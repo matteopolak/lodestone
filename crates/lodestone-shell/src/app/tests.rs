@@ -44,7 +44,11 @@ fn browser_frame_signal_is_mount_local_and_cross_thread_visible() {
     assert!(!second.is_set());
 
     let producer = first.clone();
-    producer.mark();
+    std::thread::Builder::new()
+        .spawn(move || producer.mark())
+        .expect("frame producer thread must start")
+        .join()
+        .expect("frame producer thread must complete");
 
     assert!(first.is_set());
     assert!(!second.is_set());

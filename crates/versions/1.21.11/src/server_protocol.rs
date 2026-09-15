@@ -733,9 +733,13 @@ impl ServerProtocol for V774ServerProtocol {
         column: &ChunkColumn,
         neighbours: &[(i32, i32, ChunkColumn)],
     ) -> Result<ServerDirective, ChunkEncodeError> {
+        let light = column
+            .centre_settled_light()
+            .cloned()
+            .unwrap_or_else(|| served_light_with_neighbours(column, neighbours));
         Ok(ServerDirective::Send {
             packet_id: play::clientbound::LEVEL_CHUNK_WITH_LIGHT,
-            payload: encode_chunk_body(cx, cz, column, &served_light_with_neighbours(column, neighbours))?,
+            payload: encode_chunk_body(cx, cz, column, &light)?,
         })
     }
 
@@ -757,6 +761,10 @@ impl ServerProtocol for V774ServerProtocol {
     }
 
     fn uses_cross_column_light(&self) -> bool {
+        true
+    }
+
+    fn retains_initial_column_light(&self) -> bool {
         true
     }
 

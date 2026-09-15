@@ -259,7 +259,7 @@ fn reference_should_apply(base_interval: i32, amplifier: u32, tick_count: i32) -
 }
 
 fn production_snapshot(effects: &ActiveEffects) -> Vec<EffectView> {
-    effects
+    let mut snapshot: Vec<_> = effects
         .active()
         .into_iter()
         .map(|(id, _)| {
@@ -271,7 +271,9 @@ fn production_snapshot(effects: &ActiveEffects) -> Vec<EffectView> {
                 hidden: effect.has_hidden(),
             }
         })
-        .collect()
+        .collect();
+    snapshot.sort_unstable_by(|left, right| left.id.cmp(&right.id));
+    snapshot
 }
 
 fn production_trace(script: &[EffectOp]) -> Vec<Observation> {

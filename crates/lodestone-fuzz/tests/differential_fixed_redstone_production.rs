@@ -52,7 +52,7 @@ fn captured_redstone_trace_reaches_the_production_model_tick_by_tick() {
 fn captured_redstone_control_reports_the_delayed_probe_divergence() {
     let (corpus, replay) = captured_replay();
     let mut production = production_oracle();
-    let mut recorded = corpus.recorded_oracle().corrupt_at(9);
+    let mut recorded = corpus.recorded_oracle().corrupt_probe_at(9, (16, 0, 0));
     let report = replay.run(&mut production, &mut recorded);
 
     let DifferentialOutcome::Diverged(divergence) = report.outcome else {

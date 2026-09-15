@@ -213,6 +213,29 @@ pub fn can_player_fit_within_blocks_and_entities_when(
     no_collision_among_entities(view, pose.fit_box(position), nearby)
 }
 
+pub(crate) fn should_move_slowly(
+    state: &PlayerState,
+    input: MovementInput,
+    view: &dyn CollisionView,
+    nearby: &[NearbyEntity],
+) -> bool {
+    !state.flying
+        && !state.swimming
+        && can_player_fit_within_blocks_and_entities_when(
+            view,
+            state.position,
+            Pose::Crouching,
+            nearby,
+        )
+        && (input.sneak
+            || !can_player_fit_within_blocks_and_entities_when(
+                view,
+                state.position,
+                Pose::Standing,
+                nearby,
+            ))
+}
+
 /// Vanilla's own "desired pose" step — what the player *wants*, before the
 /// fit gate has a say.
 ///

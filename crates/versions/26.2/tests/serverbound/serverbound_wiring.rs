@@ -9,7 +9,7 @@
 //!
 //! # Why it exists
 //!
-//! `ServerBound` (`lodestone-server`'s `protocol.rs`) and the decode arms that
+//! `ServerBound` (`lodestone-server`'s `protocol/packets.rs`) and the decode arms that
 //! construct it (`lodestone-v26-2`'s `server_protocol.rs`) live in **different
 //! crates**, and nothing in the type system connects them: a variant can be
 //! declared, matched by `dispatch_play_packet`, given a fully-written
@@ -34,10 +34,10 @@
 //! Two shallow source scans, joined:
 //!
 //! 1. `declared_variants` reads the `pub enum ServerBound { .. }` block in
-//!    `lodestone-server/src/protocol.rs`.
-//! 2. `constructed_variants` reads `ServerBound::X` occurrences inside
-//!    `V770ServerProtocol::decode`'s body **only**, over source that has had
-//!    comments and literals blanked first.
+//!    `lodestone-server/src/protocol/packets.rs`.
+//! 2. `constructed_variants` reads `ServerBound::X` occurrences from the
+//!    production decode facade and its serverbound helper module, over source
+//!    that has had comments, literals and tests blanked first.
 //!
 //! Both restrictions are load-bearing, and the first draft of this gate had
 //! neither, which made it **half-vacuous** — worth recording because it is
@@ -285,7 +285,7 @@ fn blank_test_modules(blanked: &str) -> String {
 fn declared_variants(src: &str) -> BTreeSet<String> {
     let open = src
         .find("pub enum ServerBound {")
-        .expect("`pub enum ServerBound {` not found in lodestone-server's protocol.rs");
+        .expect("`pub enum ServerBound {` not found in lodestone-server's protocol/packets.rs");
     let body = &src[open..];
     let end = body.find("\n}").expect("unterminated `pub enum ServerBound` block");
     let mut out = BTreeSet::new();
@@ -323,7 +323,8 @@ fn serverbound_paths(src: &str) -> BTreeSet<String> {
 }
 
 /// Variants constructed by the crate's real decode path — comments, literals
-/// and `#[cfg(test)]` modules all excluded.
+/// and `#[cfg(test)]` modules all excluded. The input may combine the decode
+/// facade with production helpers that return `ServerBound` directly.
 ///
 /// Residual imprecision, stated plainly: this counts any `ServerBound::X` in
 /// non-test code, which in `server_protocol.rs` means a construction, since
@@ -337,9 +338,9 @@ fn constructed_variants(decode_src: &str) -> BTreeSet<String> {
 
 #[test]
 fn every_serverbound_variant_is_constructed_by_decode() {
-    let protocol_rs = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../lodestone-server/src/protocol.rs");
-    let enum_src = std::fs::read_to_string(&protocol_rs)
-        .unwrap_or_else(|e| panic!("reading {}: {e}", protocol_rs.display()));
+    let packets_rs = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../lodestone-server/src/protocol/packets.rs");
+    let enum_src = std::fs::read_to_string(&packets_rs)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", packets_rs.display()));
 
     let declared = declared_variants(&enum_src);
     assert!(
@@ -349,11 +350,16 @@ fn every_serverbound_variant_is_constructed_by_decode() {
         declared.len()
     );
 
-    let constructed = constructed_variants(include_str!("../../src/server_protocol.rs"));
+    let decode_src = format!(
+        "{}\n{}",
+        include_str!("../../src/server_protocol.rs"),
+        include_str!("../../src/server_protocol/serverbound.rs")
+    );
+    let constructed = constructed_variants(&decode_src);
     assert!(
         constructed.contains("Ignored") && constructed.contains("Handshake"),
-        "the construction scanner found neither `Ignored` nor `Handshake` inside `fn decode` \
-         ({constructed:?}) — it is not reading the decode body, so this gate is vacuous"
+        "the construction scanner found neither `Ignored` nor `Handshake` in the production \
+         decode sources ({constructed:?}) — it is not reading the decode path, so this gate is vacuous"
     );
 
     let stranded: Vec<&str> = declared
@@ -365,7 +371,7 @@ fn every_serverbound_variant_is_constructed_by_decode() {
     assert!(
         stranded.is_empty(),
         "{} `ServerBound` variant(s) are declared (and consumed) by `lodestone-server` but \
-         never constructed inside `V770ServerProtocol::decode`, so the packets that should \
+         never constructed by the v26-2 decode path, so the packets that should \
          produce them are silently discarded on the wire: {stranded:?}. This is the island \
          class — see this file's module docs for the two prior instances. Fix the decode arm \
          in `crates/versions/26.2/src/server_protocol.rs`; do not exempt the variant here.",

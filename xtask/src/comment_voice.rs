@@ -115,7 +115,15 @@ pub const DEFAULT_ALLOWLIST: &str = "xtask/check-comment-voice.toml";
 /// build output out of the walk (as in [`crate::ptr_const`]); `vendor`
 /// excludes the nested third-party `minecraft-data` checkout, which is not
 /// this repository's own commentary and carries its own `.git`.
-const EXCLUDED_DIR_NAMES: &[&str] = &["target", ".git", ".cache", "node_modules", "vendor", ".jj"];
+const EXCLUDED_DIR_NAMES: &[&str] = &[
+    "target",
+    ".git",
+    ".cache",
+    ".worktrees",
+    "node_modules",
+    "vendor",
+    ".jj",
+];
 
 /// A sanity floor on how many `.rs`/`.md`/`.wgsl` files the walk must find,
 /// so a moved directory or a bad exclusion reads as "the walk is broken",
@@ -1026,6 +1034,17 @@ mod tests {
     fn scan_fixture(root: &Path) -> Result<Report> {
         let files = collect_scan_files(root)?;
         scan_paths(&files, root)
+    }
+
+    #[test]
+    fn nested_worktrees_are_not_scanned() -> Result<()> {
+        let ws = Workspace::new()?;
+        ws.write("src/lib.rs", "// current checkout\n")?;
+        ws.write(".worktrees/other/src/lib.rs", "// see #295\n")?;
+        let report = scan_fixture(ws.root())?;
+        assert_eq!(report.files_scanned, 1);
+        assert!(report.hits.is_empty(), "{:#?}", report.hits);
+        Ok(())
     }
 
     #[test]

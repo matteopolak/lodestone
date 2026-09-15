@@ -4659,31 +4659,35 @@ where
                     let candidate = native_player
                         .as_ref()
                         .map_or(anvil_pos, |native| native.join_position(anvil_pos));
-                    // A restored Overworld position may have been written by
-                    // an older session before terrain clearance was enforced.
-                    // Re-read the live source before trusting it; a saved
-                    // position inside a wall falls back to the verified world
-                    // spawn. A locator restored into a sibling dimension is
-                    // deliberately skipped because its source is not the home
-                    // Overworld terrain.
-                    source
-                        .admit_columns(column_admission_footprint(
-                            (candidate.x.floor() as i32).div_euclid(16),
-                            (candidate.z.floor() as i32).div_euclid(16),
-                            1,
-                        ))
-                        .await;
-                    if restored_dimension_source.is_none()
-                        && !crate::world_spawn::is_spawn_position_clear(source.get(), candidate)
-                    {
-                        tracing::warn!(
-                            position = ?candidate,
-                            fallback = ?spawn_position,
-                            "saved player position is obstructed; using the world spawn"
-                        );
-                        spawn_position
+                    if saved_player.is_some() || native_player.is_some() {
+                        // A restored Overworld position may have been written by
+                        // an older session before terrain clearance was enforced.
+                        // Re-read the live source before trusting it; a saved
+                        // position inside a wall falls back to the verified world
+                        // spawn. A locator restored into a sibling dimension is
+                        // deliberately skipped because its source is not the home
+                        // Overworld terrain.
+                        source
+                            .admit_columns(column_admission_footprint(
+                                (candidate.x.floor() as i32).div_euclid(16),
+                                (candidate.z.floor() as i32).div_euclid(16),
+                                1,
+                            ))
+                            .await;
+                        if restored_dimension_source.is_none()
+                            && !crate::world_spawn::is_spawn_position_clear(source.get(), candidate)
+                        {
+                            tracing::warn!(
+                                position = ?candidate,
+                                fallback = ?spawn_position,
+                                "saved player position is obstructed; using the world spawn"
+                            );
+                            spawn_position
+                        } else {
+                            candidate
+                        }
                     } else {
-                        candidate
+                        spawn_position
                     }
                 };
                 #[cfg(target_arch = "wasm32")]
@@ -5005,6 +5009,7 @@ where
                     proto.end_chunk_batch(i32::try_from(batch_size).unwrap_or(i32::MAX)),
                 )
                 .await?;
+                world.mark_join_ready();
                 let chunk_ms = t_chunks.elapsed().as_millis();
                 let chunks_sent = batch_size;
                 tracing::info!(
@@ -5060,7 +5065,12 @@ where
                 let player_ticket_guard = {
                     let bits = login_uuid.unwrap_or_else(uuid::Uuid::nil).as_u128();
                     let id = (bits as u64) ^ ((bits >> 64) as u64);
-                    tickets.grant_player(id, (join_cx, join_cz), view_radius)
+                    tickets.grant_player_with_simulation_radius(
+                        id,
+                        (join_cx, join_cz),
+                        view_radius,
+                        view_radius.clamp(0, crate::chunk_store::CONCURRENT_TICK_RADIUS),
+                    )
                 };
 
                 // Initial entity sync sends tab-list additions and other
@@ -11985,10 +11995,9 @@ fn resident_fall_sample<S: ChunkSource + ?Sized>(
     })
 }
 
-/// Returns a canonical state string only when its owning column is retained.
-/// This deliberately has no fallback to [`ChunkSource::block_state`]: callers
-/// in the packet/timer loop must be able to distinguish an absent column from
-/// an air block and defer the probe without causing cold generation.
+/// Returns a canonical state string from a retained column when the source has
+/// an atomic residency gate. Sources without that capability retain the
+/// legacy synchronous block-read contract.
 fn resident_block_state<S: ChunkSource + ?Sized>(source: &S, x: i32, y: i32, z: i32) -> Option<String> {
     match source.try_resident_block_state_id(x, y, z) {
         Some(crate::chunk_store::TryResident::Present(state)) => {
@@ -11996,9 +12005,12 @@ fn resident_block_state<S: ChunkSource + ?Sized>(source: &S, x: i32, y: i32, z: 
         }
         Some(crate::chunk_store::TryResident::Busy)
         | Some(crate::chunk_store::TryResident::Absent) => None,
-        None => source
-            .resident_block_state_id(x, y, z)
-            .map(lodestone_data::block_states::StateId::canonical_state),
+        None => Some(
+            source
+                .resident_block_state_id(x, y, z)
+                .map(lodestone_data::block_states::StateId::canonical_state)
+                .unwrap_or_else(|| source.block_state(x, y, z)),
+        ),
     }
 }
 
@@ -12814,7 +12826,12 @@ where
                 player_rot.map(|rotation| rotation.yaw),
             );
             if view.center != center_before_recenter {
-                player_ticket_guard.move_to(view.center, view.radius);
+                player_ticket_guard.move_to_with_simulation_radius(
+                    view.center,
+                    view.radius,
+                    view.radius.clamp(0, crate::chunk_store::CONCURRENT_TICK_RADIUS),
+                );
+                source.get().reconcile_ticket_residency();
             }
             send_view_update(
                 conn,
@@ -14101,7 +14118,12 @@ where
                 player_rot.map(|rotation| rotation.yaw),
             );
             if view.radius != radius_before_resize {
-                player_ticket_guard.move_to(view.center, view.radius);
+                player_ticket_guard.move_to_with_simulation_radius(
+                    view.center,
+                    view.radius,
+                    view.radius.clamp(0, crate::chunk_store::CONCURRENT_TICK_RADIUS),
+                );
+                source.get().reconcile_ticket_residency();
             }
             send_view_update(
                 conn,
@@ -16903,7 +16925,12 @@ where
                             player_rot.map(|rotation| rotation.yaw),
                         );
                         if view.center != center_before_recenter {
-                            player_ticket_guard.move_to(view.center, view.radius);
+                            player_ticket_guard.move_to_with_simulation_radius(
+                                view.center,
+                                view.radius,
+                                view.radius.clamp(0, crate::chunk_store::CONCURRENT_TICK_RADIUS),
+                            );
+                            source.get().reconcile_ticket_residency();
                         }
                         send_view_update(
                             conn,

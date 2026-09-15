@@ -78,7 +78,7 @@ cargo test -p lodestone-worldgen-parity --all-targets --no-fail-fast
 ```
 
 After `(0,0)..(2,0)` passes, expand by a few thousand chunks per run and stop at the first mismatch.
-The ultimate tracked goal is issue #756: identical packet-relevant output over the full requested
+The ultimate tracked goal is identical packet-relevant output over the full requested
 domain, later including a separate lighting pass. The requested domains also include Nether and End;
 outer End islands/cities need samples away from the central island.
 
@@ -87,17 +87,17 @@ outer End islands/cities need samples away from the central island.
 GitHub had 37 open issues when queried for this handoff. Treat that list as live state and audit it
 again with `gh issue list`; the tracker can lag the tree. Notable current items are:
 
-- #756 — full worldgen parity run. This is the immediate continuation described above.
-- #753, #751, #750 — structure, Nether-decoration, and Overworld configured-feature gaps. Verify each
+- Full worldgen parity run. This is the immediate continuation described above.
+- Structure, Nether-decoration, and Overworld configured-feature gaps. Verify each
   against the current tree before implementing or closing it.
-- #747 and #748 — browser worker separation and a 20 Hz integrated simulation. World generation must
+- Browser worker separation and a 20 Hz integrated simulation. World generation must
   not starve server ticks or the browser main thread.
-- #766 and #763 — camera lag and dynamic dimension rendering appear substantially implemented by
+- Camera lag and dynamic dimension rendering appear substantially implemented by
   `f9a8ec1b0`, `ca5e9f6c4`, `fc11a229f`, and `2abe48207`; audit production consumers and close/update the
   issues with evidence if complete.
-- #769 — block-placement parity.
-- #765 — first-person offhand/use-state animation.
-- #549 — differential fuzzing remains a larger ongoing effort.
+- Block-placement parity.
+- First-person offhand/use-state animation.
+- Differential fuzzing remains a larger ongoing effort.
 - Hosted-protocol, plugin/Paper compatibility, region-executor, and typed-ID issues remain open. Work
   them by file cluster, and close stale issues only after checking production wiring and tests.
 

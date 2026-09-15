@@ -79,7 +79,7 @@ fn cheap_source() -> WorldgenChunkSource {
 ///
 /// This is the whole of singleplayer minus the shell's thread and the button:
 /// resolve, serve the box, join, receive the initial view.
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn a_registry_resolved_server_protocol_serves_a_real_joined_session() {
     let protocol = lodestone_registry::server_protocol_for_protocol(PROTOCOL)
         .expect("the v26-2 family must be hostable, not just joinable");
@@ -111,6 +111,13 @@ async fn a_registry_resolved_server_protocol_serves_a_real_joined_session() {
         handle.is_chunk_loaded(ChunkPos::new(0, 0)),
         "the spawn column is not the one that arrived"
     );
+
+    // Do not start with virtual time paused: shared production joins perform
+    // finite work on the world-generation dispatcher, and an auto-advanced
+    // deadline can expire before that worker gets to publish the spawn. Once
+    // the join is complete, virtual time is safe for the periodic keep-alive
+    // check below.
+    tokio::time::pause();
 
     // Past several keep-alive intervals (virtual time — the clock is paused), so
     // a boxed protocol whose `encode_keep_alive` fell through to the trait

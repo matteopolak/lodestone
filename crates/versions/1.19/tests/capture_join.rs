@@ -688,7 +688,7 @@ const MISROUTE_FROM_758: (usize, usize, usize, usize) = (38, 16, 10, 0);
 /// `spawner_minecart` at a plausible position with a plausible velocity.
 /// That is the failure this era's per-era entity table and its inserted
 /// head-rotation byte exist to prevent, demonstrated rather than described.
-const MISROUTE_FROM_766: (usize, usize, usize, usize) = (39, 13, 3, 10);
+const MISROUTE_FROM_766: (usize, usize, usize, usize) = (42, 10, 3, 10);
 
 /// **The per-packet negative control**, run against real bytes from both
 /// neighbouring versions.

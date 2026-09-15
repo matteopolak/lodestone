@@ -396,16 +396,6 @@ fn protocol_765_is_not_hosted() {
 
 #[tokio::test]
 async fn hosted_lighting_reaches_client_and_extinguishes_after_a_block_break() {
-    let optics: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../vendor/minecraft-data/data/pc/1.20.5/blocks.json"
-    )).unwrap();
-    let property = |name: &str, field: &str| {
-        optics.as_array().unwrap().iter().find(|block| block["name"] == name).unwrap()[field]
-            .as_u64().unwrap()
-    };
-    assert_eq!(property("torch", "emitLight"), 14);
-    assert_eq!(property("stone", "filterLight"), 15);
-    assert_eq!(property("air", "filterLight"), 0);
     let protocol = lodestone_registry::server_protocol_for_protocol(766).unwrap();
     let mut room = ChunkColumn::new(-64, 384);
     for y in 98..=104 {

@@ -274,15 +274,14 @@ pub fn view_projection(width: u32, height: u32, spin_degrees: f32) -> Mat4 {
     } else {
         width as f32 / height as f32
     };
-    // glam's `perspective_rh` is [0,1] depth where JOML's may be [-1,1]; the
-    // difference is confined to the z row and this pass has no depth attachment
-    // at all, so it cannot matter here. x/y are identical between the two.
-    let projection = glam::camera::rh::proj::directx::perspective(
-        FOV_DEGREES.to_radians(),
+    let projection = lodestone_render::Camera {
+        fov_y_degrees: FOV_DEGREES,
         aspect,
-        Z_NEAR,
-        Z_FAR,
-    );
+        near: Z_NEAR,
+        far: Z_FAR,
+        ..lodestone_render::Camera::default()
+    }
+    .projection_matrix();
     let model_view = Mat4::from_rotation_x(std::f32::consts::PI)
         * Mat4::from_rotation_x(TILT_DEGREES.to_radians())
         * Mat4::from_rotation_y(spin_degrees.to_radians());

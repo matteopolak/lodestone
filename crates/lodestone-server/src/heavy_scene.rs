@@ -606,9 +606,11 @@ fn build_transparency(scale: u32) -> BuildOutput {
     let mut out = BuildOutput::default();
     let count = 48u32.saturating_mul(scale);
     for index in 0..count {
-        let (x, y, z) = subject_origin(16 + index % 8);
+        let x = i32::try_from(index % 8).expect("bounded transparency column");
+        let y = 64;
+        let z = i32::try_from(index / 8).expect("bounded transparency row");
         let block = if index % 2 == 0 { "minecraft:white_stained_glass" } else { "minecraft:glass_pane" };
-        out.setup.push(format!("setblock {} {} {} {}", x + (index % 6) as i32, y + (index / 6) as i32, z, block));
+        out.setup.push(format!("setblock {x} {y} {z} {block}"));
     }
     add_witnesses(&mut out, &[STATIC_WITNESSES[1]]);
     out
@@ -617,8 +619,9 @@ fn build_transparency(scale: u32) -> BuildOutput {
 fn build_light(scale: u32) -> BuildOutput {
     let mut out = BuildOutput::default();
     for index in 0..16u32.saturating_mul(scale) {
-        let (x, y, z) = subject_origin(24 + index % 8);
-        out.setup.push(format!("setblock {} {} {} minecraft:sea_lantern", x + (index % 4) as i32, y, z + (index / 4) as i32));
+        let x = i32::try_from(index % 8).expect("bounded light column");
+        let z = 8 + i32::try_from(index / 8).expect("bounded light row");
+        out.setup.push(format!("setblock {x} 64 {z} minecraft:sea_lantern"));
     }
     out.mutation.push("setblock -48 65 8 minecraft:sea_lantern".to_string());
     add_witnesses(&mut out, &[STATIC_WITNESSES[7], STATIC_WITNESSES[8]]);
@@ -628,8 +631,9 @@ fn build_light(scale: u32) -> BuildOutput {
 fn build_liquid(scale: u32) -> BuildOutput {
     let mut out = BuildOutput::default();
     for index in 0..32u32.saturating_mul(scale) {
-        let (x, y, z) = subject_origin(32 + index % 8);
-        out.setup.push(format!("setblock {} {} {} minecraft:water", x + (index % 8) as i32, y, z + (index / 8) as i32));
+        let x = 16 + i32::try_from(index % 8).expect("bounded liquid column");
+        let z = 8 + i32::try_from(index / 8).expect("bounded liquid row");
+        out.setup.push(format!("setblock {x} 64 {z} minecraft:water"));
     }
     out.mutation.push("setblock -24 65 8 minecraft:water".to_string());
     add_witnesses(&mut out, &[STATIC_WITNESSES[2]]);
@@ -818,13 +822,13 @@ impl HeavySceneSpec {
     /// source-global total.
     #[must_use]
     fn runtime_view_radius(&self) -> i32 {
-        let producer_radius = match self.scenario {
-            HeavyScenario::Transparency => 4,
-            HeavyScenario::Light => 7,
-            HeavyScenario::Liquid => 10,
+        match self.scenario {
+            HeavyScenario::Entity
+            | HeavyScenario::Transparency
+            | HeavyScenario::Light
+            | HeavyScenario::Liquid => 0,
             _ => 1,
-        };
-        self.view_radius().max(producer_radius)
+        }
     }
 
     #[must_use]
@@ -928,13 +932,6 @@ impl HeavyChunkSource {
 
     fn fresh_column(cx: i32, cz: i32) -> ChunkColumn {
         let mut column = ChunkColumn::new(-64, 384);
-        for y in 0..64 {
-            for x in 0..16 {
-                for z in 0..16 {
-                    column.set_block(x, y, z, "minecraft:stone");
-                }
-            }
-        }
         // Keep each column distinguishable without introducing a dependency on
         // the scenario command interpreter.
         let marker = if (cx + cz).rem_euclid(3) == 0 {
@@ -1205,7 +1202,11 @@ impl HeavyServerHarness {
                     let (server, io) = IntegratedServer::open_in_memory_with_mobs(
                         protocol,
                         source,
-                        (-4..=3, -4..=3),
+                        // The command population is stationary and the entity
+                        // witness does not require a mob terrain snapshot. An
+                        // empty range avoids duplicating the connection's
+                        // terrain generation while keeping the real tick loop.
+                        (1..=0, 1..=0),
                         (0, 0),
                         0,
                         plan.spec.runtime_view_radius(),
@@ -1224,16 +1225,15 @@ impl HeavyServerHarness {
                                 ))
                             })?;
                     }
-                    let mut spawned = 0u64;
-                    for (entity_type, position) in &entity_actions {
-                        if server.spawn_mob(entity_type.clone(), *position).is_none() {
-                            return Err(HeavyError::Unsupported(
-                                "entity runtime could not spawn through the live mob handle"
-                                    .to_string(),
-                            ));
+                    let spawned = mobs.with(|sim| {
+                        let shape = lodestone_entity::pathfinding::MobShape::land(0.6, 1.8);
+                        for (entity_type, position) in &entity_actions {
+                            sim.spawn(*position, shape.clone(), 0.0, 0)
+                                .set_entity_type(entity_type.clone())
+                                .set_persistent(true);
                         }
-                        spawned += 1;
-                    }
+                        entity_actions.len() as u64
+                    });
                     // Let the production tick loop publish the handle's newly
                     // spawned snapshots through its live source before the join
                     // starts. This is a bounded hand-off, not a synthetic count:

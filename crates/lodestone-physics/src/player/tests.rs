@@ -571,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn moving_slowly_scale_trails_both_shift_edges_by_one_tick() {
+    fn moving_slowly_scale_follows_the_current_crouching_state() {
         let profile = PhysicsProfile::mc_1_21();
         let input = MovementInput {
             forward: 1.0,
@@ -582,12 +582,8 @@ mod tests {
             .with_pose(Pose::Standing);
 
         let (_, first_press_forward) =
-            set_sprint_and_modify_input(&mut state, input, &profile);
-        assert_eq!(
-            first_press_forward.to_bits(),
-            0.98_f32.to_bits(),
-            "the first shift tick still reads the preceding standing state"
-        );
+            set_sprint_and_modify_input(&mut state, input, &profile, true);
+        assert_eq!(first_press_forward.to_bits(), (0.98_f32 * profile.sneaking_speed).to_bits());
 
         state = state.with_pose(Pose::Crouching);
         let (_, first_release_forward) = set_sprint_and_modify_input(
@@ -598,11 +594,12 @@ mod tests {
                 ..MovementInput::NONE
             },
             &profile,
+            true,
         );
         assert_eq!(
             first_release_forward.to_bits(),
             (0.98_f32 * profile.sneaking_speed).to_bits(),
-            "the first unshift tick still reads the preceding crouching state"
+            "the crouching state still slows movement after shift is released"
         );
     }
 

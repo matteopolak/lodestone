@@ -1161,7 +1161,7 @@ mod tests {
     #[test]
     fn a_sneak_side_click_uses_the_perpendicular_single_container() {
         // The clicked face is north. The candidate searched behind the target
-        // is south-facing, so the side click selects the compatible right half.
+        // faces east, so the side click selects the compatible left half.
         let target = BlockPos::new(0, 64, 0);
         let candidate = BlockPos::new(0, 64, 1);
         let neighbour = move |p: BlockPos| {
@@ -1180,10 +1180,10 @@ mod tests {
             sneaking: true,
         };
         let placed = placement("minecraft:chest", &sneaking, neighbour).unwrap();
-        assert_eq!(placed.state, "minecraft:chest[facing=east,type=right]");
+        assert_eq!(placed.state, "minecraft:chest[facing=east,type=left]");
         assert_eq!(placed.extra.len(), 1);
         assert_eq!(placed.extra[0].0, candidate);
-        assert_eq!(placed.extra[0].1, "minecraft:chest[facing=east,type=left]");
+        assert_eq!(placed.extra[0].1, "minecraft:chest[facing=east,type=right]");
 
         // The ordinary top-face path remains the single-chest control above.
         sneaking.face = BlockFace::Up;

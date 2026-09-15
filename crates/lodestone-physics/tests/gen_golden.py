@@ -517,6 +517,7 @@ class State:
         # update_player_pose(); the box this tick's movement collides with is
         # therefore last tick's pose. Scenarios may seed it.
         self.pose = "standing"
+        self.crouching = False
         # Whether the entity is swimming -- the swimming update's sprint-swim
         # flag, which desired_pose reads. NOT "in water".
         self.swimming = False
@@ -857,7 +858,7 @@ def tick_air(world, s, forward, strafe, jump, sneak, sprint):
         dy = 0.0
     s.vel = [dx, dy, dz]
     s.sprinting = sprint
-    xxa, zza = modify_input(f32(strafe), f32(forward), sneak)
+    xxa, zza = modify_input(f32(strafe), f32(forward), s.crouching or sneak)
     if jump and s.on_ground and s.no_jump_delay == 0:
         jump_from_ground(world, s)
         s.no_jump_delay = 10
@@ -968,7 +969,7 @@ def tick_water(world, s, forward, strafe, jump, sneak, sprint):
         dy = 0.0
     s.vel = [dx, dy, dz]
     s.sprinting = sprint
-    xxa, zza = modify_input(f32(strafe), f32(forward), sneak)
+    xxa, zza = modify_input(f32(strafe), f32(forward), s.crouching or sneak)
     if jump:
         s.vel[1] += float(f32(0.04))
     else:
@@ -1116,7 +1117,7 @@ def tick_lava(world, s, forward, strafe, jump, sneak, sprint):
         dy = 0.0
     s.vel = [dx, dy, dz]
     s.sprinting = sprint
-    xxa, zza = modify_input(f32(strafe), f32(forward), sneak)
+    xxa, zza = modify_input(f32(strafe), f32(forward), s.crouching or sneak)
     if jump:
         s.vel[1] += float(f32(0.04))
     else:
@@ -1326,6 +1327,14 @@ def update_player_pose(world, s, sneak):
     s.pose = actual
 
 
+def update_crouching(world, s, sneak):
+    s.crouching = (
+        not s.swimming
+        and can_player_fit_when(world, s, "crouching")
+        and (sneak or not can_player_fit_when(world, s, "standing"))
+    )
+
+
 def cell_is_open_air(world, x, y, z):
     """The bubble column block's "nothing above" check: the state above has
     an empty collision shape AND an empty fluid state. Only true for real
@@ -1422,6 +1431,7 @@ def travel_dispatch(world, s, forward, strafe, jump, sneak, sprint):
 
 
 def tick(world, s, forward, strafe, jump, sneak, sprint):
+    update_crouching(world, s, sneak)
     travel_dispatch(world, s, forward, strafe, jump, sneak, sprint)
     update_player_pose(world, s, sneak)
 
@@ -2339,7 +2349,7 @@ def scenario_crouch_release_stays_crouched():
     # THE FIT-GATE FALLBACK. Sneak in for 60 ticks, then release shift while
     # under the slab. The desired pose says STANDING; whether the player fits
     # as STANDING is false, so the second arm keeps CROUCHING and the
-    # player accelerates to full walking speed with a 1.5-high box.
+    # the crouching movement slowdown remains active with a 1.5-high box.
     #
     # A naive `pose = sneak ? CROUCHING : STANDING` port grows the box into the
     # slab on tick 60 -- and vanilla has NO recovery for that, because the

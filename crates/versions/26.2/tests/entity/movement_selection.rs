@@ -510,10 +510,15 @@ fn correction_decode_does_not_rewrite_an_independent_move() {
     // The claim comes from an independent caller. It must not be silently
     // rewritten in this layer; the driver prevents pre-correction claims from
     // reaching this encoder in the first place.
+    let independent_pos = Vec3 {
+        x: BASE_POS.x + 1.0,
+        y: BASE_POS.y,
+        z: BASE_POS.z,
+    };
     let encoded = adapter
         .encode_action(
             ConnectionState::Play,
-            &move_action(BASE_POS, BASE_ROT, true, true),
+            &move_action(independent_pos, BASE_ROT, true, true),
         )
         .expect("encode move")
         .expect("a move this far from the last sent position always sends");
@@ -525,7 +530,7 @@ fn correction_decode_does_not_rewrite_an_independent_move() {
     let decoded: MovePlayerPos = decode(&body);
     assert_eq!(
         (decoded.x, decoded.y, decoded.z),
-        (BASE_POS.x, BASE_POS.y, BASE_POS.z),
+        (independent_pos.x, independent_pos.y, independent_pos.z),
         "the adapter preserves the action it was given"
     );
     assert_eq!(

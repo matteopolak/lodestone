@@ -731,11 +731,7 @@ impl LifecycleWorldgenSource for OverworldChunkSource {
     }
 
     fn target_spills_persist(&self) -> bool {
-        // The centre FEATURES task writes through its radius-one region. A
-        // write into an admitted CARVERS neighbour is part of the resident
-        // world and must be visible when that neighbour later emits its own
-        // packet.
-        true
+        false
     }
 
     fn target_feature_reads_carvers(&self) -> bool {

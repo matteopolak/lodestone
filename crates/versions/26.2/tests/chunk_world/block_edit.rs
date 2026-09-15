@@ -138,9 +138,9 @@ fn base_name_at(handle: &lodestone_client::ClientHandle, pos: BlockPos) -> Strin
 /// from what the test actually checks:
 ///
 /// * `(0, -50, 0)` — **`minecraft:deepslate[axis=y]`**, deep underground,
-///   used for the break half.
+///   used as an untouched reload sentinel.
 /// * `(0, 37, 0)` — **`minecraft:gravel`**, the single-block ocean floor at
-///   this column.
+///   this column, used for the break half.
 /// * `(0, 38, 0)` — **`minecraft:water`**, directly above the gravel (this
 ///   column is a submerged one, matching `worldgen_data`'s own test fixture
 ///   notes about chunk `(0, 0)` at nearby seeds) — the placement target once
@@ -184,7 +184,6 @@ async fn dig_and_place_persist_through_forget_and_reload() {
         real_column.block_state(0, 38, 0).split('[').next(),
         Some("minecraft:water")
     );
-    let deepslate_id = resolve_state(real_column.block_state(0, -50, 0));
     let gravel_id = resolve_state(real_column.block_state(0, 37, 0));
     let water_id = resolve_state(real_column.block_state(0, 38, 0));
 
@@ -202,8 +201,12 @@ async fn dig_and_place_persist_through_forget_and_reload() {
         .await
         .expect("initial column never arrived");
 
-    let break_pos = BlockPos::new(0, -50, 0);
-    let clicked_pos = BlockPos::new(0, 37, 0);
+    // The server validates interaction distance before applying either break
+    // phase. Move to the ocean floor before issuing the edits; the original
+    // deep-deepslate coordinate was a useful state sample but was over 100
+    // blocks from the fallback spawn and could therefore never be broken.
+    let break_pos = BlockPos::new(0, 37, 0);
+    let clicked_pos = break_pos;
     let target_pos = BlockPos::new(0, 38, 0); // clicked_pos.relative(Up)
 
     let stone_id = state_id("minecraft:stone");
@@ -220,13 +223,14 @@ async fn dig_and_place_persist_through_forget_and_reload() {
     // loudly rather than by coincidence.
     let break_pre = handle.block_at(break_pos).expect("break column loaded");
     assert_eq!(
-        break_pre, deepslate_id,
-        "expected the break cell to read as real deepslate pre-edit, got {}",
+        break_pre, gravel_id,
+        "expected the break cell to read as real gravel pre-edit, got {}",
         base_name_at(&handle, break_pos)
     );
     let clicked_pre = handle.block_at(clicked_pos).expect("clicked column loaded");
     assert_eq!(
-        clicked_pre, gravel_id,
+        clicked_pre,
+        gravel_id,
         "expected the clicked cell to read as real gravel pre-edit, got {}",
         base_name_at(&handle, clicked_pos)
     );
@@ -237,6 +241,18 @@ async fn dig_and_place_persist_through_forget_and_reload() {
          fluid, the case the old collapse mapped to air rather than stone), got {}",
         base_name_at(&handle, target_pos)
     );
+
+    // The fallback spawn is intentionally above the ocean. Move down to the
+    // floor before exercising the interaction wire path; the server's reach
+    // check is authoritative and would correctly ignore an edit from y=64.
+    handle
+        .move_to(
+            lodestone_model::Vec3::new(0.5, 39.0, 0.5),
+            Rotation::new(0.0, 0.0),
+            false,
+            false,
+        )
+        .expect("move to the edit fixture");
 
     // --- Sequence control: Start then Abort must NOT break the block. There
     // is no event to wait on for "nothing happened", so a later, observable

@@ -31,8 +31,36 @@ fn main() {
     let generated = generated_out.join("lodestone.storage.v1.rs");
     let descriptor = out.join("storage.fds.bin");
     let regenerate = env::var_os(REGENERATE_ENV).is_some_and(|value| value == "1");
-    sync_or_check(&generated, &manifest.join(GENERATED), regenerate);
+    sync_text_or_check(&generated, &manifest.join(GENERATED), regenerate);
     sync_or_check(&descriptor, &manifest.join(DESCRIPTOR), regenerate);
+}
+
+fn sync_text_or_check(actual: &Path, committed: &Path, regenerate: bool) {
+    let actual = fs::read(actual).unwrap_or_else(|error| {
+        panic!("read generated schema artifact {}: {error}", actual.display())
+    });
+    let actual = normalize_line_endings(&actual);
+    if regenerate {
+        fs::write(committed, &actual).unwrap_or_else(|error| {
+            panic!("write regenerated schema artifact {}: {error}", committed.display())
+        });
+        return;
+    }
+
+    match fs::read(committed) {
+        Ok(expected) if normalize_line_endings(&expected) == actual => {}
+        Ok(_) => panic!(
+            "storage schema generated artifact drifted: {}. Run \
+             `LODESTONE_STORAGE_SCHEMA_REGENERATE=1 cargo check -p lodestone-storage-schema` \
+             and commit the result.",
+            committed.display(),
+        ),
+        Err(error) => panic!(
+            "storage schema generated artifact {} is missing ({error}). Run \
+             `LODESTONE_STORAGE_SCHEMA_REGENERATE=1 cargo check -p lodestone-storage-schema`.",
+            committed.display(),
+        ),
+    }
 }
 
 fn sync_or_check(actual: &Path, committed: &Path, regenerate: bool) {
@@ -60,4 +88,21 @@ fn sync_or_check(actual: &Path, committed: &Path, regenerate: bool) {
             committed.display(),
         ),
     }
+}
+
+fn normalize_line_endings(bytes: &[u8]) -> Vec<u8> {
+    let mut normalized = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\r' {
+            if bytes.get(index + 1) == Some(&b'\n') {
+                index += 1;
+            }
+            normalized.push(b'\n');
+        } else {
+            normalized.push(bytes[index]);
+        }
+        index += 1;
+    }
+    normalized
 }

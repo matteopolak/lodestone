@@ -239,6 +239,12 @@ fn move_bytes(x: f64, y: f64, z: f64) -> Vec<u8> {
     w.into_vec()
 }
 
+fn accept_teleportation_bytes(id: i32) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.var_i32(id);
+    w.into_vec()
+}
+
 /// Reads packets until the server goes quiet for `QUIET`, returning everything
 /// received.
 ///
@@ -282,6 +288,20 @@ async fn join<T: Transport>(
         .await
         .unwrap();
     seen.extend(drain(client).await);
+    // Movement is ignored until the initial absolute position is acknowledged.
+    for (packet_id, payload) in &seen {
+        if *packet_id == play::clientbound::PLAYER_POSITION {
+            let mut reader = Reader::new(payload);
+            let id = reader.var_i32().expect("player_position teleport id");
+            client
+                .write_packet(
+                    play::serverbound::ACCEPT_TELEPORTATION,
+                    &accept_teleportation_bytes(id),
+                )
+                .await
+                .unwrap();
+        }
+    }
     seen
 }
 
@@ -457,14 +477,17 @@ async fn two_connections_see_each_other_as_player_entities() {
     // what vanilla's own server's own set-initial-spawn routine pre-seeds the world spawn with. See
     // DESIGN.md §12.129.
     //
-    // Derived from the jar plus `find_initial_spawn`'s contract, not read off the
-    // failure. X and Z stay `8.0`, which is what keeps this assertion able to do
-    // its job: all three components remain non-zero, so an uninitialised
-    // `Vec3::default()` still fails on every axis.
+    // The persisted spawn anchor is `(8, 64, 8)`; the player enters at the
+    // containing block's horizontal centre, `(8.5, 64, 8.5)`.
+    const SPAWN_ANCHOR_XZ: f64 = 8.0;
     const GENERATOR_SPAWN_HEIGHT: f64 = 64.0;
     assert_eq!(
         (a_entity.x, a_entity.y, a_entity.z),
-        (8.0, GENERATOR_SPAWN_HEIGHT, 8.0),
+        (
+            SPAWN_ANCHOR_XZ + 0.5,
+            GENERATOR_SPAWN_HEIGHT,
+            SPAWN_ANCHOR_XZ + 0.5,
+        ),
         "A's entity must stand at the join spawn position `begin_play_at` teleported A to — \
          `find_initial_spawn`'s fallback for a source with no solid block anywhere"
     );

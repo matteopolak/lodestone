@@ -710,6 +710,10 @@ impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
         self.primary.is_column_resident(cx, cz)
     }
 
+    fn reconcile_ticket_residency(&self) {
+        self.primary.reconcile_ticket_residency();
+    }
+
     fn unload(&self, cx: i32, cz: i32) {
         self.primary.unload(cx, cz);
     }

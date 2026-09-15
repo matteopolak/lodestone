@@ -186,7 +186,9 @@ protocol, optional favicon) plus a pong reply carrying the client's own echoed t
 server closes after a second status request or after answering a ping, matching vanilla. Player
 count is honestly reported as `0` — a status request lands on its own connection with no visibility
 into what other connections are serving, and closing that gap needs a shared, cross-connection
-counter this crate does not have yet.
+counter this crate does not have yet. The client accepts any syntactically valid JSON object at this
+boundary, including duplicate keys (the final occurrence wins), while malformed optional fields are
+discarded individually so they cannot hide otherwise useful status data.
 
 A disconnect reason is encoded differently by phase: a **JSON string** during Login (the phase
 predates NBT chat components on the wire) and an **NBT** chat component during Configuration/Play.

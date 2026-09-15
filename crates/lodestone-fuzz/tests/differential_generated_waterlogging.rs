@@ -90,18 +90,20 @@ async fn drive_login_and_join<T: Transport>(client: &mut Connection<T>, username
         .expect("join batch start read")
         .expect("join batch start packet");
     assert_eq!(packet_id, CHUNK_BATCH_START);
-    let (packet_id, _) = client
-        .read_packet()
-        .await
-        .expect("join chunk read")
-        .expect("join chunk packet");
-    assert_eq!(packet_id, CHUNK);
-    let (packet_id, _) = client
-        .read_packet()
-        .await
-        .expect("join batch finish read")
-        .expect("join batch finish packet");
-    assert_eq!(packet_id, CHUNK_BATCH_FINISHED);
+    let mut chunk_count = 0;
+    loop {
+        let (packet_id, _) = client
+            .read_packet()
+            .await
+            .expect("join chunk read")
+            .expect("join chunk packet");
+        match packet_id {
+            CHUNK => chunk_count += 1,
+            CHUNK_BATCH_FINISHED => break,
+            other => panic!("unexpected join packet {other}"),
+        }
+    }
+    assert!(chunk_count > 0);
 }
 
 #[derive(Clone)]
@@ -267,10 +269,10 @@ impl WaterloggingServerOracle {
             IntegratedServer::open_in_memory_with_mobs(
                 WaterloggingProtocol,
                 source,
-                (0..=0, 0..=0),
+                (0..=0, -1..=0),
                 (0, 0),
                 0,
-                0,
+                1,
             )
         };
         let mut client = Connection::new(client_io);

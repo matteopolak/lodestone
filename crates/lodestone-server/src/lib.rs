@@ -557,8 +557,8 @@ pub use advancements::{
     StatType,
 };
 pub use block_entities::{
-    merge_tick_effect_batches, BlockEntity, BlockEntityHandle, BlockEntityKind, BlockEntityRegistry,
-    BlockEntityTickAssignment, BlockEntityTickEffect, BlockEntityTickEffectBatch,
+    merge_tick_effect_batches, BlockEntity, BlockEntityHandle, BlockEntityKind, BlockEntityOwnerCompletionError,
+    BlockEntityRegistry, BlockEntityTickAssignment, BlockEntityTickEffect, BlockEntityTickEffectBatch,
     BlockEntityTickOwner, BlockEntityTickOwnerBatch, BlockEntityTickPlan, block_entity_for_item,
 };
 // `command_block` itself stays private (its module doc is an internal design
@@ -676,8 +676,8 @@ pub use rcon::{DEFAULT_RCON_PORT, RconConfig};
 pub use scheduled_tick::{
     merge_due_owner_batches, ChunkScheduledTickQueue, PersistedScheduledTick, ScheduledTick,
     ScheduledTickHandle, ScheduledTickKind, ScheduledTickOwner, ScheduledTickOwnerAssignment,
-    ScheduledTickOwnerBatch, ScheduledTickQueue, ScheduledTickQueueAccess, ScheduledTickSink,
-    StagedTick, TickPriority,
+    ScheduledTickOwnerBatch, ScheduledTickOwnerCompletionError, ScheduledTickQueue,
+    ScheduledTickQueueAccess, ScheduledTickSink, StagedTick, TickPriority,
 };
 pub use server::{
     // The gate in `tests/view_radius_store_capacity.rs` asserts at compile

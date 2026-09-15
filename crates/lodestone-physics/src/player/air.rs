@@ -8,7 +8,8 @@ pub fn tick_air(
     view: &dyn CollisionView,
     profile: &PhysicsProfile,
 ) {
-    tick_air_among_entities(state, input, view, profile, &[]);
+    let moving_slowly = state.pose == Pose::Crouching || input.sneak;
+    tick_air_among_entities(state, input, view, profile, &[], moving_slowly);
 }
 
 fn tick_air_among_entities(
@@ -17,6 +18,7 @@ fn tick_air_among_entities(
     view: &dyn CollisionView,
     profile: &PhysicsProfile,
     nearby: &[crate::push::NearbyEntity],
+    moving_slowly: bool,
 ) {
     // Vanilla's own auto-jump spend: a decision made by [`update_auto_jump`]
     // at the end of the *previous* tick's move is spent here as a forced
@@ -35,7 +37,7 @@ fn tick_air_among_entities(
     state.velocity = snap_small_velocity(state.velocity);
 
     // --- input transformation (client-side) -----------------------------------
-    let (xxa, zza) = set_sprint_and_modify_input(state, input, profile);
+    let (xxa, zza) = set_sprint_and_modify_input(state, input, profile, moving_slowly);
 
     // --- jump -----------------------------------------------------------------
     // Vanilla's own jump block is `if (this.jumping &&

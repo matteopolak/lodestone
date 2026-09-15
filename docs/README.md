@@ -958,9 +958,9 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   gates and the trade-offs that keep the browser build small without changing
   rendering or world-generation behavior.
 - [Browser embedding](./wasm-embedding.md) — The browser target exposes a small
-  `mount(options)` / `LodestoneHandle.destroy()` API for hosts that already own a
-  canvas and have downloaded the required resource bytes. The standalone page remains
-  a thin adapter that uses the same runtime and asset contract.
+  `mount(options)` / `LodestoneHandle.destroy()` API for hosts that own a transferred
+  `OffscreenCanvas` and have downloaded the required resource bytes. The standalone
+  page remains a thin adapter that uses the same runtime and asset contract.
 - [WASM plugin commands](./wasm-plugin-commands.md) — The native WASM host can
   expose a guest-owned root command through the same
   `lodestone_ecs::commands::CommandRegistry` used by compiled-in plugins. A guest

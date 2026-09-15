@@ -85,6 +85,10 @@ async fn provider_changes_real_command_acceptance_without_op_file_edits() {
             Box::new(adapter()),
         ).connect_with(client_io);
         handle.wait_for_spawn(Duration::from_secs(15)).await.expect("client spawn");
+        let position = handle.position().expect("spawn position");
+        handle
+            .acknowledge_teleport_correction(position, handle.rotation())
+            .expect("acknowledge spawn position");
         handle.command("gamemode creative").expect("send real command");
         let accepted = tokio::time::timeout(Duration::from_secs(5), async {
             loop {

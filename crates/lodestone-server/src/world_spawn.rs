@@ -415,8 +415,31 @@ fn spawn_pos_in_column(column: &ChunkColumn, cx: i32, cz: i32) -> Option<BlockPo
     None
 }
 
+/// Whether the cheap horizon classifies every horizontal cell in this candidate
+/// as water. A dry sample keeps the candidate in the exact block-state search,
+/// while an unavailable sample is treated conservatively as unknown. This is
+/// only a negative hint: the full spawn predicate still decides every candidate
+/// that is not wholly classified as water.
+fn horizon_is_all_water<S: ChunkSource + ?Sized>(source: &S, cx: i32, cz: i32) -> bool {
+    (0..16).all(|lx| {
+        (0..16).all(|lz| {
+            source
+                .horizon_sample(cx * 16 + lx, cz * 16 + lz)
+                .is_some_and(|sample| sample.water_y.is_some())
+        })
+    })
+}
+
 /// [`spawn_pos_in_column`] for a chunk that is not yet in hand.
 fn get_spawn_pos_in_chunk<S: ChunkSource + ?Sized>(source: &S, cx: i32, cz: i32) -> Option<BlockPos> {
+    // A fresh integrated world can have an ocean origin and a completely
+    // water-filled ±5 search box. The horizon path is deliberately only a
+    // negative hint: unknown sources and any dry sample still pay for the
+    // authoritative column, while a fully-water hint avoids 120 full
+    // world-generation passes before the documented fallback is chosen.
+    if horizon_is_all_water(source, cx, cz) {
+        return None;
+    }
     spawn_pos_in_column(&source.column(cx, cz), cx, cz)
 }
 

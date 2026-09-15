@@ -25,7 +25,7 @@ use lodestone_v1_14::packets::settings::{
 };
 use lodestone_v1_14::packets::slot::Slot;
 use lodestone_v1_14::packets::window::{
-    EnchantItem, ServerboundCloseWindow, ServerboundHeldItemSlot, SetCreativeSlot,
+    EnchantItem, ServerboundCloseWindow, ServerboundHeldItemSlot, SetCreativeSlot, WindowClick,
 };
 
 const CTX: Ctx = Ctx { version: 754 };
@@ -236,18 +236,9 @@ fn clearing_creative_slot_sends_empty_but_setting_needs_registry() {
 
 #[test]
 fn actions_absent_from_1_16_fail_loudly() {
-    let cases: [ClientAction; 11] = [
+    let cases: [ClientAction; 10] = [
         ClientAction::Stab,
         ClientAction::SetPlayerInput(PlayerInput::EMPTY),
-        ClientAction::ContainerClick {
-            window_id: 0,
-            state_id: lodestone_model::ContainerStateId::INITIAL,
-            slot: 0,
-            button: 0,
-            click_type: ContainerClickType::Pickup,
-            changed_slots: Vec::new(),
-            carried_item: None,
-        },
         // Continuous spectator-follow needs a target uuid; 1.16.5's
         // `spectate` packet has one, but SpectatorAction only carries a
         // network entity id with no registry to resolve it (use
@@ -440,9 +431,9 @@ fn modern_resource_pack_outcomes_fail_loudly_on_1_16() {
 }
 
 #[test]
-fn container_click_fails_loudly_pending_transaction_id_and_registry() {
-    let err = encode_err(&ClientAction::ContainerClick {
-        window_id: 1,
+fn container_click_encodes_the_legacy_transaction_shape() {
+    let (id, body) = encode(&ClientAction::ContainerClick {
+        window_id: 3,
         state_id: lodestone_model::ContainerStateId::INITIAL,
         slot: 0,
         button: 0,
@@ -450,8 +441,12 @@ fn container_click_fails_loudly_pending_transaction_id_and_registry() {
         changed_slots: Vec::new(),
         carried_item: None,
     });
-    assert!(
-        matches!(err, AdapterError::Unsupported(_)),
-        "ContainerClick must fail loudly, not silently no-op: {err:?}"
-    );
+    assert_eq!(id, play::serverbound::WINDOW_CLICK);
+    let click: WindowClick = decode(&body);
+    assert_eq!(click.window_id, 3);
+    assert_eq!(click.slot, 0);
+    assert_eq!(click.button, 0);
+    assert_eq!(click.action, 0);
+    assert_eq!(click.mode, 0);
+    assert_eq!(click.item, Slot::Empty);
 }

@@ -20,6 +20,7 @@ WEB = ROOT / "web"
 DEFAULT_OUTPUT = ROOT / "target" / "wasm-sdk"
 ARCHIVE_NAME = "lodestone-web-sdk.tar.gz"
 MANIFEST_NAME = "lodestone-web-sdk.manifest.json"
+PANORAMA_FILES = tuple(f"panorama_{index}.png" for index in range(6))
 REQUIRED_FILES = (
     "lodestone-web-entry.js",
     "lodestone-web-entry_bg.wasm",
@@ -32,6 +33,7 @@ REQUIRED_FILES = (
     "lodestone-server-worker-wasm-threaded_bg.wasm",
     "client.jar",
     "blocks.json",
+    *PANORAMA_FILES,
 )
 
 

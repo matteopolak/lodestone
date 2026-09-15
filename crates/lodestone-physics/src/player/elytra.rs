@@ -96,7 +96,8 @@ pub fn tick_elytra(
     view: &dyn CollisionView,
     profile: &PhysicsProfile,
 ) {
-    tick_elytra_among_entities(state, input, view, profile, &[]);
+    let moving_slowly = state.pose == Pose::Crouching || input.sneak;
+    tick_elytra_among_entities(state, input, view, profile, &[], moving_slowly);
 }
 
 fn tick_elytra_among_entities(
@@ -105,6 +106,7 @@ fn tick_elytra_among_entities(
     view: &dyn CollisionView,
     profile: &PhysicsProfile,
     nearby: &[crate::push::NearbyEntity],
+    moving_slowly: bool,
 ) {
     // onClimbable: vanilla stops fall-flying and reverts to the walking path.
     if view.is_climbable(
@@ -113,7 +115,7 @@ fn tick_elytra_among_entities(
         mth::floor(state.position.z),
     ) {
         state.fall_flying = false;
-        tick_air_among_entities(state, input, view, profile, nearby);
+        tick_air_among_entities(state, input, view, profile, nearby, moving_slowly);
         return;
     }
 

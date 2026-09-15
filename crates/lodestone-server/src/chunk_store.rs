@@ -896,7 +896,7 @@ impl Cache {
 const DEFAULT_LEDGER_PIPELINES: usize = 4;
 const DEFAULT_LEDGER_COORDINATES: usize = 4096;
 const DEFAULT_LEDGER_SOURCES: usize = 16_384;
-const DEFAULT_LEDGER_OVERLAYS: usize = 65_536;
+const DEFAULT_LEDGER_OVERLAYS: usize = 131_072;
 const DEFAULT_LEDGER_PRODUCTS: usize = 32_768;
 const DEFAULT_LEDGER_SIDECARS: usize = 16_384;
 
@@ -1531,6 +1531,14 @@ impl GenerationLedger {
         {
             return Err(GenerationLedgerError::CheckpointMismatch);
         }
+        let prefix = &records[..boundary_index + 1];
+        if prefix.iter().any(|record| {
+            record.input_fingerprint() != aggregate.input_fingerprint()
+                || record.output_fingerprint() != aggregate.output_fingerprint()
+                || record.executor_version() != aggregate.executor_version()
+        }) {
+            return Err(GenerationLedgerError::CheckpointMismatch);
+        }
         for record in records.iter().take(boundary_index + 1) {
             if record.key().dimension() != pipeline.dimension()
                 || schedule.index_of(record.key().stage()).is_none()
@@ -1561,13 +1569,13 @@ impl GenerationLedger {
             .expect("coordinate was checked")
             .records()
             .len();
-        if frontier_len > boundary_index + 1
-            || records
-                .iter()
-                .take(frontier_len)
-                .zip(state.frontiers[&coordinate].records())
-                .any(|(expected, found)| expected != found)
-        {
+        let current_records = state.frontiers[&coordinate].records();
+        let compatible_prefix = if frontier_len >= prefix.len() {
+            &current_records[..prefix.len()] == prefix
+        } else {
+            &prefix[..frontier_len] == current_records
+        };
+        if !compatible_prefix {
             return Err(GenerationLedgerError::CheckpointMismatch);
         }
         let mut required_sidecars = Vec::new();
@@ -1575,9 +1583,6 @@ impl GenerationLedger {
             let descriptor = pipeline
                 .descriptor(record.key().stage())
                 .ok_or(GenerationLedgerError::ForeignStage(record.key()))?;
-            if descriptor.barrier() == BarrierPolicy::SourceOrdered {
-                return Err(GenerationLedgerError::CheckpointMismatch);
-            }
             for &sidecar in descriptor.retained_sidecars() {
                 let key = crate::worldgen_session::SidecarProductKey::new(
                     coordinate,
@@ -1593,19 +1598,35 @@ impl GenerationLedger {
                 required_sidecars.push((key, value.clone()));
             }
         }
+        let has_aggregate = state.aggregates.contains_key(&coordinate);
+        let missing_sidecar = required_sidecars
+            .iter()
+            .any(|(key, _)| !state.sidecars.contains_key(key));
+        let needs_publication = frontier_len < prefix.len() || !has_aggregate || missing_sidecar;
+        if !needs_publication {
+            return Ok(());
+        }
+
         let state = self.pipeline_mut(pipeline)?;
         let frontier = state
             .frontiers
             .get_mut(&coordinate)
             .expect("coordinate was checked");
-        for record in records.iter().skip(frontier_len).take(boundary_index + 1 - frontier_len) {
+        for record in records
+            .iter()
+            .skip(frontier_len)
+            .take(prefix.len().saturating_sub(frontier_len))
+        {
             frontier
                 .commit(record.clone())
                 .map_err(GenerationLedgerError::Frontier)?;
         }
-        state.aggregates.insert(coordinate, aggregate.clone());
+        state
+            .aggregates
+            .entry(coordinate)
+            .or_insert_with(|| aggregate.clone());
         for (key, value) in required_sidecars {
-            state.sidecars.insert(key, value);
+            state.sidecars.entry(key).or_insert(value);
         }
         Self::bump_revision(state, coordinate);
         Ok(())
@@ -1774,10 +1795,14 @@ impl GenerationLedger {
                 .frontier(identity, *coordinate)?
                 .records()
                 .len();
-            if existing_len > records.len()
-                || self.frontier(identity, *coordinate)?.records()
-                    != &records[..existing_len]
-            {
+            let current_records = self.frontier(identity, *coordinate)?.records();
+            if existing_len >= records.len() {
+                if &current_records[..records.len()] != records {
+                    return Err(GenerationLedgerError::CheckpointMismatch);
+                }
+                continue;
+            }
+            if current_records != &records[..existing_len] {
                 return Err(GenerationLedgerError::CheckpointMismatch);
             }
             for record in &records[existing_len..] {
@@ -1984,6 +2009,21 @@ impl GenerationLedger {
             .ok_or(GenerationLedgerError::UnknownCoordinate(coordinate))?;
         if found != expected {
             return Err(GenerationLedgerError::RevisionConflict { coordinate, expected, found });
+        }
+        let target_output_committed = state
+            .frontiers
+            .get(&provenance.target())
+            .is_some_and(|frontier| {
+                frontier.records().iter().any(|record| {
+                    record.key()
+                        == StageKey::new(
+                            pipeline.dimension(),
+                            lodestone_worldgen::stage_schedule::ColumnStage::Output,
+                        )
+                })
+            });
+        if target_output_committed {
+            return Ok(found);
         }
         if let Some(existing) = state.overlays.get(&destination) {
             if existing.provenance() == provenance {
@@ -3185,7 +3225,7 @@ impl<S: ChunkSource> ChunkStore<S> {
             let guard = self.lock();
             (guard.columns.len() > guard.capacity).then(|| {
                 self.tickets
-                    .resident_positions()
+                    .cache_protected_positions()
                     .into_iter()
                     .collect::<HashSet<_>>()
             })
@@ -3445,19 +3485,14 @@ impl<S: ChunkSource> ChunkStore<S> {
     /// rather than going through a store — see `crate::ticket`'s own test
     /// module.
     ///
-    /// # Safety of calling `unload` from here
-    ///
-    /// Locks are never held across it: the ticket-graph lock and the cache
-    /// lock are each acquired and released in their own scope before
-    /// `self.source.unload` is called, matching the existing
-    /// `evict_down_to_capacity` pattern in [`ensure`](Self::ensure) — see
-    /// [`ChunkSource::unload`]'s own doc for why it must do no I/O and cannot
-    /// call back into this store.
+    /// A loading-ticket withdrawal only changes eviction eligibility. The
+    /// ordinary capacity path performs any needed lifecycle hand-off, while
+    /// simulation and world-owned loading tickets remain protected.
     fn maybe_tick_tickets(&self) {
         let due = {
             let mut guard = self.lock();
             let stamp = guard.stamp;
-            if stamp < guard.next_ticket_check {
+            if stamp < guard.next_ticket_check && !self.tickets.needs_propagation() {
                 false
             } else {
                 guard.next_ticket_check = stamp + Self::TICKET_CHECK_PERIOD;
@@ -3471,30 +3506,10 @@ impl<S: ChunkSource> ChunkStore<S> {
         if delta.newly_unresident.is_empty() {
             return;
         }
-        let evicted: Vec<(i32, i32)> = {
-            let mut guard = self.lock();
-            let cache = &mut *guard;
-            let mut out = Vec::new();
-            for pos in &delta.newly_unresident {
-                if cache.columns.remove(pos).is_some() {
-                    cache.evicted += 1;
-                    out.push(*pos);
-                }
-            }
-            out
-        };
-        // Outside the lock, deliberately — same reasoning as
-        // `evict_down_to_capacity`'s call site in `ensure`.
-        self.lifecycle.execute(ChunkLifecyclePlan::unload(evicted), |assignment| {
-            debug_assert_eq!(
-                assignment.owner,
-                crate::chunk_lifecycle::ChunkLifecycleOwner::Chunk {
-                    cx: assignment.chunk.0,
-                    cz: assignment.chunk.1,
-                }
-            );
-            self.source.unload(assignment.chunk.0, assignment.chunk.1);
-        });
+        // A loading ticket controls eligibility, not immediate cache lifetime.
+        // Let the bounded eviction path choose an unprotected LRU entry so a
+        // high-water view survives a temporary shrink.
+        self.evict_excess();
     }
 
     /// Replaces the cache entry and forwards the same complete value to the
@@ -4405,10 +4420,14 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
             cz,
             crate::chunk::ChunkGenerationStage::Full,
         ) {
-            return find(&fresh);
+            if let Some(entity) = find(&fresh) {
+                return Some(entity);
+            }
         }
-        self.read(cx, cz, find)
-            .unwrap_or_else(|| self.source.block_entity(x, y, z))
+        if let Some(entity) = self.read(cx, cz, find).flatten() {
+            return Some(entity);
+        }
+        self.source.block_entity(x, y, z)
     }
 
     /// The one real override of [`ChunkSource::is_column_resident`] — a plain map lookup,
@@ -4423,6 +4442,10 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
     /// not buy the column another lap of LRU life it did not earn).
     fn is_column_resident(&self, cx: i32, cz: i32) -> bool {
         self.lock().columns.contains_key(&(cx, cz))
+    }
+
+    fn reconcile_ticket_residency(&self) {
+        self.maybe_tick_tickets();
     }
 
     /// Re-derives the capacity for `view_radius` under this store's
@@ -7878,15 +7901,13 @@ mod tests {
     }
 
     /// **The discriminating gate**: a chunk reaches `Full` status under a
-    /// ticket, and removing the ticket lets it unload — observed at the real
-    /// [`ChunkSource::unload`] call the source receives, not merely at the
-    /// cache entry disappearing (which would also happen for an unrelated
-    /// reason, e.g. LRU pressure).
+    /// ticket, and removing the ticket makes it evictable under pressure —
+    /// observed at the real [`ChunkSource::unload`] call the source receives.
     #[test]
     fn removing_a_forced_ticket_lets_its_chunk_unload_and_the_source_observes_it() {
         let counting = CountingSource::new();
         let unloaded_log = Arc::clone(&counting.unloaded);
-        let store = Arc::new(ChunkStore::new(counting));
+        let store = Arc::new(ChunkStore::with_capacity(counting, 1));
 
         store.set_forced_ticket(1, (5, 5));
         drive_ticket_check_ins(&store, (5, 5), ChunkStore::<CountingSource>::TICKET_CHECK_PERIOD + 1);
@@ -7905,8 +7926,8 @@ mod tests {
         );
 
         assert!(store.remove_forced_ticket(1));
-        // Drive enough further traffic (elsewhere, so it does not touch (5,5)
-        // and re-cache it) for the next check-in to observe the removal.
+        // Drive a miss elsewhere. The removed ticket makes (5,5) eligible, and
+        // this miss supplies the capacity pressure that performs the release.
         drive_ticket_check_ins(&store, (500, 500), ChunkStore::<CountingSource>::TICKET_CHECK_PERIOD + 1);
 
         assert_eq!(
@@ -8261,6 +8282,183 @@ mod tests {
         assert_eq!(stats.products, expected_products);
         assert!(stats.retained_bytes > 0);
         assert_eq!(ledger.frontier(identity, (0, 0)).unwrap().records().len(), pure_stages);
+    }
+
+    fn end_shaped_session(
+        fingerprint: u8,
+    ) -> crate::worldgen_session::GenerationSession {
+        use lodestone_worldgen::stage_schedule::{Dimension, END_PIPELINE};
+
+        let request = crate::worldgen_session::GenerationRequest::new(
+            Dimension::End,
+            (0, 0),
+            GenerationTarget::Full,
+            0,
+        );
+        let mut session = GenerationSession::new(request);
+        let boundary = END_PIPELINE
+            .schedule()
+            .target_stage(GenerationTarget::Shaped);
+        session
+            .import_aggregate_prefix(
+                (0, 0),
+                boundary,
+                ImmutableProduct::new(ResourceKey::MaterializedWorld, ChunkColumn::new(0, 16)),
+                [],
+                [fingerprint; 32],
+                [fingerprint; 32],
+                1,
+            )
+            .expect("End shaped prefix fixture is valid");
+        session
+    }
+
+    fn complete_end_suffix(
+        session: &mut GenerationSession,
+        fingerprint: u8,
+    ) {
+        use lodestone_worldgen::stage_schedule::{ColumnStage, Dimension};
+
+        let target = session.request().target();
+        let features = StageKey::new(Dimension::End, ColumnStage::Features);
+        session
+            .declare_mutable_sources(features, [(0, target)])
+            .expect("End features source plan is valid");
+        let transaction = session
+            .begin_mutable_source(target, features, 0)
+            .expect("End feature source is valid");
+        session
+            .complete_mutable_source(transaction)
+            .expect("End feature source commits");
+        let descriptor = session
+            .pipeline()
+            .descriptor(ColumnStage::Features)
+            .expect("End features descriptor exists");
+        let products = descriptor
+            .outputs()
+            .iter()
+            .copied()
+            .map(|resource| ImmutableProduct::new(resource, fingerprint))
+            .collect();
+        let sidecars = descriptor
+            .retained_sidecars()
+            .iter()
+            .copied()
+            .map(|sidecar| ImmutableSidecar::new(sidecar, fingerprint))
+            .collect();
+        session
+            .commit_mutable_stage(
+                features,
+                [fingerprint; 32],
+                [fingerprint; 32],
+                1,
+                products,
+                sidecars,
+            )
+            .expect("End features commit");
+
+        let output = StageKey::new(Dimension::End, ColumnStage::Output);
+        let descriptor = session
+            .pipeline()
+            .descriptor(ColumnStage::Output)
+            .expect("End output descriptor exists");
+        let products = descriptor
+            .outputs()
+            .iter()
+            .copied()
+            .map(|resource| {
+                if resource == ResourceKey::OutputColumn {
+                    ImmutableProduct::new(resource, ChunkColumn::new(0, 16))
+                } else {
+                    ImmutableProduct::new(resource, fingerprint)
+                }
+            })
+            .collect();
+        let sidecars = descriptor
+            .retained_sidecars()
+            .iter()
+            .copied()
+            .map(|sidecar| ImmutableSidecar::new(sidecar, fingerprint))
+            .collect();
+        session
+            .complete_immutable(ImmutableStageCompletion::new(
+                target,
+                output,
+                [fingerprint; 32],
+                [fingerprint; 32],
+                1,
+                products,
+                sidecars,
+            ))
+            .expect("End output completion");
+        session
+            .advance_ready_immutable()
+            .expect("End output commits in order");
+    }
+
+    #[test]
+    fn ledger_accepts_a_stale_shaped_publish_after_full_publication() {
+        use lodestone_worldgen::stage_schedule::{PipelineOptions, END_PIPELINE};
+
+        let mut ledger = GenerationLedger::new();
+        ledger.admit(END_PIPELINE, &[(0, 0)]).unwrap();
+        let mut shaped = end_shaped_session(1);
+        ledger.publish_session(END_PIPELINE, &shaped).unwrap();
+
+        let checkpoint = ledger
+            .checkpoint(END_PIPELINE, shaped.request())
+            .expect("published shaped checkpoint");
+        let mut full = GenerationSession::from_checkpoint(checkpoint).unwrap();
+        complete_end_suffix(&mut full, 2);
+        ledger.publish_session(END_PIPELINE, &full).unwrap();
+
+        let identity = END_PIPELINE.identity(PipelineOptions::ALL);
+        let full_len = END_PIPELINE.stages().len();
+        assert_eq!(ledger.frontier(identity, (0, 0)).unwrap().records().len(), full_len);
+        let revision = ledger.revision(identity, (0, 0)).unwrap();
+
+        ledger
+            .publish_session(END_PIPELINE, &shaped)
+            .expect("compatible stale shaped prefix is an idempotent publication");
+        assert_eq!(ledger.frontier(identity, (0, 0)).unwrap().records().len(), full_len);
+        assert_eq!(ledger.revision(identity, (0, 0)).unwrap(), revision);
+        shaped.cancel();
+    }
+
+    #[test]
+    fn ledger_rejects_a_divergent_suffix_without_mutating_advanced_state() {
+        use lodestone_worldgen::stage_schedule::{PipelineOptions, END_PIPELINE};
+
+        let mut ledger = GenerationLedger::new();
+        ledger.admit(END_PIPELINE, &[(0, 0)]).unwrap();
+        let shaped = end_shaped_session(1);
+        ledger.publish_session(END_PIPELINE, &shaped).unwrap();
+        let checkpoint = ledger
+            .checkpoint(END_PIPELINE, shaped.request())
+            .expect("published shaped checkpoint");
+        let mut full = GenerationSession::from_checkpoint(checkpoint.clone()).unwrap();
+        complete_end_suffix(&mut full, 2);
+        ledger.publish_session(END_PIPELINE, &full).unwrap();
+
+        let identity = END_PIPELINE.identity(PipelineOptions::ALL);
+        let before = ledger.frontier(identity, (0, 0)).unwrap().records().to_vec();
+        let before_revision = ledger.revision(identity, (0, 0)).unwrap();
+        let divergent_aggregate = end_shaped_session(8);
+        assert_eq!(
+            ledger.publish_session(END_PIPELINE, &divergent_aggregate),
+            Err(GenerationLedgerError::CheckpointMismatch)
+        );
+        assert_eq!(ledger.frontier(identity, (0, 0)).unwrap().records(), before);
+        assert_eq!(ledger.revision(identity, (0, 0)).unwrap(), before_revision);
+
+        let mut divergent = GenerationSession::from_checkpoint(checkpoint).unwrap();
+        complete_end_suffix(&mut divergent, 9);
+        assert_eq!(
+            ledger.publish_session(END_PIPELINE, &divergent),
+            Err(GenerationLedgerError::CheckpointMismatch)
+        );
+        assert_eq!(ledger.frontier(identity, (0, 0)).unwrap().records(), before);
+        assert_eq!(ledger.revision(identity, (0, 0)).unwrap(), before_revision);
     }
 
     #[test]

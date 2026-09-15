@@ -323,6 +323,7 @@ pub struct TicketStore {
     tickets: HashMap<(TicketOwner, TicketKind), Ticket>,
     loading_levels: HashMap<(i32, i32), i32>,
     simulation_levels: HashMap<(i32, i32), i32>,
+    topology_dirty: bool,
 }
 
 #[must_use]
@@ -367,11 +368,14 @@ impl TicketStore {
                 ticks_left: ty.timeout,
             },
         );
+        self.topology_dirty = true;
     }
 
     /// Withdraws a ticket. Returns whether one was present.
     pub fn remove_ticket(&mut self, owner: TicketOwner, kind: TicketKind) -> bool {
-        self.tickets.remove(&(owner, kind)).is_some()
+        let removed = self.tickets.remove(&(owner, kind)).is_some();
+        self.topology_dirty |= removed;
+        removed
     }
 
     /// Resets an expiring ticket's countdown to its type's timeout, without
@@ -422,6 +426,7 @@ impl TicketStore {
         let delta = Self::diff(&self.loading_levels, &loading);
         self.loading_levels = loading;
         self.simulation_levels = simulation;
+        self.topology_dirty = false;
         delta
     }
 
@@ -533,6 +538,32 @@ impl TicketStore {
             .collect()
     }
 
+    /// Positions that must remain physically cached while capacity pressure
+    /// is resolved. Player loading tickets describe the logical view and may
+    /// exceed the cache bound; simulation and world-owned loading tickets may
+    /// not.
+    #[must_use]
+    pub fn cache_protected_positions(&self) -> Vec<(i32, i32)> {
+        let mut positions = Self::propagate_one(
+            self.tickets
+                .iter()
+                .filter(|&((_, kind), ticket)| {
+                    ticket.ty.does_load() && *kind != TicketKind::PlayerLoading
+                })
+                .map(|(_, ticket)| ticket),
+        );
+        positions.extend(
+            self.simulation_levels
+                .iter()
+                .filter(|&(_, &level)| level <= MAX_LEVEL)
+                .map(|(&pos, _)| (pos, MAX_LEVEL)),
+        );
+        positions
+            .into_iter()
+            .map(|(pos, _)| pos)
+            .collect()
+    }
+
     #[cfg(test)]
     fn active_ticket_count(&self) -> usize {
         self.tickets.len()
@@ -617,6 +648,15 @@ impl TicketStoreHandle {
         self.lock().resident_positions()
     }
 
+    #[must_use]
+    pub fn cache_protected_positions(&self) -> Vec<(i32, i32)> {
+        self.lock().cache_protected_positions()
+    }
+
+    pub(crate) fn needs_propagation(&self) -> bool {
+        self.lock().topology_dirty
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, TicketStore> {
         self.0.lock().expect("ticket store lock poisoned")
     }
@@ -644,8 +684,31 @@ impl TicketStoreHandle {
     /// `serve_play`, not just a clean disconnect.
     #[must_use]
     pub fn grant_player(&self, id: u64, pos: (i32, i32), radius: i32) -> PlayerTicketGuard {
-        self.set_ticket_with_radius(TicketOwner::Player(id), TicketKind::PlayerLoading, pos, radius);
-        self.set_ticket_with_radius(TicketOwner::Player(id), TicketKind::PlayerSimulation, pos, radius);
+        self.grant_player_with_simulation_radius(id, pos, radius, radius)
+    }
+
+    /// Grants the logical player-loading view and a separately bounded
+    /// simulation radius.
+    #[must_use]
+    pub fn grant_player_with_simulation_radius(
+        &self,
+        id: u64,
+        pos: (i32, i32),
+        loading_radius: i32,
+        simulation_radius: i32,
+    ) -> PlayerTicketGuard {
+        self.set_ticket_with_radius(
+            TicketOwner::Player(id),
+            TicketKind::PlayerLoading,
+            pos,
+            loading_radius,
+        );
+        self.set_ticket_with_radius(
+            TicketOwner::Player(id),
+            TicketKind::PlayerSimulation,
+            pos,
+            simulation_radius,
+        );
         PlayerTicketGuard {
             store: self.clone(),
             id,
@@ -676,13 +739,29 @@ impl PlayerTicketGuard {
     /// player's residency claim follows their real position, not just their
     /// join point.
     pub fn move_to(&self, pos: (i32, i32), radius: i32) {
+        self.move_to_with_simulation_radius(pos, radius, radius);
+    }
+
+    /// Moves the logical loading view while keeping simulation on its own
+    /// bounded radius.
+    pub fn move_to_with_simulation_radius(
+        &self,
+        pos: (i32, i32),
+        loading_radius: i32,
+        simulation_radius: i32,
+    ) {
         self.store
-            .set_ticket_with_radius(TicketOwner::Player(self.id), TicketKind::PlayerLoading, pos, radius);
+            .set_ticket_with_radius(
+                TicketOwner::Player(self.id),
+                TicketKind::PlayerLoading,
+                pos,
+                loading_radius,
+            );
         self.store.set_ticket_with_radius(
             TicketOwner::Player(self.id),
             TicketKind::PlayerSimulation,
             pos,
-            radius,
+            simulation_radius,
         );
     }
 

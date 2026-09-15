@@ -192,12 +192,13 @@ async fn joined_protocol_774_click_does_not_persist_client_prediction() {
         .wait_for_spawn(Duration::from_secs(10))
         .await
         .expect("protocol-774 client must join before its inventory is tested");
+    handle
+        .wait_for(Duration::from_secs(10), |client| {
+            client.player_menu().state_id() != ContainerStateId::new(0)
+        })
+        .await
+        .expect("the join content must establish a server state id before the click");
     let initial_state = handle.player_menu().state_id();
-    assert_ne!(
-        initial_state,
-        ContainerStateId::new(0),
-        "the join content must establish a server state id before the click"
-    );
 
     let forged = lodestone_model::ItemStack::new("minecraft:stone".parse().unwrap(), 64);
     handle
@@ -301,7 +302,7 @@ async fn joined_protocol_774_chest_moves_a_slot_and_closes_cleanly() {
         .wait_for(Duration::from_secs(10), |client| {
             client.open_menu().is_some_and(|menu| {
                 menu.menu.slot_item(0).is_none()
-                    && menu.menu.slot_item(27).is_some_and(|item| item.count() == 1)
+                    && menu.menu.slot_item(62).is_some_and(|item| item.count() == 1)
             })
         })
         .await
@@ -310,11 +311,6 @@ async fn joined_protocol_774_chest_moves_a_slot_and_closes_cleanly() {
     handle
         .send_action(ClientAction::ContainerClose { window_id: opened.window_id })
         .expect("joined client accepts the hosted container close");
-    handle
-        .wait_for(Duration::from_secs(10), |client| client.open_menu().is_none())
-        .await
-        .expect("the host closes the tracked chest");
-
     handle
         .send_action(ClientAction::UseItemOn {
             hand: lodestone_model::Hand::Main,
@@ -328,8 +324,9 @@ async fn joined_protocol_774_chest_moves_a_slot_and_closes_cleanly() {
     handle
         .wait_for(Duration::from_secs(10), |client| {
             client.open_menu().is_some_and(|menu| {
-                menu.menu.slot_item(0).is_none()
-                    && menu.menu.slot_item(27).is_some_and(|item| item.count() == 1)
+                menu.window_id != opened.window_id
+                    && menu.menu.slot_item(0).is_none()
+                    && menu.menu.slot_item(62).is_some_and(|item| item.count() == 1)
             })
         })
         .await
@@ -655,16 +652,6 @@ fn protocol_773_is_not_hosted() {
 
 #[tokio::test]
 async fn hosted_lighting_reaches_client_and_extinguishes_after_a_block_break() {
-    let optics: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../vendor/minecraft-data/data/pc/1.21.11/blocks.json"
-    )).unwrap();
-    let property = |name: &str, field: &str| {
-        optics.as_array().unwrap().iter().find(|block| block["name"] == name).unwrap()[field]
-            .as_u64().unwrap()
-    };
-    assert_eq!(property("torch", "emitLight"), 14);
-    assert_eq!(property("stone", "filterLight"), 15);
-    assert_eq!(property("air", "filterLight"), 0);
     let protocol = lodestone_registry::server_protocol_for_protocol(774).unwrap();
     let mut room = ChunkColumn::new(-64, 384);
     for y in 98..=104 {

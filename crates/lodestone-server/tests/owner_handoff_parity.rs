@@ -6,22 +6,15 @@
 //! missing controls prove that a partial completion cannot be published.
 
 use std::collections::BTreeSet;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use lodestone_model::{BlockPos, ItemStack};
 use lodestone_server::{
-    BlockEntity, BlockEntityHandle, BlockEntityTickEffectBatch, BlockEntityTickOwner,
-    ChunkScheduledTickQueue, Furnace, FurnaceKind, ScheduledTick, ScheduledTickKind,
-    ScheduledTickOwner, ScheduledTickOwnerBatch, TickPriority, merge_due_owner_batches,
+    BlockEntity, BlockEntityHandle, BlockEntityOwnerCompletionError, BlockEntityTickEffectBatch,
+    BlockEntityTickOwner, ChunkScheduledTickQueue, Furnace, FurnaceKind, ScheduledTick,
+    ScheduledTickKind, ScheduledTickOwner, ScheduledTickOwnerBatch,
+    ScheduledTickOwnerCompletionError, TickPriority, merge_due_owner_batches,
     merge_tick_effect_batches,
 };
-
-fn assert_rejects_completion<T>(work: impl FnOnce() -> T) {
-    assert!(
-        catch_unwind(AssertUnwindSafe(work)).is_err(),
-        "a missing or duplicate owner completion must be rejected"
-    );
-}
 
 fn scheduled_owner_batches() -> Vec<ScheduledTickOwnerBatch<ScheduledTickKind>> {
     let mut queue = ChunkScheduledTickQueue::new();
@@ -72,7 +65,7 @@ fn scheduled_owner_handoff_restores_order_and_rejects_non_exact_completion() {
         ((16, 64, 0), ScheduledTickKind::Repeater),
         ((-1, 65, 0), ScheduledTickKind::Comparator),
     ];
-    let serial = merge_due_owner_batches(batches.clone());
+    let serial = merge_due_owner_batches(batches.clone()).expect("valid scheduled owner completion");
     assert_eq!(scheduled_keys(&serial), expected);
 
     let mut reversed = batches.clone();
@@ -87,18 +80,24 @@ fn scheduled_owner_handoff_restores_order_and_rejects_non_exact_completion() {
         "the control must make reversed owner completion observable before merging"
     );
     assert_eq!(
-        scheduled_keys(&merge_due_owner_batches(reversed)),
+        scheduled_keys(&merge_due_owner_batches(reversed).expect("valid scheduled owner completion")),
         expected,
         "central publication must restore the tick-start serial order"
     );
 
     let mut missing = batches.clone();
     missing.pop();
-    assert_rejects_completion(|| merge_due_owner_batches(missing));
+    assert!(matches!(
+        merge_due_owner_batches(missing),
+        Err(ScheduledTickOwnerCompletionError::BatchCount { .. })
+    ));
 
     let mut duplicate = batches.clone();
-    duplicate.push(duplicate.first().expect("two owner batches").clone());
-    assert_rejects_completion(|| merge_due_owner_batches(duplicate));
+    duplicate[1] = duplicate[0].clone();
+    assert!(matches!(
+        merge_due_owner_batches(duplicate),
+        Err(ScheduledTickOwnerCompletionError::DuplicateOwner)
+    ));
 }
 
 #[test]
@@ -135,7 +134,7 @@ fn scheduled_owner_batches_are_a_disjoint_cover_across_chunk_boundaries() {
         }
     }
     assert_eq!(seen, expected_keys, "owner batches must cover every selected tick exactly once");
-    let merged = merge_due_owner_batches(batches);
+    let merged = merge_due_owner_batches(batches).expect("valid scheduled owner completion");
     assert_eq!(
         merged.iter().map(|tick| (tick.pos, tick.kind)).collect::<Vec<_>>(),
         expected.iter().map(|tick| (tick.pos, tick.kind)).collect::<Vec<_>>(),
@@ -211,18 +210,26 @@ fn block_entity_owner_handoff_restores_order_and_rejects_non_exact_completion() 
         "the control must make reversed owner completion observable before merging"
     );
     assert_eq!(
-        effect_keys_from_flattened(&merge_tick_effect_batches(reversed)),
+        effect_keys_from_flattened(
+            &merge_tick_effect_batches(reversed).expect("valid block-entity owner completion"),
+        ),
         expected,
         "central publication must restore the tick-start serial order"
     );
 
     let mut missing = batches.clone();
     missing.pop();
-    assert_rejects_completion(|| merge_tick_effect_batches(missing));
+    assert!(matches!(
+        merge_tick_effect_batches(missing),
+        Err(BlockEntityOwnerCompletionError::BatchCount { .. })
+    ));
 
     let mut duplicate = batches.clone();
-    duplicate.push(duplicate.first().expect("two owner batches").clone());
-    assert_rejects_completion(|| merge_tick_effect_batches(duplicate));
+    duplicate[1] = duplicate[0].clone();
+    assert!(matches!(
+        merge_tick_effect_batches(duplicate),
+        Err(BlockEntityOwnerCompletionError::DuplicateOwner)
+    ));
 }
 
 fn effect_keys_from_flattened(

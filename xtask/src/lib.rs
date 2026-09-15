@@ -3940,8 +3940,8 @@ struct DocIndexEntry {
 
 /// True for a real ATX heading line (`#` through `######`, followed by a
 /// space or end of line, per CommonMark) -- deliberately **not** just
-/// `starts_with('#')`. A prose line beginning with an issue reference like
-/// `#12/#72/#98/#121)` also starts with `#`, and treating that as a heading
+/// `starts_with('#')`. A prose line beginning with an issue-reference sequence
+/// without a following space also starts with `#`, and treating that as a heading
 /// silently truncated `docs/research/combat-scope.md`'s summary mid-sentence
 /// the first time this ran -- caught by eye in the generated
 /// `docs/README.md`, not by any test, which is why this got its own name

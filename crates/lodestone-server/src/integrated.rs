@@ -4223,11 +4223,25 @@ impl IntegratedServer {
         let tick_scheduled = registries
             .as_ref()
             .map_or_else(Default::default, |r| r.scheduled.clone());
+        let warm_world_state = lan_world_state.clone();
         let warm_source = Arc::clone(&source);
         let warm_coords: Vec<(i32, i32)> = (-LAN_TICK_RADIUS..=LAN_TICK_RADIUS)
             .flat_map(|cz| (-LAN_TICK_RADIUS..=LAN_TICK_RADIUS).map(move |cx| (cx, cz)))
             .collect();
         let warm_task = spawn_tick_task(&shutdown, async move {
+            let started = lodestone_time::Instant::now();
+            let fallback_delay = crate::tick::TICK_PERIOD
+                * u32::try_from(crate::tick::INITIAL_RANDOM_TICK_DEFERRAL_TICKS)
+                    .unwrap_or(u32::MAX);
+            loop {
+                if warm_world_state.is_join_ready()
+                    || (started.elapsed() >= fallback_delay
+                        && !warm_world_state.has_active_connections())
+                {
+                    break;
+                }
+                tokio::time::sleep(crate::tick::TICK_PERIOD).await;
+            }
             let _ = crate::chunk::generate_columns_offloaded(warm_source, warm_coords).await;
         });
         // Shared world state for the LAN world: rules set by one player are
@@ -4435,6 +4449,7 @@ impl IntegratedServer {
                         let plugin_channels = conn_plugin_channels.clone();
                         // One clone per accepted socket, all naming the same store.
                         let world_state = lan_world_state.clone();
+                        lan_world_state.connection_started();
                         // one clone per accepted socket, all naming
                         // the same lists — an op granted by one connection is an
                         // op for the next.
@@ -4535,6 +4550,7 @@ impl IntegratedServer {
                                     .await
                                 }
                             };
+                            world_state.connection_ended();
                             // Lets the relay arm above drop this connection's
                             // feeds on its next pass.
                             alive.store(false, std::sync::atomic::Ordering::Relaxed);

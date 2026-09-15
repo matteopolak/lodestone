@@ -30,7 +30,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use lodestone_core::{Reader, State, Writer};
-use lodestone_net::Connection;
+use lodestone_net::{Connection, Transport};
 use lodestone_server::{
     ChunkColumn, ChunkSource, IntegratedServer, ServerBound, ServerDirective, ServerProtocol,
 };
@@ -485,36 +485,11 @@ async fn lan_join_still_works_with_the_tick_loop_running() {
         .await
         .expect("finish configuration");
 
-    let (id, _) = client
-        .read_packet()
-        .await
-        .expect("read batch start")
-        .expect("batch start present");
-    assert_eq!(id, CHUNK_BATCH_START, "expected CHUNK_BATCH_START, got {id}");
-
     let expected_chunks = ((2 * view_radius + 1) * (2 * view_radius + 1)) as usize;
-    for i in 0..expected_chunks {
-        let (id, _) = client
-            .read_packet()
-            .await
-            .expect("read chunk")
-            .expect("chunk present");
-        assert_eq!(id, CHUNK, "expected CHUNK at index {i}, got {id}");
-    }
-
-    let (id, payload) = client
-        .read_packet()
-        .await
-        .expect("read batch finished")
-        .expect("batch finished present");
+    let received_chunks = drain_join_view(&mut client, expected_chunks).await;
     assert_eq!(
-        id, CHUNK_BATCH_FINISHED,
-        "expected CHUNK_BATCH_FINISHED, got {id}"
-    );
-    assert_eq!(
-        Reader::new(&payload).var_i32().expect("batch size"),
-        expected_chunks as i32,
-        "the LAN join burst must still send the whole view"
+        received_chunks, expected_chunks,
+        "the LAN join stream must still send the whole view"
     );
 
     // And the world is ticking alongside the connection — the two are not
@@ -537,4 +512,38 @@ async fn lan_join_still_works_with_the_tick_loop_running() {
 
     drop(client);
     server.shutdown().await;
+}
+
+async fn drain_join_view<T: Transport>(client: &mut Connection<T>, expected: usize) -> usize {
+    let mut received = 0;
+    let mut open = false;
+    let mut in_batch = 0;
+    while received < expected || open {
+        let (id, payload) = client
+            .read_packet()
+            .await
+            .expect("read join packet")
+            .expect("join packet present");
+        if id == CHUNK_BATCH_START {
+            assert!(payload.is_empty());
+            assert!(!open, "a join batch cannot overlap another batch");
+            open = true;
+            in_batch = 0;
+            continue;
+        }
+        if id == CHUNK {
+            assert!(open, "a join chunk must be inside a batch");
+            received += 1;
+            in_batch += 1;
+            continue;
+        }
+        if id == CHUNK_BATCH_FINISHED {
+            assert!(open, "a join batch cannot finish before it starts");
+            let reported = Reader::new(&payload).var_i32().expect("batch size") as usize;
+            assert_eq!(reported, in_batch, "join batch marker count mismatch");
+            open = false;
+            continue;
+        }
+    }
+    received
 }

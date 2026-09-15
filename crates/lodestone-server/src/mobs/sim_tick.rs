@@ -388,13 +388,13 @@ impl<'w> MobSim<'w> {
             // goal selector simply does not tick while ridden.
             if m.rider.is_none() {
                 m.mob.tick(&mut m.goals);
+                // The navigation world is intentionally a stable, bounded snapshot;
+                // collision cannot be. A command-spawned mob may be far outside the
+                // initial snapshot, and a player can edit its support after it was
+                // made, so resolve every SimMob through the live shape oracle before
+                // any subsequent per-tick consumer reads its position.
+                settle_mob(&live_collision, &mut m.mob, before_live_collision, true);
             }
-            // The navigation world is intentionally a stable, bounded snapshot;
-            // collision cannot be. A command-spawned mob may be far outside the
-            // initial snapshot, and a player can edit its support after it was
-            // made, so resolve every SimMob through the live shape oracle before
-            // any subsequent per-tick consumer reads its position.
-            settle_mob(&live_collision, &mut m.mob, before_live_collision, true);
             // Vanilla's own generic per-tick base update's ambient-sound roll runs every tick a
             // mob is alive, independent of any goal — see
             // `roll_ambient_sound`'s own doc.
@@ -833,11 +833,13 @@ impl<'w> MobSim<'w> {
         // snapshots are published so no producer gets a one-tick collision
         // bypass merely because it ran later in the tick order.
         for mob in &mut self.mobs {
-            let before_live_collision = mob.mob.live_collision_origin();
-            // This pass only resolves motion added after the main AI sweep. Do
-            // not integrate gravity twice when a mined floor left a mob
-            // unsupported: the first pass already did that for this tick.
-            settle_mob(&live_collision, &mut mob.mob, before_live_collision, false);
+            if mob.rider.is_none() {
+                let before_live_collision = mob.mob.live_collision_origin();
+                // This pass only resolves motion added after the main AI sweep. Do
+                // not integrate gravity twice when a mined floor left a mob
+                // unsupported: the first pass already did that for this tick.
+                settle_mob(&live_collision, &mut mob.mob, before_live_collision, false);
+            }
         }
 
         self.tick_count += 1;

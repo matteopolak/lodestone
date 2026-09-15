@@ -755,9 +755,9 @@ mod tests {
         let json = [
             r#"{"textures":{"SKIN":{"url":""#,
             skin_url,
-            r#"","CAPE":{"url":""#,
+            r#""},"CAPE":{"url":""#,
             cape_url,
-            r#"","ELYTRA":{"url":""#,
+            r#""},"ELYTRA":{"url":""#,
             elytra_url,
             r#""}}}"#,
         ]

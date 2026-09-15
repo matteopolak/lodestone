@@ -1253,7 +1253,7 @@ mod tests {
     const WINDOW_OPEN_BODY: &[u8] = b"\x07\x0fminecraft:chest\x10{\"text\":\"Chest\"}\x1b";
     const WINDOW_ITEMS_BODY: &[u8] = b"\x07\x00\x02\xff\xff\x00\x01\x01\x00\x00\x00";
     const SET_SLOT_BODY: &[u8] = b"\x07\x00\x24\x00\x01\x01\x00\x00\x00";
-    const WINDOW_CLICK_BODY: &[u8] = b"\x07\x00\x24\x00\x0c\x00\x00\x01\x01\x00\x00\x00";
+    const WINDOW_CLICK_BODY: &[u8] = b"\x07\x00\x24\x00\x0c\x00\x00\x00\x01\x01\x00\x00\x00";
     const WINDOW_CLOSE_BODY: &[u8] = b"\x07";
 
     fn payload(directive: ServerDirective) -> Vec<u8> {

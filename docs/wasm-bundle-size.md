@@ -6,7 +6,7 @@ The browser delivery consists of a page WebAssembly module, a dedicated server-w
 
 ## How it works
 
-`web/Trunk.toml` builds the page package and then stages the optional client archive, block report, panorama faces, curated sound files, and the worker bundle. `web/src/main.rs` fetches the page assets relative to the current page before installing them into the shared asset loader. Starting singleplayer loads `lodestone-server-worker-bootstrap.js`, which dynamically imports the worker glue and its sibling `lodestone-server-worker-wasm_bg.wasm`; the worker owns the integrated world and sends framed bytes over a `MessageChannel`.
+`web/Trunk.toml` builds the page package and then stages the client archive, block report, panorama faces, curated sound files, and the worker bundle. `just wasm-sdk` runs `fetch-assets-ci` first; its content-addressed verification means a preceding explicit fetch does not redownload the faces. The SDK package requires all six panorama files and records them in its manifest, while the development `trunk serve`/`just run-wasm` path remains fail-open. `web/src/main.rs` fetches the page assets relative to the current page before installing them into the shared asset loader. Starting singleplayer loads `lodestone-server-worker-bootstrap.js`, which dynamically imports the worker glue and its sibling `lodestone-server-worker-wasm_bg.wasm`; the worker owns the integrated world and sends framed bytes over a `MessageChannel`.
 
 The page and worker Cargo profiles use `opt-level = "z"`, `lto = "fat"`, one codegen unit, `panic = "abort"`, and `strip = true`. `opt-level = "z"` is intentional: measured compressed output is smaller than both `"s"` and `3`. The `strip` setting removes symbol and debug sections from the release artifact; the `wasm-bindgen` step adds only the exports and glue metadata needed by the browser.
 
@@ -19,6 +19,8 @@ filter. Its controls cover loader-surface retention, deterministic bytes, and
 missing/corrupt source rejection. Keep the filter aligned with production
 resource consumers; adding a loader that reads another namespace requires either
 including that namespace or proving it is supplied by a separate runtime bundle.
+Run `just test-wasm-sdk` when changing SDK collection or archive inventory; its
+missing-face control must continue to fail closed.
 
 Keep multiplayer enabled in the default browser build unless the product explicitly accepts a singleplayer-only deployment. `web/Cargo.toml --no-default-features` is a supported alternative, but saves only about 9 KiB gzip in the measured build. Do not enable a required `wasm-opt` dependency casually: it is not installed by the repository's pinned Trunk workflow and its measured gain is expected to be mostly raw bytes, while compression and startup still need independent checks.
 
@@ -38,6 +40,7 @@ stay optional or curated rather than embedded in the Wasm module.
 - `web/index.html`: `data-wasm-opt="0"` keeps Trunk independent of an unpinned Binaryen installation.
 - `CEILING_BYTES`: optional gzip ceiling override for `scripts/wasm-size.sh` (default `5_800_000`). The default is based on the measured 5,678,198 B post-bindgen page baseline and leaves a small, reviewable allowance for toolchain drift.
 - `LODESTONE_WEB_CLIENT_JAR_PARTS=1`: stages content-addressed archive parts instead of one direct archive.
+- `fetch-assets-ci`: verifies `.cache/mc/26.2/client.jar` and its asset index, including the six panorama objects used by `wasm-sdk`.
 - `client.jar.manifest.json`: digest and entry-count manifest for the direct filtered archive.
 - `web/scripts/stage_resource_pack.py`: deterministic resource-pack staging and CRC validation.
 

@@ -1676,7 +1676,7 @@ fn stand_low_corridor_control_is_the_world_control() {
 fn crouch_release_stays_crouched_matches_golden() {
     // THE FIT-GATE FALLBACK, end to end. Shift is released on tick 60, deep inside
     // the corridor: vanilla's own "desired pose" step says STANDING, the gate refuses it, and the
-    // second arm keeps CROUCHING while the walk speed goes to full.
+    // second arm keeps CROUCHING, including the movement slowdown.
     //
     // A naive `pose = sneak ? CROUCHING : STANDING` port grows the box into the
     // slab on tick 60 and jams — vanilla has no recovery for a *player* whose box
@@ -1697,14 +1697,14 @@ fn crouch_release_stays_crouched_matches_golden() {
         inputs,
     );
 
-    // It must both keep moving and speed up — a jam would show as neither.
+    // It must keep moving at the crouching rate after the release.
     let n = GOLDEN_CROUCH_RELEASE_STAYS_CROUCHED.len();
     let at = |i: usize| f64::from_bits(GOLDEN_CROUCH_RELEASE_STAYS_CROUCHED[i].pos[0]);
     let sneak_rate = (at(59) - at(50)) / 9.0;
     let walk_rate = (at(n - 1) - at(n - 10)) / 9.0;
     assert!(
-        walk_rate > sneak_rate * 2.0,
-        "releasing shift must speed the player up (sneak {sneak_rate}, walk {walk_rate})"
+        (walk_rate - sneak_rate).abs() < 1.0e-12,
+        "a crouching player must keep the slowdown after release (sneak {sneak_rate}, walk {walk_rate})"
     );
 
     // And the pose is still CROUCHING at the end, with the crouch eye height.

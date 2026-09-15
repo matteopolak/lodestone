@@ -64,6 +64,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use thiserror::Error;
 
 /// Mirrors the real per-tick priority enum, in its real declared order:
 /// extremely high, very high, high, normal, low, very low, extremely low —
@@ -862,60 +863,82 @@ impl<T> ScheduledTickOwnerBatch<T> {
 /// owner and every original drain slot before it runs any callback. That keeps
 /// completion order from becoming visible behavior when owners eventually run
 /// independently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum ScheduledTickOwnerCompletionError {
+    #[error("scheduled-tick owner completion expected {expected} batches, got {actual}")]
+    BatchCount { expected: usize, actual: usize },
+    #[error("scheduled-tick owner completions disagree about their tick-start plan")]
+    PlanMismatch,
+    #[error("scheduled-tick owner completion has a duplicate owner")]
+    DuplicateOwner,
+    #[error("a scheduled-tick owner completion contains another owner's tick")]
+    ForeignAssignment,
+    #[error("scheduled-tick owner completion has plan slot {actual}, expected {expected}")]
+    PlanSlot { expected: usize, actual: usize },
+    #[error("scheduled-tick owner completion expected {expected} ticks, got {actual}")]
+    TickCount { expected: usize, actual: usize },
+    #[error("scheduled-tick owner completion has drain slot {actual}, expected {expected}")]
+    DrainSlot { expected: usize, actual: usize },
+}
+
 #[must_use]
 pub fn merge_due_owner_batches<T>(
     mut batches: Vec<ScheduledTickOwnerBatch<T>>,
-) -> Vec<ScheduledTick<T>> {
+) -> Result<Vec<ScheduledTick<T>>, ScheduledTickOwnerCompletionError> {
     let expected_batch_count = batches.first().map_or(0, |batch| batch.batch_count);
     let expected_tick_count = batches.first().map_or(0, |batch| batch.tick_count);
-    assert_eq!(
-        batches.len(),
-        expected_batch_count,
-        "scheduled-tick owner completion omitted or duplicated a plan batch"
-    );
-    assert!(
-        batches.iter().all(|batch| {
-            batch.batch_count == expected_batch_count && batch.tick_count == expected_tick_count
-        }),
-        "scheduled-tick owner completions disagree about their tick-start plan"
-    );
-    assert_eq!(
-        batches.iter().map(|batch| batch.owner).collect::<BTreeSet<_>>().len(),
-        expected_batch_count,
-        "scheduled-tick owner completion has a duplicate owner"
-    );
-    assert!(
-        batches.iter().all(|batch| {
-            batch.assignments.iter().all(|assignment| {
-                ScheduledTickOwner::for_position(assignment.tick.pos) == batch.owner
-            })
-        }),
-        "a scheduled-tick owner completion contains another owner's tick"
-    );
+    if batches.len() != expected_batch_count {
+        return Err(ScheduledTickOwnerCompletionError::BatchCount {
+            expected: expected_batch_count,
+            actual: batches.len(),
+        });
+    }
+    if batches.iter().any(|batch| {
+        batch.batch_count != expected_batch_count || batch.tick_count != expected_tick_count
+    }) {
+        return Err(ScheduledTickOwnerCompletionError::PlanMismatch);
+    }
+    if batches.iter().map(|batch| batch.owner).collect::<BTreeSet<_>>().len()
+        != expected_batch_count
+    {
+        return Err(ScheduledTickOwnerCompletionError::DuplicateOwner);
+    }
+    if batches.iter().any(|batch| {
+        batch.assignments.iter().any(|assignment| {
+            ScheduledTickOwner::for_position(assignment.tick.pos) != batch.owner
+        })
+    }) {
+        return Err(ScheduledTickOwnerCompletionError::ForeignAssignment);
+    }
     batches.sort_unstable_by_key(|batch| batch.serial);
     for (serial, batch) in batches.iter().enumerate() {
-        assert_eq!(
-            batch.serial, serial,
-            "scheduled-tick owner completion has a duplicate, missing, or stale plan slot"
-        );
+        if batch.serial != serial {
+            return Err(ScheduledTickOwnerCompletionError::PlanSlot {
+                expected: serial,
+                actual: batch.serial,
+            });
+        }
     }
     let mut assignments: Vec<_> = batches
         .into_iter()
         .flat_map(ScheduledTickOwnerBatch::into_assignments)
         .collect();
-    assert_eq!(
-        assignments.len(),
-        expected_tick_count,
-        "scheduled-tick owner completion omitted or duplicated a drain assignment"
-    );
+    if assignments.len() != expected_tick_count {
+        return Err(ScheduledTickOwnerCompletionError::TickCount {
+            expected: expected_tick_count,
+            actual: assignments.len(),
+        });
+    }
     assignments.sort_unstable_by_key(|assignment| assignment.serial);
     for (serial, assignment) in assignments.iter().enumerate() {
-        assert_eq!(
-            assignment.serial, serial,
-            "scheduled-tick owner completion has a duplicate, missing, or stale drain slot"
-        );
+        if assignment.serial != serial {
+            return Err(ScheduledTickOwnerCompletionError::DrainSlot {
+                expected: serial,
+                actual: assignment.serial,
+            });
+        }
     }
-    assignments.into_iter().map(|assignment| assignment.tick).collect()
+    Ok(assignments.into_iter().map(|assignment| assignment.tick).collect())
 }
 
 impl<T> Default for ChunkScheduledTickQueue<T> {
@@ -1918,7 +1941,7 @@ mod tests {
             "control requires completion order to differ from global drain order"
         );
         assert_eq!(
-            merge_due_owner_batches(completed)
+            merge_due_owner_batches(completed).expect("valid scheduled-tick owner completion")
                 .iter()
                 .map(|tick| tick.kind)
                 .collect::<Vec<_>>(),
@@ -1931,27 +1954,31 @@ mod tests {
     /// missing; silently running the remaining callbacks would make worker
     /// timing visible as a lost world update.
     #[test]
-    #[should_panic(expected = "omitted or duplicated a plan batch")]
     fn due_owner_batch_merge_rejects_a_missing_owner() {
         let mut q: ChunkScheduledTickQueue<&str> = ChunkScheduledTickQueue::new();
         assert!(q.schedule((0, 0, 0), "origin", 10, TickPriority::Normal));
         assert!(q.schedule((16, 0, 0), "east", 10, TickPriority::Normal));
         let mut batches = q.drain_due_owner_batches(10, usize::MAX);
         batches.pop();
-        let _ = merge_due_owner_batches(batches);
+        assert!(matches!(
+            merge_due_owner_batches(batches),
+            Err(ScheduledTickOwnerCompletionError::BatchCount { .. })
+        ));
     }
 
     /// A repeated owner result is equally invalid: it could otherwise run one
     /// chunk's callback twice and discard a different selected owner's work.
     #[test]
-    #[should_panic(expected = "duplicate owner")]
     fn due_owner_batch_merge_rejects_a_duplicate_owner() {
         let mut q: ChunkScheduledTickQueue<&str> = ChunkScheduledTickQueue::new();
         assert!(q.schedule((0, 0, 0), "origin", 10, TickPriority::Normal));
         assert!(q.schedule((16, 0, 0), "east", 10, TickPriority::Normal));
         let mut batches = q.drain_due_owner_batches(10, usize::MAX);
         batches[1] = batches[0].clone();
-        let _ = merge_due_owner_batches(batches);
+        assert!(matches!(
+            merge_due_owner_batches(batches),
+            Err(ScheduledTickOwnerCompletionError::DuplicateOwner)
+        ));
     }
 
     /// Block reactions can hand work to either side of a column boundary,

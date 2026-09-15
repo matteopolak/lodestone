@@ -606,14 +606,18 @@ def seed_resource_pack_zip() -> list[str]:
 
 
 def seed_status_json_model() -> list[str]:
-    """Seed the status model with a raw response captured from a real server."""
+    """Seed the status model with a captured response and its parser regression."""
     fixture = require(V26_2_FIXTURES / "vanilla_status_response_26_2.json")
     capture = json.loads(fixture.read_text())
     raw = capture.get("status_json_raw")
     if not isinstance(raw, str) or not raw:
         raise Fatal(f"{fixture} has no non-empty status_json_raw capture")
     write_seed("status_json_model", "vanilla_status_response_26_2.json", raw.encode())
-    return ["a real 26.2 status response -> status_json_model"]
+    regression = require(
+        REPO / "crates/lodestone-net/tests/fixtures/status_duplicate_sample.json"
+    )
+    write_seed("status_json_model", regression.name, regression.read_bytes())
+    return ["a real 26.2 status response plus a duplicate-key regression -> status_json_model"]
 
 
 FAMILIES = [

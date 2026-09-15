@@ -272,7 +272,12 @@ pub(super) fn settle_mob(
     let vertical_collision = (resolved.y - attempted.y).abs() > f64::EPSILON;
     let landed = attempted.y < 0.0 && vertical_collision;
     let supported = mob_supported(view, dimensions, resolved_position);
-    mob.apply_live_collision(before, resolved_position, landed || supported, vertical_collision);
+    mob.apply_live_collision(
+        before,
+        resolved_position,
+        landed || supported,
+        vertical_collision,
+    );
 }
 
 /// Moves an initially intersecting body to the highest live shape it overlaps.

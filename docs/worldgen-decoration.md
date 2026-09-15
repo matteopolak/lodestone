@@ -270,6 +270,14 @@ layout exactly. The fixed-seed `vegetation_mushroom_fields_neg1_0_jvm.txt` and
 selector; their composed 3×3 replays contain both cap variants and their stems, so the selector path
 cannot regress while feature-local geometry tests remain green.
 
+The seam controls keep this contract measurable without pinning feature-count totals. The server-side
+`decoration_seam_spill` test checks contiguous tree material and orphan edge leaves in served columns,
+then feeds an air-routed neighbour to the same detector as a negative control. The worldgen-side
+`vegetation_seam_consistency` test compares one source's sparse writes from adjacent target requests;
+the widened five-by-five read arm must match, while the deliberately narrowed three-by-three arm must
+diverge. This catches missing neighbour spill and request-relative source results as locations, even
+when biome feature selection legitimately changes generated counts.
+
 Sculk cursor movement uses an explicit 18-offset order: X advances fastest,
 then Y, with Z as the outer coordinate, while the zero offset and cube corners
 are omitted. That order is part of the seeded shuffle contract, so changing it

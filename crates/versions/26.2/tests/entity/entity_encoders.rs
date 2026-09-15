@@ -13,8 +13,7 @@
 
 use lodestone_core::Nbt;
 use lodestone_model::{
-    ClientEvent, ConnectionState, Directive, EntityMovement, ResourceKey, Rotation, Vec3,
-    VersionAdapter,
+    ClientEvent, ConnectionState, Directive, ResourceKey, Rotation, Vec3, VersionAdapter,
 };
 use lodestone_server::{EntitySnapshot, ServerDirective, ServerProtocol};
 use lodestone_v26_2::V770Adapter;
@@ -166,25 +165,35 @@ fn encode_entity_update_round_trips_an_absolute_teleport_and_head_rotation() {
     };
     assert_eq!(*packet_id, play::clientbound::TELEPORT_ENTITY);
     let events = decode_events(*packet_id, payload);
-    let ClientEvent::EntityMoved {
+    let ClientEvent::EntityTeleported {
         entity_id,
-        movement,
+        pos,
         rotation,
+        flags,
+        velocity,
+        on_ground,
         ..
     } = &events[0]
     else {
-        panic!("expected EntityMoved, got {:?}", events[0]);
+        panic!("expected EntityTeleported, got {:?}", events[0]);
     };
     assert_eq!(*entity_id, 7);
-    let EntityMovement::Absolute(pos) = movement else {
-        panic!("expected an absolute movement, got {movement:?}");
-    };
     assert!((pos.x - 12.5).abs() < 1e-9);
+    assert!((pos.y - 64.0).abs() < 1e-9);
     assert!((pos.z - (-3.25)).abs() < 1e-9);
-    // teleport_entity's yaw/pitch are full-precision f32, not signed bytes.
-    let rotation = rotation.expect("rotation present");
     assert!((rotation.yaw - (-90.0)).abs() < 1e-4, "yaw: {}", rotation.yaw);
     assert!((rotation.pitch - 5.0).abs() < 1e-4, "pitch: {}", rotation.pitch);
+    assert!(!flags.relative_x);
+    assert!(!flags.relative_y);
+    assert!(!flags.relative_z);
+    assert!(!flags.relative_yaw);
+    assert!(!flags.relative_pitch);
+    assert_eq!(velocity.delta, Vec3::new(0.0, 0.0, 0.0));
+    assert!(!velocity.relative_x);
+    assert!(!velocity.relative_y);
+    assert!(!velocity.relative_z);
+    assert!(!velocity.rotate_delta);
+    assert!(*on_ground);
 
     let ServerDirective::Send { packet_id, payload } = &directives[1] else {
         panic!("expected a Send directive");
