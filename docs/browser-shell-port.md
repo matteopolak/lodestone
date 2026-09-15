@@ -138,7 +138,7 @@ until it is called.
 | `Instant::now()` / `Instant` in struct fields | replaced with a seam: `crate::platform::Instant` |
 | `SystemTime::now()` | replaced with a seam: `crate::platform::epoch_duration` |
 | `std::thread::spawn` | gated per call site (mesher worker pool, network) |
-| `tokio::time::{sleep,timeout}` | gated with the native-only workers that use them |
+| `tokio::time::{sleep,timeout}` | native only; browser deadlines use the shared host-timer future |
 | blocking `Runtime::new` + `block_on` | gated — a browser main thread cannot block |
 
 The clock seam now lives in `lodestone-time`, a shared crate absorbing what used to be three
@@ -151,6 +151,12 @@ a hand-rolled `performance.now()` newtype: `winit`'s own wasm arm already types
 against it, and `web_time` was already in the dependency graph via `winit`. Before reaching for
 a portability shim, check whether a crate already in the graph is the type the platform layer
 above you already speaks.
+
+Browser deadlines use `lodestone_time::browser_sleep`, a cancel-safe `setTimeout` future that works
+in both page and worker globals. The client read timeout, relay probes, and integrated-server interval
+share it; elapsed-time accounting continues to use the monotonic `performance.now()`-backed
+`lodestone_time::Instant`. Dropping a losing timeout future clears its host timer, so packet-heavy
+sessions do not accumulate callbacks until the timeout horizon.
 
 ### Dependency-class hazards
 

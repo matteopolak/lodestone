@@ -28,8 +28,8 @@
 //!
 //! # How it works
 //!
-//! [`BrowserInterval::tick`] sleeps until its next deadline (via
-//! [`browser_sleep`]) and then reschedules using [`next_deadline`] — **`Delay`
+//! [`BrowserInterval::tick`] sleeps until its next deadline and then
+//! reschedules using [`next_deadline`] — **`Delay`
 //! semantics, never `Burst`**. `tokio::time`'s default `MissedTickBehavior::
 //! Burst` fires every missed tick back to back with zero delay between them,
 //! which this repo has already paid for once: a native `keep_alive_tick`
@@ -47,13 +47,8 @@
 //! `js_sys`/`web_sys` calls cannot run under a native `cargo test` at all, so
 //! without this split the one thing worth predicting a value for (does a
 //! stall collapse instead of bursting) would be untestable outside a browser.
-//! If a second wasm32-only caller needs a portable sleep, reuse
-//! [`browser_sleep`] rather than a second `set_timeout` call site —
-//! `wasm_bindgen::closure::Closure` construction is easy to get subtly wrong
-//! (`crates/lodestone-shell/src/platform.rs`'s `relay::sleep` doc makes the
-//! same point for its own, separate copy of this primitive; that one cannot
-//! be reused from here because `lodestone-server` does not and must not
-//! depend on `lodestone-shell`).
+//! Browser sleeps come from `lodestone-time`, which owns the shared,
+//! cancel-safe page/worker timer implementation.
 //!
 //! # Configuration
 //!
@@ -66,9 +61,7 @@
 //! `lodestone_time::Instant` (the workspace's portable clock seam — see
 //! `Cargo.toml`'s comment on why this crate depends on `lodestone-time`
 //! rather than `std::time::Instant`, which traps on wasm32) for elapsed-time
-//! bookkeeping, and `js-sys`/`web-sys`/`wasm-bindgen-futures` (wasm32-only
-//! dependencies, same versions `crate::chunk::yield_to_browser` already pins)
-//! for the real macrotask.
+//! bookkeeping and its browser host timer.
 
 #[cfg(any(target_arch = "wasm32", test))]
 use std::time::Duration;
@@ -84,41 +77,6 @@ use std::time::Duration;
 /// is deliberately not a second exception to.
 #[cfg(any(target_arch = "wasm32", test))]
 pub(crate) type BrowserInstant = lodestone_time::Instant;
-
-/// Resolves after `duration` via a real browser macrotask, never
-/// `tokio::time::sleep` — see this module's doc for why that hangs rather
-/// than merely failing to compile. Identical in shape to
-/// `crate::chunk::yield_to_browser` and `lodestone_shell::platform::relay::
-/// sleep` (neither of which this crate can reuse: the former is a fixed
-/// zero-length yield with no `Duration` parameter, the latter lives in a
-/// crate this one must not depend on), generalised to a caller-supplied
-/// period.
-#[cfg(target_arch = "wasm32")]
-async fn browser_sleep(duration: Duration) {
-    let millis = i32::try_from(duration.as_millis()).unwrap_or(i32::MAX);
-    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
-        // The normal singleplayer path runs in a dedicated server worker.
-        // Workers have the same timer API but no `Window`, so use the active
-        // global directly and keep the page fallback on the same path.
-        use wasm_bindgen::{JsCast, JsValue};
-
-        let global = js_sys::global();
-        let set_timeout = js_sys::Reflect::get(&global, &JsValue::from_str("setTimeout"))
-            .expect("browser global must expose setTimeout")
-            .unchecked_into::<js_sys::Function>();
-        // A missed `set_timeout` call (the only failure mode here — an
-        // exhausted timer-id space or similar) leaves `resolve` uncalled,
-        // so this future simply never completes rather than completing
-        // early or panicking. Matches `lodestone_shell::platform::relay::
-        // sleep`'s own reasoning for the identical shape.
-        let _ = set_timeout.call2(
-            &global,
-            resolve.as_ref(),
-            &JsValue::from(millis),
-        );
-    });
-    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
-}
 
 /// The next deadline for a periodic driver, using **`Delay`** missed-tick
 /// semantics — see this module's doc comment for why `Burst` is actively
@@ -172,7 +130,7 @@ impl BrowserInterval {
     pub(crate) async fn tick(&mut self) {
         let now = BrowserInstant::now();
         if self.next > now {
-            browser_sleep(self.next - now).await;
+            lodestone_time::browser_sleep(self.next - now).await;
         }
         self.next = next_deadline(self.next, self.period, BrowserInstant::now());
     }

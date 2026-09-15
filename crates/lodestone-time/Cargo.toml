@@ -19,3 +19,8 @@ workspace = true
 # unchanged. Declaring it for both targets is what lets a signature written once
 # (`fn tick_music(now: Instant)`) work on both targets with no `cfg`.
 web-time = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = { workspace = true }
