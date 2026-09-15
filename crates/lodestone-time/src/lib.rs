@@ -94,6 +94,83 @@
 /// can switch to this type as a no-op on native, and no call site needs a `cfg`.
 pub use web_time::Instant;
 
+/// A cancel-safe browser macrotask timer backed by the active page or worker
+/// global's `setTimeout`.
+#[cfg(target_arch = "wasm32")]
+pub struct BrowserSleep {
+    future: std::pin::Pin<Box<wasm_bindgen_futures::JsFuture>>,
+    global: js_sys::Object,
+    timer_id: Option<i32>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl std::fmt::Debug for BrowserSleep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BrowserSleep")
+            .field("timer_id", &self.timer_id)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl std::future::Future for BrowserSleep {
+    type Output = ();
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        self.future.as_mut().poll(cx).map(|_| ())
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Drop for BrowserSleep {
+    fn drop(&mut self) {
+        use wasm_bindgen::JsCast;
+
+        let Some(timer_id) = self.timer_id.take() else {
+            return;
+        };
+        let Ok(clear_timeout) = js_sys::Reflect::get(
+            &self.global,
+            &wasm_bindgen::JsValue::from_str("clearTimeout"),
+        ) else {
+            return;
+        };
+        let Some(clear_timeout) = clear_timeout.dyn_ref::<js_sys::Function>() else {
+            return;
+        };
+        let _ = clear_timeout.call1(&self.global, &wasm_bindgen::JsValue::from(timer_id));
+    }
+}
+
+/// Resolves after `duration` without blocking the browser event loop.
+#[cfg(target_arch = "wasm32")]
+#[must_use]
+pub fn browser_sleep(duration: std::time::Duration) -> BrowserSleep {
+    use wasm_bindgen::{JsCast, JsValue};
+
+    let global = js_sys::global();
+    let set_timeout = js_sys::Reflect::get(&global, &JsValue::from_str("setTimeout"))
+        .expect("browser global must expose setTimeout")
+        .unchecked_into::<js_sys::Function>();
+    let millis = i32::try_from(duration.as_millis()).unwrap_or(i32::MAX);
+    let mut timer_id = None;
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        timer_id = set_timeout
+            .call2(&global, resolve.as_ref(), &JsValue::from(millis))
+            .ok()
+            .and_then(|value| value.as_f64())
+            .map(|value| value as i32);
+    });
+    BrowserSleep {
+        future: Box::pin(wasm_bindgen_futures::JsFuture::from(promise)),
+        global,
+        timer_id,
+    }
+}
+
 /// Time elapsed since the Unix epoch, i.e. wall-clock time.
 ///
 /// Replaces `SystemTime::now().duration_since(UNIX_EPOCH)`, which panics on

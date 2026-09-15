@@ -475,14 +475,6 @@ impl<T: Transport> Driver<T> {
         mut corrections: mpsc::UnboundedReceiver<(u64, Vec3, Rotation)>,
         mut shutdown: oneshot::Receiver<()>,
     ) -> SessionOutcome {
-        // wasm32 has no tokio runtime timer, so a read timeout cannot be
-        // enforced there without panicking (like a wall-clock read); it is
-        // ignored, and we say so once rather than silently.
-        #[cfg(target_arch = "wasm32")]
-        if self.read_timeout.is_some() {
-            tracing::warn!("read_timeout is unsupported on wasm32 (no runtime timer); ignoring");
-        }
-
         // Kick off the protocol-owned login sequence.
         match self.adapter.begin_login(&self.profile, &self.server) {
             Ok(directives) => {
@@ -1935,16 +1927,23 @@ async fn read_packet_timed<T: Transport>(
     read.map_err(ReadError::Transport)
 }
 
-/// Reads the next packet.
-///
-/// On wasm32 there is no runtime timer, so `timeout` is ignored (the caller
-/// warns once); the read is otherwise identical.
+/// Reads the next packet, racing an optional timeout against the browser host
+/// timer without requiring a Tokio runtime clock.
 #[cfg(target_arch = "wasm32")]
 async fn read_packet_timed<T: Transport>(
     conn: &mut Connection<T>,
-    _timeout: Option<Duration>,
+    timeout: Option<Duration>,
 ) -> Result<Option<(i32, Vec<u8>)>, ReadError> {
-    conn.read_packet().await.map_err(ReadError::Transport)
+    let read = match timeout {
+        Some(duration) => {
+            tokio::select! {
+                read = conn.read_packet() => read,
+                () = lodestone_time::browser_sleep(duration) => return Err(ReadError::TimedOut),
+            }
+        }
+        None => conn.read_packet().await,
+    };
+    read.map_err(ReadError::Transport)
 }
 
 /// Unit tests for the signed-chat producer wiring

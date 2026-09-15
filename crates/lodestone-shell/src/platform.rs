@@ -521,20 +521,7 @@ pub mod relay {
     /// used here at all (it hangs, it does not merely fail to fire).
     #[cfg(target_arch = "wasm32")]
     pub async fn sleep(duration: std::time::Duration) {
-        let millis = i32::try_from(duration.as_millis()).unwrap_or(i32::MAX);
-        let Some(window) = web_sys::window() else {
-            return;
-        };
-        let promise = js_sys::Promise::new(&mut |resolve, _reject| {
-            // A missed `set_timeout` call (the only failure mode here — an
-            // exhausted timer-id space or similar) leaves `resolve` uncalled,
-            // which means this future never completes rather than completing
-            // early. That is the safe direction: a ping that never times out
-            // degrades to "still pending", not to "reported success it never
-            // had".
-            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, millis);
-        });
-        let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+        lodestone_time::browser_sleep(duration).await;
     }
 
     #[cfg(test)]
