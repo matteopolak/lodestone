@@ -156,6 +156,24 @@ fn parent_declares_cfg_test_mod(path: &Path) -> bool {
         .any(|text| declares_cfg_test_mod(&text, stem))
 }
 
+fn in_cfg_test_module(path: &Path) -> bool {
+    let mut dir = path.parent();
+    while let Some(current) = dir {
+        if current.file_name().and_then(|name| name.to_str()) == Some("tests") {
+            if let Some(parent) = current.parent() {
+                if parent_declares_cfg_test_mod(&current.join("tests.rs")) {
+                    return true;
+                }
+                if parent_declares_cfg_test_mod(&parent.join("tests.rs")) {
+                    return true;
+                }
+            }
+        }
+        dir = current.parent();
+    }
+    false
+}
+
 /// Line numbers (0-based) that sit inside an inline `#[cfg(test)]` item.
 fn cfg_test_lines(text: &str) -> Vec<bool> {
     let lines: Vec<&str> = text.lines().collect();
@@ -236,7 +254,7 @@ fn no_production_source_file_in_this_crate_names_the_test_support_crate() {
         if hits.is_empty() {
             continue;
         }
-        if parent_declares_cfg_test_mod(file) {
+        if parent_declares_cfg_test_mod(file) || in_cfg_test_module(file) {
             excused_file_modules += hits.len();
             continue;
         }

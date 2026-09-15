@@ -925,14 +925,17 @@ impl<'w> NavigatingMob<'w> {
         on_ground: bool,
         vertical_collision: bool,
     ) {
+        let movement_attempted = self.pos != before;
         self.pos = resolved;
         self.live_collision_origin = resolved;
         self.needs_live_unembed = false;
-        self.velocity = Vec3::new(
-            resolved.x - before.x,
-            resolved.y - before.y,
-            resolved.z - before.z,
-        );
+        if movement_attempted {
+            self.velocity = Vec3::new(
+                resolved.x - before.x,
+                resolved.y - before.y,
+                resolved.z - before.z,
+            );
+        }
         self.on_ground = on_ground;
         if vertical_collision {
             self.fall_speed = 0.0;

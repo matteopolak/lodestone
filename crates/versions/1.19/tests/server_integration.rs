@@ -242,6 +242,12 @@ async fn registry_selected_protocol_762_broadcasts_an_arm_swing_to_another_clien
     )
     .player_loaded_policy(PlayerLoadedPolicy::Manual)
     .connect_with(sender_io);
+
+    sender
+        .wait_for_spawn(Duration::from_secs(10))
+        .await
+        .expect("the swing sender must reach Play");
+
     let (mut observer, mut observer_events) = ClientBuilder::new(
         observer_address,
         observer_profile,
@@ -252,10 +258,6 @@ async fn registry_selected_protocol_762_broadcasts_an_arm_swing_to_another_clien
     .await
     .expect("the observer must connect through the published shared host");
 
-    sender
-        .wait_for_spawn(Duration::from_secs(10))
-        .await
-        .expect("the swing sender must reach Play");
     observer
         .wait_for_spawn(Duration::from_secs(10))
         .await
@@ -370,7 +372,7 @@ async fn joined_protocol_762_chest_moves_a_slot_and_corrects_prediction() {
                     menu.menu.slot_item(0).is_none()
                         && menu
                             .menu
-                            .slot_item(27)
+                            .slot_item(62)
                             .is_some_and(|item| item.count() == 1)
                 })
         })
@@ -382,11 +384,8 @@ async fn joined_protocol_762_chest_moves_a_slot_and_corrects_prediction() {
             window_id: opened.window_id,
         })
         .expect("joined client accepts the chest close");
-    handle
-        .wait_for(Duration::from_secs(10), |client| client.open_menu().is_none())
-        .await
-        .expect("the host closes the tracked container");
 
+    // The serverbound close clears server state; no clientbound close echo is sent.
     handle
         .send_action(ClientAction::UseItemOn {
             hand: Hand::Main,
@@ -409,7 +408,7 @@ async fn joined_protocol_762_chest_moves_a_slot_and_corrects_prediction() {
                     menu.menu.slot_item(0).is_none()
                         && menu
                             .menu
-                            .slot_item(27)
+                            .slot_item(62)
                             .is_some_and(|item| item.count() == 1)
                 })
         })

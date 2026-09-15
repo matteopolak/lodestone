@@ -100,14 +100,19 @@ const ORACLE_EVENT_CAP: usize = 64;
 /// fast. Exceeding it fails loudly rather than hanging.
 const DEADLINE: Duration = Duration::from_secs(60);
 
-/// An all-air world. The terrain is irrelevant here — this file is about
-/// whether events reach a registered plugin, not what they contain — and a
-/// worldgen source would spend seconds per column for nothing.
+/// A minimal flat world. The terrain is irrelevant here — this file is about
+/// whether events reach a registered plugin, not what they contain.
 struct FlatAir;
 
 impl ChunkSource for FlatAir {
     fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
-        ChunkColumn::new(0, 1)
+        let mut column = ChunkColumn::new(-64, 384);
+        for lx in 0..16 {
+            for lz in 0..16 {
+                column.set_block(lx, 63, lz, "minecraft:stone");
+            }
+        }
+        column
     }
 
     fn block_state(&self, x: i32, y: i32, z: i32) -> String {
@@ -216,7 +221,7 @@ async fn run_session(ecs: &lodestone_ecs::EcsHandle, session: Entity) -> Vec<Cli
     // terrain.
     let (_server, client_io) = IntegratedServer::open_in_memory(protocol, FlatAir, 0);
 
-    let (_handle, mut events) = ClientBuilder::new(address(), profile(), adapter)
+    let (handle, mut events) = ClientBuilder::new(address(), profile(), adapter)
         .ecs(Arc::clone(ecs), session)
         .connect_with(client_io);
 
@@ -238,6 +243,12 @@ async fn run_session(ecs: &lodestone_ecs::EcsHandle, session: Entity) -> Vec<Cli
                 )
             })
             .expect("the session ended before it reached Play with a chunk");
+
+        if let ClientEvent::TeleportPlayer { pos, rotation, .. } = &event {
+            handle
+                .acknowledge_teleport_correction(*pos, *rotation)
+                .expect("the client must still own the correction transaction");
+        }
 
         // `apply` already ran for this event in `Driver::dispatch`, so it is on
         // the bus right now. Drain before aging can touch it.

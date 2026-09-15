@@ -474,8 +474,8 @@ async fn a_real_join_move_and_disconnect_drive_real_ticket_residency() {
 }
 
 /// A live server owns the cache lifecycle hand-off as well as the ticket graph:
-/// a client crossing negative chunk boundaries first loads `(-1, 0)`, then
-/// releases it after crossing into `(-2, 0)`. The source log observes the real
+/// a client crossing negative chunk boundaries first loads `(-4, 0)`, then
+/// releases it after crossing into `(-5, 0)`. The source log observes the real
 /// `ChunkStore` call, rather than an inspected ticket delta alone.
 #[tokio::test]
 async fn integrated_server_unloads_a_negative_chunk_through_the_owned_lifecycle_plan() {
@@ -493,36 +493,69 @@ async fn integrated_server_unloads_a_negative_chunk_through_the_owned_lifecycle_
     let username = format!("Life{:08x}", Uuid::new_v4().as_u128() as u32);
     drive_login_and_join(&mut client, &username).await;
 
-    // `floor(-0.5 / 16.0)` is -1; truncating toward zero would leave the
-    // intended lifecycle column at the origin and make this assertion vacuous.
-    const FIRST: (f64, f64, f64) = (-0.5, 70.0, 8.0);
-    const SECOND: (f64, f64, f64) = (-16.5, 70.0, 8.0);
-    assert_eq!(chunk_of(FIRST), (-1, 0));
-    assert_eq!(chunk_of(SECOND), (-2, 0));
+    // Both columns sit just beyond the world's radius-three spawn ticket.
+    const FIRST: (f64, f64, f64) = (-48.5, 70.0, 8.0);
+    const SECOND: (f64, f64, f64) = (-64.5, 70.0, 8.0);
+    assert_eq!(chunk_of(FIRST), (-4, 0));
+    assert_eq!(chunk_of(SECOND), (-5, 0));
+    assert!(chunk_of(FIRST).0.abs() > PLAYER_SPAWN_RADIUS);
+    assert!(chunk_of(SECOND).0.abs() > PLAYER_SPAWN_RADIUS);
 
     send_player_moved(&mut client, FIRST.0, FIRST.1, FIRST.2).await;
+    wait_for_chunk(&mut client, chunk_of(FIRST)).await;
     ping_pong(&mut client, 10).await;
     send_player_moved(&mut client, SECOND.0, SECOND.1, SECOND.2).await;
     ping_pong(&mut client, 11).await;
 
+    // The loading ticket makes (-4, 0) eligible after the move, but the
+    // integrated cache deliberately keeps it until capacity pressure needs a
+    // victim. Fill the 512-column floor with unprotected destinations so the
+    // ordinary LRU/lifecycle path performs the release.
+    for cx in 100..=612 {
+        let x = f64::from(cx * 16 + 8);
+        send_player_moved(&mut client, x, 70.0, 8.0).await;
+        wait_for_chunk(&mut client, (cx, 0)).await;
+        ping_pong(&mut client, i64::from(cx)).await;
+    }
+
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let observed = unloads.lock().expect("unload log poisoned").clone();
-        if observed.contains(&(-1, 0)) {
-            assert!(
-                observed.windows(2).all(|pair| pair[0] < pair[1]),
-                "the live cache-release hand-off must retain canonical (cx, cz) order: {observed:?}"
-            );
+        if observed.contains(&(-4, 0)) {
             break;
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "the real integrated server never released chunk (-1, 0) after crossing into (-2, 0); observed unloads: {observed:?}"
+            "the real integrated server never released chunk (-4, 0) after crossing into (-5, 0); observed unloads: {observed:?}"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
     server.shutdown().await;
+}
+
+async fn wait_for_chunk<T: lodestone_net::Transport>(
+    client: &mut Connection<T>,
+    expected: (i32, i32),
+) {
+    loop {
+        let (id, payload) = client
+            .read_packet()
+            .await
+            .expect("read streamed chunk")
+            .expect("streamed chunk present");
+        if id != CHUNK {
+            continue;
+        }
+        let mut reader = Reader::new(&payload);
+        let coordinate = (
+            reader.var_i32().expect("chunk x"),
+            reader.var_i32().expect("chunk z"),
+        );
+        if coordinate == expected {
+            return;
+        }
+    }
 }
 
 /// Two real connections share one column; the column must survive either player

@@ -521,24 +521,20 @@ fn snap_small_velocity(v: Vec3d) -> Vec3d {
 /// The sprint-flag write plus the client-side input transform shared by the
 /// air, water and lava travel paths.
 ///
-/// The slowdown reads the pose established by the preceding tick, not this
-/// tick's raw shift bit. The client computes its moving-slowly state before it
-/// refreshes keyboard input, then applies that state during travel. Keeping
-/// those values distinct makes both shift edges one tick delayed: the press
-/// gets one final full-speed input sample and the release gets one final
-/// slowed sample. The raw bit still drives edge back-off, bounce suppression,
-/// water descent, and the pose selected at the end of this tick.
+/// The full per-tick path supplies the client movement state computed before
+/// input is applied. Narrow travel entry points additionally treat held shift
+/// as slow movement because they do not run that per-tick update.
 fn set_sprint_and_modify_input(
     state: &mut PlayerState,
     input: MovementInput,
     profile: &PhysicsProfile,
+    moving_slowly: bool,
 ) -> (f32, f32) {
     state.sprinting = input.sprint;
     // The ordinary walking/airborne case. Visual crawling also counts as
     // moving slowly, but needs the separate in-water predicate owned by the
     // fluid dispatch; do not infer it from `state.swimming`, which is the
     // sprint-swim state rather than the in-water state.
-    let moving_slowly = state.pose == Pose::Crouching;
     modify_input(
         profile.input_model,
         input.strafe,

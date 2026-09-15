@@ -35,6 +35,11 @@ chunk form can retain a longer bounded run without changing the flood result; la
 keep the ordinary compact form. Explicit zero block-light sections in an update clear a client's
 existing value, so update packets always retain them.
 
+Hosted protocols whose initial packet must resolve light entering from an adjacent chunk opt into the
+retained-initial-light path. Their source admission settles the complete 3x3 footprint before encoding,
+and the initial encoder consumes that centre snapshot; protocols without that requirement continue to
+use the isolated initial encoder.
+
 ### Dimension sky rules
 
 Sky seeding is a dimension property, not a consequence of a column's vertical shape. The Nether and

@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use bevy_app::App;
 use lodestone_core::{Reader, State, Writer};
 use lodestone_data::block_states::StateId;
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, GameMode};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos};
 use lodestone_net::Connection;
 use lodestone_server::ecs::{
     PaperEvent, PaperEventBus, PaperEventKind, PaperEventPriority, ServerApp,
@@ -40,6 +40,7 @@ const LOGIN_ACKNOWLEDGED: i32 = 3;
 const FINISH_CONFIGURATION: i32 = 3;
 const BLOCK_ACTION_C2S: i32 = 100;
 const BLOCK_UPDATE_S2C: i32 = 101;
+const PLAYER_UUID: Uuid = Uuid::from_u128(0x7061_7065_725f_6272_6561_6b); // "paper_break"
 
 #[derive(Clone)]
 struct FlatSource {
@@ -101,7 +102,7 @@ impl ServerProtocol for SilentProtocol {
                 let mut reader = Reader::new(payload);
                 ServerBound::LoginStart {
                     username: reader.string(16).expect("username"),
-                    uuid: Uuid::nil(),
+                    uuid: PLAYER_UUID,
                 }
             }
             State::Login if packet_id == LOGIN_ACKNOWLEDGED => ServerBound::LoginAcknowledged,
@@ -236,7 +237,7 @@ async fn drive_silent_join(client: &mut Connection<DuplexStream>) {
         .expect("configuration finished");
 }
 
-async fn send_creative_start_destroy(client: &mut Connection<DuplexStream>) {
+async fn send_start_and_stop_destroy(client: &mut Connection<DuplexStream>) {
     let mut action = Writer::default();
     action.u8(0);
     action.i32(TARGET.x);
@@ -246,6 +247,15 @@ async fn send_creative_start_destroy(client: &mut Connection<DuplexStream>) {
         .write_packet(BLOCK_ACTION_C2S, action.as_slice())
         .await
         .expect("block action");
+    let mut stop = Writer::default();
+    stop.u8(2);
+    stop.i32(TARGET.x);
+    stop.i32(TARGET.y);
+    stop.i32(TARGET.z);
+    client
+        .write_packet(BLOCK_ACTION_C2S, stop.as_slice())
+        .await
+        .expect("stop block action");
 }
 
 async fn read_block_update(client: &mut Connection<DuplexStream>) -> String {
@@ -373,12 +383,9 @@ async fn cancelled_player_break_returns_authoritative_correction() {
         0,
         cancelling_block_break_server_app(),
     );
-    server
-        .world_state()
-        .set_default_game_mode(GameMode::Creative);
     let mut client = Connection::new(client_end);
     drive_silent_join(&mut client).await;
-    send_creative_start_destroy(&mut client).await;
+    send_start_and_stop_destroy(&mut client).await;
     assert_eq!(read_block_update(&mut client).await, "minecraft:stone");
     assert_eq!(
         server.resident_block_state_id(TARGET.x, TARGET.y, TARGET.z),
@@ -401,12 +408,9 @@ async fn cancelled_player_break_returns_authoritative_correction() {
         0,
         ServerApp::bootstrap(),
     );
-    server
-        .world_state()
-        .set_default_game_mode(GameMode::Creative);
     let mut client = Connection::new(client_end);
     drive_silent_join(&mut client).await;
-    send_creative_start_destroy(&mut client).await;
+    send_start_and_stop_destroy(&mut client).await;
     assert_eq!(read_block_update(&mut client).await, "minecraft:air");
     assert_eq!(
         server.resident_block_state_id(TARGET.x, TARGET.y, TARGET.z),

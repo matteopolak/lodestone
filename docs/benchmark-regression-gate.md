@@ -247,6 +247,14 @@ that is hermetic (no vanilla jar, no GPU adapter required, no network) *and*
 count-producing. Neither package reaches `cpal`/`alsa-sys`, which is why that job needs no
 apt step.
 
+Within `lodestone-render`'s `render_submit`, `entity_upload_buffers` is recorded from the
+CPU upload plan: each non-empty entity batch makes exactly one `upload_instances` call, and
+that helper returns one buffer. On adapters, the bench still executes the real uploads and
+asserts they match the plan; on headless CI, the same deterministic count is recorded
+without pretending that GPU execution occurred. The metric therefore remains required,
+while the separate arena-occupancy entries remain optional because they genuinely need an
+adapter.
+
 Deliberately excluded, each for a reason rather than an oversight:
 
 - **`lodestone-worldgen`'s `generation`** — real generator, tens of seconds per sweep, and

@@ -35,7 +35,9 @@ sent back to the caller.
 The server's own tree is also projected to a real client over the wire (`COMMANDS`, clientbound),
 pruned per-connection by permission level exactly as vanilla prunes an unusable subtree — a denied
 node takes its whole subtree with it — so tab completion and highlighting only ever show what that
-connection can actually run.
+connection can actually run. For a line whose committed root is not built in, the built-in
+suggestion pass returns no candidates; the live connection can then ask an installed plugin
+dispatcher for that root's permission-filtered branch instead of showing unrelated built-ins.
 
 ### Why there is a plugin seam at all
 

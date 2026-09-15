@@ -225,7 +225,8 @@ is installed from a pinned prebuilt release tarball rather than built from sourc
 `Trunk.toml` stages the gitignored vanilla `client.jar`/`blocks.json` through a conditional
 `post_build` hook rather than a mandatory `data-trunk rel="copy-file"` link, so the build
 itself does not require `.cache/` to be populated on a fresh runner — see `web/Trunk.toml` for
-the mechanism.
+the mechanism. The atomics-enabled worker rebuilds the standard library, so the pinned toolchain
+declares `rust-src` and the staging hook reports its absence before starting either worker build.
 
 **As of this writing, the job is red, and the cause is a real compile error rather than a
 tooling or caching problem**: `lodestone-shell` (and, downstream, the `trunk build` of

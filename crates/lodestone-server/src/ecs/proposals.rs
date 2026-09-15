@@ -331,7 +331,12 @@ impl bevy_app::Plugin for ServerProposalPlugin {
         app.init_resource::<ServerProposalDecisions>();
         app.init_resource::<PaperEventBus>();
         app.add_message::<ServerProposal>();
-        app.add_systems(super::GameTick, drain_proposals.in_set(TickSet::Drain));
+        app.add_systems(
+            super::GameTick,
+            drain_proposals
+                .in_set(TickSet::Drain)
+                .after(super::run_server_tasks),
+        );
         app.add_systems(
             super::GameTick,
             dispatch_paper_events.in_set(TickSet::Adjudicate),

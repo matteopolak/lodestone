@@ -334,10 +334,6 @@ async fn assert_registry_selected_host_broadcasts_arm_swing(protocol_version: i3
         username: format!("SwingSender{protocol_version}"),
         uuid: uuid::Uuid::new_v4(),
     };
-    let observer_profile = LoginProfile {
-        username: format!("SwingObserver{protocol_version}"),
-        uuid: uuid::Uuid::new_v4(),
-    };
     let (mut sender, _sender_events) = ClientBuilder::new(
         ServerAddress {
             host: "memory".to_owned(),
@@ -348,6 +344,16 @@ async fn assert_registry_selected_host_broadcasts_arm_swing(protocol_version: i3
     )
     .player_loaded_policy(PlayerLoadedPolicy::Manual)
     .connect_with(sender_io);
+
+    sender
+        .wait_for_spawn(Duration::from_secs(10))
+        .await
+        .expect("the swing sender must register before the observer joins");
+
+    let observer_profile = LoginProfile {
+        username: format!("SwingObserver{protocol_version}"),
+        uuid: uuid::Uuid::new_v4(),
+    };
     let (mut observer, mut observer_events) = ClientBuilder::new(
         ServerAddress {
             host: "127.0.0.1".to_owned(),
@@ -361,10 +367,6 @@ async fn assert_registry_selected_host_broadcasts_arm_swing(protocol_version: i3
     .await
     .expect("the observer must connect through the published shared host");
 
-    sender
-        .wait_for_spawn(Duration::from_secs(10))
-        .await
-        .expect("the swing sender must reach Play");
     observer
         .wait_for_spawn(Duration::from_secs(10))
         .await

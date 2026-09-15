@@ -51,6 +51,7 @@ use std::sync::{Arc, Mutex};
 use lodestone_core::Nbt;
 use lodestone_model::{BlockPos, ItemStack};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use thiserror::Error;
 
 use crate::brewing::BrewingStand;
 use crate::composter::Composter;
@@ -1366,6 +1367,21 @@ struct BlockEntityTickCompletion {
     updates: Vec<BlockEntityTickUpdate>,
 }
 
+/// Errors returned when a worker hands the central writer an invalid owner set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum BlockEntityOwnerCompletionError {
+    #[error("block-entity owner completion expected {expected} batches, got {actual}")]
+    BatchCount { expected: usize, actual: usize },
+    #[error("block-entity owner completions disagree about their tick-start plan")]
+    PlanMismatch,
+    #[error("block-entity owner completion has a duplicate owner")]
+    DuplicateOwner,
+    #[error("a block-entity owner completion contains another owner's update")]
+    ForeignUpdate,
+    #[error("block-entity owner completion has plan slot {actual}, expected {expected}")]
+    PlanSlot { expected: usize, actual: usize },
+}
+
 /// Restores a completed owner batch set to the tick-start publication order.
 ///
 /// The serial executor currently returns batches in this order already, but
@@ -1376,36 +1392,41 @@ struct BlockEntityTickCompletion {
 #[must_use]
 pub fn merge_tick_effect_batches(
     mut batches: Vec<BlockEntityTickEffectBatch>,
-) -> Vec<BlockEntityTickEffect> {
+) -> Result<Vec<BlockEntityTickEffect>, BlockEntityOwnerCompletionError> {
     let expected_count = batches.first().map_or(0, |batch| batch.batch_count);
-    assert_eq!(
-        batches.len(),
-        expected_count,
-        "block-entity owner completion omitted or duplicated a plan batch"
-    );
-    assert!(
-        batches
-            .iter()
-            .all(|batch| batch.batch_count == expected_count),
-        "block-entity owner completions disagree about their tick-start plan"
-    );
-    assert!(
-        batches
-            .iter()
-            .all(|batch| batch.effects.iter().all(|effect| effect.owner == batch.owner)),
-        "a block-entity owner completion contains another owner's effect"
-    );
+    if batches.len() != expected_count {
+        return Err(BlockEntityOwnerCompletionError::BatchCount {
+            expected: expected_count,
+            actual: batches.len(),
+        });
+    }
+    if batches.iter().any(|batch| batch.batch_count != expected_count) {
+        return Err(BlockEntityOwnerCompletionError::PlanMismatch);
+    }
+    if batches.iter().map(|batch| batch.owner).collect::<std::collections::BTreeSet<_>>().len()
+        != expected_count
+    {
+        return Err(BlockEntityOwnerCompletionError::DuplicateOwner);
+    }
+    if batches
+        .iter()
+        .any(|batch| batch.effects.iter().any(|effect| effect.owner != batch.owner))
+    {
+        return Err(BlockEntityOwnerCompletionError::ForeignUpdate);
+    }
     batches.sort_unstable_by_key(|batch| batch.serial);
     for (serial, batch) in batches.iter().enumerate() {
-        assert_eq!(
-            batch.serial, serial,
-            "block-entity owner completion has a duplicate, missing, or stale plan slot"
-        );
+        if batch.serial != serial {
+            return Err(BlockEntityOwnerCompletionError::PlanSlot {
+                expected: serial,
+                actual: batch.serial,
+            });
+        }
     }
-    batches
+    Ok(batches
         .into_iter()
         .flat_map(BlockEntityTickEffectBatch::into_effects)
-        .collect()
+        .collect())
 }
 
 /// A [`BlockPos`]-keyed map of live [`BlockEntity`] values — the world's own
@@ -2597,7 +2618,7 @@ mod tests {
             "control requires swapped owner completion to alter raw publication order"
         );
         assert_eq!(
-            merge_tick_effect_batches(completed),
+            merge_tick_effect_batches(completed).expect("valid block-entity owner completion"),
             serial_effects,
             "central publication must restore plan order independently of owner completion order"
         );

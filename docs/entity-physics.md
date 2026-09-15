@@ -38,13 +38,12 @@ activate a different server-side movement rule. Keep the input-to-move ordering 
 plugin. There is no configuration switch. The flow depends on `lodestone-ecs`'s `TickSet` ordering
 and `ActionQueue` preserving insertion order through `lodestone-client`.
 
-Raw shift and movement slowdown are deliberately separate. The shift bit immediately controls
-edge back-off, bounce suppression, water descent, and the pose chosen at the end of the tick, while
-the `0.3` movement-input scale reads the pose established by the preceding tick. Consequently the
-first shift tick retains full-speed input and the first release tick retains one final slowed input.
-Collapsing both decisions onto the current raw bit changes an airborne knockback trajectory on each
-edge and can make a validating server issue position corrections. The split lives in
-`lodestone_physics::player::set_sprint_and_modify_input`; change it only alongside a two-edge test.
+Raw shift and movement slowdown are separate decisions. The shift bit immediately controls edge
+back-off, bounce suppression, water descent, and the pose chosen at the end of the tick. The client
+also computes a fit-gated crouching state before movement input is applied: a held shift slows a
+player when the crouching box fits, and releasing shift keeps that slowdown under a ceiling where the
+standing box does not fit. The split lives in `lodestone_physics::player::should_move_slowly` and
+`set_sprint_and_modify_input`; change them only alongside tests for both shift edges and the fit gate.
 
 ### Collision shapes and block-physics constants
 

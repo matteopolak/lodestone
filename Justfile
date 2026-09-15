@@ -361,9 +361,19 @@ wasm-check:
 wasm-size:
     ./scripts/wasm-size.sh
 
+# The fetch is content-addressed and verifies existing files before skipping,
+# so calling this after an explicit fetch-assets-ci does not redownload them.
+[doc("fetch verified browser assets, including the six SDK panorama faces")]
+fetch-assets-ci:
+    cargo run -q -p xtask -- fetch-assets --version 26.2
+
 [doc("build the deterministic embeddable browser SDK archive and manifest")]
-wasm-sdk output="target/wasm-sdk":
+wasm-sdk output="target/wasm-sdk": fetch-assets-ci
     python3 web/scripts/package_wasm_sdk.py --output-dir {{output}}
+
+[doc("focused SDK packaging checks, including a missing-panorama negative control")]
+test-wasm-sdk:
+    python3 web/scripts/test_package_wasm_sdk.py
 
 # Native distribution build: preserves the normal release optimizer settings
 # while omitting debug metadata and the object-file symbol table. Use plain

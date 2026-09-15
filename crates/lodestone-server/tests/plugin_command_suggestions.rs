@@ -147,18 +147,21 @@ async fn plugin_suggestion_reaches_the_real_play_connection() {
     let explosions = ExplosionFeed::default();
     let commands = suggestion_dispatch();
 
-    let serve = serve_connection_with_commands(
-        &mut server,
-        &protocol,
-        &source,
-        &entities,
-        0,
-        &block_entities,
-        &mobs,
-        &block_ticks,
-        &explosions,
-        &commands,
-    );
+    let serve = tokio::spawn(async move {
+        serve_connection_with_commands(
+            &mut server,
+            &protocol,
+            &source,
+            &entities,
+            0,
+            &block_entities,
+            &mobs,
+            &block_ticks,
+            &explosions,
+            &commands,
+        )
+        .await
+    });
     let client_flow = async {
         client.write_packet(HANDSHAKE, &[2]).await.expect("handshake");
         let mut login = Writer::default();
@@ -206,7 +209,12 @@ async fn plugin_suggestion_reaches_the_real_play_connection() {
         }
     };
 
-    let (response, result) = tokio::join!(client_flow, serve);
+    let response = client_flow.await;
+    // The server loop is deliberately long-lived and only returns after its
+    // peer closes. Drop the client before awaiting it so the test observes a
+    // clean transport shutdown instead of waiting for the keep-alive watchdog.
+    drop(client);
+    let result = serve.await.expect("production Play task must join");
     result.expect("production Play loop must serve the connection");
     assert_eq!(response, (91, 4, 0, vec!["branch".to_owned()]));
 }

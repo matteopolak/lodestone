@@ -59,7 +59,11 @@
 //! [`crate::game_rules`] for the typed registry, `lodestone-core` for the NBT
 //! codec, `lodestone-model` for [`Difficulty`]. No protocol, no packet id.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc,
+    Mutex,
+};
 
 use lodestone_core::Nbt;
 use lodestone_model::{Difficulty, GameMode};
@@ -165,6 +169,8 @@ impl Default for WorldState {
 #[derive(Debug, Clone, Default)]
 pub struct WorldStateHandle {
     state: Arc<Mutex<WorldState>>,
+    join_ready: Arc<AtomicBool>,
+    active_connections: Arc<AtomicUsize>,
     /// Where this world's players are, for
     /// [`crate::tick_area::FollowArea`] — the set that makes the world tick follow
     /// them instead of sitting on chunk `(0, 0)` forever.
@@ -275,6 +281,30 @@ impl WorldStateHandle {
             .lock()
             .expect("world proposal lock poisoned")
             .clone()
+    }
+
+    pub(crate) fn mark_join_ready(&self) {
+        self.join_ready.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn is_join_ready(&self) -> bool {
+        self.join_ready.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn connection_started(&self) {
+        self.active_connections.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub(crate) fn connection_ended(&self) {
+        let _ = self.active_connections.try_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |active| active.checked_sub(1),
+        );
+    }
+
+    pub(crate) fn has_active_connections(&self) -> bool {
+        self.active_connections.load(Ordering::Acquire) != 0
     }
 
     /// This world's player-anchor set — where [`crate::tick_area::FollowArea`] reads

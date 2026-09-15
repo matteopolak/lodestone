@@ -186,6 +186,17 @@ mod tests {
     }
 
     #[test]
+    fn ci_duplicate_key_fixture_matches_the_independent_model() {
+        let json = include_str!(
+            "../../crates/lodestone-net/tests/fixtures/status_duplicate_sample.json"
+        );
+        let expected = expected_status(json).expect("the minimized fuzz input is an object");
+        let actual = lodestone_net::parse_status_json(json, None)
+            .expect("a syntactically valid object with duplicate keys parses");
+        assert_matches(&actual, &expected);
+    }
+
+    #[test]
     #[should_panic(expected = "online player count")]
     fn wrong_external_player_count_is_detected() {
         let json = include_str!("../seeds/status_json_model/vanilla_status_response_26_2.json");

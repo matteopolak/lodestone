@@ -170,7 +170,8 @@ fn discovered_plugins_reach_the_real_queue_while_absent_and_denied_plugins_do_no
 /// placement capability pair to exactly one configured manifest instance. The
 /// sibling copies use the same compiled guest and request the same capabilities;
 /// their unchanged denial proves path and manifest-name matching, not a guest
-/// behavioural difference, confines the exception.
+/// behavioural difference, confines the exception. Their manifest names remain
+/// unique because discovery rejects ambiguous duplicate names before loading.
 #[test]
 fn discovery_grants_default_denied_placement_only_to_the_configured_manifest_instance() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
@@ -178,7 +179,7 @@ fn discovery_grants_default_denied_placement_only_to_the_configured_manifest_ins
     let wasm = build_example_plugin(&["place"]);
     let requested = "\"log\", \"act:chat\", \"act:place\", \"observe:place\"";
     install_fixture_named(&root, "trusted", "placement-owner", &wasm, requested);
-    install_fixture_named(&root, "same-name-other-path", "placement-owner", &wasm, requested);
+    install_fixture_named(&root, "same-name-other-path", "placement-owner-copy", &wasm, requested);
     install_fixture_named(&root, "same-path-shape-other-name", "other-owner", &wasm, requested);
 
     let mut grants = PluginGrantPolicy::default();
@@ -237,7 +238,7 @@ fn persisted_grants_file_allows_only_the_exact_discovered_plugin() {
     let wasm = build_example_plugin(&["place"]);
     let requested = "\"log\", \"act:chat\", \"act:place\", \"observe:place\"";
     install_fixture_named(&root, "trusted", "placement-owner", &wasm, requested);
-    install_fixture_named(&root, "untrusted", "placement-owner", &wasm, requested);
+    install_fixture_named(&root, "untrusted", "placement-owner-copy", &wasm, requested);
     let grants_file = root.join("grants.json");
     std::fs::write(
         &grants_file,

@@ -661,7 +661,11 @@ async fn outbound_raw_packet_bus_observes_encoded_bytes_with_bounded_drop() {
     let second = peer.read_packet().await.unwrap().expect("second packet");
     let rewritten_first = b"decorated:first\0".to_vec();
     assert_eq!(first, (PACKET_ID, rewritten_first.clone()));
-    assert_eq!(second, (PACKET_ID, SECOND.as_bytes().to_vec()));
+    assert_eq!(
+        second,
+        (PACKET_ID, b"decorated:second".to_vec()),
+        "the decorator rewrites every chat action before encoding"
+    );
 
     let ecs = world.read();
     let messages = ecs
@@ -1204,6 +1208,63 @@ async fn player_loaded_auto_sent_on_first_teleport_after_login() {
         "driver should auto-send player_loaded on the first placement teleport"
     );
     assert_eq!(events.recv().await, Some(teleport_event()));
+
+    drop(handle);
+}
+
+/// A protocol family may defer the placement acknowledgement until the local
+/// simulation adopts the authoritative pose. The initial placement itself is
+/// already folded into the driver's read model, so a headless caller that only
+/// waits for spawn must still be able to send commands and receive chunks
+/// without manufacturing a render-loop correction owner.
+#[tokio::test]
+async fn deferred_initial_placement_does_not_block_actions() {
+    const LOGIN_PKT: i32 = 0x2B;
+    const TP_PKT: i32 = 0x40;
+    const ACCEPT_ID: i32 = 0x41;
+    const PLAYER_LOADED_ID: i32 = 0x42;
+    const MOVE_ID: i32 = 0x43;
+
+    let adapter = FakeAdapter::new()
+        .player_loaded_to(PLAYER_LOADED_ID)
+        .move_to(MOVE_ID)
+        .on(
+            ConnectionState::Handshaking,
+            LOGIN_PKT,
+            vec![Directive::Emit(login_event())],
+        )
+        .on(
+            ConnectionState::Handshaking,
+            TP_PKT,
+            vec![
+                Directive::AwaitTeleportCorrection,
+                Directive::Emit(teleport_event()),
+                send(ACCEPT_ID, &[7]),
+            ],
+        );
+    let (handle, mut events, mut peer) = start(adapter, KeepAlivePolicy::Automatic);
+
+    peer.write_packet(LOGIN_PKT, &[]).await.unwrap();
+    assert_eq!(events.recv().await, Some(login_event()));
+
+    peer.write_packet(TP_PKT, &[]).await.unwrap();
+    assert_eq!(peer.read_packet().await.unwrap().unwrap().0, PLAYER_LOADED_ID);
+    assert_eq!(peer.read_packet().await.unwrap().unwrap(), (ACCEPT_ID, vec![7]));
+    assert_eq!(peer.read_packet().await.unwrap().unwrap().0, MOVE_ID);
+    assert_eq!(events.recv().await, Some(teleport_event()));
+
+    handle
+        .send_action(ClientAction::SendChat {
+            text: "beacon light".to_owned(),
+        })
+        .unwrap();
+    let (id, payload) = tokio::time::timeout(Duration::from_secs(1), peer.read_packet())
+        .await
+        .expect("the action must not wait for a correction owner")
+        .unwrap()
+        .unwrap();
+    assert_eq!(id, CHAT_ID);
+    assert_eq!(payload, b"beacon light");
 
     drop(handle);
 }

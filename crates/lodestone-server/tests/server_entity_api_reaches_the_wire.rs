@@ -169,7 +169,8 @@ async fn typed_mutations_use_authoritative_stores_and_reach_protocol_egress() {
     assert_eq!(observed.id, mob_id);
     assert_eq!(observed.entity_type, ResourceKey::from_str("minecraft:cow").unwrap());
     assert_eq!(observed.position, Vec3::new(4.0, 8.0, 4.0));
-    assert_eq!(observed.health, Some(20.0));
+    assert_eq!(observed.health, Some(10.0));
+    assert_eq!(observed.max_health, Some(10.0));
 
     assert_eq!(
         api.mutate(mob_id, EntityMutation::ApplyKnockback(Vec3::new(0.25, 0.0, 0.0))),

@@ -24,7 +24,7 @@ use crate::fluid::apply_fluid_push;
 use crate::fluid_state::{FluidState, compute_fluid_state};
 use crate::geometry::{Aabb, Vec3d};
 use crate::mth::{self};
-use crate::pose::{Pose, update_player_pose};
+use crate::pose::{Pose, should_move_slowly, update_player_pose};
 use crate::profile::{FluidModel, InputModel, PhysicsProfile};
 
 include!("player/types.rs");

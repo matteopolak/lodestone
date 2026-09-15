@@ -3202,7 +3202,7 @@ mod tests {
         // `IntegratedServer::open_persistent_with_mobs` does.
         let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT).expect("reopen world");
         let handle = source.save_handle();
-        let store = std::sync::Arc::new(ChunkStore::new(source.clone()));
+        let store = std::sync::Arc::new(ChunkStore::with_capacity(source.clone(), 1));
 
         store.set_forced_ticket(1, (0, 0));
         // Drive real read traffic through the store (never call the ticket
@@ -3231,9 +3231,7 @@ mod tests {
         assert_eq!(source.retained_columns(), 1, "one edited column, in the edit map");
 
         store.remove_forced_ticket(1);
-        for _ in 0..25 {
-            let _ = store.column(50, 50);
-        }
+        let _ = store.column(50, 50);
 
         assert_eq!(
             store.ticket_status(0, 0),

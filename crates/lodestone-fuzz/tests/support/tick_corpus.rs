@@ -123,6 +123,7 @@ impl TickCorpus {
             observations: self.observations.clone(),
             completed_ticks: 0,
             corrupt_tick: None,
+            corrupt_probe: None,
         }
     }
 
@@ -263,12 +264,19 @@ pub struct RecordedOracle {
     observations: Vec<Observation>,
     completed_ticks: usize,
     corrupt_tick: Option<u64>,
+    corrupt_probe: Option<(u64, (i32, i32, i32))>,
 }
 
 impl RecordedOracle {
     #[must_use]
     pub fn corrupt_at(mut self, tick: u64) -> Self {
         self.corrupt_tick = Some(tick);
+        self
+    }
+
+    #[must_use]
+    pub fn corrupt_probe_at(mut self, tick: u64, pos: (i32, i32, i32)) -> Self {
+        self.corrupt_probe = Some((tick, pos));
         self
     }
 }
@@ -300,7 +308,9 @@ impl WorldOracle for RecordedOracle {
             .position(|probe| probe.pos == pos)
             .expect("replay probe must come from the validated corpus");
         let expected = observation.states[index].clone();
-        if self.corrupt_tick == Some((self.completed_ticks - 1) as u64) {
+        if self.corrupt_tick == Some((self.completed_ticks - 1) as u64)
+            || self.corrupt_probe == Some(((self.completed_ticks - 1) as u64, pos))
+        {
             return Ok(None);
         }
         Ok(expected.filter(|state| candidates.contains(state)))

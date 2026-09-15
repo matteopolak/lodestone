@@ -2640,7 +2640,7 @@ mod tests {
     fn benchmark_rejects_unknown_workloads_and_missing_durations() {
         assert!(matches!(
             Config::from_args(["--benchmark".into(), "castle".into()]),
-            CliOutcome::Error(message) if message.contains("terrain, showcase, megaworld, or lovelier")
+            CliOutcome::Error(message) if message.contains("terrain, showcase, megaworld, lovelier, or heavyweight")
         ));
         assert!(matches!(
             Config::from_args(["--benchmark-warmup".into()]),

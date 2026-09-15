@@ -5647,22 +5647,25 @@ mod tests {
         let directives = adapter
             .handle_packet(&mut world, ConnectionState::Play, 36, &payload)
             .expect("a byte-accurate explode payload must decode");
-        // Two directives are expected: the particle emitter first,
-        // then the sound. Assert the directive set rather than only its count:
-        // a count cannot identify which effects are present and could pass if
-        // the sound were replaced by a second particle.
+        // The gameplay event, particle emitter, and sound are all emitted.
         assert_eq!(
             directives.len(),
-            2,
-            "an explode packet emits both a particle and a sound"
+            3,
+            "an explode packet emits gameplay, particle, and sound events"
         );
         let mut sound_event = None;
         let mut saw_particles = false;
+        let mut saw_explosion = false;
         for directive in directives {
             let Directive::Emit(event) = directive else {
                 panic!("expected only Emit directives");
             };
             match event {
+                ClientEvent::Explosion { pos, radius, .. } => {
+                    assert_eq!(pos, Vec3::new(8.0, 64.0, 8.0));
+                    assert_eq!(radius, 3.0);
+                    saw_explosion = true;
+                }
                 // Guards the particle chain: the renderer for `explosion_emitter`
                 // is built and reaches pixels, but was fed by nothing until
                 // `decode_explode` emitted this. If it regresses, an explosion
@@ -5681,6 +5684,7 @@ mod tests {
                 other => sound_event = Some(other),
             }
         }
+        assert!(saw_explosion, "the explosion gameplay directive must be emitted");
         assert!(saw_particles, "the explosion particle directive must be emitted");
         let event = sound_event.expect("the explosion sound directive must be emitted");
 

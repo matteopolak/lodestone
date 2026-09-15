@@ -29,18 +29,23 @@ and `entity` in `ready` phase. Palette measures setup block placements and the
 resulting joined chunk wire traffic. The three terrain variants count the
 states actually installed in the retained source, then count only the matching
 cells from chunk coordinates decoded off the join wire: stained glass/panes,
-sea lanterns, and water respectively. Runtime mode expands its in-memory join
-view only far enough to include each generated producer; it does not change the
-client plan's camera contract. These ready-phase counters prove source-to-wire
-reachability, not client-side translucent mesh, water mesh, or relight/remesh
-completion. Entity waits for the real mob-seeding handoff, inserts each bounded
-summon through `IntegratedServer::spawn_mob`, and counts the resulting
-population snapshots and add-entity packets after the integrated tick loop has
-published them. The wire reader also checks that every observed spawn lies in
-the planned entity region. An entity run with no producers disables natural
-spawning and must fail its entity witness despite still serving non-empty chunk
-payloads. Runtime entity populations are capped at 2,048; larger scales remain
-valid for immutable plan emission but are rejected before a live server starts.
+sea lanterns, and water respectively. Their producers are compacted into the
+one-chunk runtime view, so the witness measures source-to-wire reachability
+without spending most of the deadline on unrelated halo encoding. Runtime mode
+does not change the client plan's camera contract. These ready-phase counters
+prove source-to-wire reachability, not client-side translucent mesh, water mesh,
+or relight/remesh completion. Entity waits for the real mob-seeding handoff,
+inserts each bounded summon into the live mob simulation, and counts the
+resulting population snapshots and add-entity packets after the integrated tick
+loop has published them. Since entity snapshots are not tied to the chunk
+payload selected for this witness, entity runtime uses a one-column view and an
+empty mob terrain seed; this avoids duplicate terrain work while retaining the
+production tick and entity-source path. The wire reader also checks that every
+observed spawn lies in the planned entity region. An entity run with no
+producers disables natural spawning and must fail its entity witness despite
+still serving non-empty chunk payloads. Runtime entity populations are capped
+at 2,048; larger scales remain valid for immutable plan emission but are
+rejected before a live server starts.
 Scheduled, mutation, and other scenario names remain valid for
 immutable plan emission, but runtime mode rejects them until their real server
 producers and tick consumers are wired; they must not be treated as profiling

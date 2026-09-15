@@ -10,8 +10,8 @@ use lodestone_v1_20_6::packets::position::Position;
 const CTX: Ctx = Ctx { version: 766 };
 
 #[test]
-fn protocol_766_does_not_opt_into_retained_initial_light() {
-    assert!(!V766ServerProtocol.retains_initial_column_light());
+fn protocol_766_retains_initial_light_for_cross_column_packets() {
+    assert!(V766ServerProtocol.retains_initial_column_light());
 }
 
 #[test]

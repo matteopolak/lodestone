@@ -318,6 +318,12 @@ submitted after it. This ordering prevents a stale pre-adoption pose from being
 assigned a post-adoption generation and reaching the server after its
 acknowledgement.
 
+The initial placement during joining is already folded into the driver's read
+model. If the adapter defers its response until a simulation owner adopts the
+pose, the driver completes that first correction after the directive batch so a
+headless client can continue without a render-loop owner; later corrections
+retain the transaction above.
+
 A direct entity-velocity packet is a complete replacement rather than an
 additive impulse. The net thread first folds it into entity state, then mirrors
 the same value through `NetUpdate::EntityVelocity`. `Sim::step` drains that

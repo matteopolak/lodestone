@@ -757,6 +757,10 @@ impl WindowApp {
             window.pre_present_notify();
         }
         surface.present(queue);
+        #[cfg(target_arch = "wasm32")]
+        if let Some(signal) = self.browser_frame_signal.as_ref() {
+            signal.mark();
+        }
         true
     }
 

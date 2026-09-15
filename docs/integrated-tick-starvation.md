@@ -36,8 +36,10 @@ it on that worker path rather than adding cold generation to the tick task or
 the connection runtime.
 
 LAN startup similarly warms its bounded fallback tick area through the same
-dispatcher, so a playerless host can perform resident-only random and scheduled
-work without making the tick task a generator.
+dispatcher. The warm-up waits for the first join's initial chunk batch, or for
+the normal playerless random-tick deferral when no connection is active, so it
+cannot compete with first-join generation while still making a playerless host
+ready for resident-only random and scheduled work.
 
 The resident-only natural-spawn view is deliberately all-or-nothing. This gives the spawner one stable terrain view rather than a mixture of newly generated and missing columns. A moved or stale area retries on a later tick after streaming has populated the cache.
 

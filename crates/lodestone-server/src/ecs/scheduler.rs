@@ -537,13 +537,13 @@ mod tests {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            world.run_schedule(GameTick);
+            run_server_tasks(&mut world);
         }));
         std::panic::set_hook(previous);
         assert!(panic.is_err(), "the callback panic must still reach the host");
         assert!(!world.resource_mut::<ServerTaskScheduler>().cancel(failed));
 
-        world.run_schedule(GameTick);
+        run_server_tasks(&mut world);
         assert_eq!(world.resource::<Calls>().0, [2]);
     }
 

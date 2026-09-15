@@ -91,6 +91,11 @@ pub(crate) struct Driver<T: Transport> {
     /// A protocol acknowledgement held until the simulation has adopted the
     /// matching authoritative player correction.
     pending_correction: Option<CorrectionTransaction>,
+    /// The initial placement is already authoritative in the driver's read
+    /// model. Keep its resolved pose until the adapter's deferred response
+    /// directive arrives, then complete it without requiring a render-loop
+    /// correction owner. Mid-session corrections remain deferred to that owner.
+    pending_initial_correction: Option<(Vec3, Rotation)>,
     /// The selected authentication policy. This must remain a typed intent:
     /// `Offline` is permitted to encrypt without Mojang, while an unresolved
     /// online account is not.
@@ -399,6 +404,7 @@ impl<T: Transport> Driver<T> {
             chat_tracker: LastSeenTracker::vanilla(),
             awaiting_player_load: false,
             pending_correction: None,
+            pending_initial_correction: None,
             #[cfg(not(target_arch = "wasm32"))]
             authentication_intent,
             // Same "deliberately fresh" note as `chat_tracker` above: `None`
@@ -497,6 +503,14 @@ impl<T: Transport> Driver<T> {
         let mut last_packet_id = None;
 
         loop {
+            if self.pending_correction.is_none() {
+                while corrections.try_recv().is_ok() {
+                    tracing::debug!(
+                        target: "net_join",
+                        "discarding correction acknowledgement with no deferred correction"
+                    );
+                }
+            }
             if self
                 .pending_correction
                 .as_ref()
@@ -819,17 +833,7 @@ impl<T: Transport> Driver<T> {
                     }
                 }
                 Directive::SetState(next) => {
-                    // `info`, not `debug`: a state transition is rare (once at
-                    // login, then only for a reconfigure/transfer's second
-                    // login on this connection) and is exactly the boundary
-                    // the "movement stops reaching the server after a
-                    // transfer" class of bug lives on — see net.rs's
-                    // `should_forward_action` gate, which reads
-                    // `self.read_model.in_play()` set two lines below. A
-                    // build that only shows `warn`/`error` by default still
-                    // would not see this; document the `RUST_LOG` needed in
-                    // the caller's brief rather than silently downgrading it.
-                    tracing::info!(
+                    tracing::debug!(
                         target: "net",
                         from = ?self.state,
                         to = ?next,
@@ -930,6 +934,28 @@ impl<T: Transport> Driver<T> {
                 other => {
                     tracing::warn!(?other, "ignoring unknown directive variant");
                 }
+            }
+        }
+
+        // The first placement teleport is the source of truth for the driver's
+        // initial pose, so a headless client must not stall after its position
+        // becomes observable merely because it has no render-loop owner to
+        // acknowledge that same placement. The adapter's response is normally
+        // the directive after Emit, which is why this completion happens after
+        // the batch rather than inside emit.
+        if let Some((pos, rotation)) = self.pending_initial_correction.take() {
+            if self
+                .pending_correction
+                .as_ref()
+                .is_some_and(|transaction| transaction.response.is_some())
+            {
+                if let Err(error) = self.complete_correction(pos, rotation).await {
+                    return Step::Stop(Box::new(SessionOutcome::Failed(error)));
+                }
+            } else {
+                tracing::error!(
+                    "initial placement correction had no deferred protocol response"
+                );
             }
         }
         Step::Continue
@@ -1106,8 +1132,7 @@ impl<T: Transport> Driver<T> {
         // Set by `TransferRequested` below; checked after the event is
         // forwarded so a caller still observes it before the session ends.
         let mut transfer: Option<SessionOutcome> = None;
-        if self.pending_correction.is_none()
-            && let ClientEvent::TeleportPlayer {
+        if let ClientEvent::TeleportPlayer {
             pos,
             rotation,
             flags,
@@ -1175,12 +1200,16 @@ impl<T: Transport> Driver<T> {
                 correction_distance = (dx * dx + dy * dy + dz * dz).sqrt(),
                 "server player correction decoded; any protocol acknowledgement required by this family is written before this event"
             );
-            teleport_echo = Some(ClientAction::Move {
-                pos: resolved_pos,
-                rotation: resolved_rotation,
-                on_ground: false,
-                horizontal_collision: false,
-            });
+            if self.pending_correction.is_none() {
+                teleport_echo = Some(ClientAction::Move {
+                    pos: resolved_pos,
+                    rotation: resolved_rotation,
+                    on_ground: false,
+                    horizontal_collision: false,
+                });
+            } else if self.awaiting_player_load {
+                self.pending_initial_correction = Some((resolved_pos, resolved_rotation));
+            }
         }
         if let ClientEvent::EntityVelocity {
             entity_id,
@@ -1320,17 +1349,7 @@ impl<T: Transport> Driver<T> {
                 dimension,
                 ..
             } => {
-                // `info`: every `Login` after the first is a "second login on
-                // this connection" — a mid-session reconfigure or the far side
-                // of a transfer that stayed on one TCP connection — which is
-                // exactly the shape the owner described ("transferred to
-                // another world"). `awaiting_player_load_was_already_armed`
-                // catches the case that would matter most: a second `Login`
-                // arriving before the first placement teleport ever cleared
-                // the latch, which would mean the *previous* load-epoch never
-                // got its `player_loaded` and the server may still be timing
-                // that one out.
-                tracing::info!(
+                tracing::debug!(
                     target: "net",
                     entity_id,
                     dimension = %dimension,
@@ -1419,18 +1438,8 @@ impl<T: Transport> Driver<T> {
                 }
             }
             ClientEvent::TeleportPlayer { pos, .. } if self.awaiting_player_load => {
-                // `info`: this is the placement teleport for the current
-                // load-epoch (join, respawn, or a reconfigure/transfer's
-                // second login) — the one the server is waiting on
-                // `player_loaded` for. If the server keeps ignoring our
-                // movement after this line appears with
-                // `sending_player_loaded = true`, the gap is not here: the
-                // packet went out, so look at `select_move_packet` (does the
-                // first post-teleport `Move` actually carry the new
-                // position?) or at the real server's own teleport-id
-                // bookkeeping, not at this latch.
                 let sending_player_loaded = self.player_loaded.is_automatic();
-                tracing::info!(
+                tracing::debug!(
                     target: "net",
                     pos_x = pos.x,
                     pos_y = pos.y,
@@ -1450,11 +1459,6 @@ impl<T: Transport> Driver<T> {
                     auto_actions.push(ClientAction::PlayerLoaded);
                 }
             }
-            // The ordinary case: a mid-epoch server correction, not a
-            // placement. Logged at `debug` (these are routine — every anti-
-            // cheat nudge is one) so `RUST_LOG=lodestone_client=debug` shows
-            // every teleport this session received, in order, alongside the
-            // `Login`/state-transition `info` lines above.
             ClientEvent::TeleportPlayer { pos, .. } => {
                 tracing::debug!(
                     target: "net",

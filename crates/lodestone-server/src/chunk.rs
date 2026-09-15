@@ -2618,6 +2618,11 @@ pub trait ChunkSource: Send + Sync {
         true
     }
 
+    /// Reconciles ticket-driven cache residency without generating or serving
+    /// a column. Sources with a ticket-backed cache override this; lightweight
+    /// generators have no residency to reconcile.
+    fn reconcile_ticket_residency(&self) {}
+
     /// Tells the source that the column at `(cx, cz)` is no longer resident in
     /// whatever cache sits above it, so a layer that retains state per column
     /// may release it.
@@ -3022,6 +3027,10 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
         (**self).is_column_resident(cx, cz)
     }
 
+    fn reconcile_ticket_residency(&self) {
+        (**self).reconcile_ticket_residency();
+    }
+
     fn unload(&self, cx: i32, cz: i32) {
         (**self).unload(cx, cz);
     }
@@ -3286,6 +3295,10 @@ impl<S: ChunkSource + ?Sized> ChunkSource for &S {
 
     fn is_column_resident(&self, cx: i32, cz: i32) -> bool {
         (**self).is_column_resident(cx, cz)
+    }
+
+    fn reconcile_ticket_residency(&self) {
+        (**self).reconcile_ticket_residency();
     }
 
     fn unload(&self, cx: i32, cz: i32) {

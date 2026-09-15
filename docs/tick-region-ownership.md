@@ -53,8 +53,10 @@ have their own chunk-local ownership seams: `ChunkScheduledTickQueue` keeps
 pending ticks at their target chunk, selects due heads in the established
 world-wide order, and returns one `ScheduledTickOwnerBatch` per selected
 owner. `tick::apply_scheduled_tick_owner_batches` is the sole central consumer
-for both block and fluid callbacks: it requires a complete, unique owner set,
-then restores every global drain slot before a callback can mutate the world.
+for both block and fluid callbacks: it validates a complete, unique owner set
+through `ScheduledTickOwnerCompletionError`, then restores every global drain
+slot before a callback can mutate the world. An invalid completion is logged
+and discarded rather than panicking the tick task.
 Thus an owner finishing first cannot move its tick ahead of an earlier
 `(trigger, priority, insertion)` entry. The scheduled-queue unit gate also
 checks that the owner batches form a disjoint cover of a mixed negative,
@@ -66,9 +68,10 @@ their scene reaches 128 entries; the registry lock is held only for the
 snapshot and central commit. Browser builds retain the ordered serial arm, and
 hoppers remain serial because their vertical mutable container relation has no
 cross-owner hand-off yet. `tick::apply_block_entity_effect_batches` is the
-sole world writer: it validates the complete tick-start batch set, restores its
-serial slots after independent completion, then applies and publishes furnace
-changes in the established order. A companion registry gate checks that
+sole world writer: it validates the complete tick-start batch set through
+`BlockEntityOwnerCompletionError`, restores its serial slots after independent
+completion, then applies and publishes furnace changes in the established
+order. A companion registry gate checks that
 chunk-local batches cover every tick-start block entity exactly once, including
 coordinates on both sides of zero and at chunk boundaries. The ambient
 entity-effect phase uses the

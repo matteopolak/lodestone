@@ -1,5 +1,6 @@
 //! Shared production execution for request-scoped world generation.
 
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::mem::size_of;
 
@@ -283,6 +284,26 @@ where
             .enumerate()
             .map(|(order, source)| (order as u64, source)),
     )?;
+    let mut winners = HashMap::new();
+    for (source_order, &source) in sources.iter().enumerate() {
+        for (spill_order, spill) in spills
+            .iter()
+            .filter(|spill| spill.source == source)
+            .enumerate()
+        {
+            let destination = BlockCoordinate::new(
+                spill.position.0,
+                spill.position.1,
+                spill.position.2,
+            );
+            if session.halo().contains((
+                spill.position.0.div_euclid(16),
+                spill.position.2.div_euclid(16),
+            )) {
+                winners.entry(destination).or_insert((source_order, spill_order));
+            }
+        }
+    }
     for (source_order, &source) in sources.iter().enumerate() {
         if session.source_order_committed(source_order as u64) {
             continue;
@@ -290,9 +311,23 @@ where
         let mut transaction = session.begin_mutable_source(source, key, source_order as u64)?;
         for (ordinal, spill) in spills
             .iter()
-            .filter(|spill| spill.source == source)
+            .filter(|spill| {
+                spill.source == source
+                    && session.halo().contains((
+                        spill.position.0.div_euclid(16),
+                        spill.position.2.div_euclid(16),
+                    ))
+            })
             .enumerate()
         {
+            let destination = BlockCoordinate::new(
+                spill.position.0,
+                spill.position.1,
+                spill.position.2,
+            );
+            if winners.get(&destination) != Some(&(source_order, ordinal)) {
+                continue;
+            }
             transaction.push(
                 ordinal as u32,
                 BlockCoordinate::new(

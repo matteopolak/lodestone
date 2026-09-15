@@ -72,7 +72,7 @@
 
     /// Regression for the real bug this generator's first draft shipped:
     /// `docs/research/combat-scope.md`'s summary paragraph contains
-    /// `#12/#72/#98/#121)` (an issue-reference list), and a naive
+    /// an issue-reference list, and a naive
     /// `starts_with('#')` heading check truncated the summary right before
     /// it, mid-sentence. A real ATX heading needs a space (or EOL) after the
     /// `#`s.

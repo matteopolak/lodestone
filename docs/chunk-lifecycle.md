@@ -50,7 +50,11 @@ consumer: it grants a spawn-area ticket and one loading+simulation ticket pair p
 player (so a shared column near two players stays resident until *both* have moved away), checks
 in with the ticket graph on its own read traffic, and evicts through the same persistence-aware
 unload path its ordinary LRU eviction already uses — so a ticket-driven eviction is exactly as safe
-as a capacity-driven one.
+as a capacity-driven one. Block-entity reads search a resident column first, then fall back to the
+wrapped source when that column has no sidecar, so generated containers remain discoverable after
+terrain was cached first. Ticket grants, moves, and removals mark the graph dirty, so the next
+cache operation reconciles a changed residency boundary immediately; unchanged traffic retains
+the rate-limited check-in.
 
 ### The ticked/simulated area follows the player
 

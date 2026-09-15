@@ -336,6 +336,16 @@ opt-level = 2
 [profile.dev.package.lodestone-ecs]
 codegen-backend = "llvm"
 
+# The scheduler's callback-isolation tests exercise the same fresh-thread
+# panic boundary as lodestone-ecs; Cranelift aborts before that panic can unwind.
+[profile.dev.package.lodestone-server]
+codegen-backend = "llvm"
+
+# The shell's callback-isolation tests cross the same fresh-thread panic
+# boundary; Cranelift aborts before that panic can unwind.
+[profile.dev.package.lodestone-shell]
+codegen-backend = "llvm"
+
 # The plugin reentrancy watchdog deliberately runs a schedule on a fresh OS
 # thread and distinguishes a worker panic from a timeout. Cranelift on this
 # pinned macOS toolchain aborts before such a panic can unwind (the same #686

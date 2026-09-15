@@ -15,7 +15,8 @@ pub fn tick(
     view: &dyn CollisionView,
     profile: &PhysicsProfile,
 ) {
-    travel_and_check_inside_blocks(state, input, view, profile, &[]);
+    let moving_slowly = should_move_slowly(state, input, view, &[]);
+    travel_and_check_inside_blocks(state, input, view, profile, &[], moving_slowly);
     // Vanilla's own pose update with no entity snapshot: the block half of
     // the fit gate. See `tick_among_entities` for the full predicate.
     update_player_pose(state, input, view, &[]);
@@ -36,6 +37,7 @@ fn travel_and_check_inside_blocks(
     view: &dyn CollisionView,
     profile: &PhysicsProfile,
     nearby: &[crate::push::NearbyEntity],
+    moving_slowly: bool,
 ) {
     // The position *before* this tick's travel dispatch moves it — the "from"
     // half of vanilla's `checkInsideBlocks(from, to, …)` segment, needed by
@@ -144,13 +146,13 @@ fn travel_and_check_inside_blocks(
     // vanilla's dispatch still honours it if both are somehow set.
     let affected_by_fluids = !state.flying;
     if affected_by_fluids && fluid.in_water() {
-        tick_water_among_entities(state, input, &fluid, view, profile, nearby);
+        tick_water_among_entities(state, input, &fluid, view, profile, nearby, moving_slowly);
     } else if affected_by_fluids && fluid.in_lava() {
-        tick_lava_among_entities(state, input, &fluid, view, profile, nearby);
+        tick_lava_among_entities(state, input, &fluid, view, profile, nearby, moving_slowly);
     } else if state.fall_flying {
-        tick_elytra_among_entities(state, input, view, profile, nearby);
+        tick_elytra_among_entities(state, input, view, profile, nearby, moving_slowly);
     } else {
-        tick_air_among_entities(state, input, view, profile, nearby);
+        tick_air_among_entities(state, input, view, profile, nearby, moving_slowly);
     }
     // The Y overwrite, closing vanilla's own player travel step. `with(Direction.Axis.Y, …)`
     // — the X and Z the dispatch produced are kept untouched. There is **no**
@@ -222,7 +224,8 @@ pub fn tick_among_entities(
     self_flags: crate::push::PushSelf,
 ) {
     crate::trace::player_tick_start(state, input);
-    travel_and_check_inside_blocks(state, input, view, profile, nearby);
+    let moving_slowly = should_move_slowly(state, input, view, nearby);
+    travel_and_check_inside_blocks(state, input, view, profile, nearby, moving_slowly);
     crate::push::apply_entity_push(state, view, profile, nearby, self_flags);
     // The pose comes *after* the push, because the crowd-push pass is the
     // tail of vanilla's own per-tick update (inside its base per-tick

@@ -29,7 +29,8 @@ pub fn tick_water(
     view: &dyn CollisionView,
     profile: &PhysicsProfile,
 ) {
-    tick_water_among_entities(state, input, fluid, view, profile, &[]);
+    let moving_slowly = state.pose == Pose::Crouching || input.sneak;
+    tick_water_among_entities(state, input, fluid, view, profile, &[], moving_slowly);
 }
 
 fn tick_water_among_entities(
@@ -39,6 +40,7 @@ fn tick_water_among_entities(
     view: &dyn CollisionView,
     profile: &PhysicsProfile,
     nearby: &[crate::push::NearbyEntity],
+    moving_slowly: bool,
 ) {
     match profile.fluid_model {
         FluidModel::Modern => {}
@@ -83,7 +85,7 @@ fn tick_water_among_entities(
     decrement_no_jump_delay(state);
     state.velocity = snap_small_velocity(state.velocity);
 
-    let (xxa, zza) = set_sprint_and_modify_input(state, input, profile);
+    let (xxa, zza) = set_sprint_and_modify_input(state, input, profile, moving_slowly);
 
     // --- AI-step jump: shallow water jumps, deep water swims up -----------------
     apply_fluid_jump(state, input, fluid, view, profile);
@@ -223,7 +225,8 @@ pub fn tick_lava(
     view: &dyn CollisionView,
     profile: &PhysicsProfile,
 ) {
-    tick_lava_among_entities(state, input, fluid, view, profile, &[]);
+    let moving_slowly = state.pose == Pose::Crouching || input.sneak;
+    tick_lava_among_entities(state, input, fluid, view, profile, &[], moving_slowly);
 }
 
 fn tick_lava_among_entities(
@@ -233,6 +236,7 @@ fn tick_lava_among_entities(
     view: &dyn CollisionView,
     profile: &PhysicsProfile,
     nearby: &[crate::push::NearbyEntity],
+    moving_slowly: bool,
 ) {
     match profile.fluid_model {
         FluidModel::Modern => {}
@@ -256,7 +260,7 @@ fn tick_lava_among_entities(
     decrement_no_jump_delay(state);
     state.velocity = snap_small_velocity(state.velocity);
 
-    let (xxa, zza) = set_sprint_and_modify_input(state, input, profile);
+    let (xxa, zza) = set_sprint_and_modify_input(state, input, profile, moving_slowly);
 
     // Vanilla's own jump block: in *shallow* lava while on the ground you
     // jump out normally; only deep lava gets the in-liquid jump's +0.04 (see

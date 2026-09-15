@@ -180,14 +180,15 @@ build-time hard dependency on 46 MB of gitignored files. That made `trunk build`
 fail outright on every CI runner and on every contributor's first build, with the
 real cause buried (see `docs/ci.md`).
 
-**The panorama faces and the sound corpus are optional in the other
-direction**: unlike `client.jar`/`blocks.json`, their absence does not stop the
-page from working, only from looking/sounding as intended — a missing
-panorama face falls back to `client.jar`'s flat grey stub, and a missing sound
-corpus leaves the browser's `ShellAudio` disabled with a logged reason,
-exactly as a native checkout with no `.ogg` corpus fetched degrades. Both are
-staged by the same conditional `post_build` hook shape as `client.jar`/
-`blocks.json` — see `scripts/stage_panorama.py`/`scripts/stage_sounds.py`.
+**The panorama faces and the sound corpus are optional for development**:
+unpopulated caches do not stop `trunk serve` or `just run-wasm`, only from
+looking/sounding as intended — a missing panorama face falls back to
+`client.jar`'s flat grey stub, and a missing sound corpus leaves the browser's
+`ShellAudio` disabled with a logged reason, exactly as a native checkout with
+no `.ogg` corpus fetched degrades. Both are staged by conditional `post_build`
+hooks — see `scripts/stage_panorama.py`/`scripts/stage_sounds.py`. The release
+SDK path is stricter: `just wasm-sdk` runs `just fetch-assets-ci` first and
+requires all six staged panorama faces, recording them in the archive manifest.
 
 ### Relay tooling (optional)
 

@@ -1525,7 +1525,13 @@ pub(crate) async fn run_primary_tick_loop_with_weather<W>(
 fn apply_scheduled_tick_owner_batches<T>(
     batches: Vec<ScheduledTickOwnerBatch<T>>,
 ) -> Vec<ScheduledTick<T>> {
-    merge_due_owner_batches(batches)
+    match merge_due_owner_batches(batches) {
+        Ok(ticks) => ticks,
+        Err(error) => {
+            tracing::error!(%error, "discarding invalid scheduled-tick owner completion");
+            Vec::new()
+        }
+    }
 }
 
 /// Applies block-entity owner messages after their serial execution phase.
@@ -2458,7 +2464,13 @@ async fn run_tick_loop_with_weather_impl<W>(
         // the one production caller that module's own doc names as holding
         // both a `ChunkSource` and the registry.
         let current_block_entity_effects =
-            crate::block_entities::merge_tick_effect_batches(furnace_effect_batches);
+            match crate::block_entities::merge_tick_effect_batches(furnace_effect_batches) {
+                Ok(effects) => effects,
+                Err(error) => {
+                    tracing::error!(%error, "discarding invalid block-entity owner completion");
+                    Vec::new()
+                }
+            };
         let deferred_block_entity_effects = apply_block_entity_effects(
             &*world,
             &block_tick_out,
@@ -3981,10 +3993,9 @@ async fn run_tick_loop_with_weather_impl<W>(
         // Run random ticks after both scheduled-tick queues, preserving the
         // block, fluid, then random ordering.
         //
-        // The random-tick pass is deferred for the first few ticks
-        // after world open, so the background column-seeding task has time to
-        // populate the shared [`ChunkStore`] before the resident boundary is
-        // first admitted. See
+        // The random-tick pass is deferred for the first few ticks after world
+        // open, allowing the initial join/admission wave to populate the shared
+        // [`ChunkStore`] before the resident boundary is first admitted. See
         // [`INITIAL_RANDOM_TICK_DEFERRAL_TICKS`] for the arithmetic.
         let tick_speed = world_state.random_tick_speed();
         if game_tick > INITIAL_RANDOM_TICK_DEFERRAL_TICKS && tick_speed > 0 {

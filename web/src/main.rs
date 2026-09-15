@@ -699,7 +699,7 @@ fn standalone_canvas() -> Option<web_sys::HtmlCanvasElement> {
 #[cfg(target_arch = "wasm32")]
 fn main() {
     console_error_panic_hook::set_once();
-    let _ = console_log::init_with_level(log::Level::Info);
+    let _ = console_log::init_with_level(log::Level::Warn);
     let standalone = window()
         .and_then(|window| window.document())
         .and_then(|document| document.query_selector("[data-lodestone-standalone]").ok())

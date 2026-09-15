@@ -116,8 +116,10 @@ overlap; the player is then placed at the selected block's horizontal centre so 
 straddle neighbouring columns. A world whose spawn search area is entirely unsuitable (for
 instance, entirely ocean) keeps its preferred height a couple of blocks above sea level when that
 body is clear, otherwise climbs to the first clear height instead of putting the player underground
-or inside bedrock. A per-player bed respawn point is stored and consulted separately, falling back
-to the world spawn whenever the recorded bed is gone.
+or inside bedrock. The search uses a cheap horizon-only water classification as a negative hint for
+fully submerged candidates; unknown or mixed candidates still run the complete column predicate, so
+the hint cannot change the selected spawn. A per-player bed respawn point is stored and consulted
+separately, falling back to the world spawn whenever the recorded bed is gone.
 
 ### Player save data
 

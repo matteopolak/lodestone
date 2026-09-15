@@ -753,11 +753,7 @@ async fn native_locator_without_game_mode_keeps_the_world_default() {
         directory: native_dir,
     })
     .expect("open native backward-compatible store");
-    let key = RecordKey::general(
-        i32::from_le_bytes(uuid_bytes[..4].try_into().expect("uuid prefix")),
-        i32::from_le_bytes(uuid_bytes[4..8].try_into().expect("uuid prefix")),
-        u32::from_le_bytes(uuid_bytes[8..12].try_into().expect("uuid prefix")),
-    );
+    let key = test_player_key(uuid_bytes);
     storage
         .write_dirty([RecordWrite::new(
             key,
@@ -933,9 +929,9 @@ async fn missing_native_locator_is_created_from_the_join_fallback() {
         Some(NativePlayerRecord {
             uuid: uuid_bytes,
             dimension: BuiltinDimension::Overworld,
-            x_fixed: 0,
+            x_fixed: 500,
             y_fixed: 61_000,
-            z_fixed: 0,
+            z_fixed: 500,
             yaw_millidegrees: 0,
             pitch_millidegrees: 0,
         }),
@@ -1026,11 +1022,7 @@ async fn corrupt_native_locator_is_not_overwritten_on_cancelled_shutdown() {
     storage
         .register_native_extensions([ExtensionRegistration::new("example", "opaque", 1)])
         .expect("register extension table");
-    let key = RecordKey::general(
-        i32::from_le_bytes(uuid_bytes[..4].try_into().expect("uuid prefix")),
-        i32::from_le_bytes(uuid_bytes[4..8].try_into().expect("uuid prefix")),
-        u32::from_le_bytes(uuid_bytes[8..12].try_into().expect("uuid prefix")),
-    );
+    let key = test_player_key(uuid_bytes);
     let record = StorageRecord {
         format_version: 1,
         record: Some(storage_record::Record::General(GeneralRecord {
@@ -1099,4 +1091,12 @@ async fn corrupt_native_locator_is_not_overwritten_on_cancelled_shutdown() {
 /// decode above and the store lookup below.
 fn test_uuid_for(username: &str) -> Uuid {
     Uuid::new_v3(&Uuid::NAMESPACE_OID, username.as_bytes())
+}
+
+fn test_player_key(uuid: [u8; 16]) -> RecordKey {
+    RecordKey::general(
+        i32::from_le_bytes(uuid[..4].try_into().expect("uuid prefix")),
+        i32::from_le_bytes(uuid[4..8].try_into().expect("uuid prefix")),
+        u32::from_le_bytes(uuid[8..12].try_into().expect("uuid prefix")) & !(1 << 31),
+    )
 }

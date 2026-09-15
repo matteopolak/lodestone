@@ -141,7 +141,9 @@ clone section data when encoding or ticking.
    per tick.
 5. Replace view-driven residency with player loading and simulation tickets.
    Replication remains per connection: it tracks which chunks a client has
-   received, while tickets define which chunks exist in memory.
+   received. Ticket levels define logical loading and simulation status;
+   cache retention separately protects world-owned and simulation columns while
+   allowing a streamed view to exceed the bounded cache.
 6. Add pending unloads and the guarded save boundary.
 7. Add temporary player-spawn and persistent forced tickets once the world
    spawn position and ticket persistence are available.

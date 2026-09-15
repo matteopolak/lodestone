@@ -83,8 +83,8 @@ fn protocol_774_rejects_the_neighboring_full_stack_click_layout() {
 }
 
 #[test]
-fn protocol_774_does_not_opt_into_retained_initial_light() {
-    assert!(!V774ServerProtocol.retains_initial_column_light());
+fn protocol_774_retains_initial_light_for_cross_column_packets() {
+    assert!(V774ServerProtocol.retains_initial_column_light());
 }
 
 #[test]

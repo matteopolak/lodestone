@@ -123,6 +123,7 @@ fn our_own_server_encodes_a_creepers_swell_and_detonation_byte_accurately_for_th
     let mut swell_dir_first_seen: Option<i32> = None;
     let mut ignited_first_seen: Option<bool> = None;
     let mut detonation_tick: Option<u64> = None;
+    let mut detonation_event = None;
     let mut explode_directives: Option<Vec<Directive>> = None;
 
     for tick in 1..=MAX_SWELL {
@@ -172,6 +173,7 @@ fn our_own_server_encodes_a_creepers_swell_and_detonation_byte_accurately_for_th
             );
             detonation_tick = Some(tick);
             let detonation = detonations[0];
+            detonation_event = Some(detonation);
             let directive = proto.encode_explode(detonation.centre, detonation.radius);
             let lodestone_server::ServerDirective::Send { packet_id, payload } = directive else {
                 panic!("encode_explode must return Send, got {directive:?}");
@@ -213,24 +215,39 @@ fn our_own_server_encodes_a_creepers_swell_and_detonation_byte_accurately_for_th
         "MobSim::tick must discard the creeper on the tick its fuse completes"
     );
 
-    // -- explode: same two directives, same field values,
+    // -- explode: gameplay event, particles, then sound.
     // `tests/live_creeper_explosion.rs` asserts against real captured bytes.
     let directives = explode_directives.expect("a detonation must have produced an EXPLODE packet");
+    let detonation = detonation_event.expect("the detonation event must accompany its packet");
+    assert_eq!(detonation.radius, 3.0, "a creeper blast uses the fixed radius 3.0");
     assert_eq!(
         directives.len(),
-        2,
-        "one Particles directive, then one Sound directive"
+        3,
+        "one Explosion, one Particles, then one Sound directive"
     );
+    let Directive::Emit(ClientEvent::Explosion {
+        pos,
+        radius,
+        affected_blocks,
+        knockback,
+    }) = &directives[0]
+    else {
+        panic!("expected an Explosion directive first, got {:?}", directives[0]);
+    };
+    assert_eq!(*pos, detonation.centre);
+    assert_eq!(*radius, detonation.radius);
+    assert!(affected_blocks.is_empty());
+    assert_eq!(*knockback, None);
     assert!(
-        matches!(&directives[0], Directive::Emit(ClientEvent::Particles { .. })),
-        "expected a Particles directive first, got {:?}",
-        directives[0]
+        matches!(&directives[1], Directive::Emit(ClientEvent::Particles { .. })),
+        "expected a Particles directive second, got {:?}",
+        directives[1]
     );
     let Directive::Emit(ClientEvent::Sound {
         sound, category, volume, pitch, ..
-    }) = &directives[1]
+    }) = &directives[2]
     else {
-        panic!("expected a Sound directive second, got {:?}", directives[1]);
+        panic!("expected a Sound directive third, got {:?}", directives[2]);
     };
     assert_eq!(
         sound.to_string(),

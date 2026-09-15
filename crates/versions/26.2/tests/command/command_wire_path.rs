@@ -471,7 +471,9 @@ where
     let beacons = sink.beacons();
     let observed_sources = sink.observed_sources();
     handle.shutdown();
-    server.abort();
+    drop(events);
+    let _ = handle.join().await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), server).await;
     Run { beacons, observed_sources, chat }
 }
 
@@ -858,5 +860,6 @@ async fn a_server_with_no_sink_installed_answers_a_command_with_a_refusal() {
     );
 
     handle.shutdown();
-    server.abort();
+    drop(events);
+    let _ = tokio::time::timeout(Duration::from_secs(1), server).await;
 }

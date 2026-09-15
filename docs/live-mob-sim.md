@@ -20,10 +20,10 @@ cell as a full cube until that move completes.
 The first pass accepts AI movement, records grounded state, cancels blocked velocity components,
 and starts a fall when a formerly supporting live block was removed. A final pass after combat,
 leash, crowd, warden, and piston effects clips their deferred impulses too, without applying
-gravity a second time that tick. Instant teleports and ridden-mob reports deliberately reset the
-collision origin: they are authority boundaries rather than physical motion. A command or plugin
-spawn that begins inside a live shape is moved upward to the highest overlapping shape before its
-next movement is published.
+gravity a second time that tick. Instant teleports reset the collision origin, while a ridden-mob
+report bypasses the sweep entirely because the rider's client owns that position. A command or
+plugin spawn that begins inside a live shape is moved upward to the highest overlapping shape
+before its next movement is published.
 
 `MobHandle` implements `EntitySource`; `EntityStreamer` consumes its snapshots in the connection
 loop. The command integration test therefore exercises summon, live ticking, and the snapshot

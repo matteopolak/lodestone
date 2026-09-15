@@ -234,7 +234,8 @@ cannot: `connectedness` only ever asks "does this clientbound packet reach anyth
   `just health` check and runs in CI's `xtask-structural-checks` job. Exceptions are recorded in
   `xtask/check-comment-voice.toml`, each with an `owner` and a `reason`; a stale entry (matching
   zero hits) is reported, not silently ignored, which is what makes shrinking the allowlist
-  file-by-file tractable.
+  file-by-file tractable. Nested checkouts under `.worktrees/` are excluded because their source is
+  validated against their own revision rather than the active workspace allowlist.
 
 ## Configuration
 

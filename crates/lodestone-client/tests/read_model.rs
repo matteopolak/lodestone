@@ -1570,6 +1570,10 @@ async fn set_position_hits_wire_and_predicts_locally() {
     let (handle, mut events, mut peer) = start(adapter);
 
     peer.write_packet(TRIGGER, &[]).await.unwrap();
+    let (id, payload) = peer.read_packet().await.unwrap().unwrap();
+    assert_eq!(id, MOVE_ID);
+    let (pos, _rot, _on_ground) = decode_move(&payload);
+    assert_eq!(pos, Vec3::new(0.0, 64.0, 0.0));
     events.recv().await.unwrap(); // teleport folded
 
     handle.set_position(Vec3::new(5.0, 64.0, 5.0)).unwrap();
@@ -1608,6 +1612,10 @@ async fn move_to_forwards_full_state_to_wire_and_predicts() {
     let (handle, mut events, mut peer) = start(adapter);
 
     peer.write_packet(TRIGGER, &[]).await.unwrap();
+    let (id, payload) = peer.read_packet().await.unwrap().unwrap();
+    assert_eq!(id, MOVE_ID);
+    let (pos, _rot, _on_ground) = decode_move(&payload);
+    assert_eq!(pos, Vec3::new(0.0, 64.0, 0.0));
     events.recv().await.unwrap(); // teleport folded
 
     let rotation = Rotation::new(90.0, -30.0);

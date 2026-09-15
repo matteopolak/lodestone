@@ -371,9 +371,21 @@ impl ServerCommands {
         let stripped = raw.strip_prefix('/').unwrap_or(raw);
         let token_start = stripped.rfind(' ').map(|i| i + 1).unwrap_or(0);
         let start = (raw.len() - stripped.len()) + token_start;
+        // A best-effort tree walk returns root candidates after an unknown
+        // committed command (`/plugin `). Keep that empty for the built-in
+        // tree so the connection can ask an installed plugin dispatcher for
+        // the command's own branch instead of presenting every built-in root.
+        let known_root = token_start == 0 || {
+            let committed = stripped[..token_start].trim_end();
+            let root = committed.split_whitespace().next().unwrap_or("");
+            self.suggest(root, level)
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(root))
+        };
         let suggestions = self
             .suggest(stripped, level)
             .into_iter()
+            .filter(|_| known_root)
             .map(|text| WireCommandSuggestionEntry { text, tooltip: None })
             .collect();
         WireCommandSuggestionsResponse {
@@ -528,5 +540,14 @@ mod suggest_response_tests {
             vec!["gamemode", "gamerule"],
             "case-insensitively sorted, per CommandTree::suggest_filtered's own doc"
         );
+    }
+
+    #[test]
+    fn an_unknown_committed_root_does_not_fall_back_to_builtins() {
+        let commands = ServerCommands::new();
+        let response = commands.suggest_response(9, "/plugin ", 4);
+        assert!(response.suggestions.is_empty());
+        assert_eq!(response.start, 8);
+        assert_eq!(response.length, 0);
     }
 }
