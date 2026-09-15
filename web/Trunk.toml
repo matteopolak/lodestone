@@ -42,9 +42,9 @@ command_arguments = [
   "python3 scripts/stage_sounds.py --cache-dir ../.cache/mc/26.2 --out \"$TRUNK_STAGING_DIR\"",
 ]
 
-# Stage stable filenames for the standalone OffscreenCanvas render worker. The
-# worker imports the ESM glue from its own global scope, so it cannot follow
-# Trunk's content hash at runtime without a fixed alias.
+# Stage stable filenames for the standalone page. SDK packaging replaces the
+# render-worker filename with a release key and selects Trunk's hashed module
+# pair through the SDK manifest.
 [[hooks]]
 stage = "post_build"
 command = "sh"

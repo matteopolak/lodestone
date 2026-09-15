@@ -21,14 +21,15 @@ def load_packager():
     return module
 
 
-def make_stage(packager, root: Path) -> Path:
+def make_stage(packager, root: Path, marker: bytes = b"first") -> Path:
     stage = root / "dist"
-    stage.mkdir()
+    stage.mkdir(parents=True)
+    release_name = marker.decode("ascii")
     files = {
         "lodestone-web-entry.js": b"export {}\n",
         "lodestone-web-entry_bg.wasm": b"wasm",
-        "lodestone-web-page.js": b"export {}\n",
-        "lodestone-web-page_bg.wasm": b"wasm",
+        f"lodestone-web-{release_name}.js": b"export {}\n" + marker,
+        f"lodestone-web-{release_name}_bg.wasm": b"wasm" + marker,
     }
     for relative in packager.REQUIRED_FILES:
         files.setdefault(relative, b"asset")
@@ -50,11 +51,25 @@ def main() -> int:
         stage = make_stage(packager, root)
         package = root / "package"
         package.mkdir()
-        files, _ = packager.collect_package(stage, package)
+        files, entrypoint, worker_entrypoint = packager.collect_package(stage, package)
         assert all(face in files for face in packager.PANORAMA_FILES)
-        worker = (package / "lodestone-render-worker.js").read_text(encoding="utf-8")
+        assert worker_entrypoint in files
+        assert "lodestone-render-worker.js" not in files
+        assert "lodestone-web-entry.js" not in files
+        assert "lodestone-web-entry_bg.wasm" not in files
+        worker = (package / worker_entrypoint).read_text(encoding="utf-8")
         assert "assetProvider: packageAsset" in worker
         assert "fetch(new URL(name, self.location.href))" in worker
+        assert "cache: \"no-store\"" in worker
+        assert "manifest.entrypoint" in worker
+        assert "SDK worker mismatch" in worker
+
+        second_stage = make_stage(packager, root / "second", marker=b"second")
+        second_package = root / "second-package"
+        second_package.mkdir()
+        _, second_entrypoint, second_worker = packager.collect_package(second_stage, second_package)
+        assert second_entrypoint != entrypoint
+        assert second_worker != worker_entrypoint
 
         (stage / "panorama_5.png").unlink()
         missing_package = root / "missing-package"
@@ -65,7 +80,7 @@ def main() -> int:
             assert "panorama_5.png" in str(error)
         else:
             raise AssertionError("SDK packaging accepted a missing panorama face")
-    print("wasm SDK packaging checks: PASS (six faces included; missing-face control rejected)")
+    print("wasm SDK packaging checks: PASS (versioned worker; release swap; panorama controls)")
     return 0
 
 

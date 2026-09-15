@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Stage a stable worker entrypoint alongside Trunk's hashed Wasm output.
+# Stage aliases used only by the standalone page; SDK packaging selects and
+# retains the hashed module pair instead.
 set -euo pipefail
 
 out_dir="$1"
