@@ -26,6 +26,14 @@ fn worker_count_for(available: usize) -> usize {
     available.saturating_sub(TICK_RESERVE).max(1)
 }
 
+fn configured_worker_count(available: usize) -> usize {
+    std::env::var("LODESTONE_WORLDGEN_WORKERS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or_else(|| worker_count_for(available))
+}
+
 struct Dispatcher {
     pool: rayon::ThreadPool,
     permits: Arc<Semaphore>,
@@ -39,11 +47,12 @@ struct Dispatcher {
 /// must commit mutable lifecycle state or emit packets deterministically.
 ///
 /// This is the synchronous compatibility seam used by generator-owned
-/// dependency batches. It reserves the complete dispatcher budget before
-/// entering Rayon. If another async producer already owns any permit, it keeps
-/// the result ordered but runs serially instead of placing a second batch in
-/// Rayon’s queue. The async [`try_spawn`] path remains the preferred admission
-/// mechanism for connection and tick-facing callers.
+/// dependency batches. It reserves only the smaller of the batch size and
+/// dispatcher budget before entering Rayon. If another async producer already
+/// owns enough permits, it keeps the result ordered but runs serially instead
+/// of placing a second batch in Rayon’s queue. The async [`try_spawn`] path
+/// remains the preferred admission mechanism for connection and tick-facing
+/// callers.
 pub(crate) fn run_ordered<T, R, F>(jobs: Vec<T>, work: F) -> Vec<R>
 where
     T: Send,
@@ -65,7 +74,8 @@ where
         return jobs.into_par_iter().map(work).collect();
     }
     let workers = dispatcher().workers;
-    let permits = u32::try_from(workers).expect("worldgen worker count fits semaphore permits");
+    let permits = u32::try_from(jobs.len().min(workers))
+        .expect("worldgen job count fits semaphore permits");
     let permit = match Arc::clone(&dispatcher().permits).try_acquire_many_owned(permits) {
         Ok(permit) => permit,
         Err(tokio::sync::TryAcquireError::NoPermits) => {
@@ -118,7 +128,7 @@ fn dispatcher() -> &'static Dispatcher {
         let available = std::thread::available_parallelism()
             .map(std::num::NonZero::get)
             .unwrap_or(1);
-        let workers = worker_count_for(available);
+        let workers = configured_worker_count(available);
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(workers)
             .thread_name(|index| format!("lodestone-worldgen-{index}"))
@@ -275,6 +285,21 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    async fn hold_permits(count: usize) -> Vec<PermitGuard> {
+        let mut held = Vec::with_capacity(count);
+        for _ in 0..count {
+            let permit = Arc::clone(&dispatcher().permits)
+                .acquire_owned()
+                .await
+                .expect("worldgen dispatcher semaphore open");
+            held.push(PermitGuard {
+                permit: Some(permit),
+                capacity: Arc::clone(&dispatcher().capacity),
+            });
+        }
+        held
+    }
+
     #[test]
     fn a_dispatch_job_returns_through_the_async_channel() {
         let _test_guard = test_guard();
@@ -291,15 +316,7 @@ mod tests {
     async fn try_submission_reports_backpressure_without_waiting() {
         let _test_guard = test_guard();
         let permits = worker_count();
-        let mut held = Vec::with_capacity(permits);
-        for _ in 0..permits {
-            held.push(
-                Arc::clone(&dispatcher().permits)
-                    .acquire_owned()
-                    .await
-                    .expect("worldgen dispatcher semaphore open"),
-            );
-        }
+        let held = hold_permits(permits).await;
 
         let returned = match try_spawn(|| 7_u8) {
             Err(job) => job,
@@ -335,15 +352,7 @@ mod tests {
     async fn ordered_batch_falls_back_serial_when_dispatcher_is_saturated() {
         let _test_guard = test_guard();
         let permits = worker_count();
-        let mut held = Vec::with_capacity(permits);
-        for _ in 0..permits {
-            held.push(
-                Arc::clone(&dispatcher().permits)
-                    .acquire_owned()
-                    .await
-                    .expect("worldgen dispatcher semaphore open"),
-            );
-        }
+        let held = hold_permits(permits).await;
 
         let caller = std::thread::current().id();
         let results = run_ordered(vec![3_u8, 1, 2], |value| {
@@ -359,6 +368,30 @@ mod tests {
             "a saturated ordered batch must not queue Rayon work"
         );
         drop(held);
+    }
+
+    #[test]
+    fn ordered_batch_reserves_only_the_jobs_it_can_run() {
+        let _test_guard = test_guard();
+        let workers = worker_count();
+        if workers < 2 {
+            return;
+        }
+        let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+        runtime.block_on(async {
+            let held = hold_permits(1).await;
+            let caller = std::thread::current().id();
+            let results = run_ordered((0..workers - 1).collect(), |value| {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+                (value, std::thread::current().id())
+            });
+            assert_eq!(results.len(), workers - 1);
+            assert!(
+                results.iter().any(|(_, thread)| *thread != caller),
+                "the free dispatcher permits must admit a partial ordered batch"
+            );
+            drop(held);
+        });
     }
 
     #[test]

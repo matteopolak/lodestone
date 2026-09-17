@@ -49,7 +49,7 @@ impl Plugin for CountingServerPlugin {
 }
 
 /// Every column is bare air — the cheapest terrain that still lets
-/// `MobHandle::seeded` build a `ChunkWorld`. Mirrors `tick.rs`'s own
+/// `MobHandle::new` build a `ChunkWorld`. Mirrors `tick.rs`'s own
 /// `EmptyWorld` fixture rather than sharing it, because that one is private to
 /// that module's test block.
 struct AirWorld;
@@ -130,7 +130,6 @@ fn production_server() -> IntegratedServer {
         AirWorld,
         (0..=0, 0..=0),
         (0, 0),
-        0,
         1,
     );
     server
@@ -260,7 +259,6 @@ async fn a_supplied_server_plugin_runs_on_the_primary_world_tick_task() {
         AirWorld,
         (0..=0, 0..=0),
         (0, 0),
-        0,
         1,
         server_app,
     );
@@ -303,7 +301,6 @@ async fn the_production_primary_world_runs_deterministic_scheduler_tasks() {
         AirWorld,
         (0..=0, 0..=0),
         (0, 0),
-        0,
         1,
         server_app,
     );
@@ -346,7 +343,6 @@ async fn completed_async_work_reaches_the_production_primary_world_tick_task() {
         AirWorld,
         (0..=0, 0..=0),
         (0, 0),
-        0,
         1,
         server_app,
     );
@@ -409,7 +405,7 @@ async fn independent_plugins_exchange_bounded_messages_on_the_primary_tick_task(
         app.add_plugins((NoticeConsumer(plugin_observed), NoticeProducer));
     });
     let (server, _client) = IntegratedServer::open_in_memory_with_mobs_and_server_app(
-        Silent, AirWorld, (0..=0, 0..=0), (0, 0), 0, 1, server_app,
+        Silent, AirWorld, (0..=0, 0..=0), (0, 0), 1, server_app,
     );
     assert_eq!(observed.load(Ordering::Relaxed), 0);
     tokio::task::yield_now().await;
@@ -437,7 +433,6 @@ async fn a_supplied_resource_without_a_plugin_system_never_runs() {
         AirWorld,
         (0..=0, 0..=0),
         (0, 0),
-        0,
         1,
         server_app,
     );

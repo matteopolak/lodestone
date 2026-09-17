@@ -32,14 +32,13 @@
 //! test compares block-for-block over a whole chunk column and names the
 //! divergent `x,y,z`.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::cell::{Cell, RefCell};
+use std::sync::{Arc, Condvar, Mutex};
 
 use serde_json::Value;
 
 use crate::density::{Builder, Context as DfContext, Density, NoiseChunkSampler};
-use crate::engine::{Bounds, Program};
+use crate::engine::{Bounds, PointProgram, PointScratch, Program};
 use crate::math::{clamp, clamped_map, floor, map};
 use crate::rng::{PositionalRandomFactory, RandomSource};
 pub use crate::rng::AnyPositionalFactory;
@@ -146,8 +145,73 @@ impl FluidStatus {
     }
 }
 
+enum PointDensity {
+    SimpleNoise { node: Arc<Density>, kind: usize },
+    Tree(Arc<Density>),
+    Compiled {
+        program: Arc<PointProgram>,
+        scratch: RefCell<PointScratch>,
+    },
+}
+
+impl PointDensity {
+    fn from_arc(node: Arc<Density>) -> Self {
+        if matches!(node.as_ref(), Density::Noise { .. }) {
+            let kind = node.kind_index();
+            Self::SimpleNoise { node, kind }
+        } else {
+            Self::Tree(node)
+        }
+    }
+
+    fn from_program(program: Arc<PointProgram>) -> Self {
+        Self::Compiled {
+            program,
+            scratch: RefCell::new(PointScratch::new()),
+        }
+    }
+
+    #[cfg(test)]
+    fn is_compiled(&self) -> bool {
+        matches!(self, Self::Compiled { .. })
+    }
+
+    #[inline]
+    fn compute(&self, ctx: DfContext) -> f64 {
+        match self {
+            Self::SimpleNoise { node, kind } => {
+                crate::counters::bump_density_point_compute(*kind);
+                crate::engine::redundancy_probe::visit_point(
+                    Arc::as_ptr(node).cast::<()>(),
+                    *kind,
+                    ctx.x,
+                    ctx.y,
+                    ctx.z,
+                );
+                match node.as_ref() {
+                    Density::Noise {
+                        noise,
+                        xz_scale,
+                        y_scale,
+                    } => noise.get_value(
+                        f64::from(ctx.x) * xz_scale,
+                        f64::from(ctx.y) * y_scale,
+                        f64::from(ctx.z) * xz_scale,
+                    ),
+                    _ => unreachable!("simple-noise route changed after specialization"),
+                }
+            }
+            Self::Tree(node) => node.compute(ctx),
+            Self::Compiled { program, scratch } => {
+                program.compute(ctx, &mut scratch.borrow_mut())
+            }
+        }
+    }
+}
+
 // Grid constant (Aquifer.NoiseBasedAquifer): Y_SPACING.
 const Y_SPACING: i32 = 12;
+const VERTICAL_CANDIDATE_COUNT: usize = 12;
 
 const SURFACE_SAMPLING_OFFSETS_IN_CHUNKS: [[i32; 2]; 13] = [
     [0, 0],
@@ -197,9 +261,146 @@ fn section_to_block(section: i32) -> i32 {
 fn similarity(distance_sqr1: i32, distance_sqr2: i32) -> f64 {
     1.0 - f64::from(distance_sqr2 - distance_sqr1) / 25.0
 }
+
 #[inline]
 fn quantize(value: f64, resolution: i32) -> i32 {
     floor(value / f64::from(resolution)) * resolution
+}
+
+#[derive(Clone, Copy)]
+struct VerticalRunScratch {
+    anchor_x: i32,
+    anchor_y: i32,
+    anchor_z: i32,
+    current_y: i32,
+    indices: [usize; VERTICAL_CANDIDATE_COUNT],
+    distances: [i32; VERTICAL_CANDIDATE_COUNT],
+    deltas: [i32; VERTICAL_CANDIDATE_COUNT],
+}
+
+impl VerticalRunScratch {
+    fn new(aquifer: &AquiferSystem, x: i32, y: i32, z: i32) -> Self {
+        VERTICAL_RUN_SCRATCH_INITIALIZATIONS.with(|count| count.set(count.get() + 1));
+        let anchor_x = grid_x(x - 5);
+        let anchor_y = grid_y(y + 1);
+        let anchor_z = grid_z(z - 5);
+        let mut indices = [0; VERTICAL_CANDIDATE_COUNT];
+        let mut distances = [0; VERTICAL_CANDIDATE_COUNT];
+        let mut deltas = [0; VERTICAL_CANDIDATE_COUNT];
+        let mut candidate = 0;
+        for x1 in 0..=1 {
+            for y1 in -1..=1 {
+                for z1 in 0..=1 {
+                    let spaced_grid_x = anchor_x + x1;
+                    let spaced_grid_y = anchor_y + y1;
+                    let spaced_grid_z = anchor_z + z1;
+                    let index = aquifer.get_index(spaced_grid_x, spaced_grid_y, spaced_grid_z);
+                    let (lx, ly, lz) = aquifer.location(
+                        spaced_grid_x,
+                        spaced_grid_y,
+                        spaced_grid_z,
+                        index,
+                    );
+                    let dx = lx - x;
+                    let dy = ly - y;
+                    let dz = lz - z;
+                    distances[candidate] = dx * dx + dy * dy + dz * dz;
+                    deltas[candidate] = 1 - 2 * dy;
+                    indices[candidate] = index;
+                    candidate += 1;
+                }
+            }
+        }
+        Self {
+            anchor_x,
+            anchor_y,
+            anchor_z,
+            current_y: y,
+            indices,
+            distances,
+            deltas,
+        }
+    }
+
+    #[inline]
+    fn can_advance_to(&self, anchor_x: i32, anchor_y: i32, anchor_z: i32, y: i32) -> bool {
+        self.anchor_x == anchor_x
+            && self.anchor_y == anchor_y
+            && self.anchor_z == anchor_z
+            && self.current_y.checked_add(1) == Some(y)
+    }
+
+    #[inline]
+    fn advance(&mut self) {
+        for candidate in 0..VERTICAL_CANDIDATE_COUNT {
+            self.distances[candidate] += self.deltas[candidate];
+            self.deltas[candidate] += 2;
+        }
+        self.current_y += 1;
+    }
+
+    #[inline]
+    fn closest_three(&self) -> (usize, usize, usize, i32, i32, i32) {
+        let mut distance_sqr1 = i32::MAX;
+        let mut distance_sqr2 = i32::MAX;
+        let mut distance_sqr3 = i32::MAX;
+        let mut closest_index1 = 0;
+        let mut closest_index2 = 0;
+        let mut closest_index3 = 0;
+        for candidate in 0..VERTICAL_CANDIDATE_COUNT {
+            let new_distance = self.distances[candidate];
+            if distance_sqr1 >= new_distance {
+                closest_index3 = closest_index2;
+                closest_index2 = closest_index1;
+                closest_index1 = candidate;
+                distance_sqr3 = distance_sqr2;
+                distance_sqr2 = distance_sqr1;
+                distance_sqr1 = new_distance;
+            } else if distance_sqr2 >= new_distance {
+                closest_index3 = closest_index2;
+                closest_index2 = candidate;
+                distance_sqr3 = distance_sqr2;
+                distance_sqr2 = new_distance;
+            } else if distance_sqr3 >= new_distance {
+                closest_index3 = candidate;
+                distance_sqr3 = new_distance;
+            }
+        }
+        (
+            self.indices[closest_index1],
+            self.indices[closest_index2],
+            self.indices[closest_index3],
+            distance_sqr1,
+            distance_sqr2,
+            distance_sqr3,
+        )
+    }
+}
+
+/// Request-local state for adjacent vertical density slices.
+///
+/// The production cell path supplies eight blocks at a time. Keeping this
+/// small value across adjacent slices lets the next slice advance the same
+/// candidate-distance recurrence when its grid anchor is unchanged. It is
+/// deliberately not stored on [`AquiferSystem`]: each XZ column owns one
+/// state, and concurrent requests must not share mutable fill state.
+#[derive(Default)]
+pub(crate) struct VerticalRunState {
+    scratch: Option<VerticalRunScratch>,
+}
+
+thread_local! {
+    static VERTICAL_RUN_SCRATCH_INITIALIZATIONS: Cell<u64> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_vertical_run_scratch_initializations() {
+    VERTICAL_RUN_SCRATCH_INITIALIZATIONS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn vertical_run_scratch_initializations() -> u64 {
+    VERTICAL_RUN_SCRATCH_INITIALIZATIONS.with(Cell::get)
 }
 
 /// Per-thread cache storage retained between adjacent aquifer instances.
@@ -212,8 +413,565 @@ fn quantize(value: f64, resolution: i32) -> i32 {
 struct AquiferScratch {
     aquifer: Vec<Option<FluidStatus>>,
     locations: Vec<Option<(i32, i32, i32)>>,
-    prelim: HashMap<(i32, i32), i32>,
 }
+
+#[derive(Clone, Copy, Debug)]
+struct PreliminarySurfaceEntry {
+    qx: i32,
+    qz: i32,
+    value: i32,
+    occupied: bool,
+}
+
+#[derive(Debug)]
+struct PreliminarySurfaceState {
+    values: Vec<PreliminarySurfaceEntry>,
+    scratch: PointScratch,
+    pending: Vec<PreliminarySurfacePending>,
+    program: Option<Arc<PointProgram>>,
+    lookups: u64,
+    hits: u64,
+    misses: u64,
+    evictions: u64,
+    scratch_slots: usize,
+    replacement: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PreliminarySurfacePending {
+    qx: i32,
+    qz: i32,
+}
+
+const PRELIMINARY_LOCAL_CAPACITY: usize = 512;
+
+#[derive(Clone, Copy, Debug)]
+struct PreliminaryLocalEntry {
+    qx: i32,
+    qz: i32,
+    value: i32,
+    occupied: bool,
+}
+
+impl PreliminaryLocalEntry {
+    const EMPTY: Self = Self {
+        qx: 0,
+        qz: 0,
+        value: 0,
+        occupied: false,
+    };
+}
+
+#[derive(Debug)]
+struct PreliminaryLocalCache {
+    values: [PreliminaryLocalEntry; PRELIMINARY_LOCAL_CAPACITY],
+}
+
+impl PreliminaryLocalCache {
+    fn new() -> Self {
+        Self {
+            values: [PreliminaryLocalEntry::EMPTY; PRELIMINARY_LOCAL_CAPACITY],
+        }
+    }
+
+    #[inline]
+    fn index(qx: i32, qz: i32) -> usize {
+        (PreliminarySurfaceCache::hash(qx, qz) >> 5) as usize
+            & (PRELIMINARY_LOCAL_CAPACITY - 1)
+    }
+
+    #[inline]
+    fn get(&self, qx: i32, qz: i32) -> Option<i32> {
+        let entry = self.values[Self::index(qx, qz)];
+        (entry.occupied && entry.qx == qx && entry.qz == qz).then_some(entry.value)
+    }
+
+    #[inline]
+    fn insert(&mut self, qx: i32, qz: i32, value: i32) {
+        self.values[Self::index(qx, qz)] = PreliminaryLocalEntry {
+            qx,
+            qz,
+            value,
+            occupied: true,
+        };
+    }
+}
+
+impl PreliminarySurfaceEntry {
+    const EMPTY: Self = Self {
+        qx: 0,
+        qz: 0,
+        value: 0,
+        occupied: false,
+    };
+}
+
+/// Bounded preliminary-surface values with scalar and cross-shard batch admission.
+#[derive(Debug)]
+pub(crate) struct PreliminarySurfaceCache {
+    shards: Vec<PreliminarySurfaceShard>,
+    shard_capacity: usize,
+    batch_scratch: Mutex<PointScratch>,
+}
+
+#[derive(Debug)]
+struct PreliminarySurfaceShard {
+    state: Mutex<PreliminarySurfaceState>,
+    ready: Condvar,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreliminarySurfaceCacheStats {
+    pub lookups: u64,
+    pub hits: u64,
+    pub misses: u64,
+    pub evictions: u64,
+    pub retained_entries: usize,
+    pub capacity: usize,
+    pub entry_bytes: usize,
+    pub scratch_slots: usize,
+    pub retained_bytes: usize,
+}
+
+const PRELIMINARY_CACHE_SCALAR_CAPACITY: usize = PRELIMINARY_LOCAL_CAPACITY;
+pub(crate) const PRELIMINARY_CACHE_BATCH_CAPACITY: usize = 8_192;
+pub(crate) const PRELIMINARY_CACHE_REGION_CAPACITY: usize = 8_192;
+const PRELIMINARY_CACHE_SHARDS: usize = 32;
+const PRELIMINARY_POINT_SCRATCH_CAPACITY: usize = 128;
+const POINT_SCRATCH_ENTRY_BYTES: usize = 24;
+const PRELIMINARY_BATCH_WIDTH: usize = 8;
+
+impl PreliminarySurfaceCache {
+    #[must_use]
+    pub(crate) fn new() -> Self {
+        Self::with_capacity(PRELIMINARY_CACHE_SCALAR_CAPACITY)
+    }
+
+    #[must_use]
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        let capacity = capacity
+            .max(PRELIMINARY_CACHE_SHARDS)
+            .next_power_of_two();
+        let shard_capacity = capacity / PRELIMINARY_CACHE_SHARDS;
+        let scratch_slots = PRELIMINARY_POINT_SCRATCH_CAPACITY;
+        Self {
+            shards: (0..PRELIMINARY_CACHE_SHARDS)
+                .map(|_| PreliminarySurfaceShard {
+                    state: Mutex::new(PreliminarySurfaceState {
+                        values: vec![PreliminarySurfaceEntry::EMPTY; shard_capacity],
+                        scratch: PointScratch::with_capacity(scratch_slots),
+                        pending: Vec::with_capacity(shard_capacity),
+                        program: None,
+                        lookups: 0,
+                        hits: 0,
+                        misses: 0,
+                        evictions: 0,
+                        scratch_slots,
+                        replacement: 0,
+                    }),
+                    ready: Condvar::new(),
+                })
+                .collect(),
+            shard_capacity,
+            batch_scratch: Mutex::new(PointScratch::with_capacity(scratch_slots)),
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn with_program(program: Arc<PointProgram>, capacity: usize) -> Self {
+        let cache = Self::with_capacity(capacity);
+        for shard in &cache.shards {
+            shard
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .program = Some(Arc::clone(&program));
+        }
+        cache
+    }
+
+    #[inline]
+    fn hash(qx: i32, qz: i32) -> u64 {
+        let x = (qx as i64 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let z = (qz as i64 as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+        let mut hash = x ^ z.rotate_left(32);
+        hash ^= hash >> 32;
+        hash = (hash ^ (hash >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        hash = (hash ^ (hash >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        hash ^ (hash >> 31)
+    }
+
+    #[inline]
+    fn locate(qx: i32, qz: i32, capacity: usize) -> (usize, usize) {
+        let hash = Self::hash(qx, qz);
+        (
+            (hash as usize) & (PRELIMINARY_CACHE_SHARDS - 1),
+            ((hash >> PRELIMINARY_CACHE_SHARDS.trailing_zeros()) as usize) & (capacity - 1),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get_or_compute(&self, qx: i32, qz: i32, compute: impl FnOnce() -> i32) -> i32 {
+        let shard_capacity = self.shard_capacity;
+        let (shard_index, mut index) = Self::locate(qx, qz, shard_capacity);
+        let mut state = self.shards[shard_index]
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.lookups += 1;
+        for _ in 0..shard_capacity {
+            let entry = state.values[index];
+            if !entry.occupied {
+                state.misses += 1;
+                let value = compute();
+                state.values[index] = PreliminarySurfaceEntry {
+                    qx,
+                    qz,
+                    value,
+                    occupied: true,
+                };
+                return value;
+            }
+            if entry.qx == qx && entry.qz == qz {
+                state.hits += 1;
+                return entry.value;
+            }
+            index = (index + 1) & (shard_capacity - 1);
+        }
+        state.misses += 1;
+        state.evictions += 1;
+        let value = compute();
+        let replacement = state.replacement;
+        state.replacement = (replacement + 1) & (shard_capacity - 1);
+        state.values[replacement] = PreliminarySurfaceEntry {
+            qx,
+            qz,
+            value,
+            occupied: true,
+        };
+        value
+    }
+
+    pub(crate) fn get_or_compute_preliminary(
+        &self,
+        qx: i32,
+        qz: i32,
+        fallback: impl FnOnce() -> i32,
+    ) -> i32 {
+        let mut fallback = Some(fallback);
+        let (shard_index, _) = Self::locate(qx, qz, self.shard_capacity);
+        let mut state = self.shards[shard_index]
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.lookups += 1;
+        let mut waited = false;
+        loop {
+            if let Some(index) = Self::find_slot(&state, qx, qz) {
+                if !waited {
+                    state.hits += 1;
+                }
+                return state.values[index].value;
+            }
+            if state
+                .pending
+                .iter()
+                .any(|pending| pending.qx == qx && pending.qz == qz)
+            {
+                if !waited {
+                    state.hits += 1;
+                    waited = true;
+                }
+                state = self.shards[shard_index]
+                    .ready
+                    .wait(state)
+                    .unwrap_or_else(|error| error.into_inner());
+                continue;
+            }
+            state.misses += 1;
+            let program = state.program.clone();
+            let value = match program {
+                Some(program) => {
+                    crate::counters::bump_preliminary_surface_compute();
+                    floor(program.compute(DfContext::new(qx, 0, qz), &mut state.scratch))
+                }
+                None => fallback.take().expect("preliminary fallback consumed")(),
+            };
+            Self::store(&mut state, qx, qz, value, self.shard_capacity);
+            return value;
+        }
+    }
+
+    /// Computes up to eight keys with one compiled graph walk when possible.
+    pub(crate) fn get_or_compute_preliminary_batch(
+        &self,
+        keys: &[(i32, i32)],
+        output: &mut [i32],
+        mut fallback: impl FnMut(i32, i32) -> i32,
+    ) {
+        assert_eq!(keys.len(), output.len());
+        assert!(keys.len() <= PRELIMINARY_BATCH_WIDTH);
+        if keys.is_empty() {
+            return;
+        }
+
+        let mut shard_indices = [usize::MAX; PRELIMINARY_BATCH_WIDTH];
+        let mut shard_len = 0;
+        for &(qx, qz) in keys {
+            let shard_index = Self::locate(qx, qz, self.shard_capacity).0;
+            if !shard_indices[..shard_len].contains(&shard_index) {
+                shard_indices[shard_len] = shard_index;
+                shard_len += 1;
+            }
+        }
+        shard_indices[..shard_len].sort_unstable();
+        let mut guards = Vec::with_capacity(shard_len);
+        for &shard_index in &shard_indices[..shard_len] {
+            guards.push((
+                shard_index,
+                self.shards[shard_index]
+                    .state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()),
+            ));
+        }
+        let mut missing = [(0, 0); PRELIMINARY_BATCH_WIDTH];
+        let mut missing_outputs = [usize::MAX; PRELIMINARY_BATCH_WIDTH];
+        let mut missing_len = 0;
+        let mut waiting = [usize::MAX; PRELIMINARY_BATCH_WIDTH];
+        let mut waiting_len = 0;
+        let mut deferred = [usize::MAX; PRELIMINARY_BATCH_WIDTH];
+        let mut deferred_len = 0;
+        let mut program = None;
+        for (key_index, &(qx, qz)) in keys.iter().enumerate() {
+            let shard_index = Self::locate(qx, qz, self.shard_capacity).0;
+            let guard_index = shard_indices[..shard_len]
+                .binary_search(&shard_index)
+                .expect("batch shard was not admitted");
+            let state = &mut guards[guard_index].1;
+            state.lookups += 1;
+            if let Some(index) = Self::find_slot(state, qx, qz) {
+                state.hits += 1;
+                output[key_index] = state.values[index].value;
+            } else if state
+                .pending
+                .iter()
+                .any(|pending| pending.qx == qx && pending.qz == qz)
+            {
+                state.hits += 1;
+                waiting[waiting_len] = key_index;
+                waiting_len += 1;
+            } else {
+                if state.pending.len() == state.pending.capacity() {
+                    state.lookups -= 1;
+                    deferred[deferred_len] = key_index;
+                    deferred_len += 1;
+                    continue;
+                }
+                state.misses += 1;
+                state.pending.push(PreliminarySurfacePending { qx, qz });
+                missing[missing_len] = (qx, qz);
+                missing_outputs[missing_len] = key_index;
+                missing_len += 1;
+                if program.is_none() {
+                    program = state.program.clone();
+                }
+            }
+        }
+        drop(guards);
+
+        let mut values = [0i32; PRELIMINARY_BATCH_WIDTH];
+        if missing_len != 0 {
+            if let Some(program) = program {
+                let mut contexts = [DfContext::new(0, 0, 0); PRELIMINARY_BATCH_WIDTH];
+                for (lane, &(qx, qz)) in missing[..missing_len].iter().enumerate() {
+                    contexts[lane] = DfContext::new(qx, 0, qz);
+                }
+                let mut computed = [0.0; PRELIMINARY_BATCH_WIDTH];
+                let mut scratch = self
+                    .batch_scratch
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                program.compute_batch(
+                    &contexts[..missing_len],
+                    &mut computed[..missing_len],
+                    &mut scratch,
+                );
+                for lane in 0..missing_len {
+                    crate::counters::bump_preliminary_surface_compute();
+                    values[lane] = floor(computed[lane]);
+                }
+            } else {
+                for lane in 0..missing_len {
+                    let (qx, qz) = missing[lane];
+                    values[lane] = fallback(qx, qz);
+                }
+            }
+        }
+
+        let mut guards = Vec::with_capacity(shard_len);
+        for &shard_index in &shard_indices[..shard_len] {
+            guards.push((
+                shard_index,
+                self.shards[shard_index]
+                    .state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()),
+            ));
+        }
+        for lane in 0..missing_len {
+            let (qx, qz) = missing[lane];
+            let shard_index = Self::locate(qx, qz, self.shard_capacity).0;
+            let guard_index = shard_indices[..shard_len]
+                .binary_search(&shard_index)
+                .expect("batch shard was not committed");
+            let state = &mut guards[guard_index].1;
+            let pending = state
+                .pending
+                .iter()
+                .position(|pending| pending.qx == qx && pending.qz == qz)
+                .expect("preliminary batch reservation disappeared");
+            state.pending.swap_remove(pending);
+            Self::store(state, qx, qz, values[lane], self.shard_capacity);
+            output[missing_outputs[lane]] = values[lane];
+        }
+        drop(guards);
+        for &shard_index in &shard_indices[..shard_len] {
+            self.shards[shard_index].ready.notify_all();
+        }
+        for &key_index in &waiting[..waiting_len] {
+            let (qx, qz) = keys[key_index];
+            output[key_index] = self.wait_for_preliminary(qx, qz, &mut fallback);
+        }
+        for &key_index in &deferred[..deferred_len] {
+            let (qx, qz) = keys[key_index];
+            output[key_index] = self.get_or_compute_preliminary(qx, qz, || fallback(qx, qz));
+        }
+    }
+
+    fn wait_for_preliminary(
+        &self,
+        qx: i32,
+        qz: i32,
+        fallback: &mut impl FnMut(i32, i32) -> i32,
+    ) -> i32 {
+        let (shard_index, _) = Self::locate(qx, qz, self.shard_capacity);
+        let mut state = self.shards[shard_index]
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        loop {
+            if let Some(index) = Self::find_slot(&state, qx, qz) {
+                return state.values[index].value;
+            }
+            if state
+                .pending
+                .iter()
+                .any(|pending| pending.qx == qx && pending.qz == qz)
+            {
+                state = self.shards[shard_index]
+                    .ready
+                    .wait(state)
+                    .unwrap_or_else(|error| error.into_inner());
+            } else {
+                drop(state);
+                return self.get_or_compute_preliminary(qx, qz, || fallback(qx, qz));
+            }
+        }
+    }
+
+    #[inline]
+    fn find_slot(state: &PreliminarySurfaceState, qx: i32, qz: i32) -> Option<usize> {
+        let mut index = Self::locate(qx, qz, state.values.len()).1;
+        for _ in 0..state.values.len() {
+            let entry = state.values[index];
+            if !entry.occupied {
+                return None;
+            }
+            if entry.qx == qx && entry.qz == qz {
+                return Some(index);
+            }
+            index = (index + 1) & (state.values.len() - 1);
+        }
+        None
+    }
+
+    fn store(
+        state: &mut PreliminarySurfaceState,
+        qx: i32,
+        qz: i32,
+        value: i32,
+        shard_capacity: usize,
+    ) {
+        let mut index = Self::locate(qx, qz, shard_capacity).1;
+        for _ in 0..shard_capacity {
+            let entry = state.values[index];
+            if !entry.occupied || (entry.qx == qx && entry.qz == qz) {
+                state.values[index] = PreliminarySurfaceEntry {
+                    qx,
+                    qz,
+                    value,
+                    occupied: true,
+                };
+                return;
+            }
+            index = (index + 1) & (shard_capacity - 1);
+        }
+        state.evictions += 1;
+        let replacement = state.replacement;
+        state.replacement = (replacement + 1) & (shard_capacity - 1);
+        state.values[replacement] = PreliminarySurfaceEntry {
+            qx,
+            qz,
+            value,
+            occupied: true,
+        };
+    }
+
+    pub fn stats(&self) -> PreliminarySurfaceCacheStats {
+        let mut stats = PreliminarySurfaceCacheStats {
+            lookups: 0,
+            hits: 0,
+            misses: 0,
+            evictions: 0,
+            retained_entries: 0,
+            capacity: 0,
+            entry_bytes: std::mem::size_of::<PreliminarySurfaceEntry>(),
+            scratch_slots: 0,
+            retained_bytes: 0,
+        };
+        for shard in &self.shards {
+            let state = shard.state.lock().unwrap_or_else(|error| error.into_inner());
+            stats.lookups += state.lookups;
+            stats.hits += state.hits;
+            stats.misses += state.misses;
+            stats.evictions += state.evictions;
+            stats.retained_entries += state.values.iter().filter(|entry| entry.occupied).count();
+            stats.capacity += state.values.len();
+            stats.scratch_slots += state.scratch_slots;
+            stats.retained_bytes +=
+                state.pending.capacity() * std::mem::size_of::<PreliminarySurfacePending>();
+            stats.retained_bytes += state.scratch.batch_buffer_bytes();
+        }
+        let batch_scratch = self
+            .batch_scratch
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        stats.retained_bytes += batch_scratch.batch_buffer_bytes();
+        stats.retained_bytes += stats.capacity * stats.entry_bytes
+            + (stats.scratch_slots + PRELIMINARY_POINT_SCRATCH_CAPACITY)
+                * POINT_SCRATCH_ENTRY_BYTES;
+        stats
+    }
+
+}
+
+impl Default for PreliminarySurfaceCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 
 thread_local! {
     static AQUIFER_SCRATCH: RefCell<Vec<AquiferScratch>> =
@@ -227,7 +985,6 @@ fn take_aquifer_scratch() -> AquiferScratch {
 fn return_aquifer_scratch(mut scratch: AquiferScratch) {
     scratch.aquifer.clear();
     scratch.locations.clear();
-    scratch.prelim.clear();
     AQUIFER_SCRATCH.with(|slot| {
         let mut slot = slot.borrow_mut();
         if slot.len() < 2 {
@@ -250,13 +1007,13 @@ pub struct AquiferSystem {
     depth: NoiseChunkSampler,
     /// The four point-evaluated router outputs and the preliminary-surface
     /// tree, behind `Arc` so a per-chunk `AquiferSystem` shares them instead of
-    /// deep-copying five `Density` trees (diagnostic D3). `Density::compute`
-    /// reaches through the `Deref`, so every use site is unchanged.
-    barrier: Arc<Density>,
-    floodedness: Arc<Density>,
-    spread: Arc<Density>,
-    lava: Arc<Density>,
-    prelim: Arc<Density>,
+    /// deep-copying five `Density` trees. Direct `noise` roots use the compact
+    /// point path; all other roots retain the `Density::compute` fallback.
+    barrier: PointDensity,
+    floodedness: PointDensity,
+    spread: PointDensity,
+    lava: PointDensity,
+    prelim: PointDensity,
 
     positional: AnyPositionalFactory,
     sea_level: i32,
@@ -285,10 +1042,23 @@ pub struct AquiferSystem {
 
     aquifer_cache: RefCell<Vec<Option<FluidStatus>>>,
     location_cache: RefCell<Vec<Option<(i32, i32, i32)>>>,
-    prelim_cache: RefCell<HashMap<(i32, i32), i32>>,
+    prelim_cache: RefCell<PreliminaryLocalCache>,
+    preliminary_shared: Arc<PreliminarySurfaceCache>,
 }
 
 impl AquiferSystem {
+    /// Number of operations in the immutable preliminary-surface program.
+    ///
+    /// This is a diagnostic witness that the production aquifer handoff carries
+    /// the compiled point route; it does not affect generation decisions.
+    #[must_use]
+    pub fn preliminary_surface_program_nodes(&self) -> usize {
+        match &self.prelim {
+            PointDensity::Compiled { program, .. } => program.node_count(),
+            PointDensity::SimpleNoise { .. } | PointDensity::Tree(_) => 0,
+        }
+    }
+
     /// Builds the aquifer + fill for chunk `(chunk_x, chunk_z)` from a
     /// `noise_settings` JSON value, using `builder` (seeded with the same seed as
     /// `RandomState`) to instantiate the router functions and the aquifer RNG.
@@ -390,22 +1160,7 @@ impl AquiferSystem {
     }
 
     /// Same construction as [`Self::new`], but from already-built density
-    /// trees and positional factory instead of a `Resolver`-backed
-    /// [`Builder`]. Exists so a caller that must keep the trees around across
-    /// many chunks (e.g. [`crate::overworld::OverworldGenerator`], which is
-    /// built once per world seed and cannot hold a borrowed `Builder`/
-    /// `Resolver` for its own lifetime) can build the eight router outputs
-    /// once and construct a fresh per-chunk [`AquiferSystem`] — matching
-    /// vanilla's own per-chunk `NoiseChunk` — by cloning the trees rather than
-    /// re-resolving JSON every chunk.
-    ///
-    /// Since U4 those clones are **refcount bumps**: the three interpolated
-    /// routes arrive as a [`Program`] (`Arc<Graph>` plus a root index) and the
-    /// five point-evaluated ones as `Arc<Density>`. Before that they were eight
-    /// recursive deep copies of a `Box`-linked tree whose every node was 232
-    /// bytes wide, performed once per chunk — diagnostic D3.
-    /// `cell_width` and `cell_height` are the settings-derived interpolation
-    /// geometry and must be shared by all three field samplers.
+    /// trees and positional factory instead of a resolver-backed builder.
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn from_parts(
@@ -426,6 +1181,122 @@ impl AquiferSystem {
         slots: usize,
         cell_width: i32,
         cell_height: i32,
+    ) -> Self {
+        let prelim_program = Arc::new(PointProgram::compile(&prelim));
+        let preliminary_shared = Arc::new(PreliminarySurfaceCache::with_program(
+            Arc::clone(&prelim_program),
+            PRELIMINARY_CACHE_SCALAR_CAPACITY,
+        ));
+        Self::from_parts_internal(
+            final_density_node,
+            erosion_node,
+            depth_node,
+            barrier,
+            floodedness,
+            spread,
+            lava,
+            prelim,
+            Some(prelim_program),
+            positional,
+            sea_level,
+            min_y,
+            height,
+            chunk_x,
+            chunk_z,
+            slots,
+            cell_width,
+            cell_height,
+            preliminary_shared,
+        )
+    }
+
+    /// Builds a chunk-bound aquifer while sharing preliminary-surface values
+    /// with other chunks from the same generator/session.
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub(crate) fn from_parts_with_preliminary_cache(
+        final_density_node: Program,
+        erosion_node: Program,
+        depth_node: Program,
+        barrier: Arc<Density>,
+        floodedness: Arc<Density>,
+        spread: Arc<Density>,
+        lava: Arc<Density>,
+        prelim: Arc<Density>,
+        prelim_program: Arc<PointProgram>,
+        positional: AnyPositionalFactory,
+        sea_level: i32,
+        min_y: i32,
+        height: i32,
+        chunk_x: i32,
+        chunk_z: i32,
+        slots: usize,
+        cell_width: i32,
+        cell_height: i32,
+        preliminary_shared: Arc<PreliminarySurfaceCache>,
+    ) -> Self {
+        Self::from_parts_internal(
+            final_density_node,
+            erosion_node,
+            depth_node,
+            barrier,
+            floodedness,
+            spread,
+            lava,
+            prelim,
+            Some(prelim_program),
+            positional,
+            sea_level,
+            min_y,
+            height,
+            chunk_x,
+            chunk_z,
+            slots,
+            cell_width,
+            cell_height,
+            preliminary_shared,
+        )
+    }
+
+    /// Same construction as [`Self::new`], but from already-built density
+    /// trees and positional factory instead of a `Resolver`-backed
+    /// [`Builder`]. Exists so a caller that must keep the trees around across
+    /// many chunks (e.g. [`crate::overworld::OverworldGenerator`], which is
+    /// built once per world seed and cannot hold a borrowed `Builder`/
+    /// `Resolver` for its own lifetime) can build the eight router outputs
+    /// once and construct a fresh per-chunk [`AquiferSystem`] — matching
+    /// vanilla's own per-chunk `NoiseChunk` — by cloning the trees rather than
+    /// re-resolving JSON every chunk.
+    ///
+    /// Since U4 those clones are **refcount bumps**: the three interpolated
+    /// routes arrive as a [`Program`] (`Arc<Graph>` plus a root index) and the
+    /// five point-evaluated ones as `Arc<Density>`. Before that they were eight
+    /// recursive deep copies of a `Box`-linked tree whose every node was 232
+    /// bytes wide, performed once per chunk — diagnostic D3.
+    /// `cell_width` and `cell_height` are the settings-derived interpolation
+    /// geometry and must be shared by all three field samplers.
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    fn from_parts_internal(
+        final_density_node: Program,
+        erosion_node: Program,
+        depth_node: Program,
+        barrier: Arc<Density>,
+        floodedness: Arc<Density>,
+        spread: Arc<Density>,
+        lava: Arc<Density>,
+        prelim: Arc<Density>,
+        prelim_program: Option<Arc<PointProgram>>,
+        positional: AnyPositionalFactory,
+        sea_level: i32,
+        min_y: i32,
+        height: i32,
+        chunk_x: i32,
+        chunk_z: i32,
+        slots: usize,
+        cell_width: i32,
+        cell_height: i32,
+        preliminary_shared: Arc<PreliminarySurfaceCache>,
     ) -> Self {
         // Grid bounds, verbatim from NoiseBasedAquifer's constructor.
         let min_block_x = chunk_x * 16;
@@ -478,17 +1349,18 @@ impl AquiferSystem {
         let mut scratch = take_aquifer_scratch();
         scratch.aquifer.resize(total, None);
         scratch.locations.resize(total, None);
-        scratch.prelim.clear();
 
         let mut system = Self {
             final_density,
             erosion,
             depth,
-            barrier,
-            floodedness,
-            spread,
-            lava,
-            prelim,
+            barrier: PointDensity::from_arc(barrier),
+            floodedness: PointDensity::from_arc(floodedness),
+            spread: PointDensity::from_arc(spread),
+            lava: PointDensity::from_arc(lava),
+            prelim: prelim_program
+                .map(PointDensity::from_program)
+                .unwrap_or_else(|| PointDensity::from_arc(prelim)),
             positional,
             sea_level,
             default_fluid: Fluid::Water,
@@ -501,7 +1373,8 @@ impl AquiferSystem {
             skip_sampling_above_y: 0,
             aquifer_cache: RefCell::new(scratch.aquifer),
             location_cache: RefCell::new(scratch.locations),
-            prelim_cache: RefCell::new(scratch.prelim),
+            prelim_cache: RefCell::new(PreliminaryLocalCache::new()),
+            preliminary_shared,
         };
 
         let max_prelim = system.max_preliminary_surface_level(
@@ -605,11 +1478,11 @@ impl AquiferSystem {
             final_density,
             erosion: stub_sampler(),
             depth: stub_sampler(),
-            barrier: stub(),
-            floodedness: stub(),
-            spread: stub(),
-            lava: stub(),
-            prelim: stub(),
+            barrier: PointDensity::from_arc(stub()),
+            floodedness: PointDensity::from_arc(stub()),
+            spread: PointDensity::from_arc(stub()),
+            lava: PointDensity::from_arc(stub()),
+            prelim: PointDensity::from_arc(stub()),
             // Vanilla's own disabled-aquifer constructor takes no
             // `PositionalRandomFactory` at all; this
             // is the cheapest inert stand-in and is never sampled.
@@ -625,7 +1498,8 @@ impl AquiferSystem {
             skip_sampling_above_y: i32::MAX,
             aquifer_cache: RefCell::new(Vec::new()),
             location_cache: RefCell::new(Vec::new()),
-            prelim_cache: RefCell::new(HashMap::new()),
+            prelim_cache: RefCell::new(PreliminaryLocalCache::new()),
+            preliminary_shared: Arc::new(PreliminarySurfaceCache::new()),
         }
     }
 
@@ -645,6 +1519,101 @@ impl AquiferSystem {
         self.block_at_beard(x, y, z, 0.0)
     }
 
+    /// Evaluates a vertical final-density run using the aquifer's chunk-bound
+    /// sampler. The caller may then pass each value to [`Self::block_at_density`]
+    /// while retaining this aquifer's independent fluid caches.
+    pub fn final_density_column(
+        &self,
+        x: i32,
+        z: i32,
+        y_start: i32,
+        output: &mut [f64],
+    ) {
+        self.final_density
+            .final_density_column(x, z, y_start, output);
+    }
+
+    /// Starts request-local state for adjacent vertical density slices.
+    pub(crate) fn vertical_run_state(&self) -> VerticalRunState {
+        VerticalRunState::default()
+    }
+
+    /// Resolves a consecutive vertical density run without repeating the
+    /// candidate-location and squared-distance work for every block.
+    pub fn block_at_density_vertical_run(
+        &self,
+        x: i32,
+        z: i32,
+        y_start: i32,
+        densities: &[f64],
+        output: &mut [BlockKind],
+    ) {
+        let mut state = VerticalRunState::default();
+        self.block_at_density_vertical_slice(x, z, y_start, densities, output, &mut state);
+    }
+
+    /// Resolves one consecutive density slice using caller-owned request state.
+    ///
+    /// Adjacent slices can pass the same [`VerticalRunState`] to preserve the
+    /// candidate-distance recurrence across an eight-block cell boundary. A
+    /// positive-density block, disabled aquifer, upper shortcut, lava shortcut,
+    /// or changed grid anchor clears the state at the exact boundary where the
+    /// scalar path would no longer be equivalent.
+    pub(crate) fn block_at_density_vertical_slice(
+        &self,
+        x: i32,
+        z: i32,
+        y_start: i32,
+        densities: &[f64],
+        output: &mut [BlockKind],
+        state: &mut VerticalRunState,
+    ) {
+        assert_eq!(densities.len(), output.len());
+        for (offset, (&density, block)) in densities.iter().zip(output.iter_mut()).enumerate() {
+            let y = y_start + offset as i32;
+            if density > 0.0 {
+                *block = self.block_at_density(x, y, z, density);
+                state.scratch = None;
+                continue;
+            }
+            let global_fluid = self.global_fluid(y);
+            if !self.enabled
+                || y > self.skip_sampling_above_y
+                || global_fluid.at(y) == Fluid::Lava
+            {
+                *block = self.block_at_density_with_global(x, y, z, density, global_fluid);
+                state.scratch = None;
+                continue;
+            }
+
+            let anchor_x = grid_x(x - 5);
+            let anchor_y = grid_y(y + 1);
+            let anchor_z = grid_z(z - 5);
+            let run = match state.scratch.as_mut() {
+                Some(run) if run.can_advance_to(anchor_x, anchor_y, anchor_z, y) => {
+                    run.advance();
+                    run
+                }
+                Some(_) => {
+                    *block = self.block_at_density_with_global(x, y, z, density, global_fluid);
+                    state.scratch = None;
+                    continue;
+                }
+                None => state.scratch.insert(VerticalRunScratch::new(self, x, y, z)),
+            };
+            let (closest1, closest2, closest3, distance1, distance2, distance3) =
+                run.closest_three();
+            crate::counters::bump_block_at();
+            let fluid = self.compute_substance_with_closest(
+                x, y, z, density, closest1, closest2, closest3, distance1, distance2, distance3,
+            );
+            *block = match fluid {
+                None => BlockKind::Stone,
+                Some(fluid) => fluid.to_block(),
+            };
+        }
+    }
+
     /// [`block_at`](Self::block_at) with a beardifier term added to the density —
     /// vanilla's own structure-adaptation density addition.
     ///
@@ -657,13 +1626,42 @@ impl AquiferSystem {
     /// than inside the density graph.
     #[must_use]
     pub fn block_at_beard(&self, x: i32, y: i32, z: i32, beard: f64) -> BlockKind {
-        crate::counters::bump_block_at();
         let density = self.final_density.final_density(x, y, z) + beard;
+        self.block_at_density(x, y, z, density)
+    }
+
+    /// Resolves a block from a final-density value that was already sampled
+    /// for the same position. This keeps the aquifer status and location
+    /// caches on their normal per-target path without re-entering the density
+    /// field evaluator.
+    #[must_use]
+    pub fn block_at_density(&self, x: i32, y: i32, z: i32, density: f64) -> BlockKind {
+        crate::counters::bump_block_at();
         let block = match self.compute_substance(x, y, z, density) {
             None => BlockKind::Stone,
             Some(fluid) => fluid.to_block(),
         };
         block
+    }
+
+    /// Resolves a non-positive density when the caller already evaluated the
+    /// global fluid picker for this Y. The vertical fill path needs that value
+    /// to select its fast branches, so threading it through avoids evaluating
+    /// the same tiny picker a second time without changing any aquifer draws.
+    #[inline]
+    fn block_at_density_with_global(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        density: f64,
+        global_fluid: FluidStatus,
+    ) -> BlockKind {
+        crate::counters::bump_block_at();
+        match self.compute_substance_with_global(x, y, z, density, global_fluid) {
+            None => BlockKind::Stone,
+            Some(fluid) => fluid.to_block(),
+        }
     }
 
     /// Vanilla's own world-carver carve-state lookup's aquifer branch:
@@ -683,11 +1681,16 @@ impl AquiferSystem {
     fn preliminary_surface_level(&self, sample_x: i32, sample_z: i32) -> i32 {
         let qx = (sample_x >> 2) << 2;
         let qz = (sample_z >> 2) << 2;
-        if let Some(v) = self.prelim_cache.borrow().get(&(qx, qz)) {
-            return *v;
+        crate::counters::bump_preliminary_surface_request(qx, qz);
+        if let Some(v) = self.prelim_cache.borrow().get(qx, qz) {
+            return v;
         }
-        let v = floor(self.prelim.compute(DfContext::new(qx, 0, qz)));
-        self.prelim_cache.borrow_mut().insert((qx, qz), v);
+        let prelim = &self.prelim;
+        let v = self.preliminary_shared.get_or_compute_preliminary(qx, qz, || {
+            crate::counters::bump_preliminary_surface_compute();
+            floor(prelim.compute(DfContext::new(qx, 0, qz)))
+        });
+        self.prelim_cache.borrow_mut().insert(qx, qz, v);
         v
     }
 
@@ -699,17 +1702,51 @@ impl AquiferSystem {
         max_block_z: i32,
     ) -> i32 {
         let mut max_y = i32::MIN;
+        let mut local_cache = self.prelim_cache.borrow_mut();
+        let mut keys = [(0, 0); PRELIMINARY_BATCH_WIDTH];
+        let mut values = [0i32; PRELIMINARY_BATCH_WIDTH];
+        let mut batch_len = 0;
         let mut block_z = min_block_z;
         while block_z <= max_block_z {
             let mut block_x = min_block_x;
             while block_x <= max_block_x {
-                let surface_level = self.preliminary_surface_level(block_x, block_z);
-                if surface_level > max_y {
-                    max_y = surface_level;
+                crate::counters::bump_preliminary_surface_request(block_x, block_z);
+                keys[batch_len] = (block_x, block_z);
+                batch_len += 1;
+                if batch_len == PRELIMINARY_BATCH_WIDTH {
+                    let prelim = &self.prelim;
+                    self.preliminary_shared.get_or_compute_preliminary_batch(
+                        &keys,
+                        &mut values,
+                        |qx, qz| {
+                            crate::counters::bump_preliminary_surface_compute();
+                            floor(prelim.compute(DfContext::new(qx, 0, qz)))
+                        },
+                    );
+                    for (key, &surface_level) in keys.iter().zip(values.iter()) {
+                        local_cache.insert(key.0, key.1, surface_level);
+                        max_y = max_y.max(surface_level);
+                    }
+                    batch_len = 0;
                 }
                 block_x += 4;
             }
             block_z += 4;
+        }
+        if batch_len != 0 {
+            let prelim = &self.prelim;
+            self.preliminary_shared.get_or_compute_preliminary_batch(
+                &keys[..batch_len],
+                &mut values[..batch_len],
+                |qx, qz| {
+                    crate::counters::bump_preliminary_surface_compute();
+                    floor(prelim.compute(DfContext::new(qx, 0, qz)))
+                },
+            );
+            for (key, &surface_level) in keys[..batch_len].iter().zip(values[..batch_len].iter()) {
+                local_cache.insert(key.0, key.1, surface_level);
+                max_y = max_y.max(surface_level);
+            }
         }
         max_y
     }
@@ -767,7 +1804,24 @@ impl AquiferSystem {
             return None;
         }
 
-        let global_fluid = self.global_fluid(pos_y);
+        self.compute_substance_with_global(
+            pos_x,
+            pos_y,
+            pos_z,
+            density,
+            self.global_fluid(pos_y),
+        )
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn compute_substance_with_global(
+        &self,
+        pos_x: i32,
+        pos_y: i32,
+        pos_z: i32,
+        density: f64,
+        global_fluid: FluidStatus,
+    ) -> Option<Fluid> {
         if !self.enabled {
             // Vanilla's own disabled-aquifer constructor's entire body. Deliberately before the
             // `skip_sampling_above_y` shortcut rather than folded into it: that
@@ -826,6 +1880,34 @@ impl AquiferSystem {
             }
         }
 
+        self.compute_substance_with_closest(
+            pos_x,
+            pos_y,
+            pos_z,
+            density,
+            closest_index1,
+            closest_index2,
+            closest_index3,
+            distance_sqr1,
+            distance_sqr2,
+            distance_sqr3,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn compute_substance_with_closest(
+        &self,
+        pos_x: i32,
+        pos_y: i32,
+        pos_z: i32,
+        density: f64,
+        closest_index1: usize,
+        closest_index2: usize,
+        closest_index3: usize,
+        distance_sqr1: i32,
+        distance_sqr2: i32,
+        distance_sqr3: i32,
+    ) -> Option<Fluid> {
         let closest_status1 = self.aquifer_status(closest_index1);
         let similarity12 = similarity(distance_sqr1, distance_sqr2);
         let fluid_state = closest_status1.at(pos_y);
@@ -1096,7 +2178,6 @@ impl Drop for AquiferSystem {
         let scratch = AquiferScratch {
             aquifer: std::mem::take(self.aquifer_cache.get_mut()),
             locations: std::mem::take(self.location_cache.get_mut()),
-            prelim: std::mem::take(self.prelim_cache.get_mut()),
         };
         return_aquifer_scratch(scratch);
     }
@@ -1104,9 +2185,17 @@ impl Drop for AquiferSystem {
 
 #[cfg(test)]
 mod tests {
-    use super::{AquiferSystem, BlockKind};
-    use crate::density::{Builder, NoiseParams, Resolver};
+    use super::{
+        reset_vertical_run_scratch_initializations, vertical_run_scratch_initializations,
+        AquiferSystem, BlockKind, VerticalRunScratch, VERTICAL_CANDIDATE_COUNT,
+    };
+    use crate::density::{Builder, Context, Context as DfContext, Density, NoiseParams, Resolver};
+    use crate::engine::{PointProgram, PointScratch};
+    use crate::math::floor;
+    use crate::noise::NormalNoise;
+    use crate::rng::LegacyRandomSource;
     use serde_json::Value;
+    use std::sync::Arc;
 
     struct NoReferences;
 
@@ -1136,6 +2225,117 @@ mod tests {
                     "from_value": 0.0,
                     "to_value": 1.0
                 }
+            }
+        })
+    }
+
+    fn nonconstant_negative_density() -> Value {
+        serde_json::json!({
+            "type": "minecraft:y_clamped_gradient",
+            "from_y": 0,
+            "to_y": 16,
+            "from_value": -0.25,
+            "to_value": -0.75
+        })
+    }
+
+    fn preliminary_find_top_density() -> Value {
+        serde_json::json!({
+            "type": "minecraft:find_top_surface",
+            "cell_height": 8,
+            "lower_bound": -16,
+            "upper_bound": 32.0,
+            "density": {
+                "type": "minecraft:add",
+                "argument1": {
+                    "type": "minecraft:y_clamped_gradient",
+                    "from_y": -16,
+                    "to_y": 16,
+                    "from_value": -1.0,
+                    "to_value": 1.0
+                },
+                "argument2": {
+                    "type": "minecraft:cache_2d",
+                    "argument": 0.25
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn direct_noise_point_route_preserves_bits() {
+        let mut random = LegacyRandomSource::new(17);
+        let density = std::sync::Arc::new(Density::Noise {
+            noise: NormalNoise::create(&mut random, -2, &[1.0, 0.5]),
+            xz_scale: 0.75,
+            y_scale: 0.125,
+        });
+        let route = super::PointDensity::from_arc(std::sync::Arc::clone(&density));
+        assert!(matches!(route, super::PointDensity::SimpleNoise { .. }));
+        for (x, y, z) in [(0, 0, 0), (17, -23, 41), (-101, 64, 7)] {
+            let ctx = Context::new(x, y, z);
+            assert_eq!(route.compute(ctx).to_bits(), density.compute(ctx).to_bits());
+        }
+    }
+
+    #[test]
+    fn production_preliminary_route_is_compiled_and_bit_exact() {
+        let mut settings = test_settings(constant_density(), 8);
+        settings["noise_router"]["preliminary_surface_level"] = preliminary_find_top_density();
+        let resolver = NoReferences;
+        let builder = Builder::new(0, &resolver);
+        let tree = builder
+            .build(&settings["noise_router"]["preliminary_surface_level"])
+            .expect("preliminary fixture density");
+        let system = AquiferSystem::new(&settings, &builder, 0, 0);
+
+        assert!(system.prelim.is_compiled());
+        assert!(system.preliminary_surface_program_nodes() > 0);
+
+        // This is the negative control for the production-consumption witness:
+        // constructing a point route directly from the tree remains recursive,
+        // so the assertion cannot pass merely because every point route was
+        // changed to report itself as compiled.
+        let recursive = super::PointDensity::from_arc(std::sync::Arc::new(tree.clone()));
+        assert!(!recursive.is_compiled());
+
+        let sampled = system.preliminary_surface_level(1000, 1000);
+        assert_eq!(
+            sampled,
+            floor(tree.compute(Context::new(1000, 0, 1000))),
+            "production preliminary request did not use the compiled route"
+        );
+
+        for (x, y, z) in [(-9, -17, 4), (0, 0, 0), (7, 15, -6), (23, 64, 11)] {
+            let context = Context::new(x, y, z);
+            assert_eq!(
+                system.prelim.compute(context).to_bits(),
+                tree.compute(context).to_bits(),
+                "compiled preliminary mismatch at ({x}, {y}, {z})"
+            );
+        }
+    }
+
+    fn test_settings(final_density: Value, sea_level: i32) -> Value {
+        serde_json::json!({
+            "aquifers_enabled": true,
+            "sea_level": sea_level,
+            "default_fluid": {"Name": "minecraft:water"},
+            "noise": {
+                "min_y": 0,
+                "height": 16,
+                "size_horizontal": 1,
+                "size_vertical": 2
+            },
+            "noise_router": {
+                "final_density": final_density,
+                "erosion": constant_density(),
+                "depth": constant_density(),
+                "barrier": constant_density(),
+                "fluid_level_floodedness": constant_density(),
+                "fluid_level_spread": constant_density(),
+                "lava": constant_density(),
+                "preliminary_surface_level": constant_density()
             }
         })
     }
@@ -1173,6 +2373,145 @@ mod tests {
     }
 
     #[test]
+    fn density_column_resolves_same_blocks_as_scalar_path() {
+        let settings = test_settings(nonlinear_density(), 8);
+        let resolver = NoReferences;
+        let builder = Builder::new(0, &resolver);
+        let column_path = AquiferSystem::new(&settings, &builder, 0, 0);
+        let scalar_path = AquiferSystem::new(&settings, &builder, 0, 0);
+        let mut density = [0.0; 16];
+        column_path.final_density_column(7, 9, 0, &mut density);
+
+        for (offset, value) in density.iter().copied().enumerate() {
+            let y = offset as i32;
+            assert_eq!(
+                column_path.block_at_density(7, y, 9, value),
+                scalar_path.block_at(7, y, 9),
+                "y={y}"
+            );
+        }
+    }
+
+    #[test]
+    fn vertical_density_run_matches_scalar_across_anchor_seams() {
+        let settings = test_settings(constant_density(), 8);
+        let resolver = NoReferences;
+        let builder = Builder::new(0, &resolver);
+        let run_path = AquiferSystem::new(&settings, &builder, 0, 0);
+        let scalar_path = AquiferSystem::new(&settings, &builder, 0, 0);
+        let y_start = 0;
+        let mut densities = [0.0; 16];
+        run_path.final_density_column(7, 9, y_start, &mut densities);
+        let mut blocks = [BlockKind::Stone; 16];
+        run_path.block_at_density_vertical_run(7, 9, y_start, &densities, &mut blocks);
+
+        for (offset, (&density, &block)) in densities.iter().zip(&blocks).enumerate() {
+            let y = y_start + offset as i32;
+            assert_eq!(block, scalar_path.block_at_density(7, y, 9, density), "y={y}");
+        }
+    }
+
+    #[test]
+    fn vertical_slice_reuse_is_bit_exact_at_nonconstant_anchor_seam() {
+        let settings = test_settings(nonconstant_negative_density(), 8);
+        let resolver = NoReferences;
+        let builder = Builder::new(0, &resolver);
+        let reused_path = AquiferSystem::new(&settings, &builder, 0, 0);
+        let scalar_path = AquiferSystem::new(&settings, &builder, 0, 0);
+        let mut densities = [0.0; 16];
+        reused_path.final_density_column(7, 9, 0, &mut densities);
+        assert!(densities
+            .windows(2)
+            .any(|window| window[0].to_bits() != window[1].to_bits()));
+        assert!(densities.iter().all(|density| *density <= 0.0));
+
+        reset_vertical_run_scratch_initializations();
+        let mut reused_blocks = [BlockKind::Stone; 16];
+        let mut reused_state = reused_path.vertical_run_state();
+        for y_start in [0, 8] {
+            let start = y_start as usize;
+            reused_path.block_at_density_vertical_slice(
+                7,
+                9,
+                y_start,
+                &densities[start..start + 8],
+                &mut reused_blocks[start..start + 8],
+                &mut reused_state,
+            );
+        }
+        let reused_initializations = vertical_run_scratch_initializations();
+
+        reset_vertical_run_scratch_initializations();
+        let mut baseline_blocks = [BlockKind::Stone; 16];
+        for y_start in [0, 8] {
+            let start = y_start as usize;
+            let mut state = reused_path.vertical_run_state();
+            reused_path.block_at_density_vertical_slice(
+                7,
+                9,
+                y_start,
+                &densities[start..start + 8],
+                &mut baseline_blocks[start..start + 8],
+                &mut state,
+            );
+        }
+        let baseline_initializations = vertical_run_scratch_initializations();
+
+        assert_eq!(reused_blocks, baseline_blocks);
+        for (y, (&density, &block)) in densities.iter().zip(&reused_blocks).enumerate() {
+            assert_eq!(
+                block,
+                scalar_path.block_at(7, y as i32, 9),
+                "scalar final-density path diverged at y={y}"
+            );
+            assert_eq!(
+                block,
+                scalar_path.block_at_density(7, y as i32, 9, density),
+                "scalar supplied-density path diverged at y={y}"
+            );
+        }
+        assert_eq!(baseline_initializations, 3);
+        assert_eq!(reused_initializations, 2);
+        assert_eq!(baseline_initializations - reused_initializations, 1);
+    }
+
+    #[test]
+    fn vertical_run_scratch_preserves_later_ties_and_invalidates_gaps() {
+        let mut scratch = VerticalRunScratch {
+            anchor_x: 1,
+            anchor_y: 2,
+            anchor_z: 3,
+            current_y: 4,
+            indices: std::array::from_fn(|index| index),
+            distances: [7; VERTICAL_CANDIDATE_COUNT],
+            deltas: [0; VERTICAL_CANDIDATE_COUNT],
+        };
+        assert_eq!(scratch.closest_three().0, 11);
+        assert!(scratch.can_advance_to(1, 2, 3, 5));
+        assert!(!scratch.can_advance_to(1, 2, 3, 6));
+        assert!(!scratch.can_advance_to(1, 4, 3, 5));
+        scratch.advance();
+        assert_eq!(scratch.current_y, 5);
+    }
+
+    #[test]
+    fn vertical_run_scratch_fits_request_local_budget() {
+        assert!(std::mem::size_of::<VerticalRunScratch>() <= 256);
+    }
+
+    #[test]
+    fn supplied_density_path_does_not_resample_final_density() {
+        let settings = test_settings(constant_density(), 4);
+        let resolver = NoReferences;
+        let builder = Builder::new(0, &resolver);
+        let system = AquiferSystem::new(&settings, &builder, 0, 0);
+
+        let scalar = system.block_at(0, 0, 0);
+        assert_ne!(scalar, BlockKind::Stone);
+        assert_eq!(system.block_at_density(0, 0, 0, 1.0), BlockKind::Stone);
+    }
+
+    #[test]
     fn enabled_aquifer_uses_settings_default_fluid() {
         let settings = serde_json::json!({
             "aquifers_enabled": true,
@@ -1202,5 +2541,267 @@ mod tests {
         // At y=0 the global status is below its level 4, so an enabled
         // aquifer must preserve the settings-selected lava identity.
         assert_eq!(system.block_at(0, 0, 0), BlockKind::Lava);
+    }
+
+    #[test]
+    fn preliminary_cache_preserves_integer_skip_bound_across_translation() {
+        let settings = serde_json::json!({
+            "aquifers_enabled": true,
+            "sea_level": 0,
+            "default_fluid": {"Name": "minecraft:water"},
+            "noise": {
+                "min_y": 0,
+                "height": 16,
+                "size_horizontal": 1,
+                "size_vertical": 2
+            },
+            "noise_router": {
+                "final_density": constant_density(),
+                "erosion": constant_density(),
+                "depth": constant_density(),
+                "barrier": constant_density(),
+                "fluid_level_floodedness": constant_density(),
+                "fluid_level_spread": constant_density(),
+                "lava": constant_density(),
+                "preliminary_surface_level": constant_density()
+            }
+        });
+        let resolver = NoReferences;
+        let builder = Builder::new(0, &resolver);
+        let origin = AquiferSystem::new(&settings, &builder, 0, 0);
+        let translated = AquiferSystem::new(&settings, &builder, -1, -1);
+
+        // max preliminary = 0, adjustment = 8, then the exact integer grid
+        // conversion yields grid 2 and the last block y = 34.
+        assert_eq!(origin.skip_sampling_above_y, 34);
+        assert_eq!(translated.skip_sampling_above_y, origin.skip_sampling_above_y);
+    }
+
+    #[test]
+    fn preliminary_cache_is_once_filled_for_negative_and_translated_keys() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let cache = std::sync::Arc::new(super::PreliminarySurfaceCache::new());
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let cache = std::sync::Arc::clone(&cache);
+                let calls = std::sync::Arc::clone(&calls);
+                scope.spawn(move || {
+                    assert_eq!(
+                        cache.get_or_compute(-4, -8, || {
+                            calls.fetch_add(1, Ordering::Relaxed);
+                            17
+                        }),
+                        17
+                    );
+                });
+            }
+        });
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            cache.get_or_compute(4, -8, || {
+                calls.fetch_add(1, Ordering::Relaxed);
+                23
+            }),
+            23
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn preliminary_cache_batch_deduplicates_keys_and_preserves_order() {
+        use std::cell::Cell;
+
+        let cache = super::PreliminarySurfaceCache::new();
+        let calls = Cell::new(0);
+        let keys = [(-4, -8), (4, -8), (-4, -8), (12, 16), (4, -8)];
+        let mut output = [0; 5];
+        cache.get_or_compute_preliminary_batch(&keys, &mut output, |qx, qz| {
+            calls.set(calls.get() + 1);
+            qx + qz
+        });
+        assert_eq!(output, [-12, -4, -12, 28, -4]);
+        assert_eq!(calls.get(), 3, "each unique key should be evaluated once");
+        let stats = cache.stats();
+        assert_eq!(stats.lookups, keys.len() as u64);
+        assert_eq!(stats.misses, 3);
+        assert_eq!(stats.hits, 2);
+    }
+
+    #[test]
+    fn preliminary_cache_batch_defers_when_a_shard_is_full() {
+        use std::cell::Cell;
+
+        let cache = super::PreliminarySurfaceCache::with_capacity(32);
+        let first = (0, 0);
+        let shard = super::PreliminarySurfaceCache::locate(
+            first.0,
+            first.1,
+            cache.shard_capacity,
+        )
+        .0;
+        let mut second = (1, 0);
+        while super::PreliminarySurfaceCache::locate(
+            second.0,
+            second.1,
+            cache.shard_capacity,
+        )
+        .0 != shard
+        {
+            second.0 += 1;
+        }
+        let calls = Cell::new(0);
+        let keys = [first, second];
+        let mut output = [0; 2];
+        cache.get_or_compute_preliminary_batch(&keys, &mut output, |qx, qz| {
+            calls.set(calls.get() + 1);
+            qx + qz
+        });
+        assert_eq!(output, [0, second.0 + second.1]);
+        assert_eq!(calls.get(), 2);
+        assert_eq!(cache.stats().misses, 2);
+    }
+
+    #[test]
+    fn preliminary_cache_batch_uses_compiled_program_scratch() {
+        let density = Density::FindTopSurface {
+            density: Box::new(Density::Const(1.0)),
+            upper_bound: Box::new(Density::Const(8.0)),
+            lower_bound: 0,
+            cell_height: 8,
+        };
+        let program = Arc::new(PointProgram::compile(&density));
+        let cache = super::PreliminarySurfaceCache::with_program(Arc::clone(&program), 32);
+        let keys = [(-4, -8), (4, -8), (12, 16)];
+        let mut output = [0; 3];
+        cache.get_or_compute_preliminary_batch(&keys, &mut output, |_, _| unreachable!());
+        assert_eq!(output, [8, 8, 8]);
+        let mut expected_scratch = PointScratch::new();
+        for (key, value) in keys.iter().zip(output) {
+            assert_eq!(
+                value,
+                floor(program.compute(DfContext::new(key.0, 0, key.1), &mut expected_scratch))
+            );
+        }
+        let stats = cache.stats();
+        let fixed_bytes = stats.capacity * stats.entry_bytes
+            + stats.scratch_slots * super::POINT_SCRATCH_ENTRY_BYTES;
+        assert!(stats.retained_bytes > fixed_bytes);
+    }
+
+    #[test]
+    fn preliminary_batch_reservation_makes_scalar_racer_wait() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Barrier};
+
+        let cache = Arc::new(super::PreliminarySurfaceCache::new());
+        let entered = Arc::new(AtomicBool::new(false));
+        let gate = Arc::new(Barrier::new(2));
+        let key = (20, -28);
+        let (batch_value, scalar_value) = std::thread::scope(|scope| {
+            let batch_cache = Arc::clone(&cache);
+            let batch_entered = Arc::clone(&entered);
+            let batch_gate = Arc::clone(&gate);
+            let batch = scope.spawn(move || {
+                let mut output = [0];
+                batch_cache.get_or_compute_preliminary_batch(
+                    &[key],
+                    &mut output,
+                    |_, _| {
+                        batch_entered.store(true, Ordering::Release);
+                        batch_gate.wait();
+                        17
+                    },
+                );
+                output[0]
+            });
+            while !entered.load(Ordering::Acquire) {
+                std::hint::spin_loop();
+            }
+            let scalar_cache = Arc::clone(&cache);
+            let scalar = scope.spawn(move || {
+                scalar_cache.get_or_compute_preliminary(key.0, key.1, || 99)
+            });
+            while cache.stats().hits == 0 {
+                std::thread::yield_now();
+            }
+            gate.wait();
+            (batch.join().unwrap(), scalar.join().unwrap())
+        });
+        assert_eq!((batch_value, scalar_value), (17, 17));
+        let stats = cache.stats();
+        assert_eq!(stats.misses, 1);
+        assert_eq!(stats.hits, 1);
+    }
+
+    #[test]
+    fn preliminary_cache_retains_bounded_compiled_route_scratch() {
+        let cache = super::PreliminarySurfaceCache::new();
+        let stats = cache.stats();
+        assert_eq!(stats.capacity, super::PRELIMINARY_CACHE_SCALAR_CAPACITY);
+        assert_eq!(
+            stats.scratch_slots,
+            super::PRELIMINARY_CACHE_SHARDS * super::PRELIMINARY_POINT_SCRATCH_CAPACITY
+        );
+        assert_eq!(
+            stats.retained_bytes,
+            stats.capacity * stats.entry_bytes
+                + (stats.scratch_slots + super::PRELIMINARY_POINT_SCRATCH_CAPACITY)
+                    * super::POINT_SCRATCH_ENTRY_BYTES
+                + super::PRELIMINARY_CACHE_SHARDS
+                    * cache.shard_capacity
+                    * std::mem::size_of::<super::PreliminarySurfacePending>()
+        );
+    }
+
+    #[test]
+    fn preliminary_cache_allows_distinct_shards_to_compute_concurrently() {
+        use std::sync::{Arc, Barrier};
+
+        let cache = Arc::new(super::PreliminarySurfaceCache::new());
+        let first = (0, 0);
+        let mut second = (1, 0);
+        while super::PreliminarySurfaceCache::locate(
+            first.0,
+            first.1,
+            cache.shard_capacity,
+        )
+        .0
+            == super::PreliminarySurfaceCache::locate(
+                second.0,
+                second.1,
+                cache.shard_capacity,
+            )
+            .0
+        {
+            second.0 += 1;
+        }
+        let gate = Arc::new(Barrier::new(2));
+        let (first_value, second_value) = std::thread::scope(|scope| {
+            let first_cache = Arc::clone(&cache);
+            let first_gate = Arc::clone(&gate);
+            let first_thread = scope.spawn(move || {
+                first_cache.get_or_compute(first.0, first.1, || {
+                    first_gate.wait();
+                    17
+                })
+            });
+            let second_cache = Arc::clone(&cache);
+            let second_gate = Arc::clone(&gate);
+            let second_thread = scope.spawn(move || {
+                second_cache.get_or_compute(second.0, second.1, || {
+                    second_gate.wait();
+                    23
+                })
+            });
+            (first_thread.join().unwrap(), second_thread.join().unwrap())
+        });
+        assert_eq!((first_value, second_value), (17, 23));
+        let stats = cache.stats();
+        assert_eq!(stats.lookups, 2);
+        assert_eq!(stats.hits, 0);
+        assert_eq!(stats.misses, 2);
+        assert_eq!(stats.evictions, 0);
     }
 }

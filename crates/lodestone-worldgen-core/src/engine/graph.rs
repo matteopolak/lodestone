@@ -23,6 +23,12 @@
 //!    [`super::Scratch`], so the graph itself is immutable and `Sync` with no
 //!    interior mutability at all.
 //!
+//! The compiler also removes constant-only arithmetic and selectors before
+//! emitting their children. This is a conservative field pass: an
+//! `interpolated` or `flat_cache` wrapper is never folded because its cache
+//! write is observable, while a selector with a constant input can discard the
+//! branch that the evaluator could never enter.
+//!
 //! # What it deliberately does *not* flatten
 //!
 //! `spline`, `old_blended_noise`, `find_top_surface` and `end_islands` are
@@ -36,13 +42,23 @@
 //!
 //! # Node kind fidelity
 //!
-//! [`OpKind`]'s discriminants **are** [`Density::kind_index`]'s values, so the
-//! `density_evals` per-kind counter reads the same bucket before and after the
-//! flattening and the D1 diagnostic stays comparable across the cutover.
+//! For every emitted kind, [`OpKind`]'s discriminant is [`Density::kind_index`]'s
+//! value, so the `density_evals` per-kind counter reads the same bucket before
+//! and after flattening. The two transparent wrapper indexes are intentionally
+//! absent from the field graph.
 //! [`tests::op_kind_discriminants_match_density_kind_index`] is that gate — and
 //! it is the gate that would catch a flattening pass mislabelling a node,
 //! which is otherwise invisible (a mislabelled node still *evaluates*, it just
 //! evaluates as the wrong operator).
+
+//! # Constant-folding boundary
+//!
+//! [`constant_value`] is intentionally a whitelist. It may grow only for
+//! operations whose result and evaluation side effects are both determined by
+//! their constant children. In particular, do not fold an entered sampler
+//! wrapper or a subtree whose cache write can be reached: later queries rely on
+//! that slot being populated in the same order. An unreachable right operand of
+//! a zero-first `mul` is the explicit short-circuit exception.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -55,10 +71,9 @@ pub type NodeId = u32;
 
 /// The operator of one flattened node.
 ///
-/// Discriminants are deliberately equal to [`Density::kind_index`] — see the
-/// module doc's *Node kind fidelity*. Do not renumber; the per-kind counter
-/// tables in [`crate::counters`] are indexed by these values and a recorded
-/// table from an earlier run is indexed by the same numbers.
+/// Emitted operators use the matching [`Density::kind_index`] discriminant.
+/// Indexes 19 and 20 are reserved for transparent wrappers omitted from the
+/// field graph. Do not renumber; per-kind counter tables use these values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum OpKind {
@@ -81,8 +96,7 @@ pub(crate) enum OpKind {
     Clamp = 16,
     Interpolated = 17,
     FlatCache = 18,
-    Cache2D = 19,
-    Marker = 20,
+    // 19 and 20 are the transparent Cache2D and Marker density kinds.
     Noise = 21,
     ShiftedNoise = 22,
     ShiftA = 23,
@@ -137,6 +151,28 @@ pub struct Graph {
     /// dropped) by [`Program::compile`] the moment compilation finishes, so a
     /// live `Graph` carries five empty `HashMap`s — see [`Interner`].
     interner: Interner,
+    /// The exact production final-density shape, when this graph is eligible
+    /// for the bounded cell evaluator.
+    overworld_final_density: Option<OverworldFinalDensityPlan>,
+}
+
+/// The five nodes needed by the production final-density cell plan.
+///
+/// The graph matcher fills this only for the complete root shape. Keeping the
+/// child ids, rather than only the slots, preserves the exact point evaluator
+/// beneath each interpolation boundary.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct OverworldFinalDensityPlan {
+    pub(crate) terrain_inner: NodeId,
+    pub(crate) terrain_slot: usize,
+    pub(crate) noodle_control_inner: NodeId,
+    pub(crate) noodle_control_slot: usize,
+    pub(crate) noodle_thickness_inner: NodeId,
+    pub(crate) noodle_thickness_slot: usize,
+    pub(crate) noodle_ridge_a_inner: NodeId,
+    pub(crate) noodle_ridge_a_slot: usize,
+    pub(crate) noodle_ridge_b_inner: NodeId,
+    pub(crate) noodle_ridge_b_slot: usize,
 }
 
 /// The node-sharing (common-subexpression-elimination) tables, live only while
@@ -213,6 +249,9 @@ struct Interner {
     /// [`Program::shared_nodes`] so a gate can assert the pass ran at all: a pass
     /// that shared nothing would satisfy every value assertion.
     shared_ops: u32,
+    /// Composite nodes replaced by a side-effect-free constant before their
+    /// children were emitted.
+    constant_folds: u32,
     /// Of those, how many were an `interpolated`/`flat_cache` whose slot was
     /// collapsed onto an earlier one — the subset that removes *evaluation*
     /// rather than only memory.
@@ -266,8 +305,11 @@ impl Program {
             noises: Vec::new(),
             leaves: Vec::new(),
             interner: Interner::default(),
+            overworld_final_density: None,
         };
         let id = g.compile_node(root);
+        let overworld_final_density = g.detect_overworld_final_density(id);
+        g.overworld_final_density = overworld_final_density;
         // The tables are only useful while compiling, and they are large (a leaf
         // signature includes every octave's 256-byte permutation table). Dropping
         // them here is most of the point of interning in the first place: the
@@ -294,6 +336,19 @@ impl Program {
     #[must_use]
     pub(crate) fn root(&self) -> NodeId {
         self.root
+    }
+
+    /// Whether this program has the bounded production final-density shape.
+    ///
+    /// The public boolean keeps the graph's node ids private to the evaluator
+    /// while allowing a production driver to choose its cell loop once.
+    #[must_use]
+    pub fn has_overworld_final_density_cell_plan(&self) -> bool {
+        self.graph.overworld_final_density.is_some()
+    }
+
+    pub(crate) fn overworld_final_density_plan(&self) -> Option<OverworldFinalDensityPlan> {
+        self.graph.overworld_final_density
     }
 
     /// Number of flattened nodes in the shared graph — an implementation
@@ -333,11 +388,20 @@ impl Program {
     /// rather than a value assertion for the reason §12.132's `Cache2D` deletion
     /// records: a sharing pass that shares *nothing* leaves every generated byte
     /// identical, so no terrain gate and no parity dump can distinguish it from a
-    /// working one. Pair it with [`node_count`](Self::node_count): shared + kept
-    /// is the size of the tree `Builder` handed over.
+    /// working one. Pair it with [`node_count`](Self::node_count) and
+    /// [`constant_folds`](Self::constant_folds): the latter also removes source
+    /// nodes before the sharing table sees them.
     #[must_use]
     pub fn shared_nodes(&self) -> usize {
         self.graph.interner.shared_ops as usize
+    }
+
+    /// Composite nodes eliminated by constant folding during compilation.
+    /// Direct literal nodes are not counted; this measures the structural pass,
+    /// not the number of constants that remain in the graph.
+    #[must_use]
+    pub fn constant_folds(&self) -> usize {
+        self.graph.interner.constant_folds as usize
     }
 
     /// Of [`shared_nodes`](Self::shared_nodes), how many were an
@@ -528,25 +592,282 @@ fn spline_children(s: &Spline) -> Vec<&Density> {
     }
 }
 
+/// Evaluates the side-effect-free constant subset of a density tree.
+///
+/// This is intentionally separate from [`Density::compute`]. It rejects every
+/// sampler memo write that the field walk would enter, because removing one
+/// would change the cache state observed by a later query even when its numeric
+/// result is constant. A zero-first multiply does not inspect its right child,
+/// so a memo below that unreachable branch is safe to omit.
+fn constant_value(d: &Density) -> Option<f64> {
+    match d {
+        Density::Const(value) => Some(*value),
+        Density::BlendAlpha => Some(1.0),
+        Density::BlendOffset | Density::Beardifier => Some(0.0),
+        Density::Add(a, b) => Some(constant_value(a)? + constant_value(b)?),
+        Density::Mul(a, b) => {
+            let first = constant_value(a)?;
+            if first == 0.0 {
+                // The field and point evaluators both return a positive zero
+                // without entering the right operand in this case.
+                Some(0.0)
+            } else {
+                Some(first * constant_value(b)?)
+            }
+        }
+        Density::Min(a, b) => Some(constant_value(a)?.min(constant_value(b)?)),
+        Density::Max(a, b) => Some(constant_value(a)?.max(constant_value(b)?)),
+        Density::Abs(a) => Some(constant_value(a)?.abs()),
+        Density::Square(a) => {
+            let value = constant_value(a)?;
+            Some(value * value)
+        }
+        Density::Cube(a) => {
+            let value = constant_value(a)?;
+            Some(value * value * value)
+        }
+        Density::HalfNegative(a) => {
+            let value = constant_value(a)?;
+            Some(if value > 0.0 { value } else { value * 0.5 })
+        }
+        Density::QuarterNegative(a) => {
+            let value = constant_value(a)?;
+            Some(if value > 0.0 { value } else { value * 0.25 })
+        }
+        Density::Squeeze(a) => {
+            let value = crate::math::clamp(constant_value(a)?, -1.0, 1.0);
+            Some(value / 2.0 - value * value * value / 24.0)
+        }
+        Density::Invert(a) => Some(1.0 / constant_value(a)?),
+        Density::Clamp { input, min, max } => {
+            Some(crate::math::clamp(constant_value(input)?, *min, *max))
+        }
+        // `marker` is transparent in both interpreters and has no cache of its
+        // own. The three sampler wrappers below are deliberately absent: their
+        // memo writes are observable even if their wrapped value is constant.
+        Density::Marker(inner) => constant_value(inner),
+        Density::RangeChoice {
+            input,
+            min_inclusive,
+            max_exclusive,
+            when_in_range,
+            when_out_of_range,
+        } => {
+            let value = constant_value(input)?;
+            if value >= *min_inclusive && value < *max_exclusive {
+                constant_value(when_in_range)
+            } else {
+                constant_value(when_out_of_range)
+            }
+        }
+        Density::IntervalSelect {
+            input,
+            thresholds,
+            functions,
+        } => {
+            let value = constant_value(input)?;
+            let index = thresholds
+                .iter()
+                .position(|threshold| value < *threshold)
+                .unwrap_or(functions.len().checked_sub(1)?);
+            functions.get(index).and_then(constant_value)
+        }
+        Density::YClampedGradient { .. }
+        | Density::Interpolated { .. }
+        | Density::FlatCache { .. }
+        | Density::Cache2D { .. }
+        | Density::Noise { .. }
+        | Density::ShiftedNoise { .. }
+        | Density::ShiftA(_)
+        | Density::ShiftB(_)
+        | Density::Shift(_)
+        | Density::Spline(_)
+        | Density::Blended(_)
+        | Density::FindTopSurface { .. }
+        | Density::EndIslands(_) => None,
+    }
+}
+
+/// Whether a subtree can write a block-field cache when entered by
+/// [`Field`](super::field::Field). Point-evaluated leaves stop the walk because
+/// the field evaluator calls their point interpreter as one opaque operation.
+fn contains_field_cache_writer(d: &Density) -> bool {
+    match d {
+        Density::Interpolated { .. } | Density::FlatCache { .. } => true,
+        Density::Cache2D { inner, .. } | Density::Marker(inner) => {
+            contains_field_cache_writer(inner)
+        }
+        Density::Add(a, b) | Density::Mul(a, b) | Density::Min(a, b) | Density::Max(a, b) => {
+            contains_field_cache_writer(a) || contains_field_cache_writer(b)
+        }
+        Density::Abs(a)
+        | Density::Square(a)
+        | Density::Cube(a)
+        | Density::HalfNegative(a)
+        | Density::QuarterNegative(a)
+        | Density::Squeeze(a)
+        | Density::Invert(a) => contains_field_cache_writer(a),
+        Density::Clamp { input, .. } => contains_field_cache_writer(input),
+        Density::ShiftedNoise {
+            shift_x,
+            shift_y,
+            shift_z,
+            ..
+        } => {
+            contains_field_cache_writer(shift_x)
+                || contains_field_cache_writer(shift_y)
+                || contains_field_cache_writer(shift_z)
+        }
+        Density::RangeChoice {
+            input,
+            when_in_range,
+            when_out_of_range,
+            ..
+        } => {
+            contains_field_cache_writer(input)
+                || contains_field_cache_writer(when_in_range)
+                || contains_field_cache_writer(when_out_of_range)
+        }
+        Density::IntervalSelect {
+            input, functions, ..
+        } => {
+            contains_field_cache_writer(input)
+                || functions.iter().any(contains_field_cache_writer)
+        }
+        Density::Const(_)
+        | Density::BlendAlpha
+        | Density::BlendOffset
+        | Density::Beardifier
+        | Density::YClampedGradient { .. }
+        | Density::Noise { .. }
+        | Density::ShiftA(_)
+        | Density::ShiftB(_)
+        | Density::Shift(_)
+        | Density::Spline(_)
+        | Density::Blended(_)
+        | Density::FindTopSurface { .. }
+        | Density::EndIslands(_) => false,
+    }
+}
+
 impl Graph {
-    pub(crate) fn op(&self, id: NodeId) -> Op {
-        self.ops[id as usize]
+    pub(crate) fn ops(&self) -> &[Op] {
+        &self.ops
     }
 
-    pub(crate) fn param(&self, at: u32) -> f64 {
-        self.params[at as usize]
+    pub(crate) fn params(&self) -> &[f64] {
+        &self.params
+    }
+
+    pub(crate) fn children(&self) -> &[NodeId] {
+        &self.children
+    }
+
+    pub(crate) fn noises(&self) -> &[NormalNoise] {
+        &self.noises
+    }
+
+    pub(crate) fn leaves(&self) -> &[Density] {
+        &self.leaves
+    }
+
+    pub(crate) fn op(&self, id: NodeId) -> Op {
+        self.ops[id as usize]
     }
 
     pub(crate) fn child(&self, at: u32) -> NodeId {
         self.children[at as usize]
     }
 
-    pub(crate) fn noise(&self, at: u32) -> &NormalNoise {
-        &self.noises[at as usize]
+
+    fn detect_overworld_final_density(&self, root: NodeId) -> Option<OverworldFinalDensityPlan> {
+        let root_op = self.op(root);
+        if root_op.kind != OpKind::Min {
+            return None;
+        }
+
+        let squeeze = self.op(root_op.a);
+        if squeeze.kind != OpKind::Squeeze {
+            return None;
+        }
+        let terrain = self.op(squeeze.a);
+        if terrain.kind != OpKind::Interpolated {
+            return None;
+        }
+
+        let noodle = self.op(root_op.b);
+        if noodle.kind != OpKind::RangeChoice
+            || !self.params_equal(noodle.b, -1_000_000.0, 0.0)
+        {
+            return None;
+        }
+        let control = self.op(self.child(noodle.a));
+        if control.kind != OpKind::Interpolated {
+            return None;
+        }
+        if !self.const_equal(self.child(noodle.a + 1), 64.0) {
+            return None;
+        }
+
+        let out = self.op(self.child(noodle.a + 2));
+        if out.kind != OpKind::Add {
+            return None;
+        }
+        let thickness = self.op(out.a);
+        if thickness.kind != OpKind::Interpolated {
+            return None;
+        }
+
+        let scaled_ridges = self.op(out.b);
+        if scaled_ridges.kind != OpKind::Mul
+            || !self.const_equal(scaled_ridges.a, 1.5)
+        {
+            return None;
+        }
+        let ridges = self.op(scaled_ridges.b);
+        if ridges.kind != OpKind::Max {
+            return None;
+        }
+        let ridge_a = self.op(ridges.a);
+        let ridge_b = self.op(ridges.b);
+        if ridge_a.kind != OpKind::Abs
+            || ridge_b.kind != OpKind::Abs
+            || self.op(ridge_a.a).kind != OpKind::Interpolated
+            || self.op(ridge_b.a).kind != OpKind::Interpolated
+        {
+            return None;
+        }
+
+        Some(OverworldFinalDensityPlan {
+            terrain_inner: terrain.a,
+            terrain_slot: terrain.b as usize,
+            noodle_control_inner: control.a,
+            noodle_control_slot: control.b as usize,
+            noodle_thickness_inner: thickness.a,
+            noodle_thickness_slot: thickness.b as usize,
+            noodle_ridge_a_inner: self.op(ridge_a.a).a,
+            noodle_ridge_a_slot: self.op(ridge_a.a).b as usize,
+            noodle_ridge_b_inner: self.op(ridge_b.a).a,
+            noodle_ridge_b_slot: self.op(ridge_b.a).b as usize,
+        })
     }
 
-    pub(crate) fn leaf(&self, at: u32) -> &Density {
-        &self.leaves[at as usize]
+    fn const_equal(&self, id: NodeId, expected: f64) -> bool {
+        let op = self.op(id);
+        op.kind == OpKind::Const
+            && self.params.get(op.a as usize).copied().map(f64::to_bits)
+                == Some(expected.to_bits())
+    }
+
+    fn params_equal(&self, offset: u32, first: f64, second: f64) -> bool {
+        self.params.get(offset as usize).copied().map(f64::to_bits)
+            == Some(first.to_bits())
+            && self
+                .params
+                .get(offset as usize + 1)
+                .copied()
+                .map(f64::to_bits)
+                == Some(second.to_bits())
     }
 
     /// Emits a node, or returns the existing node with the same shape.
@@ -571,6 +892,11 @@ impl Graph {
         self.ops.push(Op { kind, a, b, c });
         self.interner.ops.insert(key, id);
         id
+    }
+
+    fn const_node(&mut self, value: f64) -> NodeId {
+        let p = self.push_params(&[value]);
+        self.push(OpKind::Const, p, 0, 0)
     }
 
     /// Interns an exact `f64` run. Only whole-run matches count — deliberately no
@@ -640,7 +966,8 @@ impl Graph {
     /// | `BlendAlpha`/`BlendOffset`/`Beardifier` | — | — | — |
     /// | `YClampedGradient` | params\[4\] | — | — |
     /// | `Add`/`Mul`/`Min`/`Max` | lhs id | rhs id | — |
-    /// | unary arithmetic, `Marker`, `Cache2D` | child id | — | — |
+    /// | unary arithmetic | child id | — | — |
+    /// | `Marker`/`Cache2D` | transparent; omitted from the field graph |
     /// | `Clamp` | child id | params\[2\] | — |
     /// | `Interpolated`/`FlatCache` | child id | slot | — |
     /// | `Noise` | noise idx | params\[2\] | — |
@@ -650,6 +977,23 @@ impl Graph {
     /// | `IntervalSelect` | children\[n\] | n | params\[n-1\] |
     /// | `Spline`/`Blended`/`FindTopSurface`/`EndIslands` | leaf idx | — | — |
     fn compile_node(&mut self, d: &Density) -> NodeId {
+        // Resolve constant-only subtrees before emitting their children. This
+        // is deliberately side-effect-aware: interpolated and flat-cache nodes
+        // are not constants here because evaluating either writes a sampler
+        // cache even when its value happens to be constant. A selector whose
+        // input is constant is safe to route directly; the discarded branch
+        // was unreachable in the reference walk anyway.
+        if !matches!(
+            d,
+            Density::Const(_)
+                | Density::BlendAlpha
+                | Density::BlendOffset
+                | Density::Beardifier
+        ) && let Some(value) = constant_value(d)
+        {
+            self.interner.constant_folds += 1;
+            return self.const_node(value);
+        }
         match d {
             Density::Const(v) => {
                 let p = self.push_params(&[*v]);
@@ -691,13 +1035,11 @@ impl Graph {
                 let child = self.compile_node(inner);
                 self.push(OpKind::FlatCache, child, u32::try_from(*slot).unwrap(), 0)
             }
-            // `cache_2d` is transparent in the block field (it is a real memo
-            // only in the point interpreter), but the node is still emitted so
-            // the `density_evals` per-kind counter keeps reporting it — the
-            // flattening is not the place to change what the D1 diagnostic
-            // measures.
-            Density::Cache2D { inner, .. } => self.unary(OpKind::Cache2D, inner),
-            Density::Marker(inner) => self.unary(OpKind::Marker, inner),
+            // Both wrappers are transparent in the block-field evaluator.
+            // `cache_2d` remains meaningful to the point interpreter, but this
+            // graph never enters a point leaf, so retaining either wrapper only
+            // adds a dispatch per field visit.
+            Density::Cache2D { inner, .. } | Density::Marker(inner) => self.compile_node(inner),
             Density::Noise {
                 noise,
                 xz_scale,
@@ -742,9 +1084,24 @@ impl Graph {
                 when_in_range,
                 when_out_of_range,
             } => {
-                let ci = self.compile_node(input);
+                if let Some(value) = constant_value(input) {
+                    let selected = if value >= *min_inclusive && value < *max_exclusive {
+                        when_in_range
+                    } else {
+                        when_out_of_range
+                    };
+                    return self.compile_node(selected);
+                }
                 let cin = self.compile_node(when_in_range);
                 let cout = self.compile_node(when_out_of_range);
+                if cin == cout && !contains_field_cache_writer(input) {
+                    // The input is still evaluated by the unoptimised walk,
+                    // but it cannot write a field cache. Both branches denote
+                    // the same compiled function, so the selector adds only a
+                    // dispatch and a dead input walk.
+                    return cin;
+                }
+                let ci = self.compile_node(input);
                 let kids = self.push_children(&[ci, cin, cout]);
                 let p = self.push_params(&[*min_inclusive, *max_exclusive]);
                 self.push(OpKind::RangeChoice, kids, p, 0)
@@ -764,14 +1121,31 @@ impl Graph {
                 // off the end of this node's params into whatever the next node
                 // pushed. Layout: `children[a] = n`, then input, then the n
                 // functions; `b` = params offset; `c` = k.
-                let ci = self.compile_node(input);
                 let n = u32::try_from(functions.len()).unwrap();
+                if let Some(value) = constant_value(input)
+                    && n > 0
+                {
+                    let index = thresholds
+                        .iter()
+                        .position(|threshold| value < *threshold)
+                        .unwrap_or(functions.len() - 1);
+                    if let Some(selected) = functions.get(index) {
+                        return self.compile_node(selected);
+                    }
+                }
                 let mut ids = Vec::with_capacity(functions.len() + 2);
                 ids.push(n);
-                ids.push(ci);
                 for f in functions {
                     ids.push(self.compile_node(f));
                 }
+                if n > 0
+                    && ids[1..].windows(2).all(|pair| pair[0] == pair[1])
+                    && !contains_field_cache_writer(input)
+                {
+                    return ids[1];
+                }
+                let ci = self.compile_node(input);
+                ids.insert(1, ci);
                 let kids = self.push_children(&ids);
                 let p = self.push_params(thresholds);
                 self.push(
@@ -841,9 +1215,7 @@ impl Graph {
             | OpKind::QuarterNegative
             | OpKind::Squeeze
             | OpKind::Invert
-            | OpKind::Clamp
-            | OpKind::Cache2D
-            | OpKind::Marker => self.walk_interpolating(op.a, interpolate, out),
+            | OpKind::Clamp => self.walk_interpolating(op.a, interpolate, out),
             OpKind::ShiftedNoise => {
                 for i in 0..3 {
                     self.walk_interpolating(self.child(op.a + i), interpolate, out);
@@ -898,9 +1270,28 @@ mod tests {
         Box::new(d)
     }
 
-    /// Every [`OpKind`] discriminant must equal the [`Density::kind_index`] of
-    /// the variant it compiles from, so the `density_evals` per-kind counter
-    /// reads the same bucket before and after the flattening.
+    fn varying() -> Density {
+        Density::YClampedGradient {
+            from_y: -1.0,
+            to_y: 1.0,
+            from_value: -1.0,
+            to_value: 1.0,
+        }
+    }
+
+    fn varying_alt() -> Density {
+        Density::YClampedGradient {
+            from_y: -2.0,
+            to_y: 2.0,
+            from_value: -1.0,
+            to_value: 1.0,
+        }
+    }
+
+    /// Every emitted [`OpKind`] discriminant must equal the
+    /// [`Density::kind_index`] of the variant it compiles from, so the
+    /// `density_evals` per-kind counter reads the same bucket before and after
+    /// flattening. Transparent wrappers are deliberately not emitted.
     ///
     /// This is not decoration. A flattening pass that emitted `OpKind::Min`
     /// where the source said `max` would still *evaluate* — it would just
@@ -923,24 +1314,24 @@ mod tests {
                     to_value: 1.0,
                 },
             ),
-            (OpKind::Add, Density::Add(b(Density::Const(0.0)), b(Density::Const(0.0)))),
-            (OpKind::Mul, Density::Mul(b(Density::Const(0.0)), b(Density::Const(0.0)))),
-            (OpKind::Min, Density::Min(b(Density::Const(0.0)), b(Density::Const(0.0)))),
-            (OpKind::Max, Density::Max(b(Density::Const(0.0)), b(Density::Const(0.0)))),
-            (OpKind::Abs, Density::Abs(b(Density::Const(0.0)))),
-            (OpKind::Square, Density::Square(b(Density::Const(0.0)))),
-            (OpKind::Cube, Density::Cube(b(Density::Const(0.0)))),
-            (OpKind::HalfNegative, Density::HalfNegative(b(Density::Const(0.0)))),
+            (OpKind::Add, Density::Add(b(varying()), b(varying()))),
+            (OpKind::Mul, Density::Mul(b(varying()), b(varying()))),
+            (OpKind::Min, Density::Min(b(varying()), b(varying()))),
+            (OpKind::Max, Density::Max(b(varying()), b(varying()))),
+            (OpKind::Abs, Density::Abs(b(varying()))),
+            (OpKind::Square, Density::Square(b(varying()))),
+            (OpKind::Cube, Density::Cube(b(varying()))),
+            (OpKind::HalfNegative, Density::HalfNegative(b(varying()))),
             (
                 OpKind::QuarterNegative,
-                Density::QuarterNegative(b(Density::Const(0.0))),
+                Density::QuarterNegative(b(varying())),
             ),
-            (OpKind::Squeeze, Density::Squeeze(b(Density::Const(0.0)))),
-            (OpKind::Invert, Density::Invert(b(Density::Const(0.0)))),
+            (OpKind::Squeeze, Density::Squeeze(b(varying()))),
+            (OpKind::Invert, Density::Invert(b(varying()))),
             (
                 OpKind::Clamp,
                 Density::Clamp {
-                    input: b(Density::Const(0.0)),
+                    input: b(varying()),
                     min: 0.0,
                     max: 1.0,
                 },
@@ -961,29 +1352,21 @@ mod tests {
                 },
             ),
             (
-                OpKind::Cache2D,
-                Density::Cache2D {
-                    inner: b(Density::Const(0.0)),
-                    memo: crate::density::memo_id_for(&Density::Const(0.0)),
-                },
-            ),
-            (OpKind::Marker, Density::Marker(b(Density::Const(0.0)))),
-            (
                 OpKind::RangeChoice,
                 Density::RangeChoice {
-                    input: b(Density::Const(0.0)),
+                    input: b(varying()),
                     min_inclusive: 0.0,
                     max_exclusive: 1.0,
-                    when_in_range: b(Density::Const(0.0)),
+                    when_in_range: b(varying()),
                     when_out_of_range: b(Density::Const(0.0)),
                 },
             ),
             (
                 OpKind::IntervalSelect,
                 Density::IntervalSelect {
-                    input: b(Density::Const(0.0)),
+                    input: b(varying()),
                     thresholds: vec![0.0],
-                    functions: vec![Density::Const(0.0), Density::Const(1.0)],
+                    functions: vec![varying(), Density::Const(1.0)],
                 },
             ),
             (
@@ -1028,18 +1411,15 @@ mod tests {
             );
         }
 
-        // Control on the control: the three noise-payload kinds and `Spline`
-        // need a resolver to construct and are not in the list, so state the
-        // coverage rather than letting silence imply completeness. `EndIslands`
-        // used to be in that group and no longer is — its payload is seeded from a
-        // bare `i64`, so it is constructible here and is covered exactly.
+        // The seven noise/spline payload kinds need a resolver; the two
+        // transparent wrappers are intentionally absent from the field graph.
         assert_eq!(
             cases.len(),
-            25,
-            "the case list changed size; 25 of the 32 kinds are constructible \
-             without a resolver (the 7 needing a NormalNoise/BlendedNoise/Spline \
-             payload are covered by `compiles_the_real_router` in \
-             tests/engine_semantics.rs against real data)"
+            23,
+            "the case list changed size; 23 of the 32 kinds are emitted by the \
+             field graph without a resolver (the 7 needing a \
+             NormalNoise/BlendedNoise/Spline payload are covered by \
+             `compiles_the_real_router` in tests/engine_semantics.rs)"
         );
     }
 
@@ -1079,11 +1459,11 @@ mod tests {
     #[test]
     fn compilation_is_post_order_with_the_root_last() {
         let d = Density::Add(
-            b(Density::Mul(b(Density::Const(2.0)), b(Density::Const(3.0)))),
-            b(Density::Abs(b(Density::Const(-4.0)))),
+            b(Density::Mul(b(varying()), b(Density::Const(3.0)))),
+            b(Density::Abs(b(varying_alt()))),
         );
         let p = Program::compile(&d);
-        assert_eq!(p.node_count(), 6, "2 consts + mul + const + abs + add");
+        assert_eq!(p.node_count(), 6, "2 gradients + 1 const + mul + abs + add");
         assert_eq!(p.root(), 5, "the root is the last node pushed");
         let g = p.graph();
         for id in 0..p.node_count() as u32 {
@@ -1154,24 +1534,115 @@ mod tests {
         scratch.release();
     }
 
-    /// `0.0` and `-0.0` compare *equal* under `==` and are different values
-    /// under `1.0 / x`, so a signature built from compared floats rather than
-    /// raw bits would fuse them and silently change terrain. Predict 2 nodes,
-    /// not "at least 1".
+    /// Constant folding must preserve the evaluator's signed-zero result. The
+    /// source operands compare equal under `==`, but the addition's positive
+    /// zero result is an IEEE value that the folded node must retain.
     #[test]
-    fn signed_zero_constants_do_not_share_a_node() {
+    fn constant_folding_preserves_signed_zero_result() {
         let d = Density::Add(b(Density::Const(0.0)), b(Density::Const(-0.0)));
         let p = Program::compile(&d);
-        assert_eq!(p.node_count(), 3, "two distinct consts plus the add");
+        assert_eq!(p.node_count(), 1, "the constant addition folds before emission");
+        assert_eq!(p.graph().op(p.root()).kind, OpKind::Const);
+        assert_eq!(p.graph().params()[p.graph().op(p.root()).a as usize].to_bits(), 0.0f64.to_bits());
         assert_eq!(p.shared_nodes(), 0);
 
-        // The control: two constants that really are the same value do share,
-        // so the assertion above is about signed zero and not about the pass
-        // being switched off.
+        // Control: an equal-valued addition folds to the same single constant,
+        // so this checks the result is not an accidental signed-zero special case.
         let same = Density::Add(b(Density::Const(0.0)), b(Density::Const(0.0)));
         let q = Program::compile(&same);
-        assert_eq!(q.node_count(), 2, "one const plus the add");
-        assert_eq!(q.shared_nodes(), 1);
+        assert_eq!(q.node_count(), 1, "the equal constant addition also folds");
+        assert_eq!(q.shared_nodes(), 0);
+
+        let skipped = Density::Mul(
+            b(Density::Const(-0.0)),
+            b(Density::Interpolated {
+                inner: b(Density::Const(99.0)),
+                slot: 0,
+            }),
+        );
+        let r = Program::compile(&skipped);
+        assert_eq!(r.node_count(), 1, "a zero first operand skips its right subtree");
+        assert_eq!(r.graph().params()[r.graph().op(r.root()).a as usize].to_bits(), 0.0f64.to_bits());
+    }
+
+    #[test]
+    fn constant_selector_keeps_selected_cache_writer_and_drops_unreachable_branch() {
+        let d = Density::RangeChoice {
+            input: b(Density::Const(0.5)),
+            min_inclusive: 0.0,
+            max_exclusive: 1.0,
+            when_in_range: b(Density::Interpolated {
+                inner: b(Density::Const(2.0)),
+                slot: 0,
+            }),
+            when_out_of_range: b(Density::Add(
+                b(Density::Const(20.0)),
+                b(Density::Const(22.0)),
+            )),
+        };
+        let p = Program::compile(&d);
+        assert_eq!(p.graph().op(p.root()).kind, OpKind::Interpolated);
+        assert_eq!(p.node_count(), 2, "selected cache writer plus its constant");
+
+        let mut scratch = super::super::Scratch::acquire(1, 4, 8, None);
+        let actual = super::super::Field::new(
+            p.graph(),
+            super::super::Geom {
+                cell_width: 4,
+                cell_height: 8,
+            },
+            &mut scratch,
+        )
+        .eval(p.root(), 3, 5, 7, true);
+        assert_eq!(actual.to_bits(), 2.0f64.to_bits());
+        assert_eq!(d.compute(crate::density::Context::new(3, 5, 7)).to_bits(), actual.to_bits());
+        scratch.release();
+
+        let interval = Density::IntervalSelect {
+            input: b(Density::Const(2.0)),
+            thresholds: vec![0.0, 1.0],
+            functions: vec![
+                Density::Interpolated {
+                    inner: b(Density::Const(7.0)),
+                    slot: 1,
+                },
+                Density::Const(8.0),
+                Density::Const(9.0),
+            ],
+        };
+        let interval_program = Program::compile(&interval);
+        assert_eq!(interval_program.node_count(), 1);
+        assert_eq!(interval_program.graph().op(interval_program.root()).kind, OpKind::Const);
+        assert_eq!(
+            interval_program.graph().params()[interval_program.graph().op(interval_program.root()).a as usize].to_bits(),
+            9.0f64.to_bits()
+        );
+    }
+
+    #[test]
+    fn identical_selector_branches_drop_only_a_side_effect_free_input() {
+        let no_writer = Density::RangeChoice {
+            input: b(varying()),
+            min_inclusive: 0.0,
+            max_exclusive: 1.0,
+            when_in_range: b(varying_alt()),
+            when_out_of_range: b(varying_alt()),
+        };
+        let p = Program::compile(&no_writer);
+        assert_eq!(p.graph().op(p.root()).kind, OpKind::YClampedGradient);
+
+        let writer = Density::RangeChoice {
+            input: b(Density::Interpolated {
+                inner: b(Density::Const(1.0)),
+                slot: 0,
+            }),
+            min_inclusive: 0.0,
+            max_exclusive: 2.0,
+            when_in_range: b(Density::Const(4.0)),
+            when_out_of_range: b(Density::Const(4.0)),
+        };
+        let q = Program::compile(&writer);
+        assert_eq!(q.graph().op(q.root()).kind, OpKind::RangeChoice);
     }
 
     /// The slot collapse: two `flat_cache` nodes over one inner, carrying the
@@ -1297,9 +1768,9 @@ mod tests {
         let p = Program::compile(&d);
         assert_eq!(p.leaf_count(), 1, "one leaf for both occurrences");
         assert_eq!(p.shared_leaves(), 1, "the second occurrence was interned");
-        // ops: end_islands + cache_2d + add. The bare occurrence shares the
-        // end_islands node with the one under cache_2d.
-        assert_eq!(p.node_count(), 3);
+        // The transparent cache wrapper is omitted; the bare occurrence shares
+        // the end-islands node with the wrapped occurrence.
+        assert_eq!(p.node_count(), 2);
         assert_eq!(p.shared_nodes(), 1);
 
         // A different seed must not share — the control that says the assertion
@@ -1325,7 +1796,7 @@ mod tests {
     #[test]
     fn wide_payload_nodes_share_through_their_interned_runs() {
         let arm = || Density::IntervalSelect {
-            input: b(Density::Const(0.5)),
+            input: b(varying()),
             thresholds: vec![0.0, 1.0],
             functions: vec![Density::Const(1.0), Density::Const(2.0), Density::Const(3.0)],
         };
@@ -1346,6 +1817,64 @@ mod tests {
             flat.to_bits(),
             d.compute(crate::density::Context::new(1, 2, 3)).to_bits()
         );
+        scratch.release();
+    }
+
+    #[test]
+    #[ignore = "local density evaluator instruction control"]
+    fn density_eval_instruction_control() {
+        use std::hint::black_box;
+
+        let (noise, _) = twin_noises();
+        let mut density = Density::Noise {
+            noise,
+            xz_scale: 0.03125,
+            y_scale: 0.0625,
+        };
+        for i in 0..24 {
+            density = Density::Add(
+                b(density),
+                b(Density::Squeeze(b(Density::Const(0.03125 * f64::from(i))))),
+            );
+        }
+        let program = Program::compile(&density);
+        let mut scratch = super::super::Scratch::acquire(0, 4, 8, None);
+        for i in 0..128 {
+            let x = i * 13 - 701;
+            let y = i * 7 - 397;
+            let z = i * 11 - 503;
+            let actual = super::super::Field::new(
+                program.graph(),
+                super::super::Geom {
+                    cell_width: 4,
+                    cell_height: 8,
+                },
+                &mut scratch,
+            )
+            .eval(program.root(), x, y, z, true);
+            let expected = density.compute(crate::density::Context::new(x, y, z));
+            assert_eq!(actual.to_bits(), expected.to_bits(), "at ({x}, {y}, {z})");
+        }
+
+        let mut checksum = 0_u64;
+        for i in 0..2_000_000_i32 {
+            let x = i.wrapping_mul(13).wrapping_sub(701);
+            let y = i.wrapping_mul(7).wrapping_sub(397);
+            let z = i.wrapping_mul(11).wrapping_sub(503);
+            checksum ^= black_box(
+                super::super::Field::new(
+                    program.graph(),
+                    super::super::Geom {
+                        cell_width: 4,
+                        cell_height: 8,
+                    },
+                    &mut scratch,
+                )
+                .eval(program.root(), x, y, z, true)
+                .to_bits(),
+            );
+        }
+        println!("density eval instruction control: checksum={checksum}");
         scratch.release();
     }
 }

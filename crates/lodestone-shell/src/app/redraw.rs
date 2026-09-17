@@ -8,6 +8,9 @@ impl WindowApp {
 
 
     pub(super) fn redraw(&mut self) {
+        if let (Some(gpu), Some(render)) = (self.gpu.as_ref(), self.render.as_mut()) {
+            render.initialize_deferred_entity_assets(gpu.device(), gpu.queue());
+        }
         // Refresh the cached recipe corpus if a plugin registered
         // since the last frame. Revision-gated, so the ordinary frame pays one
         // `u64` comparison under a short read guard and nothing else.
@@ -495,6 +498,21 @@ impl WindowApp {
         // `SnapshotOutcome::Empty` records, and so the final non-air upload in
         // this frame can release the overlay before the frame is presented.
         self.sim.refresh_terrain_readiness();
+        #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+        {
+            let loaded_columns = self.sim.terrain_progress().map_or(0, |progress| progress.loaded);
+            let pending_meshes = self.sim.pending_meshes();
+            let overlay_ready = self.sim.shows_new_world_loading() && self.sim.world_wait().is_none();
+            let phase = self.sim.connect_phase();
+            if let Some(trace) = self.browser_join_trace.as_mut() {
+                trace.observe_before_present(
+                    phase,
+                    overlay_ready,
+                    loaded_columns,
+                    pending_meshes,
+                );
+            }
+        }
         self.frame_profile.mark(FramePhase::MeshUpload, Instant::now());
 
         let (w, h) = target.size();
@@ -2903,11 +2921,34 @@ impl WindowApp {
             window.pre_present_notify();
         }
         frame.present(queue);
+        render.allow_deferred_entity_assets();
         self.frame_profile.mark(FramePhase::Present, Instant::now());
         #[cfg(target_arch = "wasm32")]
         // Signal only after the frame has been handed to the browser queue.
         if let Some(signal) = self.browser_frame_signal.as_ref() {
             signal.mark();
+        }
+        #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+        {
+            let pending_meshes = self.sim.pending_meshes();
+            let progress = self.sim.terrain_progress();
+            let loaded_columns = progress.map_or(0, |value| value.loaded);
+            let settled_columns = if progress.is_some_and(|value| value.loaded >= value.expected)
+                && pending_meshes == 0
+            {
+                self.sim.visible_view_settlement().map_or(0, |(_, settled, _)| settled)
+            } else {
+                0
+            };
+            let terrain_drawn = stats.sections_drawn > 0 || stats.water_sections_drawn > 0;
+            if let Some(trace) = self.browser_join_trace.as_mut() {
+                trace.observe_presented(
+                    terrain_drawn,
+                    loaded_columns,
+                    settled_columns,
+                    pending_meshes,
+                );
+            }
         }
 
         // The frame-profile tracing line — see `docs/frame-profiling.md` for

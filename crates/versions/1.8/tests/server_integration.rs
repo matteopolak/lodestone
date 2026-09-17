@@ -271,7 +271,6 @@ async fn protocol_47_entity_interaction_reaches_the_shared_mob_consumer() {
         (0..=0, 0..=0),
         (0, 0),
         0,
-        0,
     );
     let profile = profile();
     // Legacy login_start carries only the username; the hosted decoder uses

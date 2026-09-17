@@ -41,10 +41,12 @@
 //! ## Outbound (S6)
 //!
 //! Movement flows the other way through the same thread: the sim queues a
-//! [`ClientAction::Move`] every 20 Hz tick onto an `mpsc` sender; the net loop
-//! drains it each iteration and hands it to [`ClientHandle::send_action`], which
-//! the version adapter lowers into the concrete movement packet. The shell never
-//! names that packet.
+//! [`ClientAction::Move`] every 20 Hz tick onto the replacement lane; the net
+//! loop drains the newest pose each iteration and hands it to
+//! [`ClientHandle::send_action`], which the version adapter lowers into the
+//! concrete movement packet. Control actions use a separate FIFO lane, so a
+//! movement burst cannot displace chat, commands, or interactions. The shell
+//! never names the concrete packet.
 //!
 //! **Seam status (verified 2026-07-27):** the v770 adapter now has a `Move`
 //! encode arm (→ `move_player_pos_rot`) and a `SwingArm` arm (→ `swing`), so the
@@ -104,10 +106,11 @@
 //! If the vanilla pack is missing, `load` falls back to the demo palette and
 //! logs a banner naming the fix rather than silently rendering an empty world.
 
+use std::collections::VecDeque;
 use std::sync::{
     Arc, LazyLock, Mutex, OnceLock, PoisonError,
     atomic::{AtomicBool, AtomicU64, Ordering},
-    mpsc::{self, Receiver, Sender, SyncSender},
+    mpsc::{self, Receiver, Sender, SyncSender, TryRecvError},
 };
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -354,18 +357,164 @@ fn take_pending_server_pack_policy() -> crate::menu::servers::ServerPackPolicy {
 /// hard ceiling.
 const NET_RELAY_CAPACITY: usize = 1024;
 
-/// Depth of the outbound [`ClientAction`] relay ([`NetClient::action_tx`]).
+/// Depth of the reliable outbound [`ClientAction`] relay ([`NetClient::action_tx`]).
 ///
-/// [`NetClient::send_action`] is called from the render/game thread — native
-/// *and* wasm32 — every frame a local action needs to reach the net thread,
-/// so it must never block there either; see [`NET_RELAY_CAPACITY`] for why a
-/// blocking bound is unsafe on this driver. It uses `try_send` and drops the
-/// action on `Full`. That is safe: a full queue means the net thread has
-/// already stopped draining actions (dead or wedged), so an action that
-/// can't be queued would never have been acted on anyway — no different from
-/// today's `let _ = ...` best-effort semantics on a disconnected receiver,
-/// just reachable before the thread actually exits too.
+/// Movement does not consume this queue: [`ActionRelaySender`] keeps only its
+/// newest movement separately. This prevents the 20 Hz replaceable stream from
+/// crowding out chat, commands, drops, uses, and other control actions. The
+/// queue remains bounded and non-blocking on wasm32; a genuine control burst
+/// beyond this bound is reported as an actionable warning rather than silently
+/// disappearing.
 const ACTION_RELAY_CAPACITY: usize = 256;
+
+/// A movement or control action waiting for the net loop. The sequence is
+/// assigned before a movement can replace its predecessor, so the receiver can
+/// merge the two lanes without moving a retained movement across a control
+/// action that was queued before or after it.
+#[derive(Debug)]
+struct QueuedAction {
+    sequence: u64,
+    action: ClientAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActionAdmission {
+    Accepted,
+    MovementCoalesced,
+    ControlQueueFull,
+    Closed,
+}
+
+/// Non-blocking sender for the two outbound action lanes.
+#[derive(Debug)]
+struct ActionRelaySender {
+    control_tx: SyncSender<QueuedAction>,
+    latest_move: Arc<Mutex<Option<QueuedAction>>>,
+    next_sequence: Arc<AtomicU64>,
+    dropped_controls: Arc<AtomicU64>,
+}
+
+/// Receiver counterpart to [`ActionRelaySender`]. The small local pending
+/// deque makes its `try_recv` surface match `std::sync::mpsc::Receiver`, which
+/// keeps loopback tests and the net loop's drain shape unchanged.
+#[derive(Debug)]
+pub(crate) struct ActionRelayReceiver {
+    control_rx: Receiver<QueuedAction>,
+    latest_move: Arc<Mutex<Option<QueuedAction>>>,
+    pending: Mutex<VecDeque<QueuedAction>>,
+    control_closed: AtomicBool,
+}
+
+fn action_relay() -> (ActionRelaySender, ActionRelayReceiver) {
+    let (control_tx, control_rx) = mpsc::sync_channel(ACTION_RELAY_CAPACITY);
+    let latest_move = Arc::new(Mutex::new(None));
+    let dropped_controls = Arc::new(AtomicU64::new(0));
+    (
+        ActionRelaySender {
+            control_tx,
+            latest_move: Arc::clone(&latest_move),
+            next_sequence: Arc::new(AtomicU64::new(0)),
+            dropped_controls,
+        },
+        ActionRelayReceiver {
+            control_rx,
+            latest_move,
+            pending: Mutex::new(VecDeque::new()),
+            control_closed: AtomicBool::new(false),
+        },
+    )
+}
+
+impl ActionRelaySender {
+    fn send(&self, action: ClientAction) -> ActionAdmission {
+        let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);
+        let queued = QueuedAction { sequence, action };
+        if matches!(queued.action, ClientAction::Move { .. }) {
+            let mut latest = self
+                .latest_move
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let replaced = latest.replace(queued).is_some();
+            if replaced {
+                ActionAdmission::MovementCoalesced
+            } else {
+                ActionAdmission::Accepted
+            }
+        } else {
+            match self.control_tx.try_send(queued) {
+                Ok(()) => ActionAdmission::Accepted,
+                Err(mpsc::TrySendError::Full(_)) => {
+                    self.dropped_controls.fetch_add(1, Ordering::Relaxed);
+                    ActionAdmission::ControlQueueFull
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => ActionAdmission::Closed,
+            }
+        }
+    }
+}
+
+impl ActionRelayReceiver {
+    fn refill(&self) {
+        let mut batch = Vec::new();
+        loop {
+            match self.control_rx.try_recv() {
+                Ok(action) => batch.push(action),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.control_closed.store(true, Ordering::Release);
+                    break;
+                }
+            }
+        }
+        if let Some(action) = self
+            .latest_move
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            batch.push(action);
+        }
+        if batch.is_empty() {
+            return;
+        }
+        batch.sort_unstable_by_key(|action| action.sequence);
+        self.pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .extend(batch);
+    }
+
+    pub(crate) fn try_recv(&self) -> Result<ClientAction, TryRecvError> {
+        if let Some(action) = self
+            .pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pop_front()
+        {
+            return Ok(action.action);
+        }
+        self.refill();
+        if let Some(action) = self
+            .pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pop_front()
+        {
+            return Ok(action.action);
+        }
+        if self.control_closed.load(Ordering::Acquire)
+            && self
+                .latest_move
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_none()
+        {
+            Err(TryRecvError::Disconnected)
+        } else {
+            Err(TryRecvError::Empty)
+        }
+    }
+}
 
 /// The bounded client-ECS to integrated-server handoff for one WASM guest's
 /// authoritative resident-block request. It carries only copied WIT values;
@@ -420,14 +569,16 @@ fn wasm_block_mutation_refusal(
 #[derive(Debug)]
 pub struct NetClient {
     rx: Receiver<NetUpdate>,
-    /// Outbound actions (movement, swings, chat) queued for the net thread to
-    /// hand to the client. Kept off the render thread; the net loop drains it.
+    /// Outbound actions queued for the net thread to hand to the client. The
+    /// relay keeps reliable controls FIFO and coalesces replaceable movement;
+    /// see [`ActionRelaySender`].
     ///
-    /// Bounded ([`ACTION_RELAY_CAPACITY`]); [`Self::send_action`] uses
-    /// `try_send` and drops on `Full` rather than blocking the caller's
-    /// thread — see [`NET_RELAY_CAPACITY`]'s doc for why blocking is unsafe
-    /// on this driver's wasm32 path.
-    action_tx: SyncSender<ClientAction>,
+    /// The control lane is bounded ([`ACTION_RELAY_CAPACITY`]) and uses
+    /// `try_send`, so a genuine control overflow is reported without blocking
+    /// the caller. Movement uses a separate one-slot replacement lane — see
+    /// [`NET_RELAY_CAPACITY`]'s doc for why blocking is unsafe on this
+    /// driver's wasm32 path.
+    action_tx: ActionRelaySender,
     /// "Open to LAN" requests: a port to add a TCP listener on,
     /// drained by the net thread's own loop rather than handed to the client
     /// handle like [`Self::action_tx`] — this is not a wire packet, it is a
@@ -716,16 +867,6 @@ const SINGLEPLAYER_ADDRESS: (&str, u16) = ("singleplayer", 0);
 /// the loss — no new disconnect wiring, which is why this is one line on the
 /// builder.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// How long an integrated client may wait for the first Play packet.
-///
-/// The integrated server resolves a fresh world's spawn during the
-/// configuration-to-Play handoff. That work may generate the spawn search's
-/// candidate columns before it can send the Play login, so the remote socket
-/// timeout above would be a false disconnect for a healthy local world. Keep
-/// the longer bound local to this transport; after the first packet, the
-/// server's 15-second keep-alive cadence still keeps a session below it.
-const INTEGRATED_READ_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Well-known Minecraft port used when a caller supplies only a host address.
 ///
@@ -1133,7 +1274,7 @@ impl NetClient {
         identity: LoginProfile,
     ) -> Self {
         let (tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
-        let (action_tx, action_rx) = mpsc::sync_channel(ACTION_RELAY_CAPACITY);
+        let (action_tx, action_rx) = action_relay();
         #[cfg(not(target_arch = "wasm32"))]
         let (publish_tx, publish_rx) = mpsc::channel();
         #[cfg(not(target_arch = "wasm32"))]
@@ -1270,10 +1411,10 @@ impl NetClient {
     }
 
     /// Queue an outbound action for the net thread to submit through the client
-    /// handle. Best-effort: if the session has ended, or the queue is full
-    /// ([`ACTION_RELAY_CAPACITY`] — meaning the net thread is not draining,
-    /// i.e. already dead or wedged), the send is silently dropped and the
-    /// shell keeps rendering regardless.
+    /// handle. Movement is replaceable and coalesced to the newest pose;
+    /// reliable controls use their own bounded FIFO and never compete with
+    /// movement for its capacity. No lane blocks the render thread, including
+    /// on wasm32.
     ///
     /// # Why the authorised-pose rewrite happens *here* as well as at the drain
     ///
@@ -1305,7 +1446,30 @@ impl NetClient {
             Some(pose) => with_authorised_pose(action, pose),
             None => action,
         };
-        let _ = self.action_tx.try_send(action);
+        let kind = lodestone_model::ClientActionKind::from(&action);
+        match self.action_tx.send(action) {
+            ActionAdmission::Accepted => {
+                if !matches!(kind, lodestone_model::ClientActionKind::Move) {
+                    tracing::debug!(target: "net", action = ?kind, "outbound action admitted");
+                }
+            }
+            ActionAdmission::MovementCoalesced => {}
+            ActionAdmission::ControlQueueFull => {
+                let dropped = self.action_tx.dropped_controls.load(Ordering::Relaxed);
+                if dropped == 1 || dropped.is_multiple_of(32) {
+                    tracing::warn!(
+                        target: "net",
+                        action = ?kind,
+                        dropped_controls = dropped,
+                        capacity = ACTION_RELAY_CAPACITY,
+                        "reliable outbound action dropped: control relay is full"
+                    );
+                }
+            }
+            ActionAdmission::Closed => {
+                tracing::warn!(target: "net", action = ?kind, "outbound action dropped: relay is closed");
+            }
+        }
     }
 
     /// Release the driver's deferred correction response after this frame has
@@ -1692,10 +1856,10 @@ impl NetClient {
     /// captures every [`send_action`](Self::send_action) on the returned
     /// receiver so the outbound path can be asserted without a live server.
     #[cfg(test)]
-    pub(crate) fn loopback() -> (Self, Receiver<ClientAction>) {
+    pub(crate) fn loopback() -> (Self, ActionRelayReceiver) {
         // `rx`'s sender is dropped immediately, so `poll` just yields nothing.
         let (_tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
-        let (action_tx, action_rx) = mpsc::sync_channel(ACTION_RELAY_CAPACITY);
+        let (action_tx, action_rx) = action_relay();
         let client = Self {
             rx,
             action_tx,
@@ -1772,9 +1936,9 @@ impl NetClient {
     /// receiver so a test can both push the session to `Connected` and assert
     /// the outbound movement it then produces.
     #[cfg(test)]
-    pub(crate) fn loopback_with_feed() -> (Self, Receiver<ClientAction>, SyncSender<NetUpdate>) {
+    pub(crate) fn loopback_with_feed() -> (Self, ActionRelayReceiver, SyncSender<NetUpdate>) {
         let (tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
-        let (action_tx, action_rx) = mpsc::sync_channel(ACTION_RELAY_CAPACITY);
+        let (action_tx, action_rx) = action_relay();
         let client = Self {
             rx,
             action_tx,
@@ -2055,7 +2219,7 @@ async fn run_async(
     origin: Origin,
     protocol: i32,
     tx: SyncSender<NetUpdate>,
-    action_rx: Receiver<ClientAction>,
+    action_rx: ActionRelayReceiver,
     // Native only — the capability it drives (`IntegratedServer::publish`)
     // needs a real TCP socket, which wasm32 does not have; the wasm `spawn_local`
     // call site below passes nothing for this parameter, matching how `world_dir`/
@@ -2408,7 +2572,6 @@ async fn run_async(
                                 height,
                                 mob_area,
                                 (8, 8),
-                                6,
                                 view_radius,
                                 AUTOSAVE_INTERVAL,
                                 commands.clone(),
@@ -2441,7 +2604,6 @@ async fn run_async(
                             source,
                             mob_area,
                             (8, 8),
-                            6,
                             view_radius,
                             commands,
                         ),
@@ -2707,16 +2869,7 @@ async fn run_async(
         let builder_server_host = server.host.clone();
         let mut builder = ClientBuilder::new(server, profile, adapter)
             .connect_timeout(Some(Duration::from_secs(10)))
-            // Arm the read timeout so a server that hangs (sends nothing)
-            // surfaces as a disconnect instead of stalling the session forever.
-            // A fresh integrated world gets the longer bound because its
-            // server may resolve the initial spawn before sending Play's first
-            // packet; see [`INTEGRATED_READ_TIMEOUT`].
-            .read_timeout(Some(if integrated_session {
-                INTEGRATED_READ_TIMEOUT
-            } else {
-                READ_TIMEOUT
-            }))
+            .read_timeout((!integrated_session).then_some(READ_TIMEOUT))
             .respawn_policy(RespawnPolicy::Manual);
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(explicit_port) = remote_explicit_port {
@@ -2931,7 +3084,31 @@ async fn run_async(
                     Some(pose) => with_authorised_pose(action, pose),
                     None => action,
                 };
-                let _ = handle.send_action(action);
+                let kind = lodestone_model::ClientActionKind::from(&action);
+                let handed = match handle.send_action(action) {
+                    Ok(()) => {
+                        if !matches!(kind, lodestone_model::ClientActionKind::Move) {
+                            tracing::debug!(
+                                target: "net",
+                                action = ?kind,
+                                "outbound action handed to client driver"
+                            );
+                        }
+                        true
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "net",
+                            action = ?kind,
+                            %error,
+                            "client driver rejected outbound action"
+                        );
+                        false
+                    }
+                };
+                if !handed {
+                    continue;
+                }
                 handed_actions += 1;
                 if handed_actions == 1 {
                     tracing::debug!(target: "net", "client: first action sent to server");
@@ -2939,7 +3116,7 @@ async fn run_async(
                 if handed_actions.is_multiple_of(100) {
                     tracing::debug!(target: "net", "client: {} actions sent to server so far (incl. movement, keep-alive)", handed_actions);
                 }
-                if handed_actions == 1 || handed_actions.is_multiple_of(20) {
+                if handed_actions == 1 || handed_actions.is_multiple_of(100) {
                     tracing::debug!(target: "net", "handed {handed_actions} action(s) to client handle (encode is the adapter's job)");
                 }
             }
@@ -3099,7 +3276,7 @@ async fn run_async(
             // nothing that needs flushing anyway. Same accepted, documented gap
             // as `read_timeout` just above — not a silent one.
             #[cfg(target_arch = "wasm32")]
-            tracing::debug!(target: "netbuf", "events:recv (untimed on wasm32)");
+            tracing::trace!(target: "netbuf", "events:recv (untimed on wasm32)");
             #[cfg(target_arch = "wasm32")]
             let netbuf_timeout_result: Result<Option<ClientEvent>, tokio::time::error::Elapsed> =
                 Ok(events.recv().await);
@@ -3270,7 +3447,7 @@ fn run(
     origin: Origin,
     protocol: i32,
     tx: SyncSender<NetUpdate>,
-    action_rx: Receiver<ClientAction>,
+    action_rx: ActionRelayReceiver,
     publish_rx: Receiver<u16>,
     wasm_block_mutation_request_rx: Receiver<WasmBlockMutationRequest>,
     wasm_block_mutation_result_tx: Sender<WasmBlockMutationResult>,
@@ -6343,6 +6520,84 @@ mod tests {
         assert_eq!(actions.try_recv().unwrap(), a);
         assert_eq!(actions.try_recv().unwrap(), b);
         assert!(actions.try_recv().is_err());
+    }
+
+    #[test]
+    fn movement_coalesces_without_displacing_reliable_controls() {
+        use lodestone_client::{ClientAction, Rotation, Vec3};
+        let (client, actions) = NetClient::loopback();
+        let first_move = ClientAction::Move {
+            pos: Vec3::new(1.0, 2.0, 3.0),
+            rotation: Rotation::new(10.0, 0.0),
+            on_ground: true,
+            horizontal_collision: false,
+        };
+        let latest_move = ClientAction::Move {
+            pos: Vec3::new(4.0, 5.0, 6.0),
+            rotation: Rotation::new(20.0, 1.0),
+            on_ground: false,
+            horizontal_collision: true,
+        };
+        let chat = ClientAction::SendChat {
+            text: "hello".into(),
+        };
+        let drop = ClientAction::DropSelectedItem;
+
+        client.send_action(first_move);
+        client.send_action(chat.clone());
+        client.send_action(latest_move.clone());
+        client.send_action(drop.clone());
+
+        assert_eq!(actions.try_recv().unwrap(), chat);
+        assert_eq!(actions.try_recv().unwrap(), latest_move);
+        assert_eq!(actions.try_recv().unwrap(), drop);
+        assert!(actions.try_recv().is_err());
+    }
+
+    #[test]
+    fn movement_burst_does_not_consume_control_capacity() {
+        use lodestone_client::{ClientAction, Rotation, Vec3};
+        let (client, actions) = NetClient::loopback();
+        let mut latest_move = None;
+        for index in 0..(ACTION_RELAY_CAPACITY * 2) {
+            let movement = ClientAction::Move {
+                pos: Vec3::new(index as f64, 0.0, 0.0),
+                rotation: Rotation::new(0.0, 0.0),
+                on_ground: true,
+                horizontal_collision: false,
+            };
+            latest_move = Some(movement.clone());
+            client.send_action(movement);
+        }
+        let command = ClientAction::SendCommand {
+            command: "say hello".into(),
+        };
+        client.send_action(command.clone());
+
+        assert_eq!(actions.try_recv().unwrap(), latest_move.unwrap());
+        assert_eq!(actions.try_recv().unwrap(), command);
+        assert!(actions.try_recv().is_err());
+    }
+
+    #[test]
+    fn control_overflow_is_non_blocking_and_counted() {
+        use lodestone_client::ClientAction;
+        let (sender, _receiver) = action_relay();
+        for _ in 0..ACTION_RELAY_CAPACITY {
+            assert_eq!(
+                sender.send(ClientAction::SendChat {
+                    text: "queued".into(),
+                }),
+                ActionAdmission::Accepted
+            );
+        }
+        assert_eq!(
+            sender.send(ClientAction::SendChat {
+                text: "overflow".into(),
+            }),
+            ActionAdmission::ControlQueueFull
+        );
+        assert_eq!(sender.dropped_controls.load(Ordering::Relaxed), 1);
     }
 
     // `bare_entity_view`, the "entity_snapshot_carries_*" tests, and the

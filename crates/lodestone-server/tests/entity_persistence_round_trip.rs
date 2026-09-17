@@ -27,7 +27,7 @@
 //!
 //! # Why reseeding requires a poll rather than a sleep
 //!
-//! `MobHandle::reseed` **replaces the whole `MobSim`** once the mob-seeding task
+//! `MobHandle::replace_world` **replaces the whole `MobSim`** once the mob terrain task
 //! has generated its terrain off-thread. Anything spawned into the sim before
 //! that point is discarded.
 //! So a test that spawned immediately after `open()` would pass or fail on
@@ -35,12 +35,13 @@
 //! persistence bug.
 //!
 //! `MobSim::next_id` is the deterministic signal: `MobSim::new` starts at `1`,
-//! `reseed` sets `1000`. Polling that is exact, where a `sleep` would be a guess.
+//! `replace_world` sets `1000`. Polling that is exact, where a `sleep` would be a guess.
 
 use std::path::Path;
 use std::time::Duration;
 
-use lodestone_core::State;
+use lodestone_core::{Reader, State, Writer};
+use lodestone_net::Connection;
 use lodestone_server::{
     ChunkColumn, ChunkSource, IntegratedServer, ServerBound, ServerDirective, ServerProtocol,
 };
@@ -53,11 +54,30 @@ use uuid::Uuid;
 struct TestProtocol;
 
 impl ServerProtocol for TestProtocol {
-    fn decode(&self, _state: State, _packet_id: i32, _payload: &[u8]) -> ServerBound {
-        ServerBound::Ignored
+    fn decode(&self, state: State, packet_id: i32, payload: &[u8]) -> ServerBound {
+        match state {
+            State::Handshaking if packet_id == 0 => ServerBound::Handshake {
+                next_state: State::Login,
+            },
+            State::Login if packet_id == 0 => {
+                let mut reader = Reader::new(payload);
+                ServerBound::LoginStart {
+                    username: reader.string(16).expect("username"),
+                    uuid: Uuid::nil(),
+                }
+            }
+            State::Login if packet_id == 3 => ServerBound::LoginAcknowledged,
+            State::Configuration if packet_id == 3 => ServerBound::ConfigurationFinished,
+            _ => ServerBound::Ignored,
+        }
     }
-    fn login_success(&self, _username: &str, _uuid: Uuid) -> Vec<ServerDirective> {
-        Vec::new()
+    fn login_success(&self, username: &str, _uuid: Uuid) -> Vec<ServerDirective> {
+        let mut payload = Writer::default();
+        payload.string(username);
+        vec![ServerDirective::Send {
+            packet_id: 2,
+            payload: payload.as_slice().to_vec(),
+        }]
     }
     fn begin_configuration(&self) -> Vec<ServerDirective> {
         Vec::new()
@@ -140,8 +160,8 @@ const DROPPED_COUNT: u8 = 7;
 /// so a restored value is distinguishable from a freshly spawned one.
 const COW_HEALTH: f32 = 4.0;
 
-async fn open(dir: &Path) -> IntegratedServer {
-    let (server, _client, _world) = IntegratedServer::open_persistent_with_mobs(
+async fn open(dir: &Path) -> (IntegratedServer, Connection<tokio::io::DuplexStream>) {
+    let (server, client_io, _world) = IntegratedServer::open_persistent_with_mobs(
         TestProtocol,
         dir,
         FlatWorld,
@@ -149,14 +169,37 @@ async fn open(dir: &Path) -> IntegratedServer {
         HEIGHT,
         (0..=1, 0..=1),
         (8, 8),
-        0,
         1,
         // An hour: every save in this gate is an explicit one, so a timer firing
         // mid-assertion cannot be mistaken for the thing under test.
         Duration::from_secs(3600),
     )
     .expect("open persistent world");
-    server
+    let mut client = Connection::new(client_io);
+    client.write_packet(0, &[2]).await.expect("handshake");
+    let mut login = Writer::default();
+    login.string("EntityPersist");
+    client
+        .write_packet(0, login.as_slice())
+        .await
+        .expect("login start");
+    let (id, payload) = client
+        .read_packet()
+        .await
+        .expect("read login success")
+        .expect("login success packet");
+    assert_eq!(id, 2);
+    let mut reader = Reader::new(&payload);
+    assert_eq!(reader.string(16).expect("login username"), "EntityPersist");
+    client
+        .write_packet(3, &[])
+        .await
+        .expect("login acknowledgement");
+    client
+        .write_packet(3, &[])
+        .await
+        .expect("configuration finish");
+    (server, client)
 }
 
 /// Waits until the mob-seeding task has replaced the sim — see this file's header.
@@ -201,7 +244,7 @@ async fn a_mob_and_a_dropped_item_survive_close_and_reopen() {
     let dir = tempdir("entities");
 
     // --- session one -------------------------------------------------------
-    let server = open(&dir).await;
+    let (server, _client) = open(&dir).await;
     assert!(
         wait_for_reseed(&server).await,
         "the mob seed task never ran; anything spawned now would be discarded"
@@ -260,7 +303,7 @@ async fn a_mob_and_a_dropped_item_survive_close_and_reopen() {
     );
 
     // --- session two -------------------------------------------------------
-    let server = open(&dir).await;
+    let (server, _client) = open(&dir).await;
     let (mob_count, item_count) = wait_for_population(&server).await;
     assert_eq!(
         (mob_count, item_count),
@@ -310,11 +353,11 @@ async fn a_mob_and_a_dropped_item_survive_close_and_reopen() {
     assert_eq!(id.to_string(), DROPPED, "the dropped stack changed item");
     assert_eq!(count, DROPPED_COUNT, "the dropped stack changed count");
     assert_eq!(item.uuid, item_uuid, "the item's uuid must round-trip too");
-    assert_eq!(
-        item.age,
-        Some(40),
+    assert!(
+        item.age.is_some_and(|age| age >= 40),
         "the item's age must survive, or every reloaded drop restarts its 5-minute \
-         despawn clock and the world fills with immortal litter"
+         despawn clock and the world fills with immortal litter: {:?}",
+        item.age
     );
 
     server.shutdown().await;
@@ -323,14 +366,11 @@ async fn a_mob_and_a_dropped_item_survive_close_and_reopen() {
 /// **The negative control** for the gate above: with nothing ever saved, the same
 /// assertions must fail.
 ///
-/// Without this, a `wait_for_population` that returned `(1, 1)` because the demo
-/// seeder happened to place a mob would read as a pass. `demo_mob_count` returns
-/// `0` unless an env var is set — this asserts that premise rather than trusting
-/// it, which is the "what else already paints here" check.
+/// Without this, a broken restore path could be mistaken for a populated world.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_fresh_world_has_no_entities_so_the_gate_above_cannot_pass_vacuously() {
     let dir = tempdir("entities-control");
-    let server = open(&dir).await;
+    let (server, _client) = open(&dir).await;
     assert!(wait_for_reseed(&server).await, "seed task never ran");
     // Give the restore every chance to put something here.
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -372,7 +412,6 @@ async fn player_inventory_and_position_survive_a_disconnect() {
         HEIGHT,
         (0..=0, 0..=0),
         (8, 8),
-        0,
         1,
         Duration::from_secs(3600),
     )

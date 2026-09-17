@@ -1,6 +1,8 @@
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 use sha1::Digest;
+use syn::spanned::Spanned;
+use syn::visit::Visit;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt::Write as _,
@@ -5267,6 +5269,76 @@ fn is_comment_line(line: &str) -> bool {
     trimmed.starts_with("//") || trimmed.starts_with('*') || trimmed.starts_with('#')
 }
 
+/// Return source lines belonging to items removed by `cfg(test)`. The
+/// confinement guard is intentionally lexical for production code, but test
+/// modules are not part of a wasm build and may use native-only helpers (for
+/// example a private Rayon pool used to prove a parallel path). Keeping those
+/// lines out of the production scan avoids forcing a whole source file onto an
+/// allowlist, which would hide a future ungated call beside the test.
+fn cfg_test_lines(text: &str) -> BTreeSet<usize> {
+    fn has_test_cfg(attrs: &[syn::Attribute]) -> bool {
+        attrs.iter().any(|attribute| {
+            if !attribute.path().is_ident("cfg") {
+                return false;
+            }
+            let mut found = false;
+            let _ = attribute.parse_nested_meta(|meta| {
+                if meta.path.is_ident("test") {
+                    found = true;
+                }
+                Ok(())
+            });
+            found
+        })
+    }
+
+    struct Visitor {
+        spans: Vec<(usize, usize)>,
+    }
+
+    impl<'ast> Visit<'ast> for Visitor {
+        fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+            if has_test_cfg(&node.attrs) {
+                let span = node.span();
+                self.spans.push((span.start().line, span.end().line));
+                return;
+            }
+            syn::visit::visit_item_mod(self, node);
+        }
+
+        fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+            if has_test_cfg(&node.attrs) {
+                let span = node.span();
+                self.spans.push((span.start().line, span.end().line));
+                return;
+            }
+            syn::visit::visit_item_fn(self, node);
+        }
+
+        fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+            if has_test_cfg(&node.attrs) {
+                let span = node.span();
+                self.spans.push((span.start().line, span.end().line));
+                return;
+            }
+            syn::visit::visit_item_impl(self, node);
+        }
+    }
+
+    let Ok(file) = syn::parse_file(text) else {
+        // Non-Rust probe files and malformed fixtures still use the ordinary
+        // lexical scan; a parse failure must not turn the guard into a skip.
+        return BTreeSet::new();
+    };
+    let mut visitor = Visitor { spans: Vec::new() };
+    visitor.visit_file(&file);
+    visitor
+        .spans
+        .into_iter()
+        .flat_map(|(start, end)| start..=end)
+        .collect()
+}
+
 fn scan_confinement_dir(
     dir: &Path,
     workspace_root: &Path,
@@ -5305,8 +5377,16 @@ fn scan_confinement_dir(
                 }
             };
             let text = String::from_utf8_lossy(&bytes);
+            let test_lines = if path.extension().is_some_and(|extension| extension == "rs") {
+                cfg_test_lines(&text)
+            } else {
+                BTreeSet::new()
+            };
             for (index, line) in text.lines().enumerate() {
-                if line.contains(rule.banned) && !is_comment_line(line) {
+                if line.contains(rule.banned)
+                    && !is_comment_line(line)
+                    && !test_lines.contains(&(index + 1))
+                {
                     let rel = path
                         .strip_prefix(workspace_root)
                         .unwrap_or(&path)

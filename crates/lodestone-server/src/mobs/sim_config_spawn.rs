@@ -415,7 +415,7 @@ impl<'w> MobSim<'w> {
     ///
     /// The read side of [`set_next_id`](Self::set_next_id), and it answers one
     /// question nothing else can: **has this sim been reseeded yet?**
-    /// [`MobHandle::reseed`] replaces the whole sim and then calls
+    /// [`MobHandle::replace_world`] replaces the whole sim and then calls
     /// `set_next_id(1000)`, while [`MobSim::new`] starts at `1` — so a caller that
     /// must not touch a sim about to be thrown away (a saved-entity restore, a
     /// `/summon` racing world open) can tell the difference. Without it, that
@@ -674,6 +674,12 @@ impl<'w> MobSim<'w> {
             visited_budget,
             entity_type,
         );
+        let goal_speed_scale = if base_speed > 0.0 {
+            ai_ground_speed(base_speed) / base_speed
+        } else {
+            0.0
+        };
+        mob.mob.set_goal_speed_scale(goal_speed_scale);
         mob.has_left_horn = has_left_horn;
         mob.has_right_horn = has_right_horn;
         mob.reinforcement_chance = reinforcement_chance;
@@ -689,7 +695,7 @@ impl<'w> MobSim<'w> {
         // The `FOLLOW_RANGE` attribute reaches the controller, which is what
         // bounds target acquisition. Without this every hosted mob used
         // the seam's `DEFAULT_FOLLOW_RANGE`, so the zombie family — the only
-        // family `seed_demo_mobs` spawns — targeted at 16 blocks instead of its
+        // family spawn path — targeted at 16 blocks instead of its
         // real 35.0. A wrong *value* on a fully connected wire, which is the
         // failure mode `cargo xtask connectedness` structurally cannot see.
         //

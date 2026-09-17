@@ -34,7 +34,7 @@ use super::block_ids;
 pub struct ChunkWorld {
     columns: HashMap<(i32, i32), ChunkColumn>,
     // `min_y`/`height` are read directly (`world.min_y`, `world.height`) from
-    // `mobs/mod.rs`'s `tick_with_terrain`/`surface_y`/`tick_orbs`, so both need
+    // `mobs/mod.rs`'s `tick_with_terrain`/`tick_orbs`, so both need
     // to cross the `mobs::world` boundary — the only two-field visibility
     // promotion this split needed.
     pub(super) min_y: i32,
@@ -44,7 +44,7 @@ pub struct ChunkWorld {
     /// (`from_source`/`from_columns`) — a column loaded from disk contributes
     /// nothing here, which is what makes this empty on every reopen of an
     /// existing world and non-empty only the first time a chunk is ever
-    /// generated. [`MobHandle::reseed`](super::MobHandle::reseed) drains this
+    /// generated. [`MobHandle::replace_world`](super::MobHandle::replace_world) drains this
     /// once, after construction, into real placed mobs.
     pending_generation_spawns: Vec<lodestone_worldgen::spawn_stage::GenerationSpawn>,
 }
@@ -136,8 +136,8 @@ impl ChunkWorld {
     /// Takes every `SPAWN`-stage candidate collected while constructing this
     /// [`ChunkWorld`], leaving the list empty.
     ///
-    /// A [`ChunkWorld`] snapshot is built once per [`MobHandle::reseed`
-    /// ](super::MobHandle::reseed) call — see that method and `ChunkColumn`'s
+    /// A [`ChunkWorld`] snapshot is built once per [`MobHandle::replace_world`
+    /// ](super::MobHandle::replace_world) call — see that method and `ChunkColumn`'s
     /// own field doc for why draining here, exactly once, is what keeps a
     /// fresh world's generation-time animals from duplicating across a
     /// restart.

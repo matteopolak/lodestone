@@ -80,10 +80,7 @@
 //! # What consumes these tables — and the honest limit on it
 //!
 //! [`goals_for`](super::goals_for) is called by `MobSim::spawn_species`, so every
-//! table here reaches a real `GoalSelector` on a real mob. **This paragraph used
-//! to say `seed_demo_mobs`'s hardcoded zombie ring was the only production path
-//! and none of these species reached a running game — that is now stale and the
-//! correction matters more than the original claim did.** `crate::natural_spawn`
+//! table here reaches a real `GoalSelector` on a real mob. `crate::natural_spawn`
 //! (`tick.rs`'s own tick loop, not a test) now drives a real per-species spawn
 //! cycle, and every farm animal in this file — cow, mooshroom, sheep, pig,
 //! chicken, rabbit — plus the wolf and the parrot below all have rows in its

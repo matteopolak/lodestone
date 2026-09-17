@@ -227,6 +227,16 @@ pub(super)     radius_offset: i32,
 pub(super)     double_trunk: bool,
 }
 
+#[derive(Clone, Copy)]
+struct FancyFoliageCoord {
+    pos: BlockPos,
+    branch_base: i32,
+}
+
+thread_local! {
+    static FANCY_FOLIAGE: RefCell<Vec<FancyFoliageCoord>> = const { RefCell::new(Vec::new()) };
+}
+
 /// The forking trunk placer's own trunk placement — acacia's real trunk.
 /// Places a below-trunk block at the origin's below position first (matching
 /// the straight trunk placer's own convention, [`place_tree`]'s existing
@@ -893,12 +903,9 @@ pub(super) fn place_fancy_trunk<R: RandomSource>(
     let trunk_top = origin.y + trunk_height;
     let mut relative_y = height - 5;
 
-    struct FoliageCoord {
-        pos: BlockPos,
-        branch_base: i32,
-    }
-    let mut foliage_coords: Vec<FoliageCoord> = Vec::new();
-    foliage_coords.push(FoliageCoord {
+    let mut foliage_coords = FANCY_FOLIAGE.take();
+    foliage_coords.clear();
+    foliage_coords.push(FancyFoliageCoord {
         pos: BlockPos { x: origin.x, y: origin.y + relative_y, z: origin.z },
         branch_base: trunk_top,
     });
@@ -942,7 +949,7 @@ pub(super) fn place_fancy_trunk<R: RandomSource>(
                         random, check_branch_base, check_start, false, grid, tags, trunk_provider,
                         &mut placed_any, trunk_positions,
                     ) {
-                        foliage_coords.push(FoliageCoord { pos: check_start, branch_base: branch_top });
+                        foliage_coords.push(FancyFoliageCoord { pos: check_start, branch_base: branch_top });
                     }
                 }
             }
@@ -983,6 +990,7 @@ pub(super) fn place_fancy_trunk<R: RandomSource>(
         }
     }
 
+    FANCY_FOLIAGE.set(foliage_coords);
     placed_any
 }
 
@@ -1682,15 +1690,22 @@ pub(super) fn update_leaf_distances(
 #[derive(Debug, Default)]
 struct SourcePositionSet {
     buckets: Vec<VecDeque<(i32, i32, i32)>>,
+    /// Active hash-table size. The backing bucket vector keeps its high-water
+    /// capacity between trees; resetting only clears queues and returns to the
+    /// reference's initial 16 buckets, so a later resize does not allocate a
+    /// fresh bucket vector for every tree.
+    active_capacity: usize,
     len: usize,
     first_bucket: usize,
 }
 
 impl SourcePositionSet {
     fn reset(&mut self) {
-        self.buckets.truncate(16);
-        self.buckets
-            .resize_with(16, || VecDeque::with_capacity(8));
+        self.active_capacity = 16;
+        if self.buckets.len() < self.active_capacity {
+            self.buckets
+                .resize_with(self.active_capacity, || VecDeque::with_capacity(8));
+        }
         for bucket in &mut self.buckets {
             bucket.clear();
         }
@@ -1709,41 +1724,51 @@ impl SourcePositionSet {
     }
 
     fn resize(&mut self, capacity: usize) {
-        let old = std::mem::take(&mut self.buckets);
-        let mut next = Vec::with_capacity(capacity);
-        next.resize_with(capacity, || VecDeque::with_capacity(8));
-        for bucket in old {
-            for position in bucket {
+        let old_capacity = self.active_capacity;
+        if self.buckets.len() < capacity {
+            self.buckets
+                .resize_with(capacity, || VecDeque::with_capacity(8));
+        }
+        self.active_capacity = capacity;
+        // A doubled mask maps every old bucket either to itself or to that
+        // bucket plus `old_capacity`. Visit only the bucket's original length
+        // so values retaining their old index are not revisited indefinitely.
+        for old_index in 0..old_capacity {
+            let original_len = self.buckets[old_index].len();
+            for _ in 0..original_len {
+                let position = self.buckets[old_index]
+                    .pop_front()
+                    .expect("bucket length was measured immediately above");
                 let index = Self::hash(position) & (capacity - 1);
-                next[index].push_back(position);
+                self.buckets[index].push_back(position);
             }
         }
-        self.buckets = next;
         self.first_bucket = self
             .buckets
             .iter()
+            .take(self.active_capacity)
             .position(|bucket| !bucket.is_empty())
             .unwrap_or(capacity);
     }
 
     fn insert(&mut self, position: (i32, i32, i32)) {
-        if self.buckets.is_empty() {
+        if self.active_capacity == 0 {
             self.resize(16);
         }
-        let index = Self::hash(position) & (self.buckets.len() - 1);
+        let index = Self::hash(position) & (self.active_capacity - 1);
         if self.buckets[index].iter().any(|entry| *entry == position) {
             return;
         }
         self.buckets[index].push_back(position);
         self.len += 1;
         self.first_bucket = self.first_bucket.min(index);
-        if self.len > self.buckets.len() * 3 / 4 {
-            self.resize(self.buckets.len() * 2);
+        if self.len > self.active_capacity * 3 / 4 {
+            self.resize(self.active_capacity * 2);
         }
     }
 
     fn pop_first(&mut self) -> Option<(i32, i32, i32)> {
-        while self.first_bucket < self.buckets.len() {
+        while self.first_bucket < self.active_capacity {
             if let Some(position) = self.buckets[self.first_bucket].pop_front() {
                 self.len -= 1;
                 return Some(position);
@@ -2688,7 +2713,8 @@ mod tests {
             fresh.insert(position);
         }
 
-        assert_eq!(reused.buckets.len(), 16);
+        assert_eq!(reused.active_capacity, 16);
+        assert!(reused.buckets.len() > 16);
         assert_eq!(reused.pop_first(), fresh.pop_first());
         assert_eq!(reused.pop_first(), fresh.pop_first());
         assert_eq!(reused.pop_first(), fresh.pop_first());

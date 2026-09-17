@@ -253,7 +253,6 @@ async fn join(
         (-1..=1, -1..=1),
         (0, 0),
         0,
-        0,
     );
     let (handle, events) =
         ClientBuilder::new(address(), profile(name), wrap(adapter())).connect_with(client_io);

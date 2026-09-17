@@ -6,7 +6,7 @@ The browser target exposes a small `mount(options)` / `LodestoneHandle.destroy()
 
 ## How it works
 
-`mount` accepts an `OffscreenCanvas` transferred into the calling worker. It also accepts `Uint8Array` or `ArrayBuffer` values for `clientJar` and `blocksJson`, and an optional `assetProvider(name)` callback. The provider resolves missing required blobs and, when present, all six `panorama_0.png` through `panorama_5.png` faces; it may return bytes directly or a promise of bytes. The optional `onProgress` callback receives objects with `type`, `phase`, `fraction`, and `message`; the lifecycle emits asset, startup, started, first-frame, and destroyed events. `onHostAction(action)` receives browser actions such as `{ type: "pointer-lock", locked: true }`; the page must perform the corresponding user-gesture-gated DOM operation and forward the resulting state back to the handle. The worker-local path creates a WebGPU surface directly and drives the same `WindowApp` renderer from a worker timer. The returned handle owns renderer shutdown and can be destroyed idempotently from the host.
+`mount` accepts an `OffscreenCanvas` transferred into the calling worker. It also accepts `Uint8Array` or `ArrayBuffer` values for `clientJar` and `blocksJson`, and an optional `assetProvider(name)` callback. The provider resolves missing required blobs and, when present, all six `panorama_0.png` through `panorama_5.png` faces; it may return bytes directly or a promise of bytes. The optional `onProgress` callback receives objects with `type`, `phase`, `fraction`, and `message`; the lifecycle emits asset, startup, started, first-frame, and destroyed events. `onHostAction(action)` receives browser actions such as `{ type: "pointer-lock", locked: true }`; the page must perform the corresponding user-gesture-gated DOM operation and forward the resulting state back to the handle. `logLevel` accepts `off`, `error`, `warn`, `info`, `debug`, or `trace` and applies to both the render worker and its integrated-server worker. It defaults to `warn`. The worker-local path creates a WebGPU surface directly and drives the same `WindowApp` renderer from a worker timer. The returned handle owns renderer shutdown and can be destroyed idempotently from the host.
 
 The transferred canvas is owned by the worker for the entire session; Lodestone never accesses the page DOM or performs the transfer itself. `first-frame` is emitted only after the render loop has handed a frame to the browser presentation queue, including the full-screen ownership menu path. The readiness latch is created per mount and is set by the same `WindowApp` present boundary that draws the frame, so it is not a process-global or thread-local observation that can miss a canonical threaded build. The worker-facing poll remains bounded only as a failure diagnostic if WebGPU never becomes ready. Fullscreen, input bridging, and worker lifetime remain caller-owned. `destroyed` is emitted after the worker has dropped the renderer and GPU state. A mount started while that teardown is in progress waits for it, so callers may safely reuse the initialized module and asset bundle without an arbitrary delay.
 
@@ -18,14 +18,14 @@ current handle and is dropped by `destroy`; it is an acknowledgement, not a secu
 
 The presentation seam is intentionally caller-owned: the page creates an HTML canvas, calls `transferControlToOffscreen()`, transfers that object to its worker, owns worker lifetime and input/UI bridging, and invokes `mount` from the worker. Lodestone never calls `transferControlToOffscreen()` and never touches the DOM. Its worker loop creates the WebGPU surface directly from the received `OffscreenCanvas`, runs the existing simulation/render passes, and marks the per-mount readiness latch immediately after `present`. Worker timers replace page `requestAnimationFrame` for both render pacing and bounded lifecycle polling. Required asset installation still materializes host-provided bytes into the shell's owned bundle, and renderer bring-up still performs synchronous pipeline/atlas construction after asynchronous adapter selection; those costs occur on the worker that owns the canvas rather than blocking the page.
 
-The handle exposes `pointerMove`, `mouseMotion`, `mouseButton`, `wheel`, `key`, `focus`, `resize`, and `pointerLock` for a caller-owned input bridge. Forward keyboard, pointer, wheel, focus, backing-size/DPR, and browser pointer-lock events from the page to the worker. Pointer lock is a two-way protocol: the shell requests or releases it through `onHostAction`; the page performs `requestPointerLock()` from its gesture handler (and `exitPointerLock()` for release), then calls `pointerLock(actualState)` when `pointerlockchange` fires.
+The handle exposes `pointerMove`, `mouseMotion`, `mouseButton`, `wheel`, `key`, `focus`, `resize`, and `pointerLock` for a caller-owned input bridge. Forward keyboard, pointer, wheel, focus, backing-size/DPR, and browser pointer-lock events from the page to the worker. After `transferControlToOffscreen()`, the page measures the HTML element but must not assign its `width` or `height`; send the DPR-scaled dimensions through `resize`, which updates the worker-owned `OffscreenCanvas` backing store and surface together. Pointer lock is a two-way protocol: the shell requests or releases it through `onHostAction`; the page performs `requestPointerLock()` from its gesture handler (and `exitPointerLock()` for release), then calls `pointerLock(actualState)` when `pointerlockchange` fires.
 
 ## How to change it
 
 Change `web/src/embed.rs` when adding host-facing lifecycle events or options. Keep `web/src/main.rs` limited to the standalone bootstrap and its caller-owned render worker. Changes to shutdown semantics belong in the worker-local browser control exported by `lodestone-shell`, because only that layer owns renderer teardown. Keep the API idempotent: hosts may call `destroy` from both an explicit unmount and a worker teardown path.
 
 The public Wasm mount shape is intentionally limited to `canvas`, `clientJar`, `blocksJson`,
-`assetProvider`, `onProgress`, and `onHostAction`; do not add an auth provider or
+`assetProvider`, `onProgress`, `onHostAction`, and `logLevel`; do not add an auth provider or
 credential-bearing option. A supplied `assetProvider` must resolve every panorama face as well as
 any required blob omitted from the direct options. Omitting it retains the jar fallback for custom
 hosts that intentionally do not ship the full title panorama.
@@ -39,6 +39,7 @@ const offscreen = canvas.transferControlToOffscreen();
 const game = await lodestone.mount({
   canvas: offscreen,
   assetProvider: name => fetch(name).then(response => response.arrayBuffer()),
+  logLevel: "warn",
   onProgress: event => console.log(event.type, event.fraction),
   onHostAction: action => {
     if (action.type === "pointer-lock" && action.locked) {
@@ -65,6 +66,8 @@ messages. An `OffscreenCanvas` cannot be remounted after its owner is torn down;
 create a fresh transferred canvas for a new worker session.
 
 The host must serve the page with WebGPU support and the same cross-origin isolation headers required by the optional compute-worker pool. The standalone page marks its canvas with `data-lodestone-standalone`; embedded hosts omit that marker so importing the module does not auto-start a second session.
+
+The standalone page accepts `?log=debug` (or another `logLevel` value) for a diagnostic run. Verbose levels are opt-in because world generation and render-loop traces can materially increase console and scheduling overhead.
 
 One wasm module instance owns one installed asset bundle. A different bundle requires a fresh module instance after `destroy`; the shell intentionally keeps its immutable resource caches for the lifetime of the module.
 

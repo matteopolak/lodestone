@@ -405,7 +405,6 @@ impl Sim {
             expected_view_radius: None,
             new_world_loading: false,
             dimension_transition_pending: false,
-            terrain_wait_started: None,
             vanilla_atlas: resources.vanilla_atlas,
             particle_atlas,
             language: resources.language,

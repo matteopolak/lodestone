@@ -213,7 +213,6 @@ async fn registry_selected_protocol_762_broadcasts_an_arm_swing_to_another_clien
         (0..=0, 0..=0),
         (8, 8),
         0,
-        0,
     );
     let address = server
         .publish(("127.0.0.1", 0), None)

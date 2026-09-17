@@ -466,7 +466,7 @@ pub(super) fn mob_experience_reward(entity_type: &ResourceKey, rng: &mut SpawnRn
 mod hostility_category_tests {
     use super::*;
     use lodestone_entity::ai::roster;
-    use super::super::{ChunkWorld, DEMO_SPECIES, MobSim, seed_demo_mobs};
+    use super::super::{ChunkWorld, MobSim};
     use crate::mob_spawn::MobCategory;
     use lodestone_model::Vec3;
     use std::str::FromStr;
@@ -567,109 +567,6 @@ mod hostility_category_tests {
             "these rostered species have no jar-cited spawn category, so they \
              silently fall through to persistent Creature (#457): {undecided:?}"
         );
-    }
-
-    /// [`DEMO_SPECIES`]'s two invariants: every entry is claimed
-    /// by a roster family, and the first six span all five families.
-    ///
-    /// The first half is what stops a typo or a plausible-but-unrostered name
-    /// (`"villager"`, `"bat"`) from spawning a mob that renders fine and
-    /// exercises nothing — `roster::registrations_for` answers `FALLBACK` for
-    /// an unclaimed species rather than failing, so nothing else would notice.
-    ///
-    /// The family-coverage assertion checks the rendering-sensitive invariant:
-    /// seeding six mobs of six *different monsters* must reach all five families.
-    #[test]
-    fn demo_species_are_all_rostered_and_span_every_family() {
-        use lodestone_entity::ai::roster;
-
-        assert!(
-            !DEMO_SPECIES.is_empty(),
-            "an empty list would make both checks below vacuous"
-        );
-
-        let unclaimed: Vec<&str> = DEMO_SPECIES
-            .iter()
-            .copied()
-            .filter(|s| roster::is_fallback(roster::registrations_for(s)))
-            .collect();
-        assert!(
-            unclaimed.is_empty(),
-            "these DEMO_SPECIES entries are claimed by no roster family, so they \
-             spawn with FALLBACK goals and demonstrate nothing: {unclaimed:?}"
-        );
-
-        // `mob_count` in `lodestone-shell/src/net.rs`. Stated here as the
-        // expectation this list is ordered against; if production changes it,
-        // the ordering argument in `DEMO_SPECIES`' doc needs revisiting.
-        const PRODUCTION_COUNT: usize = 6;
-        let families: [(&str, &[&str]); 5] = [
-            ("hostile_melee", roster::hostile_melee::SPECIES),
-            ("ranged", roster::ranged::SPECIES),
-            ("passive", roster::passive::SPECIES),
-            ("neutral", roster::neutral::SPECIES),
-            ("specialist", roster::specialist::SPECIES),
-        ];
-        let first_six = &DEMO_SPECIES[..PRODUCTION_COUNT.min(DEMO_SPECIES.len())];
-        let unreached: Vec<&str> = families
-            .iter()
-            .filter(|(_, members)| !first_six.iter().any(|s| members.contains(s)))
-            .map(|(name, _)| *name)
-            .collect();
-        assert!(
-            unreached.is_empty(),
-            "a default singleplayer world seeds {PRODUCTION_COUNT} mobs, and these \
-             roster families are not among them — so their goal tables still reach \
-             zero pixels, which is exactly the #457 defect: {unreached:?}"
-        );
-    }
-
-    /// The seeder really produces those species — not merely that the constant
-    /// lists them.
-    ///
-    /// Drives [`seed_demo_mobs`] itself (the function `MobHandle::reseed` calls
-    /// in production) rather than restating the loop, and reads the entity types
-    /// back off the resulting sim's snapshots. The assertion that matters is
-    /// **`> 1` distinct types**: a seeder that still hardcoded one species would
-    /// produce exactly one and pass any "mobs exist" check.
-    #[test]
-    fn the_seeder_spawns_more_than_one_species() {
-        let mut world = ChunkWorld::new(-64, 384);
-        for x in -12..=12 {
-            for z in -12..=12 {
-                world.set_solid(x, -1, z, true);
-            }
-        }
-        let world: &'static ChunkWorld = Box::leak(Box::new(world));
-        let mut sim = MobSim::new(world);
-        seed_demo_mobs(&mut sim, 0, 0, 6);
-
-        let types: Vec<String> = sim
-            .snapshots()
-            .iter()
-            .map(|s| s.entity_type.path().to_string())
-            .collect();
-        assert_eq!(types.len(), 6, "six requested mobs must all reach the sim");
-
-        let mut distinct: Vec<&str> = types.iter().map(String::as_str).collect();
-        distinct.sort_unstable();
-        distinct.dedup();
-        assert!(
-            distinct.len() > 1,
-            "the seeder produced only {distinct:?} — a single-species ring is the \
-             #457 defect, and 'mobs were spawned' passes for it"
-        );
-        assert_eq!(
-            types[0], "zombie",
-            "the first demo mob must stay a zombie: entity id 1000 is \
-             deterministic and live_mob_sim.rs depends on it"
-        );
-        for want in ["cow", "wolf", "blaze", "guardian", "creeper"] {
-            assert!(
-                types.iter().any(|t| t == want),
-                "a default world must contain a {want}; got {types:?}"
-            );
-        }
     }
 
     /// The value half: the predicate must agree with the jar for every row.

@@ -241,11 +241,16 @@ fn connected_sim_emits_one_move_per_physics_tick() {
     feed.send(NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
     sim.poll_net(); // → Connected
     assert_eq!(sim.session_phase(), SessionPhase::Connected);
-    sim.step(5.0 / 20.0); // ~5 ticks, all now in-world.
+    // Drain after each call so the test observes every tick before the
+    // replaceable movement lane coalesces a burst to its newest pose.
+    let mut sent = Vec::new();
+    for _ in 0..5 {
+        sim.step(1.0 / 20.0);
+        sent.extend(std::iter::from_fn(|| actions.try_recv().ok()));
+    }
     // Counted by *variant*, not as a total: the tick tail also emits one
-    // `EndClientTick` per tick (vanilla's `Minecraft.tick` does the same), so a
-    // bare count answers "how many actions" rather than "how many moves".
-    let sent: Vec<ClientAction> = std::iter::from_fn(|| actions.try_recv().ok()).collect();
+    // `EndClientTick` per tick, so a bare count answers "how many actions"
+    // rather than "how many moves".
     let moves = sent
         .iter()
         .filter(|a| matches!(a, ClientAction::Move { .. }))

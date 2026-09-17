@@ -826,11 +826,15 @@ pub(super) fn compute_served_light_with_neighbours(
     )
 }
 
+/// Computes the initial packet value and its allocation mask from a supplied
+/// footprint. `admit_neighbour_sources` is false for partial packet inputs,
+/// making fresh neighbour emission wait for a complete retained admission.
 pub(super) fn compute_served_initial_light_with_neighbours(
     center: &WorldChunkColumn,
     shape: &ChunkShape,
     neighbours: &[(i32, i32, ServerChunkColumn)],
     dimension: Dimension,
+    admit_neighbour_sources: bool,
 ) -> ColumnLight {
     let neighbour_columns = neighbours
         .iter()
@@ -854,25 +858,49 @@ pub(super) fn compute_served_initial_light_with_neighbours(
         // sources. Diagonal sources wait for the later light-update pass. Keep
         // the all-neighbour computation above because its storage footprint is
         // still needed by the packet representation below.
-        let mut cardinal_neighbourhood = Neighbourhood::new(center);
-        for ((dx, dz, _), neighbour) in neighbours.iter().zip(&neighbour_columns) {
-            if dx.abs() + dz.abs() == 1 {
-                cardinal_neighbourhood = cardinal_neighbourhood.with(*dx, *dz, neighbour);
+        let mut admitted_neighbourhood = Neighbourhood::new(center);
+        if admit_neighbour_sources {
+            for ((dx, dz, _), neighbour) in neighbours.iter().zip(&neighbour_columns) {
+                if dx.abs() + dz.abs() == 1 {
+                    admitted_neighbourhood = admitted_neighbourhood.with(*dx, *dz, neighbour);
+                }
             }
         }
-        let cardinal_light = compute_column_light_with_neighbours_for_initial_chunk(
-            &cardinal_neighbourhood,
+        let admitted_light = compute_column_light_with_neighbours_for_initial_chunk(
+            &admitted_neighbourhood,
             &V770LightProps { has_skylight: false },
             initial_full_sky_sections(dimension),
         );
         for section in 0..light.light_section_count() {
-            *light.block_mut(section) = cardinal_light.block(section).clone();
+            *light.block_mut(section) = admitted_light.block(section).clone();
         }
     }
     let block_light_storage = (dimension == Dimension::Nether || dimension == Dimension::End)
         .then(|| initial_block_light_storage_sections(center, &neighbour_columns));
     normalize_initial_chunk_light(&mut light, dimension, block_light_storage.as_deref());
     light
+}
+
+/// Whether the supplied packet neighbourhood contains every immediate
+/// neighbour. A partial neighbourhood is an incomplete admission boundary:
+/// its centre can be encoded, but fresh neighbour emissions must wait for the
+/// retained-light settlement that has a complete footprint.
+pub(super) fn neighbours_have_complete_footprint(
+    neighbours: &[(i32, i32, ServerChunkColumn)],
+) -> bool {
+    const OFFSETS: [(i32, i32); 8] = [
+        (-1, -1),
+        (0, -1),
+        (1, -1),
+        (-1, 0),
+        (1, 0),
+        (-1, 1),
+        (0, 1),
+        (1, 1),
+    ];
+    OFFSETS
+        .iter()
+        .all(|offset| neighbours.iter().any(|(dx, dz, _)| (*dx, *dz) == *offset))
 }
 
 pub(super) fn compute_served_initial_lights_with_neighbours_and_storage(

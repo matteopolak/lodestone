@@ -41,12 +41,16 @@
 //! [`TableResolver::with_block_freeze_facts`] and
 //! [`TableResolver::with_block_survival_facts`].
 
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Mutex};
+
 use serde_json::Value;
 
 use crate::density::{NoiseParams, Resolver};
 
 /// See the [module docs](self).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct TableResolver<'a> {
     json: &'a [(&'a str, &'a str)],
     structure_templates: &'a [(&'a str, &'a [u8])],
@@ -54,6 +58,19 @@ pub struct TableResolver<'a> {
     biome_temperatures_key: Option<&'a str>,
     block_freeze_facts: Option<fn() -> &'static Value>,
     block_survival_facts: Option<fn() -> &'static Value>,
+    json_cache: Option<Arc<JsonCache>>,
+}
+
+/// Parsed documents shared by resolvers over one immutable asset table.
+///
+/// The cache is intentionally opt-in: arbitrary datapack resolvers remain
+/// uncached, while an embedder can retain parsed documents across generators.
+/// The fingerprint prevents a cache built for one asset bundle from being
+/// attached to another bundle by mistake.
+#[derive(Debug)]
+pub struct JsonCache {
+    fingerprint: u64,
+    documents: Mutex<HashMap<String, Value>>,
 }
 
 /// The keys the bundled Overworld resolver uses for the two dimension-scoped
@@ -78,7 +95,48 @@ impl<'a> TableResolver<'a> {
             biome_temperatures_key: Some(DEFAULT_BIOME_TEMPERATURES_KEY),
             block_freeze_facts: None,
             block_survival_facts: None,
+            json_cache: None,
         }
+    }
+
+    /// Creates an empty parsed-document cache tied to this resolver's assets.
+    #[must_use]
+    pub fn json_cache(&self) -> Arc<JsonCache> {
+        Arc::new(JsonCache {
+            fingerprint: self.fingerprint(),
+            documents: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// Reuses parsed documents from a resolver over the same immutable assets.
+    ///
+    /// A cache made from a different JSON or template table is ignored, which
+    /// leaves this resolver on its uncached fallback path.
+    #[must_use]
+    pub fn with_json_cache(mut self, cache: Arc<JsonCache>) -> Self {
+        if cache.fingerprint == self.fingerprint() {
+            self.json_cache = Some(cache);
+        }
+        self
+    }
+
+    /// Stable within the process and sensitive to every embedded asset byte.
+    /// Dynamic resolvers do not expose this value and therefore do not enter
+    /// any shared production cache.
+    #[must_use]
+    pub fn fingerprint(&self) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.json.len().hash(&mut hasher);
+        for &(key, value) in self.json {
+            key.hash(&mut hasher);
+            value.hash(&mut hasher);
+        }
+        self.structure_templates.len().hash(&mut hasher);
+        for &(key, value) in self.structure_templates {
+            key.hash(&mut hasher);
+            value.hash(&mut hasher);
+        }
+        hasher.finish()
     }
 
     /// Attaches a table of raw `structure/<path>.nbt` bytes (sorted by id,
@@ -151,6 +209,16 @@ impl<'a> TableResolver<'a> {
     }
 
     fn json_at(&self, key: &str) -> Value {
+        if let Some(cache) = &self.json_cache {
+            let mut documents = cache.documents.lock().expect("json cache lock poisoned");
+            return documents
+                .entry(key.to_owned())
+                .or_insert_with(|| {
+                    serde_json::from_str(self.raw(key))
+                        .unwrap_or_else(|e| panic!("parsing embedded '{key}': {e}"))
+                })
+                .clone();
+        }
         serde_json::from_str(self.raw(key))
             .unwrap_or_else(|e| panic!("parsing embedded '{key}': {e}"))
     }
@@ -166,6 +234,20 @@ impl<'a> TableResolver<'a> {
     }
 
     fn try_json(&self, key: &str) -> Value {
+        if let Some(cache) = &self.json_cache {
+            let mut documents = cache.documents.lock().expect("json cache lock poisoned");
+            return documents
+                .entry(key.to_owned())
+                .or_insert_with(|| {
+                    self.try_raw(key)
+                        .map(|raw| {
+                            serde_json::from_str(raw)
+                                .unwrap_or_else(|e| panic!("parsing embedded '{key}': {e}"))
+                        })
+                        .unwrap_or(Value::Null)
+                })
+                .clone();
+        }
         self.try_raw(key).map_or(Value::Null, |raw| {
             serde_json::from_str(raw).unwrap_or_else(|e| panic!("parsing embedded '{key}': {e}"))
         })
@@ -173,6 +255,10 @@ impl<'a> TableResolver<'a> {
 }
 
 impl Resolver for TableResolver<'_> {
+    fn asset_fingerprint(&self) -> Option<u64> {
+        Some(self.fingerprint())
+    }
+
     fn density_function(&self, id: &str) -> Value {
         let name = id.strip_prefix("minecraft:").unwrap_or(id);
         self.json_at(&format!("density_function/{name}"))
@@ -202,14 +288,10 @@ impl Resolver for TableResolver<'_> {
         // whatever this returns — `Value::Null` would panic instead of
         // taking the "no real biome variety supplied" fallback path.
         self.biome_parameters_key
-            .and_then(|key| self.try_raw(key))
-            .map_or_else(
-                || Value::Array(Vec::new()),
-                |raw| {
-                    serde_json::from_str(raw)
-                        .unwrap_or_else(|e| panic!("parsing embedded biome parameters: {e}"))
-                },
-            )
+            .map_or_else(|| Value::Array(Vec::new()), |key| {
+                let value = self.try_json(key);
+                (!value.is_null()).then_some(value).unwrap_or_else(|| Value::Array(Vec::new()))
+            })
     }
 
     fn biome_temperatures(&self) -> Value {
@@ -217,14 +299,12 @@ impl Resolver for TableResolver<'_> {
         // calls `.as_object().expect(..)`, so the empty default must be an
         // object, not `Null`.
         self.biome_temperatures_key
-            .and_then(|key| self.try_raw(key))
-            .map_or_else(
-                || Value::Object(serde_json::Map::new()),
-                |raw| {
-                    serde_json::from_str(raw)
-                        .unwrap_or_else(|e| panic!("parsing embedded biome temperatures: {e}"))
-                },
-            )
+            .map_or_else(|| Value::Object(serde_json::Map::new()), |key| {
+                let value = self.try_json(key);
+                (!value.is_null())
+                    .then_some(value)
+                    .unwrap_or_else(|| Value::Object(serde_json::Map::new()))
+            })
     }
 
     fn biome_document(&self, id: &str) -> Value {
@@ -414,6 +494,23 @@ mod tests {
             Some(b"\x1f\x8b\x00fake".to_vec())
         );
         assert_eq!(r.structure_template("minecraft:nonexistent"), None);
+    }
+
+    #[test]
+    fn parsed_documents_are_reused_by_an_attached_cache() {
+        let cache = TableResolver::new(JSON).json_cache();
+        let r = TableResolver::new(JSON).with_json_cache(Arc::clone(&cache));
+        assert_eq!(r.biome_document("minecraft:plains")["carvers"][0], "minecraft:cave");
+        assert_eq!(r.biome_document("minecraft:plains")["carvers"][0], "minecraft:cave");
+        assert_eq!(cache.documents.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn cache_rejects_a_different_asset_table_without_using_stale_data() {
+        let cache = TableResolver::new(JSON).json_cache();
+        let other = [("biome/plains", r#"{"carvers": []}"#)];
+        let resolver = TableResolver::new(&other).with_json_cache(cache);
+        assert_eq!(resolver.biome_document("minecraft:plains")["carvers"], serde_json::json!([]));
     }
 
     #[test]

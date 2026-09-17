@@ -529,7 +529,7 @@ pub mod worldgen_lifecycle;
 /// Request-scoped world-generation state for the production session seam.
 pub mod worldgen_session;
 pub mod worldgen_progress;
-mod production_worldgen_session;
+pub(crate) mod production_worldgen_session;
 /// Lightning: per-chunk strike-target selection during a thunderstorm, the
 /// `LightningBolt` life-cycle and its entity-facing effects (`docs/lightning.md`).
 /// Public because spawning the bolt as a real entity and applying an effect
@@ -543,6 +543,7 @@ mod lock_order;
 /// skeleton-horse-trap roll reads it from outside this crate's tick loop.
 pub mod regional_difficulty;
 mod world_spawn;
+pub use world_spawn::{SpawnSearchMetrics, spawn_search_metrics};
 /// One shared, persistable store for the world's scalars — game rules,
 /// difficulty and the clock. Public because a host and
 /// the gates both read it.

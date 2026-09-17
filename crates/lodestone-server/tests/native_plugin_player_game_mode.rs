@@ -223,7 +223,6 @@ fn open_server(server_app: ServerApp) -> (IntegratedServer, DuplexStream) {
         FlatWorld,
         (0..=0, 0..=0),
         (0, 0),
-        0,
         1,
         server_app,
     )

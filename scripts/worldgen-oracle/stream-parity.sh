@@ -69,6 +69,9 @@ count=$(( (cx1 - cx0 + 1) * (cz1 - cz0 + 1) ))
 
 artifact_dir="${LODESTONE_LARGE_PARITY_STREAM_ARTIFACT_DIR:-}"
 if [[ -n "$artifact_dir" ]]; then
+  if [[ "$artifact_dir" != /* ]]; then
+    artifact_dir="$PWD/$artifact_dir"
+  fi
   if [[ -e "$artifact_dir" && ! -d "$artifact_dir" ]]; then
     echo "stream parity artifact path is not a directory: $artifact_dir" >&2
     exit 2
@@ -183,7 +186,7 @@ if [[ -n "${LODESTONE_LARGE_PARITY_STREAM_SCAN_ALL:-}" ]]; then
   consumer_env+=("LODESTONE_LARGE_PARITY_STREAM_SCAN_ALL=$LODESTONE_LARGE_PARITY_STREAM_SCAN_ALL")
 fi
 if [[ -n "${LODESTONE_LARGE_PARITY_STREAM_ARTIFACT_DIR:-}" ]]; then
-  consumer_env+=("LODESTONE_LARGE_PARITY_STREAM_ARTIFACT_DIR=$LODESTONE_LARGE_PARITY_STREAM_ARTIFACT_DIR")
+  consumer_env+=("LODESTONE_LARGE_PARITY_STREAM_ARTIFACT_DIR=$artifact_dir")
 fi
 env "${consumer_env[@]}" cargo test -p lodestone-v26-2 --test streaming_worldgen_parity \
   stream_external_oracle_matches_lodestone -- --ignored --nocapture \

@@ -191,6 +191,7 @@ unicode-bidi = { workspace = true }
 # Logging, errors, ids. `tokio` and the file-writing/OS-probing crates are in the
 # target sections below.
 tracing = { workspace = true }
+log = "0.4"
 crossbeam-channel = "0.5"
 anyhow = { workspace = true }
 serde_json = { workspace = true }

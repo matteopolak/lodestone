@@ -29,6 +29,29 @@ indexed answer remains an explicit negative control. A per-source-chunk memo (th
 direct-mapped on the low bits of chunk coordinates, collision-free for any window the carver/ore
 drivers actually use) avoids repeating the search across a 17×17/3×3 neighbourhood walk.
 
+The immutable tree uses compact i32 spans when every table and derived hull bound fits that range,
+and retains the wide layout for arbitrary tables. Both layouts widen bounds before exact i64 target
+and squared-distance arithmetic, so storage locality cannot change results. The production table's
+seventh offset axis is zero for every row and every query target is zero there, so its compact visitor
+uses a six-axis cutoff kernel; synthetic or nonzero-offset inputs keep the complete seven-axis path.
+The ignored, `gen-counters`-gated production-data probe reports the cutoff-axis histogram and compares
+the compact visitor with a branchless scalar control while retaining the same fixed axis order and
+cutoff semantics.
+Static resolvers with an asset fingerprint also share the parsed rows and tree through a process
+cache; un-fingerprinted dynamic resolvers rebuild them. Each constructed table keeps a distinct memo
+identity even when its immutable catalog is shared, while clones inside one generator retain that
+identity. Climate samplers and search cursors remain per-generator because they carry seed and
+lifecycle state. A biome request prepares only the climate channels whose density trees prove
+X/Z-only, once per quart X/Z in its bounded footprint; every other channel is evaluated at its
+actual Y. The prepared path retains the existing floating-point quantization and leaves the search
+cursor and section query order unchanged.
+
+The Overworld pre-ore request prepares one bordered X/Z grid for both consumers. Biome cells take
+the checked 4×4 centre view, while the surface context keeps the full border for its nearby-corner
+lookups; both views borrow the same request-owned storage. The `gen-counters` snapshot exposes the
+preparation count, and the production control requires exactly one for a shaped request. A view
+rejects non-quart coordinates and every coordinate outside its declared subregion before indexing.
+
 **Sampling height matters and is per-consumer, not unified.** Carver and ore selection resolve a
 source chunk's biome at `y = 0`; vegetation resolves at the column's own generated surface height.
 At `y = 0` the `depth` channel's gradient is already ≈ +1.0 (climate-space "deep cave"), so a surface
@@ -77,25 +100,29 @@ water and lava (including states with a level property) remain fluids.
 
 The surface lookup is stateful and follows the scan, not a prepass: for each column the initial
 height query runs first, then rule conditions request biome data lazily while `x`, `z`, and
-descending `y` advance. Climate targets are cached, but row ids are not reused because the indexed
-search's previous leaf is part of its tie-break state. Reusing a row cache or filling the footprint
-q-y-major changes boundary material; keep the cursor local to the pre-ore lifecycle and copy its
-final state into the later carve/ore stages.
+descending `y` advance. Climate targets are cached, and a bounded request-local transition memo
+reuses a row only when both the quart index and incoming search leaf match; it restores the recorded
+outgoing leaf, so tie history is unchanged. Consecutive repeats remain a cheaper no-op because they
+have not changed the cursor. Do not key this memo by quart alone or fill the footprint q-y-major:
+either changes boundary material. Keep the cursor local to the pre-ore lifecycle and copy its final
+state into the later carve/ore stages.
 
 Performance-wise, the surface stage historically dominated worldgen's heap allocation (every probe
 built and cloned `String`s for `pre`/`biome_at`/matched-rule results); it is now interned end to end
 — `PreState` carries a `StateId` plus a cheap `PreClass` (air/fluid/stone) rather than deriving
-classification from a string per probe, and the diff handed to materialisation is a `FastMap` keyed
-by position, read only by point lookup (never iterated) so hasher choice cannot leak into palette
-order. Parsed condition sources also receive compact cache slots: X/Z predicates and 2-D noise live
+classification from a string per probe, and the diff handed to materialisation is a typed, ordered
+per-column vector, so no coordinate hash can perturb palette order. Parsed condition sources also
+receive compact cache slots: X/Z predicates and 2-D noise live
 for one column, while biome, depth, water, vertical-gradient and 3-D noise predicates are refreshed
 for each scanned Y position. This preserves the context's lazy invalidation domains without mutable
 state in the shared rule tree.
 
 `SurfaceSystem::build_surface_reusing` accepts a cleared caller-owned diff so generation workers can
-retain the hash table's capacity between chunks. Nether uses one thread-local diff per worker and
-returns it only after fixed-order materialization; callers must never iterate the diff to determine
-palette order, and must not return the scratch map while any consumer still borrows it.
+retain the ordered change vector's capacity between chunks. The diff stores typed rewrites grouped by
+surface column in the scan's descending Y order; materializers consume each column backwards in fixed
+`z,x,y` order, so no coordinate map, conversion pass, reverse pass, or sort can perturb palette
+insertion. Nether uses one thread-local diff per worker and returns it only after materialization;
+callers must not return the scratch diff while any consumer still borrows it.
 
 ### Freeze-top-layer (snow and ice)
 
@@ -132,6 +159,10 @@ and need no repeated range fallback.
   cursor owned by one column's pre-ore pipeline; do not replace production calls with the stateless
   negative control or reorder the section's `x`, local `y`, `z` query walk. Worker identity is never
   semantic state.
+- **Keep the indexed visitor specialized to the table layout.** Production tables fit their seven
+  parameter spans in `i32`, while dynamic or synthetic tables can require the `i64` fallback. Select
+  that representation once per lookup and recurse through the matching visitor; branching on storage
+  at every node materially increases the hot-path cost without changing the answer.
 - **A biome resolved per chunk position should go through the existing thread-local memo**, keyed by
   table identity as well as coordinates (two generators on one thread must never share biomes), not a
   second cache — see `docs/worldgen.md`'s memoisation guidance.

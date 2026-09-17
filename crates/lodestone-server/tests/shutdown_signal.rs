@@ -126,7 +126,6 @@ fn open(dir: &Path) -> lodestone_server::IntegratedServer {
         HEIGHT,
         (0..=0, 0..=0),
         (8, 8),
-        0,
         1,
         Duration::from_secs(3600),
     )

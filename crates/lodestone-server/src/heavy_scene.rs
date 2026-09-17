@@ -8,7 +8,6 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
-#[cfg(not(target_arch = "wasm32"))]
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use lodestone_time::Instant;
@@ -20,7 +19,6 @@ use lodestone_core::{Reader, Writer};
 use lodestone_net::Connection;
 use tokio::io::DuplexStream;
 use lodestone_model::BlockPos;
-#[cfg(not(target_arch = "wasm32"))]
 use lodestone_model::{ResourceKey, Vec3};
 
 use crate::{
@@ -1208,38 +1206,12 @@ impl HeavyServerHarness {
                         // terrain generation while keeping the real tick loop.
                         (1..=0, 1..=0),
                         (0, 0),
-                        0,
                         plan.spec.runtime_view_radius(),
                     );
                     let mobs = server.mobs().cloned().ok_or_else(|| {
                         HeavyError::Unsupported("entity runtime has no mob handle".to_string())
                     })?;
-                    wait_for_mob_reseed(&mobs).await?;
-                    if entity_actions.is_empty() {
-                        server
-                            .world_state()
-                            .set_rule("spawn_mobs", "false")
-                            .map_err(|error| {
-                                HeavyError::Unsupported(format!(
-                                    "entity negative control could not disable natural spawning: {error}"
-                                ))
-                            })?;
-                    }
-                    let spawned = mobs.with(|sim| {
-                        let shape = lodestone_entity::pathfinding::MobShape::land(0.6, 1.8);
-                        for (entity_type, position) in &entity_actions {
-                            sim.spawn(*position, shape.clone(), 0.0, 0)
-                                .set_entity_type(entity_type.clone())
-                                .set_persistent(true);
-                        }
-                        entity_actions.len() as u64
-                    });
-                    // Let the production tick loop publish the handle's newly
-                    // spawned snapshots through its live source before the join
-                    // starts. This is a bounded hand-off, not a synthetic count:
-                    // the subsequent packets still have to be decoded below.
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    (server, io, Some(mobs), spawned)
+                    (server, io, Some(mobs), entity_actions.len() as u64)
                 }
             } else {
                 let (server, io) = IntegratedServer::open_in_memory_with_entities(
@@ -1252,14 +1224,58 @@ impl HeavyServerHarness {
             };
         let mut peer = Connection::new(io);
         let started = Instant::now();
-        let join = drive_v770_join(
-            &mut peer,
-            plan.spec.expected_runtime_join_columns(),
-            requested_entities,
-            entity_region,
-        )
-        .await;
-        let join = join;
+        let join = if let Some(mobs) = mob_handle.as_ref() {
+            // The seed task waits for a registered player. Complete the initial
+            // join first so the real connection reaches that registration point;
+            // entity snapshots are requested in a second play pass below.
+            let initial = drive_v770_join(
+                &mut peer,
+                plan.spec.expected_runtime_join_columns(),
+                0,
+                None,
+            )
+            .await?;
+            wait_for_mob_reseed(mobs).await?;
+            if requested_entities == 0 {
+                server
+                    .world_state()
+                    .set_rule("spawn_mobs", "false")
+                    .map_err(|error| {
+                        HeavyError::Unsupported(format!(
+                            "entity negative control could not disable natural spawning: {error}"
+                        ))
+                    })?;
+            }
+            let entity_actions = entity_spawn_actions(&plan.commands.setup)?;
+            let spawned = mobs.with(|sim| {
+                let shape = lodestone_entity::pathfinding::MobShape::land(0.6, 1.8);
+                for (entity_type, position) in &entity_actions {
+                    sim.spawn(*position, shape.clone(), 0.0, 0)
+                        .set_entity_type(entity_type.clone())
+                        .set_persistent(true);
+                }
+                entity_actions.len() as u64
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let (entity_packets, entity_positions_in_region) =
+                read_v770_entities(&mut peer, spawned, entity_region).await?;
+            Ok::<_, HeavyError>((
+                initial.0,
+                initial.1,
+                initial.2,
+                initial.3,
+                entity_packets,
+                entity_positions_in_region,
+            ))
+        } else {
+            drive_v770_join(
+                &mut peer,
+                plan.spec.expected_runtime_join_columns(),
+                requested_entities,
+                entity_region,
+            )
+            .await
+        };
         let installed_entities = mob_handle
             .as_ref()
             .map_or(0, |mobs| mobs.with(|sim| sim.snapshots().len() as u64));
@@ -1449,7 +1465,6 @@ fn counts_for(
     (requested, installed, consumed)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn entity_spawn_actions(commands: &[String]) -> Result<Vec<(ResourceKey, Vec3)>, HeavyError> {
     commands
         .iter()
@@ -1482,7 +1497,6 @@ fn entity_spawn_actions(commands: &[String]) -> Result<Vec<(ResourceKey, Vec3)>,
         .collect()
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 async fn wait_for_mob_reseed(mobs: &MobHandle) -> Result<(), HeavyError> {
     let started = Instant::now();
     let limit = std::time::Duration::from_secs(5);
@@ -1659,6 +1673,54 @@ async fn drive_v770_join(
         entity_packets,
         entity_positions_in_region,
     ))
+}
+
+async fn read_v770_entities(
+    peer: &mut Connection<DuplexStream>,
+    expected_entities: u64,
+    entity_region: Option<(f64, f64, f64, f64)>,
+) -> Result<(u64, u64), HeavyError> {
+    const PLAY_CLIENT_TICK_END: i32 = 13;
+    const PLAY_ADD_ENTITY: i32 = 1;
+
+    peer.write_packet(PLAY_CLIENT_TICK_END, &[])
+        .await
+        .map_err(|error| HeavyError::Peer(error.to_string()))?;
+    let mut entity_packets = 0;
+    let mut entity_positions_in_region = 0;
+    while entity_packets < expected_entities {
+        let (id, payload) = next_packet(peer).await?;
+        if id != PLAY_ADD_ENTITY {
+            continue;
+        }
+        let mut entity = Reader::new(&payload);
+        let _id = entity
+            .var_i32()
+            .map_err(|error| HeavyError::Peer(error.to_string()))?;
+        let _uuid = entity
+            .uuid()
+            .map_err(|error| HeavyError::Peer(error.to_string()))?;
+        let _type = entity
+            .var_i32()
+            .map_err(|error| HeavyError::Peer(error.to_string()))?;
+        let x = entity
+            .f64()
+            .map_err(|error| HeavyError::Peer(error.to_string()))?;
+        let _y = entity
+            .f64()
+            .map_err(|error| HeavyError::Peer(error.to_string()))?;
+        let z = entity
+            .f64()
+            .map_err(|error| HeavyError::Peer(error.to_string()))?;
+        entity_packets += 1;
+        if let Some((min_x, max_x, min_z, max_z)) = entity_region
+            && (min_x..max_x).contains(&x)
+            && (min_z..max_z).contains(&z)
+        {
+            entity_positions_in_region += 1;
+        }
+    }
+    Ok((entity_packets, entity_positions_in_region))
 }
 
 async fn next_packet(peer: &mut Connection<DuplexStream>) -> Result<(i32, Vec<u8>), HeavyError> {

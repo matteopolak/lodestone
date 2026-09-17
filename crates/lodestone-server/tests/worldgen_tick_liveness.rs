@@ -168,7 +168,6 @@ async fn integrated_ticks_and_play_packets_continue_during_held_worldgen() {
         world.clone(),
         (0..=0, 0..=0),
         (0, 0),
-        0,
         VIEW_RADIUS,
     );
     // Keep the liveness witness focused on the generation handoff rather than

@@ -224,7 +224,6 @@ async fn native_plugins_deny_or_prioritize_replacement_before_integrated_spawn()
         FlatWorld::default(),
         (0..=0, 0..=0),
         (0, 0),
-        0,
         1,
         server_app,
     );
@@ -278,7 +277,6 @@ async fn native_plugin_block_mutations_are_adjudicated_then_reach_the_authoritat
         FlatWorld::default(),
         (0..=0, 0..=0),
         (0, 0),
-        0,
         1,
         server_app,
     );

@@ -196,6 +196,123 @@ impl BrowserFrameSignal {
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+#[derive(Clone, Debug)]
+pub struct BrowserJoinProgress {
+    pub phase: &'static str,
+    pub elapsed_ms: f64,
+    pub loaded_columns: usize,
+    pub expected_columns: usize,
+    pub settled_columns: usize,
+    pub pending_meshes: usize,
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+#[derive(Debug)]
+struct BrowserJoinTrace {
+    started: Option<Instant>,
+    expected_columns: usize,
+    joining: bool,
+    loading_terrain: bool,
+    overlay_ready: bool,
+    first_terrain_presented: bool,
+    full_view_presented: bool,
+    events: Rc<RefCell<VecDeque<BrowserJoinProgress>>>,
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+impl BrowserJoinTrace {
+    fn new(events: Rc<RefCell<VecDeque<BrowserJoinProgress>>>) -> Self {
+        Self {
+            started: None,
+            expected_columns: 0,
+            joining: false,
+            loading_terrain: false,
+            overlay_ready: false,
+            first_terrain_presented: false,
+            full_view_presented: false,
+            events,
+        }
+    }
+
+    fn start(&mut self, radius: u32, phase: &'static str) {
+        self.started = Some(Instant::now());
+        self.expected_columns = crate::menu::loading::TerrainProgress::expected_for_radius(radius);
+        self.joining = false;
+        self.loading_terrain = false;
+        self.overlay_ready = false;
+        self.first_terrain_presented = false;
+        self.full_view_presented = false;
+        self.events.borrow_mut().clear();
+        self.push(phase, 0, 0, 0);
+    }
+
+    fn observe_before_present(
+        &mut self,
+        phase: crate::menu::loading::ConnectPhase,
+        overlay_ready: bool,
+        loaded_columns: usize,
+        pending_meshes: usize,
+    ) {
+        if !self.joining && phase == crate::menu::loading::ConnectPhase::Joining {
+            self.joining = true;
+            self.push("joining", loaded_columns, 0, pending_meshes);
+        }
+        if !self.loading_terrain && phase == crate::menu::loading::ConnectPhase::LoadingTerrain {
+            self.loading_terrain = true;
+            self.push("loading-terrain", loaded_columns, 0, pending_meshes);
+        }
+        if !self.overlay_ready && overlay_ready {
+            self.overlay_ready = true;
+            self.push("loading-overlay-ready", loaded_columns, 0, pending_meshes);
+        }
+    }
+
+    fn observe_presented(
+        &mut self,
+        terrain_drawn: bool,
+        loaded_columns: usize,
+        settled_columns: usize,
+        pending_meshes: usize,
+    ) {
+        if !self.first_terrain_presented && terrain_drawn {
+            self.first_terrain_presented = true;
+            self.push("first-terrain-presented", loaded_columns, settled_columns, pending_meshes);
+        }
+        if !self.full_view_presented
+            && settled_columns >= self.expected_columns
+            && pending_meshes == 0
+        {
+            self.full_view_presented = true;
+            self.push("full-view-presented", loaded_columns, settled_columns, pending_meshes);
+        }
+    }
+
+    fn push(
+        &self,
+        phase: &'static str,
+        loaded_columns: usize,
+        settled_columns: usize,
+        pending_meshes: usize,
+    ) {
+        let Some(started) = self.started else {
+            return;
+        };
+        let mut events = self.events.borrow_mut();
+        if events.len() == 16 {
+            events.pop_front();
+        }
+        events.push_back(BrowserJoinProgress {
+            phase,
+            elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+            loaded_columns,
+            expected_columns: self.expected_columns,
+            settled_columns,
+            pending_meshes,
+        });
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
 #[derive(Debug)]
 pub(crate) enum BrowserInput {
     CursorMoved { x: f64, y: f64 },
@@ -306,6 +423,7 @@ pub struct BrowserControl {
     frame_signal: BrowserFrameSignal,
     input: Rc<RefCell<BrowserInputQueue>>,
     actions: Rc<RefCell<BrowserActionQueue>>,
+    join_progress: Rc<RefCell<VecDeque<BrowserJoinProgress>>>,
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
@@ -335,6 +453,10 @@ impl BrowserControl {
             Some(BrowserAction::PointerLock(locked)) => Some(locked),
             None => None,
         }
+    }
+
+    pub fn take_join_progress(&self) -> Vec<BrowserJoinProgress> {
+        self.join_progress.borrow_mut().drain(..).collect()
     }
 
     pub fn browser_pointer_move(&self, x: f64, y: f64) {
@@ -1118,6 +1240,8 @@ pub(crate) struct WindowApp {
     browser_pointer_requested: bool,
     #[cfg(target_arch = "wasm32")]
     browser_actions: Option<Rc<RefCell<BrowserActionQueue>>>,
+    #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+    browser_join_trace: Option<BrowserJoinTrace>,
     /// Opt-in deterministic benchmark choreography. `None` is the ordinary
     /// player-controlled path and pays no per-frame state-machine work.
     benchmark: Option<BenchmarkDriver>,

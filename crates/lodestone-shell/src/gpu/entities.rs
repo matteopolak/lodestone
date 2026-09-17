@@ -1,6 +1,6 @@
 //! GPU resources and texture loading for the entity render pass: mobs,
 //! humanoid armour layers, the sheep wool layer, and the mob-fire billboard.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use lodestone_assets::equipment::{ArmourLayerType, ArmourSlot};
 use lodestone_render::entity_pipeline::flame_mesh;
@@ -22,7 +22,22 @@ use lodestone_render::{
 /// rather than invisible.
 #[derive(Debug)]
 pub(super) struct EntityRenderer {
+    deferred_assets_pending: bool,
+    deferred_assets_allowed: bool,
+    deferred_stage: DeferredEntityStage,
+    deferred_cursor: usize,
+    deferred_manager: Option<lodestone_assets::ResourceManager>,
+    deferred_trim_images:
+        Option<Vec<(lodestone_assets::ResourceLocation, lodestone_assets::Image)>>,
+    deferred_trim_decode_rx: Option<
+        std::sync::mpsc::Receiver<
+            Vec<(lodestone_assets::ResourceLocation, lodestone_assets::Image)>,
+        >,
+    >,
+    deferred_variant_refs: Option<Vec<String>>,
+    deferred_armour_specs: Option<Vec<((&'static str, ArmourLayerType), String)>>,
     pub(super) pipeline: EntityPipeline,
+    texture_sampler: wgpu::Sampler,
     /// `PlayerModel`'s own `ENTITY_TRANSLUCENT` equivalent.  Player skins are
     /// the one ordinary-body texture family whose partially-alpha outer-layer
     /// texels must blend at the 26.2 `0.1` cutout threshold; mobs continue to
@@ -288,291 +303,102 @@ pub(super) struct EntityRenderer {
     pub(super) variant_textures: HashMap<String, wgpu::BindGroup>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeferredEntityStage {
+    Models,
+    Variants,
+    ArmourModels,
+    ArmourTextures,
+    Trims,
+    Wool,
+    Cape,
+    Elytra,
+    PaintingsModels,
+    PaintingsTextures,
+    FlameModels,
+    FlameTexture,
+    Orb,
+    SpritesModel,
+    SpritesTextures,
+    Shadow,
+    Complete,
+}
+
+const DEFERRED_WORK_ITEMS_PER_FRAME: usize = 4;
+#[cfg(any(target_arch = "wasm32", test))]
+const TRIM_PERMUTATIONS_PER_BATCH: usize = 4;
+
+#[derive(Debug)]
+struct DeferredWorkBudget {
+    remaining: usize,
+    consumed: usize,
+}
+
+impl DeferredWorkBudget {
+    fn new() -> Self {
+        Self {
+            remaining: DEFERRED_WORK_ITEMS_PER_FRAME,
+            consumed: 0,
+        }
+    }
+
+    fn take(&mut self) -> bool {
+        if self.remaining == 0 {
+            return false;
+        }
+        self.remaining -= 1;
+        self.consumed += 1;
+        true
+    }
+}
+
 impl EntityRenderer {
     pub(super) fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         color_format: wgpu::TextureFormat,
     ) -> Self {
+        let started = crate::platform::Instant::now();
         let pipeline = EntityPipeline::new(device, color_format);
         let player_skin_pipeline = pipeline.player_skin_pipeline(device, color_format);
+        let cpu_started = crate::platform::Instant::now();
         let models = EntityModelSet::load();
-
+        let models_ms = cpu_started.elapsed().as_secs_f64() * 1000.0;
+        let cpu_started = crate::platform::Instant::now();
+        let armour_models = ArmourModelSet::load();
+        let armour_ms = cpu_started.elapsed().as_secs_f64() * 1000.0;
+        let cpu_started = crate::platform::Instant::now();
+        let wool_models = SheepWoolModelSet::load();
+        let wool_ms = cpu_started.elapsed().as_secs_f64() * 1000.0;
+        let cpu_started = crate::platform::Instant::now();
+        let cape_model = lodestone_render::CapeMesh::load();
+        let cape_ms = cpu_started.elapsed().as_secs_f64() * 1000.0;
+        let cpu_started = crate::platform::Instant::now();
+        let elytra_model = lodestone_render::ElytraMesh::load();
+        let elytra_ms = cpu_started.elapsed().as_secs_f64() * 1000.0;
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("lodestone-entity-sampler"),
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
-
         let mut gpu_models = HashMap::new();
         let mut textures = HashMap::new();
-        // Real per-mob sheets from client.jar, keyed by model name. Empty (and so
-        // every model falls back to a synthetic placeholder) when no pack is
-        // present — e.g. the offline demo world or a headless test.
-        let real = crate::resources::load_entity_textures();
-        for (name, mesh) in models.iter() {
+        for (name, mesh) in models.iter().filter(|(name, _)| {
+            matches!(*name, "player_wide" | "player_slim")
+        }) {
             if let Some(gpu) = GpuEntityModel::upload(device, mesh) {
                 gpu_models.insert(name, gpu);
             }
-            let view = match real.get(name) {
-                Some(img) => entity_texture_from_image(device, queue, img),
-                None => synthetic_entity_texture(device, queue, name).0,
-            };
-            let bg = pipeline.texture_bind_group(device, &view, &sampler);
-            textures.insert(name, bg);
+            let view = synthetic_entity_texture(device, queue, name).0;
+            textures.insert(name, pipeline.texture_bind_group(device, &view, &sampler));
         }
 
-        // The variant sheets, keyed by corpus reference. Loaded from the same pack
-        // stack as `real` above; empty without one, and every mob then draws its
-        // model's default sheet exactly as it did before this map existed.
-        let variant_textures: HashMap<String, wgpu::BindGroup> =
-            crate::resources::load_entity_variant_textures()
-                .iter()
-                .map(|(reference, img)| {
-                    let view = entity_texture_from_image(device, queue, img);
-                    (
-                        reference.clone(),
-                        pipeline.texture_bind_group(device, &view, &sampler),
-                    )
-                })
-                .collect();
-
-        // The armour layers. Four meshes, uploaded once and shared by every
-        // material — the geometry depends only on the slot's inflation, so
-        // eight materials do not mean eight helmets.
         let armour_pipeline = pipeline.armour_pipeline(device, color_format);
-        let armour_models = ArmourModelSet::load();
-        let armour_gpu: Vec<(ArmourSlot, GpuEntityModel)> = armour_models
-            .iter()
-            .filter_map(|(slot, mesh)| {
-                GpuEntityModel::upload_armour(device, mesh).map(|gpu| (slot, gpu))
-            })
-            .collect();
-        let armour_textures: HashMap<(&'static str, ArmourLayerType), wgpu::BindGroup> =
-            load_humanoid_armour_textures()
-                .iter()
-                .map(|(key, img)| {
-                    let view = entity_texture_from_image(device, queue, img);
-                    (*key, pipeline.texture_bind_group(device, &view, &sampler))
-                })
-                .collect();
-        // The trim sprites. Palette-swapped per material by
-        // `TrimAtlas`, so this is one bind group per `(pattern, suffix, layer
-        // type)` — 576 against the real jar, each a full-size sheet rather than a
-        // sub-rect of a stitched atlas, which is why they key on a
-        // `ResourceLocation` rather than joining `armour_textures`' tuple key.
-        let trim_textures: HashMap<lodestone_assets::ResourceLocation, wgpu::BindGroup> =
-            load_trim_sprites()
-                .into_iter()
-                .map(|(id, img)| {
-                    let view = entity_texture_from_image(device, queue, &img);
-                    (id, pipeline.texture_bind_group(device, &view, &sampler))
-                })
-                .collect();
-
-        // The sheep wool layer. One mesh, uploaded once — unlike armour, wool
-        // has no per-material variant to multiply it by.
-        let wool_models = SheepWoolModelSet::load();
-        let wool_gpu = GpuEntityModel::upload_wool(device, wool_models.mesh());
-        let wool_texture = load_sheep_wool_texture().map(|img| {
-            let view = entity_texture_from_image(device, queue, &img);
-            pipeline.texture_bind_group(device, &view, &sampler)
-        });
-
-        // The cape overlay. Code-defined geometry, so — unlike wool/armour —
-        // there is no pack-presence gate: the mesh always bakes, and whether
-        // any particular player's cape draws is entirely a function of
-        // whether *their* cape URL has a bind group in `player_skins` yet.
-        let cape_model = lodestone_render::CapeMesh::load();
-        let cape_gpu = GpuEntityModel::upload_cape(device, &cape_model);
-
-        // Paintings. Nine shapes baked eagerly (the same reason `flame_gpu_models`
-        // and `gpu_models` are: `prepare_paintings` only ever reads this list),
-        // and one texture per variant the jar actually carries.
-        let painting_models: Vec<(lodestone_render::painting::PaintingSize, GpuEntityModel)> =
-            lodestone_render::painting::painting_sizes()
-                .into_iter()
-                .filter_map(|size| {
-                    let mesh = lodestone_render::painting::painting_mesh(size.width, size.height);
-                    let (mut vertices, mut indices) = mesh.front;
-                    let front = lodestone_render::PartRange {
-                        index_start: 0,
-                        index_count: indices.len() as u32,
-                        vertex_start: 0,
-                        vertex_count: vertices.len() as u32,
-                    };
-                    let frame_index_start = indices.len() as u32;
-                    let frame_vertex_start = vertices.len() as u32;
-                    let base = frame_vertex_start;
-                    indices.extend(mesh.frame.1.iter().map(|i| i + base));
-                    vertices.extend(mesh.frame.0);
-                    let frame = lodestone_render::PartRange {
-                        index_start: frame_index_start,
-                        index_count: indices.len() as u32 - frame_index_start,
-                        vertex_start: frame_vertex_start,
-                        vertex_count: vertices.len() as u32 - frame_vertex_start,
-                    };
-                    GpuEntityModel::upload_parts(device, &vertices, &indices, vec![front, frame])
-                        .map(|gpu| (size, gpu))
-                })
-                .collect();
-        let painting_textures: HashMap<&'static str, wgpu::BindGroup> =
-            load_painting_textures()
-                .into_iter()
-                .map(|(name, img)| {
-                    let view = entity_texture_from_image(device, queue, &img);
-                    (name, pipeline.texture_bind_group(device, &view, &sampler))
-                })
-                .collect();
-        let painting_back_texture = load_jar_image(
-            lodestone_render::painting::PAINTING_BACK_TEXTURE,
-            "painting back tile",
-        )
-        .map(|img| {
-            let view = entity_texture_from_image(device, queue, &img);
-            pipeline.texture_bind_group(device, &view, &sampler)
-        });
-
-        // The elytra wings. Code-defined geometry like the cape, so the mesh
-        // always bakes; unlike the cape it has a fixed jar sheet, so there is
-        // a pack-presence gate on the *texture* the way wool has one.
-        let elytra_model = lodestone_render::ElytraMesh::load();
-        let elytra_gpu = GpuEntityModel::upload_parts(
-            device,
-            &elytra_model.vertices,
-            &elytra_model.indices,
-            elytra_model.parts.iter().map(|(_, r)| *r).collect(),
-        );
-        let elytra_texture = load_elytra_texture().map(|img| {
-            let view = entity_texture_from_image(device, queue, &img);
-            pipeline.texture_bind_group(device, &view, &sampler)
-        });
-
-        // The mob-fire billboard. A fourth pipeline over this
-        // pipeline's own two bind-group layouts — see
-        // `EntityPipeline::flame_pipeline`'s doc for why this is not a fifth
-        // bind group.
         let flame_pipeline = pipeline.flame_pipeline(device, color_format);
-        // One baked mesh per entity type with a known base hitbox, built
-        // eagerly for the same reason `gpu_models` above is: `prepare_flame`
-        // (gpu.rs) only ever *reads* this map, never builds into it, so every
-        // entry has to exist before the first frame. `EntityType::COUNT` is
-        // ~160 — trivial to build in full rather
-        // than lazily keying on which types are ever actually seen on fire.
-        let mut flame_gpu_models: HashMap<String, GpuEntityModel> = HashMap::new();
-        for entity_type in lodestone_data::entity_type::EntityType::all() {
-            let path = entity_type.path();
-            let dims = lodestone_data::entity_dimensions::base_dimensions(entity_type);
-            let (vertices, indices) = flame_mesh(dims.width, dims.height);
-            if let Some(gpu) = GpuEntityModel::upload_parts(
-                device,
-                &vertices,
-                &indices,
-                vec![lodestone_render::PartRange {
-                    index_start: 0,
-                    index_count: indices.len() as u32,
-                    vertex_start: 0,
-                    vertex_count: vertices.len() as u32,
-                }],
-            ) {
-                flame_gpu_models.insert(path.to_string(), gpu);
-            }
-        }
-        let flame_texture = load_flame_textures().map(|img| {
-            let view = entity_texture_from_image(device, queue, &img);
-            pipeline.texture_bind_group(device, &view, &sampler)
-        });
-
-        // The experience-orb billboard. One mesh, eleven parts — see
-        // `Self::orb_pipeline`'s doc for why the sprite cell is geometry rather
-        // than an instance attribute.
         let orb_pipeline = pipeline.orb_pipeline(device, color_format);
-        let orb_gpu_model = {
-            let mut vertices = Vec::new();
-            let mut indices = Vec::new();
-            let mut parts = Vec::new();
-            for icon in 0..lodestone_render::EXPERIENCE_ORB_ICON_COUNT {
-                let (cell_vertices, cell_indices) = lodestone_render::experience_orb_mesh(icon);
-                let vertex_start = u32::try_from(vertices.len()).unwrap_or(0);
-                let index_start = u32::try_from(indices.len()).unwrap_or(0);
-                // The draw binds no `base_vertex`, so each cell's indices are
-                // rebased onto its own slice of the shared vertex buffer here.
-                indices.extend(cell_indices.iter().map(|i| i + vertex_start));
-                let vertex_count = u32::try_from(cell_vertices.len()).unwrap_or(0);
-                vertices.extend(cell_vertices);
-                parts.push(lodestone_render::PartRange {
-                    index_start,
-                    index_count: u32::try_from(indices.len()).unwrap_or(0) - index_start,
-                    vertex_start,
-                    vertex_count,
-                });
-            }
-            GpuEntityModel::upload_parts(device, &vertices, &indices, parts)
-        };
-        let orb_texture = load_experience_orb_texture().map(|img| {
-            let view = entity_texture_from_image(device, queue, &img);
-            pipeline.texture_bind_group(device, &view, &sampler)
-        });
-
-        // The camera-facing entity sprites (dragon fireball, fishing bobber).
-        // One mesh with one part per table row, baked exactly the way the orb's
-        // eleven cells above are — the part index is the table index, which is
-        // what lets `prepare_entity_sprites` carry one `usize` instead of a
-        // name. See `EntityRenderer::sprite_gpu_model`.
-        let sprite_gpu_model = {
-            let mut vertices = Vec::new();
-            let mut indices = Vec::new();
-            let mut parts = Vec::new();
-            for sprite in lodestone_render::entity_sprite::ENTITY_SPRITES {
-                let (quad_vertices, quad_indices) =
-                    lodestone_render::entity_sprite::entity_sprite_mesh(sprite);
-                let vertex_start = u32::try_from(vertices.len()).unwrap_or(0);
-                let index_start = u32::try_from(indices.len()).unwrap_or(0);
-                // No `base_vertex` at the draw, so each sprite's indices are
-                // rebased onto its own slice of the shared vertex buffer here —
-                // the orb's loop above does the same and for the same reason.
-                indices.extend(quad_indices.iter().map(|i| i + vertex_start));
-                let vertex_count = u32::try_from(quad_vertices.len()).unwrap_or(0);
-                vertices.extend(quad_vertices);
-                parts.push(lodestone_render::PartRange {
-                    index_start,
-                    index_count: u32::try_from(indices.len()).unwrap_or(0) - index_start,
-                    vertex_start,
-                    vertex_count,
-                });
-            }
-            GpuEntityModel::upload_parts(device, &vertices, &indices, parts)
-        };
-        let sprite_textures = lodestone_render::entity_sprite::ENTITY_SPRITES
-            .iter()
-            .map(|sprite| {
-                load_entity_sprite_texture(sprite.texture).map(|img| {
-                    let view = entity_texture_from_image(device, queue, &img);
-                    pipeline.texture_bind_group(device, &view, &sampler)
-                })
-            })
-            .collect();
-
-        // The boat water-clip mask. No geometry/texture of its own to build:
-        // `"boat_water_patch"` went through the corpus loop above like every
-        // other rig, so `gpu_models`/`textures` already carry it.
         let water_mask_pipeline = pipeline.water_mask_pipeline(device, color_format);
-
-        // The entity ground-shadow decal. A seventh pipeline over this
-        // pipeline's own two bind-group layouts — see
-        // `EntityPipeline::shadow_pipeline`'s doc for why it does not go
-        // through `build_entity_pipeline` the way its siblings above do.
         let shadow_pipeline = pipeline.shadow_pipeline(device, color_format);
-        let shadow_texture = load_shadow_texture().map(|img| {
-            let view = entity_texture_from_image(device, queue, &img);
-            pipeline.texture_bind_group(device, &view, &sampler)
-        });
-
-        // A persistent group-0 uniform, rewritten every frame before the pass.
-        // Sized for camera **plus fog**: the entity shader reads both out of one
-        // binding, so a buffer sized for the camera alone would leave the fog
-        // block reading past the end.
         let cam_buffer = entity_camera_buffer(
             device,
             EntityCameraUniform {
@@ -584,18 +410,6 @@ impl EntityRenderer {
             },
         );
         let cam_bind_group = pipeline.camera_bind_group(device, &cam_buffer);
-
-        // The arm pass's own group-0 uniform (see the field docs). Fog is
-        // disabled rather than shared: the arm sits ~0.7 blocks from the eye and
-        // the nearest fog onset any preset produces is lava's 0 (and the sky
-        // fog's is `render_distance * 16 - clamp(that / 10, 4, 64)`, i.e. 115.2
-        // blocks at the default render distance — That fix replaced a flat
-        // 0.75× fraction with vanilla's span, but either way the arm is orders of
-        // magnitude nearer than the ramp), so a shared fog block could only ever
-        // contribute rounding — and vanilla likewise does not fog the hand.
-        // The *sky darken* lane is still rewritten each frame, because a
-        // permanently noon-lit arm over a dark world is exactly the "mobs are
-        // super bright at night" defect in miniature.
         let hand_cam_buffer = entity_camera_buffer(
             device,
             EntityCameraUniform {
@@ -608,8 +422,18 @@ impl EntityRenderer {
         );
         let hand_cam_bind_group = pipeline.camera_bind_group(device, &hand_cam_buffer);
 
-        Self {
+        let renderer = Self {
+            deferred_assets_pending: true,
+            deferred_assets_allowed: false,
+            deferred_stage: DeferredEntityStage::Models,
+            deferred_cursor: 0,
+            deferred_manager: None,
+            deferred_trim_images: None,
+            deferred_trim_decode_rx: None,
+            deferred_variant_refs: None,
+            deferred_armour_specs: None,
             pipeline,
+            texture_sampler: sampler,
             player_skin_pipeline,
             models,
             gpu_models,
@@ -620,36 +444,509 @@ impl EntityRenderer {
             hand_cam_bind_group,
             armour_pipeline,
             armour_models,
-            armour_gpu,
-            armour_textures,
-            trim_textures,
+            armour_gpu: Vec::new(),
+            armour_textures: HashMap::new(),
+            trim_textures: HashMap::new(),
             wool_models,
-            wool_gpu,
-            wool_texture,
+            wool_gpu: None,
+            wool_texture: None,
             cape_model,
-            cape_gpu,
+            cape_gpu: None,
             elytra_model,
-            elytra_gpu,
-            elytra_texture,
-            painting_models,
-            painting_textures,
-            painting_back_texture,
+            elytra_gpu: None,
+            elytra_texture: None,
+            painting_models: Vec::new(),
+            painting_textures: HashMap::new(),
+            painting_back_texture: None,
             flame_pipeline,
-            flame_gpu_models,
-            flame_texture,
+            flame_gpu_models: HashMap::new(),
+            flame_texture: None,
             orb_pipeline,
-            orb_gpu_model,
-            orb_texture,
-            sprite_gpu_model,
-            sprite_textures,
+            orb_gpu_model: None,
+            orb_texture: None,
+            sprite_gpu_model: None,
+            sprite_textures: Vec::new(),
             water_mask_pipeline,
             shadow_pipeline,
-            shadow_texture,
-            // Nothing until a skin is fetched; see `player_skins`' doc for why a
-            // miss falls back rather than failing.
+            shadow_texture: None,
             player_skins: HashMap::new(),
             player_skins_epoch: 0,
-            variant_textures,
+            variant_textures: HashMap::new(),
+        };
+        tracing::info!(
+            target: "startup_profile",
+            phase = "entity_renderer_core",
+            models_ms,
+            armour_ms,
+            wool_ms,
+            cape_ms,
+            elytra_ms,
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "core entity resources ready"
+        );
+        renderer
+    }
+
+    pub(super) fn initialize_deferred_assets(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color_format: wgpu::TextureFormat,
+    ) {
+        if !self.deferred_assets_pending || !self.deferred_assets_allowed {
+            return;
+        }
+        let started = crate::platform::Instant::now();
+        let stage_before = self.deferred_stage;
+        if self.deferred_manager.is_none() {
+            self.deferred_manager = crate::resources::vanilla_manager();
+        }
+        let mut budget = DeferredWorkBudget::new();
+        while self.deferred_assets_pending
+            && self.deferred_step(device, queue, color_format, &mut budget)
+        {}
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        if budget.consumed > 0 || stage_before != self.deferred_stage {
+            tracing::info!(
+                target: "startup_profile",
+                phase = "entity_renderer_deferred",
+                stage = ?stage_before,
+                work_items = budget.consumed,
+                elapsed_ms,
+                pending = self.deferred_assets_pending,
+                "deferred entity resource batch"
+            );
+        } else {
+            tracing::trace!(
+                target: "startup_profile",
+                phase = "entity_renderer_deferred_wait",
+                stage = ?stage_before,
+                elapsed_ms,
+                "deferred entity resources are waiting for an async dependency"
+            );
+        }
+    }
+
+    pub(super) fn allow_deferred_assets(&mut self) {
+        self.deferred_assets_allowed = true;
+    }
+
+    #[cfg(test)]
+    pub(super) fn deferred_assets_pending(&self) -> bool {
+        self.deferred_assets_pending
+    }
+
+    fn deferred_step(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        _color_format: wgpu::TextureFormat,
+        budget: &mut DeferredWorkBudget,
+    ) -> bool {
+        loop {
+            match self.deferred_stage {
+                DeferredEntityStage::Models => {
+                    let Some((name, mesh)) = self.models.iter().nth(self.deferred_cursor) else {
+                        self.deferred_stage = DeferredEntityStage::Variants;
+                        self.deferred_cursor = 0;
+                        continue;
+                    };
+                    if !budget.take() {
+                        return false;
+                    }
+                    let name = name;
+                    if !self.gpu_models.contains_key(name) {
+                        if let Some(gpu) = GpuEntityModel::upload(device, mesh) {
+                            self.gpu_models.insert(name, gpu);
+                        }
+                    }
+                    let view = self
+                        .deferred_manager
+                        .as_ref()
+                        .and_then(|manager| load_entity_image(manager, name))
+                        .map(|image| entity_texture_from_image(device, queue, &image))
+                        .unwrap_or_else(|| synthetic_entity_texture(device, queue, name).0);
+                    let bg = self.pipeline.texture_bind_group(device, &view, &self.texture_sampler);
+                    self.textures.insert(name, bg);
+                    self.deferred_cursor += 1;
+                    return true;
+                }
+                DeferredEntityStage::Variants => {
+                    if self.deferred_variant_refs.is_none() {
+                        self.deferred_variant_refs = Some(
+                            self.deferred_manager
+                                .as_ref()
+                                .map(variant_references)
+                                .unwrap_or_default(),
+                        );
+                    }
+                    let refs = self
+                        .deferred_variant_refs
+                        .as_ref()
+                        .expect("variant refs set");
+                    let Some(reference) = refs.get(self.deferred_cursor) else {
+                        self.deferred_stage = DeferredEntityStage::ArmourModels;
+                        self.deferred_cursor = 0;
+                        continue;
+                    };
+                    if !budget.take() {
+                        return false;
+                    }
+                    let reference = reference.clone();
+                    if let Some(image) = self
+                        .deferred_manager
+                        .as_ref()
+                        .and_then(|manager| load_reference_image(manager, &reference))
+                    {
+                        let view = entity_texture_from_image(device, queue, &image);
+                        let bg = self.pipeline.texture_bind_group(device, &view, &self.texture_sampler);
+                        self.variant_textures.insert(reference, bg);
+                    }
+                    self.deferred_cursor += 1;
+                    return true;
+                }
+                DeferredEntityStage::ArmourModels => {
+                    let Some(&slot) = ArmourSlot::ALL.get(self.deferred_cursor) else {
+                        self.deferred_stage = DeferredEntityStage::ArmourTextures;
+                        self.deferred_cursor = 0;
+                        continue;
+                    };
+                    if !budget.take() {
+                        return false;
+                    }
+                    if let Some(mesh) = self.armour_models.get(slot)
+                        && let Some(gpu) = GpuEntityModel::upload_armour(device, mesh)
+                    {
+                        self.armour_gpu.push((slot, gpu));
+                    }
+                    self.deferred_cursor += 1;
+                    return true;
+                }
+                DeferredEntityStage::ArmourTextures => {
+                    if self.deferred_armour_specs.is_none() {
+                        self.deferred_armour_specs = Some(armour_texture_specs());
+                    }
+                    let specs = self
+                        .deferred_armour_specs
+                        .as_ref()
+                        .expect("armour specs set");
+                    let Some((key, path)) = specs.get(self.deferred_cursor) else {
+                        self.deferred_stage = DeferredEntityStage::Trims;
+                        self.deferred_cursor = 0;
+                        continue;
+                    };
+                    if !budget.take() {
+                        return false;
+                    }
+                    let key = *key;
+                    if let Some(image) = self
+                        .deferred_manager
+                        .as_ref()
+                        .and_then(|manager| load_image(manager, path, "humanoid armour"))
+                    {
+                        let view = entity_texture_from_image(device, queue, &image);
+                        let bg = self.pipeline.texture_bind_group(device, &view, &self.texture_sampler);
+                        self.armour_textures.insert(key, bg);
+                    }
+                    self.deferred_cursor += 1;
+                    return true;
+                }
+                DeferredEntityStage::Trims => {
+                    if self.deferred_trim_decode_rx.is_none() && self.deferred_trim_images.is_none() {
+                        if !budget.take() {
+                            return false;
+                        }
+                        self.deferred_trim_decode_rx = Some(start_trim_decode());
+                        return true;
+                    }
+                    if self.deferred_trim_images.is_none() {
+                        let Some(receiver) = self.deferred_trim_decode_rx.as_ref() else {
+                            return false;
+                        };
+                        match receiver.try_recv() {
+                            Ok(mut images) => {
+                                images.sort_by(|(left, _), (right, _)| left.cmp(right));
+                                tracing::info!(
+                                    target: "startup_profile",
+                                    phase = "entity_renderer_trim_decode",
+                                    count = images.len(),
+                                    "deferred trim images ready"
+                                );
+                                self.deferred_trim_images = Some(images);
+                                self.deferred_trim_decode_rx = None;
+                                self.deferred_cursor = 0;
+                                continue;
+                            }
+                            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                self.deferred_trim_images = Some(Vec::new());
+                                self.deferred_trim_decode_rx = None;
+                                self.deferred_cursor = 0;
+                                continue;
+                            }
+                        }
+                    }
+                    let images = self.deferred_trim_images.as_ref().expect("trim images set");
+                    let Some((id, image)) = images.get(self.deferred_cursor) else {
+                        self.deferred_stage = DeferredEntityStage::Wool;
+                        self.deferred_cursor = 0;
+                        continue;
+                    };
+                    if !budget.take() {
+                        return false;
+                    }
+                    let id = id.clone();
+                    let view = entity_texture_from_image(device, queue, image);
+                    let bg = self
+                        .pipeline
+                        .texture_bind_group(device, &view, &self.texture_sampler);
+                    self.trim_textures.insert(id, bg);
+                    self.deferred_cursor += 1;
+                    return true;
+                }
+                DeferredEntityStage::Wool => {
+                    if self.deferred_cursor == 0 {
+                        if !budget.take() {
+                            return false;
+                        }
+                        self.wool_gpu = GpuEntityModel::upload_wool(device, self.wool_models.mesh());
+                        self.deferred_cursor = 1;
+                        return true;
+                    }
+                    if self.deferred_cursor == 1 {
+                        if !budget.take() {
+                            return false;
+                        }
+                        self.wool_texture = self
+                            .deferred_manager
+                            .as_ref()
+                            .and_then(load_sheep_wool_texture_from_manager)
+                            .map(|image| {
+                                let view = entity_texture_from_image(device, queue, &image);
+                                self.pipeline.texture_bind_group(device, &view, &self.texture_sampler)
+                            });
+                        self.deferred_stage = DeferredEntityStage::Cape;
+                        self.deferred_cursor = 0;
+                        return true;
+                    }
+                }
+                DeferredEntityStage::Cape => {
+                    if !budget.take() {
+                        return false;
+                    }
+                    self.cape_gpu = GpuEntityModel::upload_cape(device, &self.cape_model);
+                    self.deferred_stage = DeferredEntityStage::Elytra;
+                    self.deferred_cursor = 0;
+                    return true;
+                }
+                DeferredEntityStage::Elytra => {
+                    if self.deferred_cursor == 0 {
+                        if !budget.take() {
+                            return false;
+                        }
+                        self.elytra_gpu = GpuEntityModel::upload_parts(
+                            device,
+                            &self.elytra_model.vertices,
+                            &self.elytra_model.indices,
+                            self.elytra_model.parts.iter().map(|(_, range)| *range).collect(),
+                        );
+                        self.deferred_cursor = 1;
+                        return true;
+                    }
+                    if self.deferred_cursor == 1 {
+                        if !budget.take() {
+                            return false;
+                        }
+                        self.elytra_texture = self
+                            .deferred_manager
+                            .as_ref()
+                            .and_then(load_elytra_texture_from_manager)
+                            .map(|image| {
+                                let view = entity_texture_from_image(device, queue, &image);
+                                self.pipeline.texture_bind_group(device, &view, &self.texture_sampler)
+                            });
+                        self.deferred_stage = DeferredEntityStage::PaintingsModels;
+                        self.deferred_cursor = 0;
+                        return true;
+                    }
+                }
+                DeferredEntityStage::PaintingsModels => {
+                    let sizes = lodestone_render::painting::painting_sizes();
+                    let Some(&size) = sizes.get(self.deferred_cursor) else {
+                        self.deferred_stage = DeferredEntityStage::PaintingsTextures;
+                        self.deferred_cursor = 0;
+                        continue;
+                    };
+                    if !budget.take() {
+                        return false;
+                    }
+                    if let Some(gpu) = upload_painting_model(device, size) {
+                        self.painting_models.push((size, gpu));
+                    }
+                    self.deferred_cursor += 1;
+                    return true;
+                }
+                DeferredEntityStage::PaintingsTextures => {
+                    let variants = lodestone_render::painting::PAINTING_VARIANTS;
+                    if self.deferred_cursor < variants.len() {
+                        if !budget.take() {
+                            return false;
+                        }
+                        let name = variants[self.deferred_cursor].0;
+                        if let Some(image) = self
+                            .deferred_manager
+                            .as_ref()
+                            .and_then(|manager| load_image(manager, &lodestone_render::painting::painting_texture_path(name), "painting sprite"))
+                        {
+                            let view = entity_texture_from_image(device, queue, &image);
+                    let bg = self.pipeline.texture_bind_group(device, &view, &self.texture_sampler);
+                            self.painting_textures.insert(name, bg);
+                        }
+                        self.deferred_cursor += 1;
+                        return true;
+                    }
+                    if self.deferred_cursor == variants.len() {
+                        if !budget.take() {
+                            return false;
+                        }
+                        self.painting_back_texture = self
+                            .deferred_manager
+                            .as_ref()
+                            .and_then(|manager| load_image(manager, lodestone_render::painting::PAINTING_BACK_TEXTURE, "painting back tile"))
+                            .map(|image| {
+                                let view = entity_texture_from_image(device, queue, &image);
+                                self.pipeline.texture_bind_group(device, &view, &self.texture_sampler)
+                            });
+                        self.deferred_stage = DeferredEntityStage::FlameModels;
+                        self.deferred_cursor = 0;
+                        return true;
+                    }
+                }
+                DeferredEntityStage::FlameModels => {
+                    let Some(entity_type) = lodestone_data::entity_type::EntityType::all()
+                        .nth(self.deferred_cursor)
+                    else {
+                        self.deferred_stage = DeferredEntityStage::FlameTexture;
+                        self.deferred_cursor = 0;
+                        continue;
+                    };
+                    if !budget.take() {
+                        return false;
+                    }
+                    let path = entity_type.path();
+                    let dims = lodestone_data::entity_dimensions::base_dimensions(entity_type);
+                    let (vertices, indices) = flame_mesh(dims.width, dims.height);
+                    if let Some(gpu) = GpuEntityModel::upload_parts(
+                        device,
+                        &vertices,
+                        &indices,
+                        vec![lodestone_render::PartRange {
+                            index_start: 0,
+                            index_count: indices.len() as u32,
+                            vertex_start: 0,
+                            vertex_count: vertices.len() as u32,
+                        }],
+                    ) {
+                        self.flame_gpu_models.insert(path.to_owned(), gpu);
+                    }
+                    self.deferred_cursor += 1;
+                    return true;
+                }
+                DeferredEntityStage::FlameTexture => {
+                    if !budget.take() {
+                        return false;
+                    }
+                    self.flame_texture = self
+                        .deferred_manager
+                        .as_ref()
+                        .and_then(load_flame_textures_from_manager)
+                        .map(|image| {
+                            let view = entity_texture_from_image(device, queue, &image);
+                            self.pipeline.texture_bind_group(device, &view, &self.texture_sampler)
+                        });
+                    self.deferred_stage = DeferredEntityStage::Orb;
+                    self.deferred_cursor = 0;
+                    return true;
+                }
+                DeferredEntityStage::Orb => {
+                    if self.deferred_cursor == 0 {
+                        if !budget.take() {
+                            return false;
+                        }
+                        self.orb_gpu_model = upload_orb_model(device);
+                        self.deferred_cursor = 1;
+                        return true;
+                    }
+                    if self.deferred_cursor == 1 {
+                        if !budget.take() {
+                            return false;
+                        }
+                        self.orb_texture = self
+                            .deferred_manager
+                            .as_ref()
+                            .and_then(load_orb_texture_from_manager)
+                            .map(|image| {
+                                let view = entity_texture_from_image(device, queue, &image);
+                                self.pipeline.texture_bind_group(device, &view, &self.texture_sampler)
+                            });
+                        self.deferred_stage = DeferredEntityStage::SpritesModel;
+                        self.deferred_cursor = 0;
+                        return true;
+                    }
+                }
+                DeferredEntityStage::SpritesModel => {
+                    if !budget.take() {
+                        return false;
+                    }
+                    self.sprite_gpu_model = upload_sprite_model(device);
+                    self.deferred_stage = DeferredEntityStage::SpritesTextures;
+                    self.deferred_cursor = 0;
+                    return true;
+                }
+                DeferredEntityStage::SpritesTextures => {
+                    let sprites = lodestone_render::entity_sprite::ENTITY_SPRITES;
+                    let Some(sprite) = sprites.get(self.deferred_cursor) else {
+                        self.deferred_stage = DeferredEntityStage::Shadow;
+                        self.deferred_cursor = 0;
+                        continue;
+                    };
+                    if !budget.take() {
+                        return false;
+                    }
+                    let texture = self
+                        .deferred_manager
+                        .as_ref()
+                        .and_then(|manager| load_image(manager, sprite.texture, "entity sprite"))
+                        .map(|image| {
+                            let view = entity_texture_from_image(device, queue, &image);
+                            self.pipeline.texture_bind_group(device, &view, &self.texture_sampler)
+                        });
+                    self.sprite_textures.push(texture);
+                    self.deferred_cursor += 1;
+                    return true;
+                }
+                DeferredEntityStage::Shadow => {
+                    if !budget.take() {
+                        return false;
+                    }
+                    self.shadow_texture = self
+                        .deferred_manager
+                        .as_ref()
+                        .and_then(load_shadow_texture_from_manager)
+                        .map(|image| {
+                            let view = entity_texture_from_image(device, queue, &image);
+                            self.pipeline.texture_bind_group(device, &view, &self.texture_sampler)
+                        });
+                    self.deferred_stage = DeferredEntityStage::Complete;
+                    self.deferred_cursor = 0;
+                    self.deferred_assets_pending = false;
+                    return true;
+                }
+                DeferredEntityStage::Complete => {
+                    self.deferred_assets_pending = false;
+                    return false;
+                }
+            }
         }
     }
 
@@ -715,6 +1012,343 @@ impl EntityRenderer {
     }
 }
 
+fn load_image(
+    manager: &lodestone_assets::ResourceManager,
+    path: &str,
+    what: &str,
+) -> Option<lodestone_assets::Image> {
+    let bytes = manager.read(path)?;
+    match lodestone_assets::Image::decode_png(&bytes) {
+        Ok(image) => Some(image),
+        Err(error) => {
+            tracing::warn!(target: "assets", "decode {what} {path}: {error}");
+            None
+        }
+    }
+}
+
+fn load_entity_image(
+    manager: &lodestone_assets::ResourceManager,
+    model_name: &str,
+) -> Option<lodestone_assets::Image> {
+    lodestone_render::entity_texture_candidates(model_name)
+        .iter()
+        .find_map(|path| load_image(manager, path, "entity sheet"))
+}
+
+fn load_reference_image(
+    manager: &lodestone_assets::ResourceManager,
+    reference: &str,
+) -> Option<lodestone_assets::Image> {
+    load_image(
+        manager,
+        &format!("assets/minecraft/textures/{reference}.png"),
+        "entity variant sheet",
+    )
+}
+
+fn variant_references(manager: &lodestone_assets::ResourceManager) -> Vec<String> {
+    let mut seen = HashSet::<String>::new();
+    let mut references = Vec::new();
+    for skin in lodestone_assets::skin::default_skins() {
+        if seen.insert(skin.texture.to_owned()) {
+            references.push(skin.texture.to_owned());
+        }
+    }
+    for directory in lodestone_render::entity_variant_sheet_dirs() {
+        for path in manager.list(directory) {
+            if let Some(reference) = lodestone_render::sheet_reference_of(&path)
+                && seen.insert(reference.to_owned())
+            {
+                references.push(reference.to_owned());
+            }
+        }
+    }
+    references.sort();
+    references
+}
+
+fn armour_texture_specs() -> Vec<((&'static str, ArmourLayerType), String)> {
+    use lodestone_assets::equipment::{ARMOUR_ASSETS, armour_texture_path};
+
+    let mut seen = HashSet::new();
+    let mut specs = Vec::new();
+    for asset in ARMOUR_ASSETS {
+        for layer_type in [ArmourLayerType::Humanoid, ArmourLayerType::HumanoidLeggings] {
+            for layer in asset.layers(layer_type) {
+                let key = (layer.texture, layer_type);
+                if seen.insert(key) {
+                    specs.push((key, armour_texture_path(layer, layer_type)));
+                }
+            }
+        }
+    }
+    specs
+}
+
+fn load_sheep_wool_texture_from_manager(
+    manager: &lodestone_assets::ResourceManager,
+) -> Option<lodestone_assets::Image> {
+    load_image(
+        manager,
+        "assets/minecraft/textures/entity/sheep/sheep_wool.png",
+        "sheep wool sheet",
+    )
+}
+
+fn load_elytra_texture_from_manager(
+    manager: &lodestone_assets::ResourceManager,
+) -> Option<lodestone_assets::Image> {
+    load_image(manager, lodestone_assets::entity::ELYTRA_TEXTURE_PATH, "elytra sheet")
+}
+
+fn load_flame_textures_from_manager(
+    manager: &lodestone_assets::ResourceManager,
+) -> Option<lodestone_assets::Image> {
+    match lodestone_assets::entity_flame::load_combined_flame_texture(manager) {
+        Ok(image) => Some(image),
+        Err(error) => {
+            tracing::warn!(target: "assets", "load combined flame texture: {error}");
+            None
+        }
+    }
+}
+
+fn load_orb_texture_from_manager(
+    manager: &lodestone_assets::ResourceManager,
+) -> Option<lodestone_assets::Image> {
+    load_image(
+        manager,
+        lodestone_render::EXPERIENCE_ORB_TEXTURE,
+        "experience orb sheet",
+    )
+}
+
+fn load_shadow_texture_from_manager(
+    manager: &lodestone_assets::ResourceManager,
+) -> Option<lodestone_assets::Image> {
+    load_image(manager, lodestone_render::SHADOW_TEXTURE, "entity shadow sheet")
+}
+
+fn start_trim_decode(
+) -> std::sync::mpsc::Receiver<Vec<(lodestone_assets::ResourceLocation, lodestone_assets::Image)>>
+{
+    let (sender, receiver) = std::sync::mpsc::channel();
+    #[cfg(all(not(test), not(target_arch = "wasm32")))]
+    {
+        let _ = std::thread::Builder::new()
+            .name("lodestone-trim-decode".to_owned())
+            .spawn(move || {
+                let _ = sender.send(decode_trim_images());
+            });
+    }
+    #[cfg(all(not(test), target_arch = "wasm32"))]
+    {
+        wasm_bindgen_futures::spawn_local(async move {
+            crate::platform::relay::sleep(std::time::Duration::ZERO).await;
+            let _ = sender.send(decode_trim_images_batched().await);
+        });
+    }
+    #[cfg(test)]
+    {
+        let _ = sender.send(decode_trim_images());
+    }
+    receiver
+}
+
+fn decode_trim_images() -> Vec<(lodestone_assets::ResourceLocation, lodestone_assets::Image)> {
+    let started = crate::platform::Instant::now();
+    let images: Vec<_> = load_trim_sprites().into_iter().collect();
+    tracing::info!(
+        target: "startup_profile",
+        phase = "entity_renderer_trim_decode",
+        count = images.len(),
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+        "trim decode complete"
+    );
+    images
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn decode_trim_images_batched() -> Vec<(lodestone_assets::ResourceLocation, lodestone_assets::Image)> {
+    use lodestone_assets::atlas_source::{AtlasDefinition, AtlasSource};
+    use lodestone_assets::equipment::ARMOUR_ASSETS;
+    use lodestone_assets::trim::{
+        ARMOR_TRIMS_ATLAS_PATH, TRIM_MATERIALS, TRIM_PATTERNS, trim_sprite_id,
+    };
+
+    let started = crate::platform::Instant::now();
+    let Some(manager) = crate::resources::vanilla_manager() else {
+        return Vec::new();
+    };
+    let Some(definition) = AtlasDefinition::load_stacked(&manager, ARMOR_TRIMS_ATLAS_PATH) else {
+        tracing::warn!(target: "assets", "load armour trims: descriptor missing");
+        return Vec::new();
+    };
+
+    let mut allowed = HashSet::new();
+    for pattern in TRIM_PATTERNS {
+        for material in TRIM_MATERIALS {
+            for asset in ARMOUR_ASSETS {
+                for layer_type in [ArmourLayerType::Humanoid, ArmourLayerType::HumanoidLeggings] {
+                    if let Ok(id) = trim_sprite_id(pattern, material, layer_type, asset.id) {
+                        allowed.insert(id);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut out = HashMap::new();
+    let mut batches = 0usize;
+    let mut max_batch_ms = 0.0f64;
+    for source in definition.sources {
+        let AtlasSource::PalettedPermutations {
+            textures,
+            palette_key,
+            permutations,
+            separator,
+        } = source
+        else {
+            continue;
+        };
+        for texture in textures {
+            let mut permutation_iter = permutations.iter();
+            loop {
+                let mut permutation = std::collections::BTreeMap::new();
+                for _ in 0..TRIM_PERMUTATIONS_PER_BATCH {
+                    let Some((suffix, palette)) = permutation_iter.next() else {
+                        break;
+                    };
+                    permutation.insert(suffix.clone(), palette.clone());
+                }
+                if permutation.is_empty() {
+                    break;
+                }
+                let source = AtlasSource::PalettedPermutations {
+                    textures: vec![texture.clone()],
+                    palette_key: palette_key.clone(),
+                    permutations: permutation,
+                    separator: separator.clone(),
+                };
+                let batch_started = crate::platform::Instant::now();
+                let (baked, _) = lodestone_assets::bake_paletted_permutations(&source, &manager);
+                for (id, image) in baked {
+                    if allowed.contains(&id) {
+                        out.insert(id, image);
+                    }
+                }
+                batches += 1;
+                max_batch_ms =
+                    max_batch_ms.max(batch_started.elapsed().as_secs_f64() * 1000.0);
+                crate::platform::relay::sleep(std::time::Duration::ZERO).await;
+            }
+        }
+    }
+    let images: Vec<_> = out.into_iter().collect();
+    tracing::info!(
+        target: "startup_profile",
+        phase = "entity_renderer_trim_decode",
+        batches,
+        count = images.len(),
+        max_batch_ms,
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+        "trim decode complete"
+    );
+    images
+}
+
+fn upload_painting_model(
+    device: &wgpu::Device,
+    size: lodestone_render::painting::PaintingSize,
+) -> Option<GpuEntityModel> {
+    let mesh = lodestone_render::painting::painting_mesh(size.width, size.height);
+    let (mut vertices, mut indices) = mesh.front;
+    let front = lodestone_render::PartRange {
+        index_start: 0,
+        index_count: indices.len() as u32,
+        vertex_start: 0,
+        vertex_count: vertices.len() as u32,
+    };
+    let frame_index_start = indices.len() as u32;
+    let frame_vertex_start = vertices.len() as u32;
+    indices.extend(mesh.frame.1.iter().map(|index| index + frame_vertex_start));
+    vertices.extend(mesh.frame.0);
+    let frame = lodestone_render::PartRange {
+        index_start: frame_index_start,
+        index_count: indices.len() as u32 - frame_index_start,
+        vertex_start: frame_vertex_start,
+        vertex_count: vertices.len() as u32 - frame_vertex_start,
+    };
+    GpuEntityModel::upload_parts(device, &vertices, &indices, vec![front, frame])
+}
+
+fn upload_orb_model(device: &wgpu::Device) -> Option<GpuEntityModel> {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    let mut parts = Vec::new();
+    for icon in 0..lodestone_render::EXPERIENCE_ORB_ICON_COUNT {
+        let (cell_vertices, cell_indices) = lodestone_render::experience_orb_mesh(icon);
+        let vertex_start = u32::try_from(vertices.len()).unwrap_or(0);
+        let index_start = u32::try_from(indices.len()).unwrap_or(0);
+        indices.extend(cell_indices.iter().map(|index| index + vertex_start));
+        let vertex_count = u32::try_from(cell_vertices.len()).unwrap_or(0);
+        vertices.extend(cell_vertices);
+        parts.push(lodestone_render::PartRange {
+            index_start,
+            index_count: u32::try_from(indices.len()).unwrap_or(0) - index_start,
+            vertex_start,
+            vertex_count,
+        });
+    }
+    GpuEntityModel::upload_parts(device, &vertices, &indices, parts)
+}
+
+fn upload_sprite_model(device: &wgpu::Device) -> Option<GpuEntityModel> {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    let mut parts = Vec::new();
+    for sprite in lodestone_render::entity_sprite::ENTITY_SPRITES {
+        let (quad_vertices, quad_indices) =
+            lodestone_render::entity_sprite::entity_sprite_mesh(sprite);
+        let vertex_start = u32::try_from(vertices.len()).unwrap_or(0);
+        let index_start = u32::try_from(indices.len()).unwrap_or(0);
+        indices.extend(quad_indices.iter().map(|index| index + vertex_start));
+        let vertex_count = u32::try_from(quad_vertices.len()).unwrap_or(0);
+        vertices.extend(quad_vertices);
+        parts.push(lodestone_render::PartRange {
+            index_start,
+            index_count: u32::try_from(indices.len()).unwrap_or(0) - index_start,
+            vertex_start,
+            vertex_count,
+        });
+    }
+    GpuEntityModel::upload_parts(device, &vertices, &indices, parts)
+}
+
+#[cfg(test)]
+mod deferred_tests {
+    use super::{
+        DEFERRED_WORK_ITEMS_PER_FRAME, DeferredWorkBudget, TRIM_PERMUTATIONS_PER_BATCH,
+    };
+
+    #[test]
+    fn deferred_work_budget_has_a_hard_per_redraw_limit() {
+        let mut budget = DeferredWorkBudget::new();
+        for _ in 0..DEFERRED_WORK_ITEMS_PER_FRAME {
+            assert!(budget.take());
+        }
+        assert_eq!(budget.consumed, DEFERRED_WORK_ITEMS_PER_FRAME);
+        assert!(!budget.take());
+        assert_eq!(budget.consumed, DEFERRED_WORK_ITEMS_PER_FRAME);
+    }
+
+    #[test]
+    fn trim_decode_yields_after_a_bounded_batch() {
+        assert_eq!(TRIM_PERMUTATIONS_PER_BATCH, 4);
+    }
+}
+
 /// Decode every humanoid-armour sheet 26.2 ships, keyed by
 /// `(texture name, layer type)` — the identity `equipment/<asset>.json` gives a
 /// layer, and therefore the identity a bind group needs.
@@ -735,6 +1369,7 @@ impl EntityRenderer {
 /// `crate::platform::assets` rather than as a path, so a surviving copy would have read
 /// a path that cannot exist, found nothing, and drawn armourless players in a browser —
 /// while every log line still reported success.
+#[cfg(test)]
 pub(super) fn load_humanoid_armour_textures()
 -> HashMap<(&'static str, ArmourLayerType), lodestone_assets::Image> {
     use lodestone_assets::equipment::{ARMOUR_ASSETS, armour_texture_path};
@@ -833,202 +1468,6 @@ pub(super) fn load_trim_sprites() -> HashMap<lodestone_assets::ResourceLocation,
     }
     tracing::info!(target: "assets", loaded = out.len(), "loaded vanilla armour trim sprites");
     out
-}
-
-/// Decode the sheep wool layer's own sheet (`entity/sheep/sheep_wool.png`)
-/// from the vanilla `client.jar`, or `None` if no pack is found — the wool
-/// equivalent of [`load_humanoid_armour_textures`], and reaching the jar the same way
-/// it does — through [`crate::resources::vanilla_manager`], for the reason documented
-/// there.
-///
-/// Confirmed 64×32 and exactly greyscale against the real jar by
-/// `lodestone-assets/tests/real_jar.rs::sheep_wool_texture_decodes_from_the_real_jar`
-/// — that is why [`sheep_wool_tint`] can paint this sheet with a flat gamma-
-/// space multiply rather than needing a per-colour texture.
-fn load_sheep_wool_texture() -> Option<lodestone_assets::Image> {
-    use lodestone_assets::Image;
-
-    // `crate::resources::vanilla_manager` — see `load_humanoid_armour_textures`.
-    let manager = crate::resources::vanilla_manager()?;
-    const PATH: &str = "assets/minecraft/textures/entity/sheep/sheep_wool.png";
-    let Some(png) = manager.read(PATH) else {
-        tracing::warn!(target: "assets", "missing sheep wool sheet {PATH}");
-        return None;
-    };
-    match Image::decode_png(&png) {
-        Ok(img) => Some(img),
-        Err(e) => {
-            tracing::warn!(target: "assets", "decode {PATH}: {e}");
-            None
-        }
-    }
-}
-
-/// Decode one jar image by full asset path, or `None` if there is no pack or
-/// the file is missing/undecodable — the shared body every `load_*_texture`
-/// here had open-coded.
-///
-/// `what` names the subject in the warning, so a missing file says which
-/// feature will silently draw nothing rather than just printing a path.
-fn load_jar_image(path: &str, what: &str) -> Option<lodestone_assets::Image> {
-    use lodestone_assets::Image;
-
-    // `crate::resources::vanilla_manager` — see `load_humanoid_armour_textures`.
-    let manager = crate::resources::vanilla_manager()?;
-    let Some(png) = manager.read(path) else {
-        tracing::warn!(target: "assets", "missing {what} {path}");
-        return None;
-    };
-    match Image::decode_png(&png) {
-        Ok(img) => Some(img),
-        Err(e) => {
-            tracing::warn!(target: "assets", "decode {path}: {e}");
-            None
-        }
-    }
-}
-
-/// Decode every painting variant sprite the vanilla `client.jar` carries,
-/// keyed by [`lodestone_render::painting::PAINTING_VARIANTS`]' own name.
-///
-/// Driven off that table rather than off a directory listing, because the table
-/// is what `EntityDraw::painting` has already been narrowed to: a sprite in the
-/// jar with no table entry could not be asked for, and a table entry with no
-/// sprite must be *absent* here so the draw skips it instead of binding
-/// something else. Empty without a vanilla pack.
-fn load_painting_textures() -> Vec<(&'static str, lodestone_assets::Image)> {
-    lodestone_render::painting::PAINTING_VARIANTS
-        .iter()
-        .filter_map(|&(name, ..)| {
-            let path = lodestone_render::painting::painting_texture_path(name);
-            load_jar_image(&path, "painting sprite").map(|img| (name, img))
-        })
-        .collect()
-}
-
-/// Decode the elytra wings' own sheet
-/// ([`lodestone_assets::entity::ELYTRA_TEXTURE_PATH`]) from the vanilla
-/// `client.jar`, or `None` if no pack is found — the elytra equivalent of
-/// [`load_sheep_wool_texture`], reaching the jar the same way through
-/// [`crate::resources::vanilla_manager`].
-///
-/// The sheet is **64×32**, matching what `ElytraModel.createLayer` declares
-/// and what a cape sheet is — which is what lets a player's cape URL stand in
-/// for this one without re-unwrapping anything.
-fn load_elytra_texture() -> Option<lodestone_assets::Image> {
-    use lodestone_assets::Image;
-
-    // `crate::resources::vanilla_manager` — see `load_humanoid_armour_textures`.
-    let manager = crate::resources::vanilla_manager()?;
-    let path = lodestone_assets::entity::ELYTRA_TEXTURE_PATH;
-    let Some(png) = manager.read(path) else {
-        tracing::warn!(target: "assets", "missing elytra sheet {path}");
-        return None;
-    };
-    match Image::decode_png(&png) {
-        Ok(img) => Some(img),
-        Err(e) => {
-            tracing::warn!(target: "assets", "decode {path}: {e}");
-            None
-        }
-    }
-}
-
-/// Decode and combine the mob-fire billboard's two sprites
-/// (`textures/block/fire_0.png`/`fire_1.png`) from the vanilla `client.jar`,
-/// or `None` if no pack is found — the flame equivalent of
-/// [`load_sheep_wool_texture`], reaching the jar the same way through
-/// [`crate::resources::vanilla_manager`].
-///
-/// Delegates the actual decode/reorder/combine to
-/// [`lodestone_assets::entity_flame::load_combined_flame_texture`].
-fn load_flame_textures() -> Option<lodestone_assets::Image> {
-    // `crate::resources::vanilla_manager` — see `load_humanoid_armour_textures`.
-    let manager = crate::resources::vanilla_manager()?;
-    match lodestone_assets::entity_flame::load_combined_flame_texture(&manager) {
-        Ok(img) => Some(img),
-        Err(e) => {
-            tracing::warn!(target: "assets", "load combined flame texture: {e}");
-            None
-        }
-    }
-}
-
-/// Decode the experience-orb sprite sheet from the vanilla `client.jar`, or
-/// `None` if no pack is found — the orb equivalent of
-/// [`load_sheep_wool_texture`], reaching the jar the same way through
-/// [`crate::resources::vanilla_manager`].
-///
-/// One sheet holding all eleven cells, so there is nothing to combine the way the
-/// flame's two strips need: [`lodestone_render::EXPERIENCE_ORB_TEXTURE`] is the
-/// single path `ExperienceOrbRenderer` binds.
-fn load_experience_orb_texture() -> Option<lodestone_assets::Image> {
-    use lodestone_assets::Image;
-
-    // `crate::resources::vanilla_manager` — see `load_humanoid_armour_textures`.
-    let manager = crate::resources::vanilla_manager()?;
-    let path = lodestone_render::EXPERIENCE_ORB_TEXTURE;
-    let Some(png) = manager.read(path) else {
-        tracing::warn!(target: "assets", "missing experience orb sheet {path}");
-        return None;
-    };
-    match Image::decode_png(&png) {
-        Ok(img) => Some(img),
-        Err(e) => {
-            tracing::warn!(target: "assets", "decode {path}: {e}");
-            None
-        }
-    }
-}
-
-/// Decode one camera-facing entity sprite's sheet from the vanilla
-/// `client.jar`, or `None` if no pack is found — the
-/// [`lodestone_render::entity_sprite`] equivalent of
-/// [`load_experience_orb_texture`], reaching the jar the same way through
-/// [`crate::resources::vanilla_manager`].
-///
-/// Takes the path rather than hardcoding one, because unlike the orb there is
-/// more than one sheet and the table is what decides which — see
-/// `EntityRenderer::sprite_textures`.
-fn load_entity_sprite_texture(path: &str) -> Option<lodestone_assets::Image> {
-    use lodestone_assets::Image;
-
-    // `crate::resources::vanilla_manager` — see `load_humanoid_armour_textures`.
-    let manager = crate::resources::vanilla_manager()?;
-    let Some(png) = manager.read(path) else {
-        tracing::warn!(target: "assets", "missing entity sprite sheet {path}");
-        return None;
-    };
-    match Image::decode_png(&png) {
-        Ok(img) => Some(img),
-        Err(e) => {
-            tracing::warn!(target: "assets", "decode {path}: {e}");
-            None
-        }
-    }
-}
-
-/// Decode the entity ground-shadow sprite from the vanilla `client.jar`, or
-/// `None` if no pack is found — the shadow equivalent of
-/// [`load_experience_orb_texture`], reaching the jar the same way through
-/// [`crate::resources::vanilla_manager`].
-fn load_shadow_texture() -> Option<lodestone_assets::Image> {
-    use lodestone_assets::Image;
-
-    // `crate::resources::vanilla_manager` — see `load_humanoid_armour_textures`.
-    let manager = crate::resources::vanilla_manager()?;
-    let path = lodestone_render::SHADOW_TEXTURE;
-    let Some(png) = manager.read(path) else {
-        tracing::warn!(target: "assets", "missing entity shadow sprite {path}");
-        return None;
-    };
-    match Image::decode_png(&png) {
-        Ok(img) => Some(img),
-        Err(e) => {
-            tracing::warn!(target: "assets", "decode {path}: {e}");
-            None
-        }
-    }
 }
 
 #[cfg(test)]

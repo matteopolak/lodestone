@@ -248,11 +248,11 @@ use crate::ticket::{TicketDelta, TicketStoreHandle};
 use crate::worldgen_session::{
     AggregatePrefix, BlockCoordinate, ChunkCoordinate, GenerationCheckpoint, GenerationSession,
     ImmutableProduct,
-    ImmutableSidecar, ImmutableStageCompletion, ProvenanceMutation, SessionError,
+    ImmutableSidecar, ImmutableStageCompletion, MutationProvenance, ProvenanceMutation, SessionError,
     SourceCompletionRecord,
 };
 use lodestone_worldgen::stage_schedule::{
-    BarrierPolicy, ChunkRequest, Dimension, DimensionPipeline, GenerationTarget, PipelineIdentity,
+    BarrierPolicy, ChunkRequest, ColumnStage, Dimension, DimensionPipeline, GenerationTarget, PipelineIdentity,
     PipelineOptions, ResourceKey, StageFrontier, StageKey, StageRecord,
 };
 #[cfg(test)]
@@ -767,10 +767,11 @@ impl GenerationRegionCoordinator {
                 self.wake.notify_all();
                 return Err(());
             }
-            state = self
+            let (next_state, _) = self
                 .wake
-                .wait(state)
+                .wait_timeout(state, std::time::Duration::from_millis(10))
                 .expect("generation region lock poisoned");
+            state = next_state;
         }
         let coordinates = state
             .pending
@@ -940,9 +941,21 @@ pub(crate) struct GenerationLedgerStats {
     pub(crate) overlays: usize,
     pub(crate) products: usize,
     pub(crate) aggregates: usize,
+    pub(crate) stamp: u64,
     /// Structural retention plus the sizes declared by typed products,
     /// sidecars, and mutations.
     pub(crate) retained_bytes: usize,
+}
+
+fn generation_ledger_trace_enabled() -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::env::var_os("LODESTONE_WORLDGEN_LEDGER_TRACE").is_some()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        false
+    }
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -999,7 +1012,6 @@ pub(crate) enum GenerationLedgerError {
     CheckpointMismatch,
 }
 
-#[derive(Clone)]
 struct PipelineLedger {
     frontiers: BTreeMap<(i32, i32), StageFrontier>,
     products: BTreeMap<crate::worldgen_session::ProductKey, ImmutableProduct>,
@@ -1007,16 +1019,224 @@ struct PipelineLedger {
     aggregates: BTreeMap<(i32, i32), AggregatePrefix>,
     sources: BTreeMap<SourceCompletionKey, u64>,
     source_next: BTreeMap<((i32, i32), StageKey), u64>,
-    overlays: BTreeMap<BlockCoordinate, ProvenanceMutation>,
+    overlays: BTreeMap<(i32, i32), BTreeMap<BlockCoordinate, ProvenanceMutation>>,
     revisions: BTreeMap<(i32, i32), u64>,
+    coordinate_last_used: BTreeMap<(i32, i32), u64>,
     last_used: u64,
+}
+
+impl PipelineLedger {
+    fn overlays_len(&self) -> usize {
+        self.overlays.values().map(BTreeMap::len).sum()
+    }
+
+    fn overlays_iter(&self) -> impl Iterator<Item = (&BlockCoordinate, &ProvenanceMutation)> {
+        self.overlays.values().flat_map(|bucket| bucket.iter())
+    }
+
+    fn overlay(&self, destination: BlockCoordinate) -> Option<&ProvenanceMutation> {
+        let coordinate = (
+            destination.x().div_euclid(16),
+            destination.z().div_euclid(16),
+        );
+        self.overlays
+            .get(&coordinate)
+            .and_then(|bucket| bucket.get(&destination))
+    }
+
+    fn has_pending_overlay_for(&self, coordinate: (i32, i32)) -> bool {
+        self.overlays.get(&coordinate).is_some_and(|bucket| !bucket.is_empty())
+            || self.overlays.values().any(|bucket| {
+                bucket
+                    .values()
+                    .any(|mutation| mutation.provenance().target() == coordinate)
+            })
+    }
+
+    fn evict_coordinate(&mut self, coordinate: (i32, i32)) {
+        self.frontiers.remove(&coordinate);
+        self.revisions.remove(&coordinate);
+        self.coordinate_last_used.remove(&coordinate);
+        self.products
+            .retain(|key, _| key.coordinate() != coordinate);
+        self.sidecars
+            .retain(|key, _| key.coordinate() != coordinate);
+        self.aggregates.remove(&coordinate);
+        self.sources.retain(|key, _| {
+            key.target != coordinate && key.source != coordinate
+        });
+        self.source_next
+            .retain(|(target, _), _| *target != coordinate);
+        self.overlays.remove(&coordinate);
+        self.overlays.retain(|_, bucket| {
+            bucket.retain(|_, mutation| mutation.provenance().target() != coordinate);
+            !bucket.is_empty()
+        });
+    }
+}
+
+struct GenerationLedgerJournal {
+    identity: PipelineIdentity,
+    stamp: u64,
+    pipeline_last_used: u64,
+    frontiers: BTreeMap<(i32, i32), Option<StageFrontier>>,
+    products: BTreeMap<crate::worldgen_session::ProductKey, Option<ImmutableProduct>>,
+    sidecars: BTreeMap<crate::worldgen_session::SidecarProductKey, Option<ImmutableSidecar>>,
+    aggregates: BTreeMap<(i32, i32), Option<AggregatePrefix>>,
+    sources: BTreeMap<SourceCompletionKey, Option<u64>>,
+    source_next: BTreeMap<((i32, i32), StageKey), Option<u64>>,
+    overlays: BTreeMap<(i32, i32), BTreeMap<BlockCoordinate, Option<ProvenanceMutation>>>,
+    revisions: BTreeMap<(i32, i32), Option<u64>>,
+}
+
+impl GenerationLedgerJournal {
+    fn new(ledger: &GenerationLedger, identity: PipelineIdentity) -> Self {
+        let pipeline_last_used = ledger
+            .pipelines
+            .get(&identity)
+            .expect("publish journal requires an admitted pipeline")
+            .last_used;
+        Self {
+            identity,
+            stamp: ledger.stamp,
+            pipeline_last_used,
+            frontiers: BTreeMap::new(),
+            products: BTreeMap::new(),
+            sidecars: BTreeMap::new(),
+            aggregates: BTreeMap::new(),
+            sources: BTreeMap::new(),
+            source_next: BTreeMap::new(),
+            overlays: BTreeMap::new(),
+            revisions: BTreeMap::new(),
+        }
+    }
+
+    fn frontier(&mut self, state: &PipelineLedger, coordinate: (i32, i32)) {
+        self.frontiers
+            .entry(coordinate)
+            .or_insert_with(|| state.frontiers.get(&coordinate).cloned());
+    }
+
+    fn product(
+        &mut self,
+        state: &PipelineLedger,
+        key: crate::worldgen_session::ProductKey,
+    ) {
+        self.products
+            .entry(key)
+            .or_insert_with(|| state.products.get(&key).cloned());
+    }
+
+    fn sidecar(
+        &mut self,
+        state: &PipelineLedger,
+        key: crate::worldgen_session::SidecarProductKey,
+    ) {
+        self.sidecars
+            .entry(key)
+            .or_insert_with(|| state.sidecars.get(&key).cloned());
+    }
+
+    fn aggregate(&mut self, state: &PipelineLedger, coordinate: (i32, i32)) {
+        self.aggregates
+            .entry(coordinate)
+            .or_insert_with(|| state.aggregates.get(&coordinate).cloned());
+    }
+
+    fn source(&mut self, state: &PipelineLedger, key: SourceCompletionKey) {
+        self.sources
+            .entry(key)
+            .or_insert_with(|| state.sources.get(&key).copied());
+    }
+
+    fn source_next(&mut self, state: &PipelineLedger, key: ((i32, i32), StageKey)) {
+        self.source_next
+            .entry(key)
+            .or_insert_with(|| state.source_next.get(&key).copied());
+    }
+
+    fn overlay(&mut self, state: &PipelineLedger, destination: BlockCoordinate) {
+        let coordinate = (
+            destination.x().div_euclid(16),
+            destination.z().div_euclid(16),
+        );
+        self.overlays
+            .entry(coordinate)
+            .or_default()
+            .entry(destination)
+            .or_insert_with(|| {
+                state
+                    .overlays
+                    .get(&coordinate)
+                    .and_then(|bucket| bucket.get(&destination))
+                    .cloned()
+            });
+    }
+
+    fn revision(&mut self, state: &PipelineLedger, coordinate: (i32, i32)) {
+        self.revisions
+            .entry(coordinate)
+            .or_insert_with(|| state.revisions.get(&coordinate).copied());
+    }
+
+    fn rollback(self, ledger: &mut GenerationLedger) {
+        ledger.stamp = self.stamp;
+        let state = ledger
+            .pipelines
+            .get_mut(&self.identity)
+            .expect("publish journal pipeline survived the transaction");
+        state.last_used = self.pipeline_last_used;
+        Self::restore(&mut state.frontiers, self.frontiers);
+        Self::restore(&mut state.products, self.products);
+        Self::restore(&mut state.sidecars, self.sidecars);
+        Self::restore(&mut state.aggregates, self.aggregates);
+        Self::restore(&mut state.sources, self.sources);
+        Self::restore(&mut state.source_next, self.source_next);
+        Self::restore_overlays(&mut state.overlays, self.overlays);
+        Self::restore(&mut state.revisions, self.revisions);
+    }
+
+    fn restore<K: Ord, V>(map: &mut BTreeMap<K, V>, entries: BTreeMap<K, Option<V>>) {
+        for (key, value) in entries {
+            match value {
+                Some(value) => {
+                    map.insert(key, value);
+                }
+                None => {
+                    map.remove(&key);
+                }
+            }
+        }
+    }
+
+    fn restore_overlays(
+        map: &mut BTreeMap<(i32, i32), BTreeMap<BlockCoordinate, ProvenanceMutation>>,
+        buckets: BTreeMap<(i32, i32), BTreeMap<BlockCoordinate, Option<ProvenanceMutation>>>,
+    ) {
+        for (coordinate, entries) in buckets {
+            let bucket = map.entry(coordinate).or_default();
+            for (destination, value) in entries {
+                match value {
+                    Some(value) => {
+                        bucket.insert(destination, value);
+                    }
+                    None => {
+                        bucket.remove(&destination);
+                    }
+                }
+            }
+            if bucket.is_empty() {
+                map.remove(&coordinate);
+            }
+        }
+    }
+
 }
 
 /// World-owned, bounded generation state shared by future streaming sessions.
 /// The cache remains a packet-column store; this ledger retains the typed
 /// frontier, source completion identity, and sparse mutable products that a
 /// request may reuse after its session is cancelled or dropped.
-#[derive(Clone)]
 pub(crate) struct GenerationLedger {
     pipelines: HashMap<PipelineIdentity, PipelineLedger>,
     pipeline_pins: HashMap<PipelineIdentity, usize>,
@@ -1074,6 +1294,7 @@ impl GenerationLedger {
                 source_next: BTreeMap::new(),
                 overlays: BTreeMap::new(),
                 revisions: BTreeMap::new(),
+                coordinate_last_used: BTreeMap::new(),
                 last_used: stamp,
             });
         }
@@ -1094,17 +1315,6 @@ impl GenerationLedger {
         pipeline: DimensionPipeline,
         coordinates: &[(i32, i32)],
     ) -> Result<Vec<(i32, i32)>, GenerationLedgerError> {
-        let mut trial = self.clone();
-        let admitted = trial.admit_inner(pipeline, coordinates)?;
-        *self = trial;
-        Ok(admitted)
-    }
-
-    fn admit_inner(
-        &mut self,
-        pipeline: DimensionPipeline,
-        coordinates: &[(i32, i32)],
-    ) -> Result<Vec<(i32, i32)>, GenerationLedgerError> {
         let limits = self.limits;
         let mut canonical = coordinates.to_vec();
         canonical.sort_unstable();
@@ -1120,8 +1330,40 @@ impl GenerationLedger {
                 .iter()
                 .filter(|coordinate| !state.frontiers.contains_key(coordinate))
                 .count();
-            if state.frontiers.len() + new_coordinates > limits.coordinates_per_pipeline {
-                return Err(GenerationLedgerError::CoordinateCapacity);
+            let required_evictions = state
+                .frontiers
+                .len()
+                .saturating_add(new_coordinates)
+                .saturating_sub(limits.coordinates_per_pipeline);
+            if required_evictions != 0 {
+                if self.pipeline_pins.contains_key(&identity) {
+                    return Err(GenerationLedgerError::CoordinateCapacity);
+                }
+                let mut candidates = state
+                    .frontiers
+                    .keys()
+                    .filter(|coordinate| {
+                        !canonical.contains(coordinate)
+                            && !state.has_pending_overlay_for(**coordinate)
+                    })
+                    .copied()
+                    .collect::<Vec<_>>();
+                candidates.sort_unstable_by_key(|coordinate| {
+                    (
+                        state.coordinate_last_used.get(coordinate).copied().unwrap_or(0),
+                        *coordinate,
+                    )
+                });
+                if candidates.len() < required_evictions {
+                    return Err(GenerationLedgerError::CoordinateCapacity);
+                }
+                let state = self
+                    .pipelines
+                    .get_mut(&identity)
+                    .expect("pipeline was checked before coordinate eviction");
+                for coordinate in candidates.into_iter().take(required_evictions) {
+                    state.evict_coordinate(coordinate);
+                }
             }
         } else if canonical.len() > limits.coordinates_per_pipeline {
             return Err(GenerationLedgerError::CoordinateCapacity);
@@ -1132,9 +1374,6 @@ impl GenerationLedger {
             .filter(|coordinate| !state.frontiers.contains_key(coordinate))
             .copied()
             .collect::<Vec<_>>();
-        if state.frontiers.len() + new_coordinates.len() > limits.coordinates_per_pipeline {
-            return Err(GenerationLedgerError::CoordinateCapacity);
-        }
         for coordinate in &new_coordinates {
             if !state.frontiers.contains_key(coordinate) {
                 state.frontiers.insert(
@@ -1146,6 +1385,14 @@ impl GenerationLedger {
                 );
                 state.revisions.insert(*coordinate, 0);
             }
+            state
+                .coordinate_last_used
+                .insert(*coordinate, state.last_used);
+        }
+        for coordinate in canonical.iter().filter(|coordinate| !new_coordinates.contains(coordinate)) {
+            state
+                .coordinate_last_used
+                .insert(*coordinate, state.last_used);
         }
         Ok(new_coordinates)
     }
@@ -1175,12 +1422,13 @@ impl GenerationLedger {
                     || state.sources.keys().any(|key| {
                         key.target == *coordinate || key.source == *coordinate
                     })
-                    || state.overlays.values().any(|mutation| {
+                    || state.overlays.values().flat_map(|bucket| bucket.values()).any(|mutation| {
                         mutation.provenance().target() == *coordinate
                     });
                 if !has_committed_state {
                     state.frontiers.remove(coordinate);
                     state.revisions.remove(coordinate);
+                    state.coordinate_last_used.remove(coordinate);
                 }
             }
             state.products.retain(|key, _| {
@@ -1218,12 +1466,15 @@ impl GenerationLedger {
                         .get(target)
                         .is_some_and(|frontier| !frontier.records().is_empty())
             });
-            state.overlays.retain(|_, mutation| {
-                !remove.contains(&mutation.provenance().target())
-                    || state
-                        .frontiers
-                        .get(&mutation.provenance().target())
-                        .is_some_and(|frontier| !frontier.records().is_empty())
+            state.overlays.retain(|_, bucket| {
+                bucket.retain(|_, mutation| {
+                    !remove.contains(&mutation.provenance().target())
+                        || state
+                            .frontiers
+                            .get(&mutation.provenance().target())
+                            .is_some_and(|frontier| !frontier.records().is_empty())
+                });
+                !bucket.is_empty()
             });
             remove_pipeline = state.frontiers.is_empty();
         }
@@ -1277,6 +1528,7 @@ impl GenerationLedger {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn complete_source(
         &mut self,
         pipeline: DimensionPipeline,
@@ -1284,6 +1536,18 @@ impl GenerationLedger {
         source: (i32, i32),
         stage: StageKey,
         source_order: u64,
+    ) -> Result<bool, GenerationLedgerError> {
+        self.complete_source_with_journal(pipeline, target, source, stage, source_order, None)
+    }
+
+    fn complete_source_with_journal(
+        &mut self,
+        pipeline: DimensionPipeline,
+        target: (i32, i32),
+        source: (i32, i32),
+        stage: StageKey,
+        source_order: u64,
+        mut journal: Option<&mut GenerationLedgerJournal>,
     ) -> Result<bool, GenerationLedgerError> {
         if stage.dimension() != pipeline.dimension() {
             return Err(GenerationLedgerError::ForeignStage(stage));
@@ -1318,7 +1582,6 @@ impl GenerationLedger {
                 },
             ));
         }
-        let state = self.pipeline_mut(pipeline)?;
         let key = SourceCompletionKey { target, source, stage };
         if state.sources.contains_key(&key) {
             return Ok(false);
@@ -1338,25 +1601,33 @@ impl GenerationLedger {
         if state.sources.len() >= limits.source_completions_per_pipeline {
             return Err(GenerationLedgerError::SourceCapacity);
         }
+        if let Some(journal) = journal.as_deref_mut() {
+            journal.source(state, key);
+            journal.source_next(state, (target, stage));
+            journal.revision(state, target);
+        }
+        let state = self.pipeline_mut(pipeline)?;
         state.sources.insert(key, expected_order);
         state.source_next.insert((target, stage), expected_order + 1);
         Self::bump_revision(state, target);
         Ok(true)
     }
 
+    #[cfg(test)]
     pub(crate) fn commit_immutable(
         &mut self,
         pipeline: DimensionPipeline,
         completion: &ImmutableStageCompletion,
     ) -> Result<(), GenerationLedgerError> {
-        self.commit_stage_completion(pipeline, completion, false)
+        self.commit_stage_completion_with_journal(pipeline, completion, false, None)
     }
 
-    fn commit_stage_completion(
+    fn commit_stage_completion_with_journal(
         &mut self,
         pipeline: DimensionPipeline,
         completion: &ImmutableStageCompletion,
         source_ordered: bool,
+        mut journal: Option<&mut GenerationLedgerJournal>,
     ) -> Result<(), GenerationLedgerError> {
         let limits = self.limits;
         if completion.stage().dimension() != pipeline.dimension() {
@@ -1428,13 +1699,45 @@ impl GenerationLedger {
         if state.sidecars.len() + completion.sidecars().len() > limits.sidecars_per_pipeline {
             return Err(GenerationLedgerError::SidecarCapacity);
         }
-        let state = self.pipeline_mut(pipeline)?;
         let record = StageRecord::for_descriptor(
             descriptor,
             completion.input_fingerprint(),
             completion.output_fingerprint(),
             completion.executor_version(),
         );
+        let product_keys = completion
+            .products()
+            .iter()
+            .map(|product| {
+                crate::worldgen_session::ProductKey::new(
+                    completion.coordinate(),
+                    completion.stage(),
+                    product.resource(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let sidecar_keys = completion
+            .sidecars()
+            .iter()
+            .map(|sidecar| {
+                crate::worldgen_session::SidecarProductKey::new(
+                    completion.coordinate(),
+                    completion.stage(),
+                    sidecar.sidecar(),
+                )
+            })
+            .collect::<Vec<_>>();
+        if let Some(journal) = journal.as_deref_mut() {
+            journal.frontier(state, completion.coordinate());
+            for key in &product_keys {
+                journal.product(state, *key);
+            }
+            for key in &sidecar_keys {
+                journal.sidecar(state, *key);
+            }
+            journal.revision(state, completion.coordinate());
+        }
+        let state = self.pipeline_mut(pipeline)?;
         state
             .frontiers
             .get_mut(&completion.coordinate())
@@ -1465,10 +1768,11 @@ impl GenerationLedger {
         Ok(())
     }
 
-    pub(crate) fn commit_mutable_stage(
+    fn commit_mutable_stage_with_journal(
         &mut self,
         pipeline: DimensionPipeline,
         completion: &ImmutableStageCompletion,
+        journal: Option<&mut GenerationLedgerJournal>,
     ) -> Result<(), GenerationLedgerError> {
         if completion.stage().dimension() != pipeline.dimension() {
             return Err(GenerationLedgerError::ForeignStage(completion.stage()));
@@ -1502,7 +1806,7 @@ impl GenerationLedger {
                     .count() as u64,
             });
         }
-        self.commit_stage_completion(pipeline, completion, true)
+        self.commit_stage_completion_with_journal(pipeline, completion, true, journal)
     }
 
     /// Retain an externally materialized shaped prefix without manufacturing
@@ -1515,6 +1819,7 @@ impl GenerationLedger {
         aggregate: &AggregatePrefix,
         records: &[StageRecord],
         sidecars: &[(crate::worldgen_session::SidecarProductKey, ImmutableSidecar)],
+        journal: &mut GenerationLedgerJournal,
     ) -> Result<(), GenerationLedgerError> {
         let coordinate = aggregate.coordinate();
         let boundary = aggregate.boundary();
@@ -1526,7 +1831,11 @@ impl GenerationLedger {
                 boundary,
             )))?;
         if aggregate.product().resource() != ResourceKey::MaterializedWorld
-            || aggregate.product().get::<ChunkColumn>().is_none()
+            || (aggregate.product().get::<ChunkColumn>().is_none()
+                && aggregate
+                    .product()
+                    .get::<lodestone_worldgen::overworld::GeneratedColumn>()
+                    .is_none())
             || records.len() <= boundary_index
         {
             return Err(GenerationLedgerError::CheckpointMismatch);
@@ -1607,6 +1916,11 @@ impl GenerationLedger {
             return Ok(());
         }
 
+        journal.frontier(state, coordinate);
+        journal.aggregate(state, coordinate);
+        for (key, _) in &required_sidecars {
+            journal.sidecar(state, *key);
+        }
         let state = self.pipeline_mut(pipeline)?;
         let frontier = state
             .frontiers
@@ -1658,32 +1972,28 @@ impl GenerationLedger {
             frontiers.push((*coordinate, frontier.records().to_vec()));
         }
         let in_halo = coordinates.iter().copied().collect::<BTreeSet<_>>();
-        let products = state
+        let products: Vec<_> = state
             .products
             .iter()
             .filter(|(key, _)| in_halo.contains(&key.coordinate()))
             .map(|(key, product)| (*key, product.clone()))
             .collect();
-        let aggregates = state
+        let aggregates: Vec<_> = state
             .aggregates
             .iter()
             .filter(|(coordinate, _)| in_halo.contains(coordinate))
             .map(|(coordinate, aggregate)| (*coordinate, aggregate.clone()))
             .collect();
-        let sidecars = state
+        let sidecars: Vec<_> = state
             .sidecars
             .iter()
             .filter(|(key, _)| in_halo.contains(&key.coordinate()))
             .map(|(key, sidecar)| (*key, sidecar.clone()))
             .collect();
-        let committed_mutations = state
-            .overlays
-            .values()
-            .filter(|mutation| {
-                let destination = mutation.provenance().destination();
-                let destination = (destination.x().div_euclid(16), destination.z().div_euclid(16));
-                in_halo.contains(&destination)
-            })
+        let committed_mutations = coordinates
+            .iter()
+            .filter_map(|coordinate| state.overlays.get(coordinate))
+            .flat_map(|bucket| bucket.values())
             .cloned()
             .collect::<Vec<_>>();
         let source_completions = state
@@ -1714,30 +2024,15 @@ impl GenerationLedger {
         ))
     }
 
-    /// Publish a session's committed report atomically. A clone-and-swap
-    /// keeps a capacity or validation failure from consuming only the first
-    /// part of a request's bounded ledger allowance.
+    /// Publish a session's committed report atomically. The journal records
+    /// only entries touched by this request, so a rejected report can restore
+    /// the prior state without cloning unrelated pipelines or products.
     pub(crate) fn publish_session(
         &mut self,
         pipeline: DimensionPipeline,
         session: &GenerationSession,
     ) -> Result<(), GenerationLedgerError> {
-        let mut trial = self.clone();
-        trial.publish_session_inner(pipeline, session)?;
-        *self = trial;
-        Ok(())
-    }
-
-    fn publish_session_inner(
-        &mut self,
-        pipeline: DimensionPipeline,
-        session: &GenerationSession,
-    ) -> Result<(), GenerationLedgerError> {
         let checkpoint = session.export_checkpoint();
-        // A newly-created request has an empty frontier report. It is not a
-        // stale checkpoint: the world ledger is the source that will hydrate
-        // this request below. Treat that empty report as a no-op so an
-        // existing committed prefix can be reused by the new session.
         if checkpoint
             .frontiers()
             .iter()
@@ -1750,6 +2045,118 @@ impl GenerationLedger {
         {
             return Ok(());
         }
+        let identity = pipeline.identity(PipelineOptions::ALL);
+        if !self.pipelines.contains_key(&identity) {
+            return Err(GenerationLedgerError::UnknownPipeline(identity));
+        }
+        let mut journal = GenerationLedgerJournal::new(self, identity);
+        let result = self.publish_session_inner(pipeline, &checkpoint, &mut journal, None);
+        if result.is_err() {
+            journal.rollback(self);
+        }
+        result
+    }
+
+    /// Publish several completed sessions against one authoritative set of
+    /// final output columns. Cross-target writes already folded into those
+    /// columns are validated before any frontier is advanced and are omitted
+    /// from the overlay ledger; every other write keeps its provenance.
+    pub(crate) fn publish_sessions_with_final_outputs(
+        &mut self,
+        sessions: &[(DimensionPipeline, &GenerationSession)],
+        final_outputs: &BTreeMap<ChunkCoordinate, &ChunkColumn>,
+    ) -> Result<(), GenerationLedgerError> {
+        if sessions.is_empty() {
+            return Ok(());
+        }
+
+        for &(pipeline, session) in sessions {
+            for mutation in session.committed_mutations() {
+                let destination = mutation.provenance().destination();
+                let coordinate = (
+                    destination.x().div_euclid(16),
+                    destination.z().div_euclid(16),
+                );
+                let Some(column) = final_outputs.get(&coordinate) else {
+                    continue;
+                };
+                let Some(state) = mutation.get::<String>() else {
+                    return Err(GenerationLedgerError::CheckpointMismatch);
+                };
+                if column.block_state(
+                    destination.x().rem_euclid(16),
+                    destination.y(),
+                    destination.z().rem_euclid(16),
+                ) != state.as_str()
+                {
+                    return Err(GenerationLedgerError::CheckpointMismatch);
+                }
+
+                let identity = pipeline.identity(PipelineOptions::ALL);
+                let output_key = crate::worldgen_session::ProductKey::new(
+                    coordinate,
+                    StageKey::new(pipeline.dimension(), ColumnStage::Output),
+                    ResourceKey::OutputColumn,
+                );
+                if let Some(existing) = self
+                    .pipeline_ref(identity)?
+                    .products
+                    .get(&output_key)
+                    .and_then(|product| product.get::<ChunkColumn>())
+                {
+                    if existing.block_state(
+                        destination.x().rem_euclid(16),
+                        destination.y(),
+                        destination.z().rem_euclid(16),
+                    ) != state.as_str()
+                    {
+                        return Err(GenerationLedgerError::CheckpointMismatch);
+                    }
+                }
+            }
+        }
+
+        let mut journals = Vec::new();
+        for &(pipeline, session) in sessions {
+            let identity = pipeline.identity(PipelineOptions::ALL);
+            let journal_index = if let Some(index) = journals
+                .iter()
+                .position(|journal: &GenerationLedgerJournal| journal.identity == identity)
+            {
+                index
+            } else {
+                if !self.pipelines.contains_key(&identity) {
+                    for journal in journals.into_iter().rev() {
+                        journal.rollback(self);
+                    }
+                    return Err(GenerationLedgerError::UnknownPipeline(identity));
+                }
+                journals.push(GenerationLedgerJournal::new(self, identity));
+                journals.len() - 1
+            };
+            let checkpoint = session.export_checkpoint();
+            if let Err(error) = self.publish_session_inner(
+                pipeline,
+                &checkpoint,
+                &mut journals[journal_index],
+                Some(final_outputs),
+            ) {
+                for journal in journals.into_iter().rev() {
+                    journal.rollback(self);
+                }
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    fn publish_session_inner(
+        &mut self,
+        pipeline: DimensionPipeline,
+        checkpoint: &GenerationCheckpoint,
+        journal: &mut GenerationLedgerJournal,
+        final_outputs: Option<&BTreeMap<ChunkCoordinate, &ChunkColumn>>,
+    ) -> Result<(), GenerationLedgerError> {
         let identity = pipeline.identity(PipelineOptions::ALL);
         if checkpoint.pipeline_identity() != identity {
             return Err(GenerationLedgerError::UnknownPipeline(identity));
@@ -1789,6 +2196,7 @@ impl GenerationLedger {
                     aggregate,
                     records,
                     checkpoint.sidecars(),
+                    journal,
                 )?;
             }
             let existing_len = self
@@ -1798,11 +2206,23 @@ impl GenerationLedger {
             let current_records = self.frontier(identity, *coordinate)?.records();
             if existing_len >= records.len() {
                 if &current_records[..records.len()] != records {
+                    if generation_ledger_trace_enabled() {
+                        eprintln!(
+                            "worldgen ledger mismatch: frontier prefix coordinate={coordinate:?} existing_len={existing_len} checkpoint_len={}",
+                            records.len(),
+                        );
+                    }
                     return Err(GenerationLedgerError::CheckpointMismatch);
                 }
                 continue;
             }
             if current_records != &records[..existing_len] {
+                if generation_ledger_trace_enabled() {
+                    eprintln!(
+                        "worldgen ledger mismatch: frontier suffix coordinate={coordinate:?} existing_len={existing_len} checkpoint_len={}",
+                        records.len(),
+                    );
+                }
                 return Err(GenerationLedgerError::CheckpointMismatch);
             }
             for record in &records[existing_len..] {
@@ -1857,23 +2277,33 @@ impl GenerationLedger {
                     .ok_or(GenerationLedgerError::ForeignStage(record.key()))?;
                 if descriptor.barrier() == BarrierPolicy::SourceOrdered {
                     if published_source_stages.insert(record.key()) {
-                        for completion in session
-                            .committed_source_completions()
+                        for completion in checkpoint
+                            .source_completions()
                             .iter()
                             .filter(|completion| completion.stage() == record.key())
                         {
-                            self.complete_source(
+                            self.complete_source_with_journal(
                                 pipeline,
                                 checkpoint.request().target(),
                                 completion.source(),
                                 completion.stage(),
                                 completion.source_order(),
+                                Some(journal),
                             )?;
                         }
                     }
-                    self.commit_mutable_stage(pipeline, &completion)?;
+                    self.commit_mutable_stage_with_journal(
+                        pipeline,
+                        &completion,
+                        Some(journal),
+                    )?;
                 } else {
-                    self.commit_immutable(pipeline, &completion)?;
+                    self.commit_stage_completion_with_journal(
+                        pipeline,
+                        &completion,
+                        false,
+                        Some(journal),
+                    )?;
                 }
             }
         }
@@ -1884,8 +2314,17 @@ impl GenerationLedger {
                 destination.x().div_euclid(16),
                 destination.z().div_euclid(16),
             );
+            if final_outputs.is_some_and(|outputs| outputs.contains_key(&coordinate)) {
+                continue;
+            }
             let expected = self.revision(identity, coordinate)?;
-            self.commit_overlay(pipeline, coordinate, expected, mutation.clone())?;
+            self.commit_overlay_with_journal(
+                pipeline,
+                coordinate,
+                expected,
+                mutation.clone(),
+                Some(journal),
+            )?;
         }
         Ok(())
     }
@@ -1947,8 +2386,10 @@ impl GenerationLedger {
                     + state.sources.len() * std::mem::size_of::<(SourceCompletionKey, u64)>()
                     + state.source_next.len()
                         * std::mem::size_of::<((i32, i32), StageKey, u64)>()
-                    + state.overlays.len()
-                        * std::mem::size_of::<(BlockCoordinate, ProvenanceMutation)>();
+                    + state.overlays_len()
+                        * std::mem::size_of::<(BlockCoordinate, ProvenanceMutation)>()
+                    + state.coordinate_last_used.len()
+                        * std::mem::size_of::<((i32, i32), u64)>();
                 let payload = state
                     .products
                     .values()
@@ -1960,13 +2401,16 @@ impl GenerationLedger {
                             .map(|aggregate| aggregate.product().retained_bytes()),
                     )
                     .chain(state.sidecars.values().map(ImmutableSidecar::retained_bytes))
-                    .chain(state.overlays.values().map(ProvenanceMutation::retained_bytes))
+                    .chain(state.overlays_iter().map(|(_, mutation)| {
+                        mutation.retained_bytes()
+                    }))
                     .fold(0usize, usize::saturating_add);
                 structural.saturating_add(payload)
             })
             .fold(0usize, usize::saturating_add)
     }
 
+    #[cfg(test)]
     pub(crate) fn commit_overlay(
         &mut self,
         pipeline: DimensionPipeline,
@@ -1974,8 +2418,16 @@ impl GenerationLedger {
         expected: u64,
         mutation: ProvenanceMutation,
     ) -> Result<u64, GenerationLedgerError> {
-        let limits = self.limits;
-        let provenance = mutation.provenance();
+        self.commit_overlay_with_journal(pipeline, coordinate, expected, mutation, None)
+    }
+
+    fn validate_overlay_context(
+        &self,
+        pipeline: DimensionPipeline,
+        coordinate: (i32, i32),
+        expected: u64,
+        provenance: MutationProvenance,
+    ) -> Result<(PipelineIdentity, u64), GenerationLedgerError> {
         if provenance.stage().dimension() != pipeline.dimension() {
             return Err(GenerationLedgerError::ForeignStage(provenance.stage()));
         }
@@ -2010,22 +2462,69 @@ impl GenerationLedger {
         if found != expected {
             return Err(GenerationLedgerError::RevisionConflict { coordinate, expected, found });
         }
-        let target_output_committed = state
-            .frontiers
-            .get(&provenance.target())
-            .is_some_and(|frontier| {
-                frontier.records().iter().any(|record| {
-                    record.key()
-                        == StageKey::new(
-                            pipeline.dimension(),
-                            lodestone_worldgen::stage_schedule::ColumnStage::Output,
-                        )
+        Ok((identity, found))
+    }
+
+    fn commit_overlay_with_journal(
+        &mut self,
+        pipeline: DimensionPipeline,
+        coordinate: (i32, i32),
+        expected: u64,
+        mutation: ProvenanceMutation,
+        mut journal: Option<&mut GenerationLedgerJournal>,
+    ) -> Result<u64, GenerationLedgerError> {
+        let limits = self.limits;
+        let provenance = mutation.provenance();
+        let (identity, found) =
+            self.validate_overlay_context(pipeline, coordinate, expected, provenance)?;
+        let destination = provenance.destination();
+        let state = self.pipeline_ref(identity)?;
+        let key = crate::worldgen_session::ProductKey::new(
+            coordinate,
+            StageKey::new(
+                pipeline.dimension(),
+                lodestone_worldgen::stage_schedule::ColumnStage::Output,
+            ),
+            ResourceKey::OutputColumn,
+        );
+        let completed_state = state
+            .products
+            .get(&key)
+            .and_then(|product| product.get::<ChunkColumn>())
+            .map(|column| {
+                mutation.get::<String>().is_some_and(|value| {
+                    column.block_state(
+                        destination.x().rem_euclid(16),
+                        destination.y(),
+                        destination.z().rem_euclid(16),
+                    ) == value.as_str()
                 })
             });
-        if target_output_committed {
+        if let Some(same_state) = completed_state {
+            if !same_state {
+                if generation_ledger_trace_enabled() {
+                    let column = state.products[&key]
+                        .get::<ChunkColumn>()
+                        .expect("completed output product was checked");
+                    let current = column.block_state(
+                        destination.x().rem_euclid(16),
+                        destination.y(),
+                        destination.z().rem_euclid(16),
+                    );
+                    let next = mutation
+                        .get::<String>()
+                        .expect("worldgen block mutation carries a state string");
+                    eprintln!(
+                        "worldgen ledger mismatch: late output write target={:?} source={:?} destination={destination:?} current={current} next={next}",
+                        provenance.target(),
+                        provenance.source(),
+                    );
+                }
+                return Err(GenerationLedgerError::CheckpointMismatch);
+            }
             return Ok(found);
         }
-        if let Some(existing) = state.overlays.get(&destination) {
+        if let Some(existing) = state.overlay(destination) {
             if existing.provenance() == provenance {
                 return Ok(found);
             }
@@ -2037,12 +2536,159 @@ impl GenerationLedger {
             if existing.provenance() < provenance {
                 return Ok(found);
             }
-        } else if state.overlays.len() >= limits.overlays_per_pipeline {
+        } else if state.overlays_len() >= limits.overlays_per_pipeline {
             return Err(GenerationLedgerError::OverlayCapacity);
         }
+        if let Some(journal) = journal.as_deref_mut() {
+            journal.overlay(state, destination);
+            journal.revision(state, coordinate);
+        }
         let state = self.pipeline_mut(pipeline)?;
-        state.overlays.insert(destination, mutation);
+        state
+            .overlays
+            .entry(coordinate)
+            .or_default()
+            .insert(destination, mutation);
         Ok(Self::bump_revision(state, coordinate))
+    }
+
+    /// Drop overlays whose complete destination snapshot has been accepted by
+    /// the wrapped source. The destination bucket is the ownership boundary:
+    /// removing an entry never changes its target revision, and a later write
+    /// to the same coordinate remains visible because it carries a different
+    /// authenticated provenance value.
+    pub(crate) fn settle_mutations(
+        &mut self,
+        pipeline: DimensionPipeline,
+        mutations: &[ProvenanceMutation],
+        source_stored: bool,
+        ready_destinations: &[(i32, i32)],
+    ) -> usize {
+        let identity = pipeline.identity(PipelineOptions::ALL);
+        let Some(state) = self.pipelines.get_mut(&identity) else {
+            return 0;
+        };
+        let mut by_coordinate = BTreeMap::<
+            ChunkCoordinate,
+            BTreeMap<BlockCoordinate, ProvenanceMutation>,
+        >::new();
+        let mut source_candidates = HashSet::new();
+        for mutation in mutations {
+            let destination = mutation.provenance().destination();
+            let coordinate = (
+                destination.x().div_euclid(16),
+                destination.z().div_euclid(16),
+            );
+            let current = state
+                .overlays
+                .get(&coordinate)
+                .and_then(|bucket| bucket.get(&destination));
+            if current.is_some_and(|existing| {
+                existing.provenance() == mutation.provenance()
+            }) {
+                by_coordinate
+                    .entry(coordinate)
+                    .or_default()
+                    .insert(destination, mutation.clone());
+                source_candidates.insert((coordinate, destination));
+            }
+        }
+        for &coordinate in ready_destinations {
+            if !state.products.contains_key(&crate::worldgen_session::ProductKey::new(
+                coordinate,
+                StageKey::new(
+                    pipeline.dimension(),
+                    lodestone_worldgen::stage_schedule::ColumnStage::Output,
+                ),
+                ResourceKey::OutputColumn,
+            )) {
+                continue;
+            }
+            if let Some(bucket) = state.overlays.get(&coordinate) {
+                by_coordinate
+                    .entry(coordinate)
+                    .or_default()
+                    .extend(bucket.iter().map(|(destination, mutation)| {
+                        (*destination, mutation.clone())
+                    }));
+            }
+        }
+        let mut settled = 0;
+        for (coordinate, mutations) in by_coordinate {
+            let key = crate::worldgen_session::ProductKey::new(
+                coordinate,
+                StageKey::new(
+                    pipeline.dimension(),
+                    lodestone_worldgen::stage_schedule::ColumnStage::Output,
+                ),
+                ResourceKey::OutputColumn,
+            );
+            let product_update = state.products.get(&key).and_then(|product| {
+                let column = product.get::<ChunkColumn>()?;
+                let mut column = (*column).clone();
+                let mut writes = Vec::<(i32, i32, i32, Arc<String>)>::new();
+                for mutation in mutations.values() {
+                    let state = mutation.get::<String>()?;
+                    let destination = mutation.provenance().destination();
+                    writes.push((
+                        destination.x().rem_euclid(16),
+                        destination.y(),
+                        destination.z().rem_euclid(16),
+                        state,
+                    ));
+                }
+                let ordered_writes = writes
+                    .iter()
+                    .map(|(x, y, z, state)| (*x, *y, *z, state.as_str()))
+                    .collect::<Vec<_>>();
+                column.apply_ordered_block_batch(&ordered_writes);
+                let retained_bytes = column.memory_census().logical_total();
+                Some((column, retained_bytes))
+            });
+            let product_updated = if let Some((column, retained_bytes)) = product_update {
+                state.products.insert(
+                    key,
+                    ImmutableProduct::new_with_retained_bytes(
+                        ResourceKey::OutputColumn,
+                        column,
+                        retained_bytes,
+                    ),
+                );
+                true
+            } else {
+                false
+            };
+            if source_stored || product_updated {
+                for mutation in mutations.values() {
+                    let destination = mutation.provenance().destination();
+                    let remove = state
+                        .overlays
+                        .get(&coordinate)
+                        .and_then(|bucket| bucket.get(&destination))
+                        .is_some_and(|existing| {
+                            existing.provenance() == mutation.provenance()
+                        });
+                    let source_remove = source_stored
+                        && source_candidates.contains(&(coordinate, destination));
+                    if !remove || (!product_updated && !source_remove) {
+                        continue;
+                    }
+                    let empty = state
+                        .overlays
+                        .get_mut(&coordinate)
+                        .map(|bucket| {
+                            bucket.remove(&destination);
+                            bucket.is_empty()
+                        })
+                        .unwrap_or(false);
+                    if empty {
+                        state.overlays.remove(&coordinate);
+                    }
+                    settled += 1;
+                }
+            }
+        }
+        settled
     }
 
     #[cfg(test)]
@@ -2052,9 +2698,10 @@ impl GenerationLedger {
             pipelines: self.pipelines.len(),
             coordinates: self.pipelines.values().map(|state| state.frontiers.len()).sum(),
             sources: self.pipelines.values().map(|state| state.sources.len()).sum(),
-            overlays: self.pipelines.values().map(|state| state.overlays.len()).sum(),
+            overlays: self.pipelines.values().map(PipelineLedger::overlays_len).sum(),
             products: self.pipelines.values().map(|state| state.products.len()).sum(),
             aggregates: self.pipelines.values().map(|state| state.aggregates.len()).sum(),
+            stamp: self.stamp,
             retained_bytes,
         }
     }
@@ -2085,14 +2732,50 @@ impl Drop for GenerationPipelineLease<'_> {
     }
 }
 
+struct GenerationBatchEntry {
+    index: usize,
+    pipeline: DimensionPipeline,
+    admitted: Vec<(i32, i32)>,
+}
+
+struct PreparedGenerationBatch<'a, S: ChunkSource> {
+    region_lease: GenerationRegionLease<'a>,
+    halo: ChunkHaloLease<'a, S>,
+    entries: Vec<GenerationBatchEntry>,
+    reused_columns: Vec<(usize, ChunkColumn)>,
+    leases: Vec<GenerationPipelineLease<'a>>,
+    results: Vec<
+        Option<
+            Result<
+                Option<crate::worldgen_session::GenerationRequestResult>,
+                crate::worldgen_session::GenerationRequestError,
+            >,
+        >,
+    >,
+    active_sessions: Vec<GenerationSession>,
+}
+
+enum GenerationBatchFinish {
+    Complete(
+        Vec<
+            Result<
+                Option<crate::worldgen_session::GenerationRequestResult>,
+                crate::worldgen_session::GenerationRequestError,
+            >,
+        >,
+    ),
+    RevisionConflict,
+}
+
 /// Per-coordinate serialization for writes that update both retention layers.
 ///
 /// The cache mutex cannot cover the wrapped source callback: a persistent
 /// source may perform filesystem work, and holding the global cache lock across
 /// that callback would stall unrelated columns. A plain unlock between the two
 /// layers is also incorrect, though: an older light snapshot can reach the
-/// source after a newer block mutation and overwrite it. Weak entries keep this
-/// coordination table bounded by coordinates with an active snapshot or writer.
+/// source after a newer block mutation and overwrite it. The table keeps a
+/// small revision number for resident coordinates after their active gate is
+/// released; eviction prunes idle entries.
 #[derive(Debug)]
 struct ChunkWriteState {
     held: AtomicBool,
@@ -2106,8 +2789,22 @@ struct ChunkWriteObservation {
     column: ChunkColumn,
 }
 
-struct ChunkWriteSnapshot {
+struct ChunkWriteSnapshot<'a> {
+    gates: &'a ChunkWriteGates,
     observations: Vec<ChunkWriteObservation>,
+}
+
+impl Drop for ChunkWriteSnapshot<'_> {
+    fn drop(&mut self) {
+        let coordinates = self
+            .observations
+            .iter()
+            .map(|observation| observation.chunk)
+            .collect::<Vec<_>>();
+        let observations = std::mem::take(&mut self.observations);
+        drop(observations);
+        self.gates.forget_if_idle(&coordinates);
+    }
 }
 
 /// The result of a resident-only read attempt.
@@ -2167,43 +2864,91 @@ struct ChunkWriteLease<'a> {
     bump_revision: bool,
 }
 
+impl ChunkWriteLease<'_> {
+    fn release_and_prune(self) {
+        let gates = self.gates;
+        let coordinates = self.coordinates.clone();
+        drop(self);
+        gates.forget_if_idle(&coordinates);
+    }
+}
+
 impl Drop for ChunkWriteLease<'_> {
     fn drop(&mut self) {
-        let _state = self
+        let mut table = self
             .gates
             .state
             .lock()
             .expect("chunk write-gate table poisoned");
-        for state in &self.states {
-            if self.bump_revision {
-                state.revision.fetch_add(1, Ordering::AcqRel);
+        let retain_revisions = self.bump_revision
+            && self
+                .states
+                .iter()
+                .any(|state| Arc::strong_count(state) > 1);
+        for (chunk, state) in self.coordinates.iter().copied().zip(&self.states) {
+            if retain_revisions {
+                let revision = state.revision.fetch_add(1, Ordering::AcqRel) + 1;
+                if let Some(record) = table.get_mut(&chunk) {
+                    record.revision = revision;
+                }
             }
             state.held.store(false, Ordering::Release);
         }
+        drop(table);
         self.gates.wake.notify_all();
     }
 }
 
 #[derive(Debug, Default)]
 struct ChunkWriteGates {
-    state: Mutex<HashMap<(i32, i32), Weak<ChunkWriteState>>>,
+    state: Mutex<HashMap<(i32, i32), ChunkWriteGateRecord>>,
     wake: Condvar,
+}
+
+#[derive(Debug)]
+struct ChunkWriteGateRecord {
+    state: Weak<ChunkWriteState>,
+    revision: u64,
 }
 
 impl ChunkWriteGates {
     fn state_for_locked(
-        state: &mut HashMap<(i32, i32), Weak<ChunkWriteState>>,
+        state: &mut HashMap<(i32, i32), ChunkWriteGateRecord>,
         chunk: (i32, i32),
     ) -> Arc<ChunkWriteState> {
-        if let Some(gate) = state.get(&chunk).and_then(Weak::upgrade) {
-            return gate;
+        if let Some(record) = state.get(&chunk) {
+            if let Some(gate) = record.state.upgrade() {
+                return gate;
+            }
         }
+        let revision = state.get(&chunk).map_or(0, |record| record.revision);
         let gate = Arc::new(ChunkWriteState {
             held: AtomicBool::new(false),
-            revision: AtomicU64::new(0),
+            revision: AtomicU64::new(revision),
         });
-        state.insert(chunk, Arc::downgrade(&gate));
+        state.insert(
+            chunk,
+            ChunkWriteGateRecord {
+                state: Arc::downgrade(&gate),
+                revision,
+            },
+        );
         gate
+    }
+
+    fn forget_if_idle(&self, chunks: &[(i32, i32)]) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("chunk write-gate table poisoned");
+        for &chunk in chunks {
+            if state.get(&chunk).is_some_and(|record| {
+                record.state.strong_count() == 0 && record.revision == 0
+            })
+            {
+                state.remove(&chunk);
+            }
+        }
     }
 
     /// Acquires one or more coordinate gates in canonical `(cx, cz)` order.
@@ -2223,7 +2968,7 @@ impl ChunkWriteGates {
                 .state
                 .lock()
                 .expect("chunk write-gate table poisoned");
-            state.retain(|_, gate| gate.strong_count() != 0);
+            state.retain(|_, record| record.state.strong_count() != 0 || record.revision != 0);
             let records = canonical
                 .iter()
                 .map(|&chunk| (chunk, Self::state_for_locked(&mut state, chunk)))
@@ -2276,7 +3021,7 @@ impl ChunkWriteGates {
             .state
             .lock()
             .expect("chunk write-gate table poisoned");
-        state.retain(|_, gate| gate.strong_count() != 0);
+        state.retain(|_, record| record.state.strong_count() != 0 || record.revision != 0);
         let records = canonical
             .iter()
             .map(|&chunk| (chunk, Self::state_for_locked(&mut state, chunk)))
@@ -2310,7 +3055,7 @@ impl ChunkWriteGates {
     fn with<R>(&self, chunk: (i32, i32), operation: impl FnOnce() -> R) -> R {
         let lease = self.acquire_many(&[chunk], true);
         let result = operation();
-        drop(lease);
+        lease.release_and_prune();
         result
     }
 
@@ -2321,7 +3066,7 @@ impl ChunkWriteGates {
         &self,
         chunks: &[(i32, i32)],
         mut capture: impl FnMut((i32, i32)) -> Option<ChunkColumn>,
-    ) -> Result<ChunkWriteSnapshot, ()> {
+    ) -> Result<ChunkWriteSnapshot<'_>, ()> {
         let lease = self.acquire_many(chunks, false);
         let observations = lease
             .states
@@ -2338,9 +3083,12 @@ impl ChunkWriteGates {
                 })
             })
             .collect::<Option<Vec<_>>>();
-        drop(lease);
+        lease.release_and_prune();
         observations
-            .map(|observations| ChunkWriteSnapshot { observations })
+            .map(|observations| ChunkWriteSnapshot {
+                gates: self,
+                observations,
+            })
             .ok_or(())
     }
 
@@ -2351,7 +3099,7 @@ impl ChunkWriteGates {
         &self,
         lease: &ChunkWriteLease<'_>,
         mut capture: impl FnMut((i32, i32)) -> Option<ChunkColumn>,
-    ) -> Result<ChunkWriteSnapshot, ()> {
+    ) -> Result<ChunkWriteSnapshot<'_>, ()> {
         let observations = lease
             .states
             .iter()
@@ -2368,7 +3116,10 @@ impl ChunkWriteGates {
             })
             .collect::<Option<Vec<_>>>();
         observations
-            .map(|observations| ChunkWriteSnapshot { observations })
+            .map(|observations| ChunkWriteSnapshot {
+                gates: self,
+                observations,
+            })
             .ok_or(())
     }
 
@@ -2377,7 +3128,7 @@ impl ChunkWriteGates {
     /// validation, so the check and source/cache commit are one transaction.
     fn try_commit<R>(
         &self,
-        snapshot: ChunkWriteSnapshot,
+        snapshot: ChunkWriteSnapshot<'_>,
         commit: impl FnOnce() -> R,
     ) -> Result<R, ()> {
         let chunks = snapshot
@@ -2389,12 +3140,14 @@ impl ChunkWriteGates {
         if snapshot.observations.iter().any(|observation| {
             observation.state.revision.load(Ordering::Acquire) != observation.revision
         }) {
-            drop(lease);
+            drop(snapshot);
+            lease.release_and_prune();
             return Err(());
         }
         let result = commit();
+        drop(snapshot);
         lease.bump_revision = true;
-        drop(lease);
+        lease.release_and_prune();
         Ok(result)
     }
 
@@ -2410,7 +3163,8 @@ pub(crate) struct ChunkStore<S> {
     policy: CapacityPolicy,
     cache: Mutex<Cache>,
     /// Same-coordinate write gate used for revision capture and cache commits.
-    /// The wrapped source callback runs after the gate is released.
+    /// Cold source generation keeps this gate so a mutation cannot become its
+    /// input snapshot; the cache mutex remains released during the callback.
     write_gates: ChunkWriteGates,
     /// The only source-facing lifecycle owner. Cache mutation selects bounded
     /// load/release work first; this hand-off serializes source transitions for
@@ -2672,6 +3426,7 @@ pub(crate) struct ChunkHaloLease<'a, S: ChunkSource> {
     store: &'a ChunkStore<S>,
     coordinates: Vec<(i32, i32)>,
     revisions: Vec<u64>,
+    states: Vec<Arc<ChunkWriteState>>,
 }
 
 impl<S: ChunkSource> ChunkHaloLease<'_, S> {
@@ -2696,6 +3451,9 @@ impl<S: ChunkSource> Drop for ChunkHaloLease<'_, S> {
         }
         drop(cache);
         self.store.evict_excess();
+        let states = std::mem::take(&mut self.states);
+        drop(states);
+        self.store.write_gates.forget_if_idle(&self.coordinates);
     }
 }
 
@@ -2724,7 +3482,7 @@ impl<S: ChunkSource> ChunkStore<S> {
         &self,
         session: &GenerationSession,
         columns: &[(ChunkCoordinate, ChunkColumn)],
-    ) {
+    ) -> bool {
         let destinations = session
             .committed_mutations()
             .map(|mutation| {
@@ -2736,7 +3494,7 @@ impl<S: ChunkSource> ChunkStore<S> {
             })
             .collect::<BTreeSet<_>>();
         if destinations.is_empty() {
-            return;
+            return true;
         }
         let mut retained = columns
             .iter()
@@ -2750,6 +3508,7 @@ impl<S: ChunkSource> ChunkStore<S> {
             let mut column = self
                 .resident_column(coordinate.0, coordinate.1)
                 .unwrap_or_else(|| self.source.column(coordinate.0, coordinate.1));
+            let mut writes = Vec::<(i32, i32, i32, Arc<String>)>::new();
             for mutation in session.committed_mutations().filter(|mutation| {
                 let destination = mutation.provenance().destination();
                 (destination.x().div_euclid(16), destination.z().div_euclid(16)) == coordinate
@@ -2758,24 +3517,31 @@ impl<S: ChunkSource> ChunkStore<S> {
                     .get::<String>()
                     .expect("worldgen mutations carry block-state strings");
                 let destination = mutation.provenance().destination();
-                column.set_block(
+                writes.push((
                     destination.x().rem_euclid(16),
                     destination.y(),
                     destination.z().rem_euclid(16),
-                    &state,
-                );
+                    state,
+                ));
             }
+            let writes = writes
+                .iter()
+                .map(|(x, y, z, state)| (*x, *y, *z, state.as_str()))
+                .collect::<Vec<_>>();
+            column.apply_ordered_block_batch(&writes);
             retained.push((coordinate.0, coordinate.1, column));
         }
         if !retained.is_empty() {
-            let _ = self.source.store_resident_columns(&retained);
+            return self.source.store_resident_columns(&retained);
         }
+        false
     }
 
     fn apply_generation_mutations(
         columns: &mut [(ChunkCoordinate, ChunkColumn)],
         mutations: &[ProvenanceMutation],
     ) {
+        let mut writes = BTreeMap::<ChunkCoordinate, Vec<(i32, i32, i32, Arc<String>)>>::new();
         for mutation in mutations {
             let state = mutation
                 .get::<String>()
@@ -2785,13 +3551,25 @@ impl<S: ChunkSource> ChunkStore<S> {
                 destination.x().div_euclid(16),
                 destination.z().div_euclid(16),
             );
-            if let Some((_, column)) = columns.iter_mut().find(|(candidate, _)| *candidate == coordinate) {
-                column.set_block(
+            if columns.iter().any(|(candidate, _)| *candidate == coordinate) {
+                writes.entry(coordinate).or_default().push((
                     destination.x().rem_euclid(16),
                     destination.y(),
                     destination.z().rem_euclid(16),
-                    &state,
-                );
+                    state,
+                ));
+            }
+        }
+        for (coordinate, writes) in writes {
+            if let Some((_, column)) = columns
+                .iter_mut()
+                .find(|(candidate, _)| *candidate == coordinate)
+            {
+                let writes = writes
+                    .iter()
+                    .map(|(x, y, z, state)| (*x, *y, *z, state.as_str()))
+                    .collect::<Vec<_>>();
+                column.apply_ordered_block_batch(&writes);
             }
         }
     }
@@ -2802,6 +3580,682 @@ impl<S: ChunkSource> ChunkStore<S> {
             target: request.target(),
             generation_target: request.generation_target(),
             dependency_radius: request.dependency_radius(),
+        }
+    }
+
+    fn retained_output_column(
+        &self,
+        pipeline: DimensionPipeline,
+        coordinate: (i32, i32),
+    ) -> Option<ChunkColumn> {
+        let ledger = self.generation_ledger();
+        ledger.output_column(pipeline, coordinate)
+    }
+
+    fn prepare_generation_batch(
+        &self,
+        sessions: &mut [GenerationSession],
+    ) -> Result<
+        PreparedGenerationBatch<'_, S>,
+        Vec<
+            Result<
+                Option<crate::worldgen_session::GenerationRequestResult>,
+                crate::worldgen_session::GenerationRequestError,
+            >,
+        >,
+    > {
+        let coordinates = match crate::production_worldgen_session::required_generation_halo(
+            sessions,
+        ) {
+            Ok(coordinates) => coordinates,
+            Err(error) => {
+                let message = error.to_string();
+                return Err((0..sessions.len())
+                    .map(|_| {
+                        Err(crate::worldgen_session::GenerationRequestError::Boundary(
+                            message.clone(),
+                        ))
+                    })
+                    .collect());
+            }
+        };
+        let Some(cancellation) = sessions
+            .iter()
+            .find(|session| !session.cancellation().is_cancelled())
+            .map(GenerationSession::cancellation)
+        else {
+            return Err(sessions
+                .iter()
+                .map(|_| {
+                    Err(crate::worldgen_session::GenerationRequestError::Session(
+                        SessionError::Cancelled,
+                    ))
+                })
+                .collect());
+        };
+        #[cfg(target_arch = "wasm32")]
+        let _ = &cancellation;
+        #[cfg(not(target_arch = "wasm32"))]
+        let region_lease = match self.generation_regions.acquire(&coordinates, &cancellation) {
+            Ok(lease) => lease,
+            Err(_) => {
+                return Err(sessions
+                    .iter()
+                    .map(|_| {
+                        Err(crate::worldgen_session::GenerationRequestError::Session(
+                            SessionError::Cancelled,
+                        ))
+                    })
+                    .collect());
+            }
+        };
+        #[cfg(target_arch = "wasm32")]
+        let region_lease = {
+            let ticket = self.generation_regions.enqueue(&coordinates);
+            if !self.generation_regions.try_activate(ticket) {
+                return Err(sessions
+                    .iter()
+                    .map(|_| {
+                        Err(crate::worldgen_session::GenerationRequestError::Session(
+                            SessionError::Cancelled,
+                        ))
+                    })
+                    .collect());
+            }
+            GenerationRegionLease {
+                coordinator: &self.generation_regions,
+                ticket,
+            }
+        };
+        let halo = match self.lease_halo(&coordinates) {
+            Ok(halo) => halo,
+            Err(error) => {
+                let error = error.to_string();
+                return Err(sessions
+                    .iter()
+                    .map(|_| {
+                        Err(crate::worldgen_session::GenerationRequestError::Boundary(
+                            error.clone(),
+                        ))
+                    })
+                    .collect());
+            }
+        };
+
+        let mut entries: Vec<GenerationBatchEntry> = Vec::new();
+        let mut reused_columns = Vec::new();
+        let mut leases = Vec::new();
+        let mut results = (0..sessions.len())
+            .map(|_| None)
+            .collect::<Vec<Option<Result<
+                Option<crate::worldgen_session::GenerationRequestResult>,
+                crate::worldgen_session::GenerationRequestError,
+            >>>>();
+
+        for index in 0..sessions.len() {
+            let session = &mut sessions[index];
+            if session.cancellation().is_cancelled() {
+                results[index] = Some(Err(
+                    crate::worldgen_session::GenerationRequestError::Session(
+                        SessionError::Cancelled,
+                    ),
+                ));
+                continue;
+            }
+            let request = session.request();
+            let required_stage = ChunkGenerationStage::Full;
+            if let Some(column) = self.resident_column(request.target().0, request.target().1)
+                && column.generation_stage() >= required_stage
+            {
+                crate::world_spawn::record_existing_hit();
+                results[index] = Some(Ok(Some(
+                    crate::worldgen_session::GenerationRequestResult::Existing(column),
+                )));
+                continue;
+            }
+            let pipeline = session.pipeline();
+            let (admitted, checkpoint) = {
+                let mut ledger = self.generation_ledger();
+                let admitted = match ledger.admit(pipeline, &coordinates) {
+                    Ok(admitted) => admitted,
+                    Err(error) => {
+                        let message = error.to_string();
+                        drop(ledger);
+                        for entry in &entries {
+                            self.generation_ledger()
+                                .rollback_admission(entry.pipeline, &entry.admitted);
+                        }
+                        return Err((0..sessions.len())
+                            .map(|_| {
+                                Err(crate::worldgen_session::GenerationRequestError::Boundary(
+                                    message.clone(),
+                                ))
+                            })
+                            .collect());
+                    }
+                };
+                if let Err(error) = ledger.publish_session(pipeline, session) {
+                    let message = error.to_string();
+                    ledger.rollback_admission(pipeline, &admitted);
+                    drop(ledger);
+                    for entry in &entries {
+                        self.generation_ledger()
+                            .rollback_admission(entry.pipeline, &entry.admitted);
+                    }
+                    return Err((0..sessions.len())
+                        .map(|_| {
+                            Err(crate::worldgen_session::GenerationRequestError::Boundary(
+                                message.clone(),
+                            ))
+                        })
+                        .collect());
+                }
+                let checkpoint = match ledger.checkpoint(pipeline, request) {
+                    Ok(checkpoint) => checkpoint,
+                    Err(error) => {
+                        let message = error.to_string();
+                        ledger.rollback_admission(pipeline, &admitted);
+                        drop(ledger);
+                        for entry in &entries {
+                            self.generation_ledger()
+                                .rollback_admission(entry.pipeline, &entry.admitted);
+                        }
+                        return Err((0..sessions.len())
+                            .map(|_| {
+                                Err(crate::worldgen_session::GenerationRequestError::Boundary(
+                                    message.clone(),
+                                ))
+                            })
+                            .collect());
+                    }
+                };
+                let identity = match ledger.pin_pipeline(pipeline) {
+                    Ok(identity) => identity,
+                    Err(error) => {
+                        let message = error.to_string();
+                        ledger.rollback_admission(pipeline, &admitted);
+                        drop(ledger);
+                        for entry in &entries {
+                            self.generation_ledger()
+                                .rollback_admission(entry.pipeline, &entry.admitted);
+                        }
+                        return Err((0..sessions.len())
+                            .map(|_| {
+                                Err(crate::worldgen_session::GenerationRequestError::Boundary(
+                                    message.clone(),
+                                ))
+                            })
+                            .collect());
+                    }
+                };
+                leases.push(GenerationPipelineLease {
+                    ledger: &self.generation_ledger,
+                    identity,
+                });
+                (admitted, checkpoint)
+            };
+            let hydration = GenerationSession::from_checkpoint_with_budget_and_cancellation(
+                checkpoint,
+                session.budget(),
+                session.cancellation(),
+            );
+            let hydration = match hydration {
+                Ok(hydration) => hydration,
+                Err(error) => {
+                    self.generation_ledger()
+                        .rollback_admission(pipeline, &admitted);
+                    for entry in &entries {
+                        self.generation_ledger()
+                            .rollback_admission(entry.pipeline, &entry.admitted);
+                    }
+                    let message = error.to_string();
+                    return Err((0..sessions.len())
+                        .map(|_| {
+                            Err(crate::worldgen_session::GenerationRequestError::Boundary(
+                                message.clone(),
+                            ))
+                        })
+                        .collect());
+                }
+            };
+            *session = hydration;
+            if let Some(column) = self.retained_output_column(pipeline, request.target()) {
+                self.generation_ledger()
+                    .rollback_admission(pipeline, &admitted);
+                let mutations = session.committed_mutations().cloned().collect::<Vec<_>>();
+                let mut retained = vec![(request.target(), column)];
+                Self::apply_generation_mutations(&mut retained, &mutations);
+                let column = retained
+                    .pop()
+                    .expect("retained target column was installed")
+                    .1;
+                reused_columns.push((index, column.clone()));
+                results[index] = Some(Ok(Some(
+                    crate::worldgen_session::GenerationRequestResult::Existing(column),
+                )));
+                crate::world_spawn::record_existing_hit();
+                continue;
+            }
+            entries.push(GenerationBatchEntry {
+                index,
+                pipeline,
+                admitted,
+            });
+        }
+
+        let mut active_sessions = Vec::with_capacity(entries.len());
+        for entry in &entries {
+            let session = &mut sessions[entry.index];
+            let placeholder = GenerationSession::with_budget_and_cancellation(
+                session.request(),
+                session.budget(),
+                session.cancellation(),
+            );
+            active_sessions.push(std::mem::replace(session, placeholder));
+        }
+        Ok(PreparedGenerationBatch {
+            region_lease,
+            halo,
+            entries,
+            reused_columns,
+            leases,
+            results,
+            active_sessions,
+        })
+    }
+
+    fn finish_generation_batch(
+        &self,
+        sessions: &mut [GenerationSession],
+        prepared: PreparedGenerationBatch<'_, S>,
+        generated: Vec<
+            Result<
+                Option<crate::worldgen_session::GenerationRequestResult>,
+                crate::worldgen_session::GenerationRequestError,
+            >,
+        >,
+    ) -> GenerationBatchFinish {
+        let PreparedGenerationBatch {
+            region_lease: _region_lease,
+            halo,
+            entries,
+            reused_columns,
+            leases,
+            mut results,
+            active_sessions,
+        } = prepared;
+        if generated.len() != entries.len() {
+            for (entry, session) in entries.iter().zip(active_sessions) {
+                sessions[entry.index] = session;
+            }
+            for entry in &entries {
+                self.generation_ledger()
+                    .rollback_admission(entry.pipeline, &entry.admitted);
+            }
+            return GenerationBatchFinish::Complete((0..sessions.len())
+                .map(|_| {
+                    Err(crate::worldgen_session::GenerationRequestError::Boundary(
+                        "generation batch returned the wrong result count".to_owned(),
+                    ))
+                })
+                .collect());
+        }
+
+        let mut commit_columns = reused_columns
+            .iter()
+            .map(|(index, column)| (sessions[*index].request().target(), column.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut finalized_coordinates = reused_columns
+            .iter()
+            .map(|(index, _)| sessions[*index].request().target())
+            .collect::<BTreeSet<_>>();
+        let mut generated_snapshots = Vec::new();
+        let mut failed_entries = Vec::<GenerationBatchEntry>::new();
+        let mut committed_mutations = Vec::new();
+        for (index, _) in &reused_columns {
+            let target = sessions[*index].request().target();
+            committed_mutations.extend(
+                sessions[*index]
+                    .committed_mutations()
+                    .filter(|mutation| {
+                        let destination = mutation.provenance().destination();
+                        (
+                            destination.x().div_euclid(16),
+                            destination.z().div_euclid(16),
+                        ) != target
+                    })
+                    .cloned(),
+            );
+        }
+        let mut commit_indices = reused_columns
+            .iter()
+            .map(|(index, _)| *index)
+            .collect::<Vec<_>>();
+        for ((entry, session), generation) in entries
+            .into_iter()
+            .zip(active_sessions)
+            .zip(generated)
+        {
+            let index = entry.index;
+            sessions[index] = session;
+            let session = &mut sessions[index];
+            match generation {
+                Err(error) => {
+                    results[index] = Some(Err(error));
+                    failed_entries.push(entry);
+                }
+                Ok(None) => {
+                    self.generation_ledger()
+                        .rollback_admission(entry.pipeline, &entry.admitted);
+                    results[index] = Some(Ok(None));
+                }
+                Ok(Some(crate::worldgen_session::GenerationRequestResult::Existing(column))) => {
+                    crate::world_spawn::record_existing_hit();
+                    self.generation_ledger()
+                        .rollback_admission(entry.pipeline, &entry.admitted);
+                    commit_columns.insert(session.request().target(), column.clone());
+                    finalized_coordinates.insert(session.request().target());
+                    commit_indices.push(index);
+                    results[index] = Some(Ok(Some(
+                        crate::worldgen_session::GenerationRequestResult::Existing(column),
+                    )));
+                }
+                Ok(Some(crate::worldgen_session::GenerationRequestResult::Generated(snapshot))) => {
+                    if session.cancellation().is_cancelled() {
+                        self.generation_ledger()
+                            .rollback_admission(entry.pipeline, &entry.admitted);
+                        results[index] = Some(Err(
+                            crate::worldgen_session::GenerationRequestError::Session(
+                                SessionError::Cancelled,
+                            ),
+                        ));
+                        continue;
+                    }
+                    commit_columns.insert(snapshot.coordinate(), snapshot.column().clone());
+                    finalized_coordinates.insert(snapshot.coordinate());
+                    for neighbour in snapshot.neighbours() {
+                        commit_columns
+                            .entry(neighbour.coordinate())
+                            .or_insert_with(|| neighbour.column().clone());
+                    }
+                    committed_mutations.extend(session.committed_mutations().cloned());
+                    commit_indices.push(index);
+                    generated_snapshots.push((index, entry, snapshot));
+                }
+            }
+        }
+
+        let final_outputs: BTreeMap<ChunkCoordinate, &ChunkColumn> = finalized_coordinates
+            .iter()
+            .filter_map(|&coordinate| {
+                commit_columns
+                    .get(&coordinate)
+                    .map(|column| (coordinate, column))
+            })
+            .collect();
+
+        let publication_error = if generated_snapshots.is_empty() && failed_entries.is_empty() {
+            None
+        } else {
+            let mut publication_sessions = Vec::with_capacity(
+                generated_snapshots.len() + failed_entries.len(),
+            );
+            publication_sessions.extend(generated_snapshots.iter().map(|(_, entry, _)| {
+                (entry.pipeline, &sessions[entry.index])
+            }));
+            publication_sessions.extend(
+                failed_entries
+                    .iter()
+                    .map(|entry| (entry.pipeline, &sessions[entry.index])),
+            );
+            self.generation_ledger()
+                .publish_sessions_with_final_outputs(&publication_sessions, &final_outputs)
+                .err()
+        };
+        let publication_failed = publication_error.is_some();
+        if let Some(error) = publication_error {
+            for (_, entry, _) in &generated_snapshots {
+                self.generation_ledger()
+                    .rollback_admission(entry.pipeline, &entry.admitted);
+            }
+            for entry in &failed_entries {
+                self.generation_ledger()
+                    .rollback_admission(entry.pipeline, &entry.admitted);
+            }
+            for &index in &commit_indices {
+                results[index] = Some(Err(
+                    crate::worldgen_session::GenerationRequestError::Boundary(
+                        error.to_string(),
+                    ),
+                ));
+            }
+        } else {
+            for entry in &failed_entries {
+                self.generation_ledger()
+                    .rollback_admission(entry.pipeline, &entry.admitted);
+            }
+        }
+
+        if publication_failed {
+            drop(leases);
+            return GenerationBatchFinish::Complete(results
+                .into_iter()
+                .map(|result| {
+                    result.unwrap_or_else(|| {
+                        Err(crate::worldgen_session::GenerationRequestError::Boundary(
+                            "generation batch did not produce a result".to_owned(),
+                        ))
+                    })
+                })
+                .collect());
+        }
+
+        let committed_mutations = committed_mutations
+            .into_iter()
+            .filter(|mutation| {
+                let destination = mutation.provenance().destination();
+                let coordinate = (
+                    destination.x().div_euclid(16),
+                    destination.z().div_euclid(16),
+                );
+                !finalized_coordinates.contains(&coordinate)
+            })
+            .collect::<Vec<_>>();
+        drop(final_outputs);
+        if !commit_columns.is_empty() {
+            let columns = commit_columns.into_iter().collect::<Vec<_>>();
+            if let Err(error) = self.commit_generation_with_mutations(
+                &halo,
+                columns.clone(),
+                &committed_mutations,
+            ) {
+                if matches!(error, GenerationCommitError::RevisionConflict { .. }) {
+                    for (_, entry, _) in &generated_snapshots {
+                        self.generation_ledger()
+                            .rollback_admission(entry.pipeline, &entry.admitted);
+                    }
+                    return GenerationBatchFinish::RevisionConflict;
+                }
+                for index in commit_indices {
+                    results[index] = Some(Err(
+                        crate::worldgen_session::GenerationRequestError::Boundary(
+                            error.to_string(),
+                        ),
+                    ));
+                }
+                for (index, entry, _) in generated_snapshots {
+                    self.generation_ledger()
+                        .rollback_admission(entry.pipeline, &entry.admitted);
+                    results[index] = Some(Err(
+                        crate::worldgen_session::GenerationRequestError::Boundary(
+                            error.to_string(),
+                        ),
+                    ));
+                }
+            } else {
+                let ready_destinations = columns
+                    .iter()
+                    .map(|(coordinate, _)| *coordinate)
+                    .collect::<Vec<_>>();
+                for (index, _) in &reused_columns {
+                    let mutations = sessions[*index]
+                        .committed_mutations()
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    self.generation_ledger().settle_mutations(
+                        sessions[*index].pipeline(),
+                        &mutations,
+                        false,
+                        &ready_destinations,
+                    );
+                }
+                let packet_neighbour_admissions = generated_snapshots
+                    .iter()
+                    .map(|(_, _, snapshot)| snapshot.neighbours().len())
+                    .sum();
+                crate::world_spawn::record_packet_neighbour_admissions(
+                    packet_neighbour_admissions,
+                );
+                for (index, entry, snapshot) in generated_snapshots {
+                    let source_stored = self.persist_generation_mutations(&sessions[index], &columns);
+                    let mutations = sessions[index]
+                        .committed_mutations()
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let ready_destinations = columns
+                        .iter()
+                        .map(|(coordinate, _)| *coordinate)
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                    self.generation_ledger()
+                        .settle_mutations(
+                            entry.pipeline,
+                            &mutations,
+                            source_stored,
+                            &ready_destinations,
+                        );
+                    results[index] = Some(Ok(Some(
+                        crate::worldgen_session::GenerationRequestResult::Generated(snapshot),
+                    )));
+                }
+            }
+        }
+        drop(leases);
+        GenerationBatchFinish::Complete(results
+            .into_iter()
+            .map(|result| {
+                result.unwrap_or_else(|| {
+                    Err(crate::worldgen_session::GenerationRequestError::Boundary(
+                        "generation batch did not produce a result".to_owned(),
+                    ))
+                })
+            })
+            .collect())
+    }
+
+    fn batch_pipeline_identities_match(sessions: &[GenerationSession]) -> bool {
+        let Some(first) = sessions.first() else {
+            return true;
+        };
+        let identity = first.pipeline().identity(PipelineOptions::ALL);
+        sessions
+            .iter()
+            .skip(1)
+            .all(|session| session.pipeline().identity(PipelineOptions::ALL) == identity)
+    }
+
+    fn execute_generation_batch(
+        &self,
+        sessions: &mut [GenerationSession],
+    ) -> Vec<
+        Result<
+            Option<crate::worldgen_session::GenerationRequestResult>,
+            crate::worldgen_session::GenerationRequestError,
+        >,
+    > {
+        if sessions.len() >= 2 && !Self::batch_pipeline_identities_match(sessions) {
+            let message = "generation batch requires one pipeline identity";
+            return sessions
+                .iter()
+                .map(|_| {
+                    Err(crate::worldgen_session::GenerationRequestError::Boundary(
+                        message.to_owned(),
+                    ))
+                })
+                .collect();
+        }
+        if sessions.len() < 2
+            || sessions.iter().any(|session| {
+                session.request().generation_target() != GenerationTarget::Full
+            })
+        {
+            return sessions
+                .iter_mut()
+                .map(|session| self.request_generation(session.request(), Some(session)))
+                .collect();
+        }
+        loop {
+            let mut prepared = match self.prepare_generation_batch(sessions) {
+                Ok(prepared) => prepared,
+                Err(results) => return results,
+            };
+            let generated = self.source.request_generation_batch(&mut prepared.active_sessions);
+            match self.finish_generation_batch(sessions, prepared, generated) {
+                GenerationBatchFinish::Complete(results) => return results,
+                GenerationBatchFinish::RevisionConflict => std::thread::yield_now(),
+            }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn execute_generation_batch_yielding(
+        &self,
+        sessions: &mut [GenerationSession],
+    ) -> Vec<
+        Result<
+            Option<crate::worldgen_session::GenerationRequestResult>,
+            crate::worldgen_session::GenerationRequestError,
+        >,
+    > {
+        if sessions.len() >= 2 && !Self::batch_pipeline_identities_match(sessions) {
+            let message = "generation batch requires one pipeline identity";
+            return sessions
+                .iter()
+                .map(|_| {
+                    Err(crate::worldgen_session::GenerationRequestError::Boundary(
+                        message.to_owned(),
+                    ))
+                })
+                .collect();
+        }
+        if sessions.len() < 2
+            || sessions.iter().any(|session| {
+                session.request().generation_target() != GenerationTarget::Full
+            })
+        {
+            let mut results = Vec::with_capacity(sessions.len());
+            for session in sessions {
+                results.push(
+                    self.request_generation_yielding(session.request(), Some(session))
+                        .await,
+                );
+            }
+            return results;
+        }
+        loop {
+            let mut prepared = match self.prepare_generation_batch(sessions) {
+                Ok(prepared) => prepared,
+                Err(results) => return results,
+            };
+            let generated = self
+                .source
+                .request_generation_batch_yielding(&mut prepared.active_sessions)
+                .await;
+            match self.finish_generation_batch(sessions, prepared, generated) {
+                GenerationBatchFinish::Complete(results) => return results,
+                GenerationBatchFinish::RevisionConflict => crate::chunk::yield_to_browser().await,
+            }
         }
     }
 
@@ -2831,10 +4285,7 @@ impl<S: ChunkSource> ChunkStore<S> {
                 {
                     return Ok(crate::worldgen_session::GenerationRequestResult::Existing(column));
                 }
-                if let Some(column) = self
-                    .generation_ledger()
-                    .output_column(session.pipeline(), request.target())
-                {
+                if let Some(column) = self.retained_output_column(session.pipeline(), request.target()) {
                     return Ok(crate::worldgen_session::GenerationRequestResult::Existing(column));
                 }
                 continue;
@@ -2851,17 +4302,20 @@ impl<S: ChunkSource> ChunkStore<S> {
         &self,
         session: &mut GenerationSession,
     ) -> Result<crate::worldgen_session::GenerationRequestResult, GenerationSessionExecutionError> {
-        let coordinates = session.admission_order();
+        let coordinates = crate::production_worldgen_session::required_generation_halo(
+            std::slice::from_ref(session),
+        )
+        .map_err(GenerationSessionExecutionError::Session)?;
         let cancellation = session.cancellation();
         let _region_lease = self
             .generation_regions
             .acquire(&coordinates, &cancellation)
             .map_err(|_| GenerationSessionExecutionError::Session(SessionError::Cancelled))?;
-        let halo = self.lease_halo(coordinates)?;
+        let halo = self.lease_halo(&coordinates)?;
         let pipeline = session.pipeline();
         let (admitted, checkpoint, pipeline_lease) = {
             let mut ledger = self.generation_ledger();
-            let admitted = ledger.admit(pipeline, coordinates)?;
+            let admitted = ledger.admit(pipeline, &coordinates)?;
             // A caller may have completed a prefix before handing the session
             // to the store. Publish that committed local state first so
             // hydration never silently discards useful work.
@@ -2886,17 +4340,23 @@ impl<S: ChunkSource> ChunkStore<S> {
         );
         let result = (|| {
             *session = hydration?;
-            if let Some(column) = self
-                .generation_ledger()
-                .output_column(pipeline, session.request().target())
-            {
+            if let Some(column) = self.retained_output_column(pipeline, session.request().target()) {
                 self.generation_ledger()
                     .rollback_admission(pipeline, &admitted);
-                self.commit_generation(
-                    &halo,
-                    vec![(session.request().target(), column.clone())],
-                )?;
-                return Ok(crate::worldgen_session::GenerationRequestResult::Existing(column));
+                let mutations = session.committed_mutations().cloned().collect::<Vec<_>>();
+                let target = session.request().target();
+                let mut retained = vec![(target, column)];
+                Self::apply_generation_mutations(&mut retained, &mutations);
+                let output = retained[0].1.clone();
+                self.commit_generation(&halo, retained)?;
+                let ready_destinations = vec![target];
+                self.generation_ledger().settle_mutations(
+                    pipeline,
+                    &mutations,
+                    false,
+                    &ready_destinations,
+                );
+                return Ok(crate::worldgen_session::GenerationRequestResult::Existing(output));
             }
             let generation = match self
                 .source
@@ -2945,7 +4405,22 @@ impl<S: ChunkSource> ChunkStore<S> {
             );
             let committed_mutations = session.committed_mutations().cloned().collect::<Vec<_>>();
             self.commit_generation_with_mutations(&halo, columns.clone(), &committed_mutations)?;
-            self.persist_generation_mutations(session, &columns);
+            crate::world_spawn::record_packet_neighbour_admissions(snapshot.neighbours().len());
+            let source_stored = self.persist_generation_mutations(session, &columns);
+            let mutations = session.committed_mutations().cloned().collect::<Vec<_>>();
+            let ready_destinations = columns
+                .iter()
+                .map(|(coordinate, _)| *coordinate)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            self.generation_ledger()
+                .settle_mutations(
+                    pipeline,
+                    &mutations,
+                    source_stored,
+                    &ready_destinations,
+                );
             Ok(crate::worldgen_session::GenerationRequestResult::Generated(snapshot))
         })();
         if result.is_err() {
@@ -2979,10 +4454,7 @@ impl<S: ChunkSource> ChunkStore<S> {
                 {
                     return Ok(crate::worldgen_session::GenerationRequestResult::Existing(column));
                 }
-                if let Some(column) = self
-                    .generation_ledger()
-                    .output_column(session.pipeline(), request.target())
-                {
+                if let Some(column) = self.retained_output_column(session.pipeline(), request.target()) {
                     return Ok(crate::worldgen_session::GenerationRequestResult::Existing(column));
                 }
                 continue;
@@ -2998,18 +4470,21 @@ impl<S: ChunkSource> ChunkStore<S> {
         &self,
         session: &mut GenerationSession,
     ) -> Result<crate::worldgen_session::GenerationRequestResult, GenerationSessionExecutionError> {
-        let coordinates = session.admission_order();
+        let coordinates = crate::production_worldgen_session::required_generation_halo(
+            std::slice::from_ref(session),
+        )
+        .map_err(GenerationSessionExecutionError::Session)?;
         let cancellation = session.cancellation();
         let _region_lease = self
             .generation_regions
             .acquire_yielding(&coordinates, &cancellation)
             .await
             .map_err(|_| GenerationSessionExecutionError::Session(SessionError::Cancelled))?;
-        let halo = self.lease_halo(coordinates)?;
+        let halo = self.lease_halo(&coordinates)?;
         let pipeline = session.pipeline();
         let (admitted, checkpoint, pipeline_lease) = {
             let mut ledger = self.generation_ledger();
-            let admitted = ledger.admit(pipeline, coordinates)?;
+            let admitted = ledger.admit(pipeline, &coordinates)?;
             ledger.publish_session(pipeline, session)?;
             let checkpoint = ledger.checkpoint(pipeline, session.request())?;
             let identity = ledger.pin_pipeline(pipeline)?;
@@ -3031,17 +4506,23 @@ impl<S: ChunkSource> ChunkStore<S> {
         );
         let result = async {
             *session = hydration?;
-            if let Some(column) = self
-                .generation_ledger()
-                .output_column(pipeline, session.request().target())
-            {
+            if let Some(column) = self.retained_output_column(pipeline, session.request().target()) {
                 self.generation_ledger()
                     .rollback_admission(pipeline, &admitted);
-                self.commit_generation(
-                    &halo,
-                    vec![(session.request().target(), column.clone())],
-                )?;
-                return Ok(crate::worldgen_session::GenerationRequestResult::Existing(column));
+                let mutations = session.committed_mutations().cloned().collect::<Vec<_>>();
+                let target = session.request().target();
+                let mut retained = vec![(target, column)];
+                Self::apply_generation_mutations(&mut retained, &mutations);
+                let output = retained[0].1.clone();
+                self.commit_generation(&halo, retained)?;
+                let ready_destinations = vec![target];
+                self.generation_ledger().settle_mutations(
+                    pipeline,
+                    &mutations,
+                    false,
+                    &ready_destinations,
+                );
+                return Ok(crate::worldgen_session::GenerationRequestResult::Existing(output));
             }
             let generation = match self
                 .source
@@ -3083,7 +4564,22 @@ impl<S: ChunkSource> ChunkStore<S> {
             );
             let committed_mutations = session.committed_mutations().cloned().collect::<Vec<_>>();
             self.commit_generation_with_mutations(&halo, columns.clone(), &committed_mutations)?;
-            self.persist_generation_mutations(session, &columns);
+            crate::world_spawn::record_packet_neighbour_admissions(snapshot.neighbours().len());
+            let source_stored = self.persist_generation_mutations(session, &columns);
+            let mutations = session.committed_mutations().cloned().collect::<Vec<_>>();
+            let ready_destinations = columns
+                .iter()
+                .map(|(coordinate, _)| *coordinate)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            self.generation_ledger()
+                .settle_mutations(
+                    pipeline,
+                    &mutations,
+                    source_stored,
+                    &ready_destinations,
+                );
             Ok(crate::worldgen_session::GenerationRequestResult::Generated(snapshot))
         }
         .await;
@@ -3124,6 +4620,7 @@ impl<S: ChunkSource> ChunkStore<S> {
             store: self,
             coordinates: canonical,
             revisions,
+            states,
         })
     }
 
@@ -3236,6 +4733,7 @@ impl<S: ChunkSource> ChunkStore<S> {
         let mut guard = self.lock();
         let evicted = guard.evict_down_to_capacity(&ticket_resident);
         drop(guard);
+        self.write_gates.forget_if_idle(&evicted);
         self.lifecycle.execute(ChunkLifecyclePlan::unload(evicted), |assignment| {
             debug_assert_eq!(
                 assignment.owner,
@@ -3270,14 +4768,16 @@ impl<S: ChunkSource> ChunkStore<S> {
         cz: i32,
         stage: crate::chunk::ChunkGenerationStage,
     ) -> Option<ChunkColumn> {
+        crate::world_spawn::record_raw_ensure();
         loop {
             // A cheap, rate-limited check-in with the ticket graph on every
             // real op through this store; see `maybe_tick_tickets`'s own doc.
             self.maybe_tick_tickets();
-            // Capture a revision and inspect the cache under the coordinate
-            // gate, then release it before the potentially expensive source
-            // generation. The later gate reacquisition rejects stale output.
-            let gate = self.write_gates.acquire_many(&[(cx, cz)], false);
+            // Keep the coordinate gate through source generation and the cache
+            // insertion. A mutation must not become the source snapshot while
+            // a cold load is in flight; independent coordinates still proceed
+            // concurrently because this is not the cache mutex.
+            let mut gate = self.write_gates.acquire_many(&[(cx, cz)], false);
             let expected_revision = gate.states[0].revision.load(Ordering::Acquire);
             {
                 let mut guard = self.lock();
@@ -3293,9 +4793,6 @@ impl<S: ChunkSource> ChunkStore<S> {
                 }
             }
 
-            // Neither the cache lock nor the coordinate gate is held while
-            // the source owns this lifecycle load.
-            drop(gate);
             let mut fresh = self.lifecycle.execute(ChunkLifecyclePlan::load((cx, cz)), |assignment| {
                 debug_assert_eq!(assignment.chunk, (cx, cz));
                 debug_assert_eq!(
@@ -3310,11 +4807,11 @@ impl<S: ChunkSource> ChunkStore<S> {
                 .expect("an on-demand lifecycle load returns exactly one column");
             self.lock().generated += 1;
 
-            let mut gate = self.write_gates.acquire_many(&[(cx, cz)], false);
-            if gate.states[0].revision.load(Ordering::Acquire) != expected_revision {
-                drop(gate);
-                continue;
-            }
+            debug_assert_eq!(
+                gate.states[0].revision.load(Ordering::Acquire),
+                expected_revision,
+                "the coordinate gate excludes mutations during generation",
+            );
             let mut guard = self.lock();
             let cache = &mut *guard;
             let stamp = cache.next_stamp();
@@ -3601,7 +5098,7 @@ impl<S: ChunkSource> ChunkStore<S> {
         centre: (i32, i32),
         fallback: &ChunkColumn,
         resident_only: bool,
-    ) -> Result<ChunkWriteSnapshot, ColumnLightSettlementError> {
+    ) -> Result<ChunkWriteSnapshot<'_>, ColumnLightSettlementError> {
         self.write_gates
             .snapshot_many(coordinates, |(cx, cz)| {
                 self.read(cx, cz, ChunkColumn::clone)
@@ -3620,7 +5117,7 @@ impl<S: ChunkSource> ChunkStore<S> {
         centre: (i32, i32),
         fallback: &ChunkColumn,
         resident_only: bool,
-    ) -> Result<ChunkWriteSnapshot, ColumnLightSettlementError> {
+    ) -> Result<ChunkWriteSnapshot<'_>, ColumnLightSettlementError> {
         self.write_gates
             .snapshot_while_held(lease, |(cx, cz)| {
                 self.read(cx, cz, ChunkColumn::clone)
@@ -3634,7 +5131,7 @@ impl<S: ChunkSource> ChunkStore<S> {
     }
 
     fn light_columns(
-        snapshot: &ChunkWriteSnapshot,
+        snapshot: &ChunkWriteSnapshot<'_>,
         centre: (i32, i32),
         neighbour_offsets: &[(i32, i32)],
     ) -> Result<(ChunkColumn, Vec<(i32, i32, ChunkColumn)>), ColumnLightSettlementError> {
@@ -3659,7 +5156,7 @@ impl<S: ChunkSource> ChunkStore<S> {
     }
 
     fn settled_columns(
-        snapshot: &ChunkWriteSnapshot,
+        snapshot: &ChunkWriteSnapshot<'_>,
         centre: (i32, i32),
         neighbour_offsets: &[(i32, i32)],
         settlement: &ColumnLightSettlement,
@@ -3713,7 +5210,7 @@ impl<S: ChunkSource> ChunkStore<S> {
     }
 
     fn snapshot_is_centre_settled(
-        snapshot: &ChunkWriteSnapshot,
+        snapshot: &ChunkWriteSnapshot<'_>,
         centre: (i32, i32),
     ) -> bool {
         snapshot
@@ -3751,7 +5248,7 @@ impl<S: ChunkSource> ChunkStore<S> {
                 .resident_column(cx, cz)
                 .map_or(TryResident::Absent, TryResident::Present),
         };
-        drop(lease);
+        lease.release_and_prune();
         result
     }
 
@@ -3788,7 +5285,7 @@ impl<S: ChunkSource> ChunkStore<S> {
                 .map_or(TryResident::Absent, TryResident::Present),
             Ok(Some(Some(state))) => TryResident::Present(state),
         };
-        drop(lease);
+        lease.release_and_prune();
         result
     }
 
@@ -3825,7 +5322,7 @@ impl<S: ChunkSource> ChunkStore<S> {
             let mut guard = match self.cache.try_lock() {
                 Ok(guard) => guard,
                 Err(std::sync::TryLockError::WouldBlock) => {
-                    drop(lease);
+                    lease.release_and_prune();
                     return TryBlockMutation::Busy;
                 }
                 Err(std::sync::TryLockError::Poisoned(_)) => {
@@ -3836,12 +5333,12 @@ impl<S: ChunkSource> ChunkStore<S> {
             let stamp = cache.next_stamp();
             let Some(entry) = cache.columns.get_mut(&(cx, cz)) else {
                 drop(guard);
-                drop(lease);
+                lease.release_and_prune();
                 return TryBlockMutation::Absent;
             };
             if y < entry.column.min_y || y >= entry.column.min_y + entry.column.height {
                 drop(guard);
-                drop(lease);
+                lease.release_and_prune();
                 return TryBlockMutation::Absent;
             }
             let mut retained = entry.column.clone();
@@ -3858,12 +5355,12 @@ impl<S: ChunkSource> ChunkStore<S> {
                 .try_store_resident_edit(cx, cz, &retained)
             else {
                 drop(guard);
-                drop(lease);
+                    lease.release_and_prune();
                 return TryBlockMutation::Unsupported;
             };
             if retention == TryResidentEdit::Busy {
                 drop(guard);
-                drop(lease);
+                lease.release_and_prune();
                 return TryBlockMutation::Busy;
             }
 
@@ -3880,7 +5377,7 @@ impl<S: ChunkSource> ChunkStore<S> {
             }
             TryBlockMutation::Applied
         };
-        drop(lease);
+        lease.release_and_prune();
         result
     }
 }
@@ -3914,6 +5411,17 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
         if let Some(column) = self.resident_column(request.target().0, request.target().1)
             && column.generation_stage() >= required_stage
         {
+            crate::world_spawn::record_existing_hit();
+            return Ok(Some(
+                crate::worldgen_session::GenerationRequestResult::Existing(column),
+            ));
+        }
+        let pipeline = session
+            .as_deref()
+            .map(GenerationSession::pipeline)
+            .unwrap_or_else(|| GenerationSession::new(request).pipeline());
+        if let Some(column) = self.retained_output_column(pipeline, request.target()) {
+            crate::world_spawn::record_existing_hit();
             return Ok(Some(
                 crate::worldgen_session::GenerationRequestResult::Existing(column),
             ));
@@ -3933,15 +5441,18 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
                 if !leader {
                     slot.wait();
                     if let Some(column) = slot.result() {
+                        crate::world_spawn::record_existing_hit();
                         break Ok(crate::worldgen_session::GenerationRequestResult::Existing(column));
                     }
                     if let Some(column) = self.resident_column(request.target().0, request.target().1)
                         && column.generation_stage() >= required_stage
                     {
+                        crate::world_spawn::record_existing_hit();
                         break Ok(crate::worldgen_session::GenerationRequestResult::Existing(column));
                     }
                     continue;
                 }
+                crate::world_spawn::record_request_session_leader();
                 let execution = match session.as_deref_mut() {
                     Some(session) => self.execute_generation_session_inner(session),
                     None => {
@@ -3950,8 +5461,31 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
                     }
                 };
                 self.finish_generation(key, &slot, &execution);
+                if matches!(
+                    &execution,
+                    Err(GenerationSessionExecutionError::Commit(
+                        GenerationCommitError::RevisionConflict { .. }
+                    ))
+                ) {
+                    if let Some(column) =
+                        self.resident_column(request.target().0, request.target().1)
+                        && column.generation_stage() >= required_stage
+                    {
+                        break Ok(
+                            crate::worldgen_session::GenerationRequestResult::Existing(column),
+                        );
+                    }
+                    std::thread::yield_now();
+                    continue;
+                }
                 break execution;
             };
+            if matches!(
+                &execution,
+                Ok(crate::worldgen_session::GenerationRequestResult::Existing(_))
+            ) {
+                crate::world_spawn::record_existing_hit();
+            }
             match execution {
                 Ok(result) => Ok(Some(result)),
                 Err(GenerationSessionExecutionError::MissingDriver) => Ok(None),
@@ -3969,6 +5503,18 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
                 )),
             }
         }
+    }
+
+    fn request_generation_batch(
+        &self,
+        sessions: &mut [GenerationSession],
+    ) -> Vec<
+        Result<
+            Option<crate::worldgen_session::GenerationRequestResult>,
+            crate::worldgen_session::GenerationRequestError,
+    >,
+    > {
+        self.execute_generation_batch(sessions)
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -3998,6 +5544,7 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
             if let Some(column) = self.resident_column(request.target().0, request.target().1)
                 && column.generation_stage() >= required_stage
             {
+                crate::world_spawn::record_existing_hit();
                 return Ok(Some(
                     crate::worldgen_session::GenerationRequestResult::Existing(column),
                 ));
@@ -4009,15 +5556,18 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
                 if !leader {
                     slot.wait_yielding().await;
                     if let Some(column) = slot.result() {
+                        crate::world_spawn::record_existing_hit();
                         break Ok(crate::worldgen_session::GenerationRequestResult::Existing(column));
                     }
                     if let Some(column) = self.resident_column(request.target().0, request.target().1)
                         && column.generation_stage() >= required_stage
                     {
+                        crate::world_spawn::record_existing_hit();
                         break Ok(crate::worldgen_session::GenerationRequestResult::Existing(column));
                     }
                     continue;
                 }
+                crate::world_spawn::record_request_session_leader();
                 let execution = match session.as_deref_mut() {
                     Some(session) => self.execute_generation_session_yielding_inner(session).await,
                     None => {
@@ -4026,8 +5576,31 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
                     }
                 };
                 self.finish_generation(key, &slot, &execution);
+                if matches!(
+                    &execution,
+                    Err(GenerationSessionExecutionError::Commit(
+                        GenerationCommitError::RevisionConflict { .. }
+                    ))
+                ) {
+                    if let Some(column) =
+                        self.resident_column(request.target().0, request.target().1)
+                        && column.generation_stage() >= required_stage
+                    {
+                        break Ok(
+                            crate::worldgen_session::GenerationRequestResult::Existing(column),
+                        );
+                    }
+                    crate::chunk::yield_to_browser().await;
+                    continue;
+                }
                 break execution;
             };
+            if matches!(
+                &execution,
+                Ok(crate::worldgen_session::GenerationRequestResult::Existing(_))
+            ) {
+                crate::world_spawn::record_existing_hit();
+            }
             match execution {
                 Ok(result) => Ok(Some(result)),
                 Err(GenerationSessionExecutionError::MissingDriver) => Ok(None),
@@ -4044,6 +5617,41 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
                     error.to_string(),
                 )),
             }
+        })
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn request_generation_batch_yielding<'a>(
+        &'a self,
+        sessions: &'a mut [GenerationSession],
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Vec<
+                        Result<
+                            Option<crate::worldgen_session::GenerationRequestResult>,
+                            crate::worldgen_session::GenerationRequestError,
+                        >,
+                    >,
+                > + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            if sessions.len() < 2
+                || sessions.iter().any(|session| {
+                    session.request().generation_target() != GenerationTarget::Full
+                })
+            {
+                let mut results = Vec::with_capacity(sessions.len());
+                for session in sessions {
+                    results.push(
+                        self.request_generation_yielding(session.request(), Some(session))
+                            .await,
+                    );
+                }
+                return results;
+            }
+            self.execute_generation_batch_yielding(sessions).await
         })
     }
 
@@ -4121,7 +5729,7 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
         let coordinates = Self::light_coordinates(cx, cz, &RETAINED_LIGHT_NEIGHBOUR_OFFSETS);
         let lease = self.write_gates.acquire_many(&coordinates, true);
         self.invalidate_retained_light_neighbourhood_while_held(cx, cz, &coordinates);
-        drop(lease);
+        lease.release_and_prune();
     }
 
     fn store_resident_columns(&self, columns: &[(i32, i32, ChunkColumn)]) -> bool {
@@ -4131,7 +5739,7 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
             .collect::<Vec<_>>();
         let lease = self.write_gates.acquire_many(&coordinates, true);
         let stored = self.store_resident_columns_inner(columns);
-        drop(lease);
+        lease.release_and_prune();
         stored
     }
 
@@ -4219,34 +5827,55 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
 
         if exclusive {
             let mut lease = self.write_gates.acquire_many(&coordinates, false);
-            let snapshot = self.capture_light_snapshot_while_held(
+            let snapshot = match self.capture_light_snapshot_while_held(
                 &lease,
                 centre,
                 fallback,
                 resident_only,
-            )?;
-            let (centre_column, neighbours) = Self::light_columns(
+            ) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    lease.release_and_prune();
+                    return Err(error);
+                }
+            };
+            let (centre_column, neighbours) = match Self::light_columns(
                 &snapshot,
                 centre,
                 neighbour_offsets,
-            )?;
+            ) {
+                Ok(columns) => columns,
+                Err(error) => {
+                    drop(snapshot);
+                    lease.release_and_prune();
+                    return Err(error);
+                }
+            };
             if !replace_existing && Self::snapshot_is_centre_settled(&snapshot, centre) {
-                drop(lease);
+                lease.release_and_prune();
                 return Ok(centre_column);
             }
             let Some(settlement) = compute(&centre_column, &neighbours) else {
-                drop(lease);
+                lease.release_and_prune();
                 return Err(ColumnLightSettlementError::NoLight);
             };
-            let (updates, settled) = Self::settled_columns(
+            let (updates, settled) = match Self::settled_columns(
                 &snapshot,
                 centre,
                 neighbour_offsets,
                 &settlement,
-            )?;
+            ) {
+                Ok(result) => result,
+                Err(error) => {
+                    drop(snapshot);
+                    lease.release_and_prune();
+                    return Err(error);
+                }
+            };
             let _ = self.store_resident_columns_inner(&updates);
+            drop(snapshot);
             lease.bump_revision = true;
-            drop(lease);
+            lease.release_and_prune();
             return Ok(settled);
         }
 
@@ -4570,7 +6199,12 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
         {
             self.source.set_block(x, y, z, name);
         }
-        drop(lease);
+        lease.release_and_prune();
+        for &coordinate in &coordinates {
+            if !self.is_column_resident(coordinate.0, coordinate.1) {
+                self.write_gates.forget_if_idle(std::slice::from_ref(&coordinate));
+            }
+        }
     }
 
     /// Forwarded for the same reason `world_registries`/`dimension` above are:
@@ -4657,6 +6291,65 @@ mod tests {
 
     }
 
+    struct BatchStoreSource {
+        batch_calls: Arc<AtomicUsize>,
+        scalar_calls: Arc<AtomicUsize>,
+    }
+
+    impl ChunkSource for BatchStoreSource {
+        fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            self.scalar_calls.fetch_add(1, Ordering::Relaxed);
+            ChunkColumn::new(0, 1)
+        }
+
+        fn request_generation(
+            &self,
+            _request: crate::worldgen_session::GenerationRequest,
+            _session: Option<&mut GenerationSession>,
+        ) -> Result<
+            Option<crate::worldgen_session::GenerationRequestResult>,
+            crate::worldgen_session::GenerationRequestError,
+        > {
+            Ok(Some(
+                crate::worldgen_session::GenerationRequestResult::Existing(
+                    ChunkColumn::new(0, 1),
+                ),
+            ))
+        }
+
+        fn request_generation_batch(
+            &self,
+            sessions: &mut [GenerationSession],
+        ) -> Vec<
+            Result<
+                Option<crate::worldgen_session::GenerationRequestResult>,
+                crate::worldgen_session::GenerationRequestError,
+            >,
+        > {
+            self.batch_calls.fetch_add(1, Ordering::Relaxed);
+            sessions
+                .iter()
+                .map(|_| {
+                    Ok(Some(
+                        crate::worldgen_session::GenerationRequestResult::Existing(
+                            ChunkColumn::new(0, 1),
+                        ),
+                    ))
+                })
+                .collect()
+        }
+
+        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+            crate::chunk::AIR.to_owned()
+        }
+
+        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+            crate::chunk::DEFAULT_BIOME.to_owned()
+        }
+
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+    }
+
     /// The worst per-coordinate generation count, with its coordinate — the
     /// figure that distinguishes "generated once each" from "regenerated every
     /// tick" without depending on how many chunks the loop happened to visit.
@@ -4722,6 +6415,143 @@ mod tests {
                 .expect("unloaded log poisoned")
                 .push((cx, cz));
         }
+    }
+
+    #[test]
+    fn store_batch_path_reuses_one_region_and_preserves_results() {
+        let batch_calls = Arc::new(AtomicUsize::new(0));
+        let scalar_calls = Arc::new(AtomicUsize::new(0));
+        let source = BatchStoreSource {
+            batch_calls: Arc::clone(&batch_calls),
+            scalar_calls: Arc::clone(&scalar_calls),
+        };
+        let store = ChunkStore::new(source);
+        let requests = [(0, 0), (1, 0)]
+            .into_iter()
+            .map(|target| {
+                GenerationSession::new(crate::worldgen_session::GenerationRequest::new(
+                    Dimension::Overworld,
+                    target,
+                    GenerationTarget::Full,
+                    1,
+                ))
+            })
+            .collect::<Vec<_>>();
+        let mut sessions = requests;
+        let results = ChunkSource::request_generation_batch(&store, &mut sessions);
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|result| {
+            matches!(
+                result,
+                Ok(Some(crate::worldgen_session::GenerationRequestResult::Existing(_)))
+            )
+        }));
+        assert_eq!(batch_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(scalar_calls.load(Ordering::Relaxed), 0);
+        assert!(store.is_column_resident(0, 0));
+        assert!(store.is_column_resident(1, 0));
+    }
+
+    #[test]
+    fn store_batch_path_rejects_mixed_pipeline_identities_before_admission() {
+        let batch_calls = Arc::new(AtomicUsize::new(0));
+        let scalar_calls = Arc::new(AtomicUsize::new(0));
+        let store = ChunkStore::with_capacity(
+            BatchStoreSource {
+                batch_calls: Arc::clone(&batch_calls),
+                scalar_calls: Arc::clone(&scalar_calls),
+            },
+            0,
+        );
+        let mut sessions = vec![
+            GenerationSession::new(crate::worldgen_session::GenerationRequest::new(
+                Dimension::Overworld,
+                (0, 0),
+                GenerationTarget::Full,
+                1,
+            )),
+            GenerationSession::new(crate::worldgen_session::GenerationRequest::new(
+                Dimension::End,
+                (1, 0),
+                GenerationTarget::Full,
+                1,
+            )),
+        ];
+
+        let results = ChunkSource::request_generation_batch(&store, &mut sessions);
+
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|result| {
+            matches!(
+                result,
+                Err(crate::worldgen_session::GenerationRequestError::Boundary(message))
+                    if message == "generation batch requires one pipeline identity"
+            )
+        }));
+        assert_eq!(batch_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(scalar_calls.load(Ordering::Relaxed), 0);
+        let stats = store.generation_ledger().stats();
+        assert_eq!(stats.pipelines, 0);
+        assert_eq!(stats.coordinates, 0);
+        assert_eq!(stats.overlays, 0);
+        assert_eq!(stats.products, 0);
+        assert!(!store.is_column_resident(0, 0));
+        assert!(!store.is_column_resident(1, 0));
+    }
+
+    #[test]
+    fn mixed_batch_coalesces_ledger_output_before_revision_check() {
+        use lodestone_worldgen::stage_schedule::{Dimension, GenerationTarget, END_PIPELINE};
+
+        let batch_calls = Arc::new(AtomicUsize::new(0));
+        let scalar_calls = Arc::new(AtomicUsize::new(0));
+        let store = ChunkStore::with_capacity(
+            BatchStoreSource {
+                batch_calls: Arc::clone(&batch_calls),
+                scalar_calls: Arc::clone(&scalar_calls),
+            },
+            0,
+        );
+        let mut ledger = GenerationLedger::new();
+        ledger.admit(END_PIPELINE, &[(0, 0)]).unwrap();
+        let mut seeded = end_shaped_session(1);
+        complete_end_suffix(&mut seeded, 1);
+        ledger.publish_session(END_PIPELINE, &seeded).unwrap();
+        *store.generation_ledger() = ledger;
+        assert!(store
+            .generation_ledger()
+            .output_column(END_PIPELINE, (0, 0))
+            .is_some());
+
+        let reused_request = crate::worldgen_session::GenerationRequest::new(
+            Dimension::End,
+            (0, 0),
+            GenerationTarget::Full,
+            0,
+        );
+        let generated_request = crate::worldgen_session::GenerationRequest::new(
+            Dimension::End,
+            (1, 0),
+            GenerationTarget::Full,
+            0,
+        );
+        let mut sessions = vec![
+            GenerationSession::new(reused_request),
+            GenerationSession::new(generated_request),
+        ];
+        let results = ChunkSource::request_generation_batch(&store, &mut sessions);
+
+        assert_eq!(results.len(), 2);
+        assert!(matches!(
+            &results[0],
+            Ok(Some(crate::worldgen_session::GenerationRequestResult::Existing(_)))
+        ));
+        assert!(matches!(
+            &results[1],
+            Ok(Some(crate::worldgen_session::GenerationRequestResult::Existing(_)))
+        ));
+        assert_eq!(batch_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(scalar_calls.load(Ordering::Relaxed), 0);
     }
 
     struct RejectingDriver;
@@ -4851,7 +6681,13 @@ mod tests {
                         .outputs()
                         .iter()
                         .copied()
-                        .map(|resource| ImmutableProduct::new(resource, stage as u8))
+                        .map(|resource| {
+                            if resource == ResourceKey::OutputColumn {
+                                ImmutableProduct::new(resource, ChunkColumn::new(0, 16))
+                            } else {
+                                ImmutableProduct::new(resource, stage as u8)
+                            }
+                        })
                         .collect();
                     let sidecars = descriptor
                         .retained_sidecars()
@@ -4967,6 +6803,14 @@ mod tests {
         )
     }
 
+    fn preload_tick_area<S: ChunkSource>(store: &ChunkStore<S>) {
+        for cx in -SHELL_TICK_RADIUS..=SHELL_TICK_RADIUS {
+            for cz in -SHELL_TICK_RADIUS..=SHELL_TICK_RADIUS {
+                let _ = store.column(cx, cz);
+            }
+        }
+    }
+
     const EXPECTED_TICK_AREA_COLUMNS: usize =
         ((2 * SHELL_TICK_RADIUS + 1) * (2 * SHELL_TICK_RADIUS + 1)) as usize;
 
@@ -5063,11 +6907,8 @@ mod tests {
     /// # Predicting the value, not the sign
     ///
     /// The two competing hypotheses are computed rather than compared: with a
-    /// store, `RANDOM_TICK_PASSES × 49` visits produce **49** generations;
-    /// without one they produce **`RANDOM_TICK_PASSES × 49`**. Those are not
-    /// "more" and "less", they are two exact numbers a factor of
-    /// [`RANDOM_TICK_PASSES`] apart, and the negative control below lands on the
-    /// second.
+    /// a preloaded store, repeated resident-only visits produce **49** total
+    /// generations. A cold store is deliberately not touched by the tick loop.
     ///
     /// # Duration species
     ///
@@ -5082,6 +6923,7 @@ mod tests {
         let per_chunk = Arc::clone(&counting.per_chunk);
         let store = Arc::new(ChunkStore::new(counting));
 
+        preload_tick_area(store.as_ref());
         let clock = drive_tick_loop(Arc::clone(&store), shell_tick_area(), TICKS).await;
 
         // Precondition, failing rather than skipping: if the loop did not
@@ -5131,19 +6973,14 @@ mod tests {
         );
     }
 
-    /// **The negative control, and it must fail the assertion above.**
+    /// A zero-capacity store does not opt back into cold generation from the
+    /// resident-only tick boundary.
     ///
-    /// `ChunkStore::with_capacity(source, 0)` retains nothing, so every read
-    /// falls through to `source.column()` — bit-for-bit the pre-store
-    /// behaviour, reproduced as a real *configuration* of the shipped type
-    /// rather than as a temporary neuter, so the control is permanent.
-    ///
-    /// Observed when this landed: **588** generations for 49 columns over 12
-    /// random-tick passes, i.e. exactly `49 × 12`, against 49 with the store. At
-    /// the measured 909 ms per real column that is 44.5 s of generation per
-    /// 50 ms tick budget.
+    /// `ChunkStore::with_capacity(source, 0)` retains nothing. The tick loop
+    /// still refuses to cold-generate its bounded area, so a zero-capacity
+    /// source remains cold until an explicit blocking caller asks for it.
     #[tokio::test(start_paused = true)]
-    async fn without_retention_every_chunk_is_regenerated_every_tick() {
+    async fn without_retention_tick_loop_does_not_cold_generate() {
         let counting = CountingSource::new();
         let calls = Arc::clone(&counting.calls);
         let per_chunk = Arc::clone(&counting.per_chunk);
@@ -5152,24 +6989,8 @@ mod tests {
         drive_tick_loop(Arc::clone(&store), shell_tick_area(), TICKS).await;
 
         let generated = calls.load(Ordering::Relaxed);
-        // The per-chunk view of the same failure: without retention *every*
-        // column is regenerated on *every* tick, so the worst chunk's count is
-        // the tick count itself, not 1.
-        let (worst_coord, worst_count) = worst_chunk(&per_chunk);
-        assert_eq!(
-            worst_count,
-            u64::from(RANDOM_TICK_PASSES),
-            "control: chunk {worst_coord:?} should have been regenerated once per random-tick \
-             pass ({RANDOM_TICK_PASSES}), got {worst_count}"
-        );
-        assert_eq!(
-            generated,
-            EXPECTED_TICK_AREA_COLUMNS as u64 * u64::from(RANDOM_TICK_PASSES),
-            "the zero-capacity control must reproduce the pre-store behaviour exactly: \
-             {EXPECTED_TICK_AREA_COLUMNS} columns × {RANDOM_TICK_PASSES} passes. If this ever reports \
-             {EXPECTED_TICK_AREA_COLUMNS} instead, retention has leaked into the control \
-             and the positive gate above is no longer measuring anything."
-        );
+        assert_eq!(generated, 0, "resident-only ticks must not cold-generate");
+        assert!(per_chunk.lock().expect("per-chunk map poisoned").is_empty());
         assert_eq!(store.len(), 0, "a zero-capacity store must retain nothing");
     }
 
@@ -7339,16 +9160,17 @@ mod tests {
             while !mutation_started.load(Ordering::Acquire) {
                 std::thread::yield_now();
             }
-            assert!(
-                !mutation_finished.load(Ordering::Acquire),
-                "an uncached block write must wait for the cold generation gate"
-            );
+            let mutation_waited = !mutation_finished.load(Ordering::Acquire);
             let (released, wake) = &*release_generation;
             *released
                 .lock()
                 .expect("ensure race release lock poisoned") = true;
             wake.notify_one();
             let _generated = loading.join().expect("cold generation must not panic");
+            assert!(
+                mutation_waited,
+                "an uncached block write must wait for the cold generation gate"
+            );
             assert_eq!(
                 generated_source
                     .lock()
@@ -7532,6 +9354,7 @@ mod tests {
         let per_chunk = Arc::clone(&counting.per_chunk);
         let store = Arc::new(ChunkStore::new(counting));
 
+        preload_tick_area(store.as_ref());
         let clock = drive_tick_loop_with_block_entities(
             Arc::clone(&store),
             shell_tick_area(),
@@ -7604,6 +9427,7 @@ mod tests {
         let counting = CountingSource::full_height();
         let store = Arc::new(ChunkStore::new(counting));
 
+        preload_tick_area(store.as_ref());
         drive_tick_loop_with_block_entities(Arc::clone(&store), shell_tick_area(), TICKS, handle.clone())
             .await;
 
@@ -7655,6 +9479,7 @@ mod tests {
             let per_chunk = Arc::clone(&counting.per_chunk);
             let store = Arc::new(ChunkStore::new(counting));
 
+            preload_tick_area(store.as_ref());
             drive_tick_loop_with_block_entities(
                 Arc::clone(&store),
                 shell_tick_area(),
@@ -7699,6 +9524,7 @@ mod tests {
             EXPECTED_TICK_AREA_COLUMNS,
         ));
 
+        preload_tick_area(store.as_ref());
         drive_tick_loop_with_block_entities(
             Arc::clone(&store),
             shell_tick_area(),
@@ -7774,6 +9600,7 @@ mod tests {
             let calls = Arc::clone(&counting.calls);
             let store = Arc::new(ChunkStore::new(counting));
 
+            preload_tick_area(store.as_ref());
             drive_tick_loop_with_block_entities(
                 Arc::clone(&store),
                 shell_tick_area(),
@@ -7853,6 +9680,7 @@ mod tests {
         let calls = Arc::clone(&counting.calls);
         let store = Arc::new(ChunkStore::new(counting));
 
+        preload_tick_area(store.as_ref());
         drive_tick_loop_with_block_entities(Arc::clone(&store), shell_tick_area(), TICKS, handle)
             .await;
 
@@ -8205,6 +10033,63 @@ mod tests {
     }
 
     #[test]
+    fn halo_keeps_a_cold_revision_record_until_stale_commit_is_rejected() {
+        let store = ChunkStore::with_capacity(CountingSource::new(), 1);
+        let halo = store.lease_halo(&[(0, 0)]).unwrap();
+        store.set_block(0, 0, 0, "minecraft:stone");
+
+        assert_eq!(
+            store.write_gates.state.lock().unwrap().len(),
+            9,
+            "the active cold halo must retain every invalidated revision record"
+        );
+        let error = store
+            .commit_generation(&halo, vec![((0, 0), ChunkColumn::new(0, 16))])
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            GenerationCommitError::RevisionConflict {
+                coordinate: (0, 0),
+                expected: 0,
+                found: 1,
+            }
+        ));
+        assert_eq!(store.len(), 0, "a stale cold commit must not create a resident");
+
+        drop(halo);
+        assert_eq!(
+            store.write_gates.state.lock().unwrap().len(),
+            9,
+            "nonzero revisions must survive after the halo releases them"
+        );
+        let next_halo = store.lease_halo(&[(0, 0)]).unwrap();
+        assert_eq!(next_halo.revision((0, 0)), Some(1));
+    }
+
+    #[test]
+    fn absent_light_writes_do_not_retain_gate_records() {
+        let store = ChunkStore::with_capacity(CountingSource::new(), 1);
+        let fallback = ChunkColumn::new(0, 16);
+        let snapshot = store
+            .capture_light_snapshot(&[(0, 0)], (0, 0), &fallback, false)
+            .unwrap();
+        assert_eq!(store.write_gates.state.lock().unwrap().len(), 1);
+        drop(snapshot);
+        assert_eq!(store.write_gates.state.lock().unwrap().len(), 0);
+        for coordinate in 0..64 {
+            store.invalidate_retained_light_neighbourhood(coordinate * 3, 0);
+        }
+        for coordinate in 0..64 {
+            store.store_resident_columns(&[(coordinate * 3, 0, ChunkColumn::new(0, 16))]);
+        }
+        assert_eq!(
+            store.write_gates.state.lock().unwrap().len(),
+            0,
+            "absent multi-coordinate writes must not grow the gate table"
+        );
+    }
+
+    #[test]
     fn ledger_deduplicates_sources_and_retains_products_after_session_loss() {
         use lodestone_worldgen::stage_schedule::{
             ColumnStage, Dimension, PipelineOptions, END_PIPELINE,
@@ -8284,16 +10169,53 @@ mod tests {
         assert_eq!(ledger.frontier(identity, (0, 0)).unwrap().records().len(), pure_stages);
     }
 
+    #[test]
+    fn ledger_admission_evicts_a_closed_coordinate_before_extending() {
+        use lodestone_worldgen::stage_schedule::END_PIPELINE;
+
+        let mut ledger = GenerationLedger::with_limits(GenerationLedgerLimits {
+            pipelines: 1,
+            coordinates_per_pipeline: 2,
+            source_completions_per_pipeline: 1,
+            overlays_per_pipeline: 1,
+            products_per_pipeline: 1,
+            sidecars_per_pipeline: 1,
+        });
+        ledger.admit(END_PIPELINE, &[(0, 0)]).unwrap();
+        let identity = END_PIPELINE.identity(PipelineOptions::ALL);
+        assert_eq!(ledger.admit(END_PIPELINE, &[(1, 0), (2, 0)]), Ok(vec![(1, 0), (2, 0)]));
+        assert!(matches!(
+            ledger.frontier(identity, (0, 0)),
+            Err(GenerationLedgerError::UnknownCoordinate((0, 0)))
+        ));
+        assert_eq!(ledger.stats().coordinates, 2);
+    }
+
     fn end_shaped_session(
         fingerprint: u8,
+    ) -> crate::worldgen_session::GenerationSession {
+        end_shaped_session_with_radius(fingerprint, 0)
+    }
+
+    fn end_shaped_session_with_radius(
+        fingerprint: u8,
+        dependency_radius: u8,
+    ) -> crate::worldgen_session::GenerationSession {
+        end_shaped_session_at((0, 0), fingerprint, dependency_radius)
+    }
+
+    fn end_shaped_session_at(
+        target: (i32, i32),
+        fingerprint: u8,
+        dependency_radius: u8,
     ) -> crate::worldgen_session::GenerationSession {
         use lodestone_worldgen::stage_schedule::{Dimension, END_PIPELINE};
 
         let request = crate::worldgen_session::GenerationRequest::new(
             Dimension::End,
-            (0, 0),
+            target,
             GenerationTarget::Full,
-            0,
+            dependency_radius,
         );
         let mut session = GenerationSession::new(request);
         let boundary = END_PIPELINE
@@ -8301,7 +10223,7 @@ mod tests {
             .target_stage(GenerationTarget::Shaped);
         session
             .import_aggregate_prefix(
-                (0, 0),
+                target,
                 boundary,
                 ImmutableProduct::new(ResourceKey::MaterializedWorld, ChunkColumn::new(0, 16)),
                 [],
@@ -8313,9 +10235,103 @@ mod tests {
         session
     }
 
+    #[test]
+    fn ledger_accepts_a_compact_generated_shaped_prefix() {
+        use lodestone_worldgen::stage_schedule::{Dimension, END_PIPELINE};
+
+        let generated = crate::overworld_generator(42).column_shaped(0, 0);
+        let request = crate::worldgen_session::GenerationRequest::new(
+            Dimension::End,
+            (0, 0),
+            GenerationTarget::Full,
+            0,
+        );
+        let boundary = END_PIPELINE
+            .schedule()
+            .target_stage(GenerationTarget::Shaped);
+        let mut session = GenerationSession::new(request);
+        session
+            .import_aggregate_prefix(
+                (0, 0),
+                boundary,
+                ImmutableProduct::new(ResourceKey::MaterializedWorld, generated),
+                [],
+                [1; 32],
+                [1; 32],
+                1,
+            )
+            .expect("compact shaped prefix is valid session state");
+
+        let mut ledger = GenerationLedger::new();
+        ledger.admit(END_PIPELINE, &[(0, 0)]).unwrap();
+        ledger
+            .publish_session(END_PIPELINE, &session)
+            .expect("ledger accepts the compact shaped prefix used by production");
+    }
+
     fn complete_end_suffix(
         session: &mut GenerationSession,
         fingerprint: u8,
+    ) {
+        complete_end_suffix_inner(session, fingerprint, None);
+    }
+
+    fn complete_end_suffix_with_mutation(
+        session: &mut GenerationSession,
+        fingerprint: u8,
+        destination: BlockCoordinate,
+    ) {
+        complete_end_suffix_inner_with_state(
+            session,
+            fingerprint,
+            Some(destination),
+            "minecraft:stone",
+        );
+    }
+
+    fn complete_end_suffix_with_mutation_state(
+        session: &mut GenerationSession,
+        fingerprint: u8,
+        destination: BlockCoordinate,
+        state: &str,
+    ) {
+        complete_end_suffix_inner_with_state(session, fingerprint, Some(destination), state);
+    }
+
+    fn complete_end_suffix_inner(
+        session: &mut GenerationSession,
+        fingerprint: u8,
+        mutation_destination: Option<BlockCoordinate>,
+    ) {
+        complete_end_suffix_inner_with_state(
+            session,
+            fingerprint,
+            mutation_destination,
+            "minecraft:stone",
+        );
+    }
+
+    fn complete_end_suffix_inner_with_state(
+        session: &mut GenerationSession,
+        fingerprint: u8,
+        mutation_destination: Option<BlockCoordinate>,
+        mutation_state: &str,
+    ) {
+        complete_end_suffix_inner_with_state_and_output(
+            session,
+            fingerprint,
+            mutation_destination,
+            mutation_state,
+            None,
+        );
+    }
+
+    fn complete_end_suffix_inner_with_state_and_output(
+        session: &mut GenerationSession,
+        fingerprint: u8,
+        mutation_destination: Option<BlockCoordinate>,
+        mutation_state: &str,
+        output_column: Option<ChunkColumn>,
     ) {
         use lodestone_worldgen::stage_schedule::{ColumnStage, Dimension};
 
@@ -8324,9 +10340,14 @@ mod tests {
         session
             .declare_mutable_sources(features, [(0, target)])
             .expect("End features source plan is valid");
-        let transaction = session
+        let mut transaction = session
             .begin_mutable_source(target, features, 0)
             .expect("End feature source is valid");
+        if let Some(destination) = mutation_destination {
+            transaction
+                .push(0, destination, mutation_state.to_owned())
+                .expect("End feature spill is valid");
+        }
         session
             .complete_mutable_source(transaction)
             .expect("End feature source commits");
@@ -8368,7 +10389,12 @@ mod tests {
             .copied()
             .map(|resource| {
                 if resource == ResourceKey::OutputColumn {
-                    ImmutableProduct::new(resource, ChunkColumn::new(0, 16))
+                    ImmutableProduct::new(
+                        resource,
+                        output_column
+                            .clone()
+                            .unwrap_or_else(|| ChunkColumn::new(0, 16)),
+                    )
                 } else {
                     ImmutableProduct::new(resource, fingerprint)
                 }
@@ -8398,7 +10424,7 @@ mod tests {
 
     #[test]
     fn ledger_accepts_a_stale_shaped_publish_after_full_publication() {
-        use lodestone_worldgen::stage_schedule::{PipelineOptions, END_PIPELINE};
+        use lodestone_worldgen::stage_schedule::END_PIPELINE;
 
         let mut ledger = GenerationLedger::new();
         ledger.admit(END_PIPELINE, &[(0, 0)]).unwrap();
@@ -8426,6 +10452,409 @@ mod tests {
     }
 
     #[test]
+    fn ledger_retains_cross_column_mutation_after_target_output_publication() {
+        use lodestone_worldgen::stage_schedule::END_PIPELINE;
+
+        let target = (0, 0);
+        let destination = BlockCoordinate::new(16, 70, 0);
+        let session_request = crate::worldgen_session::GenerationRequest::new(
+            Dimension::End,
+            target,
+            GenerationTarget::Full,
+            1,
+        );
+        let mut session = GenerationSession::new(session_request);
+        let boundary = END_PIPELINE
+            .schedule()
+            .target_stage(GenerationTarget::Shaped);
+        session
+            .import_aggregate_prefix(
+                target,
+                boundary,
+                ImmutableProduct::new(ResourceKey::MaterializedWorld, ChunkColumn::new(0, 16)),
+                [],
+                [1; 32],
+                [1; 32],
+                1,
+            )
+            .expect("End shaped prefix fixture is valid");
+        complete_end_suffix_with_mutation(&mut session, 2, destination);
+
+        let mut ledger = GenerationLedger::new();
+        ledger
+            .admit(END_PIPELINE, session.admission_order())
+            .expect("the mutation destination is admitted in the request halo");
+        ledger
+            .publish_session(END_PIPELINE, &session)
+            .expect("cross-column mutation remains publishable after target output");
+
+        let identity = END_PIPELINE.identity(PipelineOptions::ALL);
+        assert_eq!(ledger.stats().overlays, 1);
+        let checkpoint = ledger
+            .checkpoint(END_PIPELINE, session.request())
+            .expect("cross-column overlay is checkpointed for the halo");
+        assert_eq!(checkpoint.committed_mutations().len(), 1);
+        assert_eq!(
+            checkpoint.committed_mutations()[0].provenance().destination(),
+            destination
+        );
+        let restored = GenerationSession::from_checkpoint(checkpoint)
+            .expect("cross-column overlay remains valid during session restore");
+        assert_eq!(restored.committed_mutations().count(), 1);
+        ledger
+            .publish_session(END_PIPELINE, &restored)
+            .expect("restored cross-column overlay remains idempotent");
+        assert_eq!(ledger.stats().overlays, 1);
+        assert!(ledger.revision(identity, (1, 0)).is_ok());
+
+        let adjacent_request = crate::worldgen_session::GenerationRequest::new(
+            Dimension::End,
+            (2, 0),
+            GenerationTarget::Full,
+            1,
+        );
+        let adjacent = GenerationSession::new(adjacent_request);
+        ledger
+            .admit(END_PIPELINE, adjacent.admission_order())
+            .expect("the adjacent request halo is admitted");
+        let adjacent_checkpoint = ledger
+            .checkpoint(END_PIPELINE, adjacent.request())
+            .expect("the edge overlay is checkpointed by destination");
+        assert_eq!(adjacent_checkpoint.committed_mutations().len(), 1);
+        GenerationSession::from_checkpoint(adjacent_checkpoint)
+            .expect("a retained foreign source may sit outside the new request halo");
+    }
+
+    #[test]
+    fn ledger_settles_completed_destination_and_rejects_late_spills() {
+        use lodestone_worldgen::stage_schedule::END_PIPELINE;
+
+        let destination = (1, 0);
+        let destination_block = BlockCoordinate::new(16, 4, 0);
+        let mut ledger = GenerationLedger::with_limits(GenerationLedgerLimits {
+            pipelines: 1,
+            coordinates_per_pipeline: 32,
+            source_completions_per_pipeline: 32,
+            overlays_per_pipeline: 1,
+            products_per_pipeline: 32,
+            sidecars_per_pipeline: 32,
+        });
+
+        let mut source = end_shaped_session_at((0, 0), 1, 1);
+        complete_end_suffix_with_mutation(&mut source, 2, destination_block);
+        ledger
+            .admit(END_PIPELINE, source.admission_order())
+            .expect("the source target and its destination are admitted");
+        ledger
+            .publish_session(END_PIPELINE, &source)
+            .expect("the leading-edge spill is retained before its destination output");
+        assert_eq!(ledger.stats().overlays, 1);
+        assert_eq!(
+            ledger.settle_mutations(END_PIPELINE, &[], false, &[destination]),
+            0,
+            "a destination without an output product cannot retire its spill"
+        );
+        assert_eq!(ledger.stats().overlays, 1);
+
+        let mut destination_session = end_shaped_session_at(destination, 3, 1);
+        complete_end_suffix(&mut destination_session, 4);
+        ledger
+            .admit(END_PIPELINE, destination_session.admission_order())
+            .expect("the completed destination request extends the line by one halo");
+        ledger
+            .publish_session(END_PIPELINE, &destination_session)
+            .expect("the destination output is published");
+        assert_eq!(
+            ledger.settle_mutations(END_PIPELINE, &[], false, &[destination]),
+            1,
+            "the destination output folds its bucket in one product update"
+        );
+        assert_eq!(ledger.stats().overlays, 0);
+        let output = ledger
+            .output_column(END_PIPELINE, destination)
+            .expect("the completed destination remains available after settlement");
+        assert_eq!(output.block_state(0, 4, 0), "minecraft:stone");
+
+        let identity = END_PIPELINE.identity(PipelineOptions::ALL);
+        let mut duplicate = end_shaped_session_at((0, 0), 1, 1);
+        complete_end_suffix_with_mutation(&mut duplicate, 2, destination_block);
+        ledger
+            .publish_session(END_PIPELINE, &duplicate)
+            .expect("the same output state is an idempotent no-op");
+        assert_eq!(ledger.stats().overlays, 0);
+
+        let later_target = (2, 0);
+        let later_block = BlockCoordinate::new(16, 5, 0);
+        let mut conflicting = end_shaped_session_at(later_target, 8, 1);
+        complete_end_suffix_with_mutation_state(
+            &mut conflicting,
+            9,
+            destination_block,
+            "minecraft:dirt",
+        );
+        ledger
+            .admit(END_PIPELINE, conflicting.admission_order())
+            .expect("the conflicting source target is admitted");
+        assert_eq!(
+            ledger.publish_session(END_PIPELINE, &conflicting),
+            Err(GenerationLedgerError::CheckpointMismatch)
+        );
+        assert_eq!(ledger.stats().overlays, 0);
+
+        let mut later_same_state = end_shaped_session_at(later_target, 6, 1);
+        complete_end_suffix_with_mutation(
+            &mut later_same_state,
+            7,
+            destination_block,
+        );
+        ledger
+            .admit(END_PIPELINE, later_same_state.admission_order())
+            .expect("the later source target is admitted");
+        ledger
+            .publish_session(END_PIPELINE, &later_same_state)
+            .expect("a higher-provenance identical write is a no-op");
+        assert_eq!(ledger.stats().overlays, 0);
+
+        let mut later_spill = end_shaped_session_at(later_target, 6, 1);
+        complete_end_suffix_with_mutation(&mut later_spill, 7, later_block);
+        assert_eq!(
+            ledger.publish_session(END_PIPELINE, &later_spill),
+            Err(GenerationLedgerError::CheckpointMismatch)
+        );
+        assert_eq!(ledger.stats().overlays, 0);
+        assert_eq!(
+            ledger
+                .output_column(END_PIPELINE, destination)
+                .expect("settled output remains authoritative")
+                .block_state(0, 4, 0),
+            "minecraft:stone"
+        );
+        assert!(ledger.revision(identity, destination).unwrap() > 0);
+    }
+
+    #[test]
+    fn ledger_batch_publication_folds_multi_direction_spills_before_a_future_request() {
+        use lodestone_worldgen::stage_schedule::END_PIPELINE;
+
+        let west_block = BlockCoordinate::new(0, 4, 0);
+        let east_block = BlockCoordinate::new(16, 4, 0);
+        let mut west_output = ChunkColumn::new(0, 16);
+        west_output.set_block(0, 4, 0, "minecraft:stone");
+        let mut east_output = ChunkColumn::new(0, 16);
+        east_output.set_block(0, 4, 0, "minecraft:stone");
+
+        let mut west = end_shaped_session_at((0, 0), 1, 1);
+        complete_end_suffix_inner_with_state_and_output(
+            &mut west,
+            2,
+            Some(east_block),
+            "minecraft:stone",
+            Some(west_output.clone()),
+        );
+        let mut east = end_shaped_session_at((1, 0), 3, 1);
+        complete_end_suffix_inner_with_state_and_output(
+            &mut east,
+            4,
+            Some(west_block),
+            "minecraft:stone",
+            Some(east_output.clone()),
+        );
+
+        let mut ledger = GenerationLedger::new();
+        let mut admissions = west.admission_order().to_vec();
+        admissions.extend(east.admission_order());
+        ledger.admit(END_PIPELINE, &admissions).unwrap();
+        let final_outputs = BTreeMap::from([
+            ((0, 0), &west_output),
+            ((1, 0), &east_output),
+        ]);
+        ledger
+            .publish_sessions_with_final_outputs(
+                &[(END_PIPELINE, &west), (END_PIPELINE, &east)],
+                &final_outputs,
+            )
+            .expect("both target outputs authenticate folded reverse spills");
+        assert_eq!(ledger.stats().overlays, 0);
+        assert_eq!(
+            ledger
+                .output_column(END_PIPELINE, (0, 0))
+                .unwrap()
+                .block_state(0, 4, 0),
+            "minecraft:stone"
+        );
+        assert_eq!(
+            ledger
+                .output_column(END_PIPELINE, (1, 0))
+                .unwrap()
+                .block_state(0, 4, 0),
+            "minecraft:stone"
+        );
+
+        let future_block = BlockCoordinate::new(48, 5, 0);
+        let mut future = end_shaped_session_at((2, 0), 5, 1);
+        complete_end_suffix_with_mutation(&mut future, 6, future_block);
+        ledger
+            .admit(END_PIPELINE, future.admission_order())
+            .expect("the future target can retain an outside-output spill");
+        ledger
+            .publish_session(END_PIPELINE, &future)
+            .expect("future non-finalized mutation keeps its provenance");
+        assert_eq!(ledger.stats().overlays, 1);
+        assert_eq!(
+            ledger
+                .checkpoint(END_PIPELINE, future.request())
+                .unwrap()
+                .committed_mutations()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn ledger_batch_publication_rejects_a_wrong_final_output_before_partial_publish() {
+        use lodestone_worldgen::stage_schedule::END_PIPELINE;
+
+        let destination = BlockCoordinate::new(0, 4, 0);
+        let mut source = end_shaped_session_at((1, 0), 1, 1);
+        complete_end_suffix_with_mutation(&mut source, 2, destination);
+        let mut wrong_output = ChunkColumn::new(0, 16);
+        wrong_output.set_block(0, 4, 0, "minecraft:dirt");
+
+        let mut ledger = GenerationLedger::new();
+        ledger.admit(END_PIPELINE, source.admission_order()).unwrap();
+        let before = ledger.stats();
+        let final_outputs = BTreeMap::from([((0, 0), &wrong_output)]);
+        let result = ledger.publish_sessions_with_final_outputs(
+            &[(END_PIPELINE, &source)],
+            &final_outputs,
+        );
+        assert_eq!(result, Err(GenerationLedgerError::CheckpointMismatch));
+        assert_eq!(ledger.stats(), before);
+        assert!(ledger
+            .output_column(END_PIPELINE, (1, 0))
+            .is_none());
+        assert_eq!(ledger.stats().overlays, 0);
+    }
+
+    #[test]
+    fn ledger_evicts_closed_coordinate_bundles_and_revisits_regenerate() {
+        use lodestone_worldgen::stage_schedule::{Dimension, END_PIPELINE};
+
+        let mut ledger = GenerationLedger::with_limits(GenerationLedgerLimits {
+            pipelines: 1,
+            coordinates_per_pipeline: 12,
+            source_completions_per_pipeline: 32,
+            overlays_per_pipeline: 4,
+            products_per_pipeline: 64,
+            sidecars_per_pipeline: 64,
+        });
+        let mut maximum_mutation_records = 0;
+        for x in 0..12 {
+            let target = (x, 0);
+            let mut session = end_shaped_session_at(target, 1, 1);
+            complete_end_suffix_with_mutation(
+                &mut session,
+                2,
+                BlockCoordinate::new((x + 1) * 16, 4, 0),
+            );
+            ledger
+                .admit(END_PIPELINE, session.admission_order())
+                .expect("a closed coordinate bundle can be replaced");
+            ledger
+                .publish_session(END_PIPELINE, &session)
+                .expect("the line target publishes");
+            ledger.settle_mutations(END_PIPELINE, &[], false, &[target]);
+            let stats = ledger.stats();
+            maximum_mutation_records = maximum_mutation_records.max(stats.overlays);
+            assert!(stats.coordinates <= 12);
+            assert!(stats.products <= 64);
+            assert!(stats.overlays <= 4);
+        }
+        assert!(maximum_mutation_records > 0);
+        assert!(ledger.output_column(END_PIPELINE, (0, 0)).is_none());
+
+        let source = ResumableSource {
+            driver: ResumableDriver::new(false),
+        };
+        let calls = Arc::clone(&source.driver.calls);
+        let store = ChunkStore::with_capacity(source, 1);
+        {
+            let mut ledger = store.generation_ledger();
+            ledger.limits = GenerationLedgerLimits {
+                pipelines: 1,
+                coordinates_per_pipeline: 2,
+                source_completions_per_pipeline: 16,
+                overlays_per_pipeline: 16,
+                products_per_pipeline: 64,
+                sidecars_per_pipeline: 64,
+            };
+        }
+
+        for x in 0..8 {
+            let request = crate::worldgen_session::GenerationRequest::new(
+                Dimension::End,
+                (x, 0),
+                GenerationTarget::Full,
+                0,
+            );
+            let mut session = GenerationSession::new(request);
+            let result = store
+                .execute_generation_session(&mut session)
+                .expect("bounded ledger generation succeeds");
+            assert!(matches!(
+                result,
+                crate::worldgen_session::GenerationRequestResult::Generated(_)
+            ));
+            let stats = store.generation_ledger().stats();
+            assert!(stats.coordinates <= 2);
+            assert!(stats.products <= 64);
+            assert!(stats.overlays <= 16);
+        }
+
+        let stats = store.generation_ledger().stats();
+        assert_eq!(stats.coordinates, 2);
+        assert!(store.resident_column(7, 0).is_some());
+        assert!(store
+            .generation_ledger()
+            .output_column(END_PIPELINE, (0, 0))
+            .is_none());
+
+        let before_cache_hit = calls.load(Ordering::Relaxed);
+        let cache_request = crate::worldgen_session::GenerationRequest::new(
+            Dimension::End,
+            (7, 0),
+            GenerationTarget::Full,
+            0,
+        );
+        let mut cache_session = GenerationSession::new(cache_request);
+        assert!(matches!(
+            store
+                .execute_generation_session(&mut cache_session)
+                .expect("the newest resident column remains authoritative"),
+            crate::worldgen_session::GenerationRequestResult::Existing(_)
+        ));
+        assert_eq!(calls.load(Ordering::Relaxed), before_cache_hit);
+
+        let before_revisit = calls.load(Ordering::Relaxed);
+        let request = crate::worldgen_session::GenerationRequest::new(
+            Dimension::End,
+            (0, 0),
+            GenerationTarget::Full,
+            0,
+        );
+        let mut session = GenerationSession::new(request);
+        let result = store
+            .execute_generation_session(&mut session)
+            .expect("an evicted coordinate can be regenerated");
+        assert!(matches!(
+            result,
+            crate::worldgen_session::GenerationRequestResult::Generated(_)
+        ));
+        assert_eq!(calls.load(Ordering::Relaxed), before_revisit + 1);
+        assert_eq!(store.generation_ledger().stats().coordinates, 2);
+    }
+
+    #[test]
     fn ledger_rejects_a_divergent_suffix_without_mutating_advanced_state() {
         use lodestone_worldgen::stage_schedule::{PipelineOptions, END_PIPELINE};
 
@@ -8443,6 +10872,7 @@ mod tests {
         let identity = END_PIPELINE.identity(PipelineOptions::ALL);
         let before = ledger.frontier(identity, (0, 0)).unwrap().records().to_vec();
         let before_revision = ledger.revision(identity, (0, 0)).unwrap();
+        let before_stats = ledger.stats();
         let divergent_aggregate = end_shaped_session(8);
         assert_eq!(
             ledger.publish_session(END_PIPELINE, &divergent_aggregate),
@@ -8450,6 +10880,7 @@ mod tests {
         );
         assert_eq!(ledger.frontier(identity, (0, 0)).unwrap().records(), before);
         assert_eq!(ledger.revision(identity, (0, 0)).unwrap(), before_revision);
+        assert_eq!(ledger.stats(), before_stats);
 
         let mut divergent = GenerationSession::from_checkpoint(checkpoint).unwrap();
         complete_end_suffix(&mut divergent, 9);
@@ -8459,6 +10890,106 @@ mod tests {
         );
         assert_eq!(ledger.frontier(identity, (0, 0)).unwrap().records(), before);
         assert_eq!(ledger.revision(identity, (0, 0)).unwrap(), before_revision);
+        assert_eq!(ledger.stats(), before_stats);
+    }
+
+    #[test]
+    fn ledger_capacity_rejection_rolls_back_every_touched_entry() {
+        use lodestone_worldgen::stage_schedule::{ColumnStage, PipelineOptions, END_PIPELINE};
+
+        let features_outputs = END_PIPELINE
+            .descriptor(ColumnStage::Features)
+            .expect("End features descriptor exists")
+            .outputs()
+            .len();
+        let mut ledger = GenerationLedger::with_limits(GenerationLedgerLimits {
+            pipelines: 1,
+            coordinates_per_pipeline: 1,
+            source_completions_per_pipeline: 1,
+            overlays_per_pipeline: 1,
+            products_per_pipeline: 1 + features_outputs,
+            sidecars_per_pipeline: 16,
+        });
+        ledger.admit(END_PIPELINE, &[(0, 0)]).unwrap();
+        let identity = END_PIPELINE.identity(PipelineOptions::ALL);
+        let before_stats = ledger.stats();
+        let before_last_used = ledger.pipelines[&identity].last_used;
+        let mut full = end_shaped_session(1);
+        complete_end_suffix(&mut full, 2);
+        let before_checkpoint = ledger
+            .checkpoint(END_PIPELINE, full.request())
+            .expect("admitted empty checkpoint");
+
+        assert_eq!(
+            ledger.publish_session(END_PIPELINE, &full),
+            Err(GenerationLedgerError::ProductCapacity)
+        );
+        assert_eq!(ledger.stats(), before_stats);
+        assert_eq!(ledger.pipelines[&identity].last_used, before_last_used);
+        let after_checkpoint = ledger
+            .checkpoint(END_PIPELINE, full.request())
+            .expect("checkpoint survives rejected publication");
+        assert_eq!(after_checkpoint.frontiers(), before_checkpoint.frontiers());
+        assert_eq!(
+            after_checkpoint
+                .products()
+                .iter()
+                .map(|(key, product)| (*key, product.resource(), product.retained_bytes()))
+                .collect::<Vec<_>>(),
+            before_checkpoint
+                .products()
+                .iter()
+                .map(|(key, product)| (*key, product.resource(), product.retained_bytes()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            after_checkpoint
+                .sidecars()
+                .iter()
+                .map(|(key, sidecar)| (*key, sidecar.sidecar(), sidecar.retained_bytes()))
+                .collect::<Vec<_>>(),
+            before_checkpoint
+                .sidecars()
+                .iter()
+                .map(|(key, sidecar)| (*key, sidecar.sidecar(), sidecar.retained_bytes()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            after_checkpoint
+                .aggregates()
+                .iter()
+                .map(|(coordinate, aggregate)| {
+                    (
+                        *coordinate,
+                        aggregate.boundary(),
+                        aggregate.product().resource(),
+                        aggregate.product().retained_bytes(),
+                        aggregate.input_fingerprint(),
+                        aggregate.output_fingerprint(),
+                        aggregate.executor_version(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            before_checkpoint
+                .aggregates()
+                .iter()
+                .map(|(coordinate, aggregate)| {
+                    (
+                        *coordinate,
+                        aggregate.boundary(),
+                        aggregate.product().resource(),
+                        aggregate.product().retained_bytes(),
+                        aggregate.input_fingerprint(),
+                        aggregate.output_fingerprint(),
+                        aggregate.executor_version(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(after_checkpoint.source_completions(), before_checkpoint.source_completions());
+        assert_eq!(after_checkpoint.committed_mutation_order(), before_checkpoint.committed_mutation_order());
+        assert_eq!(after_checkpoint.current_revision(), before_checkpoint.current_revision());
+        assert_eq!(ledger.frontier(identity, (0, 0)).unwrap().records(), before_checkpoint.frontiers()[0].1);
     }
 
     #[test]

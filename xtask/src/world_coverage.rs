@@ -107,10 +107,11 @@ const DRAW_SURFACE: &[&str] = &[
     "crates/lodestone-particle/src",
     "crates/lodestone-shell/src/gpu",
     "crates/lodestone-shell/src/gpu.rs",
-    "crates/lodestone-shell/src/entities.rs",
+    "crates/lodestone-shell/src/entities",
     "crates/lodestone-shell/src/display_entities.rs",
-    "crates/lodestone-shell/src/block_entities.rs",
+    "crates/lodestone-shell/src/block_entities",
     "crates/lodestone-shell/src/particles.rs",
+    "crates/lodestone-shell/src/particles",
     "crates/lodestone-shell/src/consume.rs",
     "crates/lodestone-shell/src/interact.rs",
     "crates/lodestone-shell/src/sim",
@@ -129,7 +130,7 @@ const ENTITY_MENTION_SURFACE: &[&str] = &[
     "crates/lodestone-render/src",
     "crates/lodestone-assets/src",
     "crates/lodestone-shell/src/gpu",
-    "crates/lodestone-shell/src/entities.rs",
+    "crates/lodestone-shell/src/entities",
     "crates/lodestone-shell/src/display_entities.rs",
 ];
 
@@ -143,6 +144,7 @@ const ENTITY_MENTION_SURFACE: &[&str] = &[
 const PARTICLE_MENTION_SURFACE: &[&str] = &[
     "crates/lodestone-particle/src",
     "crates/lodestone-shell/src/particles.rs",
+    "crates/lodestone-shell/src/particles",
     "crates/lodestone-shell/src/consume.rs",
 ];
 
@@ -154,8 +156,9 @@ const PARTICLE_MENTION_SURFACE: &[&str] = &[
 /// answered wrongly by a literal sitting in, say, the creative-inventory item
 /// list.
 const BLOCK_ENTITY_GATHER_SURFACE: &[&str] = &[
-    "crates/lodestone-shell/src/block_entities.rs",
+    "crates/lodestone-shell/src/block_entities",
     "crates/lodestone-render/src/block_entity.rs",
+    "crates/lodestone-render/src/block_entity",
 ];
 
 /// String methods whose literal argument is a **rule**, not a name: a
@@ -716,7 +719,7 @@ const ENTITY_RENDERERS: &[RendererClaim] = &[
     // function is the complete 26.2 registration list.
     RendererClaim {
         name: "thrown item billboard",
-        file: "crates/lodestone-render/src/entity.rs",
+        file: "crates/lodestone-render/src/entity_item.rs",
         symbol: "thrown_item_for",
         rule: ClaimRule::LiteralsInSymbol,
     },
@@ -724,14 +727,14 @@ const ENTITY_RENDERERS: &[RendererClaim] = &[
     // discriminant rather than the path string.
     RendererClaim {
         name: "rig alias",
-        file: "crates/lodestone-render/src/entity.rs",
+        file: "crates/lodestone-render/src/entity_catalog.rs",
         symbol: "canonical_model_name_for_type",
         rule: ClaimRule::ArmVariantsInSymbol("EntityType"),
     },
     // The boat/raft family: one rig per shape, selected by path suffix.
     RendererClaim {
         name: "boat/raft suffix rule",
-        file: "crates/lodestone-render/src/entity.rs",
+        file: "crates/lodestone-render/src/entity_catalog.rs",
         symbol: "boat_model_name",
         rule: ClaimRule::SuffixLiteralsInSymbol,
     },
@@ -874,7 +877,7 @@ const PARTICLE_RENDERERS: &[RendererClaim] = &[
     // whole of "this type draws".
     RendererClaim {
         name: "wire dispatch",
-        file: "crates/lodestone-shell/src/particles.rs",
+        file: "crates/lodestone-shell/src/particles/events.rs",
         symbol: "spawn_one",
         rule: ClaimRule::ArmLiteralsInSymbol,
     },
@@ -882,7 +885,7 @@ const PARTICLE_RENDERERS: &[RendererClaim] = &[
     // but emitted locally off a block state and never through a registry id.
     RendererClaim {
         name: "local block-break debris",
-        file: "crates/lodestone-shell/src/particles.rs",
+        file: "crates/lodestone-shell/src/particles/events.rs",
         symbol: "destroy_block",
         rule: ClaimRule::Explicit(&["block"]),
     },

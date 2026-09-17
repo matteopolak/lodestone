@@ -24,7 +24,10 @@ pub(super) fn run_offscreen_with_control(
     let task_input = Rc::clone(&input);
     let actions = Rc::new(RefCell::new(BrowserActionQueue::default()));
     let task_actions = Rc::clone(&actions);
+    let join_progress = Rc::new(RefCell::new(VecDeque::new()));
+    let task_join_progress = Rc::clone(&join_progress);
     let task_signal = frame_signal.clone();
+    let task_canvas = canvas.clone();
     wasm_bindgen_futures::spawn_local(async move {
         match lodestone_render::window::attach_offscreen_canvas_async(canvas).await {
             Ok((gpu, target)) if !task_lifecycle.get() && !task_shutdown.get() => {
@@ -34,6 +37,7 @@ pub(super) fn run_offscreen_with_control(
                     Rc::clone(&task_lifecycle),
                     task_signal,
                     Rc::clone(&task_actions),
+                    task_join_progress,
                 );
                 app.finish_bring_up(
                     None,
@@ -44,6 +48,20 @@ pub(super) fn run_offscreen_with_control(
                 while !task_lifecycle.get() && !task_shutdown.get() {
                     task_input.borrow_mut().drain_into(&mut pending_input);
                     for input in pending_input.drain(..) {
+                        let input = match input {
+                            BrowserInput::Resized { width, height } => {
+                                let width = width.max(1);
+                                let height = height.max(1);
+                                if task_canvas.width() != width {
+                                    task_canvas.set_width(width);
+                                }
+                                if task_canvas.height() != height {
+                                    task_canvas.set_height(height);
+                                }
+                                BrowserInput::Resized { width, height }
+                            }
+                            input => input,
+                        };
                         if app.dispatch_browser_input(input) {
                             task_shutdown.set(true);
                             break;
@@ -74,7 +92,14 @@ pub(super) fn run_offscreen_with_control(
             }
         }
     });
-    Ok(BrowserControl { lifecycle, shutdown, frame_signal, input, actions })
+    Ok(BrowserControl {
+        lifecycle,
+        shutdown,
+        frame_signal,
+        input,
+        actions,
+        join_progress,
+    })
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]

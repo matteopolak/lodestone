@@ -5,6 +5,7 @@
 //! Moved here verbatim from `overworld.rs` by U16 Phase A.
 
 use super::OverworldGenerator;
+use crate::generated_storage::CompactBlockStorage;
 use lodestone_data::biomes::{BiomeRef, BuiltinBiome};
 
 /// Which stages a [`GeneratedColumn`] carries — the wire-facing tag
@@ -88,8 +89,24 @@ impl OverworldGenerator {
         debug_assert_eq!(world.bounds().4, self.height, "centre chunk height must match the generator's");
         debug_assert_eq!(world.bounds().5, 16, "centre chunk depth must be 16");
         let (palette, blocks) = world.into_palette_and_blocks();
+        let motion_predicate = if self.snow_support.is_empty() {
+            None
+        } else {
+            Some(
+                palette
+                    .iter()
+                    .map(|state| self.snow_support.motion_blocking(state))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let (compact_blocks, summaries) = CompactBlockStorage::from_flat_with_summaries(
+            self.min_y,
+            self.height,
+            &blocks,
+            motion_predicate.as_deref(),
+        );
         // The SPAWN stage's part 2. Computed here, alongside
-        // the heightmap scan above, for the identical reason — this is the
+        // the fused vertical summary, for the identical reason — this is the
         // one place already holding the *final* palette/block field and biome
         // quarts, so no earlier stage has to grow a spawn-shaped call site.
         // See `crate::spawn_stage`'s module doc for what these candidates are
@@ -105,16 +122,9 @@ impl OverworldGenerator {
                     .name()
                     .to_owned()
             });
-            let height = self.height;
             let min_y = self.min_y;
             let surface_y_at = |lx: usize, lz: usize| -> i32 {
-                for ly in (0..height).rev() {
-                    let idx = ((ly * 16 + lz as i32) * 16 + lx as i32) as usize;
-                    if blocks[idx] != 0 {
-                        return min_y + ly + 1;
-                    }
-                }
-                min_y
+                min_y + i32::from(summaries.non_air_first_free()[lx + lz * 16])
             };
             let biome_at = |lx: usize, lz: usize| -> String {
                 biome_names[(lz >> 2) * 4 + (lx >> 2)].clone()
@@ -130,31 +140,17 @@ impl OverworldGenerator {
         } else {
             Vec::new()
         };
-        // Computed here rather than in its own stage for two
-        // reasons: this is the one place that already holds the *final* palette
-        // and block field (so the scan is integer-only — see
-        // `motion_blocking_from_palette`), and both `column` and `column_timed`
-        // route through this function, so nothing in the pipeline had to grow a
-        // call site. Its cost lands in `StageTimes::intern`, which that field's
-        // own doc now says. Computed for both stages — it is a pure read of
-        // whatever `world` holds, not a claim about *which* stages ran, and
-        // nothing downstream consumes it yet regardless (see its own doc).
-        let motion_blocking = if self.snow_support.is_empty() {
-            None
-        } else {
-            Some(motion_blocking_from_palette(
-                &palette,
-                &blocks,
-                self.height,
-                &self.snow_support,
-            ))
-        };
+        // The motion-blocking summary was accumulated by the same section
+        // inspection that packed `compact_blocks`; there is no second
+        // strided column scan here. An absent predicate retains the historical
+        // `None` sidecar semantics.
+        let motion_blocking = summaries.motion_blocking_first_free().copied();
 
         GeneratedColumn {
             min_y: self.min_y,
             height: self.height,
             palette,
-            blocks,
+            blocks: compact_blocks,
             biome_quarts: biome_quarts.map(|(biome, _)| biome),
             biome_cells,
             block_entities,
@@ -201,7 +197,7 @@ pub const HEIGHTMAP_COLUMNS: usize = 256;
 /// `lodestone_world::heightmap::Heightmap::index`, so a consumer can `set` each
 /// column straight across with no re-ordering.
 ///
-/// # Why a fresh scan is equivalent to vanilla's incremental maintenance
+/// # Why the fused pass is equivalent to incremental maintenance
 ///
 /// The same argument [`crate::feature::top_layer::motion_blocking_first_free`]
 /// makes: vanilla primes the heightmaps at the start of the `features` status and
@@ -219,10 +215,10 @@ pub const HEIGHTMAP_COLUMNS: usize = 256;
 /// against a **string** per block, which is right for it (it runs inside a stage
 /// that holds a `DenseBlockGrid`). Here the palette is already built, so the
 /// predicate is evaluated once per *palette entry* — a few dozen times — and the
-/// 256-column scan is `u16` compares against a `bool` slice. Reaching for the
-/// string form here instead would cost ~200k hash lookups per column for an
-/// identical answer.
-fn motion_blocking_from_palette(
+/// 256-column scan is now folded into section packing. The scalar scan below is
+/// retained only as an independent test control.
+#[cfg(test)]
+fn motion_blocking_from_palette_scalar_control(
     palette: &[String],
     blocks: &[u16],
     height: i32,
@@ -256,7 +252,7 @@ fn motion_blocking_from_palette(
 /// said:
 ///
 /// * **`fluid_heightmap` measured the biome stage and nothing else.** The
-///   heightmap (`heights_from_field`) is computed inside the `shape` window, so
+///   solid-top heights are derived inside the `shape` window, so
 ///   the bucket between the two timestamps contained exactly
 ///   [`OverworldGenerator::biome_stage`]. It is now called `biome`.
 /// * **`intern` measured materialize + carve + ore + vegetation + interning.**
@@ -289,8 +285,8 @@ pub struct StageTimes {
     /// split out of `shape` because the per-stage cost split names the aquifer as a stage whose cost
     /// should be visible on its own terms.
     pub aquifer: std::time::Duration,
-    /// The noise router: `fill_stage` (density field, aquifer-participating
-    /// fill) plus `heights_from_field`.
+    /// The noise router and aquifer-participating fill, including solid-top
+    /// heights derived during the same walk.
     pub shape: std::time::Duration,
     /// Biome sampling ([`OverworldGenerator::biome_stage`]).
     /// Previously, and misleadingly, called `fluid_heightmap`.
@@ -350,14 +346,14 @@ impl StageTimes {
     }
 }
 
-/// A generated 16×`height`×16 block field, block-state strings interned into a
-/// small per-column palette.
+/// A generated 16×`height`×16 block field with a column-wide palette and
+/// section-aligned compact block indices.
 #[derive(Debug, Clone)]
 pub struct GeneratedColumn {
     min_y: i32,
     height: i32,
     palette: Vec<String>,
-    blocks: Vec<u16>,
+    blocks: CompactBlockStorage,
     /// Typed biome identity per horizontal quart, row-major `qz * 4 + qx` —
     /// see [`OverworldGenerator::biome_stage`]. **The surface answer**: this is
     /// the direct surface-height quart answer used by output consumers such as
@@ -376,7 +372,7 @@ pub struct GeneratedColumn {
     /// Most chunks have none; underground rooms and beehives populate this list.
     block_entities: Vec<super::block_entities::GeneratedBlockEntity>,
     /// The `MOTION_BLOCKING` heightmap in vanilla's stored form —
-    /// see [`motion_blocking_from_palette`] and
+    /// see the fused summary builder and
     /// [`Self::motion_blocking_heightmap`].
     ///
     /// `None`, not a zeroed array, when the resolver supplied no
@@ -402,7 +398,180 @@ pub struct GeneratedColumn {
     stage: GenStage,
 }
 
+/// An owning hand-off of a generated column with sectioned block storage.
+///
+/// `GeneratedColumn` already stores this compact representation; this
+/// consuming accessor makes that ownership transfer explicit for a lifecycle
+/// consumer that will keep or mutate the column. The palette remains one
+/// column-wide and retains the dense grid's first-write order.
+#[derive(Debug, Clone)]
+pub struct CompactGeneratedColumn {
+    min_y: i32,
+    height: i32,
+    palette: Vec<String>,
+    blocks: CompactBlockStorage,
+    biome_quarts: [BiomeRef; 16],
+    biome_cells: super::BiomeCells,
+    block_entities: Vec<super::block_entities::GeneratedBlockEntity>,
+    motion_blocking: Option<[u16; HEIGHTMAP_COLUMNS]>,
+    spawn_candidates: Vec<crate::spawn_stage::GenerationSpawn>,
+    stage: GenStage,
+}
+
+/// The fields moved out by [`CompactGeneratedColumn::into_parts`].
+#[derive(Debug, Clone)]
+pub struct CompactGeneratedColumnParts {
+    /// World Y of the lowest block row.
+    pub min_y: i32,
+    /// Number of block rows.
+    pub height: i32,
+    /// Column-wide block-state palette in first-write order.
+    pub palette: Vec<String>,
+    /// Sectioned palette-index storage.
+    pub blocks: CompactBlockStorage,
+    /// Surface biome identity per horizontal quart.
+    pub biome_quarts: [BiomeRef; 16],
+    /// Full per-cell biome grid.
+    pub biome_cells: super::BiomeCells,
+    /// Generated block-entity sidecar records.
+    pub block_entities: Vec<super::block_entities::GeneratedBlockEntity>,
+    /// Optional motion-blocking heightmap sidecar.
+    pub motion_blocking: Option<[u16; HEIGHTMAP_COLUMNS]>,
+    /// Generated spawn-candidate sidecar records.
+    pub spawn_candidates: Vec<crate::spawn_stage::GenerationSpawn>,
+    /// Generation stage represented by this column.
+    pub stage: GenStage,
+}
+
+impl CompactGeneratedColumn {
+    /// Which stages produced this column.
+    #[must_use]
+    pub const fn stage(&self) -> GenStage {
+        self.stage
+    }
+
+    /// World Y of the lowest block row.
+    #[must_use]
+    pub const fn min_y(&self) -> i32 {
+        self.min_y
+    }
+
+    /// Number of block rows.
+    #[must_use]
+    pub const fn height(&self) -> i32 {
+        self.height
+    }
+
+    /// The column-wide palette in its original first-write order.
+    #[must_use]
+    pub fn palette(&self) -> &[String] {
+        &self.palette
+    }
+
+    /// Borrowed compact block storage for read-only consumers.
+    #[must_use]
+    pub fn blocks(&self) -> &CompactBlockStorage {
+        &self.blocks
+    }
+
+    /// Canonical state at local `(lx, lz)` and world `y`.
+    #[must_use]
+    pub fn block_state(&self, lx: usize, y: i32, lz: usize) -> &str {
+        let ly = y - self.min_y;
+        if !(0..self.height).contains(&ly) {
+            return "minecraft:air";
+        }
+        &self.palette[self.blocks.get(lx, y, lz) as usize]
+    }
+
+    /// Highest world Y whose block is not air, or `min_y - 1` when empty.
+    #[must_use]
+    pub fn top_non_air_y(&self, lx: usize, lz: usize) -> i32 {
+        for ly in (0..self.height).rev() {
+            if self.blocks.get(lx, self.min_y + ly, lz) != 0 {
+                return self.min_y + ly;
+            }
+        }
+        self.min_y - 1
+    }
+
+    /// Number of non-air block cells.
+    #[must_use]
+    pub fn non_air_count(&self) -> usize {
+        self.blocks.non_zero_count()
+    }
+
+    /// Typed biome identity at local `(lx, lz)` in horizontal-quart resolution.
+    #[must_use]
+    pub fn biome_state_ref(&self, lx: usize, lz: usize) -> BiomeRef {
+        assert!(lx < 16 && lz < 16, "biome_state coordinates out of range");
+        self.biome_quarts[(lz >> 2) * 4 + (lx >> 2)]
+    }
+
+    /// Full per-cell biome sidecar.
+    #[must_use]
+    pub fn biome_cells(&self) -> &super::BiomeCells {
+        &self.biome_cells
+    }
+
+    /// Generated block-entity sidecar records.
+    #[must_use]
+    pub fn block_entities(&self) -> &[super::block_entities::GeneratedBlockEntity] {
+        &self.block_entities
+    }
+
+    /// Generated spawn-candidate sidecar records.
+    #[must_use]
+    pub fn spawn_candidates(&self) -> &[crate::spawn_stage::GenerationSpawn] {
+        &self.spawn_candidates
+    }
+
+    /// Optional motion-blocking heightmap sidecar.
+    #[must_use]
+    pub fn motion_blocking_heightmap(&self) -> Option<&[u16; HEIGHTMAP_COLUMNS]> {
+        self.motion_blocking.as_ref()
+    }
+
+    /// Consumes the compact column without expanding its block sections.
+    #[must_use]
+    pub fn into_parts(self) -> CompactGeneratedColumnParts {
+        CompactGeneratedColumnParts {
+            min_y: self.min_y,
+            height: self.height,
+            palette: self.palette,
+            blocks: self.blocks,
+            biome_quarts: self.biome_quarts,
+            biome_cells: self.biome_cells,
+            block_entities: self.block_entities,
+            motion_blocking: self.motion_blocking,
+            spawn_candidates: self.spawn_candidates,
+            stage: self.stage,
+        }
+    }
+}
+
 impl GeneratedColumn {
+    /// Consumes this result into the section-aligned hand-off representation.
+    ///
+    /// World generation builds the compact block storage before returning the
+    /// column, so this operation moves the palette, sections, and every sidecar
+    /// without another block-cell copy.
+    #[must_use]
+    pub fn into_compact(self) -> CompactGeneratedColumn {
+        CompactGeneratedColumn {
+            min_y: self.min_y,
+            height: self.height,
+            palette: self.palette,
+            blocks: self.blocks,
+            biome_quarts: self.biome_quarts,
+            biome_cells: self.biome_cells,
+            block_entities: self.block_entities,
+            motion_blocking: self.motion_blocking,
+            spawn_candidates: self.spawn_candidates,
+            stage: self.stage,
+        }
+    }
+
     /// Which stages produced this column. A downstream store consults this to
     /// decide whether the column may ever be mutated or persisted — see
     /// [`GenStage`]'s own doc; this crate makes no such decision itself.
@@ -423,6 +592,18 @@ impl GeneratedColumn {
         self.height
     }
 
+    /// The column-wide palette in its original first-write order.
+    #[must_use]
+    pub fn palette(&self) -> &[String] {
+        &self.palette
+    }
+
+    /// Borrowed compact block storage for immutable lifecycle consumers.
+    #[must_use]
+    pub fn blocks(&self) -> &CompactBlockStorage {
+        &self.blocks
+    }
+
     /// Canonical block-state string at local `(lx, lz)` in `0..16` and world `y`.
     /// Out-of-range Y is `"minecraft:air"`.
     #[must_use]
@@ -431,8 +612,8 @@ impl GeneratedColumn {
         if !(0..self.height).contains(&ly) {
             return "minecraft:air";
         }
-        let idx = ((ly * 16 + lz as i32) * 16 + lx as i32) as usize;
-        &self.palette[self.blocks[idx] as usize]
+        let id = self.blocks.get(lx, y, lz);
+        &self.palette[id as usize]
     }
 
     /// Highest world Y whose block is not air, or `min_y - 1` for an all-air
@@ -440,8 +621,7 @@ impl GeneratedColumn {
     #[must_use]
     pub fn top_non_air_y(&self, lx: usize, lz: usize) -> i32 {
         for ly in (0..self.height).rev() {
-            let idx = ((ly * 16 + lz as i32) * 16 + lx as i32) as usize;
-            if self.blocks[idx] != 0 {
+            if self.blocks.get(lx, self.min_y + ly, lz) != 0 {
                 return self.min_y + ly;
             }
         }
@@ -451,7 +631,7 @@ impl GeneratedColumn {
     /// Number of non-air blocks (telemetry / anti-vacuity).
     #[must_use]
     pub fn non_air_count(&self) -> usize {
-        self.blocks.iter().filter(|b| **b != 0).count()
+        self.blocks.non_zero_count()
     }
 
     /// Typed biome identity at local `(lx, lz)` in `0..16` — quart
@@ -566,19 +746,20 @@ impl GeneratedColumn {
     /// return for one column: the first **free** Y above the topmost
     /// motion-blocking-or-fluid block, or `min_y` for a column with none.
     ///
-    /// This is the zero-copy hand-off a downstream carrier (e.g. the integrated
-    /// server's chunk column) uses to adopt the generated block field without
-    /// re-interning every block. The index layout is stable and part of the
-    /// contract.
+    /// This is the compatibility hand-off for downstream callers that still
+    /// require a contiguous block vector. New lifecycle consumers should use
+    /// [`Self::into_compact`] so no section storage is expanded.
     #[must_use]
     pub fn into_raw(self) -> (i32, i32, Vec<String>, Vec<u16>, [BiomeRef; 16]) {
-        (
-            self.min_y,
-            self.height,
-            self.palette,
-            self.blocks,
-            self.biome_quarts,
-        )
+        let CompactGeneratedColumnParts {
+            min_y,
+            height,
+            palette,
+            blocks,
+            biome_quarts,
+            ..
+        } = self.into_compact().into_parts();
+        (min_y, height, palette, blocks.into_flat(), biome_quarts)
     }
 }
 
@@ -642,7 +823,18 @@ mod tests {
         // largest value the packing must hold.
         blocks[idx(height as usize - 1, 15, 15)] = 1;
 
-        let map = motion_blocking_from_palette(&palette, &blocks, height, &support);
+        let map = motion_blocking_from_palette_scalar_control(&palette, &blocks, height, &support);
+        let motion_predicate: Vec<bool> = palette
+            .iter()
+            .map(|state| support.motion_blocking(state))
+            .collect();
+        let (_, summaries) = CompactBlockStorage::from_flat_with_summaries(
+            -32,
+            height,
+            &blocks,
+            Some(&motion_predicate),
+        );
+        assert_eq!(summaries.motion_blocking_first_free(), Some(&map));
 
         assert_eq!(map[0 + 0 * 16], 3, "three stone rows store 2 + 1");
         assert_eq!(map[5 + 9 * 16], 5, "fluid rows count for MOTION_BLOCKING");

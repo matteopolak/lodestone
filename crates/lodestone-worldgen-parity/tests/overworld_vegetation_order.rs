@@ -1,7 +1,7 @@
 //! Regression coverage for vegetation feature iteration order.
 
 use lodestone_server::overworld_chunk_source;
-use lodestone_worldgen_parity::lifecycle::{LifecycleCompletion, LifecycleMaterializer};
+use lodestone_worldgen_parity::lifecycle::LifecycleMaterializer;
 
 const TARGET: (i32, i32) = (-9, -9);
 const WITNESS: (i32, i32, i32) = (15, -31, 2);
@@ -15,7 +15,7 @@ fn vegetation_patch_stream_uses_seed_42_reference_hash_order() {
         }
     }
 
-    materializer.complete_for_target(TARGET, TARGET, LifecycleCompletion::Features, 0);
+    materializer.complete_target_features_observing(TARGET, 0, |_| {});
     materializer.finish_target(TARGET);
 
     assert_eq!(

@@ -133,6 +133,12 @@ fn hello_bytes(name: &str, uuid: Uuid) -> Vec<u8> {
     w.into_vec()
 }
 
+fn accept_teleportation_bytes(id: i32) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.var_i32(id);
+    w.into_vec()
+}
+
 fn pos_bytes(x: f64, y: f64, z: f64, on_ground: bool) -> Vec<u8> {
     let mut w = Writer::default();
     w.f64(x);
@@ -193,7 +199,29 @@ async fn join<T: Transport>(client: &mut Connection<T>, name: &str) {
         .write_packet(configuration::serverbound::FINISH_CONFIGURATION, &[])
         .await
         .unwrap();
-    drain(client).await;
+    let joined = drain(client).await;
+    // Movement is ignored until the initial absolute position is accepted.
+    if let Some((_, payload)) = joined
+        .iter()
+        .find(|(id, _)| *id == play::clientbound::PLAYER_POSITION)
+    {
+        let id = Reader::new(payload)
+            .var_i32()
+            .expect("player_position teleport id");
+        client
+            .write_packet(
+                play::serverbound::ACCEPT_TELEPORTATION,
+                &accept_teleportation_bytes(id),
+            )
+            .await
+            .unwrap();
+    }
+    // Match the real client: movement and fall tracking begin after the
+    // initial world-load acknowledgement, not merely after configuration.
+    client
+        .write_packet(play::serverbound::PLAYER_LOADED, &[])
+        .await
+        .unwrap();
 }
 
 async fn step<T: Transport>(

@@ -52,9 +52,8 @@
 //! routed through this labelled terrain screen at all, while a dimension
 //! transition uses a separate opaque cover. This distinction matters because a
 //! column can be present in the client store while its first mesh is deferred
-//! until horizontal neighbours arrive. Every path that does wait remains
-//! bounded by the 30 s timeout — see [`CLIENT_WAIT_TIMEOUT`] — so a missing
-//! producer signal cannot strand the player forever.
+//! until horizontal neighbours arrive. A declared initial view has no timeout:
+//! the overlay stays up until the producer proves that view is presentable.
 //!
 //! **Terrain is only half of it.** [`world_wait`] is the real dismissal
 //! condition, and it ANDs [`is_level_ready`] with [`assets_ready`]: a
@@ -66,7 +65,7 @@
 //! such gap for a different reason: an application is an `Overlay`, not a
 //! `Screen`, and `Gui.update` paints an overlay over everything until the reload
 //! future completes, so nothing of the world is presented meanwhile. See
-//! [`assets_ready`] for the bound, and `docs/join-readiness.md` for the whole
+//! [`assets_ready`] for that gate, and `docs/join-readiness.md` for the whole
 //! sequence.
 //!
 //! The shell deliberately narrows that broad protocol-level opportunity: the
@@ -177,7 +176,7 @@ impl TerrainProgress {
     /// The bar fill, in `0.0..=MAX_FRACTION`.
     ///
     /// **Clamped below 1.0 deliberately.** The loading screen is dismissed by
-    /// [`is_level_ready`] — the player's own column, or one of the bail-outs
+    /// [`is_level_ready`] — the producer milestone or one of the bail-outs
     /// there — never by this number reaching the end. A bar that could
     /// read as full while the screen is still up would be the false
     /// reassurance this whole feature exists to prevent; leaving the last
@@ -381,20 +380,6 @@ impl TerrainChunkGrid {
     }
 }
 
-/// How long the terrain screen may hold before it gives up and lets the player
-/// in anyway — vanilla's `LevelLoadTracker.CLIENT_WAIT_TIMEOUT_MS`, 30 s.
-///
-/// This is not a safety margin someone chose here; it is vanilla's own escape
-/// hatch, and its log line says what it is for: *"Timed out while waiting for the
-/// client to load chunks, letting the player into the world anyway"*. Without it
-/// the screen's condition is a liveness assumption about the server, and the
-/// owner-reported symptom was exactly what happens when that assumption fails —
-/// the join view was centred on chunk `(0, 0)` rather than on the player, so the
-/// column the predicate waits for was never coming, and there was nothing to
-/// dismiss the screen. A bug in the server presenting as a permanently stuck
-/// client is the failure mode this constant exists to bound.
-pub const CLIENT_WAIT_TIMEOUT: core::time::Duration = core::time::Duration::from_secs(30);
-
 /// Everything [`is_level_ready`] reads, gathered so the decision itself is a pure
 /// function of observations rather than of a `Sim`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -407,9 +392,6 @@ pub struct TerrainWait {
     /// remote-server case), so readiness falls back to `own_column_loaded`.
     /// `Some(false)` is intentionally not replaced by a full progress bar.
     pub terrain_ready: Option<bool>,
-    /// How long the terrain phase has been up. Compared against
-    /// [`CLIENT_WAIT_TIMEOUT`].
-    pub elapsed: core::time::Duration,
     /// Whether the local player is alive. A dead player is held on the death
     /// screen, and **a server holding a dead player sends no chunks at all** —
     /// so waiting for a column while dead waits forever.
@@ -423,17 +405,15 @@ pub struct TerrainWait {
 
 /// Decide whether the world can be presented.
 ///
-/// Once the wall clock passes the stored timeout, it reports ready
-/// unconditionally, letting the player in regardless of terrain state.
-/// Otherwise it waits only while the player is alive, inside the known build
+/// It waits while the player is alive, inside the known build
 /// height, standing on an admitted column, and — when the session has a declared
 /// initial view — the terrain producer has reported its completion milestone.
 ///
 /// Read carefully, the short-circuits are **"only wait if waiting could work"**:
 /// a dead player or a player known to be outside build height is ready rather
 /// than held. An unknown build height is represented by the producer's false
-/// residency/readiness observations, so it remains held until the timeout or
-/// the first real world observation. A resident count or a full progress bar is
+/// residency/readiness observations, so it remains held until the first real
+/// world observation. A resident count or a full progress bar is
 /// not a substitute for the explicit terrain milestone.
 ///
 /// # Two named deviations
@@ -447,13 +427,9 @@ pub struct TerrainWait {
 ///   mode, so `isSpectator` has nothing to read; the camera Y is the player Y here
 ///   because the shell has no detached camera in the loading phase. Both are
 ///   short-circuits *out* of the wait, so their absence can only make this hold
-///   longer than vanilla in a spectator join — bounded by
-///   [`CLIENT_WAIT_TIMEOUT`], never unbounded.
+///   longer in a spectator join.
 #[must_use]
 pub fn is_level_ready(wait: TerrainWait) -> bool {
-    if wait.elapsed >= CLIENT_WAIT_TIMEOUT {
-        return true;
-    }
     if !wait.player_alive {
         return true;
     }
@@ -493,39 +469,11 @@ pub struct AssetWait {
     /// atlas. Without this term that reader dismisses the screen one frame early
     /// — which is the whole defect, just narrower.
     pub atlas_stale: bool,
-    /// How long the terrain phase has been up. **The same clock and the same
-    /// deadline as [`TerrainWait::elapsed`]**, deliberately: see
-    /// [`assets_ready`].
-    pub elapsed: core::time::Duration,
 }
 
-/// Whether no asset work is outstanding, bounded by [`CLIENT_WAIT_TIMEOUT`].
-///
-/// # The bound, and why it is the terrain wait's own
-///
-/// This shares [`CLIENT_WAIT_TIMEOUT`] *and the clock it is measured against*
-/// with [`is_level_ready`] rather than getting a second deadline of its own, and
-/// that is a port rather than a convenience. Vanilla's `LevelLoadTracker` stamps
-/// its own millis-since-epoch clock plus `CLIENT_WAIT_TIMEOUT_MS` **once**, in `startClientLoad`,
-/// and `WaitingForServer.loadingPacketsReceived` carries that same `timeoutAfter`
-/// into `WaitingForPlayerChunk` unchanged — one deadline for the whole client
-/// load, not one per sub-wait. Two waits sharing one deadline is therefore the
-/// shape the record already has.
-///
-/// It also settles the scope question by construction. The elapsed time is
-/// measured from the entry into `ConnectPhase::LoadingTerrain`, so a pack pushed
-/// **during a join** is inside the window and holds the screen, while a pack
-/// pushed an hour into a session is far past it and this returns `true`
-/// immediately. That is a named deviation from vanilla, which covers an in-play
-/// reload with its `LoadingOverlay` too: reproducing that half needs a second
-/// clock and a screen reachable from mid-play, and the cost of getting it wrong
-/// is covering a live world, so it is deliberately left out rather than
-/// approximated.
+/// Whether no asset work is outstanding.
 #[must_use]
 pub fn assets_ready(wait: AssetWait) -> bool {
-    if wait.elapsed >= CLIENT_WAIT_TIMEOUT {
-        return true;
-    }
     wait.packs_in_flight == 0 && !wait.atlas_stale
 }
 
@@ -556,8 +504,8 @@ pub fn world_wait(terrain: TerrainWait, assets: AssetWait) -> Option<WorldWait> 
 /// The step [`world_wait`] is holding the world back for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorldWait {
-    /// The player's own column or the explicit terrain-preparation milestone
-    /// has not arrived — [`is_level_ready`].
+    /// The required column or explicit terrain-preparation milestone has not
+    /// arrived — [`is_level_ready`].
     Terrain,
     /// A server-pushed resource pack is still downloading or has not been
     /// applied to the block atlas yet — [`assets_ready`].
@@ -607,74 +555,30 @@ impl WorldWait {
 
 #[cfg(test)]
 mod tests {
-    use core::time::Duration;
-
     use super::{
-        AssetWait, CLIENT_WAIT_TIMEOUT, ChunkCellStatus, ConnectPhase, MAX_FRACTION,
-        TerrainChunkGrid, TerrainProgress, TerrainProgressTracker, TerrainWait, WorldWait,
-        assets_ready, is_level_ready, world_wait,
+        AssetWait, ChunkCellStatus, ConnectPhase, MAX_FRACTION, TerrainChunkGrid,
+        TerrainProgress, TerrainProgressTracker, TerrainWait, WorldWait, assets_ready,
+        is_level_ready, world_wait,
     };
 
     /// The state a healthy join is in the instant the terrain phase starts: alive,
-    /// in the world, no column yet, no time elapsed. Every case below is this with
+    /// in the world, with no column yet. Every case below is this with
     /// one field moved, so what each test measures is unambiguous.
     const STILL_WAITING: TerrainWait = TerrainWait {
         own_column_loaded: false,
         terrain_ready: None,
-        elapsed: Duration::ZERO,
         player_alive: true,
         within_build_height: true,
     };
 
-    /// The timeout is vanilla's 30 s, and the boundary is asserted at the two
-    /// inputs where the two readings of it differ.
-    ///
-    /// A "does it eventually give up" test would pass against any finite bound —
-    /// the *magnitude* species. So the prediction is the exact figure from
-    /// `LevelLoadTracker.CLIENT_WAIT_TIMEOUT_MS`, and it is checked one
-    /// millisecond either side: at 29.999 s the screen must still be up, at 30.000 s
-    /// it must be gone. A bound of, say, 5 s or 60 s fails one of those two.
-    #[test]
-    fn the_wait_is_bounded_at_vanillas_thirty_seconds_exactly() {
-        assert_eq!(CLIENT_WAIT_TIMEOUT, Duration::from_secs(30));
-
-        let just_short = TerrainWait {
-            elapsed: Duration::from_millis(29_999),
-            ..STILL_WAITING
-        };
-        assert!(
-            !is_level_ready(just_short),
-            "at 29.999 s with no column the screen must still be held — a shorter bound \
-             would dismiss here"
-        );
-
-        let at_the_bound = TerrainWait {
-            elapsed: Duration::from_millis(30_000),
-            ..STILL_WAITING
-        };
-        assert!(
-            is_level_ready(at_the_bound),
-            "at exactly 30.000 s the player is let in anyway, per vanilla's own log line"
-        );
-    }
-
-    /// The player's own column — not the view square — is what a healthy join
-    /// waits for, and it is sufficient on its own well inside the timeout.
-    ///
-    /// This is the case the whole feature is about, so it is checked at a
-    /// mid-stream elapsed rather than at zero: the dismissal must come from the
-    /// column, not from the clock.
+    /// A remote session without a declared view contract falls back to the
+    /// player's own column.
     #[test]
     fn the_players_own_column_dismisses_the_screen_without_the_rest_of_the_view() {
-        let mid_stream = Duration::from_secs(3);
-        assert!(!is_level_ready(TerrainWait {
-            elapsed: mid_stream,
-            ..STILL_WAITING
-        }));
+        assert!(!is_level_ready(STILL_WAITING));
         assert!(
             is_level_ready(TerrainWait {
                 own_column_loaded: true,
-                elapsed: mid_stream,
                 ..STILL_WAITING
             }),
             "one column is the condition; at view_radius 9 the square is 361 and a \
@@ -693,7 +597,6 @@ mod tests {
         let not_ready = TerrainWait {
             own_column_loaded: true,
             terrain_ready: Some(false),
-            elapsed: Duration::from_secs(3),
             player_alive: true,
             within_build_height: true,
         };
@@ -715,7 +618,7 @@ mod tests {
     /// The dead case is the one with teeth in this repo — a server holding a dead
     /// player on the death screen sends no chunks at all, so a screen that treated
     /// `player_alive` as a requirement for dismissal would stack the terrain
-    /// overlay on top of the death screen until the 30 s timeout, every death.
+    /// overlay on top of the death screen indefinitely.
     #[test]
     fn the_states_where_waiting_cannot_succeed_dismiss_rather_than_hold() {
         assert!(
@@ -751,7 +654,6 @@ mod tests {
         let no_progress = TerrainWait {
             own_column_loaded: false,
             terrain_ready: Some(false),
-            elapsed: Duration::from_secs(1),
             player_alive: true,
             within_build_height: true,
         };
@@ -859,7 +761,6 @@ mod tests {
     const TERRAIN_DONE: TerrainWait = TerrainWait {
         own_column_loaded: true,
         terrain_ready: None,
-        elapsed: Duration::ZERO,
         player_alive: true,
         within_build_height: true,
     };
@@ -868,7 +769,6 @@ mod tests {
     const ASSETS_DONE: AssetWait = AssetWait {
         packs_in_flight: 0,
         atlas_stale: false,
-        elapsed: Duration::ZERO,
     };
 
     /// **The defect, stated as a test.** With the terrain half satisfied — the
@@ -950,61 +850,26 @@ mod tests {
         );
     }
 
-    /// The asset wait is bounded by the terrain wait's own deadline, checked
-    /// one millisecond either side.
-    ///
-    /// A "does it eventually give up" test would pass against any finite bound.
-    /// The prediction is the exact figure the terrain half already uses, and the
-    /// two inputs below are the only ones at which a 30 s bound and any other
-    /// bound disagree.
-    ///
-    /// This is also what scopes the feature to the join window rather than to
-    /// the whole session: `elapsed` is measured from the entry into the terrain
-    /// phase, so the hour-into-a-session case sits far past this bound and is
-    /// never held.
+    /// Outstanding asset work remains a hard readiness requirement.
     #[test]
-    fn the_asset_wait_gives_up_at_the_same_thirty_seconds_the_terrain_wait_does() {
-        let just_short = AssetWait {
+    fn the_asset_wait_does_not_expire() {
+        let waiting = AssetWait {
             packs_in_flight: 1,
             atlas_stale: true,
-            elapsed: Duration::from_millis(29_999),
         };
-        assert!(
-            !assets_ready(just_short),
-            "at 29.999 s with a pack still outstanding the screen must be held"
-        );
+        assert!(!assets_ready(waiting));
         assert_eq!(
-            world_wait(TERRAIN_DONE, just_short),
+            world_wait(TERRAIN_DONE, waiting),
             Some(WorldWait::ApplyingPack)
         );
-
-        let at_the_bound = AssetWait {
-            elapsed: CLIENT_WAIT_TIMEOUT,
-            ..just_short
-        };
-        assert!(
-            assets_ready(at_the_bound),
-            "at exactly 30.000 s the player is let in anyway, on the same \
-             deadline `is_level_ready` uses and for the same reason: a pack \
-             that never arrives must not be a game that never starts"
-        );
-        assert_eq!(world_wait(TERRAIN_DONE, at_the_bound), None);
-
-        // An hour in — an in-play push — is past the bound and never held.
-        assert!(assets_ready(AssetWait {
-            elapsed: Duration::from_secs(3600),
-            ..just_short
-        }));
     }
 
     /// Singleplayer, and any server that pushes no pack, must pay nothing for
     /// this: the readiness condition has to be satisfied by the *absence* of
     /// work rather than by a delay elapsing.
     ///
-    /// Asserted at `Duration::ZERO` precisely so a fixed wait of any length
-    /// would fail it.
     #[test]
-    fn a_session_with_no_pack_is_ready_at_zero_elapsed() {
+    fn a_session_with_no_pack_is_ready_immediately() {
         assert!(assets_ready(ASSETS_DONE));
         assert_eq!(world_wait(TERRAIN_DONE, ASSETS_DONE), None);
     }

@@ -7,10 +7,11 @@
 //!   cargo run --release -p lodestone-server --example bench_worldgen
 //!
 //! This is a measurement tool, not a test. It builds the generator once (as
-//! callers are told to) and times a fixed patch of chunks so the numbers are
-//! comparable across runs. Timings are wall-clock `Instant`; the per-stage
-//! split comes from `OverworldGenerator::column_timed`, an instrumentation twin
-//! of `column` that does the identical work.
+//! callers are told to), times a repeated construction, and then times a fixed
+//! patch of chunks so the numbers are comparable across runs. Timings are
+//! wall-clock `Instant`; the per-stage split comes from
+//! `OverworldGenerator::column_timed`, an instrumentation twin of `column` that
+//! does the identical work.
 //!
 //! The parallel section's speedup is recorded into the shared, gitignored
 //! `bench-results/generation.jsonl` (see [`record`] below) — that file
@@ -37,9 +38,10 @@ fn main() {
         .nth(2)
         .and_then(|s| s.parse().ok())
         .unwrap_or(8);
+    let serial_only = std::env::args().nth(3).is_some_and(|arg| arg == "serial");
 
     let build_start = Instant::now();
-    let gtor = overworld_generator(seed);
+    let warmup_gtor = overworld_generator(seed);
     let build = build_start.elapsed();
 
     let coords: Vec<(i32, i32)> = (-radius..=radius)
@@ -49,32 +51,46 @@ fn main() {
 
     // Warm up (touch the caches / branch predictor) without counting it.
     for &(cx, cz) in coords.iter().take(8) {
-        std::hint::black_box(gtor.column(cx, cz));
+        std::hint::black_box(warmup_gtor.column(cx, cz));
     }
 
-    // Headline: single-threaded full-column time over the whole patch.
-    let mut per_chunk_us: Vec<f64> = Vec::with_capacity(n);
+    // Headline: single-threaded full-column time over a fresh staged store.
+    let gtor = overworld_generator(seed);
+    let mut per_chunk_us: Vec<(i32, i32, f64)> = Vec::with_capacity(n);
     let serial_start = Instant::now();
     for &(cx, cz) in &coords {
         let t = Instant::now();
         let col = gtor.column(cx, cz);
-        per_chunk_us.push(t.elapsed().as_nanos() as f64 / 1000.0);
+        per_chunk_us.push((cx, cz, t.elapsed().as_nanos() as f64 / 1000.0));
         std::hint::black_box(col.non_air_count());
     }
     let serial_total = serial_start.elapsed();
 
-    per_chunk_us.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let mean = per_chunk_us.iter().sum::<f64>() / n as f64;
-    let median = per_chunk_us[n / 2];
-    let p95 = per_chunk_us[(n as f64 * 0.95) as usize];
-    let min = per_chunk_us[0];
-    let max = per_chunk_us[n - 1];
+    per_chunk_us.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
+    let mean = per_chunk_us.iter().map(|entry| entry.2).sum::<f64>() / n as f64;
+    let median = per_chunk_us[n / 2].2;
+    let p95 = per_chunk_us[(n as f64 * 0.95) as usize].2;
+    let min = per_chunk_us[0].2;
+    let max = per_chunk_us[n - 1].2;
 
-    // Per-stage breakdown was measured separately via an instrumented twin of
-    // `column`; as of the FxHash corner-cache change the split at RD8/seed 3 was
-    // roughly noise 40% / surface 51% / intern 7% / sampler-build+heightmap 2%.
-    // The instrumented twin is not kept in-tree (it duplicated the verified
-    // pipeline); re-add it locally if you need to re-measure the split.
+    let stage_generator = overworld_generator(seed);
+    for cz in -2..=2 {
+        for cx in -2..=2 {
+            std::hint::black_box(stage_generator.column(cx, cz));
+        }
+    }
+    let (_, stages) = stage_generator.column_timed(0, 0);
+    let stage_us = [
+        ("aquifer", stages.aquifer),
+        ("shape", stages.shape),
+        ("biome", stages.biome),
+        ("surface", stages.surface),
+        ("materialize", stages.materialize),
+        ("carve", stages.carve),
+        ("features", stages.vegetation),
+        ("top_layer", stages.top_layer),
+        ("intern", stages.intern),
+    ];
 
     // Parallel wall-clock over the same patch (embarrassingly parallel: each
     // column builds a fresh sampler and reads only immutable generator state).
@@ -96,7 +112,9 @@ fn main() {
         .map(|p| p.get())
         .unwrap_or(4);
     let batch = coords.len().div_ceil(workers);
+    let repeat_build_start = Instant::now();
     let par_gtor = overworld_generator(seed);
+    let repeat_build = repeat_build_start.elapsed();
     let par_start = Instant::now();
     let par_count: usize = std::thread::scope(|scope| {
         let handles: Vec<_> = coords
@@ -118,6 +136,7 @@ fn main() {
 
     println!("seed={seed} radius={radius} chunks={n} cores={workers}");
     println!("generator build: {build:?} (one-time, amortised across all chunks)");
+    println!("repeat generator build: {repeat_build:?} (same asset bundle, new seed state)");
     println!();
     println!("--- single-threaded full column() ---");
     println!("  total     {serial_total:?} for {n} chunks");
@@ -128,6 +147,18 @@ fn main() {
         "  throughput {:.0} chunks/s",
         n as f64 / serial_total.as_secs_f64()
     );
+    println!("  slowest columns:");
+    for &(cx, cz, micros) in per_chunk_us.iter().rev().take(8) {
+        println!("    ({cx:>3},{cz:>3}) {micros:>9.0}us");
+    }
+    println!();
+    println!("--- warmed-neighbour stage sample at (0,0) ---");
+    for (stage, elapsed) in stage_us {
+        println!("  {stage:<12} {:>9.1}us", elapsed.as_secs_f64() * 1e6);
+    }
+    if serial_only {
+        return;
+    }
     println!();
     println!("--- parallel wall-clock ({workers} threads) ---");
     println!("  total     {par_total:?} for {n} chunks");
@@ -228,32 +259,28 @@ fn main() {
         });
     }
 
-    // --- In-benchmark RNG-determinism parity assertion ---------------------
-    //
-    // The whole point of this assertion: the fastest way to "improve" the numbers above is
-    // to break per-chunk RNG determinism (HANDOFF.md §4's buried-ore
-    // `nextFloat`-before-air-check trap is exactly this class of bug — a
-    // wrong draw count desyncs the shared stream and features vanish
-    // silently, invisible to a speed number alone). Recompute a small
-    // subset both ways and assert byte-identical output; this must panic
-    // this binary, not just print, if a future change breaks it.
-    let parity_coords: Vec<(i32, i32)> = (-1..=1).flat_map(|cz| (-1..=1).map(move |cx| (cx, cz))).collect();
-    let serial_fingerprints: Vec<u64> = parity_coords
+    // --- In-benchmark determinism assertion --------------------------------
+    let parity_coords: Vec<(i32, i32)> = (-1..=1)
+        .flat_map(|cz| (-1..=1).map(move |cx| (cx, cz)))
+        .collect();
+    let serial_parity_generator = overworld_generator(seed);
+    let serial_columns: Vec<GeneratedColumn> = parity_coords
         .iter()
-        .map(|&(cx, cz)| column_fingerprint(&gtor.column(cx, cz)))
+        .map(|&(cx, cz)| serial_parity_generator.column(cx, cz))
         .collect();
     let parity_workers = thread_counts.last().copied().unwrap_or(1).max(2);
     let parity_batch = parity_coords.len().div_ceil(parity_workers);
-    let parallel_fingerprints: Vec<u64> = std::thread::scope(|scope| {
+    let parallel_parity_generator = overworld_generator(seed);
+    let parallel_columns: Vec<GeneratedColumn> = std::thread::scope(|scope| {
         let handles: Vec<_> = parity_coords
             .chunks(parity_batch.max(1))
             .map(|slice| {
-                let gtor = &gtor;
+                let gtor = &parallel_parity_generator;
                 scope.spawn(move || {
                     slice
                         .iter()
-                        .map(|&(cx, cz)| column_fingerprint(&gtor.column(cx, cz)))
-                        .collect::<Vec<u64>>()
+                        .map(|&(cx, cz)| gtor.column(cx, cz))
+                        .collect::<Vec<GeneratedColumn>>()
                 })
             })
             .collect();
@@ -263,20 +290,23 @@ fn main() {
             .collect()
     });
     assert_eq!(
-        serial_fingerprints.len(),
-        parallel_fingerprints.len(),
+        serial_columns.len(),
+        parallel_columns.len(),
         "parity check lost or gained chunks between serial and parallel paths"
     );
-    for (i, (&(cx, cz), (&s, &p))) in parity_coords
+    for (i, (&(cx, cz), (serial, parallel))) in parity_coords
         .iter()
-        .zip(serial_fingerprints.iter().zip(parallel_fingerprints.iter()))
+        .zip(serial_columns.iter().zip(parallel_columns.iter()))
         .enumerate()
     {
+        let s = column_fingerprint(serial);
+        let p = column_fingerprint(parallel);
+        let difference = first_column_difference(serial, parallel)
+            .unwrap_or_else(|| "fingerprints differ without an observable field difference".into());
         assert_eq!(
             s, p,
             "chunk ({cx},{cz}) [index {i}] differs between serial and {parity_workers}-thread \
-             parallel generation (fingerprint {s:#x} vs {p:#x}) — this is the RNG-determinism \
-             break #86 is gated on, not a speed regression"
+             parallel generation (fingerprint {s:#x} vs {p:#x}): {difference}"
         );
     }
     println!();
@@ -284,6 +314,35 @@ fn main() {
         "--- parity check: {} chunks, serial vs {parity_workers}-thread parallel: byte-identical ---",
         parity_coords.len()
     );
+}
+
+fn first_column_difference(serial: &GeneratedColumn, parallel: &GeneratedColumn) -> Option<String> {
+    for lz in 0..16usize {
+        for lx in 0..16usize {
+            let serial_biome = serial.biome_state(lx, lz);
+            let parallel_biome = parallel.biome_state(lx, lz);
+            if serial_biome != parallel_biome {
+                return Some(format!(
+                    "biome ({lx}, {lz}) is {serial_biome:?} vs {parallel_biome:?}"
+                ));
+            }
+        }
+    }
+    for ly in 0..serial.height() {
+        let y = serial.min_y() + ly;
+        for lz in 0..16usize {
+            for lx in 0..16usize {
+                let serial_state = serial.block_state(lx, y, lz);
+                let parallel_state = parallel.block_state(lx, y, lz);
+                if serial_state != parallel_state {
+                    return Some(format!(
+                        "block ({lx}, {y}, {lz}) is {serial_state:?} vs {parallel_state:?}"
+                    ));
+                }
+            }
+        }
+    }
+    None
 }
 
 /// FNV-1a over every cell's canonical block-state string plus the biome at

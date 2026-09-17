@@ -407,7 +407,7 @@ fn an_item_thrown_sideways_still_comes_to_rest_on_the_floor() {
 // about, so they structurally cannot exercise the thing that was broken.
 //
 // What was broken: `MobSim`'s `ChunkWorld` is a static snapshot of `mob_area` —
-// 7×7 columns, taken once by `MobHandle::reseed` when the world opens. Outside
+// 7×7 columns, taken once by `MobHandle::replace_world` when the world opens. Outside
 // those columns `ChunkWorld::is_solid` answers `false` for every cell, because the
 // column is absent rather than empty. So an item dropped anywhere else accelerated
 // downward forever and was discarded at `min_y - 64`.

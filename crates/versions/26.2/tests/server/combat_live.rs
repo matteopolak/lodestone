@@ -150,7 +150,7 @@ async fn real_client_attacks_a_live_mob_and_the_server_applies_damage_and_knockb
         // client never spawns "itself" as an `ADD_ENTITY`, so the very
         // first mob a fresh sim spawns would silently never appear (see
         // `MobSim::set_next_id`'s own doc comment; production's
-        // `MobHandle::seeded` already does this). Matched here for the
+        // `MobHandle::new` already does this). Matched here for the
         // identical reason.
         sim.set_next_id(1000);
         let zombie = ResourceKey::new("minecraft", "zombie").expect("valid key");
@@ -317,7 +317,7 @@ async fn no_attack_means_no_movement() {
         // client never spawns "itself" as an `ADD_ENTITY`, so the very
         // first mob a fresh sim spawns would silently never appear (see
         // `MobSim::set_next_id`'s own doc comment; production's
-        // `MobHandle::seeded` already does this). Matched here for the
+        // `MobHandle::new` already does this). Matched here for the
         // identical reason.
         sim.set_next_id(1000);
         let zombie = ResourceKey::new("minecraft", "zombie").expect("valid key");

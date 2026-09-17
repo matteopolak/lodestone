@@ -304,15 +304,16 @@ async fn cancelled_resident_change_does_not_publish_or_mutate() {
     let air = state("minecraft:air");
     let source = FlatSource::new();
     let writes = Arc::clone(&source.writes);
-    let (server, client) = IntegratedServer::open_in_memory_with_mobs_and_server_app(
+    let (server, client_end) = IntegratedServer::open_in_memory_with_mobs_and_server_app(
         SilentProtocol,
         source,
         (0..=0, 0..=0),
         (0, 0),
         0,
-        0,
         cancelling_server_app(),
     );
+    let mut client = Connection::new(client_end);
+    drive_silent_join(&mut client).await;
     std::mem::forget(client);
     wait_for_target(&server, stone).await;
     server
@@ -345,15 +346,16 @@ async fn cancelled_resident_change_does_not_publish_or_mutate() {
     // Independent no-listener control: the same production API must reach the
     // source when no Paper listener claims the adjudication window.
     let source = FlatSource::new();
-    let (server, client) = IntegratedServer::open_in_memory_with_mobs_and_server_app(
+    let (server, client_end) = IntegratedServer::open_in_memory_with_mobs_and_server_app(
         SilentProtocol,
         source,
         (0..=0, 0..=0),
         (0, 0),
         0,
-        0,
         ServerApp::bootstrap(),
     );
+    let mut client = Connection::new(client_end);
+    drive_silent_join(&mut client).await;
     std::mem::forget(client);
     wait_for_target(&server, stone).await;
     assert_eq!(
@@ -380,7 +382,6 @@ async fn cancelled_player_break_returns_authoritative_correction() {
         (0..=0, 0..=0),
         (0, 0),
         0,
-        0,
         cancelling_block_break_server_app(),
     );
     let mut client = Connection::new(client_end);
@@ -404,7 +405,6 @@ async fn cancelled_player_break_returns_authoritative_correction() {
         source,
         (0..=0, 0..=0),
         (0, 0),
-        0,
         0,
         ServerApp::bootstrap(),
     );

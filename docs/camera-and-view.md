@@ -157,9 +157,12 @@ presentation.
   half the remaining distance per fixed tick. A frame interpolates that pair and
   prefixes ten percent of the residual onto the first-person hand pose and the
   synthetic local body's held-item attachment. The ordinary camera remains
-  unlagged for picking, audio, and third-person pullback. Keep the two consumers
-  on the same sampled source so a rapid-turn gate can observe a nonzero offset
-  that decays on stationary ticks.
+  unlagged for picking, audio, and third-person pullback. Yaw tick updates,
+  interpolation, and residuals all use the shortest angular arc because gameplay
+  stores yaw in a wrapped range; raw subtraction would turn crossing north into a
+  nearly complete revolution. Keep the two consumers on the same sampled source
+  so a rapid-turn gate can observe a nonzero offset that decays on stationary
+  ticks.
 - **A bob-fixture test that never actually accumulates `walkDist` measures
   nothing** — a hermetic gate needs a flattened path the player can really walk down
   before asserting on the resulting bob.

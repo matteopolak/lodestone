@@ -88,7 +88,14 @@ impl<'w> SimMob<'w> {
             } else {
                 1.0
             };
-            self.mob.set_step_per_tick(ai_ground_speed(base_speed * multiplier));
+            let movement_speed = base_speed * multiplier;
+            self.mob
+                .set_step_per_tick(ai_ground_speed(movement_speed));
+            self.mob.set_goal_speed_scale(if base_speed > 0.0 {
+                ai_ground_speed(movement_speed) / base_speed
+            } else {
+                0.0
+            });
         }
         self
     }

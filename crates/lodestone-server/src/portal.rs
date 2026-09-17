@@ -3168,14 +3168,24 @@ mod tests {
         resident: bool,
         columns_touched: Mutex<std::collections::HashSet<(i32, i32)>>,
         threads_seen: Mutex<std::collections::HashSet<std::thread::ThreadId>>,
+        first_columns: std::sync::Barrier,
+        first_columns_seen: AtomicUsize,
     }
 
     impl ChunkSource for ParallelProbeWorld {
         fn column(&self, cx: i32, cz: i32) -> crate::chunk::ChunkColumn {
             self.columns_touched.lock().unwrap().insert((cx, cz));
             self.threads_seen.lock().unwrap().insert(std::thread::current().id());
+            if self.first_columns_seen.fetch_add(1, Ordering::SeqCst) < 2 {
+                self.first_columns.wait();
+            }
             crate::chunk::ChunkColumn::new(0, 256)
         }
+
+        fn columns(&self, coords: &[(i32, i32)]) -> Vec<crate::chunk::ChunkColumn> {
+            crate::chunk::run_worldgen_jobs(coords.to_vec(), |(cx, cz)| self.column(cx, cz))
+        }
+
         fn block_state(&self, _x: i32, y: i32, _z: i32) -> String {
             if y <= self.floor_top {
                 "minecraft:netherrack".to_owned()
@@ -3209,26 +3219,33 @@ mod tests {
             resident: false,
             columns_touched: Mutex::new(std::collections::HashSet::new()),
             threads_seen: Mutex::new(std::collections::HashSet::new()),
+            first_columns: std::sync::Barrier::new(2),
+            first_columns_seen: AtomicUsize::new(0),
         };
         let origin = BlockPos::new(0, 40, 0);
-        let _ = create_portal(&world, Dimension::Nether, origin, Axis::X);
+        // Run the production path inside a small private pool. The shared
+        // dispatcher is intentionally busy during the full crate suite, and
+        // its admission fallback is allowed to serialize a batch under load.
+        // A private pool isolates this gate from that legitimate contention;
+        // `create_portal` still reaches `generate_columns_parallel`, and the
+        // source hook still uses the production `run_worldgen_jobs` seam.
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .expect("portal parallelism probe pool must build");
+        pool.install(|| {
+            let _ = create_portal(&world, Dimension::Nether, origin, Axis::X);
+        });
 
         assert_eq!(
             world.columns_touched.lock().unwrap().len(),
             9,
             "the 33x33 footprint around a chunk-aligned-ish origin spans exactly 9 columns"
         );
-        // The parallelism claim itself. `std::thread::available_parallelism`
-        // is the same machine-scale budget used by the shared Rayon
-        // dispatcher, so a single-core sandbox is the only way this could
-        // fail honestly — everywhere else, more than one thread touching 9
-        // columns is exactly what "warmed in parallel" means.
-        let cores = std::thread::available_parallelism().map(std::num::NonZero::get).unwrap_or(1);
         let threads = world.threads_seen.lock().unwrap().len();
         assert!(
-            cores <= 1 || threads > 1,
-            "with {cores} cores available, a 9-column prefetch used only {threads} thread(s) — \
-             the fan-out did not engage"
+            threads > 1,
+            "a 9-column prefetch used only {threads} thread(s) — the fan-out did not engage"
         );
     }
 
@@ -3244,6 +3261,8 @@ mod tests {
             resident: true,
             columns_touched: Mutex::new(std::collections::HashSet::new()),
             threads_seen: Mutex::new(std::collections::HashSet::new()),
+            first_columns: std::sync::Barrier::new(2),
+            first_columns_seen: AtomicUsize::new(0),
         };
         let origin = BlockPos::new(0, 40, 0);
         let _ = create_portal(&world, Dimension::Nether, origin, Axis::X);

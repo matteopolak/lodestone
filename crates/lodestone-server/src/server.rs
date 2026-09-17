@@ -14,35 +14,11 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
-#[cfg(not(target_arch = "wasm32"))]
 use lodestone_time::Instant;
 
-/// The join path's `PERF INSTRUMENT` clock, which exists so those timers do not
-/// break the `wasm32` build.
-///
-/// `std::time::Instant::now()` **panics on `wasm32`** — there is no monotonic
-/// clock behind it — so three bare `Instant::now()` calls in the join sequence
-/// made the whole crate unbuildable for the browser while the `Instant` import
-/// itself was already `cfg`-gated. The compile error named the import, not the
-/// call sites, which is why it read as a missing feature rather than three
-/// diagnostics that had outlived their debugging session.
-///
-/// **Do not "fix" this with `tokio::time::Instant`.** rustc's own `help:`
-/// suggests it beside `std`'s, and `serve_play` a few hundred lines below
-/// already uses it, so it reads as established precedent. It is not: it bottoms
-/// out in `std::time::Instant::now()` (tokio 1.53.1, `src/time/clock.rs:16`) and
-/// panics identically. That substitution trades a compile error for a runtime
-/// crash in a browser, which is strictly worse — the error moves from the one
-/// place that reports it to the one place nobody is watching.
-///
-/// The `wasm32` arm holds no clock and reports `Duration::ZERO`. These are
-/// `tracing::info!` lines about join latency; a zero on a target that cannot
-/// measure is the honest reading, and it is deliberately *not* a plausible
-/// fabricated number for the same reason `menu::options` refuses to print a
-/// value for an option it does not honour.
+/// Portable monotonic clock for join-path measurements.
 #[derive(Clone, Copy)]
 pub(crate) struct JoinStopwatch {
-    #[cfg(not(target_arch = "wasm32"))]
     started: Instant,
 }
 
@@ -57,21 +33,11 @@ impl std::fmt::Debug for JoinStopwatch {
 
 impl JoinStopwatch {
     pub(crate) fn now() -> Self {
-        Self {
-            #[cfg(not(target_arch = "wasm32"))]
-            started: Instant::now(),
-        }
+        Self { started: Instant::now() }
     }
 
     pub(crate) fn elapsed(&self) -> Duration {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            self.started.elapsed()
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            Duration::ZERO
-        }
+        self.started.elapsed()
     }
 }
 
@@ -884,14 +850,26 @@ impl<'a, S: ChunkSource + 'static> SourceRef<'a, S> {
         match self {
             Self::Borrowed(source) => crate::world_spawn::find_initial_spawn(source),
             Self::Shared(source) => {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    return crate::world_spawn::find_initial_spawn_yielding(&**source).await;
+                }
+                #[cfg(not(target_arch = "wasm32"))]
                 let source = Arc::clone(source);
+                #[cfg(not(target_arch = "wasm32"))]
                 crate::spawn::spawn_worldgen(move || {
                     crate::world_spawn::find_initial_spawn(&*source)
                 })
                 .await
             }
             Self::Dimension(source) => {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    return crate::world_spawn::find_initial_spawn_yielding(&**source).await;
+                }
+                #[cfg(not(target_arch = "wasm32"))]
                 let source = Arc::clone(source);
+                #[cfg(not(target_arch = "wasm32"))]
                 crate::spawn::spawn_worldgen(move || {
                     crate::world_spawn::find_initial_spawn(&*source)
                 })
@@ -1501,6 +1479,7 @@ where
 struct ViewTracker {
     center: (i32, i32),
     loaded: HashSet<(i32, i32)>,
+    delivered: HashSet<(i32, i32)>,
     /// The highest generation stage this connection has claimed for each
     /// loaded coordinate. `loaded` is intentionally an owed set (it is seeded
     /// before the deferred stream drains), so this map follows the same
@@ -1652,6 +1631,7 @@ impl ViewTracker {
         Self {
             center,
             loaded,
+            delivered: HashSet::new(),
             sent_stages,
             generation_band,
             radius: view_radius,
@@ -1663,6 +1643,12 @@ impl ViewTracker {
     /// tracker without a band is the all-full compatibility path.
     fn stage_for(&self, coord: (i32, i32)) -> ChunkGenerationStage {
         stage_for_band(self.generation_band, coord)
+    }
+
+    fn mark_delivered(&mut self, coord: (i32, i32)) {
+        if self.loaded.contains(&coord) {
+            self.delivered.insert(coord);
+        }
     }
 
     /// The square `[-self.radius, self.radius]²` window around `center`.
@@ -1790,6 +1776,7 @@ impl ViewTracker {
 
         self.center = (cx, cz);
         self.loaded = next;
+        self.delivered.retain(|coord| self.loaded.contains(coord));
         self.generation_band = next_band;
         for coord in &forgotten {
             self.sent_stages.remove(coord);
@@ -1861,6 +1848,7 @@ impl ViewTracker {
 
         self.radius = radius;
         self.loaded = next;
+        self.delivered.retain(|coord| self.loaded.contains(coord));
         for coord in &forgotten {
             self.sent_stages.remove(coord);
         }
@@ -1980,6 +1968,11 @@ const JOIN_PRESTREAM_RADIUS: i32 = 0;
 /// client's own rate estimate.
 const JOIN_STREAM_BATCH_COLUMNS: usize = 16;
 
+struct PendingChunkBatch {
+    directives: Vec<ServerDirective>,
+    delivered: Vec<(i32, i32)>,
+}
+
 /// Applies one [`ViewUpdate`]: the cache-center and forget directives right away,
 /// then the newly-visible columns.
 ///
@@ -1993,7 +1986,7 @@ const JOIN_STREAM_BATCH_COLUMNS: usize = 16;
 ///
 /// **Fallback: build the batch here.** `stream` refuses on its `Ringed` arm (a
 /// borrowed, non-`'static` source — protocol tests) and when the caller has no
-/// stream at all (`wasm32`, whose loop has no `select!` to drain one from). Those
+/// stream at all. Those
 /// generate, encode, and send under
 /// `awaiting_chunk_batch_ack`, the one-batch-in-flight gate
 /// `ServerBound::ChunkBatchAcknowledged` closes.
@@ -2009,9 +2002,10 @@ async fn send_view_update<T, P, S>(
     source: SourceRef<'_, S>,
     stream: Option<&mut crate::join_scheduler::JoinChunkStream<S>>,
     state: &mut State,
+    view: &mut ViewTracker,
     update: ViewUpdate,
     awaiting_chunk_batch_ack: &mut bool,
-    pending_chunk_batches: &mut VecDeque<Vec<ServerDirective>>,
+    pending_chunk_batches: &mut VecDeque<PendingChunkBatch>,
 ) -> Result<(), ServerError>
 where
     T: Transport,
@@ -2102,12 +2096,18 @@ where
     }
     batch.push(proto.end_chunk_batch(count));
     if *awaiting_chunk_batch_ack {
-        pending_chunk_batches.push_back(batch);
+        pending_chunk_batches.push_back(PendingChunkBatch {
+            directives: batch,
+            delivered: requested,
+        });
         return Ok(());
     }
     *awaiting_chunk_batch_ack = true;
     for directive in batch {
         apply(conn, state, directive).await?;
+    }
+    for coord in requested {
+        view.mark_delivered(coord);
     }
     Ok(())
 }
@@ -3409,8 +3409,8 @@ impl ResourcePackPushFeed {
 ///    [`ServerProtocol::login_success`]. Otherwise, the client's
 ///    [`ServerBound::ConfigurationFinished`] → state becomes [`State::Play`],
 ///    then [`ServerProtocol::begin_play`], then every column in
-///    `[-view_radius, view_radius]²` (chunk coordinates) from `source` as a
-///    single flow-controlled chunk batch
+///    `[-view_radius, view_radius]²` (chunk coordinates) from `source` in
+///    bounded chunk batches
 ///    ([`ServerProtocol::begin_chunk_batch`]/
 ///    [`ServerProtocol::encode_chunk`]/[`ServerProtocol::end_chunk_batch`]),
 ///    then [`ServerProtocol::welcome_message`] (optional; empty by default).
@@ -4529,15 +4529,6 @@ where
                 // which is exactly a fresh world; the first join resolves it and the
                 // next autosave writes it. See
                 // `WorldStateHandle::world_spawn`.
-                if let Some(stored) = world.world_spawn() {
-                    source
-                        .admit_columns(column_admission_footprint(
-                            (stored.pos.x.floor() as i32).div_euclid(16),
-                            (stored.pos.z.floor() as i32).div_euclid(16),
-                            1,
-                        ))
-                        .await;
-                }
                 let spawn = match world.world_spawn() {
                     Some(stored)
                         if crate::world_spawn::is_spawn_position_clear(
@@ -4557,9 +4548,9 @@ where
                         found
                     }
                     None => {
-                        let found = source.find_initial_spawn().await;
-                        world.set_world_spawn(found);
-                        found
+                        world
+                            .resolve_world_spawn(|| source.find_initial_spawn())
+                            .await
                     }
                 };
                 // Level data stores the world spawn as a block anchor. The
@@ -5111,7 +5102,7 @@ where
                 // the tracker seeds the same stage ledger the join pipeline
                 // used. Sources that require a complete packet (or retain the
                 // legacy borrowed/ringed path) keep the all-full ledger.
-                let view = match source {
+                let mut view = match source {
                     SourceRef::Shared(src)
                         if src
                             .packet_generation_stage(ChunkGenerationStage::Shaped)
@@ -5123,6 +5114,9 @@ where
                     ),
                     _ => ViewTracker::new((spawn_cx, spawn_cz), view_radius, max_view_radius),
                 };
+                if chunks_sent != 0 {
+                    view.mark_delivered((spawn_cx, spawn_cz));
+                }
                 // `player_uuid`, `permission_level` and
                 // `builtins` are the bindings the `COMMANDS` send above already
                 // derived, reused rather than recomputed — the tree the client was
@@ -6914,34 +6908,8 @@ where
     Ok(())
 }
 
-/// Recomputes every light payload a tick-driven edit can affect, but only from
-/// cached columns. A later join-stream chunk contains the same world state for
-/// an unloaded column, so generating it here would add work without producing
-/// a client-visible correction.
-async fn send_resident_lighting_for_tick<T, P, S>(
-    conn: &mut Connection<T>,
-    proto: &P,
-    source: &S,
-    state: &mut State,
-    cx: i32,
-    cz: i32,
-) -> Result<(), ServerError>
-where
-    T: Transport,
-    P: ServerProtocol,
-    S: ChunkSource + ?Sized,
-{
-    let radius = i32::from(proto.uses_cross_column_light());
-    for dz in -radius..=radius {
-        for dx in -radius..=radius {
-            send_resident_column_light(conn, proto, source, state, cx + dx, cz + dz).await?;
-        }
-    }
-    Ok(())
-}
-
 /// Sends every block mutation published by the world tick and then refreshes
-/// lighting once per affected resident column.
+/// lighting once per affected delivered column.
 ///
 /// This deliberately has no join-stream gate. A column snapshot that has not
 /// been sent yet will supersede an earlier block update, but a snapshot that
@@ -6952,6 +6920,7 @@ async fn send_tick_block_updates<T, P, S>(
     proto: &P,
     source: &S,
     state: &mut State,
+    delivered: &HashSet<(i32, i32)>,
     changes: Vec<(i32, i32, i32, String)>,
 ) -> Result<(), ServerError>
 where
@@ -6959,16 +6928,26 @@ where
     P: ServerProtocol,
     S: ChunkSource + ?Sized,
 {
-    let mut relight: Vec<(i32, i32)> = Vec::new();
+    let mut relight = HashSet::new();
+    let radius = i32::from(proto.uses_cross_column_light());
     for (x, y, z, block_state) in changes {
-        apply(conn, state, proto.encode_block_update(x, y, z, &block_state)).await?;
         let column = (x.div_euclid(16), z.div_euclid(16));
-        if !relight.contains(&column) {
-            relight.push(column);
+        if delivered.contains(&column) {
+            apply(conn, state, proto.encode_block_update(x, y, z, &block_state)).await?;
+        }
+        for dz in -radius..=radius {
+            for dx in -radius..=radius {
+                let affected = (column.0 + dx, column.1 + dz);
+                if delivered.contains(&affected) {
+                    relight.insert(affected);
+                }
+            }
         }
     }
+    let mut relight = relight.into_iter().collect::<Vec<_>>();
+    relight.sort_unstable();
     for (cx, cz) in relight {
-        send_resident_lighting_for_tick(conn, proto, source, state, cx, cz).await?;
+        send_resident_column_light(conn, proto, source, state, cx, cz).await?;
     }
     Ok(())
 }
@@ -12499,7 +12478,7 @@ async fn dispatch_play_packet<T, P, S>(
     // state to bypass a clicked container while placing a block beside it.
     sneaking: &mut bool,
     awaiting_chunk_batch_ack: &mut bool,
-    pending_chunk_batches: &mut VecDeque<Vec<ServerDirective>>,
+    pending_chunk_batches: &mut VecDeque<PendingChunkBatch>,
     // The connection's live column stream, where the caller has one to lend. A
     // chunk-boundary crossing enqueues its newly-visible strip here instead of
     // generating it inline, so the view update costs this function a set difference
@@ -12839,6 +12818,7 @@ where
                 source,
                 join_stream.as_deref_mut(),
                 state,
+                view,
                 update,
                 awaiting_chunk_batch_ack,
                 pending_chunk_batches,
@@ -14131,6 +14111,7 @@ where
                 source,
                 join_stream.as_deref_mut(),
                 state,
+                view,
                 update,
                 awaiting_chunk_batch_ack,
                 pending_chunk_batches,
@@ -14141,8 +14122,11 @@ where
             *awaiting_chunk_batch_ack = false;
             if let Some(next) = pending_chunk_batches.pop_front() {
                 *awaiting_chunk_batch_ack = true;
-                for directive in next {
+                for directive in next.directives {
                     apply(conn, state, directive).await?;
+                }
+                for coord in next.delivered {
+                    view.mark_delivered(coord);
                 }
             }
         }
@@ -15056,7 +15040,7 @@ where
     // Gating the join stream on a reply can stall fixtures whose protocol
     // implementation does not answer the acknowledgement.
     let mut awaiting_chunk_batch_ack = true;
-    let mut pending_chunk_batches: VecDeque<Vec<ServerDirective>> = VecDeque::new();
+    let mut pending_chunk_batches: VecDeque<PendingChunkBatch> = VecDeque::new();
     // Packet dispatch fills this queue; the loop drains it immediately after
     // the call returns to publish the message.
     let mut outgoing_chat: Vec<String> = Vec::new();
@@ -15263,6 +15247,7 @@ where
                     join_batch_size = 0;
                 }
                 apply(conn, &mut state, directive).await?;
+                view.mark_delivered((cx, cz));
                 if let Some(trace) = join_trace.as_ref() {
                     trace.mark("delivered", cx, cz);
                 }
@@ -15372,6 +15357,7 @@ where
                             join_batch_size = 0;
                         }
                         apply(conn, &mut state, directive).await?;
+                        view.mark_delivered((cx, cz));
                         if let Some(trace) = join_trace.as_ref() {
                             trace.mark("delivered", cx, cz);
                         }
@@ -16938,6 +16924,7 @@ where
                             source,
                             Some(&mut join_stream),
                             &mut state,
+                            &mut view,
                             update,
                             &mut awaiting_chunk_batch_ack,
                             &mut pending_chunk_batches,
@@ -17159,6 +17146,7 @@ where
                     proto,
                     source.get(),
                     &mut state,
+                    &view.delivered,
                     block_ticks.drain_all(),
                 )
                 .await?;
@@ -18091,7 +18079,7 @@ where
         player_ticket.as_ref().map_or(LOCAL_PLAYER_ENTITY_ID, |t| t.entity_id());
     // The initial join dump is unacknowledged, so this gate begins `true`.
     let mut awaiting_chunk_batch_ack = true;
-    let mut pending_chunk_batches: VecDeque<Vec<ServerDirective>> = VecDeque::new();
+    let mut pending_chunk_batches: VecDeque<PendingChunkBatch> = VecDeque::new();
     // Outgoing chat waits here until the shared broadcast queue can be drained.
     let mut outgoing_chat: Vec<String> = Vec::new();
     // Session announcements are stored for secure-profile validation.
@@ -18110,69 +18098,18 @@ where
     // the client can initialize its derived armor display.
     apply(conn, &mut state, join_attributes(proto, &inventory)).await?;
 
-    // Drain the deferred join view inline; this loop has no separate worker
-    // branch for streaming it concurrently.
-    if !join_stream.is_done() {
-        apply(conn, &mut state, proto.begin_chunk_batch()).await?;
-        let mut batch_size: i32 = 0;
-        loop {
-            let next = match join_stream.next(source).await {
-                Ok(next) => next,
-                Err(error) => {
-                    return return_chunk_encode_error(
-                        conn,
-                        proto,
-                        &mut state,
-                        Some(batch_size),
-                        error,
-                    )
-                    .await;
-                }
-            };
-            let Some(((cx, cz), payload)) = next else {
-                break;
-            };
-            let directive = match encode_column(
-                proto,
-                source,
-                cx,
-                cz,
-                join_trace.as_deref(),
-                payload,
-            )
-            .await {
-                Ok(directive) => directive,
-                Err(error) => {
-                    return return_chunk_encode_error(
-                        conn,
-                        proto,
-                        &mut state,
-                        Some(batch_size),
-                        error,
-                    )
-                    .await;
-                }
-            };
-            apply(conn, &mut state, directive).await?;
-            if let Some(trace) = join_trace.as_ref() {
-                trace.mark("delivered", cx, cz);
-            }
-            chunks_sent += 1;
-            batch_size += 1;
-        }
-        apply(conn, &mut state, proto.end_chunk_batch(batch_size)).await?;
-    }
-
     // The browser timer uses a macrotask via the active page/worker global's
     // `setTimeout`; it drives both player vitals and publication of world
     // changes once per `WASM_VITALS_TICK_INTERVAL` period.
     let mut vitals_interval =
         crate::browser_timer::BrowserInterval::new(WASM_VITALS_TICK_INTERVAL);
+    let browser_play_started = lodestone_time::Instant::now();
+    let mut browser_vitals_ticks = 0_u64;
     loop {
-        let (packet_id, payload) = tokio::select! {
+        let packet = tokio::select! {
             packet = conn.read_packet() => {
                 match packet? {
-                    Some(p) => p,
+                    Some(packet) => Some(packet),
                     // Clean disconnect. Browser connections have no
                     // filesystem-backed player store to persist here.
                     None => return Ok(ServeSummary { username, chunks_sent, inventory }),
@@ -18205,6 +18142,17 @@ where
                     block_entities,
                 )
                 .await?;
+                browser_vitals_ticks = browser_vitals_ticks.saturating_add(1);
+                if browser_vitals_ticks == 1 || browser_vitals_ticks.is_multiple_of(20) {
+                    tracing::debug!(
+                        elapsed_ms = browser_play_started.elapsed().as_millis(),
+                        vitals_ticks = browser_vitals_ticks,
+                        world_tick = world.time().game_time,
+                        chunks_sent,
+                        join_remaining = join_stream.remaining(),
+                        "browser play-loop heartbeat",
+                    );
+                }
                 republish_inventory(entities.players(), player_uuid, &inventory);
                 // The world tick runs in a separate future and can mutate the
                 // shared source while this connection is completely idle.
@@ -18217,6 +18165,7 @@ where
                     proto,
                     source.get(),
                     &mut state,
+                    &view.delivered,
                     block_ticks.drain_all(),
                 )
                 .await?;
@@ -18245,178 +18194,240 @@ where
                 ) {
                     apply(conn, &mut state, directive).await?;
                 }
+                None
+            }
+            next = async {
+                tokio::select! {
+                    next = join_stream.next(source) => Some(next),
+                    _ = lodestone_time::browser_sleep(
+                        crate::join_scheduler::JOIN_STREAM_SERVICE_BUDGET,
+                    ) => None,
+                }
+            }, if !join_stream.is_done() => {
+                let Some(next) = next else {
+                    continue;
+                };
+                let Some(((cx, cz), payload)) = (match next {
+                    Ok(next) => next,
+                    Err(error) => {
+                        return return_chunk_encode_error(conn, proto, &mut state, Some(0), error)
+                            .await;
+                    }
+                }) else {
+                    continue;
+                };
+                let directive = match encode_column(
+                    proto,
+                    source,
+                    cx,
+                    cz,
+                    join_trace.as_deref(),
+                    payload,
+                )
+                .await {
+                    Ok(directive) => directive,
+                    Err(error) => {
+                        return return_chunk_encode_error(conn, proto, &mut state, Some(0), error)
+                            .await;
+                    }
+                };
+                apply(conn, &mut state, proto.begin_chunk_batch()).await?;
+                apply(conn, &mut state, directive).await?;
+                view.mark_delivered((cx, cz));
+                apply(conn, &mut state, proto.end_chunk_batch(1)).await?;
+                if let Some(trace) = join_trace.as_ref() {
+                    trace.mark("delivered", cx, cz);
+                }
+                chunks_sent += 1;
+                if chunks_sent == 1 || chunks_sent.is_multiple_of(16) {
+                    tracing::debug!(
+                        elapsed_ms = browser_play_started.elapsed().as_millis(),
+                        chunks_sent,
+                        join_remaining = join_stream.remaining(),
+                        world_tick = world.time().game_time,
+                        "browser join stream progress",
+                    );
+                }
                 continue;
             }
         };
-        dispatch_play_packet(
-            conn,
-            proto,
-            source,
-            &mut state,
-            &mut view,
-            &player_ticket_guard,
-            &mut pending_keep_alive,
-            &mut pending_break,
-            &mut teleport_acknowledgements,
-            &mut player_pos,
-            &mut client_movement,
-            &mut player_rot,
-            &mut fall,
-            &mut vitals,
-            world,
-            &mut inventory,
-            block_entities,
-            &mut open_container,
-            &mut open_merchant,
-            &mut container_sync,
-            &mut next_window_id,
-            mobs,
-            &mut sprinting,
-            &mut sneaking,
-            &mut awaiting_chunk_batch_ack,
-            &mut pending_chunk_batches,
-            // `None`: this loop drains the join stream inline, so no deferred
-            // stream is available to `dispatch_play_packet`.
-            None,
-            &commands,
-            &mut advancements,
-            player_uuid,
-            false,
-            &mut outgoing_chat,
-            &mut chat_session,
-            entities.players(),
-            block_ticks,
-            _resource_packs,
-            &mut client_loaded,
-            &mut composter_rng,
-            &mut bone_meal_rng,
-            &mut experience,
-            &mut effects,
-            &mut drops_rng,
-            client_channels,
-            plugin_channels,
-            &mut game_mode,
-            &mut abilities,
-            &mut respawn,
-            sleep_vote,
-            border,
-            player_entity_id,
-            &username,
-            world_spawn,
-            // `None`: no timer tick counter is available for dig duration.
-            // Hardness and range still validate; only the timing check is
-            // skipped.
-            None,
-            &mut bow_draw,
-            &mut item_in_use,
-            // This target has no portal-travel state, so `source` never uses
-            // `SourceRef::Dimension` and this out-parameter remains unused.
-            &mut None,
-            packet_id,
-            &payload,
-        )
-        .await?;
-        republish_inventory(entities.players(), player_uuid, &inventory);
-        // Flush advancement changes caused by the packet just dispatched.
-        if let Some(update) = advancements.flush_dirty(player_uuid, true) {
-            apply(conn, &mut state, proto.encode_update_advancements(&update)).await?;
-        }
-        // Publish chat to the shared registry when one exists. Without a
-        // registry, echo it directly to this connection.
-        for message in outgoing_chat.drain(..) {
-            let line = ChatLine {
-                sender: username.clone(),
-                message,
-            };
-            match entities.players() {
-                Some(registry) => registry.say(&line.sender, &line.message),
-                None => {
-                    apply(conn, &mut state, proto.encode_system_chat(&line.rendered())).await?;
-                }
-            }
-        }
-        // Update the player's streamed position from the packet state.
-        if let (Some(ticket), Some(registry), Some((x, y, z))) =
-            (player_ticket.as_ref(), entities.players(), player_pos)
-        {
-            registry.set_position(ticket.entity_id(), Vec3::new(x, y, z));
-        }
-        // The pickup sweep is packet-driven, so run it after each dispatched
-        // packet while the player's position is available.
-        if let Some((x, y, z)) = player_pos {
-            let pickups = collect_nearby_items(
-                mobs,
+        if let Some((packet_id, payload)) = packet {
+            dispatch_play_packet(
+                conn,
+                proto,
+                source,
+                &mut state,
+                &mut view,
+                &player_ticket_guard,
+                &mut pending_keep_alive,
+                &mut pending_break,
+                &mut teleport_acknowledgements,
+                &mut player_pos,
+                &mut client_movement,
+                &mut player_rot,
+                &mut fall,
+                &mut vitals,
+                world,
                 &mut inventory,
-                Vec3::new(x, y, z),
+                block_entities,
+                &mut open_container,
+                &mut open_merchant,
+                &mut container_sync,
+                &mut next_window_id,
+                mobs,
+                &mut sprinting,
+                &mut sneaking,
+                &mut awaiting_chunk_batch_ack,
+                &mut pending_chunk_batches,
+                Some(&mut join_stream),
+                &commands,
                 &mut advancements,
                 player_uuid,
-                world.time().game_time.saturating_mul(50),
-            );
-            // Send pickup frames before slot updates and entity streaming so
-            // the client can animate an item entity that still exists.
-            for take in &pickups.takes {
-                apply(
-                    conn,
-                    &mut state,
-                    proto.encode_take_item_entity(
-                        take.item_entity_id,
-                        // Use the local player entity id for the pickup reply.
-                        LOCAL_PLAYER_ENTITY_ID,
-                        take.amount,
-                    ),
-                )
-                .await?;
+                false,
+                &mut outgoing_chat,
+                &mut chat_session,
+                entities.players(),
+                block_ticks,
+                _resource_packs,
+                &mut client_loaded,
+                &mut composter_rng,
+                &mut bone_meal_rng,
+                &mut experience,
+                &mut effects,
+                &mut drops_rng,
+                client_channels,
+                plugin_channels,
+                &mut game_mode,
+                &mut abilities,
+                &mut respawn,
+                sleep_vote,
+                border,
+                player_entity_id,
+                &username,
+                world_spawn,
+                // `None`: no timer tick counter is available for dig duration.
+                // Hardness and range still validate; only the timing check is
+                // skipped.
+                None,
+                &mut bow_draw,
+                &mut item_in_use,
+                // This target has no portal-travel state, so `source` never uses
+                // `SourceRef::Dimension` and this out-parameter remains unused.
+                &mut None,
+                packet_id,
+                &payload,
+            )
+            .await?;
+            republish_inventory(entities.players(), player_uuid, &inventory);
+            // Flush advancement changes caused by the packet just dispatched.
+            if let Some(update) = advancements.flush_dirty(player_uuid, true) {
+                apply(conn, &mut state, proto.encode_update_advancements(&update)).await?;
             }
-            for native in pickups.changed {
-                if let Some(menu_slot) = window_zero_menu_slot(native) {
+            // Publish chat to the shared registry when one exists. Without a
+            // registry, echo it directly to this connection.
+            for message in outgoing_chat.drain(..) {
+                let line = ChatLine {
+                    sender: username.clone(),
+                    message,
+                };
+                match entities.players() {
+                    Some(registry) => registry.say(&line.sender, &line.message),
+                    None => {
+                        apply(conn, &mut state, proto.encode_system_chat(&line.rendered())).await?;
+                    }
+                }
+            }
+            // Update the player's streamed position from the packet state.
+            if let (Some(ticket), Some(registry), Some((x, y, z))) =
+                (player_ticket.as_ref(), entities.players(), player_pos)
+            {
+                registry.set_position(ticket.entity_id(), Vec3::new(x, y, z));
+            }
+            // The pickup sweep is packet-driven, so run it after each dispatched
+            // packet while the player's position is available.
+            if let Some((x, y, z)) = player_pos {
+                let pickups = collect_nearby_items(
+                    mobs,
+                    &mut inventory,
+                    Vec3::new(x, y, z),
+                    &mut advancements,
+                    player_uuid,
+                    world.time().game_time.saturating_mul(50),
+                );
+                // Send pickup frames before slot updates and entity streaming so
+                // the client can animate an item entity that still exists.
+                for take in &pickups.takes {
                     apply(
                         conn,
                         &mut state,
-                        proto.encode_container_slot(0, 0, menu_slot, inventory.native(native)),
+                        proto.encode_take_item_entity(
+                            take.item_entity_id,
+                            // Use the local player entity id for the pickup reply.
+                            LOCAL_PLAYER_ENTITY_ID,
+                            take.amount,
+                        ),
+                    )
+                    .await?;
+                }
+                for native in pickups.changed {
+                    if let Some(menu_slot) = window_zero_menu_slot(native) {
+                        apply(
+                            conn,
+                            &mut state,
+                            proto.encode_container_slot(0, 0, menu_slot, inventory.native(native)),
+                        )
+                        .await?;
+                    }
+                }
+                // Absorb nearby experience orbs as part of the packet-driven sweep;
+                // browser players receive the resulting pickup behavior here.
+                if let Some(absorbed) = collect_nearby_orbs(
+                    mobs,
+                    Vec3::new(x, y, z),
+                    &mut experience,
+                    &mut take_xp_delay,
+                ) {
+                    apply(
+                        conn,
+                        &mut state,
+                        proto.encode_take_item_entity(
+                            absorbed.orb_entity_id,
+                            LOCAL_PLAYER_ENTITY_ID,
+                            1,
+                        ),
+                    )
+                    .await?;
+                    republish_experience(entities.players(), player_uuid, &experience);
+                    apply(
+                        conn,
+                        &mut state,
+                        proto.encode_set_experience(
+                            experience.progress(),
+                            experience.level(),
+                            experience.total(),
+                        ),
                     )
                     .await?;
                 }
             }
-            // Absorb nearby experience orbs as part of the packet-driven sweep;
-            // browser players receive the resulting pickup behavior here.
-            if let Some(absorbed) =
-                collect_nearby_orbs(mobs, Vec3::new(x, y, z), &mut experience, &mut take_xp_delay)
+            // Publish the latest player rotation to the entity registry.
+            if let (Some(ticket), Some(registry), Some(rotation)) =
+                (player_ticket.as_ref(), entities.players(), player_rot)
             {
-                apply(
-                    conn,
-                    &mut state,
-                    proto.encode_take_item_entity(absorbed.orb_entity_id, LOCAL_PLAYER_ENTITY_ID, 1),
-                )
-                .await?;
-                republish_experience(entities.players(), player_uuid, &experience);
-                apply(
-                    conn,
-                    &mut state,
-                    proto.encode_set_experience(
-                        experience.progress(),
-                        experience.level(),
-                        experience.total(),
-                    ),
-                )
-                .await?;
+                registry.set_rotation(ticket.entity_id(), rotation);
+            }
+            republish_effect_entity_flags(entities.players(), player_ticket.as_ref(), &effects);
+            for directive in stream_pass(
+                proto,
+                entities,
+                &mut streamer,
+                &mut player_list,
+                player_ticket.as_ref(),
+            ) {
+                apply(conn, &mut state, directive).await?;
             }
         }
-        // Publish the latest player rotation to the entity registry.
-        if let (Some(ticket), Some(registry), Some(rotation)) =
-            (player_ticket.as_ref(), entities.players(), player_rot)
-        {
-            registry.set_rotation(ticket.entity_id(), rotation);
-        }
-        republish_effect_entity_flags(entities.players(), player_ticket.as_ref(), &effects);
-        for directive in stream_pass(
-            proto,
-            entities,
-            &mut streamer,
-            &mut player_list,
-            player_ticket.as_ref(),
-        ) {
-            apply(conn, &mut state, directive).await?;
-        }
+
     }
 }
 
@@ -18882,6 +18893,28 @@ mod tests {
                 .then(|| ChunkColumn::new(0, 256))
         }
 
+        fn try_resident_block_state_id(
+            &self,
+            x: i32,
+            _y: i32,
+            z: i32,
+        ) -> Option<crate::chunk_store::TryResident<lodestone_data::block_states::StateId>> {
+            let resident = self.resident
+                && (!self.center_only
+                    || (x.div_euclid(16), z.div_euclid(16)) == (0, 0));
+            Some(if resident {
+                crate::chunk_store::TryResident::Present(
+                    lodestone_data::block_states::StateId::new(
+                        lodestone_data::block_states::state_id("minecraft:air")
+                            .expect("fixture air state is registered"),
+                    )
+                    .expect("fixture air state id is valid"),
+                )
+            } else {
+                crate::chunk_store::TryResident::Absent
+            })
+        }
+
         fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
             "minecraft:air".to_owned()
         }
@@ -18987,6 +19020,11 @@ mod tests {
             let mut light = lodestone_world::ColumnLight::new(column.section_count());
             *light.sky_mut(0) = lodestone_world::LightData::Uniform(4);
             *light.sky_mut(1) = lodestone_world::LightData::Uniform(12);
+            // End persistence keeps explicit zero block storage beside a
+            // retained sky layer; use that canonical representation in the
+            // fixture so a save/reload round trip compares like with like.
+            *light.block_mut(0) = lodestone_world::LightData::Uniform(0);
+            *light.block_mut(1) = lodestone_world::LightData::Uniform(0);
             *light.block_mut(2) = lodestone_world::LightData::Uniform(6);
             Some(light)
         }
@@ -19543,20 +19581,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tick_block_updates_are_sent_before_the_join_stream_finishes() {
+    async fn tick_block_updates_only_target_columns_already_delivered() {
         let (client_end, server_end) = lodestone_net::memory_pair();
         let mut conn = Connection::new(server_end);
         let mut state = State::Play;
 
-        // Model one already-sent column and one still pending join column:
-        // routing cannot know which one owns a drained feed entry, so it must
-        // preserve both updates. A future chunk snapshot may supersede either
-        // packet, but dropping this first one would leave the sent column stale.
         send_tick_block_updates(
             &mut conn,
             &RefusingChunkProtocol,
             &OneColumnSource,
             &mut state,
+            &HashSet::from([(0, 0)]),
             vec![
                 (1, 64, 1, "minecraft:grass_block".to_owned()),
                 (17, 64, 1, "minecraft:dirt".to_owned()),
@@ -19570,9 +19605,11 @@ mod tests {
             peer.read_packet().await.expect("first tick update frame decodes"),
             Some((43, vec![1, 64, 1]))
         );
-        assert_eq!(
-            peer.read_packet().await.expect("second tick update frame decodes"),
-            Some((43, vec![17, 64, 1]))
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), peer.read_packet())
+                .await
+                .is_err(),
+            "the pending column's later snapshot supersedes its tick update"
         );
     }
 
@@ -19721,6 +19758,7 @@ mod tests {
         let source = OneColumnSource;
         let mut awaiting_ack = false;
         let mut pending = VecDeque::new();
+        let mut view = ViewTracker::new((0, 0), 0, 0);
 
         let error = send_view_update(
             &mut conn,
@@ -19728,6 +19766,7 @@ mod tests {
             SourceRef::Borrowed(&source),
             None,
             &mut state,
+            &mut view,
             ViewUpdate {
                 immediate: Vec::new(),
                 forgotten: HashSet::new(),
@@ -22941,6 +22980,18 @@ mod tests {
     #[test]
     fn join_view_rings_at_radius_zero_is_a_single_column() {
         assert_eq!(join_view_rings(0), vec![vec![(0, 0)]]);
+    }
+
+    #[test]
+    fn delivered_columns_survive_only_while_they_remain_in_view() {
+        let mut view = ViewTracker::new((0, 0), 1, 1);
+        view.mark_delivered((0, 0));
+        view.mark_delivered((1, 0));
+        view.mark_delivered((9, 9));
+        assert_eq!(view.delivered, HashSet::from([(0, 0), (1, 0)]));
+
+        let _ = view.recenter(&RefusingChunkProtocol, 2, 0, None);
+        assert_eq!(view.delivered, HashSet::from([(1, 0)]));
     }
 
     /// **The cross-arm invariant the off-centre join violated**, at a centre where

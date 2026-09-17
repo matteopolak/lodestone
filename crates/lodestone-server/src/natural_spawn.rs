@@ -654,7 +654,7 @@ pub struct NaturalSpawner {
     players: Vec<Vec3>,
     /// The terrain snapshot this cycle runs against, handed in by
     /// [`begin_cycle`](Self::begin_cycle) rather than stored at construction:
-    /// [`crate::MobHandle::reseed`] replaces the sim's world, and a spawner
+    /// [`crate::MobHandle::replace_world`] replaces the sim's world, and a spawner
     /// holding the old one would light chunks nothing paths over.
     ///
     /// **`Arc`, not the `&'static` this used to be.** The old lifetime came from

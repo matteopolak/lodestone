@@ -246,7 +246,6 @@ async fn run<S: ChunkSource + 'static>(source: S, deadline: Duration) -> Arc<Obs
         source,
         (0..=0, 0..=0),
         (8, 8),
-        0,
         1,
     );
     // Drive the login so the connection actually reaches Play — see

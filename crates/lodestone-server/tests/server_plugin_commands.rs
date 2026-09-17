@@ -179,7 +179,6 @@ async fn async_plugin_command_reaches_the_production_tick_owner() {
         EmptyWorld,
         (0..=0, 0..=0),
         (0, 0),
-        0,
         1,
         server_app,
     );

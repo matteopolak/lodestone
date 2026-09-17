@@ -93,9 +93,9 @@ pub struct ZipSource {
     /// clone shares the parsed directory (`Arc`) and the byte buffer (`Arc`).
     archive: zip::ZipArchive<ZipReader>,
     /// normalized entry name -> index within the archive.
-    index: HashMap<String, usize>,
+    index: std::sync::Arc<HashMap<String, usize>>,
     /// Sorted normalized names, for `list`.
-    names: Vec<String>,
+    names: std::sync::Arc<Vec<String>>,
 }
 
 impl ZipSource {
@@ -129,8 +129,8 @@ impl ZipSource {
         names.sort();
         Ok(Self {
             archive,
-            index,
-            names,
+            index: std::sync::Arc::new(index),
+            names: std::sync::Arc::new(names),
         })
     }
 }

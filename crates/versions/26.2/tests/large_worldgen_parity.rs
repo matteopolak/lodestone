@@ -3884,7 +3884,7 @@ fn lifecycle_replay_mode_only_prunes_single_fail_fast_target() {
 }
 
 fn lifecycle_packet_payload<S: LifecycleWorldgenSource>(
-    materializer: &LifecycleMaterializer<S>,
+    materializer: &mut LifecycleMaterializer<S>,
     target: ChunkPos,
     dimension: ServerDimension,
 ) -> Vec<u8> {
@@ -3980,7 +3980,7 @@ fn prepared_overworld_replay_preserves_authenticated_target_packet_bytes() {
     assert_eq!(plan.feature_events().len(), 59, "audited target event closure changed");
 
     let unprepared_start = Instant::now();
-    let unprepared = replay_plan_without_preparation(
+    let mut unprepared = replay_plan_without_preparation(
         LifecycleMaterializer::new(overworld_chunk_source(42)),
         &plan,
     );
@@ -3989,16 +3989,16 @@ fn prepared_overworld_replay_preserves_authenticated_target_packet_bytes() {
     let prepared_start = Instant::now();
     let mut prepared = LifecycleMaterializer::new(overworld_chunk_source(42));
     prepared.prepare_lifecycle_replay(plan.admissions());
-    let prepared = replay_plan_without_preparation(prepared, &plan);
+    let mut prepared = replay_plan_without_preparation(prepared, &plan);
     let prepared_us = prepared_start.elapsed().as_micros();
 
     let unprepared_packet = lifecycle_packet_payload(
-        &unprepared,
+        &mut unprepared,
         target,
         ServerDimension::Overworld,
     );
     let prepared_packet = lifecycle_packet_payload(
-        &prepared,
+        &mut prepared,
         target,
         ServerDimension::Overworld,
     );
@@ -4117,19 +4117,19 @@ fn assert_full_and_pruned_lifecycle_packet_bytes(path: &Path, target: ChunkPos, 
     };
     match header.dimension {
         Dimension::Overworld => {
-            let full = replay_full_capture(LifecycleMaterializer::new(overworld_chunk_source(42)), &capture);
+            let mut full = replay_full_capture(LifecycleMaterializer::new(overworld_chunk_source(42)), &capture);
             let mut pruned = LifecycleMaterializer::new(overworld_chunk_source(42));
             pruned.replay_plan(&plan);
-            assert_eq!(lifecycle_packet_payload(&full, target, server_dimension), lifecycle_packet_payload(&pruned, target, server_dimension));
+            assert_eq!(lifecycle_packet_payload(&mut full, target, server_dimension), lifecycle_packet_payload(&mut pruned, target, server_dimension));
         }
         Dimension::Nether => {
             let mut full_source = LifecycleMaterializer::new(nether_chunk_source(42));
             full_source.prepare_lifecycle_replay(&admissions);
-            let full = replay_full_capture(full_source, &capture);
+            let mut full = replay_full_capture(full_source, &capture);
             let mut pruned = LifecycleMaterializer::new(nether_chunk_source(42));
             pruned.prepare_lifecycle_replay(plan.admissions());
             pruned.replay_plan(&plan);
-            assert_eq!(lifecycle_packet_payload(&full, target, server_dimension), lifecycle_packet_payload(&pruned, target, server_dimension));
+            assert_eq!(lifecycle_packet_payload(&mut full, target, server_dimension), lifecycle_packet_payload(&mut pruned, target, server_dimension));
         }
         Dimension::End => unreachable!(),
     }

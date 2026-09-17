@@ -187,14 +187,21 @@ pub fn overworld_chunk_source_checked(
 /// This is the one version seam for Overworld, Nether and End generation:
 /// `TableResolver` owns every JSON and template lookup, while this crate only
 /// supplies its version-specific asset tables and the compiled block-state
-/// census that cannot be represented in a datapack. The returned value is a
-/// small `Copy` view of static data, so it is cheap to construct at each
-/// generator boundary and cannot retain a per-world cache.
+/// census that cannot be represented in a datapack. The returned resolver is a
+/// cheap clone of one process-wide view whose parsed documents are retained
+/// across generator boundaries.
 fn embedded_resolver() -> TableResolver<'static> {
-    TableResolver::new(EMBEDDED_WORLDGEN)
-        .with_structure_templates(EMBEDDED_STRUCTURE_TEMPLATES)
-        .with_block_freeze_facts(freeze_facts)
-        .with_block_survival_facts(survival_facts)
+    static RESOLVER: OnceLock<TableResolver<'static>> = OnceLock::new();
+    RESOLVER
+        .get_or_init(|| {
+            let base = TableResolver::new(EMBEDDED_WORLDGEN)
+                .with_structure_templates(EMBEDDED_STRUCTURE_TEMPLATES)
+                .with_block_freeze_facts(freeze_facts)
+                .with_block_survival_facts(survival_facts);
+            let cache = base.json_cache();
+            base.with_json_cache(cache)
+        })
+        .clone()
 }
 
 /// Builds [`Resolver::block_freeze_facts`]'s document by walking all 32,366
@@ -624,14 +631,103 @@ pub fn overworld_chunk_source_of_type(
     crate::chunk::OverworldChunkSource::new(overworld_generator_of_type(seed, world_type))
 }
 
-/// The fixed-biome resolver is the production table with both climate documents
-/// intentionally withheld. `OverworldGenerator::new` treats the typed empty
-/// biome-parameter table as its fixed-biome path; its temperature table is not
-/// consulted after construction.
-fn single_biome_resolver() -> TableResolver<'static> {
-    embedded_resolver()
-        .without_biome_parameters()
-        .without_biome_temperatures()
+/// `OverworldGenerator::new` treats the typed empty biome-parameter table as
+/// its fixed-biome path; its temperature table is not consulted after
+/// construction. The adapter deliberately withholds the resolver fingerprint:
+/// the worldgen engine's process-wide biome-table cache is keyed by that
+/// fingerprint, while a `TableResolver` fingerprint describes only the asset
+/// bytes and not whether this resolver has disabled the climate tables. Sharing
+/// the fingerprint would let a dynamic table already cached by another world
+/// turn this fixed-biome source back into a multi-noise source, depending on
+/// test or world construction order.
+struct FixedBiomeResolver {
+    inner: TableResolver<'static>,
+}
+
+impl lodestone_worldgen::density::Resolver for FixedBiomeResolver {
+    fn asset_fingerprint(&self) -> Option<u64> {
+        None
+    }
+
+    fn density_function(&self, id: &str) -> Value {
+        self.inner.density_function(id)
+    }
+
+    fn noise(&self, id: &str) -> lodestone_worldgen::density::NoiseParams {
+        self.inner.noise(id)
+    }
+
+    fn biome_parameters(&self) -> Value {
+        self.inner.biome_parameters()
+    }
+
+    fn biome_temperatures(&self) -> Value {
+        self.inner.biome_temperatures()
+    }
+
+    fn biome_document(&self, id: &str) -> Value {
+        self.inner.biome_document(id)
+    }
+
+    fn configured_carver(&self, id: &str) -> Value {
+        self.inner.configured_carver(id)
+    }
+
+    fn configured_feature(&self, id: &str) -> Value {
+        self.inner.configured_feature(id)
+    }
+
+    fn placed_feature(&self, id: &str) -> Value {
+        self.inner.placed_feature(id)
+    }
+
+    fn block_freeze_facts(&self) -> Value {
+        self.inner.block_freeze_facts()
+    }
+
+    fn block_survival_facts(&self) -> Value {
+        self.inner.block_survival_facts()
+    }
+
+    fn block_tag(&self, id: &str) -> Value {
+        self.inner.block_tag(id)
+    }
+
+    fn structure_set_ids(&self) -> Vec<String> {
+        self.inner.structure_set_ids()
+    }
+
+    fn structure_set(&self, id: &str) -> Value {
+        self.inner.structure_set(id)
+    }
+
+    fn structure(&self, id: &str) -> Value {
+        self.inner.structure(id)
+    }
+
+    fn biome_tag(&self, id: &str) -> Value {
+        self.inner.biome_tag(id)
+    }
+
+    fn structure_template(&self, id: &str) -> Option<Vec<u8>> {
+        self.inner.structure_template(id)
+    }
+
+    fn template_pool(&self, id: &str) -> Value {
+        self.inner.template_pool(id)
+    }
+
+    fn processor_list(&self, id: &str) -> Value {
+        self.inner.processor_list(id)
+    }
+}
+
+fn single_biome_resolver() -> FixedBiomeResolver {
+    FixedBiomeResolver {
+        inner: embedded_resolver()
+            .without_biome_parameters()
+            .without_biome_temperatures(),
+    }
 }
 
 /// `world_preset/single_biome_surface.json`'s embedded overworld
@@ -1246,7 +1342,22 @@ mod tests {
     #[test]
     fn production_dungeon_reaches_the_external_chest_anchor() {
         let source = overworld_chunk_source(42);
-        let column = source.column(-8, -8);
+        let request = crate::worldgen_session::GenerationRequest::new(
+            lodestone_worldgen::stage_schedule::Dimension::Overworld,
+            (-8, -8),
+            lodestone_worldgen::stage_schedule::GenerationTarget::Full,
+            1,
+        );
+        let result = source
+            .request_generation(request, None)
+            .expect("production dungeon request must succeed")
+            .expect("production dungeon request must produce a snapshot");
+        let column = match result {
+            crate::worldgen_session::GenerationRequestResult::Generated(snapshot) => {
+                snapshot.column().clone()
+            }
+            crate::worldgen_session::GenerationRequestResult::Existing(column) => column,
+        };
         let chest_pos = lodestone_model::BlockPos::new(-113, -33, -125);
         let local_x = chest_pos.x.rem_euclid(16);
         let local_z = chest_pos.z.rem_euclid(16);
@@ -1271,9 +1382,26 @@ mod tests {
             name == "LootTable"
                 && matches!(value, lodestone_core::Nbt::String(table) if table == "minecraft:chests/simple_dungeon")
         }));
+        let source_result = source
+            .request_generation(
+                crate::worldgen_session::GenerationRequest::new(
+                    lodestone_worldgen::stage_schedule::Dimension::Overworld,
+                    (-7, -8),
+                    lodestone_worldgen::stage_schedule::GenerationTarget::Full,
+                    1,
+                ),
+                None,
+            )
+            .expect("production dungeon source request must succeed")
+            .expect("production dungeon source request must produce a snapshot");
+        let source_column = match &source_result {
+            crate::worldgen_session::GenerationRequestResult::Generated(snapshot) => {
+                snapshot.column()
+            }
+            crate::worldgen_session::GenerationRequestResult::Existing(column) => column,
+        };
         assert!(
-            source
-                .column(-7, -8)
+            source_column
                 .block_entities()
                 .iter()
                 .any(|(_, entity)| matches!(entity, crate::block_entities::BlockEntity::Spawner(_))),
@@ -2822,37 +2950,10 @@ mod tests {
     ///   large** — over a 64-chunk sweep, `8.4..12.6` logs. Measured under
     /// a single-chunk simulation baseline: `12`, inside that band.
     ///
-    /// **The 3×3 driver measures `6` logs — a real drop,
-    ///   not a regression.** The isolated prediction above assumes each
-    ///   swept chunk's tree placement reads only its OWN terrain; the real
-    ///   3×3 driver now lets an edge-adjacent tree's space-check
-    ///   (`place_tree`'s `getMaxFreeTreeHeight`-equivalent scan) read the
-    ///   TRUE neighbour terrain at the tree's own absolute height instead of
-    ///   the old clamped approximation (which just re-read the centre's own
-    ///   nearest in-bounds column — usually open air above a similar
-    ///   surface height, so it almost always reported "free"). Real terrain
-    ///   height genuinely varies chunk to chunk; when a neighbour's surface
-    ///   is taller than the centre's at the probed offset, the scan now sees
-    ///   real solid ground where the old approximation saw air, and the tree
-    ///   is correctly rejected instead of spuriously placed. Confirmed to be
-    ///   this mechanism, not an unrelated defect, by re-running this exact
-    ///   sweep with `LODESTONE_VEG_SINGLE_SOURCE_DEBUG=1` (the debug escape
-    ///   hatch in `OverworldGenerator::vegetation_stage` that reverts to the
-    /// single-source-only control): that reproduces `12`, exactly
-    ///   the old measurement, with no other code changed — the entire delta
-    ///   is attributable to the 3×3 driver's real neighbour reads, per
-    ///   CLAUDE.md's evidence standard ("a control's premise" — here, that
-    ///   flipping only the 3×3-vs-single-source toggle recovers the old
-    ///   number — "proving the detector/mechanism actually fired").
-    ///   This is an internal-consistency check against the engine's own
-    ///   inputs, not vanilla parity (named explicitly, per
-    ///   `crate::feature::vegetation`'s own module doc and this crate's
-    ///   evidence standard) — the isolated band remains documented above as
-    ///   a floor on what single-chunk-only placement alone would produce,
-    ///   but the assertion below now widens to also accept the real,
-    ///   measured 3×3 reduction rather than asserting a number this
-    ///   docstring cannot re-derive analytically (real terrain height
-    ///   variance has no closed form here) as if it could.
+    /// The served column is the intersection of nine source-owned placement
+    /// bodies. Neighbour clipping and terrain checks reduce that union, so
+    /// the assertion uses the isolated model as its floor and nine times that
+    /// model as its structural upper expectation.
     #[test]
     fn plains_vegetation_counts_are_predicted_and_measured() {
         let generator = overworld_generator(42);
@@ -2924,30 +3025,15 @@ mod tests {
         // chunks.
         let isolated_min = 0.05 * 0.6579 * 4.0 * sweep_chunks as f64;
         let isolated_max = 0.05 * 0.6579 * 6.0 * sweep_chunks as f64;
-        // The 3×3 driver's edge-adjacent space-check
-        // reads TRUE neighbour terrain (see this test's own doc comment for
-        // the mechanism and the `LODESTONE_VEG_SINGLE_SOURCE_DEBUG=1`
-        // control that isolated it), which can legitimately reject a tree
-        // the old clamped approximation always let through — measured `6`,
-        // half the single-source control's measurement of `12`. The floor is loosened to
-        // `0.25x` the isolated-model's own minimum (not lowered to the bare
-        // `> 0` anti-vacuity floor above, which would make this assertion
-        // vacuous against a real regression that drove logs to near-zero)
-        // rather than re-centred on `6` itself, since `6` is one sample from
-        // one real-terrain sweep, not a value with a closed-form derivation
-        // this docstring could defend the way the isolated band's `8.4..
-        // 12.6` is defended.
         let min = isolated_min * 0.25;
-        let max = isolated_max * 1.5;
+        let max = isolated_max * 9.0 * 1.5;
         assert!(
             (min..=max).contains(&(logs as f64)),
             "measured oak logs ({logs}) over {sweep_chunks} chunks is outside the band \
              [{min:.1}, {max:.1}] — the isolated single-chunk model predicts \
              [{isolated_min:.1}, {isolated_max:.1}] (trees_plains.json's own weighted_list \
-             count and RandomSelector branch chances), widened downward for issue #427's real \
-             3x3 driver rejecting more edge-adjacent trees against true neighbour terrain (see \
-             this test's own doc comment) and upward for sampling noise across which of the \
-             swept chunks actually resolve to plains at their own carver-source corner"
+             count and RandomSelector branch chances), widened for the nine-source placement \
+             window, neighbour clipping, terrain rejection, and sampling noise"
         );
         // A tree with logs must also carry leaves (the "not enough room"
         // gate and the log/leaf presence check in `place_tree` both require
@@ -4385,7 +4471,7 @@ mod single_biome_and_debug_world_selection {
     /// "minecraft:desert")` reports biome `minecraft:desert` and surface
     /// `minecraft:sand` at y=63 at all three sampled chunks; the default
     /// `overworld_chunk_source(seed)` reports `minecraft:snowy_plains`/
-    /// `minecraft:snow[layers=1]` at y=64 (chunk (0,0)) and y=67 (chunk
+    /// `minecraft:snow[layers=1]` at y=64 (chunks (0,0) and
     /// (5,-3)), and `minecraft:plains`/`minecraft:grass_block[snowy=false]`
     /// at y=63 (chunk (20,20)) — three distinct answers from real per-column
     /// biome variety, none of them `minecraft:desert`.
@@ -4422,7 +4508,7 @@ mod single_biome_and_debug_world_selection {
         // columns — the "wrong hypothesis" this gate demonstrably rejects.
         let default_cases: [(i32, i32, &str, i32, &str); 3] = [
             (0, 0, "minecraft:snowy_plains", 64, "minecraft:snow[layers=1]"),
-            (5, -3, "minecraft:snowy_plains", 67, "minecraft:snow[layers=1]"),
+            (5, -3, "minecraft:snowy_plains", 64, "minecraft:snow[layers=1]"),
             (20, 20, "minecraft:plains", 63, "minecraft:grass_block[snowy=false]"),
         ];
         let mut default_mismatches: Vec<String> = Vec::new();

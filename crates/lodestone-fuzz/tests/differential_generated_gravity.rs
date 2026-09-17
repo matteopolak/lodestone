@@ -266,14 +266,33 @@ impl GravityServerOracle {
             IntegratedServer::open_in_memory_with_mobs(
                 GravityProtocol,
                 source,
-                (0..=0, 0..=0),
+                (-1..=1, -1..=1),
                 (0, 0),
                 0,
-                1,
             )
         };
         let mut client = Connection::new(client_io);
         runtime.block_on(drive_login_and_join(&mut client, "gravity"));
+        let seed_deadline = Instant::now() + Duration::from_secs(2);
+        runtime.block_on(async {
+            loop {
+                let resident = (-1..=1).all(|cz| {
+                    (-1..=1).all(|cx| {
+                        server
+                            .resident_block_state_id(cx * 16, FLOOR_POS.1, cz * 16)
+                            .is_some()
+                    })
+                });
+                if resident {
+                    return;
+                }
+                assert!(
+                    Instant::now() < seed_deadline,
+                    "gravity fixture did not retain its 3x3 tick footprint"
+                );
+                tokio::task::yield_now().await;
+            }
+        });
         let initial_tick = server
             .server_tick_count()
             .expect("gravity fixture must have a live tick loop");

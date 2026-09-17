@@ -493,7 +493,6 @@ async fn run_integrated_commands(
         (-1..=1, -1..=1),
         (8, 8),
         0,
-        0,
         dispatch,
     );
 

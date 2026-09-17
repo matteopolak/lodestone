@@ -939,94 +939,110 @@ mod tests {
 
     use super::*;
 
-    const SCRATCH: &str = "/private/tmp/lodestone-wave-storage-enum-711";
-    const METADATA_SCRATCH: &str = "/private/tmp/lodestone-wave-storage-meta-711";
-    const PLAYER_SCRATCH: &str = "/private/tmp/lodestone-wave-storage-player-711";
-    const ENTITY_SCRATCH: &str = "/private/tmp/lodestone-wave-storage-entity-711";
     const LEVEL_DAT_FIXTURE: &[u8] =
         include_bytes!("../../lodestone-anvil/tests/support/level_dat_26_2_vanilla.dat");
     const WORLD_GEN_FIXTURE: &[u8] =
         include_bytes!("../../lodestone-anvil/tests/support/world_gen_settings_26_2_vanilla.dat");
 
-    struct Scratch;
+    struct Scratch(std::path::PathBuf);
 
-    struct MetadataScratch;
+    struct MetadataScratch(std::path::PathBuf);
 
-    struct PlayerScratch;
+    struct PlayerScratch(std::path::PathBuf);
 
-    struct EntityScratch;
+    struct EntityScratch(std::path::PathBuf);
+
+    fn scratch_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("lodestone-{name}-{}", std::process::id()))
+    }
 
     impl Scratch {
         fn create() -> Self {
-            let path = Path::new(SCRATCH);
+            let path = scratch_path("wave-storage-enum");
             assert!(
                 !path.exists(),
                 "shared CLI scratch path must be absent before this test"
             );
-            std::fs::create_dir(path).expect("create exact CLI scratch path");
-            Self
+            std::fs::create_dir(&path).expect("create exact CLI scratch path");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
         }
     }
 
     impl Drop for Scratch {
         fn drop(&mut self) {
-            std::fs::remove_dir_all(SCRATCH).expect("remove exact CLI scratch path");
+            std::fs::remove_dir_all(&self.0).expect("remove exact CLI scratch path");
         }
     }
 
     impl MetadataScratch {
         fn create() -> Self {
-            let path = Path::new(METADATA_SCRATCH);
+            let path = scratch_path("wave-storage-meta");
             assert!(
                 !path.exists(),
                 "metadata CLI scratch path must be absent before this test"
             );
-            std::fs::create_dir(path).expect("create exact metadata CLI scratch path");
-            Self
+            std::fs::create_dir(&path).expect("create exact metadata CLI scratch path");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
         }
     }
 
     impl Drop for MetadataScratch {
         fn drop(&mut self) {
-            std::fs::remove_dir_all(METADATA_SCRATCH)
+            std::fs::remove_dir_all(&self.0)
                 .expect("remove exact metadata CLI scratch path");
         }
     }
 
     impl PlayerScratch {
         fn create() -> Self {
-            let path = Path::new(PLAYER_SCRATCH);
+            let path = scratch_path("wave-storage-player");
             assert!(
                 !path.exists(),
                 "player CLI scratch path must be absent before this test"
             );
-            std::fs::create_dir(path).expect("create exact player CLI scratch path");
-            Self
+            std::fs::create_dir(&path).expect("create exact player CLI scratch path");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
         }
     }
 
     impl Drop for PlayerScratch {
         fn drop(&mut self) {
-            std::fs::remove_dir_all(PLAYER_SCRATCH)
+            std::fs::remove_dir_all(&self.0)
                 .expect("remove exact player CLI scratch path");
         }
     }
 
     impl EntityScratch {
         fn create() -> Self {
-            let path = Path::new(ENTITY_SCRATCH);
+            let path = scratch_path("wave-storage-entity");
             assert!(
                 !path.exists(),
                 "entity CLI scratch path must be absent before this test"
             );
-            std::fs::create_dir(path).expect("create exact entity CLI scratch path");
-            Self
+            std::fs::create_dir(&path).expect("create exact entity CLI scratch path");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
         }
     }
 
     impl Drop for EntityScratch {
         fn drop(&mut self) {
-            std::fs::remove_dir_all(ENTITY_SCRATCH)
+            std::fs::remove_dir_all(&self.0)
                 .expect("remove exact entity CLI scratch path");
         }
     }
@@ -1041,7 +1057,7 @@ mod tests {
     #[test]
     fn command_preflights_then_drives_export_and_import_coordinators() {
         let _scratch = Scratch::create();
-        let root = Path::new(SCRATCH);
+        let root = _scratch.path();
         let native_source = root.join("native-source");
         let anvil_destination = root.join("anvil-destination");
         let native_destination = root.join("native-destination");
@@ -1166,7 +1182,7 @@ mod tests {
     #[test]
     fn player_command_discovers_preflights_authorizes_and_reopens_one_batch() {
         let _scratch = PlayerScratch::create();
-        let root = Path::new(PLAYER_SCRATCH);
+        let root = _scratch.path();
         let source = root.join("anvil-source");
         let native_destination = root.join("native-destination");
         let first: uuid::Uuid = "00000000-0000-0002-0000-000000000002"
@@ -1275,7 +1291,7 @@ mod tests {
     #[test]
     fn entity_command_preflights_authorizes_commits_and_reopens_one_batch() {
         let _scratch = EntityScratch::create();
-        let root = Path::new(ENTITY_SCRATCH);
+        let root = _scratch.path();
         let source = root.join("anvil-source");
         let native_destination = root.join("native-destination");
         let sidecar = lodestone_server::entity_storage::EntityStorage::new(&source)
@@ -1351,7 +1367,7 @@ mod tests {
     #[test]
     fn metadata_command_preflights_authorizes_and_reopens_typed_world_properties() {
         let _scratch = MetadataScratch::create();
-        let root = Path::new(METADATA_SCRATCH);
+        let root = _scratch.path();
 
         let source = root.join("anvil-source");
         let native_destination = root.join("native-destination");

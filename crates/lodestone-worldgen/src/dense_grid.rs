@@ -123,6 +123,31 @@ pub struct DenseBlockGrid {
     blocks: Arc<Vec<u16>>,
 }
 
+fn palette_index(
+    palette: &mut Vec<StateId>,
+    palette_names: &mut Vec<&'static str>,
+    palette_bases: &mut Vec<StateId>,
+    palette_base_facts: &mut Vec<BaseStateFacts>,
+    index_of: &mut FastMap<StateId, u16>,
+    interner: &Arc<StateInterner>,
+    state: StateId,
+) -> u16 {
+    if let Some(&id) = index_of.get(&state) {
+        crate::counters::bump_palette_intern_hit();
+        id
+    } else {
+        crate::counters::bump_palette_intern_new();
+        let id = u16::try_from(palette.len()).expect("more than 65,536 palette entries in one grid");
+        palette.push(state);
+        palette_names.push(interner.name_of(state));
+        let base = interner.base_of(state);
+        palette_bases.push(base);
+        palette_base_facts.push(interner.base_facts(base));
+        index_of.insert(state, id);
+        id
+    }
+}
+
 impl DenseBlockGrid {
     /// A grid over the given box, every cell initialised to `default`
     /// (palette index 0), against a **fresh private interner**.
@@ -159,6 +184,32 @@ impl DenseBlockGrid {
         size_z: i32,
         default: StateId,
     ) -> Self {
+        let cells = (size_x.max(0) as usize) * (size_y.max(0) as usize) * (size_z.max(0) as usize);
+        Self::with_interner_and_blocks(
+            interner,
+            min_x,
+            min_y,
+            min_z,
+            size_x,
+            size_y,
+            size_z,
+            default,
+            vec![0u16; cells],
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn with_interner_and_blocks(
+        interner: Arc<StateInterner>,
+        min_x: i32,
+        min_y: i32,
+        min_z: i32,
+        size_x: i32,
+        size_y: i32,
+        size_z: i32,
+        default: StateId,
+        blocks: Vec<u16>,
+    ) -> Self {
         // Production terrain grids normally carry a few dozen distinct states.
         // Reserve that small palette once instead of growing the three palette
         // vectors and reverse map in lock-step as surface/carver writes arrive.
@@ -173,6 +224,7 @@ impl DenseBlockGrid {
         );
         index_of.insert(default, 0u16);
         let cells = (size_x.max(0) as usize) * (size_y.max(0) as usize) * (size_z.max(0) as usize);
+        assert_eq!(blocks.len(), cells, "dense grid carrier length must match bounds");
         let default_name = interner.name_of(default);
         let default_base = interner.base_of(default);
         let mut palette = Vec::with_capacity(INITIAL_PALETTE_CAPACITY);
@@ -196,7 +248,7 @@ impl DenseBlockGrid {
             palette_bases,
             palette_base_facts,
             index_of,
-            blocks: Arc::new(vec![0u16; cells]),
+            blocks: Arc::new(blocks),
         }
     }
 
@@ -205,6 +257,136 @@ impl DenseBlockGrid {
     #[must_use]
     pub fn interner(&self) -> &Arc<StateInterner> {
         &self.interner
+    }
+
+    /// Builds a grid while invoking `state_at` in the palette's observable
+    /// first-write order: z, x, then y. The cell carrier is detached once and
+    /// filled by index, avoiding the copy-on-write check in every write.
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn from_ordered_state_fn(
+        interner: Arc<StateInterner>,
+        min_x: i32,
+        min_y: i32,
+        min_z: i32,
+        size_x: i32,
+        size_y: i32,
+        size_z: i32,
+        default: StateId,
+        mut state_at: impl FnMut(i32, i32, i32) -> StateId,
+    ) -> Self {
+        assert!(size_x >= 0 && size_y >= 0 && size_z >= 0, "grid size is negative");
+        let mut grid = Self::with_interner(
+            interner,
+            min_x,
+            min_y,
+            min_z,
+            size_x,
+            size_y,
+            size_z,
+            default,
+        );
+        let blocks = Arc::get_mut(&mut grid.blocks).expect("new grid carrier must be uniquely owned");
+        let (palette, palette_names, palette_bases, palette_base_facts, index_of, interner) = (
+            &mut grid.palette,
+            &mut grid.palette_names,
+            &mut grid.palette_bases,
+            &mut grid.palette_base_facts,
+            &mut grid.index_of,
+            &grid.interner,
+        );
+        for lz in 0..size_z {
+            for lx in 0..size_x {
+                for ly in 0..size_y {
+                    let state = state_at(min_x + lx, min_y + ly, min_z + lz);
+                    let id = palette_index(
+                        palette,
+                        palette_names,
+                        palette_bases,
+                        palette_base_facts,
+                        index_of,
+                        interner,
+                        state,
+                    );
+                    let index = ((ly * size_z + lz) * size_x + lx) as usize;
+                    blocks[index] = id;
+                }
+            }
+        }
+        let cells = (size_x as u64) * (size_y as u64) * (size_z as u64);
+        crate::counters::bump_logical_write(
+            crate::counters::MemoryBoundary::BlockGrid,
+            cells,
+            cells * std::mem::size_of::<u16>() as u64,
+        );
+        grid
+    }
+
+    /// Builds a grid by rewriting an already packed carrier in the palette's
+    /// observable first-write order (z, x, y). `state_at` receives the packed
+    /// source value before that cell is replaced by its local palette index.
+    /// This is the allocation-free handoff for producers whose source carrier
+    /// is already `u16`-wide.
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn from_ordered_packed_state_fn(
+        interner: Arc<StateInterner>,
+        min_x: i32,
+        min_y: i32,
+        min_z: i32,
+        size_x: i32,
+        size_y: i32,
+        size_z: i32,
+        default: StateId,
+        blocks: Vec<u16>,
+        mut state_at: impl FnMut(i32, i32, i32, usize, u16) -> StateId,
+    ) -> Self {
+        assert!(size_x >= 0 && size_y >= 0 && size_z >= 0, "grid size is negative");
+        let mut grid = Self::with_interner_and_blocks(
+            interner,
+            min_x,
+            min_y,
+            min_z,
+            size_x,
+            size_y,
+            size_z,
+            default,
+            blocks,
+        );
+        let blocks = Arc::get_mut(&mut grid.blocks).expect("new grid carrier must be uniquely owned");
+        let (palette, palette_names, palette_bases, palette_base_facts, index_of, interner) = (
+            &mut grid.palette,
+            &mut grid.palette_names,
+            &mut grid.palette_bases,
+            &mut grid.palette_base_facts,
+            &mut grid.index_of,
+            &grid.interner,
+        );
+        for lz in 0..size_z {
+            for lx in 0..size_x {
+                for ly in 0..size_y {
+                    let index = ((ly * size_z + lz) * size_x + lx) as usize;
+                    let source = blocks[index];
+                    let state = state_at(min_x + lx, min_y + ly, min_z + lz, index, source);
+                    blocks[index] = palette_index(
+                        palette,
+                        palette_names,
+                        palette_bases,
+                        palette_base_facts,
+                        index_of,
+                        interner,
+                        state,
+                    );
+                }
+            }
+        }
+        let cells = (size_x as u64) * (size_y as u64) * (size_z as u64);
+        crate::counters::bump_logical_write(
+            crate::counters::MemoryBoundary::BlockGrid,
+            cells,
+            cells * std::mem::size_of::<u16>() as u64,
+        );
+        grid
     }
 
     #[inline]
@@ -225,6 +407,7 @@ impl DenseBlockGrid {
     /// inside the engine. Valid only against [`Self::interner`].
     #[must_use]
     pub fn get_id(&self, x: i32, y: i32, z: i32) -> StateId {
+        crate::counters::bump_logical_read(crate::counters::MemoryBoundary::BlockGrid, 1, 2);
         match self.index(x, y, z) {
             Some(i) => self.palette[self.blocks[i] as usize],
             None => StateId::AIR,
@@ -235,6 +418,7 @@ impl DenseBlockGrid {
     /// This is the numeric counterpart of stripping a state string at `'['`.
     #[must_use]
     pub fn get_base_id(&self, x: i32, y: i32, z: i32) -> StateId {
+        crate::counters::bump_logical_read(crate::counters::MemoryBoundary::BlockGrid, 1, 2);
         match self.index(x, y, z) {
             Some(i) => self.palette_bases[self.blocks[i] as usize],
             None => StateId::AIR,
@@ -244,6 +428,7 @@ impl DenseBlockGrid {
     /// Typed canonical facts for the base state at `(x, y, z)`.
     #[must_use]
     pub fn get_base_facts(&self, x: i32, y: i32, z: i32) -> BaseStateFacts {
+        crate::counters::bump_logical_read(crate::counters::MemoryBoundary::BlockGrid, 1, 2);
         match self.index(x, y, z) {
             Some(i) => self.palette_base_facts[self.blocks[i] as usize],
             None => BaseStateFacts::air(),
@@ -259,6 +444,7 @@ impl DenseBlockGrid {
     /// `CarveGrid::get` is).
     #[must_use]
     pub fn get(&self, x: i32, y: i32, z: i32) -> &str {
+        crate::counters::bump_logical_read(crate::counters::MemoryBoundary::BlockGrid, 1, 2);
         match self.index(x, y, z) {
             Some(i) => self.palette_names[self.blocks[i] as usize],
             None => "minecraft:air",
@@ -297,27 +483,21 @@ impl DenseBlockGrid {
     }
 
     fn set_id_at_index(&mut self, i: usize, state: StateId) {
-        let id = if let Some(&id) = self.index_of.get(&state) {
-            // Diagnostic D2's other half: a palette probe on every block write.
-            // Still counted, because its *volume* is what U6/U7 reduce; what
-            // changed in U3 is that it is now a `u16` hash, not a string hash.
-            crate::counters::bump_palette_intern_hit();
-            id
-        } else {
-            crate::counters::bump_palette_intern_new();
-            let id = u16::try_from(self.palette.len()).expect("more than 65,536 palette entries in one grid");
-            self.palette.push(state);
-            // The one interner touch on the write path, and it happens only for a
-            // state this grid has not seen before (~76 per chunk). Kept in
-            // lock-step with `palette` so the two are always the same length.
-            self.palette_names.push(self.interner.name_of(state));
-            let base = self.interner.base_of(state);
-            self.palette_bases.push(base);
-            self.palette_base_facts.push(self.interner.base_facts(base));
-            self.index_of.insert(state, id);
-            id
-        };
+        let id = self.palette_index(state);
         Arc::make_mut(&mut self.blocks)[i] = id;
+        crate::counters::bump_logical_write(crate::counters::MemoryBoundary::BlockGrid, 1, 2);
+    }
+
+    fn palette_index(&mut self, state: StateId) -> u16 {
+        palette_index(
+            &mut self.palette,
+            &mut self.palette_names,
+            &mut self.palette_bases,
+            &mut self.palette_base_facts,
+            &mut self.index_of,
+            &self.interner,
+            state,
+        )
     }
 
     /// Writes `state` at `(x, y, z)`, interning it first.
@@ -374,6 +554,17 @@ impl DenseBlockGrid {
         );
 
         let width = size_x as usize;
+        let copied_cells = (size_x as u64) * (size_y as u64) * (size_z as u64);
+        crate::counters::bump_logical_read(
+            crate::counters::MemoryBoundary::BlockGrid,
+            copied_cells,
+            copied_cells * 2,
+        );
+        crate::counters::bump_logical_write(
+            crate::counters::MemoryBoundary::BlockGrid,
+            copied_cells,
+            copied_cells * 2,
+        );
         // Keep this mapping lazy. Eagerly mapping `source.palette` would alter
         // the destination palette's first-write order (which is observable in
         // the packet), while laziness preserves the exact scan-order contract.
@@ -574,6 +765,12 @@ impl DenseBlockGrid {
     /// traffic.
     #[must_use]
     pub fn into_palette_and_blocks(self) -> (Vec<String>, Vec<u16>) {
+        crate::counters::bump_logical_read(
+            crate::counters::MemoryBoundary::BlockGrid,
+            self.blocks.len() as u64,
+            (self.blocks.len() * std::mem::size_of::<u16>()) as u64,
+        );
+        crate::counters::bump_full_column_conversion(self.blocks.len() as u64);
         let palette = self.palette_names.iter().map(|&name| name.to_owned()).collect();
         (palette, Arc::unwrap_or_clone(self.blocks))
     }
@@ -598,6 +795,17 @@ impl DenseBlockGrid {
         size_z: i32,
         default: StateId,
     ) -> (Vec<String>, Vec<u16>) {
+        let converted_cells = (size_x.max(0) as u64)
+            * (size_y.max(0) as u64)
+            * (size_z.max(0) as u64);
+        crate::counters::bump_logical_read(
+            crate::counters::MemoryBoundary::BlockGrid,
+            converted_cells,
+            converted_cells * 2,
+        );
+        crate::counters::bump_full_column_conversion(
+            converted_cells,
+        );
         assert!(size_x >= 0 && size_y >= 0 && size_z >= 0, "box size is negative");
         if size_x == 0 || size_y == 0 || size_z == 0 {
             return (vec![self.interner.name_of(default).to_owned()], Vec::new());
@@ -653,6 +861,127 @@ impl DenseBlockGrid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn packed_result_digest(palette: &[String], blocks: &[u16]) -> u64 {
+        let mut digest = 0xcbf29ce484222325u64;
+        for name in palette {
+            for byte in name.as_bytes() {
+                digest = (digest ^ u64::from(*byte)).wrapping_mul(0x100000001b3);
+            }
+            digest = (digest ^ 0xff).wrapping_mul(0x100000001b3);
+        }
+        for block in blocks {
+            for byte in block.to_le_bytes() {
+                digest = (digest ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+            }
+        }
+        digest
+    }
+
+    #[test]
+    fn packed_ordered_handoff_matches_allocating_reference_and_control() {
+        let interner = Arc::new(StateInterner::new());
+        let air = interner.id_of("minecraft:air");
+        let stone = interner.id_of("minecraft:stone");
+        let water = interner.id_of("minecraft:water");
+        let lava = interner.id_of("minecraft:lava");
+        let packed: Vec<u16> = (0..(4 * 3 * 2))
+            .map(|index| match index % 7 {
+                0 | 4 => 1,
+                1 | 5 => 2,
+                2 => 3,
+                _ => 0,
+            })
+            .collect();
+        let state = |code| match code {
+            0 => air,
+            1 => stone,
+            2 => water,
+            3 => lava,
+            _ => panic!("invalid packed test code"),
+        };
+        let reference = DenseBlockGrid::from_ordered_state_fn(
+            Arc::clone(&interner),
+            0,
+            0,
+            0,
+            4,
+            3,
+            2,
+            air,
+            |x, y, z| state(packed[((y * 2 + z) * 4 + x) as usize]),
+        );
+        let actual = DenseBlockGrid::from_ordered_packed_state_fn(
+            interner,
+            0,
+            0,
+            0,
+            4,
+            3,
+            2,
+            air,
+            packed.clone(),
+            |x, y, z, _index, code| {
+                assert_eq!(code, packed[((y * 2 + z) * 4 + x) as usize]);
+                state(code)
+            },
+        );
+        let expected = reference.into_palette_and_blocks();
+        let result = actual.into_palette_and_blocks();
+        assert_eq!(result, expected, "packed handoff changed palette or blocks");
+        let expected_palette = vec![
+            "minecraft:air".to_owned(),
+            "minecraft:stone".to_owned(),
+            "minecraft:water".to_owned(),
+            "minecraft:lava".to_owned(),
+        ];
+        let expected_blocks: Vec<u16> = packed
+            .iter()
+            .map(|&code| match code {
+                0 => 0,
+                1 => 1,
+                2 => 2,
+                3 => 3,
+                _ => panic!("invalid packed test code"),
+            })
+            .collect();
+        assert_eq!(result.0, expected_palette, "packed palette order changed");
+        assert_eq!(result.1, expected_blocks, "packed block indices changed");
+        let digest = packed_result_digest(&result.0, &result.1);
+        assert_eq!(digest, 0xabd0_10dc_d4dd_58e6, "packed output digest changed");
+
+        let mut control = packed;
+        control[0] = 3;
+        let control_interner = Arc::new(StateInterner::new());
+        let control_air = control_interner.id_of("minecraft:air");
+        let control_stone = control_interner.id_of("minecraft:stone");
+        let control_water = control_interner.id_of("minecraft:water");
+        let control_lava = control_interner.id_of("minecraft:lava");
+        let changed = DenseBlockGrid::from_ordered_packed_state_fn(
+            control_interner,
+            0,
+            0,
+            0,
+            4,
+            3,
+            2,
+            control_air,
+            control,
+            |_x, _y, _z, _index, code| match code {
+                0 => control_air,
+                1 => control_stone,
+                2 => control_water,
+                3 => control_lava,
+                _ => panic!("invalid packed test code"),
+            },
+        );
+        let changed_result = changed.into_palette_and_blocks();
+        assert_ne!(
+            digest,
+            packed_result_digest(&changed_result.0, &changed_result.1),
+            "changed packed input must affect the output digest"
+        );
+    }
 
     #[test]
     fn get_set_round_trips_within_bounds() {
@@ -858,5 +1187,107 @@ mod tests {
         }
         let (palette, _blocks) = g.into_palette_and_blocks();
         assert_eq!(palette, vec!["minecraft:air".to_string(), "minecraft:granite".to_string()]);
+    }
+
+    fn setter_reference(
+        interner: Arc<StateInterner>,
+        states: &[StateId],
+        size_x: i32,
+        size_y: i32,
+        size_z: i32,
+    ) -> DenseBlockGrid {
+        let air = StateId::AIR;
+        let mut grid = DenseBlockGrid::with_interner(
+            interner,
+            0,
+            0,
+            0,
+            size_x,
+            size_y,
+            size_z,
+            air,
+        );
+        let mut index = 0;
+        for z in 0..size_z {
+            for x in 0..size_x {
+                for y in 0..size_y {
+                    grid.set_id(x, y, z, states[index]);
+                    index += 1;
+                }
+            }
+        }
+        grid
+    }
+
+    #[test]
+    fn ordered_builder_matches_setter_for_empty_and_nonempty_diffs() {
+        let interner = Arc::new(StateInterner::new());
+        let stone = interner.id_of("minecraft:stone");
+        let dirt = interner.id_of("minecraft:dirt");
+        let states = [
+            StateId::AIR,
+            StateId::AIR,
+            StateId::AIR,
+            StateId::AIR,
+            StateId::AIR,
+            StateId::AIR,
+        ];
+        let expected = setter_reference(Arc::clone(&interner), &states, 2, 3, 1);
+        let actual = DenseBlockGrid::from_ordered_state_fn(
+            Arc::clone(&interner),
+            0,
+            0,
+            0,
+            2,
+            3,
+            1,
+            StateId::AIR,
+            |x, y, z| states[((z * 2 + x) * 3 + y) as usize],
+        );
+        assert_eq!(
+            actual.into_id_palette_and_blocks(),
+            expected.into_id_palette_and_blocks()
+        );
+
+        let states = [stone, StateId::AIR, dirt, stone, dirt, StateId::AIR];
+        let expected = setter_reference(Arc::clone(&interner), &states, 2, 3, 1);
+        let actual = DenseBlockGrid::from_ordered_state_fn(
+            interner,
+            0,
+            0,
+            0,
+            2,
+            3,
+            1,
+            StateId::AIR,
+            |x, y, z| states[((z * 2 + x) * 3 + y) as usize],
+        );
+        assert_eq!(
+            actual.into_id_palette_and_blocks(),
+            expected.into_id_palette_and_blocks()
+        );
+    }
+
+    #[test]
+    fn ordered_builder_negative_control_detects_changed_write_order() {
+        let interner = Arc::new(StateInterner::new());
+        let stone = interner.id_of("minecraft:stone");
+        let dirt = interner.id_of("minecraft:dirt");
+        let states = [stone, StateId::AIR, dirt, stone, dirt, StateId::AIR];
+        let expected = setter_reference(Arc::clone(&interner), &states, 2, 3, 1);
+        let actual = DenseBlockGrid::from_ordered_state_fn(
+            interner,
+            0,
+            0,
+            0,
+            2,
+            3,
+            1,
+            StateId::AIR,
+            |x, y, z| {
+                states[(states.len() - 1) - ((z * 2 + x) * 3 + y) as usize]
+            },
+        );
+        assert_ne!(actual.into_id_palette_and_blocks(), expected.into_id_palette_and_blocks());
     }
 }

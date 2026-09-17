@@ -1003,7 +1003,7 @@ mod tests {
     #[test]
     fn every_control_has_a_row_and_every_row_but_the_footer_scrolls_into_view() {
         let all = all_controls();
-        assert_eq!(all.len(), 36 * 2 + 2, "36 binds, 36 resets, ResetAll, Done");
+        assert_eq!(all.len(), 37 * 2 + 2, "37 binds, 37 resets, ResetAll, Done");
         for &control in &all {
             match control {
                 KeyControl::Bind(a) | KeyControl::Reset(a) => {

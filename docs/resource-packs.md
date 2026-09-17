@@ -81,6 +81,14 @@ pack goes on top") and never appears in the local pack-selection screen's own
 list, matching vanilla keeping downloaded packs out of the user-visible
 repository.
 
+The built-in archive's parsed directory is cached for the active asset
+installation. Each loader still receives its own lightweight stack wrapper so
+pack selection and reload semantics stay independent, but all wrappers share
+the archive bytes, parsed directory, and normalized entry index. Native cache
+identity includes the archive path, length, and modification time; a browser installation is identified by
+its immutable bundle storage. A changed identity parses once for the new
+installation, while renderer consumers do not repeatedly scan the full jar.
+
 The built-in pack's `version.json` is parsed into `VersionMeta`. Its `id` is a
 validated `VersionId` token, not an arbitrary string: release, snapshot, and
 pre-release spellings are preserved, while missing, empty, whitespace-bearing,

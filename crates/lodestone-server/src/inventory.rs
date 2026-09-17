@@ -1108,8 +1108,8 @@ mod tests {
     }
 
     /// Pickup uses the item's effective typed cap, not the ordinary 64-item
-    /// default. A non-stackable item must leave its remainder in the world
-    /// instead of being silently over-stacked in the player's inventory.
+    /// default. A multi-item non-stackable pickup is split across slots rather
+    /// than being silently over-stacked.
     #[test]
     fn add_respects_item_specific_stack_cap() {
         let mut inv = PlayerInventory::new();
@@ -1117,8 +1117,9 @@ mod tests {
 
         let (written, leftover) = inv.add(sword);
 
-        assert_eq!(written, vec![0]);
+        assert_eq!(written, vec![0, 1]);
         assert_eq!(inv.native(0).map(|stack| stack.count), Some(1));
-        assert_eq!(leftover.map(|stack| stack.count), Some(1));
+        assert_eq!(inv.native(1).map(|stack| stack.count), Some(1));
+        assert!(leftover.is_none());
     }
 }

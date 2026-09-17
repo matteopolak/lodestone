@@ -612,15 +612,15 @@ impl ViewLag {
         }
     }
 
-    /// Advance one fixed tick using the same half-gap response as the client
-    /// player. The direct difference is deliberate: yaw is maintained in the
-    /// shell's wrapped `[-180, 180)` convention, and this preserves the exact
-    /// edge behaviour at that seam.
+    /// Advance one fixed tick using a half-gap response. Yaw follows the
+    /// shortest equivalent arc so the shell's wrapped representation does not
+    /// turn a small north-crossing movement into a nearly complete revolution.
     pub fn tick(&mut self, yaw: f32, pitch: f32) {
         self.pitch_o = self.pitch;
         self.yaw_o = self.yaw;
         self.pitch += (pitch - self.pitch) * VIEW_LAG_RESPONSE;
-        self.yaw += (yaw - self.yaw) * VIEW_LAG_RESPONSE;
+        self.yaw += lodestone_physics::mth::wrap_degrees_f32(yaw - self.yaw)
+            * VIEW_LAG_RESPONSE;
     }
 
     /// Interpolate the current/previous pair for a rendered frame.
@@ -628,7 +628,8 @@ impl ViewLag {
     pub fn frame(&self, alpha: f32, yaw: f32, pitch: f32) -> ViewLagFrame {
         ViewLagFrame {
             pitch: self.pitch_o + (self.pitch - self.pitch_o) * alpha,
-            yaw: self.yaw_o + (self.yaw - self.yaw_o) * alpha,
+            yaw: self.yaw_o
+                + lodestone_physics::mth::wrap_degrees_f32(self.yaw - self.yaw_o) * alpha,
             view_pitch: pitch,
             view_yaw: yaw,
         }
@@ -656,7 +657,7 @@ impl ViewLagFrame {
     pub fn residual_degrees(self) -> (f32, f32) {
         (
             (self.view_pitch - self.pitch) * 0.1,
-            (self.view_yaw - self.yaw) * 0.1,
+            lodestone_physics::mth::wrap_degrees_f32(self.view_yaw - self.yaw) * 0.1,
         )
     }
 
@@ -1196,6 +1197,17 @@ mod tests {
         assert_eq!(second, 2.25);
         assert_eq!(third, 1.125);
         assert!(first > second && second > third, "the residual must decay: {first}, {second}, {third}");
+    }
+
+    #[test]
+    fn view_lag_crosses_north_on_the_short_arc() {
+        let mut lag = ViewLag::new(179.0, 0.0);
+        lag.tick(-179.0, 0.0);
+
+        let midpoint = lag.frame(0.5, -179.0, 0.0).residual_degrees().1;
+        let endpoint = lag.frame(1.0, -179.0, 0.0).residual_degrees().1;
+        assert!((midpoint - 0.15).abs() < 1.0e-5, "midpoint residual: {midpoint}");
+        assert!((endpoint - 0.1).abs() < 1.0e-5, "endpoint residual: {endpoint}");
     }
 
     #[test]

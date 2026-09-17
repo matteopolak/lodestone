@@ -809,9 +809,9 @@ pub const VEG_PADDING: i32 = 8;
 /// Side of the driven 3×3 region in blocks (48) — [`REGION_MAX`] − [`REGION_MIN`].
 pub const REGION_SIDE: i32 = REGION_MAX - REGION_MIN;
 
-/// The `OCEAN_FLOOR_WG` heightmap over ore's 5×5 **read** context as a dense
-/// array, addressed by a centre-relative local `(lx, lz)` already clamped into
-/// `[`[`ORE_READ_MIN`]`, `[`ORE_READ_MAX`]`).
+/// The `OCEAN_FLOOR_WG` heightmap over ore's 5×5 **read** context. Fixture
+/// callers use the dense compatibility representation; production contexts
+/// use [`RegionHeightStorage`] and fixed source-column slots instead.
 ///
 /// # Why this is not a `HashMap`
 ///
@@ -838,18 +838,61 @@ pub const REGION_SIDE: i32 = REGION_MAX - REGION_MIN;
 /// a driver that forgot to stitch a source's heights would otherwise silently
 /// read 0 and change where ores place. So the dense array is filled with
 /// [`Self::UNSET`] and [`Self::get`] panics on it, rather than defaulting.
+/// Compact request-owned height products. Each column is copied once into the
+/// batch window, then all target views address it through a fixed slot table.
+#[derive(Debug)]
+pub struct RegionHeightStorage {
+    columns: Box<[[i32; 256]]>,
+}
+
+impl RegionHeightStorage {
+    #[must_use]
+    pub fn from_columns(columns: Vec<[i32; 256]>) -> std::sync::Arc<Self> {
+        assert!(
+            columns.len() <= u16::MAX as usize,
+            "height product window exceeds compact index space"
+        );
+        std::sync::Arc::new(Self {
+            columns: columns.into_boxed_slice(),
+        })
+    }
+
+    #[must_use]
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + self.columns.len() * std::mem::size_of::<[i32; 256]>()
+    }
+
+    #[inline]
+    fn get(&self, slot: u16, lx: usize, lz: usize) -> i32 {
+        self.columns
+            .get(slot as usize)
+            .unwrap_or_else(|| panic!("RegionHeightStorage: invalid column slot {slot}"))[
+            lz * 16 + lx
+        ]
+    }
+}
+
 #[derive(Clone)]
 pub struct RegionHeights {
-    /// `ORE_READ_SIDE × ORE_READ_SIDE`, row-major in `lz`.
-    heights: Box<[i32]>,
+    /// Fixture-owned `ORE_READ_SIDE × ORE_READ_SIDE` table, row-major in `lz`.
+    dense: Option<Box<[i32]>>,
+    /// Production views share one compact set of source columns.
+    shared: Option<std::sync::Arc<RegionHeightStorage>>,
+    /// Product indices for chunk offsets `[-2, 2]²`, row-major in z.
+    slots: [u16; 25],
 }
 
 impl std::fmt::Debug for RegionHeights {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let set = self.heights.iter().filter(|&&v| v != Self::UNSET).count();
+        let set = self
+            .dense
+            .as_deref()
+            .map(|heights| heights.iter().filter(|&&v| v != Self::UNSET).count())
+            .unwrap_or(25 * 256);
         f.debug_struct("RegionHeights")
-            .field("cells", &self.heights.len())
+            .field("cells", &self.dense.as_ref().map_or(25 * 256, |heights| heights.len()))
             .field("set", &set)
+            .field("shared", &self.shared.is_some())
             .finish()
     }
 }
@@ -866,14 +909,31 @@ impl RegionHeights {
     /// least `min_y - 1`.
     pub const UNSET: i32 = i32::MIN;
 
-    /// Number of columns in ore's 5×5 read context (80 × 80 = 6,400).
+    /// Number of cells in the dense fixture representation (80 × 80 = 6,400).
     pub const AREA: usize = (ORE_READ_SIDE * ORE_READ_SIDE) as usize;
 
     /// An all-[`Self::UNSET`] map — nothing stitched yet.
     #[must_use]
     pub fn unset() -> Self {
         Self {
-            heights: vec![Self::UNSET; Self::AREA].into_boxed_slice(),
+            dense: Some(vec![Self::UNSET; Self::AREA].into_boxed_slice()),
+            shared: None,
+            slots: std::array::from_fn(|index| index as u16),
+        }
+    }
+
+    /// Builds a view over compact source columns. `slots` contains product
+    /// indices for chunk offsets `[-2, 2]²`, row-major in z; missing slots are
+    /// rejected when a probe reaches them, preserving the old absence detector.
+    #[must_use]
+    pub fn from_shared(
+        shared: std::sync::Arc<RegionHeightStorage>,
+        slots: [u16; 25],
+    ) -> Self {
+        Self {
+            dense: None,
+            shared: Some(shared),
+            slots,
         }
     }
 
@@ -881,7 +941,10 @@ impl RegionHeights {
     /// sentinel as [`Self::unset`]. A generator can retain this scratch on its
     /// worker thread instead of allocating and freeing 25 KiB per column.
     pub fn clear(&mut self) {
-        self.heights.fill(Self::UNSET);
+        self.dense
+            .as_mut()
+            .expect("cannot clear a shared RegionHeights view")
+            .fill(Self::UNSET);
     }
 
     #[inline]
@@ -896,7 +959,10 @@ impl RegionHeights {
     /// the `HashMap` this replaced would have stored it and then never been
     /// asked for it, which is the shape that hides a stitching mistake.
     pub fn set(&mut self, lx: i32, lz: i32, y: i32) {
-        self.heights[Self::index(lx, lz)] = y;
+        self.dense
+            .as_mut()
+            .expect("cannot set a shared RegionHeights view")
+            [Self::index(lx, lz)] = y;
     }
 
     /// Height at a **pre-clamped** region-local column.
@@ -908,13 +974,22 @@ impl RegionHeights {
     #[must_use]
     #[inline]
     pub fn get(&self, lx: i32, lz: i32) -> i32 {
-        let v = self.heights[Self::index(lx, lz)];
-        assert_ne!(
-            v,
-            Self::UNSET,
-            "RegionHeights::get: no heightmap entry for region-local ({lx},{lz})"
-        );
-        v
+        if let Some(heights) = self.dense.as_deref() {
+            let v = heights[Self::index(lx, lz)];
+            assert_ne!(
+                v,
+                Self::UNSET,
+                "RegionHeights::get: no heightmap entry for region-local ({lx},{lz})"
+            );
+            return v;
+        }
+        let chunk_x = lx.div_euclid(16) + 2;
+        let chunk_z = lz.div_euclid(16) + 2;
+        let slot = self.slots[(chunk_x * 5 + chunk_z) as usize];
+        self.shared
+            .as_ref()
+            .expect("shared RegionHeights view has no storage")
+            .get(slot, lx.rem_euclid(16) as usize, lz.rem_euclid(16) as usize)
     }
 
     /// Builds one from the `HashMap<(i32, i32), i32>` shape the JVM parity
@@ -933,6 +1008,40 @@ impl RegionHeights {
             }
         }
         out
+    }
+
+}
+
+#[cfg(test)]
+mod shared_region_tests {
+    use super::{RegionHeightStorage, RegionHeights, ORE_READ_MIN, ORE_READ_SIDE};
+
+    #[test]
+    fn shared_slots_match_dense_clamped_coordinates() {
+        let mut dense = RegionHeights::unset();
+        let mut columns = Vec::with_capacity(25);
+        for dx in -2..=2i32 {
+            for dz in -2..=2i32 {
+                let mut column = [0; 256];
+                for lz in 0..16i32 {
+                    for lx in 0..16i32 {
+                        let value = (dx * 10000) + (dz * 100) + lz * 16 + lx;
+                        dense.set(dx * 16 + lx, dz * 16 + lz, value);
+                        column[(lz * 16 + lx) as usize] = value;
+                    }
+                }
+                columns.push(column);
+            }
+        }
+        let shared = RegionHeights::from_shared(
+            RegionHeightStorage::from_columns(columns),
+            std::array::from_fn(|index| index as u16),
+        );
+        for lz in ORE_READ_MIN..ORE_READ_MIN + ORE_READ_SIDE {
+            for lx in ORE_READ_MIN..ORE_READ_MIN + ORE_READ_SIDE {
+                assert_eq!(shared.get(lx, lz), dense.get(lx, lz), "at ({lx},{lz})");
+            }
+        }
     }
 }
 

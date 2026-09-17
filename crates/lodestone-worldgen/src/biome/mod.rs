@@ -134,11 +134,12 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::Value;
 use lodestone_data::biomes::{BiomeRef, BuiltinBiome};
 
-use crate::density::{Builder, Context, Density};
+use crate::density::{Builder, Context, Density, Resolver};
 
 pub(crate) mod memo;
 mod tree;
@@ -304,17 +305,24 @@ fn next_table_id() -> u64 {
 /// That is a deliberate trade and worth naming: a `Deref` to a slice hides that
 /// the type carries more than the slice. The alternative was a one-line patch to
 /// a file two other units were mid-flight in.
-#[allow(missing_debug_implementations)]
-pub struct BiomeTable {
-    points: Vec<BiomeParameterPoint>,
-    tree: tree::BiomeTree,
+#[derive(Clone)]
+struct BiomeTableData {
+    points: Arc<Vec<BiomeParameterPoint>>,
+    tree: Arc<tree::BiomeTree>,
     /// Built-in identity for each row when the resource names resolve. A
     /// `None` entry is retained for small synthetic tables used by search
     /// tests; production resource loading uses [`Self::new_strict`].
-    builtin_biomes: Vec<Option<BuiltinBiome>>,
-    /// Unique per constructed table — [`memo`]'s tag component.
+    builtin_biomes: Arc<Vec<Option<BuiltinBiome>>>,
+}
+
+#[derive(Clone)]
+#[allow(missing_debug_implementations)]
+pub struct BiomeTable {
+    data: Arc<BiomeTableData>,
     id: u64,
 }
+
+static BIOME_TABLE_CACHE: OnceLock<Mutex<HashMap<u64, Arc<BiomeTableData>>>> = OnceLock::new();
 
 /// Explicit history for one deterministic biome-search lifecycle. The cursor
 /// is owned by its generation unit and is never inferred from worker identity.
@@ -322,6 +330,13 @@ pub struct BiomeTable {
 pub struct BiomeSearchCursor {
     table_id: u64,
     leaf: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CachedBiomeAnswer {
+    row: u32,
+    leaf: u32,
+    distance: i64,
 }
 
 impl BiomeTable {
@@ -332,17 +347,49 @@ impl BiomeTable {
     /// only constructs one when the resolver supplied a non-empty table.
     #[must_use]
     pub fn new(points: Vec<BiomeParameterPoint>) -> Self {
-        let tree = tree::BiomeTree::build(&points);
         let builtin_biomes = points
             .iter()
             .map(|point| BuiltinBiome::from_name(&point.biome))
             .collect();
+        Self::from_data(Arc::new(BiomeTableData {
+            tree: Arc::new(tree::BiomeTree::build(&points)),
+            points: Arc::new(points),
+            builtin_biomes: Arc::new(builtin_biomes),
+        }))
+    }
+
+    fn from_data(data: Arc<BiomeTableData>) -> Self {
         Self {
-            points,
-            tree,
-            builtin_biomes,
+            data,
             id: next_table_id(),
         }
+    }
+
+    fn new_cached(points: Vec<BiomeParameterPoint>, fingerprint: u64) -> Self {
+        let cache = BIOME_TABLE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Some(data) = cache
+            .lock()
+            .expect("biome table cache lock poisoned")
+            .get(&fingerprint)
+            .cloned()
+        {
+            return Self::from_data(data);
+        }
+        let builtin_biomes = points
+            .iter()
+            .map(|point| BuiltinBiome::from_name(&point.biome))
+            .collect();
+        let data = Arc::new(BiomeTableData {
+            tree: Arc::new(tree::BiomeTree::build(&points)),
+            points: Arc::new(points),
+            builtin_biomes: Arc::new(builtin_biomes),
+        });
+        let mut entries = cache.lock().expect("biome table cache lock poisoned");
+        if let Some(existing) = entries.get(&fingerprint).cloned() {
+            return Self::from_data(existing);
+        }
+        entries.insert(fingerprint, Arc::clone(&data));
+        Self::from_data(data)
     }
 
     /// Builds a table at a resource-loading boundary and rejects any name that
@@ -352,7 +399,19 @@ impl BiomeTable {
     #[must_use]
     pub fn new_strict(points: Vec<BiomeParameterPoint>) -> Self {
         let table = Self::new(points);
-        if let Some((row, _)) = table
+        table.assert_strict();
+        table
+    }
+
+    fn new_cached_strict(points: Vec<BiomeParameterPoint>, fingerprint: u64) -> Self {
+        let table = Self::new_cached(points, fingerprint);
+        table.assert_strict();
+        table
+    }
+
+    fn assert_strict(&self) {
+        if let Some((row, _)) = self
+            .data
             .builtin_biomes
             .iter()
             .enumerate()
@@ -360,17 +419,16 @@ impl BiomeTable {
         {
             panic!(
                 "unknown built-in biome {:?} at parameter row {row}",
-                table.points[row].biome
+                self.data.points[row].biome
             );
         }
-        table
     }
 
     /// The stateless indexed answer. Production generation uses
     /// [`Self::nearest_row_with_cursor`] with an explicit lifecycle cursor.
     #[must_use]
     pub fn nearest_row(&self, target: &[i64; 7]) -> u32 {
-        self.tree.nearest_row(target)
+        self.data.tree.nearest_row(target)
     }
 
     /// The fresh-instance indexed answer, with no cached history. This is the
@@ -378,7 +436,7 @@ impl BiomeTable {
     /// use [`Self::nearest_row`] so query history is preserved.
     #[must_use]
     pub fn nearest_row_stateless(&self, target: &[i64; 7]) -> u32 {
-        self.tree.nearest_row(target)
+        self.data.tree.nearest_row(target)
     }
 
     /// Starts a fresh indexed-search lifecycle owned by the caller.
@@ -398,9 +456,35 @@ impl BiomeTable {
         cursor: &mut BiomeSearchCursor,
     ) -> u32 {
         assert_eq!(cursor.table_id, self.id, "biome cursor belongs to another table");
-        let (row, leaf) = self.tree.nearest_row_with_candidate(target, cursor.leaf);
+        let (row, leaf) = self.data.tree.nearest_row_with_candidate(target, cursor.leaf);
         cursor.leaf = Some(leaf);
         row
+    }
+
+    pub(crate) fn cached_answer(&self, target: &[i64; 7]) -> CachedBiomeAnswer {
+        let (row, leaf, distance) = self.data.tree.nearest_leaf_and_distance(target);
+        CachedBiomeAnswer {
+            row,
+            leaf,
+            distance,
+        }
+    }
+
+    pub(crate) fn apply_cached_answer(
+        &self,
+        target: &[i64; 7],
+        cursor: &mut BiomeSearchCursor,
+        answer: CachedBiomeAnswer,
+    ) -> u32 {
+        assert_eq!(cursor.table_id, self.id, "biome cursor belongs to another table");
+        if let Some(leaf) = cursor.leaf {
+            let (row, distance) = self.data.tree.leaf_row_and_distance(leaf, target);
+            if distance == answer.distance {
+                return row;
+            }
+        }
+        cursor.leaf = Some(answer.leaf);
+        answer.row
     }
 
     /// Updates a cursor from a previously memoised row without re-running the
@@ -408,14 +492,14 @@ impl BiomeTable {
     /// memo supplies the same row on a later query.
     pub fn cursor_from_row(&self, cursor: &mut BiomeSearchCursor, row: u32) {
         assert_eq!(cursor.table_id, self.id, "biome cursor belongs to another table");
-        cursor.leaf = self.tree.leaf_node_for_row(row);
+        cursor.leaf = self.data.tree.leaf_node_for_row(row);
     }
 
     /// The nearest biome's id via a fresh indexed lookup. Production pipelines
     /// use [`Self::nearest_row_with_cursor`] so tie history is explicit.
     #[must_use]
     pub fn nearest(&self, target: &[i64; 7]) -> &str {
-        &self.points[self.nearest_row(target) as usize].biome
+        &self.data.points[self.nearest_row(target) as usize].biome
     }
 
     /// The biome id at a row, for a caller holding a memoised row.
@@ -426,7 +510,7 @@ impl BiomeTable {
     /// to make impossible.
     #[must_use]
     pub fn biome_at(&self, row: u32) -> &str {
-        &self.points[row as usize].biome
+        &self.data.points[row as usize].biome
     }
 
     /// The compact typed identity at a row, if that row names a generated
@@ -434,7 +518,8 @@ impl BiomeTable {
     /// production tables reject it during construction.
     #[must_use]
     pub fn biome_ref_at(&self, row: u32) -> Option<BiomeRef> {
-        self.builtin_biomes
+        self.data
+            .builtin_biomes
             .get(row as usize)
             .and_then(|biome| biome.map(BiomeRef::builtin))
     }
@@ -450,20 +535,20 @@ impl BiomeTable {
     /// `tests/biome_tree_identity.rs` — see [`tree::BiomeTree::hull_containment_violations`].
     #[must_use]
     pub fn hull_containment_violations(&self) -> Vec<(u32, u32, usize)> {
-        self.tree.hull_containment_violations()
+        self.data.tree.hull_containment_violations()
     }
 
     /// `(total nodes, leaves)` in the tree. Leaves must equal
     /// [`BiomeTable::len`].
     #[must_use]
     pub fn tree_shape(&self) -> (usize, usize) {
-        self.tree.shape()
+        self.data.tree.shape()
     }
 
     /// Node count, for a gate that perturbs one by index.
     #[must_use]
     pub fn tree_node_count(&self) -> usize {
-        self.tree.node_count()
+        self.data.tree.node_count()
     }
 
     /// Whether tree node `id` is a leaf. Gate support: a control that perturbs a
@@ -475,7 +560,7 @@ impl BiomeTable {
     /// is its first child.
     #[must_use]
     pub fn tree_node_is_leaf(&self, id: usize) -> bool {
-        self.tree.node_is_leaf(id)
+        self.data.tree.node_is_leaf(id)
     }
 
     /// Collapses one tree node's span to a point, breaking the lower-bound
@@ -483,7 +568,7 @@ impl BiomeTable {
     /// distance-identity gates: an assertion that cannot fail under this is not
     /// evidence.
     pub fn perturb_tree_node(&mut self, node: usize) {
-        self.tree.perturb_node_span(node);
+        Arc::make_mut(&mut Arc::make_mut(&mut self.data).tree).perturb_node_span(node);
     }
 
     /// `(row, squared distance)` of the selected leaf. Exposed because since the R-tree ruling
@@ -492,21 +577,21 @@ impl BiomeTable {
     /// where no tie exists. See [`tree`]'s module doc.
     #[must_use]
     pub fn nearest_row_and_distance(&self, target: &[i64; 7]) -> (u32, i64) {
-        self.tree.nearest_row_and_distance(target)
+        self.data.tree.nearest_row_and_distance(target)
     }
 
     /// Indexed search with an explicit candidate, exposed for tie controls and
     /// tests. Production uses the per-worker history in [`Self::nearest_row`].
     #[must_use]
     pub fn nearest_row_seeded(&self, target: &[i64; 7], candidate: Option<u32>) -> u32 {
-        self.tree.nearest_row_seeded(target, candidate)
+        self.data.tree.nearest_row_seeded(target, candidate)
     }
 
     /// The tree node id of the leaf carrying `row`, so a gate can seed a search
     /// with a chosen row.
     #[must_use]
     pub fn leaf_node_for_row(&self, row: u32) -> Option<u32> {
-        self.tree.leaf_node_for_row(row)
+        self.data.tree.leaf_node_for_row(row)
     }
 
     /// The root's child node ids in traversal order — see
@@ -514,7 +599,7 @@ impl BiomeTable {
     /// *later* one than the first.
     #[must_use]
     pub fn tree_root_child_nodes(&self) -> Vec<u32> {
-        self.tree.root_child_nodes()
+        self.data.tree.root_child_nodes()
     }
 }
 
@@ -522,7 +607,7 @@ impl std::ops::Deref for BiomeTable {
     type Target = [BiomeParameterPoint];
 
     fn deref(&self) -> &Self::Target {
-        &self.points
+        self.data.points.as_slice()
     }
 }
 
@@ -531,7 +616,12 @@ impl IntoIterator for BiomeTable {
     type IntoIter = std::vec::IntoIter<BiomeParameterPoint>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.points.into_iter()
+        match Arc::try_unwrap(self.data) {
+            Ok(data) => Arc::try_unwrap(data.points)
+                .unwrap_or_else(|points| points.as_ref().clone())
+                .into_iter(),
+            Err(data) => data.points.as_ref().clone().into_iter(),
+        }
     }
 }
 
@@ -607,6 +697,33 @@ pub fn usable_overworld_table(table: Vec<BiomeParameterPoint>) -> BiomeTable {
     BiomeTable::new_strict(table)
 }
 
+/// Loads the overworld table, reusing its immutable parsed catalog only when the
+/// resolver identifies a stable asset bundle. Resolvers without a fingerprint
+/// remain fully uncached.
+#[must_use]
+pub fn overworld_table(resolver: &dyn Resolver) -> Option<BiomeTable> {
+    let fingerprint = resolver.asset_fingerprint();
+    if let Some(fingerprint) = fingerprint {
+        let cache = BIOME_TABLE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Some(data) = cache
+            .lock()
+            .expect("biome table cache lock poisoned")
+            .get(&fingerprint)
+            .cloned()
+        {
+            return Some(BiomeTable::from_data(data));
+        }
+    }
+    let points = parse_table(&resolver.biome_parameters());
+    if points.is_empty() {
+        return None;
+    }
+    Some(match fingerprint {
+        Some(fingerprint) => BiomeTable::new_cached_strict(points, fingerprint),
+        None => BiomeTable::new_strict(points),
+    })
+}
+
 /// Parses the embedded per-biome `temperature` map (`{"minecraft:plains":
 /// 0.8, ...}`) from the authoritative generated biome JSON data. This field
 /// is static data and does not require runtime evaluation.
@@ -665,24 +782,147 @@ pub struct ClimateSampler {
     erosion: Density,
     depth: Density,
     weirdness: Density,
+    xz_pure: [bool; 6],
+}
+
+/// Climate values that are invariant across Y. Callers size this to the exact
+/// quart X/Z footprint they own; it is never shared across requests.
+pub(crate) struct PreparedClimateGrid {
+    min_qx: i32,
+    min_qz: i32,
+    width: usize,
+    depth: usize,
+    values: Vec<[i64; 6]>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct PreparedClimateGridView<'a> {
+    grid: &'a PreparedClimateGrid,
+    min_qx: i32,
+    min_qz: i32,
+    width: usize,
+    depth: usize,
+}
+
+impl PreparedClimateGrid {
+    pub(crate) fn full_view(&self) -> PreparedClimateGridView<'_> {
+        self.view(self.min_qx, self.min_qz, self.width, self.depth)
+    }
+
+    pub(crate) fn center_view(&self) -> PreparedClimateGridView<'_> {
+        assert!(self.width >= 6 && self.depth >= 6, "climate grid has no center view");
+        self.view(self.min_qx + 1, self.min_qz + 1, 4, 4)
+    }
+
+    pub(crate) fn view(
+        &self,
+        min_qx: i32,
+        min_qz: i32,
+        width: usize,
+        depth: usize,
+    ) -> PreparedClimateGridView<'_> {
+        assert!(width > 0 && depth > 0, "climate grid view must be non-empty");
+        let max_qx = min_qx
+            .checked_add(i32::try_from(width - 1).expect("climate grid view width"))
+            .expect("climate grid view x overflow");
+        let max_qz = min_qz
+            .checked_add(i32::try_from(depth - 1).expect("climate grid view depth"))
+            .expect("climate grid view z overflow");
+        let grid_max_qx = self
+            .min_qx
+            .checked_add(i32::try_from(self.width - 1).expect("climate grid width"))
+            .expect("climate grid x overflow");
+        let grid_max_qz = self
+            .min_qz
+            .checked_add(i32::try_from(self.depth - 1).expect("climate grid depth"))
+            .expect("climate grid z overflow");
+        assert!(
+            self.min_qx <= min_qx
+                && max_qx <= grid_max_qx
+                && self.min_qz <= min_qz
+                && max_qz <= grid_max_qz,
+            "climate grid view escaped its prepared bounds"
+        );
+        PreparedClimateGridView {
+            grid: self,
+            min_qx,
+            min_qz,
+            width,
+            depth,
+        }
+    }
+}
+
+impl PreparedClimateGridView<'_> {
+    #[inline]
+    fn values_at(&self, x: i32, z: i32) -> Option<&[i64; 6]> {
+        if x.rem_euclid(4) != 0 || z.rem_euclid(4) != 0 {
+            return None;
+        }
+        let qx = x.div_euclid(4);
+        let qz = z.div_euclid(4);
+        let local_qx = qx.checked_sub(self.min_qx)?;
+        let local_qz = qz.checked_sub(self.min_qz)?;
+        if local_qx < 0
+            || local_qz < 0
+            || local_qx >= i32::try_from(self.width).ok()?
+            || local_qz >= i32::try_from(self.depth).ok()?
+        {
+            return None;
+        }
+        let root_qx = self.min_qx.checked_add(local_qx)?;
+        let root_qz = self.min_qz.checked_add(local_qz)?;
+        let root_x = root_qx.checked_sub(self.grid.min_qx)?;
+        let root_z = root_qz.checked_sub(self.grid.min_qz)?;
+        if root_x < 0
+            || root_z < 0
+            || root_x >= i32::try_from(self.grid.width).ok()?
+            || root_z >= i32::try_from(self.grid.depth).ok()?
+        {
+            return None;
+        }
+        Some(&self.grid.values[root_z as usize * self.grid.width + root_x as usize])
+    }
 }
 
 impl ClimateSampler {
     #[must_use]
     pub fn new(settings: &Value, builder: &Builder) -> Self {
         let router = &settings["noise_router"];
-        Self {
+        let sampler = Self {
             temperature: builder
                 .build(&router["temperature"])
                 .expect("bundled temperature density-function document"),
-            humidity: builder.build(&router["vegetation"]).expect("bundled vegetation density-function document"),
+            humidity: builder
+                .build(&router["vegetation"])
+                .expect("bundled vegetation density-function document"),
             continentalness: builder
                 .build(&router["continents"])
                 .expect("bundled continents density-function document"),
-            erosion: builder.build(&router["erosion"]).expect("bundled erosion density-function document"),
-            depth: builder.build(&router["depth"]).expect("bundled depth density-function document"),
-            weirdness: builder.build(&router["ridges"]).expect("bundled ridges density-function document"),
-        }
+            erosion: builder
+                .build(&router["erosion"])
+                .expect("bundled erosion density-function document"),
+            depth: builder
+                .build(&router["depth"])
+                .expect("bundled depth density-function document"),
+            weirdness: builder
+                .build(&router["ridges"])
+                .expect("bundled ridges density-function document"),
+            xz_pure: [false; 6],
+        };
+        sampler.with_xz_purity()
+    }
+
+    fn with_xz_purity(mut self) -> Self {
+        self.xz_pure = [
+            self.temperature.is_xz_pure(),
+            self.humidity.is_xz_pure(),
+            self.continentalness.is_xz_pure(),
+            self.erosion.is_xz_pure(),
+            self.depth.is_xz_pure(),
+            self.weirdness.is_xz_pure(),
+        ];
+        self
     }
 
     /// Vanilla's own climate sampler's quantized target, at an exact block
@@ -704,11 +944,162 @@ impl ClimateSampler {
             0,
         ]
     }
+
+    /// Prepares the Y-invariant channels for one column's sixteen quart
+    /// positions. A channel is admitted only when the density tree proves its
+    /// value is independent of Y.
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn prepare_xz(&self, base_x: i32, base_z: i32) -> PreparedClimateGrid {
+        self.prepare_xz_rect(
+            base_x.div_euclid(4),
+            base_z.div_euclid(4),
+            4,
+            4,
+        )
+    }
+
+    pub(crate) fn prepare_xz_rect(
+        &self,
+        min_qx: i32,
+        min_qz: i32,
+        width: usize,
+        depth: usize,
+    ) -> PreparedClimateGrid {
+        let mut values = vec![[0; 6]; width * depth];
+        for qz in 0..depth {
+            for qx in 0..width {
+                let index = qz * width + qx;
+                let ctx = Context::new((min_qx + qx as i32) * 4, 0, (min_qz + qz as i32) * 4);
+                for (channel, value) in values[index].iter_mut().enumerate() {
+                    if self.xz_pure[channel] {
+                        *value = quantize_coord(self.channel(channel).compute(ctx));
+                    }
+                }
+            }
+        }
+        PreparedClimateGrid {
+            min_qx,
+            min_qz,
+            width,
+            depth,
+            values,
+        }
+    }
+
+    /// Computes a target using the prepared X/Z channels and the exact query Y
+    /// for every channel that was not proven invariant.
+    #[inline]
+    pub(crate) fn target_prepared(
+        &self,
+        prepared: &PreparedClimateGrid,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> [i64; 7] {
+        self.target_prepared_view(&prepared.full_view(), x, y, z)
+    }
+
+    pub(crate) fn target_prepared_view(
+        &self,
+        prepared: &PreparedClimateGridView<'_>,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> [i64; 7] {
+        let values = prepared.values_at(x, z).unwrap_or_else(|| {
+            panic!("prepared climate lookup escaped its view at ({x}, {z})")
+        });
+        let ctx = Context::new(x, y, z);
+        [
+            if self.xz_pure[0] {
+                values[0]
+            } else {
+                quantize_coord(self.temperature.compute(ctx))
+            },
+            if self.xz_pure[1] {
+                values[1]
+            } else {
+                quantize_coord(self.humidity.compute(ctx))
+            },
+            if self.xz_pure[2] {
+                values[2]
+            } else {
+                quantize_coord(self.continentalness.compute(ctx))
+            },
+            if self.xz_pure[3] {
+                values[3]
+            } else {
+                quantize_coord(self.erosion.compute(ctx))
+            },
+            if self.xz_pure[4] {
+                values[4]
+            } else {
+                quantize_coord(self.depth.compute(ctx))
+            },
+            if self.xz_pure[5] {
+                values[5]
+            } else {
+                quantize_coord(self.weirdness.compute(ctx))
+            },
+            0,
+        ]
+    }
+
+    fn channel(&self, channel: usize) -> &Density {
+        match channel {
+            0 => &self.temperature,
+            1 => &self.humidity,
+            2 => &self.continentalness,
+            3 => &self.erosion,
+            4 => &self.depth,
+            5 => &self.weirdness,
+            _ => unreachable!("climate channel index"),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::density::NoiseParams;
+    use std::path::{Path, PathBuf};
+
+    struct SupportResolver {
+        root: PathBuf,
+    }
+
+    impl SupportResolver {
+        fn read(&self, kind: &str, id: &str) -> Value {
+            let name = id.strip_prefix("minecraft:").unwrap_or(id);
+            let path = self.root.join(kind).join(format!("{name}.json"));
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
+            serde_json::from_str(&text)
+                .unwrap_or_else(|error| panic!("parsing {}: {error}", path.display()))
+        }
+    }
+
+    impl Resolver for SupportResolver {
+        fn density_function(&self, id: &str) -> Value {
+            self.read("density_function", id)
+        }
+
+        fn noise(&self, id: &str) -> NoiseParams {
+            let value = self.read("noise", id);
+            NoiseParams {
+                first_octave: value["firstOctave"]
+                    .as_i64()
+                    .expect("firstOctave") as i32,
+                amplitudes: value["amplitudes"]
+                    .as_array()
+                    .expect("amplitudes")
+                    .iter()
+                    .map(|amplitude| amplitude.as_f64().expect("amplitude"))
+                    .collect(),
+            }
+        }
+    }
 
     fn tiny_table() -> Vec<BiomeParameterPoint> {
         // Two points on the temperature axis only, everything else spans the
@@ -773,6 +1164,180 @@ mod tests {
         assert_eq!(quantize_coord(0.8), 8000);
         // Negative truncates toward zero, not floor.
         assert_eq!(quantize_coord(-0.15), -1500);
+    }
+
+    fn synthetic_climate(y_sensitive_temperature: bool) -> ClimateSampler {
+        let temperature = if y_sensitive_temperature {
+            Density::YClampedGradient {
+                from_y: -64.0,
+                to_y: 320.0,
+                from_value: -0.75,
+                to_value: 0.75,
+            }
+        } else {
+            Density::Const(0.123456789)
+        };
+        ClimateSampler {
+            temperature,
+            humidity: Density::Const(-0.23456789),
+            continentalness: Density::Const(0.34567891),
+            erosion: Density::Const(-0.45678912),
+            depth: Density::YClampedGradient {
+                from_y: -64.0,
+                to_y: 320.0,
+                from_value: 0.9,
+                to_value: -0.9,
+            },
+            weirdness: Density::Const(0.56789123),
+            xz_pure: [false; 6],
+        }
+        .with_xz_purity()
+    }
+
+    #[test]
+    fn prepared_climate_reuses_proven_xz_channels_without_changing_target_bits() {
+        let sampler = synthetic_climate(false);
+        let prepared = sampler.prepare_xz(32, -16);
+        for qz in 0..4 {
+            for qx in 0..4 {
+                let x = 32 + qx * 4;
+                let z = -16 + qz * 4;
+                for y in [-64, 0, 63, 319] {
+                    assert_eq!(
+                        sampler.target(x, y, z),
+                        sampler.target_prepared(&prepared, x, y, z),
+                        "prepared climate changed target at ({x}, {y}, {z})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn prepared_climate_keeps_y_sensitive_channels_on_the_full_path() {
+        let sampler = synthetic_climate(true);
+        let prepared = sampler.prepare_xz(0, 0);
+        for y in [-64, 0, 320] {
+            assert_eq!(
+                sampler.target(0, y, 0),
+                sampler.target_prepared(&prepared, 0, y, 0)
+            );
+        }
+        assert_ne!(
+            sampler.target_prepared(&prepared, 0, -64, 0)[0],
+            sampler.target_prepared(&prepared, 0, 320, 0)[0]
+        );
+        assert_ne!(
+            sampler.target_prepared(&prepared, 0, -64, 0)[4],
+            sampler.target_prepared(&prepared, 0, 320, 0)[4]
+        );
+    }
+
+    #[test]
+    fn prepared_climate_center_view_is_bit_identical() {
+        let sampler = synthetic_climate(false);
+        let prepared = sampler.prepare_xz_rect(-1, -1, 6, 6);
+        let center = prepared.center_view();
+        for qz in 0..4 {
+            for qx in 0..4 {
+                let x = qx * 4;
+                let z = qz * 4;
+                assert_eq!(
+                    sampler.target(x, 80, z),
+                    sampler.target_prepared_view(&center, x, 80, z),
+                    "center climate view changed target at ({x}, {z})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "prepared climate lookup escaped its view")]
+    fn prepared_climate_center_view_rejects_out_of_view_quart() {
+        let sampler = synthetic_climate(false);
+        let prepared = sampler.prepare_xz_rect(-1, -1, 6, 6);
+        let center = prepared.center_view();
+        sampler.target_prepared_view(&center, -4, 80, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "prepared climate lookup escaped its view")]
+    fn prepared_climate_view_rejects_non_quart_coordinates() {
+        let sampler = synthetic_climate(false);
+        let prepared = sampler.prepare_xz_rect(-1, -1, 6, 6);
+        let center = prepared.center_view();
+        sampler.target_prepared_view(&center, 0, 80, 1);
+    }
+
+    #[test]
+    fn prepared_climate_matches_the_bundled_router_at_negative_and_positive_edges() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/worldgen_data");
+        let resolver = SupportResolver { root: root.clone() };
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join("noise_settings/overworld.json")).unwrap(),
+        )
+        .unwrap();
+        let positions = [(-17, -19), (-1, 0), (0, 0), (1, 2), (31, 29)];
+        let ys = [-64, -63, -1, 0, 31, 80, 200, 319];
+
+        for seed in [0, 42, -8_823_894_646_i64] {
+            let builder = Builder::new(seed, &resolver);
+            let sampler = ClimateSampler::new(&settings, &builder);
+            assert!(sampler.xz_pure.iter().any(|&pure| pure));
+            for &(min_qx, min_qz) in &positions {
+                let prepared = sampler.prepare_xz_rect(min_qx, min_qz, 6, 6);
+                let center = prepared.center_view();
+                for qz in min_qz..min_qz + 6 {
+                    for qx in min_qx..min_qx + 6 {
+                        let x = qx * 4;
+                        let z = qz * 4;
+                        for &y in &ys {
+                            assert_eq!(
+                                sampler.target(x, y, z),
+                                sampler.target_prepared(&prepared, x, y, z),
+                                "prepared router target changed at seed={seed}, x={x}, y={y}, z={z}"
+                            );
+                        }
+                    }
+                }
+                for qz in min_qz + 1..min_qz + 5 {
+                    for qx in min_qx + 1..min_qx + 5 {
+                        let x = qx * 4;
+                        let z = qz * 4;
+                        assert_eq!(
+                            sampler.target(x, 80, z),
+                            sampler.target_prepared_view(&center, x, 80, z),
+                            "center prepared router target changed at seed={seed}, x={x}, z={z}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn accepted_xz_purity_is_bit_invariant_across_y() {
+        let sampler = synthetic_climate(false);
+        for x in [-8, 0, 12] {
+            for z in [-4, 0, 16] {
+                for y in [-64, -1, 0, 127, 319] {
+                    for other_y in [-63, 1, 200] {
+                        for channel in 0..6 {
+                            if sampler.xz_pure[channel] {
+                                assert_eq!(
+                                    sampler.channel(channel).compute(Context::new(x, y, z)).to_bits(),
+                                    sampler
+                                        .channel(channel)
+                                        .compute(Context::new(x, other_y, z))
+                                        .to_bits(),
+                                    "accepted X/Z-pure channel {channel} changed with Y"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -845,6 +1410,22 @@ mod tests {
             [0, 0, 0, 0, 0, 0, 0],
         ] {
             assert_eq!(nearest_biome(&table, &target), "minecraft:badlands");
+        }
+    }
+
+    #[test]
+    fn fingerprinted_tables_share_the_catalog_but_uncached_tables_do_not() {
+        let points = tiny_table();
+        let fingerprint = 0x9d7e_31a4_6b20_55c1;
+        let cached_a = BiomeTable::new_cached(points.clone(), fingerprint);
+        let cached_b = BiomeTable::new_cached(points.clone(), fingerprint);
+        assert!(Arc::ptr_eq(&cached_a.data, &cached_b.data));
+        assert_ne!(cached_a.id(), cached_b.id());
+        let uncached_a = BiomeTable::new(points.clone());
+        let uncached_b = BiomeTable::new(points);
+        assert!(!Arc::ptr_eq(&uncached_a.data, &uncached_b.data));
+        for target in [[-9000, 0, 0, 0, 0, 0, 0], [9000, 0, 0, 0, 0, 0, 0]] {
+            assert_eq!(cached_a.nearest_row(&target), uncached_a.nearest_row(&target));
         }
     }
 

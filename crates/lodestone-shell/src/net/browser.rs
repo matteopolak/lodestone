@@ -501,6 +501,19 @@ pub(super) async fn launch_browser_worker(
         &JsValue::from_f64(f64::from(epoch)),
     )
     .expect("plain launch object accepts cancellation epoch");
+    js_sys::Reflect::set(
+        &launch,
+        &JsValue::from_str("logLevel"),
+        &JsValue::from_str(match log::max_level() {
+            log::LevelFilter::Off => "off",
+            log::LevelFilter::Error => "error",
+            log::LevelFilter::Warn => "warn",
+            log::LevelFilter::Info => "info",
+            log::LevelFilter::Debug => "debug",
+            log::LevelFilter::Trace => "trace",
+        }),
+    )
+    .expect("plain launch object accepts log level");
     let transfer = js_sys::Array::new();
     transfer.push(&worker_port);
     transfer.push(&worker_progress_port);

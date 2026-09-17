@@ -67,6 +67,8 @@ fn production_conductor_delivers_both_raw_packet_directions() {
         packet_id: 0x2a,
         payload: vec![0, 255],
     });
+    app.world_mut().run_schedule(GameTick);
+
     app.world_mut().write_message(OutboundRawPacket {
         protocol: 776,
         state: ConnectionState::Configuration,
@@ -78,8 +80,8 @@ fn production_conductor_delivers_both_raw_packet_directions() {
     assert_eq!(
         chats(&app),
         [
-            "raw:in protocol=776 phase=Play id=42 bytes=2".to_owned(),
-            "raw:out protocol=776 phase=Configuration id=7 bytes=1".to_owned(),
+            "raw:in protocol=776 phase=PacketPhase::Play id=42 bytes=2".to_owned(),
+            "raw:out protocol=776 phase=PacketPhase::Configuration id=7 bytes=1".to_owned(),
         ]
     );
 }

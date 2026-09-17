@@ -888,13 +888,13 @@ impl ClientHandle {
                 Err(_) => Err(WaitError::Timeout),
             }
         }
-        // wasm32 has no runtime timer (a timeout would panic like a wall-clock
-        // read), so the timeout is not enforced there; the wait is
-        // still cancellable by the session ending.
+        // The browser arm uses the host timer rather than Tokio's runtime clock.
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = timeout;
-            self.wait_loop(predicate).await
+            tokio::select! {
+                result = self.wait_loop(predicate) => result,
+                () = lodestone_time::browser_sleep(timeout) => Err(WaitError::Timeout),
+            }
         }
     }
 

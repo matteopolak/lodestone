@@ -125,6 +125,59 @@ fn corner_lookups_and_evaluations_match_the_cell_geometry() {
     // Without this, a stub or a mis-rooted tree would measure zero lookups and
     // "0" would read as a spectacular win rather than as nothing happening.
     let program = Program::compile(&final_density);
+    assert!(
+        program.has_overworld_final_density_cell_plan(),
+        "the bundled Overworld final_density must select the production cell plan"
+    );
+    let cell_sampler = NoiseChunkSampler::from_program(
+        program.clone(),
+        builder.slot_count(),
+        CELL_WIDTH,
+        CELL_HEIGHT,
+        Some(lodestone_worldgen::engine::Bounds {
+            x: (0, 15),
+            y: (MIN_Y, MIN_Y + HEIGHT - 1),
+            z: (0, 15),
+        }),
+    );
+    let scalar_sampler = NoiseChunkSampler::from_program(
+        program.clone(),
+        builder.slot_count(),
+        CELL_WIDTH,
+        CELL_HEIGHT,
+        Some(lodestone_worldgen::engine::Bounds {
+            x: (0, 15),
+            y: (MIN_Y, MIN_Y + HEIGHT - 1),
+            z: (0, 15),
+        }),
+    );
+    let mut transitions = 0;
+    for z0 in (0..16).step_by(CELL_WIDTH as usize) {
+        for x0 in (0..16).step_by(CELL_WIDTH as usize) {
+            for y0 in (MIN_Y..MIN_Y + HEIGHT).step_by(CELL_HEIGHT as usize) {
+                let mut cell = [0.0; 128];
+                cell_sampler.final_density_cell(x0, y0, z0, &mut cell);
+                for lz in 0..4 {
+                    for lx in 0..4 {
+                        let mut column = [0.0; 8];
+                        scalar_sampler.final_density_column(x0 + lx, z0 + lz, y0, &mut column);
+                        for ly in 0..8 {
+                            let index = ((lz * 4 + lx) * 8 + ly) as usize;
+                            assert_eq!(
+                                cell[index].to_bits(),
+                                column[ly as usize].to_bits(),
+                                "bundled cell mismatch at ({x0},{y0},{z0}) local ({lx},{ly},{lz})"
+                            );
+                            if ly > 0 && cell[index].to_bits() != cell[index - 1].to_bits() {
+                                transitions += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(transitions > 0, "bundled control sweep did not cross any density branch");
     let interpolated_nodes = program.count_kind("interpolated");
     let structural_slots = program.interpolating_slots();
     assert!(

@@ -23,6 +23,31 @@ fill_stage                shape, with the beard term added at the final_density 
 structure_place_stage     write every referenced start's pieces into this chunk (structures.rs)
 ```
 
+Reference gathering enumerates only placement-cell origins that can fall inside its
+17×17 source window, then applies the ordinary frequency, exclusion, start, biome,
+bounding-box and portal-spill filters once during start evaluation. Random-spread sets are
+inverted by their cell math; ring sets use the existing context-aware origin index, including its empty
+far-from-ring fast path. The candidate list is sorted by source chunk so retained
+reference order is unchanged. A placement type without an exact inverse keeps the
+complete rectangular walk as its fallback.
+
+Each start-evaluation context reuses an aquifer and compact bounded caches for aquifer and `(x, z)`
+height probes. Both use fixed open-addressed storage, so ordinary lookups do not allocate or scan a
+linear map; a height cursor retains both `_WG` heightmap answers and the point where its downward
+walk stopped, so requesting the other map resumes the same exact scan instead of rereading the
+upper column. Height answers use an out-of-band sentinel rather than `Option<i32>`, keeping each
+entry to five `i32` fields. The caches are request-scoped and only a full-table replacement can
+repeat a probe or aquifer build; neither retains world columns or changes the store's eviction
+behaviour. The current table capacities are 512 aquifers and 256 height probes. The latter is a
+deliberate bounded working set: the 17×17 reference lifecycle can exceed it for large structure
+footprints, so replacements are expected and are counted rather than silently turning into an
+unbounded map.
+
+The start biome gate uses the context's borrowed membership query, so the production sampler does
+not allocate a biome id for every candidate. Its pre-surface block-kind reads retain only the
+immediately previous coordinate result; this is enough for eager mineshaft predicates' repeated
+checks without retaining a terrain region or allocating a cache table.
+
 A structure's pieces reach the grid one of five ways: **eager blocks** built once at start time
 against a `StartContext` (the ordinary coded pieces), a **template** placed by
 `structure_place_stage` (shipwreck, ocean ruin, igloo, ruined portal, every jigsaw structure), or a
@@ -44,13 +69,23 @@ eager blocks and runs only the terrain-dependent support columns and chest-facin
 it must not regenerate the random piece tree. Starts produced without that descriptor retain the
 legacy replay fallback, which is useful when extending persisted or fixture-created start formats.
 
+Parsed structure blueprints are shared across seed changes only for fingerprinted immutable asset
+bundles. The process cache retains at most eight blueprints; live registries own their products, so
+eviction can only repeat parsing and never invalidate generation. Dynamic resolvers bypass it.
+
 Concentric-ring sets are generator-wide: `StructureRegistry` resolves the placement set's preferred
 biome holder-set, searches the 112-block square around each initial candidate at quart resolution,
-and caches the relocated chunk list for `starts_at`. During each ring set's build, each unique probe
-coordinate's immutable climate target is sampled once (in parallel on native targets), while each
-biome-tree lookup and its cursor history still runs in probe order. The resulting list is consumed by the same
-structure-set gates as random-spread sets, so a ring candidate reaches the ordinary biome check,
-piece generator and placement stages instead of stopping at parsed placement data.
+and caches the relocated chunk list for `starts_at`. Fingerprinted asset bundles also share that
+immutable list across equivalent seed/configuration generators; dynamic resolvers stay on a
+registry-local cache. The process cache is capped at 32 products; eviction can repeat work but
+cannot alter placement. During each ring set's build, each unique probe coordinate's immutable climate
+target is sampled once (in parallel on native targets), while each biome-tree lookup and its cursor
+history still runs in probe order. The resulting list is consumed by the same structure-set gates as
+random-spread sets, so a ring candidate reaches the ordinary biome check, piece generator and
+placement stages instead of stopping at parsed placement data.
+Queries outside the initial-candidate relocation halo use an immutable empty view, so the
+first ordinary spawn-area column does not pay the stronghold relocation scan. A later query
+near a possible ring position materializes the full list and retains the same exact lifecycle.
 
 Jigsaw pools also contain **feature elements**. `PoolStore::load` resolves their placed-feature
 document into a `PoolFeaturePlacement`, retaining the assembled world-space origin instead of
@@ -217,6 +252,19 @@ The ruined-portal terrain stream and full post-template write walk use the exter
 `crates/lodestone-worldgen/tests/support/coded_ruined_portal_terrain_external.txt`; the same portal
 geometry is run against three target chunks, and the stream-derived distance draw plus resulting
 netherrack hash differ from the position-only control.
+
+The embedded production counter census is also the cache liveness and output control. For seed 42,
+one cold `(0, 0)` column made 6,811 height lookups (2,546 hits, 4,265 misses, 3,949 bounded
+replacements) and 81,009 aquifer lookups (80,821 hits, 188 builds, zero replacements); seed 43 made
+10,025 height lookups (4,009 hits, 6,016 misses, 5,741 replacements) and 112,573 aquifer lookups
+(112,407 hits, 166 builds, zero replacements). The block-stream digests were
+`70ed73dc21b4982335f567bc34ba89ef646ce1a50f442c4a40c1eddfeb9efa98` and
+`2a2d4c9aa2150cbc0ae51bb733672cc23253f9ef3751a15db4ad634de303298a`; the differing-seed control
+rejects an inert cache or input. These counts show that 512 aquifer slots cover the request without
+rebuilds, while 256 height slots intentionally trade replacement work for a fixed bound. The cache
+arrays are allocation-free: 512 aquifer slots occupy 8,192 bytes and 256 compact height entries
+occupy 5,120 bytes per sampler, before the small cursor and `RefCell` fields; eviction replaces an
+`Arc` or five-word entry in place and cannot retain a world column.
 
 ## Configuration
 

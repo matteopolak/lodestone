@@ -289,9 +289,8 @@ pub struct EndColumn {
     client_heightmaps: [[u16; 256]; 3],
     gateways: Vec<decorate::EndGateway>,
     /// Block-entity creation events emitted while structure blocks were placed.
-    /// These are retained even when a later structure or feature overwrites the
-    /// block, because the packet lifecycle observes the creation sidecar before
-    /// the final block field is assembled.
+    /// These are retained when a later structure or feature overwrites the
+    /// block, because the packet lifecycle observes the creation sidecar first.
     block_entity_events: Vec<EndBlockEntityEvent>,
     structure_blocks: StructureBlocks,
 }
@@ -301,8 +300,7 @@ pub struct EndColumn {
 /// This is deliberately an event rather than a final-state census: a later
 /// structure write may replace the state while the generated chunk still owns
 /// the entity record created by the earlier placement. Ender chests are filtered
-/// by the producer because their records are player-owned rather than generated
-/// packet sidecars.
+/// because their records are player-owned rather than generated packet sidecars.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EndBlockEntityEvent {
     /// Absolute block position of the state write.
@@ -1510,6 +1508,10 @@ impl EndGenerator {
                 }
             }
         }
+        block_entity_events.retain(|event| {
+            (min_x..min_x + 16).contains(&event.position[0])
+                && (min_z..min_z + 16).contains(&event.position[2])
+        });
         EndStructurePlacementResult {
             block_entity_events,
             structure_blocks: mutation_recorder.finish(world.interner()),

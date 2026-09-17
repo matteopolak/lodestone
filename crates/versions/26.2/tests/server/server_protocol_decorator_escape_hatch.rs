@@ -232,7 +232,6 @@ async fn join(protocol: impl ServerProtocol + 'static, name: &str) -> (ClientHan
         (-1..=1, -1..=1),
         (0, 0),
         0,
-        0,
     );
     let (handle, events) =
         ClientBuilder::new(address(), profile(name), Box::new(adapter())).connect_with(client_io);

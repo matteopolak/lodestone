@@ -135,7 +135,6 @@ async fn open(dir: &Path) -> lodestone_server::IntegratedServer {
         HEIGHT,
         (0..=0, 0..=0),
         SPAWN_CENTER,
-        0,
         1,
         // Far longer than this test runs: every write below is an explicit
         // one, so nothing here depends on the autosave timer firing.

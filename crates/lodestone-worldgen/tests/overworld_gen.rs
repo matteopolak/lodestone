@@ -71,6 +71,15 @@ fn make_generator() -> OverworldGenerator {
     OverworldGenerator::new(SEED, &settings, &resolver, "minecraft:plains", false)
 }
 
+#[test]
+fn production_aquifer_carries_compiled_preliminary_surface_graph() {
+    let generator = make_generator();
+    assert!(
+        generator.preliminary_surface_program_nodes() > 0,
+        "production aquifer construction did not retain a compiled preliminary graph"
+    );
+}
+
 /// Every block's solidity in the composed output must match the **real
 /// aquifer's own** solid/non-solid decision — not raw
 /// `density > 0` any more. Before this crate composed the real aquifer, shape

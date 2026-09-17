@@ -40,7 +40,7 @@
 //! The `_ =>` in `parse_configured_feature_doc` is the island factory here: a variant
 //! added without an arm parses to `Unsupported` and is silently never reached.
 
-use std::collections::HashSet;
+use std::{cell::RefCell, collections::HashSet};
 use std::sync::Arc;
 
 use crate::feature::{BlockPos, IntProvider};
@@ -73,6 +73,26 @@ struct CompatBlockPosSet {
     /// buckets in ascending index and preserves insertion order within a
     /// bucket; [`Self::bucket_order`] reconstructs that walk.
     entries: Vec<BlockPos>,
+}
+
+thread_local! {
+    static PATCH_SURFACES: RefCell<Vec<CompatBlockPosSet>> = const { RefCell::new(Vec::new()) };
+    static FALLEN_LOG: RefCell<Vec<BlockPos>> = const { RefCell::new(Vec::new()) };
+}
+
+fn take_patch_surface() -> CompatBlockPosSet {
+    PATCH_SURFACES.with(|slot| slot.borrow_mut().pop().unwrap_or_default())
+}
+
+fn return_patch_surface(mut surface: CompatBlockPosSet) {
+    surface.members.clear();
+    surface.entries.clear();
+    PATCH_SURFACES.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.len() < 2 {
+            slot.push(surface);
+        }
+    });
 }
 
 impl CompatBlockPosSet {
@@ -2051,7 +2071,7 @@ pub(super) fn place_multiface_growth<R: RandomSource>(
     if valid.is_empty() {
         return;
     }
-    let search_order = shuffled_copy(random, valid.as_slice());
+    let search_order = shuffled_directions(random, valid.as_slice());
     if place_growth_if_possible(random, pos, cfg, search_order.as_slice(), grid) {
         return;
     }
@@ -2067,7 +2087,7 @@ pub(super) fn place_multiface_growth<R: RandomSource>(
                 placement.len += 1;
             }
         }
-        let placement = shuffled_copy(random, placement.as_slice());
+        let placement = shuffled_directions(random, placement.as_slice());
         for _ in 0..cfg.search_range {
             let at = BlockPos {
                 x: pos.x + search_dir.0,
@@ -2273,7 +2293,7 @@ fn spread_multiface<R: RandomSource>(
     cfg: &MultifaceGrowthCfg,
     grid: &mut VegGrid,
 ) {
-    for direction in shuffled_copy(random, &DIRECTIONS) {
+    for direction in shuffled_array(random, &DIRECTIONS) {
         if same_axis(direction, starting_face)
             || !has_face(source_state, face_property(starting_face.0, starting_face.1, starting_face.2))
             || has_face(source_state, face_property(direction.0, direction.1, direction.2))
@@ -2362,22 +2382,36 @@ fn face_property(dx: i32, dy: i32, dz: i32) -> &'static str {
     }
 }
 
-/// Vanilla's own shuffled-copy / shuffle — Fisher-Yates `for (i = size; i > 1; i--)
-/// swap(i - 1, nextInt(i))`, so exactly `size - 1` draws. The count is what
-/// matters most here; see [`place_multiface_growth`]'s doc.
-fn shuffled_copy<R: RandomSource>(random: &mut R, input: &[(i32, i32, i32)]) -> DirectionList {
+fn shuffled_directions<R: RandomSource>(
+    random: &mut R,
+    input: &[(i32, i32, i32)],
+) -> DirectionList {
+    assert!(input.len() <= 6);
     let mut out = DirectionList {
         values: [(0, 0, 0); 6],
         len: input.len(),
     };
     out.values[..input.len()].copy_from_slice(input);
-    let mut i = out.len;
+    shuffle_offsets(random, &mut out.values[..out.len]);
+    out
+}
+
+fn shuffled_array<R: RandomSource, const N: usize>(
+    random: &mut R,
+    input: &[(i32, i32, i32); N],
+) -> [(i32, i32, i32); N] {
+    let mut out = *input;
+    shuffle_offsets(random, &mut out);
+    out
+}
+
+fn shuffle_offsets<R: RandomSource>(random: &mut R, values: &mut [(i32, i32, i32)]) {
+    let mut i = values.len();
     while i > 1 {
         let j = random.next_int_bounded(i as i32) as usize;
-        out.values.swap(i - 1, j);
+        values.swap(i - 1, j);
         i -= 1;
     }
-    out
 }
 
 /// Vanilla's own math-helper next-int at `(random, min, max)` — inclusive both ends, one draw.
@@ -2679,53 +2713,44 @@ pub(super) fn place_huge_mushroom_at_height<R: RandomSource>(
     match cfg.kind {
         HugeMushroomKind::Brown => {
             let radius = cfg.foliage_radius;
-            let positions: Vec<_> = (-radius..=radius)
-                .flat_map(|dx| {
-                    (-radius..=radius).filter_map(move |dz| {
-                        // The four corners are deliberately absent from the brown cap.
-                        ((dx != -radius || dz != -radius)
-                            && (dx != -radius || dz != radius)
-                            && (dx != radius || dz != -radius)
-                            && (dx != radius || dz != radius))
-                            .then_some((dx, dz))
-                    })
-                })
-                .collect();
-            let occupied: HashSet<_> = positions.iter().copied().collect();
-            for (dx, dz) in positions {
-                place_cap(
-                    BlockPos { x: pos.x + dx, y: pos.y + height, z: pos.z + dz },
-                    !occupied.contains(&(dx - 1, dz)),
-                    !occupied.contains(&(dx + 1, dz)),
-                    !occupied.contains(&(dx, dz - 1)),
-                    !occupied.contains(&(dx, dz + 1)),
-                    true,
-                );
+            for dx in -radius..=radius {
+                for dz in -radius..=radius {
+                    if !brown_cap_occupied(dx, dz, radius) {
+                        continue;
+                    }
+                    place_cap(
+                        BlockPos { x: pos.x + dx, y: pos.y + height, z: pos.z + dz },
+                        !brown_cap_occupied(dx - 1, dz, radius),
+                        !brown_cap_occupied(dx + 1, dz, radius),
+                        !brown_cap_occupied(dx, dz - 1, radius),
+                        !brown_cap_occupied(dx, dz + 1, radius),
+                        true,
+                    );
+                }
             }
         }
         HugeMushroomKind::Red => {
             let center = cfg.foliage_radius - 2;
             for y in (height - 3)..=height {
-                let radius = if y < height { cfg.foliage_radius } else { cfg.foliage_radius - 1 };
-                let positions: Vec<_> = (-radius..=radius)
-                    .flat_map(|dx| {
-                        (-radius..=radius).filter_map(move |dz| {
-                            // The three lower layers are a plus-shaped rim; the
-                            // top layer is a filled smaller square.
-                            (y == height || (west_or_east(dx, radius) != north_or_south(dz, radius)))
-                                .then_some((dx, dz))
-                        })
-                    })
-                    .collect();
-                for (dx, dz) in positions {
-                    place_cap(
-                        BlockPos { x: pos.x + dx, y: pos.y + y, z: pos.z + dz },
-                        dx < -center,
-                        dx > center,
-                        dz < -center,
-                        dz > center,
-                        y >= height - 1,
-                    );
+                let radius = if y < height {
+                    cfg.foliage_radius
+                } else {
+                    cfg.foliage_radius - 1
+                };
+                for dx in -radius..=radius {
+                    for dz in -radius..=radius {
+                        if y != height && west_or_east(dx, radius) == north_or_south(dz, radius) {
+                            continue;
+                        }
+                        place_cap(
+                            BlockPos { x: pos.x + dx, y: pos.y + y, z: pos.z + dz },
+                            dx < -center,
+                            dx > center,
+                            dz < -center,
+                            dz > center,
+                            y >= height - 1,
+                        );
+                    }
                 }
             }
         }
@@ -2742,6 +2767,13 @@ pub(super) fn place_huge_mushroom_at_height<R: RandomSource>(
             }
         }
     }
+}
+
+#[inline]
+fn brown_cap_occupied(dx: i32, dz: i32, radius: i32) -> bool {
+    (-radius..=radius).contains(&dx)
+        && (-radius..=radius).contains(&dz)
+        && !(dx.abs() == radius && dz.abs() == radius)
 }
 
 /// Places one Nether fungus. The height, rare doubled height, broad-stem roll,
@@ -2976,7 +3008,7 @@ pub(super) fn place_vegetation_patch_with_seed<R: RandomSource>(
     let outwards = -inwards;
     // Membership and table traversal are both observable: the latter assigns
     // each nested-placement random draw to a particular surface cell.
-    let mut surface = CompatBlockPosSet::default();
+    let mut surface = take_patch_surface();
     for dx in -x_radius..=x_radius {
         let x_edge = dx == -x_radius || dx == x_radius;
         for dz in -z_radius..=z_radius {
@@ -3033,20 +3065,21 @@ pub(super) fn place_vegetation_patch_with_seed<R: RandomSource>(
         // `WaterloggedVegetationPatchFeature`: only the non-exposed surface cells
         // survive. The new set's table order governs both water writes and the
         // subsequent nested-feature random draws.
-        let mut kept = CompatBlockPosSet::default();
-        for p in surface
-            .into_iter()
-            .filter(|p| !patch_exposed(grid, *p))
-        {
-            kept.insert(p);
+        let mut kept = take_patch_surface();
+        for &p in &surface.entries {
+            if !patch_exposed(grid, p) {
+                kept.insert(p);
+            }
         }
         kept.sort_bucket_order();
         for &p in &kept.entries {
             grid.set_state_if_in_bounds(p.x, p.y, p.z, "minecraft:water");
         }
+        return_patch_surface(surface);
         surface = kept;
     }
-    for p in surface {
+    surface.sort_bucket_order();
+    for &p in &surface.entries {
         if cfg.vegetation_chance > 0.0
             && random.next_float() < cfg.vegetation_chance
         {
@@ -3065,6 +3098,7 @@ pub(super) fn place_vegetation_patch_with_seed<R: RandomSource>(
             );
         }
     }
+    return_patch_surface(surface);
 }
 
 fn patch_exposed(grid: &VegGrid, pos: BlockPos) -> bool {
@@ -3151,6 +3185,18 @@ struct SculkCursor {
     update_delay: i32,
     decay_delay: i32,
     facings: Option<u8>,
+}
+
+thread_local! {
+    static SCULK_CURSORS: RefCell<Vec<SculkCursor>> = const { RefCell::new(Vec::new()) };
+    static SCULK_NEXT_CURSORS: RefCell<Vec<SculkCursor>> = const { RefCell::new(Vec::new()) };
+}
+
+fn return_sculk_cursors(mut cursors: Vec<SculkCursor>, mut next: Vec<SculkCursor>) {
+    cursors.clear();
+    next.clear();
+    SCULK_CURSORS.with(|slot| *slot.borrow_mut() = cursors);
+    SCULK_NEXT_CURSORS.with(|slot| *slot.borrow_mut() = next);
 }
 
 fn sculk_behaviour(grid: &VegGrid, pos: BlockPos) -> SculkBehaviourKind {
@@ -3399,20 +3445,16 @@ fn sculk_regrow_vein(grid: &mut VegGrid, pos: BlockPos, source_state: &str, faci
     grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, sculk_vein_state_id(grid, mask, waterlogged))
 }
 
-fn sculk_attempt_spread_vein(
-    grid: &mut VegGrid,
-    pos: BlockPos,
-    source_state: &str,
-    facings: Option<u8>,
-) -> bool {
+fn sculk_attempt_spread_vein(grid: &mut VegGrid, pos: BlockPos, source_state: StateId, facings: Option<u8>) -> bool {
+    let source_state_name = grid.interner().name_of(source_state);
     match sculk_behaviour(grid, pos) {
         SculkBehaviourKind::Default => match facings {
-            None => sculk_spread_all(grid, pos, source_state, true),
-            Some(mask) if mask != 0 => sculk_regrow_vein(grid, pos, source_state, mask),
+            None => sculk_spread_all(grid, pos, source_state_name, true),
+            Some(mask) if mask != 0 => sculk_regrow_vein(grid, pos, source_state_name, mask),
             Some(_) => false,
         },
         SculkBehaviourKind::Sculk | SculkBehaviourKind::Vein => {
-            sculk_spread_all(grid, pos, source_state, false)
+            sculk_spread_all(grid, pos, source_state_name, false)
         }
     }
 }
@@ -3469,7 +3511,7 @@ fn sculk_valid_movement_pos<R: RandomSource>(
     from: BlockPos,
 ) -> Option<BlockPos> {
     let mut fallback = None;
-    for (dx, dy, dz) in shuffled_copy(random, &SCULK_NON_CORNER_NEIGHBOURS) {
+    for (dx, dy, dz) in shuffled_array(random, &SCULK_NON_CORNER_NEIGHBOURS) {
         let target = BlockPos { x: from.x + dx, y: from.y + dy, z: from.z + dz };
         if sculk_behaviour(grid, target) == SculkBehaviourKind::Default
             || !sculk_movement_unobstructed(grid, from, target)
@@ -3484,11 +3526,12 @@ fn sculk_valid_movement_pos<R: RandomSource>(
     fallback
 }
 
-fn sculk_on_discharged(grid: &mut VegGrid, pos: BlockPos, state: &str) {
-    if super::base_id(state) != "minecraft:sculk_vein" {
+fn sculk_on_discharged(grid: &mut VegGrid, pos: BlockPos, state: StateId) {
+    let state_name = grid.interner().name_of(state);
+    if grid.interner().base_of(state) != grid.interner().id_of("minecraft:sculk_vein") {
         return;
     }
-    let mut mask = sculk_face_mask(state);
+    let mut mask = sculk_face_mask(state_name);
     for (index, &face) in SCULK_DIRECTIONS.iter().enumerate() {
         if sculk_has_face(mask, face)
             && base_at(grid, pos.x + face.0, pos.y + face.1, pos.z + face.2) == "minecraft:sculk"
@@ -3496,7 +3539,7 @@ fn sculk_on_discharged(grid: &mut VegGrid, pos: BlockPos, state: &str) {
             mask &= !(1 << index);
         }
     }
-    let waterlogged = state.contains("waterlogged=true");
+    let waterlogged = state_name.contains("waterlogged=true");
     let next = if mask == 0 {
         if waterlogged {
             grid.interner().id_of("minecraft:water[level=0]")
@@ -3509,23 +3552,21 @@ fn sculk_on_discharged(grid: &mut VegGrid, pos: BlockPos, state: &str) {
     grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, next);
 }
 
-fn sculk_random_growth_state<R: RandomSource>(random: &mut R, waterlogged: bool) -> String {
+fn sculk_random_growth_state<R: RandomSource>(
+    random: &mut R,
+    grid: &VegGrid,
+    waterlogged: bool,
+) -> StateId {
     let growth_roll = random.next_int_bounded(11);
-    let base = if growth_roll == 0 {
-        "minecraft:sculk_shrieker"
+    if growth_roll == 0 {
+        grid.formatted_state_id(format_args!(
+            "minecraft:sculk_shrieker[can_summon=true,shrieking=false,waterlogged={waterlogged}]"
+        ))
     } else {
-        "minecraft:sculk_sensor"
-    };
-    let mut state = CanonicalStateId::from_state_str(base)
-        .map(CanonicalStateId::canonical_state)
-        .unwrap_or_else(|| base.to_string());
-    if base == "minecraft:sculk_shrieker" {
-        state = state.replace("can_summon=false", "can_summon=true");
+        grid.formatted_state_id(format_args!(
+            "minecraft:sculk_sensor[facing=north,power=0,sculk_sensor_phase=inactive,waterlogged={waterlogged}]"
+        ))
     }
-    if waterlogged {
-        state = state.replace("waterlogged=false", "waterlogged=true");
-    }
-    state
 }
 
 fn sculk_can_place_growth(grid: &VegGrid, pos: BlockPos) -> bool {
@@ -3555,11 +3596,10 @@ fn sculk_attempt_place_sculk<R: RandomSource>(
     grid: &mut VegGrid,
     tags: &VegTags,
     pos: BlockPos,
-    state: &str,
+    state_mask: u8,
 ) -> bool {
-    let mask = sculk_face_mask(state);
-    for support in shuffled_copy(random, &SCULK_DIRECTIONS) {
-        if !sculk_has_face(mask, support) {
+    for support in shuffled_array(random, &SCULK_DIRECTIONS) {
+        if !sculk_has_face(state_mask, support) {
             continue;
         }
         let support_pos = BlockPos {
@@ -3590,9 +3630,11 @@ fn sculk_attempt_place_sculk<R: RandomSource>(
                 y: support_pos.y + vein_direction.1,
                 z: support_pos.z + vein_direction.2,
             };
-            let neighbour_state = grid.get(neighbour.x, neighbour.y, neighbour.z).to_string();
-            if super::base_id(&neighbour_state) == "minecraft:sculk_vein" {
-                sculk_on_discharged(grid, neighbour, &neighbour_state);
+            let neighbour_state = grid.get_id(neighbour.x, neighbour.y, neighbour.z);
+            if grid.interner().base_of(neighbour_state)
+                == grid.interner().id_of("minecraft:sculk_vein")
+            {
+                sculk_on_discharged(grid, neighbour, neighbour_state);
             }
         }
         return true;
@@ -3614,8 +3656,9 @@ fn sculk_attempt_use_charge<R: RandomSource>(
             if cursor.decay_delay > 0 { cursor.charge } else { 0 }
         }
         SculkBehaviourKind::Vein => {
-            let state = grid.get(cursor.pos.x, cursor.pos.y, cursor.pos.z).to_string();
-            if spread_veins && sculk_attempt_place_sculk(random, grid, tags, cursor.pos, &state) {
+            let state = grid.get_id(cursor.pos.x, cursor.pos.y, cursor.pos.z);
+            let state_mask = sculk_face_mask(grid.interner().name_of(state));
+            if spread_veins && sculk_attempt_place_sculk(random, grid, tags, cursor.pos, state_mask) {
                 cursor.charge - 1
             } else if {
                 let roll = random.next_int_bounded(5);
@@ -3639,8 +3682,8 @@ fn sculk_attempt_use_charge<R: RandomSource>(
                 let growth_roll = random.next_int_bounded(50);
                 if growth_roll < cursor.charge {
                     let above = grid.get(cursor.pos.x, cursor.pos.y + 1, cursor.pos.z);
-                    let growth = sculk_random_growth_state(random, sculk_is_water_source(above));
-                    grid.set_if_in_bounds(cursor.pos.x, cursor.pos.y + 1, cursor.pos.z, growth);
+                    let growth = sculk_random_growth_state(random, grid, sculk_is_water_source(above));
+                    grid.set_id_if_in_bounds(cursor.pos.x, cursor.pos.y + 1, cursor.pos.z, growth);
                 }
                 return (cursor.charge - 50).max(0);
             }
@@ -3675,21 +3718,21 @@ fn sculk_update_cursor<R: RandomSource>(
         cursor.update_delay -= 1;
         return;
     }
-    let mut state = grid.get(cursor.pos.x, cursor.pos.y, cursor.pos.z).to_string();
+    let mut state = grid.get_id(cursor.pos.x, cursor.pos.y, cursor.pos.z);
     let mut behaviour = sculk_behaviour(grid, cursor.pos);
-    if spread_veins && sculk_attempt_spread_vein(grid, cursor.pos, &state, cursor.facings) {
+    if spread_veins && sculk_attempt_spread_vein(grid, cursor.pos, state, cursor.facings) {
         if behaviour != SculkBehaviourKind::Sculk {
-            state = grid.get(cursor.pos.x, cursor.pos.y, cursor.pos.z).to_string();
+            state = grid.get_id(cursor.pos.x, cursor.pos.y, cursor.pos.z);
             behaviour = sculk_behaviour(grid, cursor.pos);
         }
     }
     cursor.charge = sculk_attempt_use_charge(random, grid, tags, cursor, origin, behaviour, spread_veins);
     if cursor.charge <= 0 {
-        sculk_on_discharged(grid, cursor.pos, &state);
+        sculk_on_discharged(grid, cursor.pos, state);
         return;
     }
     if let Some(next) = sculk_valid_movement_pos(random, grid, tags, cursor.pos) {
-        sculk_on_discharged(grid, cursor.pos, &state);
+        sculk_on_discharged(grid, cursor.pos, state);
         cursor.pos = next;
         let dx = cursor.pos.x - origin.x;
         let dz = cursor.pos.z - origin.z;
@@ -3697,10 +3740,10 @@ fn sculk_update_cursor<R: RandomSource>(
             cursor.charge = 0;
             return;
         }
-        state = grid.get(cursor.pos.x, cursor.pos.y, cursor.pos.z).to_string();
+        state = grid.get_id(cursor.pos.x, cursor.pos.y, cursor.pos.z);
     }
     if sculk_behaviour(grid, cursor.pos) != SculkBehaviourKind::Default {
-        cursor.facings = Some(sculk_face_mask(&state));
+        cursor.facings = Some(sculk_face_mask(grid.interner().name_of(state)));
     }
     cursor.decay_delay = match behaviour {
         SculkBehaviourKind::Default => (cursor.decay_delay - 1).max(0),
@@ -3722,9 +3765,13 @@ pub(super) fn place_sculk_patch<R: RandomSource>(
     if !sculk_can_spread_from(grid, pos) {
         return;
     }
+    let mut cursors = SCULK_CURSORS.take();
+    let mut next = SCULK_NEXT_CURSORS.take();
+    cursors.clear();
+    next.clear();
     let rounds = cfg.spread_rounds + cfg.growth_rounds;
     for round in 0..rounds {
-        let mut cursors = Vec::new();
+        cursors.clear();
         if cfg.charge_count > 0 && cfg.amount_per_charge > 0 {
             for _ in 0..cfg.charge_count {
                 let mut charge = cfg.amount_per_charge;
@@ -3743,8 +3790,8 @@ pub(super) fn place_sculk_patch<R: RandomSource>(
         }
         let spread_veins = round < cfg.spread_rounds;
         for _ in 0..cfg.spread_attempts.max(0) {
-            let mut next = Vec::with_capacity(cursors.len());
-            for mut cursor in cursors {
+            next.clear();
+            for mut cursor in cursors.drain(..) {
                 let dx = cursor.pos.x - pos.x;
                 let dy = cursor.pos.y - pos.y;
                 let dz = cursor.pos.z - pos.z;
@@ -3755,7 +3802,7 @@ pub(super) fn place_sculk_patch<R: RandomSource>(
                     }
                 }
             }
-            cursors = next;
+            std::mem::swap(&mut cursors, &mut next);
             if cursors.is_empty() {
                 break;
             }
@@ -3763,10 +3810,8 @@ pub(super) fn place_sculk_patch<R: RandomSource>(
     }
     let below = BlockPos { x: pos.x, y: pos.y - 1, z: pos.z };
     if random.next_float() <= cfg.catalyst_chance && sculk_full_collision_at(grid, below) {
-        let state = CanonicalStateId::from_state_str("minecraft:sculk_catalyst")
-            .map(CanonicalStateId::canonical_state)
-            .unwrap_or_else(|| "minecraft:sculk_catalyst".to_string());
-        grid.set_if_in_bounds(pos.x, pos.y, pos.z, state);
+        let state = grid.interner().id_of("minecraft:sculk_catalyst");
+        grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state);
     }
     let extra = cfg.extra_rare_growths.sample(random);
     for _ in 0..extra {
@@ -3784,15 +3829,13 @@ pub(super) fn place_sculk_patch<R: RandomSource>(
         if air_at(grid, candidate.x, candidate.y, candidate.z)
             && sculk_face_sturdy_at(grid, candidate, (0, -1, 0))
         {
-            let shrieker = CanonicalStateId::from_state_str("minecraft:sculk_shrieker")
-                .map(CanonicalStateId::canonical_state)
-                .unwrap_or_else(|| {
-                    "minecraft:sculk_shrieker[can_summon=false,shrieking=false,waterlogged=false]".to_string()
-                })
-                .replace("can_summon=false", "can_summon=true");
-            grid.set_if_in_bounds(candidate.x, candidate.y, candidate.z, shrieker);
+            let shrieker = grid.formatted_state_id(format_args!(
+                "minecraft:sculk_shrieker[can_summon=true,shrieking=false,waterlogged=false]"
+            ));
+            grid.set_id_if_in_bounds(candidate.x, candidate.y, candidate.z, shrieker);
         }
     }
+    return_sculk_cursors(cursors, next);
 }
 
 /// Vanilla's own fallen-tree feature's "is over solid ground" (`isFaceSturdy(UP)` on the block
@@ -3928,7 +3971,8 @@ pub(super) fn place_fallen_tree<R: RandomSource>(
     // `placeFallenLog`: unconditional placement, sideways axis from
     // `direction`'s own axis (`RotatedPillarBlock.AXIS`).
     let axis = if direction.0 != 0 { "x" } else { "z" };
-    let mut fallen_log = Vec::with_capacity(log_length.max(0) as usize);
+    let mut fallen_log = FALLEN_LOG.take();
+    fallen_log.clear();
     for i in 0..log_length.max(0) {
         let pos = BlockPos {
             x: log_start.x + direction.0 * i,
@@ -3942,6 +3986,7 @@ pub(super) fn place_fallen_tree<R: RandomSource>(
         }
     }
     apply_fallen_tree_decorators(random, &fallen_log, &cfg.log_decorators, grid, tags);
+    FALLEN_LOG.set(fallen_log);
 }
 
 #[cfg(test)]
@@ -4034,6 +4079,24 @@ mod tests {
                 (0, 1, 1),
             ],
         );
+    }
+
+    #[test]
+    fn sculk_neighbour_shuffle_supports_all_eighteen_offsets() {
+        let mut random = LegacyRandomSource::new(0x5c01_5eed);
+        let shuffled = shuffled_array(&mut random, &SCULK_NON_CORNER_NEIGHBOURS);
+        let next_after_shuffle = random.next_int();
+
+        assert_eq!(
+            shuffled.into_iter().collect::<HashSet<_>>(),
+            SCULK_NON_CORNER_NEIGHBOURS.into_iter().collect(),
+        );
+
+        let mut draw_control = LegacyRandomSource::new(0x5c01_5eed);
+        for bound in (2..=SCULK_NON_CORNER_NEIGHBOURS.len()).rev() {
+            let _ = draw_control.next_int_bounded(bound as i32);
+        }
+        assert_eq!(next_after_shuffle, draw_control.next_int());
     }
 
     #[test]

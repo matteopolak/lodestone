@@ -449,7 +449,6 @@ async fn run_one(fixture: &LoadedFixture) {
         source,
         (cx0..=cx1, cz0..=cz1),
         mob_center,
-        0,
         4,
     );
 

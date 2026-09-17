@@ -93,7 +93,7 @@ A saved server entry retains its port as `Option<u16>`. CLI parsing likewise rec
 
 The resolved host and port are supplied through `ClientBuilder::connect_target`; the original `ServerAddress` remains untouched for the handshake. This distinction matters for virtual-hosting proxies, which route using the hostname the player entered even when DNS directs the socket elsewhere.
 
-TCP establishment has a 10-second budget and reports `ClientError::ConnectTimeout`. Once connected, the packet reader has a separate 30-second idle budget and reports `ClientError::Timeout`. A read timeout logs the current protocol state, received-packet count, and last packet ID under the `net_join` target.
+TCP establishment has a 10-second budget and reports `ClientError::ConnectTimeout`. Remote packet readers have a separate 30-second idle budget and report `ClientError::Timeout`. Integrated singleplayer has no packet-read deadline: initial generation remains authoritative even when it is slow, while the loading UI and join profiler expose the delay. A remote read timeout logs the current protocol state, received-packet count, and last packet ID under the `net_join` target.
 
 ## How to change it
 
@@ -121,7 +121,7 @@ For the browser deployment, build both halves without their default features:
 The second command is important: a singleplayer-only WASM bundle served by a
 relay-enabled native server would still leave an arbitrary-server route exposed.
 
-The shell currently fixes TCP connection timeout at 10 seconds and inbound packet idle timeout at 30 seconds in `lodestone_shell::net`. For focused join logs without GPU or shader compiler noise, run:
+The shell fixes TCP connection timeout at 10 seconds and remote inbound packet idle timeout at 30 seconds in `lodestone_shell::net`; integrated singleplayer leaves the packet read untimed. For focused join logs without GPU or shader compiler noise, run:
 
 ```text
 RUST_LOG=warn,net=info,net_join=info just run

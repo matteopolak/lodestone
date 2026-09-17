@@ -618,7 +618,6 @@ mod tests {
         let wait = TerrainWait {
             own_column_loaded: true,
             terrain_ready: Some(false),
-            elapsed: core::time::Duration::from_secs(1),
             player_alive: true,
             within_build_height: true,
         };
@@ -629,13 +628,11 @@ mod tests {
         );
     }
 
-    /// The terrain timeout belongs to each dimension, not to the lifetime of
-    /// the connection. This control makes the original-join clock expired
-    /// first, then proves a portal reset starts a new bounded wait before
-    /// destination terrain is ready.
+    /// A dimension reset re-arms the terrain gate and keeps the transition
+    /// cover up until destination terrain is ready.
     #[test]
-    fn dimension_reset_restarts_an_expired_terrain_wait_clock() {
-        use crate::menu::loading::{is_level_ready, TerrainWait, CLIENT_WAIT_TIMEOUT};
+    fn dimension_reset_waits_for_destination_terrain_without_a_timeout() {
+        use crate::menu::loading::{is_level_ready, TerrainWait};
 
         let mut sim = Sim::new(crate::config::Config {
             mode: crate::config::Mode::Window,
@@ -644,45 +641,24 @@ mod tests {
         });
         assert!(!sim.apply_respawn(Some(dim("minecraft:overworld"))));
 
-        // Negative control: before the transition, the synthetic join clock is
-        // already past its liveness bound, so the loading predicate would let
-        // the player through if this timestamp were reused.
-        sim.terrain_wait_started = Some(
-            crate::platform::Instant::now()
-                - CLIENT_WAIT_TIMEOUT
-                - core::time::Duration::from_secs(1),
-        );
-        assert!(is_level_ready(TerrainWait {
-            own_column_loaded: false,
-            terrain_ready: Some(false),
-            elapsed: CLIENT_WAIT_TIMEOUT + core::time::Duration::from_secs(1),
-            player_alive: true,
-            within_build_height: true,
-        }));
-
         sim.reset_for_dimension_change();
         assert_eq!(
             sim.connect_phase(),
             crate::menu::loading::ConnectPhase::LoadingTerrain,
             "a dimension edge must put the connected session back in terrain loading"
         );
-        let elapsed = sim
-            .terrain_wait_started
-            .expect("the transition starts a terrain wait clock")
-            .elapsed();
         assert!(
-            elapsed < CLIENT_WAIT_TIMEOUT,
-            "the destination wait must start at the respawn edge, got {elapsed:?}"
+            sim.dimension_transition_pending(),
+            "the destination cover must remain armed after the respawn edge"
         );
         assert!(
             !is_level_ready(TerrainWait {
                 own_column_loaded: false,
                 terrain_ready: Some(false),
-                elapsed,
                 player_alive: true,
                 within_build_height: true,
             }),
-            "an expired original join must not dismiss the destination loading screen"
+            "missing destination terrain must not dismiss the loading screen"
         );
     }
 

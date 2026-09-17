@@ -784,7 +784,7 @@ mod tests {
             let id = sim.spawn_wither_at(Vec3::new(
                 x_by_owner[index % x_by_owner.len()],
                 64.0,
-                (index / x_by_owner.len()) as f64 + 0.5,
+                (index / x_by_owner.len() % 8) as f64 + 0.5,
             ));
             let wither = sim.withers.get_mut(&id).expect("just spawned");
             wither.invulnerable_ticks = if index % 5 == 0 { 3 } else { 0 };

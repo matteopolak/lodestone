@@ -137,9 +137,15 @@ impl<'ast> Visit<'ast> for FunctionVisitor {
             self.facts.typed_schedule_calls.push(line);
             self.facts.stage_operations.push(line);
         }
-        if method == "cursor" || method == "cursor_at" {
+        if matches!(
+            method.as_str(),
+            "cursor" | "cursor_at" | "executor" | "executor_at" | "executor_with_trace"
+        ) {
             let receiver = render_expr(&node.receiver);
-            if receiver.contains("stage_schedule") || receiver.contains("StageSchedule") {
+            if receiver.contains("stage_schedule")
+                || receiver.contains("stage_pipeline")
+                || receiver.contains("StageSchedule")
+            {
                 self.facts
                     .central_cursors
                     .push((receiver, node.method.span().start()));
@@ -326,7 +332,18 @@ fn stage_operation_name(name: &str) -> bool {
     // Cached-prefix accessors delegate to cursor-checked implementations and
     // do not choose a pass order themselves. A shaped entrypoint may call one
     // without opening a second cursor.
-    if matches!(name, "pre_ore_stage" | "pre_decoration_stage") {
+    // These names end in `_stage` but are generic schedule bookkeeping or a
+    // timing wrapper, not generation passes. Counting them as stage work would
+    // make a helper that invokes one real pass look like an independent
+    // pipeline owner.
+    if matches!(
+        name,
+        "pre_ore_stage"
+            | "pre_decoration_stage"
+            | "profile_stage"
+            | "target_stage"
+            | "commit_stage"
+    ) {
         return false;
     }
     STAGE_LIKE_METHODS.contains(&name) || name.ends_with("_stage")
@@ -440,7 +457,9 @@ fn inspect_function(
         });
     } else if let Some(dimension) = dimension {
         if visitor.facts.central_cursors.iter().all(|(receiver, _)| {
-            !receiver.contains(dimension) && !receiver.contains("Self::stage_schedule")
+            !receiver.contains(dimension)
+                && !receiver.contains("Self::stage_schedule")
+                && !receiver.contains("Self::stage_pipeline")
         }) {
             let line = visitor.facts.central_cursors[0].1.line.max(1);
             violations.push(Violation {
@@ -603,7 +622,7 @@ fn horizon_setting_violations(root: &Path) -> Result<Vec<Violation>> {
             file: HORIZON_SETTING_FILES[0].to_owned(),
             line: 1,
             function: "MAX_HORIZON_DISTANCE_CHUNKS".to_owned(),
-            reason: "Distant Horizon storage/slider maximum must remain exactly 256 chunks".to_owned(),
+            reason: "Far Terrain storage/slider maximum must remain exactly 256 chunks".to_owned(),
         });
     }
     if !options_source.contains("DistantHorizon")
@@ -614,7 +633,7 @@ fn horizon_setting_violations(root: &Path) -> Result<Vec<Violation>> {
             file: HORIZON_SETTING_FILES[1].to_owned(),
             line: 1,
             function: "DistantHorizon".to_owned(),
-            reason: "Distant Horizon slider must use the shared 256-chunk maximum".to_owned(),
+            reason: "Far Terrain slider must use the shared 256-chunk maximum".to_owned(),
         });
     }
     Ok(violations)

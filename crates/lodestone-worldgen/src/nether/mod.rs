@@ -2659,9 +2659,8 @@ impl NetherGenerator {
         base_x: i32,
         base_z: i32,
     ) -> crate::dense_grid::DenseBlockGrid {
-        // Point lookups into `surface_diff` in a fixed order, never iteration — see
-        // [`crate::compose::materialize_column`] for the palette-order rule and the
-        // bug that established it.
+        // Consume the ordered per-column diff through the fixed materialization
+        // cursor; this keeps palette insertion independent of hash iteration.
         let world = crate::compose::materialize_column(
             &self.interner,
             field,

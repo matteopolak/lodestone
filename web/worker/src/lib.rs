@@ -26,8 +26,11 @@ pub fn start_worker(
     seed: i64,
     preset: u8,
     epoch: u32,
+    log_level: String,
 ) -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
+    install_logger(&log_level)?;
+    tracing::info!(%log_level, protocol, seed, preset, epoch, "browser server worker starting");
     lodestone_server::worldgen_session::register_browser_worker_epoch(epoch);
     PROGRESS_PORT.with(|slot| *slot.borrow_mut() = Some((progress_port.clone(), epoch)));
     let _ = lodestone_server::worldgen_progress::install_sink(post_worldgen_event);
@@ -45,6 +48,23 @@ pub fn start_worker(
         post_progress(&progress_port, epoch, "server-started");
     }
     result
+}
+
+fn install_logger(value: &str) -> Result<(), JsValue> {
+    let filter = match value {
+        "off" => log::LevelFilter::Off,
+        "error" => log::LevelFilter::Error,
+        "warn" => log::LevelFilter::Warn,
+        "info" => log::LevelFilter::Info,
+        "debug" => log::LevelFilter::Debug,
+        "trace" => log::LevelFilter::Trace,
+        _ => return Err(JsValue::from_str("invalid browser log level")),
+    };
+    let initial = filter.to_level().unwrap_or(log::Level::Error);
+    console_log::init_with_level(initial)
+        .map_err(|error| JsValue::from_str(&format!("cannot install browser logger: {error}")))?;
+    log::set_max_level(filter);
+    Ok(())
 }
 
 #[wasm_bindgen]

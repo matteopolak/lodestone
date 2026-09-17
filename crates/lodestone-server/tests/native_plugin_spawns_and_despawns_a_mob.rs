@@ -76,14 +76,11 @@ impl ChunkSource for FlatWorld {
 }
 
 fn open() -> IntegratedServer {
-    // mob_count: 0 -- no natural spawning to confuse "is my spawned mob really
-    // there" with "some unrelated natural mob happened to be there too".
     let (server, client) = IntegratedServer::open_in_memory_with_mobs(
         SilentProtocol,
         FlatWorld,
         (0..=0, 0..=0),
         (0, 0),
-        0,
         1,
     );
     // Never used: no connection is established in this file. Leaked rather

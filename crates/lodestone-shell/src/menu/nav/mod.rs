@@ -1082,8 +1082,8 @@ mod tests {
     fn options_button_sits_between_multiplayer_and_quit_and_opens_settings() {
         let (mut nav, _) = nav("options-button");
         let mut ui = UiState::new();
-        // Singleplayer, Multiplayer, Language, Accessibility, Options, Quit,
-        // in that order — inserting Options must not disturb Multiplayer's
+        // Singleplayer, Multiplayer, Friends, Language, Accessibility, Options,
+        // Quit, in that order — inserting Options must not disturb Multiplayer's
         // index (existing wrap tests rely on it staying at 1) or Quit's
         // position as the last vanilla button. Language/Accessibility now sit
         // between Multiplayer and Options in the walk (see
@@ -1093,6 +1093,8 @@ mod tests {
         assert_eq!(nav.main_button(), MainButton::Singleplayer);
         nav.key(&mut ui, MenuKey::Down);
         assert_eq!(nav.main_button(), MainButton::Multiplayer);
+        nav.key(&mut ui, MenuKey::Down);
+        assert_eq!(nav.main_button(), MainButton::Friends);
         nav.key(&mut ui, MenuKey::Down);
         assert_eq!(nav.main_button(), MainButton::Language);
         nav.key(&mut ui, MenuKey::Down);
@@ -3650,6 +3652,9 @@ mod tests {
         // Statistics is live too.
         assert_eq!(nav.pause_button(), PauseButton::Statistics);
         nav.key(&mut ui, MenuKey::Down);
+        // Friends is live too, so it appears before Player Reporting.
+        assert_eq!(nav.pause_button(), PauseButton::Friends);
+        nav.key(&mut ui, MenuKey::Down);
         // Player Reporting is live, so it appears before Options.
         assert_eq!(nav.pause_button(), PauseButton::PlayerReporting);
         nav.key(&mut ui, MenuKey::Down);
@@ -3686,6 +3691,8 @@ mod tests {
         assert_eq!(nav.pause_button(), PauseButton::Advancements);
         nav.key(&mut ui, MenuKey::Down);
         assert_eq!(nav.pause_button(), PauseButton::Statistics);
+        nav.key(&mut ui, MenuKey::Down);
+        assert_eq!(nav.pause_button(), PauseButton::Friends);
         nav.key(&mut ui, MenuKey::Down);
         assert_eq!(nav.pause_button(), PauseButton::PlayerReporting);
         nav.key(&mut ui, MenuKey::Down);
@@ -3768,9 +3775,9 @@ mod tests {
         let mut ui = UiState::new();
         ui.enter_dev_world();
         ui.pause();
-        // BackToGame -> Advancements -> Statistics -> Player Reporting -> Options
-        // The three middle stops are live and therefore are included in the walk.
-        for _ in 0..4 {
+        // BackToGame -> Advancements -> Statistics -> Friends -> Player Reporting
+        // -> Options. The middle stops are live and therefore are included.
+        for _ in 0..5 {
             nav.key(&mut ui, MenuKey::Down);
         }
         assert_eq!(nav.pause_button(), PauseButton::Options);
@@ -3891,14 +3898,14 @@ mod tests {
         let (mut nav, _) = nav("skip-disabled");
         let mut ui = UiState::new();
 
-        // Title screen: Singleplayer, Multiplayer, Language, Accessibility,
-        // Options — Realms and Friends are stepped over in both directions.
+        // Title screen: Singleplayer, Multiplayer, Friends, Language,
+        // Accessibility, Options — Realms is stepped over in both directions.
         // Language/Accessibility joined the walk once they were flipped live
         // (see `MainButton::Language`/`::Accessibility`'s own docs); `Accounts`
         // is not vanilla (see `MainButton::Accounts`) but is enabled too, one
         // step further than this walk goes.
         let mut seen = vec![nav.main_button()];
-        for _ in 0..4 {
+        for _ in 0..5 {
             nav.key(&mut ui, MenuKey::Down);
             seen.push(nav.main_button());
         }
@@ -3907,6 +3914,7 @@ mod tests {
             vec![
                 MainButton::Singleplayer,
                 MainButton::Multiplayer,
+                MainButton::Friends,
                 MainButton::Language,
                 MainButton::Accessibility,
                 MainButton::Options,
@@ -3921,18 +3929,16 @@ mod tests {
             );
         }
 
-        // Pause screen: Back to Game, Advancements, Statistics, Player Reporting,
-        // Options, Open to LAN, Disconnect — the three icon buttons in the middle
-        // are the disabled rows Down must step over; the live entries are
-        // Advancements, Statistics and Player Reporting, while Open to LAN is
-        // session-gated.
+        // Pause screen: Back to Game, Advancements, Statistics, Friends, Player
+        // Reporting, Options, Open to LAN, Disconnect — disabled icon buttons
+        // are stepped over while the named rows are live or session-gated.
         ui.enter_dev_world();
         ui.pause();
         // This walk visits `OpenToLan`, which only a singleplayer session
         // offers — see `MenuNav::open_to_lan_available`'s own doc.
         nav.set_has_singleplayer_server(true);
         let mut seen = vec![nav.pause_button()];
-        for _ in 0..6 {
+        for _ in 0..7 {
             nav.key(&mut ui, MenuKey::Down);
             seen.push(nav.pause_button());
         }
@@ -3942,6 +3948,7 @@ mod tests {
                 PauseButton::BackToGame,
                 PauseButton::Advancements,
                 PauseButton::Statistics,
+                PauseButton::Friends,
                 PauseButton::PlayerReporting,
                 PauseButton::Options,
                 PauseButton::OpenToLan,

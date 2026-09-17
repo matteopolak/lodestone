@@ -279,7 +279,6 @@ async fn a_creative_join_sends_the_experience_bar_too() {
         (0..=0, 0..=0),
         (0, 0),
         0,
-        0,
         Duration::from_secs(3600),
     )
     .expect("open persistent world");
@@ -334,7 +333,6 @@ async fn join_with_saved_experience(
         384,
         (0..=0, 0..=0),
         (0, 0),
-        0,
         0,
         Duration::from_secs(3600),
     )

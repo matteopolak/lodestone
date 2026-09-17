@@ -15,7 +15,7 @@ fn flat_world() -> ChunkWorld {
 }
 
 /// Spawns `species` at the origin through the **production** path
-/// ([`MobSim::spawn_species`], what `seed_demo_mobs` calls), feeds one player
+/// ([`MobSim::spawn_species`]), feeds one player
 /// `distance` blocks away on +X, and reports whether the mob ever acquires a
 /// target within `ticks`.
 ///

@@ -10,7 +10,7 @@
 //! silently-empty atlas that would render an invisible world.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use lodestone_assets::{
     ItemAtlas, Language, ParticleAtlas, ResourceManager, ResourceSource, ZipSource,
@@ -112,13 +112,10 @@ impl BlockResources {
     /// Errors are stringified with the offending path so the fallback banner
     /// names the fix.
     fn try_vanilla() -> Result<(BlockAtlas, Option<Language>), String> {
-        // Browser: the bytes were `fetch`ed and installed by `web/` before the app
-        // started. Only the *acquisition* differs — `ZipSource::from_bytes` and
-        // `BlocksJsonRegistry::from_slice` are the same parsers the native arm
-        // below reaches, so everything downstream of these two `let`s is shared.
-        // See `crate::platform::assets`.
+        // The byte acquisition differs by target; the parsed source is shared by
+        // every loader below for the lifetime of this asset installation.
         #[cfg(target_arch = "wasm32")]
-        let (bytes, registry) = {
+        let registry = {
             let bundle = crate::platform::assets::bundle().ok_or_else(|| {
                 "no asset bundle installed — a browser has no filesystem to scan, so \
                  web/ must fetch client.jar + generated/reports/blocks.json and call \
@@ -129,31 +126,23 @@ impl BlockResources {
             let registry =
                 lodestone_render::BlocksJsonRegistry::from_slice(&bundle.blocks_report)
                     .map_err(|e| format!("load blocks.json bytes: {e}"))?;
-            (bundle.client_jar.clone(), registry)
+            registry
         };
 
         #[cfg(not(target_arch = "wasm32"))]
-        let (bytes, registry) = {
+        let registry = {
             let root = asset_root().ok_or_else(|| {
                 "no vanilla resource pack found — set LODESTONE_ASSETS to a pack root \
                  containing client.jar + generated/reports/blocks.json (live world uses \
                  the demo palette until then)"
                     .to_string()
             })?;
-            let jar = root.join("client.jar");
             let report = root.join("generated/reports/blocks.json");
-            let bytes = std::fs::read(&jar).map_err(|e| format!("read {}: {e}", jar.display()))?;
-            let registry = blocks_json_registry(&report)
-                .map_err(|e| format!("load {}: {e}", report.display()))?;
-            (bytes, registry)
+            blocks_json_registry(&report).map_err(|e| format!("load {}: {e}", report.display()))?
         };
 
-        let zip = ZipSource::from_bytes(bytes).map_err(|e| format!("open client.jar: {e}"))?;
-        // The user's selected packs sit on top of the built-in jar,
-        // so a pack that ships `assets/minecraft/textures/block/**` changes the
-        // world's appearance from this session on. This is the block atlas' own
-        // stack, not a shared one — see `selected_pack_sources`' doc.
-        let manager = build_pack_stack(Box::new(zip));
+        let manager = open_vanilla_pack_stack()
+            .ok_or_else(|| "open client.jar: no readable vanilla resource pack".to_string())?;
         // The live `mipmapLevels` video setting's actual consumer: `mipmap_levels()`
         // returns the shipped default until a player drags the slider, at which
         // point `set_mipmap_levels` has already bumped `PACK_GENERATION`, so the
@@ -310,16 +299,94 @@ pub fn open_pack_stack(root: &Path) -> Option<ResourceManager> {
 /// never held the pack to begin with.
 #[must_use]
 pub(crate) fn open_vanilla_pack_stack() -> Option<ResourceManager> {
+    let zip = vanilla_zip_source()?;
+    Some(build_pack_stack(Box::new(zip)))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum VanillaZipIdentity {
+    #[cfg(target_arch = "wasm32")]
+    Browser { address: usize, len: usize },
+    #[cfg(not(target_arch = "wasm32"))]
+    Native {
+        path: PathBuf,
+        len: u64,
+        modified: Option<std::time::SystemTime>,
+    },
+    #[cfg(test)]
+    Test(u64),
+}
+
+#[derive(Debug)]
+struct CachedVanillaZip {
+    identity: VanillaZipIdentity,
+    source: ZipSource,
+}
+
+static VANILLA_ZIP_CACHE: Mutex<Option<CachedVanillaZip>> = Mutex::new(None);
+static VANILLA_ZIP_PARSES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn vanilla_zip_source() -> Option<ZipSource> {
+    let identity = vanilla_zip_identity()?;
+    let mut cache = VANILLA_ZIP_CACHE.lock().ok()?;
+    if let Some(cached) = cache.as_ref().filter(|cached| cached.identity == identity) {
+        return Some(cached.source.clone());
+    }
+    #[cfg(target_arch = "wasm32")]
+    let bytes = crate::platform::assets::bundle()?.client_jar.clone();
+    #[cfg(not(target_arch = "wasm32"))]
+    let bytes = std::fs::read(identity_path(&identity)?).ok()?;
+    cached_zip_source(&mut cache, identity, bytes, &VANILLA_ZIP_PARSES)
+}
+
+fn vanilla_zip_identity() -> Option<VanillaZipIdentity> {
     #[cfg(target_arch = "wasm32")]
     {
-        let bytes = crate::platform::assets::bundle()?.client_jar.clone();
-        let zip = ZipSource::from_bytes(bytes).ok()?;
-        Some(build_pack_stack(Box::new(zip)))
+        let bundle = crate::platform::assets::bundle()?;
+        return Some(VanillaZipIdentity::Browser {
+            address: bundle.client_jar.as_ptr() as usize,
+            len: bundle.client_jar.len(),
+        });
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        open_pack_stack(&asset_root()?)
+        let path = asset_root()?.join("client.jar");
+        let metadata = std::fs::metadata(&path).ok()?;
+        Some(VanillaZipIdentity::Native {
+            path,
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+        })
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn identity_path(identity: &VanillaZipIdentity) -> Option<&Path> {
+    match identity {
+        VanillaZipIdentity::Native { path, .. } => Some(path),
+        #[cfg(test)]
+        VanillaZipIdentity::Test(_) => None,
+    }
+}
+
+fn cached_zip_source(
+    cache: &mut Option<CachedVanillaZip>,
+    identity: VanillaZipIdentity,
+    bytes: Vec<u8>,
+    parses: &std::sync::atomic::AtomicU64,
+) -> Option<ZipSource> {
+    if let Some(cached) = cache.as_ref().filter(|cached| cached.identity == identity) {
+        return Some(cached.source.clone());
+    }
+    let source = ZipSource::from_bytes(bytes).ok()?;
+    let parse_number = parses.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    tracing::debug!(target: "assets", parses = parse_number, "parsed built-in resource archive");
+    *cache = Some(CachedVanillaZip {
+        identity,
+        source: source.clone(),
+    });
+    Some(source)
 }
 
 /// Lays the currently selected user packs on top of the built-in pack.
@@ -1920,21 +1987,7 @@ fn merged_tag_json(manager: &ResourceManager, path: &str) -> Option<String> {
 /// "draw the fallback" — so the failure would be a title screen with no glyphs, or
 /// armourless players, with nothing in the log to say why.
 pub(crate) fn vanilla_manager() -> Option<ResourceManager> {
-    // Browser: the jar bytes were `fetch`ed and installed by `web/` before the app
-    // started. This is the choke point every `load_*` helper in this module reaches —
-    // fonts, the GUI atlas, the panorama, entity textures, the item and particle
-    // atlases, the recipe corpus — so routing it here is what makes the browser draw
-    // a readable title screen rather than an untextured one. Only the byte
-    // acquisition differs; `ZipSource::from_bytes` below is shared.
-    #[cfg(target_arch = "wasm32")]
-    let bytes = crate::platform::assets::bundle()?.client_jar.clone();
-    #[cfg(not(target_arch = "wasm32"))]
-    let bytes = {
-        let root = asset_root()?;
-        let jar = root.join("client.jar");
-        std::fs::read(&jar).ok()?
-    };
-    let zip = ZipSource::from_bytes(bytes).ok()?;
+    let zip = vanilla_zip_source()?;
     Some(ResourceManager::new(vec![
         Box::new(zip) as Box<dyn ResourceSource>
     ]))
@@ -2152,6 +2205,53 @@ mod tests {
             .finish()
             .expect("finish zip")
             .into_inner()
+    }
+
+    #[test]
+    fn renderer_consumers_share_one_parsed_zip_until_install_revision_changes() {
+        let first = build_test_pack_zip("marker.txt", b"first");
+        let second = build_test_pack_zip("marker.txt", b"second");
+        let parses = std::sync::atomic::AtomicU64::new(0);
+        let mut cache = None;
+
+        let one = cached_zip_source(
+            &mut cache,
+            VanillaZipIdentity::Test(1),
+            first.clone(),
+            &parses,
+        )
+        .expect("first fixture must parse");
+        let two = cached_zip_source(
+            &mut cache,
+            VanillaZipIdentity::Test(1),
+            first,
+            &parses,
+        )
+        .expect("same install must reuse its parsed source");
+        assert_eq!(parses.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(one.read("marker.txt"), Some(b"first".to_vec()));
+        assert_eq!(two.read("marker.txt"), Some(b"first".to_vec()));
+
+        let rebuilt = cached_zip_source(
+            &mut cache,
+            VanillaZipIdentity::Test(2),
+            second,
+            &parses,
+        )
+        .expect("new install must parse");
+        assert_eq!(parses.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert_eq!(rebuilt.read("marker.txt"), Some(b"second".to_vec()));
+    }
+
+    #[test]
+    #[ignore = "requires the vanilla pack (client.jar) under .cache/mc/<ver>"]
+    fn production_resource_consumers_parse_the_vanilla_zip_once() {
+        let before = VANILLA_ZIP_PARSES.load(std::sync::atomic::Ordering::Relaxed);
+        let _ = open_vanilla_pack_stack().expect("vanilla pack must be available");
+        let _ = vanilla_manager().expect("vanilla pack must be available");
+        let _ = open_vanilla_pack_stack().expect("vanilla pack must be available");
+        let after = VANILLA_ZIP_PARSES.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(after - before, 1, "all consumers must share one parsed archive");
     }
 
     /// `set_server_pack` must actually reach `selected_pack_sources` — the

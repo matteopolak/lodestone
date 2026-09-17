@@ -52,6 +52,15 @@ impl PathNavigator {
         self.last_stuck_check = self.tick;
     }
 
+    #[must_use]
+    pub fn speed(&self) -> f32 {
+        self.speed
+    }
+
+    pub fn set_speed(&mut self, speed: f32) {
+        self.speed = speed;
+    }
+
     /// Stops navigation, discarding any path.
     pub fn stop(&mut self) {
         self.path = None;
@@ -110,8 +119,13 @@ impl PathNavigator {
         let dx = (mob_pos.x - (f64::from(node.x) + 0.5)).abs();
         let dy = (mob_pos.y - f64::from(node.y)).abs();
         let dz = (mob_pos.z - (f64::from(node.z) + 0.5)).abs();
-        let close = dx < f64::from(self.max_distance_to_waypoint)
-            && dz < f64::from(self.max_distance_to_waypoint)
+        let horizontal_limit = if f64::from(node.y) < mob_pos.y {
+            (0.5 - f64::from(self.width) / 2.0).max(0.0)
+        } else {
+            f64::from(self.max_distance_to_waypoint)
+        };
+        let close = dx < horizontal_limit
+            && dz < horizontal_limit
             && dy < 1.0;
         if close {
             path.advance();
@@ -195,6 +209,27 @@ mod tests {
             nav.tick(stuck_pos);
         }
         assert!(nav.is_stuck());
+        assert!(nav.is_done());
+    }
+
+    #[test]
+    fn descending_waypoint_is_not_consumed_before_the_body_clears_the_edge() {
+        let mut nav = PathNavigator::new(0.6);
+        nav.start(
+            Path::new(
+                vec![
+                    PathNode { x: 0, y: 0, z: 0, kind: super::super::PathType::Walkable },
+                    PathNode { x: 1, y: -1, z: 0, kind: super::super::PathType::Walkable },
+                ],
+                BlockPos::new(1, -1, 0),
+                true,
+            ),
+            0.25,
+        );
+        assert_eq!(nav.tick(Vec3::new(0.5, 0.0, 0.5)), Some(Vec3::new(1.5, -1.0, 0.5)));
+        assert_eq!(nav.tick(Vec3::new(1.25, 0.0, 0.5)), Some(Vec3::new(1.5, -1.0, 0.5)));
+        assert_eq!(nav.tick(Vec3::new(1.31, 0.0, 0.5)), Some(Vec3::new(1.5, -1.0, 0.5)));
+        assert_eq!(nav.tick(Vec3::new(1.5, -0.08, 0.5)), None);
         assert!(nav.is_done());
     }
 }

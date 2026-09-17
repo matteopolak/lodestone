@@ -331,7 +331,6 @@ async fn a_real_join_move_and_disconnect_drive_real_ticket_residency() {
             (0..=0, 0..=0),
             (8, 8),
             0,
-            0,
             Duration::from_secs(3600),
         )
         .expect("open persistent world (first open)");
@@ -344,10 +343,9 @@ async fn a_real_join_move_and_disconnect_drive_real_ticket_residency() {
         FlatWorld::default(),
         MIN_Y,
         HEIGHT,
-        (0..=0, 0..=0),
-        (8, 8),
-        0,
-        // `view_radius: 0` — the player's own ticket covers exactly the
+            (0..=0, 0..=0),
+            (8, 8),
+            // `view_radius: 0` — the player's own ticket covers exactly the
         // column it stands on, which is what makes "the previous column
         // stops being resident once the player leaves it" unambiguous: with
         // no view radius, nothing but the spawn ticket or the player's exact
@@ -487,7 +485,6 @@ async fn integrated_server_unloads_a_negative_chunk_through_the_owned_lifecycle_
         (0..=0, 0..=0),
         (8, 8),
         0,
-        0,
     );
     let mut client = Connection::new(client_end);
     let username = format!("Life{:08x}", Uuid::new_v4().as_u128() as u32);
@@ -570,7 +567,6 @@ async fn a_chunk_near_two_players_stays_resident_when_either_one_alone_moves_awa
         FlatWorld::default(),
         (0..=0, 0..=0),
         (8, 8),
-        0,
         // `view_radius: 0`, same reasoning as the first gate: each player's
         // own ticket then covers exactly the column they stand on, so
         // "shares a column" and "moves off it" are unambiguous.

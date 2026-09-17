@@ -50,6 +50,28 @@ const CAVE_AIR: &str = "minecraft:cave_air";
 /// neighbourhood would have silently degraded the memo to a thrashing cache with
 /// every test still green.
 pub const NEIGHBOURHOOD_RANGE: i32 = 8;
+
+/// Four words cover the centre chunk's 256 XZ columns. The mask is request
+/// owned; it is not part of the dense block representation.
+pub type TouchedMask = [u64; 4];
+
+#[inline]
+pub fn mark_touched_column(mask: &mut TouchedMask, chunk_x: i32, chunk_z: i32, x: i32, z: i32) {
+    let lx = x - chunk_x * 16;
+    let lz = z - chunk_z * 16;
+    if !(0..16).contains(&lx) || !(0..16).contains(&lz) {
+        return;
+    }
+    let index = (lz * 16 + lx) as usize;
+    mask[index / 64] |= 1u64 << (index % 64);
+}
+
+#[inline]
+pub fn touched_column(mask: &TouchedMask, lx: i32, lz: i32) -> bool {
+    debug_assert!((0..16).contains(&lx) && (0..16).contains(&lz));
+    let index = (lz * 16 + lx) as usize;
+    mask[index / 64] & (1u64 << (index % 64)) != 0
+}
 /// Each carver's own range query (== 4), giving a max tunnel length of
 /// `(4*2-1)*16 = 112` blocks.
 const CARVER_RANGE: i32 = 4;
@@ -597,15 +619,11 @@ impl CarveGrid {
 struct CarveEnv<'a> {
     grid: &'a mut CarveGrid,
     aquifer: &'a AquiferSystem,
-    replaceable: &'a HashSet<StateId>,
+    replaceable: &'a FastSet<StateId>,
     top_material: &'a dyn Fn(i32, i32, i32, bool) -> Option<String>,
-    /// Cells this carve pass has already written.
-    ///
-    /// [`FastSet`], not the default hasher — a per-carved-cell membership test on
-    /// a coordinate key. Insert/contains only, never iterated, so no order is
-    /// observable; see [`lodestone_worldgen_core::hash::fast`] for why that has
-    /// to be established per map. U17.
-    mask: FastSet<(i32, i32, i32)>,
+    touched: Option<&'a mut TouchedMask>,
+    /// Cells this carve pass has already visited.
+    mask: CarveMask,
     min_gen_y: i32,
     gen_depth: i32,
     center_x: i32,
@@ -624,10 +642,53 @@ struct CarveEnv<'a> {
     dirt: StateId,
 }
 
+struct CarveMask {
+    bits: Vec<u64>,
+    min_y: i32,
+    #[cfg(test)]
+    depth: i32,
+}
+
+const CARVE_MASK_Y_STRIDE: usize = 16 * 16;
+
+impl CarveMask {
+    #[must_use]
+    fn new(min_y: i32, depth: i32) -> Self {
+        let cells = depth.max(0) as usize * 16 * 16;
+        Self {
+            bits: vec![0; cells.div_ceil(64)],
+            min_y,
+            #[cfg(test)]
+            depth,
+        }
+    }
+
+    #[cfg(test)]
+    #[inline]
+    fn mark(&mut self, x: i32, y: i32, z: i32) -> bool {
+        debug_assert!((0..16).contains(&x));
+        debug_assert!((0..16).contains(&z));
+        debug_assert!((self.min_y..self.min_y + self.depth).contains(&y));
+        let index = (((y - self.min_y) * 16 + z) * 16 + x) as usize;
+        self.mark_index(index)
+    }
+
+    #[inline]
+    fn mark_index(&mut self, index: usize) -> bool {
+        let word = index / 64;
+        let bit = 1u64 << (index % 64);
+        let was_set = self.bits[word] & bit != 0;
+        self.bits[word] |= bit;
+        !was_set
+    }
+}
+
 impl CarveEnv<'_> {
     #[inline]
-    fn can_replace(&self, x: i32, y: i32, z: i32) -> bool {
-        self.replaceable.contains(&self.grid.get_base_id(x, y, z))
+    fn touch(&mut self, x: i32, z: i32) {
+        if let Some(mask) = self.touched.as_deref_mut() {
+            mark_touched_column(mask, self.center_x, self.center_z, x, z);
+        }
     }
 
     /// `WorldCarver.getCarveState` for `density == 0.0`: lava below `lava_level`,
@@ -652,11 +713,12 @@ impl CarveEnv<'_> {
         if self.nether {
             return self.carve_block_nether(x, y, z);
         }
+        self.touch(x, z);
         let base = self.grid.get_base_id(x, y, z);
         if base == self.grass_block || base == self.mycelium {
             *has_grass = true;
         }
-        if !self.can_replace(x, y, z) {
+        if !self.replaceable.contains(&base) {
             return false;
         }
         let state = match self.carve_state(x, y, z) {
@@ -695,7 +757,9 @@ impl CarveEnv<'_> {
     /// of [`CarveEnv::carve_state`]'s inputs are read on this path, which is what
     /// makes a *disabled* aquifer harmless here.
     fn carve_block_nether(&mut self, x: i32, y: i32, z: i32) -> bool {
-        if !self.can_replace(x, y, z) {
+        self.touch(x, z);
+        let base = self.grid.get_base_id(x, y, z);
+        if !self.replaceable.contains(&base) {
             return false;
         }
         let state = if y <= self.min_gen_y + 31 { self.lava } else { self.cave_air };
@@ -733,24 +797,30 @@ fn carve_ellipsoid<F>(
     let max_y = (math::floor(y + vertical_radius) + 1).min(env.min_gen_y + env.gen_depth - 1 - 7);
     let min_z_index = (math::floor(z - horizontal_radius) - chunk_min_z - 1).max(0);
     let max_z_index = (math::floor(z + horizontal_radius) - chunk_min_z).min(15);
+    if max_y <= min_y {
+        return;
+    }
 
     for x_index in min_x_index..=max_x_index {
         let world_x = chunk_min_x + x_index;
         let xd = (f64::from(world_x) + 0.5 - x) / horizontal_radius;
+        let xd_squared = xd * xd;
         for z_index in min_z_index..=max_z_index {
             let world_z = chunk_min_z + z_index;
             let zd = (f64::from(world_z) + 0.5 - z) / horizontal_radius;
-            if xd * xd + zd * zd >= 1.0 {
+            if xd_squared + zd * zd >= 1.0 {
                 continue;
             }
             let mut world_y = max_y;
+            let mut mask_index = (((world_y - env.mask.min_y) * 16 + z_index) * 16 + x_index)
+                as usize;
             let mut has_grass = false;
             while world_y > min_y {
                 let yd = (f64::from(world_y) - 0.5 - y) / vertical_radius;
-                if !skip(xd, yd, zd, world_y) && !env.mask.contains(&(x_index, world_y, z_index)) {
-                    env.mask.insert((x_index, world_y, z_index));
+                if !skip(xd, yd, zd, world_y) && env.mask.mark_index(mask_index) {
                     env.carve_block(world_x, world_y, world_z, &mut has_grass);
                 }
+                mask_index -= CARVE_MASK_Y_STRIDE;
                 world_y -= 1;
             }
         }
@@ -1207,6 +1277,40 @@ pub fn apply_carvers<'a, O: CarveObserver>(
     top_material: &dyn Fn(i32, i32, i32, bool) -> Option<String>,
     observer: &mut O,
 ) {
+    apply_carvers_with_touched(
+        seed,
+        chunk_x,
+        chunk_z,
+        min_gen_y,
+        gen_depth,
+        carvers_for_source,
+        grid,
+        aquifer,
+        replaceable,
+        top_material,
+        observer,
+        None,
+    );
+}
+
+/// Applies carvers while conservatively recording centre-chunk columns whose
+/// carve loop attempts a block write. The mask is optional so parity fixtures
+/// and dimensions without a post-mutation consumer retain the old path.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_carvers_with_touched<'a, O: CarveObserver>(
+    seed: i64,
+    chunk_x: i32,
+    chunk_z: i32,
+    min_gen_y: i32,
+    gen_depth: i32,
+    carvers_for_source: &mut dyn FnMut(i32, i32) -> &'a [CarverConfig],
+    grid: &mut CarveGrid,
+    aquifer: &AquiferSystem,
+    replaceable: &HashSet<String>,
+    top_material: &dyn Fn(i32, i32, i32, bool) -> Option<String>,
+    observer: &mut O,
+    touched: Option<&mut TouchedMask>,
+) {
     // The outer RNG's initial seed is irrelevant: setLargeFeatureSeed overwrites
     // it before every carver. Seed with 0 for determinism.
     let mut random = crate::rng::WorldgenRandom::new(crate::rng::LegacyRandomSource::new(0));
@@ -1214,7 +1318,7 @@ pub fn apply_carvers<'a, O: CarveObserver>(
     // Resolve the tag's base names once at the stage boundary. The carve loop
     // compares compact numeric ids and never allocates or parses a state
     // string for its replaceability/grass/dirt checks.
-    let replaceable_ids: HashSet<StateId> = replaceable
+    let replaceable_ids: FastSet<StateId> = replaceable
         .iter()
         .map(|name| grid.interner().id_of(name))
         .collect();
@@ -1232,7 +1336,8 @@ pub fn apply_carvers<'a, O: CarveObserver>(
         aquifer,
         replaceable: &replaceable_ids,
         top_material,
-        mask: FastSet::default(),
+        touched,
+        mask: CarveMask::new(min_gen_y, gen_depth),
         min_gen_y,
         gen_depth,
         center_x: chunk_x,
@@ -1274,6 +1379,21 @@ pub fn apply_carvers<'a, O: CarveObserver>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn carve_mask_is_one_bit_per_centre_cell() {
+        let mut mask = super::CarveMask::new(-64, 384);
+        assert!(mask.mark(0, -64, 0));
+        assert!(!mask.mark(0, -64, 0));
+        assert!(mask.mark(15, 319, 15));
+        assert!(mask.mark(1, -64, 0));
+
+        let mut coordinate = super::CarveMask::new(-64, 384);
+        let mut indexed = super::CarveMask::new(-64, 384);
+        let index = (((319 + 64) * 16 + 15) * 16 + 15) as usize;
+        assert_eq!(coordinate.mark(15, 319, 15), indexed.mark_index(index));
+        assert_eq!(coordinate.mark(15, 319, 15), indexed.mark_index(index));
+    }
+
     #[test]
     fn carve_block_paths_do_not_reconstruct_state_strings() {
         let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/carver/mod.rs"));

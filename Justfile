@@ -495,6 +495,34 @@ worldgen-bench *args:
 samply-worldgen *args:
     python3 scripts/samply-worldgen.py {{args}}
 
+# Capture one bounded, serial production worldgen run with macOS hardware CPU
+# counters. Positional arguments are seed, columns, batch size, and layout. A custom Instruments CPU
+# Counters template can be selected with LODESTONE_WORLDGEN_XCTRACE_TEMPLATE.
+profile-worldgen-hardware *args:
+    ./scripts/profile-worldgen-hardware.sh {{args}}
+
+# Verify the production worldgen hardware profiler's command and argument
+# guards without requiring macOS Instruments.
+test-profile-worldgen-hardware:
+    python3 scripts/test-profile-worldgen-hardware.py
+
+# Profile the real integrated singleplayer join with a finite seed and radius.
+samply-integrated-join *args:
+    python3 scripts/samply-integrated-join.py {{args}}
+
+# Profile client world insertion, meshing, upload, and first terrain presentation.
+samply-client-join-mesh *args:
+    python3 scripts/samply-client-join-mesh.py {{args}}
+
+# Capture one bounded join with Instruments CPU counters. The workload emits
+# its aggregate phase boundaries; the capture reports retired instructions,
+# cycles, and IPC for the same process. Pass integrated or client first.
+profile-join-hardware *args:
+    python3 scripts/profile-join-hardware.py {{args}}
+
+test-profile-join-hardware:
+    python3 scripts/test-profile-join-hardware.py
+
 # Where a frame goes, CPU *and* GPU, over a fixed camera path on a fixed demo
 # world. Prints a per-waypoint CPU-vs-GPU verdict from real TIMESTAMP_QUERY
 # pass timings, with the section/draw-call counts beside every duration, and

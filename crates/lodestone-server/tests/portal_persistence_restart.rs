@@ -247,7 +247,6 @@ async fn open(
         HEIGHT,
         (0..=0, 0..=0),
         (8, 8),
-        0,
         1,
         // An hour: this gate's saves are the explicit ones at shutdown, so a
         // timer firing mid-assertion cannot be mistaken for the thing under

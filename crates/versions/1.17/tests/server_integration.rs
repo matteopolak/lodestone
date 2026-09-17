@@ -148,7 +148,6 @@ async fn assert_protocol_container_chest_move(protocol_version: i32) {
         (0..=0, 0..=0),
         (8, 8),
         0,
-        0,
     );
     let entities = server
         .block_entities()
@@ -323,7 +322,6 @@ async fn assert_registry_selected_host_broadcasts_arm_swing(protocol_version: i3
         source,
         (0..=0, 0..=0),
         (8, 8),
-        0,
         0,
     );
     let address = server

@@ -1,57 +1,102 @@
-//! The world spawn point and per-player respawn points.
+//! World and per-player respawn selection.
 //!
-//! Before this module, the world spawn was derived inline per connection
-//! (`serve_connection`'s `ConfigurationFinished` arm): the origin column's
-//! surface at local `(8, 8)`, i.e. always `(8, y, 8)` — a later fix replaced
-//! the Y with terrain, but the X/Z were still fixed, so a world whose origin
-//! chunk is ocean spawned the player under water and no search ever moved
-//! them. This module is vanilla's own search:
-//!
-//! * [`find_initial_spawn`] runs `MinecraftServer.setInitialSpawn`'s
-//!   121-iteration, ±5-chunk spiral over a [`ChunkSource`], stopping at the
-//!   first chunk that contains a valid spawn position
-//!   (`PlayerSpawnFinder.getSpawnPosInChunk`).
-//! * A per-column candidate is vanilla's `PlayerSpawnFinder.getLevelRespawnPos`:
-//!   the surface height, with a fluid between sky and ground (an ocean
-//!   column) aborting the candidate.
-//! * The **per-player** half — a player's bed respawn point
-//!   ([`RespawnPoint`]) with the set-time legality check vanilla applies
-//!   before accepting one ([`is_legal_bed_respawn`]), and the *read* that
-//!   resolves a death against it ([`resolve_bed_respawn`], vanilla's
-//!   `ServerPlayer.findRespawnAndUseSpawnBlock`). The set-time check mirrors
-//!   `ServerPlayer.startSleepInBed`'s validation.
-//!
-//!   **Both halves are needed and the read is the one that was missing.** The
-//!   point used to be stored and consulted by nothing, so `PERFORM_RESPAWN`
-//!   healed the player and left them where they died. The read re-examines the
-//!   block at the stored position rather than trusting it: a broken or walled-in
-//!   bed answers `None` and the caller falls back to the world spawn, which is
-//!   vanilla's own `Optional.empty()` arm.
-//!
-//!   Still deferred: the `respawn_radius` scatter around the world spawn and the
-//!   async chunk-ticket search of `PlayerSpawnFinder.findSpawn`, which need
-//!   shape-B player state and the ticket system (see
-//!   `docs/plans/world-state.md` unit P2).
-//!
-//! # Where the world spawn is stored
-//!
-//! In [`crate::world_state::WorldStateHandle`], persisted to `level.dat`'s nested
-//! `spawn` compound — **not** re-derived per connection. [`find_initial_spawn`] is
-//! vanilla's `setInitialSpawn`, which runs once at world creation; running it per
-//! join re-paid a 121-column search every time and meant the persisted value was
-//! written and read by nothing. `None` there means "not searched yet", which is
-//! what a fresh world is.
+//! A fresh world searches a bounded spiral for the first safe surface and
+//! persists the result. Bed respawns are validated again when used, falling
+//! back to the world spawn when the bed or its clearance is no longer valid.
 
 use lodestone_model::{BlockPos, Vec3};
+
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::chunk::{ChunkColumn, ChunkSource, is_air_or_fluid};
 
 type SpawnAabb = lodestone_data::collision_shapes::Aabb;
 
-/// The world's spawn point — vanilla's `LevelData.RespawnData` for the
-/// overworld: a position plus the yaw/pitch a player is teleported with. The
-/// initial world spawn has both rotations zero (`setInitialSpawn` passes
-/// `0.0F, 0.0F`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SpawnSearchMetrics {
+    /// Completed searches.
+    pub searches: u64,
+    /// Candidate chunks inspected.
+    pub candidate_chunks: u64,
+    /// Full columns requested.
+    pub columns_requested: u64,
+    /// Cheap surface samples read before a full-column request.
+    pub horizon_samples: u64,
+    /// Searches that found a valid candidate.
+    pub accepted: u64,
+    /// Searches that used the fallback anchor.
+    pub fallbacks: u64,
+    /// Aggregate search time.
+    pub elapsed_nanos: u64,
+    /// Calls into the store's raw ensure boundary.
+    pub raw_ensure_calls: u64,
+    /// Requests that became the in-flight generation leader.
+    pub request_session_leaders: u64,
+    /// Request results supplied by an existing resident or persisted column.
+    pub existing_hits: u64,
+    /// Packet-neighbour columns committed with a generated request.
+    pub packet_neighbour_admissions: u64,
+}
+
+static SEARCHES: AtomicU64 = AtomicU64::new(0);
+static CANDIDATE_CHUNKS: AtomicU64 = AtomicU64::new(0);
+static COLUMNS_REQUESTED: AtomicU64 = AtomicU64::new(0);
+static HORIZON_SAMPLES: AtomicU64 = AtomicU64::new(0);
+static ACCEPTED: AtomicU64 = AtomicU64::new(0);
+static FALLBACKS: AtomicU64 = AtomicU64::new(0);
+static ELAPSED_NANOS: AtomicU64 = AtomicU64::new(0);
+static RAW_ENSURE_CALLS: AtomicU64 = AtomicU64::new(0);
+static REQUEST_SESSION_LEADERS: AtomicU64 = AtomicU64::new(0);
+static EXISTING_HITS: AtomicU64 = AtomicU64::new(0);
+static PACKET_NEIGHBOUR_ADMISSIONS: AtomicU64 = AtomicU64::new(0);
+
+#[must_use]
+pub fn spawn_search_metrics() -> SpawnSearchMetrics {
+    SpawnSearchMetrics {
+        searches: SEARCHES.load(Ordering::Relaxed),
+        candidate_chunks: CANDIDATE_CHUNKS.load(Ordering::Relaxed),
+        columns_requested: COLUMNS_REQUESTED.load(Ordering::Relaxed),
+        horizon_samples: HORIZON_SAMPLES.load(Ordering::Relaxed),
+        accepted: ACCEPTED.load(Ordering::Relaxed),
+        fallbacks: FALLBACKS.load(Ordering::Relaxed),
+        elapsed_nanos: ELAPSED_NANOS.load(Ordering::Relaxed),
+        raw_ensure_calls: RAW_ENSURE_CALLS.load(Ordering::Relaxed),
+        request_session_leaders: REQUEST_SESSION_LEADERS.load(Ordering::Relaxed),
+        existing_hits: EXISTING_HITS.load(Ordering::Relaxed),
+        packet_neighbour_admissions: PACKET_NEIGHBOUR_ADMISSIONS.load(Ordering::Relaxed),
+    }
+}
+
+pub(crate) fn record_raw_ensure() {
+    RAW_ENSURE_CALLS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn record_request_session_leader() {
+    REQUEST_SESSION_LEADERS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn record_existing_hit() {
+    EXISTING_HITS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn record_packet_neighbour_admissions(count: usize) {
+    PACKET_NEIGHBOUR_ADMISSIONS.fetch_add(
+        u64::try_from(count).unwrap_or(u64::MAX),
+        Ordering::Relaxed,
+    );
+}
+
+fn publish_spawn_search_metrics(metrics: SpawnSearchMetrics) {
+    SEARCHES.fetch_add(metrics.searches, Ordering::Relaxed);
+    CANDIDATE_CHUNKS.fetch_add(metrics.candidate_chunks, Ordering::Relaxed);
+    COLUMNS_REQUESTED.fetch_add(metrics.columns_requested, Ordering::Relaxed);
+    HORIZON_SAMPLES.fetch_add(metrics.horizon_samples, Ordering::Relaxed);
+    ACCEPTED.fetch_add(metrics.accepted, Ordering::Relaxed);
+    FALLBACKS.fetch_add(metrics.fallbacks, Ordering::Relaxed);
+    ELAPSED_NANOS.fetch_add(metrics.elapsed_nanos, Ordering::Relaxed);
+}
+
+/// A persisted world spawn and the rotation applied during teleportation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct WorldSpawn {
     /// World-space block-aligned anchor, in blocks.
@@ -70,7 +115,7 @@ pub(crate) struct WorldSpawn {
 /// Converts a persisted world-spawn block anchor into the feet position used
 /// by the player entity and its initial teleport.
 ///
-/// The external spawn contract stores a [`BlockPos`] but places the player at
+/// The spawn contract stores a [`BlockPos`] but places the player at
 /// the block's horizontal centre. Keeping the conversion at this seam avoids
 /// probing one column while placing the player on a block boundary, where the
 /// player's 0.6-block body can overlap a neighbouring column.
@@ -79,91 +124,29 @@ pub(crate) fn player_position_for_spawn_anchor(anchor: Vec3) -> Vec3 {
     Vec3::new(anchor.x.floor() + 0.5, anchor.y.floor(), anchor.z.floor() + 0.5)
 }
 
-/// A player's per-player respawn point — the bed they last slept in, the
-/// tracking half. The real per-player state stores this alongside a
-/// force-set flag and consults it on death before falling back to the level
-/// spawn.
-///
-/// Position only for now: vanilla also records the facing at bed-entry time
-/// and spawns the player with it, but this crate's bed interaction is the
-/// plain right-click in [`crate::server`]'s `apply_use_item_on`, which has no
-/// player rotation in scope; the respawn teleport therefore uses the world
-/// spawn's facing. Cosmetic, documented as a follow-up when rotation is
-/// threaded.
+/// The bed block used as a player's preferred respawn point.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct RespawnPoint {
     /// The bed block's position (the half the player clicked).
     pub pos: BlockPos,
 }
 
-/// The real chunk generator's spawn-height query for a noise-based world answers
-/// a literal `64` unconditionally — only the superflat generator overrides it
-/// with something else. The world's initial-spawn setup reads that literal,
-/// keeps it because it sits at or above the world's minimum build height, and
-/// pre-seeds the world spawn eight blocks in from the chunk origin at that
-/// height; a surface-heightmap branch beside it in the real logic is dead code
-/// for any noise generator, since the literal always short-circuits it.
-///
-/// # Why a literal is the right answer and a surface query is not
-///
-/// It is two blocks above the generator's sea level of 62, so a fully-ocean
-/// search box lands the player in open water — visible, breathable at the
-/// surface, and no fall damage from a two-block drop. The surface-derived value
-/// this replaced was strictly worse in the case that actually fires: see
-/// [`find_initial_spawn`]'s own comment.
+/// Noise worlds use a fixed fallback two blocks above sea level.
 const GENERATOR_SPAWN_HEIGHT: i32 = 64;
 
-/// The height a player stands at for a `getLevelRespawnPos`-valid column
-/// position `(lx, lz)` in `[0..16)`, or `None` when the column is invalid
-/// there.
-///
-/// This is the real per-column initial-spawn search, simplified to what a
-/// [`ChunkColumn`] can answer — it has no persisted heightmaps, so the
-/// top-of-column scan below is the "motion-blocking" heightmap query's
-/// analogue:
-///
-/// 1. Scan downward from the top of the column.
-/// 2. A fluid encountered before any solid block (an ocean column, or a lava
-///    lake) aborts the candidate — the real search stops on the first
-///    non-empty fluid state and reports no valid position for the column.
-/// 3. The first solid block from the top is the surface; return one block
-///    above it, the feet position. The body-clearance gate is applied by
-///    [`spawn_pos_in_column`] after this surface candidate is found.
-/// 4. A column with no solid block at all (air/void world) is `None`.
-///
-/// The two tests reproduce the real predicates exactly, and are **not**
-/// [`is_air_or_fluid`]'s negation, which is what this function used until the
-/// measurement in DESIGN.md §12.129:
-///
-/// | the real predicate | here |
-/// |---|---|
-/// | fluid state at the position is non-empty | [`spawn_has_fluid_state`] |
-/// | the block's collision shape fully covers the up face | [`spawn_face_full_up`] |
-///
-/// The old form's justification was a *stale* `worldgen_data` scope note ("no
-/// vegetation at surface"). The generator now places `short_grass`,
-/// `dandelion`, `poppy` and snow layers, and `is_air_or_fluid` says all four are
-/// ground — so the spawn Y came out **one block above** the block a player can
-/// actually stand on, which is the "I spawn in the air" report. Measured
-/// `face_full_up`: `short_grass`/`dandelion`/`poppy`/`snow` are all `false`,
-/// `grass_block`/`stone`/`oak_log`/`oak_leaves` are all `true` — so the jar's own
-/// predicate scans past the vegetation and stops on the ground, and a treetop
-/// spawn (leaves are genuinely face-full) stays faithful rather than being
-/// "fixed" into a divergence.
-///
-/// The real search's pre-check — a comparison across the world-surface,
-/// motion-blocking and ocean-floor heightmaps — is deliberately not
-/// reproduced: it is an early-out over three persisted heightmaps a
-/// [`ChunkColumn`] does not carry, and the loop below reaches the same verdict
-/// for the case it exists to catch (a water column aborts on the fluid test
-/// before any ground is found).
+/// The safe standing height at local `(lx, lz)`, or `None` for an invalid column.
+/// The scan rejects fluid above the first full support block and returns the
+/// block immediately above that support.
 fn get_level_respawn_pos(column: &ChunkColumn, lx: i32, lz: i32) -> Option<i32> {
     let top_y = column.min_y + column.height - 1;
-    for y in (column.min_y..=top_y).rev() {
+    let scan_top = column
+        .motion_blocking()
+        .and_then(|map| map.get((lx + lz * 16) as usize).copied())
+        .map(|stored| column.min_y + i32::from(stored) - 1)
+        .map_or(top_y, |y| y.min(top_y));
+    for y in (column.min_y..=scan_top).rev() {
         let state = column.block_state(lx, y, lz);
         if spawn_has_fluid_state(state) {
-            // Fluid between sky and ground — an ocean column. Fail-closed,
-            // exactly like vanilla's `null`: the caller keeps searching.
             return None;
         }
         if spawn_face_full_up(state) {
@@ -190,7 +173,7 @@ fn spawn_collision_boxes(state: &str) -> Option<&'static [SpawnAabb]> {
 ///
 /// The position is the block centre at `(lx + 0.5, y, lz + 0.5)`, with the
 /// measured player dimensions of `0.6` blocks wide and `1.8` blocks tall. The
-/// general source-based helper below performs the same test for saved positions
+/// The helper below performs the same test for saved positions
 /// that may have fractional coordinates.
 fn spawn_position_is_clear_in_column(
     column: &ChunkColumn,
@@ -287,25 +270,7 @@ pub(crate) fn is_spawn_position_clear<S: ChunkSource + ?Sized>(
     spawn_aabb_is_clear(|x, y, z| source.block_state(x, y, z), pos)
 }
 
-/// The two lookup tables joining a block-state *string* to a census state id:
-/// exact canonical state first, base-name default second.
-///
-/// [`lodestone_data::snow_support`]'s bitsets are keyed by block-state id and
-/// this crate only ever holds a string, so the two have to be joined. **Both**
-/// halves are load-bearing and each covers a case the other gets wrong:
-///
-/// * The **exact** map is what makes `oak_leaves[waterlogged=true]` answer
-///   `has_fluid_state = true`. A base-name-only join reports its *default*
-///   state's `false`, and
-///   `spawn_state_resolution_agrees_with_the_census_for_every_surface_state`
-///   caught exactly that — it is not a hypothetical, it is why this map exists.
-/// * The **base-name** map is what makes bare `minecraft:water` resolve at all:
-///   `lodestone-worldgen` emits fluids without their `level` property
-///   (`docs/worldgen-parity.md`'s "Known representation gap", the same reason
-///   [`crate::worldgen_data`]'s `freeze_facts` keys its document by default
-///   state), so a generated column's water is a string no exact map contains.
-///
-/// Built once per process from two static tables.
+/// Lookup tables map canonical state strings and bare block names to state ids.
 fn spawn_state_tables() -> &'static (
     std::collections::HashMap<String, u32>,
     std::collections::HashMap<&'static str, u32>,
@@ -335,14 +300,7 @@ fn spawn_state_tables() -> &'static (
     })
 }
 
-/// `name[k=v,…]` with properties in `block_states::properties`' own sorted
-/// order — the spelling `lodestone_worldgen::feature::canon_state` produces and
-/// therefore the spelling a generated [`ChunkColumn`] holds.
-///
-/// A near-duplicate of [`crate::worldgen_data`]'s private `canonical_state`, kept
-/// separate rather than made shared: that one is a build input for the freeze
-/// document and this one is a runtime lookup key, and coupling them would make a
-/// change to either reach the other for no reason.
+/// Formats a state with properties in the canonical sorted order.
 fn spawn_canonical_state(id: u32) -> String {
     use lodestone_data::block_states;
     let name = block_states::block_name(id).unwrap_or("minecraft:air");
@@ -365,44 +323,27 @@ fn spawn_state_id(state: &str) -> Option<u32> {
     defaults.get(base).copied()
 }
 
-/// Vanilla `!blockState.getFluidState().isEmpty()`
-/// ([`lodestone_data::snow_support::has_fluid_state`]) for a block-state string.
-///
-/// An unknown block name answers `false`: a name the census has never heard of
-/// cannot be a fluid, and answering `true` would abort the spawn search for the
-/// whole column.
+/// Whether a block-state string represents a fluid.
 fn spawn_has_fluid_state(state: &str) -> bool {
     spawn_state_id(state)
         .and_then(lodestone_data::block_states::StateId::new)
         .is_some_and(lodestone_data::snow_support::has_fluid_state)
 }
 
-/// Vanilla `Block.isFaceFull(state.getCollisionShape(…), UP)`
-/// ([`lodestone_data::snow_support::face_full_up`]) for a block-state string.
-///
-/// An unknown block name answers `false` — fail-closed, so a name the census
-/// does not carry can never become the block a player is stood on top of. That
-/// is the safe direction: the search moves on instead of placing the player on
-/// something it cannot prove is solid.
+/// Whether a block-state string has a full upper support face.
 fn spawn_face_full_up(state: &str) -> bool {
     spawn_state_id(state)
         .and_then(lodestone_data::block_states::StateId::new)
         .is_some_and(lodestone_data::snow_support::face_full_up)
 }
 
-/// Scans one already-generated column's 256 block positions in vanilla's order
-/// (`for x … for z`, `PlayerSpawnFinder.getSpawnPosInChunk`) and returns the
-/// first valid spawn position's world `BlockPos`, or `None` if the
-/// whole chunk is invalid (all ocean, all void, …).
-///
-/// Takes the column rather than the source so [`find_initial_spawn`] can reuse
-/// the origin column it has already paid for — see its own doc comment.
+/// Returns the first safe position in x-then-z order.
 fn spawn_pos_in_column(column: &ChunkColumn, cx: i32, cz: i32) -> Option<BlockPos> {
     for lx in 0..16 {
         for lz in 0..16 {
             if let Some(y) = get_level_respawn_pos(column, lx, lz) {
                 // The surface finder and the body-clearance predicate are
-                // separate in the external implementation: a column's first
+                // The surface and body checks are separate: a column's first
                 // surface is the only candidate, and an obstructed body moves
                 // on to the next column rather than searching for a lower
                 // surface in this one.
@@ -420,9 +361,15 @@ fn spawn_pos_in_column(column: &ChunkColumn, cx: i32, cz: i32) -> Option<BlockPo
 /// while an unavailable sample is treated conservatively as unknown. This is
 /// only a negative hint: the full spawn predicate still decides every candidate
 /// that is not wholly classified as water.
-fn horizon_is_all_water<S: ChunkSource + ?Sized>(source: &S, cx: i32, cz: i32) -> bool {
+fn horizon_is_all_water<S: ChunkSource + ?Sized>(
+    source: &S,
+    cx: i32,
+    cz: i32,
+    samples: &mut u64,
+) -> bool {
     (0..16).all(|lx| {
         (0..16).all(|lz| {
+            *samples += 1;
             source
                 .horizon_sample(cx * 16 + lx, cz * 16 + lz)
                 .is_some_and(|sample| sample.water_y.is_some())
@@ -431,15 +378,20 @@ fn horizon_is_all_water<S: ChunkSource + ?Sized>(source: &S, cx: i32, cz: i32) -
 }
 
 /// [`spawn_pos_in_column`] for a chunk that is not yet in hand.
-fn get_spawn_pos_in_chunk<S: ChunkSource + ?Sized>(source: &S, cx: i32, cz: i32) -> Option<BlockPos> {
+fn get_spawn_pos_in_chunk<S: ChunkSource + ?Sized>(
+    source: &S,
+    cx: i32,
+    cz: i32,
+    metrics: &mut SpawnSearchMetrics,
+) -> Option<BlockPos> {
     // A fresh integrated world can have an ocean origin and a completely
     // water-filled ±5 search box. The horizon path is deliberately only a
     // negative hint: unknown sources and any dry sample still pay for the
     // authoritative column, while a fully-water hint avoids 120 full
-    // world-generation passes before the documented fallback is chosen.
-    if horizon_is_all_water(source, cx, cz) {
+    if horizon_is_all_water(source, cx, cz, &mut metrics.horizon_samples) {
         return None;
     }
+    metrics.columns_requested += 1;
     spawn_pos_in_column(&source.column(cx, cz), cx, cz)
 }
 
@@ -474,17 +426,7 @@ fn fallback_spawn_y(column: &ChunkColumn, lx: i32, lz: i32, preferred: i32) -> i
     top
 }
 
-/// The 121 chunk offsets the initial-spawn spiral visits, in vanilla order.
-///
-/// Transcribed from `MinecraftServer.setInitialSpawn`'s loop: it starts at
-/// `(0, 0)`, steps with an
-/// initial direction `(0, -1)`, and turns right (swapping `dX`/`dZ` with the
-/// negation) whenever it reaches a square's corner — the three-arm
-/// `xChunkOffset == zChunkOffset || (xChunkOffset < 0 && xChunkOffset ==
-/// -zChunkOffset) || (xChunkOffset > 0 && xChunkOffset == 1 - zChunkOffset)`
-/// turn test. Kept as an explicit sequence so the traversal order is a named,
-/// testable fact (the spiral's *first* candidate is not the nearest land
-/// chunk; it is the origin, then `(1,0)`, then `(1,1)`, …).
+/// The 121 offsets in canonical initial-spawn order.
 fn spiral_chunk_offsets() -> Vec<(i32, i32)> {
     let mut out = Vec::with_capacity(11 * 11);
     let (mut xo, mut zo) = (0i32, 0i32);
@@ -502,78 +444,155 @@ fn spiral_chunk_offsets() -> Vec<(i32, i32)> {
     out
 }
 
-/// Searches the world spawn point from the origin chunk, mirroring
-/// `MinecraftServer.setInitialSpawn`.
-///
-/// Vanilla's first step — `chunkSource.randomState().sampler()
-/// .findSpawnPosition()` — picks a spawn *chunk* from climate noise; that
-/// sampler is `lodestone-worldgen` deep machinery this crate does not expose,
-/// so the search centres on the origin chunk `(0, 0)`, which is exactly the
-/// result `Climate.Sampler.findSpawnPosition` returns for an empty spawn
-/// target. The consequence is honest and documented: with no
-/// climate picker the *choice* of centre is fixed, but the spiral that finds
-/// a valid surface *within* that ±5-chunk box is real, which is the piece
-/// that was missing (an ocean origin chunk now moves the spawn to the nearest
-/// land instead of spawning the player under water).
-///
-/// Returns the first valid spawn position in spiral order, or — when every
-/// chunk in the box is invalid (a full-ocean box) — the origin anchor at the
-/// generator's preferred fallback height. The preferred height is retained
-/// when its complete player body is clear; a blocked preferred height climbs
-/// to the first clear row instead of placing the player inside terrain.
-///
-/// # Column generations, because this is on the join critical path
-///
-/// This runs in `crate::server`'s `ConfigurationFinished` arm **before** the
-/// chunk-streaming ring loop, so every column it generates is time the client
-/// spends with no terrain — this is the time-to-first-chunk cost. For the normal case
-/// — a valid origin chunk — that cost is exactly **one** column: the spiral's
-/// first offset is `(0, 0)`, which is the column the `fallback_y` query already
-/// generated, so it is reused rather than re-requested. It used to be asked for
-/// twice, which made `serve_play`'s "at most 2 columns before the first encode"
-/// bound unsatisfiable at 3 against a store-less source.
-///
-/// For an *invalid* origin the spiral genuinely walks up to 121 columns first.
-/// That is vanilla's own search and it is not a leak — the ±5-chunk box sits
-/// inside the ±9 join view, so a [`crate::ChunkStore`]-wrapped source serves
-/// those columns from cache when the ring loop reaches them.
+/// Searches a bounded spiral from the origin and returns a safe fallback when
+/// every candidate chunk is invalid.
 pub(crate) fn find_initial_spawn<S: ChunkSource + ?Sized>(source: &S) -> WorldSpawn {
-    let origin = source.column(0, 0);
-    // Vanilla's own pre-seed, and **not** what this line used to say. See
-    // [`GENERATOR_SPAWN_HEIGHT`]: the previous form was
-    // `get_level_respawn_pos(&origin, 8, 8).unwrap_or(origin.min_y + 1)`, and the
-    // `min_y + 1` arm put the player at `y = -63` — *inside the bedrock floor*,
-    // under an ocean, in the dark. Measured on two of four probe seeds
-    // (`1234` and `-195764831`), where the whole ±5 box is ocean and the fallback
-    // is the arm that fires. `64` is `ChunkGenerator.getSpawnHeight`, two blocks
-    // above the generator's sea level of 62, so the same pathological world now
-    // drops the player into open water instead of burying them.
-    let fallback_y = GENERATOR_SPAWN_HEIGHT;
+    use lodestone_time::Instant;
+
+    let started = Instant::now();
+    let mut metrics = SpawnSearchMetrics {
+        searches: 1,
+        ..SpawnSearchMetrics::default()
+    };
+    let result = (|| {
+        metrics.columns_requested += 1;
+        let origin = source.column(0, 0);
+        let fallback_y = GENERATOR_SPAWN_HEIGHT;
+
+        for (xo, zo) in spiral_chunk_offsets() {
+            metrics.candidate_chunks += 1;
+            let candidate = if (xo, zo) == (0, 0) {
+                spawn_pos_in_column(&origin, 0, 0)
+            } else {
+                get_spawn_pos_in_chunk(source, xo, zo, &mut metrics)
+            };
+            if let Some(pos) = candidate {
+                metrics.accepted += 1;
+                return WorldSpawn {
+                    pos: Vec3::new(pos.x as f64, pos.y as f64, pos.z as f64),
+                    yaw: 0.0,
+                    pitch: 0.0,
+                };
+            }
+        }
+
+        metrics.fallbacks += 1;
+        let fallback_y = fallback_spawn_y(&origin, 8, 8, fallback_y);
+        WorldSpawn {
+            pos: Vec3::new(8.0, fallback_y as f64, 8.0),
+            yaw: 0.0,
+            pitch: 0.0,
+        }
+    })();
+    metrics.elapsed_nanos = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    tracing::debug!(
+        elapsed_ms = metrics.elapsed_nanos as f64 / 1_000_000.0,
+        candidate_chunks = metrics.candidate_chunks,
+        columns_requested = metrics.columns_requested,
+        horizon_samples = metrics.horizon_samples,
+        fallback = metrics.fallbacks != 0,
+        spawn = ?result.pos,
+        "initial spawn search complete"
+    );
+    publish_spawn_search_metrics(metrics);
+    result
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn spawn_column_yielding<S: ChunkSource + ?Sized>(
+    source: &S,
+    cx: i32,
+    cz: i32,
+) -> ChunkColumn {
+    use crate::worldgen_session::{GenerationRequest, GenerationRequestResult, GenerationSession};
+    use lodestone_worldgen::stage_schedule::GenerationTarget;
+
+    let target = GenerationTarget::Full;
+    let request = GenerationRequest::new(
+        source
+            .dimension()
+            .unwrap_or(crate::dimension::Dimension::Overworld)
+            .into(),
+        (cx, cz),
+        target,
+        source.generation_request_dependency_radius(target),
+    );
+    let mut session = GenerationSession::new(request);
+    let generated = match source
+        .request_generation_yielding(request, Some(&mut session))
+        .await
+    {
+        Ok(Some(GenerationRequestResult::Existing(column))) => column,
+        Ok(Some(GenerationRequestResult::Generated(snapshot))) => snapshot.column().clone(),
+        Ok(None) => source.column(cx, cz),
+        Err(error) => {
+            tracing::warn!(cx, cz, %error, "yielding spawn column generation failed");
+            source.column(cx, cz)
+        }
+    };
+    source.resident_column(cx, cz).unwrap_or(generated)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) async fn find_initial_spawn_yielding<S: ChunkSource + ?Sized>(source: &S) -> WorldSpawn {
+    use lodestone_time::Instant;
+
+    let started = Instant::now();
+    let mut metrics = SpawnSearchMetrics {
+        searches: 1,
+        ..SpawnSearchMetrics::default()
+    };
+    metrics.columns_requested += 1;
+    let origin = spawn_column_yielding(source, 0, 0).await;
+    let mut accepted = None;
 
     for (xo, zo) in spiral_chunk_offsets() {
-        // `(0, 0)` is always the spiral's first offset, and `origin` is already
-        // in hand: asking the source for it again doubles the common case's
-        // pre-streaming generation cost. See this function's doc comment.
+        metrics.candidate_chunks += 1;
         let candidate = if (xo, zo) == (0, 0) {
             spawn_pos_in_column(&origin, 0, 0)
+        } else if horizon_is_all_water(source, xo, zo, &mut metrics.horizon_samples) {
+            None
         } else {
-            get_spawn_pos_in_chunk(source, xo, zo)
+            metrics.columns_requested += 1;
+            let column = spawn_column_yielding(source, xo, zo).await;
+            spawn_pos_in_column(&column, xo, zo)
         };
         if let Some(pos) = candidate {
-            return WorldSpawn {
+            metrics.accepted += 1;
+            accepted = Some(WorldSpawn {
                 pos: Vec3::new(pos.x as f64, pos.y as f64, pos.z as f64),
                 yaw: 0.0,
                 pitch: 0.0,
-            };
+            });
+            break;
         }
+        crate::chunk::yield_to_browser().await;
     }
 
-    let fallback_y = fallback_spawn_y(&origin, 8, 8, fallback_y);
-    WorldSpawn {
-        pos: Vec3::new(8.0, fallback_y as f64, 8.0),
-        yaw: 0.0,
-        pitch: 0.0,
-    }
+    let result = accepted.unwrap_or_else(|| {
+        metrics.fallbacks += 1;
+        WorldSpawn {
+            pos: Vec3::new(
+                8.0,
+                fallback_spawn_y(&origin, 8, 8, GENERATOR_SPAWN_HEIGHT) as f64,
+                8.0,
+            ),
+            yaw: 0.0,
+            pitch: 0.0,
+        }
+    });
+    metrics.elapsed_nanos = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    tracing::debug!(
+        elapsed_ms = metrics.elapsed_nanos as f64 / 1_000_000.0,
+        candidate_chunks = metrics.candidate_chunks,
+        columns_requested = metrics.columns_requested,
+        horizon_samples = metrics.horizon_samples,
+        fallback = metrics.fallbacks != 0,
+        spawn = ?result.pos,
+        "initial spawn search complete"
+    );
+    publish_spawn_search_metrics(metrics);
+    result
 }
 
 /// Returns `true` for the sixteen bed block ids (`minecraft:white_bed` …
@@ -607,24 +626,8 @@ pub(crate) fn is_bed_block(name: &str) -> bool {
 /// point — beds/anchors need to be validated for a legal respawn spot before
 /// being accepted.
 ///
-/// This is the set-time half of vanilla's `ServerPlayer.startSleepInBed`,
-/// reduced to what this crate's interaction scope can answer:
-///
-/// 1. The clicked block is a bed ([`is_bed_block`]).
-/// 2. The cell directly above the bed is clear — vanilla's obstruction
-///    rejection, `ServerPlayer.bedBlocked`'s check that the space above the
-///    bed is free. A solid block above the bed makes the spot illegal.
-/// 3. The player is in reach of the bed — vanilla's `ServerPlayer.bedInRange`,
-///    bed ±3 x/z and ±2 y. `player_pos` is `None` until the first
-///    [`crate::server`]`::PlayerMoved` packet; a click before any move skips
-///    the range test (cannot be wrong about a position it never had).
-///
-/// The fourth check vanilla applies — a `NOT_SAFE` monster within ±8 h / ±5 v
-/// of the bed, checked inline in `ServerPlayer.startSleepInBed` and skipped
-/// only in creative — is the documented remainder: it needs a mob-AABB query
-/// this crate's interaction scope does not carry (shape-B world state; see
-/// this module's doc). Without it a bed in monster range is accepted, a gap
-/// the placement half of P2 will close.
+/// A bed is usable when its block and clearance are valid and the player is in
+/// reach when a player position is available.
 pub(crate) fn is_legal_bed_respawn<S: ChunkSource + ?Sized>(
     source: &S,
     bed: BlockPos,
@@ -633,9 +636,6 @@ pub(crate) fn is_legal_bed_respawn<S: ChunkSource + ?Sized>(
     if !is_bed_block(&source.block_state(bed.x, bed.y, bed.z)) {
         return false;
     }
-    // Obstructed: a solid block above the bed blocks the sleeping AABB
-    // (vanilla's `noCollision`), so the spot is illegal even though the bed
-    // itself is present.
     if !is_air_or_fluid(&source.block_state(bed.x, bed.y + 1, bed.z)) {
         return false;
     }
@@ -650,17 +650,8 @@ pub(crate) fn is_legal_bed_respawn<S: ChunkSource + ?Sized>(
     true
 }
 
-/// Vanilla's `bedSurroundStandUpOffsets` followed by `bedAboveStandUpOffsets`
-/// (`BedBlock.bedStandUpOffsets`), as `(forward_steps, side_steps)` multipliers
-/// rather than resolved `(dx, dz)` — the direction vectors are substituted by
-/// [`resolve_bed_respawn`], which knows the bed's `facing`.
-///
-/// The **order is the specification**, not an implementation detail: vanilla
-/// returns the first offset that yields a safe dismount location, so a different
-/// order puts the player somewhere else for the same bed. Transcribed in vanilla's
-/// own sequence, `side` first and the two on-bed cells last.
+/// Ordered offsets used to find a safe position beside a bed.
 const BED_STAND_UP_OFFSETS: [(i32, i32); 12] = [
-    // bedSurroundStandUpOffsets(forward, side)
     (0, 1),
     (-1, 1),
     (-2, 1),
@@ -671,7 +662,6 @@ const BED_STAND_UP_OFFSETS: [(i32, i32); 12] = [
     (1, -1),
     (1, 0),
     (1, 1),
-    // bedAboveStandUpOffsets(forward) — the bed's own cell, and its foot.
     (0, 0),
     (-1, 0),
 ];
@@ -693,19 +683,7 @@ fn bed_facing_steps(state: &str) -> Option<(i32, i32)> {
     }
 }
 
-/// Whether a player can stand at `pos` — the reduction of the real safe-dismount
-/// search this crate can actually answer.
-///
-/// The real search walks the player's collision shape against the level and
-/// additionally rejects "dangerous" blocks (fire, lava, magma, a cactus) on its
-/// first pass. This crate has no player AABB sweep, so the test is the two facts
-/// the census does carry: **two** clear cells of body room (a player is 1.8
-/// blocks tall, so the cell above matters), standing on something whose up-face
-/// is full.
-///
-/// Fail-closed on both halves, which is the safe direction here: an unrecognised
-/// block is not somewhere the search will place a player, so it moves on to the
-/// next offset rather than dropping them into it.
+/// Whether a player can stand at `pos` using the available block-state facts.
 pub(crate) fn is_standable<S: ChunkSource + ?Sized>(source: &S, pos: BlockPos) -> bool {
     let feet = source.block_state(pos.x, pos.y, pos.z);
     let head = source.block_state(pos.x, pos.y + 1, pos.z);
@@ -713,35 +691,8 @@ pub(crate) fn is_standable<S: ChunkSource + ?Sized>(source: &S, pos: BlockPos) -
     is_air_or_fluid(&feet) && is_air_or_fluid(&head) && spawn_face_full_up(&below)
 }
 
-/// Resolves a stored per-player [`RespawnPoint`] into the position a death should
-/// return the player to, or `None` if the point is no longer usable.
-///
-/// This is the real per-player respawn resolution's bed branch, and the
-/// `None` arm is the load-bearing half rather than an error case:
-///
-/// 1. Re-read the block state at the stored position.
-/// 2. If it is still a bed and the dimension allows setting spawn there, search
-///    for a stand-up position beside it, using the bed's stored facing and the
-///    sleeper's yaw, and return that position paired with a zero angle.
-/// 3. Otherwise, if the point was not force-set, report no usable point at all.
-///
-/// So the block at the stored position is **re-read at death time**, not trusted
-/// from when it was set: a bed that has since been broken yields no usable point,
-/// and the player lands at the world spawn instead. Storing the point at set time
-/// and never re-validating it would respawn a player inside whatever replaced
-/// their bed. That is the whole reason this function takes the source rather
-/// than just the point.
-///
-/// The candidate walk is the real [`BED_STAND_UP_OFFSETS`] in the real order,
-/// with [`is_standable`] standing in for the real safe-dismount search — see its
-/// doc for what that costs. The real second pass over the same offsets, with the
-/// "dangerous block" rejection turned off, is not reproduced: the only
-/// difference between the two passes is that danger check, which `is_standable`
-/// does not model, so a second pass would test exactly the same predicate and
-/// find exactly the same answer.
-///
-/// The returned position is the cell's centre in x/z, its floor in y — the real
-/// safe-dismount search returns a point at the block's centre-bottom.
+/// Resolves a stored bed point by re-reading the bed and checking ordered
+/// stand-up positions. Returns `None` when the bed or every candidate is unusable.
 pub(crate) fn resolve_bed_respawn<S: ChunkSource + ?Sized>(
     source: &S,
     point: RespawnPoint,
@@ -749,18 +700,9 @@ pub(crate) fn resolve_bed_respawn<S: ChunkSource + ?Sized>(
     let bed = point.pos;
     let state = source.block_state(bed.x, bed.y, bed.z);
     if !is_bed_block(&state) {
-        // The bed is gone — no usable point.
         return None;
     }
-    // A bed with no readable `facing` cannot have its offsets resolved; treat the
-    // head/foot axis as north-south, which is the default state's own facing, so
-    // the walk still happens rather than the point being silently discarded.
     let (fx, fz) = bed_facing_steps(&state).unwrap_or((0, -1));
-    // `side` is the forward direction rotated 90 degrees clockwise — the real
-    // search picks between it and its opposite using the sleeper's yaw, which
-    // this crate does not record at bed entry (see [`RespawnPoint`]'s own doc).
-    // The clockwise choice is taken, which only decides *which* side of the bed
-    // a player wakes on.
     let (sx, sz) = (-fz, fx);
     for (forward_steps, side_steps) in BED_STAND_UP_OFFSETS {
         let candidate = BlockPos::new(
@@ -776,15 +718,10 @@ pub(crate) fn resolve_bed_respawn<S: ChunkSource + ?Sized>(
             ));
         }
     }
-    // Every offset obstructed. Vanilla's `Optional.empty()` again — the bed is
-    // walled in, and the player goes to the world spawn.
     None
 }
 
-// A small `ChunkSource` for the spiral gates: a fixed map of columns, with any
-// chunk outside it answering an all-air (therefore spawn-invalid) column, so a
-// gate can exercise exactly the terrain it cares about without generating 121
-// real columns.
+// Test source with explicit columns and air outside the fixture.
 #[cfg(test)]
 struct MapSource {
     columns: std::collections::HashMap<(i32, i32), ChunkColumn>,
@@ -835,8 +772,7 @@ fn land_column(surface_y: i32) -> ChunkColumn {
     column
 }
 
-/// An all-water column (`height` rows of water) — `getLevelRespawnPos` must
-/// reject every position in it, so the spiral moves on.
+/// An all-water column that rejects every spawn position.
 #[cfg(test)]
 fn ocean_column() -> ChunkColumn {
     let mut column = ChunkColumn::new(0, 128);
@@ -855,9 +791,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn spiral_traverses_the_square_in_vanilla_order() {
-        // The first twelve offsets, transcribed from `setInitialSpawn`'s loop
-        // (verified by hand against the Java above).
+    fn spiral_traverses_the_square_in_search_order() {
         let expected: [(i32, i32); 12] = [
             (0, 0),
             (1, 0),
@@ -1010,16 +944,7 @@ mod tests {
         );
     }
 
-    /// **The spawn-in-the-air defect, as a magnitude gate.** A plains column with
-    /// vegetation on it must spawn the player *on the ground block*, not on the
-    /// flower standing on it.
-    ///
-    /// Both hypotheses are computed from outside constants rather than one being
-    /// asserted: `is_air_or_fluid`'s negation (the predicate this function used
-    /// until DESIGN.md §12.129) calls `short_grass` ground and yields `surface +
-    /// 2`; the jar's `Block.isFaceFull(…, UP)` scans past it and yields `surface +
-    /// 1`. A sign-only check ("the spawn is above the surface") passes under
-    /// both, which is exactly why the bug survived.
+    /// A non-collidable surface decoration does not become the support block.
     #[test]
     fn vegetation_on_the_surface_is_not_what_the_player_stands_on() {
         const SURFACE_Y: i32 = 70;
@@ -1030,8 +955,6 @@ mod tests {
             "minecraft:snow[layers=1]",
         ] {
             let mut column = land_column(SURFACE_Y);
-            // The generator's own shape: a solid surface block with one
-            // non-collidable decoration standing on it.
             column.set_block(0, SURFACE_Y, 0, "minecraft:grass_block[snowy=false]");
             column.set_block(0, SURFACE_Y + 1, 0, plant);
 
@@ -1043,21 +966,13 @@ mod tests {
             assert_eq!(
                 measured,
                 Some(correct),
-                "{plant} has no collision, so vanilla stands the player on the \
-                 grass_block at {SURFACE_Y} (feet {correct}); {suspected_wrong} is the \
-                 `is_air_or_fluid` answer that put the player one block in the air"
+                "{plant} has no collision, so the player stands on the \
+                 grass_block at {SURFACE_Y} (feet {correct}); {suspected_wrong} is invalid"
             );
         }
     }
 
-    /// **Control for the gate above**: the predicate is not simply "skip
-    /// everything above the stone", which would also produce `SURFACE_Y + 1`.
-    /// A block that *is* face-full — leaves, which vanilla genuinely lets a
-    /// player spawn on top of — must still raise the spawn.
-    ///
-    /// Without this, `vegetation_on_the_surface_is_not_what_the_player_stands_on`
-    /// would pass against an implementation that ignored the block census
-    /// entirely and always answered `stone_top + 1`.
+    /// A full support block above the surface becomes the new support.
     #[test]
     fn a_face_full_block_above_the_surface_does_raise_the_spawn() {
         const SURFACE_Y: i32 = 70;
@@ -1066,20 +981,11 @@ mod tests {
         assert_eq!(
             get_level_respawn_pos(&column, 0, 0),
             Some(SURFACE_Y + 2),
-            "oak_leaves measures face_full_up = true, so the player stands on the leaf"
+            "oak_leaves provides full support, so the player stands on the leaf"
         );
     }
 
-    /// **The join gate.** [`spawn_state_id`] must give the census's own answer for
-    /// **every** state of every block a generated surface can carry — not just the
-    /// default state, and not just the states this module happens to name in a
-    /// fixture.
-    ///
-    /// This test found a real defect on its first run: the join was base-name-only
-    /// and `minecraft:oak_leaves[…,waterlogged=true]` (state id 253) resolved to
-    /// its `waterlogged=false` default, reporting `has_fluid_state = false` for a
-    /// block that vanilla says holds water. A waterlogged canopy would then have
-    /// been treated as standable ground instead of aborting the column.
+    /// Every generated surface state resolves to its own census entry.
     #[test]
     fn spawn_state_resolution_agrees_with_the_census_for_every_surface_state() {
         use lodestone_data::{block_states, snow_support};
@@ -1151,37 +1057,20 @@ mod tests {
     }
 
     /// A valid origin chunk is accepted by the spiral's *first* candidate, and the
-    /// position inside it is vanilla's scan order — local `(0, 0)`, **not** the
-    /// centre.
-    ///
-    /// This test previously expected `(8, 8)` and named itself
-    /// `plains_origin_chunk_yields_spawn_at_local_8_8`, transcribed from the
-    /// hardcoded-spawn-point behaviour it replaced. It had never passed: the search
-    /// and the expectation landed in the same commit (`43e096b`), and `(8, 8)` is
-    /// not what the search returns for a valid chunk.
-    ///
-    /// `(0, 0)` is read off `PlayerSpawnFinder.getSpawnPosInChunk`, which scans
-    /// from `chunkPos.getMinBlockX()`/`getMinBlockZ()` and returns the
-    /// first valid `(x, z)` — for chunk `(0, 0)` that is world `(0, 0)`. Its
-    /// sibling [`ocean_origin_chunk_moves_the_spawn_to_the_nearest_land`] already
-    /// encoded the same rule (`x = 16, z = 0` for chunk `(1, 0)`, i.e. local
-    /// `(0, 0)`), so the two were mutually contradictory.
-    ///
-    /// `(8, 8)` is not lost: it is the *fallback* for a fully-invalid box, which
-    /// [`fully_ocean_box_falls_back_to_the_origin_surface`] pins.
+    /// A valid origin chunk returns its first valid local position.
     #[test]
-    fn plains_origin_chunk_yields_spawn_at_vanillas_first_scanned_position() {
+    fn plains_origin_chunk_yields_spawn_at_first_scanned_position() {
         let mut columns = std::collections::HashMap::new();
         columns.insert((0, 0), land_column(20));
         let spawn = find_initial_spawn(&MapSource { columns });
 
         assert_eq!(
             spawn.pos.x, 0.0,
-            "spawn X is the first x vanilla's chunk scan visits, chunkPos.getMinBlockX()"
+            "spawn X is the first x in scan order"
         );
         assert_eq!(
             spawn.pos.z, 0.0,
-            "spawn Z is the first z of that scan, chunkPos.getMinBlockZ()"
+            "spawn Z is the first z in scan order"
         );
         assert_eq!(spawn.pos.y, 21.0, "spawn Y is one above the surface");
         assert_eq!((spawn.yaw, spawn.pitch), (0.0, 0.0));
@@ -1258,7 +1147,7 @@ mod tests {
             source.calls.load(Ordering::SeqCst),
             1,
             "the origin column must be generated once and reused for the spiral's (0, 0) \
-             candidate; 2 means the reuse was reverted"
+             candidate"
         );
     }
 
@@ -1273,21 +1162,11 @@ mod tests {
         let spawn = find_initial_spawn(&MapSource { columns });
 
         assert_eq!(spawn.pos.x, 16.0, "chunk (1, 0) starts at world x=16");
-        assert_eq!(spawn.pos.z, 0.0, "chunk (1, 0)'s first z (vanilla's x-then-z scan)");
+        assert_eq!(spawn.pos.z, 0.0, "chunk (1, 0)'s first z");
         assert_eq!(spawn.pos.y, 16.0, "one above the land surface");
     }
 
-    /// Every chunk in the spiral invalid: the search must return vanilla's own
-    /// pre-seed, `(8, 64, 8)`.
-    ///
-    /// **This is the bedrock-burial gate.** The Y assertion is the whole point
-    /// and it was missing — this test asserted X and Z only, so the arm that
-    /// returned `min_y + 1` was completely uncovered and shipped. Two of four
-    /// probe seeds against the real generator take this arm.
-    ///
-    /// Both hypotheses computed from outside constants: `min_y + 1` is `-63` for
-    /// a `(-64, 384)` world (inside the bedrock floor), and
-    /// `ChunkGenerator.getSpawnHeight` is `64`.
+    /// Every chunk in the spiral invalid returns the fixed fallback position.
     #[test]
     fn a_fully_invalid_box_falls_back_above_sea_level_not_into_the_bedrock_floor() {
         const MIN_Y: i32 = -64;
@@ -1295,8 +1174,6 @@ mod tests {
         let mut ocean = ChunkColumn::new(MIN_Y, HEIGHT);
         for x in 0..16 {
             for z in 0..16 {
-                // A real ocean column: bedrock floor, stone, then water to sea
-                // level. The bedrock is what the old fallback landed inside.
                 ocean.set_block(x, MIN_Y, z, "minecraft:bedrock");
                 for y in (MIN_Y + 1)..=(MIN_Y + 3) {
                     ocean.set_block(x, y, z, "minecraft:deepslate");
@@ -1319,18 +1196,9 @@ mod tests {
         assert_eq!(spawn.pos.z, 8.0);
         assert_eq!(
             spawn.pos.y, correct,
-            "vanilla's `getSpawnHeight` is 64; {suspected_wrong} is `min_y + 1`, which is \
-             inside the bedrock floor"
+            "fallback height is 64; {suspected_wrong} is inside the solid floor"
         );
 
-        // The user-visible property, read out of the **same** fixture the search
-        // ran against rather than a fresh empty one — and with its own premise
-        // check, because "not inside a solid block" is trivially true of any
-        // coordinate in an all-air source.
-        //
-        // Premise: the wrong answer really is inside something solid. If this
-        // assertion stops holding the fixture no longer reproduces the defect and
-        // the one below proves nothing.
         assert!(
             spawn_face_full_up(&source.block_state(8, MIN_Y + 1, 8)),
             "premise: `min_y + 1` must sit inside a collidable block for this gate to \
@@ -1346,31 +1214,10 @@ mod tests {
         );
     }
 
-    /// **The world-species gate.** Every hermetic fixture above is a column this
-    /// module's own test code wrote, so none of them can exercise the thing that
-    /// actually broke: what the *production generator* leaves at the surface.
-    /// Both defects DESIGN.md §12.129 records were invisible to the whole
-    /// fixture suite and visible on the first real seed.
-    ///
-    /// The expected value originates outside this module in both halves: the
-    /// standability predicate is `lodestone-data`'s jar-dumped
-    /// `snow_support::face_full_up`, and the fallback height is the literal read
-    /// off `ChunkGenerator.getSpawnHeight`. Nothing here compares the search
-    /// against another copy of itself.
-    ///
-    /// `#[ignore]`d: it composes real columns (measured ~1.5 s per seed in
-    /// release, and an all-ocean box walks all 121).
-    ///
-    /// ```text
-    /// cargo test --release -p lodestone-server --lib real_generator_spawn -- --ignored --nocapture
-    /// ```
+    /// Validates spawn positions against generated columns for representative seeds.
     #[test]
-    #[ignore = "composes real generator columns; several seconds per seed"]
-    fn real_generator_spawn_is_always_standable_or_the_documented_fallback() {
-        // Four seeds chosen because they cover both arms: 0 and 42 find a valid
-        // chunk in the box, 1234 and -195764831 have a fully-ocean ±5 box and take
-        // the fallback. A single-seed version of this gate would be the *world*
-        // species all over again.
+    #[ignore = "composes generated columns; several seconds per seed"]
+    fn generated_spawn_is_standable_or_fallback() {
         let mut took_fallback = 0usize;
         let mut found_in_box = 0usize;
         for seed in [0_i64, 42, 1234, -195764831] {
@@ -1390,8 +1237,6 @@ mod tests {
                 "seed {seed}: spawn=({sx}, {sy}, {sz}) support={support} feet={feet} head={head}"
             );
 
-            // Holds on **both** arms, and it is the property the owner's report was
-            // about: the player is never inside terrain.
             assert!(
                 !spawn_face_full_up(&feet),
                 "seed {seed}: spawn feet at ({sx}, {sy}, {sz}) are inside {feet}"
@@ -1407,18 +1252,13 @@ mod tests {
             );
 
             if spawn_face_full_up(&support) {
-                // The search-found arm: the block under the player's feet is
-                // something vanilla's own `isFaceFull` accepts as standable.
                 found_in_box += 1;
             } else {
-                // The fallback arm. It is only reached when the whole box is
-                // invalid, and then the height is not a search result at all — it
-                // is `getSpawnHeight`.
                 assert_eq!(
                     (sx, sy, sz),
                     (8, GENERATOR_SPAWN_HEIGHT, 8),
                     "seed {seed}: a spawn with nothing standable beneath it must be \
-                     exactly the documented `(8, getSpawnHeight, 8)` fallback, not a \
+                     exactly the `(8, 64, 8)` fallback, not a \
                      search result hanging in the air"
                 );
                 took_fallback += 1;
@@ -1505,23 +1345,9 @@ mod tests {
         assert!(!is_bed_block("minecraft:bedrock"), "bedrock ends in -rock, not -bed");
         assert!(!is_bed_block("minecraft:respawn_anchor"));
     }
-    // ---------------------------------------------------------------------
-    // `resolve_bed_respawn` — the *read* half. The point was already written
-    // and validated at set time; nothing consulted it on death, so a player
-    // always woke where they died.
-    // ---------------------------------------------------------------------
-
-    /// A bed on open stone resolves to a standable cell beside it — and to the
-    /// **first** offset in vanilla's own order, not just to any of the twelve.
-    ///
-    /// `side` is `forward.getClockWise()`, so for a north-facing bed
-    /// (`forward = (0, -1)`) `side` is `(1, 0)` and the first offset
-    /// `{side.getStepX(), side.getStepZ()}` is one cell east. That is a value
-    /// predicted from the transcribed offset table, not from running this code:
-    /// an implementation that iterated the offsets in any other order would land
-    /// somewhere else and fail here.
+    /// A bed on open ground resolves to the first ordered candidate.
     #[test]
-    fn a_bed_on_open_ground_resolves_to_the_first_vanilla_offset() {
+    fn a_bed_on_open_ground_resolves_to_the_first_offset() {
         let mut column = land_column(20);
         column.set_block(8, 21, 8, "minecraft:red_bed[facing=north,part=foot]");
         let mut columns = std::collections::HashMap::new();
@@ -1539,19 +1365,10 @@ mod tests {
         );
     }
 
-    /// **The load-bearing case, and the one the missing read produced.** A bed
-    /// that has been broken since the point was set must resolve to `None`, so the
-    /// caller falls back to the world spawn — vanilla's `Optional.empty()`, which
-    /// it answers with `NO_RESPAWN_BLOCK_AVAILABLE`.
-    ///
-    /// Trusting the stored point instead would teleport the player into whatever
-    /// replaced their bed. Note the position here is *identical* to the passing
-    /// case above: only the block changed, which is what makes this a test of the
-    /// re-read rather than of the coordinates.
+    /// A bed that has been broken since the point was set resolves to `None`.
     #[test]
     fn a_broken_bed_resolves_to_nothing() {
         let mut column = land_column(20);
-        // Where the bed used to be. Someone has since built a wall there.
         column.set_block(8, 21, 8, "minecraft:stone");
         let mut columns = std::collections::HashMap::new();
         columns.insert((0, 0), column);
@@ -1566,14 +1383,8 @@ mod tests {
         );
     }
 
-    /// A bed walled in on every side resolves to `None` too — the other
-    /// `Optional.empty()` arm, and the control that proves the offset walk is
-    /// actually testing each candidate rather than returning the first one
-    /// unconditionally.
+    /// A bed walled in on every side has no usable candidate.
     ///
-    /// Filled with stone from the bed's own y upward across the whole column, so
-    /// every one of the twelve offsets (including the two on the bed itself) has a
-    /// solid cell where the player's feet would go.
     #[test]
     fn a_walled_in_bed_resolves_to_nothing() {
         let mut column = land_column(20);
@@ -1598,10 +1409,7 @@ mod tests {
         );
     }
 
-    /// The bed's `facing` really is read: a south-facing bed's `side` is the
-    /// opposite of a north-facing one's, so the same bed at the same position
-    /// resolves to a *different* cell. Without this, a hardcoded offset would pass
-    /// the first gate above.
+    /// Bed facing determines which side receives the player.
     #[test]
     fn the_beds_facing_decides_which_side_the_player_wakes_on() {
         let resolve = |facing: &str| {
@@ -1613,11 +1421,8 @@ mod tests {
                 pos: BlockPos::new(8, 21, 8),
             })
         };
-        // north: forward=(0,-1), side=clockwise=(1,0)  -> east
         assert_eq!(resolve("north"), Some(Vec3::new(9.5, 21.0, 8.5)));
-        // south: forward=(0,1),  side=clockwise=(-1,0) -> west
         assert_eq!(resolve("south"), Some(Vec3::new(7.5, 21.0, 8.5)));
-        // east:  forward=(1,0),  side=clockwise=(0,1)  -> south
         assert_eq!(resolve("east"), Some(Vec3::new(8.5, 21.0, 9.5)));
     }
 }

@@ -240,4 +240,13 @@ mod tests {
         let doubled: std::time::Duration = elapsed + std::time::Duration::from_millis(1);
         assert!(doubled > elapsed);
     }
+
+    #[cfg(target_arch = "wasm32")]
+    #[test]
+    fn browser_clock_and_timer_surface_compiles() {
+        let _ = Instant::now();
+        let _ = epoch_duration();
+        let timer = browser_sleep(std::time::Duration::ZERO);
+        drop(timer);
+    }
 }

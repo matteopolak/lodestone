@@ -1081,7 +1081,10 @@ fn held_item_overlay_spans_carry_hex_colour_from_a_real_item_to_a_vertex() {
 fn redraw_rs_still_forwards_held_item_overlay_spans_to_the_hud_frame() {
     let src = include_str!("../../app/redraw.rs");
     assert!(
-        src.contains("hud_frame.held_item_spans = self.sim.held_item_overlay_spans();"),
+        src.lines().any(|line| {
+            line.contains("hud_frame.held_item_spans =")
+                && line.contains("self.sim.held_item_overlay_spans()")
+        }),
         "app/redraw.rs no longer forwards `Sim::held_item_overlay_spans` into \
          `HudFrame::held_item_spans` — the held-item label is back to losing hex \
          colours, with nothing else in this crate able to see it because the real \

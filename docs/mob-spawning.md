@@ -144,7 +144,9 @@ the per-tick speed scale *and* the forward-input magnitude a mob's move vector m
 per-tick thrust is the *square* of the speed modifier times `movement_speed`, converging under friction
 (ground `0.6`, air drag `0.91`) to `requested_speed² / (1 - 0.6 * 0.91)`. `ai_ground_speed`
 implements that conversion for the kinematic follower's `step_per_tick`; roster goals still
-receive the *unconverted* attribute. Checked live: a zombie (`0.23`) chasing a stationary villager
+receive the *unconverted* attribute. The follower applies each roster goal's speed multiplier to
+that converted rate without rebuilding its path, so the movement request and simulation speed stay
+aligned. Checked live: a zombie (`0.23`) chasing a stationary villager
 measured ≈0.118 blocks/tick against a predicted `0.1165` — the unconverted attribute is roughly
 double either figure, matching a long-standing "mobs move too fast" report.
 

@@ -407,6 +407,18 @@ impl ImmutableProduct {
     }
 
     #[must_use]
+    pub fn from_arc<T>(resource: ResourceKey, value: Arc<T>, retained_bytes: usize) -> Self
+    where
+        T: Any + Send + Sync,
+    {
+        Self {
+            resource,
+            value,
+            retained_bytes,
+        }
+    }
+
+    #[must_use]
     pub const fn resource(&self) -> ResourceKey {
         self.resource
     }
@@ -631,6 +643,30 @@ impl Clone for ProvenanceMutation {
 }
 
 impl ProvenanceMutation {
+    #[cfg(test)]
+    pub(crate) fn test_block_state(
+        target: ChunkCoordinate,
+        source: ChunkCoordinate,
+        stage: StageKey,
+        ordinal: u32,
+        destination: BlockCoordinate,
+        revision: u64,
+        value: String,
+    ) -> Self {
+        Self {
+            provenance: MutationProvenance {
+                target,
+                source,
+                stage,
+                ordinal,
+                destination,
+                revision: SessionRevision(revision),
+            },
+            retained_bytes: size_of::<String>() + value.capacity(),
+            value: Arc::new(value),
+        }
+    }
+
     #[must_use]
     pub const fn provenance(&self) -> MutationProvenance {
         self.provenance
@@ -892,22 +928,164 @@ impl SidecarProductKey {
 }
 
 /// A packet neighbour retained with a detached target snapshot.
-#[derive(Debug, Clone)]
+///
+/// Shaped generated columns remain in their compact typed representation until
+/// a packet consumer asks for the legacy [`ChunkColumn`] view. This keeps the
+/// detached snapshot's radius and readiness contract while avoiding an eager
+/// conversion for callers that only need the target column.
+#[derive(Debug)]
 pub struct PacketNeighbour {
     coordinate: ChunkCoordinate,
-    column: ChunkColumn,
+    column: PacketNeighbourColumn,
+}
+
+#[derive(Debug)]
+enum PacketNeighbourColumn {
+    Materialized(ChunkColumn),
+    Generated {
+        column: Arc<lodestone_worldgen::overworld::GeneratedColumn>,
+        overlay: Arc<[(i32, i32, i32, String)]>,
+        materialized: std::sync::OnceLock<ChunkColumn>,
+    },
+}
+
+impl Clone for PacketNeighbour {
+    fn clone(&self) -> Self {
+        let column = match &self.column {
+            PacketNeighbourColumn::Materialized(column) => {
+                PacketNeighbourColumn::Materialized(column.clone())
+            }
+            PacketNeighbourColumn::Generated {
+                column,
+                overlay,
+                materialized,
+            } => {
+                let copied = std::sync::OnceLock::new();
+                if let Some(materialized) = materialized.get() {
+                    let _ = copied.set(materialized.clone());
+                }
+                PacketNeighbourColumn::Generated {
+                    column: Arc::clone(column),
+                    overlay: Arc::clone(overlay),
+                    materialized: copied,
+                }
+            }
+        };
+        Self {
+            coordinate: self.coordinate,
+            column,
+        }
+    }
 }
 
 impl PacketNeighbour {
+    pub(crate) fn materialized(coordinate: ChunkCoordinate, column: ChunkColumn) -> Self {
+        Self {
+            coordinate,
+            column: PacketNeighbourColumn::Materialized(column),
+        }
+    }
+
+    pub(crate) fn generated_with_overlay(
+        coordinate: ChunkCoordinate,
+        column: Arc<lodestone_worldgen::overworld::GeneratedColumn>,
+        overlay: Vec<(i32, i32, i32, String)>,
+    ) -> Self {
+        Self {
+            coordinate,
+            column: PacketNeighbourColumn::Generated {
+                column,
+                overlay: Arc::from(overlay),
+                materialized: std::sync::OnceLock::new(),
+            },
+        }
+    }
+
+    pub(crate) fn materialized_with_overlay(
+        coordinate: ChunkCoordinate,
+        mut column: ChunkColumn,
+        overlay: &[(i32, i32, i32, String)],
+    ) -> Self {
+        apply_packet_overlay(&mut column, overlay);
+        Self::materialized(coordinate, column)
+    }
+
     #[must_use]
     pub const fn coordinate(&self) -> ChunkCoordinate {
         self.coordinate
     }
 
+    /// Borrow the compact generated product without crossing into the legacy
+    /// [`ChunkColumn`] carrier. Packet encoders that only need typed terrain
+    /// metadata can retain this handle; [`Self::column`] remains the explicit
+    /// conversion boundary for light and wire consumers that require the
+    /// mutable server representation.
     #[must_use]
-    pub const fn column(&self) -> &ChunkColumn {
-        &self.column
+    pub fn generated_column(
+        &self,
+    ) -> Option<Arc<lodestone_worldgen::overworld::GeneratedColumn>> {
+        match &self.column {
+            PacketNeighbourColumn::Materialized(_) => None,
+            PacketNeighbourColumn::Generated { column, .. } => Some(Arc::clone(column)),
+        }
     }
+
+    #[must_use]
+    pub fn column(&self) -> &ChunkColumn {
+        match &self.column {
+            PacketNeighbourColumn::Materialized(column) => column,
+            PacketNeighbourColumn::Generated {
+                column,
+                overlay,
+                materialized,
+            } => materialized.get_or_init(|| {
+                #[cfg(test)]
+                crate::chunk::record_generated_materialization();
+                let mut column = ChunkColumn::from_generated((**column).clone());
+                apply_packet_overlay(&mut column, overlay);
+                column
+            }),
+        }
+    }
+
+    /// Consume this neighbour into the legacy mutable server column.
+    ///
+    /// If no borrowed consumer forced conversion, the generated compact
+    /// column can be moved directly when its shared handle is unique.
+    #[must_use]
+    pub fn into_column(self) -> ChunkColumn {
+        match self.column {
+            PacketNeighbourColumn::Materialized(column) => column,
+            PacketNeighbourColumn::Generated {
+                column,
+                overlay,
+                materialized,
+            } => {
+                if let Some(column) = materialized.into_inner() {
+                    return column;
+                }
+                #[cfg(test)]
+                crate::chunk::record_generated_materialization();
+                let mut column = match Arc::try_unwrap(column) {
+                    Ok(column) => ChunkColumn::from_generated(column),
+                    Err(column) => ChunkColumn::from_generated((*column).clone()),
+                };
+                apply_packet_overlay(&mut column, &overlay);
+                column
+            }
+        }
+    }
+}
+
+fn apply_packet_overlay(
+    column: &mut ChunkColumn,
+    overlay: &[(i32, i32, i32, String)],
+) {
+    let writes = overlay
+        .iter()
+        .map(|(x, y, z, state)| (*x, *y, *z, state.as_str()))
+        .collect::<Vec<_>>();
+    column.apply_ordered_block_batch(&writes);
 }
 
 /// A detached target and its concrete neighbour columns.
@@ -1558,13 +1736,6 @@ impl GenerationSession {
         self.mutable_source_plan.as_ref()
     }
 
-    /// Source completions already accepted by this session or hydrated from
-    /// the world ledger, in canonical order for each stage.
-    #[must_use]
-    pub(crate) fn committed_source_completions(&self) -> &[SourceCompletionRecord] {
-        &self.committed_source_completions
-    }
-
     /// Whether a source order was committed by the currently active mutable
     /// stage. Drivers use this to avoid redoing a prefix restored from the
     /// world-owned ledger.
@@ -1742,7 +1913,10 @@ impl GenerationSession {
             .target_stage(GenerationTarget::Shaped);
         if boundary != expected_boundary
             || aggregate.resource() != ResourceKey::MaterializedWorld
-            || aggregate.get::<ChunkColumn>().is_none()
+            || (aggregate.get::<ChunkColumn>().is_none()
+                && aggregate
+                    .get::<lodestone_worldgen::overworld::GeneratedColumn>()
+                    .is_none())
         {
             return Err(SessionError::InvalidCheckpoint);
         }
@@ -1851,6 +2025,21 @@ impl GenerationSession {
         self.aggregates
             .get(&coordinate)
             .and_then(|aggregate| aggregate.product().get::<ChunkColumn>())
+    }
+
+    /// Whether this coordinate has an authenticated shaped aggregate, without
+    /// forcing a typed generated product into the server column carrier.
+    #[must_use]
+    pub fn has_aggregate_prefix(&self, coordinate: ChunkCoordinate) -> bool {
+        self.aggregates.contains_key(&coordinate)
+    }
+
+    /// Return the authenticated shaped aggregate in its original typed form.
+    #[must_use]
+    pub fn aggregate_prefix_product(&self, coordinate: ChunkCoordinate) -> Option<ImmutableProduct> {
+        self.aggregates
+            .get(&coordinate)
+            .map(|aggregate| aggregate.product().clone())
     }
 
     /// Queue a pure stage result. Arrival order is independent of commit order.
@@ -2544,7 +2733,11 @@ impl GenerationSession {
                         .schedule()
                         .target_stage(GenerationTarget::Shaped)
                 || aggregate.product().resource() != ResourceKey::MaterializedWorld
-                || aggregate.product().get::<ChunkColumn>().is_none()
+                || (aggregate.product().get::<ChunkColumn>().is_none()
+                    && aggregate
+                        .product()
+                        .get::<lodestone_worldgen::overworld::GeneratedColumn>()
+                        .is_none())
                 || !frontier_valid
                 || session.aggregates.insert(coordinate, aggregate).is_some()
             {
@@ -2699,7 +2892,8 @@ impl GenerationSession {
                     destination_chunk.0 - provenance.source().0,
                     destination_chunk.1 - provenance.source().1,
                 )
-                || !session.halo.contains(provenance.source())
+                || (!foreign_target_overlay
+                    && !session.halo.contains(provenance.source()))
                 || (!foreign_target_overlay
                     && !stage_is_committed
                     && !stage_is_active)
@@ -2833,7 +3027,13 @@ impl GenerationSession {
         column: ChunkColumn,
         neighbours: impl IntoIterator<Item = (ChunkCoordinate, ChunkColumn)>,
     ) -> Result<PacketSnapshot, SessionError> {
-        self.finalize_packet_snapshot_through(column, neighbours, GenerationTarget::Full)
+        self.finalize_packet_snapshot_through(
+            column,
+            neighbours
+                .into_iter()
+                .map(|(coordinate, column)| PacketNeighbour::materialized(coordinate, column)),
+            GenerationTarget::Full,
+        )
     }
 
     /// Detach a full target together with shaped dependency columns.
@@ -2848,13 +3048,32 @@ impl GenerationSession {
         column: ChunkColumn,
         neighbours: impl IntoIterator<Item = (ChunkCoordinate, ChunkColumn)>,
     ) -> Result<PacketSnapshot, SessionError> {
+        self.finalize_packet_snapshot_through(
+            column,
+            neighbours
+                .into_iter()
+                .map(|(coordinate, column)| PacketNeighbour::materialized(coordinate, column)),
+            GenerationTarget::Shaped,
+        )
+    }
+
+    /// Detach a packet using typed shaped neighbours.
+    ///
+    /// Generated neighbours stay compact until [`PacketNeighbour::column`]
+    /// or [`PacketNeighbour::into_column`] is called by a consumer that
+    /// actually needs the mutable server carrier.
+    pub(crate) fn finalize_packet_snapshot_with_packet_neighbours(
+        &self,
+        column: ChunkColumn,
+        neighbours: impl IntoIterator<Item = PacketNeighbour>,
+    ) -> Result<PacketSnapshot, SessionError> {
         self.finalize_packet_snapshot_through(column, neighbours, GenerationTarget::Shaped)
     }
 
     fn finalize_packet_snapshot_through(
         &self,
         column: ChunkColumn,
-        neighbours: impl IntoIterator<Item = (ChunkCoordinate, ChunkColumn)>,
+        neighbours: impl IntoIterator<Item = PacketNeighbour>,
         neighbour_target: GenerationTarget,
     ) -> Result<PacketSnapshot, SessionError> {
         self.ensure_active()?;
@@ -2904,7 +3123,8 @@ impl GenerationSession {
         };
         let mut packet_neighbours = Vec::new();
         let mut supplied_domain = BTreeSet::new();
-        for (coordinate, column) in neighbours {
+        for neighbour in neighbours {
+            let coordinate = neighbour.coordinate();
             if coordinate == self.request.target
                 || !supplied_domain.insert(coordinate)
             {
@@ -2919,7 +3139,7 @@ impl GenerationSession {
             if !neighbour_frontier.is_complete_through(neighbour_terminal) {
                 return Err(SessionError::PacketNeighbourNotReady { coordinate });
             }
-            packet_neighbours.push(PacketNeighbour { coordinate, column });
+            packet_neighbours.push(neighbour);
         }
         if supplied_domain != *declared_domain {
             return Err(SessionError::PacketNeighbourDomainMismatch);

@@ -44,9 +44,8 @@ use common::unique_username;
 const MIN_Y: i32 = -64;
 const HEIGHT: i32 = 384;
 
-/// A flat, solid floor everywhere — the same shape `server_no_demo_mobs.rs`
-/// uses, so the join's world-spawn search terminates quickly instead of
-/// scanning every candidate in an all-air world.
+/// A flat, solid floor everywhere, so the join's world-spawn search terminates
+/// quickly instead of scanning every candidate in an all-air world.
 struct FlatSource;
 
 impl ChunkSource for FlatSource {
@@ -168,7 +167,6 @@ async fn a_singleplayer_join_lists_the_local_player_in_its_own_tab_list() {
         FlatSource,
         (-2..=2, -2..=2),
         (8, 8),
-        0,
         1,
     );
     let mut client = Connection::new(client_io);

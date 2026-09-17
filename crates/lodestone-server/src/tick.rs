@@ -152,8 +152,8 @@ const PHASE_TRACE_THRESHOLD: Duration = TICK_PERIOD;
 /// counterpart for reproducing a join stall: it emits only phases that exceed
 /// one full tick period, and only when `LODESTONE_TICK_TRACE` is explicitly
 /// enabled. The same implementation is used on native and `wasm32`; the
-/// browser simply does not opt in through the native environment-variable
-/// switch.
+/// browser opts in through the SDK log level instead of a process environment
+/// variable.
 #[derive(Debug, Clone, Copy)]
 struct TickTrace;
 
@@ -167,7 +167,7 @@ impl TickTrace {
         let requested = std::env::var_os("LODESTONE_TICK_TRACE")
             .is_some_and(|value| !value.is_empty() && value != "0");
         #[cfg(target_arch = "wasm32")]
-        let requested = false;
+        let requested = true;
         (requested && tracing::enabled!(target: "lodestone_tick_trace", tracing::Level::INFO))
             .then_some(Self)
     }
@@ -1904,7 +1904,7 @@ async fn run_tick_loop_with_weather_impl<W>(
         //
         // `MobSim::tick` would use `MobSim`'s own `ChunkWorld`, which is a static
         // 7×7-column snapshot of `mob_area` taken once when the world opened
-        // (`MobHandle::reseed`). Everywhere outside those columns its `is_solid`
+        // (`MobHandle::replace_world`). Everywhere outside those columns its `is_solid`
         // answers `false` for every cell — the column is absent, not empty — so a
         // dropped item accelerated downward forever, phased through the terrain,
         // and was discarded at `min_y - 64`. Inside them it answered from
@@ -2008,7 +2008,7 @@ async fn run_tick_loop_with_weather_impl<W>(
         // **the natural spawn cycle, and the despawn pass.**
         // Both engines were complete and driverless — `MobSim::run_spawn_cycle`
         // and `MobSim::despawn_pass` had no production caller at all, so a world
-        // held exactly the mobs `seed_demo_mobs` put in it, forever.
+        // held only the mobs restored or created by earlier tick paths, forever.
         //
         // Gated on the `spawn_mobs` game rule, which is what that rule's
         // accessor was waiting for (`docs/world-state.md` said so explicitly).
@@ -5160,31 +5160,28 @@ mod tests {
     // than merely if `take_grazes` regresses.
     // ---------------------------------------------------------------------
 
-    /// A [`ChunkSource`] that records every [`ChunkSource::set_block`] the tick
-    /// loop applies, and serves bare-air columns.
-    ///
-    /// Air, deliberately: the loop random-ticks `tick_area` against this same
-    /// source every tick, and an eligible block there would write its own
-    /// `set_block` calls into the very list these gates read — a grass block
-    /// dying to `minecraft:dirt` is *byte-identical* to the `Below` graze this
-    /// asserts. Air makes the recording unambiguous by making the graze the only
-    /// possible writer.
-    ///
-    /// The graze decision does not come from here in any case: `EatBlockGoal`
-    /// reads the *sim's* `ChunkWorld` (see `grass_world` below). Production
-    /// shares one object between the two roles; separating them here is what
-    /// lets the gate watch the mutation arrive.
-    #[derive(Default)]
-    struct RecordingWorld(Arc<Mutex<Vec<(i32, i32, i32, String)>>>);
+    /// A live in-memory source that records edits while serving the same
+    /// terrain snapshot used by the mob simulation.
+    struct RecordingWorld {
+        edits: Arc<Mutex<Vec<(i32, i32, i32, String)>>>,
+        terrain: Mutex<ChunkWorld>,
+    }
 
     impl ChunkSource for RecordingWorld {
-        fn column(&self, _cx: i32, _cz: i32) -> crate::chunk::ChunkColumn {
-            crate::chunk::ChunkColumn::new(0, 16)
+        fn column(&self, cx: i32, cz: i32) -> crate::chunk::ChunkColumn {
+            self.terrain
+                .lock()
+                .expect("recording terrain lock poisoned")
+                .column(cx, cz)
+                .cloned()
+                .unwrap_or_else(|| crate::chunk::ChunkColumn::new(-64, 384))
+        }
+
+        fn resident_column(&self, cx: i32, cz: i32) -> Option<crate::chunk::ChunkColumn> {
+            Some(self.column(cx, cz))
         }
 
         fn block_state(&self, x: i32, y: i32, z: i32) -> String {
-            // The plain column-regenerating form; this fixture only records
-            // `set_block` calls, nothing reads terrain back.
             let cx = x.div_euclid(16);
             let cz = z.div_euclid(16);
             let lx = x.rem_euclid(16);
@@ -5193,8 +5190,6 @@ mod tests {
         }
 
         fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
-            // The plain column-regenerating form; this fixture only records
-            // `set_block` calls, nothing reads terrain back.
             let cx = x.div_euclid(16);
             let cz = z.div_euclid(16);
             let lx = x.rem_euclid(16);
@@ -5203,7 +5198,11 @@ mod tests {
         }
 
         fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
-            self.0
+            self.terrain
+                .lock()
+                .expect("recording terrain lock poisoned")
+                .set_block(x, y, z, name);
+            self.edits
                 .lock()
                 .expect("recording world lock poisoned")
                 .push((x, y, z, name.to_owned()));
@@ -5240,16 +5239,13 @@ mod tests {
     /// draw their own `next_i32(interval)`, and an interval gate built that way
     /// measured 627 eats against a predicted 444.
     ///
-    /// `tick_area` is a chunk the sheep is nowhere near, so the random-tick pass
-    /// cannot contribute an edit even if `RecordingWorld` were ever given
-    /// eligible terrain.
     async fn graze_until_edit(
         at_feet: bool,
         baby: bool,
         max_ticks: usize,
     ) -> (Vec<(i32, i32, i32, String)>, Vec<(i32, i32, i32, String)>) {
         let world = grass_world(at_feet);
-        let mobs = MobHandle::new(world);
+        let mobs = MobHandle::new(world.clone());
         mobs.with(|sim| {
             let sheep =
                 lodestone_model::ResourceKey::from_str("minecraft:sheep").expect("static key");
@@ -5260,7 +5256,10 @@ mod tests {
         });
 
         let recorded = Arc::new(Mutex::new(Vec::new()));
-        let source = Arc::new(RecordingWorld(Arc::clone(&recorded)));
+        let source = Arc::new(RecordingWorld {
+            edits: Arc::clone(&recorded),
+            terrain: Mutex::new(world.clone()),
+        });
         let feed = BlockTickFeed::default();
         tokio::spawn(run_tick_loop(
             mobs,
@@ -5269,7 +5268,7 @@ mod tests {
             Arc::new(TickClock::new()),
             source,
             feed.clone(),
-            (64..=64, 64..=64),
+            (-2..=2, -2..=2),
             ExplosionFeed::default(),
             crate::region_source::ScheduledTickHandle::default(),
             crate::tick_area::TickFollow::default(),
@@ -6044,8 +6043,18 @@ mod tests {
     }
 
     impl ChunkSource for OverlayWorld {
-        fn column(&self, _cx: i32, _cz: i32) -> crate::chunk::ChunkColumn {
-            crate::chunk::ChunkColumn::new(0, 16)
+        fn column(&self, cx: i32, cz: i32) -> crate::chunk::ChunkColumn {
+            let mut column = crate::chunk::ChunkColumn::new(0, 16);
+            for (&(x, y, z), state) in self.0.lock().expect("overlay world lock poisoned").iter() {
+                if x.div_euclid(16) == cx && z.div_euclid(16) == cz {
+                    column.set_block(x.rem_euclid(16), y, z.rem_euclid(16), state);
+                }
+            }
+            column
+        }
+
+        fn resident_column(&self, cx: i32, cz: i32) -> Option<crate::chunk::ChunkColumn> {
+            Some(self.column(cx, cz))
         }
 
         fn block_state(&self, x: i32, y: i32, z: i32) -> String {

@@ -1,70 +1,18 @@
-//! Version-free interpreter for vanilla's surface-rule system.
+//! Data-driven surface-rule evaluation for generated terrain.
 //!
-//! This is the stage that turns the post-aquifer density field (a column of
-//! stone / water / lava / air) into recognisable terrain — grass over dirt over
-//! stone, sand near water, gravel on the ocean floor, bedrock at the bottom and
-//! deepslate below `y = 0`. Like the noise router it is **data-driven**: the
-//! `surface_rule` tree lives in the version crate's `noise_settings` and this
-//! engine only *interprets* it (plan §3).
+//! [`SurfaceSystem`] consumes an aquifer-filled column and a world-surface
+//! heightmap, then returns the sparse set of blocks rewritten by the configured
+//! surface rule tree. Rules are parsed once, use interned result states, and
+//! evaluate through a continuation graph during production scans.
 //!
-//! # What it consumes
-//!
-//! [`SurfaceSystem::build_surface`] takes the **pre-surface column** (the
-//! aquifer-filled block field, exactly what vanilla's noise-chunk sampler
-//! and its fill pass produce) and the `WORLD_SURFACE_WG`
-//! heightmap, and reproduces vanilla's own surface-building scan
-//! block-for-block. The pre-surface states are taken as given (so the engine
-//! needs no block registry): a rule only ever *replaces* the default block
-//! (stone) with one of the surface rule's result states, whose canonical form
-//! is supplied by the caller (version data, exactly like the block registry).
-//!
-//! # This seam speaks [`StateId`], not `String`
-//!
-//! Every block-state that crosses this engine's boundary is an **interned
-//! [`StateId`]**, resolved once at construction. Before U21 the `pre` callback
-//! returned `String`, [`SurfaceSystem::try_apply`] returned `Option<String>`
-//! and the diff was `HashMap<_, String>`: measured over a 3×3 cold sweep at
-//! seed 42 (`tests/ore_alloc_attribution.rs`), that was **3,847,972 real
-//! `GlobalAlloc` calls, 97.3% of the whole pipeline's heap traffic** — 18× the
-//! entire ore path — from four `to_string()`/`clone()` sites on a per-probe
-//! path. `docs/worldgen-surface-ids.md` carries the measurement.
-//!
-//! Three properties make the conversion total rather than a relocation, and
-//! each is the thing to preserve if you change this file:
-//!
-//! * **Nothing is interned during a scan.** [`Rule::Block`] holds a `StateId`
-//!   resolved at parse time, and the caller hands [`PreState`]s built from
-//!   ids it already owns. There is no `id_of` and no `name_of` — and therefore
-//!   no `RwLock` — anywhere under [`SurfaceSystem::build_surface`]. That
-//!   matters beyond allocation: `4307b59` is this repo's scar for putting many
-//!   concurrent generator calls on one shared cache line.
-//! * **`Rule::Bandlands`' "computed" name is a table subscript.**
-//!   Vanilla's own band lookup looked like the blocker — it *computes* which
-//!   block it returns rather than selecting a static one — but the set it
-//!   computes over is vanilla's own clay-bands table, exactly [`CLAY_BANDS_LEN`]
-//!   entries drawn from the [`BAND_BLOCK_NAMES`] seven. So the whole band set
-//!   is known once per world seed and pre-interned into `Vec<StateId>` by
-//!   [`RuleParser::bandlands`], which also *asserts* the finiteness rather
-//!   than assuming it. `get_band` is now an index and a `Copy`.
-//! * **Classification is supplied, not re-derived.** The scan branches on
-//!   air/fluid/stone, which a `String` let it read off the name. [`PreState`]
-//!   carries a [`PreClass`] beside the id so the branch costs nothing, and
-//!   [`class_of_name`] keeps the *string* definition (`is_air`/`is_fluid`)
-//!   as the single source of truth that a supplied class is checked against.
-//!
-//! # Parity discipline
-//!
-//! The oracle (`scripts/worldgen-oracle/SurfaceOracle.java`) drives vanilla's
-//! *own* compiled surface-building pass and dumps both columns; the test
-//! compares block-for-block over the whole chunk and names the divergent
-//! `x,y,z`. No Mojang source is transliterated — this is written from the
-//! documented algorithm and checked against the running server (plan §11).
+//! The pre-surface boundary carries both a [`StateId`] and its [`PreClass`].
+//! This keeps classification explicit and avoids deriving it from shared state
+//! tables while scanning.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use lodestone_worldgen_core::hash::FastMap;
 use serde_json::Value;
 
 use crate::density::{Builder, Context as DfContext, Density};
@@ -73,7 +21,7 @@ use crate::math::{floor, lerp2, map, random_between_inclusive, round};
 use crate::noise::NormalNoise;
 use crate::rng::{PositionalRandomFactory, RandomSource, AnyPositionalFactory};
 
-/// The vanilla `Integer.MIN_VALUE` sentinel meaning "no water above".
+/// Sentinel meaning that no water surface has been seen above the current block.
 const NO_WATER: i32 = i32::MIN;
 
 /// Fixed below-generation-window sentinel for the ceiling-depth scan.
@@ -82,64 +30,124 @@ const NO_WATER: i32 = i32::MIN;
 /// minimum Y. The scan keeps it until it finds a lower non-stone block.
 const WAY_BELOW_MIN_Y: i32 = -2032 << 4;
 
-/// The **sparse** surface diff [`SurfaceSystem::build_surface`] returns: local
-/// `(x, y, z)` -> the interned state a surface rule rewrote that position to.
-/// A position absent from the map is unchanged from the pre-surface column.
+/// Sparse local `(x, y, z)` rewrites in scan-owned column storage.
 ///
-/// # Why a [`FastMap`] is safe here
-///
-/// `docs/worldgen-fast-hashing.md` requires the other half of the argument to
-/// be established **at the map**, in one of exactly two forms, because a
-/// hasher swap changes iteration order and this repo has already shipped a
-/// palette permutation from exactly that (`crate::overworld`'s module doc).
-/// This map takes the *first* form — **never iterated**. Its only consumer,
-/// [`crate::overworld::OverworldGenerator::materialize_world`], reads it by
-/// **point lookup** in the same fixed `(lz, lx, ly)` order as its own base
-/// fill, precisely so that the `DenseBlockGrid` palette is appended in a
-/// deterministic order independent of this map; that call site's own comment
-/// carries the post-mortem. The parity tests likewise only `get`.
-///
-/// So the check to re-run after editing anything here is a grep for `.iter()`
-/// / `.keys()` / `.values()` / `.drain()` / `for (.., ..) in` against a
-/// `SurfaceDiff` **binding**, not against a file. If a consumer ever needs to
-/// iterate it, this alias must go back to `HashMap` or the consumer must
-/// impose a total order of its own and say so.
-pub type SurfaceDiff = FastMap<(i32, i32, i32), StateId>;
+/// The surface evaluator visits columns in `x,z` order and visits each column
+/// from high Y to low Y. Its small change list therefore stays descending in
+/// Y, and materializers consume each column backwards while their palette walk
+/// advances upward. This keeps the boundary typed and ordered without a
+/// coordinate hash, a conversion pass, or a sort. An absent position retains
+/// its pre-surface state.
+#[derive(Debug, Clone)]
+pub struct SurfaceDiff {
+    /// Rewrites packed by column. `column_offsets[n..=n + 1]` bounds the
+    /// column with ordinal `n = x * 16 + z`.
+    changes: Vec<(i32, StateId)>,
+    column_offsets: [usize; 257],
+}
 
-/// Which of vanilla's three surface-building classes a pre-surface block is in.
-///
-/// The scan branches on this and nothing else about the block's identity, so
-/// carrying it beside the id (see [`PreState`]) is what lets the pre-surface
-/// callback stop returning a `String` that only ever got its *name* read to
-/// answer these three questions.
+impl Default for SurfaceDiff {
+    fn default() -> Self {
+        Self {
+            changes: Vec::new(),
+            column_offsets: [0; 257],
+        }
+    }
+}
+
+impl SurfaceDiff {
+    #[inline]
+    fn begin_column(&mut self, x: i32, z: i32) {
+        let column = (x * 16 + z) as usize;
+        debug_assert_eq!(self.column_offsets[column], self.changes.len());
+    }
+
+    #[inline]
+    fn push(&mut self, x: i32, y: i32, z: i32, state: StateId) {
+        debug_assert!((0..16).contains(&x));
+        debug_assert!((0..16).contains(&z));
+        self.changes.push((y, state));
+    }
+
+    #[inline]
+    fn finish_column(&mut self, x: i32, z: i32) {
+        let column = (x * 16 + z) as usize;
+        self.column_offsets[column + 1] = self.changes.len();
+    }
+
+    #[inline]
+    fn range(&self, x: i32, z: i32) -> Option<std::ops::Range<usize>> {
+        if !(0..16).contains(&x) || !(0..16).contains(&z) {
+            return None;
+        }
+        let column = (x * 16 + z) as usize;
+        Some(self.column_offsets[column]..self.column_offsets[column + 1])
+    }
+
+    /// Returns the rewrite at one local position, if the surface rules emitted
+    /// one. This preserves the old map-shaped read seam for non-overworld
+    /// callers while using a compact ordered lookup internally.
+    #[must_use]
+    pub fn get(&self, position: &(i32, i32, i32)) -> Option<&StateId> {
+        let &(x, y, z) = position;
+        let range = self.range(x, z)?;
+        let start = range.start;
+        self.changes[range]
+            .binary_search_by(|&(candidate, _)| candidate.cmp(&y).reverse())
+            .ok()
+            .map(|index| &self.changes[start + index].1)
+    }
+
+    /// Number of rewritten positions.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.changes.len()
+    }
+
+    /// Whether no positions were rewritten.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.changes.is_empty()
+    }
+
+    /// Values in the deterministic scan order. Kept for diagnostics and the
+    /// focused allocation gate; production materializers use point/column
+    /// access so they do not need to iterate this boundary.
+    pub fn values(&self) -> impl Iterator<Item = &StateId> {
+        self.changes.iter().map(|(_, state)| state)
+    }
+
+    /// Clears rewrites while retaining the vector capacity for a worker's next
+    /// chunk.
+    pub fn clear(&mut self) {
+        self.changes.clear();
+        self.column_offsets.fill(0);
+    }
+
+    /// Returns one column's rewrites as a contiguous descending-Y slice.
+    #[inline]
+    pub(crate) fn column_slice(&self, x: i32, z: i32) -> &[(i32, StateId)] {
+        self.range(x, z)
+            .map_or(&[], |range| &self.changes[range])
+    }
+}
+
+/// Classification used by the surface scan for a pre-surface block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PreClass {
-    /// Vanilla's own "is this state air" check.
+    /// An air state.
     Air,
-    /// Vanilla's own "is this state a non-empty fluid" check — water or lava, at any property set.
+    /// A non-empty water or lava state.
     Fluid,
-    /// Neither: vanilla's implicit "stone" case, `!isAir && fluid.isEmpty()`.
+    /// Any other state.
     Stone,
 }
 
 /// One pre-surface block as [`SurfaceSystem::build_surface`] needs it: the
 /// interned state plus its [`PreClass`].
 ///
-/// # Why the class is a field and not recomputed
-///
-/// Deriving the class from an id needs either the state's *name* (an interner
-/// `RwLock` read per probe — ~60,000 per chunk, on a table shared by every
-/// concurrent generator call) or a base-name lookup (the same lock). The
-/// caller always already knows the class for free: `overworld/fill.rs` reads
-/// it straight off the `BlockKind` its own aquifer fill wrote.
-///
-/// That is a shortcut, so it is *checked* rather than trusted —
-/// [`class_of_name`] is the string definition it must agree with, and
-/// `surface_stage` asserts the agreement for every id it can produce on every
-/// call under `debug_assertions`. Without that check this would be the
-/// fully-connected-wire-carrying-the-wrong-value shape `CLAUDE.md` warns
-/// about: a mis-classified pre-surface block changes which rules fire and
-/// still produces a plausible column.
+/// The class is supplied by the producer so scanning does not need a state-name
+/// lookup. [`class_of_name`] is available for callers that start from names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PreState {
     /// The interned canonical pre-surface state.
@@ -149,17 +157,13 @@ pub struct PreState {
 }
 
 impl PreState {
-    /// `minecraft:air` — what an out-of-range Y reads as, matching vanilla's
-    /// own out-of-section behaviour.
+    /// Air returned for an out-of-range Y coordinate.
     pub const AIR: Self = Self {
         state: StateId::AIR,
         class: PreClass::Air,
     };
 
-    /// A pre-surface block whose class is derived from its **name**, for a
-    /// caller holding a canonical string rather than a pre-classified field
-    /// (the JVM parity fixtures). Production does not take this path; it is
-    /// also the reference [`class_of_name`] agreement is asserted against.
+    /// Builds a pre-surface state from a canonical name.
     #[must_use]
     pub fn from_name(interner: &StateInterner, name: &str) -> Self {
         Self {
@@ -169,9 +173,7 @@ impl PreState {
     }
 }
 
-/// The [`PreClass`] of a canonical block-state string — the definition the
-/// scan used to apply to every probe, kept as one function so a caller that
-/// supplies a class can be checked against it.
+/// Classifies a canonical block-state string.
 #[must_use]
 pub fn class_of_name(name: &str) -> PreClass {
     if is_air(name) {
@@ -183,14 +185,11 @@ pub fn class_of_name(name: &str) -> PreClass {
     }
 }
 
-/// Maps a result-state *partial key* (`name` + sorted specified `[k=v]`) to its
-/// full canonical block string (all properties, defaults filled). Supplied by
-/// the caller from the version's block data — see the oracle's `canonmap.*`
-/// lines. Keeping this out of the engine preserves the version-free split.
+/// Maps a result-state partial key (`name` plus sorted specified properties) to
+/// its canonical block-state string.
 pub type BlockCanon = HashMap<String, String>;
 
-/// A parsed surface-rule condition (vanilla's condition-source tree applied to
-/// a context).
+/// A parsed surface-rule condition.
 enum Cond {
     AbovePreliminarySurface,
     /// `biome` — a per-position runtime check
@@ -245,65 +244,152 @@ enum Cond {
     },
 }
 
-/// A parsed surface rule (vanilla's rule-source tree).
+impl Cond {
+    #[inline]
+    fn is_column_invariant(&self) -> bool {
+        match self {
+            Self::AbovePreliminarySurface
+            | Self::BiomeIs { .. }
+            | Self::StoneDepth { .. }
+            | Self::Temperature { .. }
+            | Self::VerticalGradient { .. }
+            | Self::Water { .. }
+            | Self::YAbove { .. } => false,
+            Self::NoiseThreshold { is_3d, .. } => !is_3d,
+            Self::Not(inner) => inner.is_column_invariant(),
+            Self::Steep { .. } | Self::Hole { .. } => true,
+        }
+    }
+}
+
+/// A parsed surface rule tree.
 enum Rule {
-    /// Emits a fully-canonical block state, interned at parse time (U21) so a
-    /// match is a `u16` copy rather than a `String` clone. This arm was
-    /// `try_apply`'s `Some(state.clone())`, measured at 21.92% of the surface
-    /// stage's 3,847,972 allocations.
+    /// Emits a canonical, interned block state.
     Block(StateId),
     /// First non-`None` child wins.
     Sequence(Vec<Rule>),
     /// Runs `then` only when `cond` holds.
-    Condition(Cond, Box<Rule>),
-    /// Badlands/eroded_badlands/wooded_badlands' banded-terracotta rule
-    /// (vanilla's bandlands rule, whose logic delegates to its surface
-    /// system's own band lookup — previously a carried-over gap, closed
-    /// here). Unconditional and parameterless in
-    /// vanilla's own DSL (its bandlands rule is a zero-field enum
-    /// singleton), so the [`BandBlocks`] payload is built once at parse time
-    /// from the generator's own seed, not from anything in the JSON node —
-    /// see [`RuleParser::bandlands`].
-    Bandlands(Box<BandBlocks>),
+    Condition(usize, Box<Rule>),
+    /// Emits a state selected from the generated terracotta band table.
+    Bandlands(usize),
 }
 
-/// Vanilla's own band-lookup state: the 192-entry clay-band table plus
-/// the noise that perturbs which entry a given `y` lands on.
-///
-/// Built once per world seed ([`RuleParser::bandlands`]), not per column or
-/// per block — matching vanilla, where the clay-bands table is an
-/// instance field generated once in the constructor
-/// (by vanilla's own one-time band-table build), never touched again after
-/// construction.
+/// Per-system band table and its offset noise.
 struct BandBlocks {
-    /// Vanilla's own clay-bands table — always exactly
-    /// [`CLAY_BANDS_LEN`] entries long, each the **interned id** of a full
-    /// canonical block string (these seven blocks carry no properties at 26.2
-    /// — see [`generate_bands`]'s doc comment — so no [`BlockCanon`] lookup is
-    /// needed, unlike every other [`Rule::Block`] result state).
-    ///
-    /// Interned once per world seed by [`RuleParser::bandlands`], which is the
-    /// whole reason `Bandlands` was not the blocker it looked like: see the
-    /// module doc's third bullet.
+    /// Interned entries selected by the band index.
     clay_bands: Vec<StateId>,
-    /// Vanilla's own clay-bands offset noise (`minecraft:clay_bands_offset`).
+    /// Offset noise used by the band index.
     offset_noise: NormalNoise,
 }
 
-/// Vanilla's own hardcoded clay-bands table size
-/// (its one-time band-table build allocates exactly 192 entries), not derived from
-/// anything version-supplied.
+const NO_RULE_EDGE: usize = usize::MAX;
+
+enum CompiledRuleNode {
+    Block(StateId),
+    Bandlands(usize),
+    Condition {
+        condition: usize,
+        if_true: usize,
+        if_false: usize,
+    },
+}
+
+struct CompiledRule {
+    nodes: Vec<CompiledRuleNode>,
+    entry: usize,
+}
+
+impl CompiledRule {
+    fn new(rule: &Rule) -> Self {
+        let mut nodes = Vec::new();
+        let entry = Self::compile(rule, &mut nodes, NO_RULE_EDGE);
+        Self { nodes, entry }
+    }
+
+    fn compile(rule: &Rule, nodes: &mut Vec<CompiledRuleNode>, fallback: usize) -> usize {
+        match rule {
+            Rule::Block(state) => {
+                let entry = nodes.len();
+                nodes.push(CompiledRuleNode::Block(*state));
+                entry
+            }
+            Rule::Bandlands(bands) => {
+                let entry = nodes.len();
+                nodes.push(CompiledRuleNode::Bandlands(*bands));
+                entry
+            }
+            Rule::Condition(condition, then_run) => {
+                let if_true = Self::compile(then_run, nodes, fallback);
+                let entry = nodes.len();
+                nodes.push(CompiledRuleNode::Condition {
+                    condition: *condition,
+                    if_true,
+                    if_false: fallback,
+                });
+                entry
+            }
+            Rule::Sequence(rules) => {
+                let mut entry = fallback;
+                for rule in rules.iter().rev() {
+                    entry = Self::compile(rule, nodes, entry);
+                }
+                entry
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn run(
+        &self,
+        mut condition: impl FnMut(usize) -> bool,
+        mut bandlands: impl FnMut(usize) -> StateId,
+    ) -> Option<StateId> {
+        let mut pc = self.entry;
+        while pc != NO_RULE_EDGE {
+            pc = match &self.nodes[pc] {
+                CompiledRuleNode::Block(state) => return Some(*state),
+                CompiledRuleNode::Bandlands(bands) => return Some(bandlands(*bands)),
+                CompiledRuleNode::Condition {
+                    condition: condition_id,
+                    if_true,
+                    if_false,
+                } => {
+                    if condition(*condition_id) {
+                        *if_true
+                    } else {
+                        *if_false
+                    }
+                }
+            };
+        }
+        None
+    }
+}
+
+#[cfg(test)]
+impl Rule {
+    fn run(
+        &self,
+        condition: &mut impl FnMut(usize) -> bool,
+        bandlands: &mut impl FnMut(usize) -> StateId,
+    ) -> Option<StateId> {
+        match self {
+            Self::Block(state) => Some(*state),
+            Self::Bandlands(bands) => Some(bandlands(*bands)),
+            Self::Condition(condition_id, then_run) => {
+                condition(*condition_id).then(|| then_run.run(condition, bandlands))?
+            }
+            Self::Sequence(rules) => rules
+                .iter()
+                .find_map(|rule| rule.run(condition, bandlands)),
+        }
+    }
+}
+
+/// Size of the generated clay-band table.
 const CLAY_BANDS_LEN: usize = 192;
 
-/// Every block [`generate_bands`] can write into the clay-band table, and
-/// therefore the *entire* value set vanilla's own band lookup can return.
-///
-/// This list is what makes `Rule::Bandlands` pre-internable: the band index is
-/// computed per block, but the thing indexed is drawn from these seven names,
-/// fixed at 26.2. [`RuleParser::bandlands`] asserts the built table against
-/// this rather than trusting it (`CLAUDE.md` rule 2), so an eighth band block
-/// in a future version fails loudly at generator construction instead of
-/// silently reintroducing a per-block intern.
+/// Allowed block names for generated clay-band entries.
 const BAND_BLOCK_NAMES: [&str; 7] = [
     "minecraft:terracotta",
     "minecraft:orange_terracotta",
@@ -315,11 +401,7 @@ const BAND_BLOCK_NAMES: [&str; 7] = [
 ];
 
 impl BandBlocks {
-    /// Vanilla's own band lookup at `(world_x, y, world_z)`. Never returns `None` —
-    /// vanilla's own bandlands rule (delegating to this same lookup on its
-    /// context's surface system) is a bare
-    /// rule function reference with no condition wrapped around it,
-    /// so every call that reaches [`Rule::Bandlands`] gets a real block back.
+    /// Selects a band entry for a world position.
     fn get_band(&self, world_x: i32, y: i32, world_z: i32) -> StateId {
         let offset = round(
             self.offset_noise
@@ -327,44 +409,15 @@ impl BandBlocks {
                 * 4.0,
         );
         let len = CLAY_BANDS_LEN as i32;
-        // `y` ranges over this engine's own `min_y..min_y+gen_depth` (as low
-        // as vanilla's `-64`) and `offset` is a noise sample scaled by 4, so
-        // `y + offset + len` is always positive in practice — matching why
-        // vanilla adds the clay-bands length here at all rather than needing
-        // a true Euclidean modulo.
         let index = (y + offset + len) % len;
-        // A `Copy` out of a pre-interned table. This line was
-        // `self.clay_bands[index as usize].clone()`.
         self.clay_bands[index as usize]
     }
 }
 
-/// Vanilla's own one-time clay-bands table build.
-/// `random` must be the noise random's positional factory forked from the
-/// hash of `"minecraft:clay_bands"`
-/// ([`RuleParser::bandlands`]), matching vanilla's own derivation exactly
-/// (a *positional* factory's `from_hash_of`, not any per-block draw).
-///
-/// The seven result blocks (`minecraft:terracotta` and six
-/// `minecraft:*_terracotta` dye variants) are hardcoded here rather than
-/// routed through [`BlockCanon`]/[`canonical_from_block_json`] because
-/// vanilla's own `minecraft:bandlands` rule JSON node carries no `result_state` at all
-/// (it is `{"type": "minecraft:bandlands"}`, nothing else — vanilla's own
-/// rule type has zero fields), so
-/// [`identity_canon`](crate::surface::identity_canon)'s walk of the
-/// `surface_rule` tree never sees these block names and has no key for them.
-/// Confirmed property-less at 26.2 by `docs/worldgen-parity.md`'s own
-/// measured oracle output, which names them bare (`orange_terracotta`, not
-/// `orange_terracotta[...]`) in the earlier badlands gap breakdown.
+/// Builds the deterministic clay-band table for a generator.
 fn generate_bands<R: RandomSource>(random: &mut R) -> Vec<String> {
     let mut clay_bands = vec!["minecraft:terracotta".to_string(); CLAY_BANDS_LEN];
 
-    // Vanilla's own loop is a C-style `for` over the table whose header still
-    // fires its own `i++` every iteration *in addition to* the body's own
-    // `i += (bounded random draw over [0,5)) + 1`, so each step actually
-    // advances `i` by that draw plus 2, not plus 1. Translated as an explicit
-    // `while` with both increments spelled out so that trap can't silently
-    // drop the `+ 1` a naive `for i in ...` rewrite would.
     let len = CLAY_BANDS_LEN as i32;
     let mut i: i32 = 0;
     while i < len {
@@ -397,11 +450,7 @@ fn generate_bands<R: RandomSource>(random: &mut R) -> Vec<String> {
     clay_bands
 }
 
-/// Vanilla's own band-scattering routine — scatters a random count of runs
-/// of `state`, each `base_width..base_width+3` entries wide, at independently
-/// random starts.
-/// Plain `for` loops in the original (no self-modifying index), so this is a
-/// direct, non-tricky translation unlike [`generate_bands`]'s first loop.
+/// Scatters random runs of one state through the band table.
 fn make_bands<R: RandomSource>(random: &mut R, clay_bands: &mut [String], base_width: i32, state: &str) {
     let band_count = random_between_inclusive(random, 6, 15);
     let len = clay_bands.len() as i32;
@@ -416,27 +465,18 @@ fn make_bands<R: RandomSource>(random: &mut R, clay_bands: &mut [String], base_w
     }
 }
 
-/// A lazily-filled condition result. The epoch is advanced when the scan
-/// changes its X/Z column or its Y position, matching the two invalidation
-/// domains of the surface-rule context.
+/// A condition result tagged with the scan epoch in which it was computed.
 #[derive(Debug, Clone, Copy)]
 struct CachedBool {
-    epoch: u64,
+    epoch: u32,
     value: bool,
 }
 
-/// Scratch storage for the surface-rule context's lazy predicates.
-///
-/// The rule tree is shared by every generated chunk and therefore cannot hold
-/// mutable per-scan values itself. Conversely, putting a new map behind every
-/// condition would add hashing and allocation to the hottest stage. The parser
-/// assigns each condition a compact slot, and one small epoch-tagged array is
-/// reused for a complete `build_surface`/`top_material` call. X/Z conditions
-/// survive Y updates; Y conditions are invalidated for every scanned block.
+/// Per-scan storage for lazy X/Z and Y condition results.
 #[derive(Debug)]
 struct EvalCache {
-    xz_epoch: u64,
-    y_epoch: u64,
+    xz_epoch: u32,
+    y_epoch: u32,
     xz: Vec<CachedBool>,
     y: Vec<CachedBool>,
 }
@@ -453,51 +493,43 @@ impl EvalCache {
         }
     }
 
+    #[inline(always)]
     fn begin_column(&mut self) {
         self.xz_epoch = self.xz_epoch.wrapping_add(1).max(1);
         self.y_epoch = self.y_epoch.wrapping_add(1).max(1);
     }
 
+    #[inline(always)]
     fn begin_y(&mut self) {
         self.y_epoch = self.y_epoch.wrapping_add(1).max(1);
     }
 
+    #[inline(always)]
     fn get_xz(&self, slot: usize) -> Option<bool> {
-        let entry = self
-            .xz
-            .get(slot)
-            .unwrap_or_else(|| panic!("surface X/Z cache slot {slot} is out of range"));
+        let entry = &self.xz[slot];
         (self.xz_epoch != 0 && entry.epoch == self.xz_epoch).then_some(entry.value)
     }
 
+    #[inline(always)]
     fn set_xz(&mut self, slot: usize, value: bool) {
         let epoch = self.xz_epoch;
-        let entry = self
-            .xz
-            .get_mut(slot)
-            .unwrap_or_else(|| panic!("surface X/Z cache slot {slot} is out of range"));
-        *entry = CachedBool { epoch, value };
+        self.xz[slot] = CachedBool { epoch, value };
     }
 
+    #[inline(always)]
     fn get_y(&self, slot: usize) -> Option<bool> {
-        let entry = self
-            .y
-            .get(slot)
-            .unwrap_or_else(|| panic!("surface Y cache slot {slot} is out of range"));
+        let entry = &self.y[slot];
         (self.y_epoch != 0 && entry.epoch == self.y_epoch).then_some(entry.value)
     }
 
+    #[inline(always)]
     fn set_y(&mut self, slot: usize, value: bool) {
         let epoch = self.y_epoch;
-        let entry = self
-            .y
-            .get_mut(slot)
-            .unwrap_or_else(|| panic!("surface Y cache slot {slot} is out of range"));
-        *entry = CachedBool { epoch, value };
+        self.y[slot] = CachedBool { epoch, value };
     }
 }
 
-/// Per-column / per-Y scan state mirroring vanilla's own surface-rule scan context.
+/// Per-column and per-Y state used while evaluating surface rules.
 struct Ctx<'a, 'b, 'c> {
     block_x: i32,
     block_z: i32,
@@ -508,23 +540,23 @@ struct Ctx<'a, 'b, 'c> {
     water_height: i32,
     stone_depth_above: i32,
     stone_depth_below: i32,
-    /// The current position's biome answer, populated on first use by the
-    /// surface rule. The source is deliberately lazy: the reference scan asks
-    /// the biome manager only when a rule actually reaches a biome or
-    /// temperature condition, not for every stone block.
-    biome: Cell<Option<(&'a str, bool)>>,
+    /// The current position's biome answer, populated only when needed.
+    biome: Option<(&'a str, bool)>,
     /// The callback used by the normal chunk scan. `top_material` supplies a
     /// fixed answer instead, so its context leaves this as `None`.
     biome_at: Option<&'b dyn Fn(i32, i32, i32) -> (&'a str, bool)>,
-    /// Per-call lazy condition storage. This is borrowed so concurrent
-    /// generators never share cache state, while one scan can reuse X/Z
-    /// values across all Y positions in its column.
+    /// Per-call condition storage. X/Z values survive Y updates.
     cache: &'c mut EvalCache,
+    /// Whether Y-condition memoization is useful for this caller. The linear
+    /// column scan does not revisit a compiled node, so it can skip the cache;
+    /// top-material keeps the general cached behavior.
+    cache_y: bool,
 }
 
 impl<'a, 'b, 'c> Ctx<'a, 'b, 'c> {
-    fn biome(&self) -> (&'a str, bool) {
-        if let Some(value) = self.biome.get() {
+    #[inline(always)]
+    fn biome(&mut self) -> (&'a str, bool) {
+        if let Some(value) = self.biome {
             return value;
         }
         let value = (self
@@ -534,31 +566,43 @@ impl<'a, 'b, 'c> Ctx<'a, 'b, 'c> {
             self.block_y,
             self.block_z & 15,
         );
-        self.biome.set(Some(value));
+        self.biome = Some(value);
         value
+    }
+
+    #[inline(always)]
+    fn get_y_cache(&self, slot: usize) -> Option<bool> {
+        self.cache_y.then(|| self.cache.get_y(slot)).flatten()
+    }
+
+    #[inline(always)]
+    fn set_y_cache(&mut self, slot: usize, value: bool) {
+        if self.cache_y {
+            self.cache.set_y(slot, value);
+        }
     }
 }
 
-/// The interpreter: instantiated noises + parsed rule tree, ready to build any
-/// chunk's surface from its pre-surface column.
+/// Parsed surface rules and their instantiated inputs.
 #[allow(missing_debug_implementations)]
 pub struct SurfaceSystem {
     min_y: i32,
     gen_depth: i32,
-    /// The settings' `default_block`, interned — vanilla's own
-    /// "is this the default block" guard is now a `u16` compare rather than a string compare.
+    /// Canonical state that surface rules may replace.
     default_block: StateId,
-    /// The table every id in this system was issued by. Held so
-    /// [`Self::top_material`] can still hand a `String` to the carver seam,
-    /// which is *not* part of this unit and keeps its `Option<String>`
-    /// signature; see that method's own note. Never touched by
-    /// [`Self::build_surface`].
+    /// State table used to convert carver results at the public boundary.
     interner: Arc<StateInterner>,
     surface_noise: NormalNoise,
     surface_secondary_noise: NormalNoise,
     master: AnyPositionalFactory,
-    prelim: Density,
+    prelim: Arc<Density>,
+    preliminary_shared: Arc<crate::aquifer::PreliminarySurfaceCache>,
+    #[cfg(test)]
     rule: Rule,
+    conditions: Vec<Cond>,
+    column_invariant: Vec<bool>,
+    bandlands: Vec<BandBlocks>,
+    compiled_rule: CompiledRule,
     /// Number of condition slots used by the scan's X/Z-local and Y-local
     /// lazy predicates. Slots are assigned while parsing so one context can
     /// cache repeated condition sources without giving the rule tree interior
@@ -568,31 +612,37 @@ pub struct SurfaceSystem {
 }
 
 impl SurfaceSystem {
-    /// Builds the interpreter for `settings` (a `noise_settings` JSON value)
-    /// using `builder` (already seeded with the same seed) to instantiate
-    /// noises and derive random factories exactly as vanilla's own
-    /// per-world random-state holder does.
+    /// Builds the surface system from dimension settings and seeded noise data.
     /// `canon` resolves result-state partial keys to full canonical strings.
     ///
-    /// This takes **no biome** — a generator run no
-    /// longer has one fixed biome for its whole life, so `biome`/
-    /// `cold_enough_to_snow` moved from build-time constants here to
-    /// per-column runtime inputs on [`build_surface`](Self::build_surface)/
-    /// [`top_material`](Self::top_material) instead.
+    /// Biome and climate values are supplied at scan time because they vary by
+    /// column.
     ///
-    /// `interner` is the generator's own [`StateInterner`] (U21). Every result
-    /// state in the `surface_rule` tree, every clay band and `default_block`
-    /// are interned **here**, once, so nothing under
-    /// [`build_surface`](Self::build_surface) ever takes the interner's lock.
-    /// This is a bounded set walked out of the parsed data itself, not a
-    /// hand-maintained pre-intern list, so it cannot drift from the data the
-    /// way `crate::overworld`'s own note about pre-populating warns.
+    /// Result states and band entries are interned once during construction.
     #[must_use]
     pub fn new(
         settings: &Value,
         builder: &Builder,
         canon: &BlockCanon,
         interner: &Arc<StateInterner>,
+    ) -> Self {
+        Self::new_with_preliminary_cache(
+            settings,
+            builder,
+            canon,
+            interner,
+            Arc::new(crate::aquifer::PreliminarySurfaceCache::new()),
+        )
+    }
+
+    /// Builds a surface system using a generator/session-scoped preliminary
+    /// cache shared with its aquifer systems.
+    pub(crate) fn new_with_preliminary_cache(
+        settings: &Value,
+        builder: &Builder,
+        canon: &BlockCanon,
+        interner: &Arc<StateInterner>,
+        preliminary_shared: Arc<crate::aquifer::PreliminarySurfaceCache>,
     ) -> Self {
         let min_y = settings["noise"]["min_y"].as_i64().unwrap_or(-64) as i32;
         let gen_depth = settings["noise"]["height"].as_i64().unwrap_or(384) as i32;
@@ -602,9 +652,11 @@ impl SurfaceSystem {
         let surface_noise = builder.noise("minecraft:surface");
         let surface_secondary_noise = builder.noise("minecraft:surface_secondary");
         let master = builder.positional_factory();
-        let prelim = builder
-            .build(&settings["noise_router"]["preliminary_surface_level"])
-            .expect("bundled preliminary_surface_level density-function document");
+        let prelim = Arc::new(
+            builder
+                .build(&settings["noise_router"]["preliminary_surface_level"])
+                .expect("bundled preliminary_surface_level density-function document"),
+        );
 
         let parser = RuleParser {
             builder,
@@ -614,10 +666,19 @@ impl SurfaceSystem {
             gen_depth,
             xz_cache_slots: Cell::new(0),
             y_cache_slots: Cell::new(0),
+            conditions: RefCell::new(Vec::new()),
+            bandlands: RefCell::new(Vec::new()),
         };
         let rule = parser.rule(&settings["surface_rule"]);
         let xz_cache_slots = parser.xz_cache_slots.get();
         let y_cache_slots = parser.y_cache_slots.get();
+        let conditions = parser.conditions.into_inner();
+        let column_invariant = conditions
+            .iter()
+            .map(Cond::is_column_invariant)
+            .collect();
+        let bandlands = parser.bandlands.into_inner();
+        let compiled_rule = CompiledRule::new(&rule);
 
         Self {
             min_y,
@@ -628,13 +689,19 @@ impl SurfaceSystem {
             surface_secondary_noise,
             master,
             prelim,
+            preliminary_shared,
+            #[cfg(test)]
             rule,
+            conditions,
+            column_invariant,
+            bandlands,
+            compiled_rule,
             xz_cache_slots,
             y_cache_slots,
         }
     }
 
-    /// Vanilla's own surface-depth lookup at `(x, z)`.
+    /// Computes the per-column surface depth.
     fn surface_depth(&self, x: i32, z: i32) -> i32 {
         let noise = self
             .surface_noise
@@ -643,7 +710,7 @@ impl SurfaceSystem {
         (noise * 2.75 + 3.0 + extra) as i32
     }
 
-    /// Vanilla's own secondary surface-noise lookup at `(x, z)`.
+    /// Computes the secondary surface noise at `(x, z)`.
     fn surface_secondary(&self, x: i32, z: i32) -> f64 {
         self.surface_secondary_noise
             .get_value(f64::from(x), 0.0, f64::from(z))
@@ -651,44 +718,70 @@ impl SurfaceSystem {
 
     /// Preliminary surface-height estimate at `(sample_x, sample_z)`.
     ///
-    /// This has no block-grid allocation or generation-store access. It is the
-    /// deliberate low-detail input for a distant heightfield, not a substitute
-    /// for a generated column: carving, aquifers, and surface rules can still
-    /// alter the final visible top block.
+    /// Returns the low-detail preliminary surface level used by surface rules.
     pub(crate) fn preliminary_surface_level(&self, sample_x: i32, sample_z: i32) -> i32 {
-        // Vanilla's quart<->block conversion round-trip collapses to
-        // (v >> 2) << 2.
-        let qx = (sample_x >> 2) << 2;
-        let qz = (sample_z >> 2) << 2;
-        floor(self.prelim.compute(DfContext::new(qx, 0, qz)))
+        self.preliminary_surface_level_with_cache(sample_x, sample_z, &self.preliminary_shared)
     }
 
-    /// Vanilla's own scan-context minimum-surface-level lookup.
-    ///
-    /// Used by [`Self::top_material`], which queries one arbitrary position at a
-    /// time (carvers), so it computes its own corner cell fresh. [`Self::build_surface`]
-    /// scans a whole 16×16 chunk at once — every column in that chunk shares the
-    /// same `block_x >> 4` / `block_z >> 4` corner cell (chunk width is exactly
-    /// 16, and `min_block_x`/`min_block_z` are always chunk-aligned per the
-    /// contract this type is built around), so it hoists the four corner
-    /// `preliminary_surface_level` calls out to once per chunk via
-    /// [`Self::interpolate_min_surface_level`] instead of once per column —
-    /// same four corner values, just not recomputed 256 times over.
+    fn preliminary_surface_level_with_cache(
+        &self,
+        sample_x: i32,
+        sample_z: i32,
+        preliminary_shared: &crate::aquifer::PreliminarySurfaceCache,
+    ) -> i32 {
+        let qx = (sample_x >> 2) << 2;
+        let qz = (sample_z >> 2) << 2;
+        crate::counters::bump_preliminary_surface_request(qx, qz);
+        let prelim = Arc::clone(&self.prelim);
+        preliminary_shared.get_or_compute_preliminary(qx, qz, || {
+            crate::counters::bump_preliminary_surface_compute();
+            floor(prelim.compute(DfContext::new(qx, 0, qz)))
+        })
+    }
+
+    fn preliminary_surface_corners_with_cache(
+        &self,
+        corner_cell_x: i32,
+        corner_cell_z: i32,
+        preliminary_shared: &crate::aquifer::PreliminarySurfaceCache,
+    ) -> [i32; 4] {
+        let keys = [
+            (corner_cell_x << 4, corner_cell_z << 4),
+            ((corner_cell_x + 1) << 4, corner_cell_z << 4),
+            (corner_cell_x << 4, (corner_cell_z + 1) << 4),
+            ((corner_cell_x + 1) << 4, (corner_cell_z + 1) << 4),
+        ];
+        for &(qx, qz) in &keys {
+            crate::counters::bump_preliminary_surface_request(qx, qz);
+        }
+        let mut values = [0i32; 4];
+        let prelim = &self.prelim;
+        preliminary_shared.get_or_compute_preliminary_batch(
+            &keys,
+            &mut values,
+            |qx, qz| {
+                crate::counters::bump_preliminary_surface_compute();
+                floor(prelim.compute(DfContext::new(qx, 0, qz)))
+            },
+        );
+        values
+    }
+
+    /// Computes the interpolated minimum surface level for one position.
     fn min_surface_level(&self, block_x: i32, block_z: i32, surface_depth: i32) -> i32 {
         let corner_cell_x = block_x >> 4;
         let corner_cell_z = block_z >> 4;
-        let c0 = self.preliminary_surface_level(corner_cell_x << 4, corner_cell_z << 4);
-        let c1 = self.preliminary_surface_level((corner_cell_x + 1) << 4, corner_cell_z << 4);
-        let c2 = self.preliminary_surface_level(corner_cell_x << 4, (corner_cell_z + 1) << 4);
-        let c3 = self.preliminary_surface_level((corner_cell_x + 1) << 4, (corner_cell_z + 1) << 4);
+        let [c0, c1, c2, c3] = self.preliminary_surface_corners_with_cache(
+            corner_cell_x,
+            corner_cell_z,
+            &self.preliminary_shared,
+        );
         Self::interpolate_min_surface_level(block_x, block_z, surface_depth, c0, c1, c2, c3)
     }
 
-    /// The interpolation half of [`Self::min_surface_level`], factored out so a
-    /// caller that already knows the four corner `preliminary_surface_level`
-    /// values (e.g. one chunk's worth of columns, all sharing the same corner
-    /// cell) can skip recomputing them per column.
+    /// Interpolates a minimum surface level from four corner values.
     #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
     fn interpolate_min_surface_level(
         block_x: i32,
         block_z: i32,
@@ -711,7 +804,7 @@ impl SurfaceSystem {
         level + surface_depth - 8
     }
 
-    /// Reproduces vanilla's own surface-building scan for one 16×16 chunk.
+    /// Evaluates the configured surface rules for one 16×16 chunk.
     ///
     /// * `pre` yields the pre-surface (aquifer-filled) block at local
     ///   `(x, y, z)` (`x, z` in `0..16`, `y` a world Y) as a [`PreState`] —
@@ -726,22 +819,10 @@ impl SurfaceSystem {
     ///
     /// Returns a **sparse** [`SurfaceDiff`]: local `(x, y, z)` -> interned
     /// state, present only where a surface rule actually rewrote the
-    /// pre-surface block. A position absent from the map is unchanged, i.e.
+    /// pre-surface block. A position absent from the diff is unchanged, i.e.
     /// still exactly `pre(x, y, z)` — callers that need the full column
-    /// reconstruct it from `pre` overlaid with this map, rather than the map
-    /// alone. Read [`SurfaceDiff`]'s own doc before iterating it.
+    /// reconstruct it from `pre` overlaid with this diff.
     ///
-    /// This used to be an exhaustive map (every one of a chunk's 16×16×`gen_depth`
-    /// positions inserted up front from `pre`, then selectively overwritten by
-    /// matched rules) so callers could treat the return value as the whole
-    /// column. Profiling with CPU-time weighting (see `docs/roadmap/benchmarks.md`)
-    /// showed that exhaustive
-    /// pre-fill — 98304 `String` clones and `HashMap` inserts per chunk for a
-    /// gen_depth of 384, the overwhelming majority of them immediately
-    /// discarded unread — was itself close to a fifth of total column-generation
-    /// time (`SipHasher`/`RawTable::reserve_rehash`/`memmove` self-time). The
-    /// scan below still needs `pre`/`block_at` for its own classification logic
-    /// (unchanged); only the redundant up-front full-column copy is gone.
     #[must_use]
     pub fn build_surface<'b>(
         &self,
@@ -762,8 +843,8 @@ impl SurfaceSystem {
         )
     }
 
-    /// [`Self::build_surface`] with caller-owned scratch storage. The map is
-    /// cleared before evaluation; only its allocation capacity is retained.
+    /// [`Self::build_surface`] with caller-owned scratch storage. The ordered
+    /// change vector is cleared before evaluation and its capacity is retained.
     #[must_use]
     pub fn build_surface_reusing<'b>(
         &self,
@@ -785,65 +866,111 @@ impl SurfaceSystem {
         )
     }
 
-    /// [`Self::build_surface_reusing`] with the separate per-column biome
-    /// lookup performed before that column's descending Y scan. This mirrors
-    /// the reference surface system's initial lookup, which is observable when
-    /// biome search keeps the previously selected tree leaf as its tie-break
-    /// candidate.
+    /// [`Self::build_surface_reusing`] with an initial per-column biome lookup
+    /// before the descending Y scan.
+    #[inline]
     #[must_use]
-    pub(crate) fn build_surface_reusing_with_column_biome<'b>(
+    pub(crate) fn build_surface_reusing_with_column_biome<'b, P, H, B, C>(
         &self,
-        mut out: SurfaceDiff,
-        pre: &dyn Fn(i32, i32, i32) -> PreState,
-        heightmap: &dyn Fn(i32, i32) -> i32,
-        biome_at: &dyn Fn(i32, i32, i32) -> (&'b str, bool),
-        column_biome_at: &dyn Fn(i32, i32, i32),
+        out: SurfaceDiff,
+        pre: &P,
+        heightmap: &H,
+        biome_at: &B,
+        column_biome_at: &C,
         min_block_x: i32,
         min_block_z: i32,
-    ) -> SurfaceDiff {
+    ) -> SurfaceDiff
+    where
+        P: Fn(i32, i32, i32) -> PreState + ?Sized,
+        H: Fn(i32, i32) -> i32 + ?Sized,
+        B: Fn(i32, i32, i32) -> (&'b str, bool) + ?Sized,
+        C: Fn(i32, i32, i32) + ?Sized,
+    {
+        self.build_surface_reusing_with_column_biome_and_preliminary_cache(
+            out,
+            pre,
+            heightmap,
+            biome_at,
+            column_biome_at,
+            min_block_x,
+            min_block_z,
+            &self.preliminary_shared,
+        )
+    }
+
+    pub(crate) fn build_surface_reusing_with_preliminary_cache<'b, P, H, B, C>(
+        &self,
+        out: SurfaceDiff,
+        pre: &P,
+        heightmap: &H,
+        biome_at: &B,
+        column_biome_at: &C,
+        min_block_x: i32,
+        min_block_z: i32,
+        preliminary_shared: &crate::aquifer::PreliminarySurfaceCache,
+    ) -> SurfaceDiff
+    where
+        P: Fn(i32, i32, i32) -> PreState + ?Sized,
+        H: Fn(i32, i32) -> i32 + ?Sized,
+        B: Fn(i32, i32, i32) -> (&'b str, bool) + ?Sized,
+        C: Fn(i32, i32, i32) + ?Sized,
+    {
+        self.build_surface_reusing_with_column_biome_and_preliminary_cache(
+            out,
+            pre,
+            heightmap,
+            biome_at,
+            column_biome_at,
+            min_block_x,
+            min_block_z,
+            preliminary_shared,
+        )
+    }
+
+    #[inline]
+    fn build_surface_reusing_with_column_biome_and_preliminary_cache<'b, P, H, B, C>(
+        &self,
+        mut out: SurfaceDiff,
+        pre: &P,
+        heightmap: &H,
+        biome_at: &B,
+        column_biome_at: &C,
+        min_block_x: i32,
+        min_block_z: i32,
+        preliminary_shared: &crate::aquifer::PreliminarySurfaceCache,
+    ) -> SurfaceDiff
+    where
+        P: Fn(i32, i32, i32) -> PreState + ?Sized,
+        H: Fn(i32, i32) -> i32 + ?Sized,
+        B: Fn(i32, i32, i32) -> (&'b str, bool) + ?Sized,
+        C: Fn(i32, i32, i32) + ?Sized,
+    {
         out.clear();
         let y_lo = self.min_y;
         let y_hi = self.min_y + self.gen_depth; // exclusive
         let way_below_min_y = WAY_BELOW_MIN_Y;
 
-        // The four `preliminary_surface_level` corner values for this chunk's
-        // corner cell. Every one of the 256 columns below shares the same
-        // `block_x >> 4` / `block_z >> 4` (chunk width is exactly 16 and
-        // `min_block_x`/`min_block_z` are chunk-aligned), so — unlike
-        // `min_surface_level`'s single-position form used by `top_material` —
-        // these are computed once per chunk rather than once per column. Each
-        // `preliminary_surface_level` call walks a `find_top_surface` density
-        // search (up to `(upper_bound - lower_bound) / cell_height` steps), so
-        // this turns 256 searches into 4.
+        // All columns in this chunk share these four interpolation corners.
         let corner_cell_x = min_block_x >> 4;
         let corner_cell_z = min_block_z >> 4;
-        let corner_c0 = self.preliminary_surface_level(corner_cell_x << 4, corner_cell_z << 4);
-        let corner_c1 =
-            self.preliminary_surface_level((corner_cell_x + 1) << 4, corner_cell_z << 4);
-        let corner_c2 =
-            self.preliminary_surface_level(corner_cell_x << 4, (corner_cell_z + 1) << 4);
-        let corner_c3 =
-            self.preliminary_surface_level((corner_cell_x + 1) << 4, (corner_cell_z + 1) << 4);
+        let [corner_c0, corner_c1, corner_c2, corner_c3] =
+            self.preliminary_surface_corners_with_cache(
+                corner_cell_x,
+                corner_cell_z,
+                preliminary_shared,
+            );
 
         let mut cache = EvalCache::new(self.xz_cache_slots, self.y_cache_slots);
-
-        // Immutable classification source: vanilla only ever reads the original
-        // column while scanning (`old` is at the current, not-yet-written Y and
-        // the ceiling look-ahead only reads lower, unvisited Y).
-        let block_at = |x: i32, y: i32, z: i32| -> PreState {
-            if y < y_lo || y >= y_hi {
-                PreState::AIR
-            } else {
-                pre(x, y, z)
-            }
-        };
+        let mut column_conditions = vec![0u8; self.conditions.len()];
 
         for x in 0..16 {
             for z in 0..16 {
+                out.begin_column(x, z);
                 let block_x = min_block_x + x;
                 let block_z = min_block_z + z;
                 let surface_depth = self.surface_depth(block_x, block_z);
                 cache.begin_column();
+                column_conditions.fill(0);
                 let mut ctx = Ctx {
                     block_x,
                     block_z,
@@ -862,29 +989,27 @@ impl SurfaceSystem {
                     water_height: NO_WATER,
                     stone_depth_above: 0,
                     stone_depth_below: 0,
-                    biome: Cell::new(None),
-                    biome_at: Some(biome_at),
+                    biome: None,
+                    biome_at: Some(&biome_at),
                     cache: &mut cache,
+                    cache_y: false,
                 };
 
                 let height = heightmap(x, z) + 1;
-                // This query is separate from rule evaluation. The reference
-                // scan performs it at the column's starting height before it
-                // descends through individual blocks; the result is discarded
-                // but its stateful biome-search side effect is observable.
+                // Keep this initial lookup separate from per-block rule lookup.
                 column_biome_at(x, height, z);
                 let mut stone_above_depth = 0;
                 let mut water_height = NO_WATER;
                 let mut next_ceiling_stone_y = i32::MAX;
                 let end_y = y_lo;
 
-                let mut y = height;
+                let mut y = if height >= y_hi { y_hi - 1 } else { height };
+                if y < y_lo {
+                    out.finish_column(x, z);
+                    continue;
+                }
                 while y >= end_y {
-                    let old = block_at(x, y, z);
-                    // Was `is_air(&old)` / `is_fluid(&old)` on the block's
-                    // *name*; the class is now supplied beside the id and
-                    // checked against `class_of_name` at the production seam.
-                    // The three arms are the same three, in the same order.
+                    let old = pre(x, y, z);
                     if old.class == PreClass::Air {
                         stone_above_depth = 0;
                         water_height = NO_WATER;
@@ -896,14 +1021,15 @@ impl SurfaceSystem {
                         if next_ceiling_stone_y >= y {
                             next_ceiling_stone_y = way_below_min_y;
                             let mut lookahead_y = y - 1;
-                            while lookahead_y >= end_y - 1 {
-                                // `!is_stone(..)` — `is_stone` was exactly
-                                // `!is_air && !is_fluid`, i.e. `PreClass::Stone`.
-                                if block_at(x, lookahead_y, z).class != PreClass::Stone {
+                            while lookahead_y >= end_y {
+                                if pre(x, lookahead_y, z).class != PreClass::Stone {
                                     next_ceiling_stone_y = lookahead_y + 1;
                                     break;
                                 }
                                 lookahead_y -= 1;
+                            }
+                            if next_ceiling_stone_y == way_below_min_y {
+                                next_ceiling_stone_y = end_y;
                             }
                         }
 
@@ -914,40 +1040,37 @@ impl SurfaceSystem {
                         ctx.stone_depth_above = stone_above_depth;
                         ctx.stone_depth_below = stone_below_depth;
                         ctx.cache.begin_y();
-                        ctx.biome.take();
+                        ctx.biome = None;
 
                         if old.state == self.default_block {
-                            if let Some(state) = self.try_apply(&self.rule, heightmap, &mut ctx) {
-                                out.insert((x, y, z), state);
+                            if let Some(state) = self.try_apply_compiled_column(
+                                heightmap,
+                                &mut ctx,
+                                &mut column_conditions,
+                            ) {
+                                out.push(x, y, z, state);
                             }
                         }
                     }
                     y -= 1;
                 }
+                out.finish_column(x, z);
             }
         }
 
         out
     }
 
-    /// `SurfaceSystem.topMaterial` — evaluate the surface rule for a single
-    /// position with the carver's fixed context (`stoneDepthAbove = 1`,
+    /// Evaluates the surface rule for one position with the carver context
+    /// (`stoneDepthAbove = 1`,
     /// `stoneDepthBelow = 1`, `waterHeight = underFluid ? y+1 : NONE`). Carvers
     /// use this to re-cap a dirt block exposed directly beneath a carved
     /// grass/mycelium block. Returns the canonical result state, or `None` if no
     /// rule matched. `heightmap(local_x, local_z)` is only consulted by the
     /// `steep` condition.
     ///
-    /// # Why this still returns an owned `String` (U21)
-    ///
-    /// The carver seam (`crate::carver`'s `top_material: &dyn Fn(..) ->
-    /// Option<String>`) is out of scope here and was left untouched,
-    /// so this method resolves its id back to a name at the boundary. That is
-    /// **allocation-neutral, by construction**: the pre-U21 body allocated one
-    /// `String` for the biome and one for the matched state, and this one
-    /// allocates one for the matched state and none for the biome — so the
-    /// carve stage can only go down, never up. Converting the carver seam to
-    /// ids is the obvious follow-up and is deliberately not done here.
+    /// The public carver boundary returns a canonical state name, so the
+    /// selected interned state is resolved only after rule evaluation.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn top_material(
@@ -974,18 +1097,153 @@ impl SurfaceSystem {
             water_height: if under_fluid { block_y + 1 } else { NO_WATER },
             stone_depth_above: 1,
             stone_depth_below: 1,
-            biome: Cell::new(Some((biome, cold_enough_to_snow))),
+            biome: Some((biome, cold_enough_to_snow)),
             biome_at: None,
             cache: &mut cache,
+            cache_y: true,
         };
-        self.try_apply(&self.rule, heightmap, &mut ctx)
+        self.try_apply_compiled(heightmap, &mut ctx)
             .map(|id| self.interner.name_of(id).to_string())
     }
 
-    fn try_apply(
+    #[inline]
+    fn try_apply_compiled<H: Fn(i32, i32) -> i32 + ?Sized>(
+        &self,
+        heightmap: &H,
+        ctx: &mut Ctx<'_, '_, '_>,
+    ) -> Option<StateId> {
+        let mut pc = self.compiled_rule.entry;
+        while pc != NO_RULE_EDGE {
+            pc = match &self.compiled_rule.nodes[pc] {
+                CompiledRuleNode::Block(state) => return Some(*state),
+                CompiledRuleNode::Bandlands(bands) => {
+                    return Some(self.bandlands[*bands].get_band(
+                        ctx.block_x,
+                        ctx.block_y,
+                        ctx.block_z,
+                    ));
+                }
+                CompiledRuleNode::Condition {
+                    condition,
+                    if_true,
+                    if_false,
+                } => {
+                    if self.test(&self.conditions[*condition], heightmap, ctx) {
+                        *if_true
+                    } else {
+                        *if_false
+                    }
+                }
+            };
+        }
+        None
+    }
+
+    #[inline]
+    fn try_apply_compiled_column<H: Fn(i32, i32) -> i32 + ?Sized>(
+        &self,
+        heightmap: &H,
+        ctx: &mut Ctx<'_, '_, '_>,
+        column_conditions: &mut [u8],
+    ) -> Option<StateId> {
+        let mut pc = self.compiled_rule.entry;
+        while pc != NO_RULE_EDGE {
+            pc = match &self.compiled_rule.nodes[pc] {
+                CompiledRuleNode::Block(state) => return Some(*state),
+                CompiledRuleNode::Bandlands(bands) => {
+                    return Some(self.bandlands[*bands].get_band(
+                        ctx.block_x,
+                        ctx.block_y,
+                        ctx.block_z,
+                    ));
+                }
+                CompiledRuleNode::Condition {
+                    condition,
+                    if_true,
+                    if_false,
+                } => {
+                    let cond = &self.conditions[*condition];
+                    let value = if self.column_invariant[*condition] {
+                        match column_conditions[*condition] {
+                            1 => false,
+                            2 => true,
+                            _ => {
+                                let value = self.test(cond, heightmap, ctx);
+                                column_conditions[*condition] = if value { 2 } else { 1 };
+                                value
+                            }
+                        }
+                    } else {
+                        // A compiled path visits each condition node at most once.
+                        // The general evaluator's Y epoch cache is useful only
+                        // for callers that may revisit a source; on this linear
+                        // production walk it adds a bounds check and a write for
+                        // every Y-dependent predicate without a possible hit.
+                        self.test(cond, heightmap, ctx)
+                    };
+                    if value { *if_true } else { *if_false }
+                }
+            };
+        }
+        None
+    }
+
+    #[cfg(test)]
+    fn try_apply_compiled_counted<H: Fn(i32, i32) -> i32 + ?Sized>(
+        &self,
+        heightmap: &H,
+        ctx: &mut Ctx<'_, '_, '_>,
+        mut column_conditions: Option<&mut [u8]>,
+        counts: &mut [usize],
+    ) -> Option<StateId> {
+        let mut pc = self.compiled_rule.entry;
+        while pc != NO_RULE_EDGE {
+            pc = match &self.compiled_rule.nodes[pc] {
+                CompiledRuleNode::Block(state) => return Some(*state),
+                CompiledRuleNode::Bandlands(bands) => {
+                    return Some(self.bandlands[*bands].get_band(
+                        ctx.block_x,
+                        ctx.block_y,
+                        ctx.block_z,
+                    ));
+                }
+                CompiledRuleNode::Condition {
+                    condition,
+                    if_true,
+                    if_false,
+                } => {
+                    let cond = &self.conditions[*condition];
+                    let value = match column_conditions.as_deref_mut() {
+                        Some(values) if self.column_invariant[*condition] => {
+                            match values[*condition] {
+                                1 => false,
+                                2 => true,
+                                _ => {
+                                    counts[*condition] += 1;
+                                    let value = self.test(cond, heightmap, ctx);
+                                    values[*condition] = if value { 2 } else { 1 };
+                                    value
+                                }
+                            }
+                        }
+                        _ => {
+                            counts[*condition] += 1;
+                            self.test(cond, heightmap, ctx)
+                        }
+                    };
+                    if value { *if_true } else { *if_false }
+                }
+            };
+        }
+        None
+    }
+
+    #[cfg(test)]
+    #[inline]
+    fn try_apply<H: Fn(i32, i32) -> i32 + ?Sized>(
         &self,
         rule: &Rule,
-        heightmap: &dyn Fn(i32, i32) -> i32,
+        heightmap: &H,
         ctx: &mut Ctx<'_, '_, '_>,
     ) -> Option<StateId> {
         match rule {
@@ -998,32 +1256,37 @@ impl SurfaceSystem {
                 }
                 None
             }
-            Rule::Condition(cond, then) => {
-                if self.test(cond, heightmap, ctx) {
+            Rule::Condition(condition, then) => {
+                if self.test(&self.conditions[*condition], heightmap, ctx) {
                     self.try_apply(then, heightmap, ctx)
                 } else {
                     None
                 }
             }
-            Rule::Bandlands(bands) => Some(bands.get_band(ctx.block_x, ctx.block_y, ctx.block_z)),
+            Rule::Bandlands(bands) => Some(self.bandlands[*bands].get_band(
+                ctx.block_x,
+                ctx.block_y,
+                ctx.block_z,
+            )),
         }
     }
 
-    fn test(
+    #[inline]
+    fn test<H: Fn(i32, i32) -> i32 + ?Sized>(
         &self,
         cond: &Cond,
-        heightmap: &dyn Fn(i32, i32) -> i32,
+        heightmap: &H,
         ctx: &mut Ctx<'_, '_, '_>,
     ) -> bool {
         match cond {
             Cond::BiomeIs { list, cache } => {
-                if let Some(value) = ctx.cache.get_y(*cache) {
+                if let Some(value) = ctx.get_y_cache(*cache) {
                     return value;
                 }
                 let value = list
                     .iter()
                     .any(|b| b.as_str() == ctx.biome().0);
-                ctx.cache.set_y(*cache, value);
+                ctx.set_y_cache(*cache, value);
                 value
             }
             Cond::AbovePreliminarySurface => {
@@ -1037,7 +1300,7 @@ impl SurfaceSystem {
                 cache,
             } => {
                 let cached = if *is_3d {
-                    ctx.cache.get_y(*cache)
+                    ctx.get_y_cache(*cache)
                 } else {
                     ctx.cache.get_xz(*cache)
                 };
@@ -1054,7 +1317,7 @@ impl SurfaceSystem {
                 };
                 let value = v >= *min && v <= *max;
                 if *is_3d {
-                    ctx.cache.set_y(*cache, value);
+                    ctx.set_y_cache(*cache, value);
                 } else {
                     ctx.cache.set_xz(*cache, value);
                 }
@@ -1090,7 +1353,7 @@ impl SurfaceSystem {
                 ceiling,
                 cache,
             } => {
-                if let Some(value) = ctx.cache.get_y(*cache) {
+                if let Some(value) = ctx.get_y_cache(*cache) {
                     return value;
                 }
                 let stone_depth = if *ceiling {
@@ -1115,15 +1378,15 @@ impl SurfaceSystem {
                     ) as i32
                 };
                 let value = stone_depth <= 1 + offset + surface_depth + secondary;
-                ctx.cache.set_y(*cache, value);
+                ctx.set_y_cache(*cache, value);
                 value
             }
             Cond::Temperature { cache } => {
-                if let Some(value) = ctx.cache.get_y(*cache) {
+                if let Some(value) = ctx.get_y_cache(*cache) {
                     return value;
                 }
                 let value = ctx.biome().1;
-                ctx.cache.set_y(*cache, value);
+                ctx.set_y_cache(*cache, value);
                 value
             }
             Cond::Hole { cache } => {
@@ -1140,7 +1403,7 @@ impl SurfaceSystem {
                 false_at_and_above,
                 cache,
             } => {
-                if let Some(value) = ctx.cache.get_y(*cache) {
+                if let Some(value) = ctx.get_y_cache(*cache) {
                     return value;
                 }
                 let block_y = ctx.block_y;
@@ -1159,7 +1422,7 @@ impl SurfaceSystem {
                     let mut random = factory.at(ctx.block_x, block_y, ctx.block_z);
                     f64::from(random.next_float()) < probability
                 };
-                ctx.cache.set_y(*cache, value);
+                ctx.set_y_cache(*cache, value);
                 value
             }
             Cond::Water {
@@ -1168,7 +1431,7 @@ impl SurfaceSystem {
                 add_stone_depth,
                 cache,
             } => {
-                if let Some(value) = ctx.cache.get_y(*cache) {
+                if let Some(value) = ctx.get_y_cache(*cache) {
                     return value;
                 }
                 let value = ctx.water_height == NO_WATER
@@ -1179,7 +1442,7 @@ impl SurfaceSystem {
                             0
                         }
                         >= ctx.water_height + offset + ctx.surface_depth * surface_depth_multiplier;
-                ctx.cache.set_y(*cache, value);
+                ctx.set_y_cache(*cache, value);
                 value
             }
             Cond::YAbove {
@@ -1188,7 +1451,7 @@ impl SurfaceSystem {
                 add_stone_depth,
                 cache,
             } => {
-                if let Some(value) = ctx.cache.get_y(*cache) {
+                if let Some(value) = ctx.get_y_cache(*cache) {
                     return value;
                 }
                 let value = ctx.block_y
@@ -1198,29 +1461,26 @@ impl SurfaceSystem {
                         0
                     }
                     >= anchor_y + ctx.surface_depth * surface_depth_multiplier;
-                ctx.cache.set_y(*cache, value);
+                ctx.set_y_cache(*cache, value);
                 value
             }
         }
     }
 }
 
-/// Parses the `surface_rule` JSON into [`Rule`]/[`Cond`] trees, instantiating
-/// noises and random factories at parse time (mirroring vanilla's
-/// `ConditionSource.apply`).
+/// Parses the `surface_rule` JSON into rule and condition arenas.
 struct RuleParser<'a, 'b> {
     builder: &'a Builder<'b>,
     canon: &'a BlockCanon,
-    /// Where every result state and clay band is interned, once, at parse time
-    /// — so `try_apply` never touches the table. See [`SurfaceSystem::new`].
+    /// State interner used while parsing result blocks.
     interner: &'a StateInterner,
     min_y: i32,
     gen_depth: i32,
-    /// Compact cache-slot counters. Each parsed condition gets its own slot,
-    /// preserving the source-level lazy-condition identity even when two
-    /// conditions happen to have equal JSON values.
+    /// Cache-slot counters. Each parsed condition receives its own slot.
     xz_cache_slots: Cell<usize>,
     y_cache_slots: Cell<usize>,
+    conditions: RefCell<Vec<Cond>>,
+    bandlands: RefCell<Vec<BandBlocks>>,
 }
 
 impl RuleParser<'_, '_> {
@@ -1251,30 +1511,28 @@ impl RuleParser<'_, '_> {
                     .map(|n| self.rule(n))
                     .collect(),
             ),
-            "condition" => Rule::Condition(
-                self.cond(&node["if_true"]),
-                Box::new(self.rule(&node["then_run"])),
-            ),
-            "bandlands" => Rule::Bandlands(Box::new(self.bandlands())),
+            "condition" => {
+                let condition = self.cond(&node["if_true"]);
+                let condition_id = {
+                    let mut conditions = self.conditions.borrow_mut();
+                    let id = conditions.len();
+                    conditions.push(condition);
+                    id
+                };
+                Rule::Condition(condition_id, Box::new(self.rule(&node["then_run"])))
+            }
+            "bandlands" => {
+                let bands = self.bandlands();
+                let mut bandlands = self.bandlands.borrow_mut();
+                let id = bandlands.len();
+                bandlands.push(bands);
+                Rule::Bandlands(id)
+            }
             other => panic!("unhandled surface rule type: minecraft:{other}"),
         }
     }
 
-    /// Builds [`BandBlocks`] for a `"minecraft:bandlands"` rule node — once
-    /// per occurrence of that node in the `surface_rule` tree at parse time
-    /// (there is exactly one in vanilla's real `overworld.json`), matching
-    /// vanilla's own generator constructor calling its one-time band-table
-    /// build exactly once
-    /// per world. `self.builder.positional_factory()` is the same `master`
-    /// factory [`SurfaceSystem::new`] itself stores (vanilla's own
-    /// generator-wide random-state field, i.e. what vanilla calls its noise
-    /// random) — see this module's own `master` field
-    /// doc for why that identity holds.
-    /// U21 added the interning of the finished table, and the two assertions
-    /// that make "the band set is finite" a checked claim rather than an
-    /// assumption. `generate_bands` itself is untouched — every RNG draw in it
-    /// is world-defining, and its `Vec<String>` is built exactly once per
-    /// generator, so leaving it in strings costs 192 allocations per world.
+    /// Builds the per-system band table and offset noise.
     fn bandlands(&self) -> BandBlocks {
         let offset_noise = self.builder.noise("minecraft:clay_bands_offset");
         let mut random = self
@@ -1286,18 +1544,15 @@ impl RuleParser<'_, '_> {
         assert_eq!(
             names.len(),
             CLAY_BANDS_LEN,
-            "generate_bands must produce exactly vanilla's clay-bands table length in entries"
+            "generate_bands must produce the configured clay-band table length"
         );
         if let Some(unknown) = names
             .iter()
             .find(|n| !BAND_BLOCK_NAMES.contains(&n.as_str()))
         {
             panic!(
-                "clay band table contains {unknown:?}, which is not one of \
-                 BAND_BLOCK_NAMES {BAND_BLOCK_NAMES:?} — Rule::Bandlands' \
-                 pre-interning assumes the band set is exactly those seven \
-                 blocks (see this module's doc); add the new block to the list \
-                 rather than reintroducing a per-block intern"
+                "clay band table contains {unknown:?}, which is not in \
+                 BAND_BLOCK_NAMES {BAND_BLOCK_NAMES:?}"
             );
         }
 
@@ -1403,7 +1658,7 @@ impl RuleParser<'_, '_> {
         }
     }
 
-    /// Vanilla's own vertical-anchor resolution against the world-generation context.
+    /// Resolves a vertical anchor against the configured generation window.
     fn resolve_anchor(&self, node: &Value) -> i32 {
         if let Some(y) = node["absolute"].as_i64() {
             y as i32
@@ -1434,12 +1689,8 @@ fn is_fluid(s: &str) -> bool {
     name == "minecraft:water" || name == "minecraft:lava"
 }
 
-// `is_stone` was `!is_air(s) && !is_fluid(s)`. It is gone as a function because
-// `class_of_name`'s `else` arm *is* that expression, and the scan now compares
-// `PreClass::Stone` rather than calling it — see `build_surface`'s lookahead.
-
-/// The partial key (`name` + sorted specified `[k=v]`) for a `{Name, Properties?}`
-/// block JSON node — the lookup key into a [`BlockCanon`].
+/// Builds the partial key (`name` plus sorted specified properties) for a block
+/// JSON node.
 fn block_json_key(node: &Value) -> String {
     let name = node["Name"].as_str().expect("block Name");
     let mut key = String::from(name);
@@ -1465,9 +1716,7 @@ fn block_json_key(node: &Value) -> String {
     key
 }
 
-/// Resolves a `{Name, Properties?}` block JSON to its full canonical string via
-/// the caller-supplied [`BlockCanon`] table (produced by vanilla's own
-/// `BlockState.CODEC`).
+/// Resolves a block JSON node through the caller-supplied canonical table.
 fn canonical_from_block_json(node: &Value, canon: &BlockCanon) -> String {
     let key = block_json_key(node);
     canon
@@ -1476,18 +1725,8 @@ fn canonical_from_block_json(node: &Value, canon: &BlockCanon) -> String {
         .unwrap_or_else(|| panic!("no canonical block for result_state key {key:?}"))
 }
 
-/// Builds an **identity** [`BlockCanon`] for a settings value by walking its
-/// `surface_rule` tree and `default_block`, mapping each result state's partial
-/// key to itself.
-///
-/// This exists so the composed generator ([`crate::overworld`]) can run without
-/// a JVM: 26.2's real `BlockState.CODEC` canonicalisation is the identity on
-/// every key the overworld surface rule emits (verified — every `canonmap.*`
-/// line in the surface parity fixtures has `value == key`, because the result
-/// states already carry their full property set). A version whose CODEC is
-/// non-identity would supply its own table instead of calling this. The
-/// per-stage `surface_parity` test still uses the JVM-dumped canon, so this
-/// helper's identity assumption is never what a parity claim rests on.
+/// Builds an identity canonical table from the result states in a settings
+/// value. Callers with non-identity canonicalization provide their own table.
 #[must_use]
 pub fn identity_canon(settings: &Value) -> BlockCanon {
     fn walk(node: &Value, canon: &mut BlockCanon) {
@@ -1517,7 +1756,51 @@ pub fn identity_canon(settings: &Value) -> BlockCanon {
 
 #[cfg(test)]
 mod tests {
-    use super::{class_of_name, EvalCache, PreClass, WAY_BELOW_MIN_Y};
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    use serde_json::Value;
+
+    use super::{
+        class_of_name, CompiledRule, Cond, Ctx, EvalCache, PreClass, PreState, Rule, StateId, SurfaceDiff,
+        SurfaceSystem, WAY_BELOW_MIN_Y, NO_WATER,
+    };
+    use crate::density::{Builder, NoiseParams, Resolver};
+    use crate::interner::StateInterner;
+
+    struct FsResolver {
+        root: PathBuf,
+    }
+
+    impl FsResolver {
+        fn read(&self, kind: &str, id: &str) -> Value {
+            let name = id.strip_prefix("minecraft:").unwrap_or(id);
+            let path = self.root.join(kind).join(format!("{name}.json"));
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
+            serde_json::from_str(&text)
+                .unwrap_or_else(|error| panic!("parsing {}: {error}", path.display()))
+        }
+    }
+
+    impl Resolver for FsResolver {
+        fn density_function(&self, id: &str) -> Value {
+            self.read("density_function", id)
+        }
+
+        fn noise(&self, id: &str) -> NoiseParams {
+            let value = self.read("noise", id);
+            NoiseParams {
+                first_octave: value["firstOctave"].as_i64().expect("firstOctave") as i32,
+                amplitudes: value["amplitudes"]
+                    .as_array()
+                    .expect("amplitudes")
+                    .iter()
+                    .map(|amplitude| amplitude.as_f64().expect("amplitude"))
+                    .collect(),
+            }
+        }
+    }
 
     #[test]
     fn block_classification_treats_all_air_states_as_air() {
@@ -1560,5 +1843,558 @@ mod tests {
     fn ceiling_scan_sentinel_is_dimension_independent() {
         assert_eq!(WAY_BELOW_MIN_Y, -2032 << 4);
         assert_ne!(WAY_BELOW_MIN_Y, -64 << 4);
+    }
+
+    #[test]
+    fn compiled_rule_matches_recursive_short_circuit_order() {
+        let rule = Rule::Sequence(vec![
+            Rule::Condition(0, Box::new(Rule::Block(StateId::from_raw(7)))),
+            Rule::Condition(1, Box::new(Rule::Block(StateId::from_raw(11)))),
+            Rule::Bandlands(3),
+        ]);
+        let compiled = CompiledRule::new(&rule);
+
+        let mut recursive_events = Vec::new();
+        let recursive = rule.run(
+            &mut |id| {
+                recursive_events.push(id);
+                id == 1
+            },
+            &mut |_| StateId::from_raw(13),
+        );
+        let mut compiled_events = Vec::new();
+        let compiled_result = compiled.run(
+            |id| {
+                compiled_events.push(id);
+                id == 1
+            },
+            |_| StateId::from_raw(13),
+        );
+
+        assert_eq!(compiled_result, recursive);
+        assert_eq!(compiled_events, recursive_events);
+        assert_eq!(compiled_events, [0, 1]);
+
+        let mut recursive_events = Vec::new();
+        let recursive_band_called = std::cell::Cell::new(false);
+        let recursive = rule.run(
+            &mut |id| {
+                recursive_events.push(id);
+                false
+            },
+            &mut |id| {
+                assert_eq!(id, 3);
+                recursive_band_called.set(true);
+                StateId::from_raw(13)
+            },
+        );
+        let mut compiled_events = Vec::new();
+        let compiled_band_called = std::cell::Cell::new(false);
+        let compiled_result = compiled.run(
+            |id| {
+                compiled_events.push(id);
+                false
+            },
+            |id| {
+                assert_eq!(id, 3);
+                compiled_band_called.set(true);
+                StateId::from_raw(13)
+            },
+        );
+        assert_eq!(compiled_result, Some(StateId::from_raw(13)));
+        assert_eq!(compiled_result, recursive);
+        assert_eq!(compiled_events, recursive_events);
+        assert_eq!(compiled_events, [0, 1]);
+        assert!(recursive_band_called.get());
+        assert!(compiled_band_called.get());
+    }
+
+    #[test]
+    fn compiled_rule_keeps_lazy_callback_and_draw_events_in_order() {
+        let rule = Rule::Sequence(vec![
+            Rule::Condition(2, Box::new(Rule::Block(StateId::from_raw(17)))),
+            Rule::Condition(4, Box::new(Rule::Block(StateId::from_raw(19)))),
+        ]);
+        let compiled = CompiledRule::new(&rule);
+
+        let mut recursive_events = Vec::new();
+        let recursive = rule.run(
+            &mut |id| {
+                recursive_events.push(format!("predicate:{id}"));
+                if id == 2 {
+                    recursive_events.push("random:0".to_string());
+                }
+                id == 4
+            },
+            &mut |_| StateId::AIR,
+        );
+        let mut compiled_events = Vec::new();
+        let compiled_result = compiled.run(
+            |id| {
+                compiled_events.push(format!("predicate:{id}"));
+                if id == 2 {
+                    compiled_events.push("random:0".to_string());
+                }
+                id == 4
+            },
+            |_| StateId::AIR,
+        );
+
+        assert_eq!(compiled_result, recursive);
+        assert_eq!(compiled_events, recursive_events);
+        assert_eq!(compiled_events, ["predicate:2", "random:0", "predicate:4"]);
+        assert_ne!(compiled_events, ["predicate:4", "predicate:2"]);
+    }
+
+    #[test]
+    fn compiled_empty_sequence_keeps_recursive_no_match() {
+        let rule = Rule::Sequence(Vec::new());
+        let compiled = CompiledRule::new(&rule);
+        assert_eq!(compiled.run(|_| true, |_| StateId::AIR), None);
+        assert_eq!(rule.run(&mut |_| true, &mut |_| StateId::AIR), None);
+    }
+
+    #[test]
+    fn compiled_real_settings_match_recursive_evaluation() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/worldgen_data");
+        let resolver = FsResolver { root: root.clone() };
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join("noise_settings/overworld.json")).unwrap(),
+        )
+        .unwrap();
+        let builder = Builder::new(42, &resolver);
+        let interner = Arc::new(StateInterner::new());
+        let canon = super::identity_canon(&settings);
+        let surface = SurfaceSystem::new(&settings, &builder, &canon, &interner);
+        let heightmap = |x: i32, z: i32| 62 + (x * 3 + z * 5).rem_euclid(9);
+        let biomes = [
+            "minecraft:plains",
+            "minecraft:desert",
+            "minecraft:badlands",
+            "minecraft:snowy_plains",
+        ];
+        let mut checked = 0usize;
+
+        for &block_x in &[-17, -1, 0, 7, 15, 16, 31] {
+            for &block_z in &[-17, -1, 0, 7, 15, 16, 31] {
+                let surface_depth = surface.surface_depth(block_x, block_z);
+                let min_surface_level =
+                    surface.min_surface_level(block_x, block_z, surface_depth);
+                for &biome in &biomes {
+                    let biome_at = |_x: i32, _y: i32, _z: i32| (biome, false);
+                    let mut compiled_cache =
+                        EvalCache::new(surface.xz_cache_slots, surface.y_cache_slots);
+                    let mut recursive_cache =
+                        EvalCache::new(surface.xz_cache_slots, surface.y_cache_slots);
+                    let mut column_cache =
+                        EvalCache::new(surface.xz_cache_slots, surface.y_cache_slots);
+                    let mut column_conditions = vec![0u8; surface.conditions.len()];
+                    compiled_cache.begin_column();
+                    recursive_cache.begin_column();
+                    column_cache.begin_column();
+                    column_conditions.fill(0);
+
+                    for &block_y in &[-64, -32, 0, 32, 64, 96, 128, 160, 256, 319] {
+                        for &(stone_depth_above, stone_depth_below) in
+                            &[(1, 1), (2, 5), (5, 2), (12, 20)]
+                        {
+                            for &under_fluid in &[false, true] {
+                                compiled_cache.begin_y();
+                                recursive_cache.begin_y();
+                                column_cache.begin_y();
+                                let compiled = {
+                                    let mut ctx = Ctx {
+                                        block_x,
+                                        block_z,
+                                        surface_depth,
+                                        surface_secondary: surface
+                                            .surface_secondary(block_x, block_z),
+                                        min_surface_level,
+                                        block_y,
+                                        water_height: if under_fluid {
+                                            block_y + 1
+                                        } else {
+                                            NO_WATER
+                                        },
+                                        stone_depth_above,
+                                        stone_depth_below,
+                                        biome: None,
+                                        biome_at: Some(&biome_at),
+                                        cache: &mut compiled_cache,
+                                        cache_y: true,
+                                    };
+                                    surface.try_apply_compiled(&heightmap, &mut ctx)
+                                };
+                                let recursive = {
+                                    let mut ctx = Ctx {
+                                        block_x,
+                                        block_z,
+                                        surface_depth,
+                                        surface_secondary: surface
+                                            .surface_secondary(block_x, block_z),
+                                        min_surface_level,
+                                        block_y,
+                                        water_height: if under_fluid {
+                                            block_y + 1
+                                        } else {
+                                            NO_WATER
+                                        },
+                                        stone_depth_above,
+                                        stone_depth_below,
+                                        biome: None,
+                                        biome_at: Some(&biome_at),
+                                        cache: &mut recursive_cache,
+                                        cache_y: true,
+                                    };
+                                    surface.try_apply(&surface.rule, &heightmap, &mut ctx)
+                                };
+                                let column = {
+                                    let mut ctx = Ctx {
+                                        block_x,
+                                        block_z,
+                                        surface_depth,
+                                        surface_secondary: surface
+                                            .surface_secondary(block_x, block_z),
+                                        min_surface_level,
+                                        block_y,
+                                        water_height: if under_fluid {
+                                            block_y + 1
+                                        } else {
+                                            NO_WATER
+                                        },
+                                        stone_depth_above,
+                                        stone_depth_below,
+                                        biome: None,
+                                        biome_at: Some(&biome_at),
+                                        cache: &mut column_cache,
+                                        cache_y: false,
+                                    };
+                                    surface.try_apply_compiled_column(
+                                        &heightmap,
+                                        &mut ctx,
+                                        &mut column_conditions,
+                                    )
+                                };
+                                assert_eq!(
+                                    compiled, recursive,
+                                    "compiled surface result diverged at ({block_x},{block_y},{block_z}) biome={biome} fluid={under_fluid} depths=({stone_depth_above},{stone_depth_below})"
+                                );
+                                assert_eq!(
+                                    compiled, column,
+                                    "column-specialized surface result diverged at ({block_x},{block_y},{block_z}) biome={biome} fluid={under_fluid} depths=({stone_depth_above},{stone_depth_below})"
+                                );
+                                checked += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        assert_eq!(checked, 7 * 7 * 4 * 10 * 4 * 2);
+    }
+
+    #[test]
+    fn column_specialization_reuses_invariant_predicates() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/worldgen_data");
+        let resolver = FsResolver { root: root.clone() };
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join("noise_settings/overworld.json")).unwrap(),
+        )
+        .unwrap();
+        let builder = Builder::new(42, &resolver);
+        let interner = Arc::new(StateInterner::new());
+        let canon = super::identity_canon(&settings);
+        let surface = SurfaceSystem::new(&settings, &builder, &canon, &interner);
+        let heightmap = |x: i32, z: i32| 62 + (x * 3 + z * 5).rem_euclid(9);
+        let biome = "minecraft:badlands";
+        let biome_at = |_x: i32, _y: i32, _z: i32| (biome, false);
+        let block_x = 7;
+        let block_z = 9;
+        let surface_depth = surface.surface_depth(block_x, block_z);
+        let surface_secondary = surface.surface_secondary(block_x, block_z);
+        let min_surface_level = surface.min_surface_level(block_x, block_z, surface_depth);
+        let mut ordinary_cache =
+            EvalCache::new(surface.xz_cache_slots, surface.y_cache_slots);
+        let mut column_cache = EvalCache::new(surface.xz_cache_slots, surface.y_cache_slots);
+        ordinary_cache.begin_column();
+        column_cache.begin_column();
+        let mut ordinary_ctx = Ctx {
+            block_x,
+            block_z,
+            surface_depth,
+            surface_secondary,
+            min_surface_level,
+            block_y: 0,
+            water_height: NO_WATER,
+            stone_depth_above: 0,
+            stone_depth_below: 0,
+            biome: None,
+            biome_at: Some(&biome_at),
+            cache: &mut ordinary_cache,
+            cache_y: true,
+        };
+        let mut column_ctx = Ctx {
+            block_x,
+            block_z,
+            surface_depth,
+            surface_secondary,
+            min_surface_level,
+            block_y: 0,
+            water_height: NO_WATER,
+            stone_depth_above: 0,
+            stone_depth_below: 0,
+            biome: None,
+            biome_at: Some(&biome_at),
+            cache: &mut column_cache,
+            cache_y: false,
+        };
+        let mut column_conditions = vec![0u8; surface.conditions.len()];
+        let mut ordinary_counts = vec![0usize; surface.conditions.len()];
+        let mut column_counts = vec![0usize; surface.conditions.len()];
+        let mut y = surface.min_y + surface.gen_depth - 1;
+        while y >= surface.min_y {
+            let stone_above_depth = 1;
+            let stone_below_depth = 1;
+            ordinary_ctx.block_y = y;
+            ordinary_ctx.stone_depth_above = stone_above_depth;
+            ordinary_ctx.stone_depth_below = stone_below_depth;
+            ordinary_ctx.biome = None;
+            ordinary_ctx.cache.begin_y();
+            let ordinary = surface.try_apply_compiled_counted(
+                &heightmap,
+                &mut ordinary_ctx,
+                None,
+                &mut ordinary_counts,
+            );
+            let production_ordinary = surface.try_apply_compiled(&heightmap, &mut ordinary_ctx);
+            assert_eq!(ordinary, production_ordinary);
+
+            column_ctx.block_y = y;
+            column_ctx.stone_depth_above = stone_above_depth;
+            column_ctx.stone_depth_below = stone_below_depth;
+            column_ctx.biome = None;
+            column_ctx.cache.begin_y();
+            let specialized = surface.try_apply_compiled_counted(
+                &heightmap,
+                &mut column_ctx,
+                Some(&mut column_conditions),
+                &mut column_counts,
+            );
+            assert_eq!(ordinary, specialized, "surface result diverged at y={y}");
+            let production_specialized = surface.try_apply_compiled_column(
+                &heightmap,
+                &mut column_ctx,
+                &mut column_conditions,
+            );
+            assert_eq!(specialized, production_specialized);
+            y -= 1;
+        }
+
+        let ordinary_invariant = ordinary_counts
+            .iter()
+            .enumerate()
+            .filter(|(id, _)| surface.column_invariant[*id])
+            .map(|(_, count)| count)
+            .sum::<usize>();
+        let specialized_invariant = column_counts
+            .iter()
+            .enumerate()
+            .filter(|(id, _)| surface.column_invariant[*id])
+            .map(|(_, count)| count)
+            .sum::<usize>();
+        let visited_invariant = column_counts
+            .iter()
+            .enumerate()
+            .filter(|(id, count)| surface.column_invariant[*id] && **count != 0)
+            .count();
+        assert!(
+            ordinary_invariant > specialized_invariant,
+            "ordinary={ordinary_invariant} specialized={specialized_invariant} visited={visited_invariant} available={}",
+            surface.column_invariant.iter().filter(|&&value| value).count(),
+        );
+        assert_eq!(specialized_invariant, visited_invariant);
+        for (id, invariant) in surface.column_invariant.iter().enumerate() {
+            if !invariant {
+                assert_eq!(
+                    ordinary_counts[id],
+                    column_counts[id],
+                    "Y-dependent condition {id} was hoisted"
+                );
+            }
+        }
+        let y_dependent_id = surface
+            .conditions
+            .iter()
+            .position(|condition| matches!(condition, Cond::AbovePreliminarySurface))
+            .expect("real settings must exercise a Y-dependent predicate");
+        assert!(ordinary_counts[y_dependent_id] > 1);
+        assert_eq!(ordinary_counts[y_dependent_id], column_counts[y_dependent_id]);
+    }
+
+    #[test]
+    fn surface_diff_orders_each_column_for_materialization() {
+        let mut diff = SurfaceDiff::default();
+        diff.begin_column(0, 0);
+        diff.push(0, 9, 0, StateId::from_raw(11));
+        diff.push(0, 3, 0, StateId::from_raw(12));
+        diff.finish_column(0, 0);
+        diff.begin_column(0, 1);
+        diff.push(0, 7, 1, StateId::from_raw(13));
+        diff.finish_column(0, 1);
+
+        assert_eq!(diff.len(), 3);
+        assert_eq!(diff.get(&(0, 3, 0)).copied(), Some(StateId::from_raw(12)));
+        assert_eq!(diff.get(&(0, 9, 0)).copied(), Some(StateId::from_raw(11)));
+        assert_eq!(diff.get(&(0, 6, 0)), None);
+        assert_eq!(diff.column_slice(0, 0), &[(9, StateId::from_raw(11)), (3, StateId::from_raw(12))]);
+        assert_eq!(diff.column_slice(0, 1), &[(7, StateId::from_raw(13))]);
+    }
+
+    /// Bounded release-facing characterization for the compiled column path.
+    /// Run explicitly with `--ignored --nocapture`; the digest is the control
+    /// that makes an A/B kernel comparison meaningful when timings move.
+    #[test]
+    #[ignore]
+    fn surface_kernel_profile_shaped_fixture() {
+        use lodestone_time::Instant;
+        use sha2::{Digest, Sha256};
+
+        #[cfg(target_os = "macos")]
+        #[allow(unsafe_code)]
+        fn usage() -> (u64, u64) {
+            #[repr(C)]
+            #[derive(Default)]
+            struct Rusage {
+                _uuid: [u8; 16],
+                _user_time: u64,
+                _system_time: u64,
+                _pkg_idle_wkups: u64,
+                _interrupt_wkups: u64,
+                _pageins: u64,
+                _wired_size: u64,
+                _resident_size: u64,
+                _phys_footprint: u64,
+                _proc_start_abstime: u64,
+                _proc_exit_abstime: u64,
+                _child_user_time: u64,
+                _child_system_time: u64,
+                _child_pkg_idle_wkups: u64,
+                _child_interrupt_wkups: u64,
+                _child_pageins: u64,
+                _child_elapsed_abstime: u64,
+                _diskio_bytesread: u64,
+                _diskio_byteswritten: u64,
+                _cpu_time_qos_default: u64,
+                _cpu_time_qos_maintenance: u64,
+                _cpu_time_qos_background: u64,
+                _cpu_time_qos_utility: u64,
+                _cpu_time_qos_legacy: u64,
+                _cpu_time_qos_user_initiated: u64,
+                _cpu_time_qos_user_interactive: u64,
+                _billed_system_time: u64,
+                _serviced_system_time: u64,
+                _logical_writes: u64,
+                _lifetime_max_phys_footprint: u64,
+                instructions: u64,
+                cycles: u64,
+                _billed_energy: u64,
+                _serviced_energy: u64,
+                _interval_max_phys_footprint: u64,
+                _runnable_time: u64,
+                _flags: u64,
+            }
+            unsafe extern "C" {
+                fn proc_pid_rusage(
+                    pid: i32,
+                    flavor: i32,
+                    buffer: *mut core::ffi::c_void,
+                ) -> i32;
+            }
+            let mut info = Rusage::default();
+            let rc = unsafe {
+                proc_pid_rusage(
+                    i32::try_from(std::process::id()).unwrap(),
+                    4,
+                    (&raw mut info).cast::<core::ffi::c_void>(),
+                )
+            };
+            assert_eq!(rc, 0, "proc_pid_rusage failed with {rc}");
+            (info.instructions, info.cycles)
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        fn usage() -> (u64, u64) {
+            panic!("surface instruction/cycle profile requires macOS proc_pid_rusage");
+        }
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/worldgen_data");
+        let resolver = FsResolver { root: root.clone() };
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join("noise_settings/overworld.json")).unwrap(),
+        )
+        .unwrap();
+        let builder = Builder::new(42, &resolver);
+        let interner = Arc::new(StateInterner::new());
+        let canon = super::identity_canon(&settings);
+        let surface = SurfaceSystem::new(&settings, &builder, &canon, &interner);
+        let stone = PreState::from_name(&interner, "minecraft:stone");
+        let water = PreState::from_name(&interner, "minecraft:water");
+        let heightmap = |x: i32, z: i32| 62 + (x * 7 + z * 11).rem_euclid(17);
+        let pre = |x: i32, y: i32, z: i32| {
+            let top = 72 + (x * 7 + z * 11).rem_euclid(41);
+            if y > top {
+                PreState::AIR
+            } else if y > top - 3 && (x + z).rem_euclid(5) == 0 {
+                water
+            } else {
+                stone
+            }
+        };
+        let biome_at = |_x: i32, _y: i32, _z: i32| ("minecraft:plains", false);
+        let digest = |diff: &SurfaceDiff| {
+            let mut digest = Sha256::new();
+            for x in 0..16 {
+                for z in 0..16 {
+                    for y in surface.min_y..surface.min_y + surface.gen_depth {
+                        let state = diff
+                            .get(&(x, y, z))
+                            .copied()
+                            .unwrap_or_else(|| pre(x, y, z).state);
+                        digest.update(state.raw().to_le_bytes());
+                    }
+                }
+            }
+            digest.finalize()
+        };
+        let run = || surface.build_surface(&pre, &heightmap, &biome_at, 0, 0);
+        let warm = run();
+        let _ = digest(&warm);
+        let mut times = Vec::with_capacity(9);
+        let mut instructions = Vec::with_capacity(9);
+        let mut cycles = Vec::with_capacity(9);
+        let mut output_digest = None;
+        let mut rewrites = 0;
+        for _ in 0..9 {
+            let (before_instructions, before_cycles) = usage();
+            let start = Instant::now();
+            let diff = run();
+            times.push(start.elapsed().as_nanos());
+            let (after_instructions, after_cycles) = usage();
+            instructions.push(after_instructions - before_instructions);
+            cycles.push(after_cycles - before_cycles);
+            rewrites = diff.len();
+            output_digest = Some(digest(&diff));
+        }
+        times.sort_unstable();
+        instructions.sort_unstable();
+        cycles.sort_unstable();
+        println!(
+            "SURFACE_KERNEL seed=42 fixture=shaped-full rewrites={rewrites} median_ns={} median_instructions={} median_cycles={} digest={:02x}",
+            times[times.len() / 2],
+            instructions[instructions.len() / 2],
+            cycles[cycles.len() / 2],
+            output_digest.expect("profile produced output"),
+        );
     }
 }

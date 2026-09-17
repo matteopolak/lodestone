@@ -219,11 +219,11 @@ mod tests {
                 "grants": [{
                     "manifest_path": "trusted/plugin.toml",
                     "name": "trusted",
-                    "capabilities": ["fs:write"]
+                    "capabilities": ["fs:not-a-capability"]
                 }]
             }))
             .expect_err("an unrecognised capability must fail closed")
-            .contains("unknown capability `fs:write`")
+            .contains("unknown capability `fs:not-a-capability`")
         );
     }
 

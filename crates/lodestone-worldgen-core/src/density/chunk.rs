@@ -109,9 +109,91 @@ use crate::engine::{Bounds, Field, Geom, Program, Scratch};
 pub struct NoiseChunkSampler {
     program: Program,
     geom: Geom,
+    bounds: Option<Bounds>,
     /// `Option` only so [`Drop`] can move the scratch out and return it to the
     /// thread's free list. It is `Some` for the whole of the sampler's life.
     scratch: RefCell<Option<Scratch>>,
+}
+
+/// A bounded final-density sampler for one request-scoped region.
+///
+/// The wrapped sampler owns one scratch cache over the complete block rectangle,
+/// so adjacent columns share interpolation corners at their boundaries. It is
+/// intentionally single-owner: [`NoiseChunkSampler`] uses interior mutability
+/// for its scratch and this type must stay on the worker that owns the region.
+/// Drop it when the region's products are published; no values are retained in
+/// a generator-wide cache.
+#[allow(missing_debug_implementations)]
+pub struct NoiseChunkRegionSampler {
+    sampler: NoiseChunkSampler,
+    bounds: Bounds,
+}
+
+impl NoiseChunkRegionSampler {
+    /// Creates a sampler over an inclusive block rectangle. Every queried
+    /// column must lie inside `bounds`; the Y bounds are also used to size the
+    /// interpolation corner lattice.
+    #[must_use]
+    pub fn from_program(
+        program: Program,
+        slot_count: usize,
+        cell_width: i32,
+        cell_height: i32,
+        bounds: Bounds,
+    ) -> Self {
+        Self {
+            sampler: NoiseChunkSampler::from_program(
+                program,
+                slot_count,
+                cell_width,
+                cell_height,
+                Some(bounds),
+            ),
+            bounds,
+        }
+    }
+
+    /// Inclusive block bounds covered by this sampler.
+    #[must_use]
+    pub fn bounds(&self) -> Bounds {
+        self.bounds
+    }
+
+    /// Evaluates a contiguous vertical final-density run in the shared region
+    /// scratch. Values are bit-identical to isolated chunk samplers.
+    pub fn final_density_column(
+        &self,
+        x: i32,
+        z: i32,
+        y_start: i32,
+        output: &mut [f64],
+    ) {
+        assert!((self.bounds.x.0..=self.bounds.x.1).contains(&x));
+        assert!((self.bounds.z.0..=self.bounds.z.1).contains(&z));
+        assert!(
+            output.is_empty()
+                || ((self.bounds.y.0..=self.bounds.y.1).contains(&y_start)
+                    && y_start + output.len() as i32 - 1 <= self.bounds.y.1)
+        );
+        self.sampler
+            .final_density_column(x, z, y_start, output);
+    }
+
+    /// Whether this bounded region owns the production 4×8×4 final-density
+    /// plan. Other routes continue using [`Self::final_density_column`].
+    #[must_use]
+    pub fn supports_final_density_cells(&self) -> bool {
+        self.sampler.supports_final_density_cells()
+    }
+
+    /// Evaluates one bounded 4×8×4 cell and preserves the region scratch's
+    /// shared corner lattice across adjacent cells.
+    pub fn final_density_cell(&self, x0: i32, y0: i32, z0: i32, output: &mut [f64; 128]) {
+        assert!(x0 >= self.bounds.x.0 && x0 + 3 <= self.bounds.x.1);
+        assert!(y0 >= self.bounds.y.0 && y0 + 7 <= self.bounds.y.1);
+        assert!(z0 >= self.bounds.z.0 && z0 + 3 <= self.bounds.z.1);
+        self.sampler.final_density_cell(x0, y0, z0, output);
+    }
 }
 
 impl NoiseChunkSampler {
@@ -189,6 +271,7 @@ impl NoiseChunkSampler {
                 cell_width,
                 cell_height,
             },
+            bounds,
             scratch: RefCell::new(Some(scratch)),
         }
     }
@@ -212,7 +295,95 @@ impl NoiseChunkSampler {
         self.eval_root(x, y, z)
     }
 
+    /// Evaluates a contiguous vertical run at one `(x, z)` without rebuilding
+    /// the field context for every block. The result is bit-identical to
+    /// calling [`Self::final_density`] for each y in the run.
+    pub fn final_density_column(
+        &self,
+        x: i32,
+        z: i32,
+        y_start: i32,
+        output: &mut [f64],
+    ) {
+        crate::counters::bump_logical_read(
+            crate::counters::MemoryBoundary::BlockField,
+            output.len() as u64,
+            output.len() as u64 * 8,
+        );
+        let mut borrow = self.scratch.borrow_mut();
+        let scratch = borrow
+            .as_mut()
+            .expect("the scratch is only taken in Drop, after the last query");
+        Field::new(self.program.graph(), self.geom, scratch).eval_column(
+            self.program.root(),
+            x,
+            z,
+            y_start,
+            output,
+        );
+    }
+
+    /// Returns whether this sampler can use the bounded 4×8×4 production
+    /// final-density cell plan.
+    #[must_use]
+    pub fn supports_final_density_cells(&self) -> bool {
+        self.geom.cell_width == 4
+            && self.geom.cell_height == 8
+            && self.program.has_overworld_final_density_cell_plan()
+    }
+
+    /// Evaluates one complete 4×8×4 final-density cell. Matching programs use
+    /// the production specialization; all other programs retain the generic
+    /// scalar evaluator as a correctness fallback.
+    pub fn final_density_cell(&self, x0: i32, y0: i32, z0: i32, output: &mut [f64; 128]) {
+        self.assert_cell_in_bounds(x0, y0, z0);
+        crate::counters::bump_logical_read(
+            crate::counters::MemoryBoundary::BlockField,
+            128,
+            128 * 8,
+        );
+        let mut borrow = self.scratch.borrow_mut();
+        let scratch = borrow
+            .as_mut()
+            .expect("the scratch is only taken in Drop, after the last query");
+        let mut field = Field::new(self.program.graph(), self.geom, scratch);
+        if self.geom.cell_width == 4
+            && self.geom.cell_height == 8
+            && x0.rem_euclid(4) == 0
+            && y0.rem_euclid(8) == 0
+            && z0.rem_euclid(4) == 0
+            && let Some(plan) = self.program.overworld_final_density_plan()
+        {
+            field.eval_overworld_final_density_cell(plan, x0, y0, z0, output);
+            return;
+        }
+
+        for lz in 0..4 {
+            for lx in 0..4 {
+                for ly in 0..8 {
+                    let index = ((lz * 4 + lx) * 8 + ly) as usize;
+                    output[index] = field.eval(
+                        self.program.root(),
+                        x0 + lx,
+                        y0 + ly,
+                        z0 + lz,
+                        true,
+                    );
+                }
+            }
+        }
+    }
+
+    fn assert_cell_in_bounds(&self, x0: i32, y0: i32, z0: i32) {
+        if let Some(bounds) = self.bounds {
+            assert!(x0 >= bounds.x.0 && x0 + 3 <= bounds.x.1);
+            assert!(y0 >= bounds.y.0 && y0 + 7 <= bounds.y.1);
+            assert!(z0 >= bounds.z.0 && z0 + 3 <= bounds.z.1);
+        }
+    }
+
     fn eval_root(&self, x: i32, y: i32, z: i32) -> f64 {
+        crate::counters::bump_logical_read(crate::counters::MemoryBoundary::BlockField, 1, 8);
         let mut borrow = self.scratch.borrow_mut();
         let scratch = borrow
             .as_mut()
@@ -232,5 +403,493 @@ impl Drop for NoiseChunkSampler {
         if let Some(s) = self.scratch.borrow_mut().take() {
             s.release();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NoiseChunkRegionSampler, NoiseChunkSampler};
+    use crate::density::Density;
+    use crate::engine::{Bounds, Program};
+    use crate::rng::{Algorithm, PositionalRandomFactory};
+    use crate::noise::NormalNoise;
+
+    const CELL_WIDTH: i32 = 4;
+    const CELL_HEIGHT: i32 = 8;
+    const MIN_Y: i32 = 0;
+    const HEIGHT: i32 = 384;
+
+    fn gradient_program() -> Program {
+        Program::compile(&Density::Interpolated {
+            inner: Box::new(Density::YClampedGradient {
+                from_y: -16.0,
+                to_y: 400.0,
+                from_value: -1.0,
+                to_value: 1.0,
+            }),
+            slot: 0,
+        })
+    }
+
+    fn coordinate_program() -> Program {
+        let mut source = Algorithm::Xoroshiro
+            .root_positional(42)
+            .from_hash_of("region-test");
+        let noise = NormalNoise::create(&mut source, -1, &[1.0, 1.0]);
+        Program::compile(&Density::Interpolated {
+            inner: Box::new(Density::ShiftA(noise)),
+            slot: 0,
+        })
+    }
+
+    fn bounds(cx: i32, cz: i32) -> Bounds {
+        Bounds {
+            x: (cx * 16, cx * 16 + 15),
+            y: (MIN_Y, MIN_Y + HEIGHT - 1),
+            z: (cz * 16, cz * 16 + 15),
+        }
+    }
+
+    #[test]
+    fn column_run_matches_point_queries_bit_for_bit() {
+        let root = Density::Interpolated {
+            inner: Box::new(Density::YClampedGradient {
+                from_y: -16.0,
+                to_y: 32.0,
+                from_value: -1.0,
+                to_value: 1.0,
+            }),
+            slot: 0,
+        };
+        let sampler = NoiseChunkSampler::new_bounded(
+            root,
+            1,
+            4,
+            8,
+            (0, 15),
+            (-16, 31),
+            (0, 15),
+        );
+        let mut column = vec![0.0; 48];
+        sampler.final_density_column(7, 9, -16, &mut column);
+        for (offset, got) in column.iter().enumerate() {
+            let want = sampler.final_density(7, -16 + offset as i32, 9);
+            assert_eq!(got.to_bits(), want.to_bits(), "y={}", -16 + offset as i32);
+        }
+    }
+
+    #[test]
+    fn region_matches_independent_columns_in_any_order() {
+        let program = gradient_program();
+        let mut expected = Vec::new();
+        for cz in -2..=2 {
+            for cx in -2..=2 {
+                let sampler = NoiseChunkSampler::from_program(
+                    program.clone(),
+                    1,
+                    CELL_WIDTH,
+                    CELL_HEIGHT,
+                    Some(bounds(cx, cz)),
+                );
+                let mut column = vec![0.0; HEIGHT as usize * 256];
+                let mut offset = 0;
+                for z in cz * 16..cz * 16 + 16 {
+                    for x in cx * 16..cx * 16 + 16 {
+                        sampler.final_density_column(
+                            x,
+                            z,
+                            MIN_Y,
+                            &mut column[offset..offset + HEIGHT as usize],
+                        );
+                        offset += HEIGHT as usize;
+                    }
+                }
+                expected.push(column);
+            }
+        }
+
+        let region_bounds = Bounds {
+            x: (-32, 47),
+            y: (MIN_Y, MIN_Y + HEIGHT - 1),
+            z: (-32, 47),
+        };
+        let forward = NoiseChunkRegionSampler::from_program(
+            program.clone(),
+            1,
+            CELL_WIDTH,
+            CELL_HEIGHT,
+            region_bounds,
+        );
+        let mut forward_columns = Vec::new();
+        for cz in -2..=2 {
+            for cx in -2..=2 {
+                let mut column = vec![0.0; HEIGHT as usize * 256];
+                let mut offset = 0;
+                for z in cz * 16..cz * 16 + 16 {
+                    for x in cx * 16..cx * 16 + 16 {
+                        forward.final_density_column(
+                            x,
+                            z,
+                            MIN_Y,
+                            &mut column[offset..offset + HEIGHT as usize],
+                        );
+                        offset += HEIGHT as usize;
+                    }
+                }
+                forward_columns.push(column);
+            }
+        }
+        assert_eq!(forward_columns, expected);
+
+        let reverse = NoiseChunkRegionSampler::from_program(
+            program,
+            1,
+            CELL_WIDTH,
+            CELL_HEIGHT,
+            region_bounds,
+        );
+        let mut reverse_columns = vec![vec![0.0; HEIGHT as usize * 256]; expected.len()];
+        for index in (0..expected.len()).rev() {
+            let cx = index as i32 % 5 - 2;
+            let cz = index as i32 / 5 - 2;
+            let mut offset = 0;
+            for z in cz * 16..cz * 16 + 16 {
+                for x in cx * 16..cx * 16 + 16 {
+                    reverse.final_density_column(
+                        x,
+                        z,
+                        MIN_Y,
+                        &mut reverse_columns[index][offset..offset + HEIGHT as usize],
+                    );
+                    offset += HEIGHT as usize;
+                }
+            }
+        }
+        assert_eq!(reverse_columns, expected);
+    }
+
+    #[test]
+    fn translated_regions_do_not_alias_coordinates() {
+        let program = coordinate_program();
+        let first = NoiseChunkRegionSampler::from_program(
+            program.clone(),
+            1,
+            CELL_WIDTH,
+            CELL_HEIGHT,
+            Bounds {
+                x: (0, 15),
+                y: (MIN_Y, MIN_Y + HEIGHT - 1),
+                z: (0, 15),
+            },
+        );
+        let translated = NoiseChunkRegionSampler::from_program(
+            program,
+            1,
+            CELL_WIDTH,
+            CELL_HEIGHT,
+            Bounds {
+                x: (64, 79),
+                y: (MIN_Y, MIN_Y + HEIGHT - 1),
+                z: (64, 79),
+            },
+        );
+        let mut first_values = vec![0.0; HEIGHT as usize];
+        let mut translated_values = vec![0.0; HEIGHT as usize];
+        first.final_density_column(7, 9, MIN_Y, &mut first_values);
+        translated.final_density_column(71, 73, MIN_Y, &mut translated_values);
+        assert!(
+            first_values
+                .iter()
+                .zip(&translated_values)
+                .any(|(left, right)| left.to_bits() != right.to_bits()),
+            "translated coordinate region unexpectedly produced identical noise"
+        );
+    }
+
+    fn final_density_fixture(control: Density, terrain: Density) -> Density {
+        let interpolated = |inner, slot| Density::Interpolated {
+            inner: Box::new(inner),
+            slot,
+        };
+        Density::Min(
+            Box::new(Density::Squeeze(Box::new(interpolated(terrain, 0)))),
+            Box::new(Density::RangeChoice {
+                input: Box::new(interpolated(control, 14)),
+                min_inclusive: -1_000_000.0,
+                max_exclusive: 0.0,
+                when_in_range: Box::new(Density::Const(64.0)),
+                when_out_of_range: Box::new(Density::Add(
+                    Box::new(interpolated(Density::Const(-2.0), 15)),
+                    Box::new(Density::Mul(
+                        Box::new(Density::Const(1.5)),
+                        Box::new(Density::Max(
+                            Box::new(Density::Abs(Box::new(interpolated(
+                                Density::Const(0.0),
+                                16,
+                            )))),
+                            Box::new(Density::Abs(Box::new(interpolated(
+                                Density::Const(0.25),
+                                17,
+                            )))),
+                        )),
+                    )),
+                )),
+            }),
+        )
+    }
+
+    #[test]
+    fn specialized_cell_matches_columns_at_cell_boundaries_and_branch_crossing() {
+        let program = Program::compile(&final_density_fixture(
+            Density::YClampedGradient {
+                from_y: 0.0,
+                to_y: 8.0,
+                from_value: -1.0,
+                to_value: 1.0,
+            },
+            Density::YClampedGradient {
+                from_y: -8.0,
+                to_y: 16.0,
+                from_value: -1.0,
+                to_value: 1.0,
+            },
+        ));
+        assert!(program.has_overworld_final_density_cell_plan());
+        let sampler = NoiseChunkRegionSampler::from_program(
+            program.clone(),
+            18,
+            CELL_WIDTH,
+            CELL_HEIGHT,
+            Bounds {
+                x: (0, 7),
+                y: (0, 15),
+                z: (0, 7),
+            },
+        );
+        assert!(sampler.supports_final_density_cells());
+        let scalar = NoiseChunkSampler::from_program(
+            program,
+            18,
+            CELL_WIDTH,
+            CELL_HEIGHT,
+            Some(Bounds {
+                x: (0, 7),
+                y: (0, 15),
+                z: (0, 7),
+            }),
+        );
+        for z0 in [0, 4] {
+            for x0 in [0, 4] {
+                for y0 in [0, 8] {
+                    let mut cell = [0.0; 128];
+                    sampler.final_density_cell(x0, y0, z0, &mut cell);
+                    for lz in 0..4 {
+                        for lx in 0..4 {
+                            let mut column = [0.0; 8];
+                            scalar.final_density_column(
+                                x0 + lx,
+                                z0 + lz,
+                                y0,
+                                &mut column,
+                            );
+                            for ly in 0..8 {
+                                let index = ((lz * 4 + lx) * 8 + ly) as usize;
+                                assert_eq!(
+                                    cell[index].to_bits(),
+                                    column[ly as usize].to_bits(),
+                                    "cell boundary ({x0},{y0},{z0}) local ({lx},{ly},{lz})"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut crossing_cell = [0.0; 128];
+        sampler.final_density_cell(0, 0, 0, &mut crossing_cell);
+        let low = crossing_cell[3];
+        let high = crossing_cell[4];
+        assert_ne!(low.to_bits(), high.to_bits(), "the control branch did not cross inside the cell");
+    }
+
+    #[test]
+    fn nonmatching_program_keeps_scalar_cell_fallback() {
+        let program = gradient_program();
+        assert!(!program.has_overworld_final_density_cell_plan());
+        let sampler = NoiseChunkSampler::from_program(
+            program.clone(),
+            1,
+            CELL_WIDTH,
+            CELL_HEIGHT,
+            Some(Bounds {
+                x: (0, 3),
+                y: (0, 7),
+                z: (0, 3),
+            }),
+        );
+        let mut cell = [0.0; 128];
+        sampler.final_density_cell(0, 0, 0, &mut cell);
+        for lz in 0..4 {
+            for lx in 0..4 {
+                for ly in 0..8 {
+                    let index = ((lz * 4 + lx) * 8 + ly) as usize;
+                    assert_eq!(
+                        cell[index].to_bits(),
+                        sampler.final_density(lx, ly, lz).to_bits(),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn matching_program_falls_back_for_other_geometry_and_unaligned_cells() {
+        let program = Program::compile(&final_density_fixture(
+            Density::YClampedGradient {
+                from_y: 0.0,
+                to_y: 8.0,
+                from_value: -1.0,
+                to_value: 1.0,
+            },
+            Density::YClampedGradient {
+                from_y: -8.0,
+                to_y: 16.0,
+                from_value: -1.0,
+                to_value: 1.0,
+            },
+        ));
+        assert!(program.has_overworld_final_density_cell_plan());
+        for (cell_width, cell_height, origin) in [(8, 4, (0, 0, 0)), (4, 8, (1, 1, 1))] {
+            let sampler = NoiseChunkSampler::from_program(
+                program.clone(),
+                18,
+                cell_width,
+                cell_height,
+                Some(Bounds {
+                    x: (0, 7),
+                    y: (0, 15),
+                    z: (0, 7),
+                }),
+            );
+            let mut cell = [0.0; 128];
+            sampler.final_density_cell(origin.0, origin.1, origin.2, &mut cell);
+            for lz in 0..4 {
+                for lx in 0..4 {
+                    for ly in 0..8 {
+                        let index = ((lz * 4 + lx) * 8 + ly) as usize;
+                        assert_eq!(
+                            cell[index].to_bits(),
+                            sampler
+                                .final_density(origin.0 + lx, origin.1 + ly, origin.2 + lz)
+                                .to_bits(),
+                            "fallback geometry ({cell_width},{cell_height}) origin {origin:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "gen-counters")]
+    #[test]
+    fn inactive_noodle_slots_are_not_entered_and_active_control_is_a_negative_control() {
+        let noisy = |seed| {
+            let mut source = Algorithm::Xoroshiro
+                .root_positional(seed)
+                .from_hash_of("inactive-noodle");
+            Density::ShiftA(NormalNoise::create(&mut source, -1, &[1.0, 1.0]))
+        };
+        let build = |control| {
+            let interpolated = |inner, slot| Density::Interpolated {
+                inner: Box::new(inner),
+                slot,
+            };
+            Density::Min(
+                Box::new(Density::Squeeze(Box::new(interpolated(
+                    Density::Const(2.0),
+                    0,
+                )))),
+                Box::new(Density::RangeChoice {
+                    input: Box::new(interpolated(control, 14)),
+                    min_inclusive: -1_000_000.0,
+                    max_exclusive: 0.0,
+                    when_in_range: Box::new(Density::Const(64.0)),
+                    when_out_of_range: Box::new(Density::Add(
+                        Box::new(interpolated(noisy(15), 15)),
+                        Box::new(Density::Mul(
+                            Box::new(Density::Const(1.5)),
+                            Box::new(Density::Max(
+                                Box::new(Density::Abs(Box::new(interpolated(noisy(16), 16)))),
+                                Box::new(Density::Abs(Box::new(interpolated(noisy(17), 17)))),
+                            )),
+                        )),
+                    )),
+                }),
+            )
+        };
+        let bounds = Bounds {
+            x: (0, 3),
+            y: (0, 7),
+            z: (0, 3),
+        };
+        let mut cell = [0.0; 128];
+        let inactive = NoiseChunkSampler::from_program(
+            Program::compile(&build(Density::Const(-1.0))),
+            18,
+            CELL_WIDTH,
+            CELL_HEIGHT,
+            Some(bounds),
+        );
+        crate::counters::reset();
+        inactive.final_density_cell(0, 0, 0, &mut cell);
+        let inactive_counts = crate::counters::snapshot();
+        let shift_a = Density::KIND_NAMES
+            .iter()
+            .position(|name| *name == "shift_a")
+            .expect("shift_a kind");
+        assert_eq!(inactive_counts.density_evals[shift_a], 0);
+
+        let active = NoiseChunkSampler::from_program(
+            Program::compile(&build(Density::Const(1.0))),
+            18,
+            CELL_WIDTH,
+            CELL_HEIGHT,
+            Some(bounds),
+        );
+        crate::counters::reset();
+        active.final_density_cell(0, 0, 0, &mut cell);
+        assert!(crate::counters::snapshot().density_evals[shift_a] > 0);
+    }
+
+    #[cfg(feature = "gen-counters")]
+    #[test]
+    fn region_evaluates_each_interpolation_corner_once() {
+        crate::counters::reset();
+        let sampler = NoiseChunkRegionSampler::from_program(
+            gradient_program(),
+            1,
+            CELL_WIDTH,
+            CELL_HEIGHT,
+            Bounds {
+                x: (-32, 47),
+                y: (MIN_Y, MIN_Y + HEIGHT - 1),
+                z: (-32, 47),
+            },
+        );
+        let mut density = vec![0.0; HEIGHT as usize];
+        for cz in -2..=2 {
+            for cx in -2..=2 {
+                for z in cz * 16..cz * 16 + 16 {
+                    for x in cx * 16..cx * 16 + 16 {
+                        sampler.final_density_column(x, z, MIN_Y, &mut density);
+                    }
+                }
+            }
+        }
+        let snapshot = crate::counters::snapshot();
+        let region_corners = 21_u64 * 49 * 21;
+        let isolated_corners = 25_u64 * 5 * 49 * 5;
+        assert_eq!(snapshot.corner_evals, region_corners);
+        assert_eq!(isolated_corners - region_corners, 9_016);
     }
 }

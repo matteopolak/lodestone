@@ -11,7 +11,7 @@
 //! the driver's own doc comment on `ProjectileRegistry`/`ItemEntityRegistry`.
 //!
 //! So every test here drives [`MobSim`] instead: the struct
-//! `MobHandle::seeded` (`lodestone-server/src/mobs.rs`) constructs once per
+//! `MobHandle::new` constructs once per
 //! singleplayer session and `tick::run_tick_loop` (previously
 //! `run_mob_tick_loop`) ticks it every 50ms in production
 //! (`IntegratedServer::open_in_memory_with_mobs`, the constructor

@@ -473,7 +473,6 @@ async fn real_protocol_nether_payload_and_restart_return_round_trip() {
             (0..=0, 0..=0),
             (8, 8),
             0,
-            0,
             Duration::from_secs(3600),
             storage,
         )
@@ -564,7 +563,6 @@ async fn real_protocol_nether_payload_and_restart_return_round_trip() {
             256,
             (0..=0, 0..=0),
             (8, 8),
-            0,
             0,
             Duration::from_secs(3600),
             storage,

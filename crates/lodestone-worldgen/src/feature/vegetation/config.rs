@@ -2034,6 +2034,58 @@ pub struct PlacedRef {
     pub feature: Box<ConfiguredFeature>,
 }
 
+impl PlacedRef {
+    pub(crate) fn requires_wide_context(&self) -> bool {
+        fn feature_requires_wide(feature: &ConfiguredFeature) -> bool {
+            match feature {
+                ConfiguredFeature::Unsupported(_)
+                | ConfiguredFeature::Fossil(_)
+                | ConfiguredFeature::Geode(_)
+                | ConfiguredFeature::Iceberg(_)
+                | ConfiguredFeature::LargeDripstone(_)
+                | ConfiguredFeature::HugeMushroom(_)
+                | ConfiguredFeature::HugeFungus(_)
+                | ConfiguredFeature::RootSystem(_)
+                | ConfiguredFeature::VegetationPatch(_)
+                | ConfiguredFeature::SculkPatch(_)
+                | ConfiguredFeature::MultifaceGrowth(_)
+                | ConfiguredFeature::Speleothem(_)
+                | ConfiguredFeature::SpeleothemCluster(_)
+                | ConfiguredFeature::BlockBlob(_)
+                | ConfiguredFeature::BasaltColumns(_)
+                | ConfiguredFeature::ReplaceBlobs(_)
+                | ConfiguredFeature::Delta(_)
+                | ConfiguredFeature::GlowstoneBlob
+                | ConfiguredFeature::BasaltPillar
+                | ConfiguredFeature::DesertWell
+                | ConfiguredFeature::BlueIce
+                | ConfiguredFeature::Kelp
+                | ConfiguredFeature::Vines
+                | ConfiguredFeature::WeepingVines => true,
+                ConfiguredFeature::RandomSelector { default, options } => {
+                    default.requires_wide_context()
+                        || options
+                            .iter()
+                            .any(|(_, option)| option.requires_wide_context())
+                }
+                ConfiguredFeature::SimpleRandomSelector(options)
+                | ConfiguredFeature::Sequence(options) => {
+                    options.iter().any(PlacedRef::requires_wide_context)
+                }
+                ConfiguredFeature::WeightedRandomSelector(options) => options
+                    .iter()
+                    .any(|(_, placed)| placed.requires_wide_context()),
+                ConfiguredFeature::RandomBooleanSelector { yes, no } => {
+                    yes.requires_wide_context() || no.requires_wide_context()
+                }
+                _ => false,
+            }
+        }
+
+        feature_requires_wide(&self.feature)
+    }
+}
+
 pub(super) fn unsupported_placed_ref(why: &str) -> PlacedRef {
     PlacedRef {
         registry_id: None,

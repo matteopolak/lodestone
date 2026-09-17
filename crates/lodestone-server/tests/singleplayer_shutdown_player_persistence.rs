@@ -401,7 +401,6 @@ async fn a_shutdown_cancelled_session_still_saves_position_and_game_mode() {
         (0..=0, 0..=0),
         (8, 8),
         0,
-        0,
         Duration::from_secs(3600),
     )
     .expect("open persistent world");
@@ -483,7 +482,6 @@ async fn a_session_that_never_moved_or_changed_mode_saves_the_join_time_defaults
         HEIGHT,
         (0..=0, 0..=0),
         (8, 8),
-        0,
         0,
         Duration::from_secs(3600),
     )
@@ -567,7 +565,6 @@ async fn native_locator_survives_join_restart_and_cancelled_shutdown() {
         (0..=0, 0..=0),
         (8, 8),
         0,
-        0,
         Duration::from_secs(3600),
         WorldStorage::open(WorldStorageBackend::LodestoneNative {
             directory: native_dir.clone(),
@@ -628,7 +625,6 @@ async fn native_locator_survives_join_restart_and_cancelled_shutdown() {
             HEIGHT,
             (0..=0, 0..=0),
             (8, 8),
-            0,
             0,
             Duration::from_secs(3600),
             reopened,
@@ -703,7 +699,6 @@ async fn native_player_state_survives_join_and_cancelled_shutdown() {
         HEIGHT,
         (0..=0, 0..=0),
         (8, 8),
-        0,
         0,
         Duration::from_secs(3600),
         storage,
@@ -795,7 +790,6 @@ async fn native_locator_without_game_mode_keeps_the_world_default() {
         (0..=0, 0..=0),
         (8, 8),
         0,
-        0,
         Duration::from_secs(3600),
         storage,
     )
@@ -862,7 +856,6 @@ async fn anvil_game_mode_overrides_native_game_mode_on_join() {
         (0..=0, 0..=0),
         (8, 8),
         0,
-        0,
         Duration::from_secs(3600),
         storage,
     )
@@ -908,7 +901,6 @@ async fn missing_native_locator_is_created_from_the_join_fallback() {
         HEIGHT,
         (0..=0, 0..=0),
         (8, 8),
-        0,
         0,
         Duration::from_secs(3600),
         empty,
@@ -976,7 +968,6 @@ async fn non_overworld_native_locator_is_not_overwritten_by_overworld_fallback()
         HEIGHT,
         (0..=0, 0..=0),
         (8, 8),
-        0,
         0,
         Duration::from_secs(3600),
         storage,
@@ -1056,7 +1047,6 @@ async fn corrupt_native_locator_is_not_overwritten_on_cancelled_shutdown() {
         HEIGHT,
         (0..=0, 0..=0),
         (8, 8),
-        0,
         0,
         Duration::from_secs(3600),
         storage,

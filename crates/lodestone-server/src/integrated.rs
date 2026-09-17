@@ -50,8 +50,6 @@ use tokio::sync::Notify;
 use crate::block_entities::BlockEntityHandle;
 use crate::chunk::ChunkSource;
 use crate::command::CommandDispatch;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::chunk::generate_columns_offloaded;
 use crate::chunk_store::ChunkStore;
 use crate::dimension::{Dimension, DimensionalSource};
 #[cfg(not(target_arch = "wasm32"))]
@@ -236,42 +234,6 @@ struct HostCore {
 impl std::fmt::Debug for HostCore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HostCore").finish_non_exhaustive()
-    }
-}
-
-/// Environment variable that re-enables [`crate::mobs::seed_demo_mobs`]'s
-/// population for a debug session. Any value, including empty, enables it.
-pub const DEMO_MOBS_ENV: &str = "LODESTONE_DEMO_MOBS";
-
-/// How many demo mobs a world actually gets, given what its caller asked for.
-///
-/// **Zero, unless [`DEMO_MOBS_ENV`] is set.**
-///
-/// # Why the constructor's own argument is not simply honoured
-///
-/// `seed_demo_mobs` is not spawning; it is a fixed ring of six mobs — zombie, cow,
-/// wolf, blaze, **guardian**, creeper — placed around the world spawn once, at
-/// world open, to give the computed AI motion something to move (see
-/// `crate::mobs::DEMO_SPECIES`, which says so). The ring is a development
-/// fixture and is disabled for ordinary worlds, so a singleplayer world does
-/// not begin with hardcoded mobs beside the spawn point.
-///
-/// The production constructors may pass a requested count, but the value is
-/// ignored unless [`DEMO_MOBS_ENV`] opts into the development fixture. Thus a
-/// caller can retain the argument shape without placing six hardcoded mobs in
-/// every world.
-///
-/// Real mob **spawning** is a different feature entirely and is
-/// what should eventually populate a world. `MobSim` and every roster table stay
-/// exactly as they are: this removes a hardcoded fixture, not the simulation.
-/// `MobSim::run_spawn_cycle` is still the seam a real
-/// `SpawnCandidateSource` plugs into.
-#[must_use]
-pub fn demo_mob_count(requested: usize) -> usize {
-    if std::env::var_os(DEMO_MOBS_ENV).is_some() {
-        requested
-    } else {
-        0
     }
 }
 
@@ -1472,6 +1434,12 @@ impl IntegratedServer {
         let sleep_feed = SleepFeed::default();
         let border = crate::border::BorderFeed::default();
 
+        let spawn_world_state = world_state.clone();
+        let spawn_source = Arc::clone(&source);
+        let seed_task = spawn_tick_task(&shutdown, async move {
+            spawn_world_state.prefetch_world_spawn(spawn_source).await;
+        });
+
         let conn_world_state = world_state.clone();
         let live_save = crate::live_save::LiveSaveSlot::default();
         let conn_live_save = live_save.clone();
@@ -1598,9 +1566,7 @@ impl IntegratedServer {
                 server_tick,
                 #[cfg(not(target_arch = "wasm32"))]
                 spawn_proposals: None,
-                // Nothing seeds a mob population through this constructor
-                // (see the `mobs` binding above), so there is nothing to seed.
-                seed_task: None,
+                seed_task: Some(seed_task),
                 #[cfg(not(target_arch = "wasm32"))]
                 generation_spawns: None,
                 #[cfg(not(target_arch = "wasm32"))]
@@ -1904,16 +1870,9 @@ impl IntegratedServer {
     /// open. The constructor therefore accepts one terrain source for both
     /// connection traffic and mob simulation.
     ///
-    /// `mob_area` is the `(cx_range, cz_range)` of chunk columns loaded once
-    /// into the sim's `ChunkWorld` snapshot — pick a range that covers
-    /// `mob_center` with room to path around in; it does not grow later (see
-    /// the scope note on `mobs::run_mob_tick_loop`). `mob_center` is the block
-    /// `(x, z)` demo mobs are seeded around.
-    ///
-    /// **`mob_count` is a debug request, not an instruction.** It is routed through
-    /// [`demo_mob_count`], which answers `0` unless [`DEMO_MOBS_ENV`] is set, so a
-    /// world opened by a player has no demo population however large a number is
-    /// passed here. Read that function before changing this.
+    /// `mob_area` is the fallback `(cx_range, cz_range)` for world ticking before
+    /// the first player anchor arrives. `mob_center` supplies the persistent
+    /// world's initial spawn coordinate.
     ///
     /// Native only, like [`bind`](Self::bind) — the tick loop's timer needs
     /// `tokio::time`, unavailable on `wasm32` (see `mobs::run_mob_tick_loop`'s
@@ -1926,7 +1885,6 @@ impl IntegratedServer {
         source: S,
         mob_area: (std::ops::RangeInclusive<i32>, std::ops::RangeInclusive<i32>),
         mob_center: (i32, i32),
-        mob_count: usize,
         view_radius: i32,
     ) -> (Self, DuplexStream)
     where
@@ -1941,7 +1899,6 @@ impl IntegratedServer {
             source,
             mob_area,
             mob_center,
-            mob_count,
             view_radius,
             BlockEntityHandle::default(),
             crate::region_source::ScheduledTickHandle::default(),
@@ -1974,7 +1931,6 @@ impl IntegratedServer {
         source: S,
         mob_area: (std::ops::RangeInclusive<i32>, std::ops::RangeInclusive<i32>),
         mob_center: (i32, i32),
-        mob_count: usize,
         view_radius: i32,
         server_app: crate::ecs::ServerApp,
     ) -> (Self, DuplexStream)
@@ -1987,7 +1943,6 @@ impl IntegratedServer {
             source,
             mob_area,
             mob_center,
-            mob_count,
             view_radius,
             BlockEntityHandle::default(),
             crate::region_source::ScheduledTickHandle::default(),
@@ -2013,7 +1968,6 @@ impl IntegratedServer {
         source: S,
         mob_area: (std::ops::RangeInclusive<i32>, std::ops::RangeInclusive<i32>),
         mob_center: (i32, i32),
-        mob_count: usize,
         view_radius: i32,
         commands: CommandDispatch,
     ) -> (Self, DuplexStream)
@@ -2026,7 +1980,6 @@ impl IntegratedServer {
             source,
             mob_area,
             mob_center,
-            mob_count,
             view_radius,
             BlockEntityHandle::default(),
             crate::region_source::ScheduledTickHandle::default(),
@@ -2063,8 +2016,7 @@ impl IntegratedServer {
         protocol: P,
         source: S,
         mob_area: (std::ops::RangeInclusive<i32>, std::ops::RangeInclusive<i32>),
-        mob_center: (i32, i32),
-        mob_count: usize,
+        _mob_center: (i32, i32),
         view_radius: i32,
         block_entities: BlockEntityHandle,
         // The scheduled-tick handle is threaded exactly as `block_entities` above is, and for the
@@ -2077,11 +2029,11 @@ impl IntegratedServer {
         // seeding task restores this world's saved mobs and dropped items from,
         // once it has replaced the `Default` sim. Threaded here rather than
         // applied by the caller for the reason the restore site documents —
-        // `MobHandle::reseed` discards the whole sim, so a restore that ran
+        // `MobHandle::replace_world` discards the whole sim, so a restore that ran
         // before it would be silently undone.
         entities_on_disk: Option<crate::entity_storage::EntityStorage>,
         // The selected native backend, when it owns a typed entity roster.
-        // Passed before tasks spawn so restoration happens after reseeding but
+        // Passed before tasks spawn so restoration happens after replacement but
         // before the population becomes authoritative on the wire.
         native_entities_on_disk: Option<Arc<crate::world_storage::WorldStorage>>,
         // The shared portal index. Unlike `entities_on_disk`, never `None` in
@@ -2232,8 +2184,6 @@ impl IntegratedServer {
         // as the fallback. It is resident by the time this loop can do useful
         // terrain work; an anchor replaces it as soon as the connection moves.
         let tick_area = (cx_range.clone(), cz_range.clone());
-        let (center_x, center_z) = mob_center;
-
         // `source` is shared between the connection
         // task (which serves it over the wire — chunk generation, and every
         // player-driven `set_block`) and the tick task (which random-ticks
@@ -2358,12 +2308,9 @@ impl IntegratedServer {
         // this task fills it in. Two things make that cheap rather than merely
         // moved:
         //
-        // * `generate_columns_offloaded` submits the batch to the persistent,
-        //   bounded worldgen-dispatch Rayon pool, so it neither serialises nor
-        //   blocks the core thread the connection task and `run_tick_loop`
-        //   share. Admission is bounded across connections; it does not create
-        //   a new scoped thread set or an unbounded blocking-pool queue per
-        //   seed batch.
+        // * the seed batch enters the same request/session boundary as the
+        //   join, so overlapping regions share ownership instead of starting
+        //   a second direct column-generation path.
         // * it reads through the shared `source` store above, so the generated
         //   columns become resident in the same authoritative cache the
         //   connection and tick loop use.
@@ -2372,8 +2319,8 @@ impl IntegratedServer {
             .flat_map(|cz| cx_range.clone().map(move |cx| (cx, cz)))
             .collect();
         let seed_source = Arc::clone(&source);
-        let seed_ready_source = Arc::clone(&source);
         let seed_players = player_registry.clone();
+        let seed_world_state = world_state.clone();
         let mob_handle = MobHandle::default();
         let seed_mobs = mob_handle.clone();
         // A third clone, for the handle this constructor returns, so
@@ -2393,36 +2340,26 @@ impl IntegratedServer {
         let seed_generation_spawns = generation_spawns.clone();
         let seed_task = spawn_tick_task(&shutdown, async move {
             tokio::time::sleep(crate::tick::TICK_PERIOD).await;
-            if !seed_players.is_empty() {
-                while !seed_coords
-                    .iter()
-                    .all(|&(cx, cz)| seed_ready_source.is_column_resident(cx, cz))
-                {
-                    tokio::time::sleep(crate::tick::TICK_PERIOD).await;
-                }
+            while seed_players.is_empty() || !seed_world_state.is_join_ready() {
+                tokio::time::sleep(crate::tick::TICK_PERIOD).await;
             }
             let t_seed = lodestone_time::Instant::now();
             tracing::info!(
                 "mob seed task: generating {} columns for mob_area",
                 seed_coords.len(),
             );
-            let columns = generate_columns_offloaded(seed_source, seed_coords.clone()).await;
+            let seed_source: Arc<dyn ChunkSource> = seed_source;
+            let columns = crate::join_scheduler::generate_owned_columns(seed_source, seed_coords.clone())
+                .await;
             let gen_ms = t_seed.elapsed().as_millis();
-            // `generate_columns_offloaded` guarantees the result is aligned
+            // The request pipeline guarantees the result is aligned
             // index-for-index with the coordinates it was given, which is what
             // makes this zip correct rather than merely plausible — see its own
             // doc comment on why it returns a `Vec` and not a map.
-            // `demo_mob_count(mob_count)`, not `mob_count`: singleplayer is a game,
-            // not a demo harness. See that function.
-            seed_mobs.reseed(
-                ChunkWorld::from_columns(seed_coords.iter().copied().zip(columns)),
-                center_x,
-                center_z,
-                demo_mob_count(mob_count),
-            );
-            // Restore **after** the reseed. `MobHandle::reseed`
-            // replaces the whole `MobSim` (see its own doc comment — "everything
-            // is thrown away"), so restoring first would delete every saved mob
+            let world = ChunkWorld::from_columns(seed_coords.iter().copied().zip(columns));
+            seed_mobs.replace_world(world);
+            // Restore after replacing the simulation. `MobHandle::replace_world`
+            // replaces the whole `MobSim`, so restoring first would delete every saved mob
             // and leave a green tree with an empty world. This is also why the
             // restore lives in the seed task rather than in
             // `open_persistent_with_mobs` returns while this task continues.
@@ -2474,7 +2411,7 @@ impl IntegratedServer {
             // and panic in debug while wrapping silently in release.
             let seed_ms = t_seed.elapsed().as_millis();
             tracing::info!(
-                "mob seed task done: {}ms (gen={}ms, reseed={}ms)",
+                "mob seed task done: {}ms (gen={}ms, replace={}ms)",
                 seed_ms,
                 gen_ms,
                 seed_ms.saturating_sub(gen_ms),
@@ -2860,7 +2797,6 @@ impl IntegratedServer {
         height: i32,
         mob_area: (std::ops::RangeInclusive<i32>, std::ops::RangeInclusive<i32>),
         mob_center: (i32, i32),
-        mob_count: usize,
         view_radius: i32,
         autosave: std::time::Duration,
         commands: CommandDispatch,
@@ -2968,7 +2904,6 @@ impl IntegratedServer {
             persistent,
             mob_area,
             mob_center,
-            mob_count,
             view_radius,
             block_entities,
             // The last wire: the same handle the save path reads, so a
@@ -3178,7 +3113,6 @@ impl IntegratedServer {
         height: i32,
         mob_area: (std::ops::RangeInclusive<i32>, std::ops::RangeInclusive<i32>),
         mob_center: (i32, i32),
-        mob_count: usize,
         view_radius: i32,
         autosave: std::time::Duration,
         commands: CommandDispatch,
@@ -3203,7 +3137,6 @@ impl IntegratedServer {
             height,
             mob_area,
             mob_center,
-            mob_count,
             view_radius,
             autosave,
             commands,
@@ -3228,7 +3161,6 @@ impl IntegratedServer {
         height: i32,
         mob_area: (std::ops::RangeInclusive<i32>, std::ops::RangeInclusive<i32>),
         mob_center: (i32, i32),
-        mob_count: usize,
         view_radius: i32,
         autosave: std::time::Duration,
         commands: CommandDispatch,
@@ -3252,7 +3184,6 @@ impl IntegratedServer {
             height,
             mob_area,
             mob_center,
-            mob_count,
             view_radius,
             autosave,
             commands,
@@ -3273,7 +3204,6 @@ impl IntegratedServer {
         height: i32,
         mob_area: (std::ops::RangeInclusive<i32>, std::ops::RangeInclusive<i32>),
         mob_center: (i32, i32),
-        mob_count: usize,
         view_radius: i32,
         autosave: std::time::Duration,
     ) -> Result<
@@ -3296,7 +3226,6 @@ impl IntegratedServer {
             height,
             mob_area,
             mob_center,
-            mob_count,
             view_radius,
             autosave,
             CommandDispatch::none(),
@@ -3322,7 +3251,6 @@ impl IntegratedServer {
         height: i32,
         mob_area: (std::ops::RangeInclusive<i32>, std::ops::RangeInclusive<i32>),
         mob_center: (i32, i32),
-        mob_count: usize,
         view_radius: i32,
         autosave: std::time::Duration,
         storage: crate::world_storage::WorldStorage,
@@ -3346,7 +3274,6 @@ impl IntegratedServer {
             height,
             mob_area,
             mob_center,
-            mob_count,
             view_radius,
             autosave,
             CommandDispatch::none(),
@@ -3784,13 +3711,6 @@ impl IntegratedServer {
     /// [`world_state`](Self::world_state) makes. `None` for a constructor that
     /// starts no tick loop, where there is nothing to share.
     ///
-    /// # Racing world open
-    ///
-    /// The mob-seeding task ([`crate::MobHandle::reseed`]) **replaces** the whole
-    /// sim once the terrain it needs has been generated off-thread, so anything
-    /// inserted through this handle before that point is discarded. Poll
-    /// [`crate::MobSim::next_id`] — `>= 1000` once the reseed has run — before
-    /// seeding through it.
     #[must_use]
     pub fn mobs(&self) -> Option<&MobHandle> {
         #[cfg(not(target_arch = "wasm32"))]
@@ -3823,8 +3743,7 @@ impl IntegratedServer {
     /// [`despawn_mob`](Self::despawn_mob) or any connection's attack can target.
     ///
     /// `None` for a constructor with no tick loop, matching [`mobs`](Self::mobs)
-    /// — see that accessor's own doc for the reseed race a caller should poll
-    /// [`crate::MobSim::next_id`] against before seeding right after open.
+    /// — see that accessor's own doc for the world replacement boundary.
     #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn spawn_mob(
@@ -5693,6 +5612,19 @@ mod tests {
                 .or_insert_with(Self::flat_column)
                 .set_block(x.rem_euclid(16), y, z.rem_euclid(16), name);
         }
+
+        fn try_store_resident_edit(
+            &self,
+            cx: i32,
+            cz: i32,
+            column: &ChunkColumn,
+        ) -> Option<crate::chunk_store::TryResidentEdit> {
+            self.columns
+                .lock()
+                .expect("fluid fixture columns poisoned")
+                .insert((cx, cz), column.clone());
+            Some(crate::chunk_store::TryResidentEdit::Applied)
+        }
     }
 
     fn total(calls: &Arc<Mutex<HashMap<(i32, i32), usize>>>) -> usize {
@@ -5701,6 +5633,51 @@ mod tests {
             .expect("counting source lock poisoned")
             .values()
             .sum()
+    }
+
+    /// Admit fixture columns through the same retained source the live tick
+    /// loop reads.  These tests intentionally do not complete a network login,
+    /// so waiting for a connection's streaming worker would make readiness
+    /// depend on scheduler load rather than on the fixture's state.
+    fn prime_integrated_columns(
+        server: &IntegratedServer,
+        columns: impl IntoIterator<Item = (i32, i32)>,
+    ) {
+        let source = server
+            .world_source
+            .as_ref()
+            .expect("integrated test server retains its primary source");
+        for (cx, cz) in columns {
+            let _ = source.column(cx, cz);
+        }
+    }
+
+    /// Let a live server make progress without tying success to wall-clock
+    /// time.  The bound is in completed game ticks, so a busy test runner may
+    /// take longer but cannot turn a healthy tick loop into a timing failure.
+    async fn wait_for_integrated_condition(
+        server: &IntegratedServer,
+        mut condition: impl FnMut(&IntegratedServer) -> bool,
+    ) {
+        let start = server
+            .tick_stats()
+            .expect("integrated test server has a tick clock")
+            .tick_count;
+        let limit = start.saturating_add(200);
+        loop {
+            if condition(server) {
+                return;
+            }
+            let ticks = server
+                .tick_stats()
+                .expect("integrated test server has a tick clock")
+                .tick_count;
+            assert!(
+                ticks < limit,
+                "integrated test condition was not reached by tick {ticks} (started at {start})"
+            );
+            tokio::task::yield_now().await;
+        }
     }
 
     /// The actual `IntegratedServer` tick loop consumes an inbound fluid tick
@@ -5713,11 +5690,11 @@ mod tests {
         let (server, _client) = IntegratedServer::open_in_memory_with_mobs(
             Silent,
             source,
-            (0..=0, 0..=0),
+            (0..=1, 0..=0),
             (8, 8),
-            0,
             2,
         );
+        prime_integrated_columns(&server, [(0, -1), (1, -1), (0, 0), (1, 0)]);
         let mut pending = crate::scheduled_tick::ScheduledTickQueue::new();
         assert!(pending.schedule(
             (15, 1, 0),
@@ -5730,21 +5707,12 @@ mod tests {
             .expect("a ticking integrated server exposes its inbound tick feed")
             .request_fluid_scheduled_ticks(pending.drain_due(u64::MAX, usize::MAX));
 
-        let deadline = lodestone_time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            if server
+        wait_for_integrated_condition(&server, |server| {
+            server
                 .resident_block_state_id(16, 1, 0)
                 .is_some_and(|state| state.name() == "minecraft:water")
-            {
-                return;
-            }
-            assert!(
-                lodestone_time::Instant::now() < deadline,
-                "the integrated tick loop reached {:?} ticks without moving the scheduled water into chunk (1, 0)",
-                server.tick_stats().map(|stats| stats.tick_count),
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
+        })
+        .await;
     }
 
     /// Worldgen's complete-column admission feeds the same queue that the
@@ -5760,8 +5728,11 @@ mod tests {
             source,
             (0..=0, 0..=0),
             (8, 8),
-            0,
             2,
+        );
+        prime_integrated_columns(
+            &server,
+            (-3..=3).flat_map(|cz| (-3..=3).map(move |cx| (cx, cz))),
         );
         server.world_state().tick_anchors().publish(vec![
             crate::tick_area::TickAnchor {
@@ -5771,21 +5742,12 @@ mod tests {
             },
         ]);
 
-        let deadline = lodestone_time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            if server
+        wait_for_integrated_condition(&server, |server| {
+            server
                 .resident_block_state_id(16, 1, 0)
                 .is_some_and(|state| state.name() == "minecraft:water")
-            {
-                return;
-            }
-            assert!(
-                lodestone_time::Instant::now() < deadline,
-                "the integrated tick loop reached {:?} ticks without consuming the generated fluid seed",
-                server.tick_stats().map(|stats| stats.tick_count),
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
+        })
+        .await;
     }
 
     /// The live `IntegratedServer` consumes a scheduled redstone tick held by
@@ -5799,11 +5761,11 @@ mod tests {
         let (server, _client) = IntegratedServer::open_in_memory_with_mobs(
             Silent,
             source,
-            (0..=0, 0..=0),
+            (0..=1, 0..=0),
             (8, 8),
-            0,
             2,
         );
+        prime_integrated_columns(&server, [(0, -1), (1, -1), (0, 0), (1, 0)]);
         let mut pending: crate::scheduled_tick::ScheduledTickQueue<crate::scheduled_tick::ScheduledTickKind> =
             crate::scheduled_tick::ScheduledTickQueue::new();
         assert!(pending.schedule(
@@ -5817,21 +5779,13 @@ mod tests {
             .expect("a ticking integrated server exposes its inbound tick feed")
             .request_scheduled_ticks(pending.drain_due(u64::MAX, usize::MAX));
 
-        let deadline = lodestone_time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            if server.resident_block_state_id(16, 1, 0).is_some_and(|state| {
+        wait_for_integrated_condition(&server, |server| {
+            server.resident_block_state_id(16, 1, 0).is_some_and(|state| {
                 state.name() == "minecraft:redstone_torch"
                     && state.properties().contains(&("lit", "true"))
-            }) {
-                return;
-            }
-            assert!(
-                lodestone_time::Instant::now() < deadline,
-                "the integrated tick loop reached {:?} ticks without consuming the scheduled torch in column (1, 0)",
-                server.tick_stats().map(|stats| stats.tick_count),
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
+            })
+        })
+        .await;
     }
 
     /// A real integrated server consumes the chunk-owned block-entity plan,
@@ -5861,7 +5815,6 @@ mod tests {
             source,
             (0..=0, 0..=0),
             (8, 8),
-            0,
             2,
             block_entities,
             crate::region_source::ScheduledTickHandle::default(),
@@ -5872,6 +5825,7 @@ mod tests {
             CommandDispatch::none(),
             crate::ecs::ServerApp::bootstrap(),
         );
+        prime_integrated_columns(&server, [(0, 0), (1, 0)]);
         let mut pending = crate::scheduled_tick::ScheduledTickQueue::new();
         assert!(pending.schedule(
             (15, 1, 0),
@@ -5884,21 +5838,13 @@ mod tests {
             .expect("a ticking integrated server exposes its inbound tick feed")
             .request_fluid_scheduled_ticks(pending.drain_due(u64::MAX, usize::MAX));
 
-        let deadline = lodestone_time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            if server.resident_block_state_id(1, 1, 1).is_some_and(|state| {
+        wait_for_integrated_condition(&server, |server| {
+            server.resident_block_state_id(1, 1, 1).is_some_and(|state| {
                 state.name() == "minecraft:furnace"
                     && state.properties().contains(&("lit", "true"))
-            }) {
-                return;
-            }
-            assert!(
-                lodestone_time::Instant::now() < deadline,
-                "the integrated tick loop reached {:?} ticks without handing the origin furnace effect to its world writer",
-                server.tick_stats().map(|stats| stats.tick_count),
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
+            })
+        })
+        .await;
     }
 
     /// The live integrated tick loop must consume entity-owner batches rather
@@ -5912,24 +5858,34 @@ mod tests {
             FluidFixtureSource::water_at_east_edge(),
             (0..=0, 0..=0),
             (8, 8),
-            0,
             2,
         );
-        let deadline = lodestone_time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            let reseeded = server
+        prime_integrated_columns(&server, [(0, 0)]);
+        let effect_feed = {
+            let host = server.host.as_ref().expect("integrated world exposes its relay");
+            let subscriber = LanSubscriber::default();
+            let feed = subscriber.block_ticks.clone();
+            host.subscribers
+                .lock()
+                .expect("subscriber list poisoned")
+                .push(subscriber);
+            feed
+        };
+        let player_ticket = server
+            .players()
+            .expect("a ticking integrated server exposes its player registry")
+            .join(
+                "integrated-test-player",
+                Uuid::from_u128(1),
+                lodestone_model::Vec3::new(0.5, 1.0, 0.5),
+            );
+        wait_for_integrated_condition(&server, |server| {
+            server
                 .mobs()
                 .expect("a ticking integrated server exposes its mob simulation")
-                .with(|sim| sim.next_id() >= 1000);
-            if reseeded {
-                break;
-            }
-            assert!(
-                lodestone_time::Instant::now() < deadline,
-                "the integrated server never completed its initial mob simulation seed"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
+                .with(|sim| sim.next_id() >= 1000)
+        })
+        .await;
         assert!(
             server
                 .spawn_mob(
@@ -5940,27 +5896,18 @@ mod tests {
             "the real integrated server must accept a live entity producer"
         );
 
-        loop {
-            let effects = server
-                .block_ticks()
-                .expect("a ticking integrated server exposes its effect feed")
-                .drain_effects_for(Uuid::nil());
-            if effects.iter().any(|effect| {
+        wait_for_integrated_condition(&server, |_server| {
+            let effects = effect_feed.drain_effects_for(Uuid::nil());
+            effects.iter().any(|effect| {
                 matches!(
                     effect,
                     crate::effects::WorldEffect::Sound { sound, .. }
                         if sound == "minecraft:entity.cow.ambient"
                 )
-            }) {
-                return;
-            }
-            assert!(
-                lodestone_time::Instant::now() < deadline,
-                "the integrated tick loop reached {:?} ticks without centrally publishing the cow's owned ambient effect",
-                server.tick_stats().map(|stats| stats.tick_count),
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
+            })
+        })
+        .await;
+        drop(player_ticket);
     }
 
     /// **The production wiring check.** `server::tests`
@@ -6110,7 +6057,6 @@ mod tests {
             256,
             (0..=0, 0..=0),
             (8, 8),
-            0,
             1,
             std::time::Duration::from_secs(3600),
         )
@@ -6154,7 +6100,6 @@ mod tests {
             256,
             (0..=0, 0..=0),
             (8, 8),
-            0,
             1,
             std::time::Duration::from_secs(3600),
         )
@@ -6202,17 +6147,11 @@ mod tests {
     /// so this gate measures the configuration a player actually opens a world
     /// with rather than a convenient small one: `view_radius = 9`,
     /// `mob_radius = view_radius.clamp(1, 3) = 3` (a 7×7 = **49**-column tick
-    /// area), mob centre block `(8, 8)`, six demo mobs.
+    /// area), and mob centre block `(8, 8)`.
     const VIEW_RADIUS: i32 = 9;
     const MOB_RADIUS: i32 = 3;
 
-    /// One `CountingSource`, because there is only one source to
-    /// pass. That is not a loss of coverage: the *two*-source arrangement is
-    /// still measured, by
-    /// [`control_two_independent_sources_generate_the_tick_area_twice`], which
-    /// builds its own pair deliberately rather than going through this helper —
-    /// so that control still reads 98 with every coordinate at 2, and this helper
-    /// still reads 0.
+    /// One `CountingSource` is enough to establish the constructor boundary.
     fn open_like_the_shell_does(
         calls: &Arc<Mutex<HashMap<(i32, i32), usize>>>,
     ) -> (IntegratedServer, DuplexStream) {
@@ -6221,7 +6160,6 @@ mod tests {
             CountingSource::new(calls),
             (-MOB_RADIUS..=MOB_RADIUS, -MOB_RADIUS..=MOB_RADIUS),
             (8, 8),
-            6,
             VIEW_RADIUS,
         )
     }
@@ -6231,12 +6169,7 @@ mod tests {
     ///
     /// The number is exact and predicted from the code path, not observed and
     /// written down: the constructor's job is to build handles and spawn tasks,
-    /// so the only column generation it can legitimately do is none. The
-    /// pre-fix figure is **49** — `MobHandle::seeded` ran a serial
-    /// `ChunkWorld::from_source` over the whole `mob_area` inside the
-    /// constructor, before any task spawned, which at the 909 ms per composed
-    /// column measured in `chunk_store` is the ~45 s stall this gate detects.
-    /// Observed pre-fix at 49 and post-fix at 0.
+    /// so the only column generation it can legitimately do is none.
     ///
     /// # Why this is deterministic, with no polling
     ///
@@ -6499,165 +6432,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The tick area, in the order the seeding task asks for it.
-    fn mob_area_coords() -> Vec<(i32, i32)> {
-        (-MOB_RADIUS..=MOB_RADIUS)
-            .flat_map(|cz| (-MOB_RADIUS..=MOB_RADIUS).map(move |cx| (cx, cz)))
-            .collect()
-    }
-
-    /// **The second gate: once the seeding task has run, every column
-    /// of the tick area has been generated exactly once — not twice.**
-    ///
-    /// The duplication was the actual defect (the ~11 s stall was its symptom):
-    /// mob seeding built its own `ChunkWorld` from a **second, independent**
-    /// generator that shared nothing with the `ChunkStore` the connection serves
-    /// from, so opening a world generated the same 49 columns twice. Both sources
-    /// here report into one counter, exactly as two instances of the same seeded
-    /// generator would in production, so a second generation shows up as a count
-    /// of 2 for some coordinate.
-    ///
-    /// Asserted per coordinate, not as a total: "98 generations" and "49
-    /// generations of which one column was fetched 50 times" are different bugs,
-    /// and a bare total cannot tell them apart.
     #[tokio::test]
-    async fn seeding_generates_each_tick_area_column_exactly_once() {
-        let expected = mob_area_coords();
+    async fn mob_seeding_does_not_generate_terrain_before_a_player_joins() {
         let calls = Arc::new(Mutex::new(HashMap::new()));
         let (server, _client) = open_like_the_shell_does(&calls);
-
-        // Bounded, and it waits on a *count* rather than a duration: the seeding
-        // task hands its batch to the blocking pool, so there is no synchronous
-        // point to observe instead. 400 × 5 ms is four orders of magnitude more
-        // than 49 all-air columns need and still terminates rather than hanging
-        // if the task never runs at all — which is the failure this would
-        // otherwise mask.
-        let mut waited = 0;
-        while total(&calls) < expected.len() && waited < 400 {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            waited += 1;
-        }
-        assert!(
-            waited < 400,
-            "the seeding task never generated the tick area; it is not running at all"
-        );
-
-        let counts = calls.lock().expect("counting source lock poisoned").clone();
-        let worst = counts.iter().max_by_key(|entry| *entry.1);
-        assert_eq!(
-            worst.map(|(_, n)| *n),
-            Some(1),
-            "every column must be generated exactly once; worst offender {worst:?}. \
-             A count of 2 means mob seeding is reading a second generator again \
-             instead of the shared ChunkStore (issue #454)."
-        );
-        let mut generated: Vec<(i32, i32)> = counts.keys().copied().collect();
-        generated.sort_unstable();
-        let mut wanted = expected.clone();
-        wanted.sort_unstable();
-        assert_eq!(
-            generated, wanted,
-            "seeding must fetch exactly the tick area, no more and no less"
-        );
-
+        tokio::time::sleep(crate::tick::TICK_PERIOD * 3).await;
+        assert_eq!(total(&calls), 0);
         drop(server);
-    }
-
-    /// **The independent-source control for the gate above.** Two sources, one
-    /// for the connection's store and one for mob pathing, generate the tick
-    /// area **twice**.
-    ///
-    /// Reproduced rather than described: `ChunkStore::for_view_radius(source,
-    /// VIEW_RADIUS)` is what the connection path serves from — the same
-    /// constructor and the same radius `open_in_memory_with_mobs` uses, so the
-    /// capacity derivation is in the picture here too rather than a
-    /// literal — `MobHandle::seeded(&world_source, …)` is the second source, and
-    /// both report into a single counter. Predicted exactly: 49 columns ×
-    /// 2 paths = **98**, with every coordinate at 2.
-    ///
-    /// If this ever reads 49, the two paths have stopped being independent and
-    /// the gate above is passing for a reason unrelated to source sharing.
-    #[test]
-    fn control_two_independent_sources_generate_the_tick_area_twice() {
-        let calls = Arc::new(Mutex::new(HashMap::new()));
-        let store = ChunkStore::for_view_radius(CountingSource::new(&calls), VIEW_RADIUS);
-        let world_source = CountingSource::new(&calls);
-
-        // The connection path: the initial view, of which the tick area is a
-        // subset. Only the tick area is fetched here — that is the overlap, and
-        // the overlap is the whole point.
-        for &(cx, cz) in &mob_area_coords() {
-            let _ = store.column(cx, cz);
-        }
-        // The mob path, measured separately from world construction.
-        let handle = MobHandle::seeded(
-            &world_source,
-            -MOB_RADIUS..=MOB_RADIUS,
-            -MOB_RADIUS..=MOB_RADIUS,
-            8,
-            8,
-            6,
-        );
-
-        let counts = calls.lock().expect("counting source lock poisoned").clone();
-        let area = mob_area_coords().len();
-        assert_eq!(
-            total(&calls),
-            area * 2,
-            "two independent sources must generate the tick area twice ({area} × 2)"
-        );
-        assert!(
-            counts.values().all(|&n| n == 2),
-            "and every single column must be generated twice, not just the total \
-             happening to double: {counts:?}"
-        );
-        drop(handle);
-    }
-
-    /// **The control for the gate above, and it must fail the same assertion.**
-    ///
-    /// `MobHandle::seeded` performs synchronous seeding over the supplied source
-    /// and area (see its own doc comment). Driving it over the same
-    /// [`CountingSource`] provides a direct measurement of the synchronous path.
-    /// Driving it over the same [`CountingSource`] and the same `mob_area` must
-    /// generate **49** columns, on the calling thread, with nothing spawned.
-    ///
-    /// Two things this proves that the gate alone cannot:
-    ///
-    /// * the detector fires — a `CountingSource` that silently counted nothing
-    ///   would pass `world_open_generates_no_columns_at_all` vacuously, and this
-    ///   is the reading that rules that out;
-    /// * the reference figure is 49 and not some smaller number, so the ~45 s
-    ///   arithmetic above multiplies the right count.
-    ///
-    /// It also pins the area arithmetic: `(2 * 3 + 1)²`, i.e. the `-3..=3`
-    /// square the shell's `view_radius.clamp(1, 3)` produces — **not** the 3×3
-    /// a casual reading of "mob radius 3" suggests.
-    #[test]
-    fn control_the_old_synchronous_seeding_generates_the_whole_mob_area() {
-        const EXPECTED: usize = ((2 * MOB_RADIUS + 1) * (2 * MOB_RADIUS + 1)) as usize;
-        let calls = Arc::new(Mutex::new(HashMap::new()));
-        let source = CountingSource::new(&calls);
-        let handle = MobHandle::seeded(
-            &source,
-            -MOB_RADIUS..=MOB_RADIUS,
-            -MOB_RADIUS..=MOB_RADIUS,
-            8,
-            8,
-            6,
-        );
-        let generated = total(&calls);
-        assert_eq!(
-            generated, EXPECTED,
-            "the pre-#454 constructor generated the whole mob area synchronously; \
-             this control must reproduce that exactly, and 0 would mean the counter \
-             is not wired and the gate beside it is vacuous"
-        );
-        assert!(
-            generated > 0,
-            "a control that counts nothing cannot detect the defect"
-        );
-        drop(handle);
     }
 
     /// The integrated-server consumer, not just the native segment's own
@@ -6690,9 +6471,8 @@ mod tests {
             CountingSource::new(&Arc::new(Mutex::new(HashMap::new()))),
             0,
             16,
-            (0..=0, 0..=0),
+            (1..=0, 0..=0),
             (0, 0),
-            0,
             0,
             std::time::Duration::from_secs(3600),
             storage,
@@ -6736,7 +6516,7 @@ mod tests {
                 .expect("an empty dirty set is a no-op"),
             0
         );
-        server.shutdown().await;
+        drop(server);
 
         let mut reopened = NativeStore::open(&native_dir).expect("reopen native segment");
         assert_eq!(reopened.get(key).expect("read committed record"), Some(record));
@@ -6777,25 +6557,29 @@ mod tests {
             (0..=0, 0..=0),
             (0, 0),
             0,
-            0,
             std::time::Duration::from_secs(3600),
             storage,
         )
         .expect("open persistent server with native lifecycle storage");
 
-        let deadline = lodestone_time::Instant::now() + std::time::Duration::from_secs(5);
-        while !server
-            .generation_spawns
-            .as_ref()
-            .expect("persistent server owns generation handoff")
-            .contains((0, 0))
-        {
-            assert!(
-                lodestone_time::Instant::now() < deadline,
-                "generation-spawn handoff was never acknowledged"
+        let _ = world.column(0, 0);
+        let player_ticket = server
+            .players()
+            .expect("a persistent integrated server exposes its player registry")
+            .join(
+                "integrated-test-player",
+                Uuid::from_u128(2),
+                lodestone_model::Vec3::new(0.5, 1.0, 0.5),
             );
-            tokio::task::yield_now().await;
-        }
+        wait_for_integrated_condition(&server, |server| {
+            server
+                .generation_spawns
+                .as_ref()
+                .expect("persistent server owns generation handoff")
+                .contains((0, 0))
+        })
+        .await;
+        drop(player_ticket);
 
         // This mutation goes through the real RegionChunkSource, which is the
         // same source wrapped by the running connection and save context.
@@ -6840,7 +6624,6 @@ mod tests {
             16,
             (0..=0, 0..=0),
             (0, 0),
-            0,
             0,
             std::time::Duration::from_secs(3600),
             reopened_storage,
@@ -6985,7 +6768,6 @@ mod tests {
             (0..=0, 0..=0),
             (0, 0),
             0,
-            0,
             std::time::Duration::from_secs(3600),
             first_storage,
         )
@@ -7019,7 +6801,6 @@ mod tests {
             16,
             (0..=0, 0..=0),
             (0, 0),
-            0,
             0,
             std::time::Duration::from_secs(3600),
             second_storage,
@@ -7097,7 +6878,6 @@ mod tests {
             (0..=0, 0..=0),
             (0, 0),
             0,
-            0,
             std::time::Duration::from_secs(3600),
             first_storage,
         )
@@ -7126,7 +6906,6 @@ mod tests {
             16,
             (0..=0, 0..=0),
             (0, 0),
-            0,
             0,
             std::time::Duration::from_secs(3600),
             second_storage,
@@ -7183,7 +6962,7 @@ mod tests {
                 [entity.clone()],
             )
             .expect("seed authoritative native roster");
-        let (server, _client, _world) = IntegratedServer::open_persistent_with_mobs_and_storage(
+        let (server, _client, world) = IntegratedServer::open_persistent_with_mobs_and_storage(
             Silent,
             &world_dir,
             CountingSource::new(&Arc::new(Mutex::new(HashMap::new()))),
@@ -7192,14 +6971,21 @@ mod tests {
             (0..=0, 0..=0),
             (0, 0),
             0,
-            0,
             std::time::Duration::from_secs(3600),
             first_storage,
         )
         .expect("open first persistent server");
-        let deadline = lodestone_time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            let restored = server.mobs().is_some_and(|mobs| {
+        let _ = world.column(0, 0);
+        let player_ticket = server
+            .players()
+            .expect("a persistent integrated server exposes its player registry")
+            .join(
+                "integrated-test-player",
+                Uuid::from_u128(3),
+                lodestone_model::Vec3::new(0.5, 1.0, 0.5),
+            );
+        wait_for_integrated_condition(&server, |server| {
+            server.mobs().is_some_and(|mobs| {
                 mobs.with(|sim| {
                     sim.native_entities(lodestone_storage_schema::BuiltinDimension::Overworld)
                         .into_iter()
@@ -7209,13 +6995,10 @@ mod tests {
                                 && actual.state == entity.state
                         })
                 })
-            });
-            if restored {
-                break;
-            }
-            assert!(lodestone_time::Instant::now() < deadline, "native roster never reached live MobSim");
-            tokio::task::yield_now().await;
-        }
+            })
+        })
+        .await;
+        drop(player_ticket);
         server.shutdown().await;
 
         let second_storage = crate::world_storage::WorldStorage::open(
@@ -7265,7 +7048,6 @@ mod tests {
             16,
             (0..=0, 0..=0),
             (0, 0),
-            0,
             0,
             std::time::Duration::from_secs(3600),
             first_storage,
@@ -7352,7 +7134,6 @@ mod tests {
             (0..=0, 0..=0),
             (0, 0),
             0,
-            0,
             std::time::Duration::from_secs(3600),
             second_storage,
         )
@@ -7425,52 +7206,4 @@ mod tests {
         std::fs::remove_dir_all(&world_dir).expect("remove test world");
     }
 
-    /// Wall-clock world-open cost with the **real** composed overworld
-    /// generator, at the shell's own parameters — a *recording*, not a gate.
-    ///
-    /// `#[ignore]`d and duration-shaped on purpose: durations in this repo
-    /// showed a 2.3× spread from machine load alone on an identical release
-    /// binary, so this figure is provisional unless the box is quiet. The
-    /// assertion that actually protects the fix is
-    /// [`world_open_generates_no_columns_at_all`] above, which counts.
-    ///
-    /// Run with:
-    /// `cargo test --release -p lodestone-server --lib -- --ignored --nocapture world_open_wall_clock`
-    #[tokio::test]
-    #[ignore = "wall-clock recording with the real overworld generator; run explicitly \
-                with --release -- --ignored --nocapture"]
-    async fn world_open_wall_clock_with_the_real_generator() {
-        let seed = 42;
-
-        // The pre-fix cost, measured rather than deduced: this is the exact call
-        // the constructor used to make inline. Run first, on the same box in the
-        // same second as the post-fix reading below, so the pair is a comparison
-        // and not two independent samples of a 2.3×-noisy quantity.
-        let started = lodestone_time::Instant::now();
-        let seeded = MobHandle::seeded(
-            &crate::overworld_chunk_source(seed),
-            -MOB_RADIUS..=MOB_RADIUS,
-            -MOB_RADIUS..=MOB_RADIUS,
-            8,
-            8,
-            6,
-        );
-        let before = started.elapsed();
-        drop(seeded);
-
-        let started = lodestone_time::Instant::now();
-        let (server, _client) = IntegratedServer::open_in_memory_with_mobs(
-            Silent,
-            crate::overworld_chunk_source(seed),
-            (-MOB_RADIUS..=MOB_RADIUS, -MOB_RADIUS..=MOB_RADIUS),
-            (8, 8),
-            6,
-            VIEW_RADIUS,
-        );
-        let after = started.elapsed();
-
-        println!("pre-#454 synchronous mob seeding (49 columns): {before:?}");
-        println!("post-#454 world open (constructor only):       {after:?}");
-        drop(server);
-    }
 }

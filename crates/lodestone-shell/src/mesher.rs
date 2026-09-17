@@ -168,25 +168,17 @@ enum Job {
     Mesh(SectionSnapshot, bool, i32, u64),
 }
 
-/// Mesh one snapshot. **The single meshing body, shared by both schedulers.**
-///
-/// Extracted when the browser arm landed, for the same reason `menu::accounts`'
-/// `finish_ms_token` is extracted from its two sign-in flows: the native worker
-/// thread and the browser's in-frame drain must not be able to produce *different
-/// geometry*. A forked copy is a defect that shows up as a browser world that is
-/// subtly wrong rather than as a build failure, and no `cargo check` could see it.
+/// Shared meshing implementation for native workers and browser frame drains.
 fn mesh_one(
     snap: SectionSnapshot,
     classifier: &ShellClassifier,
     cutout_leaves: bool,
     blend_radius: i32,
 ) -> Meshed {
-    let _span = tracing::info_span!(
+    let _span = tracing::trace_span!(
         "mesh_section",
         cx = snap.key.cx, cz = snap.key.cz, si = snap.key.si,
     ).entered();
-    // The vanilla classifier carries baked models → mesh through the model path;
-    // the demo classifier has none → mesh through the packed full-cube path.
     let biome_names_len = snap.biome_names.len();
     let _ = take_tint_probe();
     let mesh = match classifier.models() {
@@ -258,7 +250,7 @@ fn report_tint_probe(
             );
         }
     }
-    tracing::debug!(
+    tracing::trace!(
         target: "mesh",
         cx = key.cx,
         cz = key.cz,
@@ -814,17 +806,15 @@ impl MeshScheduler {
 // Terrain meshing as ECS state (Stage 4)
 // ---------------------------------------------------------------------------
 
-/// Budget for [`heal_dirty_columns`]: max columns to re-mesh per frame.
-/// Was 4 before crossbeam MPMC + full-core workers — the old mutex-contended
-/// pool couldn't keep up with more. Now each column's sections fan out across
-/// all cores via lock-free MPMC, so draining the full backlog every frame is
-/// both safe and correct: duplicate dirty signals are coalesced by
-/// [`DirtyColumns`], and the worker pool absorbs the burst.
-///
-/// The budget being finite is exactly why [`DirtyColumns`]' *order* matters:
-/// whatever does not fit waits a frame, so the queue decides which part of the
-/// world appears first.
+/// Legacy queue bound retained for queue-focused diagnostics. The live drain is
+/// bounded by [`MESH_SNAPSHOT_SECTION_BUDGET`] because one column can contain
+/// more sections than another.
 pub const DIRTY_COLUMN_BUDGET: usize = 64;
+
+/// Maximum number of section snapshots admitted by [`heal_dirty_columns`] in
+/// one frame. Work is counted by the sections actually visited, not columns,
+/// so the bound remains stable across dimensions with different heights.
+pub const MESH_SNAPSHOT_SECTION_BUDGET: usize = 96;
 
 /// Half-angle, in degrees, of the horizontal cone [`DirtyColumns`] treats as
 /// "the player is looking at this column".
@@ -1149,6 +1139,14 @@ pub struct TerrainMesh {
     /// lexicographically — see [`DirtyColumns`] for what that fixed and why the
     /// container is no longer a `BTreeSet`.
     pub dirty_columns: DirtyColumns,
+    /// Newly arrived columns waiting for a complete horizontal neighbourhood.
+    /// Explicit remesh requests use the established immediate path. Waiting
+    /// arrivals are deliberately not members of [`Self::dirty_columns`]: that
+    /// queue is ready work, and a frontier column must not occupy it while its
+    /// zero-work admission attempt is waiting on another arrival.
+    pending_arrivals: HashSet<(i32, i32)>,
+    /// View-center columns painted early and awaiting one halo-complete rebuild.
+    provisional_columns: HashSet<(i32, i32)>,
     /// Columns that must be meshed **even if a horizontal neighbour is missing**,
     /// because a neighbour is missing for a reason that will never resolve: it
     /// left the tracking view.
@@ -1163,9 +1161,9 @@ pub struct TerrainMesh {
     ///
     /// Whether that happens is a race between the heal budget and the player's
     /// speed, which is why it presents as "chunks stop drawing the further you
-    /// go" and why it worsens with frame rate: a column that the 4-per-frame
-    /// [`DIRTY_COLUMN_BUDGET`] reaches while the column behind it is still loaded
-    /// gets uploaded and is thereafter exempt (the `uploaded_sections` clause);
+    /// go": a column that the snapshot-work budget reaches while the column
+    /// behind it is still loaded gets uploaded and is thereafter exempt (the
+    /// `uploaded_sections` clause);
     /// one it reaches later is dropped **forever**. Measured with counts and no
     /// timing at all in `standing_still_drains_the_heal_backlog_and_no_column_is_lost`:
     /// walking twelve steps at the real budget left the whole trailing column
@@ -1230,6 +1228,9 @@ pub struct TerrainMesh {
     /// decoded column release the loading screen before its sections were
     /// examined.
     empty_sections: HashSet<SectionKey>,
+    /// Columns with at least one settled section. This column-level index keeps
+    /// arrival admission O(1) instead of scanning every section result.
+    built_columns: HashSet<(i32, i32)>,
     /// Every `SectionKey` this session has handed out for GPU upload and that has
     /// not yet come back out through a removal.
     ///
@@ -1253,6 +1254,9 @@ pub struct TerrainMesh {
     /// different block-id spaces. Kept separate so its warning can be sampled
     /// independently from the non-air content diagnostic.
     id_space_mismatch_columns: u64,
+    /// Number of consecutive frames whose ready dirty queue remained non-empty.
+    /// Reset when the ready queue drains so a warning describes current latency.
+    backlog_frames: u64,
     /// Whether an absent neighbour column means "edge of the world" or "not here
     /// yet", taken from the worker pool's classifier — see
     /// [`MeshScheduler::new`].
@@ -1289,6 +1293,8 @@ impl TerrainMesh {
             column_source: scheduler.column_source(),
             scheduler,
             dirty_columns: DirtyColumns::default(),
+            pending_arrivals: HashSet::new(),
+            provisional_columns: HashSet::new(),
             forced_columns: BTreeSet::new(),
             departed: HashSet::new(),
             light_dirty_sections: BTreeSet::new(),
@@ -1296,10 +1302,12 @@ impl TerrainMesh {
             pending_removals: Vec::new(),
             rendered_sections: HashSet::new(),
             empty_sections: HashSet::new(),
+            built_columns: HashSet::new(),
             uploaded_sections: HashSet::new(),
             drops: 0,
             non_air_empty_columns: 0,
             id_space_mismatch_columns: 0,
+            backlog_frames: 0,
             deferred: 0,
             policy: MeshPolicy::default(),
             biome_names: Arc::from([]),
@@ -1353,6 +1361,7 @@ impl TerrainMesh {
                 self.scheduler.forget_generation(&key);
                 self.rendered_sections.remove(&key);
                 self.empty_sections.insert(key);
+                self.built_columns.insert((key.cx, key.cz));
                 self.pending_removals.push(key);
                 false
             }
@@ -1385,6 +1394,81 @@ impl TerrainMesh {
             .retain(|key| key.cx != cx || key.cz != cz);
         self.empty_sections
             .retain(|key| key.cx != cx || key.cz != cz);
+        self.built_columns.remove(&(cx, cz));
+        self.provisional_columns.remove(&(cx, cz));
+    }
+
+    /// Queue a newly decoded column for admission after its horizontal halo is
+    /// resident. Keeping this state separate from ordinary remesh requests lets
+    /// an arrival wait without taking the snapshot lock or allocating doomed
+    /// section snapshots.
+    pub fn queue_column_arrival(&mut self, cx: i32, cz: i32) {
+        self.reset_column_readiness(cx, cz);
+        // A re-decoded column may still have an older boundary-heal request.
+        // Admission owns the readiness transition, so remove that stale ready
+        // entry before putting the column in the waiting set.
+        self.dirty_columns.remove((cx, cz));
+        self.pending_arrivals.insert((cx, cz));
+    }
+
+    fn horizontal_halo_ready(store: &ChunkWorld, cx: i32, cz: i32) -> bool {
+        (-1..=1).all(|dx| {
+            (-1..=1).all(|dz| store.contains_column(cx + dx, cz + dz))
+        })
+    }
+
+    fn column_has_prior_result(&self, cx: i32, cz: i32) -> bool {
+        self.built_columns.contains(&(cx, cz))
+    }
+
+    fn promote_ready_arrival(&mut self, store: &ChunkWorld, cx: i32, cz: i32) -> bool {
+        if !self.pending_arrivals.contains(&(cx, cz))
+            || !store.contains_column(cx, cz)
+            || (self.column_source == ColumnSource::Streaming
+                && !Self::horizontal_halo_ready(store, cx, cz))
+        {
+            return false;
+        }
+        self.pending_arrivals.remove(&(cx, cz));
+        self.dirty_columns.insert((cx, cz));
+        true
+    }
+
+    /// Admit one arrival from the coalesced heal queue. A first build in a
+    /// streaming world stays queued until all horizontal neighbours are
+    /// resident; a previously presented column may still be rebuilt against a
+    /// temporarily short halo.
+    pub(crate) fn mesh_arriving_column(
+        &mut self,
+        store: &ChunkWorld,
+        cx: i32,
+        cz: i32,
+        view_center: bool,
+    ) -> usize {
+        if !self.pending_arrivals.contains(&(cx, cz)) {
+            return self.mesh_column(store, cx, cz);
+        }
+        if !store.contains_column(cx, cz) {
+            self.pending_arrivals.remove(&(cx, cz));
+            return 0;
+        }
+        if self.column_source == ColumnSource::Streaming
+            && !self.column_has_prior_result(cx, cz)
+            && !Self::horizontal_halo_ready(store, cx, cz)
+        {
+            if view_center {
+                self.pending_arrivals.remove(&(cx, cz));
+                self.provisional_columns.insert((cx, cz));
+                return self.mesh_column_inner(store, cx, cz, true);
+            }
+            // Production admission keeps this column out of the ready queue
+            // until `mark_neighbours_dirty` observes the final dependency. A
+            // direct caller can still reach this defensive branch; leave it in
+            // the waiting set rather than reintroducing a zero-work queue item.
+            return 0;
+        }
+        self.pending_arrivals.remove(&(cx, cz));
+        self.mesh_column(store, cx, cz)
     }
 
     /// Re-snapshot and re-schedule every section of the column at `(cx, cz)`.
@@ -1400,8 +1484,9 @@ impl TerrainMesh {
     /// biome-only sections and elided sky sections are expected to produce no
     /// geometry. Only a loaded column whose storage contains non-air blocks but
     /// yields no eligible snapshot reaches the "invisible blocks" alarm.
-    pub fn mesh_column(&mut self, store: &ChunkWorld, cx: i32, cz: i32) {
-        self.mesh_column_inner(store, cx, cz, false);
+    pub fn mesh_column(&mut self, store: &ChunkWorld, cx: i32, cz: i32) -> usize {
+        self.pending_arrivals.remove(&(cx, cz));
+        self.mesh_column_inner(store, cx, cz, false)
     }
 
     /// [`Self::mesh_column`], but a section whose neighbourhood is incomplete is
@@ -1411,11 +1496,24 @@ impl TerrainMesh {
     /// neighbour has *left the view* and is therefore never arriving. See that
     /// field's doc for why waiting on it is waiting forever.
     /// Forces only when [`Self::all_absent_neighbours_departed`] agrees. A column
-    /// still genuinely waiting on an arrival falls back to the ordinary path,
-    /// which is what keeps the outermost buffer ring off screen.
-    pub fn mesh_column_forced(&mut self, store: &ChunkWorld, cx: i32, cz: i32) {
+    /// still genuinely waiting on an arrival remains in the admission-waiting
+    /// set rather than being put back into the ready queue, which keeps the
+    /// outermost buffer ring off screen without starving eligible work.
+    pub fn mesh_column_forced(&mut self, store: &ChunkWorld, cx: i32, cz: i32) -> usize {
         let force = self.all_absent_neighbours_departed(store, cx, cz);
-        self.mesh_column_inner(store, cx, cz, force);
+        if !force
+            && self.pending_arrivals.contains(&(cx, cz))
+            && store.contains_column(cx, cz)
+            && self.column_source == ColumnSource::Streaming
+            && !self.column_has_prior_result(cx, cz)
+            && !Self::horizontal_halo_ready(store, cx, cz)
+        {
+            // The column remains in `pending_arrivals`; a future arrival will
+            // promote it through `mark_neighbours_dirty`.
+            return 0;
+        }
+        self.pending_arrivals.remove(&(cx, cz));
+        self.mesh_column_inner(store, cx, cz, force)
     }
 
     /// Sets `options.cutoutLeaves` and, only on a real change, re-meshes
@@ -1522,7 +1620,13 @@ impl TerrainMesh {
         self.remesh_every_loaded_column(store);
     }
 
-    fn mesh_column_inner(&mut self, store: &ChunkWorld, cx: i32, cz: i32, force: bool) {
+    fn mesh_column_inner(
+        &mut self,
+        store: &ChunkWorld,
+        cx: i32,
+        cz: i32,
+        force: bool,
+    ) -> usize {
         if !self.policy.id_spaces_agree {
             self.reset_column_readiness(cx, cz);
             self.id_space_mismatch_columns += 1;
@@ -1537,10 +1641,10 @@ impl TerrainMesh {
                      (vanilla assets missing on a live session, or the reverse)"
                 );
             }
-            return;
+            return 0;
         }
         let Some(extent) = store.extent() else {
-            return;
+            return 0;
         };
 
         // One lock for the whole column — the snapshots are owned and `Send`, so
@@ -1554,7 +1658,7 @@ impl TerrainMesh {
             // already-unloaded column into a false non-air diagnostic between
             // the extent read above and this snapshot lock.
             let Some(chunk) = world.get(ChunkPos::new(cx, cz)) else {
-                return;
+                return 0;
             };
             let summary = ColumnBlockSummary::from_column(&chunk.column);
             let column_section_count = chunk.column.section_count();
@@ -1609,6 +1713,7 @@ impl TerrainMesh {
                 );
             }
         }
+        extent.section_count
     }
 
     /// Re-snapshot and re-schedule exactly one section. A section that snapshots
@@ -1645,13 +1750,27 @@ impl TerrainMesh {
     pub fn mark_neighbours_dirty(&mut self, store: &ChunkWorld, cx: i32, cz: i32) {
         for dx in -1..=1 {
             for dz in -1..=1 {
+                let (nx, nz) = (cx + dx, cz + dz);
+                if !store.contains_column(nx, nz) {
+                    continue;
+                }
+                // Admission waiters are promoted only by the event that can
+                // satisfy their halo. This keeps them out of the ready queue
+                // while one or more dependencies are still absent.
+                if self.pending_arrivals.contains(&(nx, nz)) {
+                    self.promote_ready_arrival(store, nx, nz);
+                    continue;
+                }
                 if dx == 0 && dz == 0 {
                     continue;
                 }
-                let (nx, nz) = (cx + dx, cz + dz);
-                if store.contains_column(nx, nz) {
-                    self.dirty_columns.insert((nx, nz));
+                if self.provisional_columns.contains(&(nx, nz)) {
+                    if !Self::horizontal_halo_ready(store, nx, nz) {
+                        continue;
+                    }
+                    self.provisional_columns.remove(&(nx, nz));
                 }
+                self.dirty_columns.insert((nx, nz));
             }
         }
     }
@@ -1695,10 +1814,13 @@ impl TerrainMesh {
         // `mesh_column` that will early-return anyway.
         self.dirty_columns.remove((cx, cz));
         self.forced_columns.remove(&(cx, cz));
+        self.pending_arrivals.remove(&(cx, cz));
+        self.provisional_columns.remove(&(cx, cz));
         self.rendered_sections
             .retain(|key| key.cx != cx || key.cz != cz);
         self.empty_sections
             .retain(|key| key.cx != cx || key.cz != cz);
+        self.built_columns.remove(&(cx, cz));
         let gone: Vec<SectionKey> = self
             .uploaded_sections
             .iter()
@@ -1728,6 +1850,8 @@ impl TerrainMesh {
                 }
                 let (nx, nz) = (cx + dx, cz + dz);
                 if store.contains_column(nx, nz) {
+                    self.dirty_columns.remove((nx, nz));
+                    self.pending_arrivals.remove(&(nx, nz));
                     self.forced_columns.insert((nx, nz));
                 }
             }
@@ -1843,6 +1967,7 @@ impl TerrainMesh {
     pub fn mark_mesh_uploaded(&mut self, key: SectionKey) {
         self.empty_sections.remove(&key);
         self.rendered_sections.insert(key);
+        self.built_columns.insert((key.cx, key.cz));
     }
 
     /// Whether every section in one decoded column has reached a settled result.
@@ -1862,6 +1987,16 @@ impl TerrainMesh {
         if !store.contains_column(cx, cz) {
             return false;
         }
+        self.resident_column_mesh_settled(extent, cx, cz)
+    }
+
+    #[must_use]
+    pub fn resident_column_mesh_settled(
+        &self,
+        extent: lodestone_ecs::WorldExtent,
+        cx: i32,
+        cz: i32,
+    ) -> bool {
         (0..extent.section_count).all(|si| {
             let key = SectionKey {
                 cx,
@@ -1901,25 +2036,30 @@ impl TerrainMesh {
         }
         self.dirty_columns.clear();
         self.forced_columns.clear();
+        self.pending_arrivals.clear();
+        self.provisional_columns.clear();
         self.departed.clear();
         self.light_dirty_sections.clear();
         self.drops = 0;
         self.non_air_empty_columns = 0;
         self.id_space_mismatch_columns = 0;
+        self.backlog_frames = 0;
         self.deferred = 0;
         self.rendered_sections.clear();
         self.empty_sections.clear();
+        self.built_columns.clear();
         self.pending_removals.extend(self.uploaded_sections.drain());
     }
 }
 
-/// `Update` / [`FrameSet::Terrain`]: re-mesh up to [`DIRTY_COLUMN_BUDGET`]
-/// columns whose boundary went stale.
+/// `Update` / [`FrameSet::Terrain`]: re-mesh queued columns whose boundary went
+/// stale, bounded by [`MESH_SNAPSHOT_SECTION_BUDGET`] section snapshots.
 ///
 /// This is the coalescing drain — the thing that stops water growing a falling
 /// wall at every chunk border. It enqueues snapshots onto the worker pool and
 /// returns; it never meshes anything itself.
-/// [`TerrainMesh::forced_columns`] is drained **first, and on its own budget**.
+/// [`TerrainMesh::forced_columns`] is drained first so a departure cannot leave
+/// an invisible trailing column behind.
 /// Those columns are waiting on a neighbour that has already left the view, so
 /// unlike an ordinary boundary heal they are not merely stale — they are
 /// invisible until this runs, and a shared budget would put them behind whatever
@@ -1948,44 +2088,72 @@ pub fn heal_dirty_columns(
     // legitimate configuration (`TerrainPlugin` inserts no player entity), and it
     // means exactly "no view known" — under which the ordering falls back to the
     // stored centre and no facing.
-    if let Some(state) = view.iter().next() {
-        let centre = (
+    let view_center = view.iter().next().map(|state| {
+        let center = (
             (state.0.position.x.floor() as i32).div_euclid(16),
             (state.0.position.z.floor() as i32).div_euclid(16),
         );
         terrain
             .dirty_columns
-            .reprioritise(centre, Some(state.0.yaw));
-    }
-    for _ in 0..DIRTY_COLUMN_BUDGET {
+            .reprioritise(center, Some(state.0.yaw));
+        center
+    });
+    let mut snapshot_sections = 0usize;
+    let mut eligible_columns = 0usize;
+    let forced_attempts = terrain.forced_columns.len();
+    for _ in 0..forced_attempts {
+        if snapshot_sections >= MESH_SNAPSHOT_SECTION_BUDGET {
+            break;
+        }
         let Some((cx, cz)) = terrain.forced_columns.pop_first() else {
             break;
         };
-        terrain.mesh_column_forced(&store, cx, cz);
+        eligible_columns += 1;
+        snapshot_sections += terrain.mesh_column_forced(&store, cx, cz);
     }
-    for _ in 0..DIRTY_COLUMN_BUDGET {
+    // The center is allowed one provisional first build even when its halo is
+    // incomplete. It is no longer in `dirty_columns`, so inspect this one
+    // admission waiter explicitly before draining ordinary ready work.
+    if snapshot_sections < MESH_SNAPSHOT_SECTION_BUDGET
+        && let Some((cx, cz)) = view_center
+        && terrain.pending_arrivals.contains(&(cx, cz))
+    {
+        eligible_columns += 1;
+        snapshot_sections += terrain.mesh_arriving_column(&store, cx, cz, true);
+    }
+    let dirty_attempts = terrain.dirty_columns.len();
+    for _ in 0..dirty_attempts {
+        if snapshot_sections >= MESH_SNAPSHOT_SECTION_BUDGET {
+            break;
+        }
         let Some((cx, cz)) = terrain.dirty_columns.pop_next() else {
             break;
         };
-        terrain.mesh_column(&store, cx, cz);
+        eligible_columns += 1;
+        snapshot_sections +=
+            terrain.mesh_arriving_column(&store, cx, cz, view_center == Some((cx, cz)));
     }
     // The budget was depleted with work still queued, i.e. this frame's terrain is
     // a *choice* of which columns to mesh — which is what the ordering above is
     // for. Checked after the loop, not inside its `else`: in the `else` the queue
     // is empty by construction, so the old placement could never fire.
-    if !terrain.dirty_columns.is_empty() {
-        static BACKLOG_FRAME_COUNT: std::sync::atomic::AtomicU64 =
-            std::sync::atomic::AtomicU64::new(0);
-        let n = BACKLOG_FRAME_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // Throttle: roughly every two seconds at 120 fps.
-        if n % 240 == 0 {
+    if terrain.dirty_columns.is_empty() {
+        terrain.backlog_frames = 0;
+    } else {
+        terrain.backlog_frames = terrain.backlog_frames.saturating_add(1);
+        // Throttle: roughly every two seconds at 120 fps. Unlike the old
+        // process-wide counter, this is the current contiguous backlog.
+        if terrain.backlog_frames % 240 == 0 {
             tracing::warn!(
-                "mesh column backlog: {} dirty columns waiting (heal budget is {} forced + {} \
-                 dirty), {} backlogged frames",
+                "mesh column backlog: {} ready dirty columns waiting (snapshot budget is {} \
+                 sections), {} deferred arrivals, {} eligible columns attempted, {} \
+                 snapshot sections, {} consecutive backlogged frames",
                 terrain.dirty_columns.len(),
-                DIRTY_COLUMN_BUDGET,
-                DIRTY_COLUMN_BUDGET,
-                n,
+                MESH_SNAPSHOT_SECTION_BUDGET,
+                terrain.pending_arrivals.len(),
+                eligible_columns,
+                snapshot_sections,
+                terrain.backlog_frames,
             );
         }
     }
@@ -1994,8 +2162,8 @@ pub fn heal_dirty_columns(
 /// Budget for [`relight_changed_blocks`]: max sections to re-mesh per frame after a
 /// relight.
 ///
-/// Larger than [`DIRTY_COLUMN_BUDGET`] because the unit is smaller — a *section*, not
-/// a whole column — and because the latency matters more: a black hole where a block
+/// Independent of [`MESH_SNAPSHOT_SECTION_BUDGET`] because the unit is smaller —
+/// a *section*, not a whole column — and because the latency matters more: a black hole where a block
 /// used to be is the symptom the relight exists to remove, so the sections around the
 /// break should land in the frame after the break rather than queue behind a streaming
 /// backlog. One break typically reports fewer sections than this, so the budget only
@@ -3897,6 +4065,162 @@ mod tests {
             TerrainMesh::new(MeshScheduler::new(2, ShellClassifier::Demo(DemoClassifier)));
         terrain.column_source = ColumnSource::Streaming;
         terrain
+    }
+
+    #[test]
+    fn an_arriving_column_without_a_horizontal_halo_does_not_snapshot() {
+        let write = ChunkWorldWrite::new(World::new());
+        write
+            .write()
+            .load(ChunkPos::new(0, 0), seam_column(&|_, _| true));
+        let store = write.read_handle();
+        let mut terrain = streaming_terrain();
+        terrain.queue_column_arrival(0, 0);
+
+        assert!(terrain.dirty_columns.is_empty());
+        assert!(terrain.pending_arrivals.contains(&(0, 0)));
+        assert_eq!(
+            terrain.mesh_arriving_column(&store, 0, 0, false),
+            0,
+            "a missing halo must not spend snapshot work or re-enter ready work"
+        );
+        assert!(terrain.dirty_columns.is_empty());
+        assert!(terrain.pending_arrivals.contains(&(0, 0)));
+        assert_eq!(terrain.scheduler.pending(), 0);
+    }
+
+    #[test]
+    fn a_waiting_arrival_enters_ready_work_on_the_last_halo_dependency() {
+        let write = ChunkWorldWrite::new(World::new());
+        write
+            .write()
+            .load(ChunkPos::new(0, 0), seam_column(&|_, _| true));
+        let store = write.read_handle();
+        let mut terrain = streaming_terrain();
+        terrain.queue_column_arrival(0, 0);
+
+        let neighbours = [
+            (-1, -1),
+            (0, -1),
+            (1, -1),
+            (-1, 0),
+            (1, 0),
+            (-1, 1),
+            (0, 1),
+            (1, 1),
+        ];
+        for &(cx, cz) in &neighbours[..neighbours.len() - 1] {
+            write
+                .write()
+                .load(ChunkPos::new(cx, cz), seam_column(&|_, _| true));
+            terrain.mark_neighbours_dirty(&store, cx, cz);
+            assert!(terrain.pending_arrivals.contains(&(0, 0)));
+            assert!(!terrain.dirty_columns.contains((0, 0)));
+        }
+
+        let &(cx, cz) = neighbours.last().expect("the fixture has a final dependency");
+        write
+            .write()
+            .load(ChunkPos::new(cx, cz), seam_column(&|_, _| true));
+        terrain.mark_neighbours_dirty(&store, cx, cz);
+        assert!(!terrain.pending_arrivals.contains(&(0, 0)));
+        assert!(terrain.dirty_columns.contains((0, 0)));
+    }
+
+    #[test]
+    fn the_view_center_is_meshed_before_its_horizontal_halo_arrives() {
+        let write = ChunkWorldWrite::new(World::new());
+        write
+            .write()
+            .load(ChunkPos::new(0, 0), seam_column(&|_, _| true));
+        let store = write.read_handle();
+        let mut terrain = streaming_terrain();
+        terrain.queue_column_arrival(0, 0);
+
+        assert!(terrain.mesh_arriving_column(&store, 0, 0, true) > 0);
+        assert!(terrain.scheduler.pending() > 0);
+        assert!(!terrain.pending_arrivals.contains(&(0, 0)));
+    }
+
+    #[test]
+    fn a_provisional_view_center_rebuilds_once_when_its_halo_completes() {
+        let write = ChunkWorldWrite::new(World::new());
+        write
+            .write()
+            .load(ChunkPos::new(0, 0), seam_column(&|_, _| true));
+        let store = write.read_handle();
+        let mut terrain = streaming_terrain();
+        terrain.queue_column_arrival(0, 0);
+        terrain.mesh_arriving_column(&store, 0, 0, true);
+        let initial = terrain.drain_all_meshes();
+        assert!(!initial.is_empty());
+        for mesh in initial {
+            terrain.mark_mesh_uploaded(mesh.key);
+        }
+
+        let neighbours = [
+            (-1, -1),
+            (0, -1),
+            (1, -1),
+            (-1, 0),
+            (1, 0),
+            (-1, 1),
+            (0, 1),
+            (1, 1),
+        ];
+        for (index, (cx, cz)) in neighbours.into_iter().enumerate() {
+            write
+                .write()
+                .load(ChunkPos::new(cx, cz), seam_column(&|_, _| true));
+            terrain.mark_neighbours_dirty(&store, cx, cz);
+            assert_eq!(
+                terrain.dirty_columns.contains((0, 0)),
+                index + 1 == neighbours.len(),
+            );
+        }
+        assert!(!terrain.provisional_columns.contains(&(0, 0)));
+    }
+
+    #[test]
+    fn a_completed_horizontal_halo_presents_the_same_mesh_as_direct_admission() {
+        let write = ChunkWorldWrite::new(World::new());
+        for cx in -1..=1 {
+            for cz in -1..=1 {
+                write
+                    .write()
+                    .load(ChunkPos::new(cx, cz), seam_column(&|_, _| true));
+            }
+        }
+        let store = write.read_handle();
+
+        let mut admitted = streaming_terrain();
+        admitted.queue_column_arrival(0, 0);
+        assert!(admitted.promote_ready_arrival(&store, 0, 0));
+        assert!(
+            admitted.mesh_arriving_column(&store, 0, 0, false) > 0,
+            "a complete halo must admit the arriving column"
+        );
+        let actual = admitted.drain_all_meshes();
+        for mesh in &actual {
+            admitted.mark_mesh_uploaded(mesh.key);
+        }
+        assert!(admitted.column_mesh_settled(&store, 0, 0));
+
+        let mut direct = streaming_terrain();
+        direct.column_source = ColumnSource::Complete;
+        direct.mesh_column(&store, 0, 0);
+        let expected = direct.drain_all_meshes();
+
+        assert_eq!(actual.len(), expected.len());
+        for (got, want) in actual.iter().zip(expected.iter()) {
+            assert_eq!(got.key, want.key);
+            match (&got.mesh, &want.mesh) {
+                (SectionGeometry::Packed(got), SectionGeometry::Packed(want)) => {
+                    assert_eq!(got, want);
+                }
+                _ => panic!("the hermetic demo fixture must use packed geometry"),
+            }
+        }
     }
 
     /// Walk `+x` across `WALK_STEPS` columns behind a moving tracking view,

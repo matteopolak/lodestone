@@ -15,9 +15,9 @@
 //! prove the *real* wire bytes reach a *real* client, not to re-derive the
 //! cadence a second time.
 //!
-//! Both tests run under `#[tokio::test(start_paused = true)]`, the same
-//! paused-clock auto-advance pattern `server_liveness.rs` already
-//! establishes for its 15s+ spans.
+//! Both tests pause Tokio's clock only after the real client has spawned. This
+//! keeps startup/chunk generation on wall time while still making the 25s
+//! vitals window resolve virtually.
 
 use std::time::Duration;
 
@@ -92,8 +92,8 @@ impl ChunkSource for WaterSource {
     /// `crates/lodestone-server/src/server.rs`'s `vitals_tick` branch) calls
     /// this every 50ms of virtual time for the whole span of these tests, so
     /// the cheap answer matters for real (CPU, not virtual) wall-clock test
-    /// time even though `#[tokio::test(start_paused = true)]` makes the
-    /// *virtual* duration free.
+    /// time; the tests pause their clock after startup, making that virtual
+    /// duration free.
     fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
         "minecraft:water".to_string()
     }
@@ -132,7 +132,7 @@ fn dry_source() -> WorldgenChunkSource {
 /// `PlayerSnapshot::air`, and `encode_set_health`'s packet reaches
 /// `ClientHandle::health()`, not just that `lodestone-server`'s own
 /// version-free scheduling computed the right numbers internally.
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn real_client_air_falls_and_drowning_damage_lands_underwater() {
     let (server, client_io) = IntegratedServer::open_in_memory(V770ServerProtocol, WaterSource, 0);
     let (handle, events) =
@@ -143,13 +143,18 @@ async fn real_client_air_falls_and_drowning_damage_lands_underwater() {
         .wait_for_spawn(Duration::from_secs(30))
         .await
         .expect("client never spawned");
+    handle
+        .wait_for_chunks(1, Duration::from_secs(30))
+        .await
+        .expect("initial water column never arrived");
+    tokio::time::pause();
 
     // Fresh-spawn defaults, proving the baseline this test's drop is
     // measured against is real (not e.g. already `None`/unknown).
     assert_eq!(handle.player().air, 300, "must join at full air");
     assert_eq!(handle.health(), Some(20.0), "must join at full health");
 
-    // Spawn (8, 100, 8) is already inside `WaterSource`'s all-water column,
+    // Spawn is inside `WaterSource`'s all-water column,
     // but the server only learns the player's position from an inbound
     // `PlayerMoved` (`crates/lodestone-server/src/server.rs`'s
     // `dispatch_play_packet`) — nothing assumes the join teleport as a
@@ -157,23 +162,32 @@ async fn real_client_air_falls_and_drowning_damage_lands_underwater() {
     // unchanged position/rotation is suppressed by `V770Adapter`'s own
     // `select_move_packet` dedup — `crates/versions/26.2/src/adapter.rs`'s
     // `moved`/`rotated` gate — and never reaches the wire at all), so nudge
-    // down by one block, still comfortably inside the all-water column.
+    // down by two blocks. The all-water source's verified spawn is at the top
+    // edge (y = 320), where the eye would otherwise sit outside the column.
     let spawn = handle.position().expect("spawned");
     handle
         .move_to(
-            Vec3::new(spawn.x, spawn.y - 1.0, spawn.z),
+            Vec3::new(spawn.x, spawn.y - 2.0, spawn.z),
             Rotation::new(0.0, 0.0),
             true,
             false,
         )
         .expect("send initial position");
+    // Let the driver's movement and readiness packets reach the server before
+    // advancing its timer; otherwise the first virtual tick can win the
+    // scheduler race with the newly queued movement.
+    tokio::task::yield_now().await;
 
     // Comfortably past the 16s (320-tick) real cadence to the first hit
     // (`crate::vitals`'s module doc comment in `lodestone-server`) —
     // resolved in a fraction of a second of wall time by paused-clock
     // auto-advance.
+    // Manual `pause()` keeps the startup work on wall time, but does not
+    // enable Tokio's start-paused auto-advance. Advance the bounded vitals
+    // window explicitly, then wait only for the resulting packet to fold.
+    tokio::time::advance(Duration::from_secs(25)).await;
     handle
-        .wait_for(Duration::from_secs(25), |h| h.health() == Some(18.0))
+        .wait_for(Duration::from_secs(1), |h| h.health() == Some(18.0))
         .await
         .expect("drowning damage never landed on the real client");
 
@@ -194,7 +208,7 @@ async fn real_client_air_falls_and_drowning_damage_lands_underwater() {
 /// the control that proves `encode_air_supply_update`/`encode_set_health`
 /// are gated by real submersion on the real wire, not merely that the
 /// subject test happened to show a drop.
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn real_client_stays_full_air_and_full_health_when_dry() {
     let (server, client_io) = IntegratedServer::open_in_memory(V770ServerProtocol, dry_source(), 0);
     let (handle, events) =
@@ -205,6 +219,11 @@ async fn real_client_stays_full_air_and_full_health_when_dry() {
         .wait_for_spawn(Duration::from_secs(30))
         .await
         .expect("client never spawned");
+    handle
+        .wait_for_chunks(1, Duration::from_secs(30))
+        .await
+        .expect("initial dry column never arrived");
+    tokio::time::pause();
 
     // Must actually move (see the subject test's comment on
     // `select_move_packet`'s dedup) so the server genuinely learns a
@@ -220,6 +239,7 @@ async fn real_client_stays_full_air_and_full_health_when_dry() {
             false,
         )
         .expect("send initial position");
+    tokio::task::yield_now().await;
 
     tokio::time::sleep(Duration::from_secs(25)).await;
 

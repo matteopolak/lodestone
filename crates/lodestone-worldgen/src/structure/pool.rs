@@ -429,7 +429,7 @@ impl TemplatePool {
 /// Loaded eagerly, once per generator, for the same reason
 /// [`TemplateStore`] is: a start predicate runs inside the chunk pipeline where
 /// there is no `&dyn Resolver` to reach.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct PoolStore {
     pools: HashMap<String, Arc<TemplatePool>>,
     processor_lists: HashMap<String, Arc<Vec<super::processor::Processor>>>,

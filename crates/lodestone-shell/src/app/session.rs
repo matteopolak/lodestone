@@ -497,11 +497,13 @@ impl WindowApp {
         lifecycle: Rc<Cell<bool>>,
         frame_signal: BrowserFrameSignal,
         actions: Rc<RefCell<BrowserActionQueue>>,
+        join_progress: Rc<RefCell<VecDeque<BrowserJoinProgress>>>,
     ) -> Self {
         let mut window_app = Self::new_with_app(app, config);
         window_app.browser_lifecycle = Some(lifecycle);
         window_app.browser_frame_signal = Some(frame_signal);
         window_app.browser_actions = Some(actions);
+        window_app.browser_join_trace = Some(BrowserJoinTrace::new(join_progress));
         window_app
     }
 
@@ -544,6 +546,8 @@ impl WindowApp {
             browser_pointer_requested: false,
             #[cfg(target_arch = "wasm32")]
             browser_actions: None,
+            #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+            browser_join_trace: None,
             benchmark,
             benchmark_segment: None,
             sim,
@@ -862,16 +866,11 @@ impl WindowApp {
             // LocalOnly never drives the menu — the dev world is already Playing.
             SessionPhase::LocalOnly | SessionPhase::Connecting => {}
             SessionPhase::Connected => {
-                // Login only establishes the play connection. Keep the
-                // full-frame loading square up until the terrain producer has
-                // reported its real preparation milestone; resident columns
-                // and a full bar are telemetry, not proof that their first
-                // meshes can be presented. Remote sessions without a declared
-                // initial-view contract retain the own-column fallback inside
-                // `Sim::world_wait`.
-                if self.sim.world_wait().is_none() {
-                    self.ui.session_ready();
-                }
+                // Enter the world render path as soon as Play is established.
+                // `redraw` keeps the opaque terrain/resource overlay above it
+                // until `Sim::world_wait` clears, while meshes continue to be
+                // built and uploaded underneath.
+                self.ui.session_ready();
                 // Game-rule delivery: the integrated server only
                 // starts inside `begin_singleplayer`, so there was nothing to
                 // send the overrides to any earlier than the session's own
@@ -1774,6 +1773,14 @@ impl WindowApp {
     pub(super) fn begin_singleplayer(&mut self, launch: crate::menu::nav::SingleplayerLaunch) {
         use crate::menu::nav::SingleplayerLaunch;
         let launch_for_lan = launch.clone();
+        #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+        if let Some(trace) = self.browser_join_trace.as_mut() {
+            let phase = match &launch {
+                SingleplayerLaunch::Created { .. } => "world-create-started",
+                SingleplayerLaunch::Open(_) => "world-open-started",
+            };
+            trace.start(self.config.render_distance, phase);
+        }
         // The labelled terrain-generation screen is a first-creation affordance,
         // not a generic connection screen. Existing saves (`Open`), creative
         // and hardcore creations, and remote joins all skip it; only a newly
@@ -1913,6 +1920,11 @@ impl WindowApp {
             Ok(net) => {
                 self.sim.attach_net(net);
                 let view_radius = u32::try_from(view_radius).unwrap_or(0);
+                if let Some(net) = self.sim.net() {
+                    net.send_action(lodestone_model::action::ClientAction::SetClientSettings(
+                        self.client_settings(view_radius),
+                    ));
+                }
                 if show_new_world_loading {
                     // The server receives one extra ring for neighbour-aware
                     // meshing, but the loading square is the player's chosen

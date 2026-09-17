@@ -125,11 +125,11 @@ Structure terrain adaptation is part of the authenticated full-world scope. Head
 
 The comparator replays the initial-light admission boundary before it asks the packet codec for bytes. Materialization admits rows in z-major/x-major order, so a target's first saved snapshot sees only its north row and west cell; the packet may still carry all eight terrain neighbours after that snapshot is fixed. This keeps a future east or south column from changing an already-saved initial fallback, while later live relight remains free to use the complete footprint. The same relative rule is used for one-record diagnostics and bounded prefixes, so the control never depends on a particular world coordinate.
 
-The live comparator models dependency completion separately from packet-stream order. Nether and End requests replay their admitted dependency wavefront with the request's tiled key (tile-z, tile-x, local-z, local-x); a later adjacent request schedules only the previously unseen edge. Overworld requests likewise complete the centre's three-by-three FEATURES dependency wavefront, because those source bodies can spill into the requested column even with a zero-radius ticket; a later adjacent request schedules only previously unseen sources. This is not the z-major order used to emit packet records, and it is not one universal source permutation. Overworld streaming retains the admitted dependency state across bounded frame batches, matching the external stream's removal of only the requested centre ticket. The `(0,-1)` wavefront fixture and the one-record Nether P07 glowstone witness continue to guard the halo lifecycle. Immutable shaped prefixes remain eligible for parallel preparation; only stateful decoration commits use these deterministic orders.
+The live comparator models FEATURES ownership separately from packet-stream order. Overworld uses the typed target-owned boundary: one complete operation owns the requested target, and neighbouring columns provide its admitted read/write context rather than separate completion events. Nether retains its source-ordered dependency replay, while End replays its authenticated source events and light state. This is not the z-major order used to emit packet records, and it is not one universal source permutation. Overworld streaming retains admitted lifecycle state across bounded frame batches, matching the external stream's removal of only the requested centre ticket. The `(0,-1)` source-order fixture and the one-record Nether P07 glowstone witness continue to guard the halo lifecycle. Immutable shaped prefixes remain eligible for parallel preparation; only stateful decoration commits use these deterministic orders.
 
 ### Live streaming comparison
 
-When a full frozen root is unnecessary, `scripts/worldgen-oracle/stream-parity.sh` connects the external JVM oracle to the Rust comparator through a temporary file stream. It admits the requested rectangle in z-major/x-fastest order and compares one light-free content record at a time: terrain state IDs, 4×4×4 biome cells, the three client heightmaps, and canonical block entities. Neither side constructs or compares light, so a one-chunk check does not pay packet encoding or light settlement. Overworld still replays the centre's three-by-three FEATURES source wavefront because a neighbouring source can write into the emitted centre; only the requested centre is captured.
+When a full frozen root is unnecessary, `scripts/worldgen-oracle/stream-parity.sh` connects the external JVM oracle to the Rust comparator through a temporary file stream. It admits the requested rectangle in z-major/x-fastest order and compares one light-free content record at a time: terrain state IDs, 4×4×4 biome cells, the three client heightmaps, and canonical block entities. Neither side constructs or compares light, so a one-chunk check does not pay packet encoding or light settlement. Overworld captures one target-owned FEATURES result for the requested centre against its admitted neighbouring context.
 
 During content discovery, `LODESTONE_LARGE_PARITY_STREAM_DEFER_HEIGHTMAPS=1` reports and continues past a record whose only difference is a client heightmap. Terrain, biomes, and block entities must still match byte-for-byte. This is an iteration aid for the separately tracked incremental-heightmap lifecycle; it is never an acceptance mode.
 
@@ -140,7 +140,8 @@ directory; if omitted, the comparator uses
 `.cache/worldgen-parity/runs/stream-<timestamp>-<pid>`. It writes the authenticated 256-byte
 stream header, exact compact mismatch rows, deterministic component/signature
 groups, bounded lifecycle provenance, and representative expected/actual
-records. Retention is capped at 4,096 coordinate pairs, 64 MiB of record bytes,
+records. Relative explicit paths resolve from the shell invocation directory.
+Retention is capped at 4,096 coordinate pairs, 64 MiB of record bytes,
 64 signature groups, and 32 examples per group; the summary also records the
 exact signature-record count, while total mismatch and component counts
 continue after each cap. Light-free records classify terrain, biome,
@@ -190,17 +191,18 @@ comparing records. End defaults to 64 frames and calls
 `EndChunkSource::generate_batch`, which deduplicates immutable dependency
 windows while returning decorated columns in the stream's z-major/x-fastest
 order. Overworld and Nether retain their default one-frame batch because their
-feature lifecycle is an ordered read-after-write replay. Set
+feature lifecycle is stateful and order-sensitive. Set
 `LODESTONE_LARGE_PARITY_STREAM_BATCH_SIZE` to an explicit positive value when
 running a controlled comparison; the launcher forwards it to the comparator.
 Nether batches admit their complete two-chunk feature-write halo in z-major,
 x-fastest order before replay, but emit records only for requested targets.
-Overworld stream batches retain the shaped halo and completed three-by-three
-FEATURES source bodies across frame batches. Each requested centre emits one
-record, while all nine source bodies in its dependency wavefront run in the
-authenticated source order; a source may leave a cross-boundary write in a
-resident neighbour, so retaining completed sources preserves the external
-ticket lifecycle without rebuilding an already completed source.
+Overworld stream batches retain the shaped halo and lifecycle state across
+frame batches. Each requested centre emits one record and invokes one
+target-owned FEATURES operation; its internal source order is not exposed as
+independent globally retained source completions. A target-owned operation may
+inspect and stage cross-boundary writes in the admitted context during its
+transaction; target-scoped cleanup then preserves the external ticket
+lifecycle without replaying a separate source event.
 For example, a short End control is:
 
 ```text
@@ -310,7 +312,7 @@ The capture is deliberately external and is not checked into the repository. Its
 
 `LifecycleReplayPlan` is a static per-target optimisation over that authenticated full replay. It walks events backwards from the packet's 3 by 3 light domain, selecting direct writers within Chebyshev distance two and recursively including earlier mutable dependencies within the audited distance-four bound. Destination admission is a separate clipped closure. Events remain in authenticated order, source-local top-layer work remains immediately after FEATURES, and spills are applied only to admitted destinations. The Nether adapter computes only the unique pre-decoration columns in the selected closure rather than the full replay's closure. The ignored `full_and_pruned_lifecycle_replay_have_identical_target_packet_bytes` control compares raw packet bytes for the audited corner using exactly its 3 by 3 packet-light neighbourhood; its audited closure counts remain a control on the plan itself, not an assumption in the production comparator. The streaming comparator selects this pruned plan automatically for a one-chunk fail-fast prefix (`LODESTONE_LARGE_PARITY_MAX_CHUNKS=1` with `LODESTONE_LARGE_PARITY_SCAN_ALL` unset). `LODESTONE_LARGE_PARITY_TARGET_INDEX` is the explicit arbitrary-target form: it selects one zero-based row from the authenticated 16 by 16 manifest, seeks directly to that 32-byte digest, and builds the plan for `capture.target_order[index]`. It requires the 16 by 16 Overworld or Nether lifecycle manifest, cannot be combined with scan-all, and accepts only an unset limit or `LODESTONE_LARGE_PARITY_MAX_CHUNKS=1`; invalid, out-of-range, or ambiguous combinations fail closed. Multi-target and scan-all runs retain full replay as acceptance authority. End manifests never enter this lifecycle-only branch and use the retained-source comparator. The lifecycle unit negative control mutates event order and observes plan construction reject it; geometry, event count, and order mismatches fail closed.
 
-For Overworld replay, `prepare_lifecycle_replay` creates one bounded slot per authenticated admission. A FEATURES completion lazily fills its slot with only immutable 5 by 5 pre-ore handles, stitched heights, biome eligibility, and source feature/ore selections; resident overrides, placement writes, and RNG state remain per-completion and stay serial. Ordinary production generation does not retain these cloned selection contexts for every explored chunk. The byte-identity comparator remains the authority: enabling the prepared slots must not change packet bytes or the authenticated event order. Lifecycle controls compare serial and dispatched shaped admissions byte-for-byte, while a deliberately reversed FEATURES commit is required to change a spill-dependent control state; this catches accidental completion-order semantics.
+For Overworld replay, `prepare_lifecycle_replay` creates one bounded slot per authenticated admission. A FEATURES completion lazily fills its slot with only immutable 5 by 5 pre-ore handles, stitched heights, biome eligibility, and source feature/ore selections; resident overrides, placement writes, and RNG state remain per-completion and stay serial. A production request that settles adjacent targets calls the source's batch context hook once: `MixedReplayBatch` deduplicates the radius-two pre-ore union and shares source selection plans, while `LifecycleMaterializer::prepare_lifecycle_replay_contexts` owns the target handoff. Sources without a batch implementation retain scalar context construction. Ordinary production generation does not retain these cloned selection contexts for every explored chunk. The byte-identity comparator remains the authority: enabling the prepared slots must not change packet bytes or the authenticated event order. Lifecycle controls compare serial and dispatched shaped admissions byte-for-byte, while a deliberately reversed FEATURES commit is required to change a spill-dependent control state; this catches accidental completion-order semantics.
 
 An out-of-rectangle spill is not copied into a resident packet column, but it is still retained in the shared read-after-write override map. A later source can therefore observe the spill through its wider feature context without causing an unadmitted destination chunk to enter the final packet set.
 
