@@ -20,7 +20,7 @@ use lodestone_model::Vec3;
 pub struct PathNavigator {
     path: Option<Path>,
     width: f32,
-    speed: f32,
+    speed: f64,
     max_distance_to_waypoint: f32,
     tick: i32,
     last_stuck_check: i32,
@@ -45,7 +45,7 @@ impl PathNavigator {
     }
 
     /// Begins following `path` at the given movement speed.
-    pub fn start(&mut self, path: Path, speed: f32) {
+    pub fn start(&mut self, path: Path, speed: f64) {
         self.path = Some(path);
         self.speed = speed;
         self.is_stuck = false;
@@ -53,11 +53,11 @@ impl PathNavigator {
     }
 
     #[must_use]
-    pub fn speed(&self) -> f32 {
+    pub fn speed(&self) -> f64 {
         self.speed
     }
 
-    pub fn set_speed(&mut self, speed: f32) {
+    pub fn set_speed(&mut self, speed: f64) {
         self.speed = speed;
     }
 

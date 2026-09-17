@@ -17,17 +17,20 @@ use lodestone_model::{
 };
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer, ServerBound, ServerProtocol};
 
-const TARGET: BlockPos = BlockPos::new(8, 100, 8);
 const DEADLINE: Duration = Duration::from_secs(10);
+
+fn target_for_protocol(protocol: i32) -> BlockPos {
+    BlockPos::new(8, if protocol == 776 { 64 } else { 100 }, 8)
+}
 
 struct FixtureSource {
     column: Mutex<ChunkColumn>,
 }
 
 impl FixtureSource {
-    fn new() -> Self {
+    fn new(target: BlockPos) -> Self {
         let mut column = ChunkColumn::new(-64, 384);
-        column.set_block(TARGET.x, TARGET.y, TARGET.z, "minecraft:dandelion");
+        column.set_block(target.x, target.y, target.z, "minecraft:dandelion");
         Self {
             column: Mutex::new(column),
         }
@@ -59,10 +62,10 @@ impl ChunkSource for FixtureSource {
     }
 }
 
-fn break_action() -> ClientAction {
+fn break_action(target: BlockPos) -> ClientAction {
     ClientAction::BlockAction {
         action: BlockActionKind::StartDestroy,
-        pos: TARGET,
+        pos: target,
         face: BlockFace::Up,
         sequence: 0,
     }
@@ -78,6 +81,7 @@ async fn every_registry_selected_host_consumes_a_real_adapter_action_and_keeps_p
     }
 
     for protocol_version in hosted {
+        let target = target_for_protocol(protocol_version);
         let host = lodestone_registry::server_protocol_for_protocol(protocol_version)
             .unwrap_or_else(|| panic!("hosted protocol {protocol_version} must resolve"));
         let adapter = lodestone_registry::adapter_for_protocol(protocol_version)
@@ -87,7 +91,7 @@ async fn every_registry_selected_host_consumes_a_real_adapter_action_and_keeps_p
         // the client driver. This keeps a registry selector returning a box
         // whose decoder ignores Play actions from passing merely by joining.
         let (packet_id, payload) = adapter
-            .encode_action(ConnectionState::Play, &break_action())
+            .encode_action(ConnectionState::Play, &break_action(target))
             .unwrap_or_else(|error| {
                 panic!("protocol {protocol_version} must encode block breaking: {error}")
             })
@@ -97,15 +101,15 @@ async fn every_registry_selected_host_consumes_a_real_adapter_action_and_keeps_p
                 host.decode(lodestone_core::State::Play, packet_id, &payload),
                 ServerBound::BlockAction {
                     action: BlockActionKind::StartDestroy,
-                    pos: TARGET,
+                    pos: decoded_pos,
                     face: BlockFace::Up,
                     ..
-                }
+                } if decoded_pos == target
             ),
             "protocol {protocol_version}'s real adapter frame must reach the server block-action consumer"
         );
 
-        let source = Arc::new(FixtureSource::new());
+        let source = Arc::new(FixtureSource::new(target));
         let (server, client_io) = IntegratedServer::open_in_memory(host, Arc::clone(&source), 0);
         let profile = LoginProfile {
             username: "Matrix".to_owned(),
@@ -131,13 +135,13 @@ async fn every_registry_selected_host_consumes_a_real_adapter_action_and_keeps_p
             });
 
         handle
-            .send_action(break_action())
+            .send_action(break_action(target))
             .unwrap_or_else(|error| {
                 panic!("protocol {protocol_version} must send its block-breaking action: {error}")
             });
         let air = lodestone_data::block_states::air_state_id();
         handle
-            .wait_for(DEADLINE, move |client| client.block_at(TARGET) == Some(air))
+            .wait_for(DEADLINE, move |client| client.block_at(target) == Some(air))
             .await
             .unwrap_or_else(|error| {
                 panic!("protocol {protocol_version} block action must update the client: {error}")

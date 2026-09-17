@@ -48,10 +48,13 @@ item changes), which a per-`Flag` `disable` can't express.
 `PathNavigator` retains the effective speed for its active request, and
 `NavigatingMob` uses it for each follower step. Species spawning supplies the
 attribute-to-ground conversion, so a roster multiplier changes motion without
-rebuilding the path. A downward waypoint is kept active until the body clears
-the supporting cell horizontally; only then does the gravity integrator move
-the mob vertically. Upward waypoints retain the existing auto-step and jump
-transitions.
+rebuilding the path. Brain walk-target speeds are modifiers rather than
+absolute rates; the real body's configured ground rate is multiplied by that
+modifier before the same navigator is updated. Navigation keeps these rates in
+`f64` so an exact configured step is not widened by a float conversion. A
+downward waypoint is kept active until the body clears the supporting cell
+horizontally; only then does the gravity integrator move the mob vertically.
+Upward waypoints retain the existing auto-step and jump transitions.
 
 ### Target acquisition (brain-based mobs)
 
