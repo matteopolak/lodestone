@@ -96,14 +96,12 @@
 //! incrementally, in `.set()` call order — unlike the `HashMap`-keyed
 //! `world` it replaced, whose palette used to be assigned by a *separate*,
 //! fixed-order final pass regardless of how `world` itself was populated.
-//! [`Self::materialize_world`] originally applied `surface_diff` (a
-//! `HashMap<(i32,i32,i32), String>`, fresh per chunk) by iterating it
-//! directly — and `std::collections::HashMap` iteration order is not
-//! guaranteed stable even across two *separately constructed* maps with
-//! identical content (`RandomState` reseeds per map). Two independent
-//! `column()` calls for the *same* chunk therefore produced the same blocks
-//! at the same positions but a **different palette order** — same terrain,
-//! different bytes. Caught by
+//! [`Self::materialize_world`] originally applied a hash-keyed
+//! `surface_diff` by iterating it directly — and hash iteration order is not
+//! guaranteed stable even across two separately constructed maps with
+//! identical content. Two independent `column()` calls for the same chunk
+//! therefore produced the same blocks at the same positions but a
+//! **different palette order** — same terrain, different bytes. Caught by
 //! `lodestone_server::worldgen_data::tests::column_is_byte_identical_across_two_independently_constructed_generators`
 //! (added as a permanent regression control, no threading involved) after
 //! it was first surfaced by `lodestone-server`'s own
@@ -112,8 +110,10 @@
 //! via an isolated `git worktree` at the commit *before* this crate's ore
 //! composition that the failure did not exist there, ruling out a
 //! threading bug in that test's own new code before spending time on it).
-//! Fixed by consulting `surface_diff` with a point lookup inside the same
+//! Fixed first by consulting `surface_diff` with a point lookup inside the same
 //! fixed `(lz, lx, ly)` loop the base fill already uses, never iterating it.
+//! The current boundary keeps that order in a typed per-column change vector,
+//! so materialization consumes it with a cursor and no map or sort.
 //!
 //! The working grid every stage above writes into is
 //! [`crate::dense_grid::DenseBlockGrid`] — a flat, palette-indexed array —
@@ -209,6 +209,7 @@ pub mod structures;
 mod veins;
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -228,9 +229,10 @@ pub(crate) use self::biome::{zoomed_biome, zoomed_biome_flat};
 #[cfg(test)]
 pub(crate) use self::biome::biome_zoom_seed;
 pub use self::output::{
-    GenStage, GeneratedColumn, HEIGHTMAP_COLUMNS, MOTION_BLOCKING_HEIGHTMAP_TYPE_ID,
+    CompactGeneratedColumn, CompactGeneratedColumnParts, GenStage, GeneratedColumn,
+    HEIGHTMAP_COLUMNS, MOTION_BLOCKING_HEIGHTMAP_TYPE_ID,
 };
-pub use self::decorate::MixedReplayContext;
+pub use self::decorate::{DirectDecorationResult, MixedReplayBatch, MixedReplayContext};
 #[cfg(not(target_arch = "wasm32"))]
 pub use self::output::StageTimes;
 pub use self::structures::{BEARD_REACH, REFS_RADIUS, StructureRefs};
@@ -283,6 +285,117 @@ struct ChunkStages {
     pre_ore: store::StageSlot<PreOreResult>,
 }
 
+/// Complete identity for a generator whose resolver advertises an immutable
+/// asset bundle. A matching identity proves that seed, noise settings,
+/// resolver/datapack bytes, fallback biome, and fallback snow rule are the
+/// same, so a production batch may reuse shaped products without scanning
+/// their full block fields to establish compatibility.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OverworldGenerationIdentity {
+    seed: i64,
+    settings: String,
+    resolver_fingerprint: u64,
+    fallback_biome: String,
+    fallback_cold_enough_to_snow: bool,
+}
+
+impl OverworldGenerationIdentity {
+    /// World seed used by all position-derived generation randomness.
+    #[must_use]
+    pub const fn seed(&self) -> i64 {
+        self.seed
+    }
+
+    /// Serialized noise/settings document included in the identity.
+    #[must_use]
+    pub fn settings(&self) -> &str {
+        &self.settings
+    }
+
+    /// Resolver-provided fingerprint over the immutable datapack inputs.
+    #[must_use]
+    pub const fn resolver_fingerprint(&self) -> u64 {
+        self.resolver_fingerprint
+    }
+
+    /// Constructor fallback biome, used when the resolver has no climate table.
+    #[must_use]
+    pub fn fallback_biome(&self) -> &str {
+        &self.fallback_biome
+    }
+
+    /// Constructor fallback snow rule.
+    #[must_use]
+    pub const fn fallback_cold_enough_to_snow(&self) -> bool {
+        self.fallback_cold_enough_to_snow
+    }
+}
+
+/// One request-scoped lease for a production Overworld batch.
+///
+/// The lease pins the union of every admitted column's radius-
+/// [`STRUCTURE_CLOSURE_RADIUS`] store view. Its column methods run the same
+/// private generation bodies as the scalar entrypoints, but do not reopen a
+/// view for each output. Callers must include every column they will pass to
+/// [`Self::column`] or [`Self::column_shaped`] when creating the lease; the
+/// coverage assertion keeps an incomplete admission list from weakening the
+/// eviction guarantee.
+#[allow(missing_debug_implementations)]
+pub struct OverworldBatchLease<'a> {
+    generator: &'a OverworldGenerator,
+    view: store::ViewScope<'a, ChunkStages>,
+    preliminary: Arc<crate::aquifer::PreliminarySurfaceCache>,
+}
+
+impl OverworldBatchLease<'_> {
+    /// Generates one fully decorated column while this batch lease is live.
+    #[must_use]
+    pub fn column(&self, cx: i32, cz: i32) -> GeneratedColumn {
+        self.assert_covers((cx, cz));
+        self.generator.column_leased(cx, cz, &self.preliminary)
+    }
+
+    /// Generates one shaped terrain prefix while this batch lease is live.
+    #[must_use]
+    pub fn column_shaped(&self, cx: i32, cz: i32) -> GeneratedColumn {
+        self.assert_covers((cx, cz));
+        self.generator
+            .column_shaped_leased(cx, cz, &self.preliminary)
+    }
+
+    /// Returns preliminary-surface cache counters for this live request.
+    #[must_use]
+    pub fn preliminary_cache_stats(&self) -> crate::aquifer::PreliminarySurfaceCacheStats {
+        self.preliminary.stats()
+    }
+
+    /// Prepares each target's local pre-ore stage without opening nested
+    /// store views. This is the batch counterpart of
+    /// [`OverworldGenerator::prepare_pre_ore_targets_with_radius`].
+    pub fn prepare_pre_ore_targets_with_radius(
+        &self,
+        targets: &[(i32, i32)],
+        radius: i32,
+    ) -> usize {
+        for &(cx, cz) in targets {
+            self.assert_covers_radius((cx, cz), radius);
+        }
+        self.generator
+            .prepare_pre_ore_targets_with_lease(targets, radius, self)
+    }
+
+    fn assert_covers(&self, centre: (i32, i32)) {
+        self.assert_covers_radius(centre, STRUCTURE_CLOSURE_RADIUS);
+    }
+
+    fn assert_covers_radius(&self, centre: (i32, i32), radius: i32) {
+        assert!(
+            self.view.covers(centre, radius),
+            "Overworld batch lease does not cover column {centre:?}"
+        );
+    }
+}
+
 /// Chebyshev chunk radius one [`OverworldGenerator::column`] call closes over.
 ///
 /// **Derived from the drivers, not chosen.** The unified FEATURES dispatcher reads
@@ -291,6 +404,10 @@ struct ChunkStages {
 /// driver's neighbourhood ever widens, this widens with it or the pin below
 /// stops covering the request that needs it.
 const COLUMN_CLOSURE_RADIUS: i32 = 2;
+
+/// Radius of the direct target-owned FEATURES read context for the bundled
+/// Overworld catalog. Source-replay dispatch retains [`COLUMN_CLOSURE_RADIUS`].
+pub const TARGET_DECORATION_RADIUS: i32 = 1;
 
 /// Chebyshev chunk radius one [`OverworldGenerator::column`] call closes over
 /// **including the structure stages** — the radius the store pin actually uses.
@@ -412,8 +529,17 @@ pub struct OverworldGenerator {
     /// table, in which case every column samples real climate instead of
     /// using the fallback above.
     dynamic_biome: Option<DynamicBiome>,
+    /// Stable identity for the climate sampler and biome table used by
+    /// concentric-ring relocation. The structure registry combines this with
+    /// the seed and immutable structure blueprint before sharing ring output.
+    ring_positions_cache_key: u64,
     seed: i64,
+    /// Present only when the resolver vouches for a complete immutable asset
+    /// fingerprint. Dynamic resolvers remain intentionally ineligible for
+    /// cross-request shaped-product identity reuse.
+    generation_identity: Option<OverworldGenerationIdentity>,
     aquifer_trees: AquiferTrees,
+    preliminary_region: Arc<crate::aquifer::PreliminarySurfaceCache>,
     /// `#overworld_carver_replaceables` tag closure — which
     /// blocks a carver is allowed to overwrite. Empty when the [`Resolver`]
     /// supplies no tag data (`Resolver::block_tag`'s default), in which case
@@ -589,6 +715,8 @@ impl OverworldGenerator {
         cold_enough_to_snow: bool,
     ) -> Self {
         let builder = Builder::new(seed, resolver);
+        let resolver_fingerprint = resolver.asset_fingerprint();
+        let settings_identity = settings.to_string();
         let router = &settings["noise_router"];
         let final_density = builder
             .build(&router["final_density"])
@@ -621,11 +749,7 @@ impl OverworldGenerator {
         let default_fluid_pre = crate::surface::PreState::from_name(&interner, &default_fluid);
         let default_lava_pre = crate::surface::PreState::from_name(&interner, &default_lava);
 
-        let raw_table = crate::biome::parse_table(&resolver.biome_parameters());
-        let dynamic_biome = if raw_table.is_empty() {
-            None
-        } else {
-            let table = crate::biome::usable_overworld_table(raw_table);
+        let dynamic_biome = if let Some(table) = crate::biome::overworld_table(resolver) {
             let temperatures = crate::biome::parse_temperatures(&resolver.biome_temperatures());
             let climate = ClimateSampler::new(settings, &builder);
             Some(DynamicBiome {
@@ -633,22 +757,54 @@ impl OverworldGenerator {
                 table,
                 temperatures,
             })
+        } else {
+            None
+        };
+        let ring_positions_cache_key = {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            if let Some(dynamic) = &dynamic_biome {
+                1u8.hash(&mut hasher);
+                for point in dynamic.table.iter() {
+                    point.biome.hash(&mut hasher);
+                    for parameter in point.params {
+                        parameter.min.hash(&mut hasher);
+                        parameter.max.hash(&mut hasher);
+                    }
+                }
+                router.to_string().hash(&mut hasher);
+            } else {
+                0u8.hash(&mut hasher);
+                biome.hash(&mut hasher);
+            }
+            hasher.finish()
         };
 
         // Aquifer support trees — built via the same shared
         // `builder` as final_density/surface/climate above; see
         // `AquiferTrees`'s doc comment for why `slot_count` is captured only
         // after every one of these `builder.build()` calls.
+        let prelim = std::sync::Arc::new(
+            builder
+                .build(&router["preliminary_surface_level"])
+                .expect("bundled preliminary_surface_level density-function document"),
+        );
+        let prelim_program = std::sync::Arc::new(crate::engine::PointProgram::compile(&prelim));
         let aquifer_trees = AquiferTrees {
             final_density: crate::engine::Program::compile(&final_density),
             erosion: crate::engine::Program::compile(
-                &builder.build(&router["erosion"]).expect("bundled erosion density-function document"),
+                &builder
+                    .build(&router["erosion"])
+                    .expect("bundled erosion density-function document"),
             ),
             depth: crate::engine::Program::compile(
-                &builder.build(&router["depth"]).expect("bundled depth density-function document"),
+                &builder
+                    .build(&router["depth"])
+                    .expect("bundled depth density-function document"),
             ),
             barrier: std::sync::Arc::new(
-                builder.build(&router["barrier"]).expect("bundled barrier density-function document"),
+                builder
+                    .build(&router["barrier"])
+                    .expect("bundled barrier density-function document"),
             ),
             floodedness: std::sync::Arc::new(
                 builder
@@ -661,13 +817,12 @@ impl OverworldGenerator {
                     .expect("bundled fluid_level_spread density-function document"),
             ),
             lava: std::sync::Arc::new(
-                builder.build(&router["lava"]).expect("bundled lava density-function document"),
-            ),
-            prelim: std::sync::Arc::new(
                 builder
-                    .build(&router["preliminary_surface_level"])
-                    .expect("bundled preliminary_surface_level density-function document"),
+                    .build(&router["lava"])
+                    .expect("bundled lava density-function document"),
             ),
+            prelim,
+            prelim_program,
             positional: {
                 use crate::rng::{PositionalRandomFactory, RandomSource};
                 let mut src = builder
@@ -752,6 +907,12 @@ impl OverworldGenerator {
         // surface, climate, the eight aquifer trees) — see `AquiferTrees`'s
         // doc comment for why this is always a safe bound.
         let slot_count = builder.slot_count();
+        let preliminary_region = Arc::new(
+            crate::aquifer::PreliminarySurfaceCache::with_program(
+                Arc::clone(&aquifer_trees.prelim_program),
+                crate::aquifer::PRELIMINARY_CACHE_REGION_CAPACITY,
+            ),
+        );
 
         // Structure placement's S1. Built here, from the same `resolver` borrow every
         // other composition table above uses, because the registry parses ~54
@@ -763,7 +924,15 @@ impl OverworldGenerator {
             let registry = crate::structure::StructureRegistry::new(seed, resolver);
             if registry.is_empty() { None } else { Some(registry) }
         };
-
+        let generation_identity = resolver_fingerprint.map(|resolver_fingerprint| {
+            OverworldGenerationIdentity {
+                seed,
+                settings: settings_identity,
+                resolver_fingerprint,
+                fallback_biome: biome.to_string(),
+                fallback_cold_enough_to_snow: cold_enough_to_snow,
+            }
+        });
         let generator = Self {
             slot_count,
             surface,
@@ -792,8 +961,11 @@ impl OverworldGenerator {
             fallback_biome: biome.to_string(),
             fallback_cold_enough_to_snow: cold_enough_to_snow,
             dynamic_biome,
+            ring_positions_cache_key,
             seed,
+            generation_identity,
             aquifer_trees,
+            preliminary_region,
             carver_replaceable,
             carvers_by_biome,
             ore_definitions,
@@ -808,10 +980,6 @@ impl OverworldGenerator {
             climate_noise: crate::noise::ClimateNoise::new(),
             structures,
         };
-        if let Some(registry) = &generator.structures {
-            let sampler = structures::StartSampler::new(&generator);
-            registry.prepare_origin_index(&sampler);
-        }
         generator
     }
 
@@ -982,6 +1150,14 @@ impl OverworldGenerator {
         self.sea_level
     }
 
+    /// Returns the complete immutable generation identity when the resolver
+    /// supplied an asset fingerprint. Dynamic resolvers return `None` rather
+    /// than an unsafe partial token, so callers retain content-level checks.
+    #[must_use]
+    pub fn generation_identity(&self) -> Option<&OverworldGenerationIdentity> {
+        self.generation_identity.as_ref()
+    }
+
     /// Returns the low-detail preliminary terrain-surface estimate at block
     /// coordinates `(x, z)` without generating a chunk.
     ///
@@ -992,6 +1168,16 @@ impl OverworldGenerator {
     #[must_use]
     pub fn preliminary_surface_level(&self, x: i32, z: i32) -> i32 {
         self.surface.preliminary_surface_level(x, z)
+    }
+
+    /// Number of operations in the compiled preliminary-surface point graph
+    /// carried by production aquifer construction.
+    ///
+    /// This is a diagnostic witness for bounded performance/parity controls;
+    /// generation never branches on it.
+    #[must_use]
+    pub fn preliminary_surface_program_nodes(&self) -> usize {
+        self.aquifer_trees.prelim_program.node_count()
     }
 
     /// Distinct chunks currently held in the staged store. **Diagnostics and
@@ -1022,6 +1208,95 @@ impl OverworldGenerator {
         self.store.evicted()
     }
 
+    /// Lease one production batch's complete staged-store closure.
+    ///
+    /// `admitted` is the complete set of columns that the caller may generate
+    /// while the lease is live, including any dependency halo. The store pins
+    /// the enclosing union of their radius-10 closures once, so overlapping
+    /// target columns do not repeat the 441-entry pin/unpin walk. Use the
+    /// returned lease's [`OverworldBatchLease::column`] and
+    /// [`OverworldBatchLease::column_shaped`] methods for the already-leased
+    /// generation path.
+    #[must_use]
+    pub fn lease_batch(&self, admitted: &[(i32, i32)]) -> OverworldBatchLease<'_> {
+        OverworldBatchLease {
+            generator: self,
+            view: self
+                .store
+                .open_batch_view(admitted.iter().copied(), STRUCTURE_CLOSURE_RADIUS),
+            preliminary: self.preliminary_cache(crate::aquifer::PRELIMINARY_CACHE_BATCH_CAPACITY),
+        }
+    }
+
+    fn preliminary_cache(&self, capacity: usize) -> Arc<crate::aquifer::PreliminarySurfaceCache> {
+        Arc::new(crate::aquifer::PreliminarySurfaceCache::with_program(
+            Arc::clone(&self.aquifer_trees.prelim_program),
+            capacity,
+        ))
+    }
+
+    /// Returns diagnostics for the bounded region fallback used by structure
+    /// height probes and other generator-owned aquifer callers.
+    #[must_use]
+    pub fn preliminary_region_cache_stats(
+        &self,
+    ) -> crate::aquifer::PreliminarySurfaceCacheStats {
+        self.preliminary_region.stats()
+    }
+
+    /// Runs a closure with one lease covering the complete admitted batch.
+    ///
+    /// This convenience form keeps the guard lifetime request-scoped while
+    /// allowing a production dispatcher to retain its existing ordered batch
+    /// loop. The closure must use the supplied lease for every generated
+    /// column; calling the scalar methods directly would intentionally open
+    /// their own independent lease.
+    pub fn with_batch_lease<R>(
+        &self,
+        admitted: &[(i32, i32)],
+        generate: impl FnOnce(&OverworldBatchLease<'_>) -> R,
+    ) -> R {
+        let lease = self.lease_batch(admitted);
+        generate(&lease)
+    }
+
+    /// Generates fully decorated columns in caller order under one union
+    /// lease. This is the direct immutable batch seam; stateful lifecycle
+    /// callers can retain the lease and interleave their own admission or
+    /// output bookkeeping around the same per-column methods.
+    #[must_use]
+    pub fn columns_batch(&self, coords: &[(i32, i32)]) -> Vec<GeneratedColumn> {
+        self.with_batch_lease(coords, |lease| {
+            coords
+                .iter()
+                .map(|&(cx, cz)| lease.column(cx, cz))
+                .collect()
+        })
+    }
+
+    /// Generates shaped terrain prefixes in caller order under one union
+    /// lease.
+    #[must_use]
+    pub fn columns_shaped_batch(&self, coords: &[(i32, i32)]) -> Vec<GeneratedColumn> {
+        self.with_batch_lease(coords, |lease| {
+            coords
+                .iter()
+                .map(|&(cx, cz)| lease.column_shaped(cx, cz))
+                .collect()
+        })
+    }
+
+    /// Lease bookkeeping for this generator's staged store.
+    #[must_use]
+    pub fn store_lease_stats(&self) -> store::LeaseStats {
+        self.store.lease_stats()
+    }
+
+    /// Reset staged-store lease bookkeeping. Diagnostics only.
+    pub fn reset_store_lease_stats(&self) {
+        self.store.reset_lease_stats();
+    }
+
     /// Whether `(cx, cz)` is a slime chunk for **this generator's**
     /// seed — vanilla's own slime-chunk RNG seeding, followed by a
     /// "roll a bounded random int in `[0, 10)` and require it to be 0" check.
@@ -1045,17 +1320,24 @@ impl OverworldGenerator {
     /// Generates the block field for chunk `(cx, cz)`.
     #[must_use]
     pub fn column(&self, cx: i32, cz: i32) -> GeneratedColumn {
-        // Pins this request's whole closure in the store for the duration of the
-        // call, so nothing it computes can be evicted before it is read back —
-        // the property that makes eviction view-scoped instead of a capacity
-        // guess. Dropped at the end of the call.
-        //
-        // [`STRUCTURE_CLOSURE_RADIUS`], not [`COLUMN_CLOSURE_RADIUS`]: with
-        // this radius the closure is 21×21, and pinning the inner 5×5 of it left
-        // the request's own structure-start entries evictable *by the request
-        // itself*. See that constant for the measured cost.
+        // Keep the scalar path on the scalar store primitive. Constructing a
+        // one-element batch still has to collect bounds before it can enter
+        // `open_box`, while this path already knows the exact box. The batch
+        // API remains for callers that actually submit multiple coordinates.
         let _view = self.store.open_view((cx, cz), STRUCTURE_CLOSURE_RADIUS);
-        let cached = self.pre_ore_stage(cx, cz);
+        self.column_leased(cx, cz, &self.preliminary_region)
+    }
+
+    fn column_leased(
+        &self,
+        cx: i32,
+        cz: i32,
+        preliminary: &Arc<crate::aquifer::PreliminarySurfaceCache>,
+    ) -> GeneratedColumn {
+        // The caller owns a view pin for this request's whole closure. This
+        // helper is shared by scalar and batch entrypoints and never opens a
+        // nested view itself.
+        let cached = self.pre_ore_stage_with_preliminary_cache(cx, cz, preliminary);
         // FEATURES is one globally indexed stream. Ores, disks and vegetal
         // bodies must share both their source order and their intermediate
         // writes, so production enters the same dispatcher used by lifecycle
@@ -1123,7 +1405,16 @@ impl OverworldGenerator {
     #[must_use]
     pub fn column_shaped(&self, cx: i32, cz: i32) -> GeneratedColumn {
         let _view = self.store.open_view((cx, cz), STRUCTURE_CLOSURE_RADIUS);
-        let cached = self.pre_ore_stage(cx, cz);
+        self.column_shaped_leased(cx, cz, &self.preliminary_region)
+    }
+
+    fn column_shaped_leased(
+        &self,
+        cx: i32,
+        cz: i32,
+        preliminary: &Arc<crate::aquifer::PreliminarySurfaceCache>,
+    ) -> GeneratedColumn {
+        let cached = self.pre_ore_stage_with_preliminary_cache(cx, cz, preliminary);
         self.intern_from_dense(
             cx,
             cz,
@@ -1172,10 +1463,15 @@ impl OverworldGenerator {
     /// distinct chunks whose stages 1–4 really ran, and a sweep can assert it
     /// equals the size of the region it swept.
     fn pre_ore_stage(&self, cx: i32, cz: i32) -> Arc<PreOreResult> {
-        self.pre_ore_stage_store(cx, cz)
+        self.pre_ore_stage_with_preliminary_cache(cx, cz, &self.preliminary_region)
     }
 
-    fn pre_ore_stage_store(&self, cx: i32, cz: i32) -> Arc<PreOreResult> {
+    fn pre_ore_stage_with_preliminary_cache(
+        &self,
+        cx: i32,
+        cz: i32,
+        preliminary: &Arc<crate::aquifer::PreliminarySurfaceCache>,
+    ) -> Arc<PreOreResult> {
         let entry = self.store.entry((cx, cz));
         entry.pre_ore.get_or_compute(
             crate::counters::bump_pre_ore,
@@ -1186,7 +1482,7 @@ impl OverworldGenerator {
                 // consumed inside `pre_ore_stage_uncached` →
                 // `beardifier_for` → `fill_stage`. Nothing to do at this level
                 // any more, which is why the guard is gone rather than relaxed.
-                self.pre_ore_stage_uncached(cx, cz)
+                self.pre_ore_stage_uncached_with_preliminary_cache(cx, cz, preliminary)
             },
         )
     }
@@ -1248,6 +1544,7 @@ impl OverworldGenerator {
         // protection or a bench near the retention ceiling could measure an
         // eviction rather than the pipeline.
         let _view = self.store.open_view((cx, cz), STRUCTURE_CLOSURE_RADIUS);
+        let preliminary = self.preliminary_cache(512);
         let base_x = cx * 16;
         let base_z = cz * 16;
         // Keep the timing-only path on the same named order as `column` and
@@ -1257,7 +1554,7 @@ impl OverworldGenerator {
         let mut schedule = Self::stage_schedule().cursor();
 
         let t_aquifer_start = lodestone_time::Instant::now();
-        let aquifer = self.build_aquifer(cx, cz);
+        let aquifer = self.build_aquifer_with_preliminary_cache(cx, cz, &preliminary);
         // Structure placement's S3, inside the *aquifer* timing bucket rather than given one
         // of its own: for a chunk with no adaptation-bearing start in reach this is
         // a store read and an empty `Vec`, and the per-block cost it can add lands
@@ -1268,8 +1565,7 @@ impl OverworldGenerator {
         schedule.enter(crate::stage_schedule::ColumnStage::StructureInfluence);
         schedule.enter(crate::stage_schedule::ColumnStage::Fill);
         let t_shape_start = lodestone_time::Instant::now();
-        let field = self.fill_stage(&aquifer, base_x, base_z, &beard);
-        let heights = self.heights_from_field(&field);
+        let (field, heights) = self.fill_stage(&aquifer, base_x, base_z, &beard);
         let mut biome_cursor = self
             .dynamic_biome
             .as_ref()
@@ -1288,12 +1584,13 @@ impl OverworldGenerator {
         let biome_quarts = self.biome_stage(&biome_cells, &heights);
         schedule.enter(crate::stage_schedule::ColumnStage::Surface);
         let t_surface_start = lodestone_time::Instant::now();
-        let surface_diff = self.surface_stage(
+        let surface_diff = self.surface_stage_with_preliminary_cache(
             &field,
             &heights,
             base_x,
             base_z,
             biome_cursor.as_mut().map(|cursor| cursor),
+            &preliminary,
         );
         schedule.enter(crate::stage_schedule::ColumnStage::Materialize);
         let t_materialize_start = lodestone_time::Instant::now();

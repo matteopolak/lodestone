@@ -137,6 +137,45 @@ pub const STAGE_NAMES: [&str; STAGE_COUNT] = [
     "other",
 ];
 
+/// Logical cache boundaries visible to the world-generation implementation.
+/// These are software representations, not CPU cache levels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum MemoryBoundary {
+    BlockField = 0,
+    CellCache = 1,
+    SlotCache = 2,
+    LeafMemo = 3,
+    BlockGrid = 4,
+}
+
+/// Number of logical representation boundaries tracked by the counters.
+pub const MEMORY_BOUNDARY_COUNT: usize = 5;
+
+/// Names in [`MemoryBoundary`] discriminant order.
+pub const MEMORY_BOUNDARY_NAMES: [&str; MEMORY_BOUNDARY_COUNT] = [
+    "block_field",
+    "cell_cache",
+    "slot_cache",
+    "leaf_memo",
+    "block_grid",
+];
+
+/// Software cache populations with existing lookup hooks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CacheKind {
+    Cell = 0,
+    Slot = 1,
+    Leaf = 2,
+}
+
+/// Number of software cache populations.
+pub const CACHE_COUNT: usize = 3;
+
+/// Names in [`CacheKind`] discriminant order.
+pub const CACHE_NAMES: [&str; CACHE_COUNT] = ["cell", "slot", "leaf"];
+
 /// How many density-function slots get their own `slot_misses_by_slot` bucket.
 ///
 /// The overworld's `slot_count` is data-derived (`DensityBuilder::slot_count`),
@@ -155,6 +194,52 @@ pub const MAX_TRACKED_SLOTS: usize = 64;
 /// impls. Widening a bucket array is therefore an edit here too.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
+    /// Cache lookups that returned a value, indexed by [`CacheKind`].
+    pub cache_hits: [u64; CACHE_COUNT],
+    /// Cache lookups that did not return a value, indexed by [`CacheKind`].
+    pub cache_misses: [u64; CACHE_COUNT],
+    /// Values computed after a cache miss, indexed by [`CacheKind`].
+    pub cache_computes: [u64; CACHE_COUNT],
+    /// Existing entries displaced by a bounded cache, indexed by [`CacheKind`].
+    /// The current implementation has displacement only in the direct-mapped
+    /// leaf memo; map and dense stores do not evict entries.
+    pub cache_evictions: [u64; CACHE_COUNT],
+    /// Logical representation reads, indexed by [`MemoryBoundary`].
+    /// A read is an attempted payload lookup; a miss still counts one lookup.
+    pub logical_reads: [u64; MEMORY_BOUNDARY_COUNT],
+    /// Logical representation writes, indexed by [`MemoryBoundary`].
+    pub logical_writes: [u64; MEMORY_BOUNDARY_COUNT],
+    /// Payload bytes returned by logical reads, indexed by boundary. Metadata
+    /// probes and CPU cache-line traffic are not represented by this field.
+    pub logical_read_bytes: [u64; MEMORY_BOUNDARY_COUNT],
+    /// Payload bytes written by logical writes, indexed by boundary.
+    pub logical_write_bytes: [u64; MEMORY_BOUNDARY_COUNT],
+    /// Compatibility view of `logical_reads[MemoryBoundary::BlockField]`.
+    /// Keeping this derived avoids a second atomic increment per query.
+    pub block_field_queries: u64,
+    /// Scratch instances acquired from the thread-local free list.
+    pub scratch_pool_reuses: u64,
+    /// Scratch instances created because the free list was empty.
+    pub scratch_pool_allocations: u64,
+    /// Scratch instances discarded because the free-list bound was full.
+    pub scratch_pool_evictions: u64,
+    /// Cumulative logical payload bytes added by scratch buffer growth.
+    pub scratch_buffer_allocated_bytes: u64,
+    /// Logical bytes retained by all live and pooled scratch buffers at read
+    /// time. This excludes allocator metadata and hash-table overhead.
+    pub scratch_retained_bytes: u64,
+    /// Maximum observed [`Self::scratch_retained_bytes`] since reset.
+    pub scratch_retained_bytes_high_water: u64,
+    /// Full-column scans performed by an owning pipeline boundary. The core
+    /// sampler has no knowledge of whether a caller's sequence is a scan, so
+    /// this remains zero until such a boundary calls the hook.
+    pub full_column_scans: u64,
+    /// Logical block cells visited by full-column scans.
+    pub full_column_scan_cells: u64,
+    /// Representation conversions over complete columns.
+    pub full_column_conversions: u64,
+    /// Logical block cells covered by complete-column conversions.
+    pub full_column_conversion_cells: u64,
     /// `AquiferSystem::block_at` calls. Exactly `256 * height` per chunk fill —
     /// **plus** [`Self::structure_probe_block_at`] and
     /// [`Self::structure_context_block_at`], which are structure consumers with
@@ -176,6 +261,17 @@ pub struct Snapshot {
     /// survey of this crate found the second evaluator only by grepping for the
     /// `match`; a merged counter would have hidden it again.
     pub density_point_computes: [u64; crate::density::Density::KIND_COUNT],
+    /// Preliminary-surface requests after the caller's integer `(>> 2) << 2`
+    /// snap. This includes cache hits and misses from both aquifer and surface
+    /// consumers.
+    pub preliminary_surface_requests: u64,
+    /// Distinct preliminary-surface keys served by the shared cache. This is
+    /// derived from cache computations rather than maintaining a set on the
+    /// request path, so it has no lock or per-key allocation.
+    pub preliminary_surface_unique: u64,
+    /// Preliminary-surface density evaluations that were not answered by a
+    /// preliminary cache.
+    pub preliminary_surface_computations: u64,
     /// Corner *lookups* — one per corner fetched while filling a cell, hit or
     /// miss. Since U4's hoist this is exactly `8 * cell_fills`, **not** 8 per
     /// block: the eight corners of a cell are fetched once for the whole cell.
@@ -212,6 +308,10 @@ pub struct Snapshot {
     /// cannot see LLVM scalarising a `Simd` op. That question is answered by
     /// disassembly, recorded in `docs/worldgen-simd-kernels.md`.
     pub noise_corner_batches: u64,
+    /// Active octave visits in the packed Perlin kernel.
+    pub noise_active_visits: u64,
+    /// Empty octave slots bypassed by the packed Perlin kernel.
+    pub noise_skipped_visits: u64,
     /// Slot-cache lookups that found a memoised value.
     pub slot_hits: u64,
     /// Slot-cache lookups that had to evaluate the subtree — the real
@@ -230,6 +330,8 @@ pub struct Snapshot {
     pub pre_ore_computed: u64,
     /// `pre_ore_stage` hits: served from the memo cache.
     pub pre_ore_hits: u64,
+    /// Request-scoped bordered climate grids prepared for biome and surface stages.
+    pub climate_grid_preparations: u64,
     /// `biome::nearest_biome` calls — climate nearest-neighbour searches.
     ///
     /// **Not brute-force any more.** U9 (`7ff942dd`) put a ported
@@ -324,13 +426,37 @@ pub struct Snapshot {
 impl Default for Snapshot {
     fn default() -> Self {
         Self {
+            cache_hits: [0; CACHE_COUNT],
+            cache_misses: [0; CACHE_COUNT],
+            cache_computes: [0; CACHE_COUNT],
+            cache_evictions: [0; CACHE_COUNT],
+            logical_reads: [0; MEMORY_BOUNDARY_COUNT],
+            logical_writes: [0; MEMORY_BOUNDARY_COUNT],
+            logical_read_bytes: [0; MEMORY_BOUNDARY_COUNT],
+            logical_write_bytes: [0; MEMORY_BOUNDARY_COUNT],
+            block_field_queries: 0,
+            scratch_pool_reuses: 0,
+            scratch_pool_allocations: 0,
+            scratch_pool_evictions: 0,
+            scratch_buffer_allocated_bytes: 0,
+            scratch_retained_bytes: 0,
+            scratch_retained_bytes_high_water: 0,
+            full_column_scans: 0,
+            full_column_scan_cells: 0,
+            full_column_conversions: 0,
+            full_column_conversion_cells: 0,
             block_at: 0,
             density_evals: [0; crate::density::Density::KIND_COUNT],
             density_point_computes: [0; crate::density::Density::KIND_COUNT],
+            preliminary_surface_requests: 0,
+            preliminary_surface_unique: 0,
+            preliminary_surface_computations: 0,
             corner_lookups: 0,
             cell_fills: 0,
             corner_evals: 0,
             noise_corner_batches: 0,
+            noise_active_visits: 0,
+            noise_skipped_visits: 0,
             slot_hits: 0,
             slot_misses: 0,
             slot_misses_by_slot: [0; MAX_TRACKED_SLOTS],
@@ -338,6 +464,7 @@ impl Default for Snapshot {
             palette_intern_hit: 0,
             pre_ore_computed: 0,
             pre_ore_hits: 0,
+            climate_grid_preparations: 0,
             biome_searches: 0,
             biome_rows_compared: 0,
             rng_draws: [0; STAGE_COUNT],
@@ -396,18 +523,43 @@ mod imp {
     use std::cell::Cell;
     use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
-    use super::{MAX_TRACKED_SLOTS, STAGE_COUNT, Snapshot, Stage};
+    use super::{
+        CACHE_COUNT, MAX_TRACKED_SLOTS, MEMORY_BOUNDARY_COUNT, STAGE_COUNT, CacheKind,
+        MemoryBoundary, Snapshot, Stage,
+    };
 
     const KINDS: usize = crate::density::Density::KIND_COUNT;
 
     struct Counters {
+        cache_hits: [AtomicU64; CACHE_COUNT],
+        cache_misses: [AtomicU64; CACHE_COUNT],
+        cache_computes: [AtomicU64; CACHE_COUNT],
+        cache_evictions: [AtomicU64; CACHE_COUNT],
+        logical_reads: [AtomicU64; MEMORY_BOUNDARY_COUNT],
+        logical_writes: [AtomicU64; MEMORY_BOUNDARY_COUNT],
+        logical_read_bytes: [AtomicU64; MEMORY_BOUNDARY_COUNT],
+        logical_write_bytes: [AtomicU64; MEMORY_BOUNDARY_COUNT],
+        scratch_pool_reuses: AtomicU64,
+        scratch_pool_allocations: AtomicU64,
+        scratch_pool_evictions: AtomicU64,
+        scratch_buffer_allocated_bytes: AtomicU64,
+        scratch_retained_bytes: AtomicU64,
+        scratch_retained_bytes_high_water: AtomicU64,
+        full_column_scans: AtomicU64,
+        full_column_scan_cells: AtomicU64,
+        full_column_conversions: AtomicU64,
+        full_column_conversion_cells: AtomicU64,
         block_at: AtomicU64,
         density_evals: [AtomicU64; KINDS],
         density_point_computes: [AtomicU64; KINDS],
+        preliminary_surface_requests: AtomicU64,
+        preliminary_surface_computations: AtomicU64,
         corner_lookups: AtomicU64,
         cell_fills: AtomicU64,
         corner_evals: AtomicU64,
         noise_corner_batches: AtomicU64,
+        noise_active_visits: AtomicU64,
+        noise_skipped_visits: AtomicU64,
         slot_hits: AtomicU64,
         slot_misses: AtomicU64,
         slot_misses_by_slot: [AtomicU64; MAX_TRACKED_SLOTS],
@@ -415,6 +567,7 @@ mod imp {
         palette_intern_hit: AtomicU64,
         pre_ore_computed: AtomicU64,
         pre_ore_hits: AtomicU64,
+        climate_grid_preparations: AtomicU64,
         biome_searches: AtomicU64,
         biome_rows_compared: AtomicU64,
         rng_draws: [AtomicU64; STAGE_COUNT],
@@ -433,13 +586,35 @@ mod imp {
     }
 
     static C: Counters = Counters {
+        cache_hits: [const { AtomicU64::new(0) }; CACHE_COUNT],
+        cache_misses: [const { AtomicU64::new(0) }; CACHE_COUNT],
+        cache_computes: [const { AtomicU64::new(0) }; CACHE_COUNT],
+        cache_evictions: [const { AtomicU64::new(0) }; CACHE_COUNT],
+        logical_reads: [const { AtomicU64::new(0) }; MEMORY_BOUNDARY_COUNT],
+        logical_writes: [const { AtomicU64::new(0) }; MEMORY_BOUNDARY_COUNT],
+        logical_read_bytes: [const { AtomicU64::new(0) }; MEMORY_BOUNDARY_COUNT],
+        logical_write_bytes: [const { AtomicU64::new(0) }; MEMORY_BOUNDARY_COUNT],
+        scratch_pool_reuses: AtomicU64::new(0),
+        scratch_pool_allocations: AtomicU64::new(0),
+        scratch_pool_evictions: AtomicU64::new(0),
+        scratch_buffer_allocated_bytes: AtomicU64::new(0),
+        scratch_retained_bytes: AtomicU64::new(0),
+        scratch_retained_bytes_high_water: AtomicU64::new(0),
+        full_column_scans: AtomicU64::new(0),
+        full_column_scan_cells: AtomicU64::new(0),
+        full_column_conversions: AtomicU64::new(0),
+        full_column_conversion_cells: AtomicU64::new(0),
         block_at: AtomicU64::new(0),
         density_evals: [const { AtomicU64::new(0) }; KINDS],
         density_point_computes: [const { AtomicU64::new(0) }; KINDS],
+        preliminary_surface_requests: AtomicU64::new(0),
+        preliminary_surface_computations: AtomicU64::new(0),
         corner_lookups: AtomicU64::new(0),
         cell_fills: AtomicU64::new(0),
         corner_evals: AtomicU64::new(0),
         noise_corner_batches: AtomicU64::new(0),
+        noise_active_visits: AtomicU64::new(0),
+        noise_skipped_visits: AtomicU64::new(0),
         slot_hits: AtomicU64::new(0),
         slot_misses: AtomicU64::new(0),
         slot_misses_by_slot: [const { AtomicU64::new(0) }; MAX_TRACKED_SLOTS],
@@ -447,6 +622,7 @@ mod imp {
         palette_intern_hit: AtomicU64::new(0),
         pre_ore_computed: AtomicU64::new(0),
         pre_ore_hits: AtomicU64::new(0),
+        climate_grid_preparations: AtomicU64::new(0),
         biome_searches: AtomicU64::new(0),
         biome_rows_compared: AtomicU64::new(0),
         rng_draws: [const { AtomicU64::new(0) }; STAGE_COUNT],
@@ -480,6 +656,105 @@ mod imp {
         c.fetch_add(n, Relaxed);
     }
 
+    /// Records one logical payload lookup at a representation boundary. The
+    /// payload byte count is deliberately supplied by the caller: it describes
+    /// representation bytes, not cache lines or DRAM traffic.
+    #[inline]
+    pub fn bump_logical_read(boundary: MemoryBoundary, items: u64, bytes: u64) {
+        bump_by(&C.logical_reads[boundary as usize], items);
+        bump_by(&C.logical_read_bytes[boundary as usize], bytes);
+    }
+
+    /// Records one logical payload write at a representation boundary.
+    #[inline]
+    pub fn bump_logical_write(boundary: MemoryBoundary, items: u64, bytes: u64) {
+        bump_by(&C.logical_writes[boundary as usize], items);
+        bump_by(&C.logical_write_bytes[boundary as usize], bytes);
+    }
+
+    #[inline]
+    pub fn bump_cache_lookup(kind: CacheKind, hit: bool) {
+        bump(if hit {
+            &C.cache_hits[kind as usize]
+        } else {
+            &C.cache_misses[kind as usize]
+        });
+    }
+
+    #[inline]
+    pub fn bump_cache_compute(kind: CacheKind) {
+        bump(&C.cache_computes[kind as usize]);
+    }
+
+    #[inline]
+    pub fn bump_cache_eviction(kind: CacheKind) {
+        bump(&C.cache_evictions[kind as usize]);
+    }
+
+    #[inline]
+    pub fn bump_scratch_pool_reuse() {
+        bump(&C.scratch_pool_reuses);
+    }
+
+    #[inline]
+    pub fn bump_scratch_pool_allocation() {
+        bump(&C.scratch_pool_allocations);
+    }
+
+    #[inline]
+    pub fn bump_scratch_pool_eviction() {
+        bump(&C.scratch_pool_evictions);
+    }
+
+    /// Adds bytes to the cumulative logical scratch-buffer growth counter.
+    #[inline]
+    pub fn bump_scratch_buffer_allocated_bytes(bytes: u64) {
+        bump_by(&C.scratch_buffer_allocated_bytes, bytes);
+    }
+
+    #[inline]
+    fn update_high_water(value: u64) {
+        let mut old = C.scratch_retained_bytes_high_water.load(Relaxed);
+        while value > old {
+            match C.scratch_retained_bytes_high_water.compare_exchange_weak(
+                old,
+                value,
+                Relaxed,
+                Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(next) => old = next,
+            }
+        }
+    }
+
+    #[inline]
+    pub fn bump_scratch_retained_add(bytes: u64) {
+        let value = C.scratch_retained_bytes.fetch_add(bytes, Relaxed) + bytes;
+        update_high_water(value);
+    }
+
+    #[inline]
+    pub fn bump_scratch_retained_remove(bytes: u64) {
+        C.scratch_retained_bytes.fetch_sub(bytes, Relaxed);
+    }
+
+    /// Records a complete-column scan and its logical cell count. This hook is
+    /// for owning pipeline/materialization boundaries; the core sampler cannot
+    /// infer a scan from an arbitrary sequence of point queries.
+    #[inline]
+    pub fn bump_full_column_scan(cells: u64) {
+        bump(&C.full_column_scans);
+        bump_by(&C.full_column_scan_cells, cells);
+    }
+
+    /// Records a complete-column representation conversion.
+    #[inline]
+    pub fn bump_full_column_conversion(cells: u64) {
+        bump(&C.full_column_conversions);
+        bump_by(&C.full_column_conversion_cells, cells);
+    }
+
     #[inline]
     pub fn current_stage() -> Stage {
         STAGE.get()
@@ -504,6 +779,19 @@ mod imp {
         }
     }
 
+    /// Records one snapped preliminary-surface request. Coordinates are kept
+    /// in the API for call-site compatibility; uniqueness is derived from the
+    /// shared cache's computation count without retaining a key set.
+    #[inline]
+    pub fn bump_preliminary_surface_request(_qx: i32, _qz: i32) {
+        bump(&C.preliminary_surface_requests);
+    }
+
+    #[inline]
+    pub fn bump_preliminary_surface_compute() {
+        bump(&C.preliminary_surface_computations);
+    }
+
     #[inline]
     pub fn bump_corner_lookup() {
         bump(&C.corner_lookups);
@@ -525,6 +813,16 @@ mod imp {
     #[inline]
     pub fn bump_noise_corner_batch() {
         bump(&C.noise_corner_batches);
+    }
+
+    #[inline]
+    pub fn bump_noise_active_visits(n: u64) {
+        bump_by(&C.noise_active_visits, n);
+    }
+
+    #[inline]
+    pub fn bump_noise_skipped_visits(n: u64) {
+        bump_by(&C.noise_skipped_visits, n);
     }
 
     #[inline]
@@ -559,6 +857,11 @@ mod imp {
     #[inline]
     pub fn bump_pre_ore(computed: bool) {
         bump(if computed { &C.pre_ore_computed } else { &C.pre_ore_hits });
+    }
+
+    #[inline]
+    pub fn bump_climate_grid_preparation() {
+        bump(&C.climate_grid_preparations);
     }
 
     #[inline]
@@ -655,6 +958,43 @@ mod imp {
     }
 
     pub fn reset() {
+        for a in &C.cache_hits {
+            a.store(0, Relaxed);
+        }
+        for a in &C.cache_misses {
+            a.store(0, Relaxed);
+        }
+        for a in &C.cache_computes {
+            a.store(0, Relaxed);
+        }
+        for a in &C.cache_evictions {
+            a.store(0, Relaxed);
+        }
+        for a in &C.logical_reads {
+            a.store(0, Relaxed);
+        }
+        for a in &C.logical_writes {
+            a.store(0, Relaxed);
+        }
+        for a in &C.logical_read_bytes {
+            a.store(0, Relaxed);
+        }
+        for a in &C.logical_write_bytes {
+            a.store(0, Relaxed);
+        }
+        C.scratch_pool_reuses.store(0, Relaxed);
+        C.scratch_pool_allocations.store(0, Relaxed);
+        C.scratch_pool_evictions.store(0, Relaxed);
+        C.scratch_buffer_allocated_bytes.store(0, Relaxed);
+        // Retained bytes describe live/pool state rather than an event stream;
+        // preserve the current value across a reset so the next release cannot
+        // underflow it. The high-water mark starts at that retained baseline.
+        let retained = C.scratch_retained_bytes.load(Relaxed);
+        C.scratch_retained_bytes_high_water.store(retained, Relaxed);
+        C.full_column_scans.store(0, Relaxed);
+        C.full_column_scan_cells.store(0, Relaxed);
+        C.full_column_conversions.store(0, Relaxed);
+        C.full_column_conversion_cells.store(0, Relaxed);
         C.block_at.store(0, Relaxed);
         for a in &C.density_evals {
             a.store(0, Relaxed);
@@ -662,10 +1002,14 @@ mod imp {
         for a in &C.density_point_computes {
             a.store(0, Relaxed);
         }
+        C.preliminary_surface_requests.store(0, Relaxed);
+        C.preliminary_surface_computations.store(0, Relaxed);
         C.corner_lookups.store(0, Relaxed);
         C.cell_fills.store(0, Relaxed);
         C.corner_evals.store(0, Relaxed);
         C.noise_corner_batches.store(0, Relaxed);
+        C.noise_active_visits.store(0, Relaxed);
+        C.noise_skipped_visits.store(0, Relaxed);
         C.slot_hits.store(0, Relaxed);
         C.slot_misses.store(0, Relaxed);
         for a in &C.slot_misses_by_slot {
@@ -675,6 +1019,7 @@ mod imp {
         C.palette_intern_hit.store(0, Relaxed);
         C.pre_ore_computed.store(0, Relaxed);
         C.pre_ore_hits.store(0, Relaxed);
+        C.climate_grid_preparations.store(0, Relaxed);
         C.biome_searches.store(0, Relaxed);
         C.biome_rows_compared.store(0, Relaxed);
         for a in &C.rng_draws {
@@ -698,15 +1043,39 @@ mod imp {
 
     pub fn snapshot() -> Snapshot {
         Snapshot {
+            cache_hits: std::array::from_fn(|i| C.cache_hits[i].load(Relaxed)),
+            cache_misses: std::array::from_fn(|i| C.cache_misses[i].load(Relaxed)),
+            cache_computes: std::array::from_fn(|i| C.cache_computes[i].load(Relaxed)),
+            cache_evictions: std::array::from_fn(|i| C.cache_evictions[i].load(Relaxed)),
+            logical_reads: std::array::from_fn(|i| C.logical_reads[i].load(Relaxed)),
+            logical_writes: std::array::from_fn(|i| C.logical_writes[i].load(Relaxed)),
+            logical_read_bytes: std::array::from_fn(|i| C.logical_read_bytes[i].load(Relaxed)),
+            logical_write_bytes: std::array::from_fn(|i| C.logical_write_bytes[i].load(Relaxed)),
+            block_field_queries: C.logical_reads[MemoryBoundary::BlockField as usize].load(Relaxed),
+            scratch_pool_reuses: C.scratch_pool_reuses.load(Relaxed),
+            scratch_pool_allocations: C.scratch_pool_allocations.load(Relaxed),
+            scratch_pool_evictions: C.scratch_pool_evictions.load(Relaxed),
+            scratch_buffer_allocated_bytes: C.scratch_buffer_allocated_bytes.load(Relaxed),
+            scratch_retained_bytes: C.scratch_retained_bytes.load(Relaxed),
+            scratch_retained_bytes_high_water: C.scratch_retained_bytes_high_water.load(Relaxed),
+            full_column_scans: C.full_column_scans.load(Relaxed),
+            full_column_scan_cells: C.full_column_scan_cells.load(Relaxed),
+            full_column_conversions: C.full_column_conversions.load(Relaxed),
+            full_column_conversion_cells: C.full_column_conversion_cells.load(Relaxed),
             block_at: C.block_at.load(Relaxed),
             density_evals: std::array::from_fn(|i| C.density_evals[i].load(Relaxed)),
             density_point_computes: std::array::from_fn(|i| {
                 C.density_point_computes[i].load(Relaxed)
             }),
+            preliminary_surface_requests: C.preliminary_surface_requests.load(Relaxed),
+            preliminary_surface_unique: C.preliminary_surface_computations.load(Relaxed),
+            preliminary_surface_computations: C.preliminary_surface_computations.load(Relaxed),
             corner_lookups: C.corner_lookups.load(Relaxed),
             cell_fills: C.cell_fills.load(Relaxed),
             corner_evals: C.corner_evals.load(Relaxed),
             noise_corner_batches: C.noise_corner_batches.load(Relaxed),
+            noise_active_visits: C.noise_active_visits.load(Relaxed),
+            noise_skipped_visits: C.noise_skipped_visits.load(Relaxed),
             slot_hits: C.slot_hits.load(Relaxed),
             slot_misses: C.slot_misses.load(Relaxed),
             slot_misses_by_slot: std::array::from_fn(|i| C.slot_misses_by_slot[i].load(Relaxed)),
@@ -714,6 +1083,7 @@ mod imp {
             palette_intern_hit: C.palette_intern_hit.load(Relaxed),
             pre_ore_computed: C.pre_ore_computed.load(Relaxed),
             pre_ore_hits: C.pre_ore_hits.load(Relaxed),
+            climate_grid_preparations: C.climate_grid_preparations.load(Relaxed),
             biome_searches: C.biome_searches.load(Relaxed),
             biome_rows_compared: C.biome_rows_compared.load(Relaxed),
             rng_draws: std::array::from_fn(|i| C.rng_draws[i].load(Relaxed)),
@@ -735,18 +1105,48 @@ mod imp {
 
 #[cfg(not(feature = "gen-counters"))]
 mod imp {
-    use super::{Snapshot, Stage};
+    use super::{CacheKind, MemoryBoundary, Snapshot, Stage};
 
     #[inline(always)]
     pub fn current_stage() -> Stage {
         Stage::Other
     }
     #[inline(always)]
+    pub fn bump_logical_read(_boundary: MemoryBoundary, _items: u64, _bytes: u64) {}
+    #[inline(always)]
+    pub fn bump_logical_write(_boundary: MemoryBoundary, _items: u64, _bytes: u64) {}
+    #[inline(always)]
+    pub fn bump_cache_lookup(_kind: CacheKind, _hit: bool) {}
+    #[inline(always)]
+    pub fn bump_cache_compute(_kind: CacheKind) {}
+    #[inline(always)]
+    pub fn bump_cache_eviction(_kind: CacheKind) {}
+    #[inline(always)]
+    pub fn bump_scratch_pool_reuse() {}
+    #[inline(always)]
+    pub fn bump_scratch_pool_allocation() {}
+    #[inline(always)]
+    pub fn bump_scratch_pool_eviction() {}
+    #[inline(always)]
+    pub fn bump_scratch_buffer_allocated_bytes(_bytes: u64) {}
+    #[inline(always)]
+    pub fn bump_scratch_retained_add(_bytes: u64) {}
+    #[inline(always)]
+    pub fn bump_scratch_retained_remove(_bytes: u64) {}
+    #[inline(always)]
+    pub fn bump_full_column_scan(_cells: u64) {}
+    #[inline(always)]
+    pub fn bump_full_column_conversion(_cells: u64) {}
+    #[inline(always)]
     pub fn bump_block_at() {}
     #[inline(always)]
     pub fn bump_density_eval(_kind_index: usize) {}
     #[inline(always)]
     pub fn bump_density_point_compute(_kind_index: usize) {}
+    #[inline(always)]
+    pub fn bump_preliminary_surface_request(_qx: i32, _qz: i32) {}
+    #[inline(always)]
+    pub fn bump_preliminary_surface_compute() {}
     #[inline(always)]
     pub fn bump_corner_lookup() {}
     /// Inert without the feature.
@@ -759,6 +1159,10 @@ mod imp {
     #[inline(always)]
     pub fn bump_noise_corner_batch() {}
     #[inline(always)]
+    pub fn bump_noise_active_visits(_n: u64) {}
+    #[inline(always)]
+    pub fn bump_noise_skipped_visits(_n: u64) {}
+    #[inline(always)]
     pub fn bump_slot_hit() {}
     #[inline(always)]
     pub fn bump_slot_miss(_slot: usize) {}
@@ -768,6 +1172,8 @@ mod imp {
     pub fn bump_palette_intern_hit() {}
     #[inline(always)]
     pub fn bump_pre_ore(_computed: bool) {}
+    #[inline(always)]
+    pub fn bump_climate_grid_preparation() {}
     #[inline(always)]
     pub fn bump_biome_search(_rows: u64) {}
     #[inline(always)]
@@ -814,11 +1220,18 @@ mod imp {
 }
 
 pub use imp::{
-    StageGuard, bump_biome_search, bump_block_at, bump_cell_fill, bump_corner_eval,
+    StageGuard, bump_biome_search, bump_block_at, bump_cache_compute,
+    bump_cache_eviction, bump_cache_lookup, bump_cell_fill, bump_corner_eval,
     bump_corner_lookup, bump_density_eval,
-    bump_density_point_compute, bump_noise_corner_batch, bump_palette_intern_hit,
+    bump_density_point_compute, bump_noise_active_visits, bump_noise_corner_batch,
+    bump_noise_skipped_visits, bump_palette_intern_hit,
     bump_palette_intern_new,
-    bump_pre_ore, bump_rng_draw, bump_slot_hit, bump_slot_miss, bump_state_intern_new,
+    bump_full_column_conversion, bump_full_column_scan, bump_logical_read, bump_logical_write,
+    bump_climate_grid_preparation, bump_pre_ore, bump_preliminary_surface_compute,
+    bump_preliminary_surface_request,
+    bump_rng_draw, bump_scratch_buffer_allocated_bytes, bump_scratch_pool_allocation,
+    bump_scratch_pool_eviction, bump_scratch_pool_reuse, bump_scratch_retained_add,
+    bump_scratch_retained_remove, bump_slot_hit, bump_slot_miss, bump_state_intern_new,
     bump_state_name_lookup, bump_stitch_cells, bump_string_allocs, bump_structure_aquifer,
     bump_structure_context_block_at, bump_structure_context_kind_block_at,
     bump_structure_context_replaceable_block_at, bump_structure_height_probe, bump_structure_start,
@@ -847,6 +1260,8 @@ mod tests {
         assert_eq!(Stage::Other as usize, STAGE_COUNT - 1);
         assert_eq!(STAGE_NAMES[Stage::Vegetation as usize], "vegetation");
         assert_eq!(STAGE_NAMES[Stage::Aquifer as usize], "aquifer");
+        assert_eq!(MEMORY_BOUNDARY_NAMES.len(), MEMORY_BOUNDARY_COUNT);
+        assert_eq!(CACHE_NAMES.len(), CACHE_COUNT);
     }
 
     /// With the feature off every hook must be callable and every read zero —
@@ -860,7 +1275,23 @@ mod tests {
         bump_structure_context_replaceable_block_at();
         bump_structure_context_kind_block_at();
         bump_rng_draw();
+        bump_preliminary_surface_request(-4, 8);
+        bump_preliminary_surface_compute();
         bump_stitch_cells(1_000);
+        bump_cache_lookup(CacheKind::Cell, true);
+        bump_cache_lookup(CacheKind::Slot, false);
+        bump_cache_compute(CacheKind::Slot);
+        bump_cache_eviction(CacheKind::Leaf);
+        bump_logical_read(MemoryBoundary::BlockGrid, 2, 4);
+        bump_logical_write(MemoryBoundary::BlockGrid, 1, 2);
+        bump_scratch_pool_reuse();
+        bump_scratch_pool_allocation();
+        bump_scratch_pool_eviction();
+        bump_scratch_buffer_allocated_bytes(32);
+        bump_scratch_retained_add(32);
+        bump_scratch_retained_remove(32);
+        bump_full_column_scan(384);
+        bump_full_column_conversion(384);
         let guard = StageGuard::enter(Stage::Vegetation);
         bump_rng_draw();
         drop(guard);
@@ -881,6 +1312,22 @@ mod tests {
         bump_structure_context_replaceable_block_at();
         bump_structure_context_kind_block_at();
         bump_rng_draw();
+        bump_preliminary_surface_request(-4, 8);
+        bump_preliminary_surface_compute();
+        bump_cache_lookup(CacheKind::Cell, true);
+        bump_cache_lookup(CacheKind::Slot, false);
+        bump_cache_compute(CacheKind::Slot);
+        bump_cache_eviction(CacheKind::Leaf);
+        bump_logical_read(MemoryBoundary::BlockGrid, 2, 4);
+        bump_logical_write(MemoryBoundary::BlockGrid, 1, 2);
+        bump_scratch_pool_reuse();
+        bump_scratch_pool_allocation();
+        bump_scratch_pool_eviction();
+        bump_scratch_buffer_allocated_bytes(32);
+        bump_scratch_retained_add(32);
+        bump_scratch_retained_remove(32);
+        bump_full_column_scan(384);
+        bump_full_column_conversion(384);
         {
             let _veg = StageGuard::enter(Stage::Vegetation);
             bump_rng_draw();
@@ -902,11 +1349,32 @@ mod tests {
         assert_eq!(s.structure_context_block_at, 2);
         assert_eq!(s.structure_context_replaceable_block_at, 1);
         assert_eq!(s.structure_context_kind_block_at, 1);
+        assert_eq!(s.preliminary_surface_requests, 1);
+        assert_eq!(s.preliminary_surface_unique, 1);
+        assert_eq!(s.preliminary_surface_computations, 1);
         assert_eq!(s.rng_draws[Stage::Other as usize], 1);
         assert_eq!(s.rng_draws[Stage::Vegetation as usize], 3);
         assert_eq!(s.rng_draws[Stage::Shape as usize], 1);
         assert_eq!(s.stage_entered[Stage::Vegetation as usize], 1);
         assert_eq!(s.stage_entered[Stage::Shape as usize], 1);
+        assert_eq!(s.cache_hits[CacheKind::Cell as usize], 1);
+        assert_eq!(s.cache_misses[CacheKind::Slot as usize], 1);
+        assert_eq!(s.cache_computes[CacheKind::Slot as usize], 1);
+        assert_eq!(s.cache_evictions[CacheKind::Leaf as usize], 1);
+        assert_eq!(s.logical_reads[MemoryBoundary::BlockGrid as usize], 2);
+        assert_eq!(s.logical_read_bytes[MemoryBoundary::BlockGrid as usize], 4);
+        assert_eq!(s.logical_writes[MemoryBoundary::BlockGrid as usize], 1);
+        assert_eq!(s.logical_write_bytes[MemoryBoundary::BlockGrid as usize], 2);
+        assert_eq!(s.scratch_pool_reuses, 1);
+        assert_eq!(s.scratch_pool_allocations, 1);
+        assert_eq!(s.scratch_pool_evictions, 1);
+        assert_eq!(s.scratch_buffer_allocated_bytes, 32);
+        assert_eq!(s.scratch_retained_bytes, 0);
+        assert_eq!(s.scratch_retained_bytes_high_water, 32);
+        assert_eq!(s.full_column_scans, 1);
+        assert_eq!(s.full_column_scan_cells, 384);
+        assert_eq!(s.full_column_conversions, 1);
+        assert_eq!(s.full_column_conversion_cells, 384);
 
         reset();
         assert_eq!(snapshot(), Snapshot::default());

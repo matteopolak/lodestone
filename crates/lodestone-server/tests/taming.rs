@@ -637,6 +637,11 @@ fn a_tamed_parrot_does_not_auto_sit_but_can_still_be_ordered_to_and_follows_tigh
     // returns whenever the parrot has stalled short of the goal, which is
     // what re-arms `can_use` in both vanilla and here.
     for _ in 0..30 {
+        // Keep the independent shoulder-mount goal from removing the mob while
+        // this assertion measures its follow stop distance.
+        sim.get_mut(parrot)
+            .expect("alive")
+            .set_shoulder_dismount_ticks(0);
         sim.tick_for(10);
         let gap = owner_at.x - sim.position(parrot).expect("alive").x;
         if (0.25..3.5).contains(&gap) {

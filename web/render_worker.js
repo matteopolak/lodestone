@@ -43,6 +43,7 @@ async function mount(request) {
       canvas: request.canvas,
       clientJar: request.clientJar,
       blocksJson: request.blocksJson,
+      logLevel: request.logLevel,
       assetProvider: packageAsset,
       onHostAction: action => self.postMessage({ kind: "host-action", action }),
       onProgress: event => self.postMessage({ kind: "progress", event }),

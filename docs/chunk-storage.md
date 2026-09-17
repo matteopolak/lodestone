@@ -31,6 +31,22 @@ replaying per-cell would mean re-resolving each of a column's ~98,000 cells agai
 column-wide palette one string comparison at a time, when the region file already hands over
 almost all of that structure pre-computed.
 
+Generated columns derive palette metadata, random-tick section counts, and the three client
+heightmaps while the flat palette-index grid is analyzed for section uniformity and maximum id.
+That same analysis feeds section packing, so the generated path does not make a separate metadata
+scan and does not unpack the new section storage to reconstruct data it could have retained.
+Imported dimension adapters still use the packed-grid recount because they do not receive the flat
+generation handoff.
+
+Lifecycle spill replay uses `ChunkColumn::apply_ordered_block_batch` for the same reason at a
+smaller scale. The batch validates every coordinate before mutating, preserves source order,
+updates section ticking counts per write, and refreshes each dirty local X/Z heightmap cell once
+after the batch. Detached generation snapshots and rollback still commit through the same
+column method; single gameplay edits retain the scalar path. Generation halo leases retain their
+coordinate revision records for the lease lifetime, so an evicted or cold coordinate cannot lose
+the conflict check while a generated result is in flight; idle records are pruned after the lease
+and other multi-coordinate writes release their gates.
+
 The retained `ChunkColumn` and production `ChunkSource` implementations remain in the server's
 chunk module. The deliberately limited `WorldgenChunkSource` used by transport/seam tests lives
 in `chunk_worldgen.rs`: it point-samples a density node into stone-or-air and has no edit ledger,

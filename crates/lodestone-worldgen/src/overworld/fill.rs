@@ -8,15 +8,75 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 
-use crate::aquifer::{AquiferSystem, BlockKind, AnyPositionalFactory};
+use lodestone_worldgen_core::hash::FastMap;
+
+use crate::aquifer::{AquiferSystem, AnyPositionalFactory, BlockKind, VerticalRunState};
 use crate::biome::BiomeSearchCursor;
-use crate::carver::{CarveGrid, CarveObserver, CarverConfig};
-use crate::density::Density;
-use crate::engine::Program;
+use crate::carver::{CarveGrid, CarveObserver, CarverConfig, TouchedMask};
+use crate::density::{Density, NoiseChunkRegionSampler};
+use crate::engine::Bounds;
+use crate::engine::{PointProgram, Program};
+use crate::interner::{BaseStateFacts, StateId};
 use crate::rng::RandomSource;
 use crate::surface::{PreState, SurfaceDiff};
 
 use super::{OverworldGenerator, PreOreResult};
+
+/// Packed pre-surface fill output. The carrier uses the same `u16` width as
+/// the dense grid's final block indices, so materialisation can rewrite it in
+/// place instead of allocating a second full-column buffer.
+#[derive(Debug)]
+struct PackedShapeField {
+    blocks: Vec<u16>,
+    height: i32,
+}
+
+/// Baseline ocean-floor heights produced as the packed materialisation walk
+/// visits final states. Later stages only replace entries for touched columns.
+#[derive(Debug, Clone, Copy)]
+struct OceanFloorState {
+    heights: [i32; 256],
+    touched: TouchedMask,
+    min_y: i32,
+}
+
+impl OceanFloorState {
+    fn new(min_y: i32) -> Self {
+        Self {
+            heights: [min_y; 256],
+            touched: [0; 4],
+            min_y,
+        }
+    }
+
+    #[inline]
+    fn observe(&mut self, lx: i32, y: i32, lz: i32, facts: BaseStateFacts) {
+        if facts.is_ocean_floor() {
+            self.heights[(lz * 16 + lx) as usize] = y + 1;
+        }
+    }
+}
+
+#[inline]
+fn pack_block_kind(block: BlockKind) -> u16 {
+    match block {
+        BlockKind::Air => 0,
+        BlockKind::Stone => 1,
+        BlockKind::Water => 2,
+        BlockKind::Lava => 3,
+    }
+}
+
+#[inline]
+fn unpack_block_kind(block: u16) -> BlockKind {
+    match block {
+        0 => BlockKind::Air,
+        1 => BlockKind::Stone,
+        2 => BlockKind::Water,
+        3 => BlockKind::Lava,
+        other => panic!("invalid packed fill block kind: {other}"),
+    }
+}
 
 /// The real aquifer's eight router outputs plus its positional RNG factory,
 /// pre-built once from the same shared [`Builder`] that builds
@@ -46,22 +106,163 @@ pub(super) struct AquiferTrees {
     pub(super) spread: Arc<Density>,
     pub(super) lava: Arc<Density>,
     pub(super) prelim: Arc<Density>,
+    /// Compiled point path for `prelim`, shared by every chunk-bound aquifer.
+    /// Its evaluator scratch remains inside each [`AquiferSystem`].
+    pub(super) prelim_program: Arc<PointProgram>,
     pub(super) positional: AnyPositionalFactory,
     pub(super) cell_width: i32,
     pub(super) cell_height: i32,
 }
 
 impl OverworldGenerator {
-    /// The actual stages 1-4 computation [`Self::pre_ore_stage`] memoises.
-    /// Never call this directly outside that wrapper — doing so bypasses the
-    /// cache and reintroduces the exact 9× redundancy this cache exists to
-    /// remove.
-    pub(super) fn pre_ore_stage_uncached(&self, cx: i32, cz: i32) -> PreOreResult {
+    /// Prepares the terrain-prefix closure used by one production target.
+    pub fn prepare_pre_ore_batch(&self, cx: i32, cz: i32) -> usize {
+        self.prepare_pre_ore_targets(&[(cx, cz)])
+    }
+
+    /// Prepares nearby production targets while keeping each density sampler
+    /// within the cache-efficient five-by-five request closure.
+    pub fn prepare_pre_ore_targets(&self, targets: &[(i32, i32)]) -> usize {
+        self.prepare_pre_ore_targets_with_radius(targets, super::COLUMN_CLOSURE_RADIUS)
+    }
+
+    /// Prepares the terrain halo required by a target-owned decoration pass.
+    pub fn prepare_pre_ore_targets_with_radius(
+        &self,
+        targets: &[(i32, i32)],
+        radius: i32,
+    ) -> usize {
+        assert!(radius >= 0, "pre-ore radius must be non-negative");
+        let preliminary = self.preliminary_cache(crate::aquifer::PRELIMINARY_CACHE_BATCH_CAPACITY);
+        targets
+            .iter()
+            .map(|&(cx, cz)| {
+                let positions = (-radius..=radius)
+                    .flat_map(|dz| (-radius..=radius).map(move |dx| (cx + dx, cz + dz)))
+                    .collect();
+                self.prepare_pre_ore_region(positions, None, &preliminary)
+            })
+            .sum()
+    }
+
+    /// Prepares target-local terrain while an enclosing production batch lease
+    /// is live. Each target keeps its own bounded density sampler and exact
+    /// traversal order; only the store's repeated pin/unpin work is removed.
+    pub(super) fn prepare_pre_ore_targets_with_lease(
+        &self,
+        targets: &[(i32, i32)],
+        radius: i32,
+        lease: &super::OverworldBatchLease<'_>,
+    ) -> usize {
+        assert!(radius >= 0, "pre-ore radius must be non-negative");
+        let preliminary = Arc::clone(&lease.preliminary);
+        targets
+            .iter()
+            .map(|&(cx, cz)| {
+                let positions = (-radius..=radius)
+                    .flat_map(|dz| (-radius..=radius).map(move |dx| (cx + dx, cz + dz)))
+                    .collect();
+                self.prepare_pre_ore_region(positions, Some(&lease.view), &preliminary)
+            })
+            .sum()
+    }
+
+    fn prepare_pre_ore_region(
+        &self,
+        positions: Vec<(i32, i32)>,
+        existing_lease: Option<&crate::overworld::store::ViewScope<'_, super::ChunkStages>>,
+        preliminary: &Arc<crate::aquifer::PreliminarySurfaceCache>,
+    ) -> usize {
+        let Some(&(min_x, min_z)) = positions.first() else {
+            return 0;
+        };
+        let (mut max_x, mut max_z) = (min_x, min_z);
+        let (mut low_x, mut low_z) = (min_x, min_z);
+        for &(x, z) in &positions[1..] {
+            low_x = low_x.min(x);
+            low_z = low_z.min(z);
+            max_x = max_x.max(x);
+            max_z = max_z.max(z);
+        }
+        let centre = ((low_x + max_x).div_euclid(2), (low_z + max_z).div_euclid(2));
+        let radius = positions.iter().fold(0, |radius, &(x, z)| {
+            radius.max((x - centre.0).abs()).max((z - centre.1).abs())
+        });
+        let bounds = Bounds {
+            x: (low_x * 16, max_x * 16 + 15),
+            y: (self.min_y, self.min_y + self.height - 1),
+            z: (low_z * 16, max_z * 16 + 15),
+        };
+        let mut region_sampler = None;
+        let compute = |(source_x, source_z)| {
+            let sampler = region_sampler.get_or_insert_with(|| {
+                NoiseChunkRegionSampler::from_program(
+                    self.aquifer_trees.final_density.clone(),
+                    self.slot_count,
+                    self.aquifer_trees.cell_width,
+                    self.aquifer_trees.cell_height,
+                    bounds,
+                )
+            });
+            self.pre_ore_stage_uncached_with_sampler(
+                source_x,
+                source_z,
+                Some(sampler),
+                preliminary,
+            )
+        };
+        let prepared = match existing_lease {
+            Some(lease) => self.store.compute_stage_batch_in_view(
+                lease,
+                positions,
+                |entry| &entry.pre_ore,
+                crate::counters::bump_pre_ore,
+                compute,
+            ),
+            None => self.store.compute_stage_batch(
+                centre,
+                radius,
+                positions,
+                |entry| &entry.pre_ore,
+                crate::counters::bump_pre_ore,
+                compute,
+            ),
+        };
+        prepared.len()
+    }
+
+    pub(super) fn pre_ore_stage_uncached_with_preliminary_cache(
+        &self,
+        cx: i32,
+        cz: i32,
+        preliminary: &Arc<crate::aquifer::PreliminarySurfaceCache>,
+    ) -> PreOreResult {
+        let sampler = NoiseChunkRegionSampler::from_program(
+            self.aquifer_trees.final_density.clone(),
+            self.slot_count,
+            self.aquifer_trees.cell_width,
+            self.aquifer_trees.cell_height,
+            Bounds {
+                x: (cx * 16, cx * 16 + 15),
+                y: (self.min_y, self.min_y + self.height - 1),
+                z: (cz * 16, cz * 16 + 15),
+            },
+        );
+        self.pre_ore_stage_uncached_with_sampler(cx, cz, Some(&sampler), preliminary)
+    }
+
+    fn pre_ore_stage_uncached_with_sampler(
+        &self,
+        cx: i32,
+        cz: i32,
+        region_sampler: Option<&NoiseChunkRegionSampler>,
+        preliminary: &Arc<crate::aquifer::PreliminarySurfaceCache>,
+    ) -> PreOreResult {
         let base_x = cx * 16;
         let base_z = cz * 16;
         let mut schedule = crate::stage_schedule::OVERWORLD.cursor();
 
-        let aquifer = self.build_aquifer(cx, cz);
+        let aquifer = self.build_aquifer_with_preliminary_cache(cx, cz, preliminary);
         // Structure placement's S3. Built here rather than passed in because the *only*
         // consumer is the fill below, and it must be built from this chunk's own
         // refs — a beardifier from a neighbouring chunk has a different junction
@@ -71,35 +272,44 @@ impl OverworldGenerator {
         let beard = self.beardifier_for(cx, cz);
         schedule.enter(crate::stage_schedule::ColumnStage::StructureInfluence);
         schedule.enter(crate::stage_schedule::ColumnStage::Fill);
-        let field = self.fill_stage(&aquifer, base_x, base_z, &beard);
-        let heights = self.heights_from_field(&field);
+        let (field, heights) = self.fill_stage_packed_with_sampler(
+            &aquifer,
+            base_x,
+            base_z,
+            &beard,
+            region_sampler,
+        );
         let mut biome_cursor = self
             .dynamic_biome
             .as_ref()
             .map(|dynamic| dynamic.table.search_cursor());
+        let climate_grid = self.prepare_climate_grid(base_x, base_z);
         // The 4x4x4 grid is now the primary biome product and the
         // 16-entry surface array is read out of it. Two separate sample passes
         // would be two chances to diverge; see `biome_stage`.
         schedule.enter(crate::stage_schedule::ColumnStage::Biomes);
-        let biome_cells = self.biome_cells_stage(
+        let biome_cells = self.biome_cells_stage_with_prepared(
             base_x,
             base_z,
             biome_cursor.as_mut().map(|cursor| cursor),
+            climate_grid.as_deref(),
         );
         let biome_quarts = self.biome_stage(&biome_cells, &heights);
         schedule.enter(crate::stage_schedule::ColumnStage::Surface);
-        let surface_diff = self.surface_stage(
+        let surface_diff = self.surface_stage_packed_with_preliminary_cache(
             &field,
             &heights,
             base_x,
             base_z,
             biome_cursor.as_mut().map(|cursor| cursor),
+            climate_grid,
+            preliminary,
         );
 
         schedule.enter(crate::stage_schedule::ColumnStage::Materialize);
-        let world = self.materialize_world(&field, surface_diff, base_x, base_z);
+        let (world, mut ocean_floor) = self.materialize_world_packed(field, surface_diff, base_x, base_z);
         schedule.enter(crate::stage_schedule::ColumnStage::Carvers);
-        let world = self.carve_stage(
+        let world = self.carve_stage_with_touched(
             cx,
             cz,
             &aquifer,
@@ -109,16 +319,22 @@ impl OverworldGenerator {
             base_z,
             world,
             biome_cursor.as_mut().map(|cursor| cursor),
+            Some(&mut ocean_floor.touched),
         );
         // Structure placement's S2. A no-op (and free) for a generator with no structure
         // data, which is every fixture resolver in this workspace.
         schedule.enter(crate::stage_schedule::ColumnStage::StructurePlacement);
-        let world = self.structure_place_stage(cx, cz, world);
+        let world = self.structure_place_stage_with_touched(
+            cx,
+            cz,
+            world,
+            Some(&mut ocean_floor.touched),
+        );
         // Ores consult the live `OCEAN_FLOOR_WG` map while deciding whether a
         // blob is buried. Unlike the surface and biome heights above, this map
         // must see the completed pre-ore terrain: a carver can lower a column
         // enough to cull a feature before it draws its blob radii.
-        let ore_heights = self.ore_heights_from_world(&world);
+        let ore_heights = self.ore_heights_from_ocean_floor_state(&world, ocean_floor);
 
         // `Arc` because `PreOreResult` hands this world out to
         // the unified FEATURES stage's rim sources rather than only into a mutating
@@ -138,9 +354,18 @@ impl OverworldGenerator {
     /// field types are `Program` and `Arc<Density>`: nothing else in this
     /// function changed.
     pub(super) fn build_aquifer(&self, cx: i32, cz: i32) -> AquiferSystem {
+        self.build_aquifer_with_preliminary_cache(cx, cz, &self.preliminary_region)
+    }
+
+    pub(super) fn build_aquifer_with_preliminary_cache(
+        &self,
+        cx: i32,
+        cz: i32,
+        preliminary: &Arc<crate::aquifer::PreliminarySurfaceCache>,
+    ) -> AquiferSystem {
         let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Aquifer);
         let t = &self.aquifer_trees;
-        AquiferSystem::from_parts(
+        AquiferSystem::from_parts_with_preliminary_cache(
             t.final_density.clone(),
             t.erosion.clone(),
             t.depth.clone(),
@@ -149,6 +374,7 @@ impl OverworldGenerator {
             t.spread.clone(),
             t.lava.clone(),
             t.prelim.clone(),
+            t.prelim_program.clone(),
             t.positional,
             self.sea_level,
             self.min_y,
@@ -158,13 +384,13 @@ impl OverworldGenerator {
             self.slot_count,
             t.cell_width,
             t.cell_height,
+            Arc::clone(preliminary),
         )
     }
 
     /// Stage 1: `fillFromNoise` — shape + the **real** aquifer,
     /// replacing the sea-level approximation this generator used before.
-    /// Returns a `16×height×16` dense field of [`BlockKind`] indexed by
-    /// [`Self::idx`].
+    /// Returns the dense field and its solid-top heights in one pass.
     ///
     /// # The two loops, and why they are two
     ///
@@ -188,67 +414,196 @@ impl OverworldGenerator {
         base_x: i32,
         base_z: i32,
         beard: &crate::structure::beardifier::Beardifier,
-    ) -> Vec<BlockKind> {
+    ) -> (Vec<BlockKind>, [i32; 256]) {
+        let (packed, heights) = self.fill_stage_packed_with_sampler(
+            aquifer,
+            base_x,
+            base_z,
+            beard,
+            None,
+        );
+        let field = packed.blocks.into_iter().map(unpack_block_kind).collect();
+        (field, heights)
+    }
+
+    fn fill_stage_packed_with_sampler(
+        &self,
+        aquifer: &AquiferSystem,
+        base_x: i32,
+        base_z: i32,
+        beard: &crate::structure::beardifier::Beardifier,
+        region_sampler: Option<&NoiseChunkRegionSampler>,
+    ) -> (PackedShapeField, [i32; 256]) {
         let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Shape);
+        crate::counters::bump_full_column_scan((16 * 16 * self.height) as u64);
         let height = self.height as usize;
-        let mut field = vec![BlockKind::Air; 16 * 16 * height];
+        let mut field = vec![pack_block_kind(BlockKind::Air); 16 * 16 * height];
+        let mut heights = [self.min_y - 1; 256];
+        let use_cells = region_sampler.is_some_and(|region| {
+            region.supports_final_density_cells()
+                && self.min_y.rem_euclid(8) == 0
+                && self.height.rem_euclid(8) == 0
+        });
+        if use_cells {
+            self.fill_stage_cells(
+                aquifer,
+                base_x,
+                base_z,
+                beard,
+                region_sampler.expect("cell path selected a region sampler"),
+                &mut field,
+                &mut heights,
+            );
+            for height in &mut heights {
+                *height = (*height).max(self.sea_level - 1);
+            }
+            return (PackedShapeField { blocks: field, height: self.height }, heights);
+        }
+        let mut densities = vec![0.0; height];
+        let mut blocks = vec![BlockKind::Air; height];
         if beard.is_empty() {
             for lz in 0..16i32 {
                 for lx in 0..16i32 {
+                    let (wx, wz) = (base_x + lx, base_z + lz);
+                    match region_sampler {
+                        Some(region) => {
+                            region.final_density_column(wx, wz, self.min_y, &mut densities)
+                        }
+                        None => aquifer.final_density_column(wx, wz, self.min_y, &mut densities),
+                    }
+                    aquifer.block_at_density_vertical_run(
+                        wx,
+                        wz,
+                        self.min_y,
+                        &densities,
+                        &mut blocks,
+                    );
                     for ly in 0..self.height {
                         let wy = self.min_y + ly;
-                        field[Self::idx(lx, ly, lz, self.height)] =
-                            aquifer.block_at(base_x + lx, wy, base_z + lz);
+                        let block = blocks[ly as usize];
+                        field[Self::idx(lx, ly, lz, self.height)] = pack_block_kind(block);
+                        if block == BlockKind::Stone {
+                            heights[(lz * 16 + lx) as usize] = wy;
+                        }
                     }
                 }
             }
-            return field;
-        }
-        for lz in 0..16i32 {
-            for lx in 0..16i32 {
-                for ly in 0..self.height {
-                    let wy = self.min_y + ly;
+        } else {
+            for lz in 0..16i32 {
+                for lx in 0..16i32 {
                     let (wx, wz) = (base_x + lx, base_z + lz);
-                    field[Self::idx(lx, ly, lz, self.height)] =
-                        aquifer.block_at_beard(wx, wy, wz, beard.compute(wx, wy, wz));
+                    match region_sampler {
+                        Some(region) => {
+                            region.final_density_column(wx, wz, self.min_y, &mut densities)
+                        }
+                        None => aquifer.final_density_column(wx, wz, self.min_y, &mut densities),
+                    }
+                    for ly in 0..self.height {
+                        let wy = self.min_y + ly;
+                        densities[ly as usize] += beard.compute(wx, wy, wz);
+                    }
+                    aquifer.block_at_density_vertical_run(
+                        wx,
+                        wz,
+                        self.min_y,
+                        &densities,
+                        &mut blocks,
+                    );
+                    for ly in 0..self.height {
+                        let wy = self.min_y + ly;
+                        let block = blocks[ly as usize];
+                        field[Self::idx(lx, ly, lz, self.height)] = pack_block_kind(block);
+                        if block == BlockKind::Stone {
+                            heights[(lz * 16 + lx) as usize] = wy;
+                        }
+                    }
                 }
             }
         }
-        field
+        for height in &mut heights {
+            *height = (*height).max(self.sea_level - 1);
+        }
+        (PackedShapeField { blocks: field, height: self.height }, heights)
     }
 
-    /// The heightmap [`Self::biome_stage`] and [`SurfaceSystem::build_surface`]
-    /// consume: highest local `(lx, lz)` position whose block is *solid*
-    /// (`BlockKind::Stone` — non-air, non-fluid), or `sea_level - 1` for a
-    /// column with nothing solid. Matches
-    /// `scripts/worldgen-oracle/ComposedChunkOracle.java`'s `solidTop`
-    /// exactly (same definition, same fallback) — confirmed by name in that
-    /// oracle's own doc comment, which calls this out as the reason biome
-    /// sampling agrees between the two languages even though only the Rust
-    /// side used to run an *approximated* aquifer.
-    pub(super) fn heights_from_field(&self, field: &[BlockKind]) -> [i32; 256] {
-        let mut heights = [i32::MIN; 16 * 16];
-        for lz in 0..16i32 {
-            for lx in 0..16i32 {
-                let mut top = self.min_y - 1;
-                for ly in (0..self.height).rev() {
-                    if field[Self::idx(lx, ly, lz, self.height)] == BlockKind::Stone {
-                        top = self.min_y + ly;
-                        break;
+    fn fill_stage_cells(
+        &self,
+        aquifer: &AquiferSystem,
+        base_x: i32,
+        base_z: i32,
+        beard: &crate::structure::beardifier::Beardifier,
+        sampler: &NoiseChunkRegionSampler,
+        field: &mut [u16],
+        heights: &mut [i32; 256],
+    ) {
+        let mut densities = [0.0; 128];
+        let mut vertical_densities = [0.0; 8];
+        let mut vertical_blocks = [BlockKind::Air; 8];
+        let empty_beard = beard.is_empty();
+        for cell_z in 0..4i32 {
+            for cell_x in 0..4i32 {
+                // Keep one tiny recurrence state per XZ column while its
+                // adjacent eight-block Y slices are consumed. The states are
+                // request-local and never cross an XZ column.
+                let mut vertical_run_states: [VerticalRunState; 16] =
+                    std::array::from_fn(|_| aquifer.vertical_run_state());
+                for cell_y in 0..(self.height / 8) {
+                    let x0 = base_x + cell_x * 4;
+                    let y0 = self.min_y + cell_y * 8;
+                    let z0 = base_z + cell_z * 4;
+                    sampler.final_density_cell(x0, y0, z0, &mut densities);
+                    for lz in 0..4i32 {
+                        for lx in 0..4i32 {
+                            let wx = x0 + lx;
+                            let wz = z0 + lz;
+                            let density_start = ((lz * 4 + lx) * 8) as usize;
+                            if empty_beard {
+                                vertical_densities.copy_from_slice(
+                                    &densities[density_start..density_start + 8],
+                                );
+                            } else {
+                                for ly in 0..8i32 {
+                                    let wy = y0 + ly;
+                                    vertical_densities[ly as usize] =
+                                        densities[density_start + ly as usize]
+                                            + beard.compute(wx, wy, wz);
+                                }
+                            }
+                            aquifer.block_at_density_vertical_slice(
+                                wx,
+                                wz,
+                                y0,
+                                &vertical_densities,
+                                &mut vertical_blocks,
+                                &mut vertical_run_states[(lz * 4 + lx) as usize],
+                            );
+                            for ly in 0..8i32 {
+                                let wy = y0 + ly;
+                                let block = vertical_blocks[ly as usize];
+                                field[Self::idx(
+                                    cell_x * 4 + lx,
+                                    cell_y * 8 + ly,
+                                    cell_z * 4 + lz,
+                                    self.height,
+                                )] = pack_block_kind(block);
+                                if block == BlockKind::Stone {
+                                    heights[(cell_z * 4 + lz) as usize * 16
+                                        + (cell_x * 4 + lx) as usize] = wy;
+                                }
+                            }
+                        }
                     }
                 }
-                heights[(lz * 16 + lx) as usize] = top.max(self.sea_level - 1);
             }
         }
-        heights
-    }
+        }
 
     /// The live `OCEAN_FLOOR_WG` heightmap ores probe after surface, carving,
     /// and structure placement. The result is one above the topmost
     /// motion-blocking block, or `min_y` for an empty column.
     ///
-    /// This is intentionally separate from [`Self::heights_from_field`]: that
-    /// earlier field-derived value is the surface-rule input and must remain
+    /// This is intentionally separate from the fill-derived solid-top height:
+    /// that earlier field-derived value is the surface-rule input and must remain
     /// stable while carving mutates the materialised grid.
     pub(super) fn ore_heights_from_world(&self, world: &crate::dense_grid::DenseBlockGrid) -> [i32; 256] {
         let (min_x, min_y, min_z, size_x, size_y, size_z) = world.bounds();
@@ -259,6 +614,70 @@ impl OverworldGenerator {
         Self::ocean_floor_wg_heights(world, min_x, min_y, min_z, size_y)
     }
 
+    fn ore_heights_from_ocean_floor_state(
+        &self,
+        world: &crate::dense_grid::DenseBlockGrid,
+        state: OceanFloorState,
+    ) -> [i32; 256] {
+        let (_, min_y, _, size_x, size_y, size_z) = world.bounds();
+        assert_eq!(min_y, state.min_y, "ocean-floor baseline min_y drifted");
+        assert_eq!(min_y, self.min_y, "pre-ore world min_y drifted from its generator");
+        assert_eq!(size_y, self.height, "pre-ore world height drifted from its generator");
+        assert_eq!(size_x, 16, "pre-ore world must cover one chunk in x");
+        assert_eq!(size_z, 16, "pre-ore world must cover one chunk in z");
+
+        Self::ocean_floor_wg_heights_from_state(world, state)
+    }
+
+    fn ocean_floor_wg_heights_from_state(
+        world: &crate::dense_grid::DenseBlockGrid,
+        state: OceanFloorState,
+    ) -> [i32; 256] {
+        let (min_x, min_y, min_z, size_x, size_y, size_z) = world.bounds();
+        debug_assert_eq!(min_y, state.min_y);
+        debug_assert_eq!(size_x, 16);
+        debug_assert_eq!(size_z, 16);
+        let mut heights = state.heights;
+        let mut scanned_cells = 0u64;
+        for lz in 0..16i32 {
+            for lx in 0..16i32 {
+                if !crate::carver::touched_column(&state.touched, lx, lz) {
+                    continue;
+                }
+                let (height, cells) = Self::ocean_floor_wg_height(
+                    world,
+                    min_x + lx,
+                    min_y,
+                    min_z + lz,
+                    size_y,
+                );
+                heights[(lz * 16 + lx) as usize] = height;
+                scanned_cells += cells;
+            }
+        }
+        if scanned_cells != 0 {
+            crate::counters::bump_full_column_scan(scanned_cells);
+        }
+        heights
+    }
+
+    fn ocean_floor_wg_height(
+        world: &crate::dense_grid::DenseBlockGrid,
+        x: i32,
+        min_y: i32,
+        z: i32,
+        height: i32,
+    ) -> (i32, u64) {
+        let mut scanned_cells = 0u64;
+        for y in (min_y..min_y + height).rev() {
+            scanned_cells += 1;
+            if world.get_base_facts(x, y, z).is_ocean_floor() {
+                return (y + 1, scanned_cells);
+            }
+        }
+        (min_y, scanned_cells)
+    }
+
     fn ocean_floor_wg_heights(
         world: &crate::dense_grid::DenseBlockGrid,
         min_x: i32,
@@ -267,19 +686,16 @@ impl OverworldGenerator {
         height: i32,
     ) -> [i32; 256] {
         let mut heights = [min_y; 256];
+        let mut scanned_cells = 0u64;
         for lz in 0..16i32 {
             for lx in 0..16i32 {
-                for y in (min_y..min_y + height).rev() {
-                    if world
-                        .get_base_facts(min_x + lx, y, min_z + lz)
-                        .is_ocean_floor()
-                    {
-                        heights[(lz * 16 + lx) as usize] = y + 1;
-                        break;
-                    }
-                }
+                let (column_height, cells) =
+                    Self::ocean_floor_wg_height(world, min_x + lx, min_y, min_z + lz, height);
+                heights[(lz * 16 + lx) as usize] = column_height;
+                scanned_cells += cells;
             }
         }
+        crate::counters::bump_full_column_scan(scanned_cells);
         heights
     }
 
@@ -307,13 +723,88 @@ impl OverworldGenerator {
     /// A wrong class would change which rules fire and still produce a
     /// plausible column, so the pairing is re-derived and asserted on every
     /// entry below rather than reasoned about.
-    pub(super) fn surface_stage(
+    pub(super) fn surface_stage_with_preliminary_cache(
         &self,
         field: &[BlockKind],
         heights: &[i32; 256],
         base_x: i32,
         base_z: i32,
         cursor: Option<&mut BiomeSearchCursor>,
+        preliminary: &Arc<crate::aquifer::PreliminarySurfaceCache>,
+    ) -> SurfaceDiff {
+        self.surface_stage_with_prepared_and_preliminary_cache(
+            field,
+            heights,
+            base_x,
+            base_z,
+            cursor,
+            None,
+            preliminary,
+        )
+    }
+
+    fn surface_stage_with_prepared_and_preliminary_cache(
+        &self,
+        field: &[BlockKind],
+        heights: &[i32; 256],
+        base_x: i32,
+        base_z: i32,
+        cursor: Option<&mut BiomeSearchCursor>,
+        prepared: Option<Arc<crate::biome::PreparedClimateGrid>>,
+        preliminary: &Arc<crate::aquifer::PreliminarySurfaceCache>,
+    ) -> SurfaceDiff {
+        self.surface_stage_with_prepared_and_preliminary_cache_using(
+            &|lx, y, lz| match field[Self::idx(lx, y - self.min_y, lz, self.height)] {
+                BlockKind::Stone => self.default_block_pre,
+                BlockKind::Water => self.default_fluid_pre,
+                BlockKind::Lava => self.default_lava_pre,
+                BlockKind::Air => PreState::AIR,
+            },
+            heights,
+            base_x,
+            base_z,
+            cursor,
+            prepared,
+            preliminary,
+        )
+    }
+
+    fn surface_stage_packed_with_preliminary_cache(
+        &self,
+        field: &PackedShapeField,
+        heights: &[i32; 256],
+        base_x: i32,
+        base_z: i32,
+        cursor: Option<&mut BiomeSearchCursor>,
+        prepared: Option<Arc<crate::biome::PreparedClimateGrid>>,
+        preliminary: &Arc<crate::aquifer::PreliminarySurfaceCache>,
+    ) -> SurfaceDiff {
+        self.surface_stage_with_prepared_and_preliminary_cache_using(
+            &|lx, y, lz| match field.blocks[Self::idx(lx, y - self.min_y, lz, field.height)] {
+                1 => self.default_block_pre,
+                2 => self.default_fluid_pre,
+                3 => self.default_lava_pre,
+                0 => PreState::AIR,
+                other => panic!("invalid packed fill block kind: {other}"),
+            },
+            heights,
+            base_x,
+            base_z,
+            cursor,
+            prepared,
+            preliminary,
+        )
+    }
+
+    fn surface_stage_with_prepared_and_preliminary_cache_using(
+        &self,
+        pre: &dyn Fn(i32, i32, i32) -> PreState,
+        heights: &[i32; 256],
+        base_x: i32,
+        base_z: i32,
+        cursor: Option<&mut BiomeSearchCursor>,
+        prepared: Option<Arc<crate::biome::PreparedClimateGrid>>,
+        preliminary: &Arc<crate::aquifer::PreliminarySurfaceCache>,
     ) -> SurfaceDiff {
         let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Surface);
 
@@ -349,21 +840,14 @@ impl OverworldGenerator {
             "PreState::AIR must be what class_of_name says minecraft:air is"
         );
 
-        let pre = |lx: i32, y: i32, lz: i32| -> PreState {
-            let ly = y - self.min_y;
-            if !(0..self.height).contains(&ly) {
-                return PreState::AIR;
-            }
-            match field[Self::idx(lx, ly, lz, self.height)] {
-                BlockKind::Stone => self.default_block_pre,
-                BlockKind::Water => self.default_fluid_pre,
-                BlockKind::Lava => self.default_lava_pre,
-                BlockKind::Air => PreState::AIR,
-            }
-        };
         let heightmap = |lx: i32, lz: i32| -> i32 { heights[(lz * 16 + lx) as usize] };
         let cursor_state = cursor.as_ref().map(|value| **value);
-        let surface_biomes = RefCell::new(self.surface_biome_context(base_x, base_z, cursor_state));
+        let surface_biomes = RefCell::new(self.surface_biome_context(
+            base_x,
+            base_z,
+            cursor_state,
+            prepared,
+        ));
         let biome_at = |lx: i32, y: i32, lz: i32| -> (&str, bool) {
             let name = surface_biomes
                 .borrow_mut()
@@ -380,7 +864,7 @@ impl OverworldGenerator {
                 .borrow_mut()
                 .touch_block(base_x + lx, y, base_z + lz);
         };
-        let result = self.surface.build_surface_reusing_with_column_biome(
+        let result = self.surface.build_surface_reusing_with_preliminary_cache(
             SurfaceDiff::default(),
             &pre,
             &heightmap,
@@ -388,6 +872,7 @@ impl OverworldGenerator {
             &column_biome_at,
             base_x,
             base_z,
+            preliminary,
         );
         let surface_biomes = surface_biomes.into_inner();
         if let (Some(cursor), Some(updated)) = (cursor, surface_biomes.into_cursor()) {
@@ -411,7 +896,22 @@ impl OverworldGenerator {
         base_z: i32,
     ) -> crate::dense_grid::DenseBlockGrid {
         let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Materialize);
-        let mut world = crate::dense_grid::DenseBlockGrid::with_interner(
+        crate::counters::bump_full_column_conversion((16 * 16 * self.height) as u64);
+        // The sparse diff is already grouped by column and descending Y. Keep a
+        // cursor into the active column so materialization performs no map
+        // probes, coordinate conversion, or sort before the palette walk.
+        let mut surface_column = &[][..];
+        let mut surface_column_x = -1;
+        let mut surface_column_z = -1;
+        let mut next_surface_change = 0;
+        // Build the bounded vein product before the palette walk; its cursor
+        // follows this closure's z, x, y order.
+        let mut vein_batch = self.veins.as_ref().map(|programs| {
+            programs
+                .for_chunk(self.slot_count, base_x, base_z, self.min_y, self.height)
+                .prepare_batch(&field, base_x, base_z, self.min_y, self.height)
+        });
+        let world = crate::dense_grid::DenseBlockGrid::from_ordered_state_fn(
             Arc::clone(&self.interner),
             base_x,
             self.min_y,
@@ -420,86 +920,128 @@ impl OverworldGenerator {
             self.height,
             16,
             crate::interner::StateId::AIR,
-        );
-        // `surface_diff` is consulted by **point lookup**, in the same fixed
-        // `(lz, lx, ly)` order as the base fill below — never iterated
-        // directly. This was a real bug, found by
-        // `worldgen_data::tests::column_is_byte_identical_across_two_independently_constructed_generators`:
-        // a `DenseBlockGrid`'s palette is built incrementally, in `.set()`
-        // call order, unlike the old `HashMap<(i32,i32,i32), String>` `world`
-        // this replaced, whose palette used to be assigned by a *separate*,
-        // fixed-order final pass (`intern_from_world`) regardless of how
-        // `world` itself was populated. `std::collections::HashMap`'s
-        // iteration order is not guaranteed stable even across two
-        // *separately constructed* maps with identical content (`RandomState`
-        // reseeds per map) — so `for ((lx,y,lz), state) in surface_diff` here
-        // assigned "which small integer means dirt" differently between two
-        // independent `column()` calls for the *same* chunk: same blocks,
-        // different palette order, so `GeneratedColumn::into_raw`'s
-        // `blocks`/`palette` pair differed byte-for-byte while the actual
-        // terrain did not. Confirmed by that control test failing with
-        // exactly a palette permutation (`gravel`/`dirt`/`bedrock` reordered,
-        // nothing added or removed) before this fix.
-        //
-        // U21: `set_id` rather than `set`, and pre-interned `default_*` ids
-        // rather than `&str`. `DenseBlockGrid::set` is `id_of` + `set_id`, so
-        // this deletes 98,304 block-state *string* hashes per chunk and changes
-        // nothing else — the palette is still appended in this loop's order,
-        // which is the property the comment above is about.
-        // The ore-vein sampler. Bound to this chunk once, outside the loop,
-        // because `vein_toggle`/`vein_ridged` are `minecraft:interpolated` and the
-        // sampler's cell caches are per-chunk — see `super::veins`.
-        let veins = self
-            .veins
-            .as_ref()
-            .map(|v| v.for_chunk(self.slot_count, base_x, base_z, self.min_y, self.height));
-        for lz in 0..16i32 {
-            for lx in 0..16i32 {
-                for ly in 0..self.height {
-                    let y = self.min_y + ly;
-                    let base = match field[Self::idx(lx, ly, lz, self.height)] {
-                        BlockKind::Stone => self.default_block_pre.state,
-                        BlockKind::Water => self.default_fluid_pre.state,
-                        BlockKind::Lava => self.default_lava_pre.state,
-                        BlockKind::Air => crate::interner::StateId::AIR,
-                    };
-                    // Veins replace the *default block* only: vanilla's material
-                    // rule chain reaches vein replacement after the aquifer
-                    // and only where it returned that block, never over air or a
-                    // fluid.
-                    let vein_state = if base == self.default_block_pre.state {
-                        veins
-                            .as_ref()
-                            .and_then(|v| v.state_at(base_x + lx, y, base_z + lz))
-                    } else {
-                        None
-                    };
-                    // **A vein wins over the surface diff, and that is not an
-                    // ordering shortcut.** Vanilla runs surface building *after* the
-                    // fill that placed the vein, but that pass opens by comparing
-                    // the cell against the default block before applying any rule
-                    // — a cell holding copper ore or
-                    // granite is not the default block, so every surface rule skips
-                    // it. Applying the diff unconditionally here was measured to
-                    // erase **every** vein cell: the overworld surface rules write
-                    // `deepslate` over the whole column below y ≈ 0, so a vein at
-                    // y = -40 came back out as deepslate and the served chunk was
-                    // byte-identical with veins on and off. That is what made this
-                    // an island for one debugging session.
-                    //
-                    // Known second-order gap: `surface_diff` is computed from the
-                    // pre-vein `field`, so vanilla's `stone_depth_above/below`
-                    // counters see vein blocks and ours do not. Narrow (it can only
-                    // matter where a vein reaches the surface band) and not measured.
-                    let state = match vein_state {
-                        Some(v) => v,
-                        None => surface_diff.get(&(lx, y, lz)).copied().unwrap_or(base),
-                    };
-                    world.set_id(base_x + lx, y, base_z + lz, state);
+            |x, y, z| {
+                let lx = x - base_x;
+                let ly = y - self.min_y;
+                let lz = z - base_z;
+                let index = Self::idx(lx, ly, lz, self.height);
+                let base = match field[index] {
+                    BlockKind::Stone => self.default_block_pre.state,
+                    BlockKind::Water => self.default_fluid_pre.state,
+                    BlockKind::Lava => self.default_lava_pre.state,
+                    BlockKind::Air => crate::interner::StateId::AIR,
+                };
+                let vein_state = if base == self.default_block_pre.state {
+                    vein_batch
+                        .as_mut()
+                        .and_then(|batch| batch.state_at_index(index))
+                } else {
+                    None
+                };
+                if lx != surface_column_x || lz != surface_column_z {
+                    surface_column = surface_diff.column_slice(lx, lz);
+                    surface_column_x = lx;
+                    surface_column_z = lz;
+                    next_surface_change = surface_column.len();
                 }
-            }
-        }
+                let surface_state = (next_surface_change != 0
+                    && surface_column[next_surface_change - 1].0 == y)
+                    .then(|| {
+                        next_surface_change -= 1;
+                        let state = surface_column[next_surface_change].1;
+                        state
+                    });
+                vein_state.or(surface_state).unwrap_or(base)
+            },
+        );
+        assert!(
+            vein_batch
+                .as_ref()
+                .is_none_or(super::veins::VeinBatch::is_consumed),
+            "ordered materialisation must consume every vein candidate"
+        );
         world
+    }
+
+    /// Materialises the packed fill carrier in place. The callback receives
+    /// the original fill code before it is overwritten with the local palette
+    /// index, so the fill allocation becomes the dense-grid allocation.
+    fn materialize_world_packed(
+        &self,
+        field: PackedShapeField,
+        surface_diff: SurfaceDiff,
+        base_x: i32,
+        base_z: i32,
+    ) -> (crate::dense_grid::DenseBlockGrid, OceanFloorState) {
+        let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Materialize);
+        crate::counters::bump_full_column_conversion((16 * 16 * self.height) as u64);
+        let PackedShapeField { blocks, height } = field;
+        debug_assert_eq!(height, self.height);
+        let mut ocean_floor = OceanFloorState::new(self.min_y);
+        let mut state_facts: FastMap<StateId, BaseStateFacts> = FastMap::default();
+        let mut surface_column = &[][..];
+        let mut surface_column_x = -1;
+        let mut surface_column_z = -1;
+        let mut next_surface_change = 0;
+        let mut vein_batch = self.veins.as_ref().map(|programs| {
+            programs
+                .for_chunk(self.slot_count, base_x, base_z, self.min_y, self.height)
+                .prepare_batch_packed(&blocks, base_x, base_z, self.min_y, self.height)
+        });
+        let world = crate::dense_grid::DenseBlockGrid::from_ordered_packed_state_fn(
+            Arc::clone(&self.interner),
+            base_x,
+            self.min_y,
+            base_z,
+            16,
+            self.height,
+            16,
+            crate::interner::StateId::AIR,
+            blocks,
+            |x, y, z, index, packed| {
+                let lx = x - base_x;
+                let lz = z - base_z;
+                let base = match packed {
+                    1 => self.default_block_pre.state,
+                    2 => self.default_fluid_pre.state,
+                    3 => self.default_lava_pre.state,
+                    0 => crate::interner::StateId::AIR,
+                    other => panic!("invalid packed fill block kind: {other}"),
+                };
+                let vein_state = if base == self.default_block_pre.state {
+                    vein_batch
+                        .as_mut()
+                        .and_then(|batch| batch.state_at_index(index))
+                } else {
+                    None
+                };
+                if lx != surface_column_x || lz != surface_column_z {
+                    surface_column = surface_diff.column_slice(lx, lz);
+                    surface_column_x = lx;
+                    surface_column_z = lz;
+                    next_surface_change = surface_column.len();
+                }
+                let surface_state = (next_surface_change != 0
+                    && surface_column[next_surface_change - 1].0 == y)
+                    .then(|| {
+                        next_surface_change -= 1;
+                        surface_column[next_surface_change].1
+                    });
+                let state = vein_state.or(surface_state).unwrap_or(base);
+                let facts = *state_facts
+                    .entry(state)
+                    .or_insert_with(|| self.interner.base_facts(state));
+                ocean_floor.observe(lx, y, lz, facts);
+                state
+            },
+        );
+        assert!(
+            vein_batch
+                .as_ref()
+                .is_none_or(super::veins::VeinBatch::is_consumed),
+            "ordered materialisation must consume every vein candidate"
+        );
+        (world, ocean_floor)
     }
 
     /// Stage 4: `applyCarvers` over the post-surface world grid.
@@ -518,7 +1060,34 @@ impl OverworldGenerator {
         base_x: i32,
         base_z: i32,
         world: crate::dense_grid::DenseBlockGrid,
+        cursor: Option<&mut BiomeSearchCursor>,
+    ) -> crate::dense_grid::DenseBlockGrid {
+        self.carve_stage_with_touched(
+            cx,
+            cz,
+            aquifer,
+            heights,
+            biome_quarts,
+            base_x,
+            base_z,
+            world,
+            cursor,
+            None,
+        )
+    }
+
+    pub(super) fn carve_stage_with_touched(
+        &self,
+        cx: i32,
+        cz: i32,
+        aquifer: &AquiferSystem,
+        heights: &[i32; 256],
+        biome_quarts: &[(String, bool); 16],
+        base_x: i32,
+        base_z: i32,
+        world: crate::dense_grid::DenseBlockGrid,
         mut cursor: Option<&mut BiomeSearchCursor>,
+        touched: Option<&mut TouchedMask>,
     ) -> crate::dense_grid::DenseBlockGrid {
         let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Carve);
         let mut owned_cursor = self
@@ -567,7 +1136,7 @@ impl OverworldGenerator {
             center_x: cx,
             center_z: cz,
         };
-        crate::carver::apply_carvers(
+        crate::carver::apply_carvers_with_touched(
             self.seed,
             cx,
             cz,
@@ -579,6 +1148,7 @@ impl OverworldGenerator {
             &self.carver_replaceable,
             &top_material,
             &mut observer,
+            touched,
         );
         if std::env::var("LODESTONE_CARVE_HASHMAP_DEBUG").is_ok() {
             crate::dense_grid::DenseBlockGrid::from_hashmap_with_interner(
@@ -710,6 +1280,22 @@ mod tests {
         heights
     }
 
+    fn block_digest(world: &DenseBlockGrid) -> u64 {
+        let (min_x, min_y, min_z, size_x, size_y, size_z) = world.bounds();
+        let mut digest = 0xcbf2_9ce4_8422_2325u64;
+        for y in min_y..min_y + size_y {
+            for z in min_z..min_z + size_z {
+                for x in min_x..min_x + size_x {
+                    for byte in world.get(x, y, z).as_bytes() {
+                        digest = (digest ^ u64::from(*byte)).wrapping_mul(0x1000_0000_01b3);
+                    }
+                    digest = (digest ^ 0xff).wrapping_mul(0x1000_0000_01b3);
+                }
+            }
+        }
+        digest
+    }
+
     #[test]
     fn numeric_ocean_floor_scan_matches_string_oracle_for_builtin_and_extension_states() {
         let mut world = DenseBlockGrid::new(0, 0, 0, 16, 16, 16, "minecraft:air");
@@ -729,6 +1315,107 @@ mod tests {
         let oracle = string_ocean_floor_wg_heights(&world);
         assert_eq!(numeric, oracle);
         assert!(numeric.iter().all(|&height| height == 7));
+    }
+
+    #[test]
+    fn post_mutation_ocean_floor_scan_only_visits_touched_columns() {
+        let mut world = DenseBlockGrid::new(0, 0, 0, 16, 16, 16, "minecraft:air");
+        for z in 0..16 {
+            for x in 0..16 {
+                for y in 0..=5 {
+                    world.set(x, y, z, "minecraft:stone");
+                }
+            }
+        }
+        let mut state = super::OceanFloorState::new(0);
+        state.heights = [6; 256];
+        world.set(3, 5, 4, "minecraft:air");
+        crate::carver::mark_touched_column(&mut state.touched, 0, 0, 3, 4);
+
+        #[cfg(feature = "gen-counters")]
+        crate::counters::reset();
+        let incremental = OverworldGenerator::ocean_floor_wg_heights_from_state(&world, state);
+        #[cfg(feature = "gen-counters")]
+        let counters = crate::counters::snapshot();
+        let full = OverworldGenerator::ocean_floor_wg_heights(&world, 0, 0, 0, 16);
+
+        assert_eq!(incremental, full);
+        assert_eq!(incremental[(4 * 16 + 3) as usize], 5);
+        #[cfg(feature = "gen-counters")]
+        {
+            assert_eq!(counters.full_column_scans, 1);
+            assert_eq!(counters.full_column_scan_cells, 12);
+        }
+    }
+
+    #[test]
+    fn post_mutation_heights_preserve_the_final_block_digest_control() {
+        let mut baseline = DenseBlockGrid::new(0, 0, 0, 16, 16, 16, "minecraft:air");
+        for z in 0..16 {
+            for x in 0..16 {
+                for y in 0..=5 {
+                    baseline.set(x, y, z, "minecraft:stone");
+                }
+            }
+        }
+        let mut state = super::OceanFloorState::new(0);
+        state.heights = OverworldGenerator::ocean_floor_wg_heights(&baseline, 0, 0, 0, 16);
+        let mut incremental_world = baseline.clone();
+        let mut full_world = baseline;
+        for &(x, y, z) in &[(3, 5, 4), (11, 2, 9)] {
+            incremental_world.set(x, y, z, "minecraft:air");
+            full_world.set(x, y, z, "minecraft:air");
+            crate::carver::mark_touched_column(&mut state.touched, 0, 0, x, z);
+        }
+
+        let incremental = OverworldGenerator::ocean_floor_wg_heights_from_state(
+            &incremental_world,
+            state,
+        );
+        let full = OverworldGenerator::ocean_floor_wg_heights(&full_world, 0, 0, 0, 16);
+        assert_eq!(incremental, full);
+        assert_eq!(block_digest(&incremental_world), block_digest(&full_world));
+    }
+
+    #[test]
+    fn no_post_mutation_ocean_floor_scan_runs_without_touches() {
+        let world = DenseBlockGrid::new(0, 0, 0, 16, 16, 16, "minecraft:air");
+        let state = super::OceanFloorState::new(0);
+        #[cfg(feature = "gen-counters")]
+        crate::counters::reset();
+        let incremental = OverworldGenerator::ocean_floor_wg_heights_from_state(&world, state);
+        #[cfg(feature = "gen-counters")]
+        let counters = crate::counters::snapshot();
+
+        assert!(incremental.iter().all(|&height| height == 0));
+        #[cfg(feature = "gen-counters")]
+        {
+            assert_eq!(counters.full_column_scans, 0);
+            assert_eq!(counters.full_column_scan_cells, 0);
+        }
+    }
+
+    #[test]
+    fn omitting_a_touched_column_is_rejected_by_the_full_recount_control() {
+        let mut world = DenseBlockGrid::new(0, 0, 0, 16, 16, 16, "minecraft:air");
+        for z in 0..16 {
+            for x in 0..16 {
+                for y in 0..=5 {
+                    world.set(x, y, z, "minecraft:stone");
+                }
+            }
+        }
+        let mut state = super::OceanFloorState::new(0);
+        state.heights = [6; 256];
+        world.set(1, 5, 1, "minecraft:air");
+        world.set(2, 5, 2, "minecraft:air");
+        crate::carver::mark_touched_column(&mut state.touched, 0, 0, 1, 1);
+
+        let incremental = OverworldGenerator::ocean_floor_wg_heights_from_state(&world, state);
+        let full = OverworldGenerator::ocean_floor_wg_heights(&world, 0, 0, 0, 16);
+        assert_ne!(incremental, full, "the omitted touched bit must be observable");
+        assert_eq!(incremental[(1 * 16 + 1) as usize], full[(1 * 16 + 1) as usize]);
+        assert_ne!(incremental[(2 * 16 + 2) as usize], full[(2 * 16 + 2) as usize]);
     }
 
     #[test]

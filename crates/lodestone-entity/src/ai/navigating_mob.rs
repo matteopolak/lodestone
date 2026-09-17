@@ -184,8 +184,9 @@ pub struct NavigatingMob<'w> {
     finder: PathFinder,
     navigator: PathNavigator,
     pos: Vec3,
-    /// Blocks travelled per tick along the path (kinematic follower speed).
+    /// Default blocks travelled per tick when no navigation speed is active.
     step_per_tick: f64,
+    goal_speed_scale: f64,
     rng: SplitMix64,
     attack_target: Option<Vec3>,
     /// The bare item id (e.g. `"trident"`) this mob spawned holding in its
@@ -636,6 +637,7 @@ impl<'w> NavigatingMob<'w> {
             navigator: PathNavigator::new(width),
             pos,
             step_per_tick,
+            goal_speed_scale: 1.0,
             rng: SplitMix64(seed),
             attack_target: None,
             main_hand: None,
@@ -771,6 +773,12 @@ impl<'w> NavigatingMob<'w> {
     /// which this crate has no attribute system to recompute on its own.
     pub fn set_step_per_tick(&mut self, step_per_tick: f64) -> &mut Self {
         self.step_per_tick = step_per_tick;
+        self
+    }
+
+    /// Sets the goal-speed multiplier.
+    pub fn set_goal_speed_scale(&mut self, scale: f64) -> &mut Self {
+        self.goal_speed_scale = scale.max(0.0);
         self
     }
 
@@ -1655,14 +1663,16 @@ impl<'w> NavigatingMob<'w> {
             self.velocity = Vec3::new(0.0, moved_y, 0.0);
             return;
         };
+        let step_per_tick = f64::from(self.navigator.speed());
         let dx = waypoint.x - self.pos.x;
         let dz = waypoint.z - self.pos.z;
         let horizontal = (dx * dx + dz * dz).sqrt();
-        if horizontal <= self.step_per_tick || horizontal == 0.0 {
+        let at_vertical_transition = horizontal <= step_per_tick || horizontal == 0.0;
+        if horizontal <= step_per_tick || horizontal == 0.0 {
             self.pos.x = waypoint.x;
             self.pos.z = waypoint.z;
         } else {
-            let scale = self.step_per_tick / horizontal;
+            let scale = step_per_tick / horizontal;
             self.pos.x += dx * scale;
             self.pos.z += dz * scale;
         }
@@ -1670,12 +1680,14 @@ impl<'w> NavigatingMob<'w> {
         // above — see `step_vertical`'s own doc comment for why, and for the
         // "glide up" / "phase through the ground" bug an unconditional
         // `pos.y = waypoint.y` used to produce.
-        self.pos.y = Self::step_vertical(
-            self.pos.y,
-            waypoint.y,
-            f64::from(self.shape.max_up_step),
-            &mut self.fall_speed,
-        );
+        if at_vertical_transition || self.fall_speed != 0.0 {
+            self.pos.y = Self::step_vertical(
+                self.pos.y,
+                waypoint.y,
+                f64::from(self.shape.max_up_step),
+                &mut self.fall_speed,
+            );
+        }
         // Record the applied delta as blocks/tick velocity, and face the
         // horizontal motion (retaining the last body yaw while stationary).
         let moved_x = self.pos.x - old.x;
@@ -1785,6 +1797,8 @@ impl MobController for NavigatingMob<'_> {
         let same_target = self.active_target_block == Some(block);
         let recompute = self.navigator.is_done() || !same_target;
         if !recompute {
+            self.navigator
+                .set_speed((speed * self.goal_speed_scale) as f32);
             self.move_calls += 1;
             return true;
         }
@@ -1819,7 +1833,8 @@ impl MobController for NavigatingMob<'_> {
             .find_path(self.world, &self.shape, start, &[block], params)
         {
             Some(path) => {
-                self.navigator.start(path, speed as f32);
+                self.navigator
+                    .start(path, (speed * self.goal_speed_scale) as f32);
                 self.move_calls += 1;
                 true
             }
@@ -2372,7 +2387,7 @@ mod tests {
         AvoidEntityGoal, FloatGoal, HurtByTargetGoal, LookAtPlayerGoal, MeleeAttackGoal, PanicGoal,
         RandomStrollGoal, SwellGoal, TemptGoal,
     };
-    use crate::pathfinding::{Aabb, PathType};
+    use crate::pathfinding::{Aabb, Path, PathType};
 
     /// Flat ground one block below `y=0`, plus a set of fence cells with a 1.5
     /// collision top (unjumpable). Mirrors the live-navigation arena so the
@@ -3251,6 +3266,100 @@ mod tests {
         // reset actually took effect rather than merely being asserted above.
         let after_step = NavigatingMob::step_vertical(pos_y, waypoint_y + 0.5, 0.6, &mut fall_speed);
         assert_eq!(after_step, waypoint_y + 0.5);
+    }
+
+    #[test]
+    fn a_drop_keeps_the_body_level_until_the_waypoint_clears_the_edge() {
+        let world = Arena { walls: HashSet::new() };
+        let mut mob = NavigatingMob::new(
+            &world,
+            MobShape::land(0.6, 1.95),
+            Vec3::new(0.5, 1.0, 0.5),
+            0.25,
+            400,
+            0,
+        );
+        mob.navigator.start(
+            Path::new(
+                vec![
+                    crate::pathfinding::PathNode { x: 0, y: 1, z: 0, kind: PathType::Walkable },
+                    crate::pathfinding::PathNode { x: 1, y: 0, z: 0, kind: PathType::Walkable },
+                ],
+                BlockPos::new(1, 0, 0),
+                true,
+            ),
+            0.25,
+        );
+        mob.on_ground = true;
+
+        for expected_x in [0.75, 1.0, 1.25] {
+            mob.advance();
+            assert_eq!(mob.position().x, expected_x);
+            assert_eq!(mob.position().y, 1.0);
+        }
+        mob.advance();
+        assert_eq!(mob.position().x, 1.5);
+        assert_eq!(mob.position().y, 0.92);
+    }
+
+    #[test]
+    fn navigation_speed_changes_the_followers_actual_step() {
+        let world = Arena { walls: HashSet::new() };
+        let mut mob = NavigatingMob::new(
+            &world,
+            MobShape::land(0.6, 1.95),
+            Vec3::new(0.5, 0.0, 0.5),
+            0.25,
+            400,
+            0,
+        );
+        mob.navigator.start(
+            Path::new(
+                vec![
+                    crate::pathfinding::PathNode { x: 0, y: 0, z: 0, kind: PathType::Walkable },
+                    crate::pathfinding::PathNode { x: 1, y: 0, z: 0, kind: PathType::Walkable },
+                ],
+                BlockPos::new(1, 0, 0),
+                true,
+            ),
+            0.1,
+        );
+        mob.advance();
+        assert!((mob.position().x - 0.6).abs() < 1.0e-8);
+    }
+
+    #[test]
+    fn a_step_up_waits_until_the_body_reaches_the_edge() {
+        let world = Arena { walls: HashSet::new() };
+        let mut mob = NavigatingMob::new(
+            &world,
+            MobShape::land(0.6, 1.95),
+            Vec3::new(0.5, 0.0, 0.5),
+            0.25,
+            400,
+            0,
+        );
+        mob.navigator.start(
+            Path::new(
+                vec![
+                    crate::pathfinding::PathNode { x: 0, y: 0, z: 0, kind: PathType::Walkable },
+                    crate::pathfinding::PathNode { x: 1, y: 1, z: 0, kind: PathType::Walkable },
+                ],
+                BlockPos::new(1, 1, 0),
+                true,
+            ),
+            0.25,
+        );
+        mob.on_ground = true;
+
+        for expected_x in [0.75, 1.0, 1.25] {
+            mob.advance();
+            assert_eq!(mob.position().x, expected_x);
+            assert_eq!(mob.position().y, 0.0);
+        }
+        mob.advance();
+        assert_eq!(mob.position(), Vec3::new(1.5, 0.42, 0.5));
+        assert!(mob.fall_speed < 0.0);
     }
 
     // ---- Gaze / teleport / self-damage / ownership primitives ---------------

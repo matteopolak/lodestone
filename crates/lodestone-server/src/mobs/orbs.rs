@@ -958,8 +958,13 @@ mod experience_orb_tests {
         let id = sim.spawn_orb(
             3,
             Vec3::new(-0.5, 3.0, 0.5),
-            Vec3::new(17.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 0.0),
         );
+        sim.orbs
+            .get_mut(&id)
+            .expect("the boundary orb was spawned")
+            .motion
+            .velocity = Vec3::new(17.0, 0.0, 0.0);
 
         let batches = sim.tick_orb_owner_batches(&view);
         let effect = batches
@@ -995,8 +1000,13 @@ mod experience_orb_tests {
         let id = sim.spawn_orb(
             3,
             Vec3::new(-0.5, 3.0, 0.5),
-            Vec3::new(17.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 0.0),
         );
+        sim.orbs
+            .get_mut(&id)
+            .expect("the boundary orb was spawned")
+            .motion
+            .velocity = Vec3::new(17.0, 0.0, 0.0);
         let batches = sim.tick_orb_owner_batches(&view);
         let mut acknowledged = Vec::new();
         sim.apply_orb_tick_owner_batches_with_durable_save(batches, |token| {

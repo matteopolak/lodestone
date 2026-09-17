@@ -28,8 +28,10 @@ unconstrained form.
 
 `compose::DecorationCatalog` resolves biome `features` arrays over the driven steps —
 `RAW_GENERATION`, `LAKES`, `LOCAL_MODIFICATIONS`, `UNDERGROUND_STRUCTURES`, `SURFACE_STRUCTURES`,
-`UNDERGROUND_DECORATION`, `FLUID_SPRINGS`, `VEGETAL_DECORATION` — into `(step, index, PlacedRef)`
-triples in step order. `TOP_LAYER_MODIFICATION` is a separate engine with its own docs
+`UNDERGROUND_DECORATION`, `FLUID_SPRINGS`, `VEGETAL_DECORATION` — into `(step, index,
+Arc<PlacedRef>)` handles in step order. The catalog owns one immutable placed-feature record
+per registry id, so replay contexts retain Arc handles instead of recursively copying feature
+configuration. `TOP_LAYER_MODIFICATION` is a separate engine with its own docs
 (freeze/snow in `worldgen-biomes.md`); underground ores are selected by the unified FEATURES
 dispatcher described below. `STRONGHOLDS` has zero entries across every bundled biome and is not
 driven.
@@ -51,6 +53,16 @@ followed by body offsets `(4,3)` and `(3,4)`. Enumerating all bundled biome
 documents instead gives index 104, a deliberately retained failing-control
 value. The catalog must therefore use the biome source's possible-biome order
 and use biome membership only when selecting which already-indexed features run.
+
+Adjacent Overworld replay targets can use `OverworldGenerator::mixed_replay_batch` to
+build one request-owned `MixedReplayBatch`. The product admits the union of each target's
+radius-two read windows, so every unique `PreOreResult` is computed once, then shares each
+source's immutable feature/ore selection across target contexts. `write_contexts` preserves
+the caller's first-occurrence target order for production writers; `with_mixed_replay_batch`
+is the scoped convenience form. The product is not retained on the generator and its
+`retained_bytes` report covers the dependency union and source plans, so callers should
+drop it at the end of the request. A target context still carries the full global
+`(step,index)` ordering and remains compatible with the scalar source-replay methods.
 
 The catalog also materializes each placed feature's eligible-biome map once and
 shares it by `Arc` with replay contexts and vegetation grids. This map is immutable
@@ -91,23 +103,19 @@ direction mapping is explicit: below→up, north→south, south→north, west→
 
 Each synthetic 3x3 source pass resets the random wrapper's Gaussian cache before reseeding that source. This keeps cached paired draws local to one source, matching independent source wrappers; sharing the cache would leak a prior source's spare Gaussian into the next feature stream.
 
-The production Overworld dispatcher completes its nine sources in x-major,
-z-fastest order: `(-1,-1), (-1,0), (-1,1), (0,-1), (0,0), (0,1),
-(1,-1), (1,0), (1,1)`. This is the order observed in the external feature
-trace and is shared by production replay and parity admission. Source seeds
-remain position-derived, but placement reads and replacement checks observe
-earlier cross-chunk writes, so changing this order changes generated blocks even
-when every individual source's random stream is unchanged.
+The production Overworld dispatcher runs the target origin once over its
+admitted radius-one CARVERS read/write region. The neighbouring columns supply
+context and may receive boundary writes, but their origins are not additional
+production FEATURES bodies. Source-local parity controls can still select one
+explicit origin; the nine-coordinate schedule remains useful there for
+source-ordered dimensions and diagnostics, not as a target-owned replay loop.
 
-Lifecycle packet replay keeps the requested target separate from the completing
-source. Each completion runs one source's body with the target's live
-radius-one read/write region, while the source retains its position-derived
-decoration seed. A spill into an admitted neighbour remains resident for later
-target packets. This distinction is observable at seed 42: the streamed target
-`(1,0)` retains `minecraft:granite` at local `(1,27,14)` from the preceding
-`(0,0)` source, whereas a fused nine-source dispatch produces a different
-state. A complete source event sequence still preserves the tuff witness at
-target `(2,0)` and local `(5,-62,0)`.
+Lifecycle packet replay treats Overworld FEATURES as one target-owned status
+completion. The admitted radius-one CARVERS columns provide the read/write
+region, and the replay plan must contain exactly one event naming the requested
+centre. Writes into that region remain resident for later target packets. This
+distinction is covered by the seed-42 target-owned and nine-event rejection
+controls in `overworld_tuff_lifecycle`.
 
 Collections traversed while consuming that random stream must have explicit order. Vegetation patches
 use `CompatBlockPosSet` for successful surface positions: its compact membership index and insertion
@@ -282,7 +290,10 @@ Sculk cursor movement uses an explicit 18-offset order: X advances fastest,
 then Y, with Z as the outer coordinate, while the zero offset and cube corners
 are omitted. That order is part of the seeded shuffle contract, so changing it
 changes which reachable vein is updated even when the bounded random values do
-not change. Sculk substrate access and world-generation support conversion use
+not change. Fixed-array shuffling retains all 18 entries without allocation and
+consumes exactly 17 bounded draws; the six-face multiface path uses the same
+shuffle core through its separately bounded direction list. Sculk substrate
+access and world-generation support conversion use
 separate resolved tag closures; the latter includes the additional deepslate
 variants accepted only during generation.
 The focused red-canopy control also
@@ -357,6 +368,9 @@ falls back to the pre-bitset string path, which is a correctness requirement, no
 unexamined id would answer every tag query `false`, which changes what decorates where. Two derived
 per-position values (`distance=N` leaf rewrite, `waterlogged` fix-up) are memoised `id -> id`
 lookups rather than re-derived per call.
+Synthesized state formatting reuses one thread-local string, cleared both before and after every
+format operation. Leaving prior contents in that buffer concatenates two individually valid states
+and makes output depend on which features previously ran on a worker.
 
 The spring, block-blob and replacement-blob configuration carriers validate their state object into
 the global `lodestone_data::block_states::StateId` while parsing. A malformed object, unknown block,
@@ -368,12 +382,13 @@ Other configuration fields remain textual where they are targets or registry/imp
 ### Ore allocation
 
 `feature/mod.rs`'s ore engine (`UNDERGROUND_ORES`) is the same placement-modifier/positions shape as
-vegetation, composed into `column()` over the real vanilla 3×3 `blockStateWriteRadius(1)` driver. Each
-source selects ore-capable entries from the global decoration catalog using every section biome in
-that source chunk; the retained global step index, not a biome document's local array offset,
-seeds that ore. The same nine sources write the result, but their terrain and
-heightmap probes use a 5×5 read context: a blob at an outer source edge can
-inspect the real neighbour column rather than a clamped substitute. Those probes
+vegetation. A production FEATURES completion is owned by its target source and may mutate the
+immediate neighbouring ring. It selects ore-capable entries from the global decoration catalog
+using every section biome in that source chunk; the retained global step index, not a biome
+document's local array offset, seeds that ore. Terrain and heightmap probes use a 5×5 read context,
+so a blob at the source edge can inspect the real neighbour column rather than a clamped substitute.
+The immutable replay product retains feature selection only for the source being completed; the
+source-ordered compatibility path may explicitly retain the full source set. Those probes
 read `OCEAN_FLOOR_WG` from the completed pre-ore grid, after carving and structure
 placement; the earlier fill height is only for biome and surface selection. `OrePositions::{None, One, Repeat}` replaces a
 per-attempt-allocated `Vec<BlockPos>`, matching vegetation's `Positions` shape; per-blob scratch (the

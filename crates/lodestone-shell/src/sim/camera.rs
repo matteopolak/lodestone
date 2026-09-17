@@ -814,7 +814,7 @@ impl Sim {
                     // Logged because "drew a default" and "declined to
                     // resolve" are indistinguishable on screen, and only one
                     // of them is a bug.
-                    tracing::debug!(
+                    tracing::trace!(
                         target: "assets",
                         player = %id,
                         sheet = skin.default_sheet,

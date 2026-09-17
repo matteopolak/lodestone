@@ -449,7 +449,7 @@ disconnect **and** every ~30 s regardless, because the disconnect path is
 reached by only one of several exit routes (a keep-alive timeout, a crash, or
 a cancelled task at shutdown all skip it) — the common case (alt-F4) would
 otherwise lose the whole session. Entity restore runs in the mob-seeding task
-**after** `MobHandle::reseed`, because reseeding replaces the whole
+**after** `MobHandle::replace_world`, because replacement replaces the whole
 simulation outright; restoring before it would delete every restored mob with
 a completely green build.
 

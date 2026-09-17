@@ -502,8 +502,9 @@ fn served_block_light_carries_a_placed_emitters_halo() {
 
     let before = served_light(CX, CZ, &source, &shape);
     for dx in 0..3usize {
-        let got = block_at(&before, shape.min_y, lx + dx, y, lz)
-            .expect("block light section is present on the wire");
+        // Uniformly dark block-light sections are legitimately elided as
+        // `Missing` on the wire; that decodes to zero at every cell.
+        let got = block_at(&before, shape.min_y, lx + dx, y, lz).unwrap_or(0);
         assert_eq!(
             got,
             0,

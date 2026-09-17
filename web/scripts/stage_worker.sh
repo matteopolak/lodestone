@@ -45,6 +45,7 @@ if [ -z "$threaded_helper" ]; then
   echo "threaded worker glue did not stage its no-bundler helper" >&2
   exit 1
 fi
+node "$root/web/scripts/patch_threaded_worker_helper.mjs" "$threaded_helper"
 if ! grep -Fq 'workerHelpers.no-bundler.js' "$out_dir"/lodestone-server-worker-wasm-threaded.js; then
   echo "threaded worker glue does not import its staged no-bundler helper" >&2
   exit 1

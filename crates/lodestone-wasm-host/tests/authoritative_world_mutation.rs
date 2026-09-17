@@ -177,7 +177,6 @@ async fn wasm_request_reaches_native_adjudicator_and_authoritative_source() {
         (0..=0, 0..=0),
         (0, 0),
         0,
-        1,
         server_app,
     );
     std::mem::forget(client_io);

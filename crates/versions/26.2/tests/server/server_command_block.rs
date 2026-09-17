@@ -152,7 +152,6 @@ async fn an_always_active_command_block_runs_its_command() {
         source.clone(),
         (0..=0, 0..=0),
         (0, 0),
-        0,
         view_radius,
     );
     let (mut handle, _events) =
@@ -213,7 +212,6 @@ async fn an_unpowered_impulse_command_block_never_runs() {
         source.clone(),
         (0..=0, 0..=0),
         (0, 0),
-        0,
         view_radius,
     );
     let (mut handle, _events) =
@@ -263,7 +261,6 @@ async fn a_conditional_always_active_command_block_with_no_predecessor_never_run
         source.clone(),
         (0..=0, 0..=0),
         (0, 0),
-        0,
         view_radius,
     );
     let (mut handle, _events) =

@@ -266,7 +266,7 @@ fn sprint_edges_reach_the_wire_as_player_commands() {
     // for something the drain itself adds.
     // `connected_sim_emits_one_move_per_physics_tick` is where the tail is
     // asserted, so filtering here does not hide it from every gate.
-    let drain = |actions: &std::sync::mpsc::Receiver<ClientAction>| -> Vec<ClientAction> {
+    let drain = |actions: &crate::net::ActionRelayReceiver| -> Vec<ClientAction> {
         std::iter::from_fn(|| actions.try_recv().ok())
             .filter(|a| !matches!(a, ClientAction::EndClientTick))
             .collect()

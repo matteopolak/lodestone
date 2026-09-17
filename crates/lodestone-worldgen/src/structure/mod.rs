@@ -164,7 +164,8 @@ pub mod stronghold;
 pub mod template;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::{Arc, OnceLock};
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use lodestone_worldgen_core::rng::{
     LegacyRandomSource, RandomSource, WorldgenRandom, XoroshiroRandomSource,
@@ -749,6 +750,13 @@ pub trait StartContext {
     fn supports_ring_probe_batch(&self) -> bool {
         false
     }
+    /// A stable identity for the complete biome sampler used by ring
+    /// relocation. Returning `None` keeps the registry-local path, which is
+    /// required for contexts whose answers are dynamic or stateful beyond the
+    /// explicit lookup cursor.
+    fn ring_positions_cache_key(&self) -> Option<u64> {
+        None
+    }
     /// The dimension's sea level.
     fn sea_level(&self) -> i32;
     /// The dimension's lowest generatable Y. Defaulted to the overworld's so
@@ -1005,7 +1013,7 @@ pub enum PieceRefinement {
 /// predicate runs inside the chunk pipeline where there is no `&dyn Resolver` to
 /// reach and no obvious place to put a lock, and 71 gunzips at construction is
 /// cheaper than the machinery to avoid them.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct TemplateStore {
     templates: HashMap<String, Arc<StructureTemplate>>,
 }
@@ -2949,22 +2957,76 @@ pub struct StructureSetDef {
     pub entries: Vec<(String, i32)>,
 }
 
-/// The structure engine for one seed.
-#[allow(missing_debug_implementations)]
-pub struct StructureRegistry {
-    seed: i64,
+#[derive(Clone)]
+struct StructureBlueprint {
     sets: Vec<StructureSetDef>,
-    /// Ring positions depend on the generator's biome sampler, which is only
-    /// available through [`StartContext`]. The registry is owned by one
-    /// generator, so compute the list on its first start query and reuse it for
-    /// the remaining chunks.
-    ring_positions: OnceLock<HashMap<String, Vec<(i32, i32)>>>,
     set_index: HashMap<String, usize>,
     structures: HashMap<String, StructureDef>,
     structure_order: Vec<String>,
     templates: TemplateStore,
     pools: PoolStore,
     unsupported: BTreeMap<String, String>,
+}
+
+static BLUEPRINT_CACHE: OnceLock<Mutex<HashMap<u64, Arc<StructureBlueprint>>>> = OnceLock::new();
+const BLUEPRINT_CACHE_CAPACITY: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct RingPositionsCacheKey {
+    seed: i64,
+    blueprint: u64,
+    context: u64,
+}
+
+static RING_POSITIONS_CACHE: OnceLock<
+    Mutex<HashMap<RingPositionsCacheKey, Arc<HashMap<String, Vec<(i32, i32)>>>>>,
+> = OnceLock::new();
+const RING_POSITIONS_CACHE_CAPACITY: usize = 32;
+const RING_RELOCATION_CHUNK_REACH: i32 = 7;
+static EMPTY_RING_POSITIONS: OnceLock<HashMap<String, Vec<(i32, i32)>>> = OnceLock::new();
+
+fn blueprint_key(
+    resolver: &dyn Resolver,
+    possible_biomes: Option<&HashSet<String>>,
+) -> Option<u64> {
+    let fingerprint = resolver.asset_fingerprint()?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    fingerprint.hash(&mut hasher);
+    match possible_biomes {
+        None => 0u8.hash(&mut hasher),
+        Some(biomes) => {
+            1u8.hash(&mut hasher);
+            let mut names: Vec<_> = biomes.iter().collect();
+            names.sort_unstable();
+            names.len().hash(&mut hasher);
+            for name in names {
+                name.hash(&mut hasher);
+            }
+        }
+    }
+    Some(hasher.finish())
+}
+
+fn cached_blueprint(key: u64) -> Option<Arc<StructureBlueprint>> {
+    BLUEPRINT_CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("structure blueprint cache lock poisoned")
+        .get(&key)
+        .cloned()
+}
+
+/// The structure engine for one seed.
+#[allow(missing_debug_implementations)]
+pub struct StructureRegistry {
+    seed: i64,
+    blueprint: Arc<StructureBlueprint>,
+    blueprint_cache_key: Option<u64>,
+    /// Ring positions depend on the generator's biome sampler, which is only
+    /// available through [`StartContext`]. The local slot is an `Arc` so an
+    /// equivalent generator can reuse the immutable process cache without
+    /// copying the candidate list.
+    ring_positions: OnceLock<Arc<HashMap<String, Vec<(i32, i32)>>>>,
 }
 
 impl StructureRegistry {
@@ -3021,6 +3083,12 @@ impl StructureRegistry {
         resolver: &dyn Resolver,
         possible_biomes: Option<&HashSet<String>>,
     ) -> Self {
+        let cache_key = blueprint_key(resolver, possible_biomes);
+        if let Some(key) = cache_key {
+            if let Some(blueprint) = cached_blueprint(key) {
+                return Self::from_blueprint(seed, blueprint, cache_key);
+            }
+        }
         let ids = resolver.structure_set_ids();
         let mut sets: Vec<StructureSetDef> = Vec::with_capacity(ids.len());
         let mut structures: HashMap<String, StructureDef> = HashMap::new();
@@ -3305,16 +3373,43 @@ impl StructureRegistry {
         let mut structure_order: Vec<String> = structures.keys().cloned().collect();
         structure_order.sort();
 
-        Self {
-            seed,
+        let blueprint = Arc::new(StructureBlueprint {
             sets,
-            ring_positions: OnceLock::new(),
             set_index,
             structures,
             structure_order,
             templates,
             pools,
             unsupported,
+        });
+        if let Some(key) = cache_key {
+            let mut cache = BLUEPRINT_CACHE
+                .get_or_init(|| Mutex::new(HashMap::new()))
+                .lock()
+                .expect("structure blueprint cache lock poisoned");
+            if let Some(existing) = cache.get(&key).cloned() {
+                return Self::from_blueprint(seed, existing, cache_key);
+            }
+            if cache.len() >= BLUEPRINT_CACHE_CAPACITY {
+                if let Some(evicted) = cache.keys().next().copied() {
+                    cache.remove(&evicted);
+                }
+            }
+            cache.insert(key, Arc::clone(&blueprint));
+        }
+        Self::from_blueprint(seed, blueprint, cache_key)
+    }
+
+    fn from_blueprint(
+        seed: i64,
+        blueprint: Arc<StructureBlueprint>,
+        blueprint_cache_key: Option<u64>,
+    ) -> Self {
+        Self {
+            seed,
+            blueprint,
+            blueprint_cache_key,
+            ring_positions: OnceLock::new(),
         }
     }
 
@@ -3342,7 +3437,7 @@ impl StructureRegistry {
         world: &crate::dense_grid::DenseBlockGrid,
         placement_random: &mut WorldgenRandom<XoroshiroRandomSource>,
     ) -> Option<Vec<CodedBlock>> {
-        let StructureKind::Mineshaft { wood, blocking } = &self.structures.get(&start.structure)?.kind else {
+        let StructureKind::Mineshaft { wood, blocking } = &self.blueprint.structures.get(&start.structure)?.kind else {
             return None;
         };
         let mut tree_random = structure_random(self.seed, start.chunk_x, start.chunk_z);
@@ -3400,7 +3495,7 @@ impl StructureRegistry {
         solid_render: &dyn Fn(&str) -> bool,
         mutation: Option<&mut StructureMutationContext<'_>>,
     ) -> Option<Vec<CodedLoot>> {
-        let Some(definition) = self.structures.get(&start.structure) else {
+        let Some(definition) = self.blueprint.structures.get(&start.structure) else {
             return None;
         };
         let StructureKind::Fortress = &definition.kind else {
@@ -3454,31 +3549,31 @@ impl StructureRegistry {
     /// The loaded jigsaw template pools.
     #[must_use]
     pub fn pools(&self) -> &PoolStore {
-        &self.pools
+        &self.blueprint.pools
     }
 
     /// The decoded templates this registry loaded.
     #[must_use]
     pub fn templates(&self) -> &TemplateStore {
-        &self.templates
+        &self.blueprint.templates
     }
 
     /// True when this registry places nothing at all (no structure-set data).
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.sets.is_empty()
+        self.blueprint.sets.is_empty()
     }
 
     /// The parsed sets, in vanilla's bootstrap order.
     #[must_use]
     pub fn sets(&self) -> &[StructureSetDef] {
-        &self.sets
+        &self.blueprint.sets
     }
 
     /// One structure's parsed document.
     #[must_use]
     pub fn structure(&self, id: &str) -> Option<&StructureDef> {
-        self.structures.get(id)
+        self.blueprint.structures.get(id)
     }
 
     /// `(generation step, runtime index within that step)` used to seed a
@@ -3489,12 +3584,12 @@ impl StructureRegistry {
     /// the filtered registry's resource-location order as a best-effort
     /// fallback because the resolver does not expose unrelated registry values.
     pub(crate) fn feature_placement_key(&self, id: &str) -> Option<(i32, usize)> {
-        let step = structure_step_index(&self.structures.get(id)?.step)?;
+        let step = structure_step_index(&self.blueprint.structures.get(id)?.step)?;
         let index = runtime_structure_index(step, id).or_else(|| {
-            self.structure_order
+            self.blueprint.structure_order
                 .iter()
                 .filter(|other| {
-                    self.structures
+                    self.blueprint.structures
                         .get(*other)
                         .and_then(|def| structure_step_index(&def.step))
                         == Some(step)
@@ -3508,7 +3603,7 @@ impl StructureRegistry {
     /// This is deliberately restricted to the two steps whose callers replay
     /// a shared structure stream (mineshafts and fortresses).
     pub(crate) fn runtime_decoration_key(&self, id: &str) -> Option<(i32, usize)> {
-        let step = structure_step_index(&self.structures.get(id)?.step)?;
+        let step = structure_step_index(&self.blueprint.structures.get(id)?.step)?;
         if !matches!(step, 3 | 7) {
             return None;
         }
@@ -3524,21 +3619,105 @@ impl StructureRegistry {
     /// 30", and only the second sentence is true today.
     #[must_use]
     pub fn unsupported(&self) -> &BTreeMap<String, String> {
-        &self.unsupported
+        &self.blueprint.unsupported
     }
 
     /// Computes the ring positions once for the generator's biome sampler.
     /// Concentric-ring placement is a property of the whole generator rather
     /// than of one source chunk: each candidate is nudged toward a preferred
-    /// biome before the per-chunk start walk can see it.
+    /// biome before the per-chunk start walk can see it. Contexts that provide
+    /// a stable sampler key share the immutable result across generators;
+    /// dynamic contexts retain the registry-local behavior.
     fn ring_positions_for_context(
         &self,
         ctx: &dyn StartContext,
     ) -> &HashMap<String, Vec<(i32, i32)>> {
-        let sets = &self.sets;
-        let seed = self.seed;
         self.ring_positions
-            .get_or_init(|| build_ring_positions(sets, seed, ctx))
+            .get_or_init(|| {
+                let cache_key = self
+                    .blueprint_cache_key
+                    .zip(ctx.ring_positions_cache_key())
+                    .map(|(blueprint, context)| RingPositionsCacheKey {
+                        seed: self.seed,
+                        blueprint,
+                        context,
+                    });
+                if let Some(cache_key) = cache_key {
+                    if let Some(existing) = RING_POSITIONS_CACHE
+                        .get_or_init(|| Mutex::new(HashMap::new()))
+                        .lock()
+                        .expect("ring positions cache lock poisoned")
+                        .get(&cache_key)
+                        .cloned()
+                    {
+                        return existing;
+                    }
+                    let built =
+                        Arc::new(build_ring_positions(&self.blueprint.sets, self.seed, ctx));
+                    let mut cache = RING_POSITIONS_CACHE
+                        .get_or_init(|| Mutex::new(HashMap::new()))
+                        .lock()
+                        .expect("ring positions cache lock poisoned");
+                    if let Some(existing) = cache.get(&cache_key).cloned() {
+                        return existing;
+                    }
+                    if cache.len() >= RING_POSITIONS_CACHE_CAPACITY {
+                        if let Some(evicted) = cache.keys().next().copied() {
+                            cache.remove(&evicted);
+                        }
+                    }
+                    cache.insert(cache_key, Arc::clone(&built));
+                    built
+                } else {
+                    Arc::new(build_ring_positions(&self.blueprint.sets, self.seed, ctx))
+                }
+            })
+            .as_ref()
+    }
+
+    fn ring_positions_for_context_in_box(
+        &self,
+        ctx: &dyn StartContext,
+        min_x: i32,
+        max_x: i32,
+        min_z: i32,
+        max_z: i32,
+    ) -> &HashMap<String, Vec<(i32, i32)>> {
+        let exclusion_radius = self
+            .blueprint
+            .sets
+            .iter()
+            .filter_map(|set| set.placement.exclusion_zone.as_ref())
+            .map(|zone| zone.chunk_count.max(0))
+            .max()
+            .unwrap_or(0);
+        let padding = RING_RELOCATION_CHUNK_REACH.saturating_add(exclusion_radius);
+        let min_x = min_x.saturating_sub(padding);
+        let max_x = max_x.saturating_add(padding);
+        let min_z = min_z.saturating_sub(padding);
+        let max_z = max_z.saturating_add(padding);
+        let ring_can_reach = self.blueprint.sets.iter().any(|set| {
+            let PlacementKind::ConcentricRings {
+                distance,
+                spread,
+                count,
+                ..
+            } = &set.placement.kind
+            else {
+                return false;
+            };
+            (*count > 0 && *spread > 0)
+                && placement::ring_candidates(self.seed, *distance, *spread, *count)
+                    .into_iter()
+                    .any(|(_, x, z)| {
+                        (min_x..=max_x).contains(&x) && (min_z..=max_z).contains(&z)
+                    })
+        });
+        if ring_can_reach {
+            self.ring_positions_for_context(ctx)
+        } else {
+            EMPTY_RING_POSITIONS.get_or_init(HashMap::new)
+        }
     }
 
     /// Returns the possible structure origins in an inclusive chunk box, with
@@ -3562,9 +3741,9 @@ impl StructureRegistry {
         if min_x > max_x || min_z > max_z {
             return Vec::new();
         }
-        let ring_positions = self.ring_positions_for_context(ctx);
+        let ring_positions = self.ring_positions_for_context_in_box(ctx, min_x, max_x, min_z, max_z);
         let mut origins = Vec::new();
-        for set in &self.sets {
+        for set in &self.blueprint.sets {
             match &set.placement.kind {
                 PlacementKind::RandomSpread { spacing, .. } if *spacing > 0 => {
                     let spacing = *spacing;
@@ -3592,7 +3771,8 @@ impl StructureRegistry {
                 PlacementKind::ConcentricRings { .. } => {
                     if let Some(positions) = ring_positions.get(&set.id) {
                         origins.extend(positions.iter().copied().filter(|(x, z)| {
-                            (min_x..=max_x).contains(x) && (min_z..=max_z).contains(z)
+                            (min_x..=max_x).contains(x)
+                                && (min_z..=max_z).contains(z)
                         }));
                     }
                 }
@@ -3643,10 +3823,10 @@ impl StructureRegistry {
         range: i32,
         ring_positions: &HashMap<String, Vec<(i32, i32)>>,
     ) -> bool {
-        let Some(&index) = self.set_index.get(other_set) else {
+        let Some(&index) = self.blueprint.set_index.get(other_set) else {
             return false;
         };
-        let other = &self.sets[index];
+        let other = &self.blueprint.sets[index];
         for x in (cx - range)..=(cx + range) {
             for z in (cz - range)..=(cz + range) {
                 if self.placement_chunk_with_context(other, x, z, ring_positions)
@@ -3695,10 +3875,10 @@ impl StructureRegistry {
     /// zone of its own, so one level is exact. A datapack chaining two zones
     /// would be silently under-excluded here, which is why this is written down.
     fn has_placement_in_range(&self, other_set: &str, cx: i32, cz: i32, range: i32) -> bool {
-        let Some(&index) = self.set_index.get(other_set) else {
+        let Some(&index) = self.blueprint.set_index.get(other_set) else {
             return false;
         };
-        let other = &self.sets[index];
+        let other = &self.blueprint.sets[index];
         for x in (cx - range)..=(cx + range) {
             for z in (cz - range)..=(cz + range) {
                 if other.placement.is_placement_chunk(self.seed, x, z)
@@ -3736,9 +3916,9 @@ impl StructureRegistry {
     /// Pure in `(seed, cx, cz, ctx)`. Starts are returned in structure-set
     /// (bootstrap) order.
     pub fn starts_at(&self, cx: i32, cz: i32, ctx: &dyn StartContext) -> Vec<StructureStart> {
-        let ring_positions = self.ring_positions_for_context(ctx);
+        let ring_positions = self.ring_positions_for_context_in_box(ctx, cx, cx, cz, cz);
         let mut out = Vec::new();
-        for set in &self.sets {
+        for set in &self.blueprint.sets {
             if !self.is_structure_chunk_with_context(set, cx, cz, ring_positions) {
                 continue;
             }
@@ -3784,7 +3964,7 @@ impl StructureRegistry {
             return Some(Vec::new());
         }
         let mut origins = Vec::new();
-        for set in &self.sets {
+        for set in &self.blueprint.sets {
             let PlacementKind::RandomSpread { spacing, .. } = &set.placement.kind else {
                 if matches!(&set.placement.kind, PlacementKind::Unsupported(_)) {
                     continue;
@@ -3829,14 +4009,18 @@ impl StructureRegistry {
         cz: i32,
         ctx: &dyn StartContext,
     ) -> Option<StructureStart> {
-        let def = self.structures.get(structure_id)?;
-        let stub = def.kind.find_stub(cx, cz, self.seed, ctx, &self.pools, &self.templates)?;
+        let def = self.blueprint.structures.get(structure_id)?;
+        let stub = def.kind.find_stub(cx, cz, self.seed, ctx, &self.blueprint.pools, &self.blueprint.templates)?;
         let position = stub.position();
         // The biome-validity check: the biome at the *stub position*, quart-wise,
         // including Y. Using y = 0 (or the surface) instead is the "y = 0 trap"
         // `crate::biome` already documents for carvers.
-        let biome = ctx.biome_at_quart(position[0] >> 2, position[1] >> 2, position[2] >> 2);
-        if !def.biomes.contains(&biome) {
+        if !ctx.biome_in_set_at_quart(
+            position[0] >> 2,
+            position[1] >> 2,
+            position[2] >> 2,
+            &def.biomes,
+        ) {
             return None;
         }
         // Only now — a generation stub's piece consumer runs
@@ -3848,8 +4032,8 @@ impl StructureRegistry {
             cz,
             self.seed,
             ctx,
-            &self.templates,
-            &self.pools,
+            &self.blueprint.templates,
+            &self.blueprint.pools,
         );
         match def.kind.validity(&generated) {
             Validity::Invalid => None,
@@ -4203,6 +4387,181 @@ mod tests {
         }
     }
 
+    #[test]
+    fn structure_blueprint_reuses_immutable_state_between_seeds() {
+        const JSON: &[(&str, &str)] = &[("structure_set/test", r#"{"placement": {}}"#)];
+        let resolver = crate::table_resolver::TableResolver::new(JSON);
+        let first = StructureRegistry::new(1, &resolver);
+        let second = StructureRegistry::new(2, &resolver);
+        assert!(Arc::ptr_eq(&first.blueprint, &second.blueprint));
+    }
+
+    struct CountingRingContext {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        cache_key: Option<u64>,
+    }
+
+    impl StartContext for CountingRingContext {
+        fn first_occupied_height(&self, _x: i32, _z: i32, _heightmap: HeightmapKind) -> i32 {
+            63
+        }
+
+        fn biome_at_quart(&self, _qx: i32, _qy: i32, _qz: i32) -> String {
+            "test:preferred".to_owned()
+        }
+
+        fn biome_in_set_at_quart(
+            &self,
+            _qx: i32,
+            _qy: i32,
+            _qz: i32,
+            allowed: &HashSet<String>,
+        ) -> bool {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            allowed.contains("test:preferred")
+        }
+
+        fn ring_positions_cache_key(&self) -> Option<u64> {
+            self.cache_key
+        }
+
+        fn sea_level(&self) -> i32 {
+            63
+        }
+    }
+
+    fn ring_test_registry(
+        seed: i64,
+        blueprint_cache_key: Option<u64>,
+        distance: i32,
+    ) -> StructureRegistry {
+        let set = StructureSetDef {
+            id: "test:ring".to_owned(),
+            placement: Placement::parse(&serde_json::json!({
+                "type": "minecraft:concentric_rings",
+                "distance": distance,
+                "spread": 1,
+                "count": 1,
+                "preferred_biomes": ["test:preferred"]
+            })),
+            entries: Vec::new(),
+        };
+        StructureRegistry {
+            seed,
+            blueprint: Arc::new(StructureBlueprint {
+                sets: vec![set],
+                set_index: HashMap::new(),
+                structures: HashMap::new(),
+                structure_order: Vec::new(),
+                templates: TemplateStore::default(),
+                pools: PoolStore::default(),
+                unsupported: BTreeMap::new(),
+            }),
+            blueprint_cache_key,
+            ring_positions: OnceLock::new(),
+        }
+    }
+
+    #[test]
+    fn equivalent_ring_contexts_share_exact_positions() {
+        let first_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let first_context = CountingRingContext {
+            calls: Arc::clone(&first_calls),
+            cache_key: Some(0x51a7),
+        };
+        let first = ring_test_registry(0x1234, Some(0x81), 1);
+        let first_positions = first.origin_candidates_in(-64, 64, -64, 64, &first_context);
+        assert!(first_calls.load(std::sync::atomic::Ordering::Relaxed) > 0);
+
+        let second_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let second_context = CountingRingContext {
+            calls: Arc::clone(&second_calls),
+            cache_key: Some(0x51a7),
+        };
+        let second = ring_test_registry(0x1234, Some(0x81), 1);
+        let second_positions = second.origin_candidates_in(-64, 64, -64, 64, &second_context);
+        assert_eq!(first_positions, second_positions);
+        assert_eq!(
+            second_calls.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "a stable sampler key should reuse the immutable ring product"
+        );
+    }
+
+    #[test]
+    fn distant_ring_queries_do_not_initialize_relocation() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let context = CountingRingContext {
+            calls: Arc::clone(&calls),
+            cache_key: None,
+        };
+        let registry = ring_test_registry(42, None, 100);
+        assert!(registry.origin_candidates_in(-2, 2, -2, 2, &context).is_empty());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+        let positions = registry.origin_candidates_in(-1_000, 1_000, -1_000, 1_000, &context);
+        assert_eq!(positions.len(), 1);
+        assert!(calls.load(std::sync::atomic::Ordering::Relaxed) > 0);
+    }
+
+    #[test]
+    fn dynamic_ring_contexts_run_independently() {
+        struct DynamicResolver;
+        impl Resolver for DynamicResolver {
+            fn density_function(&self, _id: &str) -> Value {
+                Value::Null
+            }
+
+            fn noise(&self, _id: &str) -> crate::density::NoiseParams {
+                unreachable!("dynamic ring placement does not resolve noise")
+            }
+
+            fn structure_set_ids(&self) -> Vec<String> {
+                vec!["test:ring".to_owned()]
+            }
+
+            fn structure_set(&self, id: &str) -> Value {
+                if id == "test:ring" {
+                    serde_json::json!({
+                        "placement": {
+                            "type": "minecraft:concentric_rings",
+                            "distance": 1,
+                            "spread": 1,
+                            "count": 1,
+                            "preferred_biomes": ["test:preferred"]
+                        },
+                        "structures": []
+                    })
+                } else {
+                    Value::Null
+                }
+            }
+        }
+
+        let resolver = DynamicResolver;
+        let first_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let first_context = CountingRingContext {
+            calls: Arc::clone(&first_calls),
+            cache_key: None,
+        };
+        let first = StructureRegistry::new(0x5678, &resolver);
+        let first_positions = first.origin_candidates_in(-64, 64, -64, 64, &first_context);
+        assert!(first_calls.load(std::sync::atomic::Ordering::Relaxed) > 0);
+
+        let second_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let second_context = CountingRingContext {
+            calls: Arc::clone(&second_calls),
+            cache_key: None,
+        };
+        let second = StructureRegistry::new(0x5678, &resolver);
+        let second_positions = second.origin_candidates_in(-64, 64, -64, 64, &second_context);
+        assert_eq!(first_positions, second_positions);
+        assert!(
+            second_calls.load(std::sync::atomic::Ordering::Relaxed) > 0,
+            "dynamic contexts must not reuse a ring product"
+        );
+    }
+
     /// The target-chunk structure stream follows the runtime registry, whose
     /// resource entries are sorted lexically rather than by bootstrap call order.
     #[test]
@@ -4296,19 +4655,22 @@ mod tests {
         };
         let registry = StructureRegistry {
             seed: -195_764_831,
-            sets: vec![set],
+            blueprint: Arc::new(StructureBlueprint {
+                sets: vec![set],
+                set_index: HashMap::new(),
+                structures: HashMap::new(),
+                structure_order: Vec::new(),
+                templates: TemplateStore::default(),
+                pools: PoolStore::default(),
+                unsupported: BTreeMap::new(),
+            }),
+            blueprint_cache_key: None,
             ring_positions: OnceLock::new(),
-            set_index: HashMap::new(),
-            structures: HashMap::new(),
-            structure_order: Vec::new(),
-            templates: TemplateStore::default(),
-            pools: PoolStore::default(),
-            unsupported: BTreeMap::new(),
         };
         let expected = (-25..=25)
             .flat_map(|x| (-25..=25).map(move |z| (x, z)))
             .filter(|&(x, z)| {
-                registry.sets[0]
+                registry.blueprint.sets[0]
                     .placement
                     .is_placement_chunk(registry.seed, x, z)
             })
@@ -4347,19 +4709,22 @@ mod tests {
         };
         let registry = StructureRegistry {
             seed: -195_764_831,
-            sets: vec![set],
+            blueprint: Arc::new(StructureBlueprint {
+                sets: vec![set],
+                set_index: HashMap::new(),
+                structures: HashMap::new(),
+                structure_order: Vec::new(),
+                templates: TemplateStore::default(),
+                pools: PoolStore::default(),
+                unsupported: BTreeMap::new(),
+            }),
+            blueprint_cache_key: None,
             ring_positions: OnceLock::new(),
-            set_index: HashMap::new(),
-            structures: HashMap::new(),
-            structure_order: Vec::new(),
-            templates: TemplateStore::default(),
-            pools: PoolStore::default(),
-            unsupported: BTreeMap::new(),
         };
         let expected = (-80..=80)
             .flat_map(|x| (-80..=80).map(move |z| (x, z)))
             .filter(|&(x, z)| {
-                registry.sets[0]
+                registry.blueprint.sets[0]
                     .placement
                     .is_placement_chunk(registry.seed, x, z)
             })
@@ -4383,14 +4748,17 @@ mod tests {
         };
         let registry = StructureRegistry {
             seed: 42,
-            sets: vec![set],
+            blueprint: Arc::new(StructureBlueprint {
+                sets: vec![set],
+                set_index: HashMap::new(),
+                structures: HashMap::new(),
+                structure_order: Vec::new(),
+                templates: TemplateStore::default(),
+                pools: PoolStore::default(),
+                unsupported: BTreeMap::new(),
+            }),
+            blueprint_cache_key: None,
             ring_positions: OnceLock::new(),
-            set_index: HashMap::new(),
-            structures: HashMap::new(),
-            structure_order: Vec::new(),
-            templates: TemplateStore::default(),
-            pools: PoolStore::default(),
-            unsupported: BTreeMap::new(),
         };
         assert!(registry.random_spread_origins_in(-64, 64, -64, 64).is_none());
     }
@@ -4471,7 +4839,17 @@ mod tests {
             }
 
             fn biome_at_quart(&self, _qx: i32, _qy: i32, _qz: i32) -> String {
-                "test:stronghold_preferred".into()
+                panic!("registry start must use the borrowed biome-membership seam")
+            }
+
+            fn biome_in_set_at_quart(
+                &self,
+                _qx: i32,
+                _qy: i32,
+                _qz: i32,
+                allowed: &HashSet<String>,
+            ) -> bool {
+                allowed.contains("test:stronghold_preferred")
             }
 
             fn sea_level(&self) -> i32 {

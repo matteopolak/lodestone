@@ -50,7 +50,7 @@ use lodestone_server::{
 };
 use lodestone_v26_2::{V770ServerProtocol, adapter};
 
-/// An all-air column with real edit retention, **shared** with the test.
+/// An otherwise-air column with real edit retention, **shared** with the test.
 ///
 /// The `Arc` is the point: `block_entities_live.rs`'s own `AirSource` is moved
 /// wholesale into the server task and is therefore unreadable afterwards, so
@@ -79,7 +79,11 @@ impl SharedAirSource {
 
 impl ChunkSource for SharedAirSource {
     fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
-        ChunkColumn::new(0, 16)
+        let mut column = ChunkColumn::new(0, 16);
+        // Redstone dust needs a solid supporting block; keep that fixture
+        // state in the served column rather than adding it to the edit log.
+        column.set_block(6, 4, 2, "minecraft:stone");
+        column
     }
 
     fn block_state(&self, x: i32, y: i32, z: i32) -> String {
@@ -88,7 +92,13 @@ impl ChunkSource for SharedAirSource {
             .expect("edits lock poisoned")
             .get(&(x, y, z))
             .cloned()
-            .unwrap_or_else(|| "minecraft:air".to_string())
+            .unwrap_or_else(|| {
+                if (x, y, z) == (6, 4, 2) {
+                    "minecraft:stone".to_string()
+                } else {
+                    "minecraft:air".to_string()
+                }
+            })
     }
 
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {

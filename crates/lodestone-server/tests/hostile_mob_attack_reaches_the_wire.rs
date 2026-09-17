@@ -186,7 +186,6 @@ async fn a_zombie_next_to_a_real_player_damages_them_through_the_production_loop
         RoofedRoom,
         (-2..=2, -2..=2),
         (8, 8),
-        0,
         3,
     );
     // No natural spawns competing for the health-drop signal.

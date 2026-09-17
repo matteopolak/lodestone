@@ -96,11 +96,23 @@ compiled into a flat, `Arc`-shared, lock-free `Program` rather than walked as bo
 per chunk — one compiled graph backs unlimited concurrent chunk generation with zero clones on the
 hot path.
 
+Compilation also folds side-effect-free constant arithmetic and routes selectors
+whose input is constant, eliminating their unreachable child graph before the
+field walk. Cache-writing wrappers remain explicit: even a numerically constant
+interpolation must retain its slot write and corner order. Graph controls cover
+IEEE signed zero, selector branch choice, and this cache-write boundary.
+
+The four simple aquifer noise roots use a direct point-noise path while complex
+roots retain the boxed density interpreter. The specialized path keeps the
+same point counter and identity probe, and computes the same scaled coordinates;
+it is a dispatch reduction, not a new cache or a changed route.
+
 Everything the graph evaluates must preserve vanilla's IEEE-754 evaluation order exactly: `Mul`
 short-circuits on an exact `0.0` first operand without evaluating the second (so the field walk must
 stay recursive descent, never a bottom-up sweep), no `mul_add`/FMA anywhere, no reassociation of an
-octave accumulation chain, and no folding a `0.0 *` multiply that could carry a sign (`-0.0` vs
-`0.0` diverge downstream). SIMD vectorization (`lodestone-worldgen-core`'s `noise/improved.rs`,
+octave accumulation chain, and no folding a multiply until its first operand is proven constant
+and the exact short-circuit result is known (`-0.0` vs `0.0` diverge downstream). SIMD
+vectorization (`lodestone-worldgen-core`'s `noise/improved.rs`,
 nightly `#![feature(portable_simd)]`) lanes only independent lattice positions, never across an
 accumulation chain, for the same reason — it is the one place lanes are safe.
 
@@ -224,6 +236,14 @@ recorded split.
   it must not recreate `Resolver` methods. Use the key selectors for
   dimension-specific biome tables or the typed-empty selectors for a fixed
   biome, and use `document` only for bundled data outside the `Resolver` trait.
+  Production embedders may attach the resolver's fingerprint-checked
+  `JsonCache` to retain parsed documents across seed changes; custom or
+  mutable resolvers should leave it detached.
+- **Keep structure setup seed-independent.** `StructureRegistry` caches a
+  fingerprinted blueprint (including decoded templates and reachable pools) and
+  shares the resulting pure ring-position list for the same seed and sampler
+  identity. A resolver that can change its assets must return no fingerprint so
+  it always takes the fallback construction path.
 - **When you add a caller that resolves per-chunk state, route it through the existing memo/store
   rather than adding a second cache.** A `Mutex`-guarded FIFO cache under concurrent load has already
   cost this repo a reverted change once; sharded once-only slots or a thread-local direct-mapped memo

@@ -763,8 +763,8 @@ pub struct Options {
     /// the local Overworld estimate is capped at
     /// [`MAX_HORIZON_DISTANCE_CHUNKS`].
     ///
-    /// This is intentionally not a vanilla setting. The Video screen calls it
-    /// **Distant Horizon** so it cannot be mistaken for real Render Distance.
+    /// The Video screen calls it **Far Terrain Distance** so it cannot be
+    /// mistaken for real Render Distance.
     pub horizon_distance_chunks: u32,
     /// Vanilla's `options.advancedItemTooltips`, toggled by
     /// **F3+H** and by nothing else.

@@ -20,6 +20,44 @@ use self::census::bump as census_bump;
 
 const HEIGHT_CACHE_UNSET: i32 = i32::MIN;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HeightLaneMask(u8);
+
+impl HeightLaneMask {
+    const LIVE_SURFACE: Self = Self(1 << 0);
+    const WORLD_SURFACE_WG: Self = Self(1 << 1);
+    const MOTION_BLOCKING: Self = Self(1 << 2);
+    const OCEAN_FLOOR: Self = Self(1 << 3);
+    const LIVE: Self = Self(
+        Self::LIVE_SURFACE.0 | Self::MOTION_BLOCKING.0 | Self::OCEAN_FLOOR.0,
+    );
+    const WG: Self = Self(Self::WORLD_SURFACE_WG.0);
+
+    const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    const fn without(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
+    }
+
+    const fn intersection(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+
+    const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    const fn for_lane(lane: usize) -> Self {
+        Self(1 << lane)
+    }
+}
+
 thread_local! {
     static STATE_FORMAT: RefCell<String> = const { RefCell::new(String::new()) };
 }
@@ -206,11 +244,12 @@ pub(super)     height: i32,
     air_ids: [StateId; 3],
     /// Memoised heightmap results, indexed by the local `(x, z)` column.
     ///
-    /// Height queries are frequent during vegetation placement and their old
-    /// implementation walked the complete vertical span on every call. The
-    /// four caches memoise the result for each local column. They are
-    /// interior-mutable because the public height accessors intentionally stay
-    /// shared (`&self`), while writes invalidate only the column they touch.
+    /// Height queries are frequent during vegetation placement. A miss walks
+    /// the vertical span once for the compatible live lanes, or separately for
+    /// the immutable WG lane; each cache memoises its result for the local
+    /// column. They are interior-mutable because the public height accessors
+    /// intentionally stay shared (`&self`), while writes invalidate only the
+    /// column they touch.
     /// A single four-lane cell keeps the caches compact (one allocation and
     /// 16 bytes per column). [`HEIGHT_CACHE_UNSET`] is outside the generated build range
     /// and represents an uncomputed lane.
@@ -601,6 +640,7 @@ impl VegGrid {
                     let dx = source_chunk_x - centre_chunk_x;
                     let dz = source_chunk_z - centre_chunk_z;
                     let slot = wide_source_slot(dx * 16, dz * 16)?;
+                    census::record_source_slot(slot);
                     let cells = match flat {
                         FlatBiomeSources::Ids { cells } => cells,
                     };
@@ -629,8 +669,10 @@ impl VegGrid {
                 |source_chunk_x, source_chunk_z| {
                     let dx = source_chunk_x - centre_chunk_x;
                     let dz = source_chunk_z - centre_chunk_z;
-                    wide_source_slot(dx * 16, dz * 16)
-                        .and_then(|slot| sources[slot].as_deref())
+                    wide_source_slot(dx * 16, dz * 16).and_then(|slot| {
+                        census::record_source_slot(slot);
+                        sources[slot].as_deref()
+                    })
                 },
             )
         } else {
@@ -639,6 +681,7 @@ impl VegGrid {
             let Some(slot) = wide_source_slot(lx, lz) else {
                 return false;
             };
+            census::record_source_slot(slot);
             let Some(cells) = sources[slot].as_deref() else {
                 return false;
             };
@@ -671,7 +714,10 @@ impl VegGrid {
     /// chunk-band calculation for each cell.
     #[inline]
     fn source_grid(&self, lx: i32, lz: i32) -> Option<&DenseBlockGrid> {
-        wide_source_slot(lx, lz).and_then(|slot| self.sources[slot].as_deref())
+        wide_source_slot(lx, lz).and_then(|slot| {
+            census::record_source_slot(slot);
+            self.sources[slot].as_deref()
+        })
     }
 
     #[inline]
@@ -818,6 +864,18 @@ impl VegGrid {
         self.height_cache[index].set(cache);
     }
 
+    #[inline]
+    fn uncached_height_lanes(&self, lx: i32, lz: i32, lanes: HeightLaneMask) -> HeightLaneMask {
+        let cache = self.height_cache[self.height_cache_index(lx, lz)].get();
+        let mut uncached = HeightLaneMask(0);
+        for (lane, value) in cache.into_iter().enumerate() {
+            if value == HEIGHT_CACHE_UNSET {
+                uncached = HeightLaneMask(uncached.0 | (1 << lane));
+            }
+        }
+        HeightLaneMask(lanes.0 & uncached.0)
+    }
+
     /// Absolute world `(x, z)` -> local `[local_lo, local_hi)`, **clamped**
     /// into range — used only by read paths, which must always answer
     /// something.
@@ -895,23 +953,115 @@ impl VegGrid {
         }
     }
 
-    /// Typed block facts for one live cell. Source grids already cache these
-    /// facts in their palettes; only a decoration overlay cell needs the
-    /// interner lookup. Keeping this split makes heightmap scans exact without
-    /// putting a lock on every source-terrain cell.
     #[inline]
-    fn get_local_facts(&self, lx: i32, y: i32, lz: i32) -> BaseStateFacts {
+    fn live_id_and_facts(
+        &self,
+        source: Option<&DenseBlockGrid>,
+        lx: i32,
+        y: i32,
+        lz: i32,
+    ) -> (StateId, BaseStateFacts) {
         if y < self.min_y || y >= self.min_y + self.height {
-            return BaseStateFacts::air();
+            return (StateId::AIR, BaseStateFacts::air());
         }
-        match self.blocks.get_in_bounds(&(lx, y, lz)) {
-            Some(id) => self.interner.base_facts(id),
-            None => self
-                .source_grid(lx, lz)
-                .map_or_else(BaseStateFacts::air, |source| {
-                    source.get_base_facts(self.origin_x + lx, y, self.origin_z + lz)
-                }),
+        if let Some(id) = self.blocks.get_in_bounds(&(lx, y, lz)) {
+            return (id, self.interner.base_facts(id));
         }
+        source.map_or((StateId::AIR, BaseStateFacts::air()), |source| {
+            (
+                source.get_id(self.origin_x + lx, y, self.origin_z + lz),
+                source.get_base_facts(self.origin_x + lx, y, self.origin_z + lz),
+            )
+        })
+    }
+
+    #[inline]
+    fn worldgen_id(
+        &self,
+        source: Option<&DenseBlockGrid>,
+        lx: i32,
+        y: i32,
+        lz: i32,
+    ) -> StateId {
+        source.map_or_else(
+            || {
+                self.seeded_baseline
+                    .as_ref()
+                    .and_then(|baseline| baseline.get_in_bounds(&(lx, y, lz)))
+                    .unwrap_or(StateId::AIR)
+            },
+            |source| source.get_id(self.origin_x + lx, y, self.origin_z + lz),
+        )
+    }
+
+    fn scan_height_lanes(
+        &self,
+        lx: i32,
+        lz: i32,
+        requested: HeightLaneMask,
+        primary: HeightLaneMask,
+    ) {
+        let mut pending = self.uncached_height_lanes(lx, lz, requested);
+        if pending.is_empty() {
+            return;
+        }
+        census_bump(|c| c.height_scans += 1);
+        let source = self.source_grid(lx, lz);
+        for y in (self.min_y..self.min_y + self.height).rev() {
+            census_bump(|c| c.height_scan_cells += 1);
+            if pending.contains(primary) {
+                census_bump(|c| c.height_primary_cells += 1);
+            } else if !pending.is_empty() {
+                census_bump(|c| c.height_companion_tail_cells += 1);
+            }
+            if !pending.intersection(HeightLaneMask::LIVE).is_empty() {
+                let (id, facts) = self.live_id_and_facts(source, lx, y, lz);
+                if pending.contains(HeightLaneMask::LIVE_SURFACE) && !self.is_air_id(id) {
+                    self.cache_height(lx, lz, 0, y + 1);
+                    pending = pending.without(HeightLaneMask::LIVE_SURFACE);
+                }
+                if pending.contains(HeightLaneMask::MOTION_BLOCKING) && facts.is_motion_blocking() {
+                    self.cache_height(lx, lz, 2, y + 1);
+                    pending = pending.without(HeightLaneMask::MOTION_BLOCKING);
+                }
+                if pending.contains(HeightLaneMask::OCEAN_FLOOR) && facts.is_ocean_floor() {
+                    self.cache_height(lx, lz, 3, y + 1);
+                    pending = pending.without(HeightLaneMask::OCEAN_FLOOR);
+                }
+            }
+            if pending.contains(HeightLaneMask::WORLD_SURFACE_WG)
+                && !self.is_air_id(self.worldgen_id(source, lx, y, lz))
+            {
+                self.cache_height(lx, lz, 1, y + 1);
+                pending = pending.without(HeightLaneMask::WORLD_SURFACE_WG);
+            }
+            if pending.is_empty() {
+                break;
+            }
+        }
+        for lane in 0..4 {
+            if pending.contains(HeightLaneMask::for_lane(lane)) {
+                self.cache_height(lx, lz, lane, self.min_y);
+            }
+        }
+    }
+
+    #[inline]
+    fn height_for_lane(&self, lx: i32, lz: i32, lane: usize) -> i32 {
+        if self.cached_height(lx, lz, lane).is_none() {
+            let (group, primary) = match lane {
+                0 => (HeightLaneMask::LIVE_SURFACE, HeightLaneMask::LIVE_SURFACE),
+                1 => (HeightLaneMask::WG, HeightLaneMask::WORLD_SURFACE_WG),
+                2 => (
+                    HeightLaneMask::LIVE_SURFACE.union(HeightLaneMask::MOTION_BLOCKING),
+                    HeightLaneMask::MOTION_BLOCKING,
+                ),
+                3 => (HeightLaneMask::LIVE, HeightLaneMask::OCEAN_FLOOR),
+                _ => unreachable!("height cache lane out of range"),
+            };
+            self.scan_height_lanes(lx, lz, group, primary);
+        }
+        self.height_cache[self.height_cache_index(lx, lz)].get()[lane]
     }
 
     fn get_local(&self, lx: i32, y: i32, lz: i32) -> &str {
@@ -969,6 +1119,7 @@ impl VegGrid {
                 .write_fmt(state)
                 .expect("writing a block state into a String cannot fail");
             let id = self.interner.id_of(scratch.as_str());
+            scratch.clear();
             self.set_id_if_in_bounds(x, y, z, id)
         })
     }
@@ -976,6 +1127,7 @@ impl VegGrid {
     pub fn formatted_state_id(&self, state: std::fmt::Arguments<'_>) -> StateId {
         STATE_FORMAT.with(|scratch| {
             let mut scratch = scratch.borrow_mut();
+            scratch.clear();
             scratch
                 .write_fmt(state)
                 .expect("writing a block state into a String cannot fail");
@@ -1013,23 +1165,7 @@ impl VegGrid {
     #[must_use]
     pub fn height_world_surface(&self, x: i32, z: i32) -> i32 {
         let (lx, lz) = self.to_local_clamped(x, z);
-        if let Some(height) = self.cached_height(lx, lz, 0) {
-            return height;
-        }
-        let source = self.source_grid(lx, lz);
-        for y in (self.min_y..self.min_y + self.height).rev() {
-            let id = match self.blocks.get_in_bounds(&(lx, y, lz)) {
-                Some(id) => id,
-                None => self.source_id_from_grid(source, lx, y, lz),
-            };
-            if !self.is_air_id(id) {
-                let height = y + 1;
-                self.cache_height(lx, lz, 0, height);
-                return height;
-            }
-        }
-        self.cache_height(lx, lz, 0, self.min_y);
-        self.min_y
+        self.height_for_lane(lx, lz, 0)
     }
 
     /// `Heightmap.Types.WORLD_SURFACE_WG` — topmost non-air in the immutable
@@ -1040,33 +1176,7 @@ impl VegGrid {
     #[must_use]
     pub fn height_world_surface_wg(&self, x: i32, z: i32) -> i32 {
         let (lx, lz) = self.to_local_clamped(x, z);
-        if let Some(height) = self.cached_height(lx, lz, 1) {
-            return height;
-        }
-        let source = self.source_grid(lx, lz);
-        for y in (self.min_y..self.min_y + self.height).rev() {
-            // Production grids have a source chunk, whose immutable terrain
-            // must win over this pass's overlay. Compact parity/unit fixtures
-            // have no source and seed that same baseline into a sparse
-            // snapshot, so they need the equivalent fallback here rather
-            // than reading an all-air synthetic source or the live overlay.
-            let id = source.map_or_else(
-                || {
-                    self.seeded_baseline
-                        .as_ref()
-                        .and_then(|baseline| baseline.get_in_bounds(&(lx, y, lz)))
-                        .unwrap_or(StateId::AIR)
-                },
-                |source| source.get_id(self.origin_x + lx, y, self.origin_z + lz),
-            );
-            if !self.is_air_id(id) {
-                let height = y + 1;
-                self.cache_height(lx, lz, 1, height);
-                return height;
-            }
-        }
-        self.cache_height(lx, lz, 1, self.min_y);
-        self.min_y
+        self.height_for_lane(lx, lz, 1)
     }
 
     /// `Heightmap.Types.MOTION_BLOCKING` — the first free row above the
@@ -1075,18 +1185,7 @@ impl VegGrid {
     #[must_use]
     pub fn height_motion_blocking(&self, x: i32, z: i32) -> i32 {
         let (lx, lz) = self.to_local_clamped(x, z);
-        if let Some(height) = self.cached_height(lx, lz, 2) {
-            return height;
-        }
-        for y in (self.min_y..self.min_y + self.height).rev() {
-            if self.get_local_facts(lx, y, lz).is_motion_blocking() {
-                let height = y + 1;
-                self.cache_height(lx, lz, 2, height);
-                return height;
-            }
-        }
-        self.cache_height(lx, lz, 2, self.min_y);
-        self.min_y
+        self.height_for_lane(lx, lz, 2)
     }
 
     /// Whether `id` is one of the three air states.
@@ -1118,18 +1217,7 @@ impl VegGrid {
     #[must_use]
     pub fn height_ocean_floor(&self, x: i32, z: i32) -> i32 {
         let (lx, lz) = self.to_local_clamped(x, z);
-        if let Some(height) = self.cached_height(lx, lz, 3) {
-            return height;
-        }
-        for y in (self.min_y..self.min_y + self.height).rev() {
-            if self.get_local_facts(lx, y, lz).is_ocean_floor() {
-                let height = y + 1;
-                self.cache_height(lx, lz, 3, height);
-                return height;
-            }
-        }
-        self.cache_height(lx, lz, 3, self.min_y);
-        self.min_y
+        self.height_for_lane(lx, lz, 3)
     }
 
 }
@@ -1172,6 +1260,8 @@ impl VegGrid {
 /// thread sees only its own placements, so a gate resets, generates, and reads
 /// back on one thread and measures exactly what it caused.
 pub mod census {
+    #[cfg(feature = "gen-counters")]
+    use std::cell::Cell;
     use std::cell::RefCell;
     use std::collections::BTreeMap;
 
@@ -1236,10 +1326,20 @@ pub mod census {
         /// a chunk this grid does not cover — expected, see
         /// [`super::VegGrid::set_if_in_bounds`]).
         pub writes_rejected: usize,
+        /// Downward height-cache walks started.
+        pub height_scans: usize,
+        /// Vertical cells visited by height-cache walks.
+        pub height_scan_cells: u64,
+        /// Cells visited while the requested lane remained unresolved.
+        pub height_primary_cells: u64,
+        /// Cells visited after the requested lane resolved for companions.
+        pub height_companion_tail_cells: u64,
     }
 
     thread_local! {
         static CENSUS: RefCell<VegCensus> = RefCell::new(VegCensus::default());
+        #[cfg(feature = "gen-counters")]
+        static SOURCE_SLOT_MASK: Cell<u32> = const { Cell::new(0) };
     }
 
     /// Whether an unmodelled terminal dispatch should panic instead of being
@@ -1262,6 +1362,7 @@ pub mod census {
     /// gate intends to measure.
     pub fn reset() {
         CENSUS.with(|c| *c.borrow_mut() = VegCensus::default());
+        reset_source_slots();
     }
 
     /// This thread's census so far.
@@ -1273,14 +1374,45 @@ pub mod census {
     pub(in crate::feature::vegetation) fn bump(f: impl FnOnce(&mut VegCensus)) {
         CENSUS.with(|c| f(&mut c.borrow_mut()));
     }
+
+    #[cfg(feature = "gen-counters")]
+    pub(in crate::feature::vegetation) fn record_source_slot(slot: usize) {
+        SOURCE_SLOT_MASK.with(|mask| mask.set(mask.get() | (1u32 << slot)));
+    }
+
+    #[cfg(not(feature = "gen-counters"))]
+    pub(in crate::feature::vegetation) fn record_source_slot(_slot: usize) {}
+
+    #[cfg(feature = "gen-counters")]
+    pub fn reset_source_slots() {
+        SOURCE_SLOT_MASK.with(|mask| mask.set(0));
+    }
+
+    #[cfg(not(feature = "gen-counters"))]
+    pub fn reset_source_slots() {}
+
+    #[cfg(feature = "gen-counters")]
+    #[must_use]
+    pub fn source_slot_mask() -> u32 {
+        SOURCE_SLOT_MASK.with(Cell::get)
+    }
+
+    #[cfg(not(feature = "gen-counters"))]
+    #[must_use]
+    pub fn source_slot_mask() -> u32 {
+        0
+    }
 }
 
 #[cfg(test)]
 mod heightmap_tests {
     use std::sync::Arc;
 
+    use super::census;
     use super::VegGrid;
     use crate::dense_grid::DenseBlockGrid;
+    #[cfg(feature = "gen-counters")]
+    use crate::feature::region_view::wide_slot_of_offset;
     use crate::interner::StateInterner;
 
     /// The P07 witness is on the east edge of source `(-26,-25)`: the source
@@ -1323,6 +1455,34 @@ mod heightmap_tests {
             },
         );
         (grid, air.raw(), grass.raw(), short_grass.raw())
+    }
+
+    #[cfg(feature = "gen-counters")]
+    #[test]
+    fn source_slot_census_detects_a_radius_two_read() {
+        let (grid, _, _, _) = p07_source_grid();
+        census::reset();
+        let _ = grid.source_id(32, 120, 0);
+        let far_slot = wide_slot_of_offset(2, 0);
+        assert_ne!(census::source_slot_mask() & (1u32 << far_slot), 0);
+    }
+
+    #[test]
+    fn formatted_state_scratch_never_prefixes_the_next_state() {
+        let mut grid = VegGrid::new(0, 16, 0, 0);
+        assert!(grid.set_formatted_state_if_in_bounds(
+            0,
+            0,
+            0,
+            format_args!("minecraft:vine[up=true]"),
+        ));
+        let state = grid.formatted_state_id(format_args!(
+            "minecraft:glow_lichen[down=false,east=false,north=false,south=false,up=false,waterlogged=false,west=true]"
+        ));
+        assert_eq!(
+            grid.interner().name_of(state),
+            "minecraft:glow_lichen[down=false,east=false,north=false,south=false,up=false,waterlogged=false,west=true]"
+        );
     }
 
     #[test]
@@ -1466,5 +1626,97 @@ mod heightmap_tests {
         assert!(grid.set_id_if_in_bounds(0, 68, 0, stone));
         assert_eq!(grid.height_ocean_floor(0, 0), 69);
         assert_eq!(grid.height_motion_blocking(0, 0), 69);
+    }
+
+    fn feature_rich_grid() -> VegGrid {
+        let mut grid = VegGrid::with_footprint(0, 16, 0, 0, 0, 1);
+        let dirt = grid.interner().id_of("minecraft:dirt");
+        let water = grid.interner().id_of("minecraft:water[level=0]");
+        let leaves = grid
+            .interner()
+            .id_of("minecraft:dark_oak_leaves[distance=3,persistent=false,waterlogged=false]");
+        let short_grass = grid.interner().id_of("minecraft:short_grass");
+        grid.seed_id(0, 2, 0, dirt);
+        grid.seed_id(0, 4, 0, leaves);
+        assert!(grid.set_id_if_in_bounds(0, 6, 0, water));
+        assert!(grid.set_id_if_in_bounds(0, 8, 0, short_grass));
+        grid
+    }
+
+    fn surface_only_grid() -> VegGrid {
+        let mut grid = VegGrid::with_footprint(0, 16, 0, 0, 0, 1);
+        let short_grass = grid.interner().id_of("minecraft:short_grass");
+        assert!(grid.set_id_if_in_bounds(0, 8, 0, short_grass));
+        grid
+    }
+
+    #[test]
+    fn live_height_walk_fills_compatible_lanes_once() {
+        let grid = feature_rich_grid();
+        census::reset();
+
+        assert_eq!(grid.height_ocean_floor(0, 0), 5);
+        assert_eq!(grid.height_world_surface(0, 0), 9);
+        assert_eq!(grid.height_motion_blocking(0, 0), 7);
+
+        let snapshot = census::snapshot();
+        assert_eq!(snapshot.height_scans, 1);
+        assert_eq!(snapshot.height_scan_cells, 12);
+        assert_eq!(snapshot.height_primary_cells, 12);
+        assert_eq!(snapshot.height_companion_tail_cells, 0);
+        assert!(
+            snapshot.height_scan_cells < 8 + 10 + 12,
+            "fused live walk did not beat three independent scans: {snapshot:?}"
+        );
+    }
+
+    #[test]
+    fn surface_only_walk_has_no_companion_tail() {
+        let grid = surface_only_grid();
+        census::reset();
+
+        assert_eq!(grid.height_world_surface(0, 0), 9);
+
+        let snapshot = census::snapshot();
+        assert_eq!(snapshot.height_scans, 1);
+        assert_eq!(snapshot.height_scan_cells, 8);
+        assert_eq!(snapshot.height_primary_cells, 8);
+        assert_eq!(snapshot.height_companion_tail_cells, 0);
+    }
+
+    #[test]
+    fn immutable_wg_walk_stays_separate_when_live_height_differs() {
+        let grid = feature_rich_grid();
+        census::reset();
+
+        assert_eq!(grid.height_world_surface(0, 0), 9);
+        assert_eq!(grid.height_world_surface_wg(0, 0), 5);
+
+        let snapshot = census::snapshot();
+        assert_eq!(snapshot.height_scans, 2);
+        assert_eq!(snapshot.height_scan_cells, 8 + 12);
+        assert_eq!(snapshot.height_primary_cells, 8 + 12);
+        assert_eq!(snapshot.height_companion_tail_cells, 0);
+    }
+
+    #[test]
+    fn removing_the_live_top_block_forces_a_fresh_live_walk() {
+        let mut grid = feature_rich_grid();
+        let air = grid.interner().id_of("minecraft:air");
+        assert_eq!(grid.height_ocean_floor(0, 0), 5);
+        assert_eq!(grid.height_world_surface_wg(0, 0), 5);
+
+        census::reset();
+        assert!(grid.set_id_if_in_bounds(0, 8, 0, air));
+        assert_eq!(grid.height_ocean_floor(0, 0), 5);
+        assert_eq!(grid.height_world_surface(0, 0), 7);
+        assert_eq!(grid.height_motion_blocking(0, 0), 7);
+
+        let snapshot = census::snapshot();
+        assert_eq!(snapshot.height_scans, 1);
+        assert_eq!(snapshot.height_scan_cells, 12);
+        assert_eq!(snapshot.height_primary_cells, 12);
+        assert_eq!(snapshot.height_companion_tail_cells, 0);
+        assert_eq!(grid.height_world_surface_wg(0, 0), 5);
     }
 }

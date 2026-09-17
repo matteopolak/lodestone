@@ -3572,6 +3572,7 @@ dependencies = [
  "lodestone-wasm-host",
  "lodestone-world",
  "lodestone-worldgen-core",
+ "log",
  "memory-stats",
  "objc2-core-graphics",
  "png",

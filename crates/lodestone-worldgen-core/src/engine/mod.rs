@@ -12,13 +12,14 @@
 //!
 //! ## How it works
 //!
-//! Three pieces, one per file:
+//! Four pieces, one per file:
 //!
 //! | file | holds | mutability |
 //! |---|---|---|
 //! | `graph.rs` | [`Program`], the `Op` table and the side tables | immutable, `Sync`, `Arc`-shared |
 //! | `scratch.rs` | [`Scratch`] — the corner and cell caches | per-chunk, per-thread, pooled |
 //! | `field.rs` | the `NoiseChunk`-semantics evaluator | borrows both |
+//! | `point.rs` | [`PointProgram`] and [`PointScratch`] for point-only leaves | graph shared, scratch per request |
 //!
 //! The split is the design: because *no* cache lives in the graph, one graph can
 //! back concurrent chunk generation on any number of threads with no lock and no
@@ -76,10 +77,12 @@
 
 mod field;
 mod graph;
+mod point;
 pub mod redundancy_probe;
 mod scratch;
 
 pub(crate) use field::Field;
 pub use field::Geom;
 pub use graph::Program;
+pub use point::{PointProgram, PointScratch};
 pub use scratch::{Bounds, Scratch, leaf_memo_stats, reset_leaf_memo_stats};

@@ -146,7 +146,21 @@ impl RenderState {
         });
         let plugin_billboards =
             PluginBillboardRenderer::new(device, color_format, &atlas.view, &atlas.sampler);
-        let entities = EntityRenderer::new(device, queue, color_format);
+        #[cfg_attr(not(test), allow(unused_mut))]
+        let mut entities = EntityRenderer::new(device, queue, color_format);
+        #[cfg(test)]
+        {
+            entities.allow_deferred_assets();
+            let mut deferred_batches = 0;
+            while entities.deferred_assets_pending() {
+                entities.initialize_deferred_assets(device, queue, color_format);
+                deferred_batches += 1;
+                assert!(
+                    deferred_batches <= 2_048,
+                    "deferred entity setup did not reach completion"
+                );
+            }
+        }
         let nametag = NameTagRenderer::new(device, color_format);
         let sign_text = SignTextRenderer::new(device, color_format);
         let display_text = DisplayTextRenderer::new(device, color_format);
@@ -526,6 +540,19 @@ impl RenderState {
                 &["world_total", "world", "first_person", "hud_total"],
             )),
         }
+    }
+
+    pub(crate) fn initialize_deferred_entity_assets(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) {
+        self.entities
+            .initialize_deferred_assets(device, queue, self.color_format);
+    }
+
+    pub(crate) fn allow_deferred_entity_assets(&mut self) {
+        self.entities.allow_deferred_assets();
     }
 
     /// Turn the per-frame terrain cull (distance ∩ frustum ∩ occlusion) on or

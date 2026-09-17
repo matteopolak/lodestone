@@ -55,6 +55,8 @@ pub use chunk_worldgen::WorldgenChunkSource;
 #[cfg(test)]
 thread_local! {
     static INTERN_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static HEIGHTMAP_REPAIRS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static GENERATED_MATERIALIZATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// Resets [`INTERN_CALLS`] to zero. Call before the operation under
@@ -70,6 +72,31 @@ pub(crate) fn reset_intern_calls() {
 #[cfg(test)]
 pub(crate) fn intern_calls() -> u64 {
     INTERN_CALLS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn reset_heightmap_repairs() {
+    HEIGHTMAP_REPAIRS.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+fn heightmap_repairs() -> u64 {
+    HEIGHTMAP_REPAIRS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn record_generated_materialization() {
+    GENERATED_MATERIALIZATIONS.with(|c| c.set(c.get() + 1));
+}
+
+#[cfg(test)]
+pub(crate) fn reset_generated_materializations() {
+    GENERATED_MATERIALIZATIONS.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn generated_materializations() -> u64 {
+    GENERATED_MATERIALIZATIONS.with(std::cell::Cell::get)
 }
 
 pub(crate) const AIR: &str = "minecraft:air";
@@ -169,6 +196,172 @@ fn derive_client_heightmaps(column: &ChunkColumn) -> lodestone_world::Heightmaps
         maps.insert(type_id, map);
     }
     maps
+}
+
+struct GeneratedColumnMetadata {
+    palette_ticking: Vec<bool>,
+    palette_state_ids: Vec<lodestone_data::block_states::StateId>,
+    palette_reaction: Vec<crate::redstone_graph::ReactionClass>,
+    palette_arc: Vec<std::sync::Arc<str>>,
+    section_ticking: Vec<u16>,
+    client_heightmaps: lodestone_world::Heightmaps,
+}
+
+fn derive_palette_metadata(
+    palette: &[String],
+) -> (
+    Vec<bool>,
+    Vec<lodestone_data::block_states::StateId>,
+    Vec<crate::redstone_graph::ReactionClass>,
+    Vec<std::sync::Arc<str>>,
+) {
+    let palette_ticking = palette
+        .iter()
+        .map(|state| crate::random_tick::is_randomly_ticking(state))
+        .collect::<Vec<_>>();
+    let palette_state_ids = palette
+        .iter()
+        .map(|state| resolve_palette_state_id(state))
+        .collect::<Vec<_>>();
+    let palette_reaction = palette
+        .iter()
+        .map(|state| crate::redstone_graph::classify(state))
+        .collect::<Vec<_>>();
+    let palette_arc = palette
+        .iter()
+        .map(|state| {
+            lodestone_data::block_states::StateId::from_state_str(state)
+                .map(canonical_state_arc)
+                .unwrap_or_else(|| std::sync::Arc::from(state.as_str()))
+        })
+        .collect::<Vec<_>>();
+    (palette_ticking, palette_state_ids, palette_reaction, palette_arc)
+}
+
+struct GeneratedMetadataAccumulator {
+    palette_ticking: Vec<bool>,
+    palette_state_ids: Vec<lodestone_data::block_states::StateId>,
+    palette_reaction: Vec<crate::redstone_graph::ReactionClass>,
+    palette_arc: Vec<std::sync::Arc<str>>,
+    section_ticking: Vec<u16>,
+    raw_maps: [[u16; 256]; 3],
+    #[cfg(test)]
+    remaining_maps: [u8; 256],
+}
+
+impl GeneratedMetadataAccumulator {
+    fn new(height: i32, palette: &[String]) -> Self {
+        let (palette_ticking, palette_state_ids, palette_reaction, palette_arc) =
+            derive_palette_metadata(palette);
+        Self {
+            palette_ticking,
+            palette_state_ids,
+            palette_reaction,
+            palette_arc,
+            section_ticking: vec![0u16; (height as usize).div_ceil(SECTION_ROWS)],
+            raw_maps: [[0u16; 256]; 3],
+            #[cfg(test)]
+            remaining_maps: [0b111u8; 256],
+        }
+    }
+
+    #[cfg(test)]
+    #[inline]
+    fn observe(&mut self, cell_index: usize, id: u16) {
+        let section = cell_index / (SECTION_ROWS * 16 * 16);
+        if self.palette_ticking[id as usize] {
+            self.section_ticking[section] += 1;
+        }
+        let map_index = cell_index % 256;
+        let remaining = self.remaining_maps[map_index];
+        if remaining == 0 {
+            return;
+        }
+        let state = self.palette_state_ids[id as usize];
+        let stored = (cell_index / 256 + 1) as u16;
+        if remaining & 1 != 0
+            && client_heightmap_includes(CLIENT_WORLD_SURFACE_HEIGHTMAP_TYPE_ID, state)
+        {
+            self.raw_maps[0][map_index] = stored;
+            self.remaining_maps[map_index] &= !1;
+        }
+        if remaining & 2 != 0
+            && client_heightmap_includes(CLIENT_MOTION_BLOCKING_HEIGHTMAP_TYPE_ID, state)
+        {
+            self.raw_maps[1][map_index] = stored;
+            self.remaining_maps[map_index] &= !2;
+        }
+        if remaining & 4 != 0
+            && client_heightmap_includes(
+                CLIENT_MOTION_BLOCKING_NO_LEAVES_HEIGHTMAP_TYPE_ID,
+                state,
+            )
+        {
+            self.raw_maps[2][map_index] = stored;
+            self.remaining_maps[map_index] &= !4;
+        }
+    }
+
+    #[inline]
+    fn observe_ascending(&mut self, cell_index: usize, id: u16) {
+        let section = cell_index / (SECTION_ROWS * 16 * 16);
+        if self.palette_ticking[id as usize] {
+            self.section_ticking[section] += 1;
+        }
+        let map_index = cell_index % 256;
+        let state = self.palette_state_ids[id as usize];
+        let stored = (cell_index / 256 + 1) as u16;
+        if client_heightmap_includes(CLIENT_WORLD_SURFACE_HEIGHTMAP_TYPE_ID, state) {
+            self.raw_maps[0][map_index] = stored;
+        }
+        if client_heightmap_includes(CLIENT_MOTION_BLOCKING_HEIGHTMAP_TYPE_ID, state) {
+            self.raw_maps[1][map_index] = stored;
+        }
+        if client_heightmap_includes(
+            CLIENT_MOTION_BLOCKING_NO_LEAVES_HEIGHTMAP_TYPE_ID,
+            state,
+        ) {
+            self.raw_maps[2][map_index] = stored;
+        }
+    }
+
+    fn finish(self, height: i32) -> GeneratedColumnMetadata {
+        let mut client_heightmaps = lodestone_world::Heightmaps::new();
+        for (type_id, values) in [
+            (CLIENT_WORLD_SURFACE_HEIGHTMAP_TYPE_ID, self.raw_maps[0]),
+            (CLIENT_MOTION_BLOCKING_HEIGHTMAP_TYPE_ID, self.raw_maps[1]),
+            (CLIENT_MOTION_BLOCKING_NO_LEAVES_HEIGHTMAP_TYPE_ID, self.raw_maps[2]),
+        ] {
+            let mut map = lodestone_world::Heightmap::new(height as u32);
+            for z in 0..16usize {
+                for x in 0..16usize {
+                    map.set(x, z, u32::from(values[x + z * 16]));
+                }
+            }
+            client_heightmaps.insert(type_id, map);
+        }
+        GeneratedColumnMetadata {
+            palette_ticking: self.palette_ticking,
+            palette_state_ids: self.palette_state_ids,
+            palette_reaction: self.palette_reaction,
+            palette_arc: self.palette_arc,
+            section_ticking: self.section_ticking,
+            client_heightmaps,
+        }
+    }
+}
+
+#[cfg(test)]
+fn derive_generated_column_metadata(
+    height: i32,
+    palette: &[String],
+    cells: &[u16],
+) -> GeneratedColumnMetadata {
+    let mut metadata = GeneratedMetadataAccumulator::new(height, palette);
+    for (cell_index, &id) in cells.iter().enumerate().rev() {
+        metadata.observe(cell_index, id);
+    }
+    metadata.finish(height)
 }
 
 /// Returns `true` for blocks that do not count as collidable terrain: air
@@ -612,23 +805,16 @@ impl ChunkColumn {
         }
     }
 
-    /// Adopts a [`GeneratedColumn`] from the real worldgen pipeline: the palette
-    /// moves as-is, and the flat block grid is *packed* into
-    /// [`SectionedBlocks`] — one pass over the cells the caller has just written,
-    /// which is also the pass that discards the ~160 KiB of it that is air (see
-    /// `crate::chunk_blocks`). Real per-quart biome data comes across too.
+    /// Adopts a [`GeneratedColumn`] from the real worldgen pipeline. Section
+    /// analysis derives ticking counts and client heightmaps during the same
+    /// source-cell walk that selects each section's packed representation.
+    /// Real per-quart biome data comes across too.
     ///
-    /// Packing uses one sequential pass over the cells. The dense representation
-    /// costs 192 KiB per column; `chunk_store`'s
-    /// 909 ms-per-column generation figure is the scale this pass is measured
-    /// against.
-    ///
-    /// The 3-D biome grid and the block-entity list
-    /// are *copied* rather than moved, because `GeneratedColumn::into_raw`
-    /// deliberately does not carry them — see that method's doc comment. Both
-    /// are small: a column's biome grid is `height / 4 * 16` `u16`s over a
-    /// handful of palette entries (~3 KB), and nearly every column has zero
-    /// block entities.
+    /// The 3-D biome grid and the block-entity list are *copied* rather than
+    /// moved, because the compact hand-off keeps them behind borrowed
+    /// accessors. Both are small: a column's biome grid is `height / 4 * 16`
+    /// `u16`s over a handful of palette entries (~3 KB), and nearly every
+    /// column has zero block entities.
     #[must_use]
     pub fn from_generated(column: GeneratedColumn) -> Self {
         let generation_stage = match column.stage() {
@@ -661,30 +847,39 @@ impl ChunkColumn {
         // one-shot rather than a duplication hazard.
         let generation_spawns = column.spawn_candidates().to_vec();
 
-        let (min_y, height, palette, blocks, biome_quarts) = column.into_raw();
+        let lodestone_worldgen::overworld::CompactGeneratedColumnParts {
+            min_y,
+            height,
+            palette,
+            blocks,
+            biome_quarts,
+            biome_cells: _,
+            block_entities: _,
+            motion_blocking: _,
+            spawn_candidates: _,
+            stage: _,
+        } = column.into_compact().into_parts();
         debug_assert_eq!(
             palette.first().map(String::as_str),
             Some(AIR),
             "generated palette must start with air"
         );
-        let blocks = SectionedBlocks::from_flat(height, &blocks);
+        let mut metadata_accumulator = GeneratedMetadataAccumulator::new(height, &palette);
+        let blocks = SectionedBlocks::from_compact_with_observer(blocks, |cell_index, id| {
+            metadata_accumulator.observe_ascending(cell_index, id);
+        });
+        let metadata = metadata_accumulator.finish(height);
         let mut column = Self {
             min_y,
             height,
             generation_stage,
             palette,
             blocks,
-            // Placeholders: this constructor *adopts* an already-populated
-            // grid, so the counters cannot be right by construction the way
-            // `new`'s all-air ones are. `recalc_ticking_counts` below is the
-            // one counting pass in the crate — vanilla's own block-count
-            // recalculation, called from exactly the analogous
-            // constructor.
-            palette_ticking: Vec::new(),
-            palette_state_ids: Vec::new(),
-            palette_reaction: Vec::new(),
-            palette_arc: Vec::new(),
-            section_ticking: Vec::new(),
+            palette_ticking: metadata.palette_ticking,
+            palette_state_ids: metadata.palette_state_ids,
+            palette_reaction: metadata.palette_reaction,
+            palette_arc: metadata.palette_arc,
+            section_ticking: metadata.section_ticking,
             biome_quarts: biome_quarts.map(generated_biome_name),
             biome_palette,
             biome_cells,
@@ -692,14 +887,12 @@ impl ChunkColumn {
             structure_starts: Vec::new(),
             structure_references: std::collections::BTreeMap::new(),
             motion_blocking,
-            client_heightmaps: None,
+            client_heightmaps: Some(metadata.client_heightmaps),
             generation_spawns,
             retained_light: None,
             retained_light_status: None,
         };
         column.add_generated_block_entities(&generated_block_entities);
-        column.recalc_ticking_counts();
-        column.client_heightmaps = Some(derive_client_heightmaps(&column));
         debug_assert_eq!(
             column.biome_cells.len(),
             column.biome_y_quarts() * 16,
@@ -908,21 +1101,6 @@ impl ChunkColumn {
                     event.position[1],
                     event.position[2],
                 );
-                // Structure placement reports a state-owned creation before
-                // the template's attachment-survival pass runs.  A later
-                // pass may therefore have replaced that state with air (or
-                // another block-entity type).  Only carry the event across
-                // the source boundary when the completed block still owns
-                // the same type; otherwise it is an orphan packet sidecar.
-                let actual_type = lodestone_data::block_states::StateId::new(out.block_state_id(
-                    position.x.rem_euclid(16),
-                    position.y,
-                    position.z.rem_euclid(16),
-                ))
-                .and_then(lodestone_data::block_entity_types::block_entity_type);
-                if actual_type != Some(event.type_id) {
-                    continue;
-                }
                 if entities.iter().any(|(existing, _)| *existing == position) {
                     continue;
                 }
@@ -1348,6 +1526,8 @@ impl ChunkColumn {
         let Some(mut maps) = self.client_heightmaps.take() else {
             return;
         };
+        #[cfg(test)]
+        HEIGHTMAP_REPAIRS.with(|c| c.set(c.get() + 1));
         for type_id in [
             CLIENT_WORLD_SURFACE_HEIGHTMAP_TYPE_ID,
             CLIENT_MOTION_BLOCKING_HEIGHTMAP_TYPE_ID,
@@ -1411,11 +1591,9 @@ impl ChunkColumn {
         y_local as usize / SECTION_ROWS
     }
 
-    /// Recomputes both derived ticking tables from scratch — vanilla's own
-    /// block-count recalculation,
-    /// kept as a named production function for the same reason vanilla keeps
-    /// it: exactly one constructor needs it (the one that *adopts* an
-    /// already-populated grid), and naming it says so.
+    /// Recomputes the derived palette tables and section ticking counts from
+    /// scratch. Dimension adapters use it when they adopt an already-populated
+    /// packed grid without the generated flat-cell handoff.
     ///
     /// Cost as a count rather than a duration, per this repo's evidence rule:
     /// exactly `palette.len()` predicate evaluations plus one read of every
@@ -1424,41 +1602,12 @@ impl ChunkColumn {
     /// of data already in cache, once per column construction — against the
     /// per-tick, per-column scan it removes.
     fn recalc_ticking_counts(&mut self) {
-        self.palette_ticking = self
-            .palette
-            .iter()
-            .map(|state| crate::random_tick::is_randomly_ticking(state))
-            .collect();
-        // The other per-palette-entry derived table, rebuilt here for the same
-        // reason and by the same argument — this is the one constructor that
-        // adopts an already-populated palette, so it is the one place the
-        // append-time computation in `intern` cannot have run.
-        self.palette_state_ids = self
-            .palette
-            .iter()
-            .map(|state| resolve_palette_state_id(state))
-            .collect();
-        // And the third, for the same reason: this constructor adopts a
-        // palette `intern` never saw, so the append-time classification in
-        // `intern` cannot have run for any of its entries.
-        self.palette_reaction = self
-            .palette
-            .iter()
-            .map(|state| crate::redstone_graph::classify(state))
-            .collect();
-        // And the fourth, for the same reason: this constructor adopts a
-        // palette `intern` never saw, so the append-time `Arc` build in
-        // `intern` cannot have run for any of its entries. Built-in state text
-        // is shared process-wide; unknown text remains owned by this column.
-        self.palette_arc = self
-            .palette
-            .iter()
-            .map(|state| {
-                lodestone_data::block_states::StateId::from_state_str(state)
-                    .map(canonical_state_arc)
-                    .unwrap_or_else(|| std::sync::Arc::from(state.as_str()))
-            })
-            .collect();
+        (
+            self.palette_ticking,
+            self.palette_state_ids,
+            self.palette_reaction,
+            self.palette_arc,
+        ) = derive_palette_metadata(&self.palette);
         let sections = (self.height as usize).div_ceil(SECTION_ROWS);
         let mut counts = vec![0u16; sections];
         for s in 0..sections {
@@ -1537,6 +1686,48 @@ impl ChunkColumn {
         let id = self.intern(name);
         self.write_block_id(x, y, z, id);
         self.refresh_client_heightmaps_at(x, z);
+    }
+
+    /// Applies an already ordered set of local block writes and repairs each
+    /// affected heightmap cell once. Validation happens before the first write,
+    /// so an invalid batch cannot leave a partially updated column.
+    pub fn apply_ordered_block_batch(&mut self, writes: &[(i32, i32, i32, &str)]) {
+        if writes.is_empty() {
+            return;
+        }
+        for &(x, y, z, _) in writes {
+            assert!((0..16).contains(&x), "batch block x coordinate out of range: {x}");
+            assert!((0..16).contains(&z), "batch block z coordinate out of range: {z}");
+            assert!(self.contains_y(y), "batch block y coordinate out of range: {y}");
+        }
+
+        self.clear_retained_light();
+        let mut interned = Vec::new();
+        let mut dirty = Vec::with_capacity(writes.len().min(256));
+        let mut seen = [false; 256];
+        for &(x, y, z, name) in writes {
+            let id = match interned.iter().find(|(state, _)| *state == name) {
+                Some((_, id)) => *id,
+                None => {
+                    let id = self.intern(name);
+                    interned.push((name, id));
+                    id
+                }
+            };
+            self.write_block_id(x, y, z, id);
+            let index = x as usize + z as usize * 16;
+            if !seen[index] {
+                seen[index] = true;
+                dirty.push(index as u16);
+            }
+        }
+        dirty.sort_unstable();
+        for index in dirty {
+            self.refresh_client_heightmaps_at(
+                (index as usize & 15) as i32,
+                (index as usize >> 4) as i32,
+            );
+        }
     }
 
     /// Whether `y` lies inside this column's stored vertical extent.
@@ -2260,6 +2451,22 @@ pub trait ChunkSource: Send + Sync {
         }
     }
 
+    /// Generates an ordered batch, falling back to independent sessions.
+    fn request_generation_batch(
+        &self,
+        sessions: &mut [crate::worldgen_session::GenerationSession],
+    ) -> Vec<
+        Result<
+            Option<crate::worldgen_session::GenerationRequestResult>,
+            crate::worldgen_session::GenerationRequestError,
+        >,
+    > {
+        sessions
+            .iter_mut()
+            .map(|session| self.request_generation(session.request(), Some(session)))
+            .collect()
+    }
+
     #[cfg(target_arch = "wasm32")]
     fn request_generation_yielding<'a>(
         &'a self,
@@ -2295,6 +2502,34 @@ pub trait ChunkSource: Send + Sync {
                 }
             };
             generated.map_err(Into::into)
+        })
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn request_generation_batch_yielding<'a>(
+        &'a self,
+        sessions: &'a mut [crate::worldgen_session::GenerationSession],
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Vec<
+                        Result<
+                            Option<crate::worldgen_session::GenerationRequestResult>,
+                            crate::worldgen_session::GenerationRequestError,
+                        >,
+                    >,
+                > + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let mut results = Vec::with_capacity(sessions.len());
+            for session in sessions {
+                results.push(
+                    self.request_generation_yielding(session.request(), Some(session))
+                        .await,
+                );
+            }
+            results
         })
     }
 
@@ -2989,6 +3224,18 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
         (**self).request_generation(request, session)
     }
 
+    fn request_generation_batch(
+        &self,
+        sessions: &mut [crate::worldgen_session::GenerationSession],
+    ) -> Vec<
+        Result<
+            Option<crate::worldgen_session::GenerationRequestResult>,
+            crate::worldgen_session::GenerationRequestError,
+        >,
+    > {
+        (**self).request_generation_batch(sessions)
+    }
+
     #[cfg(target_arch = "wasm32")]
     fn request_generation_yielding<'a>(
         &'a self,
@@ -3005,6 +3252,25 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
         >,
     > {
         (**self).request_generation_yielding(request, session)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn request_generation_batch_yielding<'a>(
+        &'a self,
+        sessions: &'a mut [crate::worldgen_session::GenerationSession],
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Vec<
+                        Result<
+                            Option<crate::worldgen_session::GenerationRequestResult>,
+                            crate::worldgen_session::GenerationRequestError,
+                        >,
+                    >,
+                > + 'a,
+        >,
+    > {
+        (**self).request_generation_batch_yielding(sessions)
     }
 
     fn block_state(&self, x: i32, y: i32, z: i32) -> String {
@@ -3259,6 +3525,18 @@ impl<S: ChunkSource + ?Sized> ChunkSource for &S {
         (**self).request_generation(request, session)
     }
 
+    fn request_generation_batch(
+        &self,
+        sessions: &mut [crate::worldgen_session::GenerationSession],
+    ) -> Vec<
+        Result<
+            Option<crate::worldgen_session::GenerationRequestResult>,
+            crate::worldgen_session::GenerationRequestError,
+        >,
+    > {
+        (**self).request_generation_batch(sessions)
+    }
+
     #[cfg(target_arch = "wasm32")]
     fn request_generation_yielding<'a>(
         &'a self,
@@ -3275,6 +3553,25 @@ impl<S: ChunkSource + ?Sized> ChunkSource for &S {
         >,
     > {
         (**self).request_generation_yielding(request, session)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn request_generation_batch_yielding<'a>(
+        &'a self,
+        sessions: &'a mut [crate::worldgen_session::GenerationSession],
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Vec<
+                        Result<
+                            Option<crate::worldgen_session::GenerationRequestResult>,
+                            crate::worldgen_session::GenerationRequestError,
+                        >,
+                    >,
+                > + 'a,
+        >,
+    > {
+        (**self).request_generation_batch_yielding(sessions)
     }
 
     fn block_state(&self, x: i32, y: i32, z: i32) -> String {
@@ -3464,6 +3761,12 @@ where
     use rayon::prelude::*;
 
     jobs.into_par_iter().map(work).collect()
+}
+
+#[must_use]
+#[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+pub(crate) fn browser_worldgen_parallelism() -> usize {
+    rayon::current_num_threads().clamp(1, 4)
 }
 
 /// Single-threaded, yielding map used by the wasm32
@@ -3852,6 +4155,72 @@ impl OverworldChunkSource {
         &self.generator
     }
 
+    /// Returns the typed shaped product for a pristine coordinate. Edited or
+    /// hydrated columns deliberately fall back to the server carrier because
+    /// their retained state outranks deterministic generation.
+    pub(crate) fn generated_shaped_column(
+        &self,
+        cx: i32,
+        cz: i32,
+    ) -> Option<lodestone_worldgen::overworld::GeneratedColumn> {
+        let edits = self.edits.lock().expect("chunk edit cache lock poisoned");
+        if edits.contains_key(&(cx, cz)) {
+            return None;
+        }
+        drop(edits);
+        let generation_inputs = self
+            .generation_inputs
+            .lock()
+            .expect("generation input lock poisoned");
+        if generation_inputs.contains_key(&(cx, cz)) {
+            return None;
+        }
+        drop(generation_inputs);
+        Some(self.generator.column_shaped(cx, cz))
+    }
+
+    /// Returns one compact shaped product per pristine coordinate while one
+    /// staged-store lease covers the complete batch closure. Any edited or
+    /// hydrated coordinate rejects the batch as a whole so the caller can
+    /// preserve the scalar precedence path without generating a value that
+    /// would immediately be discarded.
+    pub(crate) fn generated_shaped_columns(
+        &self,
+        coords: &[(i32, i32)],
+    ) -> Option<Vec<lodestone_worldgen::overworld::GeneratedColumn>> {
+        if coords.is_empty() {
+            return Some(Vec::new());
+        }
+        let edits = self.edits.lock().expect("chunk edit cache lock poisoned");
+        if coords.iter().any(|coord| edits.contains_key(coord)) {
+            return None;
+        }
+        drop(edits);
+        let generation_inputs = self
+            .generation_inputs
+            .lock()
+            .expect("generation input lock poisoned");
+        if coords
+            .iter()
+            .any(|coord| generation_inputs.contains_key(coord))
+        {
+            return None;
+        }
+        drop(generation_inputs);
+
+        let lease = self.generator.lease_batch(coords);
+        #[cfg(not(target_arch = "wasm32"))]
+        let columns = crate::run_worldgen_jobs(coords.to_vec(), |(cx, cz)| {
+            lease.column_shaped(cx, cz)
+        });
+        #[cfg(target_arch = "wasm32")]
+        let columns = coords
+            .iter()
+            .map(|&(cx, cz)| lease.column_shaped(cx, cz))
+            .collect();
+        Some(columns)
+    }
+
     /// Copies the generator's structure placement answer for `(cx, cz)` onto a
     /// freshly built column.
     ///
@@ -3860,7 +4229,7 @@ impl OverworldChunkSource {
     /// generation work — it only moves an answer the generator already computed
     /// somewhere the NBT writer can see it. Without it the placement engine is an
     /// island: fully built, oracle-verified, and reaching zero chunks.
-    fn attach_structures(&self, column: &mut ChunkColumn, cx: i32, cz: i32) {
+    pub(crate) fn attach_structures(&self, column: &mut ChunkColumn, cx: i32, cz: i32) {
         let starts = self.generator.structure_starts(cx, cz);
         let references = self.generator.structure_references(cx, cz);
         self.fill_structure_chests(column, cx, cz, &references);
@@ -4055,6 +4424,43 @@ impl ChunkSource for OverworldChunkSource {
         &self,
     ) -> Option<&dyn crate::worldgen_session::RequestStageDriver> {
         Some(self)
+    }
+
+    fn request_generation_batch(
+        &self,
+        sessions: &mut [crate::worldgen_session::GenerationSession],
+    ) -> Vec<
+        Result<
+            Option<crate::worldgen_session::GenerationRequestResult>,
+            crate::worldgen_session::GenerationRequestError,
+        >,
+    > {
+        crate::production_worldgen_session::generate_batch_with_executor::<Self>(
+            self,
+            sessions,
+            &crate::worldgen_lifecycle::PersistentWorldgenExecutor,
+        )
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn request_generation_batch_yielding<'a>(
+        &'a self,
+        sessions: &'a mut [crate::worldgen_session::GenerationSession],
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Vec<
+                        Result<
+                            Option<crate::worldgen_session::GenerationRequestResult>,
+                            crate::worldgen_session::GenerationRequestError,
+                        >,
+                    >,
+                > + 'a,
+        >,
+    > {
+        Box::pin(crate::production_worldgen_session::generate_batch_yielding::<Self>(
+            self, sessions,
+        ))
     }
 
     // There is no cheaper single-block path here: the generator only answers
@@ -4295,6 +4701,10 @@ impl std::fmt::Debug for NetherChunkSource {
 }
 
 impl ChunkSource for NetherChunkSource {
+    fn dimension(&self) -> Option<crate::dimension::Dimension> {
+        Some(crate::dimension::Dimension::Nether)
+    }
+
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
         let edits = self.edits.lock().expect("chunk edit cache lock poisoned");
         if let Some(edited) = edits.get(&(cx, cz)) {
@@ -4347,6 +4757,43 @@ impl ChunkSource for NetherChunkSource {
         &self,
     ) -> Option<&dyn crate::worldgen_session::RequestStageDriver> {
         Some(self)
+    }
+
+    fn request_generation_batch(
+        &self,
+        sessions: &mut [crate::worldgen_session::GenerationSession],
+    ) -> Vec<
+        Result<
+            Option<crate::worldgen_session::GenerationRequestResult>,
+            crate::worldgen_session::GenerationRequestError,
+        >,
+    > {
+        crate::production_worldgen_session::generate_batch_with_executor::<Self>(
+            self,
+            sessions,
+            &crate::worldgen_lifecycle::PersistentWorldgenExecutor,
+        )
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn request_generation_batch_yielding<'a>(
+        &'a self,
+        sessions: &'a mut [crate::worldgen_session::GenerationSession],
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Vec<
+                        Result<
+                            Option<crate::worldgen_session::GenerationRequestResult>,
+                            crate::worldgen_session::GenerationRequestError,
+                        >,
+                    >,
+                > + 'a,
+        >,
+    > {
+        Box::pin(crate::production_worldgen_session::generate_batch_yielding::<Self>(
+            self, sessions,
+        ))
     }
 
 
@@ -4542,8 +4989,10 @@ impl EndChunkSource {
         }
 
         let mut baseline = self.shaped_column(cx, cz);
+        self.attach_structures(&mut baseline, cx, cz);
         baseline.populate_missing_block_entity_states(cx, cz);
 
+        column.populate_missing_block_entity_states(cx, cz);
         let existing = std::mem::take(&mut column.block_entities);
         let mut packet_entities = Vec::with_capacity(existing.len());
         for (position, entity) in existing {
@@ -4611,12 +5060,6 @@ impl EndChunkSource {
         });
         packet_entities.dedup_by(|(left, _), (right, _)| left == right);
         column.block_entities = packet_entities;
-        // A source completion may have written over a structure attachment
-        // after its sidecar was installed.  Reconcile the detached packet
-        // against the final block field so removed or replaced generated
-        // blocks cannot leave an orphan record.  Ender chests are the one
-        // state-owned type deliberately omitted from a fresh End packet.
-        column.reconcile_generated_block_entity_states(cx, cz);
         column
             .block_entities
             .retain(|(_, entity)| entity.type_id() != "minecraft:ender_chest");
@@ -4747,7 +5190,7 @@ impl EndChunkSource {
         // the block state is installed, so materialize those records after
         // preserving the richer generated sidecars above.
         column.set_block_entities(entities);
-        column.reconcile_generated_block_entity_states(cx, cz);
+        column.populate_missing_block_entity_states(cx, cz);
         column.set_structures(starts, references);
     }
 }
@@ -4780,6 +5223,10 @@ impl std::fmt::Debug for EndChunkSource {
 }
 
 impl ChunkSource for EndChunkSource {
+    fn dimension(&self) -> Option<crate::dimension::Dimension> {
+        Some(crate::dimension::Dimension::End)
+    }
+
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
         let edits = self.edits.lock().expect("chunk edit cache lock poisoned");
         if let Some(edited) = edits.get(&(cx, cz)) {
@@ -4835,6 +5282,43 @@ impl ChunkSource for EndChunkSource {
         &self,
     ) -> Option<&dyn crate::worldgen_session::RequestStageDriver> {
         Some(self)
+    }
+
+    fn request_generation_batch(
+        &self,
+        sessions: &mut [crate::worldgen_session::GenerationSession],
+    ) -> Vec<
+        Result<
+            Option<crate::worldgen_session::GenerationRequestResult>,
+            crate::worldgen_session::GenerationRequestError,
+        >,
+    > {
+        crate::production_worldgen_session::generate_batch_with_executor::<Self>(
+            self,
+            sessions,
+            &crate::worldgen_lifecycle::PersistentWorldgenExecutor,
+        )
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn request_generation_batch_yielding<'a>(
+        &'a self,
+        sessions: &'a mut [crate::worldgen_session::GenerationSession],
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Vec<
+                        Result<
+                            Option<crate::worldgen_session::GenerationRequestResult>,
+                            crate::worldgen_session::GenerationRequestError,
+                        >,
+                    >,
+                > + 'a,
+        >,
+    > {
+        Box::pin(crate::production_worldgen_session::generate_batch_yielding::<Self>(
+            self, sessions,
+        ))
     }
 
     fn columns(&self, coords: &[(i32, i32)]) -> Vec<ChunkColumn> {
@@ -4932,6 +5416,86 @@ mod tests {
             from_value: 1.0,
             to_value: -1.0,
         }
+    }
+
+    #[test]
+    fn generated_metadata_matches_independent_packed_rescans() {
+        let generated = crate::overworld_generator(42).column_shaped(0, 0);
+        let (_, height, palette, cells, _) = generated.clone().into_raw();
+        let fused = derive_generated_column_metadata(height, &palette, &cells);
+        let plain_blocks = SectionedBlocks::from_flat(height, &cells);
+        let observed_blocks = SectionedBlocks::from_flat_with_observer(height, &cells, |_, _| {});
+        assert_eq!(observed_blocks, plain_blocks);
+        let column = ChunkColumn::from_generated(generated);
+
+        let expected_ticking = palette
+            .iter()
+            .map(|state| crate::random_tick::is_randomly_ticking(state))
+            .collect::<Vec<_>>();
+        let mut expected_sections = vec![0u16; (height as usize).div_ceil(SECTION_ROWS)];
+        for (index, &id) in cells.iter().enumerate() {
+            if expected_ticking[id as usize] {
+                expected_sections[index / (SECTION_ROWS * 16 * 16)] += 1;
+            }
+        }
+        assert_eq!(column.section_ticking, expected_sections);
+        assert_eq!(column.section_ticking, fused.section_ticking);
+        assert_eq!(
+            column.client_heightmaps.as_ref(),
+            Some(&derive_client_heightmaps(&column))
+        );
+        assert_eq!(
+            column.client_heightmaps,
+            Some(fused.client_heightmaps.clone())
+        );
+
+        let mut legacy_heightmap_reads = 0usize;
+        for type_id in [
+            CLIENT_WORLD_SURFACE_HEIGHTMAP_TYPE_ID,
+            CLIENT_MOTION_BLOCKING_HEIGHTMAP_TYPE_ID,
+            CLIENT_MOTION_BLOCKING_NO_LEAVES_HEIGHTMAP_TYPE_ID,
+        ] {
+            for z in 0..16usize {
+                for x in 0..16usize {
+                    for local_y in (0..height as usize).rev() {
+                        legacy_heightmap_reads += 1;
+                        let index = (local_y * 16 + z) * 16 + x;
+                        if client_heightmap_includes(
+                            type_id,
+                            resolve_palette_state_id(&palette[cells[index] as usize]),
+                        ) {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        let fused_cell_reads = cells.len();
+        let legacy_cell_reads = fused_cell_reads + legacy_heightmap_reads;
+        assert!(
+            legacy_cell_reads > fused_cell_reads,
+            "the control must exercise the eliminated metadata reread"
+        );
+        println!(
+            "generated metadata cell reads: fused={fused_cell_reads} legacy={}",
+            legacy_cell_reads
+        );
+
+        let stone = palette
+            .iter()
+            .position(|state| state == "minecraft:stone")
+            .expect("the fixture must contain a stone palette entry") as u16;
+        let index = cells
+            .iter()
+            .rposition(|&id| id == 0)
+            .expect("the fixture must contain an air cell");
+        let mut changed = cells;
+        changed[index] = stone;
+        let changed_metadata = derive_generated_column_metadata(height, &palette, &changed);
+        assert_ne!(
+            fused.client_heightmaps, changed_metadata.client_heightmaps,
+            "the changed flat input must affect the derived map"
+        );
     }
 
     #[test]
@@ -5202,10 +5766,6 @@ mod tests {
                 id: "minecraft:chest".to_owned().into(),
                 nbt: lodestone_core::Nbt::End,
             }),
-            (BlockPos::new(4541, 103, 1369), BlockEntity::Opaque {
-                id: "minecraft:chest".to_owned().into(),
-                nbt: lodestone_core::Nbt::End,
-            }),
             (BlockPos::new(4543, 143, 1360), BlockEntity::Opaque {
                 id: "minecraft:chest".to_owned().into(),
                 nbt: lodestone_core::Nbt::End,
@@ -5307,6 +5867,61 @@ mod tests {
         assert!(!col.is_solid(3, 4, 7));
         // Only the grass block counts toward solidity.
         assert_eq!(col.solid_count(), 1);
+    }
+
+    #[test]
+    fn ordered_batch_matches_scalar_writes_and_repairs_unique_xz_cells() {
+        let writes = [
+            (3, 5, 7, "minecraft:grass_block[snowy=false]"),
+            (3, 4, 7, "minecraft:water[level=0]"),
+            (3, 5, 7, "minecraft:dirt"),
+            (9, 2, 7, "minecraft:stone"),
+        ];
+        let mut scalar = ChunkColumn::new(0, 16);
+        scalar.prime_client_heightmaps();
+        for &(x, y, z, state) in &writes {
+            scalar.set_block(x, y, z, state);
+        }
+
+        let mut batch = ChunkColumn::new(0, 16);
+        batch.prime_client_heightmaps();
+        reset_heightmap_repairs();
+        batch.apply_ordered_block_batch(&writes);
+
+        assert_eq!(column_bytes(&batch), column_bytes(&scalar));
+        assert_eq!(batch.client_heightmaps_raw(), scalar.client_heightmaps_raw());
+        assert_eq!(batch.section_ticking_counts(), scalar.section_ticking_counts());
+        assert_eq!(heightmap_repairs(), 2, "one repair per dirty XZ cell");
+    }
+
+    #[test]
+    fn ordered_batch_validates_before_mutating() {
+        let mut column = ChunkColumn::new(0, 16);
+        column.prime_client_heightmaps();
+        let before = column_bytes(&column);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            column.apply_ordered_block_batch(&[
+                (1, 1, 1, "minecraft:stone"),
+                (16, 1, 1, "minecraft:dirt"),
+            ]);
+        }));
+        assert!(result.is_err());
+        assert_eq!(column_bytes(&column), before);
+    }
+
+    #[test]
+    fn skipped_heightmap_repair_negative_control_is_detectable() {
+        let mut column = ChunkColumn::new(0, 16);
+        column.prime_client_heightmaps();
+        let id = column.intern("minecraft:stone");
+        column.write_block_id(0, 3, 0, id);
+        let expected = derive_client_heightmaps(&column);
+        let actual = column.client_heightmaps_raw().unwrap();
+        assert_ne!(
+            actual[0][0],
+            expected.get(1).unwrap().get(0, 0) as u16,
+            "the control must observe a stale map when repair is skipped"
+        );
     }
 
     /// Canonical byte serialisation of a column's full content — `min_y`,

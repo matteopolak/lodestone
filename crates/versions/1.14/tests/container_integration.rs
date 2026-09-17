@@ -73,7 +73,6 @@ async fn assert_protocol(protocol_version: i32) {
         (0..=0, 0..=0),
         (0, 0),
         0,
-        0,
     );
     let entities = server.block_entities().expect("server owns block entities").clone();
     entities.with(|registry| {

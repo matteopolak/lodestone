@@ -130,37 +130,12 @@ impl MobHandle {
         Self(Arc::new(Mutex::new(MobSim::new(world))))
     }
 
-    /// Builds a handle already seeded with [`seed_demo_mobs`]'s baseline
-    /// population, snapshotting `world_source` the same way the previous
-    /// (pre-handle) `run_mob_tick_loop` did at the top of its own future —
-    /// see that function's doc comment for the `cx_range`/`cz_range`/
-    /// `mob_center` scope notes, unchanged by this refactor.
-    #[must_use]
-    pub fn seeded<S: ChunkSource>(
-        world_source: &S,
-        cx_range: std::ops::RangeInclusive<i32>,
-        cz_range: std::ops::RangeInclusive<i32>,
-        center_x: i32,
-        center_z: i32,
-        mob_count: usize,
-    ) -> Self {
-        let handle = Self::default();
-        handle.reseed(
-            ChunkWorld::from_source(world_source, cx_range, cz_range),
-            center_x,
-            center_z,
-            mob_count,
-        );
-        handle
-    }
-
-    /// Replaces this handle's terrain snapshot **and** its population with a
-    /// fresh [`MobSim`] over `world`, seeded exactly as
-    /// [`seeded`](Self::seeded) would have.
+    /// Replaces this handle's terrain snapshot and population with a fresh
+    /// [`MobSim`] over `world`.
     ///
     /// # Why this exists
     ///
-    /// `seeded` did the whole job inside
+    /// The old eager construction did the whole job inside
     /// [`crate::IntegratedServer::open_in_memory_with_mobs`]'s body, *before any
     /// task spawned* — so the 49-column `ChunkWorld::from_source` snapshot it
     /// needs was on the critical path of opening a world, at ~909 ms per
@@ -176,14 +151,14 @@ impl MobHandle {
     /// the one caller — a handle that has only ever been `Default` has no
     /// population to lose, and `set_next_id(1000)` must be re-applied to the new
     /// sim anyway. It is **not** a general "load more terrain" primitive; a mob
-    /// spawned in the window before the first reseed would vanish. Widening the
+    /// spawned in the window before the first replacement would vanish. Widening the
     /// snapshot as the player walks (this module's long-standing documented
     /// scope cut) needs a sim that can *extend* its world, not replace it.
     ///
     /// Takes `&self`, like every other accessor here, because the sim lives
     /// behind the handle's own `Mutex` — so this is safe to call from a
     /// background task while the connection task holds a clone.
-    pub fn reseed(&self, mut world: ChunkWorld, center_x: i32, center_z: i32, mob_count: usize) {
+    pub fn replace_world(&self, mut world: ChunkWorld) {
         // Drain pending generation spawns while `world` is still an owned local,
         // before it leaks to `'static` below. The list is non-empty only while
         // these chunks are ever generated — see `ChunkWorld`'s own field doc
@@ -194,15 +169,13 @@ impl MobHandle {
         let pending_generation_spawns = world.take_pending_generation_spawns();
         // Leaked for the same reason `new` leaks: `MobSim` borrows its world for
         // `'static`. See the struct's own doc comment — one bounded snapshot per
-        // reseed, and production reseeds exactly once per world.
+        // replacement, and production replaces it exactly once per world.
         let world: &'static ChunkWorld = Box::leak(Box::new(world));
         self.with(|sim| {
             *sim = MobSim::new(world);
             // See `MobSim::set_next_id`'s own doc comment: id `1` collides
             // with `LOCAL_PLAYER_ENTITY_ID` on the wire.
             sim.set_next_id(1000);
-            // Exactly `mob_count`, including zero — see [`seed_demo_mobs`].
-            seed_demo_mobs(sim, center_x, center_z, mob_count);
             // Place the `SPAWN` stage's proposed animals as real mobs,
             // re-validated against the per-species placement rule
             // and this world's own light through the exact gate the

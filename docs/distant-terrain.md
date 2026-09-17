@@ -49,7 +49,7 @@ submission for an unpopulated slot must fail.
 
 `Options::horizon_distance_chunks` is persisted as `horizon_distance_chunks`, ranges from `0` to
 `MAX_HORIZON_DISTANCE_CHUNKS` (256), and defaults to `0` (OFF). The Video screen names it
-**Distant Horizon**, separate from **Render Distance**. It is deliberately independent of the real
+**Far Terrain Distance**, separate from **Render Distance**. It is deliberately independent of the real
 render-distance setting and does not alter server view radius, streamed chunks, mesh queues, or the
 fixed atlas size. The CPU/GPU atlases exist only while the option is nonzero in an eligible local
 Overworld session. Values are shown in chunks and the cycle control advances in 16-chunk coarse cells.

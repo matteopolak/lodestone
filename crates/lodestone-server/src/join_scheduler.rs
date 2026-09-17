@@ -152,6 +152,114 @@ impl ColumnPayload {
     }
 }
 
+type PipelineResult = Result<((i32, i32), ColumnPayload), ChunkEncodeError>;
+
+#[derive(Clone)]
+struct BatchRequest {
+    coordinate: (i32, i32),
+    stage: ChunkGenerationStage,
+    request: GenerationRequest,
+    cancellation: RequestCancellation,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct InflightBatch {
+    requests: Vec<BatchRequest>,
+    handle: crate::worldgen_dispatch::DispatchHandle<Vec<PipelineResult>>,
+}
+
+#[cfg(target_arch = "wasm32")]
+struct InflightBatch {
+    requests: Vec<BatchRequest>,
+    future: std::pin::Pin<Box<dyn std::future::Future<Output = Vec<PipelineResult>>>>,
+}
+
+fn map_batch_result<S: ChunkSource + ?Sized>(
+    source: &S,
+    request: &BatchRequest,
+    result: Result<Option<GenerationRequestResult>, GenerationRequestError>,
+    encoder: Option<Arc<dyn ChunkEncoder>>,
+    trace: Option<Arc<JoinTrace>>,
+    _batch_size: usize,
+) -> PipelineResult {
+    let dimension = source
+        .dimension()
+        .unwrap_or(crate::dimension::Dimension::Overworld);
+    let payload = match result {
+        Ok(Some(GenerationRequestResult::Existing(column))) => ColumnPayload::Column(column),
+        Ok(Some(GenerationRequestResult::Generated(snapshot))) => {
+            ColumnPayload::Snapshot(snapshot)
+        }
+        Ok(None) | Err(GenerationRequestError::Unsupported) => {
+            ColumnPayload::Column(source.column_at(
+                request.coordinate.0,
+                request.coordinate.1,
+                request.stage,
+            ))
+        }
+        Err(error) => return Err(ChunkEncodeError::new(error.to_string())),
+    };
+    if let Some(trace) = trace.as_ref() {
+        trace.mark("generated", request.coordinate.0, request.coordinate.1);
+    }
+    #[cfg(target_arch = "wasm32")]
+    let encoding_started = encoder
+        .as_ref()
+        .and_then(|_| worldgen_timing_start());
+    let payload = match encoder {
+        Some(encoder) => match payload {
+            ColumnPayload::Column(column) => encoder
+                .try_encode_chunk_in_dimension(
+                    request.coordinate.0,
+                    request.coordinate.1,
+                    &column,
+                    dimension,
+                )
+                .map(ColumnPayload::Encoded),
+            snapshot @ ColumnPayload::Snapshot(_) => Ok(snapshot),
+            ColumnPayload::Encoded(_) => unreachable!("batch payload is not encoded"),
+        },
+        None => Ok(payload),
+    }?;
+    #[cfg(target_arch = "wasm32")]
+    if let Some(started) = encoding_started {
+        worldgen_timing_emit(request.coordinate, _batch_size, "encoding", started);
+    }
+    if matches!(&payload, ColumnPayload::Encoded(_)) {
+        if let Some(trace) = trace.as_ref() {
+            trace.mark("encoded", request.coordinate.0, request.coordinate.1);
+        }
+    }
+    Ok((request.coordinate, payload))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn worldgen_timing_start() -> Option<lodestone_time::Instant> {
+    tracing::enabled!(target: "lodestone_worldgen_timing", tracing::Level::DEBUG)
+        .then(lodestone_time::Instant::now)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn worldgen_timing_emit(
+    coordinate: (i32, i32),
+    batch_size: usize,
+    phase: &'static str,
+    started: lodestone_time::Instant,
+) {
+    let elapsed_ms = lodestone_time::Instant::now()
+        .duration_since(started)
+        .as_millis();
+    tracing::debug!(
+        target: "lodestone_worldgen_timing",
+        target_x = coordinate.0,
+        target_z = coordinate.1,
+        batch_size,
+        phase,
+        phase_ms = elapsed_ms,
+        "worldgen pipeline phase"
+    );
+}
+
 /// Half-angle, in degrees, of the horizontal cone counted as "the player is
 /// looking at this column" by [`ColumnQueue`]'s frustum bonus.
 ///
@@ -527,12 +635,30 @@ impl ColumnQueue {
             .map(|(entry, _)| (entry.coord, entry.force_full))
     }
 
-    /// The best pending coordinate and its explicit full-generation bit.
-    #[must_use]
-    fn peek_request(&self) -> Option<((i32, i32), bool)> {
-        self.pending
-            .last()
-            .map(|&(entry, _)| (entry.coord, entry.force_full))
+    fn prepend(&mut self, requests: Vec<((i32, i32), bool)>) {
+        if requests.is_empty() {
+            return;
+        }
+        let mut index = self
+            .pending
+            .iter()
+            .map(|&(_, index)| index)
+            .max()
+            .map_or(0, |max| max.saturating_add(1));
+        let mut entries = requests
+            .into_iter()
+            .map(|(coord, force_full)| {
+                let entry = (
+                    QueuedColumn { coord, force_full },
+                    index,
+                );
+                index = index.saturating_add(1);
+                entry
+            })
+            .collect::<Vec<_>>();
+        entries.reverse();
+        self.pending.extend(entries);
+        self.sort();
     }
 
     /// How many columns have not been handed out yet.
@@ -633,7 +759,9 @@ fn yaw_sector(yaw_degrees: f32) -> i32 {
 pub fn generation_window() -> usize {
     #[cfg(not(target_arch = "wasm32"))]
     let parallelism = crate::worldgen_dispatch::worker_count();
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+    let parallelism = crate::chunk::browser_worldgen_parallelism();
+    #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
     let parallelism = 1;
     generation_window_for(parallelism)
 }
@@ -663,9 +791,9 @@ pub(crate) const JOIN_STREAM_SERVICE_BUDGET: Duration = Duration::from_millis(25
 ///
 /// # wasm32
 ///
-/// There is no native worker pool, so the window is forced to 1 and columns are
-/// generated inline — the unchanged behaviour of a target that never had a second
-/// thread. Same as `crate::chunk::generate_columns_offloaded`'s `cfg`.
+/// Threaded browser workers use the initialized Rayon pool width, capped to the
+/// same four lanes as the worker bootstrap. The serial artifact keeps the
+/// one-lane fallback and therefore retains the minimum window of two.
 pub struct ColumnPipeline<S: ?Sized> {
     source: Arc<S>,
     /// Protocol encode, moved **into** the worker that generates the column —
@@ -688,6 +816,7 @@ pub struct ColumnPipeline<S: ?Sized> {
     window: usize,
     /// Set once the head column has been emitted. Until then the window is 1.
     primed: bool,
+    ready: VecDeque<PipelineResult>,
     /// Optional operator trace shared by the inline and deferred portions of a
     /// join. `None` is the ordinary path; see [`JoinTrace`] for why this is
     /// intentionally not a global logger or an always-on clock.
@@ -697,17 +826,9 @@ pub struct ColumnPipeline<S: ?Sized> {
     /// order they finish in. Pairing them here (rather than indexing a `coords`
     /// vector) is what lets the spawn order itself be dynamic.
     #[cfg(not(target_arch = "wasm32"))]
-    inflight: VecDeque<(
-        ((i32, i32), ChunkGenerationStage),
-        crate::worldgen_dispatch::DispatchHandle<Result<ColumnPayload, ChunkEncodeError>>,
-        RequestCancellation,
-    )>,
+    inflight: VecDeque<InflightBatch>,
     #[cfg(target_arch = "wasm32")]
-    inflight: VecDeque<((i32, i32), ChunkGenerationStage, ColumnPayload)>,
-    #[cfg(target_arch = "wasm32")]
-    request_position: Option<(i32, i32)>,
-    #[cfg(target_arch = "wasm32")]
-    request_cancellation: Option<RequestCancellation>,
+    inflight: VecDeque<InflightBatch>,
 }
 
 impl<S: ?Sized> std::fmt::Debug for ColumnPipeline<S> {
@@ -719,6 +840,7 @@ impl<S: ?Sized> std::fmt::Debug for ColumnPipeline<S> {
             .field("emitted", &self.emitted)
             .field("generation_band", &self.generation_band)
             .field("inflight", &self.inflight.len())
+            .field("ready", &self.ready.len())
             .finish_non_exhaustive()
     }
 }
@@ -773,12 +895,9 @@ impl<S: ChunkSource + ?Sized + 'static> ColumnPipeline<S> {
             emitted: 0,
             window: window.max(1),
             primed: false,
+            ready: VecDeque::new(),
             trace: None,
             inflight: VecDeque::new(),
-            #[cfg(target_arch = "wasm32")]
-            request_position: None,
-            #[cfg(target_arch = "wasm32")]
-            request_cancellation: None,
         }
     }
 
@@ -825,6 +944,40 @@ impl<S: ChunkSource + ?Sized + 'static> ColumnPipeline<S> {
                 ChunkGenerationStage::Shaped
             }
             _ => ChunkGenerationStage::Full,
+        }
+    }
+
+    fn batch_request_for(&self, coord: (i32, i32), force_full: bool) -> BatchRequest {
+        let stage = if force_full {
+            ChunkGenerationStage::Full
+        } else {
+            self.generation_stage_for(coord)
+        };
+        let generation_target = match stage {
+            ChunkGenerationStage::Shaped => {
+                lodestone_worldgen::stage_schedule::GenerationTarget::Shaped
+            }
+            ChunkGenerationStage::Full => {
+                lodestone_worldgen::stage_schedule::GenerationTarget::Full
+            }
+        };
+        let dependency_radius = self
+            .source
+            .generation_request_dependency_radius(generation_target);
+        let request = GenerationRequest::new(
+            self.source
+                .dimension()
+                .unwrap_or(crate::dimension::Dimension::Overworld)
+                .into(),
+            coord,
+            generation_target,
+            dependency_radius,
+        );
+        BatchRequest {
+            coordinate: coord,
+            stage,
+            request,
+            cancellation: RequestCancellation::new(),
         }
     }
 
@@ -884,60 +1037,41 @@ impl<S: ChunkSource + ?Sized + 'static> ColumnPipeline<S> {
     /// Withdraws still-pending columns the client has been told to forget,
     /// returning how many were withdrawn.
     ///
-    /// # Why this is needed, and why it is not new
-    ///
     /// `ViewTracker` records a column as `loaded` the moment it decides to send it,
     /// so its `loaded` set means *owed* rather than *delivered* — which is what lets
     /// the join seed the whole square up front. A player who steps across a boundary
     /// and straight back therefore forgets a column that is still sitting in this
     /// queue, and without this it would be sent afterwards: the client loads a column
     /// outside its own view and never forgets it again, and the next step re-adds the
-    /// same coordinate so it goes out twice. Vanilla's `PlayerChunkSender` drops
-    /// pending sends for exactly this reason.
-    ///
-    /// The bug predates the steady-state path — the join stream has always been able
-    /// to outlive a forget — and fixing it here fixes both.
+    /// same coordinate so it goes out twice. The pending-send contract drops
+    /// entries that became irrelevant for exactly this reason.
     ///
     /// In-flight columns are cancelled cooperatively. A running source call is
     /// allowed to finish, but its result is suppressed and its request token is
     /// visible to stage drivers.
     pub(crate) fn cancel(&mut self, dropped: &std::collections::HashSet<(i32, i32)>) -> usize {
         let removed = self.queue.cancel(dropped);
-        #[cfg(not(target_arch = "wasm32"))]
-        let mut cancelled = 0;
-        #[cfg(not(target_arch = "wasm32"))]
-        self.inflight.retain(|((position, _), handle, request)| {
-            if dropped.contains(position) {
-                request.cancel();
-                handle.cancel();
-                cancelled += 1;
-                false
-            } else {
-                true
-            }
+        let ready_before = self.ready.len();
+        self.ready.retain(|result| {
+            !result.as_ref().is_ok_and(|entry| dropped.contains(&entry.0))
         });
-        #[cfg(target_arch = "wasm32")]
-        let cancelled = 0usize;
-        #[cfg(target_arch = "wasm32")]
-        let cancelled_active = match (self.request_position, self.request_cancellation.take()) {
-            (Some(position), Some(request)) if dropped.contains(&position) => {
-                request.cancel();
-                self.request_position = None;
-                1
+        let removed_ready = ready_before - self.ready.len();
+        let mut cancelled = 0;
+        for batch in &self.inflight {
+            for request in &batch.requests {
+                if dropped.contains(&request.coordinate)
+                    && !request.cancellation.is_cancelled()
+                {
+                    request.cancellation.cancel();
+                    cancelled += 1;
+                }
             }
-            (position, request) => {
-                self.request_position = position;
-                self.request_cancellation = request;
-                0
-            }
-        };
-        #[cfg(not(target_arch = "wasm32"))]
-        let cancelled_active = 0usize;
+        }
         // `remaining()` is `total - emitted`, and the `select!` branch is gated on
         // it: leaving `total` alone would keep the branch enabled with nothing to
         // hand back, and `next` would spin returning `None`.
-        self.total -= removed + cancelled + cancelled_active;
-        removed + cancelled + cancelled_active
+        self.total -= removed + removed_ready + cancelled;
+        removed + removed_ready + cancelled
     }
 
     /// The window this pipeline was built with.
@@ -961,219 +1095,217 @@ impl<S: ChunkSource + ?Sized + 'static> ColumnPipeline<S> {
     ///
     /// # Cancel safety
     ///
-    /// **This is now a `select!` branch** (`crate::server`'s `serve_play` races it
-    /// against the socket read), so being dropped mid-`await` has to be free. It
-    /// is: the front entry is awaited *by reference* and only popped once its
-    /// column is in hand, so a cancelled `next` leaves the pipeline exactly as it
-    /// found it and the next call re-awaits the same worker. Popping first — as
-    /// this did while it was only ever driven to completion — would have dropped
-    /// the queued result on cancellation and silently lost that column from the
-    /// wire.
+    /// The front batch is awaited by reference and popped only after completion,
+    /// so dropping this future retains the work for the next poll.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn next(&mut self) -> Result<Option<((i32, i32), ColumnPayload)>, ChunkEncodeError> {
-        if self.remaining() == 0 {
-            return Ok(None);
-        }
-        // The first top-up is to 1, not to `window`: this is the
-        // time-to-first-chunk fix. See the module doc.
-        let target = if self.primed { self.window } else { 1 };
-        while self.inflight.len() < target {
-            let Some(((cx, cz), force_full)) = self.queue.peek_request() else {
-                break;
+        loop {
+            if let Some(result) = self.ready.pop_front() {
+                self.emitted += 1;
+                self.primed = true;
+                return result.map(Some);
+            }
+            if self.remaining() == 0 {
+                return Ok(None);
+            }
+            if self.inflight.is_empty() {
+                let target = if self.primed { self.window } else { 1 };
+                let mut requests = Vec::with_capacity(target);
+                while requests.len() < target {
+                    let Some((coordinate, force_full)) = self.queue.pop_request() else {
+                        break;
+                    };
+                    requests.push(self.batch_request_for(coordinate, force_full));
+                }
+                if requests.is_empty() {
+                    return Ok(None);
+                }
+                let source = Arc::clone(&self.source);
+                let encoder = self.encoder.clone();
+                let trace = self.trace.clone();
+                let job_requests = requests.clone();
+                match crate::worldgen_dispatch::try_spawn(move || {
+                    let mut sessions = job_requests
+                        .iter()
+                        .map(|request| {
+                            GenerationSession::with_cancellation(
+                                request.request,
+                                request.cancellation.clone(),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let results = if sessions.len() == 1 {
+                        vec![source.request_generation(
+                            sessions[0].request(),
+                            Some(&mut sessions[0]),
+                        )]
+                    } else {
+                        source.request_generation_batch(&mut sessions)
+                    };
+                    if results.len() != job_requests.len() {
+                        return job_requests
+                            .iter()
+                            .map(|_| {
+                                Err(ChunkEncodeError::new(
+                                    "generation batch returned the wrong result count",
+                                ))
+                            })
+                            .collect();
+                    }
+                    results
+                        .into_iter()
+                        .zip(job_requests.iter())
+                        .map(|(result, request)| {
+                            map_batch_result(
+                                source.as_ref(),
+                                request,
+                                result,
+                                encoder.clone(),
+                                trace.clone(),
+                                job_requests.len(),
+                            )
+                        })
+                        .collect()
+                }) {
+                    Ok(handle) => self.inflight.push_back(InflightBatch { requests, handle }),
+                    Err(_job) => {
+                        let restore = requests
+                            .iter()
+                            .map(|request| (request.coordinate, request.stage == ChunkGenerationStage::Full))
+                            .collect();
+                        self.queue.prepend(restore);
+                        crate::worldgen_dispatch::wait_for_capacity().await;
+                    }
+                }
+            }
+            if self.inflight.is_empty() {
+                continue;
+            }
+            let results = {
+                let batch = self
+                    .inflight
+                    .front_mut()
+                    .expect("an admitted batch remains in flight");
+                (&mut batch.handle)
+                    .await
+                    .map_err(|_| ChunkEncodeError::new("worldgen batch worker dropped its result"))?
             };
-            let source = Arc::clone(&self.source);
-            let source_dimension = source
-                .dimension()
-                .unwrap_or(crate::dimension::Dimension::Overworld);
-            let generation_dimension = source_dimension.into();
-            let stage = if force_full {
-                ChunkGenerationStage::Full
-            } else {
-                self.generation_stage_for((cx, cz))
-            };
-            let generation_target = match stage {
-                ChunkGenerationStage::Shaped => {
-                    lodestone_worldgen::stage_schedule::GenerationTarget::Shaped
-                }
-                ChunkGenerationStage::Full => {
-                    lodestone_worldgen::stage_schedule::GenerationTarget::Full
-                }
-            };
-            let dependency_radius =
-                source.generation_request_dependency_radius(generation_target);
-            // **Protocol encode happens here, on the worker, not on the caller's
-            // task** — that is the whole point of `encoder`. The column is dropped
-            // inside the closure, so the connection task never even sees the
-            // terrain: it receives ~40 KiB of finished frame instead of a
-            // multi-hundred-KiB column plus 62 M instructions of work to do to it.
-            let encoder = self.encoder.clone();
-            let trace = self.trace.clone();
-            let cancellation = RequestCancellation::new();
-            let request_cancellation = cancellation.clone();
-            // Admission is deliberately a try-operation. If every worker is
-            // occupied by another connection, keep this coordinate in the
-            // queue and let an already-in-flight head make progress rather
-            // than waiting on a semaphore from the connection/tick task.
-            let result = match crate::worldgen_dispatch::try_spawn(move || {
-                let request = GenerationRequest::new(
-                    generation_dimension,
-                    (cx, cz),
-                    generation_target,
-                    dependency_radius,
-                );
-                let mut session = GenerationSession::with_cancellation(request, request_cancellation);
-                let requested = source.request_generation(request, Some(&mut session));
-                if session.cancellation().is_cancelled() {
-                    return Err(ChunkEncodeError::new("generation request cancelled"));
-                }
-                let payload = match requested {
-                    Ok(Some(GenerationRequestResult::Existing(column))) => {
-                        Ok(ColumnPayload::Column(column))
-                    }
-                    Ok(Some(GenerationRequestResult::Generated(snapshot))) => {
-                        if let Some(trace) = trace.as_ref() {
-                            trace.mark("generated", cx, cz);
-                        }
-                        Ok(ColumnPayload::Snapshot(snapshot))
-                    }
-                    Ok(None) => Ok(ColumnPayload::Column(source.column_at(cx, cz, stage))),
-                    Err(GenerationRequestError::Unsupported) => {
-                        Ok(ColumnPayload::Column(source.column_at(cx, cz, stage)))
-                    }
-                    Err(error) => Err(ChunkEncodeError::new(error.to_string())),
-                }?;
-                if matches!(&payload, ColumnPayload::Column(_)) {
-                    if let Some(trace) = trace.as_ref() {
-                        trace.mark("generated", cx, cz);
-                    }
-                }
-                match encoder {
-                    Some(encoder) => {
-                        // One-column worker encoders cannot consume a detached
-                        // neighbour halo; preserve snapshots for the broker.
-                        let encoded = match payload {
-                            ColumnPayload::Column(column) => encoder
-                                .try_encode_chunk_in_dimension(cx, cz, &column, source_dimension)
-                                .map(ColumnPayload::Encoded),
-                            snapshot @ ColumnPayload::Snapshot(_) => Ok(snapshot),
-                            ColumnPayload::Encoded(_) => {
-                                unreachable!("worker payload is not encoded")
-                            }
-                        };
-                        if matches!(&encoded, Ok(ColumnPayload::Encoded(_))) {
-                            if let Some(trace) = trace.as_ref() {
-                                trace.mark("encoded", cx, cz);
-                            }
-                        }
-                        encoded
-                    }
-                    None => Ok(payload),
-                }
-            }) {
-                Ok(result) => result,
-                Err(_job) if !self.inflight.is_empty() => break,
-                Err(_job) => {
-                    // No head exists to emit yet, so wait cooperatively for a
-                    // returned permit. This is not a blocking admission wait:
-                    // the dispatcher wakes this future after releasing a
-                    // permit, and Tokio can continue socket and tick service
-                    // on the same runtime thread while generation runs.
-                    crate::worldgen_dispatch::wait_for_capacity().await;
-                    continue;
-                }
-            };
-            let popped = self.queue.pop_request();
-            debug_assert_eq!(popped, Some(((cx, cz), force_full)));
-            self.inflight
-                .push_back((((cx, cz), stage), result, cancellation));
-        }
-        let (pos, payload) = {
-            let ((pos, _stage), handle, _cancellation) = self
+            let batch = self
                 .inflight
-                .front_mut()
-                .expect("the top-up above spawns at least one column while any remain");
-            let pos = *pos;
-            let payload = handle.await.expect("worldgen Rayon worker panicked")?;
-            (pos, payload)
-        };
-        self.inflight.pop_front();
-        self.emitted += 1;
-        self.primed = true;
-        Ok(Some((pos, payload)))
+                .pop_front()
+                .expect("the awaited batch remains in flight");
+            if results.len() != batch.requests.len() {
+                return Err(ChunkEncodeError::new(
+                    "worldgen batch returned the wrong result count",
+                ));
+            }
+            for (request, result) in batch.requests.into_iter().zip(results) {
+                if !request.cancellation.is_cancelled() {
+                    self.ready.push_back(result);
+                }
+            }
+        }
     }
 
-    /// wasm32: no native worker pool, so this is the serial path. See the struct doc.
+    /// wasm32: retains the active request across cancelled polls of this future.
     #[cfg(target_arch = "wasm32")]
     pub async fn next(&mut self) -> Result<Option<((i32, i32), ColumnPayload)>, ChunkEncodeError> {
-        if self.remaining() == 0 {
-            return Ok(None);
+        loop {
+            if let Some(result) = self.ready.pop_front() {
+                self.emitted += 1;
+                self.primed = true;
+                return result.map(Some);
+            }
+            if self.remaining() == 0 {
+                return Ok(None);
+            }
+            if self.inflight.is_empty() {
+                let target = if self.primed { self.window } else { 1 };
+                let mut requests = Vec::with_capacity(target);
+                while requests.len() < target {
+                    let Some((coordinate, force_full)) = self.queue.pop_request() else {
+                        break;
+                    };
+                    requests.push(self.batch_request_for(coordinate, force_full));
+                }
+                if requests.is_empty() {
+                    return Ok(None);
+                }
+                let source = Arc::clone(&self.source);
+                let encoder = self.encoder.clone();
+                let trace = self.trace.clone();
+                let job_requests = requests.clone();
+                let future = Box::pin(async move {
+                    let mut sessions = job_requests
+                        .iter()
+                        .map(|request| {
+                            GenerationSession::with_cancellation(
+                                request.request,
+                                request.cancellation.clone(),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let results = if sessions.len() == 1 {
+                        vec![
+                            source
+                                .request_generation_yielding(
+                                    sessions[0].request(),
+                                    Some(&mut sessions[0]),
+                                )
+                                .await,
+                        ]
+                    } else {
+                        source.request_generation_batch_yielding(&mut sessions).await
+                    };
+                    if results.len() != job_requests.len() {
+                        return job_requests
+                            .iter()
+                            .map(|_| {
+                                Err(ChunkEncodeError::new(
+                                    "generation batch returned the wrong result count",
+                                ))
+                            })
+                            .collect();
+                    }
+                    results
+                        .into_iter()
+                        .zip(job_requests.iter())
+                        .map(|(result, request)| {
+                            map_batch_result(
+                                source.as_ref(),
+                                request,
+                                result,
+                                encoder.clone(),
+                                trace.clone(),
+                                job_requests.len(),
+                            )
+                        })
+                        .collect()
+                });
+                self.inflight.push_back(InflightBatch { requests, future });
+            }
+            let results = {
+                let batch = self
+                    .inflight
+                    .front_mut()
+                    .expect("an admitted batch remains in flight");
+                batch.future.as_mut().await
+            };
+            let batch = self
+                .inflight
+                .pop_front()
+                .expect("the awaited batch remains in flight");
+            if results.len() != batch.requests.len() {
+                return Err(ChunkEncodeError::new(
+                    "worldgen batch returned the wrong result count",
+                ));
+            }
+            for (request, result) in batch.requests.into_iter().zip(results) {
+                if !request.cancellation.is_cancelled() {
+                    self.ready.push_back(result);
+                }
+            }
         }
-        let Some(((cx, cz), force_full)) = self.queue.pop_request() else {
-            return Ok(None);
-        };
-        let stage = if force_full {
-            ChunkGenerationStage::Full
-        } else {
-            self.generation_stage_for((cx, cz))
-        };
-        let source_dimension = self
-            .source
-            .dimension()
-            .unwrap_or(crate::dimension::Dimension::Overworld);
-        let generation_target = match stage {
-            ChunkGenerationStage::Shaped => {
-                lodestone_worldgen::stage_schedule::GenerationTarget::Shaped
-            }
-            ChunkGenerationStage::Full => {
-                lodestone_worldgen::stage_schedule::GenerationTarget::Full
-            }
-        };
-        let dependency_radius = self
-            .source
-            .generation_request_dependency_radius(generation_target);
-        let request = GenerationRequest::new(
-            source_dimension.into(),
-            (cx, cz),
-            generation_target,
-            dependency_radius,
-        );
-        let cancellation = RequestCancellation::new();
-        let request_cancellation = cancellation.clone();
-        self.request_position = Some((cx, cz));
-        self.request_cancellation = Some(cancellation.clone());
-        let generation = {
-            let mut session = GenerationSession::with_cancellation(request, cancellation);
-            self.source
-                .request_generation_yielding(request, Some(&mut session))
-                .await
-        };
-        self.request_position = None;
-        self.request_cancellation = None;
-        if request_cancellation.is_cancelled() {
-            return Err(ChunkEncodeError::new("generation request cancelled"));
-        }
-        let payload = match generation {
-            Ok(Some(GenerationRequestResult::Existing(column))) => {
-                ColumnPayload::Column(column)
-            }
-            Ok(Some(GenerationRequestResult::Generated(snapshot))) => {
-                ColumnPayload::Snapshot(snapshot)
-            }
-            Ok(None) => ColumnPayload::Column(self.source.column_at(cx, cz, stage)),
-            Err(GenerationRequestError::Unsupported) => {
-                ColumnPayload::Column(self.source.column_at(cx, cz, stage))
-            }
-            Err(error) => return Err(ChunkEncodeError::new(error.to_string())),
-        };
-        if let Some(trace) = self.trace.as_ref() {
-            trace.mark("generated", cx, cz);
-        }
-        self.emitted += 1;
-        self.primed = true;
-        let _ = &self.inflight;
-        // There is no worker to move encoding to; the caller consumes the
-        // detached snapshot or scalar column on its own task.
-        Ok(Some(((cx, cz), payload)))
     }
 }
 
@@ -1209,9 +1341,8 @@ pub(crate) async fn generate_owned_columns(
 /// `crate::server`'s `serve_connection_inner` streams the innermost rings inline
 /// (so the player has ground under their feet before they can act), builds one of
 /// these for the rest, and `serve_play` drains it from a `tokio::select!` branch
-/// alongside the socket read. Vanilla's shape — `PlayerChunkSender` feeding a
-/// player who is already in the level — rather than "generate the whole view,
-/// then let the player exist".
+/// alongside the socket read, so generation and play proceed together rather
+/// than waiting for the whole view to finish.
 ///
 /// The two variants are the two [`SourceRef`] arms, and they exist for the reason
 /// the module doc already gives: a borrowed source is not `'static`, so it cannot
@@ -1487,6 +1618,11 @@ mod tests {
         scalar_calls: AtomicUsize,
     }
 
+    struct BatchPathSource {
+        batch_calls: AtomicUsize,
+        scalar_calls: AtomicUsize,
+    }
+
     struct CancellableRequestSource {
         started: Arc<AtomicUsize>,
         cancelled: Arc<AtomicUsize>,
@@ -1508,6 +1644,51 @@ mod tests {
                 .expect("request log lock poisoned")
                 .push((request.target(), request.generation_target(), session.is_some()));
             Ok(Some(GenerationRequestResult::Existing(ChunkColumn::new(0, 16))))
+        }
+
+        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+            crate::chunk::AIR.to_string()
+        }
+
+        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+            crate::chunk::DEFAULT_BIOME.to_string()
+        }
+
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+    }
+
+    impl ChunkSource for BatchPathSource {
+        fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            self.scalar_calls.fetch_add(1, Ordering::SeqCst);
+            ChunkColumn::new(0, 1)
+        }
+
+        fn request_generation(
+            &self,
+            _request: GenerationRequest,
+            _session: Option<&mut GenerationSession>,
+        ) -> Result<Option<GenerationRequestResult>, GenerationRequestError> {
+            Ok(Some(GenerationRequestResult::Existing(ChunkColumn::new(0, 1))))
+        }
+
+        fn request_generation_batch(
+            &self,
+            sessions: &mut [GenerationSession],
+        ) -> Vec<
+            Result<
+                Option<GenerationRequestResult>,
+                GenerationRequestError,
+            >,
+        > {
+            self.batch_calls.fetch_add(1, Ordering::SeqCst);
+            sessions
+                .iter()
+                .map(|_| {
+                    Ok(Some(GenerationRequestResult::Existing(ChunkColumn::new(
+                        0, 1,
+                    ))))
+                })
+                .collect()
         }
 
         fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
@@ -1748,6 +1929,25 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn adjacent_requests_share_one_batch_boundary() {
+        let source = Arc::new(BatchPathSource {
+            batch_calls: AtomicUsize::new(0),
+            scalar_calls: AtomicUsize::new(0),
+        });
+        let mut pipeline = ColumnPipeline::with_window(
+            Arc::clone(&source),
+            vec![(0, 0), (1, 0), (2, 0)],
+            2,
+        );
+        assert_eq!(pipeline.next().await.unwrap().unwrap().0, (0, 0));
+        assert_eq!(pipeline.next().await.unwrap().unwrap().0, (1, 0));
+        assert_eq!(pipeline.next().await.unwrap().unwrap().0, (2, 0));
+        assert_eq!(source.batch_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(source.scalar_calls.load(Ordering::SeqCst), 0);
     }
 
     #[cfg(not(target_arch = "wasm32"))]

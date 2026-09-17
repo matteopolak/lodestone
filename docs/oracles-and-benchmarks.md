@@ -180,6 +180,31 @@ an end-to-end stage percentage. Record first-result latency, steady-state
 throughput, resident-column and retained-byte high-water marks, cache hits and
 misses, duplicate completions, spill counts, and simulation-thread stalls.
 
+On macOS, `just profile-worldgen-hardware 42 8 2 line` records the dedicated
+single-thread production test with Instruments CPU Counters and exports its
+table of contents and raw counter samples under
+`bench-results/profiles/hardware/`. The profiler launches the test executable
+directly with `LODESTONE_WORLDGEN_WORKERS=1` and `--test-threads=1`, so its
+process-wide worker setting is established before the dispatcher exists. It
+does not conflate the raw generator example with the production request path.
+The workload labels the integrated metric `production_request`, and also emits
+`session_initialization`, `fresh_column`, `retained_target_control`,
+`light_encode`, and `pmu_calibration` for phase separation. Request output
+includes explicit batch and layout labels; cloning and assertions occur after
+each measured request.
+A template whose exact event set is `Cycles, Instructions` also produces
+exclusive and inclusive symbol summaries. `LODESTONE_WORLDGEN_XCTRACE_TEMPLATE`
+selects a user template when a comparison needs a fixed event set such as
+retired instructions or L1-data-miss sampling; `LODESTONE_WORLDGEN_PROFILE_DIR`
+changes the artifact directory and `LODESTONE_WORLDGEN_PROFILE_RUN_ID` supplies
+a reproducible artifact name. Set `LODESTONE_WORLDGEN_PROFILE_DRY_RUN=1` for a
+command-shape check without Instruments. The standard `CPU Counters` template
+reports CPU bottleneck samples and is not evidence for every cache level.
+Hardware counters answer where the processor stalled. The feature-gated
+generation counters separately report logical cells read and written, cache
+decisions, retained bytes and representation passes. Neither instrument infers
+exact DRAM traffic from source-level accesses.
+
 On the current macOS toolchain, the release worldgen benchmark can fail at the
 final link when Rust emits LLVM 23 LTO bitcode but the selected Apple linker
 understands LLVM 21. `just worldgen-bench` selects the pinned toolchain's

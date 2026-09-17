@@ -278,6 +278,37 @@ fn drive_ui_from_session_refreshes_the_social_roster_from_the_real_tab_list() {
     );
 }
 
+#[test]
+fn connected_session_renders_behind_the_initial_terrain_overlay() {
+    use crate::net::NetUpdate;
+
+    let mut app = WindowApp::new(Config {
+        mode: Mode::Headless,
+        ..Config::default()
+    });
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    app.sim.attach_net(net);
+    app.sim.arm_new_world_loading(8);
+    app.ui.begin(crate::menu::SessionKind::Singleplayer);
+    feed.send(NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
+    app.sim.step(1.0 / 20.0);
+
+    assert_eq!(
+        app.sim.world_wait(),
+        Some(crate::menu::loading::WorldWait::Terrain),
+    );
+    assert_eq!(app.ui.screen(), crate::menu::Screen::Connecting);
+
+    app.drive_ui_from_session();
+
+    assert_eq!(app.ui.screen(), crate::menu::Screen::Playing);
+    assert_eq!(
+        app.sim.world_wait(),
+        Some(crate::menu::loading::WorldWait::Terrain),
+        "the opaque overlay remains while the world render path builds its first mesh",
+    );
+}
+
 /// The credits-screen handoff, exercised through production code exactly like
 /// the social-roster test above: `menu::UiState::show_credits` and
 /// `net::NetUpdate::WinGame` both already existed, individually tested,

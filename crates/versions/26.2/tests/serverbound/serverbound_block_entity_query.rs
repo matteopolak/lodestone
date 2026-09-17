@@ -31,7 +31,7 @@ async fn entity_tag_query_reaches_the_real_client_response_stream() {
         from_y: -64.0, to_y: 64.0, from_value: 1.0, to_value: -1.0,
     }, -64, 384);
     let (server, io) = IntegratedServer::open_in_memory_with_mobs(
-        V770ServerProtocol, source, (0..=0, 0..=0), (0, 0), 0, 0,
+        V770ServerProtocol, source, (0..=0, 0..=0), (0, 0), 0,
     );
     let (mut handle, mut events) = ClientBuilder::new(
         ServerAddress { host: "memory".into(), port: 0 },

@@ -89,7 +89,6 @@ async fn protocol_47_chest_move_reaches_the_live_inventory_consumer() {
         (0..=0, 0..=0),
         (0, 0),
         0,
-        0,
     );
     let entities = server
         .block_entities()

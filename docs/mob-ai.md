@@ -43,6 +43,16 @@ acquired this tick is visible to a movement goal the same tick).
 mobs do (a skeleton switches between its melee and bow goals when the held
 item changes), which a per-`Flag` `disable` can't express.
 
+### Navigation motion
+
+`PathNavigator` retains the effective speed for its active request, and
+`NavigatingMob` uses it for each follower step. Species spawning supplies the
+attribute-to-ground conversion, so a roster multiplier changes motion without
+rebuilding the path. A downward waypoint is kept active until the body clears
+the supporting cell horizontally; only then does the gravity integrator move
+the mob vertically. Upward waypoints retain the existing auto-step and jump
+transitions.
+
 ### Target acquisition (brain-based mobs)
 
 Two additions to `lodestone_entity::brain`, demonstrated by villager panic:
@@ -190,22 +200,12 @@ list for the wire.
 `IntegratedServer::open_in_memory_with_mobs` spawns the existing connection
 task (diffing `LiveMobSource::snapshots()` against what was last sent)
 alongside `tick::run_tick_loop`, which builds a second, independent
-`ChunkWorld` snapshot of the same deterministic terrain, seeds a small fixed
-population once via `seed_demo_mobs` (cycling `DEMO_SPECIES`, each spawned
-through the real roster with `MobSim::spawn_species`), then loops at 20 Hz:
-tick the sim and block entities, publish snapshots. `LiveMobSource` is an
+`ChunkWorld` snapshot of the same deterministic terrain, then loops at 20 Hz:
+tick the sim, natural spawning, and block entities, and publishes snapshots. `LiveMobSource` is an
 `Arc<Mutex<Vec<EntitySnapshot>>>` behind `EntitySource`.
 `crates/lodestone-shell/src/net.rs` calls this for singleplayer with a small
 fixed chunk radius around join spawn, independent of the client's own
 streamed view radius.
-
-`DEMO_SPECIES`'s first six entries cover one species per roster family plus
-a creeper, since production seeds exactly six; `zombie` stays at index 0
-because mob ids are assigned in spawn order starting at **1000**
-(`MobSim::set_next_id(1000)`), chosen to avoid colliding with the local
-player's own entity id (`1`), which silently ate the first mob a fresh
-`MobSim` ever spawned before this was found — `MobSim::new`'s own default id
-start (`1`) is unchanged for hermetic tests.
 
 ## How to change it
 
@@ -239,11 +239,9 @@ start (`1`) is unchanged for hermetic tests.
   leaks silently. Test the driver's `tick()` itself, not only the pure per-entity function it calls,
   which proves nothing about whether anything drives it in production.
 - **Live wiring**: the simulation and everything it holds must stay `Send`, since it's ticked from a
-  spawned async task. There is no natural spawning in production yet — a fixed demo population is seeded
-  once so AI motion has something to move (see [`docs/mob-spawning.md`](./mob-spawning.md) for the
-  candidate-source seam this will eventually plug into) — and no despawn pass, since the tick task has no
-  way to learn a player's position. A version target with no async timer support (e.g. wasm32) falls
-  back to a mob-free path entirely.
+  spawned async task. Natural spawning consumes the terrain snapshot and biome spawn tables on the
+  server tick; the client receives the resulting snapshots through the normal entity stream. A version
+  target with no async timer support (e.g. wasm32) falls back to a mob-free path entirely.
 
 ## Configuration
 
@@ -258,10 +256,9 @@ start (`1`) is unchanged for hermetic tests.
   `[80, 120]` ticks (`mobs/mod.rs`).
 - Vertical motion: `JUMP_POWER` (`0.42`), `FALL_GRAVITY_PER_TICK` (`0.08`),
   `FALL_VERTICAL_AIR_DRAG` (`0.98`), all `pub const` in `navigating_mob.rs`.
-- Live wiring: demo mob count (`6`), spawn center matching the server's
-  hardcoded join spawn, mob-area radius (clamped `1..=3`) in `net.rs`;
-  `seed_demo_mobs`'s ring radius (`6.0` blocks) and the mob tick interval
-  (`50ms`, one vanilla tick) in `mobs/mod.rs`.
+- Live wiring: the spawn center matching the server's join spawn and mob-area
+  radius (clamped `1..=3`) in `net.rs`; the mob tick interval (`50ms`) in
+  `mobs/mod.rs`.
 - No env vars anywhere in this subsystem.
 
 ## Dependencies

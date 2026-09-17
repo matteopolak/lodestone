@@ -35,8 +35,6 @@ mod server_join_inventory;
 mod server_light;
 #[path = "server/server_liveness.rs"]
 mod server_liveness;
-#[path = "server/server_no_demo_mobs.rs"]
-mod server_no_demo_mobs;
 #[path = "server/server_player_entity_stream.rs"]
 mod server_player_entity_stream;
 #[path = "server/server_player_rotation_stream.rs"]

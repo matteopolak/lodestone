@@ -272,7 +272,6 @@ impl WaterloggingServerOracle {
                 (0..=0, -1..=0),
                 (0, 0),
                 0,
-                1,
             )
         };
         let mut client = Connection::new(client_io);

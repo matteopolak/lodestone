@@ -179,7 +179,6 @@ async fn open(dir: &Path) -> (lodestone_server::IntegratedServer, RegionChunkSou
         HEIGHT,
         (0..=0, 0..=0),
         (0, 0),
-        0,
         1,
         Duration::from_secs(3600),
     )

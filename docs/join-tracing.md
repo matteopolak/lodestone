@@ -30,10 +30,16 @@ packet bytes, or mesh scheduling.
 
 ## Configuration
 
-`LODESTONE_JOIN_TRACE=1` enables the trace on native builds. The tracing subscriber
+`LODESTONE_JOIN_TRACE=1` enables the per-column trace on native builds. The tracing subscriber
 must also accept the `lodestone_join_trace` target at `INFO`; for example, use
-`RUST_LOG=lodestone_join_trace=info` alongside the flag. Browser builds leave the
-trace disabled because they have no host environment configuration.
+`RUST_LOG=lodestone_join_trace=info` alongside the flag. Browser builds use the
+same monotonic clock and expose bounded operational diagnostics through the SDK's
+`logLevel` mount option. Use `mount({ ..., logLevel: "debug" })`, or append
+`?log=debug` to the standalone runner. The console then reports spawn-search
+duration and work counts, join-stream progress, the play-loop heartbeat, and
+world-tick phases that exceed one 50 ms tick period.
+Supported levels are `off`, `error`, `warn`, `info`, `debug`, and `trace`; the
+default is `warn`.
 
 ## Dependencies
 

@@ -17,6 +17,7 @@ pub struct LodestoneHandle {
     active: Rc<Cell<bool>>,
     first_frame_raf: Rc<Cell<Option<i32>>>,
     host_action_timer: Rc<Cell<Option<i32>>>,
+    join_progress_timer: Rc<Cell<Option<i32>>>,
     mount_lease: Option<MountLease>,
     destroyed: bool,
 }
@@ -26,6 +27,7 @@ impl Drop for LodestoneHandle {
         self.active.set(false);
         cancel_first_frame(&self.first_frame_raf);
         cancel_host_actions(&self.host_action_timer);
+        cancel_host_actions(&self.join_progress_timer);
         if let Some(control) = self.control.take() {
             let _ = control.shutdown();
         }
@@ -45,6 +47,7 @@ impl LodestoneHandle {
         self.active.set(false);
         cancel_first_frame(&self.first_frame_raf);
         cancel_host_actions(&self.host_action_timer);
+        cancel_host_actions(&self.join_progress_timer);
         let shutdown = self
             .control
             .take()
@@ -142,6 +145,9 @@ impl LodestoneHandle {
 
 #[wasm_bindgen]
 pub async fn mount(options: JsValue) -> Result<LodestoneHandle, JsValue> {
+    let log_level = browser_log_level(property(&options, "logLevel"))?;
+    log::set_max_level(log_level);
+    log::info!("browser diagnostics enabled at {log_level}");
     let progress = match property(&options, "onProgress") {
         Some(value) => Some(Rc::new(
             value
@@ -186,6 +192,20 @@ pub async fn mount(options: JsValue) -> Result<LodestoneHandle, JsValue> {
         host_action,
     )
     .await
+}
+
+fn browser_log_level(value: Option<JsValue>) -> Result<log::LevelFilter, JsValue> {
+    match value.and_then(|value| value.as_string()).as_deref() {
+        None | Some("warn") => Ok(log::LevelFilter::Warn),
+        Some("off") => Ok(log::LevelFilter::Off),
+        Some("error") => Ok(log::LevelFilter::Error),
+        Some("info") => Ok(log::LevelFilter::Info),
+        Some("debug") => Ok(log::LevelFilter::Debug),
+        Some("trace") => Ok(log::LevelFilter::Trace),
+        Some(_) => Err(JsValue::from_str(
+            "options.logLevel must be off, error, warn, info, debug, or trace",
+        )),
+    }
 }
 
 async fn panorama_assets(
@@ -238,6 +258,7 @@ pub(crate) async fn mount_bundle(
     lease.mark_started();
     let first_frame_raf = Rc::new(Cell::new(None));
     let host_action_timer = Rc::new(Cell::new(None));
+    let join_progress_timer = Rc::new(Cell::new(None));
     let handle = LodestoneHandle {
         control: Some(control),
         progress,
@@ -245,6 +266,7 @@ pub(crate) async fn mount_bundle(
         active: Rc::new(Cell::new(true)),
         first_frame_raf: Rc::clone(&first_frame_raf),
         host_action_timer: Rc::clone(&host_action_timer),
+        join_progress_timer: Rc::clone(&join_progress_timer),
         mount_lease: Some(lease),
         destroyed: false,
     };
@@ -260,6 +282,12 @@ pub(crate) async fn mount_bundle(
         handle.active.clone(),
         action_control,
         host_action_timer,
+    );
+    schedule_join_progress(
+        handle.progress.clone(),
+        handle.active.clone(),
+        Rc::clone(handle.control.as_ref().expect("mounted control exists")),
+        join_progress_timer,
     );
     Ok(handle)
 }
@@ -419,6 +447,68 @@ fn schedule_host_actions(
         timer_slot.set(Some(id));
         closure.forget();
     }
+}
+
+fn schedule_join_progress(
+    callback: Option<Rc<Function>>,
+    active: Rc<Cell<bool>>,
+    control: Rc<lodestone::BrowserControl>,
+    timer_slot: Rc<Cell<Option<i32>>>,
+) {
+    let Some(callback) = callback else {
+        return;
+    };
+    let callback_timer = Rc::clone(&timer_slot);
+    let next_timer = Rc::clone(&timer_slot);
+    let closure = Closure::once(move || {
+        callback_timer.set(None);
+        if !active.get() {
+            return;
+        }
+        for progress in control.take_join_progress() {
+            emit_join_progress(&callback, &progress);
+        }
+        schedule_join_progress(Some(callback), active, control, next_timer);
+    });
+    if let Ok(id) = request_timeout(closure.as_ref(), 50.0) {
+        timer_slot.set(Some(id));
+        closure.forget();
+    }
+}
+
+fn emit_join_progress(callback: &Function, progress: &lodestone::BrowserJoinProgress) {
+    let event = Object::new();
+    let expected = progress.expected_columns;
+    let fraction = if expected == 0 {
+        0.0
+    } else {
+        progress.loaded_columns as f64 / expected as f64
+    };
+    let message = match progress.phase {
+        "world-create-started" => "creating world",
+        "world-open-started" => "opening world",
+        "joining" => "joining integrated server",
+        "loading-terrain" => "loading terrain",
+        "loading-overlay-ready" => "loading overlay ready to dismiss",
+        "first-terrain-presented" => "first terrain frame presented",
+        "full-view-presented" => "configured view presented",
+        _ => "singleplayer join progress",
+    };
+    let fields = [
+        ("type", JsValue::from_str(progress.phase)),
+        ("phase", JsValue::from_str(progress.phase)),
+        ("fraction", JsValue::from_f64(fraction.clamp(0.0, 1.0))),
+        ("message", JsValue::from_str(message)),
+        ("elapsedMs", JsValue::from_f64(progress.elapsed_ms)),
+        ("loadedColumns", JsValue::from_f64(progress.loaded_columns as f64)),
+        ("expectedColumns", JsValue::from_f64(expected as f64)),
+        ("settledColumns", JsValue::from_f64(progress.settled_columns as f64)),
+        ("pendingMeshes", JsValue::from_f64(progress.pending_meshes as f64)),
+    ];
+    for (name, value) in fields {
+        let _ = Reflect::set(&event, &JsValue::from_str(name), &value);
+    }
+    let _ = callback.call1(&JsValue::NULL, &event);
 }
 
 fn emit_callback(callback: &Function, kind: &str, fraction: f64, message: &str) {

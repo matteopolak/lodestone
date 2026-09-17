@@ -49,7 +49,11 @@ construction enters the Worker, so it identifies the only long startup section
 without pretending to know how many columns remain. These are not a made-up
 percentage: terrain progress remains the client-observed count of chunk packets
 already applied to its world, so the existing loading grid and bar continue to
-paint while the Worker prepares and streams the initial view.
+paint while the Worker prepares and streams the initial view. Only the centre
+column precedes the play loop. Deferred generation races packet and timer
+service, retaining an interrupted request until its next poll. Each completed
+column is framed independently; chunk acknowledgements pace reactive fallback
+batches but do not serialize the finite join stream.
 
 `lodestone_net::MessagePortTransport` turns the two ports into an async byte
 stream. Binary messages carry framed bytes; a private `{kind: "credit", bytes}`

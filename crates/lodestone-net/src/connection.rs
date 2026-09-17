@@ -139,10 +139,10 @@ impl<T: Transport> Connection<T> {
         #[cfg(target_arch = "wasm32")]
         let (seq, len) = (netbuf_seq(), frame.len());
         #[cfg(target_arch = "wasm32")]
-        tracing::debug!(target: "netbuf", seq, len, "write:start");
+        tracing::trace!(target: "netbuf", seq, len, "write:start");
         self.transport.write_all(&frame).await?;
         #[cfg(target_arch = "wasm32")]
-        tracing::debug!(target: "netbuf", seq, done_seq = netbuf_seq(), len, "write:done");
+        tracing::trace!(target: "netbuf", seq, done_seq = netbuf_seq(), len, "write:done");
         self.transport.flush().await?;
         Ok(())
     }
@@ -161,10 +161,10 @@ impl<T: Transport> Connection<T> {
             #[cfg(target_arch = "wasm32")]
             let poll_seq = netbuf_seq();
             #[cfg(target_arch = "wasm32")]
-            tracing::debug!(target: "netbuf", seq = poll_seq, "read:polling");
+            tracing::trace!(target: "netbuf", seq = poll_seq, "read:polling");
             let n = self.transport.read(&mut self.scratch).await?;
             #[cfg(target_arch = "wasm32")]
-            tracing::debug!(target: "netbuf", seq = poll_seq, done_seq = netbuf_seq(), n, "read:polled");
+            tracing::trace!(target: "netbuf", seq = poll_seq, done_seq = netbuf_seq(), n, "read:polled");
             if n == 0 {
                 let buffered = self.codec.buffered_len();
                 if buffered == 0 {

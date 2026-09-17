@@ -28,20 +28,6 @@ use crate::sin_table::SIN_TABLE_BITS;
 /// Vanilla's own quantization constant for the sine table.
 pub const SIN_SCALE: f64 = 10430.378350470453;
 
-/// Lazily-materialised sine table as `f32` values, reconstructed from the
-/// checked-in bit patterns so no rounding can creep in at load time.
-fn sin_table() -> &'static [f32; 65536] {
-    use std::sync::OnceLock;
-    static TABLE: OnceLock<[f32; 65536]> = OnceLock::new();
-    TABLE.get_or_init(|| {
-        let mut t = [0.0f32; 65536];
-        for (dst, &bits) in t.iter_mut().zip(SIN_TABLE_BITS.iter()) {
-            *dst = f32::from_bits(bits);
-        }
-        t
-    })
-}
-
 /// Vanilla's own sine: a quantized table lookup, **not** `f64::sin`.
 ///
 /// Scales the input by the table's per-entry angle step, truncates to a
@@ -50,7 +36,7 @@ fn sin_table() -> &'static [f32; 65536] {
 #[must_use]
 pub fn sin(i: f64) -> f32 {
     let idx = ((i * SIN_SCALE) as i64 & 65535) as usize;
-    sin_table()[idx]
+    f32::from_bits(SIN_TABLE_BITS[idx])
 }
 
 /// Vanilla's own cosine: the same quantized table, offset by a quarter turn.
@@ -60,7 +46,7 @@ pub fn sin(i: f64) -> f32 {
 #[must_use]
 pub fn cos(i: f64) -> f32 {
     let idx = ((i * SIN_SCALE + 16384.0) as i64 & 65535) as usize;
-    sin_table()[idx]
+    f32::from_bits(SIN_TABLE_BITS[idx])
 }
 
 /// Vanilla's own floor-to-int: floor, then truncate to `i32`.

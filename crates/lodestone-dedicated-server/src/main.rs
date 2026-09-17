@@ -147,9 +147,6 @@ where
         Dimension::Overworld.height(),
         mob_area,
         mob_center,
-        // No demo-mob fixture ring. Real mob spawning is driven by the world
-        // tick independently of this development-only seed count.
-        0,
         view_radius,
         AUTOSAVE_INTERVAL,
         dedicated_command_dispatch(),

@@ -5,8 +5,7 @@
 //! *drives* them against real terrain, real biome spawn lists and real light:
 //!
 //! 1. **A lit grass plain populates with the plains creature list**, and only with
-//!    species that list actually names. This is the whole feature: before it, a
-//!    world held exactly the mobs `seed_demo_mobs` placed and nothing else, ever.
+//!    species that list actually names.
 //! 2. **A sealed dark room populates with monsters**, and the same room lit by a
 //!    glowstone floor does not. The light half is where a spawn table goes
 //!    silently wrong, and the direction is the assertion: darkness spawns

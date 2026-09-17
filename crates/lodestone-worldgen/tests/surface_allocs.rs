@@ -273,12 +273,10 @@ fn one_chunk(scene: &Scene) -> Run {
         )
     });
 
-    // The only place in the tree that iterates a `SurfaceDiff`. `SurfaceDiff` is
-    // a `FastMap`, whose iteration order is not stable across commits, so this
-    // takes the *second* form its doc allows: the consumer imposes a total order
-    // of its own. The `sort_unstable` is therefore load-bearing, not tidiness —
-    // without it this count would be order-dependent on a non-deterministic
-    // hasher. It is also only ever reduced to a length, never compared.
+    // This diagnostic is the only place that iterates a `SurfaceDiff`; production
+    // materializers consume each ordered column with a cursor. Sort the copied
+    // ids because this check only measures distinct result states, not rewrite
+    // order.
     let mut distinct: Vec<_> = diff.values().copied().collect();
     distinct.sort_unstable();
     distinct.dedup();
@@ -290,17 +288,11 @@ fn one_chunk(scene: &Scene) -> Run {
     }
 }
 
-/// The bound. The residual is the diff map's growth series plus the fixed setup
-/// cost of the X/Z and Y condition-cache arrays. Two independent instruments
-/// measured the map's **unsampled** size histogram as exactly 14 distinct sizes
-/// (76, 144, 280, 552, 1096, 2184, 4360, 8712, 17416, 34824, 69640, 139272,
-/// 278536, 557064 bytes — a doubling series for a 16-byte entry), each once per
-/// stage entry; the cache contributes at most two additional allocations.
-///
-/// So the expected value is ⌈log2(rewrites)⌉-ish, ~14 for a full chunk, and the
-/// bound is set at 64 to leave room for a fixture with more rewrites without
-/// making the gate a false alarm. That headroom is deliberate and it is *why*
-/// the per-probe assertion below carries the real discriminating power.
+/// The bound allows the ordered diff vector's geometric growth plus the fixed
+/// setup cost of the X/Z and Y condition-cache arrays. Its expected value is
+/// logarithmic in the number of rewrites, while the bound leaves room for a
+/// fixture with more rewrites without making the gate a false alarm. The
+/// per-probe assertion below carries the real discriminating power.
 const PER_CHUNK_BOUND: u64 = 64;
 
 #[test]

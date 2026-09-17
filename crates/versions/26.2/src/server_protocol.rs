@@ -3661,6 +3661,7 @@ impl ServerProtocol for V770ServerProtocol {
                 &shape,
                 neighbours,
                 dimension,
+                neighbours_have_complete_footprint(neighbours),
             )
         };
         let payload = encode_column_body(cx, cz, &shape, &world_column, &light, column);
@@ -3683,6 +3684,7 @@ impl ServerProtocol for V770ServerProtocol {
             &shape,
             neighbours,
             dimension,
+            true,
         ))
     }
 
@@ -3737,7 +3739,7 @@ impl ServerProtocol for V770ServerProtocol {
                     );
                 }
             }
-        } else {
+        } else if dimension == Dimension::Overworld {
             for slot in 0..lights.len() {
                 if slot != 4 && stored[slot].is_none() {
                     lights[slot] = empty_light_storage_like(&lights[slot]);

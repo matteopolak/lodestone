@@ -119,6 +119,9 @@
 //! a separate, later stage — [`NoiseChunkSampler`], not this module.)
 
 use serde_json::Value;
+use std::collections::HashMap;
+use std::hash::Hash;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::math::{clamp, clamped_map};
 use crate::noise::{BlendedNoise, NormalNoise};
@@ -127,7 +130,7 @@ use crate::rng::PositionalRandomFactory;
 mod chunk;
 mod spline;
 pub mod xz_memo;
-pub use chunk::NoiseChunkSampler;
+pub use chunk::{NoiseChunkRegionSampler, NoiseChunkSampler};
 pub use spline::{Spline, SplinePoint};
 pub use xz_memo::XzMemoId;
 
@@ -142,6 +145,12 @@ pub struct NoiseParams {
 
 /// Resolves references encountered while building a density-function tree.
 pub trait Resolver {
+    /// Identifies an immutable asset bundle suitable for sharing parsed
+    /// products across generators. Dynamic resolvers return `None`.
+    fn asset_fingerprint(&self) -> Option<u64> {
+        None
+    }
+
     /// Loads the JSON body of another density function by id (e.g.
     /// `"minecraft:overworld/continents"`).
     fn density_function(&self, id: &str) -> Value;
@@ -549,6 +558,117 @@ pub enum Density {
     /// renumbers every later kind.
     EndIslands(std::sync::Arc<crate::noise::EndIslandNoise>),
 }
+
+#[derive(Clone, Debug)]
+enum BlueprintNode {
+    Const(f64),
+    BlendAlpha,
+    BlendOffset,
+    Beardifier,
+    YClampedGradient {
+        from_y: f64,
+        to_y: f64,
+        from_value: f64,
+        to_value: f64,
+    },
+    Add(Box<Self>, Box<Self>),
+    Mul(Box<Self>, Box<Self>),
+    Min(Box<Self>, Box<Self>),
+    Max(Box<Self>, Box<Self>),
+    Abs(Box<Self>),
+    Square(Box<Self>),
+    Cube(Box<Self>),
+    HalfNegative(Box<Self>),
+    QuarterNegative(Box<Self>),
+    Squeeze(Box<Self>),
+    Invert(Box<Self>),
+    Clamp {
+        input: Box<Self>,
+        min: f64,
+        max: f64,
+    },
+    Interpolated(Box<Self>),
+    FlatCache(Box<Self>),
+    Cache2D(Box<Self>),
+    Marker(Box<Self>),
+    Noise {
+        id: String,
+        xz_scale: f64,
+        y_scale: f64,
+    },
+    ShiftedNoise {
+        shift_x: Box<Self>,
+        shift_y: Box<Self>,
+        shift_z: Box<Self>,
+        xz_scale: f64,
+        y_scale: f64,
+        id: String,
+    },
+    ShiftA(String),
+    ShiftB(String),
+    Shift(String),
+    RangeChoice {
+        input: Box<Self>,
+        min_inclusive: f64,
+        max_exclusive: f64,
+        when_in_range: Box<Self>,
+        when_out_of_range: Box<Self>,
+    },
+    IntervalSelect {
+        input: Box<Self>,
+        thresholds: Vec<f64>,
+        functions: Vec<Self>,
+    },
+    Spline(BlueprintSpline),
+    Blended {
+        xz_scale: f64,
+        y_scale: f64,
+        xz_factor: f64,
+        y_factor: f64,
+        smear_scale_multiplier: f64,
+    },
+    FindTopSurface {
+        density: Box<Self>,
+        upper_bound: Box<Self>,
+        lower_bound: i32,
+        cell_height: i32,
+    },
+    EndIslands,
+}
+
+#[derive(Clone, Debug)]
+enum BlueprintSpline {
+    Constant(f32),
+    Multipoint {
+        coordinate: Box<BlueprintNode>,
+        points: Vec<BlueprintPoint>,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct BlueprintPoint {
+    location: f32,
+    derivative: f32,
+    value: BlueprintSpline,
+}
+
+/// A validated, seed-independent density tree.
+///
+/// Resolver references are expanded while this value is built. Noise ids and
+/// numeric parameters remain as data; a [`Builder`] supplies seed-specific
+/// noise instances and evaluator-local slot and memo identities later.
+#[derive(Clone, Debug)]
+pub struct DensityBlueprint {
+    root: BlueprintNode,
+}
+
+#[derive(Hash, PartialEq, Eq)]
+struct BlueprintKey {
+    fingerprint: u64,
+    root: String,
+}
+
+static BLUEPRINT_CACHE: OnceLock<Mutex<HashMap<BlueprintKey, Arc<DensityBlueprint>>>> = OnceLock::new();
 
 impl Density {
     /// Number of [`Density`] variants — the width of the per-kind counter
@@ -1062,6 +1182,7 @@ pub struct Builder<'a> {
     seed: i64,
     algorithm: crate::rng::Algorithm,
     resolver: &'a dyn Resolver,
+    asset_fingerprint: Option<u64>,
     slots: std::cell::Cell<usize>,
     /// The one `end_islands` instance this builder hands to every occurrence.
     ///
@@ -1128,6 +1249,7 @@ impl<'a> Builder<'a> {
             seed,
             algorithm,
             resolver,
+            asset_fingerprint: resolver.asset_fingerprint(),
             slots: std::cell::Cell::new(0),
             end_islands: std::cell::OnceCell::new(),
         }
@@ -1200,7 +1322,46 @@ impl<'a> Builder<'a> {
         self.algorithm
     }
 
-    fn instantiate_blended(&self, node: &Value) -> Result<BlendedNoise, DensityBuildError> {
+    /// Returns the cached parsed density blueprint for `node` when the
+    /// resolver identifies an immutable asset bundle. Dynamic resolvers stay on
+    /// the uncached path and return `None`.
+    pub fn blueprint(
+        &self,
+        node: &Value,
+    ) -> Result<Option<Arc<DensityBlueprint>>, DensityBuildError> {
+        let Some(fingerprint) = self.asset_fingerprint else {
+            return Ok(None);
+        };
+        let root = serde_json::to_string(node).expect("density JSON is serializable");
+        let key = BlueprintKey { fingerprint, root };
+        let cache = BLUEPRINT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut cache = cache.lock().expect("density blueprint cache lock poisoned");
+        if let Some(blueprint) = cache.get(&key).cloned() {
+            return Ok(Some(blueprint));
+        }
+        let blueprint = Arc::new(DensityBlueprint::parse(node, self.resolver)?);
+        cache.insert(key, Arc::clone(&blueprint));
+        Ok(Some(blueprint))
+    }
+
+    /// Builds a density tree through the shared parsed blueprint when the
+    /// resolver is immutable, preserving the ordinary build path for dynamic
+    /// inputs.
+    pub fn build_cached(&self, node: &Value) -> Result<Density, DensityBuildError> {
+        match self.blueprint(node)? {
+            Some(blueprint) => blueprint.instantiate(self),
+            None => self.build_uncached(node),
+        }
+    }
+
+    fn instantiate_blended_values(
+        &self,
+        xz_scale: f64,
+        y_scale: f64,
+        xz_factor: f64,
+        y_factor: f64,
+        smear_scale_multiplier: f64,
+    ) -> BlendedNoise {
         // Vanilla's own random-state class: `useLegacyInit ? newLegacyInstance(0L)
         // : random.fromHashOf("terrain")`. Both `old_blended_noise` dimensions
         // (Nether, End) take the first arm, on the raw world seed.
@@ -1209,8 +1370,18 @@ impl<'a> Builder<'a> {
         } else {
             self.master.from_hash_of("minecraft:terrain")
         };
-        Ok(BlendedNoise::new(
+        BlendedNoise::new(
             &mut src,
+            xz_scale,
+            y_scale,
+            xz_factor,
+            y_factor,
+            smear_scale_multiplier,
+        )
+    }
+
+    fn instantiate_blended(&self, node: &Value) -> Result<BlendedNoise, DensityBuildError> {
+        Ok(self.instantiate_blended_values(
             f(node, "xz_scale")?,
             f(node, "y_scale")?,
             f(node, "xz_factor")?,
@@ -1235,11 +1406,15 @@ impl<'a> Builder<'a> {
     /// `dimension_type`/noise-settings registry entry is exactly this shape,
     /// and those travel over the wire to a joining client).
     pub fn build(&self, node: &Value) -> Result<Density, DensityBuildError> {
+        self.build_cached(node)
+    }
+
+    fn build_uncached(&self, node: &Value) -> Result<Density, DensityBuildError> {
         match node {
             Value::Number(n) => n.as_f64().map(Density::Const).ok_or(DensityBuildError::InvalidNumber),
             Value::String(id) => {
                 let referenced = self.resolver.density_function(id);
-                self.build(&referenced)
+                self.build_uncached(&referenced)
             }
             Value::Object(_) => self.build_object(node),
             _ => Err(DensityBuildError::NotNumberStringOrObject),
@@ -1247,7 +1422,7 @@ impl<'a> Builder<'a> {
     }
 
     fn child(&self, node: &Value, key: &str) -> Result<Box<Density>, DensityBuildError> {
-        Ok(Box::new(self.build(&node[key])?))
+        Ok(Box::new(self.build_uncached(&node[key])?))
     }
 
     fn build_object(&self, node: &Value) -> Result<Density, DensityBuildError> {
@@ -1339,7 +1514,7 @@ impl<'a> Builder<'a> {
                     .as_array()
                     .ok_or(DensityBuildError::MissingArrayField("functions"))?
                     .iter()
-                    .map(|v| self.build(v))
+                    .map(|v| self.build_uncached(v))
                     .collect::<Result<Vec<_>, _>>()?;
                 Density::IntervalSelect {
                     input: self.child(node, "input")?,
@@ -1374,7 +1549,7 @@ impl<'a> Builder<'a> {
         if let Some(n) = node.as_f64() {
             return Ok(Spline::Constant(n as f32));
         }
-        let coordinate = Box::new(self.build(&node["coordinate"])?);
+        let coordinate = Box::new(self.build_uncached(&node["coordinate"])?);
         let points = node["points"]
             .as_array()
             .ok_or(DensityBuildError::MissingArrayField("points"))?
@@ -1453,6 +1628,324 @@ impl std::fmt::Display for DensityBuildError {
 }
 
 impl std::error::Error for DensityBuildError {}
+
+impl DensityBlueprint {
+    fn parse(node: &Value, resolver: &dyn Resolver) -> Result<Self, DensityBuildError> {
+        Ok(Self {
+            root: BlueprintNode::parse(node, resolver)?,
+        })
+    }
+
+    fn instantiate(&self, builder: &Builder<'_>) -> Result<Density, DensityBuildError> {
+        self.root.instantiate(builder)
+    }
+}
+
+impl BlueprintNode {
+    fn parse(node: &Value, resolver: &dyn Resolver) -> Result<Self, DensityBuildError> {
+        match node {
+            Value::Number(number) => number
+                .as_f64()
+                .map(Self::Const)
+                .ok_or(DensityBuildError::InvalidNumber),
+            Value::String(id) => Self::parse(&resolver.density_function(id), resolver),
+            Value::Object(_) => {
+                let ty_full = node
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .ok_or(DensityBuildError::MissingType)?;
+                let ty = ty_full
+                    .strip_prefix("minecraft:")
+                    .ok_or_else(|| DensityBuildError::NotMinecraftNamespaced(ty_full.to_owned()))?;
+                let child = |key| Self::parse(&node[key], resolver).map(Box::new);
+                Ok(match ty {
+                    "constant" => Self::Const(f(node, "argument")?),
+                    "blend_alpha" => Self::BlendAlpha,
+                    "blend_offset" => Self::BlendOffset,
+                    "beardifier" => Self::Beardifier,
+                    "y_clamped_gradient" => Self::YClampedGradient {
+                        from_y: f(node, "from_y")?,
+                        to_y: f(node, "to_y")?,
+                        from_value: f(node, "from_value")?,
+                        to_value: f(node, "to_value")?,
+                    },
+                    "add" => Self::Add(child("argument1")?, child("argument2")?),
+                    "mul" => Self::Mul(child("argument1")?, child("argument2")?),
+                    "min" => Self::Min(child("argument1")?, child("argument2")?),
+                    "max" => Self::Max(child("argument1")?, child("argument2")?),
+                    "abs" => Self::Abs(child("argument")?),
+                    "square" => Self::Square(child("argument")?),
+                    "cube" => Self::Cube(child("argument")?),
+                    "half_negative" => Self::HalfNegative(child("argument")?),
+                    "quarter_negative" => Self::QuarterNegative(child("argument")?),
+                    "squeeze" => Self::Squeeze(child("argument")?),
+                    "invert" => Self::Invert(child("argument")?),
+                    "clamp" => Self::Clamp {
+                        input: child("input")?,
+                        min: f(node, "min")?,
+                        max: f(node, "max")?,
+                    },
+                    "interpolated" => Self::Interpolated(child("argument")?),
+                    "flat_cache" => Self::FlatCache(child("argument")?),
+                    "cache_2d" => Self::Cache2D(child("argument")?),
+                    "cache_once" | "cache_all_in_cell" | "blend_density" => {
+                        Self::Marker(child("argument")?)
+                    }
+                    "noise" => Self::Noise {
+                        id: str_field(node, "noise")?.to_owned(),
+                        xz_scale: f(node, "xz_scale")?,
+                        y_scale: f(node, "y_scale")?,
+                    },
+                    "shifted_noise" => Self::ShiftedNoise {
+                        shift_x: child("shift_x")?,
+                        shift_y: child("shift_y")?,
+                        shift_z: child("shift_z")?,
+                        xz_scale: f(node, "xz_scale")?,
+                        y_scale: f(node, "y_scale")?,
+                        id: str_field(node, "noise")?.to_owned(),
+                    },
+                    "shift_a" => Self::ShiftA(str_field(node, "argument")?.to_owned()),
+                    "shift_b" => Self::ShiftB(str_field(node, "argument")?.to_owned()),
+                    "shift" => Self::Shift(str_field(node, "argument")?.to_owned()),
+                    "range_choice" => Self::RangeChoice {
+                        input: child("input")?,
+                        min_inclusive: f(node, "min_inclusive")?,
+                        max_exclusive: f(node, "max_exclusive")?,
+                        when_in_range: child("when_in_range")?,
+                        when_out_of_range: child("when_out_of_range")?,
+                    },
+                    "interval_select" => {
+                        let thresholds = node["thresholds"]
+                            .as_array()
+                            .ok_or(DensityBuildError::MissingArrayField("thresholds"))?
+                            .iter()
+                            .map(|value| {
+                                value
+                                    .as_f64()
+                                    .ok_or(DensityBuildError::MissingNumberField("thresholds"))
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let functions = node["functions"]
+                            .as_array()
+                            .ok_or(DensityBuildError::MissingArrayField("functions"))?
+                            .iter()
+                            .map(|value| Self::parse(value, resolver))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        Self::IntervalSelect {
+                            input: child("input")?,
+                            thresholds,
+                            functions,
+                        }
+                    }
+                    "end_islands" => Self::EndIslands,
+                    "spline" => Self::Spline(Self::parse_spline(&node["spline"], resolver)?),
+                    "old_blended_noise" => Self::Blended {
+                        xz_scale: f(node, "xz_scale")?,
+                        y_scale: f(node, "y_scale")?,
+                        xz_factor: f(node, "xz_factor")?,
+                        y_factor: f(node, "y_factor")?,
+                        smear_scale_multiplier: f(node, "smear_scale_multiplier")?,
+                    },
+                    "find_top_surface" => Self::FindTopSurface {
+                        density: child("density")?,
+                        upper_bound: child("upper_bound")?,
+                        lower_bound: int_field(node, "lower_bound")? as i32,
+                        cell_height: int_field(node, "cell_height")? as i32,
+                    },
+                    other => return Err(DensityBuildError::UnhandledType(other.to_owned())),
+                })
+            }
+            _ => Err(DensityBuildError::NotNumberStringOrObject),
+        }
+    }
+
+    fn parse_spline(node: &Value, resolver: &dyn Resolver) -> Result<BlueprintSpline, DensityBuildError> {
+        if let Some(value) = node.as_f64() {
+            return Ok(BlueprintSpline::Constant(value as f32));
+        }
+        let coordinate = Box::new(Self::parse(&node["coordinate"], resolver)?);
+        let points = node["points"]
+            .as_array()
+            .ok_or(DensityBuildError::MissingArrayField("points"))?
+            .iter()
+            .map(|point| {
+                Ok(BlueprintPoint {
+                    location: f(point, "location")? as f32,
+                    derivative: f(point, "derivative")? as f32,
+                    value: Self::parse_spline(&point["value"], resolver)?,
+                })
+            })
+            .collect::<Result<Vec<_>, DensityBuildError>>()?;
+        Ok(BlueprintSpline::Multipoint { coordinate, points })
+    }
+
+    fn instantiate(&self, builder: &Builder<'_>) -> Result<Density, DensityBuildError> {
+        let boxed = |node: &Self| node.instantiate(builder).map(Box::new);
+        Ok(match self {
+            Self::Const(value) => Density::Const(*value),
+            Self::BlendAlpha => Density::BlendAlpha,
+            Self::BlendOffset => Density::BlendOffset,
+            Self::Beardifier => Density::Beardifier,
+            Self::YClampedGradient {
+                from_y,
+                to_y,
+                from_value,
+                to_value,
+            } => Density::YClampedGradient {
+                from_y: *from_y,
+                to_y: *to_y,
+                from_value: *from_value,
+                to_value: *to_value,
+            },
+            Self::Add(left, right) => Density::Add(boxed(left)?, boxed(right)?),
+            Self::Mul(left, right) => Density::Mul(boxed(left)?, boxed(right)?),
+            Self::Min(left, right) => Density::Min(boxed(left)?, boxed(right)?),
+            Self::Max(left, right) => Density::Max(boxed(left)?, boxed(right)?),
+            Self::Abs(inner) => Density::Abs(boxed(inner)?),
+            Self::Square(inner) => Density::Square(boxed(inner)?),
+            Self::Cube(inner) => Density::Cube(boxed(inner)?),
+            Self::HalfNegative(inner) => Density::HalfNegative(boxed(inner)?),
+            Self::QuarterNegative(inner) => Density::QuarterNegative(boxed(inner)?),
+            Self::Squeeze(inner) => Density::Squeeze(boxed(inner)?),
+            Self::Invert(inner) => Density::Invert(boxed(inner)?),
+            Self::Clamp { input, min, max } => Density::Clamp {
+                input: boxed(input)?,
+                min: *min,
+                max: *max,
+            },
+            Self::Interpolated(inner) => {
+                let inner = boxed(inner)?;
+                Density::Interpolated {
+                    inner,
+                    slot: builder.next_slot(),
+                }
+            }
+            Self::FlatCache(inner) => {
+                let inner = boxed(inner)?;
+                Density::FlatCache {
+                    memo: memo_id_for(&inner),
+                    inner,
+                    slot: builder.next_slot(),
+                }
+            }
+            Self::Cache2D(inner) => {
+                let inner = boxed(inner)?;
+                Density::Cache2D {
+                    memo: memo_id_for(&inner),
+                    inner,
+                }
+            }
+            Self::Marker(inner) => Density::Marker(boxed(inner)?),
+            Self::Noise {
+                id,
+                xz_scale,
+                y_scale,
+            } => Density::Noise {
+                noise: builder.instantiate_noise(id),
+                xz_scale: *xz_scale,
+                y_scale: *y_scale,
+            },
+            Self::ShiftedNoise {
+                shift_x,
+                shift_y,
+                shift_z,
+                xz_scale,
+                y_scale,
+                id,
+            } => Density::ShiftedNoise {
+                shift_x: boxed(shift_x)?,
+                shift_y: boxed(shift_y)?,
+                shift_z: boxed(shift_z)?,
+                xz_scale: *xz_scale,
+                y_scale: *y_scale,
+                noise: builder.instantiate_noise(id),
+            },
+            Self::ShiftA(id) => Density::ShiftA(builder.instantiate_noise(id)),
+            Self::ShiftB(id) => Density::ShiftB(builder.instantiate_noise(id)),
+            Self::Shift(id) => Density::Shift(builder.instantiate_noise(id)),
+            Self::RangeChoice {
+                input,
+                min_inclusive,
+                max_exclusive,
+                when_in_range,
+                when_out_of_range,
+            } => Density::RangeChoice {
+                input: boxed(input)?,
+                min_inclusive: *min_inclusive,
+                max_exclusive: *max_exclusive,
+                when_in_range: boxed(when_in_range)?,
+                when_out_of_range: boxed(when_out_of_range)?,
+            },
+            Self::IntervalSelect {
+                input,
+                thresholds,
+                functions,
+            } => {
+                let functions = functions
+                    .iter()
+                    .map(|function| function.instantiate(builder))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let input = boxed(input)?;
+                Density::IntervalSelect {
+                    input,
+                    thresholds: thresholds.clone(),
+                    functions,
+                }
+            }
+            Self::Spline(spline) => Density::Spline(spline.instantiate(builder)?),
+            Self::Blended {
+                xz_scale,
+                y_scale,
+                xz_factor,
+                y_factor,
+                smear_scale_multiplier,
+            } => Density::Blended(builder.instantiate_blended_values(
+                *xz_scale,
+                *y_scale,
+                *xz_factor,
+                *y_factor,
+                *smear_scale_multiplier,
+            )),
+            Self::FindTopSurface {
+                density,
+                upper_bound,
+                lower_bound,
+                cell_height,
+            } => Density::FindTopSurface {
+                density: boxed(density)?,
+                upper_bound: boxed(upper_bound)?,
+                lower_bound: *lower_bound,
+                cell_height: *cell_height,
+            },
+            Self::EndIslands => Density::EndIslands(Arc::clone(
+                builder.end_islands.get_or_init(|| {
+                    Arc::new(crate::noise::EndIslandNoise::new(builder.seed))
+                }),
+            )),
+        })
+    }
+}
+
+impl BlueprintSpline {
+    fn instantiate(&self, builder: &Builder<'_>) -> Result<Spline, DensityBuildError> {
+        Ok(match self {
+            Self::Constant(value) => Spline::Constant(*value),
+            Self::Multipoint { coordinate, points } => Spline::Multipoint {
+                coordinate: Box::new(coordinate.instantiate(builder)?),
+                points: points
+                    .iter()
+                    .map(|point| {
+                        Ok(SplinePoint {
+                            location: point.location,
+                            derivative: point.derivative,
+                            value: Box::new(point.value.instantiate(builder)?),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, DensityBuildError>>()?,
+            },
+        })
+    }
+}
 
 fn f(node: &Value, key: &'static str) -> Result<f64, DensityBuildError> {
     node[key].as_f64().ok_or(DensityBuildError::MissingNumberField(key))
@@ -1775,5 +2268,210 @@ mod xz_purity_tests {
             }
         }
         assert_eq!(compared, 36);
+    }
+}
+
+#[cfg(test)]
+mod blueprint_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    struct ResolverFixture {
+        fingerprint: Option<u64>,
+        density_calls: Cell<u32>,
+    }
+
+    impl ResolverFixture {
+        fn cached() -> Self {
+            Self {
+                fingerprint: Some(7),
+                density_calls: Cell::new(0),
+            }
+        }
+
+        fn dynamic() -> Self {
+            Self {
+                fingerprint: None,
+                density_calls: Cell::new(0),
+            }
+        }
+    }
+
+    impl Resolver for ResolverFixture {
+        fn asset_fingerprint(&self) -> Option<u64> {
+            self.fingerprint
+        }
+
+        fn density_function(&self, _id: &str) -> Value {
+            self.density_calls.set(self.density_calls.get() + 1);
+            serde_json::json!({"type": "minecraft:constant", "argument": 3.0})
+        }
+
+        fn noise(&self, _id: &str) -> NoiseParams {
+            NoiseParams {
+                first_octave: 0,
+                amplitudes: vec![1.0],
+            }
+        }
+    }
+
+    fn digest(density: &Density) -> u64 {
+        let mut out = 0xcbf2_9ce4_8422_2325u64;
+        for x in -3..=3 {
+            for y in [-64, -8, 0, 7, 64, 200] {
+                for z in -3..=3 {
+                    out ^= density.compute(Context::new(x, y, z)).to_bits();
+                    out = out.wrapping_mul(0x1000_0000_01b3);
+                }
+            }
+        }
+        out
+    }
+
+    fn slots(density: &Density, out: &mut Vec<usize>) {
+        match density {
+            Density::Interpolated { inner, slot } | Density::FlatCache { inner, slot, .. } => {
+                slots(inner, out);
+                out.push(*slot);
+            }
+            Density::Cache2D { inner, .. }
+            | Density::Marker(inner)
+            | Density::Abs(inner)
+            | Density::Square(inner)
+            | Density::Cube(inner)
+            | Density::HalfNegative(inner)
+            | Density::QuarterNegative(inner)
+            | Density::Squeeze(inner)
+            | Density::Invert(inner) => slots(inner, out),
+            Density::Add(left, right)
+            | Density::Mul(left, right)
+            | Density::Min(left, right)
+            | Density::Max(left, right) => {
+                slots(left, out);
+                slots(right, out);
+            }
+            Density::Clamp { input, .. } => slots(input, out),
+            Density::ShiftedNoise {
+                shift_x,
+                shift_y,
+                shift_z,
+                ..
+            } => {
+                slots(shift_x, out);
+                slots(shift_y, out);
+                slots(shift_z, out);
+            }
+            Density::RangeChoice {
+                input,
+                when_in_range,
+                when_out_of_range,
+                ..
+            } => {
+                slots(input, out);
+                slots(when_in_range, out);
+                slots(when_out_of_range, out);
+            }
+            Density::IntervalSelect {
+                input, functions, ..
+            } => {
+                for function in functions {
+                    slots(function, out);
+                }
+                slots(input, out);
+            }
+            Density::Spline(Spline::Multipoint {
+                coordinate, points, ..
+            }) => {
+                slots(coordinate, out);
+                for point in points {
+                    spline_slots(&point.value, out);
+                }
+            }
+            Density::FindTopSurface {
+                density,
+                upper_bound,
+                ..
+            } => {
+                slots(density, out);
+                slots(upper_bound, out);
+            }
+            Density::Const(_)
+            | Density::BlendAlpha
+            | Density::BlendOffset
+            | Density::Beardifier
+            | Density::YClampedGradient { .. }
+            | Density::Noise { .. }
+            | Density::ShiftA(_)
+            | Density::ShiftB(_)
+            | Density::Shift(_)
+            | Density::Spline(Spline::Constant(_))
+            | Density::Blended(_)
+            | Density::EndIslands(_) => {}
+        }
+    }
+
+    fn spline_slots(spline: &Spline, out: &mut Vec<usize>) {
+        match spline {
+            Spline::Constant(_) => {}
+            Spline::Multipoint { coordinate, points } => {
+                slots(coordinate, out);
+                for point in points {
+                    spline_slots(&point.value, out);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cached_blueprint_preserves_digest_rng_and_slot_order() {
+        let root = serde_json::json!({
+            "type": "minecraft:add",
+            "argument1": {
+                "type": "minecraft:interval_select",
+                "thresholds": [0.0],
+                "functions": [{"type": "minecraft:interpolated", "argument": 1.0}],
+                "input": {"type": "minecraft:interpolated", "argument": 2.0}
+            },
+            "argument2": {"type": "minecraft:noise", "noise": "minecraft:test", "xz_scale": 1.0, "y_scale": 0.5}
+        });
+        let old_resolver = ResolverFixture::cached();
+        let cached_resolver = ResolverFixture::cached();
+        let old_builder = Builder::new(123, &old_resolver);
+        let cached_builder = Builder::new(123, &cached_resolver);
+        let old = old_builder.build_uncached(&root).expect("old build");
+        let cached = cached_builder.build_cached(&root).expect("cached build");
+        let mut old_slots = Vec::new();
+        let mut cached_slots = Vec::new();
+        slots(&old, &mut old_slots);
+        slots(&cached, &mut cached_slots);
+        assert_eq!(old_builder.slot_count(), cached_builder.slot_count());
+        assert_eq!(old_slots, cached_slots);
+        assert_eq!(old_slots, vec![0, 1]);
+        assert_eq!(digest(&old), digest(&cached));
+
+        let mut old_signature = Vec::new();
+        let mut cached_signature = Vec::new();
+        old.write_signature(&mut old_signature);
+        cached.write_signature(&mut cached_signature);
+        assert_eq!(old_signature, cached_signature);
+        assert_eq!(old_resolver.density_calls.get(), 0);
+        assert_eq!(cached_resolver.density_calls.get(), 0);
+    }
+
+    #[test]
+    fn cached_blueprint_has_stable_identity_and_dynamic_resolvers_are_excluded() {
+        let root = serde_json::json!("minecraft:test");
+        let resolver = ResolverFixture::cached();
+        let builder = Builder::new(1, &resolver);
+        let first = builder.blueprint(&root).expect("blueprint").expect("cached");
+        let second = builder.blueprint(&root).expect("blueprint").expect("cached");
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(resolver.density_calls.get(), 1);
+
+        let dynamic = ResolverFixture::dynamic();
+        let dynamic_builder = Builder::new(1, &dynamic);
+        assert!(dynamic_builder.blueprint(&root).expect("blueprint").is_none());
+        dynamic_builder.build_cached(&root).expect("dynamic build");
+        assert_eq!(dynamic.density_calls.get(), 1);
     }
 }

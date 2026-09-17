@@ -136,6 +136,12 @@ fn hello_bytes(name: &str, uuid: Uuid) -> Vec<u8> {
     w.into_vec()
 }
 
+fn accept_teleportation_bytes(id: i32) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.var_i32(id);
+    w.into_vec()
+}
+
 /// Hand-written serverbound `move_player_pos`: `f64`×3 then the flags byte,
 /// per `vanilla's own serverbound move player packet's own pos`. `on_ground` is bit `0x01`.
 fn pos_bytes(x: f64, y: f64, z: f64, on_ground: bool) -> Vec<u8> {
@@ -186,6 +192,28 @@ async fn join<T: Transport>(client: &mut Connection<T>, name: &str, uuid: Uuid) 
         .await
         .unwrap();
     let joined = drain(client).await;
+    // Movement is ignored until the initial absolute position is accepted.
+    if let Some((_, payload)) = joined
+        .iter()
+        .find(|(id, _)| *id == play::clientbound::PLAYER_POSITION)
+    {
+        let id = Reader::new(payload)
+            .var_i32()
+            .expect("player_position teleport id");
+        client
+            .write_packet(
+                play::serverbound::ACCEPT_TELEPORTATION,
+                &accept_teleportation_bytes(id),
+            )
+            .await
+            .unwrap();
+    }
+    // The real client acknowledges its initial world load before movement is
+    // accepted. Keep the hand-written join equivalent to that wire contract.
+    client
+        .write_packet(play::serverbound::PLAYER_LOADED, &[])
+        .await
+        .unwrap();
     // `ClientboundLoginPacket`'s first field is a raw big-endian `i32` entity id.
     let login_body = joined
         .iter()
@@ -551,7 +579,28 @@ async fn death_is_announced_exactly_once_per_life() {
         .write_packet(play::serverbound::CLIENT_COMMAND, &client_command_bytes(0))
         .await
         .unwrap();
-    let _ = drain(&mut client).await;
+    let after_respawn = drain(&mut client).await;
+    // A respawn re-arms both server-side gates: acknowledge the new placement
+    // teleport and announce that the client loaded the new world position.
+    if let Some((_, payload)) = after_respawn
+        .iter()
+        .find(|(id, _)| *id == play::clientbound::PLAYER_POSITION)
+    {
+        let id = Reader::new(payload)
+            .var_i32()
+            .expect("respawn player_position teleport id");
+        client
+            .write_packet(
+                play::serverbound::ACCEPT_TELEPORTATION,
+                &accept_teleportation_bytes(id),
+            )
+            .await
+            .unwrap();
+    }
+    client
+        .write_packet(play::serverbound::PLAYER_LOADED, &[])
+        .await
+        .unwrap();
     let _ = step(&mut client, 200.0, false).await;
     let second_life = step(&mut client, 70.0, true).await;
     assert_eq!(

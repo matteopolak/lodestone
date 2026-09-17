@@ -196,7 +196,7 @@ fn identity_and_motion_accessors_expose_real_derived_state() {
     let target = Vec3::new(8.5, 0.0, 0.5); // due east of the start
     let (id_a, uuid_a) = {
         let m = sim.spawn(start, MobShape::land(0.6, 1.95), 0.15, 400);
-        m.add_goal(1, Box::new(MeleeAttackGoal::new(1.0, 2.0)));
+        m.add_goal(1, Box::new(MeleeAttackGoal::new(0.15, 2.0)));
         m.set_attack_target(Some(target));
         // Default entity_type is a valid, namespaced key.
         assert_eq!(m.entity_type().to_string(), "minecraft:zombie");

@@ -394,17 +394,6 @@ impl Sim {
         self.net.as_ref()
     }
 
-    /// How long the terrain phase has been up, shared by [`Self::terrain_wait`]
-    /// and [`Self::asset_wait`] so the two can never disagree about the deadline
-    /// — see `crate::menu::loading::assets_ready` for why they share one at all.
-    ///
-    /// `Duration::ZERO` when the phase boundary was never seen, which can only
-    /// under-report the wait — it never dismisses early.
-    fn load_elapsed(&self) -> core::time::Duration {
-        self.terrain_wait_started
-            .map_or(core::time::Duration::ZERO, |started| started.elapsed())
-    }
-
     /// Reset the connection-scoped loading view before another server can use
     /// this `Sim`. Keeping this boundary in one method prevents a prior
     /// denominator, high-water count, phase clock or cache center from
@@ -415,7 +404,6 @@ impl Sim {
         self.expected_view_radius = None;
         self.new_world_loading = false;
         self.dimension_transition_pending = false;
-        self.terrain_wait_started = None;
         let local = self.local;
         self.write(|world| {
             if let Some(mut center) =
@@ -434,9 +422,8 @@ impl Sim {
     /// other reader of this exact question, so the two cannot disagree about
     /// which chunk the player is standing on.
     ///
-    /// Readiness is bounded by the shared loading deadline. A missing required
-    /// column therefore delays presentation for at most 30 seconds instead of
-    /// leaving the loading screen up indefinitely.
+    /// A missing required column keeps the loading screen up until the producer
+    /// satisfies the declared initial-view contract.
     #[must_use]
     pub fn terrain_wait(&self) -> Option<crate::menu::loading::TerrainWait> {
         let net = self.net()?;
@@ -456,25 +443,15 @@ impl Sim {
         });
 
         let own_column_loaded = net.is_chunk_loaded(lodestone_client::ChunkPos { x: pcx, z: pcz });
-        let own_column_mesh_settled = self.column_mesh_settled(pcx, pcz);
         Some(crate::menu::loading::TerrainWait {
             // Residency is necessary but not sufficient. The mesh producer's
             // per-section ledger only settles this observation after every
             // non-air section has crossed the renderer hand-off and every
             // all-air section has been explicitly classified as empty.
             own_column_loaded,
-            // Keep the producer latch for sessions with a declared initial
-            // view, while also applying the same per-player-column predicate
-            // to remote sessions that have no trustworthy denominator. The
-            // progress count remains telemetry in both cases.
-            terrain_ready: Some(
-                own_column_mesh_settled
-                    && self
-                        .terrain_progress
-                        .snapshot()
-                        .is_none_or(|_| self.terrain_progress.is_ready()),
-            ),
-            elapsed: self.load_elapsed(),
+            // `refresh_terrain_readiness` latches this only after the declared
+            // initial view crosses the renderer hand-off.
+            terrain_ready: Some(self.terrain_progress.is_ready()),
             player_alive: !self.is_dead(),
             within_build_height,
         })
@@ -498,7 +475,6 @@ impl Sim {
         crate::menu::loading::AssetWait {
             packs_in_flight: crate::net::packs_in_flight(),
             atlas_stale: crate::resources::pack_generation() != self.last_pack_generation,
-            elapsed: self.load_elapsed(),
         }
     }
 
@@ -536,17 +512,14 @@ impl Sim {
     /// This is intentionally a separate presentation state from the initial
     /// world-generation screen.
     #[must_use]
-    pub fn dimension_transition_pending(&self) -> bool {
+    pub const fn dimension_transition_pending(&self) -> bool {
         self.dimension_transition_pending
-            && self
-                .terrain_wait_started
-                .is_none_or(|started| started.elapsed() < crate::menu::loading::CLIENT_WAIT_TIMEOUT)
     }
 
     /// Arm the initial-world loading screen for the newly-created survival
     /// world selected by the menu. Existing saves and multiplayer never call
     /// this method.
-    pub(crate) fn arm_new_world_loading(&mut self, view_radius: u32) {
+    pub fn arm_new_world_loading(&mut self, view_radius: u32) {
         self.new_world_loading = true;
         self.dimension_transition_pending = false;
         self.set_view_radius(view_radius);
@@ -567,18 +540,7 @@ impl Sim {
     /// Record the loading screen's step. Only [`crate::net::NetUpdate`] handling
     /// calls this — see [`crate::menu::loading::ConnectPhase`].
     ///
-    /// Also starts the terrain wait's clock, on the transition *into*
-    /// `LoadingTerrain` and not on a re-set of the same phase, so the timeout in
-    /// [`Self::terrain_wait`] measures the phase and cannot be pushed forward by
-    /// a repeated `NetUpdate::ConnectPhase`. This is still the only place a real
-    /// boundary is recorded; the clock reads off that boundary rather than
-    /// replacing it.
     pub(crate) fn set_connect_phase(&mut self, phase: crate::menu::loading::ConnectPhase) {
-        if phase == crate::menu::loading::ConnectPhase::LoadingTerrain
-            && self.connect_phase != crate::menu::loading::ConnectPhase::LoadingTerrain
-        {
-            self.terrain_wait_started = Some(crate::platform::Instant::now());
-        }
         self.connect_phase = phase;
     }
 
@@ -586,12 +548,9 @@ impl Sim {
     /// changed dimensions.
     ///
     /// A portal transition remains `Connected` while destination columns
-    /// arrive, so routing this through [`Self::set_connect_phase`] would not
-    /// restart the clock when the phase is already `LoadingTerrain`. The
-    /// timeout belongs to the destination world, not to the original join.
+    /// arrive.
     pub(crate) fn restart_terrain_loading(&mut self) {
         self.connect_phase = crate::menu::loading::ConnectPhase::LoadingTerrain;
-        self.terrain_wait_started = Some(crate::platform::Instant::now());
     }
 
     /// Record the terrain producer's real preparation milestone for the current
@@ -652,6 +611,42 @@ impl Sim {
         self.terrain_progress.snapshot()
     }
 
+    #[must_use]
+    pub fn visible_view_settlement(&self) -> Option<(usize, usize, usize)> {
+        let net = self.net()?;
+        let radius = self.expected_view_radius?;
+        let loaded: std::collections::HashSet<_> = net
+            .loaded_chunks()
+            .into_iter()
+            .map(|pos| (pos.x, pos.z))
+            .collect();
+        let extent = self.chunk_world().extent()?;
+        let position = self.player().position;
+        let player_center = (
+            (position.x.floor() as i32).div_euclid(16),
+            (position.z.floor() as i32).div_euclid(16),
+        );
+        let (cx, cz) = self.chunk_cache_center().unwrap_or(player_center);
+        let radius = i32::try_from(radius).ok()?;
+        let expected = crate::menu::loading::TerrainProgress::expected_for_radius(radius as u32);
+        let (resident, settled) = self.terrain(|terrain| {
+            let mut resident = 0;
+            let mut settled = 0;
+            for z in cz - radius..=cz + radius {
+                for x in cx - radius..=cx + radius {
+                    if loaded.contains(&(x, z)) {
+                        resident += 1;
+                        if terrain.resident_column_mesh_settled(extent, x, z) {
+                            settled += 1;
+                        }
+                    }
+                }
+            }
+            (resident, settled)
+        });
+        Some((resident, settled, expected))
+    }
+
     /// Fold the client's current admitted columns into the loading high-water
     /// mark. The count is restricted to the server's current streamed square
     /// so columns outside the expected view cannot fill the bar. This reads
@@ -692,8 +687,8 @@ impl Sim {
     ///
     /// Centred on the server's reported streamed-view center, falling back to
     /// the chunk under the player before such a report. The loading grid is a
-    /// view of what the server is streaming, while [`Self::terrain_wait`]
-    /// intentionally remains about the local player's own column.
+    /// view of what the server is streaming and the same declared region the
+    /// terrain producer must settle before presentation.
     ///
     /// Each cell reads [`crate::net::NetClient::is_chunk_loaded`] directly:
     /// real, per-position, client-observed state, never synthesised from the

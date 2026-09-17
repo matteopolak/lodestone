@@ -137,6 +137,32 @@ that same manifest in the worker's mount message, keeping the worker, glue modul
 and Wasm binary on one content-versioned release. See `docs/wasm-embedding.md` for
 the lifecycle and progress events.
 
+`onProgress` also receives one bounded sequence for each singleplayer join:
+`world-create-started`, `joining`, `loading-terrain`, `loading-overlay-ready`,
+`first-terrain-presented`, and `full-view-presented`. These records expose
+`elapsedMs`, `loadedColumns`, `expectedColumns`, `settledColumns`, and
+`pendingMeshes`; they measure
+from the in-game world action rather than SDK mount. `first-frame` remains the
+mount readiness signal and must not be interpreted as terrain readiness.
+Opening an existing world emits `world-open-started` at the same boundary.
+The standalone adapter prints these transition-only records as `lodestone join:`
+console messages, including elapsed milliseconds and loaded, expected, settled,
+and pending counts. Asset and frame-heartbeat progress remains in the page status
+rather than producing per-frame console output.
+
+Pass `logLevel: "debug"` to the embedding API, or open the standalone page with
+`?log=debug`, to expose render-worker and integrated-server tracing in the JavaScript
+console. Supported levels are `off`, `error`, `warn`, `info`, `debug`, and `trace`;
+the default is `warn` so diagnostics do not affect ordinary play.
+
+The standalone adapter fetches `client.jar` and `blocks.json` concurrently. When a
+multipart jar manifest is present, all authenticated parts are fetched concurrently,
+then copied into their declared order before the whole-archive digest is checked. The
+completed required blobs stay as transferable `ArrayBuffer`s across the page-to-render-
+worker boundary; the worker's mount boundary performs the single Wasm-owned byte copy.
+Optional panorama assets are fetched by that worker only when the title screen requests
+them, avoiding a discarded page-side prefetch.
+
 ```sh
 cargo xtask fetch-assets --version 26.2   # -> .cache/mc/26.2/client.jar
 # blocks.json is a Mojang *generated report*, not a download: it comes from the

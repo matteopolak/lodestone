@@ -249,32 +249,90 @@ impl SectionedBlocks {
     /// Each section independently picks the narrowest representation for its own
     /// content, so this is where an air section above the terrain surface becomes
     /// free.
+    #[cfg(test)]
     pub(crate) fn from_flat(height: i32, cells: &[Id]) -> Self {
+        Self::from_flat_with_observer(height, cells, |_, _| {})
+    }
+
+    /// Adopts a flat grid while visiting each source cell during section
+    /// analysis. The observer runs before packing, so callers can derive
+    /// metadata from the same read that determines a section's uniform value
+    /// and width.
+    #[cfg(test)]
+    pub(crate) fn from_flat_with_observer(
+        height: i32,
+        cells: &[Id],
+        mut observer: impl FnMut(usize, Id),
+    ) -> Self {
         debug_assert!(height > 0);
         debug_assert_eq!(cells.len(), 16 * 16 * height as usize);
         let section_count = (height as usize).div_ceil(SECTION_ROWS);
         let mut sections = Vec::with_capacity(section_count);
-        for s in 0..section_count {
+        for s in (0..section_count).rev() {
             let base = s * CELLS;
             let slice = &cells[base..(base + CELLS).min(cells.len())];
-            sections.push(Self::pack(slice));
+            sections.push(Self::pack_with_observer(slice, base, &mut observer));
         }
+        sections.reverse();
+        Self { sections, height }
+    }
+
+    /// Adopts the generated column's section-aligned storage while visiting
+    /// each real cell for server metadata. Packed words move directly into the
+    /// server sections; unlike the compatibility flat path, no 98,304-cell
+    /// expansion is created in between.
+    pub(crate) fn from_compact_with_observer(
+        blocks: lodestone_worldgen::generated_storage::CompactBlockStorage,
+        mut observer: impl FnMut(usize, Id),
+    ) -> Self {
+        for section in 0..blocks.section_count() {
+            blocks.for_each_section(section, |cell, id| {
+                observer(section * CELLS + cell, id);
+            });
+        }
+        let (_, height, sections) = blocks.into_sections();
+        let sections = sections
+            .into_iter()
+            .map(|section| match section.into_parts() {
+                lodestone_worldgen::generated_storage::CompactSectionParts::Uniform(id) => {
+                    Section::Uniform(id)
+                }
+                lodestone_worldgen::generated_storage::CompactSectionParts::Packed {
+                    bits,
+                    words,
+                } => Section::Packed {
+                    bits: u32::from(bits),
+                    longs: words,
+                },
+            })
+            .collect();
         Self { sections, height }
     }
 
     /// Chooses the narrowest [`Section`] for `slice`, which may be shorter than
     /// [`CELLS`] for a partial top section (its surplus cells read back as 0).
-    fn pack(slice: &[Id]) -> Section {
+    #[cfg(test)]
+    fn pack_with_observer(
+        slice: &[Id],
+        base: usize,
+        observer: &mut impl FnMut(usize, Id),
+    ) -> Section {
         let first = slice.first().copied().unwrap_or(0);
+        let mut uniform = true;
+        let mut max_id = first;
+        for (cell, &id) in slice.iter().enumerate().rev() {
+            observer(base + cell, id);
+            uniform &= id == first;
+            max_id = max_id.max(id);
+        }
         // A partial top section collapses to `Uniform(first)` too, even though
         // that makes its surplus cells read back as `first` rather than as the
         // flat grid's implicit 0. Sound because no reader can reach them:
         // `section_rows` bounds every bulk read and `get` is only ever called
         // with a `y_local` inside `height`.
-        if slice.iter().all(|&id| id == first) {
+        if uniform {
             return Section::Uniform(first);
         }
-        let max_id = slice.iter().copied().max().unwrap_or(0);
         let bits = bits_for_id(max_id);
         let per = values_per_long(bits);
         let mut longs = vec![0u64; long_count(bits)];
@@ -607,6 +665,26 @@ mod tests {
             "predicted exactly; the flat grid was {} bytes",
             16 * 16 * height as usize * 2
         );
+    }
+
+    #[test]
+    fn observed_packing_is_byte_identical_for_uniform_low_and_high_sections() {
+        for (ids, expected_bits, expected_uniform) in [
+            (vec![0u16; CELLS], 0, true),
+            ((0..CELLS).map(|i| (i as u16 & 1) + 1).collect(), 2, false),
+            ((0..CELLS).map(|i| 0x8000 | (i as u16 & 1)).collect(), 16, false),
+        ] {
+            let plain = SectionedBlocks::from_flat(16, &ids);
+            let mut observed_cells = 0;
+            let observed = SectionedBlocks::from_flat_with_observer(16, &ids, |index, id| {
+                assert_eq!(ids[index], id);
+                observed_cells += 1;
+            });
+            assert_eq!(observed, plain);
+            assert_eq!(observed_cells, CELLS);
+            assert_eq!(observed.uniform_sections() == 1, expected_uniform);
+            assert_eq!(observed.section_bits(0), expected_bits);
+        }
     }
 
     #[test]

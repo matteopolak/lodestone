@@ -18,11 +18,60 @@ Edited columns retain the scalar path so the edit ledger remains authoritative.
 The indexed collection preserves caller coordinate order, and the content digest
 is the exactness control for worker scheduling.
 
-The ordinary improved-noise entry point has a dedicated zero-scale path. It keeps the same coordinate, floor, and interpolation order as the general scaled entry while avoiding its scale/fudge branch; the focused `zero_scale_entry_is_bit_identical_to_scaled_entry` test checks the two entry points by result bits over fractional coordinates. This is a local, immutable change, so concurrent generators share no cache or mutable state.
+The synchronous dispatcher path reserves only the permits needed by the
+submitted batch, capped by the worker budget. A short immutable batch can
+therefore overlap another producer instead of monopolising idle workers; a
+saturated dispatcher still falls back to ordered serial execution.
+
+Production sessions prepare immutable source products once per admitted batch,
+before shaped residents are dispatched. Reconstructing a target state machine
+for ordered mutation and packet finalization does not repeat preparation.
+Overworld preparation still uses one bounded five-by-five density sampler per
+target: experiments with wider shared samplers reduced evaluations but enlarged
+the dense scratch enough to regress cache locality.
+
+The Overworld generator also exposes `OverworldBatchLease`. A production
+dispatcher passes its complete admitted coordinate set to `lease_batch`, then
+uses the lease's shaped/full column methods for the request. The store pins the
+union of the radius-10 closures once and releases it once; scalar `column` and
+`column_shaped` use the direct one-column `open_view` path, avoiding batch-bound
+construction while retaining the same radius-10 pin. The lease's coverage
+assertion preserves the eviction guarantee, while store lease counters report
+exact opens, coordinate pins, and shard-map touches for a scalar-versus-batch
+control.
+
+Within one Overworld pre-ore request, the climate preparation is also shared:
+one bordered quart grid supplies the biome-cell stage through its 4×4 centre
+view and the surface scan through its full nearby-corner view. The preparation
+counter is request-scoped; it must be one for a shaped production request, and
+the view bounds are checked before any prepared-channel index is read.
+
+The ordinary improved-noise entry point has a dedicated zero-scale path. It keeps the same coordinate, floor, and interpolation order as the general scaled entry while avoiding its scale/fudge branch; the focused `zero_scale_entry_is_bit_identical_to_scaled_entry` test checks the two entry points by result bits over fractional coordinates. The three blended-noise loops use a private non-zero-scale entry after their positive-scale contract is established; `noise_scaled` remains the general zero/non-zero API. The focused `nonzero_scaled_entry_is_bit_identical_to_general_entry` control covers negative, lattice-boundary, wrapped, and fractional coordinates plus varied positive scales and fudges. These are local, immutable changes, so concurrent generators share no cache or mutable state.
+
+Perlin construction now derives a bounded active-octave list. Each non-zero
+level retains its original slot order and the exact input/value factors reached
+after the full slot walk, while the reverse power used by blended noise is also
+captured. Point sampling therefore visits only active levels: it has no
+empty-slot branch or per-sample factor update. The original slot map remains
+only for signatures and the compatibility octave accessor. The focused core
+controls compare sparse and all-zero amplitudes against an independent scalar
+slot walk over negative, fractional, and wrapped coordinates; the gen-counters
+binary reports active and skipped visits separately.
 
 The overworld biome stage searches its seven-axis parameter tree with an exact i64 squared-distance bound. A child visit stops accumulating once its partial sum reaches the incumbent distance; the cutoff is inclusive so equal distances remain pruned by the strict visit comparison and the incumbent tie-break does not change. The full-distance path remains in place for selected leaves and single-row roots. Tree identity controls cover cutoff equality, tied-row selection, real-table distance parity, and the fixed production fixture.
 
-The surface stage keeps its nearby-quart footprint and climate targets in typed caches rather than cloning a `String` for every cell. Each stateful tree lookup still runs in the reference column order (`x`, `z`, descending `y`, after the column's initial query); reusing a row id would change the cursor's tie-break history. A lookup resolves the selected id back to a borrowed table name only while evaluating a surface rule, and fallback-biome contexts keep their one borrowed name.
+Compact-tree bounds test the axes in measured cutoff order. The offset-zero
+specialization omits its constant axis and uses the same remaining order. This
+only changes how soon a child bound reaches the incumbent distance; exact sums,
+equal-distance pruning, child order, and selected rows remain unchanged.
+
+Production biome tables whose bounds fit `i32` use 64-byte search nodes. Leaves
+store their row in the child-offset field that has no leaf meaning, while
+internal nodes retain the same offsets and child order. Wide tables keep the
+original representation. The compact and wide searches share exact-result,
+cursor-sequence, tree-shape, and corrupted-row controls.
+
+The surface stage keeps its nearby-quart footprint and climate targets in typed caches rather than cloning a `String` for every cell. Each unique quart also retains its canonical nearest leaf and distance. A later lookup keeps the incoming cursor leaf when its exact distance ties that canonical minimum; otherwise it selects the canonical leaf. This reproduces incumbent-wins-ties behavior without walking the tree again. A lookup resolves the selected id back to a borrowed table name only while evaluating a surface rule, and fallback-biome contexts keep their one borrowed name. All retained answers are bounded by the surface scan's existing quart footprint.
 
 The mixed ore/vegetation bridge reuses its ordered overlay and changed-cell buffers for the lifetime of one feature stage. The buffers are cleared before reuse, while the deterministic coordinate sort and overwrite filtering remain unchanged; this removes cumulative temporary-vector traffic without changing generated content. Ore replay also keeps a cursor into the ordered write log: each entry sorts only writes appended since the previous entry, resolves every repeated key to its final overlay value, and lets the existing transfer map retain last-write semantics. Seeded read context is not logged because it is already present in that transfer map. The benchmark prints both allocation count and allocated bytes per sampled chunk, making cumulative-vector regressions visible even when allocation counts are similar.
 
@@ -38,6 +87,21 @@ one short-lived mapping allocation per copy, rather than one lookup per copied
 cell; it is intentionally kept separate from the grid's persistent worker
 scratch because source palette sizes vary by feature.
 
+Overworld materialisation consumes the typed sparse surface diff a column at a
+time while producing the dense grid's fixed `(z, x, y)` traversal. The builder
+fills the unique cell carrier directly and interns states in that same order,
+preserving both the block vector and palette bytes without a per-cell hash
+lookup, coordinate conversion, sort, or copy-on-write check. This path is
+intentionally scalar: palette assignment is order-dependent, so SIMD cannot
+safely replace it without changing the observable palette contract.
+
+The server's generated-column handoff derives palette classifications, section
+ticking counts, and all three client heightmaps from the generator's flat cells
+before `SectionedBlocks` packing. Heightmap predicates share one top-down walk
+per XZ column and index the palette's validated state ids directly. This avoids
+re-reading packed sections for the same metadata while preserving the packed
+block output and the independently rescanned heightmap values.
+
 The unified FEATURES dispatcher also takes its short-lived seeded-state map,
 ore-transfer map, and two cross-adapter write buffers from a worker-local
 scratch slot. They are cleared and returned after each dispatch, so their
@@ -45,16 +109,21 @@ capacity survives to the next chunk on that worker without a shared lock or
 observable ordering change. Nested generation takes a separate slot; the
 free-list is bounded to two entries per worker.
 
-Vegetation heightmap probes cache one result per local `(x, z)` column for each
-of the four predicates (`WORLD_SURFACE`, `WORLD_SURFACE_WG`,
-`MOTION_BLOCKING`, and `OCEAN_FLOOR`). A probe still performs the complete
-top-down scan on its first use, but repeated placement modifiers become a
-constant-time `Cell` read. Any overlay write invalidates only its own column
-for the three mutable predicates, including fixture seeding, so later probes
-observe the same read-after-write state as an uncached scan. The immutable
-`WORLD_SURFACE_WG` cache does not need invalidation because it reads source
-terrain rather than the overlay. The cache is private to a `VegGrid`; it is
-not shared across worker threads and does not change source-grid immutability.
+Vegetation heightmap probes cache one result per local `(x, z)` column for
+each of the four predicates (`WORLD_SURFACE`, `WORLD_SURFACE_WG`,
+`MOTION_BLOCKING`, and `OCEAN_FLOOR`). A surface miss walks only surface;
+motion-blocking walks surface plus motion-blocking; and ocean-floor walks all
+three compatible live lanes. This demand-aware ordering avoids chasing a
+deeper companion that the caller did not request, while an ocean-first query
+still resolves all live lanes in one downward walk. The immutable
+`WORLD_SURFACE_WG` lane remains a separate source walk. Subsequent placement
+modifiers become constant-time `Cell` reads. Any overlay write invalidates
+only its own column for the three mutable predicates, including fixture
+seeding, so later probes observe the same read-after-write state as an
+uncached scan. The cache is private to a `VegGrid`; it is not shared across
+worker threads and does not change source-grid immutability. The vegetation
+census exposes total, primary, and companion-tail cell counts for bounded
+experiments.
 
 The Overworld ore heightmap scan uses typed base-state facts cached alongside
 the dense grid's numeric palette. Built-in facts come from generated canonical
@@ -64,6 +133,16 @@ focused parity control compares this path with the former string predicate
 across built-in property states and an extension state. In a 2,000-round
 release control over a 16×384×16 grid, the numeric scan took 192.202625ms
 versus 1.71046275s for the string oracle, with both producing digest 134000.
+
+The pre-ore packed materialisation walk also records the baseline ocean-floor
+height for each centre column, so the later carver and structure passes do not
+require a second full-column recount. Those passes carry a request-owned
+four-word XZ mask and conservatively set a bit whenever their write path is
+attempted, including writes that leave the state unchanged. Only marked
+columns are rescanned before ores; an empty mask performs no post-mutation
+vertical scan. Focused controls compare incremental heights and the final
+block digest with a full scalar recount, bound visited cells by the marked
+columns, and deliberately omit one bit to prove the stale-height control.
 
 The five-by-five vegetation source router is chunk-aligned (`[-32, 48)` in
 centre-relative coordinates). Its hot read path checks that window once and
@@ -76,12 +155,37 @@ repeated for every Y coordinate.
 
 Bounded density evaluation retains each thread-local `Scratch` slot's dense value and presence buffers when adjacent chunks change only their world-coordinate origin. Reconfiguration clears every presence flag before installing the new origin, so the retained allocations cannot expose a prior chunk's result; a dimension or dense/hashed-layout change still takes the existing rebuild path. The buffers are never shared between generators or worker threads.
 
+Overworld fill requests one final-density vertical run per `(x, z)` and then
+resolves the blocks through the target aquifer's status caches. This preserves
+the original `lz → lx → ly` decision order while avoiding field-context setup
+for every block; the scalar block path remains available to carvers and other
+point consumers.
+
+The production 4×8×4 final-density cell path evaluates its contiguous eight-lane
+interpolation and shared-noodle output chunks with the crate's nightly portable
+SIMD. The scalar helpers remain the exact reference and fallback for other cell
+geometries. The vector lanes retain the existing lerp nesting and only commit
+active mask lanes; focused field controls compare all 128 output bits across
+full, partial, and empty masks, including signed zero, NaN, and cell-boundary
+origins.
+
 Each enabled aquifer instance likewise takes its per-chunk fluid-status,
 aquifer-location, and preliminary-surface caches from a bounded worker-local
 pool. The caches are cleared when the instance is dropped and their backing
 storage is retained for the next chunk; the sampler graphs and chunk-specific
 bounds remain newly configured. Disabled aquifers retain empty caches, so this
 does not add work to dimensions without aquifer simulation.
+
+The aquifer also exposes a consecutive vertical density-run boundary. Within
+one 12-block grid anchor it updates the twelve candidate squared distances by
+integer recurrence and preserves the existing later-candidate tie rule. The
+production cell path carries that tiny state across adjacent eight-block Y
+slices for each XZ column, so a slice boundary inside an anchor does not
+rebuild the twelve candidates. A changed anchor or interrupted run invalidates
+the state and uses the scalar path for the boundary sample; no persistent or
+cross-column cache is introduced. The deterministic nonconstant seam control
+measures two initializations for the reused pair versus three when each slice
+starts cold, while asserting identical block output and scalar results.
 
 Canyon carving keeps its depth-indexed width-factor table borrowed while each
 ellipsoid is visited. The table is immutable for the whole tunnel, so cloning
@@ -137,6 +241,8 @@ quiet host with `cargo test
 --nocapture`. A latency cliff that coincides with evictions is a
 cache-retention regression; a cliff without evictions belongs to the
 intrinsic generator or its scheduling boundary.
+
+`crates/lodestone-server/examples/bench_worldgen.rs` provides the smaller production-data control. In addition to scalar and parallel throughput, it warms the five-by-five dependency neighbourhood and prints one current per-stage sample from the same generator implementation. Pass `serial` as its third positional argument to stop before the parallel scaling sweep, which is useful when measuring a larger radius without saturating the host. Use the stage sample to choose a profiling target; it is diagnostic context rather than a regression threshold.
 
 ## How to change it
 

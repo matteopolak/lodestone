@@ -79,7 +79,7 @@ Maintenance follows these mutation boundaries:
 | reference boundary | ours | mechanism |
 |---|---|---|
 | the single block-write method, ±1 | `ChunkColumn::set_block` | read `old_id` before writing; if `palette_ticking[old] != palette_ticking[new]`, `±1` on `section_ticking[y_local / 16]` |
-| constructor adopting a container → recount pass | `ChunkColumn::from_generated` | one O(cells) counting pass (`recalc_ticking_counts`, retained as a named production function) |
+| constructor adopting a container → recount pass | `ChunkColumn::from_generated` | one O(cells) counting pass fused with flat-cell metadata derivation before packing |
 | empty-section ctor, no recalc | `ChunkColumn::new` | all-air ⇒ all-zero counters, correct by construction |
 | copy ctor copies counters | `#[derive(Clone)]` | free |
 | palette insertion | `intern` | classify each **new** palette entry once as it is appended: `palette_ticking.push(is_randomly_ticking(name))` |
@@ -178,10 +178,10 @@ exist**: palette remap/compaction (append-only, verified), any direct field writ
 Per this repo's rule, quantified by operation counts (this machine's wall clock reproduces to
 10.8% at best):
 
-- `from_generated` recalc: exactly **98,304 palette-index reads + `palette.len()` predicate
-  evaluations**, once per column construction. Construction already writes/moves all 98,304
-  cells and follows a full generation (~ms scale, per `chunk_store.rs`'s 909 µs regeneration
-  record vs. 3.1 µs clone) — the pass adds less than one additional read of data just written.
+- `from_generated` metadata derivation: exactly **98,304 palette-index reads + `palette.len()`
+  predicate evaluations**, once per column construction, while the same flat input is still
+  available for packing. The three client heightmaps share the top-down XZ walk and index the
+  validated palette directly, avoiding a second read of packed sections.
 - Region load: **zero extra passes** — O(1) counter delta inside each `set_block` the loader
   already makes.
 - Per-tick saving: the interim scan re-reads up to 98,304 indices per column per tick
@@ -199,8 +199,9 @@ the same session — U1's only consumer-in-waiting is U2, and that window is clo
 them as one sequence (U1's own gates consume the counters meanwhile, and the plan's answer to
 "what consumes this?" for U1 is, explicitly, U2).
 
-`ChunkColumn` now maintains the counters in `set_block`, `intern`, and `from_generated`.
-`recalc_ticking_counts` handles bulk adoption, while the public section and column queries feed
+`ChunkColumn` now maintains the counters in `set_block`, `intern`, and bulk constructors.
+Generated columns derive the counts before packing; `recalc_ticking_counts` handles dimension
+adapters that adopt an already-packed grid, while the public section and column queries feed
 the scheduler. The mutation census and gates below remain the maintenance contract.
 
 ### Counter maintenance gates
@@ -224,7 +225,7 @@ the gate must **assert it included** (hard preconditions that fail, never skip):
 - a non-ticking→non-ticking write (stone→dirt — dirt does **not** tick; only grass does);
 - a write in the column's top and bottom sections (partial-window indexing);
 - **both construction entry points**: a real `OverworldChunkSource` column at a surface chunk
-  (`from_generated` + recalc) *and* the same column round-tripped through `chunk_nbt`
+  (`from_generated` metadata derivation) *and* the same column round-tripped through `chunk_nbt`
   (`new` + per-cell `set_block`), with counters asserted equal across the round trip.
 
 **World-species check** (the unreadable vacuity): before the storm, assert the fixture column

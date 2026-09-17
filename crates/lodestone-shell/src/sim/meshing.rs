@@ -317,16 +317,13 @@ impl Sim {
     /// breaking any block in the column fixes it — [`Sim::remesh_around`] already
     /// re-meshes neighbours.
     ///
-    /// The centre column meshes immediately (load responsiveness); the eight
-    /// neighbours are coalesced into `TerrainMesh::dirty_columns` and drained on a
-    /// budget by the `heal_dirty_columns` system, so a spiral load re-meshes each
-    /// column a small constant number of times instead of nine.
+    /// The arriving column waits in `TerrainMesh::pending_arrivals` until its
+    /// horizontal 3×3 residency halo is present; only then is it promoted into
+    /// the ready `dirty_columns` queue. Loaded neighbours are coalesced into
+    /// that ready queue. The view center remains the one exception: the heal
+    /// system may paint it provisionally before the halo arrives.
     pub(crate) fn on_column_arrived(&mut self, cx: i32, cz: i32) {
-        // A fresh decoder admission starts a fresh per-section settlement
-        // record. Keep the old GPU geometry until the ordinary removal/upload
-        // order below, but never let it release this column's new load gate.
-        self.terrain_mut(|terrain| terrain.reset_column_readiness(cx, cz));
-        self.mark_column_dirty(cx, cz);
+        self.terrain_mut(|terrain| terrain.queue_column_arrival(cx, cz));
         self.terrain_and_world(|store, terrain| terrain.mark_neighbours_dirty(store, cx, cz));
         self.join_trace.mark("remesh_queued", cx, cz);
     }
@@ -344,7 +341,7 @@ impl Sim {
     /// it (that would overwrite the server's seam-complete cross-chunk light with a
     /// partial result — a divergence bug). Multiplayer *consumes* light;
     /// singleplayer computes it.
-    pub(crate) fn mark_column_dirty(&mut self, cx: i32, cz: i32) {
+    pub fn mark_column_dirty(&mut self, cx: i32, cz: i32) {
         self.terrain_and_world(|store, terrain| terrain.mesh_column(store, cx, cz));
     }
 
@@ -354,24 +351,28 @@ impl Sim {
     /// not when [`TerrainMesh::drain_meshes`] merely returns a worker result.
     /// That distinction keeps the loading screen from clearing for a mesh that
     /// is still only held by the CPU side of the pipeline.
-    pub(crate) fn mark_mesh_uploaded(&mut self, key: SectionKey) {
+    pub fn mark_mesh_uploaded(&mut self, key: SectionKey) {
         self.terrain_mut(|terrain| terrain.mark_mesh_uploaded(key));
     }
 
     /// Re-evaluate the initial terrain gate after this frame has drained mesh
     /// removals and handed every finished mesh to the renderer.
     ///
-    /// The check is deliberately scoped to the local player's column. The
-    /// progress numerator remains a high-water telemetry value; it is not used
-    /// as a readiness shortcut, and a completed unrelated column cannot release
-    /// this gate.
-    pub(crate) fn refresh_terrain_readiness(&mut self) {
-        let position = self.player().position;
-        let (cx, cz) = (
-            (position.x.floor() as i32).div_euclid(16),
-            (position.z.floor() as i32).div_euclid(16),
+    /// A declared view is ready only when every expected column is resident and
+    /// renderer-settled. Sessions without a declared view fall back to the local
+    /// player's column.
+    pub fn refresh_terrain_readiness(&mut self) {
+        let settled = self.visible_view_settlement().map_or_else(
+            || {
+                let position = self.player().position;
+                let (cx, cz) = (
+                    (position.x.floor() as i32).div_euclid(16),
+                    (position.z.floor() as i32).div_euclid(16),
+                );
+                self.column_mesh_settled(cx, cz)
+            },
+            |(resident, settled, expected)| resident == expected && settled == expected,
         );
-        let settled = self.column_mesh_settled(cx, cz);
         if settled {
             if self.dimension_transition_pending {
                 // Destination geometry has crossed the renderer hand-off.
@@ -385,10 +386,7 @@ impl Sim {
         }
     }
 
-    /// Read the current per-section settlement result for one column. The
-    /// session gate uses this alongside the network decoder's own-column fact;
-    /// keeping the two observations separate prevents an unrelated uploaded
-    /// column from satisfying the player's gate.
+    /// Read the current per-section settlement result for one column.
     pub(crate) fn column_mesh_settled(&self, cx: i32, cz: i32) -> bool {
         let store = self.chunk_world();
         self.terrain(|terrain| terrain.column_mesh_settled(&store, cx, cz))

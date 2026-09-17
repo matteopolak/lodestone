@@ -758,17 +758,13 @@ fn the_nether_ledger_names_the_remaining_gaps_and_not_the_closed_one() {
         "nether_fossil places blocks now: {:?}",
         ledger.get("minecraft:nether_fossil")
     );
-    // The dimension row must no longer claim there is no structure stage.
-    let row = ledger
-        .get("dimension:nether_structures")
-        .expect("the remaining dimension-level gap must be named");
+    // The dimension-level gap is closed now that the Nether generator owns the
+    // structure start, reference and placement stages. Keep this absence check
+    // alongside the per-structure closed rows so a stale ledger row cannot hide
+    // the live consumer seam.
     assert!(
-        row.contains("places blocks"),
-        "the row still describes the closed gap: {row}"
-    );
-    assert!(
-        row.contains("chunk source") || row.contains("ChunkSource"),
-        "the row must name what is still missing — nothing serves this dimension: {row}"
+        !ledger.contains_key("dimension:nether_structures"),
+        "Nether structure stages are live; the closed dimension row must be gone"
     );
     // An Overworld-only structure is not in a Nether registry's ledger at all, which
     // is the filter's observable consequence.

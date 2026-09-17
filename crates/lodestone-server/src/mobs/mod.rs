@@ -90,7 +90,6 @@ use lodestone_model::{
 };
 use uuid::Uuid;
 
-use crate::chunk::ChunkSource;
 use crate::entity_handoff::{EntityHandoffToken, EntityOwnershipHandoff};
 #[cfg(test)]
 use crate::chunk::AIR;
@@ -3387,18 +3386,6 @@ fn nearest_patrol_leader_target(mobs: &[SimMob<'_>], from: Vec3, exclude_id: i32
         .and_then(SimMob::patrol_target)
 }
 
-/// The highest solid-block Y at `(x, z)` within `world`'s loaded vertical
-/// range, or `None` if the whole column reads air (or is unloaded) — the
-/// ground a freshly seeded mob should stand on. A linear scan from the top
-/// down; called only where a mob is placed rather than every tick — at seed
-/// time, and from [`MobSim::run_patrol_spawn_cycle`], which itself only
-/// reaches this on the rare tick a patrol attempt actually fires — so this is
-/// not a hot path either way.
-fn surface_y(world: &ChunkWorld, x: i32, z: i32) -> Option<i32> {
-    let top = world.min_y + world.height - 1;
-    (world.min_y..=top).rev().find(|&y| world.is_solid(x, y, z))
-}
-
 /// Approximates vanilla's own no-active-raid "current difficulty at
 /// position, effective difficulty" formula for [`MobSim::run_patrol_spawn_cycle`]'s group
 /// size, the ceiling of the effective difficulty plus one
@@ -3422,116 +3409,6 @@ fn patrol_group_size(difficulty: Difficulty) -> i32 {
     };
     effective.ceil() as i32 + 1
 }
-
-/// Seeds `count` zombies in a ring of radius 6 blocks around `(center_x,
-/// center_z)`, each placed on the real terrain surface (skipped if the column
-/// has no solid ground within `world`'s loaded range) with a baseline
-/// wander/look goal set — the same defaults [`MobSim::run_spawn_cycle`] gives
-/// a naturally-spawned mob.
-///
-/// This is **not** vanilla natural spawning: there is no light-level,
-/// biome, or pack-size logic here, because no terrain/biome-aware
-/// [`SpawnCandidateSource`] implementation exists in production yet (the
-/// trait exists; every current impl is a test mock — see `mob_spawn.rs`).
-/// Building that is a separate, considerably larger feature. This exists
-/// purely so the actual subject — computed AI motion reaching the
-/// wire — has a population to move; a caller that wants real spawning wires
-/// [`MobSim::run_spawn_cycle`] in its place once a real source exists.
-fn seed_demo_mobs(sim: &mut MobSim<'_>, center_x: i32, center_z: i32, count: usize) {
-    let world = sim.world();
-    // `count`, **not** `count.max(1)`. The floor was here until singleplayer
-    // needed to be mob-free: it made a request for zero demo mobs silently
-    // produce one zombie, so "turn the demo population off" was not expressible
-    // at all. Vanilla does not seed a demo population; a caller asking for none
-    // must get none.
-    for i in 0..count {
-        let species = DEMO_SPECIES[i % DEMO_SPECIES.len()];
-        let key = ResourceKey::from_str(&format!("minecraft:{species}"))
-            .expect("DEMO_SPECIES entries are valid paths");
-        let angle = (i as f64) * std::f64::consts::TAU / (count.max(1) as f64);
-        let x = center_x + (angle.cos() * 6.0).round() as i32;
-        let z = center_z + (angle.sin() * 6.0).round() as i32;
-        let Some(y) = surface_y(world, x, z) else {
-            continue;
-        };
-        let pos = Vec3::new(f64::from(x) + 0.5, f64::from(y + 1), f64::from(z) + 0.5);
-        // Through `spawn_species`, not `spawn` plus a hardcoded component set.
-        // This is the **only** production path that creates a
-        // mob a connected client can see, so it is also the only place the
-        // per-species roster can reach pixels: routed this way, a demo zombie
-        // gets the complete target-selection, attack, and look-at behavior
-        // instead of wandering obliviously past the player.
-        //
-        // The shape, speed and A* budget were hardcoded here as `0.6 × 1.95`,
-        // `0.23` and `400`; `spawn_species` derives the first two from the same
-        // dimension census and `movement_speed` attribute and gets the same
-        // numbers, and the third from `follow_range * 16` = `560`, preserving
-        // the measured follow-range budget rather than a call-site guess.
-        sim.spawn_species(key, pos);
-    }
-}
-
-/// The species [`seed_demo_mobs`] cycles through, in order.
-///
-/// # What this is for
-///
-/// [`seed_demo_mobs`] cycles a client-visible demonstration roster. The list
-/// covers every roster family plus an additional hostile entry, making each
-/// family observable to a connected client while keeping this helper separate
-/// from spawn eggs and spawner blocks.
-///
-/// # Order is load-bearing, twice
-///
-/// The seeder cycles this list, so with production's `mob_count` of 6
-/// (`lodestone-shell/src/net.rs`) a player sees exactly the **first six**
-/// entries. Those six are therefore one per roster family plus one, so that a
-/// default singleplayer world exercises every family rather than six variations
-/// on a monster:
-///
-/// | # | species | family |
-/// |---|---|---|
-/// | 0 | `zombie` | `hostile_melee` |
-/// | 1 | `cow` | `passive` |
-/// | 2 | `wolf` | `neutral` |
-/// | 3 | `blaze` | `ranged` |
-/// | 4 | `guardian` | `specialist` |
-/// | 5 | `creeper` | `hostile_melee` (the swelling behavior is the most visible) |
-///
-/// `zombie` is first for a second, narrower reason: `MobSim::set_next_id(1000)`
-/// plus spawn order makes entity id 1000 deterministic, and
-/// `crates/protocol/v770/tests/live_mob_sim.rs` relies on that. Keeping the
-/// zombie at index 0 leaves the *first* demo mob exactly what it has always
-/// been.
-///
-/// # Gotcha when adding to this list
-///
-/// Every entry must be a species some roster family claims, or it silently
-/// spawns with `roster::FALLBACK` (wander and look) — visible, but proving
-/// nothing about any goal table. `demo_species_are_all_rostered_and_span_every_family`
-/// fails rather than letting that through. An entry also needs a
-/// `type_spec` arm in `lodestone_entity::attribute`, or it runs at the 0.7
-/// registry default; that is pinned separately by
-/// `every_rostered_species_has_a_type_spec_arm`.
-///
-/// This is still a demo ring on flat ground, not natural spawning — a guardian
-/// on land is a real consequence and an accepted one, since the alternative is
-/// that `specialist.rs` stays unobservable.
-pub const DEMO_SPECIES: &[&str] = &[
-    "zombie",
-    "cow",
-    "wolf",
-    "blaze",
-    "guardian",
-    "creeper",
-    // Beyond production's count of 6, but reached by any caller asking for
-    // more, and each one another family's table on screen.
-    "skeleton",
-    "spider",
-    "sheep",
-    "chicken",
-    "enderman",
-    "snow_golem",
-];
 
 #[cfg(test)]
 mod tests;

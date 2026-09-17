@@ -248,7 +248,6 @@ async fn a_rejoining_players_saved_inventory_arrives_as_a_window_zero_snapshot()
         (0..=0, 0..=0),
         (0, 0),
         0,
-        0,
         Duration::from_secs(3600),
     )
     .expect("open persistent world");

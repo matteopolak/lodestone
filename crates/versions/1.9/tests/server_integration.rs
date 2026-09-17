@@ -197,7 +197,6 @@ async fn assert_registry_selected_server_consumes_a_chest_click(protocol_version
         (0..=-1, 0..=-1),
         (0, 0),
         0,
-        0,
         Duration::from_secs(3600),
     )
     .expect("open persistent legacy fixture world");
@@ -382,7 +381,6 @@ async fn protocol_340_entity_interaction_reaches_the_shared_mob_consumer() {
         source,
         (0..=0, 0..=0),
         (0, 0),
-        0,
         0,
     );
     let (mut handle, _events) = ClientBuilder::new(

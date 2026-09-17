@@ -3,7 +3,7 @@
 //!
 //! # What it is
 //!
-//! A port of vanilla's own structure-template type: the `.nbt` files under
+//! The structure-template type reads `.nbt` files under
 //! `assets/structure/` (1212 of them, see
 //! [`docs/worldgen-structure-corpus.md`](../../../../docs/worldgen-structure-corpus.md))
 //! decoded into a palette plus a block list, and placed into a
@@ -19,23 +19,22 @@
 //!             world = transform(rel, mirror, rotation, pivot) + position
 //!             state = palette[block.state]                  <- unrotated
 //!             state = processors.process(world, state)?      <- may drop it
-//!             state = state.mirror(m).rotate(r)              <- vanilla's order
+//!             state = state.mirror(m).rotate(r)              <- placement order
 //!             grid.set(world, state)                         <- clipped by the grid
 //! ```
 //!
 //! Two properties make this work chunk-at-a-time with no cross-chunk state, which
-//! is what our per-chunk memoised pipeline needs and vanilla's shared mutable
-//! `StructureStart` does not have:
+//! is what our per-chunk memoised pipeline needs:
 //!
 //! * **Every random draw here is position-seeded.** Palette choice is
 //!   a fresh default random source seeded from a position-derived hash of
-//!   `templatePosition` and
-//!   vanilla's own block-rot processor's keep/drop roll is the same
-//!   position-derived hash of `blockPos` — so two
+//!   template position and
+//!   the block-rotation processor's keep/drop roll is the same
+//!   position-derived hash of each block position — so two
 //!   chunks placing two halves of the same piece agree without communicating.
 //! * **A write outside the grid's box is a no-op** ([`DenseBlockGrid::set`]), so
 //!   "clip this piece to the chunk" needs no explicit box: the grid *is* the box.
-//!   This is vanilla's own place-settings bounding-box assignment by construction.
+//!   The grid therefore provides the placement bounding box by construction.
 //!
 //! # How to change it
 //!
@@ -44,7 +43,7 @@
 //!   every property in the 71 templates this unit places. A block whose rotation
 //!   needs *block-class* knowledge (a stair's `shape` under a **mirror**, a rail's
 //!   `shape`) is **not** handled — the three structures wired here all use
-//!   `Mirror.NONE`, where `shape` is invariant, and the gap is named in
+//!   no mirror, where `shape` is invariant, and the gap is named in
 //!   [`super::StructureRegistry::unsupported`] rather than left to be discovered.
 //! * **Multi-palette templates are normal, not exotic.** Every shipwreck template
 //!   carries 8 palettes (the wood species), and the block list is shared across
@@ -53,21 +52,21 @@
 //!   `palette` key would silently place nothing for every shipwreck.
 //! * Entities are parsed but not placed. Container blocks and their NBT are
 //!   retained: the server's structure-loot consumer reads both data markers and
-//!   a container's own `LootTable`/`LootTableSeed` fields to attach contents after
+//!   a container's own loot fields to attach contents after
 //!   the structure stage. The marker blocks themselves are dropped by the same
 //!   block-ignore processor as ordinary template placement.
-//! * **A block's `nbt` compound is retained** ([`TemplateBlock::nbt`]), which S2
-//!   deliberately dropped. It is not decoration: a jigsaw block's *entire*
+//! * **A block's `nbt` compound is retained** ([`TemplateBlock::nbt`]). It is not
+//!   decoration: a jigsaw block's *entire*
 //!   configuration — `name`, `target`, `pool`, `final_state`, `joint`,
-//!   `placement_priority`, `selection_priority` — lives nowhere else, so S4's
-//!   assembly reads it through [`StructureTemplate::filter_blocks`]. Only a few
+//!   `placement_priority`, `selection_priority` — lives nowhere else, so assembly
+//!   reads it through [`StructureTemplate::filter_blocks`]. Only a few
 //!   blocks per template carry one, so it is an `Option<Arc<..>>` rather than a
 //!   parallel dense array.
 //!
 //! # Dependencies
 //!
-//! `lodestone-core` for the NBT codec, `flate2` for the gzip wrapper vanilla
-//! writes these files with, and [`crate::dense_grid`] for the write target.
+//! `lodestone-core` for the NBT codec, `flate2` for the gzip wrapper around these
+//! files, and [`crate::dense_grid`] for the write target.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -101,8 +100,8 @@ pub fn nbt_string<'a>(nbt: &'a BlockNbt, key: &str) -> Option<&'a str> {
 }
 
 /// One integer field of a [`BlockNbt`], accepting any of NBT's integral widths
-/// (vanilla writes `placement_priority`/`selection_priority` as `Int`, but
-/// vanilla's own "get int or" reads a `Byte` too).
+/// `placement_priority` and `selection_priority` are normally `Int`, but
+/// accepting `Byte` and `Short` keeps parsing tolerant of older files.
 #[must_use]
 pub fn nbt_int(nbt: &BlockNbt, key: &str) -> Option<i32> {
     nbt.iter().find(|(k, _)| k == key).and_then(|(_, v)| match *v {
@@ -113,25 +112,22 @@ pub fn nbt_int(nbt: &BlockNbt, key: &str) -> Option<i32> {
     })
 }
 
-/// One of vanilla's four rotations, in vanilla's own declaration order — the order
-/// vanilla's own random-rotation pick indexes with a single `nextInt(4)`.
+/// One of the four rotations, in the order used by the position-seeded picker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Rotation {
-    /// `NONE`.
+    /// No rotation.
     #[default]
     None,
-    /// `CLOCKWISE_90`.
+    /// A clockwise quarter turn.
     Cw90,
-    /// `CLOCKWISE_180`.
+    /// A clockwise half turn.
     Cw180,
-    /// `COUNTERCLOCKWISE_90`.
+    /// A counter-clockwise quarter turn.
     Ccw90,
 }
 
 impl Rotation {
-    /// Vanilla's own random-rotation pick at `(random)` — its own pick-a-random-list-element
-    /// helper over all four values, one
-    /// `nextInt(4)`.
+    /// Chooses a rotation using the supplied random source.
     pub fn random<R: RandomSource>(random: &mut R) -> Self {
         match random.next_int_bounded(4) {
             1 => Self::Cw90,
@@ -153,15 +149,15 @@ impl Rotation {
     }
 }
 
-/// Vanilla's `Mirror`.
+/// A horizontal mirror operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mirror {
-    /// `NONE`.
+    /// No mirror.
     #[default]
     None,
-    /// `LEFT_RIGHT` — negates `z`, so north and south swap.
+    /// Negates `z`, so north and south swap.
     LeftRight,
-    /// `FRONT_BACK` — negates `x`, so east and west swap.
+    /// Negates `x`, so east and west swap.
     FrontBack,
 }
 
@@ -227,8 +223,8 @@ impl BlockState {
         out
     }
 
-    /// Vanilla's own block-state rotate at `(rotation)`, per property (see the module doc for the
-    /// deliberate limits).
+    /// Rotates supported directional properties (see the module documentation
+    /// for the deliberate limits).
     #[must_use]
     pub fn rotate(&self, rotation: Rotation) -> Self {
         self.clone().into_rotate(rotation)
@@ -263,7 +259,7 @@ impl BlockState {
             }
         }
         if let Some(value) = self.properties.get("rotation").and_then(|r| r.parse::<u32>().ok()) {
-            // Vanilla's own rotation-index rotate over a span of 16: +4 per clockwise quarter turn.
+            // Sixteen-step orientation values advance by four per quarter turn.
             let rotated = (value + 4 * turns) % 16;
             self.properties.insert("rotation".into(), rotated.to_string());
         }
@@ -281,8 +277,7 @@ impl BlockState {
         self
     }
 
-    /// Vanilla's own jigsaw-block front-facing / top-facing accessors — the two halves of the
-    /// `orientation` property (`FrontAndTop`, serialised `"<front>_<top>"`).
+    /// Returns the two components of a jigsaw `orientation` property.
     ///
     /// Returns `None` for a state with no `orientation`, which is every block
     /// except a jigsaw.
@@ -291,7 +286,7 @@ impl BlockState {
         self.properties.get("orientation")?.split_once('_')
     }
 
-    /// Vanilla's own block-state mirror at `(mirror)` for the same property set.
+    /// Mirrors supported directional properties.
     #[must_use]
     pub fn mirror(&self, mirror: Mirror) -> Self {
         self.clone().into_mirror(mirror)
@@ -312,14 +307,8 @@ impl BlockState {
                 _ => None,
             }
         };
-        // Vanilla's own stair-block mirror — the one place a mirror needs *block-class*
-        // knowledge, and now reachable: a coded piece with a SOUTH or WEST
-        // orientation mirrors LEFT_RIGHT, and both the swamp hut and the pyramids
-        // place stairs with an explicit `shape`. Vanilla applies the shape swap
-        // **only** when the mirror actually moves the facing (LEFT_RIGHT with a Z
-        // facing, FRONT_BACK with an X facing), and the two cases are *not*
-        // symmetric: LEFT_RIGHT swaps all four inner/outer variants, FRONT_BACK
-        // swaps only the outer pair.
+        // Stairs require shape-specific handling when the mirror moves their
+        // facing. The two mirror axes are intentionally asymmetric here.
         let is_stair = self.properties.contains_key("shape")
             && self.properties.contains_key("half")
             && self.properties.contains_key("facing");
@@ -342,8 +331,7 @@ impl BlockState {
                         }
                         (Mirror::LeftRight, "inner_left") => Some("inner_right"),
                         (Mirror::LeftRight, "inner_right") => Some("inner_left"),
-                        // FRONT_BACK leaves the inner pair alone — transcribed,
-                        // not tidied.
+                        // This mirror leaves the inner pair unchanged.
                         _ => None,
                     };
                     if let Some(swapped) = swapped {
@@ -391,17 +379,14 @@ impl BlockState {
     }
 }
 
-/// Vanilla's own base-rail-block rotate at `(RailShape, Rotation)`, transcribed.
-///
+/// Rotates the ten supported rail shape values.
 /// Keyed on the `shape` **value** rather than on the presence of neighbouring
 /// properties, because `shape` is spelled by two unrelated block families here: a
 /// stair's is one of `straight`/`inner_*`/`outer_*` and a rail's is one of the ten
 /// below, and the two sets are disjoint. Returning `None` for anything unrecognised
 /// is therefore what leaves the stair branch — and every other `shape` — alone.
 ///
-/// Written out rather than derived from "rotate the two connected directions and
-/// re-canonicalise": the derivation needs a canonical-name pass of its own, and a
-/// table lifted from the source cannot disagree with it.
+/// The explicit table keeps this mapping independent of canonicalisation.
 fn rotate_rail_shape(shape: &str, turns: u32) -> Option<&'static str> {
     let table: [(&str, [&'static str; 3]); 10] = [
         // shape -> [cw90, cw180, ccw90]
@@ -437,12 +422,11 @@ fn rotate_rail_shape(shape: &str, turns: u32) -> Option<&'static str> {
     }
 }
 
-/// Vanilla's own base-rail-block mirror at `(RailShape, Mirror)`, transcribed.
-///
-/// Note the asymmetry, which is vanilla's: `LEFT_RIGHT` leaves `ascending_east` and
-/// `ascending_west` alone and `FRONT_BACK` leaves `ascending_north`/`ascending_south`
+/// Mirrors the supported rail shape values. The mapping is asymmetric:
+/// `LeftRight` leaves `ascending_east` and
+/// `ascending_west` alone and `FrontBack` leaves `ascending_north`/`ascending_south`
 /// alone, while both swap the four diagonals — the same shape of asymmetry the stair
-/// branch above carries, and for the same reason (the mirror axis must actually move
+/// branch above carries, because the mirror axis must actually move
 /// the shape's own axis).
 fn mirror_rail_shape(shape: &str, mirror: Mirror) -> Option<&'static str> {
     match mirror {
@@ -474,11 +458,8 @@ fn rotate_direction(dir: &str, turns: u32) -> Option<&'static str> {
     Some(CW[(index + turns as usize) % 4])
 }
 
-/// Vanilla's own octahedral-group rotate at `(FrontAndTop)` for a Y-axis rotation:
-/// `fromFrontAndTop(rotate(front), rotate(top))`.
-///
-/// A vertical component is invariant (vanilla's own rotation-of-direction returns a
-/// Y-axis direction unchanged), which is what makes this a per-component rewrite
+/// Rotates both components of a jigsaw orientation around the Y axis.
+/// A vertical component is invariant, which makes this a per-component rewrite
 /// rather than a 12-entry table. **Load-bearing for jigsaw assembly**: the front
 /// facing of a rotated jigsaw block is the direction the connection points in,
 /// and getting it wrong makes every `canAttach` fail — a village that silently
@@ -490,7 +471,7 @@ fn rotate_orientation(orientation: &str, turns: u32) -> Option<String> {
     Some(format!("{front}_{top}"))
 }
 
-/// Vanilla's own direction "get opposite".
+/// Returns the opposite cardinal or vertical direction.
 #[must_use]
 pub fn opposite_direction(dir: &str) -> &str {
     match dir {
@@ -504,7 +485,7 @@ pub fn opposite_direction(dir: &str) -> &str {
     }
 }
 
-/// Vanilla's own per-axis direction step accessors — the unit offset of a named direction.
+/// Returns the unit offset of a named direction.
 #[must_use]
 pub fn direction_step(dir: &str) -> [i32; 3] {
     match dir {
@@ -585,7 +566,7 @@ fn rotate_directional_flags(state: &mut BlockState, turns: u32) {
     }
 }
 
-/// Vanilla's own structure-template transform at `(pos, mirror, rotation, pivot)`.
+/// Applies mirror and rotation around `pivot` to a template-local position.
 #[must_use]
 pub fn transform(pos: [i32; 3], mirror: Mirror, rotation: Rotation, pivot: [i32; 3]) -> [i32; 3] {
     let [mut x, y, mut z] = pos;
@@ -603,9 +584,8 @@ pub fn transform(pos: [i32; 3], mirror: Mirror, rotation: Rotation, pivot: [i32;
     }
 }
 
-/// `placeInWorld`'s three non-`StructurePlaceSettings` arguments.
-///
-/// Grouped because they arrive from three different places and every one of them
+/// The three origins needed when placing a template.
+/// Grouped because each arrives from a different context and
 /// is easy to get wrong on its own: `position` is the piece's, `reference` is the
 /// whole *start*'s (see [`super::jigsaw::reference_position`]), and `seed` is the
 /// **world** seed rather than any derived stream — [`Processor::Capped`] forks it
@@ -613,28 +593,26 @@ pub fn transform(pos: [i32; 3], mirror: Mirror, rotation: Rotation, pivot: [i32;
 /// different set of suspicious blocks in each chunk it spans.
 #[derive(Debug, Clone, Copy)]
 pub struct PlaceOrigin {
-    /// `templatePosition` — where template-local `(0,0,0)` lands.
+    /// Where template-local `(0,0,0)` lands.
     pub position: [i32; 3],
-    /// `referencePos`.
+    /// Reference position used by processors.
     pub reference: [i32; 3],
-    /// `level.getSeed()`.
+    /// World seed used by processors.
     pub seed: i64,
 }
 
-/// How one piece places its template: vanilla's `StructurePlaceSettings` plus the
-/// template position, held together because a piece needs all of it and nothing
-/// else.
+/// How one piece places its template.
 #[derive(Debug, Clone)]
 pub struct PlaceSettings {
-    /// `getRotation`.
+    /// Template rotation.
     pub rotation: Rotation,
-    /// `getMirror`.
+    /// Template mirror.
     pub mirror: Mirror,
-    /// `getRotationPivot`.
+    /// Rotation pivot.
     pub pivot: [i32; 3],
     /// The processor chain, in `addProcessor` order.
     pub processors: Vec<Processor>,
-    /// `shouldApplyWaterlogging` — false for `LiquidSettings.IGNORE_WATERLOGGING`.
+    /// Whether dry waterloggable blocks should be waterlogged.
     pub waterlogging: bool,
 }
 
@@ -658,29 +636,30 @@ pub struct TemplateBlock {
     pos: [i32; 3],
     state: u16,
     /// The block's own `nbt` compound — a jigsaw block's whole configuration, a
-    /// data marker's `metadata`, a chest's `LootTable`. `None` for the
+    /// data marker's `metadata`, or a container's loot fields. `None` for the
     /// overwhelming majority of blocks, and behind an `Arc` so cloning a block
     /// info is a refcount bump.
     pub nbt: Option<Arc<BlockNbt>>,
 }
 
 /// One block of a template, resolved: absolute world position, rotated state and
-/// retained NBT — vanilla's `StructureTemplate.StructureBlockInfo` after
-/// `filterBlocks(position, settings, block, absolute = true)`.
+/// retained NBT after resolving the selected palette and transform.
 #[derive(Debug, Clone)]
 pub struct TemplateBlockInfo {
     /// The world position, i.e. `calculateRelativePosition(...).offset(position)`.
     pub pos: [i32; 3],
     /// The **rotated** state (`blockInfo.state.rotate(rotation)`).
     pub state: BlockState,
-    /// The template-local, unrotated position — what a `GravityProcessor` reads
-    /// its `delta` from.
+    /// The template-local, unrotated position used by processors that apply a
+    /// local displacement.
     pub local: [i32; 3],
     /// The block's `nbt`.
     pub nbt: Option<Arc<BlockNbt>>,
 }
 
 /// A parsed `.nbt` structure template.
+const JIGSAW_BLOCK_NAME: &str = "minecraft:jigsaw";
+
 #[derive(Debug, Clone)]
 pub struct StructureTemplate {
     size: [i32; 3],
@@ -688,11 +667,36 @@ pub struct StructureTemplate {
     /// palette has the same length and the block list indexes all of them.
     palettes: Vec<Vec<BlockState>>,
     blocks: Vec<TemplateBlock>,
+    /// Block-list order for the fixed jigsaw state, once per palette.
+    jigsaw_indices: Vec<Vec<usize>>,
 }
 
 impl StructureTemplate {
-    /// Decodes a template from its file bytes, gzip-wrapped (as Mojang ships
-    /// them) or bare NBT.
+    fn new(size: [i32; 3], palettes: Vec<Vec<BlockState>>, blocks: Vec<TemplateBlock>) -> Self {
+        let jigsaw_indices = palettes
+            .iter()
+            .map(|palette| {
+                blocks
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, block)| {
+                        (palette
+                            .get(block.state as usize)
+                            .is_some_and(|state| state.name == JIGSAW_BLOCK_NAME))
+                        .then_some(index)
+                    })
+                    .collect()
+            })
+            .collect();
+        Self {
+            size,
+            palettes,
+            blocks,
+            jigsaw_indices,
+        }
+    }
+
+    /// Decodes a template from gzip-wrapped or bare NBT bytes.
     ///
     /// # Errors
     ///
@@ -739,9 +743,7 @@ impl StructureTemplate {
                     Some(Nbt::Int(i)) => u16::try_from(*i).unwrap_or(0),
                     _ => 0,
                 };
-                // Retained, unlike S2 and unlike vanilla's own placement loop:
-                // this is the only place a jigsaw block's pool/target/joint
-                // configuration exists. See the module doc.
+                // Jigsaw configuration is carried only by this block-local NBT.
                 let nbt = match field(entry, "nbt") {
                     Some(Nbt::Compound(fields)) => Some(Arc::new(fields.clone())),
                     _ => None,
@@ -753,33 +755,18 @@ impl StructureTemplate {
             return Err("template has no `blocks`".into());
         }
 
-        Ok(Self {
-            size,
-            palettes,
-            blocks,
-        })
+        Ok(Self::new(size, palettes, blocks))
     }
 
-    /// The template vanilla's own structure-template-manager get-or-create invents when a
-    /// referenced `.nbt` does not exist: **zero size, no palette, no blocks.**
-    ///
-    /// This is not a defensive stub; it is vanilla's own behaviour for a dangling
-    /// reference, and vanilla's own data has one —
-    /// vanilla's own ancient-city structure-pool data names
-    /// `ancient_city/walls/intact_horizontal_wall_stairs_5`, of which only `_1`
-    /// through `_4` ship. Its own get-or-create call logs, caches an empty template, and the
-    /// element stays in its pool with a degenerate box and no jigsaw blocks, so it
-    /// is offered by the pool's shuffle (consuming the draws) and never attaches.
-    /// Refusing the pool instead would delete the whole structure.
+    /// Returns an empty template for a missing or intentionally absent element.
     #[must_use]
     pub fn empty() -> Self {
-        Self {
-            size: [0, 0, 0],
-            // One empty palette rather than none, so `place`/`filter_blocks` need
-            // no extra guard: the block list is empty, so neither iterates.
-            palettes: vec![Vec::new()],
-            blocks: Vec::new(),
-        }
+        Self::new(
+            [0, 0, 0],
+            // Keep one empty palette so placement paths need no special case.
+            vec![Vec::new()],
+            Vec::new(),
+        )
     }
 
     /// Builds a template directly from a size, a single palette, and a list
@@ -795,23 +782,23 @@ impl StructureTemplate {
     /// of its own.
     #[must_use]
     pub fn from_blocks(size: [i32; 3], palette: Vec<BlockState>, blocks: Vec<([i32; 3], u16)>) -> Self {
-        Self {
+        Self::new(
             size,
-            palettes: vec![palette],
-            blocks: blocks
+            vec![palette],
+            blocks
                 .into_iter()
                 .map(|(pos, state)| TemplateBlock { pos, state, nbt: None })
                 .collect(),
-        }
+        )
     }
 
-    /// Vanilla's own size accessor.
+    /// Returns the template dimensions.
     #[must_use]
     pub fn size(&self) -> [i32; 3] {
         self.size
     }
 
-    /// Vanilla's own bounding-box accessor at `(settings, position)` — the transformed corner-to-corner
+    /// Returns the transformed bounding box at `position`.
     /// box, in world space.
     #[must_use]
     pub fn bounding_box(&self, position: [i32; 3], settings: &PlaceSettings) -> BoundingBox {
@@ -832,10 +819,8 @@ impl StructureTemplate {
         }
     }
 
-    /// Vanilla's own place-settings random-palette accessor at `(palettes,
-    /// position)` — the
-    /// palette index for a placement at `position`, from a fresh
-    /// default random source seeded from a position-derived hash.
+    /// Returns the palette index for a placement at `position`, using a
+    /// position-seeded random source.
     #[must_use]
     pub fn palette_for(&self, position: [i32; 3]) -> usize {
         if self.palettes.len() == 1 {
@@ -846,16 +831,13 @@ impl StructureTemplate {
         random.next_int_bounded(count).max(0) as usize
     }
 
-    /// `filterBlocks(position, new StructurePlaceSettings().setRotation(r), block,
-    /// absolute = true)` — every block of this template whose *id* is `name`, at
-    /// its world position with its state already rotated.
+    /// Returns every block whose id is `name`, at its transformed world position
+    /// with its state already rotated.
     ///
-    /// The reader jigsaw assembly is built on: it needs the jigsaw blocks of an
-    /// element at an arbitrary position and rotation, which is a different
-    /// traversal from placing the whole template. Note the palette is chosen from
-    /// `position`, exactly as vanilla's `getJigsaws` does — so the same element
-    /// scanned at its real position and at `BlockPos.ZERO` can legitimately see
-    /// two different palettes, and `JigsawPlacement` scans it both ways.
+    /// Jigsaw assembly uses this traversal at arbitrary positions and rotations,
+    /// while placement traverses the full block list. Palette choice depends on
+    /// `position`, so the same element can legitimately use different palettes
+    /// at different positions.
     #[must_use]
     pub fn filter_blocks(
         &self,
@@ -863,9 +845,31 @@ impl StructureTemplate {
         position: [i32; 3],
         rotation: Rotation,
     ) -> Vec<TemplateBlockInfo> {
-        let palette = &self.palettes[self.palette_for(position).min(self.palettes.len() - 1)];
+        let palette_index = self.palette_for(position).min(self.palettes.len() - 1);
+        let palette = &self.palettes[palette_index];
+        if name == JIGSAW_BLOCK_NAME {
+            return self.filter_block_indices(
+                palette,
+                name,
+                position,
+                rotation,
+                self.jigsaw_indices[palette_index].iter().copied(),
+            );
+        }
+        self.filter_block_indices(palette, name, position, rotation, 0..self.blocks.len())
+    }
+
+    fn filter_block_indices(
+        &self,
+        palette: &[BlockState],
+        name: &str,
+        position: [i32; 3],
+        rotation: Rotation,
+        indices: impl IntoIterator<Item = usize>,
+    ) -> Vec<TemplateBlockInfo> {
         let mut out = Vec::new();
-        for block in &self.blocks {
+        for index in indices {
+            let block = &self.blocks[index];
             let Some(state) = palette.get(block.state as usize) else {
                 continue;
             };
@@ -891,15 +895,13 @@ impl StructureTemplate {
     /// box (a write outside it is a no-op, which is how per-chunk clipping
     /// happens — see the module doc).
     ///
-    /// # Two passes, because a processor can read the world
+    /// # Two passes, because processors can read the world
     ///
-    /// `processBlockInfos` runs the **whole** chain over the **whole** block list
-    /// before `placeInWorld` writes a single block, so a `RuleProcessor`'s
+    /// The processor chain runs over the **whole** block list before any block is
+    /// written, so a location predicate
     /// `location_predicate` (village streets test for water under a `dirt_path`, to
     /// build a bridge) sees the pre-structure world — never an earlier block of
-    /// the same template. S2's single pass had no processor that read the world, so
-    /// the distinction did not exist; with rule location predicates it is the
-    /// difference between a plank bridge and a random one.
+    /// on the same template always observes the pre-structure world.
     ///
     /// Returns the number of blocks actually written inside the grid.
     pub fn place(
@@ -1001,9 +1003,8 @@ impl StructureTemplate {
             let Some(state) = palette.get(block.state as usize) else {
                 continue;
             };
-            // Processors see the *unrotated* state at the absolute position —
-            // `processBlockInfos` runs before the `mirror().rotate()` in the
-            // placement loop. A processor returning `None` drops the block, which
+            // Processors see the *unrotated* state at the absolute position.
+            // A processor returning `None` drops the block, which
             // is how air, rot and jigsaw replacement work.
             let mut current = Some(ProcessedBlock {
                 pos: world,
@@ -1024,9 +1025,7 @@ impl StructureTemplate {
                 originals.push((block.pos, block.nbt.clone()));
             }
         }
-        // `for (StructureProcessor processor : settings.getProcessors())
-        //      processedBlockInfoList = processor.finalizeProcessing(...)` — every
-        // processor in chain order, and every one but `capped` is the identity.
+        // Finalize each processor in chain order.
         for processor in &settings.processors {
             processor.finalize(
                 position,
@@ -1040,7 +1039,7 @@ impl StructureTemplate {
         let mut written = 0;
         let mut written_states = Vec::new();
         for block in processed {
-            // A `GravityProcessor` moves a block, so re-test the clip.
+            // A processor may move a block, so re-test the clip.
             if !inside(block.pos) {
                 continue;
             }
@@ -1169,7 +1168,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn transform_matches_vanilla_corner_arithmetic() {
+    fn transform_matches_corner_arithmetic() {
         // A 4x1x2 template's far corner (3, 0, 1) about pivot ZERO.
         assert_eq!(transform([3, 0, 1], Mirror::None, Rotation::None, [0, 0, 0]), [3, 0, 1]);
         assert_eq!(transform([3, 0, 1], Mirror::None, Rotation::Cw90, [0, 0, 0]), [-1, 0, 3]);
@@ -1249,5 +1248,156 @@ mod tests {
         );
         assert_eq!(grid.get(15, 1, 15), "minecraft:air");
         assert_eq!(grid.get(1, 1, 1), "minecraft:ladder[facing=north,waterlogged=false]");
+    }
+
+    fn linear_filter_blocks(
+        template: &StructureTemplate,
+        name: &str,
+        position: [i32; 3],
+        rotation: Rotation,
+    ) -> Vec<TemplateBlockInfo> {
+        let palette_index = template.palette_for(position).min(template.palettes.len() - 1);
+        let palette = &template.palettes[palette_index];
+        let mut out = Vec::new();
+        for block in &template.blocks {
+            let Some(state) = palette.get(block.state as usize) else {
+                continue;
+            };
+            if state.name != name {
+                continue;
+            }
+            let rel = transform(block.pos, Mirror::None, rotation, [0, 0, 0]);
+            out.push(TemplateBlockInfo {
+                pos: [
+                    rel[0] + position[0],
+                    rel[1] + position[1],
+                    rel[2] + position[2],
+                ],
+                state: state.rotate(rotation),
+                local: block.pos,
+                nbt: block.nbt.clone(),
+            });
+        }
+        out
+    }
+
+    fn assert_filter_matches_linear(
+        template: &StructureTemplate,
+        name: &str,
+        position: [i32; 3],
+        rotation: Rotation,
+    ) {
+        let indexed = template.filter_blocks(name, position, rotation);
+        let linear = linear_filter_blocks(template, name, position, rotation);
+        assert_eq!(
+            indexed.len(),
+            linear.len(),
+            "name={name} position={position:?} rotation={rotation:?}"
+        );
+        for (actual, expected) in indexed.iter().zip(linear.iter()) {
+            assert_eq!(actual.pos, expected.pos);
+            assert_eq!(actual.state, expected.state);
+            assert_eq!(actual.local, expected.local);
+            assert_eq!(actual.nbt, expected.nbt);
+        }
+    }
+
+    #[test]
+    fn indexed_jigsaw_filter_matches_linear_scan() {
+        let nbt_a = Arc::new(vec![
+            ("name".to_string(), Nbt::String("test:a".to_string())),
+            ("selection_priority".to_string(), Nbt::Int(3)),
+        ]);
+        let nbt_b = Arc::new(vec![
+            ("name".to_string(), Nbt::String("test:b".to_string())),
+            ("placement_priority".to_string(), Nbt::Int(7)),
+        ]);
+        let template = StructureTemplate::new(
+            [4, 1, 1],
+            vec![
+                vec![
+                    BlockState::parse("minecraft:jigsaw[orientation=north_up]"),
+                    BlockState::of("minecraft:stone"),
+                ],
+                vec![
+                    BlockState::parse("minecraft:jigsaw[orientation=south_up]"),
+                    BlockState::of("minecraft:dirt"),
+                ],
+            ],
+            vec![
+                TemplateBlock {
+                    pos: [0, 0, 0],
+                    state: 0,
+                    nbt: Some(Arc::clone(&nbt_a)),
+                },
+                TemplateBlock {
+                    pos: [1, 0, 0],
+                    state: 1,
+                    nbt: None,
+                },
+                TemplateBlock {
+                    pos: [2, 0, 0],
+                    state: 99,
+                    nbt: Some(Arc::clone(&nbt_b)),
+                },
+                TemplateBlock {
+                    pos: [3, 0, 0],
+                    state: 0,
+                    nbt: Some(Arc::clone(&nbt_b)),
+                },
+            ],
+        );
+        assert_eq!(template.jigsaw_indices, vec![vec![0, 3], vec![0, 3]]);
+
+        let mut palette_positions = [None, None];
+        'search: for x in -32..=32 {
+            for y in -2..=2 {
+                for z in -32..=32 {
+                    let position = [x, y, z];
+                    let palette = template.palette_for(position);
+                    palette_positions[palette] = Some(position);
+                    if palette_positions.iter().all(Option::is_some) {
+                        break 'search;
+                    }
+                }
+            }
+        }
+        let positions = [
+            palette_positions[0].expect("palette 0 position"),
+            palette_positions[1].expect("palette 1 position"),
+            [-123, 45, 77],
+        ];
+        let names = [
+            JIGSAW_BLOCK_NAME,
+            "minecraft:stone",
+            "minecraft:dirt",
+            "minecraft:missing",
+        ];
+        for position in positions {
+            for rotation in [
+                Rotation::None,
+                Rotation::Cw90,
+                Rotation::Cw180,
+                Rotation::Ccw90,
+            ] {
+                for name in names {
+                    assert_filter_matches_linear(&template, name, position, rotation);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn constructors_populate_jigsaw_indices() {
+        let template = StructureTemplate::from_blocks(
+            [2, 1, 1],
+            vec![BlockState::of(JIGSAW_BLOCK_NAME)],
+            vec![([0, 0, 0], 0), ([1, 0, 0], 1)],
+        );
+        assert_eq!(template.jigsaw_indices, vec![vec![0]]);
+        assert_eq!(
+            StructureTemplate::empty().jigsaw_indices,
+            vec![Vec::<usize>::new()]
+        );
     }
 }

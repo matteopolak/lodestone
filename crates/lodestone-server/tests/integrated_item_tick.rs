@@ -4,10 +4,12 @@
 
 #![cfg(not(target_arch = "wasm32"))]
 
-use std::time::{Duration, Instant};
 use std::str::FromStr;
+use std::time::{Duration, Instant};
 
+use lodestone_core::{Reader, State, Writer};
 use lodestone_entity::item_entity::ItemLifecycle;
+use lodestone_net::Connection;
 use lodestone_model::{ResourceKey, Vec3};
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
 
@@ -41,14 +43,37 @@ impl ChunkSource for FlatFloor {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn integrated_tick_loop_advances_a_live_dropped_item() {
-    let (server, _client) = IntegratedServer::open_in_memory_with_mobs(
+    let (server, client_io) = IntegratedServer::open_in_memory_with_mobs(
         FakeProtocol,
         FlatFloor,
         (0..=0, 0..=0),
         (0, 0),
         0,
-        0,
     );
+    let mut client = Connection::new(client_io);
+    client.write_packet(0, &[2]).await.expect("handshake");
+    let mut login = Writer::default();
+    login.string("ItemTick");
+    client
+        .write_packet(0, login.as_slice())
+        .await
+        .expect("login start");
+    let (id, payload) = client
+        .read_packet()
+        .await
+        .expect("read login success")
+        .expect("login success packet");
+    assert_eq!(id, 2);
+    let mut reader = Reader::new(&payload);
+    assert_eq!(reader.string(16).expect("login username"), "ItemTick");
+    client
+        .write_packet(3, &[])
+        .await
+        .expect("login acknowledgement");
+    client
+        .write_packet(3, &[])
+        .await
+        .expect("configuration finish");
     let mobs = server.mobs().expect("the integrated world owns a MobHandle");
 
     // World-open reseeding replaces the initial simulation. Wait for the
@@ -108,15 +133,36 @@ struct FakeProtocol;
 impl lodestone_server::ServerProtocol for FakeProtocol {
     fn decode(
         &self,
-        _state: lodestone_core::State,
-        _packet_id: i32,
-        _payload: &[u8],
+        state: State,
+        packet_id: i32,
+        payload: &[u8],
     ) -> lodestone_server::ServerBound {
-        lodestone_server::ServerBound::Ignored
+        match state {
+            State::Handshaking if packet_id == 0 => lodestone_server::ServerBound::Handshake {
+                next_state: State::Login,
+            },
+            State::Login if packet_id == 0 => {
+                let mut reader = Reader::new(payload);
+                lodestone_server::ServerBound::LoginStart {
+                    username: reader.string(16).expect("username"),
+                    uuid: uuid::Uuid::nil(),
+                }
+            }
+            State::Login if packet_id == 3 => lodestone_server::ServerBound::LoginAcknowledged,
+            State::Configuration if packet_id == 3 => {
+                lodestone_server::ServerBound::ConfigurationFinished
+            }
+            _ => lodestone_server::ServerBound::Ignored,
+        }
     }
 
-    fn login_success(&self, _username: &str, _uuid: uuid::Uuid) -> Vec<lodestone_server::ServerDirective> {
-        Vec::new()
+    fn login_success(&self, username: &str, _uuid: uuid::Uuid) -> Vec<lodestone_server::ServerDirective> {
+        let mut payload = Writer::default();
+        payload.string(username);
+        vec![lodestone_server::ServerDirective::Send {
+            packet_id: 2,
+            payload: payload.as_slice().to_vec(),
+        }]
     }
 
     fn begin_configuration(&self) -> Vec<lodestone_server::ServerDirective> {

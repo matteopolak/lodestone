@@ -76,6 +76,31 @@ pub struct ParityDecorationSpill {
 pub struct ParityDecorationResult {
     pub spills: Vec<ParityDecorationSpill>,
     pub block_entities: Vec<super::block_entities::GeneratedBlockEntity>,
+    /// Target-local final FEATURES writes retained by direct target output.
+    /// This is separate from [`Self::spills`] because the target column is
+    /// already complete when the lifecycle materializer adopts it.
+    pub local_features: Vec<ParityDecorationSpill>,
+}
+
+/// The target-owned production result keeps the finished target column in its
+/// dense representation and separates its local read state from writes that
+/// leave that column.
+#[derive(Debug)]
+pub struct DirectDecorationResult {
+    pub column: super::GeneratedColumn,
+    pub spills: Vec<ParityDecorationSpill>,
+    /// Final target-local FEATURES and top-layer writes. The caller seeds these
+    /// into the later target read view without replaying them into this
+    /// already-finished dense column.
+    pub local_features: Vec<ParityDecorationSpill>,
+}
+
+/// Sparse target-owned decoration result for a settlement padding writer.
+#[derive(Debug)]
+pub struct SparseDirectDecorationResult {
+    pub spills: Vec<ParityDecorationSpill>,
+    pub local_features: Vec<ParityDecorationSpill>,
+    pub block_entities: Vec<super::block_entities::GeneratedBlockEntity>,
 }
 
 /// Final source-local `TOP_LAYER_MODIFICATION` transition used by the
@@ -95,6 +120,13 @@ pub struct ParityTopLayerSpill {
 enum MixedEntryWriter {
     Decoration,
     Ore,
+}
+
+#[derive(Clone, Copy)]
+enum SpillCapture {
+    None,
+    All,
+    CrossColumn,
 }
 
 #[derive(Default)]
@@ -163,59 +195,287 @@ fn overworld_source_offsets() -> &'static [(i32, i32)] {
 /// Immutable read context for one centre chunk's unified FEATURES dispatch.
 ///
 /// The terrain prefixes are already memoised by [`super::OverworldGenerator`]'s
-/// staged store. This second layer keeps the derived 5×5 handles, stitched ore
-/// height table, and source-local feature selections alive across the source
-/// completions that share one centre. It contains no mutable world state and no
-/// placement result: resident overrides and every source's RNG stream remain
-/// owned by the caller and are evaluated in authenticated order.
+/// staged store. This second layer points into one request-owned 5×5 product
+/// window and keeps fixed source-plan indices and a compact height view alive
+/// across the source completions that share one centre. It contains no mutable
+/// world state and no placement result: resident overrides and every source's
+/// RNG stream remain owned by the caller and are evaluated in authenticated order.
 #[derive(Debug)]
 pub struct MixedReplayContext {
-    wide_pre: [Option<Arc<super::PreOreResult>>; crate::feature::region_view::WIDE_SLOTS],
+    window: Arc<MixedReplayWindow>,
+    wide_pre: [u16; crate::feature::region_view::WIDE_SLOTS],
+    centre_pre: Option<u16>,
     centre_biomes: Arc<super::biome_cells::BiomeCells>,
     ocean_floor_wg: crate::feature::RegionHeights,
-    feature_biomes: Arc<HashMap<String, HashSet<String>>>,
-    source_ores: BTreeMap<(i32, i32), Vec<PlacedOre>>,
-    source_features:
-        BTreeMap<(i32, i32), Vec<(i32, usize, crate::feature::vegetation::PlacedRef)>>,
+    source_plans: [u16; 9],
 }
 
 impl MixedReplayContext {
     #[must_use]
     pub fn retained_bytes(&self) -> usize {
-        let ore_maps = self
-            .source_ores
+        std::mem::size_of::<Self>()
+            + self.window.retained_bytes()
+    }
+
+    pub(crate) fn centre_pre_ore(&self) -> Option<&Arc<super::PreOreResult>> {
+        self.centre_pre.map(|index| {
+            self.window.products[index as usize]
+                .pre
+                .as_ref()
+                .expect("a centre product index must point at a pre-ore product")
+        })
+    }
+
+    #[inline]
+    fn pre(&self, index: u16) -> Option<&super::PreOreResult> {
+        self.window.products[index as usize].pre.as_deref()
+    }
+
+    #[inline]
+    fn source_plan(&self, source_x: i32, source_z: i32, cx: i32, cz: i32) -> Option<&MixedReplaySourcePlan> {
+        let dx = source_x - cx;
+        let dz = source_z - cz;
+        if !(-1..=1).contains(&dx) || !(-1..=1).contains(&dz) {
+            return None;
+        }
+        Some(&self.window.source_plans[self.source_plans[((dx + 1) * 3 + dz + 1) as usize] as usize])
+    }
+}
+
+type MixedFeatureList =
+    Vec<(i32, usize, Arc<crate::feature::vegetation::PlacedRef>)>;
+
+/// Immutable source selection shared by every target whose 3×3 window contains
+/// this source. Selection depends on the source's biome union, not on the
+/// target-relative coordinates, so adjacent targets can retain one plan.
+#[derive(Debug)]
+struct MixedReplaySourcePlan {
+    source: (i32, i32),
+    ores: Arc<Vec<PlacedOre>>,
+    features: Arc<MixedFeatureList>,
+}
+
+struct MixedReplayProduct {
+    coordinate: (i32, i32),
+    pre: Option<Arc<super::PreOreResult>>,
+    heights: [i32; 256],
+}
+
+struct MixedReplayWindow {
+    products: Vec<MixedReplayProduct>,
+    source_plans: Vec<Arc<MixedReplaySourcePlan>>,
+    heights: Arc<crate::feature::RegionHeightStorage>,
+    feature_biomes: Arc<HashMap<String, HashSet<String>>>,
+}
+
+impl std::fmt::Debug for MixedReplayWindow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MixedReplayWindow")
+            .field("products", &self.products.len())
+            .field("source_plans", &self.source_plans.len())
+            .finish()
+    }
+}
+
+impl MixedReplayWindow {
+    fn product_index(&self, coordinate: (i32, i32)) -> u16 {
+        self.products
+            .binary_search_by_key(&coordinate, |product| product.coordinate)
+            .ok()
+            .unwrap_or_else(|| panic!("replay product missing for {coordinate:?}")) as u16
+    }
+
+    fn source_plan_index(&self, source: (i32, i32)) -> u16 {
+        self.source_plans
+            .binary_search_by_key(&source, |plan| plan.source)
+            .ok()
+            .unwrap_or_else(|| panic!("replay source plan missing for {source:?}")) as u16
+    }
+
+    fn retained_bytes(&self) -> usize {
+        let mut seen_features = HashSet::new();
+        let feature_bytes = self
+            .source_plans
             .iter()
-            .map(|(_, ores)| {
-                std::mem::size_of::<((i32, i32), Vec<PlacedOre>)>()
-                    + ores.capacity() * std::mem::size_of::<PlacedOre>()
-                    + ores.iter().map(placed_ore_retained_bytes).sum::<usize>()
-            })
-            .sum::<usize>();
-        let feature_maps = self
-            .source_features
-            .iter()
-            .map(|(_, features)| {
-                std::mem::size_of::<(
-                    (i32, i32),
-                    Vec<(i32, usize, crate::feature::vegetation::PlacedRef)>,
-                )>()
-                    + features.capacity()
-                        * std::mem::size_of::<(
-                            i32,
-                            usize,
-                            crate::feature::vegetation::PlacedRef,
-                        )>()
-                    + features
+            .map(|plan| {
+                std::mem::size_of::<MixedReplaySourcePlan>()
+                    + plan.ores.capacity() * std::mem::size_of::<PlacedOre>()
+                    + plan.ores.iter().map(placed_ore_retained_bytes).sum::<usize>()
+                    + plan.features.capacity()
+                        * std::mem::size_of::<(i32, usize, Arc<crate::feature::vegetation::PlacedRef>)>()
+                    + plan
+                        .features
                         .iter()
-                        .map(|(_, _, feature)| placed_ref_retained_bytes(feature))
+                        .filter_map(|(_, _, feature)| {
+                            seen_features.insert(Arc::as_ptr(feature)).then(|| placed_ref_retained_bytes(feature))
+                        })
                         .sum::<usize>()
             })
             .sum::<usize>();
         std::mem::size_of::<Self>()
-            + crate::feature::RegionHeights::AREA * std::mem::size_of::<i32>()
-            + ore_maps
-            + feature_maps
+            + self.products.capacity() * std::mem::size_of::<MixedReplayProduct>()
+            + self.heights.retained_bytes()
+            + feature_bytes
     }
+}
+
+fn make_replay_window(
+    products: Vec<MixedReplayProduct>,
+    source_plans: Vec<Arc<MixedReplaySourcePlan>>,
+    feature_biomes: Arc<HashMap<String, HashSet<String>>>,
+) -> Arc<MixedReplayWindow> {
+    assert!(products.len() <= u16::MAX as usize, "replay product window exceeds compact index space");
+    assert!(source_plans.len() <= u16::MAX as usize, "replay source-plan window exceeds compact index space");
+    let heights = crate::feature::RegionHeightStorage::from_columns(
+        products.iter().map(|product| product.heights).collect(),
+    );
+    Arc::new(MixedReplayWindow {
+        products,
+        source_plans,
+        heights,
+        feature_biomes,
+    })
+}
+
+fn context_from_window(
+    window: Arc<MixedReplayWindow>,
+    cx: i32,
+    cz: i32,
+    read_radius: i32,
+    centre_pre: Option<u16>,
+    centre_biomes: Arc<super::biome_cells::BiomeCells>,
+) -> MixedReplayContext {
+    let mut wide_pre = [u16::MAX; crate::feature::region_view::WIDE_SLOTS];
+    for dx in -crate::feature::region_view::WIDE_RADIUS..=crate::feature::region_view::WIDE_RADIUS {
+        for dz in -crate::feature::region_view::WIDE_RADIUS..=crate::feature::region_view::WIDE_RADIUS {
+            if dx.abs() <= read_radius && dz.abs() <= read_radius {
+                wide_pre[crate::feature::region_view::wide_slot_of_offset(dx, dz)] =
+                    window.product_index((cx + dx, cz + dz));
+            }
+        }
+    }
+    let mut source_plans = [u16::MAX; 9];
+    for &(dx, dz) in overworld_source_offsets() {
+        source_plans[((dx + 1) * 3 + dz + 1) as usize] =
+            window.source_plan_index((cx + dx, cz + dz));
+    }
+    MixedReplayContext {
+        ocean_floor_wg: crate::feature::RegionHeights::from_shared(
+            Arc::clone(&window.heights),
+            wide_pre,
+        ),
+        window,
+        wide_pre,
+        centre_pre,
+        centre_biomes,
+        source_plans,
+    }
+}
+
+/// Request-owned immutable preparation for a set of adjacent Overworld targets.
+/// The generator's staged store remains the only cross-request memo; dropping
+/// this value releases the batch's terrain handles, height tables and plans.
+#[derive(Debug)]
+pub struct MixedReplayBatch {
+    order: Vec<(i32, i32)>,
+    contexts: Vec<((i32, i32), Arc<MixedReplayContext>)>,
+    window: Arc<MixedReplayWindow>,
+}
+
+impl MixedReplayBatch {
+    /// Targets in the caller's first-occurrence order.
+    #[must_use]
+    pub fn targets(&self) -> &[(i32, i32)] {
+        &self.order
+    }
+
+    /// Returns the immutable context for one admitted target.
+    #[must_use]
+    pub fn context(&self, target: (i32, i32)) -> Option<&MixedReplayContext> {
+        self.contexts
+            .iter()
+            .find(|(coordinate, _)| *coordinate == target)
+            .map(|(_, context)| context.as_ref())
+    }
+
+    /// Clone the target context handle for a lifecycle owner. The batch keeps
+    /// the product alive while the returned context is in use.
+    #[must_use]
+    pub fn context_arc(&self, target: (i32, i32)) -> Option<Arc<MixedReplayContext>> {
+        self.contexts
+            .iter()
+            .find(|(coordinate, _)| *coordinate == target)
+            .map(|(_, context)| Arc::clone(context))
+    }
+
+    /// Writes each context in the request's stable target order. The closure
+    /// is the production seam: callers can run source bodies and persist their
+    /// results while this request-owned product remains live.
+    pub fn write_contexts<F>(&self, mut writer: F)
+    where
+        F: FnMut((i32, i32), &MixedReplayContext),
+    {
+        for &target in &self.order {
+            writer(target, self.context(target).expect("batch target context missing"));
+        }
+    }
+
+    /// Number of unique pre-ore products admitted by this request.
+    #[must_use]
+    pub fn pre_ore_product_count(&self) -> usize {
+        self.window.products.iter().filter(|product| product.pre.is_some()).count()
+    }
+
+    /// Number of source-local selection plans retained by this request.
+    #[must_use]
+    pub fn source_plan_count(&self) -> usize {
+        self.window.source_plans.len()
+    }
+
+    /// Conservative accounting for storage retained by this request product.
+    /// The dense source fields are bounded by the admitted dependency union;
+    /// no generator-global decoration map is involved.
+    #[must_use]
+    pub fn retained_bytes(&self) -> usize {
+        let world_bytes = self.window.products.iter().filter_map(|product| product.pre.as_ref()).map(|pre| {
+                let (_, _, _, sx, sy, sz) = pre.0.bounds();
+                (sx as usize)
+                    .saturating_mul(sy as usize)
+                    .saturating_mul(sz as usize)
+                    .saturating_mul(std::mem::size_of::<crate::interner::StateId>())
+            }).sum::<usize>();
+        std::mem::size_of::<Self>()
+            + self.order.capacity() * std::mem::size_of::<(i32, i32)>()
+            + world_bytes
+            + self.window.retained_bytes()
+    }
+}
+
+fn unique_target_order(targets: &[(i32, i32)]) -> Vec<(i32, i32)> {
+    let mut order = Vec::with_capacity(targets.len());
+    let mut seen = BTreeSet::new();
+    for &target in targets {
+        if seen.insert(target) {
+            order.push(target);
+        }
+    }
+    order
+}
+
+fn replay_dependency_union(targets: &[(i32, i32)]) -> BTreeSet<(i32, i32)> {
+    let mut dependencies = BTreeSet::new();
+    for &(cx, cz) in targets {
+        for dx in -crate::feature::region_view::WIDE_RADIUS
+            ..=crate::feature::region_view::WIDE_RADIUS
+        {
+            for dz in -crate::feature::region_view::WIDE_RADIUS
+                ..=crate::feature::region_view::WIDE_RADIUS
+            {
+                dependencies.insert((cx + dx, cz + dz));
+            }
+        }
+    }
+    dependencies
 }
 
 fn placed_ore_retained_bytes(value: &PlacedOre) -> usize {
@@ -440,9 +700,10 @@ impl OverworldGenerator {
             return ParityDecorationResult {
                 spills: Vec::new(),
                 block_entities: Vec::new(),
+                local_features: Vec::new(),
             };
         }
-        let context = self.replay_context_for(target_x, target_z);
+        let context = self.replay_context_for(target_x, target_z, (source_x, source_z));
         self.parity_source_decoration_with_context(
             target_x,
             target_z,
@@ -465,11 +726,15 @@ impl OverworldGenerator {
         overrides: &[(i32, i32, i32, String)],
         context: &MixedReplayContext,
     ) -> ParityDecorationResult {
-        let pre = self.pre_ore_stage(target_x, target_z);
+        let pre = context
+            .centre_pre_ore()
+            .cloned()
+            .unwrap_or_else(|| self.pre_ore_stage(target_x, target_z));
         if self.decoration_catalog.is_empty() {
             return ParityDecorationResult {
                 spills: Vec::new(),
                 block_entities: Vec::new(),
+                local_features: Vec::new(),
             };
         }
         self.mixed_features_stage_selected(
@@ -479,16 +744,15 @@ impl OverworldGenerator {
             context,
             Some((source_x, source_z)),
             overrides,
-            true,
+            SpillCapture::All,
         )
         .1
     }
 
     /// Runs the one target FEATURES completion against its radius-one
-    /// CARVERS region and returns the complete transition stream. The
-    /// dispatcher may use several internal source views to route boundary
-    /// reads and writes, but they are one lifecycle completion owned by the
-    /// target chunk.
+    /// CARVERS region and returns the complete transition stream. The target
+    /// origin owns this invocation; neighbouring columns are read/write
+    /// context, not additional source bodies.
     #[must_use]
     pub fn parity_features_with_overrides(
         &self,
@@ -501,9 +765,10 @@ impl OverworldGenerator {
             return ParityDecorationResult {
                 spills: Vec::new(),
                 block_entities: Vec::new(),
+                local_features: Vec::new(),
             };
         }
-        let context = self.replay_context_for(target_x, target_z);
+        let context = self.replay_context_for(target_x, target_z, (target_x, target_z));
         self.mixed_features_stage_selected(
             target_x,
             target_z,
@@ -511,9 +776,271 @@ impl OverworldGenerator {
             &context,
             None,
             overrides,
-            true,
+            SpillCapture::All,
         )
         .1
+    }
+
+    /// Complete the target-owned Overworld decoration and top-layer stages in
+    /// one pass. The dense target result is adopted directly; only writes into
+    /// other columns cross the lifecycle boundary.
+    #[must_use]
+    pub fn direct_decoration_with_overrides(
+        &self,
+        target_x: i32,
+        target_z: i32,
+        overrides: &[(i32, i32, i32, String)],
+    ) -> DirectDecorationResult {
+        let pre = self.pre_ore_stage(target_x, target_z);
+        if self.decoration_catalog.is_empty() {
+            let mut local_states = BTreeMap::new();
+            let (world, _) =
+                self.top_layer_stage_with_observer(
+                    target_x,
+                    target_z,
+                    (*pre.0).clone(),
+                    &pre.2,
+                    &mut |x, y, z, state| {
+                        local_states.insert((x, y, z), state.to_owned());
+                    },
+                );
+            let column = self.intern_from_dense(
+                target_x,
+                target_z,
+                super::output::GenStage::Full,
+                world,
+                pre.2.clone(),
+                (*pre.3).clone(),
+                Vec::new(),
+            );
+            return DirectDecorationResult {
+                column,
+                spills: Vec::new(),
+                local_features: local_states
+                    .into_iter()
+                    .map(|(position, state)| ParityDecorationSpill {
+                        source: (target_x, target_z),
+                        position,
+                        state,
+                    })
+                    .collect(),
+            };
+        }
+        let context = self.replay_context_for(target_x, target_z, (target_x, target_z));
+        self.direct_decoration_with_context_and_pre(
+            target_x,
+            target_z,
+            overrides,
+            &context,
+            &pre,
+        )
+    }
+
+    /// Complete target-owned decoration using a context prepared by the
+    /// request batch. This is the direct-output counterpart to source replay's
+    /// `parity_source_decoration_with_context` seam.
+    #[must_use]
+    pub fn direct_decoration_with_context(
+        &self,
+        target_x: i32,
+        target_z: i32,
+        overrides: &[(i32, i32, i32, String)],
+        context: &MixedReplayContext,
+    ) -> DirectDecorationResult {
+        let pre = context
+            .centre_pre_ore()
+            .cloned()
+            .unwrap_or_else(|| self.pre_ore_stage(target_x, target_z));
+        self.direct_decoration_with_context_and_pre(
+            target_x,
+            target_z,
+            overrides,
+            context,
+            &pre,
+        )
+    }
+
+    /// Run FEATURES and TOP_LAYER in production order while retaining only
+    /// sparse writes and generated entities.
+    #[must_use]
+    pub fn sparse_direct_decoration_with_context(
+        &self,
+        target_x: i32,
+        target_z: i32,
+        overrides: &[(i32, i32, i32, String)],
+        context: &MixedReplayContext,
+    ) -> SparseDirectDecorationResult {
+        let pre = context
+            .centre_pre_ore()
+            .cloned()
+            .unwrap_or_else(|| self.pre_ore_stage(target_x, target_z));
+        if self.decoration_catalog.is_empty() {
+            let mut world = (*pre.0).clone();
+            let (min_x, min_y, min_z, size_x, size_y, size_z) = world.bounds();
+            for &(x, y, z, ref state) in overrides {
+                if (min_x..min_x + size_x).contains(&x)
+                    && (min_y..min_y + size_y).contains(&y)
+                    && (min_z..min_z + size_z).contains(&z)
+                {
+                    world.set(x, y, z, state);
+                }
+            }
+            let mut local_states = BTreeMap::new();
+            let (world, _) = self.top_layer_stage_with_observer(
+                target_x,
+                target_z,
+                world,
+                &pre.2,
+                &mut |x, y, z, state| {
+                    local_states.insert((x, y, z), state.to_owned());
+                },
+            );
+            drop(world);
+            return SparseDirectDecorationResult {
+                spills: Vec::new(),
+                local_features: local_states
+                    .into_iter()
+                    .map(|(position, state)| ParityDecorationSpill {
+                        source: (target_x, target_z),
+                        position,
+                        state,
+                    })
+                    .collect(),
+                block_entities: Vec::new(),
+            };
+        }
+        let (world, result) = self.mixed_features_stage_selected(
+            target_x,
+            target_z,
+            (*pre.0).clone(),
+            context,
+            None,
+            overrides,
+            SpillCapture::CrossColumn,
+        );
+        let mut local_states = result
+            .local_features
+            .into_iter()
+            .map(|spill| (spill.position, spill.state))
+            .collect::<BTreeMap<_, _>>();
+        let (_, _) = self.top_layer_stage_with_observer(
+            target_x,
+            target_z,
+            world,
+            &pre.2,
+            &mut |x, y, z, state| {
+                local_states.insert((x, y, z), state.to_owned());
+            },
+        );
+        SparseDirectDecorationResult {
+            spills: result.spills,
+            local_features: local_states
+                .into_iter()
+                .map(|(position, state)| ParityDecorationSpill {
+                    source: (target_x, target_z),
+                    position,
+                    state,
+                })
+                .collect(),
+            block_entities: result.block_entities,
+        }
+    }
+
+    fn direct_decoration_with_context_and_pre(
+        &self,
+        target_x: i32,
+        target_z: i32,
+        overrides: &[(i32, i32, i32, String)],
+        context: &MixedReplayContext,
+        pre: &Arc<super::PreOreResult>,
+    ) -> DirectDecorationResult {
+        if self.decoration_catalog.is_empty() {
+            let mut local_states = BTreeMap::new();
+            let (world, _) =
+                self.top_layer_stage_with_observer(
+                    target_x,
+                    target_z,
+                    (*pre.0).clone(),
+                    &pre.2,
+                    &mut |x, y, z, state| {
+                        local_states.insert((x, y, z), state.to_owned());
+                    },
+                );
+            let column = self.intern_from_dense(
+                target_x,
+                target_z,
+                super::output::GenStage::Full,
+                world,
+                pre.2.clone(),
+                (*pre.3).clone(),
+                Vec::new(),
+            );
+            return DirectDecorationResult {
+                column,
+                spills: Vec::new(),
+                local_features: local_states
+                    .into_iter()
+                    .map(|(position, state)| ParityDecorationSpill {
+                        source: (target_x, target_z),
+                        position,
+                        state,
+                    })
+                    .collect(),
+            };
+        }
+        let (world, result) = self.mixed_features_stage_selected(
+            target_x,
+            target_z,
+            (*pre.0).clone(),
+            &context,
+            None,
+            overrides,
+            SpillCapture::CrossColumn,
+        );
+        let mut local_states = result
+            .local_features
+            .into_iter()
+            .map(|spill| (spill.position, spill.state))
+            .collect::<BTreeMap<_, _>>();
+        let (world, _) = self.top_layer_stage_with_observer(
+            target_x,
+            target_z,
+            world,
+            &pre.2,
+            &mut |x, y, z, state| {
+                local_states.insert((x, y, z), state.to_owned());
+            },
+        );
+        let local_features = local_states
+            .into_iter()
+            .map(|(position, state)| ParityDecorationSpill {
+                source: (target_x, target_z),
+                position,
+                state,
+            })
+            .collect();
+        let block_entities = result
+            .block_entities
+            .into_iter()
+            .filter(|entity| {
+                let (x, _, z) = entity.position();
+                (x >> 4) == target_x && (z >> 4) == target_z
+            })
+            .collect();
+        let column = self.intern_from_dense(
+            target_x,
+            target_z,
+            super::output::GenStage::Full,
+            world,
+            pre.2.clone(),
+            (*pre.3).clone(),
+            block_entities,
+        );
+        DirectDecorationResult {
+            column,
+            spills: result.spills,
+            local_features,
+        }
     }
 
     /// Runs the source-local `TOP_LAYER_MODIFICATION` body over the source's
@@ -619,24 +1146,23 @@ impl OverworldGenerator {
         }
         let centre_biomes = Arc::clone(&self.pre_ore_stage(cx, cz).3);
 
-        // The `OCEAN_FLOOR_WG` heightmap is still gathered into a small map,
-        // deliberately: at most 80 × 80 = 6,400 entries across the whole read context,
-        // three orders of magnitude below the block field this pass stopped
-        // copying, and `OreInput` reads it by clamped region-local key rather than
-        // by chunk. It was never the cost D2 named.
-        let mut ocean_floor_wg = crate::feature::RegionHeights::unset();
-        Self::stitch_heights(&mut ocean_floor_wg, 0, 0, center_heights);
+        let mut columns = Vec::with_capacity(crate::feature::region_view::WIDE_SLOTS);
         for dx in -crate::feature::region_view::WIDE_RADIUS..=crate::feature::region_view::WIDE_RADIUS {
             for dz in -crate::feature::region_view::WIDE_RADIUS..=crate::feature::region_view::WIDE_RADIUS {
-                if dx == 0 && dz == 0 {
-                    continue;
-                }
-                let neighbour = wide_pre[crate::feature::region_view::wide_slot_of_offset(dx, dz)]
-                    .as_ref()
-                    .expect("every non-centre offset was filled above");
-                Self::stitch_heights(&mut ocean_floor_wg, dx * 16, dz * 16, &neighbour.1);
+                columns.push(if dx == 0 && dz == 0 {
+                    *center_heights
+                } else {
+                    wide_pre[crate::feature::region_view::wide_slot_of_offset(dx, dz)]
+                        .as_ref()
+                        .expect("every non-centre offset was filled above")
+                        .1
+                });
             }
         }
+        let ocean_floor_wg = crate::feature::RegionHeights::from_shared(
+            crate::feature::RegionHeightStorage::from_columns(columns),
+            std::array::from_fn(|index| index as u16),
+        );
 
         let mut source_ores = BTreeMap::new();
         for &(dx, dz) in overworld_source_offsets() {
@@ -650,13 +1176,10 @@ impl OverworldGenerator {
                 &centre_biomes,
                 &wide_pre,
             );
-            source_ores.insert(
-                (source_x, source_z),
-                self.decoration_catalog.select_ores(
+            source_ores.insert((source_x, source_z), self.decoration_catalog.select_ores(
                     biomes.iter().copied(),
                     &self.ore_definitions,
-                ),
-            );
+                ));
         }
         let ores_for_source = |source_x: i32, source_z: i32| -> &[PlacedOre] {
             source_ores
@@ -871,23 +1394,6 @@ impl OverworldGenerator {
     /// now that dense array, and the clamp did move with it — it stays in
     /// [`crate::feature::OreInput::region_local`], and `RegionHeights`'s accessors
     /// document that they assume a pre-clamped key.
-    fn stitch_heights(
-        ocean_floor_wg: &mut crate::feature::RegionHeights,
-        offset_x: i32,
-        offset_z: i32,
-        heights: &[i32; 256],
-    ) {
-        for lz in 0..16i32 {
-            for lx in 0..16i32 {
-                ocean_floor_wg.set(
-                    offset_x + lx,
-                    offset_z + lz,
-                    heights[(lz * 16 + lx) as usize],
-                );
-            }
-        }
-    }
-
     /// Returns the biomes visible to one source's own 3x3 feature neighbourhood
     /// without consulting the staged store.  The returned set borrows the
     /// already-built biome palettes; callers that need several catalog streams
@@ -926,8 +1432,28 @@ impl OverworldGenerator {
         biomes
     }
 
+    fn source_biomes_from_products<'a>(
+        source: (i32, i32),
+        products: &'a [MixedReplayProduct],
+    ) -> BTreeSet<&'a str> {
+        let mut biomes = BTreeSet::new();
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                let coordinate = (source.0 + dx, source.1 + dz);
+                let pre = products
+                    .iter()
+                    .find(|product| product.coordinate == coordinate)
+                    .and_then(|product| product.pre.as_ref())
+                    .expect("batch source biome lies inside the admitted radius-two union");
+                biomes.extend(pre.3.palette().builtin_names());
+            }
+        }
+        biomes
+    }
+
     /// Build the immutable dispatch product owned by one request target.
-    /// Callers retain this `Arc` for all nine source completions.
+    /// Callers retain this `Arc` for the source bodies that share the target's
+    /// read context.
     pub fn lifecycle_replay_context(&self, cx: i32, cz: i32) -> Arc<MixedReplayContext> {
         let centre = self.pre_ore_stage(cx, cz);
         Arc::new(self.build_mixed_replay_context(
@@ -935,11 +1461,120 @@ impl OverworldGenerator {
             cz,
             &centre.1,
             Arc::clone(&centre.3),
+            Some(Arc::clone(&centre)),
+            None,
+            crate::feature::region_view::WIDE_RADIUS,
         ))
     }
 
-    fn replay_context_for(&self, cx: i32, cz: i32) -> Arc<MixedReplayContext> {
-        self.lifecycle_replay_context(cx, cz)
+    /// Prepares one request-owned mixed replay product for `targets`. Every
+    /// terrain prefix in the union of the target radius-two windows is touched
+    /// once, and every source selection shared by those windows is built once.
+    /// The returned product is intentionally not stored on the generator.
+    #[must_use]
+    pub fn mixed_replay_batch(&self, targets: &[(i32, i32)]) -> MixedReplayBatch {
+        let order = unique_target_order(targets);
+        let products = replay_dependency_union(&order)
+            .into_iter()
+            .map(|position| {
+                let pre = self.pre_ore_stage(position.0, position.1);
+                MixedReplayProduct {
+                    coordinate: position,
+                    heights: pre.1,
+                    pre: Some(pre),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let mut source_positions = BTreeSet::new();
+        for &(cx, cz) in &order {
+            for &(dx, dz) in overworld_source_offsets() {
+                source_positions.insert((cx + dx, cz + dz));
+            }
+        }
+        let source_plans = source_positions
+            .into_iter()
+            .map(|source| {
+                let biomes = Self::source_biomes_from_products(source, &products);
+                let selected = self
+                    .decoration_catalog
+                    .select_all(biomes.iter().copied(), &self.ore_definitions);
+                let mut features = selected.features;
+                features.extend(selected.step6_disks);
+                features.extend(selected.step6_non_ore);
+                features.sort_by_key(|(step, index, _)| (*step, *index));
+                Arc::new(MixedReplaySourcePlan {
+                    source,
+                    ores: Arc::new(selected.ores),
+                    features: Arc::new(features),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let window = make_replay_window(
+            products,
+            source_plans,
+            self.decoration_catalog.feature_biomes(),
+        );
+
+        let mut contexts = Vec::with_capacity(order.len());
+        for &(cx, cz) in &order {
+            let centre = window.product_index((cx, cz));
+            let centre_biomes = window.products[centre as usize]
+                .pre
+                .as_ref()
+                .expect("batch target must have a pre-ore product")
+                .3
+                .clone();
+            let context = context_from_window(
+                Arc::clone(&window),
+                cx,
+                cz,
+                crate::feature::region_view::WIDE_RADIUS,
+                Some(centre),
+                centre_biomes,
+            );
+            contexts.push(((cx, cz), Arc::new(context)));
+        }
+
+        MixedReplayBatch {
+            order,
+            contexts,
+            window,
+        }
+    }
+
+    /// Runs a writer over one request-owned mixed replay product and drops the
+    /// product as soon as the writer returns.
+    pub fn with_mixed_replay_batch<R>(
+        &self,
+        targets: &[(i32, i32)],
+        writer: impl FnOnce(&MixedReplayBatch) -> R,
+    ) -> R {
+        let batch = self.mixed_replay_batch(targets);
+        writer(&batch)
+    }
+
+    fn replay_context_for(
+        &self,
+        cx: i32,
+        cz: i32,
+        source: (i32, i32),
+    ) -> Arc<MixedReplayContext> {
+        let centre = self.pre_ore_stage(cx, cz);
+        Arc::new(self.build_mixed_replay_context(
+            cx,
+            cz,
+            &centre.1,
+            Arc::clone(&centre.3),
+            Some(Arc::clone(&centre)),
+            Some(source),
+            if source == (cx, cz) {
+                super::TARGET_DECORATION_RADIUS
+            } else {
+                crate::feature::region_view::WIDE_RADIUS
+            },
+        ))
     }
 
     /// Builds the immutable portion of one unified FEATURES dispatch.
@@ -947,23 +1582,27 @@ impl OverworldGenerator {
     /// `center_heights` and `center_biomes` are supplied explicitly so the
     /// timing path can still measure a locally computed centre prefix without
     /// accidentally replacing it with the staged-store value. The normal
-    /// production and lifecycle paths pass the staged centre values and use
-    /// [`Self::replay_context_for`] to retain the result.
+    /// production and lifecycle paths pass the staged centre values.
     fn build_mixed_replay_context(
         &self,
         cx: i32,
         cz: i32,
         center_heights: &[i32; 256],
         center_biomes: Arc<super::biome_cells::BiomeCells>,
+        center_product: Option<Arc<super::PreOreResult>>,
+        selected_source: Option<(i32, i32)>,
+        read_radius: i32,
     ) -> MixedReplayContext {
+        assert!(
+            (0..=crate::feature::region_view::WIDE_RADIUS).contains(&read_radius),
+            "mixed replay read radius exceeds its slot table"
+        );
         let mut wide_pre:
             [Option<Arc<super::PreOreResult>>; crate::feature::region_view::WIDE_SLOTS] =
             std::array::from_fn(|_| None);
-        for dx in -crate::feature::region_view::WIDE_RADIUS
-            ..=crate::feature::region_view::WIDE_RADIUS
+        for dx in -read_radius..=read_radius
         {
-            for dz in -crate::feature::region_view::WIDE_RADIUS
-                ..=crate::feature::region_view::WIDE_RADIUS
+            for dz in -read_radius..=read_radius
             {
                 if dx == 0 && dz == 0 {
                     continue;
@@ -974,42 +1613,24 @@ impl OverworldGenerator {
         }
         let centre_biomes = center_biomes;
 
-        let mut ocean_floor_wg = crate::feature::RegionHeights::unset();
-        Self::stitch_heights(&mut ocean_floor_wg, 0, 0, center_heights);
-        for dx in -crate::feature::region_view::WIDE_RADIUS
-            ..=crate::feature::region_view::WIDE_RADIUS
-        {
-            for dz in -crate::feature::region_view::WIDE_RADIUS
-                ..=crate::feature::region_view::WIDE_RADIUS
-            {
-                if dx == 0 && dz == 0 {
-                    continue;
-                }
-                let neighbour = wide_pre[crate::feature::region_view::wide_slot_of_offset(dx, dz)]
-                    .as_ref()
-                    .expect("every non-centre wide source was filled above");
-                Self::stitch_heights(
-                    &mut ocean_floor_wg,
-                    dx * 16,
-                    dz * 16,
-                    &neighbour.1,
-                );
-            }
-        }
-
-        let mut source_ores = BTreeMap::new();
-        let mut source_features = BTreeMap::new();
+        let mut source_plans = Vec::with_capacity(9);
         for &(dx, dz) in overworld_source_offsets() {
             let source_x = cx + dx;
             let source_z = cz + dz;
-            let source_biomes = Self::source_biomes(
-                source_x,
-                source_z,
-                cx,
-                cz,
-                &centre_biomes,
-                &wide_pre,
-            );
+            let source_biomes = if selected_source
+                .is_none_or(|source| source == (source_x, source_z))
+            {
+                Self::source_biomes(
+                    source_x,
+                    source_z,
+                    cx,
+                    cz,
+                    &centre_biomes,
+                    &wide_pre,
+                )
+            } else {
+                BTreeSet::new()
+            };
             let selected = self.decoration_catalog.select_all(
                 source_biomes.iter().copied(),
                 &self.ore_definitions,
@@ -1021,18 +1642,67 @@ impl OverworldGenerator {
             // step/index, so retaining this sort preserves the prior
             // ordering after the catalog scan was unified.
             features.sort_by_key(|(step, index, _)| (*step, *index));
-            source_features.insert((source_x, source_z), features);
-            source_ores.insert((source_x, source_z), selected.ores);
+            source_plans.push(Arc::new(MixedReplaySourcePlan {
+                source: (source_x, source_z),
+                ores: Arc::new(selected.ores),
+                features: Arc::new(features),
+            }));
         }
 
-        MixedReplayContext {
-            wide_pre,
-            centre_biomes,
-            ocean_floor_wg,
-            feature_biomes: self.decoration_catalog.feature_biomes(),
-            source_ores,
-            source_features,
+        if read_radius < crate::feature::region_view::WIDE_RADIUS
+            && source_plans
+                .iter()
+                .flat_map(|plan| plan.features.iter())
+                .any(|(_, _, placed)| placed.requires_wide_context())
+        {
+            return self.build_mixed_replay_context(
+                cx,
+                cz,
+                center_heights,
+                centre_biomes,
+                center_product,
+                selected_source,
+                crate::feature::region_view::WIDE_RADIUS,
+            );
         }
+
+        let mut products = Vec::new();
+        for dx in -read_radius..=read_radius {
+            for dz in -read_radius..=read_radius {
+                let coordinate = (cx + dx, cz + dz);
+                let pre = if dx == 0 && dz == 0 {
+                    center_product.clone()
+                } else {
+                    wide_pre[crate::feature::region_view::wide_slot_of_offset(dx, dz)].clone()
+                };
+                let heights = if dx == 0 && dz == 0 {
+                    *center_heights
+                } else {
+                    pre.as_ref()
+                        .expect("every non-centre replay product was filled above")
+                        .1
+                };
+                products.push(MixedReplayProduct {
+                    coordinate,
+                    pre,
+                    heights,
+                });
+            }
+        }
+        let window = make_replay_window(
+            products,
+            source_plans,
+            self.decoration_catalog.feature_biomes(),
+        );
+        let centre_index = window.product_index((cx, cz));
+        context_from_window(
+            window,
+            cx,
+            cz,
+            read_radius,
+            center_product.map(|_| centre_index),
+            centre_biomes,
+        )
     }
 
     /// Runs the complete Overworld FEATURES stage for normal generation.  The
@@ -1052,7 +1722,7 @@ impl OverworldGenerator {
         if self.decoration_catalog.is_empty() {
             return (center_world, Vec::new());
         }
-        let context = self.replay_context_for(cx, cz);
+        let context = self.lifecycle_replay_context(cx, cz);
         self.features_stage_with_context(cx, cz, center_world, &context, None, &[], false)
     }
 
@@ -1079,6 +1749,9 @@ impl OverworldGenerator {
             cz,
             center_heights,
             Arc::new(center_biomes.clone()),
+            None,
+            None,
+            crate::feature::region_view::WIDE_RADIUS,
         );
         self.features_stage_with_context(cx, cz, center_world, &context, None, &[], false)
     }
@@ -1103,7 +1776,11 @@ impl OverworldGenerator {
             context,
             selected_source,
             overrides,
-            capture_spills,
+            if capture_spills {
+                SpillCapture::All
+            } else {
+                SpillCapture::None
+            },
         );
         let block_entities = result
             .block_entities
@@ -1116,21 +1793,21 @@ impl OverworldGenerator {
         (world, block_entities)
     }
 
-    /// Runs the complete Overworld FEATURES stream over one shared read/write
-    /// neighbourhood. `selected_source` is a parity filter for source-local
-    /// controls. The adapters are synchronized after every raw entry so later
-    /// entries see the current resident state regardless of whether the
-    /// previous body used ore or vegetation placement.
+    /// Runs the complete Overworld FEATURES dispatch over its shared
+    /// read/write neighbourhood. `None` executes all nine canonical sources;
+    /// `Some` is the source-local parity filter. The adapters are synchronized
+    /// after every raw entry so later entries see the current resident state
+    /// regardless of whether the previous body used ore or vegetation.
     #[allow(clippy::too_many_arguments)]
     fn mixed_features_stage_selected(
         &self,
         cx: i32,
         cz: i32,
-        center_world: crate::dense_grid::DenseBlockGrid,
+        mut center_world: crate::dense_grid::DenseBlockGrid,
         context: &MixedReplayContext,
         selected_source: Option<(i32, i32)>,
         overrides: &[(i32, i32, i32, String)],
-        capture_spills: bool,
+        spill_capture: SpillCapture,
     ) -> (
         crate::dense_grid::DenseBlockGrid,
         ParityDecorationResult,
@@ -1141,23 +1818,34 @@ impl OverworldGenerator {
                 ParityDecorationResult {
                     spills: Vec::new(),
                     block_entities: Vec::new(),
+                    local_features: Vec::new(),
                 },
             );
         }
         let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Vegetation);
 
+        if matches!(spill_capture, SpillCapture::CrossColumn) {
+            let (min_x, min_y, min_z, size_x, size_y, size_z) = center_world.bounds();
+            for &(x, y, z, ref state) in overrides {
+                if (min_x..min_x + size_x).contains(&x)
+                    && (min_y..min_y + size_y).contains(&y)
+                    && (min_z..min_z + size_z).contains(&z)
+                {
+                    center_world.set(x, y, z, state);
+                }
+            }
+        }
+
         let wide_pre = &context.wide_pre;
         let centre_biomes = &context.centre_biomes;
         let ocean_floor_wg = &context.ocean_floor_wg;
-        let source_ores = &context.source_ores;
-        let source_features = &context.source_features;
 
         let in_tag = |block: &str, tag: &str| -> bool {
             self.ore_tag_map
                 .get(tag)
                 .is_some_and(|members| members.contains(block))
         };
-        let feature_biomes = &context.feature_biomes;
+        let feature_biomes = &context.window.feature_biomes;
         let biome_zoom_seed = super::biome::biome_zoom_seed(self.seed);
         let biome_sources = |source_x: i32, source_z: i32| {
             let dx = source_x - cx;
@@ -1171,8 +1859,8 @@ impl OverworldGenerator {
                     ..=crate::feature::region_view::WIDE_RADIUS)
                     .contains(&dz)
             {
-                wide_pre[crate::feature::region_view::wide_slot_of_offset(dx, dz)]
-                    .as_ref()
+                context
+                    .pre(wide_pre[crate::feature::region_view::wide_slot_of_offset(dx, dz)])
                     .map(|pre| &*pre.3)
             } else {
                 None
@@ -1205,8 +1893,8 @@ impl OverworldGenerator {
                 if dx == 0 && dz == 0 {
                     Some(centre_source)
                 } else {
-                    wide_sources[crate::feature::region_view::wide_slot_of_offset(dx, dz)]
-                        .as_ref()
+                    context
+                        .pre(wide_sources[crate::feature::region_view::wide_slot_of_offset(dx, dz)])
                         .map(|pre| &*pre.0)
                 }
             },
@@ -1230,8 +1918,8 @@ impl OverworldGenerator {
                 if dx == 0 && dz == 0 {
                     Some(Arc::clone(&centre_grid))
                 } else {
-                    grid_sources[crate::feature::region_view::wide_slot_of_offset(dx, dz)]
-                        .as_ref()
+                    context
+                        .pre(grid_sources[crate::feature::region_view::wide_slot_of_offset(dx, dz)])
                         .map(|pre| Arc::clone(&pre.0))
                 }
             },
@@ -1239,8 +1927,8 @@ impl OverworldGenerator {
                 if dx == 0 && dz == 0 {
                     Some(Arc::clone(&centre_biomes))
                 } else {
-                    grid_biomes[crate::feature::region_view::wide_slot_of_offset(dx, dz)]
-                        .as_ref()
+                    context
+                        .pre(grid_biomes[crate::feature::region_view::wide_slot_of_offset(dx, dz)])
                         .map(|pre| Arc::clone(&pre.3))
                 }
             },
@@ -1275,24 +1963,17 @@ impl OverworldGenerator {
         let mut ore_cursor = 0usize;
         let changed_scratch = &mut dispatch_scratch.changed;
         let final_cells_scratch = &mut dispatch_scratch.final_cells;
-        // A selected source is retained for the parity seam, which can inspect
-        // one source in isolation. The lifecycle adapter exposes the complete
-        // dispatch as one target-owned FEATURES transition; this loop's
-        // internal source views are not lifecycle completion events.
         for &(dx, dz) in overworld_source_offsets() {
             let source_x = cx + dx;
             let source_z = cz + dz;
             if selected_source.is_some_and(|source| source != (source_x, source_z)) {
                 continue;
             }
-            let features = source_features
-                .get(&(source_x, source_z))
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            let ores = source_ores
-                .get(&(source_x, source_z))
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
+            let plan = context
+                .source_plan(source_x, source_z, cx, cz)
+                .expect("every dispatched source has a source plan");
+            let features = plan.features.as_slice();
+            let ores = plan.ores.as_slice();
             let origin = crate::feature::BlockPos {
                 x: source_x * 16,
                 y: self.min_y,
@@ -1393,21 +2074,30 @@ impl OverworldGenerator {
         }
 
         let mut spills = Vec::new();
-        if capture_spills {
+        let mut local_features = Vec::new();
+        if !matches!(spill_capture, SpillCapture::None) {
             let source = selected_source.unwrap_or((cx, cz));
             let mut final_cells = BTreeMap::new();
             for (x, y, z, state) in grid.dirty_cell_ids() {
                 final_cells.insert((x, y, z), state);
             }
-            spills = final_cells
-                .into_iter()
-                .filter(|(position, state)| seeded.get(position).copied() != Some(*state))
-                .map(|(position, state)| ParityDecorationSpill {
+            for (position, state) in final_cells {
+                let transition = ParityDecorationSpill {
                     source,
                     position,
                     state: self.interner.name_of(state).to_owned(),
-                })
-                .collect();
+                };
+                if matches!(spill_capture, SpillCapture::CrossColumn)
+                    && (position.0.div_euclid(16), position.2.div_euclid(16)) == (cx, cz)
+                {
+                    // Direct target output already contains these writes. Keep
+                    // the sparse final stream for later target read state, but
+                    // never send it through the outward spill ledger.
+                    local_features.push(transition);
+                } else if seeded.get(&position).copied() != Some(state) {
+                    spills.push(transition);
+                }
+            }
         }
         let block_entities = grid.take_block_entities();
         drop(ore_view);
@@ -1421,6 +2111,7 @@ impl OverworldGenerator {
             ParityDecorationResult {
                 spills,
                 block_entities,
+                local_features,
             },
         )
     }
@@ -1452,6 +2143,21 @@ impl OverworldGenerator {
         cz: i32,
         world: crate::dense_grid::DenseBlockGrid,
         biome_quarts: &[(String, bool); 16],
+    ) -> (
+        crate::dense_grid::DenseBlockGrid,
+        crate::feature::top_layer::FreezeCounts,
+    ) {
+        let mut discard_write = |_x: i32, _y: i32, _z: i32, _state: &str| {};
+        self.top_layer_stage_with_observer(cx, cz, world, biome_quarts, &mut discard_write)
+    }
+
+    fn top_layer_stage_with_observer(
+        &self,
+        cx: i32,
+        cz: i32,
+        world: crate::dense_grid::DenseBlockGrid,
+        biome_quarts: &[(String, bool); 16],
+        observer: &mut dyn FnMut(i32, i32, i32, &str),
     ) -> (
         crate::dense_grid::DenseBlockGrid,
         crate::feature::top_layer::FreezeCounts,
@@ -1496,7 +2202,7 @@ impl OverworldGenerator {
                 ""
             }
         };
-        let counts = crate::feature::top_layer::apply_freeze_top_layer(
+        let counts = crate::feature::top_layer::apply_freeze_top_layer_with_observer(
             &mut world,
             cx,
             cz,
@@ -1507,6 +2213,7 @@ impl OverworldGenerator {
             &self.biome_climates,
             &self.snow_support,
             &self.climate_noise,
+            observer,
         );
         (world, counts)
     }
@@ -1532,12 +2239,91 @@ impl OverworldGenerator {
 mod tests {
     use std::sync::Arc;
 
-    use super::{MixedEntryWriter, synchronize_mixed_entry};
+    use super::{
+        MixedEntryWriter, MixedReplayProduct, MixedReplaySourcePlan, context_from_window,
+        make_replay_window, replay_dependency_union, synchronize_mixed_entry,
+        unique_target_order,
+    };
     use crate::dense_grid::DenseBlockGrid;
     use crate::feature::OVERWORLD_SOURCE_OFFSETS;
     use crate::feature::region_view::RegionView;
     use crate::feature::vegetation::VegGrid;
     use crate::interner::StateInterner;
+
+    fn synthetic_window(targets: &[(i32, i32)]) -> super::MixedReplayWindow {
+        let coordinates = replay_dependency_union(targets);
+        let products = coordinates
+            .into_iter()
+            .map(|coordinate| MixedReplayProduct {
+                coordinate,
+                pre: None,
+                heights: [coordinate.0 * 1000 + coordinate.1; 256],
+            })
+            .collect();
+        let sources = targets
+            .iter()
+            .flat_map(|&(cx, cz)| {
+                super::overworld_source_offsets()
+                    .iter()
+                    .map(move |&(dx, dz)| (cx + dx, cz + dz))
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        let plans = sources
+            .into_iter()
+            .map(|source| {
+                Arc::new(MixedReplaySourcePlan {
+                    source,
+                    ores: Arc::new(Vec::new()),
+                    features: Arc::new(Vec::new()),
+                })
+            })
+            .collect();
+        Arc::try_unwrap(make_replay_window(
+            products,
+            plans,
+            Arc::new(std::collections::HashMap::new()),
+        ))
+        .ok()
+        .expect("synthetic window has one owner")
+    }
+
+    #[test]
+    fn adjacent_contexts_share_one_window_and_fixed_height_products() {
+        let window = Arc::new(synthetic_window(&[(0, 0), (1, 0)]));
+        let biomes = || Arc::new(crate::overworld::biome_cells::BiomeCells::uniform("minecraft:plains", -64, 384));
+        let first = context_from_window(Arc::clone(&window), 0, 0, 2, None, biomes());
+        let second = context_from_window(Arc::clone(&window), 1, 0, 2, None, biomes());
+        assert!(Arc::ptr_eq(&first.window, &second.window));
+        assert_eq!(window.products.len(), 30);
+        assert_eq!(window.source_plans.len(), 12);
+        assert_eq!(first.ocean_floor_wg.get(16, 0), 1000);
+        assert_eq!(second.ocean_floor_wg.get(0, 0), 1000);
+    }
+
+    #[test]
+    fn far_apart_targets_keep_the_window_sparse_and_bounded() {
+        let window = synthetic_window(&[(0, 0), (100, 100)]);
+        assert_eq!(window.products.len(), 50);
+        assert_eq!(window.source_plans.len(), 18);
+        assert!(window.products.len() < 1000);
+    }
+
+    #[test]
+    fn replay_batch_deduplicates_adjacent_and_negative_targets() {
+        let targets = [(-1, 0), (0, 0), (-1, 0)];
+        assert_eq!(unique_target_order(&targets), [(-1, 0), (0, 0)]);
+        let dependencies = replay_dependency_union(&unique_target_order(&targets));
+        assert_eq!(dependencies.len(), 30);
+        assert!(dependencies.contains(&(-3, -2)));
+        assert!(dependencies.contains(&(2, 2)));
+        assert!(!dependencies.contains(&(-4, -2)));
+    }
+
+    #[test]
+    fn replay_batch_empty_request_retains_no_dependency_products() {
+        assert!(replay_dependency_union(&[]).is_empty());
+        assert!(unique_target_order(&[]).is_empty());
+    }
 
     #[test]
     fn overworld_source_offsets_match_external_feature_trace_order() {

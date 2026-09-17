@@ -211,7 +211,6 @@ async fn assert_entity_interaction_reaches_mob_consumer(protocol_version: i32) {
         (0..=0, 0..=0),
         (0, 0),
         0,
-        0,
     );
     let profile = LoginProfile {
         username: "EntityFixture".to_owned(),

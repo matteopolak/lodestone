@@ -454,7 +454,33 @@ fn run_real_source_request<S: ChunkSource>(source: &S, dimension: Dimension) {
         .records()
         .iter()
         .any(|record| record.key() == StageKey::new(dimension, ColumnStage::Output)));
-    if dimension != Dimension::Overworld {
+    if dimension == Dimension::Overworld {
+        let scalar = source.column(target.0, target.1);
+        let start_signature = |column: &ChunkColumn| {
+            column
+                .structure_starts()
+                .iter()
+                .map(|start| {
+                    (
+                        start.structure.clone(),
+                        start.chunk_x,
+                        start.chunk_z,
+                        start.references,
+                        start.bounding_box,
+                        start.pieces.len(),
+                        start.terrain_adaptation,
+                        start.pieces_complete,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(start_signature(packet.column()), start_signature(&scalar));
+        assert_eq!(
+            packet.column().structure_references(),
+            scalar.structure_references(),
+        );
+        assert_eq!(packet.column().block_entities(), scalar.block_entities());
+    } else {
         session
             .resident_read(target)
             .expect("target resident is readable")

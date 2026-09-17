@@ -36,7 +36,7 @@
 //!
 //! * The interval is not a fresh per-mob random draw. Every `NavigatingMob`
 //!   shares one hardcoded seed (`lodestone-entity/src/ai/navigating_mob.rs`'s
-//!   `SplitMix64(0x1234_5678_9ABC_DEF0)`), so all three demo mobs roll the
+//!   `SplitMix64(0x1234_5678_9ABC_DEF0)`), so all three mobs roll the
 //!   *same* stream, whose first successful `next_u64() % 120 == 0` draw is draw
 //!   130 — not an average, a fixed tick.
 //! * That draw was unreachable. `RandomStrollGoal::can_use` early-returns once
@@ -176,13 +176,11 @@ async fn a_real_client_observes_a_real_ai_ticked_mob_sim() {
     // copy that merely agrees.
     let source = WorldgenChunkSource::new(floor_density(), min_y, height);
 
-    let mob_count = 3;
     let (server, client_io) = IntegratedServer::open_in_memory_with_mobs(
         V770ServerProtocol,
         source,
         (-1..=1, -1..=1),
         (8, 8),
-        mob_count,
         view_radius,
     );
 
@@ -201,14 +199,14 @@ async fn a_real_client_observes_a_real_ai_ticked_mob_sim() {
 
     // `run_mob_tick_loop` starts mob ids at 1000 (`MobSim::set_next_id`,
     // avoiding a collision with `LOCAL_PLAYER_ENTITY_ID` — see that method's
-    // doc comment) and `seed_demo_mobs` assigns them in spawn order, so ids
-    // 1000..1000+mob_count are deterministic here.
-    let mob_ids: Vec<i32> = (1000..1000 + i32::try_from(mob_count).unwrap()).collect();
+    // doc comment). Natural spawns are not a fixed roster, so scan the reserved
+    // range and retain whichever ids the spawn cycle produces.
+    let candidate_ids: Vec<i32> = (1000..1100).collect();
 
     let spawn_deadline = std::time::Instant::now() + Duration::from_secs(60);
     let mut initial = std::collections::HashMap::new();
-    while std::time::Instant::now() < spawn_deadline && initial.len() < mob_ids.len() {
-        for &id in &mob_ids {
+    while std::time::Instant::now() < spawn_deadline && initial.is_empty() {
+        for &id in &candidate_ids {
             if let Some(view) = handle.entity_from_wire(id) {
                 initial.entry(id).or_insert(view);
             }
@@ -217,28 +215,10 @@ async fn a_real_client_observes_a_real_ai_ticked_mob_sim() {
         report_position(&handle);
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert_eq!(
-        initial.len(),
-        mob_ids.len(),
-        "not every demo mob reached the client within 60s"
+    assert!(
+        !initial.is_empty(),
+        "no naturally spawned mob reached the client within 60s"
     );
-    // **The streamed-species wire assertion.** `seed_demo_mobs` used to be a hardcoded
-    // `minecraft:zombie` ring and this loop asserted exactly that. It now
-    // cycles `lodestone_server::DEMO_SPECIES`, whose first three entries are
-    // one per roster family, so `mob_count` of 3 must produce one of each.
-    //
-    // This is an assertion about the **streamed type id**, not merely that an
-    // entity arrived, even though it reads a name. `encode_add_entity_body`
-    // writes `entity_type_id(&key).unwrap_or(0)` and index 0 is
-    // `minecraft:acacia_boat`, so a species key that fails to resolve reaches
-    // the client as a boat and lands here as `"acacia_boat"`. The client folded
-    // these names *from* the ids on the wire — there is no other source for
-    // them — so `"cow"` here is `30` on the wire and nothing else.
-    let mut species: Vec<&str> = initial
-        .values()
-        .map(|view| view.entity_type.path())
-        .collect();
-    species.sort_unstable();
     for view in initial.values() {
         assert_eq!(view.entity_type.namespace(), "minecraft");
         assert_ne!(
@@ -248,18 +228,10 @@ async fn a_real_client_observes_a_real_ai_ticked_mob_sim() {
              streams for a species key entity_type_id could not resolve"
         );
     }
-    assert_eq!(
-        species,
-        vec!["cow", "wolf", "zombie"],
-        "the first three DEMO_SPECIES entries must each reach the client; a \
-         result of [zombie, zombie, zombie] is the old hardcoded single-species ring"
-    );
 
     // Move: poll for *any* mob's client-folded position to diverge from its
     // spawn snapshot — proof this is a *ticking* simulation (`MobSim::tick`
-    // really running goal AI over the wire), not a spawn-only echo. Polling all
-    // `mob_count` mobs rather than just one keeps this from depending on any one
-    // mob's goal choice.
+    // really running goal AI over the wire), not a spawn-only echo.
     //
     // `report_position` inside the loop is load-bearing, not hygiene: it is what
     // keeps a player in the sim's perception at all, and therefore what any
@@ -269,7 +241,7 @@ async fn a_real_client_observes_a_real_ai_ticked_mob_sim() {
     while std::time::Instant::now() < move_deadline && moved.is_none() {
         let _ = handle.chat("poke");
         report_position(&handle);
-        for &id in &mob_ids {
+        for &id in initial.keys() {
             if let Some(view) = handle.entity_from_wire(id)
                 && view.position != initial[&id].position
             {
@@ -280,7 +252,7 @@ async fn a_real_client_observes_a_real_ai_ticked_mob_sim() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let (moved_id, moved_pos) = moved.expect(
-        "no demo mob moved from its spawn position within 90s — AI does not appear to be ticking",
+        "no mob moved from its spawn position within 90s — AI does not appear to be ticking",
     );
 
     println!(

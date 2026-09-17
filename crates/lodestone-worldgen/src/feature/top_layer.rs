@@ -877,6 +877,40 @@ pub fn apply_freeze_top_layer<'b>(
     support: &SnowSupport,
     noise: &ClimateNoise,
 ) -> FreezeCounts {
+    let mut discard_write = |_x: i32, _y: i32, _z: i32, _state: &str| {};
+    apply_freeze_top_layer_with_observer(
+        grid,
+        chunk_x,
+        chunk_z,
+        min_y,
+        height,
+        sea_level,
+        biome_at,
+        climates,
+        support,
+        noise,
+        &mut discard_write,
+    )
+}
+
+/// Runs [`apply_freeze_top_layer`] while observing each ordered block write.
+/// The existing adapter above remains the normal production entrypoint; this
+/// bounded sink is for callers that need the sparse final state without a
+/// second full-column diff.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_freeze_top_layer_with_observer<'b>(
+    grid: &mut DenseBlockGrid,
+    chunk_x: i32,
+    chunk_z: i32,
+    min_y: i32,
+    height: i32,
+    sea_level: i32,
+    biome_at: &dyn Fn(i32, i32) -> &'b str,
+    climates: &HashMap<String, BiomeClimate>,
+    support: &SnowSupport,
+    noise: &ClimateNoise,
+    observer: &mut dyn FnMut(i32, i32, i32, &str),
+) -> FreezeCounts {
     let mut counts = FreezeCounts::default();
     if support.is_empty() {
         return counts;
@@ -910,6 +944,7 @@ pub fn apply_freeze_top_layer<'b>(
                     .test_id(grid.interner(), grid.get_id(x, below_y, z))
                 {
                     grid.set(x, below_y, z, ICE);
+                    observer(x, below_y, z, ICE);
                     counts.ice += 1;
                 }
             }
@@ -940,13 +975,16 @@ pub fn apply_freeze_top_layer<'b>(
                 continue;
             }
             grid.set(x, top_y, z, SNOW_LAYER);
+            observer(x, top_y, z, SNOW_LAYER);
             counts.snow += 1;
             if inside_below
                 && support
                     .snowy_property
                     .test_id(grid.interner(), grid.get_id(x, below_y, z))
             {
-                grid.set(x, below_y, z, &with_snowy_true(&below_state));
+                let snowy_state = with_snowy_true(&below_state);
+                grid.set(x, below_y, z, &snowy_state);
+                observer(x, below_y, z, &snowy_state);
                 counts.snowy_flips += 1;
             }
         }
@@ -1029,6 +1067,50 @@ mod tests {
         assert_eq!(snow_layers("minecraft:snow[layers=1]"), Some(1));
         assert_eq!(snow_layers("minecraft:snow"), None);
         assert_eq!(snow_layers("minecraft:stone"), None);
+    }
+
+    #[test]
+    fn freeze_observer_reports_the_ordered_write_without_a_grid_diff() {
+        let support = SnowSupport {
+            blocks_motion: StatePredicate::new(
+                ["minecraft:stone".to_owned()].into_iter().collect(),
+                HashMap::new(),
+            ),
+            has_fluid_state: StatePredicate::new(
+                ["minecraft:stone".to_owned()].into_iter().collect(),
+                HashMap::new(),
+            ),
+            face_full_up: StatePredicate::new(
+                ["minecraft:stone".to_owned()].into_iter().collect(),
+                HashMap::new(),
+            ),
+            ..SnowSupport::default()
+        };
+        let mut grid = DenseBlockGrid::new(0, 0, 0, 16, 2, 16, "minecraft:air");
+        grid.set(0, 0, 0, "minecraft:stone");
+        let biome_at = |_x: i32, _z: i32| "cold";
+        let climates = HashMap::from([(String::from("cold"), climate(0.0))]);
+        let mut writes = Vec::new();
+        let counts = apply_freeze_top_layer_with_observer(
+            &mut grid,
+            0,
+            0,
+            0,
+            2,
+            63,
+            &biome_at,
+            &climates,
+            &support,
+            &ClimateNoise::new(),
+            &mut |x, y, z, state| writes.push((x, y, z, state.to_owned())),
+        );
+        assert_eq!(counts.snow, 1);
+        assert_eq!(
+            writes,
+            vec![(0, 1, 0, SNOW_LAYER.to_owned())],
+            "the observer must expose the exact top-layer write order",
+        );
+        assert_eq!(grid.get(0, 1, 0), SNOW_LAYER);
     }
 
     /// The two-level lookup: an exact state wins, and a property-less name falls

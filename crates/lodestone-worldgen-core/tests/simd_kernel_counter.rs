@@ -47,6 +47,8 @@ fn batch_count_equals_the_octave_count_the_amplitudes_declare() {
         "four unit amplitudes must cost exactly four eight-lane batches; 0 would \
          mean the SIMD kernel is not on the production path at all"
     );
+    assert_eq!(counters::snapshot().noise_active_visits, 4);
+    assert_eq!(counters::snapshot().noise_skipped_visits, 0);
 
     let b = two_of_four.get_value(12.5, 33.25, -7.75);
     let after_two = counters::snapshot().noise_corner_batches;
@@ -56,6 +58,9 @@ fn batch_count_equals_the_octave_count_the_amplitudes_declare() {
         "two non-zero amplitudes of four must cost exactly two batches; reading 4 \
          would mean the counter is per octave slot rather than per sample"
     );
+    let sparse = counters::snapshot();
+    assert_eq!(sparse.noise_active_visits, 6);
+    assert_eq!(sparse.noise_skipped_visits, 2);
 
     // Non-vacuity: the samples have to be real values, or the counts above could
     // be coming from a kernel that returned early.
@@ -84,4 +89,6 @@ fn counters_are_compiled_out_without_the_feature() {
         "the batch counter is live without the gen-counters feature; every hook is \
          supposed to be an empty inline function in a shipped build"
     );
+    assert_eq!(counters::snapshot().noise_active_visits, 0);
+    assert_eq!(counters::snapshot().noise_skipped_visits, 0);
 }

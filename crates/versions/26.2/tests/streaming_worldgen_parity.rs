@@ -9,6 +9,7 @@ use std::fs::{self, File};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufReader, Read, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -16,8 +17,8 @@ use lodestone_core::Reader;
 use lodestone_server::{ChunkColumn, EndChunkSource, NetherChunkSource, OverworldChunkSource, end_chunk_source, nether_chunk_source, overworld_chunk_source};
 use lodestone_world::{ChunkColumn as WorldChunkColumn, Heightmaps};
 use lodestone_worldgen_parity::lifecycle::{
-    FEATURES_SOURCE_RADIUS, FEATURES_WRITE_RADIUS, LifecycleCompletion, LifecycleMaterializer,
-    LifecycleFeatureResult, LifecycleReplayEvent, LifecycleResidentStage,
+    FEATURES_SOURCE_RADIUS, FEATURES_WRITE_RADIUS, LifecycleCompletion, LifecycleFeatureDispatch,
+    LifecycleMaterializer, LifecycleFeatureResult, LifecycleReplayEvent, LifecycleResidentStage,
     LifecycleResidentTransition, LifecycleWorldgenSource,
 };
 use lodestone_server::{ServerDirective, ServerProtocol};
@@ -697,11 +698,9 @@ fn lifecycle_admissions(targets: &[(i32, i32)]) -> Vec<(i32, i32)> {
         .collect()
 }
 
-/// Decoration completions follow each requested chunk's accumulated dependency
-/// square with x changing by column and z changing fastest. A source body is
-/// retained after its first completion, so an overlapping later target does
-/// not replay the same source against a different resident window. This is
-/// distinct from the z-major/x-fastest order used to emit packet records.
+/// Source-ordered fallback completions follow each requested chunk's dependency
+/// square with x changing by column and z changing fastest. This is distinct
+/// from the z-major/x-fastest order used to emit packet records.
 fn lifecycle_completion_wavefront(targets: &[(i32, i32)]) -> Vec<((i32, i32), (i32, i32))> {
     let mut order = Vec::new();
     for &(target_x, target_z) in targets {
@@ -714,16 +713,18 @@ fn lifecycle_completion_wavefront(targets: &[(i32, i32)]) -> Vec<((i32, i32), (i
     order
 }
 
-/// A streamed ticket completes the requested chunk's FEATURES body before
-/// its FULL result resolves. Its radius-one region supplies the admitted
-/// read/write context, but dependency admissions do not run independent
-/// FEATURES bodies. The target pass owns all writes observed at this boundary.
-fn target_centered_completion_order(targets: &[(i32, i32)]) -> Vec<((i32, i32), (i32, i32))> {
-    targets
-        .iter()
-        .copied()
-        .map(|target| (target, target))
-        .collect()
+fn stream_feature_completion_order(
+    dispatch: LifecycleFeatureDispatch,
+    targets: &[(i32, i32)],
+) -> Vec<((i32, i32), (i32, i32))> {
+    match dispatch {
+        LifecycleFeatureDispatch::TargetOwned => targets
+            .iter()
+            .copied()
+            .map(|target| (target, target))
+            .collect(),
+        LifecycleFeatureDispatch::SourceOrdered => lifecycle_completion_wavefront(targets),
+    }
 }
 
 #[derive(Default)]
@@ -731,9 +732,8 @@ struct StreamLifecycleState {
     /// The live oracle leaves dependency chunks resident after removing the
     /// requested centre ticket. Keep that state across bounded frame batches.
     admitted: BTreeSet<(i32, i32)>,
-    /// Source bodies are globally retained after their first authenticated
-    /// completion. A source owns its generation-region writes even when a
-    /// later target reaches the same source through an overlapping halo.
+    /// Source-ordered fallback bodies are retained after their first completion
+    /// when a later target reaches the same source through an overlapping halo.
     completed: BTreeSet<(i32, i32)>,
 }
 
@@ -775,61 +775,69 @@ fn lifecycle_columns(
         materializer.admit_many_parallel(&new_admissions);
         let admit_ms = admit_started.elapsed().as_millis();
         let complete_started = Instant::now();
-        let completion_order = if dimension == StreamDimension::End {
-            targets
-                .iter()
-                .flat_map(|target| {
-                    end_events
-                        .and_then(|events| events.get(target))
-                        .unwrap_or_else(|| panic!("P06 End stream has no lifecycle events for target {target:?}"))
-                        .iter()
-                        .map(move |event| (*target, event.source))
-                })
-                .collect::<Vec<_>>()
-        } else {
-            match dimension {
-                StreamDimension::Overworld => lifecycle_completion_wavefront(targets),
-                StreamDimension::Nether => lifecycle_completion_wavefront(targets),
-                StreamDimension::End => unreachable!(),
-            }
-        };
-        let target_scoped = dimension != StreamDimension::End;
-        let mut active_target = None;
-        for (sequence, (target, source)) in completion_order.into_iter().enumerate() {
-            if target_scoped && active_target != Some(target) {
-                if let Some(previous) = active_target {
-                    materializer.finish_target(previous);
-                }
-                materializer.begin_target(target);
-                active_target = Some(target);
-            }
-            let should_complete = state.completed.insert(source);
-            if should_complete {
-                if dimension == StreamDimension::End {
-                    let event = end_events
-                        .and_then(|events| events.get(&target))
-                        .and_then(|events| events.iter().find(|event| event.source == source))
-                        .unwrap_or_else(|| panic!("P06 End stream has no event for target {target:?}, source {source:?}"));
-                    materializer.complete_observing_with_residents(
-                        event.source,
-                        event.stage,
-                        event.sequence,
-                        &event.resident_transitions,
-                        |_| {},
-                    );
-                } else {
-                    materializer.complete_for_target(
-                        target,
-                        source,
-                        LifecycleCompletion::Features,
-                        sequence as u64,
-                    );
-                }
-            }
-        }
-        if target_scoped {
-            if let Some(target) = active_target {
+        let dispatch = materializer.feature_dispatch();
+        if dispatch == LifecycleFeatureDispatch::TargetOwned {
+            assert_ne!(dimension, StreamDimension::End, "End lifecycle events are source-ordered");
+            for (sequence, (target, source)) in
+                stream_feature_completion_order(dispatch, targets).into_iter().enumerate()
+            {
+                assert_eq!(target, source, "target-owned FEATURES must name their target");
+                materializer.complete_target_features_observing(target, sequence as u64, |_| {});
                 materializer.finish_target(target);
+            }
+        } else {
+            let completion_order = if dimension == StreamDimension::End {
+                targets
+                    .iter()
+                    .flat_map(|target| {
+                        end_events
+                            .and_then(|events| events.get(target))
+                            .unwrap_or_else(|| panic!("P06 End stream has no lifecycle events for target {target:?}"))
+                            .iter()
+                            .map(move |event| (*target, event.source))
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                stream_feature_completion_order(dispatch, targets)
+            };
+            let target_scoped = dimension != StreamDimension::End;
+            let mut active_target = None;
+            for (sequence, (target, source)) in completion_order.into_iter().enumerate() {
+                if target_scoped && active_target != Some(target) {
+                    if let Some(previous) = active_target {
+                        materializer.finish_target(previous);
+                    }
+                    materializer.begin_target(target);
+                    active_target = Some(target);
+                }
+                let should_complete = state.completed.insert(source);
+                if should_complete {
+                    if dimension == StreamDimension::End {
+                        let event = end_events
+                            .and_then(|events| events.get(&target))
+                            .and_then(|events| events.iter().find(|event| event.source == source))
+                            .unwrap_or_else(|| panic!("P06 End stream has no event for target {target:?}, source {source:?}"));
+                        materializer.complete_observing_with_residents(
+                            event.source,
+                            event.stage,
+                            event.sequence,
+                            &event.resident_transitions,
+                            |_| {},
+                        );
+                    } else {
+                        materializer.complete_for_target(
+                            target,
+                            source,
+                            LifecycleCompletion::Features,
+                            sequence as u64,
+                        );
+                    }
+                }
+            }
+            if target_scoped {
+                if let Some(target) = active_target {
+                    materializer.finish_target(target);
+                }
             }
         }
         let complete_ms = complete_started.elapsed().as_millis();
@@ -843,10 +851,9 @@ fn lifecycle_columns(
     }
 
     let materializer = materializer.expect("ordered lifecycle materializer for non-End stream");
-    // The external stream keeps generated dependency columns resident after a
-    // centre ticket is removed in both terrain dimensions.  End batches are
-    // intentionally independent because their packet stream uses a wider
-    // batch and does not expose the same source-spill boundary.
+    // The external stream keeps generated columns resident after a centre
+    // ticket is removed. End batches remain independent because their packet
+    // stream uses a wider batch and its captured events own the replay state.
     let persistent = dimension != StreamDimension::End;
     let columns = match materializer {
         OrderedLifecycleMaterializer::Overworld(materializer) => {
@@ -864,7 +871,7 @@ fn lifecycle_columns(
 }
 
 fn end_p06_packet_payload(
-    materializer: &LifecycleMaterializer<EndChunkSource>,
+    materializer: &mut LifecycleMaterializer<EndChunkSource>,
     target: (i32, i32),
 ) -> Vec<u8> {
     let column = materializer.snapshot_for_packet(target);
@@ -927,14 +934,27 @@ fn completion_wavefront_reuses_dependencies_between_adjacent_requests() {
 }
 
 #[test]
-fn overworld_stream_completes_only_the_target_features_body() {
+fn stream_feature_dispatch_routes_target_owned_and_source_ordered_fallback() {
+    let targets = [(0, 0), (1, 0)];
     assert_eq!(
-        target_centered_completion_order(&[(2, 0), (3, 0), (2, 0)]),
-        vec![
-            ((2, 0), (2, 0)),
-            ((3, 0), (3, 0)),
-            ((2, 0), (2, 0)),
-        ],
+        stream_feature_completion_order(LifecycleFeatureDispatch::TargetOwned, &targets),
+        vec![((0, 0), (0, 0)), ((1, 0), (1, 0))],
+    );
+    assert_eq!(
+        stream_feature_completion_order(LifecycleFeatureDispatch::SourceOrdered, &targets),
+        lifecycle_completion_wavefront(&targets),
+    );
+    assert_eq!(
+        LifecycleMaterializer::new(overworld_chunk_source(SEED)).feature_dispatch(),
+        LifecycleFeatureDispatch::TargetOwned,
+    );
+    assert_eq!(
+        LifecycleMaterializer::new(nether_chunk_source(SEED)).feature_dispatch(),
+        LifecycleFeatureDispatch::SourceOrdered,
+    );
+    assert_eq!(
+        LifecycleMaterializer::new(end_chunk_source(SEED)).feature_dispatch(),
+        LifecycleFeatureDispatch::SourceOrdered,
     );
 }
 
@@ -967,16 +987,23 @@ fn nether_target_completion_replays_the_captured_source_wavefront() {
 #[test]
 fn stream_state_deduplicates_completed_targets() {
     let mut state = StreamLifecycleState::default();
-    let first = target_centered_completion_order(&[(0, 0)]);
+    let first = lifecycle_completion_wavefront(&[(0, 0)]);
     for &(_, source) in &first {
         assert!(state.completed.insert(source));
     }
-    let second = target_centered_completion_order(&[(1, 0)]);
+    let second = lifecycle_completion_wavefront(&[(1, 0)]);
     let unseen = second
         .into_iter()
         .filter(|&(_, source)| state.completed.insert(source))
         .collect::<Vec<_>>();
-    assert_eq!(unseen, vec![((1, 0), (1, 0))]);
+    assert_eq!(
+        unseen,
+        vec![
+            ((1, 0), (2, -1)),
+            ((1, 0), (2, 0)),
+            ((1, 0), (2, 1)),
+        ],
+    );
 }
 
 #[test]
@@ -1899,10 +1926,13 @@ fn scan_test_difference(component: &'static str, expected: &str, actual: &str, c
     }
 }
 
+static SCAN_TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
 fn scan_test_dir() -> PathBuf {
     std::env::temp_dir().join(format!(
-        "lodestone-stream-scan-{}-{}",
+        "lodestone-stream-scan-{}-{}-{}",
         std::process::id(),
+        SCAN_TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("test clock")
@@ -2274,7 +2304,7 @@ fn stream_external_oracle_matches_lodestone() {
             let expected_cz = stream_header.cz0 + (index / width) as i32;
             assert_eq!((frame.cx, frame.cz), (expected_cx, expected_cz), "stream coordinate order");
             let actual = if stream_header.format == STREAM_FORMAT_END_P06_LIFECYCLE {
-                let end_materializer = match materializer.as_ref().expect("End materializer") {
+                let end_materializer = match materializer.as_mut().expect("End materializer") {
                     OrderedLifecycleMaterializer::End(materializer) => materializer,
                     _ => panic!("P06 End stream selected a non-End materializer"),
                 };

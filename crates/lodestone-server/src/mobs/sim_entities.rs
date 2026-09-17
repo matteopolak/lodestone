@@ -167,15 +167,6 @@ impl<'w> MobSim<'w> {
         true
     }
 
-    /// The world this sim's mobs path over. Exposed so a caller holding only
-    /// a `&mut MobSim` (e.g. [`MobHandle::with`]) can still reach terrain —
-    /// see [`seed_demo_mobs`]'s use of this to resolve spawn-surface Y
-    /// without a second, separately-threaded `&ChunkWorld` parameter.
-    #[must_use]
-    pub(crate) fn world(&self) -> &'w ChunkWorld {
-        self.world
-    }
-
     /// The position of the mob with `id`, if present.
     #[must_use]
     pub fn position(&self, id: i32) -> Option<Vec3> {

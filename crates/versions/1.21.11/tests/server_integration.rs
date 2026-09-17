@@ -177,7 +177,6 @@ async fn joined_protocol_774_click_does_not_persist_client_prediction() {
         (0..=0, 0..=0),
         (8, 8),
         0,
-        0,
         Duration::from_secs(3600),
     )
     .expect("open temporary protocol-774 container world");

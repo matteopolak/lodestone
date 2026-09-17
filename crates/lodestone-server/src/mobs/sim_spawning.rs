@@ -219,7 +219,7 @@ impl<'w> MobSim<'w> {
             // check + this method's own
             // "not modelled" note: a surface exists and there are two open
             // cells above it. `None`/`false` both mean "no valid cell here".
-            let spawn_ok = surface_y(world, spawn_x, spawn_z).filter(|&surface| {
+            let spawn_ok = world.surface_y(spawn_x, spawn_z).filter(|&surface| {
                 !world.is_solid(spawn_x, surface + 1, spawn_z)
                     && !world.is_solid(spawn_x, surface + 2, spawn_z)
             });
@@ -329,7 +329,7 @@ impl<'w> MobSim<'w> {
         for _ in 0..10 {
             let x = reference.0 + self.trader_rng.next_int(96) - 48;
             let z = reference.1 + self.trader_rng.next_int(96) - 48;
-            if let Some(surface) = surface_y(world, x, z) {
+            if let Some(surface) = world.surface_y(x, z) {
                 spawn_pos = Some(Vec3::new(
                     f64::from(x) + 0.5,
                     f64::from(surface + 1),

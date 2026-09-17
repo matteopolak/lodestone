@@ -7,7 +7,7 @@
 //! ordinary vegetation placers because its world-seed noise and its
 //! replace/invalid-block rules are unlike the surface feature families.
 
-use std::collections::HashSet;
+use std::{cell::RefCell, collections::HashSet, fmt::Write};
 
 use serde_json::Value;
 
@@ -22,6 +22,41 @@ use super::config::{
     BlockStateProvider, VegTags, is_air, resolve_block_set, try_parse_int_provider,
 };
 use super::grid::VegGrid;
+
+thread_local! {
+    static GEODE_POINTS: RefCell<Vec<Vec<(BlockPos, i32)>>> = const { RefCell::new(Vec::new()) };
+    static GEODE_CRACK_POINTS: RefCell<Vec<Vec<BlockPos>>> = const { RefCell::new(Vec::new()) };
+    static GEODE_CRYSTAL_POINTS: RefCell<Vec<Vec<BlockPos>>> = const { RefCell::new(Vec::new()) };
+    static GEODE_CRYSTAL_STATE: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+fn return_scratch(
+    mut points: Vec<(BlockPos, i32)>,
+    mut crack_points: Vec<BlockPos>,
+    mut crystal_points: Vec<BlockPos>,
+) {
+    points.clear();
+    crack_points.clear();
+    crystal_points.clear();
+    GEODE_POINTS.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.len() < 2 {
+            slot.push(points);
+        }
+    });
+    GEODE_CRACK_POINTS.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.len() < 2 {
+            slot.push(crack_points);
+        }
+    });
+    GEODE_CRYSTAL_POINTS.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.len() < 2 {
+            slot.push(crystal_points);
+        }
+    });
+}
 
 /// Parsed configuration for the geode body used by 26.2's cave decoration.
 ///
@@ -296,7 +331,8 @@ pub(super) fn place_geode<R: RandomSource>(
         .sqrt();
     let should_generate_crack = f64::from(random.next_float()) < cfg.generate_crack_chance;
 
-    let mut points = Vec::new();
+    let mut points = GEODE_POINTS.with(|slot| slot.borrow_mut().pop().unwrap_or_default());
+    points.clear();
     let mut invalid_points = 0;
     for _ in 0..num_points {
         let x = cfg.outer_wall_distance.sample(random);
@@ -311,13 +347,19 @@ pub(super) fn place_geode<R: RandomSource>(
         if is_air(base) || cfg.invalid_blocks.contains(base) {
             invalid_points += 1;
             if invalid_points > cfg.invalid_blocks_threshold {
+                return_scratch(
+                    points,
+                    GEODE_CRACK_POINTS.with(|slot| slot.borrow_mut().pop().unwrap_or_default()),
+                    GEODE_CRYSTAL_POINTS.with(|slot| slot.borrow_mut().pop().unwrap_or_default()),
+                );
                 return false;
             }
         }
         points.push((pos, cfg.point_offset.sample(random)));
     }
 
-    let mut crack_points = Vec::new();
+    let mut crack_points = GEODE_CRACK_POINTS.with(|slot| slot.borrow_mut().pop().unwrap_or_default());
+    crack_points.clear();
     if should_generate_crack {
         let offset_index = random.next_int_bounded(4);
         let crack_offset = num_points * 2 + 1;
@@ -336,7 +378,9 @@ pub(super) fn place_geode<R: RandomSource>(
         }
     }
 
-    let mut potential_crystal_placements = Vec::new();
+    let mut potential_crystal_placements =
+        GEODE_CRYSTAL_POINTS.with(|slot| slot.borrow_mut().pop().unwrap_or_default());
+    potential_crystal_placements.clear();
     for z in origin.z + cfg.min_gen_offset..=origin.z + cfg.max_gen_offset {
         for y in origin.y + cfg.min_gen_offset..=origin.y + cfg.max_gen_offset {
             for x in origin.x + cfg.min_gen_offset..=origin.x + cfg.max_gen_offset {
@@ -414,11 +458,10 @@ pub(super) fn place_geode<R: RandomSource>(
         }
     }
 
-    for crystal_pos in potential_crystal_placements {
+    for &crystal_pos in &potential_crystal_placements {
         let index = random.next_int_bounded(cfg.inner_placements.len() as i32) as usize;
         let base_state = &cfg.inner_placements[index];
         for (direction, (dx, dy, dz)) in DIRECTIONS {
-            let mut state = replace_state_property(base_state, "facing", direction);
             let place_pos = BlockPos {
                 x: crystal_pos.x + dx,
                 y: crystal_pos.y + dy,
@@ -426,20 +469,56 @@ pub(super) fn place_geode<R: RandomSource>(
             };
             let place_state = grid.get(place_pos.x, place_pos.y, place_pos.z);
             let waterlogged = is_source_water_state(place_state);
-            state = replace_state_property(state.as_str(), "waterlogged", if waterlogged { "true" } else { "false" });
             if can_cluster_grow_at_state(place_state) {
+                let state = geode_crystal_state_id(grid, base_state, direction, waterlogged);
                 safe_set_state(
                     grid,
                     &cfg.cannot_replace,
                     place_pos,
-                    grid.interner().id_of(&state),
+                    state,
                 );
                 break;
             }
         }
     }
 
+    return_scratch(points, crack_points, potential_crystal_placements);
     true
+}
+
+fn geode_crystal_state_id(
+    grid: &VegGrid,
+    state: &str,
+    direction: &str,
+    waterlogged: bool,
+) -> StateId {
+    let Some(open) = state.find('[') else {
+        return grid.interner().id_of(state);
+    };
+    let mut scratch = GEODE_CRYSTAL_STATE.with(|slot| std::mem::take(&mut *slot.borrow_mut()));
+    scratch.clear();
+    scratch.push_str(&state[..open]);
+    scratch.push('[');
+    let properties = &state[open + 1..state.len().saturating_sub(1)];
+    for (index, property) in properties.split(',').enumerate() {
+        if index != 0 {
+            scratch.push(',');
+        }
+        let Some((name, old_value)) = property.split_once('=') else {
+            scratch.push_str(property);
+            continue;
+        };
+        let value = match name {
+            "facing" => direction,
+            "waterlogged" => if waterlogged { "true" } else { "false" },
+            _ => old_value,
+        };
+        let _ = write!(scratch, "{name}={value}");
+    }
+    scratch.push(']');
+    let id = grid.interner().id_of(&scratch);
+    GEODE_CRYSTAL_STATE.with(|slot| *slot.borrow_mut() = scratch);
+    id
 }
 
 const DIRECTIONS: [(&str, (i32, i32, i32)); 6] = [
@@ -518,6 +597,7 @@ fn is_source_water_state(state: &str) -> bool {
     &state[value_start..value_end] == "0"
 }
 
+#[cfg(test)]
 fn replace_state_property(state: &str, property: &str, value: &str) -> String {
     let needle = format!("{property}=");
     let Some(start) = state.find(&needle) else {

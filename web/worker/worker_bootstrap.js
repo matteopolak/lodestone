@@ -82,6 +82,9 @@
     if (!Number.isSafeInteger(request.epoch) || request.epoch < 1) {
       return "invalid server worker cancellation epoch";
     }
+    if (!["off", "error", "warn", "info", "debug", "trace"].includes(request.logLevel ?? "warn")) {
+      return "invalid server worker log level";
+    }
     return null;
   }
 
@@ -164,6 +167,7 @@
         BigInt(request.seed),
         request.preset,
         request.epoch,
+        request.logLevel ?? "warn",
       );
       postMessage({ kind: "ready" });
       postWorldgenProgress(ports[1], request.epoch, "server-ready", { queue: 0 });

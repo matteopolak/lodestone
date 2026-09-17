@@ -664,7 +664,6 @@ impl IntegratedServerOracle {
                 (0..=0, 0..=0),
                 (0, 0),
                 0,
-                0,
             )
         };
         let initial_tick = server

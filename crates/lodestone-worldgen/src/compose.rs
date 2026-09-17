@@ -113,7 +113,7 @@ fn parse_placed_ore(resolver: &dyn Resolver, placed_id: &str) -> Option<PlacedOr
 pub struct DecorationCatalog {
     ordered: Vec<(i32, String)>,
     members: HashMap<String, HashSet<(i32, String)>>,
-    placed: HashMap<String, crate::feature::vegetation::PlacedRef>,
+    placed: HashMap<String, Arc<crate::feature::vegetation::PlacedRef>>,
     /// Immutable feature-to-biome admission map shared by every replay context.
     /// Building this map per served column cloned thousands of strings and sets
     /// even though the catalog is generator-scoped and never changes.
@@ -127,9 +127,9 @@ pub struct DecorationCatalog {
 /// while still exposing the same per-stream vectors that the dispatchers use.
 #[derive(Debug, Default)]
 pub(crate) struct DecorationSelection {
-    pub features: Vec<(i32, usize, crate::feature::vegetation::PlacedRef)>,
-    pub step6_disks: Vec<(i32, usize, crate::feature::vegetation::PlacedRef)>,
-    pub step6_non_ore: Vec<(i32, usize, crate::feature::vegetation::PlacedRef)>,
+    pub features: Vec<(i32, usize, Arc<crate::feature::vegetation::PlacedRef>)>,
+    pub step6_disks: Vec<(i32, usize, Arc<crate::feature::vegetation::PlacedRef>)>,
+    pub step6_non_ore: Vec<(i32, usize, Arc<crate::feature::vegetation::PlacedRef>)>,
     pub ores: Vec<PlacedOre>,
 }
 
@@ -167,10 +167,10 @@ impl DecorationCatalog {
                     if let Some(placed) = self.placed.get(id) {
                         match placed.feature.as_ref() {
                             crate::feature::vegetation::ConfiguredFeature::Disk(_) => {
-                                out.step6_disks.push((*step, *index, placed.clone()));
+                                out.step6_disks.push((*step, *index, Arc::clone(placed)));
                             }
                             crate::feature::vegetation::ConfiguredFeature::UnderwaterMagma(_) => {
-                                out.step6_non_ore.push((*step, *index, placed.clone()));
+                                out.step6_non_ore.push((*step, *index, Arc::clone(placed)));
                             }
                             _ => {}
                         }
@@ -179,8 +179,8 @@ impl DecorationCatalog {
                         ore.index = *index;
                         out.ores.push(ore);
                     }
-                } else if let Some(placed) = self.placed.get(id).cloned() {
-                    out.features.push((*step, *index, placed));
+                } else if let Some(placed) = self.placed.get(id) {
+                    out.features.push((*step, *index, Arc::clone(placed)));
                 }
             }
             *index += 1;
@@ -213,7 +213,7 @@ impl DecorationCatalog {
                 let index = per_step.entry(*step).or_default();
                 let result = (*step != STEP_UNDERGROUND_ORES
                     && selected.contains(&(*step, id.as_str())))
-                    .then(|| self.placed.get(id).cloned().map(|placed| (*step, *index, placed)))
+                    .then(|| self.placed.get(id).map(|placed| (*step, *index, (**placed).clone())))
                     .flatten();
                 *index += 1;
                 result
@@ -249,7 +249,7 @@ impl DecorationCatalog {
                                 placed.feature.as_ref(),
                                 crate::feature::vegetation::ConfiguredFeature::Disk(_)
                             )
-                            .then(|| (*step, *index, placed.clone()))
+                            .then(|| (*step, *index, (**placed).clone()))
                         })
                     })
                     .flatten();
@@ -288,7 +288,7 @@ impl DecorationCatalog {
                                 placed.feature.as_ref(),
                                 crate::feature::vegetation::ConfiguredFeature::UnderwaterMagma(_)
                             )
-                            .then(|| (*step, *index, placed.clone()))
+                            .then(|| (*step, *index, (**placed).clone()))
                         })
                     })
                     .flatten();
@@ -422,7 +422,7 @@ pub fn build_decoration_catalog(
                     assigned
                 });
                 placed.entry(id.to_string()).or_insert_with(|| {
-                    crate::feature::vegetation::resolve_placed_feature_ref(resolver, entry)
+                    Arc::new(crate::feature::vegetation::resolve_placed_feature_ref(resolver, entry))
                 });
                 let node = DecorationNode { step: step as i32, first_seen: ordinal };
                 edges.entry(node.clone()).or_default();
@@ -654,13 +654,12 @@ pub fn solid_top_heights(
 ///
 /// # The loop order is the specification
 ///
-/// A [`crate::dense_grid::DenseBlockGrid`]'s palette is built in `set` order, and
-/// `surface_diff` is a hash map whose iteration order is not stable even across two
-/// separately constructed maps with identical content. So the diff is consulted by
-/// **point lookup inside this fixed `(lz, lx, ly)` loop** and never iterated:
-/// iterating it made two independently built generators produce the same terrain
-/// with different bytes, which is a real bug this repo shipped once (see
-/// `overworld/mod.rs`'s own note).
+/// A [`crate::dense_grid::DenseBlockGrid`]'s palette is built in `set` order.
+/// `surface_diff` is grouped by column and retains the surface scan's
+/// descending Y order, so this fixed `(lz, lx, ly)` loop can consume each
+/// column backwards without a coordinate conversion or a separate sort.
+/// Keeping palette insertion here makes the output order explicit and stable
+/// across independently constructed generators.
 #[must_use]
 pub fn materialize_column(
     interner: &std::sync::Arc<crate::interner::StateInterner>,
@@ -687,6 +686,8 @@ pub fn materialize_column(
     );
     for lz in 0..16i32 {
         for lx in 0..16i32 {
+            let changes = surface_diff.column_slice(lx, lz);
+            let mut next_change = changes.len();
             for ly in 0..height {
                 let y = min_y + ly;
                 let base = match field[column_index(lx, ly, lz, height)] {
@@ -694,7 +695,13 @@ pub fn materialize_column(
                     BlockKind::Water | BlockKind::Lava => fluid,
                     BlockKind::Air => StateId::AIR,
                 };
-                let state = surface_diff.get(&(lx, y, lz)).copied().unwrap_or(base);
+                let state = (next_change != 0 && changes[next_change - 1].0 == y)
+                    .then(|| {
+                        next_change -= 1;
+                        let state = changes[next_change].1;
+                        state
+                    })
+                    .unwrap_or(base);
                 world.set_id(base_x + lx, y, base_z + lz, state);
             }
         }
@@ -1035,6 +1042,16 @@ mod tests {
         assert_eq!(combined.features.len(), ordinary.len());
         assert_eq!(combined.features[0].0, ordinary[0].0);
         assert_eq!(combined.features[0].1, ordinary[0].1);
+        let repeated = catalog.select_all(["minecraft:first"], &definitions);
+        assert!(Arc::ptr_eq(&combined.features[0].2, &repeated.features[0].2));
+        assert_ne!(
+            Arc::as_ptr(&combined.features[0].2),
+            &ordinary[0].2 as *const crate::feature::vegetation::PlacedRef
+        );
+        assert_eq!(
+            combined.features[0].2.registry_id.as_deref(),
+            ordinary[0].2.registry_id.as_deref()
+        );
         assert_eq!(combined.step6_disks.len(), disks.len());
         assert_eq!(combined.step6_disks[0].0, disks[0].0);
         assert_eq!(combined.step6_disks[0].1, disks[0].1);

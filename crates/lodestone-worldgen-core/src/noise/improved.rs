@@ -238,6 +238,38 @@ impl ImprovedNoise {
         self.sample_and_lerp(xf, yf, zf, xr, yr - yr_fudge, zr, yr)
     }
 
+    /// The non-zero-scale half of [`Self::noise_scaled`]. Callers use this
+    /// only when the scale contract is already proven, so the general API's
+    /// zero-scale branch is absent from this hot path.
+    #[inline]
+    pub(crate) fn noise_scaled_nonzero(
+        &self,
+        px: f64,
+        py: f64,
+        pz: f64,
+        y_scale: f64,
+        y_fudge: f64,
+    ) -> f64 {
+        debug_assert_ne!(y_scale, 0.0);
+        let x = px + self.xo;
+        let y = py + self.yo;
+        let z = pz + self.zo;
+        let xf = floor(x);
+        let yf = floor(y);
+        let zf = floor(z);
+        let xr = x - f64::from(xf);
+        let yr = y - f64::from(yf);
+        let zr = z - f64::from(zf);
+        let fudge_limit = if y_fudge >= 0.0 && y_fudge < yr {
+            y_fudge
+        } else {
+            yr
+        };
+        let yr_fudge = f64::from(floor(fudge_limit / y_scale + f64::from(1.0e-7_f32)))
+            * y_scale;
+        self.sample_and_lerp(xf, yf, zf, xr, yr - yr_fudge, zr, yr)
+    }
+
     /// The eight gradient dot products of one lattice cell, then vanilla's
     /// own three-axis lerp reduction over them.
     ///
@@ -279,9 +311,36 @@ impl ImprovedNoise {
         ];
         crate::counters::bump_noise_corner_batch();
 
-        let gx = Simd::<f64, 8>::from_array(hash.map(|i| GRADIENT_X[i]));
-        let gy = Simd::<f64, 8>::from_array(hash.map(|i| GRADIENT_Y[i]));
-        let gz = Simd::<f64, 8>::from_array(hash.map(|i| GRADIENT_Z[i]));
+        let gx = Simd::<f64, 8>::from_array([
+            GRADIENT_X[hash[0]],
+            GRADIENT_X[hash[1]],
+            GRADIENT_X[hash[2]],
+            GRADIENT_X[hash[3]],
+            GRADIENT_X[hash[4]],
+            GRADIENT_X[hash[5]],
+            GRADIENT_X[hash[6]],
+            GRADIENT_X[hash[7]],
+        ]);
+        let gy = Simd::<f64, 8>::from_array([
+            GRADIENT_Y[hash[0]],
+            GRADIENT_Y[hash[1]],
+            GRADIENT_Y[hash[2]],
+            GRADIENT_Y[hash[3]],
+            GRADIENT_Y[hash[4]],
+            GRADIENT_Y[hash[5]],
+            GRADIENT_Y[hash[6]],
+            GRADIENT_Y[hash[7]],
+        ]);
+        let gz = Simd::<f64, 8>::from_array([
+            GRADIENT_Z[hash[0]],
+            GRADIENT_Z[hash[1]],
+            GRADIENT_Z[hash[2]],
+            GRADIENT_Z[hash[3]],
+            GRADIENT_Z[hash[4]],
+            GRADIENT_Z[hash[5]],
+            GRADIENT_Z[hash[6]],
+            GRADIENT_Z[hash[7]],
+        ]);
 
         let xm = xr - 1.0;
         let ym = yr - 1.0;
@@ -482,6 +541,43 @@ mod tests {
             fractional > 19_000,
             "only {fractional}/20000 sample positions had fractional coordinates"
         );
+    }
+
+    #[test]
+    fn nonzero_scaled_entry_is_bit_identical_to_general_entry() {
+        let n = fixture();
+        let round_off = 3.355_443_2e7_f64;
+        let coordinates = [
+            (-1024.75, -64.5, -2048.25),
+            (-n.xo, -n.yo, -n.zo),
+            (1.0 - n.xo, -1.0 - n.yo, 2.0 - n.zo),
+            (
+                crate::noise::perlin::wrap(round_off + 0.375),
+                crate::noise::perlin::wrap(-round_off - 0.625),
+                crate::noise::perlin::wrap(2.0 * round_off + 0.875),
+            ),
+            (
+                crate::noise::perlin::wrap(-3.0 * round_off + 0.125),
+                -0.5,
+                crate::noise::perlin::wrap(round_off - 0.875),
+            ),
+        ];
+        let scales = [0.125, 0.5, 1.0, 3.75, 64.0];
+        let fudges = [-128.5, -0.25, 0.0, 0.25, 1.5, 128.5];
+
+        for &(px, py, pz) in &coordinates {
+            for &scale in &scales {
+                for &fudge in &fudges {
+                    let specialized = n.noise_scaled_nonzero(px, py, pz, scale, fudge);
+                    let general = n.noise_scaled(px, py, pz, scale, fudge);
+                    assert_eq!(
+                        specialized.to_bits(),
+                        general.to_bits(),
+                        "non-zero scale path diverged at ({px}, {py}, {pz}), scale {scale}, fudge {fudge}"
+                    );
+                }
+            }
+        }
     }
 
     /// The `-0.0` hazard the module doc names, made concrete: a gradient

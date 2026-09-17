@@ -25,6 +25,11 @@ The leaf-distance worklist clears its queues in place and gives each collision
 bucket a small initial capacity when it is first built. This keeps later tree
 shapes from reallocating scratch storage while retaining the same bucket order.
 
+Vegetation patch surface sets, fallen-log positions, sculk cursor queues, and
+geode sample lists are similarly returned to bounded request-local pools. The
+geode crystal-state formatter also reuses its temporary state buffer; all of
+these retain the existing traversal and random-draw order.
+
 Ordinary production columns retain a bounded immutable replay-context cache. Its
 key includes the generator seed, generator configuration identity, and target
 chunk. The cache holds at most 128 contexts and 16 MiB of estimated owned

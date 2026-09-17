@@ -444,7 +444,6 @@ where
             world,
             mob_area,
             (0, 0),
-            0,
             view_radius,
         );
 

@@ -5,7 +5,7 @@ use super::*;
 use lodestone_model::ClientAction;
 use lodestone_model::text::{ClickAction, ClickEvent};
 
-fn headless_app_with_loopback() -> (WindowApp, std::sync::mpsc::Receiver<ClientAction>) {
+fn headless_app_with_loopback() -> (WindowApp, crate::net::ActionRelayReceiver) {
     let mut app = WindowApp::new(Config {
         mode: Mode::Headless,
         ..Config::default()

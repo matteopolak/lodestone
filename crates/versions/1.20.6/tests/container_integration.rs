@@ -78,7 +78,6 @@ async fn protocol_766_chest_move_is_authoritative_and_corrected_before_close() {
         (0..=0, 0..=0),
         (0, 0),
         0,
-        0,
     );
     let entities = server
         .block_entities()

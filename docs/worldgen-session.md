@@ -24,10 +24,37 @@ only the contiguous source-order prefix. Unsubmitted transactions can be
 rolled back, while cancellation clears pending work and retains committed
 products and mutations.
 
-Target-scoped feature replay keeps source-body deduplication within the active
-target transaction. An overlapping target may execute the same source again
-because its resident read view and ownership boundary are different; the
-resulting absolute writes still apply in canonical completion order.
+FEATURES has an explicit `LifecycleFeatureDispatch` ownership contract.
+`TargetOwned` dimensions run one complete target dispatcher and retain the
+returned mutation sequence as the stage's source ordinal; `SourceOrdered`
+dimensions keep the scalar source wavefront as the compatibility fallback.
+This distinction is part of the behavior contract, not an executor detail:
+an overlapping target may still execute source bodies again when its read view
+and ownership boundary differ. Capture replay remains source-ordered so its
+authenticated event stream is not changed by the production fast path.
+
+Before an Overworld output becomes terminal, production completes every
+target-owned writer within the FEATURES mutable-write radius. Those writers
+run in global `(z, x)` order. Their immutable read context expands the requested
+set by the separate FEATURES read radius, while only requested targets receive
+OUTPUT products or packet snapshots. `ChunkStore` gates, pins, and admits that
+complete context. Adjacent targets share one request-owned replay product, so
+overlapping terrain prefixes and source-selection plans are prepared once.
+
+Settlement padding uses the explicit `LifecycleCompletionMode::SparsePadding`
+boundary. A padding writer still runs the mixed FEATURES stream followed by
+TOP_LAYER in order, but retains only final local writes, outward spills, and
+block entities destined for requested columns. It does not create an output
+product, attach padding structures, settle light, or repair padding-local
+entities. Local writes are retained in a coordinate-keyed sparse overlay and
+are applied to the shaped prefix only if that padding column later becomes a
+packet neighbour or another mutable consumer; unrelated transaction overrides
+are not folded into it. A generated `PacketNeighbour` owns that overlay and
+applies it once, lazily at its first `column()` or `into_column()` call, so
+repeated packet or light reads reuse the same materialized column and its
+incremental heightmaps.
+Deferred future-target entries in the CARVERS read overlay are rolled back by
+the same transaction boundary, while sparse padding-local entries remain.
 
 `ResidentRead` captures the current committed revision and owns its product
 handles. `RequestCancellation` can be cloned into worker jobs; cancellation
@@ -50,16 +77,56 @@ this request boundary use the scalar generation fallback.
 
 Production dimension drivers live at the `ChunkSource` boundary in
 `production_worldgen_session`. Their typed policies select source order,
-shaped sidecars, and top-layer behavior. A shaped admission is imported as one
-authenticated `MaterializedWorld` aggregate with its real column and required
-sidecars; earlier stage records are coverage metadata, not copied density,
-biome, or surface products. `ImmutableComputeExecutor` is the replaceable seam
-for immutable admission work. The default uses the persistent server
-dispatcher on native targets and the serial fallback in browser builds.
-Mutable feature and top-layer commits remain in session order. Dimensions whose
-Features stream places structures retain its typed structure-write product from
-that same execution; the session never reruns the structure body to manufacture
-an earlier stage product.
+FEATURES ownership, shaped sidecars, and top-layer behavior. A shaped
+admission is imported as one
+authenticated `MaterializedWorld` aggregate with its required sidecars; for the
+Overworld it may retain an immutable `GeneratedColumn` rather than immediately
+constructing a mutable `ChunkColumn`. The latter conversion is deferred until
+the first mutation, heightmap, light, or packet consumer, and is deduplicated
+per admitted coordinate. Earlier stage records are coverage metadata, not
+copied density, biome, or surface products. `ImmutableComputeExecutor` is the
+replaceable seam for immutable admission work. The default uses the persistent server
+dispatcher on native targets, the initialized Rayon pool in threaded browser
+workers, and a serial fallback in browser workers without shared memory.
+Mutable feature and top-layer commits remain in session order. Target-owned
+FEATURES results retain their internal write order and provenance while the
+session commits one ordered source transaction. Dimensions whose Features
+stream places structures retain its typed structure-write product from that
+same execution; the session never reruns the structure body to manufacture an
+earlier stage product.
+
+Pristine Overworld admission batches use one request-scoped staged-store lease
+for the union of their radius-ten closures. If any requested coordinate is
+edited or hydrated, the source rejects that batch and the existing per-column
+precedence path is used. Target-owned transactional writes into untouched
+generated neighbours remain ordered sparse overrides until a later consumer
+actually needs a mutable `ChunkColumn`; persistent, already-materialized, and
+source-ordered destinations still cross that boundary immediately.
+
+The Overworld target-owned path can return its finished dense target column
+directly after FEATURES and top-layer work. The materializer adopts that
+column while its authenticated generated shaped prefix remains compact, and
+forwards only cross-column mutations. It also retains a sparse
+target-local final-FEATURES/top-layer read-state product: later target-owned
+operations seed their CARVERS view from it, without reapplying those writes to
+the already finished resident column or recording them as cross-target
+provenance. The session's reusable provenance map therefore retains only
+writes whose destination crosses into another column; this keeps mutable-source
+validation proportional to reusable overlays.
+
+Batch sessions share the materializer's immutable shaped-prefix handles while
+they import their frontier coverage. The resident column remains mutable and
+authoritative; its short-lived shared-prefix cache is invalidated at each
+mutable target boundary, so later targets cannot observe stale blocks while
+avoiding one deep column copy per session.
+
+The generated resident map is request/region scoped and bounded by the
+admission halo. It preserves block access, stage identity, structures,
+heightmaps, sidecars, fingerprints, mutation transactions, and packet output
+through the existing materialization boundary; it is not a completed-column
+cache. This boundary also leaves room for a future producer to hand off
+section-aligned compact storage without forcing an intermediate flat-grid
+repack.
 
 `SessionBudget` bounds product, sidecar, mutation, and explicitly accounted
 retained-byte usage. `new` accounts inline value size; heap-backed values use
@@ -88,6 +155,55 @@ low-level driver through its wrapper. A source that has no request capability
 continues to use `column`/`column_at` unchanged, which is the explicit legacy
 fallback used by tests and older protocols.
 
+If a cache miss finds a retained output product, the store reapplies any
+checkpointed destination overlays to that target before returning the existing
+column. This keeps a later spill into an already-completed destination visible
+after cache eviction; the same product-backed settlement also retires the
+pending bucket once its destination is complete.
+
+Batch requests share one prepare/finalize transaction:
+halo and generation-region leases, ledger hydration, ordered mutation commit,
+and rollback are identical on native and browser targets. Ledger-reused output
+columns join generated columns in that final commit rather than publishing an
+intermediate cache write against the same halo revision. Only the execution step
+differs; browser batches await the yielding source boundary so a multi-column
+batch cannot starve the server worker's tick and packet tasks.
+
+Ledger publication uses a bounded journal over only touched pipeline entries.
+Validation or capacity failure restores those entries and the ledger stamp
+exactly, without cloning unrelated pipelines or the growing product store.
+When a session has already committed its target `OUTPUT` frontier, a
+direct target-local mutation (the target is also the source and destination)
+is still checked against the pipeline, destination frontier, and coordinate
+revision, but publication skips reinserting it because the committed output
+is authoritative. Cross-column and foreign-source mutations remain ledger
+overlays until their destination reaches `OUTPUT`; after that boundary, the
+destination product is authoritative for the cell.
+When a later request hydrates such an overlay, the destination must be in its
+halo and the destination must remain inside the recorded source's write radius;
+the foreign source itself need not also be in the later request's halo.
+The world-owned ledger indexes pending overlays by destination chunk, so a
+checkpoint visits only the buckets in the request halo rather than scanning all
+historical writes. After a destination `OUTPUT` product is available, its
+bucket is folded into that product in one ordered batch and the pending values
+are retired. Nonpersistent sources use the same product-backed path; sources
+that retain complete columns may retire a write as soon as the source accepts
+the snapshot. A destination output product is authoritative: an identical
+later write is a no-op and any conflicting write is rejected. Leading-edge
+writes remain overlays only until the destination output is published, then
+they are folded in one ordered batch. Admission evicts the least recently used
+closed coordinate bundles when the coordinate ceiling is reached; active
+pipeline leases block eviction, and a later request regenerates an evicted
+bundle through the normal source/cache boundary.
+Any new retained ledger map must add a journal slot, record its prior value
+before mutation, and restore it on rollback; include a later-failure control
+that reaches the new entry before returning an error.
+
+Integrated mob seeding uses this boundary too. It cannot run the scalar column
+generator beside an active join. The low-priority seed task waits until a player
+has joined and its whole seed region is resident, then reuses those session-owned
+columns.
+
 ## How to change it
 
 Add new immutable products or sidecars to the central worldgen stage
@@ -110,10 +226,37 @@ dependency radius. `SessionBudget::DEFAULT` allows 4096 products, 2048
 sidecars, 131072 mutations, and 64 MiB of explicitly accounted retained
 values; `with_budget` selects tighter limits. A world-owned `GenerationLedger`
 can supply a checkpoint to the store execution boundary; session and ledger
-revisions remain separate. No environment variables or persistent storage are
-used by this module; checkpoints are intentionally in-memory. Aggregate-prefix
+revisions remain separate. Checkpoints are intentionally in-memory. Set
+`LODESTONE_WORLDGEN_LEDGER_TRACE=1` on native builds to print a strict frontier
+or late-output conflict when diagnosing a rejected publication; browser builds
+keep this disabled. Aggregate-prefix
 imports carry a dimension-specific executor version and two fingerprints so a
 checkpoint cannot silently cross an executor or shaped-boundary change.
+The ledger's `coordinates_per_pipeline` ceiling is an LRU bound for closed
+coordinate bundles; pinned pipelines reject an admission that cannot fit, while
+unpinned closed bundles are regenerated on a later request.
+Fingerprint v2 hashes the ordered palette-index stream directly. Cell ordinals
+are implicit in that fixed stream order, so hashing each ordinal again added
+CPU work without adding identity information. Indices are fed to the digest a
+section at a time instead of through one digest call per cell.
+Mutable stage and packet-output identities wrap that content digest with the
+stage boundary and coordinate. When a later stage only carries the same block
+field, production reuses the prior content digest instead of rescanning the
+column; stages with writes still compute a fresh content digest. This keeps
+content hashing separate from the smaller lifecycle identity chain.
+For pristine Overworld generated prefixes, an authenticated resolver identity
+also covers the seed, settings, fallback biome, and asset bundle, so the
+request records use a coordinate/stage provenance digest without scanning the
+compact block field. Dynamic resolvers and edited or persisted columns retain
+the exact content-digest path. The lifecycle marks that provenance only after
+the typed prefix has been admitted; direct target output and the
+FEATURES-to-TOP_LAYER-to-OUTPUT digest chain require the marker. A dynamic
+typed column, an edit, a hydrated column, or a cross-target override therefore
+cannot accidentally take the provenance shortcut. The one-block mutation
+control remains on the exact path and must change the resulting fingerprint.
+When an authenticated target receives a persistent cross-target write, the
+lifecycle folds that ordered `(position, state)` event into the resident
+identity in constant work; temporary speculative writes are never folded.
 
 ## Dependencies
 

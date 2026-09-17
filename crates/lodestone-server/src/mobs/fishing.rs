@@ -1169,7 +1169,7 @@ mod fishing_tests {
 
     #[test]
     fn fishing_owner_workers_preserve_random_state_transitions() {
-        let world = Box::leak(Box::new(ChunkWorld::new(-128, 128)));
+        let world = Box::leak(Box::new(ChunkWorld::new(-128, 384)));
         for index in 0..4 {
             let x = [-0.5_f64, 16.5, 32.5, 48.5][index];
             for dx in -2..=2 {

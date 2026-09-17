@@ -1827,20 +1827,20 @@ mod tests {
     #[test]
     fn a_powered_door_opens_and_closes_both_halves_through_the_reaction_dispatch() {
         let mut column = ChunkColumn::new(0, 16);
-        column.set_block(3, 5, 3, "minecraft:oak_door[half=lower,open=false,powered=false]");
-        column.set_block(3, 6, 3, "minecraft:oak_door[half=upper,open=false,powered=false]");
+        column.set_block(3, 5, 3, "minecraft:oak_door[facing=north,half=lower,hinge=left,open=false,powered=false]");
+        column.set_block(3, 6, 3, "minecraft:oak_door[facing=north,half=upper,hinge=left,open=false,powered=false]");
         let torch = (2, 5, 3); // west of the bottom half
 
         // Power on: the torch fan-out notifies the door; both halves flip.
         let events = flip_torch_and_propagate(&mut column, torch, true);
         assert_eq!(
             column.block_state(3, 5, 3),
-            "minecraft:oak_door[half=lower,open=true,powered=true]",
+            "minecraft:oak_door[facing=north,half=lower,hinge=left,open=true,powered=true]",
             "the bottom half must open when powered"
         );
         assert_eq!(
             column.block_state(3, 6, 3),
-            "minecraft:oak_door[half=upper,open=true,powered=true]",
+            "minecraft:oak_door[facing=north,half=upper,hinge=left,open=true,powered=true]",
             "the top half must open together with the bottom half"
         );
         let flipped: Vec<(i32, i32, i32)> = events.iter().map(|e| e.pos).collect();
@@ -1853,11 +1853,11 @@ mod tests {
         let events = flip_torch_and_propagate(&mut column, torch, false);
         assert_eq!(
             column.block_state(3, 5, 3),
-            "minecraft:oak_door[half=lower,open=false,powered=false]"
+            "minecraft:oak_door[facing=north,half=lower,hinge=left,open=false,powered=false]"
         );
         assert_eq!(
             column.block_state(3, 6, 3),
-            "minecraft:oak_door[half=upper,open=false,powered=false]"
+            "minecraft:oak_door[facing=north,half=upper,hinge=left,open=false,powered=false]"
         );
         let flipped: Vec<(i32, i32, i32)> = events.iter().map(|e| e.pos).collect();
         assert!(
@@ -1872,19 +1872,19 @@ mod tests {
     #[test]
     fn a_door_opens_from_power_at_the_top_half_too() {
         let mut column = ChunkColumn::new(0, 16);
-        column.set_block(3, 5, 3, "minecraft:oak_door[half=lower,open=false,powered=false]");
-        column.set_block(3, 6, 3, "minecraft:oak_door[half=upper,open=false,powered=false]");
+        column.set_block(3, 5, 3, "minecraft:oak_door[facing=north,half=lower,hinge=left,open=false,powered=false]");
+        column.set_block(3, 6, 3, "minecraft:oak_door[facing=north,half=upper,hinge=left,open=false,powered=false]");
         let torch = (2, 6, 3); // west of the TOP half
 
         flip_torch_and_propagate(&mut column, torch, true);
         assert_eq!(
             column.block_state(3, 6, 3),
-            "minecraft:oak_door[half=upper,open=true,powered=true]",
+            "minecraft:oak_door[facing=north,half=upper,hinge=left,open=true,powered=true]",
             "the notified top half must open"
         );
         assert_eq!(
             column.block_state(3, 5, 3),
-            "minecraft:oak_door[half=lower,open=true,powered=true]",
+            "minecraft:oak_door[facing=north,half=lower,hinge=left,open=true,powered=true]",
             "the bottom half must follow a signal at the top half"
         );
     }
@@ -1896,13 +1896,13 @@ mod tests {
     #[test]
     fn a_powered_trapdoor_opens_and_closes_with_exactly_one_event() {
         let mut column = ChunkColumn::new(0, 16);
-        column.set_block(3, 5, 3, "minecraft:oak_trapdoor[half=bottom,open=false,powered=false]");
+        column.set_block(3, 5, 3, "minecraft:oak_trapdoor[facing=north,half=bottom,open=false,powered=false,waterlogged=false]");
         let torch = (2, 5, 3);
 
         let events = flip_torch_and_propagate(&mut column, torch, true);
         assert_eq!(
             column.block_state(3, 5, 3),
-            "minecraft:oak_trapdoor[half=bottom,open=true,powered=true]"
+            "minecraft:oak_trapdoor[facing=north,half=bottom,open=true,powered=true,waterlogged=false]"
         );
         assert_eq!(events.len(), 1, "a trapdoor is one block — exactly one flip event");
         assert_eq!(events[0].pos, (3, 5, 3));
@@ -1910,7 +1910,7 @@ mod tests {
         let events = flip_torch_and_propagate(&mut column, torch, false);
         assert_eq!(
             column.block_state(3, 5, 3),
-            "minecraft:oak_trapdoor[half=bottom,open=false,powered=false]"
+            "minecraft:oak_trapdoor[facing=north,half=bottom,open=false,powered=false,waterlogged=false]"
         );
         assert_eq!(events.len(), 1);
     }
@@ -1939,18 +1939,18 @@ mod tests {
     #[test]
     fn a_powered_fence_gate_opens_and_closes() {
         let mut column = ChunkColumn::new(0, 16);
-        column.set_block(3, 5, 3, "minecraft:oak_fence_gate[open=false,powered=false]");
+        column.set_block(3, 5, 3, "minecraft:oak_fence_gate[facing=north,in_wall=false,open=false,powered=false]");
         let torch = (2, 5, 3);
 
         flip_torch_and_propagate(&mut column, torch, true);
         assert_eq!(
             column.block_state(3, 5, 3),
-            "minecraft:oak_fence_gate[open=true,powered=true]"
+            "minecraft:oak_fence_gate[facing=north,in_wall=false,open=true,powered=true]"
         );
         flip_torch_and_propagate(&mut column, torch, false);
         assert_eq!(
             column.block_state(3, 5, 3),
-            "minecraft:oak_fence_gate[open=false,powered=false]"
+            "minecraft:oak_fence_gate[facing=north,in_wall=false,open=false,powered=false]"
         );
     }
 

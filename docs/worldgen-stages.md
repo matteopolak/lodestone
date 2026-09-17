@@ -85,6 +85,12 @@ selection. The production feature path is source-major in the stable
 The feature catalog and the mixed ore/decoration dispatcher preserve the
 global step/index identity even when an entry is not selected.
 
+During the carver pass, duplicate centre-chunk visits are tracked by a
+transient bitset indexed by local X/Z and generation-window Y. This keeps the
+membership check cache-local without retaining a coordinate map or changing
+the order in which carvers inspect, mark, and write cells. The bitset is
+created per carve request and is never part of a retained stage product.
+
 The retained `PreOreResult` contains the prefix world, 256 height values,
 surface biome values, and the immutable biome-cell product. The final output
 also carries block entities, a motion-blocking heightmap, and spawn

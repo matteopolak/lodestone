@@ -90,12 +90,14 @@ fn a_plugin_that_uses_a_capability_it_did_not_declare_is_refused_at_load() {
 fn the_control_the_same_module_reaches_the_filesystem_once_granted() {
     let wasm = support::build_example_plugin(&["misbehave"]);
 
-    // A scoped root with one readable file in it. `granted.txt` is the path the
-    // fixture asks for from *inside* the root; it also asks for `/etc/passwd`, from
-    // outside.
+    // A scoped parent with one readable file in the plugin's own subtree.
+    // `with_filesystem_root` creates `<root>/<plugin-name>` for each plugin, so
+    // the fixture's relative `granted.txt` read resolves below `thief` while
+    // `/etc/passwd` remains outside the configured root.
     let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fs-root-control");
-    std::fs::create_dir_all(&root).expect("create the plugin filesystem root");
-    std::fs::write(root.join("granted.txt"), b"granted-bytes").expect("seed the root");
+    let plugin_root = root.join("thief");
+    std::fs::create_dir_all(&plugin_root).expect("create the plugin filesystem root");
+    std::fs::write(plugin_root.join("granted.txt"), b"granted-bytes").expect("seed the root");
 
     let mut host = PluginHost::new(CapabilitySet::permissive())
         .expect("engine")

@@ -26,6 +26,10 @@ division would assign the negative side to the wrong owner.
 
 ## How it works
 
+Quantized sine and cosine index the checked-in IEEE-754 bit table directly and reinterpret the selected
+entry as `f32`. Keep this lookup allocation-free: materializing the full table lazily creates a 256 KiB
+temporary that can exhaust the browser Wasm stack on the first movement tick.
+
 ### Local player input ordering
 
 Each fixed tick computes one `MovementIntent`, applies it to local physics, then queues the changed

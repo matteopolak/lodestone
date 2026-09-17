@@ -224,6 +224,12 @@ fn hello_bytes(name: &str, uuid: Uuid) -> Vec<u8> {
     w.into_vec()
 }
 
+fn accept_teleportation_bytes(id: i32) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.var_i32(id);
+    w.into_vec()
+}
+
 async fn drain<T: Transport>(client: &mut Connection<T>) -> Vec<(i32, Vec<u8>)> {
     const QUIET: Duration = Duration::from_millis(250);
     let mut out = Vec::new();
@@ -256,6 +262,28 @@ async fn join<T: Transport>(
         .await
         .unwrap();
     seen.extend(drain(client).await);
+    // Movement is ignored until the initial absolute position is accepted.
+    if let Some((_, payload)) = seen
+        .iter()
+        .find(|(id, _)| *id == play::clientbound::PLAYER_POSITION)
+    {
+        let id = Reader::new(payload)
+            .var_i32()
+            .expect("player_position teleport id");
+        client
+            .write_packet(
+                play::serverbound::ACCEPT_TELEPORTATION,
+                &accept_teleportation_bytes(id),
+            )
+            .await
+            .unwrap();
+    }
+    // The server starts publishing movement-derived state only after the
+    // client's initial world-load acknowledgement.
+    client
+        .write_packet(play::serverbound::PLAYER_LOADED, &[])
+        .await
+        .unwrap();
     seen
 }
 

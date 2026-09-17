@@ -251,6 +251,65 @@ pub fn wait_stats() -> WaitStats {
     }
 }
 
+/// Counts the request leases and shard-map touches made by the store.
+///
+/// These counters are a diagnostic control for the batch lease seam. They are
+/// deliberately separate from stage counters: a warm generation pass can have
+/// zero stage misses while still paying all of its pin bookkeeping. A batch
+/// lease should reduce the number of lease lifetimes and coordinate pins while
+/// preserving the same stage values.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LeaseStats {
+    /// Number of lease scopes opened.
+    pub opens: u64,
+    /// Number of union-batch lease scopes opened.
+    pub batch_opens: u64,
+    /// Number of coordinate pins acquired.
+    pub pins: u64,
+    /// Number of shard-map locks acquired while pinning.
+    pub pin_shards: u64,
+    /// Number of coordinate pins released.
+    pub unpins: u64,
+    /// Number of shard-map locks acquired while releasing pins.
+    pub unpin_shards: u64,
+}
+
+#[derive(Debug, Default)]
+struct LeaseCounters {
+    opens: AtomicU64,
+    batch_opens: AtomicU64,
+    pins: AtomicU64,
+    pin_shards: AtomicU64,
+    unpins: AtomicU64,
+    unpin_shards: AtomicU64,
+}
+
+impl LeaseCounters {
+    fn read(&self) -> LeaseStats {
+        LeaseStats {
+            opens: self.opens.load(Ordering::Relaxed),
+            batch_opens: self.batch_opens.load(Ordering::Relaxed),
+            pins: self.pins.load(Ordering::Relaxed),
+            pin_shards: self.pin_shards.load(Ordering::Relaxed),
+            unpins: self.unpins.load(Ordering::Relaxed),
+            unpin_shards: self.unpin_shards.load(Ordering::Relaxed),
+        }
+    }
+
+    fn reset(&self) {
+        for counter in [
+            &self.opens,
+            &self.batch_opens,
+            &self.pins,
+            &self.pin_shards,
+            &self.unpins,
+            &self.unpin_shards,
+        ] {
+            counter.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
 /// One chunk-stage's memoised product.
 ///
 /// A hit costs an atomic load and an `Arc` bump — no lock. A miss runs `compute`
@@ -322,6 +381,58 @@ impl<T> StageSlot<T> {
     }
 }
 
+impl<E: Default> StagedStore<E> {
+    /// Computes one stage for an ordered batch while the complete request
+    /// closure is leased against eviction. The slot guard remains the source
+    /// of truth: a concurrent scalar request waits for the batch's value and
+    /// never computes a duplicate.
+    pub fn compute_stage_batch<T, Select, Outcome, Compute>(
+        &self,
+        centre: ChunkPos,
+        radius: i32,
+        positions: impl IntoIterator<Item = ChunkPos>,
+        select: Select,
+        outcome: Outcome,
+        compute: Compute,
+    ) -> Vec<Arc<T>>
+    where
+        Select: for<'a> Fn(&'a E) -> &'a StageSlot<T>,
+        Outcome: Fn(bool) + Copy,
+        Compute: FnMut(ChunkPos) -> T,
+    {
+        let _lease = self.open_view(centre, radius);
+        self.compute_stage_batch_in_view(&_lease, positions, select, outcome, compute)
+    }
+
+    /// Computes one stage for positions covered by an existing request lease.
+    ///
+    /// This is crate-visible because the Overworld batch API owns the typed
+    /// lease. Keeping the already-leased path separate makes it impossible for
+    /// scalar entrypoints to accidentally skip their safety view, while batch
+    /// preparation can reuse one enclosing pin for all target-local work.
+    pub(crate) fn compute_stage_batch_in_view<T, Select, Outcome, Compute>(
+        &self,
+        _lease: &ViewScope<'_, E>,
+        positions: impl IntoIterator<Item = ChunkPos>,
+        select: Select,
+        outcome: Outcome,
+        mut compute: Compute,
+    ) -> Vec<Arc<T>>
+    where
+        Select: for<'a> Fn(&'a E) -> &'a StageSlot<T>,
+        Outcome: Fn(bool) + Copy,
+        Compute: FnMut(ChunkPos) -> T,
+    {
+        positions
+            .into_iter()
+            .map(|position| {
+                let entry = self.entry(position);
+                select(entry.as_ref()).get_or_compute(outcome, || compute(position))
+            })
+            .collect()
+    }
+}
+
 /// One shard's map. `pins` and `last_epoch` live here, beside the entry, so
 /// maintaining them costs nothing beyond the shard lock a lookup already takes —
 /// no per-entry atomics, no separate recency structure.
@@ -384,6 +495,9 @@ pub struct StagedStore<E> {
     /// Entries dropped by reclamation, ever. A sweep asserting this is zero is
     /// the direct control for "eviction never made us recompute".
     evicted: AtomicUsize,
+    /// Per-store lease bookkeeping, kept local so concurrent generators and
+    /// unrelated tests cannot contaminate one another's diagnostics.
+    lease_counters: LeaseCounters,
 }
 
 impl<E: Default> StagedStore<E> {
@@ -401,6 +515,7 @@ impl<E: Default> StagedStore<E> {
             reclaiming: AtomicBool::new(false),
             retention: retention.max(1),
             evicted: AtomicUsize::new(0),
+            lease_counters: LeaseCounters::default(),
         }
     }
 
@@ -473,19 +588,83 @@ impl<E: Default> StagedStore<E> {
     /// reason to move it.
     #[must_use]
     pub fn open_view(&self, centre: ChunkPos, radius: i32) -> ViewScope<'_, E> {
+        self.open_box(
+            centre.0.saturating_sub(radius),
+            centre.0.saturating_add(radius),
+            centre.1.saturating_sub(radius),
+            centre.1.saturating_add(radius),
+        )
+    }
+
+    /// Opens one lease for the union of the closures around `centres`.
+    ///
+    /// The input is the set of chunk columns that the caller will generate;
+    /// each receives a Chebyshev `radius` closure, and the store pins the
+    /// enclosing box once. A complete admitted rectangle therefore pays one
+    /// pin and one shard lock per coordinate in the union, rather than opening
+    /// and dropping a full view for every target. The enclosing box may pin a
+    /// few cells not required by a sparse input, but it never leaves a required
+    /// cell unpinned.
+    #[must_use]
+    pub fn open_batch_view(
+        &self,
+        centres: impl IntoIterator<Item = ChunkPos>,
+        radius: i32,
+    ) -> ViewScope<'_, E> {
+        assert!(radius >= 0, "batch view radius must be non-negative");
+        self.lease_counters
+            .batch_opens
+            .fetch_add(1, Ordering::Relaxed);
+        let mut bounds: Option<(i32, i32, i32, i32)> = None;
+        for (x, z) in centres {
+            bounds = Some(match bounds {
+                Some((min_x, max_x, min_z, max_z)) => (
+                    min_x.min(x),
+                    max_x.max(x),
+                    min_z.min(z),
+                    max_z.max(z),
+                ),
+                None => (x, x, z, z),
+            });
+        }
+        let Some((min_x, max_x, min_z, max_z)) = bounds else {
+            return self.open_box(1, 0, 1, 0);
+        };
+        self.open_box(
+            min_x.saturating_sub(radius),
+            max_x.saturating_add(radius),
+            min_z.saturating_sub(radius),
+            max_z.saturating_add(radius),
+        )
+    }
+
+    fn open_box(
+        &self,
+        min_x: i32,
+        max_x: i32,
+        min_z: i32,
+        max_z: i32,
+    ) -> ViewScope<'_, E> {
         let epoch = self.epoch.fetch_add(1, Ordering::Relaxed) + 1;
         let mut fresh_inserts = 0usize;
+        let mut touched_shards = 0u64;
+        let mut pinned = 0u64;
         VIEW_POSITIONS.with_borrow_mut(|buckets| {
             for bucket in buckets.iter_mut() {
                 bucket.clear();
             }
-            for pos in box_around(centre, radius) {
-                buckets[shard_of(pos)].push(pos);
+            for x in min_x..=max_x {
+                for z in min_z..=max_z {
+                    let pos = (x, z);
+                    buckets[shard_of(pos)].push(pos);
+                }
             }
             for (shard_index, positions) in buckets.iter().enumerate() {
                 if positions.is_empty() {
                     continue;
                 }
+                touched_shards += 1;
+                pinned += positions.len() as u64;
                 let shard = &self.shards[shard_index];
                 let mut slots = shard.slots.lock().unwrap_or_else(PoisonError::into_inner);
                 for &pos in positions {
@@ -524,10 +703,17 @@ impl<E: Default> StagedStore<E> {
                 self.reclaim();
             }
         }
+        self.lease_counters.opens.fetch_add(1, Ordering::Relaxed);
+        self.lease_counters.pins.fetch_add(pinned, Ordering::Relaxed);
+        self.lease_counters
+            .pin_shards
+            .fetch_add(touched_shards, Ordering::Relaxed);
         ViewScope {
             store: self,
-            centre,
-            radius,
+            min_x,
+            max_x,
+            min_z,
+            max_z,
         }
     }
 
@@ -552,6 +738,18 @@ impl<E: Default> StagedStore<E> {
     #[must_use]
     pub fn evicted(&self) -> usize {
         self.evicted.load(Ordering::Relaxed)
+    }
+
+    /// Reads this store's lease bookkeeping counters.
+    #[must_use]
+    pub fn lease_stats(&self) -> LeaseStats {
+        self.lease_counters.read()
+    }
+
+    /// Resets this store's lease bookkeeping counters. Diagnostics and tests
+    /// only; generation never branches on these values.
+    pub fn reset_lease_stats(&self) {
+        self.lease_counters.reset();
     }
 
     /// Drops the oldest unpinned entries until the live count is back inside
@@ -617,18 +815,25 @@ impl<E: Default> StagedStore<E> {
         self.reclaiming.store(false, Ordering::Release);
     }
 
-    fn unpin_view(&self, centre: ChunkPos, radius: i32) {
+    fn unpin_view(&self, min_x: i32, max_x: i32, min_z: i32, max_z: i32) {
+        let mut touched_shards = 0u64;
+        let mut unpinned = 0u64;
         VIEW_POSITIONS.with_borrow_mut(|buckets| {
             for bucket in buckets.iter_mut() {
                 bucket.clear();
             }
-            for pos in box_around(centre, radius) {
-                buckets[shard_of(pos)].push(pos);
+            for x in min_x..=max_x {
+                for z in min_z..=max_z {
+                    let pos = (x, z);
+                    buckets[shard_of(pos)].push(pos);
+                }
             }
             for (shard_index, positions) in buckets.iter().enumerate() {
                 if positions.is_empty() {
                     continue;
                 }
+                touched_shards += 1;
+                unpinned += positions.len() as u64;
                 let shard = &self.shards[shard_index];
                 let mut slots = shard.slots.lock().unwrap_or_else(PoisonError::into_inner);
                 for &pos in positions {
@@ -638,6 +843,12 @@ impl<E: Default> StagedStore<E> {
                 }
             }
         });
+        self.lease_counters
+            .unpins
+            .fetch_add(unpinned, Ordering::Relaxed);
+        self.lease_counters
+            .unpin_shards
+            .fetch_add(touched_shards, Ordering::Relaxed);
     }
 }
 
@@ -657,6 +868,7 @@ fn retain_oldest_candidates(candidates: &mut Vec<(u64, ChunkPos)>, requested: us
 }
 
 /// Every chunk position within Chebyshev `radius` of `centre`, in a fixed order.
+#[cfg(test)]
 fn box_around(centre: ChunkPos, radius: i32) -> impl Iterator<Item = ChunkPos> {
     let (cx, cz) = centre;
     (-radius..=radius).flat_map(move |dx| (-radius..=radius).map(move |dz| (cx + dx, cz + dz)))
@@ -665,20 +877,38 @@ fn box_around(centre: ChunkPos, radius: i32) -> impl Iterator<Item = ChunkPos> {
 /// Pins one request's whole neighbourhood against eviction. See
 /// [`StagedStore::open_view`].
 ///
-/// Holds no ownership of its pinned set: coordinates are re-derived from
-/// `centre`/`radius` on drop. The store batches those coordinates through a
-/// thread-local scratch array, so the guard itself remains two coordinates and
-/// no per-request allocation is retained.
+/// Holds no ownership of its pinned set: the four box bounds are re-used to
+/// derive the coordinates on drop. The store batches those coordinates through
+/// a thread-local scratch array, so the guard retains no per-request list.
 #[allow(missing_debug_implementations)]
 pub struct ViewScope<'a, E: Default> {
     store: &'a StagedStore<E>,
-    centre: ChunkPos,
-    radius: i32,
+    min_x: i32,
+    max_x: i32,
+    min_z: i32,
+    max_z: i32,
+}
+
+impl<E: Default> ViewScope<'_, E> {
+    /// Whether this lease contains the complete view needed by `centre`.
+    ///
+    /// Batch callers use this check before invoking an already-leased column;
+    /// it keeps the eviction guarantee explicit even if a future caller passes
+    /// a sparse or incomplete admission list.
+    #[must_use]
+    pub fn covers(&self, centre: ChunkPos, radius: i32) -> bool {
+        radius >= 0
+            && centre.0.saturating_sub(radius) >= self.min_x
+            && centre.0.saturating_add(radius) <= self.max_x
+            && centre.1.saturating_sub(radius) >= self.min_z
+            && centre.1.saturating_add(radius) <= self.max_z
+    }
 }
 
 impl<E: Default> Drop for ViewScope<'_, E> {
     fn drop(&mut self) {
-        self.store.unpin_view(self.centre, self.radius);
+        self.store
+            .unpin_view(self.min_x, self.max_x, self.min_z, self.max_z);
     }
 }
 
@@ -1153,5 +1383,89 @@ mod tests {
              than a property of the store"
         );
         assert_eq!(store.evicted(), 0, "the D4 burst closure must not evict");
+    }
+
+    /// A pair of adjacent radius-10 requests has a 22x21 union. The scalar
+    /// control opens two 21x21 leases (and touches each coordinate twice),
+    /// while the batch lease pins that union once. Both arms compute the same
+    /// 462 stage values and neither arm evicts, so the bookkeeping reduction is
+    /// not being purchased by changing the cache's correctness contract.
+    #[test]
+    fn batch_view_pins_union_once_without_recomputation_or_eviction() {
+        let centres = [(0, 0), (1, 0)];
+        let radius = 10;
+        let expected_union = 22 * 21;
+        let expected_scalar_shards = centres
+            .iter()
+            .map(|&centre| {
+                box_around(centre, radius)
+                    .map(shard_of)
+                    .collect::<std::collections::HashSet<_>>()
+                    .len() as u64
+            })
+            .sum::<u64>();
+        let expected_union_shards = (-radius..=radius + 1)
+            .flat_map(|x| (-radius..=radius).map(move |z| (x, z)))
+            .map(shard_of)
+            .collect::<std::collections::HashSet<_>>()
+            .len() as u64;
+
+        let run = |batch: bool| {
+            let store: StagedStore<Stages> = StagedStore::new(1024);
+            store.reset_lease_stats();
+            let mut runs = 0usize;
+            let mut digest = 0u64;
+            if batch {
+                let lease = store.open_batch_view(centres, radius);
+                for centre in centres {
+                    for pos in box_around(centre, radius) {
+                        let value = store.entry(pos).a.get_or_compute(
+                            |computed| runs += usize::from(computed),
+                            || (pos.0 as u64).rotate_left(17) ^ (pos.1 as u64),
+                        );
+                        digest = digest.rotate_left(3) ^ *value;
+                    }
+                }
+                drop(lease);
+            } else {
+                for centre in centres {
+                    let lease = store.open_view(centre, radius);
+                    for pos in box_around(centre, radius) {
+                        let value = store.entry(pos).a.get_or_compute(
+                            |computed| runs += usize::from(computed),
+                            || (pos.0 as u64).rotate_left(17) ^ (pos.1 as u64),
+                        );
+                        digest = digest.rotate_left(3) ^ *value;
+                    }
+                    drop(lease);
+                }
+            }
+            (digest, runs, store.evicted(), store.len(), store.lease_stats())
+        };
+
+        let scalar = run(false);
+        let batch = run(true);
+        assert_eq!(scalar.0, batch.0, "batch lease changed stage values");
+        assert_eq!(scalar.1, expected_union, "scalar control recomputed unexpectedly");
+        assert_eq!(batch.1, expected_union, "batch lease recomputed a stage");
+        assert_eq!(scalar.2, 0, "scalar control evicted below its retention ceiling");
+        assert_eq!(batch.2, 0, "batch lease evicted below its retention ceiling");
+        assert_eq!(scalar.3, expected_union as usize);
+        assert_eq!(batch.3, expected_union as usize);
+
+        assert_eq!(scalar.4.opens, 2);
+        assert_eq!(scalar.4.pins, (2 * 21 * 21) as u64);
+        assert_eq!(scalar.4.pin_shards, expected_scalar_shards);
+        assert_eq!(scalar.4.unpins, (2 * 21 * 21) as u64);
+        assert_eq!(scalar.4.unpin_shards, expected_scalar_shards);
+        assert_eq!(batch.4.opens, 1);
+        assert_eq!(scalar.4.batch_opens, 0);
+        assert_eq!(batch.4.batch_opens, 1);
+        assert_eq!(batch.4.pins, expected_union as u64);
+        assert_eq!(batch.4.pin_shards, expected_union_shards);
+        assert_eq!(batch.4.unpins, expected_union as u64);
+        assert_eq!(batch.4.unpin_shards, expected_union_shards);
+        assert!(batch.4.pins < scalar.4.pins);
+        assert!(batch.4.pin_shards <= scalar.4.pin_shards);
     }
 }

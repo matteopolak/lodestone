@@ -17,14 +17,14 @@
 //! offers exactly three shapes — `addBig` (one 310 px control),
 //! `addSmall` (two 150 px controls, 160 px apart) and `addHeader` — so a
 //! settings screen is a **list of options**, not bespoke geometry. That is why
-//! the census here is a table ([`Entry`]/[`Cell`]) rather than 143 hand-placed
+//! the census here is a table ([`Entry`]/[`Cell`]) rather than 144 hand-placed
 //! widgets, and why adding a screen is adding a `static`.
 //!
 //! ## `active = false` is the entire disabled path
 //!
 //! There is no disabled widget type in vanilla and none here — see
 //! [`super::widget`]'s module docs. [`Cell::is_live`] is what decides it, and
-//! it answers `false` for most of the 143 controls this module renders. The
+//! it answers `false` for most of the 144 controls this module renders. The
 //! remaining controls are the persisted options, completed navigation buttons,
 //! and the local Friends privacy rows.
 //!
@@ -76,8 +76,8 @@
 //!    canvas has no room for. [`drawn_scroll`] re-clamps where the canvas is
 //!    first known — vanilla's own `refreshScrollAmount` — so the rows, the
 //!    scrollbar and the clip are three readers of one expression. Read its doc:
-//!    it carries the player report that found this, and the two numbers (330 at
-//!    the shortest canvas, 90 at 854×480) that made it visible.
+//!    it carries the player report that found this, and the two numbers (386 at
+//!    the shortest canvas, 146 at 854×480) that made it visible.
 //!
 //!    The clip itself is [`super::render::Origin::is_scrolling_list_row`], and it
 //!    had to be added: `with_clip` reached the three screens whose rows are list
@@ -1105,7 +1105,7 @@ impl Cell {
 /// are placed on two pages each (`textBackgroundOpacity`, `chatOpacity`,
 /// `chatLineSpacing`). A field would have to be repeated per placement and could
 /// drift between them; keying by accessor makes "one `OptionInstance`, one tooltip"
-/// structural, which is vanilla's own shape. It also keeps 143 table rows untouched,
+/// structural, which is vanilla's own shape. It also keeps 144 table rows untouched,
 /// exactly as [`UNIT_DOUBLE_DEFAULTS`] and [`INT_RANGE_SLIDERS`] already do.
 ///
 /// The accessor is a safe key here in a way a field *name* would not be — see
@@ -1115,10 +1115,12 @@ impl Cell {
 ///
 /// ## What is in it, and what is deliberately not
 ///
-/// Derived from a grep of `cachedConstantTooltip` in vanilla's own persisted-options declarations (34 sites) plus
-/// `OnlineOptionsScreen`'s two `withTooltip` call sites, resolved through the
-/// declaring field name and then through `en_us.json`. Of those, **33 land on rows
-/// this tree has**; two do not and are not omissions:
+/// Derived from the persisted-option tooltip declarations and the online-screen
+/// tooltip call sites, resolved through the declaring field name and then through
+/// `en_us.json`. The table contains 32 option tooltips that land on rows this tree
+/// has. The account-scoped `allowFriendRequests` control is an action row rather
+/// than an option, so its service preference is intentionally not in this table.
+/// Two option tooltips do not land on this tree and are not omissions:
 ///
 /// - `japaneseGlyphVariants` — the row itself is absent from our Video table.
 /// - `telemetryOptInExtra` — it lives on `TelemetryInfoScreen`, which is
@@ -1131,7 +1133,6 @@ impl Cell {
 /// anyway, so naming the platform fork here is more honest than guessing the host.
 const OPTION_TOOLTIPS: &[(&str, &str)] = &[
     ("allowCursorChanges", "Allows the mouse cursor to change shape when over certain UI elements."),
-    ("allowFriendRequests", "Allow other players to send you friend requests"),
     ("allowServerListing", "Servers may list online players as part of their public status.\nWith this option off, your name will not show up in such lists."),
     ("chunkSectionFadeInTime", "How long in seconds chunks should fade in when they're first rendered, if at all."),
     ("cutoutLeaves", "Allows you to see through gaps in leaves. Disabling improves performance."),
@@ -1515,7 +1516,7 @@ pub fn render_distance_slider_fraction(chunks: u32) -> f32 {
     range.to_slider_value(i32::try_from(chunks).unwrap_or(range.min))
 }
 
-/// `Distant Horizon`'s fraction from the persisted visual-horizon distance.
+/// `Far Terrain Distance`'s fraction from the persisted visual-horizon distance.
 ///
 /// Unlike [`render_distance_slider_fraction`], this is not a vanilla range:
 /// zero is an intentional OFF value, while the far endpoint is the fixed
@@ -2316,10 +2317,10 @@ static VIDEO: &[Entry] = &[
     // This client-specific control is intentionally separated from the normal
     // chunk-distance rows above. Its label must make clear that it is a coarse
     // visual horizon, never a larger server streaming radius.
-    head("Distant Terrain"),
+    head("Far Terrain"),
     big(live_slider(
         "distantHorizon",
-        "Distant Horizon",
+        "Far Terrain Distance",
         LiveOption::DistantHorizon,
     )),
 ];
@@ -3302,9 +3303,9 @@ pub fn list_cell_origin(
 /// mouse event) and clamps exactly, through [`SettingsNav::model`]. The
 /// **keyboard** does not: a keypress has no canvas, so [`SettingsNav::scroll_to_cursor`]
 /// runs against [`crate::config::MIN_SCALED_HEIGHT`] — where the band is
-/// `240 - 33 - 33` = 174 and `maxScrollAmount` for the Video page's 500 px of
-/// content is **330**. At an 854×480 canvas the band is 414 and the real maximum
-/// is **90**. So arrowing to the bottom of the Video page set an offset up to
+/// `240 - 33 - 33` = 174 and `maxScrollAmount` for the Video page's 556 px of
+/// content is **386**. At an 854×480 canvas the band is 414 and the real maximum
+/// is **146**. So arrowing to the bottom of the Video page set an offset up to
 /// 240 px past that canvas's own end, and the rows were drawn from the raw value
 /// while the scrollbar — which goes through `model` — was drawn from the clamped
 /// one. Two readers, two different numbers.
@@ -4222,7 +4223,7 @@ mod tests {
         // vanilla's own online-options screen rendering's seven controls (`:85-116`) plus its Done.
         let expected = [
             (SettingsPage::Root, 13),
-            // The vanilla census is 32. Distant Horizon is one explicit
+            // The base census is 32. Far Terrain Distance is one explicit
             // Lodestone-only control, separated under its own header.
             (SettingsPage::Video, 33),
             (SettingsPage::Controls, 10),
@@ -4240,12 +4241,12 @@ mod tests {
                 "{page:?} should carry {count} controls"
             );
         }
-        // 143 across the nine pages.
+        // 144 across the nine pages.
         let total: usize = PAGES
             .iter()
             .map(|&p| all_controls(p, OUTSIDE_A_WORLD).len())
             .sum();
-        assert_eq!(total, 143, "13+32+10+8+17+19+27+9+8");
+        assert_eq!(total, 144, "13+33+10+8+17+19+27+9+9");
     }
 
     #[test]
@@ -4263,7 +4264,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(total, 143);
+        assert_eq!(total, 144);
         // The live *options*, in page order (`PAGES`) and then declaration
         // order within each page — the persisted fields of `config::Options`
         // besides `keybinds`.
@@ -4306,7 +4307,6 @@ mod tests {
                 // `BlendedTintCursor`, fed the frozen `BLEND_RADIUS`.
                 LiveOption::BiomeBlendRadius,
                 LiveOption::RenderDistance,
-                LiveOption::DistantHorizon,
                 // Also Video, in the `(ambientOcclusion, cloudStatus)` pair: the
                 // three-state Clouds cycle, whose `SkyFrame::with_cloud_status`
                 // consumer had zero production callers.
@@ -4339,6 +4339,9 @@ mod tests {
                 // three-state indicator cycle, whose crosshair half already drew
                 // pinned to vanilla's CROSSHAIR.
                 LiveOption::AttackIndicator,
+                // The far-terrain row follows the Preferences pair in the
+                // rendered table.
+                LiveOption::DistantHorizon,
                 LiveOption::ToggleSneak,
                 LiveOption::ToggleSprint,
                 LiveOption::ToggleAttack,
@@ -4460,11 +4463,11 @@ mod tests {
             render_distance.is_live(),
             "renderDistance is a persisted `Options` field since #443"
         );
-        // The count itself, not just the ratio's ingredients: 57 live option
-        // *rows* (52 distinct options, **five** of them placed twice — the three
+        // The count itself, not just the ratio's ingredients: 60 live option
+        // *rows* (55 distinct options, **five** of them placed twice — the three
         // Chat/Accessibility sliders, `showSubtitles` on Sound and
         // Accessibility, and now `menuBackgroundBlurriness` on Video and
-        // Accessibility, so 57 - 5 == 52 — the video-settings/leaves session's
+        // Accessibility, so 60 - 5 == 55 — the video-settings/leaves session's
         // five, framerateLimit/enableVsync/inactivityFpsLimit/graphicsPreset/
         // cutoutLeaves, plus mipmapLevels, entityShadows, weatherRadius,
         // attackIndicator, particles and biomeBlendRadius, are each placed
@@ -4473,13 +4476,14 @@ mod tests {
         // (Skin/Sound/Video/Controls/Chat/Accessibility/**Language**/
         // **Telemetry**/**Resource Packs** from the root grid,
         // Accessibility -> Controls, Controls -> Mouse, Controls -> Key Binds,
-        // and the root's own Online button, live outside a world).
+        // and the root's own Online button, live outside a world) + 2 live
+        // Friends action rows.
         // A change that adds or removes a live row anywhere must say so here.
-        assert_eq!(live.len(), 83, "outside a world: {live:?}");
+        assert_eq!(live.len(), 84, "outside a world: {live:?}");
     }
 
     /// The companion to [`the_disabled_majority_is_the_point_and_it_is_measured`]:
-    /// the same sweep, mid-session (`in_world == true`). The census (143) is
+    /// the same sweep, mid-session (`in_world == true`). The census (144) is
     /// identical — `SettingsPage::Online` and its own Done exist either way —
     /// but the live count drops by exactly one, because the root's header
     /// button is the (unbuilt) World Options fork instead of a live link to
@@ -4509,8 +4513,8 @@ mod tests {
         // and
         // `menuBackgroundBlurriness`, which is **two** rows (Video and
         // Accessibility) for one option.
-        assert_eq!(outside.len(), 83);
-        assert_eq!(inside.len(), 82, "one fewer: the root's Online button");
+        assert_eq!(outside.len(), 84);
+        assert_eq!(inside.len(), 83, "one fewer: the root's Online button");
         assert!(
             outside.contains(&nav("Online...", SettingsPage::Online)),
             "outside a world the root links to Online"
@@ -4535,6 +4539,12 @@ mod tests {
         assert_eq!(bob.label(&options), "View Bobbing: ON");
         options.view_bobbing = false;
         assert_eq!(bob.label(&options), "View Bobbing: OFF");
+        let far_terrain = live_slider(
+            "distantHorizon",
+            "Far Terrain Distance",
+            LiveOption::DistantHorizon,
+        );
+        assert_eq!(far_terrain.label(&options), "Far Terrain Distance: OFF");
         // An option we hold no value for shows the caption alone — the module
         // docs' departure (1). The control is the live row above, which does
         // carry a value, so this is not simply "labels never have colons".
@@ -5653,7 +5663,7 @@ mod tests {
         // session's entity-shadows row, plus the weather-radius,
         // menu-background-blur, attack-indicator, particles and biome-blend
         // rows.
-        assert_eq!(ALL.len(), 54, "fifty-four distinct live options");
+        assert_eq!(ALL.len(), 55, "fifty-five distinct live options");
         // And the eleven indices are all of them, none repeated: `SoundVolume` is
         // a *payload* variant, so neither the compiler nor the match above can see
         // a missing or duplicated index, and a duplicate would silently leave one
@@ -6056,8 +6066,8 @@ mod tests {
     /// The clamp itself, both hypotheses computed from outside constants.
     ///
     /// At the shortest canvas the Video page's band is `240 - 33 - 33` = 174 and
-    /// `contentHeight` is `500 + 4`, so `maxScrollAmount` is **330**. At 854×480
-    /// the band is 414 and the maximum is **90**. `scroll_to_cursor` legitimately
+    /// `contentHeight` is `556 + 4`, so `maxScrollAmount` is **386**. At 854×480
+    /// the band is 414 and the maximum is **146**. `scroll_to_cursor` legitimately
     /// produces the former; drawing it at the latter canvas is the defect.
     #[test]
     fn the_settings_scroll_is_clamped_to_the_canvas_it_is_drawn_at() {
@@ -6065,20 +6075,20 @@ mod tests {
         let content: f32 = (0..page.entries().len())
             .map(|i| entry_height(page.entries(), i))
             .sum();
-        assert_eq!(content, 500.0, "premise: the Video page's own content height");
+        assert_eq!(content, 556.0, "premise: the Video page's own content height");
         let short = crate::config::MIN_SCALED_HEIGHT as f32;
         assert_eq!(
             list_spec(page, 0.0).model(short).unwrap().max_scroll(),
             content + 4.0 - (short - 2.0 * FOOTER_HEIGHT),
-            "330 at the shortest canvas"
+            "386 at the shortest canvas"
         );
         assert_eq!(
             list_spec(page, 0.0).model(480.0).unwrap().max_scroll(),
             content + 4.0 - (480.0 - 2.0 * FOOTER_HEIGHT),
-            "90 at 854x480"
+            "146 at 854x480"
         );
         // The keyboard's own offset, clamped for the canvas it is drawn at.
-        assert_eq!(drawn_scroll(page, 330.0, 480.0), 90.0);
+        assert_eq!(drawn_scroll(page, 330.0, 480.0), 146.0);
         assert_eq!(drawn_scroll(page, 330.0, short), 330.0, "legal at its own canvas");
         assert_ne!(
             drawn_scroll(page, 330.0, 480.0),

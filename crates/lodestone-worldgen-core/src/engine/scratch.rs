@@ -106,6 +106,9 @@ struct DenseShape {
     nx: i32,
     ny: i32,
     nz: i32,
+    /// Bit shifts for the common power-of-two lattice spacings. `None` keeps
+    /// the general `div_euclid` path for unusual sampler geometries.
+    shifts: Option<(u32, u32)>,
 }
 
 impl DenseShape {
@@ -128,6 +131,12 @@ impl DenseShape {
         let y0 = y_interp_lo.min(0);
         let y1 = y_interp_hi.max(0);
 
+        let shifts = (step_xz > 0
+            && step_y > 0
+            && (step_xz as u32).is_power_of_two()
+            && (step_y as u32).is_power_of_two())
+            .then_some((step_xz.trailing_zeros(), step_y.trailing_zeros()));
+
         Self {
             x0,
             y0,
@@ -137,6 +146,7 @@ impl DenseShape {
             nx: (x1 - x0) / step_xz + 1,
             ny: (y1 - y0) / step_y + 1,
             nz: (z1 - z0) / step_xz + 1,
+            shifts,
         }
     }
 
@@ -147,18 +157,32 @@ impl DenseShape {
 
     #[inline]
     fn index(&self, x: i32, y: i32, z: i32) -> usize {
-        let ix = (x - self.x0).div_euclid(self.step_xz);
-        let iy = (y - self.y0).div_euclid(self.step_y);
-        let iz = (z - self.z0).div_euclid(self.step_xz);
+        let (ix, iy, iz) = if let Some((xz_shift, y_shift)) = self.shifts {
+            // The bounded-sampler contract makes each delta non-negative. An
+            // unsigned shift is therefore the exact quotient for these
+            // power-of-two steps and avoids three integer divisions on every
+            // dense cache access.
+            (
+                (x - self.x0) as usize >> xz_shift,
+                (y - self.y0) as usize >> y_shift,
+                (z - self.z0) as usize >> xz_shift,
+            )
+        } else {
+            (
+                (x - self.x0).div_euclid(self.step_xz) as usize,
+                (y - self.y0).div_euclid(self.step_y) as usize,
+                (z - self.z0).div_euclid(self.step_xz) as usize,
+            )
+        };
         debug_assert!(
-            ix >= 0 && ix < self.nx && iy >= 0 && iy < self.ny && iz >= 0 && iz < self.nz,
+            ix < self.nx as usize && iy < self.ny as usize && iz < self.nz as usize,
             "corner key outside the sampler's declared bounds: ({x}, {y}, {z}) -> \
              ({ix}, {iy}, {iz}) not within (0..{}, 0..{}, 0..{})",
             self.nx,
             self.ny,
             self.nz
         );
-        (ix as usize * self.ny as usize + iy as usize) * self.nz as usize + iz as usize
+        (ix * self.ny as usize + iy) * self.nz as usize + iz
     }
 }
 
@@ -278,6 +302,8 @@ enum CellStore {
 pub struct Scratch {
     slots: Vec<SlotStore>,
     cells: Vec<CellStore>,
+    column_values: Vec<Vec<f64>>,
+    column_cell_y: Vec<Option<i32>>,
     dense: Option<DenseShape>,
     cell_shape: Option<CellShape>,
     /// The configuration currently installed, so [`Self::reconfigure`] can tell
@@ -295,6 +321,11 @@ pub struct Scratch {
     /// nothing here". One `Cell` increment per sampler construction (tens per
     /// column against ~10^9 instructions) is why this is not behind a feature.
     probe_scope: u64,
+    /// Logical bytes retained by this scratch's vectors. Hash-table allocator
+    /// overhead is intentionally not included; this value is used to report
+    /// bounded dense-buffer growth and pool retention.
+    #[cfg(feature = "gen-counters")]
+    retained_bytes: u64,
     /// A one-slot-per-node last-`(x, y, z)` memo for the field evaluator's
     /// **side-effect-free** node kinds — the four point-evaluated leaves and
     /// `Noise`. See [`Self::leaf_get`] for why those and no others.
@@ -306,10 +337,14 @@ impl Default for Scratch {
         Self {
             slots: Vec::new(),
             cells: Vec::new(),
+            column_values: Vec::new(),
+            column_cell_y: Vec::new(),
             dense: None,
             cell_shape: None,
             config: None,
             probe_scope: 0,
+            #[cfg(feature = "gen-counters")]
+            retained_bytes: 0,
             leaf_memo: [LEAF_MEMO_EMPTY; LEAF_MEMO_LEN],
         }
     }
@@ -329,6 +364,18 @@ impl Scratch {
         cell_height: i32,
         bounds: Option<Bounds>,
     ) -> Self {
+        #[cfg(feature = "gen-counters")]
+        let mut s = match POOL.with(|p| p.borrow_mut().pop()) {
+            Some(s) => {
+                crate::counters::bump_scratch_pool_reuse();
+                s
+            }
+            None => {
+                crate::counters::bump_scratch_pool_allocation();
+                Self::default()
+            }
+        };
+        #[cfg(not(feature = "gen-counters"))]
         let mut s = POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default();
         s.reconfigure(slot_count, cell_width, cell_height, bounds);
         s.probe_scope = NEXT_SCOPE.with(|c| {
@@ -351,6 +398,12 @@ impl Scratch {
             let mut v = p.borrow_mut();
             if v.len() < POOL_CAP {
                 v.push(self);
+            } else {
+                #[cfg(feature = "gen-counters")]
+                {
+                    crate::counters::bump_scratch_pool_eviction();
+                    crate::counters::bump_scratch_retained_remove(self.retained_bytes);
+                }
             }
         });
     }
@@ -391,15 +444,30 @@ impl Scratch {
                     CellStore::Dense { has, .. } => has.fill(false),
                 }
             }
+            self.column_cell_y.fill(None);
             return;
         }
 
+        #[cfg(feature = "gen-counters")]
+        let old_slots_capacity = self.slots.capacity();
+        #[cfg(feature = "gen-counters")]
+        let old_cells_capacity = self.cells.capacity();
+        #[cfg(feature = "gen-counters")]
+        let old_columns_capacity = self.column_values.capacity();
+        #[cfg(feature = "gen-counters")]
+        let old_column_cell_y_capacity = self.column_cell_y.capacity();
+        #[cfg(feature = "gen-counters")]
+        let old_retained_bytes = self.retained_bytes;
         let dense = bounds.map(|b| DenseShape::for_bounds(cell_width, cell_height, b));
         let cell_shape = bounds.map(|b| CellShape::for_bounds(cell_width, cell_height, b));
         self.slots.clear();
         self.cells.clear();
+        self.column_values.clear();
+        self.column_cell_y.clear();
         self.slots.reserve(slot_count);
         self.cells.reserve(slot_count);
+        self.column_values.reserve(slot_count);
+        self.column_cell_y.reserve(slot_count);
         for _ in 0..slot_count {
             self.slots.push(if dense.is_some() {
                 SlotStore::Dense {
@@ -417,23 +485,183 @@ impl Scratch {
             } else {
                 CellStore::Hashed(HashMap::default())
             });
+            self.column_values.push(Vec::new());
+            self.column_cell_y.push(None);
         }
         self.dense = dense;
         self.cell_shape = cell_shape;
         self.config = Some(want);
+        #[cfg(feature = "gen-counters")]
+        {
+            let new_retained_bytes = self.logical_retained_bytes();
+            self.retained_bytes = new_retained_bytes;
+            if new_retained_bytes > old_retained_bytes {
+                crate::counters::bump_scratch_retained_add(new_retained_bytes - old_retained_bytes);
+            } else if old_retained_bytes > new_retained_bytes {
+                crate::counters::bump_scratch_retained_remove(old_retained_bytes - new_retained_bytes);
+            }
+            let top_level_growth = (self.slots.capacity().saturating_sub(old_slots_capacity)
+                * std::mem::size_of::<SlotStore>()) as u64
+                + (self.cells.capacity().saturating_sub(old_cells_capacity)
+                    * std::mem::size_of::<CellStore>()) as u64
+                + (self.column_values.capacity().saturating_sub(old_columns_capacity)
+                    * std::mem::size_of::<Vec<f64>>()) as u64
+                + (self
+                    .column_cell_y
+                    .capacity()
+                    .saturating_sub(old_column_cell_y_capacity)
+                    * std::mem::size_of::<Option<i32>>()) as u64;
+            crate::counters::bump_scratch_buffer_allocated_bytes(top_level_growth);
+        }
+    }
+
+    #[cfg(feature = "gen-counters")]
+    fn logical_retained_bytes(&self) -> u64 {
+        let slots = self.slots.capacity() * std::mem::size_of::<SlotStore>();
+        let cells = self.cells.capacity() * std::mem::size_of::<CellStore>();
+        let columns = self.column_values.capacity() * std::mem::size_of::<Vec<f64>>()
+            + self.column_cell_y.capacity() * std::mem::size_of::<Option<i32>>();
+        let slot_payloads = self
+            .slots
+            .iter()
+            .map(|store| match store {
+                SlotStore::Hashed(_) => 0,
+                SlotStore::Dense { values, has } => {
+                    values.capacity() * std::mem::size_of::<f64>() + has.capacity()
+                }
+            })
+            .sum::<usize>();
+        let cell_payloads = self
+            .cells
+            .iter()
+            .map(|store| match store {
+                CellStore::Hashed(_) => 0,
+                CellStore::Dense { values, has } => {
+                    values.capacity() * std::mem::size_of::<[f64; 8]>() + has.capacity()
+                }
+            })
+            .sum::<usize>();
+        let column_payloads = self
+            .column_values
+            .iter()
+            .map(Vec::capacity)
+            .sum::<usize>()
+            * std::mem::size_of::<f64>();
+        (slots + cells + columns + slot_payloads + cell_payloads + column_payloads) as u64
+    }
+
+    pub(crate) fn begin_column(&mut self) {
+        self.column_cell_y.fill(None);
+    }
+
+    #[inline]
+    pub(crate) fn column_value(&self, slot: usize, cell_y: i32, offset: usize) -> Option<f64> {
+        (self.column_cell_y[slot] == Some(cell_y)).then(|| self.column_values[slot][offset])
+    }
+
+    pub(crate) fn take_column_values(&mut self, slot: usize) -> Vec<f64> {
+        self.column_cell_y[slot] = None;
+        std::mem::take(&mut self.column_values[slot])
+    }
+
+    pub(crate) fn put_column_values(&mut self, slot: usize, cell_y: i32, values: Vec<f64>) {
+        #[cfg(feature = "gen-counters")]
+        let old_retained_bytes = self.retained_bytes;
+        self.column_values[slot] = values;
+        self.column_cell_y[slot] = Some(cell_y);
+        #[cfg(feature = "gen-counters")]
+        self.refresh_retained_bytes(old_retained_bytes);
+    }
+
+    #[cfg(feature = "gen-counters")]
+    fn refresh_retained_bytes(&mut self, old_retained_bytes: u64) {
+        let new_retained_bytes = self.logical_retained_bytes();
+        self.retained_bytes = new_retained_bytes;
+        if new_retained_bytes > old_retained_bytes {
+            let delta = new_retained_bytes - old_retained_bytes;
+            crate::counters::bump_scratch_buffer_allocated_bytes(delta);
+            crate::counters::bump_scratch_retained_add(delta);
+        } else if old_retained_bytes > new_retained_bytes {
+            crate::counters::bump_scratch_retained_remove(old_retained_bytes - new_retained_bytes);
+        }
     }
 
     /// Reads a cached corner octet for one cell of one `interpolated` slot.
     #[inline]
+    #[cfg(test)]
     pub(crate) fn cell_get(&self, slot: usize, cx: i32, cy: i32, cz: i32) -> Option<[f64; 8]> {
-        match &self.cells[slot] {
-            CellStore::Hashed(m) => m.get(&(cx, cy, cz)).copied(),
+        self.cell_get_ref_with_column(slot, cx, cy, cz, None)
+            .copied()
+    }
+
+    pub(crate) fn cell_column_indices(&self, cx: i32, cz: i32) -> Option<(usize, usize)> {
+        self.cell_shape.map(|shape| {
+            (
+                (cx - shape.cx0) as usize,
+                (cz - shape.cz0) as usize,
+            )
+        })
+    }
+
+    #[inline]
+    pub(crate) fn cell_get_ref_with_column(
+        &self,
+        slot: usize,
+        cx: i32,
+        cy: i32,
+        cz: i32,
+        column_indices: Option<(usize, usize)>,
+    ) -> Option<&[f64; 8]> {
+        let value = match &self.cells[slot] {
+            CellStore::Hashed(m) => m.get(&(cx, cy, cz)),
             CellStore::Dense { values, has } => {
                 if values.is_empty() {
-                    return None;
+                    None
+                } else {
+                    let shape = self.cell_shape.expect("dense cells need a CellShape");
+                    let i = if let Some((ix, iz)) = column_indices {
+                        let iy = (cy - shape.cy0) as usize;
+                        (ix * shape.ny as usize + iy) * shape.nz as usize + iz
+                    } else {
+                        shape.index(cx, cy, cz)
+                    };
+                    if has[i] { Some(&values[i]) } else { None }
                 }
-                let i = self.cell_shape.expect("dense cells need a CellShape").index(cx, cy, cz);
-                if has[i] { Some(values[i]) } else { None }
+            }
+        };
+        let hit = value.is_some();
+        crate::counters::bump_cache_lookup(crate::counters::CacheKind::Cell, hit);
+        crate::counters::bump_logical_read(
+            crate::counters::MemoryBoundary::CellCache,
+            1,
+            if hit { 64 } else { 0 },
+        );
+        value
+    }
+
+    #[inline]
+    pub(crate) fn cell_is_present(
+        &self,
+        slot: usize,
+        cx: i32,
+        cy: i32,
+        cz: i32,
+        column_indices: Option<(usize, usize)>,
+    ) -> bool {
+        match &self.cells[slot] {
+            CellStore::Hashed(m) => m.contains_key(&(cx, cy, cz)),
+            CellStore::Dense { values, has } => {
+                if values.is_empty() {
+                    return false;
+                }
+                let shape = self.cell_shape.expect("dense cells need a CellShape");
+                let i = if let Some((ix, iz)) = column_indices {
+                    let iy = (cy - shape.cy0) as usize;
+                    (ix * shape.ny as usize + iy) * shape.nz as usize + iz
+                } else {
+                    shape.index(cx, cy, cz)
+                };
+                has[i]
             }
         }
     }
@@ -441,6 +669,8 @@ impl Scratch {
     /// Stores a cell's corner octet.
     #[inline]
     pub(crate) fn cell_put(&mut self, slot: usize, cx: i32, cy: i32, cz: i32, v: [f64; 8]) {
+        #[cfg(feature = "gen-counters")]
+        let old_retained_bytes = self.retained_bytes;
         let shape = self.cell_shape;
         match &mut self.cells[slot] {
             CellStore::Hashed(m) => {
@@ -457,6 +687,9 @@ impl Scratch {
                 has[i] = true;
             }
         }
+        crate::counters::bump_logical_write(crate::counters::MemoryBoundary::CellCache, 1, 64);
+        #[cfg(feature = "gen-counters")]
+        self.refresh_retained_bytes(old_retained_bytes);
     }
 
     /// Reads the one-slot last-`(x, y, z)` memo for a side-effect-free node.
@@ -489,50 +722,74 @@ impl Scratch {
     #[inline]
     pub(crate) fn leaf_get(&self, id: u32, x: i32, y: i32, z: i32) -> Option<f64> {
         let e = self.leaf_memo[(id as usize) & (LEAF_MEMO_LEN - 1)];
-        if e.id == id && e.x == x && e.y == y && e.z == z {
+        let hit = e.id == id && e.x == x && e.y == y && e.z == z;
+        if hit {
             #[cfg(feature = "gen-counters")]
             LEAF_MEMO_HITS.with(|c| c.set(c.get() + 1));
-            Some(e.value)
         } else {
             #[cfg(feature = "gen-counters")]
             LEAF_MEMO_MISSES.with(|c| c.set(c.get() + 1));
-            None
         }
+        crate::counters::bump_cache_lookup(crate::counters::CacheKind::Leaf, hit);
+        crate::counters::bump_logical_read(
+            crate::counters::MemoryBoundary::LeafMemo,
+            1,
+            if hit { 8 } else { 0 },
+        );
+        hit.then_some(e.value)
     }
 
     /// Stores `(node, x, y, z) -> value`, evicting whatever shared the slot.
     #[inline]
     pub(crate) fn leaf_put(&mut self, id: u32, x: i32, y: i32, z: i32, value: f64) {
-        self.leaf_memo[(id as usize) & (LEAF_MEMO_LEN - 1)] = LeafMemo {
+        let entry = &mut self.leaf_memo[(id as usize) & (LEAF_MEMO_LEN - 1)];
+        if entry.id != LEAF_MEMO_EMPTY.id
+            && (entry.id != id || entry.x != x || entry.y != y || entry.z != z)
+        {
+            crate::counters::bump_cache_eviction(crate::counters::CacheKind::Leaf);
+        }
+        *entry = LeafMemo {
             id,
             x,
             y,
             z,
             value,
         };
+        crate::counters::bump_logical_write(crate::counters::MemoryBoundary::LeafMemo, 1, 8);
     }
 
     /// Reads a cached corner (or `flat_cache`) value for one slot.
     #[inline]
     pub(crate) fn slot_get(&self, slot: usize, key: (i32, i32, i32)) -> Option<f64> {
-        match &self.slots[slot] {
+        let value = match &self.slots[slot] {
             SlotStore::Hashed(m) => m.get(&key).copied(),
             SlotStore::Dense { values, has } => {
                 if values.is_empty() {
-                    return None;
+                    None
+                } else {
+                    let i = self
+                        .dense
+                        .expect("dense slots need a DenseShape")
+                        .index(key.0, key.1, key.2);
+                    if has[i] { Some(values[i]) } else { None }
                 }
-                let i = self
-                    .dense
-                    .expect("dense slots need a DenseShape")
-                    .index(key.0, key.1, key.2);
-                if has[i] { Some(values[i]) } else { None }
             }
-        }
+        };
+        let hit = value.is_some();
+        crate::counters::bump_cache_lookup(crate::counters::CacheKind::Slot, hit);
+        crate::counters::bump_logical_read(
+            crate::counters::MemoryBoundary::SlotCache,
+            1,
+            if hit { 8 } else { 0 },
+        );
+        value
     }
 
     /// Stores a corner (or `flat_cache`) value for one slot.
     #[inline]
     pub(crate) fn slot_put(&mut self, slot: usize, key: (i32, i32, i32), v: f64) {
+        #[cfg(feature = "gen-counters")]
+        let old_retained_bytes = self.retained_bytes;
         let dense = self.dense;
         match &mut self.slots[slot] {
             SlotStore::Hashed(m) => {
@@ -549,6 +806,9 @@ impl Scratch {
                 has[i] = true;
             }
         }
+        crate::counters::bump_logical_write(crate::counters::MemoryBoundary::SlotCache, 1, 8);
+        #[cfg(feature = "gen-counters")]
+        self.refresh_retained_bytes(old_retained_bytes);
     }
 }
 
@@ -618,10 +878,40 @@ mod tests {
     fn grid_sizes_match_the_derived_geometry() {
         let d = DenseShape::for_bounds(4, 8, B);
         assert_eq!((d.nx, d.ny, d.nz), (5, 49, 5), "corner lattice");
+        assert_eq!(d.shifts, Some((2, 3)));
         assert_eq!(d.len(), 1_225);
         let c = CellShape::for_bounds(4, 8, B);
         assert_eq!((c.nx, c.ny, c.nz), (4, 48, 4), "cell grid");
         assert_eq!(c.len(), 768);
+    }
+
+    #[test]
+    fn dense_power_of_two_index_matches_the_division_reference() {
+        let bounds = Bounds {
+            x: (-33, 18),
+            y: (-70, 321),
+            z: (-19, 26),
+        };
+        let d = DenseShape::for_bounds(4, 8, bounds);
+        assert_eq!(d.shifts, Some((2, 3)));
+        for ix in 0..d.nx {
+            for iy in 0..d.ny {
+                for iz in 0..d.nz {
+                    let x = d.x0 + ix * d.step_xz;
+                    let y = d.y0 + iy * d.step_y;
+                    let z = d.z0 + iz * d.step_xz;
+                    let reference = ((x - d.x0).div_euclid(d.step_xz) as usize
+                        * d.ny as usize
+                        + (y - d.y0).div_euclid(d.step_y) as usize)
+                        * d.nz as usize
+                        + (z - d.z0).div_euclid(d.step_xz) as usize;
+                    assert_eq!(d.index(x, y, z), reference, "lattice index ({ix}, {iy}, {iz})");
+                }
+            }
+        }
+
+        let non_power_of_two = DenseShape::for_bounds(3, 6, bounds);
+        assert_eq!(non_power_of_two.shifts, None);
     }
 
     /// A reused scratch must not serve the previous configuration's values.
@@ -725,5 +1015,36 @@ mod tests {
             "the pool handed back a dirty scratch"
         );
         s2.release();
+    }
+
+    #[cfg(feature = "gen-counters")]
+    #[test]
+    fn cache_traffic_counter_has_predictable_hits_misses_and_eviction() {
+        crate::counters::reset();
+        let mut s = Scratch::default();
+        s.reconfigure(1, 4, 8, Some(B));
+
+        assert_eq!(s.cell_get(0, 0, 0, 0), None);
+        s.cell_put(0, 0, 0, 0, [1.0; 8]);
+        assert_eq!(s.cell_get(0, 0, 0, 0), Some([1.0; 8]));
+        assert_eq!(s.slot_get(0, (0, 0, 0)), None);
+        s.slot_put(0, (0, 0, 0), 2.0);
+        assert_eq!(s.slot_get(0, (0, 0, 0)), Some(2.0));
+        assert_eq!(s.leaf_get(3, 0, 0, 0), None);
+        s.leaf_put(3, 0, 0, 0, 3.0);
+        assert_eq!(s.leaf_get(3, 0, 0, 0), Some(3.0));
+        s.leaf_put(3 + LEAF_MEMO_LEN as u32, 0, 0, 0, 4.0);
+
+        let snapshot = crate::counters::snapshot();
+        assert!(snapshot.cache_hits[crate::counters::CacheKind::Cell as usize] >= 1);
+        assert!(snapshot.cache_misses[crate::counters::CacheKind::Cell as usize] >= 1);
+        assert!(snapshot.cache_hits[crate::counters::CacheKind::Slot as usize] >= 1);
+        assert!(snapshot.cache_misses[crate::counters::CacheKind::Slot as usize] >= 1);
+        assert!(snapshot.cache_hits[crate::counters::CacheKind::Leaf as usize] >= 1);
+        assert!(snapshot.cache_misses[crate::counters::CacheKind::Leaf as usize] >= 1);
+        assert!(snapshot.cache_evictions[crate::counters::CacheKind::Leaf as usize] >= 1);
+        assert!(snapshot.scratch_buffer_allocated_bytes > 0);
+        assert!(snapshot.scratch_retained_bytes_high_water >= snapshot.scratch_retained_bytes);
+        s.release();
     }
 }

@@ -11,6 +11,8 @@
 use std::path::{Path, PathBuf};
 
 use lodestone_worldgen::density::{NoiseParams, Resolver};
+#[cfg(feature = "gen-counters")]
+use lodestone_worldgen::feature::vegetation::census;
 use lodestone_worldgen::overworld::OverworldGenerator;
 use serde_json::Value;
 
@@ -130,5 +132,37 @@ fn source_biome_selection_does_not_import_neighbour_copper_into_the_ne_edge() {
             state,
             "external packet control differs at chunk (250,-250), local ({x},{y},{z})",
         );
+    }
+}
+
+#[cfg(feature = "gen-counters")]
+#[test]
+fn standard_direct_features_stay_inside_the_target_radius_one_context() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../lodestone-server/assets/worldgen");
+    let assets = Assets { root: root.clone() };
+    let settings: Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join("noise_settings/overworld.json"))
+            .expect("read overworld settings"),
+    )
+    .expect("parse overworld settings");
+    let generator = OverworldGenerator::new(42, &settings, &assets, "minecraft:plains", false);
+
+    for (target_x, target_z) in [(0, 0), (37, -29)] {
+        census::reset();
+        let _ = generator.direct_decoration_with_overrides(target_x, target_z, &[]);
+        let mask = census::source_slot_mask();
+        println!("direct source slots target=({target_x},{target_z}) mask={mask:#x}");
+        for dx in -2i32..=2 {
+            for dz in -2i32..=2 {
+                if dx.abs() > 1 || dz.abs() > 1 {
+                    let slot = ((dx + 2) * 5 + (dz + 2)) as usize;
+                    assert_eq!(
+                        mask & (1u32 << slot),
+                        0,
+                        "target ({target_x},{target_z}) read radius-two source ({dx},{dz}); mask={mask:#x}",
+                    );
+                }
+            }
+        }
     }
 }

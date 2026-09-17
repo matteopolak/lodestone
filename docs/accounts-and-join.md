@@ -173,19 +173,16 @@ known live-server hazard — see the root project rules).
 
 The loading screen clears only when **two** independent conditions are both satisfied: the
 terrain rule and the asset rule. For a newly created survival world with a declared initial view,
-terrain requires both the player's own admitted column and an explicit preparation
-milestone from the terrain producer. The resident-column count and its progress bar remain
-telemetry; a full bar is not readiness because a first mesh can still be deferred on a missing
-horizontal neighbour. Remote sessions without a trustworthy denominator retain the own-column
-fallback. A known destination-world vertical extent is required before the out-of-range liveness
-escape can apply; an unknown extent is not proof of being outside the build height. The timeout
-and dead-player short-circuits remain independent of that extent check. The asset rule
+terrain requires the player's own admitted column and explicit producer confirmation that every
+column in the declared initial view is resident and renderer-settled. The progress counter remains
+telemetry and cannot release the overlay. Remote sessions without a trustworthy denominator retain
+the own-column fallback. A known destination-world vertical extent is required before the
+out-of-range liveness escape can apply; an unknown extent is not proof of being outside the build
+height. The dead-player short-circuit remains independent of that extent check. The asset rule
 requires that no server-pushed resource pack is still downloading or
-waiting to be applied to the block atlas. Both are measured from one shared clock, the moment
-the client enters `ConnectPhase::LoadingTerrain`, with vanilla's own 30-second
-`CLIENT_WAIT_TIMEOUT` — a
-single deadline for the whole client load rather than one per sub-wait, matching vanilla's
-`LevelLoadTracker`. Assets are checked first, matching vanilla's precedence between a resource
+waiting to be applied to the block atlas. Neither gate has a time-based escape: the overlay stays
+up until the declared initial view and its assets are actually presentable. Assets are checked
+first, matching the reference client's precedence between a resource
 reload overlay and a loading screen. The world keeps rendering underneath the opaque loading
 overlay throughout, so chunks keep meshing and remote-player skins keep resolving while the
 screen is up. The ordering inside the frame loop is load-bearing and nothing in the type system

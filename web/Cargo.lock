@@ -3154,10 +3154,13 @@ name = "lodestone-server-worker"
 version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
+ "console_log",
  "js-sys",
  "lodestone-server",
  "lodestone-shell",
+ "log",
  "rayon",
+ "tracing",
  "wasm-bindgen",
  "wasm-bindgen-rayon",
  "web-sys",
@@ -3201,6 +3204,7 @@ dependencies = [
  "lodestone-wasm-host",
  "lodestone-world",
  "lodestone-worldgen-core",
+ "log",
  "memory-stats",
  "objc2-core-graphics",
  "png",
@@ -3306,6 +3310,7 @@ version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
  "console_log",
+ "futures-util",
  "getrandom 0.2.17",
  "js-sys",
  "lodestone-shell",

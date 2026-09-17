@@ -15,11 +15,9 @@
 //! client hardcodes that shape by dimension name rather than reading it off
 //! the wire, so anything else would misalign decode.
 //!
-//! All three tests run under `#[tokio::test(start_paused = true)]` so the
-//! 15-second keep-alive interval and 1-second time-sync interval resolve in
-//! a fraction of a second of wall-clock time via tokio's auto-advance —
-//! the same pattern `crates/lodestone-server/tests/serve_play.rs` and
-//! `crates/lodestone-net/src/connection.rs`'s own tests already establish.
+//! Timer-focused tests pause Tokio's clock only after the real client has
+//! spawned. The view-streaming test keeps wall time throughout because its
+//! assertions measure chunk generation and delivery rather than a long timer.
 
 use std::time::Duration;
 
@@ -76,7 +74,7 @@ fn square(cx: i32, cz: i32, r: i32) -> Vec<(i32, i32)> {
 /// `serve_play.rs`'s `responsive_client_survives_multiple_keep_alive_intervals`
 /// (that test's negative control; this one proves the same holds for the
 /// actual protocol-776 `keep_alive` encoding/decoding, not a stand-in).
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn real_client_survives_multiple_keep_alive_intervals() {
     let source = cheap_source();
     let (server, client_io) = IntegratedServer::open_in_memory(V770ServerProtocol, source, 0);
@@ -88,6 +86,7 @@ async fn real_client_survives_multiple_keep_alive_intervals() {
         .wait_for_spawn(Duration::from_secs(30))
         .await
         .expect("client never spawned");
+    tokio::time::pause();
 
     // Comfortably past four 15-second keep-alive intervals. With the clock
     // paused this advances virtually, resolving in a fraction of a second
@@ -118,7 +117,7 @@ async fn real_client_survives_multiple_keep_alive_intervals() {
 /// a number that rose reliably and was not the world's time. So the constructor is
 /// load-bearing here, and picking the wrong one makes the gate measure a clock
 /// nothing ticks.
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn real_client_time_of_day_advances_from_periodic_broadcasts() {
     let source = cheap_source();
     let (server, client_io) = IntegratedServer::open_in_memory_with_mobs(
@@ -126,7 +125,6 @@ async fn real_client_time_of_day_advances_from_periodic_broadcasts() {
         source,
         (0..=0, 0..=0),
         (0, 0),
-        0,
         0,
     );
     let (handle, _events) =
@@ -137,6 +135,7 @@ async fn real_client_time_of_day_advances_from_periodic_broadcasts() {
         .wait_for_spawn(Duration::from_secs(30))
         .await
         .expect("client never spawned");
+    tokio::time::pause();
 
     let (age0, time_of_day0) = handle.world_time();
 
@@ -170,7 +169,7 @@ async fn real_client_time_of_day_advances_from_periodic_broadcasts() {
 /// old and new windows share nothing, then back near the original spawn
 /// chunk — so this cannot pass by having the player never actually leave
 /// its starting view.
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn real_client_view_follows_player_across_chunk_boundaries() {
     let view_radius = 1; // 3x3 = 9 columns
     let source = cheap_source();

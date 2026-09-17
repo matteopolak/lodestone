@@ -20,6 +20,10 @@
 //! The world owns these values, while connection tasks only read snapshots and
 //! enqueue requests that the world tick loop applies.
 //!
+//! The initial-spawn resolver is a separate runtime sibling of the persisted
+//! scalars. It serializes only the one-time terrain search and wakes waiters
+//! asynchronously; it never holds the scalar lock across generation.
+//!
 //! # How it works
 //!
 //! `run_tick_loop` calls [`WorldStateHandle::tick_time`] once per world tick.
@@ -59,6 +63,7 @@
 //! [`crate::game_rules`] for the typed registry, `lodestone-core` for the NBT
 //! codec, `lodestone-model` for [`Difficulty`]. No protocol, no packet id.
 
+use std::future::Future;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
@@ -69,6 +74,43 @@ use lodestone_core::Nbt;
 use lodestone_model::{Difficulty, GameMode};
 
 use crate::game_rules::{GameRuleError, GameRuleValue, GameRules};
+
+#[derive(Debug, Default)]
+struct InitialSpawnCoordinator {
+    searching: Mutex<bool>,
+    wake: tokio::sync::Notify,
+}
+
+struct InitialSpawnLease {
+    coordinator: Arc<InitialSpawnCoordinator>,
+    finished: bool,
+}
+
+impl InitialSpawnLease {
+    fn finish(mut self) {
+        self.finished = true;
+        *self
+            .coordinator
+            .searching
+            .lock()
+            .expect("initial spawn coordinator lock poisoned") = false;
+        self.coordinator.wake.notify_waiters();
+    }
+}
+
+impl Drop for InitialSpawnLease {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        *self
+            .coordinator
+            .searching
+            .lock()
+            .expect("initial spawn coordinator lock poisoned") = false;
+        self.coordinator.wake.notify_waiters();
+    }
+}
 
 /// Ticks in one full day (`24_000`). The client takes `day_time % 24000` to
 /// place the sun; nothing here needs to.
@@ -169,6 +211,7 @@ impl Default for WorldState {
 #[derive(Debug, Clone, Default)]
 pub struct WorldStateHandle {
     state: Arc<Mutex<WorldState>>,
+    spawn_coordinator: Arc<InitialSpawnCoordinator>,
     join_ready: Arc<AtomicBool>,
     active_connections: Arc<AtomicUsize>,
     /// Where this world's players are, for
@@ -571,11 +614,119 @@ impl WorldStateHandle {
         self.with(|state| state.spawn)
     }
 
+    /// Resolves the terrain-backed initial spawn once for this world. The
+    /// first caller owns the search; later callers wait asynchronously and use
+    /// its committed result. A dropped leader releases the claim so a later
+    /// join can retry without leaving the world permanently unresolved.
+    pub(crate) async fn resolve_world_spawn<F, Fut>(&self, search: F) -> crate::world_spawn::WorldSpawn
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = crate::world_spawn::WorldSpawn>,
+    {
+        let mut search = Some(search);
+        loop {
+            let notified = self.spawn_coordinator.wake.notified();
+            let mut notified = std::pin::pin!(notified);
+            notified.as_mut().enable();
+            if let Some(spawn) = self.world_spawn() {
+                return spawn;
+            }
+
+            let leader = {
+                let mut searching = self
+                    .spawn_coordinator
+                    .searching
+                    .lock()
+                    .expect("initial spawn coordinator lock poisoned");
+                if *searching {
+                    false
+                } else {
+                    *searching = true;
+                    true
+                }
+            };
+
+            if leader {
+                let lease = InitialSpawnLease {
+                    coordinator: Arc::clone(&self.spawn_coordinator),
+                    finished: false,
+                };
+                let found = (search.take().expect("spawn search closure is one-shot"))().await;
+                self.set_world_spawn(found);
+                lease.finish();
+                return found;
+            }
+
+            notified.await;
+        }
+    }
+
+    /// Warms the fresh Overworld spawn while the caller continues startup.
+    ///
+    /// The returned future is deliberately not spawned here: the owner must
+    /// place it in its tracked server task so shutdown can cancel it. The
+    /// source is retained by the same world-generation dispatcher used by a
+    /// joining connection, and a join racing this future observes the same
+    /// coordinator claim and result.
+    pub(crate) async fn prefetch_world_spawn<S>(&self, source: Arc<S>)
+    where
+        S: crate::chunk::ChunkSource + ?Sized + 'static,
+    {
+        if source.dimension().unwrap_or(crate::dimension::Dimension::Overworld)
+            != crate::dimension::Dimension::Overworld
+        {
+            return;
+        }
+
+        let started = lodestone_time::Instant::now();
+        tracing::debug!("spawn preparation started");
+
+        let spawn = if let Some(spawn) = self.world_spawn() {
+            spawn
+        } else {
+            let search_source = Arc::clone(&source);
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                self.resolve_world_spawn(|| async move {
+                    crate::spawn::spawn_worldgen(move || {
+                        crate::world_spawn::find_initial_spawn(&*search_source)
+                    })
+                    .await
+                })
+                .await
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                self.resolve_world_spawn(|| async move {
+                    crate::world_spawn::find_initial_spawn_yielding(&*search_source).await
+                })
+                .await
+            }
+        };
+
+        let centre = (
+            (spawn.pos.x / 16.0).floor() as i32,
+            (spawn.pos.z / 16.0).floor() as i32,
+        );
+        tracing::debug!(
+            elapsed_ms = started.elapsed().as_millis(),
+            spawn = ?spawn.pos,
+            ?centre,
+            "spawn resolved"
+        );
+        tracing::debug!(
+            elapsed_ms = started.elapsed().as_millis(),
+            ?centre,
+            "spawn preparation complete"
+        );
+    }
+
     /// Records the world spawn — the first join's spiral result, or a
     /// `/setworldspawn`. Persisted on the next autosave through
     /// [`level_data_fields`](Self::level_data_fields).
     pub(crate) fn set_world_spawn(&self, spawn: crate::world_spawn::WorldSpawn) {
         self.with(|state| state.spawn = Some(spawn));
+        self.spawn_coordinator.wake.notify_waiters();
     }
 
     /// Forgets the world spawn, so the next join searches for one.
@@ -750,6 +901,277 @@ fn difficulty_from_name(name: &str) -> Option<Difficulty> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn initial_spawn_search_is_shared_by_concurrent_joiners() {
+        let world = WorldStateHandle::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let first_calls = Arc::clone(&calls);
+        let first_world = world.clone();
+        let first = async move {
+            first_world
+                .resolve_world_spawn(|| async move {
+                    assert_eq!(first_calls.fetch_add(1, Ordering::SeqCst), 0);
+                    tokio::task::yield_now().await;
+                    crate::world_spawn::WorldSpawn {
+                        pos: lodestone_model::Vec3::new(12.0, 71.0, -4.0),
+                        yaw: 0.0,
+                        pitch: 0.0,
+                    }
+                })
+                .await
+        };
+        let second_calls = Arc::clone(&calls);
+        let second_world = world.clone();
+        let second = async move {
+            second_world
+                .resolve_world_spawn(|| async move {
+                    second_calls.fetch_add(1, Ordering::SeqCst);
+                    crate::world_spawn::WorldSpawn {
+                        pos: lodestone_model::Vec3::new(99.0, 99.0, 99.0),
+                        yaw: 0.0,
+                        pitch: 0.0,
+                    }
+                })
+                .await
+        };
+
+        let (first, second) = tokio::join!(first, second);
+        assert_eq!(first, second);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn eager_spawn_warmup_shares_its_result_with_a_racing_login() {
+        struct Source {
+            columns: Arc<AtomicUsize>,
+        }
+
+        impl crate::chunk::ChunkSource for Source {
+            fn column(&self, _cx: i32, _cz: i32) -> crate::chunk::ChunkColumn {
+                self.columns.fetch_add(1, Ordering::SeqCst);
+                crate::chunk::ChunkColumn::new(-64, 384)
+            }
+
+            fn horizon_sample(&self, _x: i32, _z: i32) -> Option<crate::chunk::HorizonSample> {
+                Some(crate::chunk::HorizonSample {
+                    terrain_y: 62,
+                    water_y: Some(62),
+                    surface_rgb565: 0,
+                    flags: 0,
+                })
+            }
+
+            fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+                "minecraft:air".to_owned()
+            }
+
+            fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+                "minecraft:plains".to_owned()
+            }
+
+            fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        }
+
+        let world = WorldStateHandle::new();
+        let columns = Arc::new(AtomicUsize::new(0));
+        let source = Arc::new(Source {
+            columns: Arc::clone(&columns),
+        });
+        let login_calls = Arc::new(AtomicUsize::new(0));
+        let login_world = world.clone();
+        let login_calls_for_search = Arc::clone(&login_calls);
+        let login = async move {
+            login_world
+                .resolve_world_spawn(|| async move {
+                    login_calls_for_search.fetch_add(1, Ordering::SeqCst);
+                    crate::world_spawn::WorldSpawn {
+                        pos: lodestone_model::Vec3::new(99.0, 99.0, 99.0),
+                        yaw: 0.0,
+                        pitch: 0.0,
+                    }
+                })
+                .await
+        };
+
+        let ((), spawn) = tokio::join!(world.prefetch_world_spawn(source), login);
+        assert_eq!(spawn.pos, lodestone_model::Vec3::new(8.0, 64.0, 8.0));
+        assert_eq!(columns.load(Ordering::SeqCst), 1);
+        assert_eq!(login_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn eager_spawn_warmup_does_not_search_when_spawn_is_persisted() {
+        struct Source {
+            columns: Arc<AtomicUsize>,
+        }
+
+        impl crate::chunk::ChunkSource for Source {
+            fn column(&self, _cx: i32, _cz: i32) -> crate::chunk::ChunkColumn {
+                self.columns.fetch_add(1, Ordering::SeqCst);
+                crate::chunk::ChunkColumn::new(-64, 384)
+            }
+
+            fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+                "minecraft:air".to_owned()
+            }
+
+            fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+                "minecraft:plains".to_owned()
+            }
+
+            fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        }
+
+        let world = WorldStateHandle::new();
+        let persisted = crate::world_spawn::WorldSpawn {
+            pos: lodestone_model::Vec3::new(17.0, 70.0, -3.0),
+            yaw: 12.0,
+            pitch: 2.0,
+        };
+        world.set_world_spawn(persisted);
+        let columns = Arc::new(AtomicUsize::new(0));
+        world
+            .prefetch_world_spawn(Arc::new(Source {
+                columns: Arc::clone(&columns),
+            }))
+            .await;
+
+        assert_eq!(world.world_spawn(), Some(persisted));
+        assert_eq!(columns.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn spawn_prefetch_stops_after_resolving_the_centre() {
+        struct Source {
+            requests: std::sync::Mutex<Vec<((i32, i32), bool)>>,
+            batch_calls: AtomicUsize,
+            columns: AtomicUsize,
+        }
+
+        impl crate::chunk::ChunkSource for Source {
+            fn column(&self, _cx: i32, _cz: i32) -> crate::chunk::ChunkColumn {
+                self.columns.fetch_add(1, Ordering::SeqCst);
+                let mut column = crate::chunk::ChunkColumn::new(0, 16);
+                column.set_block(0, 0, 0, "minecraft:stone");
+                column
+            }
+
+            fn horizon_sample(&self, _x: i32, _z: i32) -> Option<crate::chunk::HorizonSample> {
+                Some(crate::chunk::HorizonSample {
+                    terrain_y: 0,
+                    water_y: Some(0),
+                    surface_rgb565: 0,
+                    flags: 0,
+                })
+            }
+
+            fn request_generation(
+                &self,
+                request: crate::worldgen_session::GenerationRequest,
+                session: Option<&mut crate::worldgen_session::GenerationSession>,
+            ) -> Result<
+                Option<crate::worldgen_session::GenerationRequestResult>,
+                crate::worldgen_session::GenerationRequestError,
+            > {
+                self.requests
+                    .lock()
+                    .expect("request log lock poisoned")
+                    .push((request.target(), session.is_some()));
+                Ok(Some(
+                    crate::worldgen_session::GenerationRequestResult::Existing(
+                        crate::chunk::ChunkColumn::new(0, 16),
+                    ),
+                ))
+            }
+
+            fn request_generation_batch(
+                &self,
+                sessions: &mut [crate::worldgen_session::GenerationSession],
+            ) -> Vec<
+                Result<
+                    Option<crate::worldgen_session::GenerationRequestResult>,
+                    crate::worldgen_session::GenerationRequestError,
+                >,
+            > {
+                self.batch_calls.fetch_add(1, Ordering::SeqCst);
+                sessions
+                    .iter()
+                    .map(|session| {
+                        let request = session.request();
+                        self.requests
+                            .lock()
+                            .expect("request log lock poisoned")
+                            .push((request.target(), true));
+                        Ok(Some(
+                            crate::worldgen_session::GenerationRequestResult::Existing(
+                                crate::chunk::ChunkColumn::new(0, 16),
+                            ),
+                        ))
+                    })
+                    .collect()
+            }
+
+            fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+                "minecraft:air".to_owned()
+            }
+
+            fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+                "minecraft:plains".to_owned()
+            }
+
+            fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        }
+
+        let world = WorldStateHandle::new();
+        let source = Arc::new(Source {
+            requests: std::sync::Mutex::new(Vec::new()),
+            batch_calls: AtomicUsize::new(0),
+            columns: AtomicUsize::new(0),
+        });
+        world.prefetch_world_spawn(Arc::clone(&source)).await;
+
+        assert_eq!(source.columns.load(Ordering::SeqCst), 1);
+        assert_eq!(source.batch_calls.load(Ordering::SeqCst), 0);
+        assert!(source
+            .requests
+            .lock()
+            .expect("request log lock poisoned")
+            .is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_spawn_warmup_releases_the_search_claim() {
+        let world = WorldStateHandle::new();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let wait_for_entry = entered.notified();
+        let mut wait_for_entry = std::pin::pin!(wait_for_entry);
+        wait_for_entry.as_mut().enable();
+        let task_world = world.clone();
+        let task_entered = Arc::clone(&entered);
+        let task = tokio::spawn(async move {
+            task_world
+                .resolve_world_spawn(|| async move {
+                    task_entered.notify_one();
+                    std::future::pending::<crate::world_spawn::WorldSpawn>().await
+                })
+                .await;
+        });
+        wait_for_entry.await;
+        task.abort();
+        assert!(task.await.is_err(), "the pending search must be cancelled");
+
+        let recovered = world
+            .resolve_world_spawn(|| async {
+                crate::world_spawn::WorldSpawn {
+                    pos: lodestone_model::Vec3::new(1.0, 65.0, 1.0),
+                    yaw: 0.0,
+                    pitch: 0.0,
+                }
+            })
+            .await;
+        assert_eq!(recovered.pos, lodestone_model::Vec3::new(1.0, 65.0, 1.0));
+    }
 
     /// The clock's one asymmetry, which is the whole of `advance_time`'s meaning:
     /// `game_time` counts every tick, `day_time` only counts while the rule is on.

@@ -5,8 +5,11 @@
 //! Moved here verbatim from `overworld.rs` by U16 Phase A. See [`crate::biome`] for the
 //! sampler itself and its "y = 0 trap" section.
 
-use crate::biome::{BiomeSearchCursor, BiomeTable, ClimateSampler};
+use crate::biome::{
+    BiomeSearchCursor, BiomeTable, CachedBiomeAnswer, ClimateSampler, PreparedClimateGrid,
+};
 use sha2::{Digest as _, Sha256};
+use std::sync::Arc;
 
 use super::OverworldGenerator;
 use super::biome_cells::BiomeCells;
@@ -30,10 +33,11 @@ pub(super) struct DynamicBiome {
 ///
 /// The wire grid is indexed directly by quart coordinates. Surface rules use a
 /// nearby-corner selection instead, so this context keeps the extra border
-/// cells and climate targets in typed caches while resolving the stateful tree
-/// search on every reference lookup. The lookup sequence therefore follows
-/// the surface walk's `x`, `z`, descending-`y` order, rather than a separate
-/// qy-major prepass.
+/// cells and climate targets in typed caches while resolving each new quart
+/// through the stateful tree. Consecutive references to the same quart reuse
+/// its selected row without changing the cursor. The lookup sequence therefore
+/// follows the surface walk's `x`, `z`, descending-`y` order, rather than a
+/// separate qy-major prepass.
 pub(super) struct SurfaceBiomeContext<'a> {
     min_qx: i32,
     min_qy: i32,
@@ -41,19 +45,18 @@ pub(super) struct SurfaceBiomeContext<'a> {
     width: usize,
     height: usize,
     depth: usize,
-    /// Last row ids returned for each quart. The stateful cursor means a row
-    /// cannot be reused as a cache entry: querying the same climate point again
-    /// is observable when a later search starts from a different leaf.
-    cells: Vec<Option<u32>>,
     /// Climate targets are pure for a quart coordinate, so retaining them
     /// avoids repeating the sampler arithmetic while still running the tree
     /// search for every reference biome lookup.
     targets: Vec<Option<[i64; 7]>>,
+    answers: Vec<Option<CachedBiomeAnswer>>,
     climate: Option<&'a ClimateSampler>,
+    prepared: Option<Arc<PreparedClimateGrid>>,
     table: Option<&'a BiomeTable>,
     fallback: &'a str,
     zoom_seed: i64,
     cursor: Option<BiomeSearchCursor>,
+    last_quart: Option<(usize, u32)>,
 }
 
 impl<'a> SurfaceBiomeContext<'a> {
@@ -73,16 +76,28 @@ impl<'a> SurfaceBiomeContext<'a> {
         let row = match (&self.climate, &self.table, &mut self.cursor) {
             (Some(climate), Some(table), Some(cursor)) => {
                 let target = self.targets[index].unwrap_or_else(|| {
-                    let target = climate.target(qx * 4, qy * 4, qz * 4);
+                    let target = self.prepared.as_deref().map_or_else(
+                        || climate.target(qx * 4, qy * 4, qz * 4),
+                        |prepared| climate.target_prepared(prepared, qx * 4, qy * 4, qz * 4),
+                    );
                     self.targets[index] = Some(target);
                     target
                 });
-                table.nearest_row_with_cursor(&target, cursor)
+                if let Some((last_index, row)) = self.last_quart
+                    && last_index == index
+                {
+                    row
+                } else {
+                    let answer = *self.answers[index]
+                        .get_or_insert_with(|| table.cached_answer(&target));
+                    let row = table.apply_cached_answer(&target, cursor, answer);
+                    self.last_quart = Some((index, row));
+                    row
+                }
             }
             (None, None, None) => 0,
             _ => panic!("surface biome context has incomplete dynamic state"),
         };
-        self.cells[index] = Some(row);
         self.table.map_or(self.fallback, |table| table.biome_at(row))
     }
 
@@ -284,14 +299,39 @@ pub(crate) fn biome_zoom_seed(seed: i64) -> i64 {
 }
 
 impl OverworldGenerator {
+    /// Prepares the surface biome footprint once for this request. The returned
+    /// grid includes the one-quart border selected by the block-position zoom;
+    /// the centre biome-cell stage takes a bounded view over the same storage.
+    pub(super) fn prepare_climate_grid(
+        &self,
+        base_x: i32,
+        base_z: i32,
+    ) -> Option<Arc<PreparedClimateGrid>> {
+        let dynamic = self.dynamic_biome.as_ref()?;
+        crate::counters::bump_climate_grid_preparation();
+        let min_qx = (base_x - 2).div_euclid(4);
+        let max_qx = (base_x + 15 - 2).div_euclid(4) + 1;
+        let min_qz = (base_z - 2).div_euclid(4);
+        let max_qz = (base_z + 15 - 2).div_euclid(4) + 1;
+        let width = usize::try_from(max_qx - min_qx + 1).expect("surface biome x footprint");
+        let depth = usize::try_from(max_qz - min_qz + 1).expect("surface biome z footprint");
+        Some(Arc::new(
+            dynamic
+                .climate
+                .prepare_xz_rect(min_qx, min_qz, width, depth),
+        ))
+    }
+
     /// Precomputes the raw quart cells that the surface scan's zoomed biome
     /// lookup can select. The extra one-cell border comes from shifting the
-    /// block position before choosing between adjacent corners.
+    /// block position before choosing between adjacent corners. A caller may
+    /// supply the request's bordered climate grid to avoid preparing it again.
     pub(super) fn surface_biome_context(
         &self,
         base_x: i32,
         base_z: i32,
         cursor: Option<BiomeSearchCursor>,
+        prepared: Option<Arc<PreparedClimateGrid>>,
     ) -> SurfaceBiomeContext<'_> {
         let min_qx = (base_x - 2) >> 2;
         let max_qx = ((base_x + 15 - 2) >> 2) + 1;
@@ -302,7 +342,7 @@ impl OverworldGenerator {
         let width = usize::try_from(max_qx - min_qx + 1).expect("surface biome x footprint");
         let height = usize::try_from(max_qy - min_qy + 1).expect("surface biome y footprint");
         let depth = usize::try_from(max_qz - min_qz + 1).expect("surface biome z footprint");
-        let cells = vec![None; width * height * depth];
+        let prepared = prepared.or_else(|| self.prepare_climate_grid(base_x, base_z));
         SurfaceBiomeContext {
             min_qx,
             min_qy,
@@ -310,13 +350,15 @@ impl OverworldGenerator {
             width,
             height,
             depth,
-            cells,
             targets: vec![None; width * height * depth],
+            answers: vec![None; width * height * depth],
             climate: self.dynamic_biome.as_ref().map(|dynamic| &dynamic.climate),
+            prepared,
             table: self.dynamic_biome.as_ref().map(|dynamic| &dynamic.table),
             fallback: &self.fallback_biome,
             zoom_seed: zoom_seed(self.seed),
             cursor,
+            last_quart: None,
         }
     }
 
@@ -373,12 +415,34 @@ impl OverworldGenerator {
         &self,
         base_x: i32,
         base_z: i32,
+        cursor: Option<&mut BiomeSearchCursor>,
+    ) -> BiomeCells {
+        self.biome_cells_stage_with_prepared(base_x, base_z, cursor, None)
+    }
+
+    /// Resolves biome cells from the centre view of a request's bordered grid.
+    pub(super) fn biome_cells_stage_with_prepared(
+        &self,
+        base_x: i32,
+        base_z: i32,
         mut cursor: Option<&mut BiomeSearchCursor>,
+        prepared: Option<&PreparedClimateGrid>,
     ) -> BiomeCells {
         let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Biome);
         let Some(dynamic) = &self.dynamic_biome else {
             return BiomeCells::uniform_strict(&self.fallback_biome, self.min_y, self.height);
         };
+        let owned_prepared;
+        let prepared = match prepared {
+            Some(prepared) => prepared,
+            None => {
+                owned_prepared = self
+                    .prepare_climate_grid(base_x, base_z)
+                    .expect("dynamic biome stage requires a climate grid");
+                owned_prepared.as_ref()
+            }
+        };
+        let prepared = prepared.center_view();
         BiomeCells::from_fn_section_query_order_typed(self.min_y, self.height, |qx, qy, qz| {
             // Quart *corner*, not centre — the convention `biome_stage`'s own
             // comment records as having matched a real dark_forest/river boundary
@@ -386,9 +450,12 @@ impl OverworldGenerator {
             // why `min_y` has to be quart-aligned for this to be exact (it is:
             // -64 >> 2 << 2 == -64).
             let y = self.min_y + (qy as i32) * 4;
-            let target = dynamic
-                .climate
-                .target(base_x + qx as i32 * 4, y, base_z + qz as i32 * 4);
+            let target = dynamic.climate.target_prepared_view(
+                &prepared,
+                base_x + qx as i32 * 4,
+                y,
+                base_z + qz as i32 * 4,
+            );
             let row = dynamic.table.nearest_row_with_cursor(
                 &target,
                 cursor
@@ -553,7 +620,140 @@ impl OverworldGenerator {
 
 #[cfg(test)]
 mod tests {
-    use super::{zoom_seed, zoomed_biome, BiomeCells};
+    use super::{
+        BiomeCells, BiomeTable, SurfaceBiomeContext, zoom_seed, zoomed_biome,
+    };
+    use crate::biome::{BiomeParameterPoint, ClimateSampler, Parameter};
+    use crate::density::{Builder, NoiseParams, Resolver};
+    use serde_json::Value;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    struct SupportResolver {
+        root: PathBuf,
+    }
+
+    impl SupportResolver {
+        fn read(&self, kind: &str, id: &str) -> Value {
+            let name = id.strip_prefix("minecraft:").unwrap_or(id);
+            let path = self.root.join(kind).join(format!("{name}.json"));
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
+            serde_json::from_str(&text)
+                .unwrap_or_else(|error| panic!("parsing {}: {error}", path.display()))
+        }
+    }
+
+    impl Resolver for SupportResolver {
+        fn density_function(&self, id: &str) -> Value {
+            self.read("density_function", id)
+        }
+
+        fn noise(&self, id: &str) -> NoiseParams {
+            let value = self.read("noise", id);
+            NoiseParams {
+                first_octave: value["firstOctave"].as_i64().expect("firstOctave") as i32,
+                amplitudes: value["amplitudes"]
+                    .as_array()
+                    .expect("amplitudes")
+                    .iter()
+                    .map(|amplitude| amplitude.as_f64().expect("amplitude"))
+                    .collect(),
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_surface_quarts_preserve_prepared_and_direct_sequence() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/worldgen_data");
+        let resolver = SupportResolver { root: root.clone() };
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join("noise_settings/overworld.json"))
+                .expect("read overworld settings"),
+        )
+        .expect("parse overworld settings");
+        let builder = Builder::new(42, &resolver);
+        let climate = ClimateSampler::new(&settings, &builder);
+        let table_json: Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../lodestone-server/assets/worldgen/biome_parameters/overworld.json"),
+            )
+            .expect("read overworld biome parameters"),
+        )
+        .expect("parse overworld biome parameters");
+        let table = BiomeTable::new(crate::biome::parse_table(&table_json));
+
+        let make_context = |prepared| SurfaceBiomeContext {
+            min_qx: -1,
+            min_qy: -17,
+            min_qz: -1,
+            width: 6,
+            height: 98,
+            depth: 6,
+            targets: vec![None; 6 * 98 * 6],
+            answers: vec![None; 6 * 98 * 6],
+            climate: Some(&climate),
+            prepared,
+            table: Some(&table),
+            fallback: "minecraft:plains",
+            zoom_seed: zoom_seed(42),
+            cursor: Some(table.search_cursor()),
+            last_quart: None,
+        };
+        let mut direct = make_context(None);
+        let mut prepared = make_context(Some(Arc::new(climate.prepare_xz_rect(-1, -1, 6, 6))));
+        let sequence = [
+            (0, -64, 0),
+            (0, -64, 0),
+            (1, -64, 1),
+            (1, -64, 1),
+            (0, -64, 0),
+            (15, 0, 15),
+            (15, 0, 15),
+            (0, 0, 0),
+        ];
+        for &(x, y, z) in &sequence {
+            assert_eq!(
+                prepared.at_block(x, y, z),
+                direct.at_block(x, y, z),
+                "prepared surface answer changed at ({x}, {y}, {z})"
+            );
+        }
+    }
+
+    #[test]
+    fn cached_answer_preserves_seeded_ties_across_a_query_sequence() {
+        let wide = Parameter { min: -10_000, max: 10_000 };
+        let tied = BiomeParameterPoint {
+            params: [wide, wide, wide, wide, wide, wide, Parameter { min: 0, max: 0 }],
+            biome: "minecraft:cold".to_owned(),
+        };
+        let table = BiomeTable::new(vec![
+            tied.clone(),
+            BiomeParameterPoint {
+                biome: "minecraft:hot".to_owned(),
+                ..tied
+            },
+        ]);
+        let targets = [
+            [0; 7],
+            [5_000, 0, 0, 0, 0, 0, 0],
+            [0; 7],
+            [-5_000, 0, 0, 0, 0, 0, 0],
+        ];
+        let answers = targets.map(|target| table.cached_answer(&target));
+        let mut expected = table.search_cursor();
+        let mut actual = table.search_cursor();
+        table.cursor_from_row(&mut expected, 1);
+        table.cursor_from_row(&mut actual, 1);
+        for (target, answer) in targets.iter().zip(answers) {
+            assert_eq!(
+                table.apply_cached_answer(target, &mut actual, answer),
+                table.nearest_row_with_cursor(target, &mut expected),
+            );
+        }
+    }
 
     #[test]
     fn zoom_seed_matches_the_independently_captured_seed_42_value() {

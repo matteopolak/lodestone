@@ -56,7 +56,6 @@ async fn a_lone_singleplayer_connection_sees_its_own_name_in_chat() {
         mob_area,
         (0, 0),
         0,
-        0,
     );
 
     let name = "SoloPlayer";

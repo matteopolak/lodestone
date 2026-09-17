@@ -1439,6 +1439,11 @@ fn bench_counter_calibration(_c: &mut Criterion) {
          region; got {}",
         s.pre_ore_computed
     );
+    assert_eq!(
+        s.climate_grid_preparations, COLD_PRE_ORE_CHUNKS,
+        "one bordered climate grid must be prepared per cold pre-ore chunk; got {}",
+        s.climate_grid_preparations
+    );
     // `Stage::Aquifer` is the one stage with the same two-consumer problem as
     // `block_at`: `StartSampler` builds a real aquifer per probed chunk, and those
     // chunks are not in the pre-ore closure. Decomposed, for the same reason.
@@ -1643,6 +1648,14 @@ fn print_counters(s: &Snapshot, chunks: u64) {
     row("block_at", s.block_at);
     row("density_evals (chunk sampler)", s.density_evals_total());
     row("density_computes (point eval)", s.density_point_computes_total());
+    row("block_field_queries", s.block_field_queries);
+    row("full_column_scans", s.full_column_scans);
+    row("full_column_scan_cells", s.full_column_scan_cells);
+    row("full_column_conversions", s.full_column_conversions);
+    row(
+        "full_column_conversion_cells",
+        s.full_column_conversion_cells,
+    );
     row("corner_lookups", s.corner_lookups);
     row("slot_cache_hits", s.slot_hits);
     row("slot_cache_misses (real evals)", s.slot_misses);
@@ -1650,6 +1663,7 @@ fn print_counters(s: &Snapshot, chunks: u64) {
     row("palette_intern_hit", s.palette_intern_hit);
     row("pre_ore_computed", s.pre_ore_computed);
     row("pre_ore_cache_hits", s.pre_ore_hits);
+    row("climate_grid_preparations", s.climate_grid_preparations);
     row("biome_nn_searches", s.biome_searches);
     row("biome_rows_compared", s.biome_rows_compared);
     row("stitch_cells_copied", s.stitch_cells);
@@ -1665,6 +1679,35 @@ fn print_counters(s: &Snapshot, chunks: u64) {
     );
     row("structure_context_kind", s.structure_context_kind_block_at);
     row("rng_draws (all stages)", s.rng_draws_total());
+    println!("  software cache traffic:");
+    for (i, name) in lodestone_worldgen::counters::CACHE_NAMES.iter().enumerate() {
+        println!(
+            "    {name:<14} hits={:<12} misses={:<12} computes={:<12} evictions={}",
+            s.cache_hits[i], s.cache_misses[i], s.cache_computes[i], s.cache_evictions[i]
+        );
+    }
+    println!("  logical representation traffic:");
+    for (i, name) in lodestone_worldgen::counters::MEMORY_BOUNDARY_NAMES
+        .iter()
+        .enumerate()
+    {
+        println!(
+            "    {name:<14} reads={:<12} read_bytes={:<12} writes={:<12} write_bytes={}",
+            s.logical_reads[i],
+            s.logical_read_bytes[i],
+            s.logical_writes[i],
+            s.logical_write_bytes[i]
+        );
+    }
+    println!(
+        "  scratch pool: reuse={} fresh={} evicted={} growth_bytes={} retained={} high_water={}",
+        s.scratch_pool_reuses,
+        s.scratch_pool_allocations,
+        s.scratch_pool_evictions,
+        s.scratch_buffer_allocated_bytes,
+        s.scratch_retained_bytes,
+        s.scratch_retained_bytes_high_water
+    );
     println!("  rng draws by stage:");
     for (i, name) in lodestone_worldgen::counters::STAGE_NAMES.iter().enumerate() {
         if s.rng_draws[i] > 0 {

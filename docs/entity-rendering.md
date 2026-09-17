@@ -196,6 +196,16 @@ A pose changes exactly two numbers, **box height and eye height**, anchored at t
 
 Gotchas: `(double)0.6F != 0.6` — pose heights are widened `f32` literals, build boxes from the pose table, never hand-typed decimals. A 1.5-block gap is a flush fit and is the real "crouch under a slab" case, not a rounding fluke. A new pose must respect `SLEEPING` being checked *first* in priority order — sleeping must be tested before crouching or a sleeping player will crouch instead. `eye_height` fields elsewhere in the stack are output mirrors of the pose, never an independent input.
 
+GPU entity bring-up has a staged boundary. The initial renderer builds the
+pipelines, camera state, player rigs, and synthetic fallback sheets needed for a
+first presented frame. Later redraws install bounded groups of model uploads and
+decoded sheets, while the trim atlas is decoded independently of redraw work and its
+GPU bind groups are installed in the same bounded batches. On the browser, trim
+decoding handles at most four palette permutations before yielding to the next
+archive reads and PNG decodes; native decoding remains on its worker. Decode and
+installation timings use the `startup_profile` trace target. Once a family is
+ready, the ordinary maps and draw paths consume it directly.
+
 ## How to change it
 
 * **New mob ported**: add the `EntityModelEntry` to the corpus; nothing else needs touching. Alias only for another mob's model *class*; extend `HumanoidArms` only for a subclass animation override on an identical skeleton, never a branch in `AnimFamily::classify`.

@@ -639,6 +639,33 @@
     }
 
     #[test]
+    fn confinement_scan_ignores_cfg_test_rust_items_but_keeps_production_lines() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path();
+        let src = root.join("crates/probe/src");
+        std::fs::create_dir_all(&src)?;
+        std::fs::write(
+            src.join("probe.rs"),
+            "fn production() { let _ = std::time::Instant::now(); }\n\
+             #[cfg(test)]\n\
+             mod tests {\n\
+                 fn native_only_probe() { let _ = std::time::Instant::now(); }\n\
+             }\n",
+        )?;
+        let rule = ConfinementRule {
+            label: "probe instant-ban",
+            src_dir: "crates/probe/src",
+            banned: "std::time::Instant",
+            allowlist: &[],
+        };
+        let leaks = scan_confinement(root, &rule)?;
+        assert_eq!(leaks.len(), 1, "only the production call must be reported");
+        assert_eq!(leaks[0].line, 1);
+        assert!(leaks[0].content.contains("production"));
+        Ok(())
+    }
+
+    #[test]
     fn confinement_rules_hold_across_the_real_workspace() -> Result<()> {
         // The guard as a test: every configured rule must scan clean against
         // the real crates, so `cargo test -p xtask` (and thus `just health`)

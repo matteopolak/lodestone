@@ -15,7 +15,7 @@
 //! So this gate starts a real [`IntegratedServer`] with a real tick loop, joins
 //! a real connection through the duplex, moves the player once (the only thing
 //! that registers a player with the sim at all), and counts
-//! `encode_add_entity` calls **for entities the seed did not place**.
+//! `encode_add_entity` calls produced by the natural spawn cycle.
 //!
 //! # The fixture, and why it is hand-built
 //!
@@ -25,15 +25,9 @@
 //! plains spawn list. A grass surface under open sky is the cheapest input the
 //! creature pass accepts.
 //!
-//! # What "did not come from the seed" means, and why it is load-bearing
-//!
-//! `open_in_memory_with_mobs`' seed task places `demo_mob_count(mob_count)`
-//! mobs, and those stream through the same `encode_add_entity`. A gate counting
-//! spawn packets would therefore pass with natural spawning entirely dead.
-//! `mob_count` is **0** here for that reason, and the negative control below
-//! turns the `spawn_mobs` game rule off through the same path and requires the
-//! count to go to zero — so a spawn packet from any other producer (a dropped
-//! item, a projectile, the player's own avatar) cannot read as a pass either.
+//! The test starts with an empty entity simulation, then turns the `spawn_mobs`
+//! game rule off in its negative control. This ensures the observed packets come
+//! from the natural spawn path rather than another producer.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -214,10 +208,10 @@ async fn run_with_server_app(
     let area = (-3..=3, -3..=3);
     let (server, client) = if let Some(server_app) = server_app {
         IntegratedServer::open_in_memory_with_mobs_and_server_app(
-            protocol, PlainsWorld, area, (8, 8), 0, 3, server_app,
+            protocol, PlainsWorld, area, (8, 8), 3, server_app,
         )
     } else {
-        IntegratedServer::open_in_memory_with_mobs(protocol, PlainsWorld, area, (8, 8), 0, 3)
+        IntegratedServer::open_in_memory_with_mobs(protocol, PlainsWorld, area, (8, 8), 3)
     };
     if !spawn_mobs {
         server
@@ -291,8 +285,7 @@ fn deny_natural_spawns(
 }
 
 /// **The gate.** A joined player standing on a lit plain must receive
-/// `ADD_ENTITY` for at least one mob nothing seeded — i.e. the natural spawn
-/// cycle reaches the wire.
+/// `ADD_ENTITY` for at least one naturally spawned mob.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn natural_spawning_reaches_a_client_as_add_entity() {
     let spawned = run(true, DEADLINE).await;
@@ -303,7 +296,7 @@ async fn natural_spawning_reaches_a_client_as_add_entity() {
     eprintln!("natural spawn reached the wire with {} ADD_ENTITY: {kinds:?}", spawned.len());
     assert!(
         !spawned.is_empty(),
-        "no entity spawn packet at all in {DEADLINE:?} with zero seeded mobs: the \
+        "no entity spawn packet at all in {DEADLINE:?}: the \
          natural spawn cycle is not reaching the wire, so a singleplayer world is \
          empty forever no matter what the engine's own tests say"
     );
@@ -339,8 +332,8 @@ async fn native_plugin_denial_keeps_observed_natural_spawns_off_the_wire() {
     );
 }
 
-/// **The negative control, and it must observe zero.** With `spawn_mobs` off and
-/// nothing seeded, no entity spawn packet may reach the client — otherwise the
+/// **The negative control, and it must observe zero.** With `spawn_mobs` off,
+/// no entity spawn packet may reach the client — otherwise the
 /// gate above could be passing on a spawn packet from some entirely different
 /// producer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -348,7 +341,7 @@ async fn spawn_mobs_off_sends_no_entity_spawn_at_all() {
     let spawned = run(false, Duration::from_secs(8)).await;
     assert!(
         spawned.is_empty(),
-        "spawn_mobs is off and nothing was seeded, yet these spawned: {spawned:?}"
+        "spawn_mobs is off, yet these spawned: {spawned:?}"
     );
 }
 

@@ -26,6 +26,7 @@ const launchRequest = Object.freeze({
   seed: "-42",
   preset: 0,
   epoch: 1,
+  logLevel: "debug",
 });
 
 // Messages originate in the isolated `vm` realm, whereas the expected values
@@ -38,6 +39,7 @@ test("validates the complete worker launch envelope before importing wasm", () =
   assert.equal(invalidLaunch({ ...launchRequest, protocol: 0 }, [{}, {}, {}]), "invalid server worker protocol");
   assert.equal(invalidLaunch({ ...launchRequest, seed: "42.5" }, [{}, {}, {}]), "invalid server worker seed");
   assert.equal(invalidLaunch({ ...launchRequest, preset: 7 }, [{}, {}, {}]), "invalid server worker world preset");
+  assert.equal(invalidLaunch({ ...launchRequest, logLevel: "verbose" }, [{}, {}, {}]), "invalid server worker log level");
   assert.equal(invalidLaunch(launchRequest, [{}, {}]), "invalid server worker launch");
   assert.equal(invalidLaunch(launchRequest, []), "invalid server worker launch");
 });
@@ -109,7 +111,7 @@ test("reports ordered startup milestones and passes all three supplied ports", a
     { kind: "progress", stage: "preparing-world", executor: "serial", workers: 1 },
     { kind: "ready" },
   ]);
-  assert.deepEqual(started, [[serverPort, progressPort, horizonPort, 776, -42n, 0, 1]]);
+  assert.deepEqual(started, [[serverPort, progressPort, horizonPort, 776, -42n, 0, 1, "debug"]]);
 });
 
 test("does not import wasm after a malformed launch and makes failure observable", async () => {
@@ -276,7 +278,14 @@ test("staging keeps serial and threaded artifacts separate", () => {
     assert.match(staging, new RegExp(`link-arg=${flag.replaceAll("+", "\\\\+")}`));
   }
   assert.match(staging, /workerHelpers\.no-bundler\.js/);
+  assert.match(staging, /patch_threaded_worker_helper\.mjs/);
   assert.doesNotMatch(fs.readFileSync(new URL("./worker.js", import.meta.url), "utf8"), /new Worker/);
+});
+
+test("patches the rayon child-worker initialization to the object API", () => {
+  const patcher = fs.readFileSync(new URL("../scripts/patch_threaded_worker_helper.mjs", import.meta.url), "utf8");
+  assert.match(patcher, /data\.module, data\.memory/);
+  assert.match(patcher, /module_or_path: data\.module, memory: data\.memory/);
 });
 
 function memoryModule({ defined = false, imports = [], exports = [] } = {}) {
