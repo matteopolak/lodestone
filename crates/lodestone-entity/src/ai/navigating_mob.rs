@@ -1663,7 +1663,7 @@ impl<'w> NavigatingMob<'w> {
             self.velocity = Vec3::new(0.0, moved_y, 0.0);
             return;
         };
-        let step_per_tick = f64::from(self.navigator.speed());
+        let step_per_tick = self.navigator.speed();
         let dx = waypoint.x - self.pos.x;
         let dz = waypoint.z - self.pos.z;
         let horizontal = (dx * dx + dz * dz).sqrt();
@@ -1798,7 +1798,7 @@ impl MobController for NavigatingMob<'_> {
         let recompute = self.navigator.is_done() || !same_target;
         if !recompute {
             self.navigator
-                .set_speed((speed * self.goal_speed_scale) as f32);
+                .set_speed(speed * self.goal_speed_scale);
             self.move_calls += 1;
             return true;
         }
@@ -1834,7 +1834,7 @@ impl MobController for NavigatingMob<'_> {
         {
             Some(path) => {
                 self.navigator
-                    .start(path, (speed * self.goal_speed_scale) as f32);
+                    .start(path, speed * self.goal_speed_scale);
                 self.move_calls += 1;
                 true
             }
@@ -2231,7 +2231,12 @@ impl BrainMob for NavigatingMob<'_> {
     }
 
     fn move_to(&mut self, target: Vec3, speed: f32) -> bool {
-        MobController::move_to(self, target, f64::from(speed))
+        let requested = if self.goal_speed_scale > 0.0 {
+            self.step_per_tick * f64::from(speed) / self.goal_speed_scale
+        } else {
+            0.0
+        };
+        MobController::move_to(self, target, requested)
     }
 
     fn navigation_done(&self) -> bool {

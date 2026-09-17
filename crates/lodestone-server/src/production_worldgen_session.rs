@@ -402,6 +402,19 @@ fn session_output_complete(session: &GenerationSession) -> bool {
         .is_some_and(|frontier| frontier.is_complete_through(terminal))
 }
 
+fn target_owned_settlement_plan<S, P>(
+    session: &GenerationSession,
+) -> Result<Option<TargetSettlementPlan>, SessionError>
+where
+    S: RegionGenerationSource<Policy = P>,
+    P: DimensionPolicy<S>,
+{
+    if !P::target_owned_reverse_settlement() || session_output_complete(session) {
+        return Ok(None);
+    }
+    target_settlement_plan(std::slice::from_ref(session), true)
+}
+
 fn target_settlement_plan(
     sessions: &[GenerationSession],
     enabled: bool,
@@ -1453,19 +1466,7 @@ where
     S: RegionGenerationSource<Policy = P>,
     P: DimensionPolicy<S>,
 {
-    if P::target_owned_reverse_settlement() {
-        if session_output_complete(session) {
-            source.prepare_generation_batch(&[session.request().target()]);
-            let mut materializer = LifecycleMaterializer::new(source);
-            return generate_request_with_materializer::<S, P>(
-                source,
-                session,
-                executor,
-                &mut materializer,
-            );
-        }
-        let plan = target_settlement_plan(std::slice::from_ref(session), true)?
-            .expect("target-owned settlement policy must produce a plan");
+    if let Some(plan) = target_owned_settlement_plan::<S, P>(session)? {
         let mut region = ProductionGenerationRegion::for_halo(source, &plan.context);
         return region.generate_with_executor(session, executor);
     }
@@ -1622,10 +1623,7 @@ where
         {
             return Err(SessionError::OutsideHalo(coordinate));
         }
-        if let Some(plan) = target_settlement_plan(
-            std::slice::from_ref(session),
-            S::Policy::target_owned_reverse_settlement(),
-        )? {
+        if let Some(plan) = target_owned_settlement_plan::<S, S::Policy>(session)? {
             if let Some(&coordinate) = plan
                 .context
                 .iter()
@@ -1720,10 +1718,7 @@ where
         {
             return Err(SessionError::OutsideHalo(coordinate));
         }
-        if let Some(plan) = target_settlement_plan(
-            std::slice::from_ref(session),
-            S::Policy::target_owned_reverse_settlement(),
-        )? {
+        if let Some(plan) = target_owned_settlement_plan::<S, S::Policy>(session)? {
             if let Some(&coordinate) = plan
                 .context
                 .iter()
@@ -2152,9 +2147,7 @@ where
     S: RegionGenerationSource<Policy = P>,
     P: DimensionPolicy<S>,
 {
-    if P::target_owned_reverse_settlement() {
-        let plan = target_settlement_plan(std::slice::from_ref(session), true)?
-            .expect("target-owned settlement policy must produce a plan");
+    if let Some(plan) = target_owned_settlement_plan::<S, P>(session)? {
         let mut region = ProductionGenerationRegion::for_halo(source, &plan.context);
         return region.generate_with_yielding(session).await;
     }
@@ -2827,6 +2820,21 @@ mod tests {
                 column_content_fingerprint(snapshot.column()),
             )
         );
+
+        assert!(target_owned_settlement_plan::<SettlementSource, SettlementPolicy>(&session)
+            .expect("terminal session can be inspected")
+            .is_none());
+        let replay = generate_request_with_executor::<SettlementSource, SettlementPolicy>(
+            &source,
+            &mut session,
+            &CountingExecutor {
+                dispatches: AtomicUsize::new(0),
+                jobs: AtomicUsize::new(0),
+            },
+        )
+        .expect("terminal scalar request can be replayed");
+        assert_eq!(invocations.load(Ordering::Relaxed), 9);
+        assert_eq!(replay.column().block_state(15, 0, 0), "minecraft:air");
     }
 
     #[test]

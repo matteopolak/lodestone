@@ -5879,6 +5879,7 @@ mod tests {
                 Uuid::from_u128(1),
                 lodestone_model::Vec3::new(0.5, 1.0, 0.5),
             );
+        server.world_state().mark_join_ready();
         wait_for_integrated_condition(&server, |server| {
             server
                 .mobs()
@@ -6571,6 +6572,7 @@ mod tests {
                 Uuid::from_u128(2),
                 lodestone_model::Vec3::new(0.5, 1.0, 0.5),
             );
+        server.world_state().mark_join_ready();
         wait_for_integrated_condition(&server, |server| {
             server
                 .generation_spawns
@@ -6984,6 +6986,7 @@ mod tests {
                 Uuid::from_u128(3),
                 lodestone_model::Vec3::new(0.5, 1.0, 0.5),
             );
+        server.world_state().mark_join_ready();
         wait_for_integrated_condition(&server, |server| {
             server.mobs().is_some_and(|mobs| {
                 mobs.with(|sim| {
