@@ -248,8 +248,8 @@ use crate::chunk::{
 use crate::chunk_lifecycle::{ChunkLifecycleHandoff, ChunkLifecyclePlan};
 use crate::ticket::{TicketDelta, TicketStoreHandle};
 use crate::worldgen_session::{
-    AggregatePrefix, BlockCoordinate, ChunkCoordinate, GenerationCheckpoint, GenerationSession,
-    ImmutableProduct,
+    AggregatePrefix, BlockCoordinate, ChunkCoordinate, FeatureSettlementProof,
+    GenerationCheckpoint, GenerationSession, ImmutableProduct,
     ImmutableSidecar, ImmutableStageCompletion, MutationProvenance, ProvenanceMutation, SessionError,
     SourceCompletionRecord,
 };
@@ -1022,6 +1022,7 @@ struct PipelineLedger {
     sources: BTreeMap<SourceCompletionKey, u64>,
     source_next: BTreeMap<((i32, i32), StageKey), u64>,
     overlays: BTreeMap<(i32, i32), BTreeMap<BlockCoordinate, ProvenanceMutation>>,
+    feature_settlements: BTreeMap<ChunkCoordinate, FeatureSettlementProof>,
     revisions: BTreeMap<(i32, i32), u64>,
     coordinate_last_used: BTreeMap<(i32, i32), u64>,
     last_used: u64,
@@ -1055,6 +1056,22 @@ impl PipelineLedger {
             })
     }
 
+    fn accepts_settled_feature_replay(
+        &self,
+        coordinate: ChunkCoordinate,
+        mutation: &ProvenanceMutation,
+    ) -> bool {
+        let provenance = mutation.provenance();
+        provenance.stage().stage() == ColumnStage::Features
+            && provenance.target() == provenance.source()
+            && self
+                .feature_settlements
+                .get(&coordinate)
+                .is_some_and(|proof| {
+                    proof.output() == coordinate && proof.contains(provenance.target())
+                })
+    }
+
     fn evict_coordinate(&mut self, coordinate: (i32, i32)) {
         self.frontiers.remove(&coordinate);
         self.revisions.remove(&coordinate);
@@ -1074,6 +1091,7 @@ impl PipelineLedger {
             bucket.retain(|_, mutation| mutation.provenance().target() != coordinate);
             !bucket.is_empty()
         });
+        self.feature_settlements.remove(&coordinate);
     }
 }
 
@@ -1088,6 +1106,7 @@ struct GenerationLedgerJournal {
     sources: BTreeMap<SourceCompletionKey, Option<u64>>,
     source_next: BTreeMap<((i32, i32), StageKey), Option<u64>>,
     overlays: BTreeMap<(i32, i32), BTreeMap<BlockCoordinate, Option<ProvenanceMutation>>>,
+    feature_settlements: BTreeMap<ChunkCoordinate, Option<FeatureSettlementProof>>,
     revisions: BTreeMap<(i32, i32), Option<u64>>,
 }
 
@@ -1109,6 +1128,7 @@ impl GenerationLedgerJournal {
             sources: BTreeMap::new(),
             source_next: BTreeMap::new(),
             overlays: BTreeMap::new(),
+            feature_settlements: BTreeMap::new(),
             revisions: BTreeMap::new(),
         }
     }
@@ -1181,6 +1201,12 @@ impl GenerationLedgerJournal {
             .or_insert_with(|| state.revisions.get(&coordinate).copied());
     }
 
+    fn feature_settlement(&mut self, state: &PipelineLedger, coordinate: ChunkCoordinate) {
+        self.feature_settlements
+            .entry(coordinate)
+            .or_insert_with(|| state.feature_settlements.get(&coordinate).copied());
+    }
+
     fn rollback(self, ledger: &mut GenerationLedger) {
         ledger.stamp = self.stamp;
         let state = ledger
@@ -1195,6 +1221,7 @@ impl GenerationLedgerJournal {
         Self::restore(&mut state.sources, self.sources);
         Self::restore(&mut state.source_next, self.source_next);
         Self::restore_overlays(&mut state.overlays, self.overlays);
+        Self::restore(&mut state.feature_settlements, self.feature_settlements);
         Self::restore(&mut state.revisions, self.revisions);
     }
 
@@ -1295,6 +1322,7 @@ impl GenerationLedger {
                 sources: BTreeMap::new(),
                 source_next: BTreeMap::new(),
                 overlays: BTreeMap::new(),
+                feature_settlements: BTreeMap::new(),
                 revisions: BTreeMap::new(),
                 coordinate_last_used: BTreeMap::new(),
                 last_used: stamp,
@@ -2125,6 +2153,9 @@ impl GenerationLedger {
                         destination.y(),
                         destination.z().rem_euclid(16),
                     ) != *state
+                        && !self
+                            .pipeline_ref(identity)?
+                            .accepts_settled_feature_replay(coordinate, mutation)
                     {
                         return Err(GenerationLedgerError::CheckpointMismatch);
                     }
@@ -2341,6 +2372,31 @@ impl GenerationLedger {
                 Some(journal),
             )?;
         }
+        if let Some(proof) = checkpoint.feature_settlement() {
+            let coordinate = proof.output();
+            let output_key = crate::worldgen_session::ProductKey::new(
+                coordinate,
+                StageKey::new(pipeline.dimension(), ColumnStage::Output),
+                ResourceKey::OutputColumn,
+            );
+            let state = self.pipeline_ref(identity)?;
+            if coordinate != checkpoint.request().target()
+                || !state.products.contains_key(&output_key)
+                || final_outputs.is_some_and(|outputs| !outputs.contains_key(&coordinate))
+                || state
+                    .feature_settlements
+                    .get(&coordinate)
+                    .is_some_and(|existing| *existing != proof)
+            {
+                return Err(GenerationLedgerError::CheckpointMismatch);
+            }
+            journal.feature_settlement(state, coordinate);
+            self.pipelines
+                .get_mut(&identity)
+                .expect("the checkpoint pipeline remains admitted")
+                .feature_settlements
+                .insert(coordinate, proof);
+        }
         Ok(())
     }
 
@@ -2403,6 +2459,8 @@ impl GenerationLedger {
                         * std::mem::size_of::<((i32, i32), StageKey, u64)>()
                     + state.overlays_len()
                         * std::mem::size_of::<(BlockCoordinate, ProvenanceMutation)>()
+                    + state.feature_settlements.len()
+                        * std::mem::size_of::<(ChunkCoordinate, FeatureSettlementProof)>()
                     + state.coordinate_last_used.len()
                         * std::mem::size_of::<((i32, i32), u64)>();
                 let payload = state
@@ -2515,6 +2573,9 @@ impl GenerationLedger {
                 ) == *value
             });
             if !same_state {
+                if state.accepts_settled_feature_replay(coordinate, &mutation) {
+                    return Ok(found);
+                }
                 if generation_ledger_trace_enabled() {
                     let current = column.block_state_id(
                         destination.x().rem_euclid(16),
@@ -10675,6 +10736,89 @@ mod tests {
             Block::Stone.default_state()
         );
         assert!(ledger.revision(identity, destination).unwrap() > 0);
+    }
+
+    #[test]
+    fn ledger_accepts_only_replays_covered_by_reverse_settlement() {
+        use lodestone_worldgen::stage_schedule::{Dimension, OVERWORLD_PIPELINE};
+
+        let destination = (0, 0);
+        let destination_block = BlockCoordinate::new(15, 4, 0);
+        let mut output = ChunkColumn::new(0, 16);
+        output.set_block_id(15, 4, 0, Block::Stone.default_state());
+
+        let mut ledger = GenerationLedger::new();
+        ledger
+            .admit(OVERWORLD_PIPELINE, &[destination, (1, 0), (2, 0)])
+            .expect("the settlement fixture is admitted");
+        let identity = OVERWORLD_PIPELINE.identity(PipelineOptions::ALL);
+        let state = ledger
+            .pipelines
+            .get_mut(&identity)
+            .expect("the Overworld pipeline is admitted");
+        state.products.insert(
+            crate::worldgen_session::ProductKey::new(
+                destination,
+                StageKey::new(Dimension::Overworld, ColumnStage::Output),
+                ResourceKey::OutputColumn,
+            ),
+            ImmutableProduct::new(ResourceKey::OutputColumn, output),
+        );
+        state.feature_settlements.insert(
+            destination,
+            FeatureSettlementProof::square(destination, 1),
+        );
+
+        let revision = ledger.revision(identity, destination).unwrap();
+        let covered = ProvenanceMutation::test_block_state(
+            (1, 0),
+            (1, 0),
+            StageKey::new(Dimension::Overworld, ColumnStage::Features),
+            0,
+            destination_block,
+            1,
+            Block::Dirt.default_state(),
+        );
+        assert_eq!(
+            ledger.commit_overlay(OVERWORLD_PIPELINE, destination, revision, covered),
+            Ok(revision)
+        );
+
+        let wrong_source = ProvenanceMutation::test_block_state(
+            (1, 0),
+            destination,
+            StageKey::new(Dimension::Overworld, ColumnStage::Features),
+            0,
+            destination_block,
+            1,
+            Block::Dirt.default_state(),
+        );
+        assert_eq!(
+            ledger.commit_overlay(OVERWORLD_PIPELINE, destination, revision, wrong_source),
+            Err(GenerationLedgerError::CheckpointMismatch)
+        );
+
+        let outside = ProvenanceMutation::test_block_state(
+            (2, 0),
+            (2, 0),
+            StageKey::new(Dimension::Overworld, ColumnStage::Features),
+            0,
+            destination_block,
+            1,
+            Block::Dirt.default_state(),
+        );
+        assert_eq!(
+            ledger.commit_overlay(OVERWORLD_PIPELINE, destination, revision, outside),
+            Err(GenerationLedgerError::CheckpointMismatch)
+        );
+        assert_eq!(ledger.stats().overlays, 0);
+        assert_eq!(
+            ledger
+                .output_column(OVERWORLD_PIPELINE, destination)
+                .unwrap()
+                .block_state_id(15, 4, 0),
+            Block::Stone.default_state()
+        );
     }
 
     #[test]

@@ -16,8 +16,9 @@ use crate::worldgen_lifecycle::{
     PersistentWorldgenExecutor,
 };
 use crate::worldgen_session::{
-    BlockCoordinate, ChunkCoordinate, GenerationRequest, GenerationSession, ImmutableProduct,
-    ImmutableSidecar, PacketNeighbour, PacketSnapshot, RequestStageDriver, SessionError,
+    BlockCoordinate, ChunkCoordinate, FeatureSettlementProof, GenerationRequest, GenerationSession,
+    ImmutableProduct, ImmutableSidecar, PacketNeighbour, PacketSnapshot, RequestStageDriver,
+    SessionError,
 };
 use lodestone_worldgen::stage_schedule::{
     ChunkRequest, ColumnStage, Dimension, GenerationTarget, ResourceKey, SidecarKey, SourceSchedule,
@@ -382,6 +383,18 @@ struct TargetSettlementPlan {
     targets: Vec<ChunkCoordinate>,
     context: Vec<ChunkCoordinate>,
     padding: BTreeSet<ChunkCoordinate>,
+    mutable_radius: i32,
+}
+
+impl TargetSettlementPlan {
+    fn proof_for(&self, output: ChunkCoordinate) -> FeatureSettlementProof {
+        let proof = FeatureSettlementProof::square(output, self.mutable_radius);
+        debug_assert!(self.targets.iter().copied().filter(|target| proof.contains(*target)).count()
+            >= usize::try_from(self.mutable_radius * 2 + 1)
+                .expect("the mutable radius is non-negative")
+                .pow(2));
+        proof
+    }
 }
 
 fn canonical_coordinates(coordinates: BTreeSet<ChunkCoordinate>) -> Vec<ChunkCoordinate> {
@@ -458,6 +471,7 @@ fn target_settlement_plan(
         targets: canonical_coordinates(targets),
         context: canonical_coordinates(context),
         padding,
+        mutable_radius: radius,
     }))
 }
 
@@ -1763,6 +1777,7 @@ where
             )?;
             machine.padding_targets = Some(&self.settlement_padding);
             let snapshot = machine.finalize_batch_target(executor)?;
+            session.mark_target_owned_feature_settlement(plan.proof_for(target));
             return Ok(snapshot);
         }
         let missing = session
@@ -1875,6 +1890,7 @@ where
             let snapshot = machine
                 .finalize_batch_target_yielding(&PersistentWorldgenExecutor)
                 .await?;
+            session.mark_target_owned_feature_settlement(plan.proof_for(target));
             return Ok(snapshot);
         }
         let missing = session
@@ -2059,6 +2075,14 @@ where
                 }
                 machine.finalize_batch_target(executor)
             };
+            if result.is_ok() && settlement.is_some() {
+                sessions[index].mark_target_owned_feature_settlement(
+                    settlement
+                        .as_ref()
+                        .expect("settlement was checked above")
+                        .proof_for(targets[index]),
+                );
+            }
             results.push(
                 result
                     .map(|snapshot| {
@@ -2251,6 +2275,14 @@ where
                     .finalize_batch_target_yielding(&PersistentWorldgenExecutor)
                     .await
             };
+            if result.is_ok() && settlement.is_some() {
+                sessions[index].mark_target_owned_feature_settlement(
+                    settlement
+                        .as_ref()
+                        .expect("settlement was checked above")
+                        .proof_for(targets[index]),
+                );
+            }
             results.push(
                 result
                     .map(|snapshot| {

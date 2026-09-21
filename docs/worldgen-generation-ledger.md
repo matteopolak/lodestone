@@ -16,11 +16,15 @@ bodies; shaped packet neighbours remain distinct from full requested outputs.
 
 Before a requested output is captured, its mutable stages finish and the
 canonical provenance winner for each destination cell is applied to the target
-column. The resulting Output product is immutable. Settlement retires an
-overlay only after confirming that the persisted source contains it or that
+column. The resulting Output product is immutable. A completed target-owned
+feature region publishes a compact proof of the exact reverse-writer domain
+settled around that output. Recomputing one of those target-owned writers is a
+no-op even when its losing state differs from the canonical cell already in the
+output. Writes outside the proven domain, writes whose source is not their
+target, and dimensions without this proof still fail closed. Settlement retires
+an overlay only after confirming that the persisted source contains it or that
 the destination Output already contains the same state; it never patches a
-published product. Any differing write that arrives after Output publication
-fails closed.
+published product.
 
 `ChunkStore::lease_halo` canonicalizes coordinates, captures their write-gate revisions, and pins them in the cache. The lease holds the gate state records but not the gates themselves, so generation may run without blocking unrelated writes. `ChunkStore::execute_generation_session` admits the halo and snapshots a validated ledger checkpoint under the ledger lock, releases that lock while the borrowed driver runs, then publishes the session's immutable records, ordered source completions, and overlays through an atomic clone-and-swap. It rechecks cancellation immediately before `ChunkStore::commit_generation`; a cancelled request therefore leaves any committed ledger prefix and removes only newly admitted coordinates that are still empty. `ChunkStore::commit_generation` reacquires the canonical write gates, rejects any cache revision change, inserts the complete batch, and releases the gates before eviction work. Dropping the lease removes its pins and performs deferred LRU eviction.
 
@@ -29,6 +33,14 @@ fails closed.
 Add new retained values through the typed `ImmutableProduct`/`ImmutableSidecar` APIs and keep their descriptor declarations in the worldgen stage schedule. A source completion is identified by target, source, stage, and its contiguous source order; do not use request identity for deduplication. Keep overlays sparse and bounded, accept only canonical provenance order for overwrites, and treat a revision conflict as a retry signal rather than overwriting newer state.
 
 `GenerationSession::export_checkpoint` is the handoff shape between the request and ledger. It carries the validated frontiers, typed products, sidecars, aggregate prefixes, ordered source identities, and provenance-bearing overlays; pending worker values are never published. Aggregate prefixes are consumed directly on resume, and terminal output products can repopulate the cache after eviction without replaying the source driver. A source completion is keyed by `(target, source, stage)` and stores its canonical order separately, so two target requests sharing one source remain independent. Concurrent requests with one request key share an in-flight admission slot; waiters retry from the resulting resident or retained output. Ledger revisions used for optimistic overlay commits are per-target cache state and are deliberately distinct from `SessionRevision`, which only allocates mutation provenance inside a request. Overlay replacement compares provenance, so publication is deterministic even when workers finish in reverse order. A completed output frontier does not retain its target-scoped overlays because the output product is the reusable terminal state; partial mutable prefixes retain their ordered writes for resume. `ChunkStore::active_retained_bytes` reports logical bytes for both resident columns and retained ledger payloads.
+
+Reverse-settlement proof belongs to `GenerationSession` rather than packet
+encoding. The production region installs it only after every target-owned
+writer in the domain completes, and checkpoint publication journals it with
+the Output product. Keep this path shared by scalar, batch, native, and browser
+execution. If feature ownership becomes non-square or permits a distinct
+source coordinate, replace the compact domain type with a representation that
+can authenticate that shape instead of weakening the replay predicate.
 
 Publication is monotonic across overlapping requests: a checkpoint whose records are already a prefix of the current frontier is accepted only when its aggregate metadata and covered records agree with the current state. The existing frontier, aggregate, sidecars, products, source completions, and overlays remain authoritative; a divergent stale checkpoint fails transactionally without replacing newer state.
 
