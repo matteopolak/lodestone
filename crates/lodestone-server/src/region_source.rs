@@ -116,8 +116,8 @@ use std::sync::{Arc, Mutex};
 use lodestone_anvil::CompressionScheme;
 use lodestone_anvil::region::{ChunkToWrite, RegionFile, build_region, region_and_local};
 use lodestone_core::{Reader, Writer, read_named_nbt, write_named_nbt};
-use lodestone_model::BlockPos;
 use lodestone_data::block_states::StateId;
+use lodestone_model::BlockPos;
 
 use crate::block_entities::BlockEntityHandle;
 use crate::chunk::{ChunkColumn, ChunkSource};
@@ -2438,13 +2438,24 @@ impl WorldSaveJob {
 #[cfg(test)]
 mod tests {
     use lodestone_core::Nbt;
+    use lodestone_data::block::Block;
 
     use super::*;
     use crate::chunk_store::ChunkStore;
 
     const MIN_Y: i32 = -64;
     const HEIGHT: i32 = 384;
-    const MARKER: &str = "minecraft:diamond_block";
+    fn marker() -> StateId {
+        Block::DiamondBlock.default_state()
+    }
+
+    fn gold_block() -> StateId {
+        Block::GoldBlock.default_state()
+    }
+
+    fn wither_skeleton_skull() -> StateId {
+        Block::WitherSkeletonSkull.default_state()
+    }
 
     #[test]
     fn durable_unload_tokens_are_bounded_and_reject_stale_or_mismatched_replies() {
@@ -2557,8 +2568,8 @@ mod tests {
 
         // `(0, 0)` and `(32, 0)` have separate physical file owners and
         // therefore land together in the two-owner dispatch batch.
-        source.set_block(1, 70, 1, MARKER);
-        source.set_block(32 * 16 + 1, 70, 1, "minecraft:gold_block");
+        source.set_block(1, 70, 1, marker());
+        source.set_block(32 * 16 + 1, 70, 1, gold_block());
         source.unload(0, 0);
 
         let region_dir = source.state.region_dir.clone();
@@ -2590,8 +2601,8 @@ mod tests {
             (0, 1, 1),
             "the retry must persist both owners, then acknowledge only the matching unload"
         );
-        assert_eq!(source.block_state(1, 70, 1), MARKER);
-        assert_eq!(source.block_state(32 * 16 + 1, 70, 1), "minecraft:gold_block");
+        assert_eq!(source.block_state_id(1, 70, 1), marker());
+        assert_eq!(source.block_state_id(32 * 16 + 1, 70, 1), gold_block());
     }
 
     /// A blocking save job must carry its token snapshot from the world owner
@@ -2606,7 +2617,7 @@ mod tests {
             .expect("open world");
         let handle = source.save_handle();
 
-        source.set_block(1, 70, 1, MARKER);
+        source.set_block(1, 70, 1, marker());
         source.unload(0, 0);
         let first_job = handle.begin_save();
         // The owner releases this column again before the worker gets CPU.
@@ -2640,7 +2651,7 @@ mod tests {
             (0, 1),
             "only the job that captured the current token may release the edit"
         );
-        assert_eq!(source.block_state(1, 70, 1), MARKER);
+        assert_eq!(source.block_state_id(1, 70, 1), marker());
     }
 
     #[derive(Debug)]
@@ -2651,12 +2662,7 @@ mod tests {
             let mut column = ChunkColumn::new(MIN_Y, HEIGHT);
             for z in 0..16 {
                 for x in 0..16 {
-                column.set_block_id(
-                    x,
-                    60,
-                    z,
-                    StateId::from_state_str("minecraft:stone").expect("stone is canonical"),
-                );
+                    column.set_block_id(x, 60, z, Block::Stone.default_state());
                 }
             }
             column
@@ -2718,7 +2724,7 @@ mod tests {
         // The edit is at a relative local position in (0,0), so all four
         // saved centres above depend on the changed column; (2,0) is two
         // chunks away and is outside the dependency footprint.
-        source.set_block(1, 70, 1, MARKER);
+        source.set_block(1, 70, 1, marker());
         for coordinate in [(-1, -1), (0, 0), (1, 0), (1, 1)] {
             assert_eq!(
                 source.column(coordinate.0, coordinate.1).retained_light(),
@@ -2757,7 +2763,7 @@ mod tests {
             .expect("reopen world");
         // The east saved snapshot is deliberately not loaded before this
         // mutation. The save worker must discover and clear it from disk.
-        source.set_block(1, 70, 1, MARKER);
+        source.set_block(1, 70, 1, marker());
         source.save_handle().save().expect("save invalidated snapshots");
 
         let reopened = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT)
@@ -2801,8 +2807,8 @@ mod tests {
 
         // A block set into one dimension's edit map must not appear as an
         // edit in another's — the collision this test exists to rule out.
-        overworld.set_block(1, 70, 1, MARKER);
-        nether.set_block(1, 70, 1, MARKER);
+        overworld.set_block(1, 70, 1, marker());
+        nether.set_block(1, 70, 1, marker());
         assert_eq!(overworld.retained_columns(), 1);
         assert_eq!(nether.retained_columns(), 1);
         assert_eq!(end.retained_columns(), 0, "the End was never written to");
@@ -2842,7 +2848,7 @@ mod tests {
 
     fn write_status_fixture(source: &RegionChunkSource<Flat>, status: Option<&str>) {
         let mut column = ChunkColumn::new(MIN_Y, HEIGHT);
-        column.set_block(1, 70, 1, MARKER);
+        column.set_block_id(1, 70, 1, marker());
         let mut nbt = chunk_nbt::column_to_nbt(0, 0, &column).expect("full fixture encodes");
         let Nbt::Compound(fields) = &mut nbt else {
             panic!("encoded chunk root must be a compound");
@@ -2883,8 +2889,8 @@ mod tests {
                 "schema rejection must never promote partial disk terrain to Full"
             );
             assert_ne!(
-                column.block_state(1, 70, 1),
-                MARKER,
+                column.block_state_id(1, 70, 1),
+                marker(),
                 "rejected partial disk terrain must fall back to the generator"
             );
             assert_eq!(
@@ -2960,7 +2966,7 @@ mod tests {
             Some(crate::chunk::RetainedLightStatus::DependencyInitialized)
         );
 
-        store.set_block(1, 60, 1, MARKER);
+        store.set_block(1, 60, 1, marker());
         assert_eq!(
             store.column(0, 0).retained_light(),
             None,
@@ -3002,7 +3008,7 @@ mod tests {
 
         // Three edited chunks: (0,0), (1,0), (2,0).
         for cx in 0..3 {
-            source.set_block(cx * 16 + 1, 70, 1, MARKER);
+            source.set_block(cx * 16 + 1, 70, 1, marker());
         }
         assert_eq!(
             source.retained_columns(),
@@ -3036,8 +3042,8 @@ mod tests {
         // And the point of the whole exercise: releasing must cost a disk read,
         // never a block. This reads the chunk that was dropped.
         assert_eq!(
-            source.block_state(1, 70, 1),
-            MARKER,
+            source.block_state_id(1, 70, 1),
+            marker(),
             "the released column lost its edit; releasing is only sound while it is reconstructible"
         );
     }
@@ -3058,13 +3064,13 @@ mod tests {
         let handle = source.save_handle();
         let store = ChunkStore::with_capacity(source.clone(), 1);
 
-        source.set_block(1, 70, 1, MARKER);
+        source.set_block(1, 70, 1, marker());
         let _ = store.column(0, 0);
         // Evicts (0,0): capacity is 1.
         let _ = store.column(5, 5);
 
         // Mutated after the eviction, before the save.
-        source.set_block(2, 71, 2, "minecraft:gold_block");
+        source.set_block(2, 71, 2, gold_block());
 
         handle.save().expect("save");
         assert_eq!(
@@ -3078,8 +3084,8 @@ mod tests {
         // The load-bearing half: **both** edits come back, including the one
         // made after the eviction. If the save had written a pre-mutation
         // snapshot and then released, this is the assertion that would fail.
-        assert_eq!(source.block_state(2, 71, 2), "minecraft:gold_block");
-        assert_eq!(source.block_state(1, 70, 1), MARKER);
+        assert_eq!(source.block_state_id(2, 71, 2), gold_block());
+        assert_eq!(source.block_state_id(1, 70, 1), marker());
     }
 
     /// The sweep's decision rule in isolation: a column that is **dirty at the
@@ -3097,7 +3103,7 @@ mod tests {
         let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT).expect("open world");
         let handle = source.save_handle();
 
-        source.set_block(1, 70, 1, MARKER);
+        source.set_block(1, 70, 1, marker());
         source.unload(0, 0);
 
         let token = source
@@ -3138,7 +3144,7 @@ mod tests {
             (0, 1),
             "the deferred column must be released once it is on disk"
         );
-        assert_eq!(source.block_state(1, 70, 1), MARKER);
+        assert_eq!(source.block_state_id(1, 70, 1), marker());
     }
 
     /// An idle world still reclaims: the sweep must not sit behind the
@@ -3151,7 +3157,7 @@ mod tests {
         let handle = source.save_handle();
         let store = ChunkStore::with_capacity(source.clone(), 1);
 
-        source.set_block(1, 70, 1, MARKER);
+        source.set_block(1, 70, 1, marker());
         handle.save().expect("first save writes it");
         assert_eq!(source.retained_columns(), 1);
 
@@ -3169,7 +3175,7 @@ mod tests {
             (0, 1),
             "an empty save must still reclaim an evicted column"
         );
-        assert_eq!(source.block_state(1, 70, 1), MARKER);
+        assert_eq!(source.block_state_id(1, 70, 1), marker());
     }
 
     /// The discriminating gate over the **real** production stack —
@@ -3199,7 +3205,7 @@ mod tests {
         // cannot exercise.
         {
             let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT).expect("open world");
-            source.set_block(1, 70, 1, MARKER);
+            source.set_block(1, 70, 1, marker());
             source.save_handle().save().expect("seed save");
         }
 
@@ -3224,16 +3230,15 @@ mod tests {
         );
         assert!(store.is_column_resident(0, 0));
         assert_eq!(
-            source.block_state(1, 70, 1),
-            MARKER,
+            source.block_state_id(1, 70, 1),
+            marker(),
             "precondition: the saved edit must survive the reopen and the ticket grant"
         );
 
         // A fresh edit this session, on top of the one carried over from
         // disk — this is what gives the sweep below something real to defer
         // then release, exactly like the capacity-eviction gates above.
-        const SECOND_MARKER: &str = "minecraft:gold_block";
-        source.set_block(2, 71, 2, SECOND_MARKER);
+        source.set_block(2, 71, 2, gold_block());
         assert_eq!(source.retained_columns(), 1, "one edited column, in the edit map");
 
         store.remove_forced_ticket(1);
@@ -3266,13 +3271,13 @@ mod tests {
         // And the point of the whole exercise: neither edit is lost. Reading
         // them back after the unload costs a disk load, never a wrong block.
         assert_eq!(
-            source.block_state(1, 70, 1),
-            MARKER,
+            source.block_state_id(1, 70, 1),
+            marker(),
             "the edit carried over from session 1 must survive the ticket-driven unload"
         );
         assert_eq!(
-            source.block_state(2, 71, 2),
-            SECOND_MARKER,
+            source.block_state_id(2, 71, 2),
+            gold_block(),
             "the edit made in session 2, right before the unload, must also survive it"
         );
     }
@@ -3287,7 +3292,7 @@ mod tests {
         let dir = tempdir("ticket_no_removal");
         {
             let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT).expect("open world");
-            source.set_block(1, 70, 1, MARKER);
+            source.set_block(1, 70, 1, marker());
             source.save_handle().save().expect("seed save");
         }
 
@@ -3299,7 +3304,7 @@ mod tests {
         for _ in 0..25 {
             let _ = store.column(0, 0);
         }
-        source.set_block(2, 71, 2, "minecraft:gold_block");
+        source.set_block(2, 71, 2, gold_block());
         // No removal here — the control.
         for _ in 0..75 {
             let _ = store.column(50, 50);
@@ -3330,11 +3335,10 @@ mod tests {
     #[test]
     fn a_skull_state_with_no_saved_block_entity_stays_omitted_on_load() {
         let dir = tempdir("skull-omission");
-        const SKULL: &str = "minecraft:wither_skeleton_skull";
         {
             let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT)
                 .expect("open world");
-            source.set_block(1, 70, 1, SKULL);
+            source.set_block(1, 70, 1, wither_skeleton_skull());
             source.save_handle().save().expect("seed save");
         }
 
@@ -3350,7 +3354,7 @@ mod tests {
     }
 
     /// The negative control: a state that owns **no** block-entity type
-    /// (plain stone via `MARKER`) must never gain a synthesized record —
+    /// (a diamond block via `marker()`) must never gain a synthesized record —
     /// `ChunkColumn::missing_block_entity_states`'s palette-classification
     /// fast path must reject it outright, not merely happen not to find a
     /// position for it. Without this, the positive gate above could be
@@ -3362,7 +3366,7 @@ mod tests {
         {
             let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT)
                 .expect("open world");
-            source.set_block(1, 70, 1, MARKER);
+            source.set_block(1, 70, 1, marker());
             source.save_handle().save().expect("seed save");
         }
         let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT)

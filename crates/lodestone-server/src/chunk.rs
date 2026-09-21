@@ -300,29 +300,6 @@ impl GeneratedMetadataAccumulator {
         }
     }
 
-    #[inline]
-    fn observe_ascending(&mut self, cell_index: usize, id: u16) {
-        let section = cell_index / (SECTION_ROWS * 16 * 16);
-        if self.palette_ticking[id as usize] {
-            self.section_ticking[section] += 1;
-        }
-        let map_index = cell_index % 256;
-        let state = self.palette[id as usize];
-        let stored = (cell_index / 256 + 1) as u16;
-        if client_heightmap_includes(CLIENT_WORLD_SURFACE_HEIGHTMAP_TYPE_ID, state) {
-            self.raw_maps[0][map_index] = stored;
-        }
-        if client_heightmap_includes(CLIENT_MOTION_BLOCKING_HEIGHTMAP_TYPE_ID, state) {
-            self.raw_maps[1][map_index] = stored;
-        }
-        if client_heightmap_includes(
-            CLIENT_MOTION_BLOCKING_NO_LEAVES_HEIGHTMAP_TYPE_ID,
-            state,
-        ) {
-            self.raw_maps[2][map_index] = stored;
-        }
-    }
-
     fn finish(self, height: i32) -> GeneratedColumnMetadata {
         GeneratedColumnMetadata {
             palette: self.palette,
@@ -5791,7 +5768,7 @@ mod tests {
         let full = generator.column(280, 78);
         for (name, column) in [("base", base), ("full", full)] {
             let non_air = (0..128)
-                .filter(|&y| column.block_state_id(2, y, 0) != StateId::air_state())
+                .filter(|&y| column.block_state_id(2, y, 0) != StateId::AIR)
                 .map(|y| (y, column.block_state_id(2, y, 0)))
                 .collect::<Vec<_>>();
             println!("{name} top {:?} maps {:?}", non_air.last(), [0, 1, 2].map(|i| column.client_heightmaps()[i][2]));
@@ -5994,8 +5971,8 @@ mod tests {
     }
 
     /// Canonical byte serialisation of a column's full content — `min_y`,
-    /// `height`, the palette (length-prefixed strings), the block-index
-    /// grid, then the biome quarts (length-prefixed strings). Two columns
+    /// `height`, the raw-id palette, the block-index grid, then the biome
+    /// quarts (length-prefixed strings). Two columns
     /// with identical bytes here carry identical block/biome content; this
     /// is the "emitted byte sequence" the determinism control below
     /// compares, standing in for the real wire encoding (which lives behind
@@ -6004,9 +5981,9 @@ mod tests {
         let mut out = Vec::new();
         out.extend_from_slice(&col.min_y.to_le_bytes());
         out.extend_from_slice(&col.height.to_le_bytes());
-        for s in &col.palette {
-            out.extend_from_slice(&(s.len() as u32).to_le_bytes());
-            out.extend_from_slice(s.as_bytes());
+        out.extend_from_slice(&(col.palette.len() as u32).to_le_bytes());
+        for state in &col.palette {
+            out.extend_from_slice(&state.raw().to_le_bytes());
         }
         // Section by section, which is also the storage order — the bytes are
         // identical to the flat `Vec<u16>` walk this replaced, because

@@ -962,15 +962,27 @@ mod tests {
                 })
             }
 
-            fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-                "minecraft:air".to_owned()
+            fn block_state_id(
+                &self,
+                _x: i32,
+                _y: i32,
+                _z: i32,
+            ) -> lodestone_data::block_states::StateId {
+                lodestone_data::block_states::StateId::AIR
             }
 
             fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
                 "minecraft:plains".to_owned()
             }
 
-            fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+            fn set_block(
+                &self,
+                _x: i32,
+                _y: i32,
+                _z: i32,
+                _state: lodestone_data::block_states::StateId,
+            ) {
+            }
         }
 
         let world = WorldStateHandle::new();
@@ -1012,15 +1024,27 @@ mod tests {
                 crate::chunk::ChunkColumn::new(-64, 384)
             }
 
-            fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-                "minecraft:air".to_owned()
+            fn block_state_id(
+                &self,
+                _x: i32,
+                _y: i32,
+                _z: i32,
+            ) -> lodestone_data::block_states::StateId {
+                lodestone_data::block_states::StateId::AIR
             }
 
             fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
                 "minecraft:plains".to_owned()
             }
 
-            fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+            fn set_block(
+                &self,
+                _x: i32,
+                _y: i32,
+                _z: i32,
+                _state: lodestone_data::block_states::StateId,
+            ) {
+            }
         }
 
         let world = WorldStateHandle::new();
@@ -1053,7 +1077,12 @@ mod tests {
             fn column(&self, _cx: i32, _cz: i32) -> crate::chunk::ChunkColumn {
                 self.columns.fetch_add(1, Ordering::SeqCst);
                 let mut column = crate::chunk::ChunkColumn::new(0, 16);
-                column.set_block(0, 0, 0, "minecraft:stone");
+                column.set_block_id(
+                    0,
+                    0,
+                    0,
+                    lodestone_data::block::Block::Stone.default_state(),
+                );
                 column
             }
 
@@ -1112,15 +1141,27 @@ mod tests {
                     .collect()
             }
 
-            fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-                "minecraft:air".to_owned()
+            fn block_state_id(
+                &self,
+                _x: i32,
+                _y: i32,
+                _z: i32,
+            ) -> lodestone_data::block_states::StateId {
+                lodestone_data::block_states::StateId::AIR
             }
 
             fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
                 "minecraft:plains".to_owned()
             }
 
-            fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+            fn set_block(
+                &self,
+                _x: i32,
+                _y: i32,
+                _z: i32,
+                _state: lodestone_data::block_states::StateId,
+            ) {
+            }
         }
 
         let world = WorldStateHandle::new();

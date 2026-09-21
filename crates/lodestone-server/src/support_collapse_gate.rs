@@ -57,9 +57,10 @@ fn state(value: &str) -> StateId {
 impl RigWorld {
     fn new() -> Self {
         let mut column = ChunkColumn::new(MIN_Y, HEIGHT);
+        let dirt = state("minecraft:dirt");
         for x in 0..16 {
             for z in 0..16 {
-                column.set_block(x, FLOOR_Y, z, state("minecraft:dirt"));
+                column.set_block_id(x, FLOOR_Y, z, dirt);
             }
         }
         let mut columns = HashMap::new();
@@ -69,8 +70,8 @@ impl RigWorld {
         }
     }
 
-    fn put(&self, pos: BlockPos, state_name: &str) {
-        self.set_block(pos.x, pos.y, pos.z, state(state_name));
+    fn put(&self, pos: BlockPos, state: StateId) {
+        self.set_block(pos.x, pos.y, pos.z, state);
     }
 
     fn at(&self, pos: BlockPos) -> StateId {
@@ -97,7 +98,7 @@ impl ChunkSource for RigWorld {
             .map(|c| {
                 c.block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
             })
-            .unwrap_or_else(|| state(crate::chunk::AIR))
+            .unwrap_or_else(crate::chunk::air_state)
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -110,7 +111,7 @@ impl ChunkSource for RigWorld {
                 c.biome_state_at(x.rem_euclid(16), y, z.rem_euclid(16))
                     .to_string()
             })
-            .unwrap_or_else(|| crate::chunk::AIR.to_string())
+            .unwrap_or_else(|| "minecraft:plains".to_owned())
     }
 
     fn set_block(&self, x: i32, y: i32, z: i32, state_id: StateId) {
@@ -120,7 +121,7 @@ impl ChunkSource for RigWorld {
             .expect("rig world poisoned")
             .entry((cx, cz))
             .or_insert_with(|| ChunkColumn::new(MIN_Y, HEIGHT))
-            .set_block(x.rem_euclid(16), y, z.rem_euclid(16), state_id);
+            .set_block_id(x.rem_euclid(16), y, z.rem_euclid(16), state_id);
     }
 }
 
@@ -132,7 +133,7 @@ fn the_rig_world_reflects_its_own_edits() {
     let world = RigWorld::new();
     let pos = BlockPos::new(3, FLOOR_Y + 1, 3);
     assert_eq!(world.at(pos), state("minecraft:air"));
-    world.put(pos, "minecraft:torch");
+    world.put(pos, state("minecraft:torch"));
     assert_eq!(world.at(pos), state("minecraft:torch"));
     assert_eq!(
         world.at(BlockPos::new(3, FLOOR_Y, 3)),
@@ -157,12 +158,13 @@ fn collapse_family_shapes() {
             // breaking the dirt must take all three, not only the bottom one.
             label: "sugar cane column",
             build: |world| {
+                let cane = state("minecraft:sugar_cane[age=0]");
                 let base = BlockPos::new(2, FLOOR_Y, 2);
                 let cells: Vec<BlockPos> = (1..=3)
                     .map(|dy| BlockPos::new(base.x, base.y + dy, base.z))
                     .collect();
                 for cell in &cells {
-                    world.put(*cell, "minecraft:sugar_cane[age=0]");
+                    world.put(*cell, cane);
                 }
                 (base, cells)
             },
@@ -174,11 +176,11 @@ fn collapse_family_shapes() {
             label: "wall torch",
             build: |world| {
                 let wall = BlockPos::new(5, FLOOR_Y + 1, 5);
-                world.put(wall, "minecraft:stone");
+                world.put(wall, state("minecraft:stone"));
                 let torch = BlockPos::new(6, FLOOR_Y + 1, 5);
                 // `facing=east` means the torch points east and is stuck to the
                 // block on its west — which is `wall`.
-                world.put(torch, "minecraft:wall_torch[facing=east]");
+                world.put(torch, state("minecraft:wall_torch[facing=east]"));
                 (wall, vec![torch])
             },
         },
@@ -192,11 +194,11 @@ fn collapse_family_shapes() {
                 let upper = BlockPos::new(8, FLOOR_Y + 2, 8);
                 world.put(
                     lower,
-                    "minecraft:oak_door[facing=north,half=lower,hinge=left,open=false,powered=false]",
+                    state("minecraft:oak_door[facing=north,half=lower,hinge=left,open=false,powered=false]"),
                 );
                 world.put(
                     upper,
-                    "minecraft:oak_door[facing=north,half=upper,hinge=left,open=false,powered=false]",
+                    state("minecraft:oak_door[facing=north,half=upper,hinge=left,open=false,powered=false]"),
                 );
                 (base, vec![lower, upper])
             },
@@ -206,7 +208,7 @@ fn collapse_family_shapes() {
             build: |world| {
                 let base = BlockPos::new(11, FLOOR_Y, 11);
                 let rail = BlockPos::new(11, FLOOR_Y + 1, 11);
-                world.put(rail, "minecraft:rail[shape=north_south,waterlogged=false]");
+                world.put(rail, state("minecraft:rail[shape=north_south,waterlogged=false]"));
                 (base, vec![rail])
             },
         },
@@ -220,15 +222,15 @@ fn collapse_family_shapes() {
                 let head = BlockPos::new(13, FLOOR_Y + 1, 14);
                 world.put(
                     foot,
-                    "minecraft:red_bed[facing=south,occupied=false,part=foot]",
+                    state("minecraft:red_bed[facing=south,occupied=false,part=foot]"),
                 );
                 world.put(
                     head,
-                    "minecraft:red_bed[facing=south,occupied=false,part=head]",
+                    state("minecraft:red_bed[facing=south,occupied=false,part=head]"),
                 );
                 // The player breaks the foot itself, which is what `destroy_block`
                 // does before it calls the collapse.
-                world.put(foot, crate::chunk::AIR);
+                world.put(foot, crate::chunk::air_state());
                 (foot, vec![head])
             },
         },
@@ -240,7 +242,7 @@ fn collapse_family_shapes() {
         let (broken, expected) = (arm.build)(&world);
         // Exactly what `destroy_block` does: the broken cell goes to air first,
         // then the collapse runs from it.
-        world.put(broken, crate::chunk::AIR);
+        world.put(broken, crate::chunk::air_state());
         let removed = collapse_unsupported(&world, broken);
         for cell in &expected {
             if !removed.iter().any(|(pos, _)| pos == cell) {
@@ -280,12 +282,12 @@ fn nothing_collapses_when_the_support_is_intact_or_unmodelled() {
     let world = RigWorld::new();
     // A torch two cells away from the break, on floor that stays.
     let torch = BlockPos::new(4, FLOOR_Y + 1, 4);
-    world.put(torch, "minecraft:torch");
+    world.put(torch, state("minecraft:torch"));
     // An ordinary block directly above the break — stone has no survival check.
     let stone = BlockPos::new(2, FLOOR_Y + 1, 2);
-    world.put(stone, "minecraft:stone");
+    world.put(stone, state("minecraft:stone"));
     let broken = BlockPos::new(2, FLOOR_Y, 2);
-    world.put(broken, crate::chunk::AIR);
+    world.put(broken, crate::chunk::air_state());
     let removed = collapse_unsupported(&world, broken);
     assert!(
         removed.is_empty(),
@@ -307,15 +309,14 @@ fn a_collapsed_plant_rolls_its_loot() {
     let world = RigWorld::new();
     let base = BlockPos::new(6, FLOOR_Y, 6);
     let cane = BlockPos::new(6, FLOOR_Y + 1, 6);
-    world.put(cane, "minecraft:sugar_cane[age=0]");
-    world.put(base, crate::chunk::AIR);
+    world.put(cane, state("minecraft:sugar_cane[age=0]"));
+    world.put(base, crate::chunk::air_state());
     let removed = collapse_unsupported(&world, base);
     assert_eq!(removed.len(), 1, "expected the cane and nothing else");
     let mut rng = crate::mob_spawn::SpawnRng::new(0x5EED_C0DE);
     let popped = crate::block_drops::drop_block_loot(
         crate::block_drops::bundled_tables(),
-        state(&removed[0].1)
-            .expect("collapsed state is canonical"),
+        removed[0].1,
         removed[0].0,
         None,
         &mut rng,
@@ -337,14 +338,15 @@ fn a_collapsed_plant_rolls_its_loot() {
 fn the_collapse_bound_truncates_a_runaway_column_and_nothing_shorter() {
     let world = RigWorld::new();
     let base = BlockPos::new(9, FLOOR_Y, 9);
+    let cane = state("minecraft:sugar_cane[age=0]");
     // 200 canes, well past the 64-cell bound.
     for dy in 1..=200 {
         world.put(
             BlockPos::new(base.x, base.y + dy, base.z),
-            "minecraft:sugar_cane[age=0]",
+            cane,
         );
     }
-    world.put(base, crate::chunk::AIR);
+    world.put(base, crate::chunk::air_state());
     let removed = collapse_unsupported(&world, base);
     assert!(
         removed.len() <= 64,
@@ -376,13 +378,13 @@ fn a_collapsed_waterlogged_block_keeps_its_water_source_while_a_dry_one_goes_to_
 
     let dry_base = BlockPos::new(2, FLOOR_Y, 2);
     let dry_rail = BlockPos::new(2, FLOOR_Y + 1, 2);
-    world.put(dry_rail, "minecraft:rail[shape=north_south,waterlogged=false]");
-    world.put(dry_base, crate::chunk::AIR);
+    world.put(dry_rail, state("minecraft:rail[shape=north_south,waterlogged=false]"));
+    world.put(dry_base, crate::chunk::air_state());
 
     let wet_base = BlockPos::new(9, FLOOR_Y, 9);
     let wet_rail = BlockPos::new(9, FLOOR_Y + 1, 9);
-    world.put(wet_rail, "minecraft:rail[shape=north_south,waterlogged=true]");
-    world.put(wet_base, crate::chunk::AIR);
+    world.put(wet_rail, state("minecraft:rail[shape=north_south,waterlogged=true]"));
+    world.put(wet_base, crate::chunk::air_state());
 
     let dry_removed = collapse_unsupported(&world, dry_base);
     let wet_removed = collapse_unsupported(&world, wet_base);

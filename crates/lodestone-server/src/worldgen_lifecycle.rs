@@ -148,7 +148,6 @@ pub enum LifecycleCompletionMode {
 thread_local! {
     static COMPLETION_MODE_COUNTS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
     static REGION_FEATURE_EPOCH_COUNTS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
-    static REGION_FEATURE_OVERRIDE_COUNTS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
     static REGION_FEATURE_SCALAR_FALLBACKS: Cell<usize> = const { Cell::new(0) };
 }
 
@@ -187,23 +186,12 @@ fn record_region_feature_epoch(mode: LifecycleCompletionMode) {
 #[cfg(test)]
 pub(crate) fn reset_region_feature_epoch_counts() {
     REGION_FEATURE_EPOCH_COUNTS.with(|counts| counts.set((0, 0)));
-    REGION_FEATURE_OVERRIDE_COUNTS.with(|counts| counts.set((0, 0)));
     REGION_FEATURE_SCALAR_FALLBACKS.with(|count| count.set(0));
 }
 
 #[cfg(test)]
 pub(crate) fn region_feature_epoch_counts() -> (usize, usize) {
     REGION_FEATURE_EPOCH_COUNTS.with(Cell::get)
-}
-
-#[cfg(test)]
-pub(crate) fn region_feature_override_counts() -> (usize, usize) {
-    REGION_FEATURE_OVERRIDE_COUNTS.with(Cell::get)
-}
-
-#[cfg(test)]
-fn record_region_feature_override_counts(counts: (usize, usize)) {
-    REGION_FEATURE_OVERRIDE_COUNTS.with(|recorded| recorded.set(counts));
 }
 
 #[cfg(test)]
@@ -4223,11 +4211,10 @@ mod tests {
                     source,
                     position: (source.0 * 16 + x, 0, source.1 * 16 + 1),
                     state: if x == 1 {
-                        "minecraft:stone"
+                        sid("minecraft:stone")
                     } else {
-                        "minecraft:dirt"
-                    }
-                    .to_owned(),
+                        sid("minecraft:dirt")
+                    },
                     transient: false,
                 })
                 .collect(),
@@ -4862,7 +4849,7 @@ mod tests {
                 },
                 0,
             ),
-            "minecraft:air",
+            sid("minecraft:air"),
             "the no-marker control must remain distinguishable",
         );
         assert_eq!(
@@ -4874,7 +4861,7 @@ mod tests {
                 },
                 1,
             ),
-            "minecraft:gold_block",
+            sid("minecraft:gold_block"),
             "an actual cross-column FEATURES spill must remain observable",
         );
     }
@@ -4890,7 +4877,7 @@ mod tests {
                 },
                 0,
             ),
-            "minecraft:diamond_block",
+            sid("minecraft:diamond_block"),
             "a target-local top-layer state must seed the later target read view",
         );
         assert_eq!(
@@ -4902,7 +4889,7 @@ mod tests {
                 },
                 0,
             ),
-            "minecraft:air",
+            sid("minecraft:air"),
             "the top-layer no-marker control must remain distinguishable",
         );
     }
@@ -5525,7 +5512,7 @@ mod tests {
         let mut overrides = BTreeMap::new();
         overrides.insert(
             (min_x, generator.min_y(), min_z),
-            "minecraft:stone".to_owned(),
+            sid("minecraft:stone"),
         );
         overrides.insert(
             (
@@ -5533,16 +5520,16 @@ mod tests {
                 generator.min_y() + generator.height() - 1,
                 max_z - 1,
             ),
-            "minecraft:dirt".to_owned(),
+            sid("minecraft:dirt"),
         );
-        overrides.insert((min_x - 1, 0, min_z), "outside-x".to_owned());
-        overrides.insert((min_x, 0, max_z), "outside-z".to_owned());
-        overrides.insert((min_x, generator.min_y() - 1, min_z), "outside-y".to_owned());
+        overrides.insert((min_x - 1, 0, min_z), sid("minecraft:granite"));
+        overrides.insert((min_x, 0, max_z), sid("minecraft:andesite"));
+        overrides.insert((min_x, generator.min_y() - 1, min_z), sid("minecraft:deepslate"));
 
         let bounded = overworld_override_vec(&overrides, target, &generator);
         assert_eq!(bounded.len(), 2);
-        assert_eq!(bounded[0].3, "minecraft:stone");
-        assert_eq!(bounded[1].3, "minecraft:dirt");
+        assert_eq!(bounded[0].3, sid("minecraft:stone"));
+        assert_eq!(bounded[1].3, sid("minecraft:dirt"));
         assert_eq!(override_vec(&overrides).len(), 5);
     }
 
@@ -5552,8 +5539,8 @@ mod tests {
         let target = (0, 0);
         let context = generator.lifecycle_replay_context(target.0, target.1);
         let mut overrides = BTreeMap::new();
-        overrides.insert((0, 63, 0), "minecraft:cobblestone".to_owned());
-        overrides.insert((10_000, 63, 10_000), "minecraft:diamond_block".to_owned());
+        overrides.insert((0, 63, 0), sid("minecraft:cobblestone"));
+        overrides.insert((10_000, 63, 10_000), sid("minecraft:diamond_block"));
         let full = override_vec(&overrides);
         let bounded = overworld_override_vec(&overrides, target, &generator);
 

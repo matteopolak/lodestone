@@ -218,10 +218,15 @@ impl DimensionRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lodestone_data::block_states::StateId;
     use lodestone_worldgen::dense_grid::DenseBlockGrid;
 
     fn key(value: &str) -> ResourceKey {
         value.parse().expect("test dimension key must be valid")
+    }
+
+    fn state(value: &str) -> StateId {
+        StateId::from_state_str(value).expect("test state is in the generated table")
     }
 
     struct AllStone {
@@ -237,11 +242,19 @@ mod tests {
             self.height
         }
         fn generate(&self, cx: i32, cz: i32) -> DenseBlockGrid {
-            let mut grid =
-                DenseBlockGrid::new(cx * 16, self.min_y, cz * 16, 16, self.height, 16, "minecraft:air");
+            let mut grid = DenseBlockGrid::with_default(
+                cx * 16,
+                self.min_y,
+                cz * 16,
+                16,
+                self.height,
+                16,
+                StateId::AIR,
+            );
+            let stone = state("minecraft:stone");
             for lx in 0..16 {
                 for lz in 0..16 {
-                    grid.set(cx * 16 + lx, self.min_y, cz * 16 + lz, "minecraft:stone");
+                    grid.set_id(cx * 16 + lx, self.min_y, cz * 16 + lz, stone);
                 }
             }
             grid
@@ -279,8 +292,8 @@ mod tests {
         assert_eq!(entry.properties.height, 16);
 
         let source = registry.chunk_source(&dimension_key).expect("just registered");
-        assert_eq!(source.block_state(0, 0, 0), "minecraft:stone");
-        assert_eq!(source.block_state(0, 1, 0), "minecraft:air");
+        assert_eq!(source.block_state_id(0, 0, 0), state("minecraft:stone"));
+        assert_eq!(source.block_state_id(0, 1, 0), StateId::AIR);
     }
 
     #[test]
@@ -294,12 +307,12 @@ mod tests {
 
         let dimension_key = key("voidworld:test");
         let first = registry.chunk_source(&dimension_key).unwrap();
-        first.set_block(0, 1, 0, "minecraft:diamond_block");
+        first.set_block(0, 1, 0, state("minecraft:diamond_block"));
 
         let second = registry.chunk_source(&dimension_key).unwrap();
         assert_eq!(
-            second.block_state(0, 1, 0),
-            "minecraft:diamond_block",
+            second.block_state_id(0, 1, 0),
+            state("minecraft:diamond_block"),
             "a second lookup of the same key must see the first's edit — proof the source is \
              cached, not rebuilt (and edit-blind) on every call"
         );
@@ -323,12 +336,12 @@ mod tests {
         });
         let source = registry.chunk_source(&dimension_key).unwrap();
         assert_eq!(
-            source.block_state(0, 5, 0),
-            "minecraft:stone",
+            source.block_state_id(0, 5, 0),
+            state("minecraft:stone"),
             "the re-registered generator (stone at y=5) must be the one actually served, not a \
              stale cached source built from the first registration (stone at y=0)"
         );
-        assert_eq!(source.block_state(0, 0, 0), "minecraft:air");
+        assert_eq!(source.block_state_id(0, 0, 0), StateId::AIR);
     }
 
     #[test]

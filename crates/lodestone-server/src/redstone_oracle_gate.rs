@@ -88,6 +88,8 @@ use crate::chunk::ChunkColumn;
 use crate::random_tick::propagate_and_react;
 use crate::scheduled_tick::ScheduledTickQueue;
 use crate::{redstone, redstone_torch, redstone_wire};
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 
 /// Live-measured dust attenuation: `(distance_from_source, power)`.
 ///
@@ -127,13 +129,25 @@ const ROW_Z: i32 = 8;
 const FLOOR_Y: i32 = 0;
 const DUST_Y: i32 = 1;
 
+macro_rules! state_id {
+    ($block:ident $(, $key:ident = $value:ident)* $(,)?) => {
+        redstone::configured_state(
+            Block::$block,
+            &[$((
+                lodestone_data::block_properties::PropertyKey::$key,
+                lodestone_data::block_properties::BuiltinPropertyValue::$value,
+            )),*],
+        )
+    };
+}
+
 /// Builds a column with a stone floor under the whole footprint, so no rig
 /// below accidentally reads air where vanilla would have had ground.
 fn column_with_floor() -> ChunkColumn {
     let mut column = ChunkColumn::new(MIN_Y, HEIGHT);
     for x in 0..16 {
         for z in 0..16 {
-            column.set_block(x, FLOOR_Y, z, "minecraft:stone");
+            column.set_block_id(x, FLOOR_Y, z, Block::Stone.default_state());
         }
     }
     column
@@ -142,16 +156,16 @@ fn column_with_floor() -> ChunkColumn {
 /// Lays a lit standing torch at `x = 0` and unpowered dust along
 /// `x = 1..=15`, all at `z = ROW_Z`.
 fn lay_torch_and_dust(column: &mut ChunkColumn, torch_lit: bool) {
-    column.set_block(0, DUST_Y, ROW_Z, &redstone_torch::set_standing_lit(torch_lit));
+    column.set_block_id(0, DUST_Y, ROW_Z, redstone_torch::set_standing_lit(torch_lit));
     for x in 1..16 {
-        column.set_block(x, DUST_Y, ROW_Z, &redstone_wire::set_power(0));
+        column.set_block_id(x, DUST_Y, ROW_Z, redstone_wire::set_power(0));
     }
 }
 
 /// The final power of the dust at each `x`, read straight out of the column.
 fn dust_profile(column: &ChunkColumn) -> Vec<(i32, u8)> {
     (1..16)
-        .map(|x| (x, redstone::wire_power(column.block_state(x, DUST_Y, ROW_Z))))
+        .map(|x| (x, redstone::wire_power(column.block_state_id(x, DUST_Y, ROW_Z))))
         .collect()
 }
 
@@ -224,7 +238,7 @@ fn dust_attenuates_exactly_as_the_live_server_does() {
     // what actually reaches a client. Every dust square whose power changed
     // must appear, carrying its final value -- a correct power that is never
     // published is still an invisible one.
-    let mut published: std::collections::HashMap<(i32, i32, i32), String> =
+    let mut published: std::collections::HashMap<(i32, i32, i32), StateId> =
         std::collections::HashMap::new();
     for event in &events {
         published.insert(event.pos, event.to.clone());
@@ -240,7 +254,7 @@ fn dust_attenuates_exactly_as_the_live_server_does() {
             )
         });
         assert_eq!(
-            redstone::wire_power(to),
+            redstone::wire_power(*to),
             oracle_power,
             "published event for (x={distance}, y={DUST_Y}, z={ROW_Z}) carries {to:?}, \
              but the live server measured power={oracle_power}"
@@ -279,7 +293,7 @@ fn a_gap_in_the_dust_stops_the_signal_at_that_coordinate() {
 
     let mut column = column_with_floor();
     lay_torch_and_dust(&mut column, true);
-    column.set_block(GAP_X, DUST_Y, ROW_Z, "minecraft:stone");
+    column.set_block_id(GAP_X, DUST_Y, ROW_Z, Block::Stone.default_state());
 
     let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
     let _ = propagate_and_react(&mut column, 0, 0, 0, DUST_Y, ROW_Z, &mut block_ticks, 0);
@@ -288,7 +302,7 @@ fn a_gap_in_the_dust_stops_the_signal_at_that_coordinate() {
         if distance >= GAP_X {
             continue;
         }
-        let measured = redstone::wire_power(column.block_state(distance, DUST_Y, ROW_Z));
+        let measured = redstone::wire_power(column.block_state_id(distance, DUST_Y, ROW_Z));
         assert_eq!(
             measured, oracle_power,
             "before the gap, dust at x={distance} must still match the oracle exactly \
@@ -296,7 +310,7 @@ fn a_gap_in_the_dust_stops_the_signal_at_that_coordinate() {
         );
     }
     for x in (GAP_X + 1)..16 {
-        let measured = redstone::wire_power(column.block_state(x, DUST_Y, ROW_Z));
+        let measured = redstone::wire_power(column.block_state_id(x, DUST_Y, ROW_Z));
         assert_eq!(
             measured, 0,
             "dust at x={x} is past a stone gap at x={GAP_X} and must be unpowered, got {measured}"
@@ -333,14 +347,14 @@ fn a_torch_inversion_is_scheduled_at_exactly_two_ticks_not_applied_immediately()
     const CURRENT_TICK: u64 = 100;
 
     let mut column = column_with_floor();
-    column.set_block(ATTACH_X, DUST_Y, ROW_Z, "minecraft:stone");
+    column.set_block_id(ATTACH_X, DUST_Y, ROW_Z, Block::Stone.default_state());
     let torch_state = redstone_torch::set_wall_lit(crate::neighbor_update::Direction::East, true);
-    column.set_block(TORCH_X, DUST_Y, ROW_Z, &torch_state);
+    column.set_block_id(TORCH_X, DUST_Y, ROW_Z, torch_state);
     // A lit source torch feeding the dust above the attachment block, so the
     // dust's own re-evaluation keeps it powered rather than resetting it.
-    column.set_block(SOURCE_X, DUST_Y + 1, ROW_Z, &redstone_torch::set_standing_lit(true));
-    column.set_block(ATTACH_X - 1, DUST_Y + 1, ROW_Z, &redstone_wire::set_power(15));
-    column.set_block(ATTACH_X, DUST_Y + 1, ROW_Z, &redstone_wire::set_power(14));
+    column.set_block_id(SOURCE_X, DUST_Y + 1, ROW_Z, redstone_torch::set_standing_lit(true));
+    column.set_block_id(ATTACH_X - 1, DUST_Y + 1, ROW_Z, redstone_wire::set_power(15));
+    column.set_block_id(ATTACH_X, DUST_Y + 1, ROW_Z, redstone_wire::set_power(14));
 
     // Premise check: with this rig the torch must actually see a signal,
     // otherwise the rest of the test is vacuous (the earlier oracle rigs
@@ -351,7 +365,7 @@ fn a_torch_inversion_is_scheduled_at_exactly_two_ticks_not_applied_immediately()
         redstone_torch::has_neighbor_signal(
             &lookup,
             lodestone_model::BlockPos::new(TORCH_X, DUST_Y, ROW_Z),
-            &torch_state,
+            torch_state,
         )
     };
     assert!(
@@ -373,9 +387,9 @@ fn a_torch_inversion_is_scheduled_at_exactly_two_ticks_not_applied_immediately()
     );
 
     // Half one: the torch must NOT have flipped yet.
-    let after = column.block_state(TORCH_X, DUST_Y, ROW_Z).to_string();
+    let after = column.block_state_id(TORCH_X, DUST_Y, ROW_Z);
     assert!(
-        redstone::torch_lit(&after),
+        redstone::torch_lit(after),
         "the torch at (x={TORCH_X}, y={DUST_Y}, z={ROW_Z}) was extinguished synchronously \
          ({after:?}); the live server left it lit until the server ticked"
     );
@@ -412,13 +426,13 @@ fn a_torch_inversion_is_scheduled_at_exactly_two_ticks_not_applied_immediately()
         redstone_torch::has_neighbor_signal(
             &lookup,
             lodestone_model::BlockPos::new(TORCH_X, DUST_Y, ROW_Z),
-            &after,
+            after,
         )
     };
-    let flipped = redstone_torch::run_scheduled_tick(&after, has_signal_now);
+    let flipped = redstone_torch::run_scheduled_tick(after, has_signal_now);
     let flipped = flipped.expect("the scheduled tick must produce a state change");
     assert!(
-        !redstone::torch_lit(&flipped),
+        !redstone::torch_lit(flipped),
         "when its scheduled tick ran the torch produced {flipped:?}, which is still lit"
     );
 }
@@ -479,15 +493,15 @@ fn the_second_layer_fan_out_reaches_a_side_torch_and_inverts_it() {
 
     let mut column = column_with_floor();
     // Source torch on its own support, feeding a dust run along y = DUST_Y+1.
-    column.set_block(SOURCE_X, DUST_Y, ROW_Z, "minecraft:stone");
-    column.set_block(SOURCE_X, DUST_Y + 1, ROW_Z, &redstone_torch::set_standing_lit(true));
+    column.set_block_id(SOURCE_X, DUST_Y, ROW_Z, Block::Stone.default_state());
+    column.set_block_id(SOURCE_X, DUST_Y + 1, ROW_Z, redstone_torch::set_standing_lit(true));
     for x in (SOURCE_X + 1)..=ATTACH_X {
-        column.set_block(x, DUST_Y + 1, ROW_Z, &redstone_wire::set_power(0));
+        column.set_block_id(x, DUST_Y + 1, ROW_Z, redstone_wire::set_power(0));
     }
     // The inverter itself: stone with dust on top and a wall torch on its side.
-    column.set_block(ATTACH_X, DUST_Y, ROW_Z, "minecraft:stone");
+    column.set_block_id(ATTACH_X, DUST_Y, ROW_Z, Block::Stone.default_state());
     let torch_state = redstone_torch::set_wall_lit(crate::neighbor_update::Direction::East, true);
-    column.set_block(TORCH_X, DUST_Y, ROW_Z, &torch_state);
+    column.set_block_id(TORCH_X, DUST_Y, ROW_Z, torch_state);
 
     // Drive it exactly as production does after a torch flip.
     let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
@@ -505,7 +519,7 @@ fn the_second_layer_fan_out_reaches_a_side_torch_and_inverts_it() {
     // Premise, checked AFTER propagation rather than before: the dust really
     // did power the attachment block, so a torch that is not scheduled would
     // be a fan-out failure and not a dead rig.
-    let dust_on_attach = redstone::wire_power(column.block_state(ATTACH_X, DUST_Y + 1, ROW_Z));
+    let dust_on_attach = redstone::wire_power(column.block_state_id(ATTACH_X, DUST_Y + 1, ROW_Z));
     assert!(
         dust_on_attach > 0,
         "PREMISE FAILED: the dust on top of the attachment block at \
@@ -539,19 +553,19 @@ fn the_second_layer_fan_out_reaches_a_side_torch_and_inverts_it() {
 
     // And the flip itself must put it out -- the live reading was
     // `source present, settled: torch lit = FALSE`.
-    let state = column.block_state(TORCH_X, DUST_Y, ROW_Z).to_string();
+    let state = column.block_state_id(TORCH_X, DUST_Y, ROW_Z);
     let has_signal_now = {
         let lookup = redstone::make_lookup(&column, 0, 0);
         redstone_torch::has_neighbor_signal(
             &lookup,
             lodestone_model::BlockPos::new(TORCH_X, DUST_Y, ROW_Z),
-            &state,
+            state,
         )
     };
-    let flipped = redstone_torch::run_scheduled_tick(&state, has_signal_now)
+    let flipped = redstone_torch::run_scheduled_tick(state, has_signal_now)
         .expect("the scheduled tick must produce a state change");
     assert!(
-        !redstone::torch_lit(&flipped),
+        !redstone::torch_lit(flipped),
         "when its scheduled tick ran the side torch produced {flipped:?}, which is still lit; the \
          live 26.2 server measured lit=false with the source present"
     );
@@ -570,17 +584,17 @@ fn the_side_torch_is_left_alone_when_the_source_is_unlit() {
     const CURRENT_TICK: u64 = 100;
 
     let mut column = column_with_floor();
-    column.set_block(SOURCE_X, DUST_Y, ROW_Z, "minecraft:stone");
-    column.set_block(SOURCE_X, DUST_Y + 1, ROW_Z, &redstone_torch::set_standing_lit(false));
+    column.set_block_id(SOURCE_X, DUST_Y, ROW_Z, Block::Stone.default_state());
+    column.set_block_id(SOURCE_X, DUST_Y + 1, ROW_Z, redstone_torch::set_standing_lit(false));
     for x in (SOURCE_X + 1)..=ATTACH_X {
-        column.set_block(x, DUST_Y + 1, ROW_Z, &redstone_wire::set_power(0));
+        column.set_block_id(x, DUST_Y + 1, ROW_Z, redstone_wire::set_power(0));
     }
-    column.set_block(ATTACH_X, DUST_Y, ROW_Z, "minecraft:stone");
-    column.set_block(
+    column.set_block_id(ATTACH_X, DUST_Y, ROW_Z, Block::Stone.default_state());
+    column.set_block_id(
         TORCH_X,
         DUST_Y,
         ROW_Z,
-        &redstone_torch::set_wall_lit(crate::neighbor_update::Direction::East, true),
+        redstone_torch::set_wall_lit(crate::neighbor_update::Direction::East, true),
     );
 
     let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
@@ -603,7 +617,7 @@ fn the_side_torch_is_left_alone_when_the_source_is_unlit() {
         due.iter().map(|t| (t.pos, &t.kind, t.trigger_tick)).collect::<Vec<_>>()
     );
     assert!(
-        redstone::torch_lit(column.block_state(TORCH_X, DUST_Y, ROW_Z)),
+        redstone::torch_lit(column.block_state_id(TORCH_X, DUST_Y, ROW_Z)),
         "the side torch changed state with no source present"
     );
 }
@@ -629,10 +643,10 @@ fn the_side_torch_is_left_alone_when_the_source_is_unlit() {
 /// `z = ROW_Z` — `lay_torch_and_dust`'s source-agnostic twin, so the input
 /// families are measured on byte-identical geometry rather than on a rig written
 /// to suit them.
-fn lay_source_and_dust(column: &mut ChunkColumn, source: &str) {
-    column.set_block(0, DUST_Y, ROW_Z, source);
+fn lay_source_and_dust(column: &mut ChunkColumn, source: StateId) {
+    column.set_block_id(0, DUST_Y, ROW_Z, source);
     for x in 1..16 {
-        column.set_block(x, DUST_Y, ROW_Z, &redstone_wire::set_power(0));
+        column.set_block_id(x, DUST_Y, ROW_Z, redstone_wire::set_power(0));
     }
 }
 
@@ -643,7 +657,7 @@ fn lay_source_and_dust(column: &mut ChunkColumn, source: &str) {
 /// loop would name the first bad coordinate and leave the other fourteen as
 /// arguments, so a neuter would demonstrate one square rather than the shape of
 /// the whole run.
-fn assert_source_reproduces_the_oracle_profile(source: &str) {
+fn assert_source_reproduces_the_oracle_profile(source: StateId) {
     let mut column = column_with_floor();
     lay_source_and_dust(&mut column, source);
 
@@ -690,7 +704,7 @@ fn assert_source_reproduces_the_oracle_profile(source: &str) {
 /// strength and from zero at fourteen of them.
 #[test]
 fn a_lever_drives_the_dust_run_exactly_as_the_live_server_does() {
-    assert_source_reproduces_the_oracle_profile("minecraft:lever[face=floor,facing=north,powered=true]");
+    assert_source_reproduces_the_oracle_profile(state_id!(Lever, Face = Floor, Facing = North, Powered = True));
 }
 
 /// **The control, and it is the arm that used to fail.** The identical rig with
@@ -702,7 +716,7 @@ fn a_lever_drives_the_dust_run_exactly_as_the_live_server_does() {
 #[test]
 fn an_unpowered_lever_propagates_nothing() {
     let mut column = column_with_floor();
-    lay_source_and_dust(&mut column, "minecraft:lever[face=floor,facing=north,powered=false]");
+    lay_source_and_dust(&mut column, state_id!(Lever, Face = Floor, Facing = North, Powered = False));
 
     let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
     let _ = propagate_and_react(&mut column, 0, 0, 0, DUST_Y, ROW_Z, &mut block_ticks, 0);
@@ -727,15 +741,13 @@ fn an_unpowered_lever_propagates_nothing() {
 /// the time.
 #[test]
 fn a_pressed_button_drives_the_dust_run_exactly_as_the_live_server_does() {
-    assert_source_reproduces_the_oracle_profile(
-        "minecraft:stone_button[face=floor,facing=north,powered=true]",
-    );
+    assert_source_reproduces_the_oracle_profile(state_id!(StoneButton, Face = Floor, Facing = North, Powered = True));
 }
 
 /// A pressed pressure plate drives the same run.
 #[test]
 fn a_pressed_pressure_plate_drives_the_dust_run_exactly_as_the_live_server_does() {
-    assert_source_reproduces_the_oracle_profile("minecraft:stone_pressure_plate[powered=true]");
+    assert_source_reproduces_the_oracle_profile(state_id!(StonePressurePlate, Powered = True));
 }
 
 /// **A `minecraft:redstone_block` drives the same run — and this arm has its own
@@ -748,7 +760,7 @@ fn a_pressed_pressure_plate_drives_the_dust_run_exactly_as_the_live_server_does(
 /// source behaves like another.
 #[test]
 fn a_redstone_block_drives_the_dust_run_exactly_as_the_live_server_does() {
-    assert_source_reproduces_the_oracle_profile("minecraft:redstone_block");
+    assert_source_reproduces_the_oracle_profile(Block::RedstoneBlock.default_state());
 }
 
 /// A **weighted** pressure plate at `power=3` drives the run from 3, not from
@@ -763,7 +775,7 @@ fn a_redstone_block_drives_the_dust_run_exactly_as_the_live_server_does() {
 #[test]
 fn a_weighted_pressure_plate_drives_the_run_from_its_own_analog_power() {
     let mut column = column_with_floor();
-    lay_source_and_dust(&mut column, "minecraft:heavy_weighted_pressure_plate[power=3]");
+    lay_source_and_dust(&mut column, state_id!(HeavyWeightedPressurePlate, Power = Value3));
 
     let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
     let _ = propagate_and_react(&mut column, 0, 0, 0, DUST_Y, ROW_Z, &mut block_ticks, 0);

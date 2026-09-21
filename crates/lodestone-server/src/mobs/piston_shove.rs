@@ -269,43 +269,25 @@ mod tests {
         assert_eq!(shoved, vec![id], "a mob at the retracting head's own cell must be shoved");
     }
 
-    /// The `moving_piston` collision-shape behavior is exercised for a mob
-    /// rather than a connected player (see this module's own doc for the
-    /// separate player boundary). Driven through the
-    /// real production path an idle mob's floor-finding actually runs:
-    /// `MobSim::tick` → `NavigatingMob::advance`'s no-waypoint branch →
-    /// `ground_below` → `PathWorld::collision_top`
-    /// (`crate::mobs::world::ChunkWorld::collision_top`).
+    /// Pathfinding must treat a moving piston cell as a floor even though its
+    /// registered collision shape is empty.
     #[test]
     fn a_mob_standing_on_a_moving_piston_cell_does_not_fall_through_it() {
-        let moving = crate::piston::moving_piston_state(Direction::East, false);
+        let moving = crate::piston::moving_piston_state_id(Direction::East, false);
 
-        // Control, run and observed rather than assumed: the per-state
-        // collision table this method would otherwise read straight through
-        // really is empty for `moving_piston` — proving the collision-table
-        // premise (see `collision_top`'s own doc for why: the census was
-        // dumped with no block entity present, and vanilla's own
-        // the moving-piston block's collision-shape getter returns an empty shape in
-        // exactly that case).
-        let state_id = lodestone_data::block_states::state_id(&moving).expect("a real 26.2 state");
-        let state = lodestone_data::block_states::StateId::new(state_id).expect("a known state id");
-        let boxes = lodestone_data::collision_shapes::collision_boxes(state);
+        let boxes = lodestone_data::collision_shapes::collision_boxes(moving);
         assert!(
             boxes.is_empty(),
-            "control: moving_piston's own per-state collision table must be empty — \
-             that is the exact gap `collision_top`'s override reads around, boxes={boxes:?}"
+            "control: moving piston registry collision shape must be empty, boxes={boxes:?}"
         );
 
-        // One real block of solid floor, with its centre cell swapped for a
-        // moving_piston — the shape a pushed block's own destination cell
-        // holds for `PISTON_MOVE_DELAY` ticks.
         let mut world = ChunkWorld::new(-64, 384);
         for x in 0..3 {
             for z in 0..3 {
                 world.set_solid(x, -1, z, true);
             }
         }
-        world.set_block(1, -1, 1, &moving);
+        world.set_block_id(1, -1, 1, moving);
 
         let mut sim = MobSim::new(&world);
         let id = spawn(&mut sim, "pig", Vec3::new(1.5, 0.0, 1.5));

@@ -628,6 +628,20 @@ fn int_triple(value: &Nbt) -> Option<[i32; 3]> {
 mod tests {
     use super::*;
     use crate::block_entities::BlockEntityKind;
+    use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey};
+    use lodestone_data::block_states::StateId;
+
+    fn chest_state(facing: BuiltinPropertyValue) -> StateId {
+        let properties = Properties::empty()
+            .with_builtin(PropertyKey::Facing, facing)
+            .expect("chest accepts horizontal facing")
+            .with_builtin(PropertyKey::Type, BuiltinPropertyValue::Single)
+            .expect("chest accepts single type")
+            .with_builtin(PropertyKey::Waterlogged, BuiltinPropertyValue::False)
+            .expect("chest accepts waterlogged state");
+        Properties::state_for_block(Block::Chest, &properties)
+            .expect("typed chest properties identify a generated state")
+    }
 
     /// The markers really are in vanilla's own shipwreck template, with the
     /// three metadata strings `ShipwreckPieces.MARKERS_TO_LOOT` keys on.
@@ -1043,10 +1057,9 @@ mod tests {
                         continue;
                     }
                     chests += 1;
-                    assert!(
-                        source
-                            .block_state(pos.x, pos.y, pos.z)
-                            .starts_with("minecraft:chest["),
+                    assert_eq!(
+                        source.block_state_id(pos.x, pos.y, pos.z).block(),
+                        Block::Chest,
                         "loot was attached to {pos:?}, which is not a chest block"
                     );
                     assert!(
@@ -1091,7 +1104,7 @@ mod tests {
 
         let source = crate::nether_chunk_source(42);
         let column = source.column(-2, 0);
-        assert_eq!(column.block_state(7, 77, 11), "minecraft:spawner");
+        assert_eq!(column.block_state_id(7, 77, 11).block(), Block::Spawner);
         let (pos, entity) = column
             .block_entities()
             .iter()
@@ -1125,7 +1138,7 @@ mod tests {
         // The final receiving block is deliberately different from the stale
         // eager-piece coordinate below. The sidecar must follow this emitted
         // block for every orientation, not the piece's parallel replay.
-        column.set_block(12, 8, 14, "minecraft:spawner");
+        column.set_block_id(12, 8, 14, Block::Spawner.default_state());
         let start = StructureStart {
             structure: "minecraft:mineshaft".to_owned(),
             chunk_x: 0,
@@ -1148,7 +1161,7 @@ mod tests {
                 extra_placements: Vec::new(),
                 blocks: Some(std::sync::Arc::new(vec![CodedBlock {
                     pos: [13, position.y, position.z],
-                    state: "minecraft:spawner".to_owned(),
+                    state: Block::Spawner.default_state(),
                 }])),
                 loot: Vec::new(),
                 beard: None,
@@ -1234,7 +1247,7 @@ mod tests {
             extra_placements: Vec::new(),
             blocks: Some(std::sync::Arc::new(vec![CodedBlock {
                 pos: [position.x, position.y, position.z],
-                state: "minecraft:spawner".to_owned(),
+                state: Block::Spawner.default_state(),
             }])),
             loot: Vec::new(),
             beard: None,
@@ -1251,14 +1264,14 @@ mod tests {
 
         let source = crate::nether_chunk_source(42);
         let expected = [
-            (BlockPos::new(-35, 53, 68), "minecraft:chest[facing=south,type=single,waterlogged=false]"),
-            (BlockPos::new(-37, 61, 78), "minecraft:chest[facing=south,type=single,waterlogged=false]"),
-            (BlockPos::new(-20, 53, 65), "minecraft:chest[facing=south,type=single,waterlogged=false]"),
-            (BlockPos::new(-6, 61, 95), "minecraft:chest[facing=west,type=single,waterlogged=false]"),
+            (BlockPos::new(-35, 53, 68), chest_state(BuiltinPropertyValue::South)),
+            (BlockPos::new(-37, 61, 78), chest_state(BuiltinPropertyValue::South)),
+            (BlockPos::new(-20, 53, 65), chest_state(BuiltinPropertyValue::South)),
+            (BlockPos::new(-6, 61, 95), chest_state(BuiltinPropertyValue::West)),
         ];
         for (pos, expected_state) in expected {
             let column = source.column(pos.x.div_euclid(16), pos.z.div_euclid(16));
-            let state = column.block_state(pos.x.rem_euclid(16), pos.y, pos.z.rem_euclid(16));
+            let state = column.block_state_id(pos.x.rem_euclid(16), pos.y, pos.z.rem_euclid(16));
             assert_eq!(state, expected_state, "placement wrote the wrong external state at {pos:?}");
             let entity = column
                 .block_entities()

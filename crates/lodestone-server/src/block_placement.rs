@@ -1017,19 +1017,22 @@ mod tests {
         }
     }
 
-    fn air(_: BlockPos) -> WorldState {
-        WorldState::from("minecraft:air")
+    fn state(text: &str) -> StateId {
+        StateId::from_state_str(text).expect("placement fixture state must be canonical")
     }
 
-    fn state_of(block: &str, face: BlockFace, cursor_y: f32, yaw: f32) -> String {
+    fn air_state() -> StateId {
+        lodestone_data::block_states::air_state()
+    }
+
+    fn air(_: BlockPos) -> WorldState {
+        air_state()
+    }
+
+    fn state_of(block: &str, face: BlockFace, cursor_y: f32, yaw: f32) -> StateId {
         placement(block, &ctx(face, cursor_y, yaw), air)
             .unwrap_or_else(|| panic!("no convention for {block}"))
             .state
-            .canonical_state()
-    }
-
-    fn text(state: StateId) -> String {
-        state.canonical_state()
     }
 
     /// The three conventions that differ from each other, at one yaw: looking
@@ -1039,19 +1042,19 @@ mod tests {
     fn the_three_horizontal_conventions_disagree_as_the_jar_does() {
         assert_eq!(
             state_of("minecraft:oak_stairs", BlockFace::Up, 0.0, 180.0),
-            "minecraft:oak_stairs[facing=north,half=bottom,shape=straight]"
+            state("minecraft:oak_stairs[facing=north,half=bottom,shape=straight]")
         );
         assert_eq!(
             state_of("minecraft:chest", BlockFace::Up, 0.0, 180.0),
-            "minecraft:chest[facing=south,type=single]"
+            state("minecraft:chest[facing=south,type=single]")
         );
         assert_eq!(
             state_of("minecraft:furnace", BlockFace::Up, 0.0, 180.0),
-            "minecraft:furnace[facing=south]"
+            state("minecraft:furnace[facing=south]")
         );
         assert_eq!(
             state_of("minecraft:anvil", BlockFace::Up, 0.0, 180.0),
-            "minecraft:anvil[facing=east]"
+            state("minecraft:anvil[facing=east]")
         );
     }
 
@@ -1062,22 +1065,25 @@ mod tests {
     fn the_half_bearing_families_read_the_click() {
         assert_eq!(
             state_of("minecraft:oak_slab", BlockFace::Up, 0.0, 0.0),
-            "minecraft:oak_slab[type=bottom]"
+            state("minecraft:oak_slab[type=bottom]")
         );
         assert_eq!(
             state_of("minecraft:oak_slab", BlockFace::Down, 0.0, 0.0),
-            "minecraft:oak_slab[type=top]"
+            state("minecraft:oak_slab[type=top]")
         );
         assert_eq!(
             state_of("minecraft:oak_slab", BlockFace::North, 0.9, 0.0),
-            "minecraft:oak_slab[type=top]"
+            state("minecraft:oak_slab[type=top]")
         );
         assert_eq!(
             state_of("minecraft:oak_slab", BlockFace::North, 0.1, 0.0),
-            "minecraft:oak_slab[type=bottom]"
+            state("minecraft:oak_slab[type=bottom]")
         );
         assert!(
-            state_of("minecraft:oak_stairs", BlockFace::North, 0.9, 0.0).contains("half=top"),
+            get_str_property(
+                state_of("minecraft:oak_stairs", BlockFace::North, 0.9, 0.0),
+                PropertyKey::Half,
+            ) == Some(BuiltinPropertyValue::Top),
             "a stair clicked high on a side face is an upper stair"
         );
     }
@@ -1085,9 +1091,10 @@ mod tests {
     /// A slab clicked onto a matching half-slab doubles.
     #[test]
     fn a_slab_on_a_slab_doubles() {
-        let existing = |_: BlockPos| WorldState::from("minecraft:oak_slab[type=bottom]");
+        let existing_state = state("minecraft:oak_slab[type=bottom]");
+        let existing = move |_: BlockPos| existing_state;
         let placed = placement("minecraft:oak_slab", &ctx(BlockFace::Up, 0.0, 0.0), existing).unwrap();
-        assert_eq!(text(placed.state), "minecraft:oak_slab[type=double]");
+        assert_eq!(placed.state, state("minecraft:oak_slab[type=double]"));
     }
 
     /// Vertical-`facing` blocks split three ways, and only one of them reads
@@ -1098,23 +1105,23 @@ mod tests {
         let mut down = ctx(BlockFace::Up, 0.0, 0.0);
         down.pitch = Some(90.0);
         assert_eq!(
-            text(placement("minecraft:dispenser", &down, air).unwrap().state),
-            "minecraft:dispenser[facing=up]"
+            placement("minecraft:dispenser", &down, air).unwrap().state,
+            state("minecraft:dispenser[facing=up]")
         );
         // An observer watches where the player looks.
         assert_eq!(
-            text(placement("minecraft:observer", &down, air).unwrap().state),
-            "minecraft:observer[facing=down]"
+            placement("minecraft:observer", &down, air).unwrap().state,
+            state("minecraft:observer[facing=down]")
         );
         // A shulker box takes the clicked face regardless.
         assert_eq!(
-            text(placement("minecraft:shulker_box", &down, air).unwrap().state),
-            "minecraft:shulker_box[facing=up]"
+            placement("minecraft:shulker_box", &down, air).unwrap().state,
+            state("minecraft:shulker_box[facing=up]")
         );
         // A hopper takes the clicked face's opposite, folded onto `down`.
         assert_eq!(
-            text(placement("minecraft:hopper", &down, air).unwrap().state),
-            "minecraft:hopper[facing=down]"
+            placement("minecraft:hopper", &down, air).unwrap().state,
+            state("minecraft:hopper[facing=down]")
         );
     }
 
@@ -1123,23 +1130,23 @@ mod tests {
     fn a_wall_click_redirects_to_the_wall_block() {
         assert_eq!(
             state_of("minecraft:torch", BlockFace::North, 0.5, 0.0),
-            "minecraft:wall_torch[facing=north]"
+            state("minecraft:wall_torch[facing=north]")
         );
         assert_eq!(
             state_of("minecraft:soul_torch", BlockFace::East, 0.5, 0.0),
-            "minecraft:soul_wall_torch[facing=east]"
+            state("minecraft:soul_wall_torch[facing=east]")
         );
         assert_eq!(
             state_of("minecraft:oak_sign", BlockFace::South, 0.5, 0.0),
-            "minecraft:oak_wall_sign[facing=south]"
+            state("minecraft:oak_wall_sign[facing=south]")
         );
         assert_eq!(
             state_of("minecraft:oak_hanging_sign", BlockFace::South, 0.5, 0.0),
-            "minecraft:oak_wall_hanging_sign[facing=south]"
+            state("minecraft:oak_wall_hanging_sign[facing=south]")
         );
         assert_eq!(
             state_of("minecraft:skeleton_skull", BlockFace::West, 0.5, 0.0),
-            "minecraft:skeleton_wall_skull[facing=west]"
+            state("minecraft:skeleton_wall_skull[facing=west]")
         );
         // A floor click keeps the standing block. A torch has no properties at
         // all, so there is nothing to orient and the caller keeps the bare name.
@@ -1148,7 +1155,7 @@ mod tests {
         // and `StandingSignBlock.getStateForPlacement` offsets by 180°.
         assert_eq!(
             state_of("minecraft:oak_sign", BlockFace::Up, 0.0, 0.0),
-            "minecraft:oak_sign[rotation=8]"
+            state("minecraft:oak_sign[rotation=8]")
         );
     }
 
@@ -1156,19 +1163,25 @@ mod tests {
     #[test]
     fn the_two_cell_families_write_their_second_cell() {
         let door = placement("minecraft:oak_door", &ctx(BlockFace::Up, 0.0, 180.0), air).unwrap();
-        assert!(text(door.state).contains("half=lower"), "{}", text(door.state));
+        assert_eq!(
+            get_str_property(door.state, PropertyKey::Half),
+            Some(BuiltinPropertyValue::Lower)
+        );
         assert_eq!(door.extra.len(), 1);
         assert_eq!(door.extra[0].0, BlockPos::new(0, 65, 0));
-        assert!(text(door.extra[0].1).contains("half=upper"), "{}", text(door.extra[0].1));
+        assert_eq!(
+            get_str_property(door.extra[0].1, PropertyKey::Half),
+            Some(BuiltinPropertyValue::Upper)
+        );
 
         // Looking north, the bed's head is the cell to the north.
         let bed = placement("minecraft:red_bed", &ctx(BlockFace::Up, 0.0, 180.0), air).unwrap();
-        assert_eq!(text(bed.state), "minecraft:red_bed[facing=north,part=foot]");
+        assert_eq!(bed.state, state("minecraft:red_bed[facing=north,part=foot]"));
         assert_eq!(
             bed.extra,
             vec![(
                 BlockPos::new(0, 64, -1),
-                StateId::from_state_str("minecraft:red_bed[facing=north,part=head]").unwrap()
+                state("minecraft:red_bed[facing=north,part=head]")
             )]
         );
 
@@ -1179,9 +1192,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(dripleaf.extra.len(), 1);
-        assert!(text(dripleaf.state).contains("half=lower"), "{}", text(dripleaf.state));
-        assert!(text(dripleaf.state).contains("facing=north"), "{}", text(dripleaf.state));
-        assert!(text(dripleaf.extra[0].1).contains("half=upper"), "{}", text(dripleaf.extra[0].1));
+        assert_eq!(
+            get_str_property(dripleaf.state, PropertyKey::Half),
+            Some(BuiltinPropertyValue::Lower)
+        );
+        assert_eq!(
+            get_str_property(dripleaf.state, PropertyKey::Facing),
+            Some(BuiltinPropertyValue::North)
+        );
+        assert_eq!(
+            get_str_property(dripleaf.extra[0].1, PropertyKey::Half),
+            Some(BuiltinPropertyValue::Upper)
+        );
     }
 
     /// A chest placed beside a single chest of the same facing pairs, and the
@@ -1191,18 +1213,20 @@ mod tests {
         // Looking north → facing south. `facing.clockwise()` is west, so a
         // single south-facing chest to the west makes this one the left half.
         let west = BlockPos::new(-1, 64, 0);
+        let neighbour_state = state("minecraft:chest[facing=south,type=single]");
+        let air_state = air_state();
         let neighbour = move |p: BlockPos| {
             if p == west {
-                WorldState::from("minecraft:chest[facing=south,type=single]")
+                neighbour_state
             } else {
-                WorldState::from("minecraft:air")
+                air_state
             }
         };
         let placed = placement("minecraft:chest", &ctx(BlockFace::Up, 0.0, 180.0), neighbour).unwrap();
-        assert_eq!(text(placed.state), "minecraft:chest[facing=south,type=left]");
+        assert_eq!(placed.state, state("minecraft:chest[facing=south,type=left]"));
         assert_eq!(
             placed.extra,
-            vec![(west, StateId::from_state_str("minecraft:chest[facing=south,type=right]").unwrap())]
+            vec![(west, state("minecraft:chest[facing=south,type=right]"))]
         );
     }
 
@@ -1212,17 +1236,19 @@ mod tests {
     #[test]
     fn a_sneak_click_keeps_a_chest_single() {
         let west = BlockPos::new(-1, 64, 0);
+        let neighbour_state = state("minecraft:chest[facing=south,type=single]");
+        let air_state = air_state();
         let neighbour = move |p: BlockPos| {
             if p == west {
-                WorldState::from("minecraft:chest[facing=south,type=single]")
+                neighbour_state
             } else {
-                WorldState::from("minecraft:air")
+                air_state
             }
         };
         let mut sneaking = ctx(BlockFace::Up, 0.0, 180.0);
         sneaking.sneaking = true;
         let placed = placement("minecraft:chest", &sneaking, neighbour).unwrap();
-        assert_eq!(text(placed.state), "minecraft:chest[facing=south,type=single]");
+        assert_eq!(placed.state, state("minecraft:chest[facing=south,type=single]"));
         assert!(placed.extra.is_empty(), "sneak placement must not re-type its neighbour");
     }
 
@@ -1232,11 +1258,13 @@ mod tests {
         // faces east, so the side click selects the compatible left half.
         let target = BlockPos::new(0, 64, 0);
         let candidate = BlockPos::new(0, 64, 1);
+        let candidate_state = state("minecraft:chest[facing=east,type=single]");
+        let air_state = air_state();
         let neighbour = move |p: BlockPos| {
             if p == candidate {
-                WorldState::from("minecraft:chest[facing=east,type=single]")
+                candidate_state
             } else {
-                WorldState::from("minecraft:air")
+                air_state
             }
         };
         let mut sneaking = PlaceContext {
@@ -1248,56 +1276,68 @@ mod tests {
             sneaking: true,
         };
         let placed = placement("minecraft:chest", &sneaking, neighbour).unwrap();
-        assert_eq!(text(placed.state), "minecraft:chest[facing=east,type=left]");
+        assert_eq!(placed.state, state("minecraft:chest[facing=east,type=left]"));
         assert_eq!(placed.extra.len(), 1);
         assert_eq!(placed.extra[0].0, candidate);
-        assert_eq!(text(placed.extra[0].1), "minecraft:chest[facing=east,type=right]");
+        assert_eq!(
+            placed.extra[0].1,
+            state("minecraft:chest[facing=east,type=right]")
+        );
 
         // The ordinary top-face path remains the single-chest control above.
         sneaking.face = BlockFace::Up;
         let ordinary = placement("minecraft:chest", &sneaking, neighbour).unwrap();
-        assert_eq!(text(ordinary.state), "minecraft:chest[facing=south,type=single]");
+        assert_eq!(ordinary.state, state("minecraft:chest[facing=south,type=single]"));
         assert!(ordinary.extra.is_empty());
     }
 
     #[test]
     fn waterlogging_is_derived_per_owned_cell_and_flowing_water_is_rejected() {
         let target = BlockPos::new(0, 64, 0);
+        let source_water = state("minecraft:water[level=0]");
+        let flowing_water = state("minecraft:water[level=1]");
+        let air_state = air_state();
         let mut context = ctx(BlockFace::Up, 0.0, 180.0);
         let wet = placement("minecraft:oak_slab", &context, |pos| {
             if pos == target {
-                WorldState::from("minecraft:water[level=0]")
+                source_water
             } else {
-                WorldState::from("minecraft:air")
+                air_state
             }
         })
         .unwrap();
         let wet = apply_waterlogging(wet, target, |pos| {
             if pos == target {
-                WorldState::from("minecraft:water[level=0]")
+                source_water
             } else {
-                WorldState::from("minecraft:air")
+                air_state
             }
         });
-        assert_eq!(text(wet.state), "minecraft:oak_slab[type=bottom,waterlogged=true]");
+        assert_eq!(
+            wet.state,
+            state("minecraft:oak_slab[type=bottom,waterlogged=true]")
+        );
 
         context.target = BlockPos::new(1, 64, 0);
         let flowing = placement("minecraft:oak_slab", &context, |pos| {
             if pos == context.target {
-                WorldState::from("minecraft:water[level=1]")
+                flowing_water
             } else {
-                WorldState::from("minecraft:air")
+                air_state
             }
         })
         .unwrap();
         let flowing = apply_waterlogging(flowing, context.target, |pos| {
             if pos == context.target {
-                WorldState::from("minecraft:water[level=1]")
+                flowing_water
             } else {
-                WorldState::from("minecraft:air")
+                air_state
             }
         });
-        assert_eq!(text(flowing.state), "minecraft:oak_slab[type=bottom,waterlogged=false]");
+        assert_eq!(
+            flowing.state,
+            state("minecraft:oak_slab[type=bottom,waterlogged=false]")
+        );
 
         let multi = placement(
             "minecraft:small_dripleaf",
@@ -1307,48 +1347,56 @@ mod tests {
         .unwrap();
         let multi = apply_waterlogging(multi, target, |pos| {
             if pos.y == target.y + 1 {
-                WorldState::from("minecraft:water[level=0]")
+                source_water
             } else {
-                WorldState::from("minecraft:air")
+                air_state
             }
         });
-        assert!(text(multi.state).contains("waterlogged=false"));
-        assert!(text(multi.extra[0].1).contains("waterlogged=true"));
+        assert_eq!(
+            get_str_property(multi.state, PropertyKey::Waterlogged),
+            Some(BuiltinPropertyValue::False)
+        );
+        assert_eq!(
+            get_str_property(multi.extra[0].1, PropertyKey::Waterlogged),
+            Some(BuiltinPropertyValue::True)
+        );
     }
 
     #[test]
     fn validation_is_atomic_for_support_and_every_extra_cell() {
         let target = BlockPos::new(0, 64, 0);
         let upper = BlockPos::new(0, 65, 0);
+        let stone = state("minecraft:stone");
+        let air_state = air_state();
         let door = placement("minecraft:oak_door", &ctx(BlockFace::Up, 0.0, 180.0), |pos| {
             if pos == BlockPos::new(0, 63, 0) {
-                WorldState::from("minecraft:stone")
+                stone
             } else {
-                WorldState::from("minecraft:air")
+                air_state
             }
         })
         .unwrap();
         assert!(validate_placement(&door, target, true, |pos| {
             if pos == BlockPos::new(0, 63, 0) {
-                WorldState::from("minecraft:stone")
+                stone
             } else {
-                WorldState::from("minecraft:air")
+                air_state
             }
         }));
         assert!(!validate_placement(&door, target, true, |pos| {
             if pos == upper {
-                WorldState::from("minecraft:stone")
+                stone
             } else if pos == BlockPos::new(0, 63, 0) {
-                WorldState::from("minecraft:stone")
+                stone
             } else {
-                WorldState::from("minecraft:air")
+                air_state
             }
         }));
         assert!(!validate_placement(&door, target, true, |pos| {
             if pos == BlockPos::new(0, 63, 0) {
-                WorldState::from("minecraft:air")
+                air_state
             } else {
-                WorldState::from("minecraft:air")
+                air_state
             }
         }));
     }
@@ -1361,7 +1409,7 @@ mod tests {
         no_angles.pitch = None;
         assert_eq!(
             placement("minecraft:oak_log", &no_angles, air).unwrap().state,
-            "minecraft:oak_log[axis=z]"
+            state("minecraft:oak_log[axis=z]")
         );
     }
 
@@ -1378,28 +1426,36 @@ mod tests {
     /// regardless of what was underneath.
     #[test]
     fn a_note_block_placed_on_gold_reads_bell() {
+        let gold = state("minecraft:gold_block");
+        let air_state = air_state();
         let below_gold = |pos: BlockPos| {
             if pos.y == 63 {
-                WorldState::from("minecraft:gold_block")
+                gold
             } else {
-                WorldState::from("minecraft:air")
+                air_state
             }
         };
         let placed = placement("minecraft:note_block", &ctx(BlockFace::Up, 0.0, 0.0), below_gold).unwrap();
-        assert_eq!(text(placed.state), "minecraft:note_block[instrument=bell]");
+        assert_eq!(
+            placed.state,
+            state("minecraft:note_block[instrument=bell]")
+        );
     }
 
     /// A mob head already sitting on top wins over the block underneath —
     /// `setInstrument`'s `above.worksAboveNoteBlock()` check runs first.
     #[test]
     fn a_note_block_placed_under_a_skull_reads_the_skull_not_the_floor() {
+        let skull = state("minecraft:skeleton_skull");
+        let gold = state("minecraft:gold_block");
+        let air_state = air_state();
         let skull_above_gold = |pos: BlockPos| {
             if pos.y == 65 {
-                WorldState::from("minecraft:skeleton_skull")
+                skull
             } else if pos.y == 63 {
-                WorldState::from("minecraft:gold_block")
+                gold
             } else {
-                WorldState::from("minecraft:air")
+                air_state
             }
         };
         let placed = placement(
@@ -1408,7 +1464,10 @@ mod tests {
             skull_above_gold,
         )
         .unwrap();
-        assert_eq!(text(placed.state), "minecraft:note_block[instrument=skeleton]");
+        assert_eq!(
+            placed.state,
+            state("minecraft:note_block[instrument=skeleton]")
+        );
     }
 
     /// Every state this module can emit must resolve to a real state id — the
@@ -1456,7 +1515,7 @@ mod tests {
                         continue;
                     };
                     for state in std::iter::once(&placed.state).chain(placed.extra.iter().map(|(_, s)| s)) {
-                        assert_state_exists(**state);
+                        assert_state_exists(*state);
                     }
                 }
             }

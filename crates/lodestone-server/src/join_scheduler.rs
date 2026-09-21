@@ -2174,11 +2174,11 @@ mod tests {
                 for &(cx, cz) in coords {
                     cx.hash(&mut digest);
                     cz.hash(&mut digest);
-                let state = if (cx as i64 * 31 + cz as i64 * 17) & 1 == 0 {
-                    Block::Stone.default_state()
-                } else {
-                    Block::Dirt.default_state()
-                };
+                    let state = if (cx as i64 * 31 + cz as i64 * 17) & 1 == 0 {
+                        Block::Stone.default_state()
+                    } else {
+                        Block::Dirt.default_state()
+                    };
                     state.hash(&mut digest);
                 }
                 digest.finish()
@@ -2190,13 +2190,13 @@ mod tests {
                 let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
                 self.max_active.fetch_max(active, Ordering::SeqCst);
                 std::thread::sleep(Duration::from_millis(2));
-                    let state = if (cx as i64 * 31 + cz as i64 * 17) & 1 == 0 {
-                        Block::Stone.default_state()
-                    } else {
-                        Block::Dirt.default_state()
-                    };
+                let state = if (cx as i64 * 31 + cz as i64 * 17) & 1 == 0 {
+                    Block::Stone.default_state()
+                } else {
+                    Block::Dirt.default_state()
+                };
                 let mut column = ChunkColumn::new(0, 16);
-                column.set_block(0, 0, 0, state);
+                column.set_block_id(0, 0, 0, state);
                 self.active.fetch_sub(1, Ordering::SeqCst);
                 column
             }

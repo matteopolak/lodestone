@@ -4644,7 +4644,7 @@ mod tests {
             "a subscriber's fluid tick must reach only the explicit fluid lane"
         );
 
-        conn.publish(1, 2, 3, "minecraft:stone".to_owned());
+        conn.publish(1, 2, 3, lodestone_data::block::Block::Stone.default_state());
         assert!(
             hub.drain_all().is_empty(),
             "the outbound queues must stay separate, or one LAN player's drain-all starves the rest"
@@ -6025,11 +6025,8 @@ mod tests {
     struct OverlayWorld(Arc<Mutex<std::collections::HashMap<(i32, i32, i32), StateId>>>);
 
     impl OverlayWorld {
-        fn with(cells: &[((i32, i32, i32), &str)]) -> Arc<Self> {
-            let map = cells
-                .iter()
-                .map(|&(pos, state)| (pos, StateId::from_state_str(state).unwrap()))
-                .collect();
+        fn with(cells: &[((i32, i32, i32), StateId)]) -> Arc<Self> {
+            let map = cells.iter().copied().collect();
             Arc::new(Self(Arc::new(Mutex::new(map))))
         }
 
@@ -6086,14 +6083,9 @@ mod tests {
     }
 
     impl ResidentGateWorld {
-        fn with(cells: &[((i32, i32, i32), &str)]) -> Arc<Self> {
+        fn with(cells: &[((i32, i32, i32), StateId)]) -> Arc<Self> {
             Arc::new(Self {
-                cells: Arc::new(Mutex::new(
-                    cells
-                        .iter()
-                        .map(|&(pos, state)| (pos, StateId::from_state_str(state).unwrap()))
-                        .collect(),
-                )),
+                cells: Arc::new(Mutex::new(cells.iter().copied().collect())),
                 resident: AtomicBool::new(false),
                 cold_column_calls: AtomicUsize::new(0),
             })
@@ -6164,7 +6156,11 @@ mod tests {
     async fn a_cold_due_tick_is_not_generated_and_runs_after_residency() {
         let pos = (3, 5, 3);
         let world = ResidentGateWorld::with(&[
-            (pos, "minecraft:fire[age=0]"),
+            (
+                pos,
+                StateId::from_state_str("minecraft:fire[age=0]")
+                    .expect("fixture fire state"),
+            ),
             ((pos.0, pos.1 - 1, pos.2), StateId::AIR),
         ]);
         let scheduled = crate::region_source::ScheduledTickHandle::default();
@@ -6230,12 +6226,16 @@ mod tests {
     /// Runs the loop for a handful of ticks with one `TICK_FIRE` already due at
     /// `pos`, and reports `(the cell afterwards, everything published)`.
     async fn fire_tick_once(
-        below: &str,
+        below: StateId,
         pos: (i32, i32, i32),
     ) -> (StateId, Vec<(i32, i32, i32, StateId)>) {
         let (x, y, z) = pos;
         let world = OverlayWorld::with(&[
-            ((x, y, z), "minecraft:fire[age=0]"),
+            (
+                (x, y, z),
+                StateId::from_state_str("minecraft:fire[age=0]")
+                    .expect("fixture fire state"),
+            ),
             ((x, y - 1, z), below),
         ]);
         let scheduled = crate::region_source::ScheduledTickHandle::default();
@@ -6277,7 +6277,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn the_loop_runs_a_due_fire_tick_and_publishes_the_change() {
         let pos = (3, 5, 3);
-        let (cell, published) = fire_tick_once("minecraft:air", pos).await;
+        let (cell, published) = fire_tick_once(StateId::AIR, pos).await;
         assert_eq!(
             cell, StateId::AIR,
             "an unsupported fire fails canSurvive and must be removed; if the cell still \
@@ -6301,7 +6301,11 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_supported_fire_survives_its_tick() {
         let pos = (3, 5, 3);
-        let (cell, _) = fire_tick_once("minecraft:netherrack", pos).await;
+        let (cell, _) = fire_tick_once(
+            lodestone_data::block::Block::Netherrack.default_state(),
+            pos,
+        )
+        .await;
         assert!(
             cell.block() == lodestone_data::block::Block::Fire,
             "fire over netherrack passes canSurvive and must persist, got {cell:?} — if this \
@@ -6325,23 +6329,20 @@ mod tests {
 
     /// A `ChunkSource` whose `column()` **reflects its own edits** — unlike
     /// [`OverlayWorld`] above, whose `column()` is hardcoded blank air
-    /// because fire's own arm reads through `world.block_state(...)`
+    /// because fire's own arm reads through `world.block_state_id(...)`
     /// directly and never through the returned column at all. The dispenser
-    /// arm reads its block state via `column.block_state(...)`, exactly
+    /// arm reads its block state via `column.block_state_id(...)`, exactly
     /// like every other arm in the big `for due in
     /// block_ticks.drain_due(...)` loop (torch/repeater/comparator/
     /// tripwire/gravity), so a double for it has to answer through that
     /// path too, or `is_dispenser_family` sees blank air and the arm is a
     /// silent no-op — which is exactly the failure mode this struct exists
     /// to avoid reproducing inside the test itself.
-    struct ColumnBackedWorld(Arc<Mutex<std::collections::HashMap<(i32, i32, i32), String>>>);
+    struct ColumnBackedWorld(Arc<Mutex<std::collections::HashMap<(i32, i32, i32), StateId>>>);
 
     impl ColumnBackedWorld {
-        fn with(cells: &[((i32, i32, i32), &str)]) -> Arc<Self> {
-            let map = cells
-                .iter()
-                .map(|&(pos, state)| (pos, state.to_owned()))
-                .collect();
+        fn with(cells: &[((i32, i32, i32), StateId)]) -> Arc<Self> {
+            let map = cells.iter().copied().collect();
             Arc::new(Self(Arc::new(Mutex::new(map))))
         }
     }
@@ -6349,32 +6350,32 @@ mod tests {
     impl ChunkSource for ColumnBackedWorld {
         fn column(&self, cx: i32, cz: i32) -> crate::chunk::ChunkColumn {
             let mut column = crate::chunk::ChunkColumn::new(0, 16);
-            for (&(x, y, z), state) in self.0.lock().expect("column-backed world lock poisoned").iter() {
+            for (&(x, y, z), &state) in self.0.lock().expect("column-backed world lock poisoned").iter() {
                 if x.div_euclid(16) == cx && z.div_euclid(16) == cz {
-                    column.set_block(x.rem_euclid(16), y, z.rem_euclid(16), state);
+                    column.set_block_id(x.rem_euclid(16), y, z.rem_euclid(16), state);
                 }
             }
             column
         }
 
-        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
             self.0
                 .lock()
                 .expect("column-backed world lock poisoned")
                 .get(&(x, y, z))
-                .cloned()
-                .unwrap_or_else(|| crate::chunk::AIR.to_owned())
+                .copied()
+                .unwrap_or(StateId::AIR)
         }
 
         fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
             crate::chunk::DEFAULT_BIOME.to_string()
         }
 
-        fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+        fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
             self.0
                 .lock()
                 .expect("column-backed world lock poisoned")
-                .insert((x, y, z), name.to_owned());
+                .insert((x, y, z), state);
         }
     }
 
@@ -6387,7 +6388,11 @@ mod tests {
     async fn the_loop_drains_a_dispenser_fire_and_the_item_lands_off_the_east_face() {
         let pos = (11, 6, 9);
         let (px, py, pz) = pos;
-        let world = ColumnBackedWorld::with(&[(pos, "minecraft:dispenser[facing=east,triggered=true]")]);
+        let world = ColumnBackedWorld::with(&[(
+            pos,
+            StateId::from_state_str("minecraft:dispenser[facing=east,triggered=true]")
+                .expect("fixture dispenser state"),
+        )]);
         let scheduled = crate::region_source::ScheduledTickHandle::default();
         scheduled.with(|queues| {
             queues.block.schedule(pos, ScheduledTickKind::DispenserFire, 1, TickPriority::Normal);
@@ -6519,7 +6524,11 @@ mod tests {
     async fn the_loop_syncs_a_lit_furnace_to_its_own_block_state() {
         let pos = (11, 6, 9);
         let (px, py, pz) = pos;
-        let world = ColumnBackedWorld::with(&[(pos, "minecraft:furnace[facing=north,lit=false]")]);
+        let world = ColumnBackedWorld::with(&[(
+            pos,
+            StateId::from_state_str("minecraft:furnace[facing=north,lit=false]")
+                .expect("fixture furnace state"),
+        )]);
         let feed = BlockTickFeed::default();
         let (mobs, out, block_entities) = handles();
         block_entities.with(|reg| {
@@ -6581,7 +6590,11 @@ mod tests {
     async fn the_loop_dispenses_an_arrow_as_a_real_projectile() {
         let pos = (11, 6, 9);
         let (px, py, pz) = pos;
-        let world = ColumnBackedWorld::with(&[(pos, "minecraft:dispenser[facing=east,triggered=true]")]);
+        let world = ColumnBackedWorld::with(&[(
+            pos,
+            StateId::from_state_str("minecraft:dispenser[facing=east,triggered=true]")
+                .expect("fixture dispenser state"),
+        )]);
         let scheduled = crate::region_source::ScheduledTickHandle::default();
         scheduled.with(|queues| {
             queues.block.schedule(pos, ScheduledTickKind::DispenserFire, 1, TickPriority::Normal);
@@ -6688,8 +6701,12 @@ mod tests {
         let (px, py, pz) = pos;
         let target = (px + 1, py, pz); // east, one cell ahead.
         let world = ColumnBackedWorld::with(&[
-            (pos, "minecraft:dispenser[facing=east,triggered=true]"),
-            (target, "minecraft:air"),
+            (
+                pos,
+                StateId::from_state_str("minecraft:dispenser[facing=east,triggered=true]")
+                    .expect("fixture dispenser state"),
+            ),
+            (target, StateId::AIR),
         ]);
         let scheduled = crate::region_source::ScheduledTickHandle::default();
         scheduled.with(|queues| {
@@ -6767,8 +6784,16 @@ mod tests {
         let (px, py, pz) = pos;
         let target = (px + 1, py, pz);
         let world = ColumnBackedWorld::with(&[
-            (pos, "minecraft:dispenser[facing=east,triggered=true]"),
-            (target, "minecraft:water[level=0]"),
+            (
+                pos,
+                StateId::from_state_str("minecraft:dispenser[facing=east,triggered=true]")
+                    .expect("fixture dispenser state"),
+            ),
+            (
+                target,
+                StateId::from_state_str("minecraft:water[level=0]")
+                    .expect("fixture water source state"),
+            ),
         ]);
         let scheduled = crate::region_source::ScheduledTickHandle::default();
         scheduled.with(|queues| {
@@ -6847,8 +6872,10 @@ mod tests {
         });
 
         let world: Arc<EmptyWorld> = Arc::new(EmptyWorld);
-        let from = "minecraft:note_block[instrument=harp,note=0,powered=false]";
-        let to = "minecraft:note_block[instrument=harp,note=0,powered=true]";
+        let from = StateId::from_state_str("minecraft:note_block[instrument=harp,note=0,powered=false]")
+            .expect("fixture note block state");
+        let to = StateId::from_state_str("minecraft:note_block[instrument=harp,note=0,powered=true]")
+            .expect("fixture note block state");
         post_note_block_vibration(&world, &mobs, (0, 0, 0), from, to);
 
         mobs.with(MobSim::tick);
@@ -6878,8 +6905,10 @@ mod tests {
         });
 
         let world: Arc<EmptyWorld> = Arc::new(EmptyWorld);
-        let from = "minecraft:note_block[instrument=harp,note=0,powered=true]";
-        let to = "minecraft:note_block[instrument=harp,note=0,powered=false]";
+        let from = StateId::from_state_str("minecraft:note_block[instrument=harp,note=0,powered=true]")
+            .expect("fixture note block state");
+        let to = StateId::from_state_str("minecraft:note_block[instrument=harp,note=0,powered=false]")
+            .expect("fixture note block state");
         post_note_block_vibration(&world, &mobs, (0, 0, 0), from, to);
 
         mobs.with(MobSim::tick);
@@ -6901,13 +6930,19 @@ mod tests {
     #[test]
     fn a_real_piston_extension_shoves_a_mob_standing_in_its_path() {
         let mut column = crate::chunk::ChunkColumn::new(0, 16);
-        // `piston[facing=south,extended=false]` at (4, 1, 8), a pushable
+        // A south-facing unextended piston at (4, 1, 8), a pushable
         // dirt block one cell south (the push direction), and an unlit
         // torch two cells west of the piston — the same rig shape
         // `redstone_piston_order_oracle_gate.rs`'s own `piston_rig` uses.
-        column.set_block(4, 1, 8, "minecraft:piston[facing=south,extended=false]");
-        column.set_block(4, 1, 9, "minecraft:dirt");
-        column.set_block(3, 1, 8, &crate::redstone_torch::set_standing_lit(false));
+        column.set_block_id(
+            4,
+            1,
+            8,
+            StateId::from_state_str("minecraft:piston[facing=south,extended=false]")
+                .expect("fixture piston state"),
+        );
+        column.set_block_id(4, 1, 9, lodestone_data::block::Block::Dirt.default_state());
+        column.set_block_id(3, 1, 8, crate::redstone_torch::set_standing_lit(false));
 
         let mobs = MobHandle::new(ChunkWorld::new(-64, 384));
         // Standing exactly where the pushed dirt is about to land — the
@@ -6922,7 +6957,7 @@ mod tests {
         let before = mobs.with(|sim| sim.get(pig_id).expect("alive").position());
 
         let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
-        column.set_block(3, 1, 8, &crate::redstone_torch::set_standing_lit(true));
+        column.set_block_id(3, 1, 8, crate::redstone_torch::set_standing_lit(true));
         let events = crate::random_tick::propagate_and_react(
             &mut column,
             0,
@@ -6939,7 +6974,7 @@ mod tests {
         // would pass vacuously (nothing to shove from).
         assert!(
             events.iter().any(|e| {
-                e.pos == (4, 1, 10) && crate::piston::is_moving_piston(&e.to)
+                e.pos == (4, 1, 10) && crate::piston::is_moving_piston_id(e.to)
             }),
             "PREMISE FAILED: extending must write a moving_piston at the pushed dirt's own \
              destination (4, 1, 10) -- events: {events:?}"
@@ -6968,13 +7003,19 @@ mod tests {
     #[test]
     fn a_real_piston_extension_publishes_a_player_push_effect_for_its_own_swept_region() {
         let mut column = crate::chunk::ChunkColumn::new(0, 16);
-        column.set_block(4, 1, 8, "minecraft:piston[facing=south,extended=false]");
-        column.set_block(4, 1, 9, "minecraft:dirt");
-        column.set_block(3, 1, 8, &crate::redstone_torch::set_standing_lit(false));
+        column.set_block_id(
+            4,
+            1,
+            8,
+            StateId::from_state_str("minecraft:piston[facing=south,extended=false]")
+                .expect("fixture piston state"),
+        );
+        column.set_block_id(4, 1, 9, lodestone_data::block::Block::Dirt.default_state());
+        column.set_block_id(3, 1, 8, crate::redstone_torch::set_standing_lit(false));
 
         let mobs = MobHandle::new(ChunkWorld::new(-64, 384));
         let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
-        column.set_block(3, 1, 8, &crate::redstone_torch::set_standing_lit(true));
+        column.set_block_id(3, 1, 8, crate::redstone_torch::set_standing_lit(true));
         let events = crate::random_tick::propagate_and_react(
             &mut column,
             0,
@@ -6987,7 +7028,7 @@ mod tests {
         );
         assert!(
             events.iter().any(|e| {
-                e.pos == (4, 1, 10) && crate::piston::is_moving_piston(&e.to)
+                e.pos == (4, 1, 10) && crate::piston::is_moving_piston_id(e.to)
             }),
             "PREMISE FAILED: extending must write a moving_piston at the pushed dirt's own \
              destination (4, 1, 10) -- events: {events:?}"
@@ -7028,9 +7069,15 @@ mod tests {
     #[test]
     fn an_unlit_torch_never_extends_the_piston_and_never_shoves_anyone() {
         let mut column = crate::chunk::ChunkColumn::new(0, 16);
-        column.set_block(4, 1, 8, "minecraft:piston[facing=south,extended=false]");
-        column.set_block(4, 1, 9, "minecraft:dirt");
-        column.set_block(3, 1, 8, &crate::redstone_torch::set_standing_lit(false));
+        column.set_block_id(
+            4,
+            1,
+            8,
+            StateId::from_state_str("minecraft:piston[facing=south,extended=false]")
+                .expect("fixture piston state"),
+        );
+        column.set_block_id(4, 1, 9, lodestone_data::block::Block::Dirt.default_state());
+        column.set_block_id(3, 1, 8, crate::redstone_torch::set_standing_lit(false));
 
         let mobs = MobHandle::new(ChunkWorld::new(-64, 384));
         let pig_id = mobs.with(|sim| {
@@ -7055,7 +7102,7 @@ mod tests {
             40,
         );
         assert!(
-            !events.iter().any(|e| crate::piston::is_moving_piston(&e.to)),
+            !events.iter().any(|e| crate::piston::is_moving_piston_id(e.to)),
             "PREMISE: an already-unlit torch must produce no piston write at all -- events: {events:?}"
         );
 

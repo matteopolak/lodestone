@@ -126,12 +126,11 @@ mod tests {
                 .get(&(x, y, z))
                 .copied()
                 .unwrap_or_else(|| {
-                    lodestone_data::block_states::StateId::from_state_str(if y == 0 {
-                        "minecraft:stone"
+                    if y == 0 {
+                        lodestone_data::block::Block::Stone.default_state()
                     } else {
-                        "minecraft:air"
-                    })
-                    .expect("fixture state is canonical")
+                        lodestone_data::block_states::StateId::AIR
+                    }
                 })
         }
 
@@ -145,10 +144,6 @@ mod tests {
                 .unwrap()
                 .insert((x, y, z), state);
         }
-
-        fn block_state(&self, x: i32, y: i32, z: i32) -> lodestone_data::block_states::StateId {
-            self.block_state_id(x, y, z)
-        }
     }
 
     /// A two-block, single-palette template: a gold block at the origin and
@@ -157,12 +152,10 @@ mod tests {
     /// elsewhere) so this test exercises only the live-placement seam.
     fn two_block_template() -> StructureTemplate {
         use lodestone_worldgen::structure::template::BlockState;
+        use lodestone_data::block::Block;
         StructureTemplate::from_blocks(
             [1, 2, 1],
-            vec![
-                BlockState::of("minecraft:gold_block"),
-                BlockState::of("minecraft:diamond_block"),
-            ],
+            vec![BlockState::of(Block::GoldBlock), BlockState::of(Block::DiamondBlock)],
             vec![([0, 0, 0], 0), ([0, 1, 0], 1)],
         )
     }
@@ -171,8 +164,8 @@ mod tests {
     fn pastes_into_an_already_generated_live_world() {
         let world = FlatStoneWorld::new();
         assert_eq!(
-            world.block_state(5, 1, 5).name(),
-            "minecraft:air",
+            world.block_state_id(5, 1, 5),
+            lodestone_data::block_states::StateId::AIR,
             "control: nothing there yet"
         );
 
@@ -185,13 +178,22 @@ mod tests {
         let written = place_structure_live(&world, &template, origin, &PlaceSettings::default());
 
         assert_eq!(written, 2);
-        assert_eq!(world.block_state(5, 1, 5).name(), "minecraft:gold_block");
-        assert_eq!(world.block_state(5, 2, 5).name(), "minecraft:diamond_block");
+        assert_eq!(
+            world.block_state_id(5, 1, 5),
+            lodestone_data::block::Block::GoldBlock.default_state()
+        );
+        assert_eq!(
+            world.block_state_id(5, 2, 5),
+            lodestone_data::block::Block::DiamondBlock.default_state()
+        );
         // Outside the template's own footprint is untouched.
-        assert_eq!(world.block_state(6, 1, 5).name(), "minecraft:air");
+        assert_eq!(world.block_state_id(6, 1, 5), lodestone_data::block_states::StateId::AIR);
         // And the pre-existing stone floor the template did not cover is
         // still there, proving the whole-bbox writeback did not clobber
         // live blocks it merely read.
-        assert_eq!(world.block_state(5, 0, 5).name(), "minecraft:stone");
+        assert_eq!(
+            world.block_state_id(5, 0, 5),
+            lodestone_data::block::Block::Stone.default_state()
+        );
     }
 }

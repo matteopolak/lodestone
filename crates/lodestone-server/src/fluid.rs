@@ -2553,9 +2553,8 @@ mod tests {
         assert_eq!(index_visits, 0, "uniform air must not expand into cell indices");
     }
 
-    /// The optimized section/palette walk must produce exactly the same
-    /// generated starts as the former per-cell state-string walk, including
-    /// mixed water/lava levels and the waterlogged negative control.
+    /// The section/palette walk must preserve the starts found by a direct
+    /// full-column scan, including waterlogged cells as a negative control.
     #[test]
     fn generated_numeric_scan_preserves_scheduled_starts() {
         let rig = Rig::flat();
@@ -2571,31 +2570,36 @@ mod tests {
         let column = rig.column(0, 0);
 
         let mut expected = Vec::new();
-        column.for_each_block_state(|x, cell_y, z, state| {
-            let Some(fluid) = fluid_state_of(state) else {
-                return;
-            };
-            if !matches!(base_name(state), "minecraft:water" | "minecraft:lava") {
-                return;
+        for cell_y in column.min_y..column.min_y + column.height {
+            for z in 0..16 {
+                for x in 0..16 {
+                    let state = column.block_state_id(x, cell_y, z);
+                    if !matches!(state.block(), Block::Water | Block::Lava) {
+                        continue;
+                    }
+                    let Some(fluid) = fluid_state_of_id(state) else {
+                        continue;
+                    };
+                    if !has_possible_destination(
+                        &rig,
+                        &column,
+                        0,
+                        0,
+                        x,
+                        cell_y,
+                        z,
+                        FluidEnv::OVERWORLD,
+                        fluid.kind,
+                    ) {
+                        continue;
+                    }
+                    let pos = BlockPos::new(x, cell_y, z);
+                    if would_spread(&rig, FluidEnv::OVERWORLD, pos, state, fluid) {
+                        expected.push((pos.x, pos.y, pos.z));
+                    }
+                }
             }
-            if !has_possible_destination(
-                &rig,
-                &column,
-                0,
-                0,
-                x,
-                cell_y,
-                z,
-                FluidEnv::OVERWORLD,
-                fluid.kind,
-            ) {
-                return;
-            }
-            let pos = BlockPos::new(x, cell_y, z);
-            if would_spread(&rig, FluidEnv::OVERWORLD, pos, state, fluid) {
-                expected.push((pos.x, pos.y, pos.z));
-            }
-        });
+        }
 
         let mut queue: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
         schedule_generated_ticks(

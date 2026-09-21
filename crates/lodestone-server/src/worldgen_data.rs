@@ -1501,7 +1501,20 @@ pub fn end_chunk_source(seed: i64) -> crate::chunk::EndChunkSource {
 mod tests {
     use super::*;
     use crate::chunk::{ChunkColumn, ChunkSource};
+    use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey};
+    use lodestone_data::block_states::StateId;
     use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+
+    fn state_id(block: Block, properties: &[(PropertyKey, BuiltinPropertyValue)]) -> StateId {
+        let mut properties_set = Properties::empty();
+        for &(key, value) in properties {
+            properties_set = properties_set
+                .with_builtin(key, value)
+                .expect("fixture properties belong to the block");
+        }
+        Properties::state_for_block(block, &properties_set)
+            .expect("fixture block state exists in the registry")
+    }
 
     fn vegetal_features_for(
         biome: &str,
@@ -1549,10 +1562,9 @@ mod tests {
         let local_z = chest_pos.z.rem_euclid(16);
         assert_eq!(
             column
-                .block_state(local_x, chest_pos.y, local_z)
-                .split('[')
-                .next(),
-            Some("minecraft:chest"),
+                .block_state_id(local_x, chest_pos.y, local_z)
+                .block(),
+            Block::Chest,
             "the externally anchored position must be a dungeon chest"
         );
         let (_, entity) = column
@@ -1611,7 +1623,7 @@ mod tests {
                 ChunkColumn::new(-64, 384)
             }
             fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> lodestone_data::block_states::StateId {
-                lodestone_data::block_states::StateId::air_state()
+            air_state()
             }
             fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
                 "minecraft:plains".to_owned()
@@ -1699,12 +1711,12 @@ mod tests {
             for x in 0..16usize {
                 for z in 0..16usize {
                     for y in 0..64i32 {
-                        let ow = ow_col.block_state(x as i32, y, z as i32);
-                        let en = en_col.block_state(x as i32, y, z as i32);
-                        if ow.starts_with("minecraft:end_stone") {
+                        let ow = ow_col.block_state_id(x as i32, y, z as i32);
+                        let en = en_col.block_state_id(x as i32, y, z as i32);
+                        if ow.block() == Block::EndStone {
                             overworld_end_stone += 1;
                         }
-                        if en.starts_with("minecraft:end_stone") {
+                        if en.block() == Block::EndStone {
                             end_end_stone += 1;
                         }
                         if ow != en {
@@ -1802,12 +1814,14 @@ mod tests {
                 for lx in 0..16usize {
                     for lz in 0..16usize {
                         for y in generator.min_y()..(generator.min_y() + generator.height()) {
-                            let state = column.block_state(lx, y, lz);
-                            if state.starts_with("minecraft:snow[") {
+                            let state = column.block_state_id(lx, y, lz);
+                            if state.block() == Block::Snow {
                                 snow += 1;
-                            } else if state == "minecraft:ice" {
+                            } else if state.block() == Block::Ice {
                                 ice += 1;
-                            } else if state.contains("snowy=true") {
+                            } else if state.block() == Block::GrassBlock
+                                && state.properties().contains(&("snowy", "true"))
+                            {
                                 snowy += 1;
                             }
                         }
@@ -2335,11 +2349,11 @@ mod tests {
             for lx in 0..16 {
                 for y in MIN_Y..=SURFACE_Y {
                     let state = if y == SURFACE_Y {
-                        "minecraft:grass_block"
+                        Block::GrassBlock.default_state()
                     } else {
-                        "minecraft:dirt"
+                        Block::Dirt.default_state()
                     };
-                    grid.seed(lx, y, lz, state.to_owned());
+                    grid.seed_id(lx, y, lz, state);
                 }
             }
         }
@@ -2434,11 +2448,11 @@ mod tests {
             for lx in 0..16 {
                 for y in MIN_Y..=SURFACE_Y {
                     let state = if y == SURFACE_Y {
-                        "minecraft:grass_block"
+                        Block::GrassBlock.default_state()
                     } else {
-                        "minecraft:dirt"
+                        Block::Dirt.default_state()
                     };
-                    grid.seed(lx, y, lz, state.to_owned());
+                    grid.seed_id(lx, y, lz, state);
                 }
             }
         }
@@ -2467,14 +2481,128 @@ mod tests {
     /// [`is_vegetation_state`]'s substring rule, so a newly-implemented placer
     /// shows up as a failure telling you to add its blocks rather than being
     /// silently absorbed.
-    const VEGETATION_SUBSTRINGS: &[&str] = &[
-        "_log", "leaves", "short_grass", "tall_grass", "bush", "flower", "poppy", "dandelion",
-        "mushroom", "sugar_cane", "pumpkin", "azure", "oxeye", "cornflower", "tulip", "daisy",
-        "allium", "sapling", "fern", "leaf_litter", "cactus", "lichen", "wildflowers",
-    ];
+    fn is_vegetation_state(block: Block) -> bool {
+        matches!(
+            block,
+            Block::OakLog
+                | Block::SpruceLog
+                | Block::BirchLog
+                | Block::JungleLog
+                | Block::AcaciaLog
+                | Block::CherryLog
+                | Block::DarkOakLog
+                | Block::PaleOakLog
+                | Block::MangroveLog
+                | Block::StrippedOakLog
+                | Block::StrippedSpruceLog
+                | Block::StrippedBirchLog
+                | Block::StrippedJungleLog
+                | Block::StrippedAcaciaLog
+                | Block::StrippedCherryLog
+                | Block::StrippedDarkOakLog
+                | Block::StrippedPaleOakLog
+                | Block::StrippedMangroveLog
+                | Block::OakLeaves
+                | Block::SpruceLeaves
+                | Block::BirchLeaves
+                | Block::JungleLeaves
+                | Block::AcaciaLeaves
+                | Block::CherryLeaves
+                | Block::DarkOakLeaves
+                | Block::PaleOakLeaves
+                | Block::MangroveLeaves
+                | Block::AzaleaLeaves
+                | Block::FloweringAzaleaLeaves
+                | Block::ShortGrass
+                | Block::TallGrass
+                | Block::DeadBush
+                | Block::Bush
+                | Block::ShortDryGrass
+                | Block::TallDryGrass
+                | Block::Dandelion
+                | Block::Torchflower
+                | Block::Poppy
+                | Block::Allium
+                | Block::AzureBluet
+                | Block::RedTulip
+                | Block::OrangeTulip
+                | Block::WhiteTulip
+                | Block::PinkTulip
+                | Block::OxeyeDaisy
+                | Block::Cornflower
+                | Block::WitherRose
+                | Block::LilyOfTheValley
+                | Block::BrownMushroom
+                | Block::RedMushroom
+                | Block::BrownMushroomBlock
+                | Block::RedMushroomBlock
+                | Block::MushroomStem
+                | Block::SugarCane
+                | Block::CarvedPumpkin
+                | Block::Pumpkin
+                | Block::Melon
+                | Block::OakSapling
+                | Block::SpruceSapling
+                | Block::BirchSapling
+                | Block::JungleSapling
+                | Block::AcaciaSapling
+                | Block::CherrySapling
+                | Block::DarkOakSapling
+                | Block::PaleOakSapling
+                | Block::BambooSapling
+                | Block::Fern
+                | Block::LargeFern
+                | Block::Cactus
+                | Block::CactusFlower
+                | Block::GlowLichen
+                | Block::LeafLitter
+                | Block::Sunflower
+                | Block::Lilac
+                | Block::Peony
+                | Block::RoseBush
+                | Block::CaveVines
+                | Block::ChorusFlower
+                | Block::SweetBerryBush
+                | Block::Vine
+                | Block::NetherWart
+                | Block::WarpedRoots
+                | Block::NetherSprouts
+                | Block::WeepingVines
+                | Block::TwistingVines
+                | Block::CrimsonRoots
+                | Block::FloweringAzalea
+                | Block::PinkPetals
+                | Block::Wildflowers
+                | Block::BigDripleaf
+                | Block::SmallDripleaf
+                | Block::HangingRoots
+                | Block::PitcherPlant
+                | Block::FireflyBush
+        )
+    }
 
-    fn is_vegetation_state(base: &str) -> bool {
-        VEGETATION_SUBSTRINGS.iter().any(|s| base.contains(s))
+    fn is_log(block: Block) -> bool {
+        matches!(
+            block,
+            Block::OakLog
+                | Block::SpruceLog
+                | Block::BirchLog
+                | Block::JungleLog
+                | Block::AcaciaLog
+                | Block::CherryLog
+                | Block::DarkOakLog
+                | Block::PaleOakLog
+                | Block::MangroveLog
+                | Block::StrippedOakLog
+                | Block::StrippedSpruceLog
+                | Block::StrippedBirchLog
+                | Block::StrippedJungleLog
+                | Block::StrippedAcaciaLog
+                | Block::StrippedCherryLog
+                | Block::StrippedDarkOakLog
+                | Block::StrippedPaleOakLog
+                | Block::StrippedMangroveLog
+        )
     }
 
     /// **island** gate: the composed production pipeline
@@ -2545,7 +2673,7 @@ mod tests {
 
         let generator = overworld_generator(42);
         // biome -> (chunks, vegetation blocks, per-state counts)
-        let mut per_biome: BTreeMap<String, (usize, usize, BTreeMap<String, usize>)> =
+        let mut per_biome: BTreeMap<String, (usize, usize, BTreeMap<Block, usize>)> =
             BTreeMap::new();
         let mut total = 0usize;
 
@@ -2554,7 +2682,7 @@ mod tests {
                 let (cx, cz) = (ORIGIN + i * STRIDE, ORIGIN + j * STRIDE);
                 let col = generator.column(cx, cz);
                 let biome = col.biome_state(8, 8).to_owned();
-                let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+                let mut counts: BTreeMap<Block, usize> = BTreeMap::new();
                 let mut chunk_total = 0usize;
                 for lz in 0..16 {
                     for lx in 0..16 {
@@ -2565,10 +2693,9 @@ mod tests {
                         let lo = (top - 8).max(col.min_y());
                         let hi = (top + 40).min(col.min_y() + col.height() - 1);
                         for y in lo..=hi {
-                            let state = col.block_state(lx, y, lz);
-                            let base = state.split('[').next().unwrap_or(state);
-                            if is_vegetation_state(base) {
-                                *counts.entry(base.to_owned()).or_default() += 1;
+                            let state = col.block_state_id(lx, y, lz);
+                            if is_vegetation_state(state.block()) {
+                                *counts.entry(state.block()).or_default() += 1;
                                 chunk_total += 1;
                             }
                         }
@@ -2612,7 +2739,7 @@ mod tests {
         let logs: usize = per_biome
             .values()
             .flat_map(|(_, _, states)| states.iter())
-            .filter(|(state, _)| state.ends_with("_log"))
+            .filter(|(state, _)| is_log(**state))
             .map(|(_, n)| *n)
             .sum();
         assert!(
@@ -2637,8 +2764,8 @@ mod tests {
         for lz in 0..16 {
             for lx in 0..16 {
                 for y in col.min_y()..col.min_y() + col.height() {
-                    let b = col.block_state(lx, y, lz);
-                    kinds.insert(b.split('[').next().unwrap_or(b).to_string());
+                    let b = col.block_state_id(lx, y, lz);
+                    kinds.insert(b.block());
                 }
             }
         }
@@ -2683,8 +2810,14 @@ mod tests {
             "the target must retain a reference to the neighbouring mineshaft start"
         );
         assert_eq!(
-            target.block_state(10, 12, 0),
-            "minecraft:rail[shape=north_south,waterlogged=false]",
+            target.block_state_id(10, 12, 0),
+            state_id(
+                Block::Rail,
+                &[
+                    (PropertyKey::Shape, BuiltinPropertyValue::NorthSouth),
+                    (PropertyKey::Waterlogged, BuiltinPropertyValue::False),
+                ],
+            ),
             "the source column's captured rail cell is the state the chunk encoder receives"
         );
     }
@@ -2712,18 +2845,18 @@ mod tests {
         for lz in 0..16i32 {
             for lx in 0..16i32 {
                 for y in served.min_y..served.min_y + served.height {
-                    let want = expected.block_state(lx as usize, y, lz as usize);
-                    let got = served.block_state(lx, y, lz);
+                    let want = expected.block_state_id(lx as usize, y, lz as usize);
+                    let got = served.block_state_id(lx, y, lz);
                     assert_eq!(got, want, "served/generated mismatch at ({lx},{y},{lz})");
                     checked += 1;
-                    match got.split('[').next().unwrap_or(got) {
-                        "minecraft:water" => water += 1,
-                        "minecraft:air"
-                        | "minecraft:cave_air"
-                        | "minecraft:void_air"
-                        | "minecraft:lava"
-                        | "minecraft:stone"
-                        | "minecraft:bedrock" => {}
+                    match got.block() {
+                        Block::Water => water += 1,
+                        Block::Air
+                        | Block::CaveAir
+                        | Block::VoidAir
+                        | Block::Lava
+                        | Block::Stone
+                        | Block::Bedrock => {}
                         _ => surface += 1,
                     }
                 }
@@ -2872,14 +3005,14 @@ mod tests {
     /// block is not possible.
     #[test]
     fn badlands_columns_when_present_carry_terracotta_bands() {
-        const TERRACOTTA_BAND_BLOCKS: [&str; 7] = [
-            "minecraft:terracotta",
-            "minecraft:orange_terracotta",
-            "minecraft:yellow_terracotta",
-            "minecraft:brown_terracotta",
-            "minecraft:red_terracotta",
-            "minecraft:white_terracotta",
-            "minecraft:light_gray_terracotta",
+        const TERRACOTTA_BAND_BLOCKS: [Block; 7] = [
+            Block::Terracotta,
+            Block::OrangeTerracotta,
+            Block::YellowTerracotta,
+            Block::BrownTerracotta,
+            Block::RedTerracotta,
+            Block::WhiteTerracotta,
+            Block::LightGrayTerracotta,
         ];
 
         let generator = overworld_generator(42);
@@ -2910,9 +3043,8 @@ mod tests {
                     }
                     badlands_cells += 1;
                     for y in min_y..min_y + height {
-                        let state = col.block_state(lx, y, lz);
-                        let base = state.split('[').next().unwrap_or(state);
-                        if TERRACOTTA_BAND_BLOCKS.contains(&base) {
+                        let state = col.block_state_id(lx, y, lz);
+                        if TERRACOTTA_BAND_BLOCKS.contains(&state.block()) {
                             band_hits += 1;
                         }
                     }
@@ -2976,29 +3108,29 @@ mod tests {
         // scope note) always fills it: real generated content, not
         // already-air, so an edit applied to existing air could not
         // pass this test by accident.
-        let pre = source.block_state(0, -50, 0);
+        let pre = source.block_state_id(0, -50, 0);
         assert_eq!(
-            pre.split('[').next(),
-            Some("minecraft:deepslate"),
-            "test fixture assumption broke: expected solid deepslate at (0,-50,0), found {pre}"
+            pre.block(),
+            Block::Deepslate,
+            "test fixture assumption broke: expected solid deepslate at (0,-50,0), found {pre:?}"
         );
 
-        source.set_block(0, -50, 0, "minecraft:air");
-        assert_eq!(source.block_state(0, -50, 0), "minecraft:air");
+        source.set_block(0, -50, 0, air_state());
+        assert_eq!(source.block_state_id(0, -50, 0), air_state());
 
         // Re-fetch the whole column again — simulating the column being
         // forgotten and re-sent, `crate::server`'s `ViewTracker` forget/resend
         // cycle — through a *second, independent* `column()` call. Without
         // retention this would silently regenerate the original deepslate.
         let recolumn = source.column(0, 0);
-        assert_eq!(recolumn.block_state(0, -50, 0), "minecraft:air");
+        assert_eq!(recolumn.block_state_id(0, -50, 0), air_state());
 
         // The edit must be scoped to exactly the touched cell, not a
         // wholesale wipe of the column: an adjacent, untouched cell in the
         // same column still reads the generator's original content.
         assert_eq!(
-            recolumn.block_state(1, -50, 0).split('[').next(),
-            Some("minecraft:deepslate"),
+            recolumn.block_state_id(1, -50, 0).block(),
+            Block::Deepslate,
             "editing (0,-50,0) must not affect its untouched neighbour"
         );
     }
@@ -3095,7 +3227,7 @@ mod tests {
         for lz in 0..16usize {
             for lx in 0..16usize {
                 for y in col.min_y()..col.min_y() + col.height() {
-                    if col.block_state(lx, y, lz) == "minecraft:short_grass" {
+                    if col.block_state_id(lx, y, lz).block() == Block::ShortGrass {
                         grass += 1;
                     }
                 }
@@ -3165,16 +3297,20 @@ mod tests {
                             any_plains = true;
                         }
                         for y in col.min_y()..col.min_y() + col.height() {
-                            let b = col.block_state(lx, y, lz);
-                            let base = b.split('[').next().unwrap_or(b);
-                            match base {
-                                "minecraft:short_grass" => grass += 1,
-                                "minecraft:dandelion" | "minecraft:poppy" | "minecraft:azure_bluet"
-                                | "minecraft:oxeye_daisy" | "minecraft:cornflower"
-                                | "minecraft:orange_tulip" | "minecraft:red_tulip"
-                                | "minecraft:pink_tulip" | "minecraft:white_tulip" => flowers += 1,
-                                "minecraft:oak_log" => logs += 1,
-                                "minecraft:oak_leaves" => leaves += 1,
+                            let b = col.block_state_id(lx, y, lz);
+                            match b.block() {
+                                Block::ShortGrass => grass += 1,
+                                Block::Dandelion
+                                | Block::Poppy
+                                | Block::AzureBluet
+                                | Block::OxeyeDaisy
+                                | Block::Cornflower
+                                | Block::OrangeTulip
+                                | Block::RedTulip
+                                | Block::PinkTulip
+                                | Block::WhiteTulip => flowers += 1,
+                                Block::OakLog => logs += 1,
+                                Block::OakLeaves => leaves += 1,
                                 _ => {}
                             }
                         }
@@ -3260,7 +3396,7 @@ mod tests {
             matches!(
                 &*p.feature,
                 ConfiguredFeature::SimpleBlock(BlockStateProvider::Simple(s))
-                    if s == "minecraft:short_grass"
+                    if *s == Block::ShortGrass.default_state()
             )
         });
         assert!(
@@ -3296,7 +3432,7 @@ mod tests {
     fn embedded_veg_tags_resolve_grass_block_as_supporting_vegetation() {
         let tags = lodestone_worldgen::feature::vegetation::build_veg_tags(&embedded_resolver());
         assert!(
-            tags.supports_vegetation.contains("minecraft:grass_block"),
+            tags.supports_vegetation.contains(&Block::GrassBlock),
             "supports_vegetation must include grass_block via \
              #supports_vegetation -> #substrate_overworld -> #grass_blocks"
         );
@@ -3377,12 +3513,11 @@ mod tests {
                             let lo = (top - 8).max(col.min_y());
                             let hi = (top + 40).min(col.min_y() + col.height() - 1);
                             for y in lo..=hi {
-                                let state = col.block_state(lx, y, lz);
-                                let base = state.split('[').next().unwrap_or(state);
-                                if is_vegetation_state(base) {
+                                let state = col.block_state_id(lx, y, lz);
+                                if is_vegetation_state(state.block()) {
                                     veg += 1;
                                 }
-                                if base == "minecraft:dark_oak_log" {
+                                if state.block() == Block::DarkOakLog {
                                     dark_oak_logs += 1;
                                 }
                             }
@@ -3465,6 +3600,8 @@ mod tests {
 mod top_layer_parity {
     use std::collections::{BTreeMap, HashMap, HashSet};
 
+    use lodestone_data::block::Block;
+    use lodestone_data::block_states::StateId;
     use lodestone_worldgen::dense_grid::DenseBlockGrid;
     use lodestone_worldgen::feature::top_layer::{
         self, BiomeClimate, FreezeCounts, SnowSupport,
@@ -3482,9 +3619,9 @@ mod top_layer_parity {
         sea_level: i32,
         step_index: i32,
         /// `base.` runs, expanded into one state per `(lx, y, lz)`.
-        base: BTreeMap<(i32, i32, i32), String>,
+        base: BTreeMap<(i32, i32, i32), StateId>,
         /// `freeze.` cells: `(lx, y, lz) -> state`.
-        freeze: BTreeMap<(i32, i32, i32), String>,
+        freeze: BTreeMap<(i32, i32, i32), StateId>,
         /// `top.` — vanilla's own `getHeight(MOTION_BLOCKING, x, z)`.
         top: BTreeMap<(i32, i32), i32>,
         snow: usize,
@@ -3548,13 +3685,17 @@ mod top_layer_parity {
                         let run: i32 = parts.next().expect("base run").parse().expect("run");
                         let state = parts.next().expect("base state");
                         assert!(parts.next().is_none(), "base line has 3 fields: {line}");
+                        let state = StateId::from_state_str(state)
+                            .unwrap_or_else(|| panic!("unknown fixture state {state}"));
                         for y in start..start + run {
-                            let previous = base.insert((lx, y, lz), state.to_owned());
+                            let previous = base.insert((lx, y, lz), state);
                             assert!(previous.is_none(), "base overlaps at ({lx},{y},{lz})");
                         }
                     } else if let Some(coords) = key.strip_prefix("freeze.") {
                         let (lx, y, lz) = split3(coords);
-                        let previous = freeze.insert((lx, y, lz), rest.to_owned());
+                        let state = StateId::from_state_str(rest)
+                            .unwrap_or_else(|| panic!("unknown fixture state {rest}"));
+                        let previous = freeze.insert((lx, y, lz), state);
                         assert!(previous.is_none(), "duplicate freeze at ({lx},{y},{lz})");
                     } else if let Some(coords) = key.strip_prefix("top.") {
                         let (lx, lz) = split2(coords);
@@ -3659,17 +3800,17 @@ mod top_layer_parity {
     fn grid_from(fixture: &Fixture) -> DenseBlockGrid {
         let base_x = fixture.chunk_x * 16;
         let base_z = fixture.chunk_z * 16;
-        let mut grid = DenseBlockGrid::new(
+        let mut grid = DenseBlockGrid::with_default(
             base_x,
             fixture.min_y,
             base_z,
             16,
             fixture.height,
             16,
-            "minecraft:air",
+            StateId::AIR,
         );
         for ((lx, y, lz), state) in &fixture.base {
-            grid.set(base_x + lx, *y, base_z + lz, state);
+            grid.set_id(base_x + lx, *y, base_z + lz, *state);
         }
         grid
     }
@@ -3680,7 +3821,7 @@ mod top_layer_parity {
         fixture: &Fixture,
         support: &SnowSupport,
         sea_level: i32,
-    ) -> (FreezeCounts, BTreeMap<(i32, i32, i32), String>) {
+    ) -> (FreezeCounts, BTreeMap<(i32, i32, i32), StateId>) {
         let base_x = fixture.chunk_x * 16;
         let base_z = fixture.chunk_z * 16;
         let mut grid = grid_from(fixture);
@@ -3700,9 +3841,9 @@ mod top_layer_parity {
         );
         let mut diff = BTreeMap::new();
         for ((lx, y, lz), before) in &fixture.base {
-            let after = grid.get(base_x + lx, *y, base_z + lz);
-            if after != before {
-                diff.insert((*lx, *y, *lz), after.to_owned());
+            let after = grid.get_id(base_x + lx, *y, base_z + lz);
+            if after != *before {
+                diff.insert((*lx, *y, *lz), after);
             }
         }
         (counts, diff)
@@ -3817,7 +3958,7 @@ mod top_layer_parity {
         // The ice must sit exactly one below the column top, which is the
         // `belowPos` the feature writes to.
         for ((lx, y, lz), state) in &ocean.freeze {
-            assert_eq!(state, "minecraft:ice", "frozen_ocean writes only ice");
+            assert_eq!(state.block(), Block::Ice, "frozen_ocean writes only ice");
             assert_eq!(
                 ocean.top[&(*lx, *lz)],
                 y + 1,
@@ -3840,7 +3981,7 @@ mod top_layer_parity {
             .freeze
             .keys()
             .filter(|(lx, y, lz)| {
-                windswept.freeze[&(*lx, *y, *lz)].starts_with("minecraft:snow[")
+                windswept.freeze[&(*lx, *y, *lz)].block() == Block::Snow
             })
             .map(|(lx, _, lz)| (*lx, *lz))
             .collect();
@@ -3939,7 +4080,7 @@ mod top_layer_parity {
         for name in ["snowy_plains", "frozen_ocean", "windswept_hills"] {
             let fixture = load(name);
             // "Disabled" = the grid untouched, so the diff is empty.
-            let empty: BTreeMap<(i32, i32, i32), String> = BTreeMap::new();
+            let empty: BTreeMap<(i32, i32, i32), StateId> = BTreeMap::new();
             assert_ne!(
                 empty.len(),
                 fixture.freeze.len(),
@@ -4045,7 +4186,21 @@ mod top_layer_parity {
 /// to make this true.
 #[cfg(test)]
 mod generation_spawn_reaches_a_real_chunk {
+    use lodestone_data::block::Block;
+    use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey};
+    use lodestone_data::block_states::StateId;
     use lodestone_data::entity_type::{EntityType, EntityTypeRef};
+
+    fn state_id(block: Block, properties: &[(PropertyKey, BuiltinPropertyValue)]) -> StateId {
+        let mut properties_set = Properties::empty();
+        for &(key, value) in properties {
+            properties_set = properties_set
+                .with_builtin(key, value)
+                .expect("fixture properties belong to the block");
+        }
+        Properties::state_for_block(block, &properties_set)
+            .expect("fixture block state exists in the registry")
+    }
 
     #[test]
     fn dark_forest_chunk_proposes_a_full_pack_of_one_species() {
@@ -4182,15 +4337,21 @@ mod generation_spawn_reaches_a_real_chunk {
 
         let mut mismatches: Vec<String> = Vec::new();
 
-        let expected_flat: [(i32, &str); 5] = [
-            (-64, "minecraft:bedrock"),
-            (-63, "minecraft:dirt"),
-            (-62, "minecraft:dirt"),
-            (-61, "minecraft:grass_block[snowy=false]"),
-            (-60, "minecraft:air"),
+        let expected_flat: [(i32, StateId); 5] = [
+            (-64, Block::Bedrock.default_state()),
+            (-63, Block::Dirt.default_state()),
+            (-62, Block::Dirt.default_state()),
+            (
+                -61,
+                state_id(
+                    Block::GrassBlock,
+                    &[(PropertyKey::Snowy, BuiltinPropertyValue::False)],
+                ),
+            ),
+            (-60, Block::Air.default_state()),
         ];
         for &(y, want) in &expected_flat {
-            let got = flat_col.block_state(0, y, 0);
+            let got = flat_col.block_state_id(0, y, 0);
             if got != want {
                 mismatches.push(format!("flat y={y}: expected {want:?}, got {got:?}"));
             }
@@ -4199,14 +4360,20 @@ mod generation_spawn_reaches_a_real_chunk {
         // The default arm's own measured values — the "wrong hypothesis" this
         // gate demonstrably rejects, not merely "differs from an unstated
         // baseline" (CLAUDE.md's *magnitude* species).
-        let expected_default: [(i32, &str); 4] = [
-            (-63, "minecraft:bedrock"),
-            (-62, "minecraft:bedrock"),
-            (-61, "minecraft:bedrock"),
-            (-60, "minecraft:deepslate[axis=y]"),
+        let expected_default: [(i32, StateId); 4] = [
+            (-63, Block::Bedrock.default_state()),
+            (-62, Block::Bedrock.default_state()),
+            (-61, Block::Bedrock.default_state()),
+            (
+                -60,
+                state_id(
+                    Block::Deepslate,
+                    &[(PropertyKey::Axis, BuiltinPropertyValue::Y)],
+                ),
+            ),
         ];
         for &(y, want) in &expected_default {
-            let got = overworld_col.block_state(0, y, 0);
+            let got = overworld_col.block_state_id(0, y, 0);
             if got != want {
                 mismatches.push(format!(
                     "default overworld y={y}: expected {want:?} (re-derive rather \
@@ -4225,8 +4392,8 @@ mod generation_spawn_reaches_a_real_chunk {
         // underground terrain.
         for y in [-63, -62, -61] {
             assert_ne!(
-                flat_col.block_state(0, y, 0),
-                overworld_col.block_state(0, y, 0),
+                flat_col.block_state_id(0, y, 0),
+                overworld_col.block_state_id(0, y, 0),
                 "flat and default overworld agree at y={y}; FlatChunkSource may be \
                  silently routing through the default generator — the exact \
                  failure mode this gate exists to catch"
@@ -4237,7 +4404,7 @@ mod generation_spawn_reaches_a_real_chunk {
         // must report the identical stack.
         let far = flat.column(500, -500);
         for &(y, want) in &expected_flat {
-            assert_eq!(far.block_state(3, y, 11), want, "y={y} at a distant chunk");
+            assert_eq!(far.block_state_id(3, y, 11), want, "y={y} at a distant chunk");
         }
 
         assert_eq!(flat_col.biome_state(0, 0), "minecraft:plains");
@@ -4252,12 +4419,27 @@ mod generation_spawn_reaches_a_real_chunk {
         use crate::chunk::ChunkSource;
         let flat = super::flat_chunk_source(super::world_preset_flat_settings(false));
 
-        assert_eq!(flat.block_state(0, -61, 0), "minecraft:grass_block[snowy=false]");
-        flat.set_block(0, -61, 0, "minecraft:diamond_block");
-        assert_eq!(flat.block_state(0, -61, 0), "minecraft:diamond_block");
+        assert_eq!(
+            flat.block_state_id(0, -61, 0),
+            state_id(
+                Block::GrassBlock,
+                &[(PropertyKey::Snowy, BuiltinPropertyValue::False)],
+            )
+        );
+        flat.set_block(0, -61, 0, Block::DiamondBlock.default_state());
+        assert_eq!(
+            flat.block_state_id(0, -61, 0),
+            Block::DiamondBlock.default_state()
+        );
 
         // A different column, never edited, still reads the generated stack.
-        assert_eq!(flat.block_state(16, -61, 0), "minecraft:grass_block[snowy=false]");
+        assert_eq!(
+            flat.block_state_id(16, -61, 0),
+            state_id(
+                Block::GrassBlock,
+                &[(PropertyKey::Snowy, BuiltinPropertyValue::False)],
+            )
+        );
     }
 
     fn tempdir(name: &str) -> std::path::PathBuf {
@@ -4299,19 +4481,19 @@ mod generation_spawn_reaches_a_real_chunk {
                 .expect("a Flat generator was stored on disk");
 
         assert_eq!(min_y, -64, "flat/debug share the bundled overworld's own min_y");
-        let expected: [(i32, &str); 8] = [
-            (-64, "minecraft:bedrock"),
-            (-63, "minecraft:sandstone"),
-            (-62, "minecraft:sandstone"),
-            (-61, "minecraft:sandstone"),
-            (-60, "minecraft:sandstone"),
-            (-59, "minecraft:sand"),
-            (-58, "minecraft:sand"),
-            (-57, "minecraft:air"),
+        let expected: [(i32, StateId); 8] = [
+            (-64, Block::Bedrock.default_state()),
+            (-63, Block::Sandstone.default_state()),
+            (-62, Block::Sandstone.default_state()),
+            (-61, Block::Sandstone.default_state()),
+            (-60, Block::Sandstone.default_state()),
+            (-59, Block::Sand.default_state()),
+            (-58, Block::Sand.default_state()),
+            (-57, Block::Air.default_state()),
         ];
         let mut mismatches = Vec::new();
         for &(y, want) in &expected {
-            let got = source.block_state(0, y, 0);
+            let got = source.block_state_id(0, y, 0);
             if got != want {
                 mismatches.push(format!("y={y}: expected {want:?}, got {got:?}"));
             }
@@ -4332,8 +4514,8 @@ mod generation_spawn_reaches_a_real_chunk {
         // would have produced regardless of this file's contents) must not
         // appear at the same rows.
         assert_ne!(
-            source.block_state(0, -63, 0),
-            "minecraft:dirt",
+            source.block_state_id(0, -63, 0).block(),
+            Block::Dirt,
             "control: the bundled default's own layer must not appear — a \
              wrong implementation that ignored world_gen_settings.dat and \
              fell back to the bundled preset would still pass every \
@@ -4452,19 +4634,33 @@ mod generation_spawn_reaches_a_real_chunk {
 #[cfg(test)]
 mod single_biome_and_debug_world_selection {
     use crate::chunk::ChunkSource;
+    use lodestone_data::block::Block;
+    use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey};
+    use lodestone_data::block_states::StateId;
+
+    fn state_id(block: Block, properties: &[(PropertyKey, BuiltinPropertyValue)]) -> StateId {
+        let mut properties_set = Properties::empty();
+        for &(key, value) in properties {
+            properties_set = properties_set
+                .with_builtin(key, value)
+                .expect("fixture properties belong to the block");
+        }
+        Properties::state_for_block(block, &properties_set)
+            .expect("fixture block state exists in the registry")
+    }
 
     /// Scans down from the top of the dimension for the first non-air block
     /// — a small local helper since [`crate::chunk::ChunkColumn`] (unlike the
     /// generator-level `GeneratedColumn`/`FlatColumn`) has no `top_non_air_y`
     /// of its own.
-    fn top_non_air(col: &crate::chunk::ChunkColumn, x: i32, z: i32) -> (i32, String) {
+    fn top_non_air(col: &crate::chunk::ChunkColumn, x: i32, z: i32) -> (i32, StateId) {
         for y in (-64..320).rev() {
-            let s = col.block_state(x, y, z);
-            if s != "minecraft:air" {
-                return (y, s.to_string());
+            let state = col.block_state_id(x, y, z);
+            if state != StateId::AIR {
+                return (y, state);
             }
         }
-        (-65, "minecraft:air".to_string())
+        (-65, StateId::AIR)
     }
 
     /// `world_preset/single_biome_surface.json`'s default biome, pinned so a
@@ -4479,13 +4675,13 @@ mod single_biome_and_debug_world_selection {
         let source = super::single_biome_chunk_source(42, "minecraft:sulfur_caves");
         let column = source.column(-500, -500);
         assert_eq!(
-            column.block_state(10, -21, 12),
-            "minecraft:sulfur",
+            column.block_state_id(10, -21, 12).block(),
+            Block::Sulfur,
             "the external surface oracle reports sulfur at this fixed-biome point"
         );
         assert_eq!(
-            column.block_state(13, -11, 5),
-            "minecraft:cinnabar",
+            column.block_state_id(13, -11, 5).block(),
+            Block::Cinnabar,
             "the external surface oracle reports cinnabar at this fixed-biome point"
         );
     }
@@ -4634,8 +4830,8 @@ mod single_biome_and_debug_world_selection {
             "the captured reference packet has plains in this raw quart cell"
         );
         assert_eq!(
-            column.block_state(10, -21, 12),
-            "minecraft:sulfur",
+            column.block_state_id(10, -21, 12).block(),
+            Block::Sulfur,
             "the independently captured surface result selects sulfur from a nearby cave-biome cell"
         );
     }
@@ -4667,10 +4863,10 @@ mod single_biome_and_debug_world_selection {
         let desert = super::single_biome_chunk_source(seed, "minecraft:desert");
         let overworld = super::overworld_chunk_source(seed);
 
-        let cases: [(i32, i32, i32, &str); 3] = [
-            (0, 0, 63, "minecraft:sand"),
-            (5, -3, 63, "minecraft:sand"),
-            (20, 20, 63, "minecraft:sand"),
+        let cases: [(i32, i32, i32, StateId); 3] = [
+            (0, 0, 63, Block::Sand.default_state()),
+            (5, -3, 63, Block::Sand.default_state()),
+            (20, 20, 63, Block::Sand.default_state()),
         ];
         let mut mismatches: Vec<String> = Vec::new();
         for &(cx, cz, want_y, want_state) in &cases {
@@ -4682,7 +4878,7 @@ mod single_biome_and_debug_world_selection {
                 ));
             }
             let (y, state) = top_non_air(&col, 0, 0);
-            if (y, state.as_str()) != (want_y, want_state) {
+            if (y, state) != (want_y, want_state) {
                 mismatches.push(format!(
                     "chunk ({cx},{cz}): expected top ({want_y}, {want_state:?}), got ({y}, {state:?})"
                 ));
@@ -4692,17 +4888,38 @@ mod single_biome_and_debug_world_selection {
 
         // The default arm's own measured values at the identical seed and
         // columns — the "wrong hypothesis" this gate demonstrably rejects.
-        let default_cases: [(i32, i32, &str, i32, &str); 3] = [
-            (0, 0, "minecraft:snowy_plains", 64, "minecraft:snow[layers=1]"),
-            (5, -3, "minecraft:snowy_plains", 64, "minecraft:snow[layers=1]"),
-            (20, 20, "minecraft:plains", 63, "minecraft:grass_block[snowy=false]"),
+        let default_cases: [(i32, i32, &str, i32, StateId); 3] = [
+            (
+                0,
+                0,
+                "minecraft:snowy_plains",
+                64,
+                state_id(Block::Snow, &[(PropertyKey::Layers, BuiltinPropertyValue::Value1)]),
+            ),
+            (
+                5,
+                -3,
+                "minecraft:snowy_plains",
+                64,
+                state_id(Block::Snow, &[(PropertyKey::Layers, BuiltinPropertyValue::Value1)]),
+            ),
+            (
+                20,
+                20,
+                "minecraft:plains",
+                63,
+                state_id(
+                    Block::GrassBlock,
+                    &[(PropertyKey::Snowy, BuiltinPropertyValue::False)],
+                ),
+            ),
         ];
         let mut default_mismatches: Vec<String> = Vec::new();
         for &(cx, cz, want_biome, want_y, want_state) in &default_cases {
             let col = overworld.column(cx, cz);
             let got_biome = col.biome_state(0, 0);
             let (y, state) = top_non_air(&col, 0, 0);
-            if got_biome != want_biome || (y, state.as_str()) != (want_y, want_state) {
+            if got_biome != want_biome || (y, state) != (want_y, want_state) {
                 default_mismatches.push(format!(
                     "chunk ({cx},{cz}): expected ({want_biome}, {want_y}, {want_state:?}) \
                      (re-derive rather than editing the desert assertion if the plain \
@@ -4738,8 +4955,8 @@ mod single_biome_and_debug_world_selection {
     fn all_block_states_ordered_matches_the_real_registry_count_and_head() {
         let states = super::all_block_states_ordered();
         assert_eq!(states.len(), lodestone_data::block_states::STATE_COUNT as usize);
-        assert_eq!(states[0], "minecraft:air");
-        assert_eq!(states[1], "minecraft:stone");
+        assert_eq!(states[0], Block::Air.default_state());
+        assert_eq!(states[1], Block::Stone.default_state());
     }
 
     /// `DebugLevelSource.GRID_WIDTH`/`GRID_HEIGHT`'s vanilla formula
@@ -4781,25 +4998,32 @@ mod single_biome_and_debug_world_selection {
         let origin = debug.column(0, 0);
         for lx in 0..16i32 {
             for lz in 0..16i32 {
-                let got = origin.block_state(lx, 60, lz);
-                if got != "minecraft:barrier" {
+                let got = origin.block_state_id(lx, 60, lz);
+                if got.block() != Block::Barrier {
                     mismatches.push(format!("barrier ({lx},{lz}): got {got:?}"));
                 }
             }
         }
-        if origin.block_state(1, 70, 1) != "minecraft:air" {
+        if origin.block_state_id(1, 70, 1) != StateId::AIR {
             mismatches.push(format!(
                 "world (1,1) grid row: expected air, got {:?}",
-                origin.block_state(1, 70, 1)
+                origin.block_state_id(1, 70, 1)
             ));
         }
 
         let far = debug.column(1, 1);
-        let want_far = "minecraft:note_block[instrument=trumpet_exposed,note=8,powered=false]";
-        if far.block_state(1, 70, 1) != want_far {
+        let want_far = state_id(
+            Block::NoteBlock,
+            &[
+                (PropertyKey::Instrument, BuiltinPropertyValue::TrumpetExposed),
+                (PropertyKey::Note, BuiltinPropertyValue::Value8),
+                (PropertyKey::Powered, BuiltinPropertyValue::False),
+            ],
+        );
+        if far.block_state_id(1, 70, 1) != want_far {
             mismatches.push(format!(
                 "world (17,17) grid row: expected {want_far:?}, got {:?}",
-                far.block_state(1, 70, 1)
+                far.block_state_id(1, 70, 1)
             ));
         }
         if origin.biome_state(0, 0) != "minecraft:plains" {
@@ -4817,15 +5041,15 @@ mod single_biome_and_debug_world_selection {
         // for the same-seed default-arm measurement convention.
         let default_col = overworld.column(1, 1);
         assert_ne!(
-            default_col.block_state(1, 70, 1),
-            far.block_state(1, 70, 1),
+            default_col.block_state_id(1, 70, 1),
+            far.block_state_id(1, 70, 1),
             "default overworld and debug world agree at (17,17) y=70 — \
              DebugChunkSource may be silently routing through the default \
              generator, the exact failure mode this gate exists to catch"
         );
         assert_ne!(
-            default_col.block_state(1, 60, 1),
-            far.block_state(1, 60, 1),
+            default_col.block_state_id(1, 60, 1),
+            far.block_state_id(1, 60, 1),
             "default overworld and debug world agree at (17,17) y=60"
         );
     }
@@ -4838,10 +5062,13 @@ mod single_biome_and_debug_world_selection {
     #[test]
     fn debug_chunk_source_set_block_persists_and_stays_chunk_local() {
         let debug = super::debug_chunk_source();
-        assert_eq!(debug.block_state(1, 60, 1), "minecraft:barrier");
-        debug.set_block(1, 60, 1, "minecraft:diamond_block");
-        assert_eq!(debug.block_state(1, 60, 1), "minecraft:diamond_block");
+        assert_eq!(debug.block_state_id(1, 60, 1).block(), Block::Barrier);
+        debug.set_block(1, 60, 1, Block::DiamondBlock.default_state());
+        assert_eq!(
+            debug.block_state_id(1, 60, 1),
+            Block::DiamondBlock.default_state()
+        );
         // A different column, never edited, still reads the generated grid.
-        assert_eq!(debug.block_state(17, 60, 1), "minecraft:barrier");
+        assert_eq!(debug.block_state_id(17, 60, 1).block(), Block::Barrier);
     }
 }

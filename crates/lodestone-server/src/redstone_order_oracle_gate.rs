@@ -105,6 +105,8 @@ use crate::neighbor_update::Direction;
 use crate::random_tick::propagate_and_react;
 use crate::scheduled_tick::ScheduledTickQueue;
 use crate::{redstone, redstone_diode, redstone_torch, redstone_wire};
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 use lodestone_model::BlockPos;
 
 const MIN_Y: i32 = -64;
@@ -142,14 +144,14 @@ fn column_with_floor() -> ChunkColumn {
     let mut column = ChunkColumn::new(MIN_Y, HEIGHT);
     for x in 0..16 {
         for z in 0..16 {
-            column.set_block(x, FLOOR_Y, z, "minecraft:stone");
+            column.set_block_id(x, FLOOR_Y, z, Block::Stone.default_state());
         }
     }
     column
 }
 
-fn at(column: &ChunkColumn, x: i32, y: i32, z: i32) -> String {
-    column.block_state(x, y, z).to_string()
+fn at(column: &ChunkColumn, x: i32, y: i32, z: i32) -> StateId {
+    column.block_state_id(x, y, z)
 }
 
 /// The same rig `redstone_diode_oracle_gate.rs`'s `repeater_rig` builds
@@ -159,16 +161,16 @@ fn at(column: &ChunkColumn, x: i32, y: i32, z: i32) -> String {
 /// rigs.
 fn locked_latch_rig() -> ChunkColumn {
     let mut column = column_with_floor();
-    column.set_block(TORCH_X, Y, ROW_Z, &redstone_torch::set_standing_lit(false));
-    column.set_block(TORCH_X + 1, Y, ROW_Z, &redstone_wire::set_power(0));
-    column.set_block(TORCH_X + 2, Y, ROW_Z, &redstone_wire::set_power(0));
-    column.set_block(
+    column.set_block_id(TORCH_X, Y, ROW_Z, redstone_torch::set_standing_lit(false));
+    column.set_block_id(TORCH_X + 1, Y, ROW_Z, redstone_wire::set_power(0));
+    column.set_block_id(TORCH_X + 2, Y, ROW_Z, redstone_wire::set_power(0));
+    column.set_block_id(
         REPEATER_X,
         Y,
         ROW_Z,
-        &redstone_diode::set_repeater(Direction::West, 1, false, false),
+        redstone_diode::set_repeater(Direction::West, 1, false, false),
     );
-    column.set_block(OUT_X, Y, ROW_Z, &redstone_wire::set_power(0));
+    column.set_block_id(OUT_X, Y, ROW_Z, redstone_wire::set_power(0));
     column
 }
 
@@ -207,7 +209,7 @@ fn a_repeater_arrival_locked_before_its_scheduled_flip_fires_is_suppressed() {
     let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
 
     // T+0: the source lights, scheduling the repeater's flip.
-    column.set_block(TORCH_X, Y, ROW_Z, &redstone_torch::set_standing_lit(true));
+    column.set_block_id(TORCH_X, Y, ROW_Z, redstone_torch::set_standing_lit(true));
     let _ = propagate_and_react(&mut column, 0, 0, TORCH_X, Y, ROW_Z, &mut block_ticks, NOW);
     let pre_lock_entries = scheduled(&mut block_ticks);
     let fire_tick = find(&pre_lock_entries, (REPEATER_X, Y, ROW_Z), redstone::TICK_REPEATER)
@@ -228,11 +230,11 @@ fn a_repeater_arrival_locked_before_its_scheduled_flip_fires_is_suppressed() {
     // is called from the side repeater's own position, exactly as
     // `react_to_notification`'s arm 3b (repeaters) is reached in production
     // when a neighbouring diode's placement notifies it.
-    column.set_block(
+    column.set_block_id(
         REPEATER_X,
         Y,
         LOCK_Z,
-        &redstone_diode::set_repeater(Direction::South, 1, false, true),
+        redstone_diode::set_repeater(Direction::South, 1, false, true),
     );
     let mut lock_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
     let _ = propagate_and_react(&mut column, 0, 0, REPEATER_X, Y, LOCK_Z, &mut lock_ticks, NOW + 1);
@@ -249,7 +251,7 @@ fn a_repeater_arrival_locked_before_its_scheduled_flip_fires_is_suppressed() {
     // Fire the *original* scheduled entry now, against the post-lock state --
     // exactly what `run_tick_loop`'s drain does: read the column at fire
     // time, not at scheduling time.
-    match redstone_diode::run_scheduled_tick(&locked_state, true) {
+    match redstone_diode::run_scheduled_tick(locked_state, true) {
         redstone_diode::RepeaterTickOutcome::Locked => {}
         other => panic!(
             "a repeater locked before its scheduled flip fired must report Locked at fire time, \
@@ -261,7 +263,7 @@ fn a_repeater_arrival_locked_before_its_scheduled_flip_fires_is_suppressed() {
     // -- Control arm: identical sequence, no side lock. --
     let mut control_column = locked_latch_rig();
     let mut control_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
-    control_column.set_block(TORCH_X, Y, ROW_Z, &redstone_torch::set_standing_lit(true));
+    control_column.set_block_id(TORCH_X, Y, ROW_Z, redstone_torch::set_standing_lit(true));
     let _ =
         propagate_and_react(&mut control_column, 0, 0, TORCH_X, Y, ROW_Z, &mut control_ticks, NOW);
     let control_entries = scheduled(&mut control_ticks);
@@ -274,10 +276,10 @@ fn a_repeater_arrival_locked_before_its_scheduled_flip_fires_is_suppressed() {
             )
         });
     let control_state = at(&control_column, REPEATER_X, Y, ROW_Z);
-    match redstone_diode::run_scheduled_tick(&control_state, true) {
+    match redstone_diode::run_scheduled_tick(control_state, true) {
         redstone_diode::RepeaterTickOutcome::TurnedOn { new_state, .. } => {
             assert!(
-                redstone::diode_powered(&new_state),
+                redstone::diode_powered(new_state),
                 "CONTROL FAILED: the unlocked control's own flip did not turn the repeater on"
             );
         }
@@ -303,13 +305,13 @@ fn unlocking_with_the_front_input_already_high_schedules_a_fresh_flip_at_the_ord
 
     // Reach the same locked-and-pending state the race gate above starts
     // from: light the source, then lock before the flip fires.
-    column.set_block(TORCH_X, Y, ROW_Z, &redstone_torch::set_standing_lit(true));
+    column.set_block_id(TORCH_X, Y, ROW_Z, redstone_torch::set_standing_lit(true));
     let _ = propagate_and_react(&mut column, 0, 0, TORCH_X, Y, ROW_Z, &mut settle, NOW);
-    column.set_block(
+    column.set_block_id(
         REPEATER_X,
         Y,
         LOCK_Z,
-        &redstone_diode::set_repeater(Direction::South, 1, false, true),
+        redstone_diode::set_repeater(Direction::South, 1, false, true),
     );
     let mut lock_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
     let _ = propagate_and_react(&mut column, 0, 0, REPEATER_X, Y, LOCK_Z, &mut lock_ticks, NOW + 1);
@@ -330,7 +332,7 @@ fn unlocking_with_the_front_input_already_high_schedules_a_fresh_flip_at_the_ord
     // Remove the lock at `NOW + 2` (an arbitrary tick past setup — the
     // oracle measured the *interval*, not an absolute tick).
     const UNLOCK_TICK: u64 = NOW + 2;
-    column.set_block(REPEATER_X, Y, LOCK_Z, "minecraft:air");
+    column.set_block_id(REPEATER_X, Y, LOCK_Z, Block::Air.default_state());
     let mut unlock_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
     let _ =
         propagate_and_react(&mut column, 0, 0, REPEATER_X, Y, LOCK_Z, &mut unlock_ticks, UNLOCK_TICK);

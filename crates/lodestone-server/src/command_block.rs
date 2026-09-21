@@ -672,11 +672,11 @@ mod tests {
         use crate::scheduled_tick::ScheduledTickQueue;
 
         let mut column = ChunkColumn::new(0, 16);
-        column.set_block(5, 5, 5, state(COMMAND_BLOCK, Direction::North, false));
+        column.set_block_id(5, 5, 5, state(COMMAND_BLOCK, Direction::North, false));
         // A constant signal source directly beside the command block —
         // `redstone::best_neighbor_signal`'s own six-direction scan reaches it
         // exactly as `Level.hasNeighborSignal` would.
-        column.set_block(5, 5, 6, Block::RedstoneBlock.default_state());
+        column.set_block_id(5, 5, 6, Block::RedstoneBlock.default_state());
 
         let block_entities = BlockEntityHandle::new();
         block_entities.with(|reg| reg.insert(BlockPos::new(5, 5, 5), BlockEntity::CommandBlock(CommandBlockData::new())));
@@ -713,8 +713,8 @@ mod tests {
         // must be a complete no-op for the command block, proving the arm is
         // actually gated on `block_entities` rather than always running.
         let mut column2 = ChunkColumn::new(0, 16);
-        column2.set_block(5, 5, 5, state(COMMAND_BLOCK, Direction::North, false));
-        column2.set_block(5, 5, 6, Block::RedstoneBlock.default_state());
+        column2.set_block_id(5, 5, 5, state(COMMAND_BLOCK, Direction::North, false));
+        column2.set_block_id(5, 5, 6, Block::RedstoneBlock.default_state());
         let mut block_ticks2: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         let _ = crate::random_tick::propagate_and_react(&mut column2, 0, 0, 5, 5, 6, &mut block_ticks2, 0);
         assert!(

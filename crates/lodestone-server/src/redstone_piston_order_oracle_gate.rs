@@ -78,6 +78,9 @@ use crate::piston;
 use crate::random_tick::propagate_and_react;
 use crate::redstone_torch;
 use crate::scheduled_tick::ScheduledTickQueue;
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, PropertyKey};
+use lodestone_data::block_states::StateId;
 
 const FLOOR_Y: i32 = 0;
 const Y: i32 = 1;
@@ -85,18 +88,27 @@ const ROW_Z: i32 = 8;
 const PISTON_X: i32 = 4;
 const NOW: u64 = 40;
 
+macro_rules! state_id {
+    ($block:ident $(, $key:ident = $value:ident)* $(,)?) => {
+        crate::redstone::configured_state(
+            Block::$block,
+            &[$((PropertyKey::$key, BuiltinPropertyValue::$value)),*],
+        )
+    };
+}
+
 fn column_with_floor() -> ChunkColumn {
     let mut column = ChunkColumn::new(FLOOR_Y - 1, 16);
     for x in 0..16 {
         for z in 0..16 {
-            column.set_block(x, FLOOR_Y, z, "minecraft:stone");
+            column.set_block_id(x, FLOOR_Y, z, Block::Stone.default_state());
         }
     }
     column
 }
 
-fn at(column: &ChunkColumn, x: i32, y: i32, z: i32) -> String {
-    column.block_state(x, y, z).to_string()
+fn at(column: &ChunkColumn, x: i32, y: i32, z: i32) -> StateId {
+    column.block_state_id(x, y, z)
 }
 
 /// Every pending piston commit, as `(pos, entity)` — a thin wrapper over
@@ -119,9 +131,9 @@ fn pending_piston_commits(
 /// `Direction::South` convention), and an *unlit* trigger the caller lights.
 fn piston_rig() -> ChunkColumn {
     let mut column = column_with_floor();
-    column.set_block(PISTON_X, Y, ROW_Z, "minecraft:piston[facing=south,extended=false]");
-    column.set_block(PISTON_X, Y, ROW_Z + 1, "minecraft:dirt");
-    column.set_block(PISTON_X - 1, Y, ROW_Z, &redstone_torch::set_standing_lit(false));
+    column.set_block_id(PISTON_X, Y, ROW_Z, state_id!(Piston, Facing = South, Extended = False));
+    column.set_block_id(PISTON_X, Y, ROW_Z + 1, Block::Dirt.default_state());
+    column.set_block_id(PISTON_X - 1, Y, ROW_Z, redstone_torch::set_standing_lit(false));
     column
 }
 
@@ -138,7 +150,7 @@ fn retracting_mid_extend_interrupts_only_the_arm_and_leaves_the_pushed_blocks_ow
     let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
 
     // -- Extend: light the trigger. --
-    column.set_block(PISTON_X - 1, Y, ROW_Z, &redstone_torch::set_standing_lit(true));
+    column.set_block_id(PISTON_X - 1, Y, ROW_Z, redstone_torch::set_standing_lit(true));
     let _ = propagate_and_react(
         &mut column,
         0,
@@ -155,7 +167,7 @@ fn retracting_mid_extend_interrupts_only_the_arm_and_leaves_the_pushed_blocks_ow
     let base = (PISTON_X, Y, ROW_Z);
 
     assert!(
-        piston::is_moving_piston(&at(&column, arm.0, arm.1, arm.2)),
+        piston::is_moving_piston_id(at(&column, arm.0, arm.1, arm.2)),
         "PREMISE FAILED: the arm cell must hold a moving_piston right after extending, got {:?}",
         at(&column, arm.0, arm.1, arm.2)
     );
@@ -175,7 +187,7 @@ fn retracting_mid_extend_interrupts_only_the_arm_and_leaves_the_pushed_blocks_ow
     );
 
     // -- Retract, one tick later, before PISTON_MOVE_DELAY (2) has elapsed. --
-    column.set_block(PISTON_X - 1, Y, ROW_Z, &redstone_torch::set_standing_lit(false));
+    column.set_block_id(PISTON_X - 1, Y, ROW_Z, redstone_torch::set_standing_lit(false));
     let _ = propagate_and_react(
         &mut column,
         0,
@@ -191,7 +203,7 @@ fn retracting_mid_extend_interrupts_only_the_arm_and_leaves_the_pushed_blocks_ow
     // `moving_piston` either (that would mean the interrupt never landed).
     let arm_state = at(&column, arm.0, arm.1, arm.2);
     assert_eq!(
-        arm_state, "minecraft:air",
+        arm_state, StateId::AIR,
         "the interrupted arm cell must evaporate to air, not materialise a head or stay \
          mid-animation; got {arm_state:?}"
     );
@@ -251,7 +263,7 @@ fn retracting_after_the_extend_already_committed_finds_nothing_to_interrupt() {
     let mut column = piston_rig();
     let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
 
-    column.set_block(PISTON_X - 1, Y, ROW_Z, &redstone_torch::set_standing_lit(true));
+    column.set_block_id(PISTON_X - 1, Y, ROW_Z, redstone_torch::set_standing_lit(true));
     let _ = propagate_and_react(&mut column, 0, 0, PISTON_X - 1, Y, ROW_Z, &mut block_ticks, NOW);
 
     let arm = (PISTON_X, Y, ROW_Z + 1);
@@ -267,16 +279,16 @@ fn retracting_after_the_extend_already_committed_finds_nothing_to_interrupt() {
     for tick in &due {
         if let Some(entity) = piston::parse_finish_kind(&tick.kind) {
             let (x, y, z) = tick.pos;
-            column.set_block(x, y, z, entity.committed_state());
+            column.set_block_id(x, y, z, entity.committed_state());
         }
     }
     assert!(
-        !piston::is_moving_piston(&at(&column, arm.0, arm.1, arm.2)),
+        !piston::is_moving_piston_id(at(&column, arm.0, arm.1, arm.2)),
         "PREMISE FAILED: the arm must have committed away from moving_piston by now, got {:?}",
         at(&column, arm.0, arm.1, arm.2)
     );
 
-    column.set_block(PISTON_X - 1, Y, ROW_Z, &redstone_torch::set_standing_lit(false));
+    column.set_block_id(PISTON_X - 1, Y, ROW_Z, redstone_torch::set_standing_lit(false));
     let _ = propagate_and_react(
         &mut column,
         0,

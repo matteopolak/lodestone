@@ -6031,7 +6031,7 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
     /// One block, without regenerating or cloning a column.
     ///
     /// This override avoids whole-column regeneration per probe: the
-    /// column-regenerating form (`self.column(cx, cz).block_state(..)`) would
+    /// column-regenerating form (`self.column(cx, cz).block_state_id(..)`) would
     /// regenerate a whole column for every read, and
     /// `crate::server`'s `vitals_tick` calls this every 50 ms on the
     /// connection task. See the module docs.
@@ -6262,6 +6262,7 @@ mod tests {
     use std::sync::{Arc, Barrier, Condvar, Mutex};
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
+    use lodestone_data::block::Block;
     use lodestone_model::BlockPos;
 
     use super::*;
@@ -7053,7 +7054,7 @@ mod tests {
         // form.
         let bare = CountingSource::new();
         for _ in 0..PROBES {
-            let _ = bare.block_state(5, 8, 5);
+            let _ = bare.block_state_id(5, 8, 5);
         }
         assert_eq!(
             bare.calls(),
@@ -7069,7 +7070,7 @@ mod tests {
         let calls = Arc::clone(&counting.calls);
         let store = ChunkStore::new(counting);
         for _ in 0..PROBES {
-            let _ = store.block_state(5, 8, 5);
+            let _ = store.block_state_id(5, 8, 5);
         }
         assert_eq!(
             calls.load(Ordering::Relaxed),
@@ -7171,7 +7172,7 @@ mod tests {
                 "a resident block read must share the coordinate admission boundary"
             );
             assert_eq!(
-                store.as_ref().try_set_block(0, 0, 0, "minecraft:stone"),
+                store.as_ref().try_set_block(0, 0, 0, Block::Stone.default_state()),
                 TryBlockMutation::Busy,
                 "a resident mutation must report the held generation gate instead of waiting"
             );
@@ -7185,7 +7186,7 @@ mod tests {
                 Some(TryResident::Busy)
             ));
             assert!(matches!(
-                erased.try_set_block(0, 0, 0, "minecraft:stone"),
+                erased.try_set_block(0, 0, 0, Block::Stone.default_state()),
                 Some(TryBlockMutation::Busy)
             ));
             assert!(
@@ -7283,7 +7284,7 @@ mod tests {
         let store = ChunkStore::with_capacity(source, 1);
 
         assert_eq!(
-            store.try_set_block(0, 0, 0, "minecraft:stone"),
+            store.try_set_block(0, 0, 0, Block::Stone.default_state()),
             TryBlockMutation::Absent,
             "a cold coordinate must not generate just to apply a tick-side mutation"
         );
@@ -7299,7 +7300,7 @@ mod tests {
 
         let _ = store.column(0, 0);
         assert_eq!(
-            store.try_set_block(0, 0, 0, "minecraft:stone"),
+            store.try_set_block(0, 0, 0, Block::Stone.default_state()),
             TryBlockMutation::Applied,
             "a resident coordinate should accept the nonblocking mutation"
         );
@@ -7311,8 +7312,8 @@ mod tests {
             )
         );
         assert_eq!(
-            store.block_state(0, 0, 0),
-            "minecraft:stone",
+            store.block_state_id(0, 0, 0),
+            Block::Stone.default_state(),
             "the blocking read must preserve the successfully applied resident mutation"
         );
         assert_eq!(generated.load(Ordering::Relaxed), 1);
@@ -7320,8 +7321,8 @@ mod tests {
         let _ = store.column(1, 0);
         assert_eq!(store.evicted(), 1, "capacity one must evict the edited resident");
         assert_eq!(
-            store.block_state(0, 0, 0),
-            "minecraft:stone",
+            store.block_state_id(0, 0, 0),
+            Block::Stone.default_state(),
             "an Applied try mutation must survive resident-cache eviction through the edit ledger"
         );
         assert_eq!(
@@ -7333,7 +7334,7 @@ mod tests {
         let unsupported = ChunkStore::new(CountingSource::new());
         let _ = unsupported.column(0, 0);
         assert_eq!(
-            unsupported.try_set_block(0, 0, 0, "minecraft:stone"),
+            unsupported.try_set_block(0, 0, 0, Block::Stone.default_state()),
             TryBlockMutation::Unsupported,
             "a source with no nonblocking edit ledger must refuse rather than report cache-local Applied"
         );
@@ -7348,7 +7349,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::Relaxed), 0);
         let _ = store.column(-2, 1);
         assert_eq!(calls.load(Ordering::Relaxed), 1, "generation control");
-        store.set_block(-19, 7, 23, "minecraft:stone");
+        store.set_block(-19, 7, 23, Block::Stone.default_state());
         let wrapped = crate::dimension::DimensionalSource::alone(
             Arc::clone(&store), crate::dimension::Dimension::Overworld,
             crate::portal::PortalIndex::default(),
@@ -7381,24 +7382,24 @@ mod tests {
         // would have pushed through.
         let store = ChunkStore::with_capacity(crate::overworld_chunk_source(42), 1);
 
-        let before = store.block_state(0, -50, 0);
+        let before = store.block_state_id(0, -50, 0);
         assert_ne!(
-            before, "minecraft:diamond_block",
+            before, Block::DiamondBlock.default_state(),
             "precondition: the generator must not already have placed the block this test \
              writes, or neither property below means anything"
         );
 
-        store.set_block(0, -50, 0, "minecraft:diamond_block");
+        store.set_block(0, -50, 0, Block::DiamondBlock.default_state());
 
         // Property 1: visible immediately, from the resident column.
         assert_eq!(
-            store.block_state(0, -50, 0),
-            "minecraft:diamond_block",
+            store.block_state_id(0, -50, 0),
+            Block::DiamondBlock.default_state(),
             "an edit must be visible to the next read"
         );
         assert_eq!(
-            store.column(0, 0).block_state(0, -50, 0),
-            "minecraft:diamond_block",
+            store.column(0, 0).block_state_id(0, -50, 0),
+            Block::DiamondBlock.default_state(),
             "an edit must be visible through `column()` too, not only `block_state()`"
         );
 
@@ -7414,8 +7415,8 @@ mod tests {
         // Property 2: still visible after the cached copy is gone, because the
         // regeneration goes back through `OverworldChunkSource::edits`.
         assert_eq!(
-            store.block_state(0, -50, 0),
-            "minecraft:diamond_block",
+            store.block_state_id(0, -50, 0),
+            Block::DiamondBlock.default_state(),
             "an edit must survive eviction of its cache entry — this is what makes the \
              store's capacity bound lossless"
         );
@@ -7548,7 +7549,7 @@ mod tests {
         assert_eq!(
             first_derived, 11,
             "the floor should stop applying at view_radius 11 (render_distance 10), \
-             which is the notch issue #505 reports; it stops at {first_derived}"
+             the capacity floor stops applying at {first_derived}"
         );
         assert_eq!(capacity_for_view_radius(first_derived - 1), DEFAULT_CAPACITY);
         assert_eq!(
@@ -7675,14 +7676,14 @@ mod tests {
                 let stored = store.column(cx, cz);
                 for &(lx, y, lz) in &probes {
                     assert_eq!(
-                        stored.block_state(lx, y, lz),
-                        bare_column.block_state(lx, y, lz),
+                        stored.block_state_id(lx, y, lz),
+                        bare_column.block_state_id(lx, y, lz),
                         "pass {pass}: retained column ({cx}, {cz}) diverged at ({lx}, {y}, {lz})"
                     );
                 }
                 assert_eq!(
-                    store.block_state(cx * 16 + probes[0].0, probes[0].1, cz * 16 + probes[0].2),
-                    bare_column.block_state(probes[0].0, probes[0].1, probes[0].2),
+                    store.block_state_id(cx * 16 + probes[0].0, probes[0].1, cz * 16 + probes[0].2),
+                    bare_column.block_state_id(probes[0].0, probes[0].1, probes[0].2),
                     "pass {pass}: the `block_state` override diverged from `column()`"
                 );
             }
@@ -7721,19 +7722,19 @@ mod tests {
         // sections pack to is the production one. 12 states + air = 13 => 4 bits
         // for a section drawing from all of them, and the surface band draws
         // from more of them than the deep band, exactly as real terrain does.
-        const STATES: [&str; 12] = [
-            "minecraft:stone",
-            "minecraft:deepslate",
-            "minecraft:dirt",
-            "minecraft:gravel",
-            "minecraft:andesite",
-            "minecraft:diorite",
-            "minecraft:granite",
-            "minecraft:grass_block[snowy=false]",
-            "minecraft:water[level=0]",
-            "minecraft:coal_ore",
-            "minecraft:iron_ore",
-            "minecraft:sand",
+        let states = [
+            Block::Stone.default_state(),
+            Block::Deepslate.default_state(),
+            Block::Dirt.default_state(),
+            Block::Gravel.default_state(),
+            Block::Andesite.default_state(),
+            Block::Diorite.default_state(),
+            Block::Granite.default_state(),
+            Block::GrassBlock.default_state(),
+            Block::Water.default_state(),
+            Block::CoalOre.default_state(),
+            Block::IronOre.default_state(),
+            Block::Sand.default_state(),
         ];
         // Surface at the midpoint: 12 packed sections and 12 uniform air ones,
         // which is the split that reproduces the measured real figure (see the
@@ -7749,10 +7750,7 @@ mod tests {
                         .wrapping_mul(31)
                         .wrapping_add((z as usize).wrapping_mul(7))
                         .wrapping_add((y - min_y) as usize);
-                    let state = lodestone_data::block_states::StateId::from_state_str(
-                        STATES[n % STATES.len()],
-                    )
-                    .expect("fixture state is canonical");
+                    let state = states[n % states.len()];
                     column.set_block_id(x, y, z, state);
                 }
             }
@@ -8134,7 +8132,7 @@ mod tests {
         // The edited block is in the relative centre. Every retained centre
         // in the 3x3 footprint must now be recomputed, while a centre two
         // chunks away is outside the dependency radius.
-        store.set_block(1, 0, 1, "minecraft:gold_block");
+        store.set_block(1, 0, 1, Block::GoldBlock.default_state());
         for &(cx, cz) in &footprint {
             assert_eq!(
                 store
@@ -8150,7 +8148,7 @@ mod tests {
         *unrelated_light.sky_mut(0) = lodestone_world::LightData::Uniform(9);
         unrelated.set_retained_light(unrelated_light.clone());
         assert!(store.store_resident_column(2, 0, &unrelated));
-        store.set_block(1, 0, 1, "minecraft:iron_block");
+        store.set_block(1, 0, 1, Block::IronBlock.default_state());
         assert_eq!(
             store
                 .resident_column(2, 0)
@@ -8615,7 +8613,7 @@ mod tests {
             let mutation_finished_for_thread = Arc::clone(&mutation_finished);
             scope.spawn(move || {
                 mutation_attempted_for_thread.store(true, Ordering::Release);
-                mutation_store.set_block(1, 0, 1, "minecraft:gold_block");
+                mutation_store.set_block(1, 0, 1, Block::GoldBlock.default_state());
                 mutation_finished_for_thread.store(true, Ordering::Release);
             });
 
@@ -8650,8 +8648,8 @@ mod tests {
             .expect("race source persistence lock poisoned")
             .clone();
         assert_eq!(
-            after_mutation.block_state(1, 0, 1),
-            "minecraft:gold_block",
+            after_mutation.block_state_id(1, 0, 1),
+            Block::GoldBlock.default_state(),
             "the delayed old refresh must not replace the newer persisted block"
         );
         assert_eq!(
@@ -8674,8 +8672,8 @@ mod tests {
             .expect("race source persistence lock poisoned")
             .clone();
         assert_eq!(
-            persisted_newest.block_state(1, 0, 1),
-            "minecraft:gold_block"
+            persisted_newest.block_state_id(1, 0, 1),
+            Block::GoldBlock.default_state()
         );
         assert_eq!(persisted_newest.retained_light(), Some(&newest_light));
         assert_eq!(
@@ -8785,21 +8783,21 @@ mod tests {
 
             // The mutation is not allowed to wait for the light computation;
             // only the short snapshot/commit sections own the coordinate gate.
-            store.set_block(1, 0, 1, "minecraft:gold_block");
+            store.set_block(1, 0, 1, Block::GoldBlock.default_state());
             let after_mutation = store
                 .resident_column(0, 0)
                 .expect("the mutation leaves the column resident");
             assert_eq!(
-                after_mutation.block_state(1, 0, 1),
-                "minecraft:gold_block"
+                after_mutation.block_state_id(1, 0, 1),
+                Block::GoldBlock.default_state()
             );
             assert_eq!(after_mutation.retained_light(), None);
             assert_eq!(
                 persisted
                     .lock()
                     .expect("revision source persistence lock poisoned")
-                    .block_state(1, 0, 1),
-                "minecraft:gold_block"
+                    .block_state_id(1, 0, 1),
+                Block::GoldBlock.default_state()
             );
 
             let (released, wake) = &*release;
@@ -8824,7 +8822,7 @@ mod tests {
         let settled = store
             .settle_resident_column_light(0, 0, &current, true, &mut compute)
             .expect("the refresh over the newer block must commit");
-        assert_eq!(settled.block_state(1, 0, 1), "minecraft:gold_block");
+        assert_eq!(settled.block_state_id(1, 0, 1), Block::GoldBlock.default_state());
         assert!(matches!(
             settled.retained_light().map(|light| light.sky(0)),
             Some(lodestone_world::LightData::Uniform(9))
@@ -8833,7 +8831,7 @@ mod tests {
             .lock()
             .expect("revision source persistence lock poisoned")
             .clone();
-        assert_eq!(persisted.block_state(1, 0, 1), "minecraft:gold_block");
+        assert_eq!(persisted.block_state_id(1, 0, 1), Block::GoldBlock.default_state());
         assert_eq!(persisted.retained_light(), settled.retained_light());
         assert_eq!(store_calls.load(Ordering::Acquire), 2);
     }
@@ -8882,8 +8880,8 @@ mod tests {
                             .find(|(dx, dz, _)| (*dx, *dz) == (1, 0))
                             .expect("the east dependency is captured")
                             .2
-                            .block_state(1, 0, 1),
-                        "minecraft:air"
+                            .block_state_id(1, 0, 1),
+                        StateId::AIR
                     );
                     refresh_captured.store(true, Ordering::Release);
                     let (released, wake) = &*refresh_release;
@@ -8914,13 +8912,13 @@ mod tests {
             while !captured.load(Ordering::Acquire) {
                 std::thread::yield_now();
             }
-            store.set_block(17, 0, 1, "minecraft:gold_block");
+            store.set_block(17, 0, 1, Block::GoldBlock.default_state());
             assert_eq!(
                 store
                     .resident_column(1, 0)
                     .expect("the east neighbour remains resident")
-                    .block_state(1, 0, 1),
-                "minecraft:gold_block"
+                    .block_state_id(1, 0, 1),
+                Block::GoldBlock.default_state()
             );
             let (released, wake) = &*release;
             *released
@@ -8972,8 +8970,8 @@ mod tests {
             store
                 .resident_column(1, 0)
                 .expect("the east neighbour remains resident")
-                .block_state(1, 0, 1),
-            "minecraft:gold_block"
+                .block_state_id(1, 0, 1),
+            Block::GoldBlock.default_state()
         );
     }
 
@@ -9048,7 +9046,7 @@ mod tests {
             let mutation_store = Arc::clone(&store);
             let mutation = scope.spawn(move || {
                 mutation_started_for_thread.store(true, Ordering::Release);
-                mutation_store.set_block(17, 0, 1, "minecraft:gold_block");
+                mutation_store.set_block(17, 0, 1, Block::GoldBlock.default_state());
                 mutation_finished_for_thread.store(true, Ordering::Release);
             });
             while !mutation_started.load(Ordering::Acquire) {
@@ -9075,8 +9073,8 @@ mod tests {
             store
                 .resident_column(1, 0)
                 .expect("the east neighbour remains resident")
-                .block_state(1, 0, 1),
-            "minecraft:gold_block"
+                .block_state_id(1, 0, 1),
+            Block::GoldBlock.default_state()
         );
         let current = store
             .resident_column(0, 0)
@@ -9105,8 +9103,8 @@ mod tests {
             Some(&lodestone_world::LightData::Uniform(9))
         );
         assert_eq!(
-            settled.block_state(1, 0, 1),
-            "minecraft:air",
+            settled.block_state_id(1, 0, 1),
+            StateId::AIR,
             "the centre has no terrain mutation from the east neighbour write"
         );
     }
@@ -9192,7 +9190,7 @@ mod tests {
             let mutation_finished_for_thread = Arc::clone(&mutation_finished);
             let mutation = scope.spawn(move || {
                 mutation_started_for_thread.store(true, Ordering::Release);
-                mutation_store.set_block(1, 0, 1, "minecraft:gold_block");
+                mutation_store.set_block(1, 0, 1, Block::GoldBlock.default_state());
                 mutation_finished_for_thread.store(true, Ordering::Release);
             });
             while !mutation_started.load(Ordering::Acquire) {
@@ -9215,24 +9213,24 @@ mod tests {
                     .expect("ensure race generated-column lock poisoned")
                     .as_ref()
                     .expect("the cold source must return a generated column")
-                    .block_state(1, 0, 1),
-                "minecraft:air",
+                    .block_state_id(1, 0, 1),
+                StateId::AIR,
                 "the in-flight generation observed the pre-write terrain"
             );
             mutation.join().expect("ordered block write must not panic");
         });
         assert!(mutation_finished.load(Ordering::Acquire));
         assert_eq!(
-            store.column(0, 0).block_state(1, 0, 1),
-            "minecraft:gold_block",
+            store.column(0, 0).block_state_id(1, 0, 1),
+            Block::GoldBlock.default_state(),
             "the cache must retain the edit that followed generation"
         );
         assert_eq!(
             persisted
                 .lock()
                 .expect("ensure race persistence lock poisoned")
-                .block_state(1, 0, 1),
-            "minecraft:gold_block"
+                .block_state_id(1, 0, 1),
+            Block::GoldBlock.default_state()
         );
         assert_eq!(store.generated(), 1);
     }
@@ -9299,15 +9297,15 @@ mod tests {
             "light-only snapshots must not become permanent terrain edits"
         );
 
-        store.set_block(15 * 16 + 1, 0, 1, "minecraft:gold_block");
+        store.set_block(15 * 16 + 1, 0, 1, Block::GoldBlock.default_state());
         let edits = edits.lock().expect("edit ledger lock poisoned");
         assert_eq!(edits.len(), 1, "a real block write still enters the edit ledger");
         assert_eq!(
             edits
                 .get(&(15, 0))
                 .expect("the edited coordinate is retained")
-                .block_state(1, 0, 1),
-            "minecraft:gold_block"
+                .block_state_id(1, 0, 1),
+            Block::GoldBlock.default_state()
         );
     }
 
@@ -9411,9 +9409,7 @@ mod tests {
         assert_eq!(
             remote, 0,
             "the remote hopper's column {REMOTE_CHUNK:?} was generated {remote} times over \
-             {TICKS} ticks. Pre-#504 this was 1 (the store pinning a column it had already \
-             probed); {TICKS} was issue #503's lead (one cold column per tick, no pinning at \
-             all). 0 is the fix: a hopper whose chunk is never loaded is never probed."
+             {TICKS} ticks. A hopper whose chunk is never loaded must never be probed."
         );
         assert_eq!(
             calls.load(Ordering::Relaxed),
@@ -9528,9 +9524,8 @@ mod tests {
             assert_eq!(
                 generations_for(&per_chunk, chunk),
                 0,
-                "band {chunk:?} ({} blocks out): the remote column must never be generated at \
-                 all — a nonzero, band-dependent count here would be the distance-dependent CPU \
-                 term issue #503's lead predicted, now supposedly fixed.",
+                "band {chunk:?} ({} blocks out): the remote column must never be generated; \
+                 a nonzero, band-dependent count would expose distance-dependent tick work.",
                 chunk.0 * 16
             );
             assert_eq!(
@@ -10073,7 +10068,7 @@ mod tests {
     fn halo_keeps_a_cold_revision_record_until_stale_commit_is_rejected() {
         let store = ChunkStore::with_capacity(CountingSource::new(), 1);
         let halo = store.lease_halo(&[(0, 0)]).unwrap();
-        store.set_block(0, 0, 0, "minecraft:stone");
+        store.set_block(0, 0, 0, Block::Stone.default_state());
 
         assert_eq!(
             store.write_gates.state.lock().unwrap().len(),
@@ -10322,7 +10317,7 @@ mod tests {
             session,
             fingerprint,
             Some(destination),
-            "minecraft:stone",
+            Block::Stone.default_state(),
         );
     }
 
@@ -10330,7 +10325,7 @@ mod tests {
         session: &mut GenerationSession,
         fingerprint: u8,
         destination: BlockCoordinate,
-        state: &str,
+        state: StateId,
     ) {
         complete_end_suffix_inner_with_state(session, fingerprint, Some(destination), state);
     }
@@ -10344,7 +10339,7 @@ mod tests {
             session,
             fingerprint,
             mutation_destination,
-            "minecraft:stone",
+            Block::Stone.default_state(),
         );
     }
 
@@ -10352,7 +10347,7 @@ mod tests {
         session: &mut GenerationSession,
         fingerprint: u8,
         mutation_destination: Option<BlockCoordinate>,
-        mutation_state: &str,
+        mutation_state: StateId,
     ) {
         complete_end_suffix_inner_with_state_and_output(
             session,
@@ -10367,7 +10362,7 @@ mod tests {
         session: &mut GenerationSession,
         fingerprint: u8,
         mutation_destination: Option<BlockCoordinate>,
-        mutation_state: &str,
+        mutation_state: StateId,
         output_column: Option<ChunkColumn>,
     ) {
         use lodestone_worldgen::stage_schedule::{ColumnStage, Dimension};
@@ -10382,7 +10377,7 @@ mod tests {
             .expect("End feature source is valid");
         if let Some(destination) = mutation_destination {
             transaction
-                .push(0, destination, mutation_state.to_owned())
+                .push(0, destination, mutation_state)
                 .expect("End feature spill is valid");
         }
         session
@@ -10599,13 +10594,13 @@ mod tests {
             0,
             4,
             0,
-            StateId::from_state_str("minecraft:stone").expect("test state is canonical"),
+            Block::Stone.default_state(),
         );
         complete_end_suffix_inner_with_state_and_output(
             &mut destination_session,
             4,
             None,
-            "minecraft:air",
+            StateId::AIR,
             Some(destination_output),
         );
         ledger
@@ -10623,7 +10618,7 @@ mod tests {
         let output = ledger
             .output_column(END_PIPELINE, destination)
             .expect("the completed destination remains available after settlement");
-        assert_eq!(output.block_state(0, 4, 0), "minecraft:stone");
+        assert_eq!(output.block_state_id(0, 4, 0), Block::Stone.default_state());
 
         let identity = END_PIPELINE.identity(PipelineOptions::ALL);
         let mut duplicate = end_shaped_session_at((0, 0), 1, 1);
@@ -10640,7 +10635,7 @@ mod tests {
             &mut conflicting,
             9,
             destination_block,
-            "minecraft:dirt",
+            Block::Dirt.default_state(),
         );
         ledger
             .admit(END_PIPELINE, conflicting.admission_order())
@@ -10676,8 +10671,8 @@ mod tests {
             ledger
                 .output_column(END_PIPELINE, destination)
                 .expect("settled output remains authoritative")
-                .block_state(0, 4, 0),
-            "minecraft:stone"
+                .block_state_id(0, 4, 0),
+            Block::Stone.default_state()
         );
         assert!(ledger.revision(identity, destination).unwrap() > 0);
     }
@@ -10689,16 +10684,16 @@ mod tests {
         let west_block = BlockCoordinate::new(0, 4, 0);
         let east_block = BlockCoordinate::new(16, 4, 0);
         let mut west_output = ChunkColumn::new(0, 16);
-        west_output.set_block(0, 4, 0, "minecraft:stone");
+        west_output.set_block_id(0, 4, 0, Block::Stone.default_state());
         let mut east_output = ChunkColumn::new(0, 16);
-        east_output.set_block(0, 4, 0, "minecraft:stone");
+        east_output.set_block_id(0, 4, 0, Block::Stone.default_state());
 
         let mut west = end_shaped_session_at((0, 0), 1, 1);
         complete_end_suffix_inner_with_state_and_output(
             &mut west,
             2,
             Some(east_block),
-            "minecraft:stone",
+            Block::Stone.default_state(),
             Some(west_output.clone()),
         );
         let mut east = end_shaped_session_at((1, 0), 3, 1);
@@ -10706,7 +10701,7 @@ mod tests {
             &mut east,
             4,
             Some(west_block),
-            "minecraft:stone",
+            Block::Stone.default_state(),
             Some(east_output.clone()),
         );
 
@@ -10729,15 +10724,15 @@ mod tests {
             ledger
                 .output_column(END_PIPELINE, (0, 0))
                 .unwrap()
-                .block_state(0, 4, 0),
-            "minecraft:stone"
+                .block_state_id(0, 4, 0),
+            Block::Stone.default_state()
         );
         assert_eq!(
             ledger
                 .output_column(END_PIPELINE, (1, 0))
                 .unwrap()
-                .block_state(0, 4, 0),
-            "minecraft:stone"
+                .block_state_id(0, 4, 0),
+            Block::Stone.default_state()
         );
 
         let future_block = BlockCoordinate::new(48, 5, 0);
@@ -10768,7 +10763,7 @@ mod tests {
         let mut source = end_shaped_session_at((1, 0), 1, 1);
         complete_end_suffix_with_mutation(&mut source, 2, destination);
         let mut wrong_output = ChunkColumn::new(0, 16);
-        wrong_output.set_block(0, 4, 0, "minecraft:dirt");
+        wrong_output.set_block_id(0, 4, 0, Block::Dirt.default_state());
 
         let mut ledger = GenerationLedger::new();
         ledger.admit(END_PIPELINE, source.admission_order()).unwrap();

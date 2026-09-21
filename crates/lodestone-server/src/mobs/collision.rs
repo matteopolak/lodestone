@@ -417,7 +417,7 @@ mod live_mob_collision_tests {
             let y = sim.get(id).expect("cow remains live").position().y;
             assert!(
                 (y - expected_y).abs() < 1.0e-9,
-                "{state} must resolve to its real collision top {expected_y}, got {y}"
+                "{state_name} must resolve to its real collision top {expected_y}, got {y}"
             );
         }
     }

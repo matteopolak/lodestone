@@ -5988,7 +5988,7 @@ mod tests {
                 let state = if across == -1 || across == 2 || up == -1 || up == 3 {
                     state_id("minecraft:obsidian")
                 } else {
-                    lodestone_data::block_states::StateId::air_state()
+                    lodestone_data::block_states::StateId::AIR
                 };
                 world.set_block(origin.x + across, origin.y + up, origin.z, state);
             }
@@ -6012,7 +6012,7 @@ mod tests {
         }
 
         fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> lodestone_data::block_states::StateId {
-            lodestone_data::block_states::StateId::air_state()
+            lodestone_data::block_states::StateId::AIR
         }
 
         fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {

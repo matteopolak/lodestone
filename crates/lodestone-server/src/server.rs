@@ -19444,8 +19444,17 @@ mod tests {
     }
 
     struct EndGatewaySource {
-        state: String,
+        state: StateId,
         generated: Option<(BlockPos, BlockEntity)>,
+    }
+
+    fn default_block_state(block: Block) -> StateId {
+        Properties::state_for_block(block, &Properties::empty())
+            .expect("generated default block state")
+    }
+
+    fn fixture_state(state: &str) -> StateId {
+        StateId::from_state_str(state).expect("fixture state")
     }
 
     impl ChunkSource for EndGatewaySource {
@@ -19454,7 +19463,7 @@ mod tests {
         }
 
         fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
-            StateId::from_state_str(&self.state).expect("fixture gateway state")
+            self.state
         }
 
         fn block_entity(&self, x: i32, y: i32, z: i32) -> Option<BlockEntity> {
@@ -19580,8 +19589,18 @@ mod tests {
             &mut state,
             &HashSet::from([(0, 0)]),
             vec![
-                (1, 64, 1, "minecraft:grass_block".to_owned()),
-                (17, 64, 1, "minecraft:dirt".to_owned()),
+                (
+                    1,
+                    64,
+                    1,
+                    default_block_state(Block::GrassBlock),
+                ),
+                (
+                    17,
+                    64,
+                    1,
+                    default_block_state(Block::Dirt),
+                ),
             ],
         )
         .await
@@ -19604,7 +19623,7 @@ mod tests {
     fn gateway_contact_reads_generated_metadata_and_prefers_live_registry() {
         let gateway = BlockPos::new(12, 70, -4);
         let source = EndGatewaySource {
-            state: crate::portal::END_GATEWAY_BLOCK.to_owned(),
+            state: default_block_state(crate::portal::END_GATEWAY_BLOCK),
             generated: Some((
                 gateway,
                 BlockEntity::EndGateway {
@@ -19637,7 +19656,7 @@ mod tests {
         );
 
         let removed = EndGatewaySource {
-            state: "minecraft:air".to_owned(),
+            state: StateId::AIR,
             generated: source.generated.clone(),
         };
         assert_eq!(
@@ -19647,7 +19666,7 @@ mod tests {
         );
 
         let missing_metadata = EndGatewaySource {
-            state: crate::portal::END_GATEWAY_BLOCK.to_owned(),
+            state: default_block_state(crate::portal::END_GATEWAY_BLOCK),
             generated: None,
         };
         assert_eq!(
@@ -19677,7 +19696,7 @@ mod tests {
     fn gateway_contact_production_decision_updates_position_and_cooldown() {
         let gateway = BlockPos::new(12, 70, -4);
         let source = EndGatewaySource {
-            state: crate::portal::END_GATEWAY_BLOCK.to_owned(),
+            state: default_block_state(crate::portal::END_GATEWAY_BLOCK),
             generated: Some((
                 gateway,
                 BlockEntity::EndGateway {
@@ -19714,7 +19733,7 @@ mod tests {
         .is_none());
         assert!(resolve_end_gateway_contact(
             &EndGatewaySource {
-                state: crate::portal::END_GATEWAY_BLOCK.to_owned(),
+                state: default_block_state(crate::portal::END_GATEWAY_BLOCK),
                 generated: None,
             },
             &registry,
@@ -22711,7 +22730,7 @@ mod tests {
             outcome,
             ComposterUseOutcome::Consumed {
                 remainder: Some(stack("minecraft:oak_leaves", 2)),
-                block_state: Some("minecraft:composter[level=1]".to_string()),
+                block_state: Some(fixture_state("minecraft:composter[level=1]")),
             }
         );
         assert_eq!(composter_level(&block_entities, pos), 1);
@@ -22729,7 +22748,7 @@ mod tests {
             outcome,
             ComposterUseOutcome::Consumed {
                 remainder: None,
-                block_state: Some("minecraft:composter[level=1]".to_string()),
+                block_state: Some(fixture_state("minecraft:composter[level=1]")),
             }
         );
         assert_eq!(inventory.native(0), None, "the selected slot is empty after the click");
@@ -22832,7 +22851,7 @@ mod tests {
         assert_eq!(
             outcome,
             ComposterUseOutcome::Extracted {
-                block_state: "minecraft:composter[level=0]".to_string(),
+                block_state: fixture_state("minecraft:composter[level=0]"),
             }
         );
         assert_eq!(composter_level(&block_entities, pos), 0);
@@ -22871,7 +22890,7 @@ mod tests {
         assert_eq!(
             outcome,
             ComposterUseOutcome::Extracted {
-                block_state: "minecraft:composter[level=0]".to_string(),
+                block_state: fixture_state("minecraft:composter[level=0]"),
             }
         );
         assert_eq!(
@@ -22902,7 +22921,7 @@ mod tests {
         assert_eq!(
             outcome,
             ComposterUseOutcome::Extracted {
-                block_state: "minecraft:composter[level=0]".to_string(),
+                block_state: fixture_state("minecraft:composter[level=0]"),
             }
         );
         assert_eq!(
@@ -23108,7 +23127,7 @@ mod tests {
             pitch: Some(0.0),
             sneaking: false,
         };
-        let air = |_: BlockPos| WorldState::from("minecraft:air");
+        let air = |_: BlockPos| WorldState::from(StateId::AIR);
         let state = |block: &str, yaw: Option<f32>| {
             placed_block_state(
                 Block::from_name(block.strip_prefix("minecraft:").unwrap_or(block))
