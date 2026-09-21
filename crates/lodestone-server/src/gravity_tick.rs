@@ -144,45 +144,7 @@ use lodestone_model::{BlockPos, Vec3};
 use lodestone_data::block::Block;
 use lodestone_data::block_states::StateId;
 
-#[cfg(test)]
-use crate::chunk::is_air_or_fluid;
 use crate::scheduled_tick::{ScheduledTick, ScheduledTickKind, ScheduledTickQueue, TickPriority};
-
-#[cfg(test)]
-pub const SAND: &str = "minecraft:sand";
-#[cfg(test)]
-pub const RED_SAND: &str = "minecraft:red_sand";
-#[cfg(test)]
-pub const GRAVEL: &str = "minecraft:gravel";
-
-/// `true` for a plain falling-block base name this crate models. The real
-/// engine
-/// also has concrete powder, anvils and pointed dripstone as
-/// falling-block subclasses; not covered here (none appear in this crate's
-/// worldgen — see `crate::chunk`'s module doc — so extending this table has
-/// no way to be exercised end to end yet, the same reasoning
-/// `crate::growth_tick` gives for not inventing tree placement).
-#[must_use]
-#[cfg(test)]
-pub fn is_gravity_block(base: &str) -> bool {
-    matches!(base, SAND | RED_SAND | GRAVEL)
-}
-
-/// The real "is free" check, narrowed to what this
-/// crate can check. Its air/liquid clause maps directly onto
-/// `crate::chunk::is_air_or_fluid`. Its fire-tag clause and
-/// its generic can-be-replaced clause are not modeled here: `crate::fire::is_fire` could
-/// answer the first now that this crate has a real fire block, but nothing
-/// wires it into this predicate yet, and there is still no generic "can be
-/// replaced" predicate beyond `is_air_or_fluid` itself (`crate::chunk`'s own
-/// doc comment: that function already *is* this crate's "can a placement
-/// replace this cell" test) — so the two disjuncts this crate has are the
-/// whole set it can evaluate, not an arbitrarily narrowed subset.
-#[must_use]
-#[cfg(test)]
-pub fn is_free(state: &str) -> bool {
-    is_air_or_fluid(state)
-}
 
 #[must_use]
 pub fn is_gravity_state(state: StateId) -> bool {
@@ -446,28 +408,28 @@ mod tests {
 
     #[test]
     fn sand_red_sand_and_gravel_are_gravity_blocks() {
-        assert!(is_gravity_block(SAND));
-        assert!(is_gravity_block(RED_SAND));
-        assert!(is_gravity_block(GRAVEL));
+        for block in [Block::Sand, Block::RedSand, Block::Gravel] {
+            assert!(is_gravity_state(block.default_state()));
+        }
     }
 
     #[test]
     fn stone_and_dirt_are_not_gravity_blocks() {
-        assert!(!is_gravity_block("minecraft:stone"));
-        assert!(!is_gravity_block("minecraft:dirt"));
+        assert!(!is_gravity_state(Block::Stone.default_state()));
+        assert!(!is_gravity_state(Block::Dirt.default_state()));
     }
 
     #[test]
     fn air_and_water_are_free() {
-        assert!(is_free("minecraft:air"));
-        assert!(is_free("minecraft:cave_air"));
-        assert!(is_free("minecraft:water[level=0]"));
+        assert!(is_free_state(Block::Air.default_state()));
+        assert!(is_free_state(Block::CaveAir.default_state()));
+        assert!(is_free_state(Block::Water.default_state()));
     }
 
     #[test]
     fn solid_stone_is_not_free() {
-        assert!(!is_free("minecraft:stone"));
-        assert!(!is_free("minecraft:gravel"));
+        assert!(!is_free_state(Block::Stone.default_state()));
+        assert!(!is_free_state(Block::Gravel.default_state()));
     }
 
     /// Predicted value: a column of pure air below `start_y` all the way to
@@ -516,10 +478,7 @@ mod tests {
     #[test]
     fn placing_a_gravity_block_schedules_one_tick_at_its_own_position_two_ticks_out() {
         let pos = BlockPos::new(12, 70, -5);
-        let scheduled = ticks_after_place_id(
-            pos,
-            StateId::from_state_str(SAND).expect("generated sand state"),
-        );
+        let scheduled = ticks_after_place_id(pos, Block::Sand.default_state());
 
         assert_eq!(scheduled.len(), 1, "one tick, not one per neighbour");
         let tick = &scheduled[0];
@@ -540,8 +499,7 @@ mod tests {
     /// schedule nothing.
     #[test]
     fn only_gravity_blocks_schedule() {
-        for state in [SAND, RED_SAND, GRAVEL] {
-            let state = StateId::from_state_str(state).expect("generated test state");
+        for state in [Block::Sand, Block::RedSand, Block::Gravel].map(Block::default_state) {
             assert_eq!(
                 ticks_after_place_id(BlockPos::new(0, 64, 0), state).len(),
                 1,
@@ -549,14 +507,14 @@ mod tests {
             );
         }
         for state in [
-            "minecraft:stone",
-            "minecraft:torch",
-            "minecraft:air",
-            // A falling-block subclass this crate deliberately does not model.
-            "minecraft:anvil",
-            "minecraft:white_concrete_powder",
-        ] {
-            let state = StateId::from_state_str(state).expect("generated test state");
+            Block::Stone,
+            Block::Torch,
+            Block::Air,
+            Block::Anvil,
+            Block::WhiteConcretePowder,
+        ]
+        .map(Block::default_state)
+        {
             assert!(ticks_after_place_id(BlockPos::new(0, 64, 0), state).is_empty());
         }
     }

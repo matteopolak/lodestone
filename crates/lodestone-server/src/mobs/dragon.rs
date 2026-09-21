@@ -1191,7 +1191,10 @@ mod tests {
         // that silently dropped `end_spike_blocks`' guarded branch would
         // fail this while still passing the raw count check above.
         assert!(
-            init_a.block_writes.iter().any(|w| w.state.starts_with("minecraft:iron_bars")),
+            init_a
+                .block_writes
+                .iter()
+                .any(|write| write.state.block() == lodestone_data::block::Block::IronBars),
             "expected at least one iron-bars cage write — got none"
         );
     }

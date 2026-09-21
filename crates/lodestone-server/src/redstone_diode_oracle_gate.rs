@@ -55,6 +55,8 @@ use crate::neighbor_update::Direction;
 use crate::random_tick::propagate_and_react;
 use crate::scheduled_tick::ScheduledTickQueue;
 use crate::{redstone, redstone_diode, redstone_observer, redstone_torch, redstone_wire};
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 use lodestone_model::BlockPos;
 
 const MIN_Y: i32 = -64;
@@ -132,14 +134,14 @@ fn column_with_floor() -> ChunkColumn {
     let mut column = ChunkColumn::new(MIN_Y, HEIGHT);
     for x in 0..16 {
         for z in 0..16 {
-            column.set_block(x, FLOOR_Y, z, "minecraft:stone");
+            column.set_block_id(x, FLOOR_Y, z, Block::Stone.default_state());
         }
     }
     column
 }
 
-fn at(column: &ChunkColumn, x: i32, y: i32, z: i32) -> String {
-    column.block_state(x, y, z).to_string()
+fn at(column: &ChunkColumn, x: i32, y: i32, z: i32) -> StateId {
+    column.block_state_id(x, y, z)
 }
 
 /// Every entry `propagate_and_react` scheduled, as
@@ -170,7 +172,7 @@ fn find(entries: &[((i32, i32, i32), String, u64)], pos: (i32, i32, i32), kind: 
 /// `redstone::input_signal` reads `facing.relative(pos)`, which is that.
 fn repeater_rig(delay: u32, powered: bool, source_lit: bool) -> ChunkColumn {
     let mut column = column_with_floor();
-    column.set_block(1, Y, ROW_Z, &redstone_torch::set_standing_lit(source_lit));
+    column.set_block_id(1, Y, ROW_Z, redstone_torch::set_standing_lit(source_lit));
     // The dust holds its PRE-flip powers: the torch has just changed and the
     // propagation under test is what re-derives them. Seeding the dust with
     // its settled value instead makes the rig vacuous — no dust power changes,
@@ -178,10 +180,10 @@ fn repeater_rig(delay: u32, powered: bool, source_lit: bool) -> ChunkColumn {
     // first draft of this file did exactly that and the locking test's control
     // arm is what caught it.
     let (near, far) = if source_lit { (0, 0) } else { (15, 14) };
-    column.set_block(2, Y, ROW_Z, &redstone_wire::set_power(near));
-    column.set_block(3, Y, ROW_Z, &redstone_wire::set_power(far));
-    column.set_block(4, Y, ROW_Z, &redstone_diode::set_repeater(Direction::West, delay, false, powered));
-    column.set_block(5, Y, ROW_Z, &redstone_wire::set_power(0));
+    column.set_block_id(2, Y, ROW_Z, redstone_wire::set_power(near));
+    column.set_block_id(3, Y, ROW_Z, redstone_wire::set_power(far));
+    column.set_block_id(4, Y, ROW_Z, redstone_diode::set_repeater(Direction::West, delay, false, powered));
+    column.set_block_id(5, Y, ROW_Z, redstone_wire::set_power(0));
     column
 }
 
@@ -294,11 +296,11 @@ fn a_repeater_scheduled_tick_produces_the_powered_state_the_live_server_showed()
          (x=3, y={Y}, z={ROW_Z}) ({:?}), so this test would pass whatever the flip did",
         at(&column, 3, Y, ROW_Z)
     );
-    match redstone_diode::run_scheduled_tick(&state, should_on) {
+    match redstone_diode::run_scheduled_tick(state, should_on) {
         redstone_diode::RepeaterTickOutcome::TurnedOn { new_state, reschedule } => {
-            assert!(redstone::diode_powered(&new_state), "flip produced {new_state:?}, still unpowered");
+            assert!(redstone::diode_powered(new_state), "flip produced {new_state:?}, still unpowered");
             assert!(!reschedule, "input is still high, so no pulse-quantization reschedule is due");
-            column.set_block(4, Y, ROW_Z, &new_state);
+            column.set_block_id(4, Y, ROW_Z, new_state);
         }
         other => panic!("expected the repeater to turn on, got {other:?}"),
     }
@@ -307,7 +309,7 @@ fn a_repeater_scheduled_tick_produces_the_powered_state_the_live_server_showed()
     // live server measured (a repeater's output dust reads 15).
     let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
     let events = propagate_and_react(&mut column, 0, 0, 4, Y, ROW_Z, &mut block_ticks, NOW);
-    let out = redstone::wire_power(&at(&column, 5, Y, ROW_Z));
+    let out = redstone::wire_power(at(&column, 5, Y, ROW_Z));
     assert_eq!(
         out, 15,
         "output dust at (x=5, y={Y}, z={ROW_Z}) carries power {out}; the live server measured 15 \
@@ -323,7 +325,7 @@ fn a_repeater_scheduled_tick_produces_the_powered_state_the_live_server_showed()
             events.iter().map(|e| e.pos).collect::<Vec<_>>()
         )
     });
-    assert_eq!(redstone::wire_power(&published.to), 15);
+    assert_eq!(redstone::wire_power(published.to), 15);
 }
 
 /// **Repeater locking**, a trap worth naming explicitly.
@@ -348,7 +350,7 @@ fn only_a_powered_diode_facing_the_right_way_locks_a_repeater() {
     // The main repeater faces west, so its side positions are north (z-1) and
     // south (z+1); a diode at the south position must have facing=south to be
     // seen, because DiodeBlock.getSignal only answers for its own FACING.
-    let cases: &[(&str, Option<String>, bool)] = &[
+    let cases: &[(&str, Option<StateId>, bool)] = &[
         ("nothing", None, false),
         (
             "powered repeater facing=south",
@@ -371,7 +373,7 @@ fn only_a_powered_diode_facing_the_right_way_locks_a_repeater() {
     for (label, side, oracle_locked) in cases {
         let mut column = repeater_rig(1, false, true);
         if let Some(side_state) = side {
-            column.set_block(4, Y, ROW_Z + 1, side_state);
+            column.set_block_id(4, Y, ROW_Z + 1, *side_state);
         }
         let locked = redstone_diode::is_locked(
             &redstone::make_lookup(&column, 0, 0),
@@ -401,8 +403,8 @@ fn only_a_powered_diode_facing_the_right_way_locks_a_repeater() {
 fn a_locked_repeater_schedules_nothing_while_the_same_rig_unlocked_schedules_at_two_ticks() {
     // Locked arm.
     let mut column = repeater_rig(1, false, true);
-    column.set_block(4, Y, ROW_Z + 1, &redstone_diode::set_repeater(Direction::South, 1, false, true));
-    column.set_block(4, Y, ROW_Z, &redstone_diode::set_repeater(Direction::West, 1, true, false));
+    column.set_block_id(4, Y, ROW_Z + 1, redstone_diode::set_repeater(Direction::South, 1, false, true));
+    column.set_block_id(4, Y, ROW_Z, redstone_diode::set_repeater(Direction::West, 1, true, false));
     let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
     let _ = propagate_and_react(&mut column, 0, 0, 1, Y, ROW_Z, &mut block_ticks, NOW);
     let locked_entries = scheduled(&mut block_ticks);
@@ -498,14 +500,14 @@ fn comparator_output_matches_the_live_server_in_both_modes() {
 fn comparator_rig(subtract: bool, with_side: bool) -> ChunkColumn {
     let mut column = column_with_floor();
     // Input arm (west): torch at x=6, dust at x=7 -> power 15.
-    column.set_block(6, Y, ROW_Z, &redstone_torch::set_standing_lit(true));
-    column.set_block(7, Y, ROW_Z, &redstone_wire::set_power(0));
-    column.set_block(8, Y, ROW_Z, &redstone_diode::set_comparator(Direction::West, subtract, false, 0));
-    column.set_block(9, Y, ROW_Z, &redstone_wire::set_power(0));
+    column.set_block_id(6, Y, ROW_Z, redstone_torch::set_standing_lit(true));
+    column.set_block_id(7, Y, ROW_Z, redstone_wire::set_power(0));
+    column.set_block_id(8, Y, ROW_Z, redstone_diode::set_comparator(Direction::West, subtract, false, 0));
+    column.set_block_id(9, Y, ROW_Z, redstone_wire::set_power(0));
     if with_side {
         // Side arm (south = +z): torch at z+2, dust at z+1 -> power 15.
-        column.set_block(8, Y, ROW_Z + 2, &redstone_torch::set_standing_lit(true));
-        column.set_block(8, Y, ROW_Z + 1, &redstone_wire::set_power(0));
+        column.set_block_id(8, Y, ROW_Z + 2, redstone_torch::set_standing_lit(true));
+        column.set_block_id(8, Y, ROW_Z + 1, redstone_wire::set_power(0));
     }
     column
 }
@@ -536,13 +538,13 @@ fn a_comparator_rig_reaches_the_live_output_through_the_production_path() {
         // Drive from the input torch, exactly as a torch flip does in production.
         let _ = propagate_and_react(&mut column, 0, 0, 6, Y, ROW_Z, &mut block_ticks, NOW);
 
-        let input = redstone::wire_power(&at(&column, 7, Y, ROW_Z));
+        let input = redstone::wire_power(at(&column, 7, Y, ROW_Z));
         assert_eq!(
             input, 15,
             "PREMISE FAILED: input dust at (x=7, y={Y}, z={ROW_Z}) reads {input}, not 15, so the \
              row being checked is not the row the oracle measured"
         );
-        let side = if with_side { redstone::wire_power(&at(&column, 8, Y, ROW_Z + 1)) } else { 0 };
+        let side = if with_side { redstone::wire_power(at(&column, 8, Y, ROW_Z + 1)) } else { 0 };
         if with_side {
             assert_eq!(
                 side, 15,
@@ -564,8 +566,8 @@ fn a_comparator_rig_reaches_the_live_output_through_the_production_path() {
         );
 
         let state = at(&column, 8, Y, ROW_Z);
-        let flipped = redstone_diode::run_scheduled_comparator_tick(&state, input, side);
-        let out = flipped.as_deref().map_or_else(|| redstone::comparator_output(&state), redstone::comparator_output);
+        let flipped = redstone_diode::run_scheduled_comparator_tick(state, input, side);
+        let out = flipped.map_or_else(|| redstone::comparator_output(state), redstone::comparator_output);
         assert_eq!(
             out, oracle_out,
             "comparator[mode={mode}] at (x=8, y={Y}, z={ROW_Z}) with input={input}, side={side}: \
@@ -595,10 +597,10 @@ fn a_comparator_rig_reaches_the_live_output_through_the_production_path() {
 #[test]
 fn an_observer_pulse_starts_and_ends_exactly_where_the_live_server_measured() {
     let mut column = column_with_floor();
-    column.set_block(8, Y, ROW_Z, &redstone_observer::set_observer(Direction::West, false));
-    column.set_block(9, Y, ROW_Z, &redstone_wire::set_power(0));
+    column.set_block_id(8, Y, ROW_Z, redstone_observer::set_observer(Direction::West, false));
+    column.set_block_id(9, Y, ROW_Z, redstone_wire::set_power(0));
     // The watched block changes: air -> stone at x = 7.
-    column.set_block(7, Y, ROW_Z, "minecraft:stone");
+    column.set_block_id(7, Y, ROW_Z, Block::Stone.default_state());
 
     let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
     let _ = propagate_and_react(&mut column, 0, 0, 7, Y, ROW_Z, &mut block_ticks, NOW);
@@ -623,9 +625,9 @@ fn an_observer_pulse_starts_and_ends_exactly_where_the_live_server_measured() {
     let mut powered_ticks = 0usize;
     let mut reschedules = 0usize;
     for _ in 0..6 {
-        let (next, reschedule) = redstone_observer::run_scheduled_tick(&state);
+        let (next, reschedule) = redstone_observer::run_scheduled_tick(state);
         state = next;
-        if redstone::observer_powered(&state) {
+        if redstone::observer_powered(state) {
             powered_ticks += 1;
         }
         if reschedule {
@@ -645,7 +647,7 @@ fn an_observer_pulse_starts_and_ends_exactly_where_the_live_server_measured() {
          makes the pulse {ORACLE_OBSERVER_PULSE_WIDTH} game ticks wide instead of endless"
     );
     assert!(
-        !redstone::observer_powered(&state),
+        !redstone::observer_powered(state),
         "after its pulse the observer is still powered ({state:?}); the live server's back face \
          was unpowered from tick {} on",
         ORACLE_OBSERVER_PULSE_START + ORACLE_OBSERVER_PULSE_WIDTH as u64
@@ -663,9 +665,9 @@ fn an_observer_pulse_starts_and_ends_exactly_where_the_live_server_measured() {
 #[test]
 fn an_observer_does_not_pulse_when_a_block_behind_it_changes() {
     let mut column = column_with_floor();
-    column.set_block(8, Y, ROW_Z, &redstone_observer::set_observer(Direction::West, false));
+    column.set_block_id(8, Y, ROW_Z, redstone_observer::set_observer(Direction::West, false));
     // Change a block BEHIND the observer (east side) rather than in front.
-    column.set_block(9, Y, ROW_Z, "minecraft:stone");
+    column.set_block_id(9, Y, ROW_Z, Block::Stone.default_state());
 
     let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
     let _ = propagate_and_react(&mut column, 0, 0, 9, Y, ROW_Z, &mut block_ticks, NOW);
@@ -679,8 +681,8 @@ fn an_observer_does_not_pulse_when_a_block_behind_it_changes() {
     // Control on the control: the same rig changed in FRONT must pulse, or the
     // silence above would prove nothing.
     let mut column = column_with_floor();
-    column.set_block(8, Y, ROW_Z, &redstone_observer::set_observer(Direction::West, false));
-    column.set_block(7, Y, ROW_Z, "minecraft:stone");
+    column.set_block_id(8, Y, ROW_Z, redstone_observer::set_observer(Direction::West, false));
+    column.set_block_id(7, Y, ROW_Z, Block::Stone.default_state());
     let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
     let _ = propagate_and_react(&mut column, 0, 0, 7, Y, ROW_Z, &mut block_ticks, NOW);
     let entries = scheduled(&mut block_ticks);

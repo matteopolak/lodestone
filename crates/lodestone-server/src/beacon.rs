@@ -414,17 +414,13 @@ mod tests {
             let column = columns
                 .entry((cx, cz))
                 .or_insert_with(|| ChunkColumn::new(MIN_Y, HEIGHT));
-            column.set_block(x - cx * 16, y, z - cz * 16, state);
+            column.set_block_id(x - cx * 16, y, z - cz * 16, state);
         }
     }
 
     /// Fills the `layers`-tall pyramid base beneath `(x, y, z)` with
     /// `block`, each layer `step` blocks below `y` and `(2*step+1)` wide —
     /// exactly the shape [`beacon_levels`] checks.
-    fn state(value: &str) -> StateId {
-        StateId::from_state_str(value).expect("test state must be canonical")
-    }
-
     fn build_pyramid(rig: &Rig, x: i32, y: i32, z: i32, block: StateId, layers: i32) {
         for step in 1..=layers {
             let ly = y - step;
@@ -439,7 +435,7 @@ mod tests {
     #[test]
     fn a_full_four_layer_pyramid_reports_level_four() {
         let rig = Rig::new();
-        build_pyramid(&rig, 0, 64, 0, state("minecraft:iron_block"), 4);
+        build_pyramid(&rig, 0, 64, 0, Block::IronBlock.default_state(), 4);
         assert_eq!(beacon_levels(&rig, 0, 64, 0), 4);
     }
 
@@ -450,14 +446,14 @@ mod tests {
     #[test]
     fn a_broken_third_layer_caps_the_level_at_two() {
         let rig = Rig::new();
-        build_pyramid(&rig, 0, 64, 0, state("minecraft:iron_block"), 2);
+        build_pyramid(&rig, 0, 64, 0, Block::IronBlock.default_state(), 2);
         // Layer 3 (y=61): fill it, then break exactly one corner.
         for lx in -3..=3 {
             for lz in -3..=3 {
-                rig.set_block(lx, 61, lz, state("minecraft:iron_block"));
+                rig.set_block(lx, 61, lz, Block::IronBlock.default_state());
             }
         }
-        rig.set_block(3, 61, 3, state("minecraft:dirt"));
+        rig.set_block(3, 61, 3, Block::Dirt.default_state());
         assert_eq!(beacon_levels(&rig, 0, 64, 0), 2);
     }
 
@@ -468,12 +464,12 @@ mod tests {
         let rig = Rig::new();
         for lx in -1..=1 {
             for lz in -1..=1 {
-                rig.set_block(lx, 63, lz, state("minecraft:diamond_block"));
+                rig.set_block(lx, 63, lz, Block::DiamondBlock.default_state());
             }
         }
         for lx in -2..=2 {
             for lz in -2..=2 {
-                rig.set_block(lx, 62, lz, state("minecraft:netherite_block"));
+                rig.set_block(lx, 62, lz, Block::NetheriteBlock.default_state());
             }
         }
         assert_eq!(beacon_levels(&rig, 0, 64, 0), 2);
@@ -495,7 +491,7 @@ mod tests {
     fn a_glass_shaft_is_unobstructed() {
         let rig = Rig::new();
         for dy in 1..=20 {
-            rig.set_block(0, 64 + dy, 0, state("minecraft:cyan_stained_glass"));
+            rig.set_block(0, 64 + dy, 0, Block::CyanStainedGlass.default_state());
         }
         assert!(beam_unobstructed(&rig, 0, 64, 0, 20));
     }
@@ -506,7 +502,7 @@ mod tests {
     #[test]
     fn one_solid_block_blocks_the_beam() {
         let rig = Rig::new();
-        rig.set_block(0, 70, 0, state("minecraft:stone"));
+        rig.set_block(0, 70, 0, Block::Stone.default_state());
         assert!(!beam_unobstructed(&rig, 0, 64, 0, 20));
     }
 
@@ -521,7 +517,7 @@ mod tests {
     fn a_carpet_shaft_is_unobstructed_even_though_it_was_never_in_the_old_family_list() {
         let rig = Rig::new();
         for dy in 1..=20 {
-            rig.set_block(0, 64 + dy, 0, state("minecraft:white_carpet"));
+            rig.set_block(0, 64 + dy, 0, Block::WhiteCarpet.default_state());
         }
         assert!(beam_unobstructed(&rig, 0, 64, 0, 20));
     }
@@ -533,7 +529,7 @@ mod tests {
     #[test]
     fn bedrock_is_exempt_from_its_own_full_dampening() {
         let rig = Rig::new();
-        rig.set_block(0, 70, 0, state("minecraft:bedrock"));
+        rig.set_block(0, 70, 0, Block::Bedrock.default_state());
         assert!(beam_unobstructed(&rig, 0, 64, 0, 20));
     }
 

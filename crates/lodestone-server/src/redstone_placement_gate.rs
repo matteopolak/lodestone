@@ -192,7 +192,7 @@ impl ChunkSource for RigWorld {
             .lock()
             .expect("rig world poisoned")
             .get(&(cx, cz))
-            .map(|c| c.resolved_block_state_id(x.rem_euclid(16), y, z.rem_euclid(16)))
+            .map(|c| c.block_state_id(x.rem_euclid(16), y, z.rem_euclid(16)))
             .unwrap_or_else(lodestone_data::block_states::air_state)
     }
 
@@ -203,7 +203,7 @@ impl ChunkSource for RigWorld {
             .expect("rig world poisoned")
             .get(&(cx, cz))
             .map(|c| c.biome_state_at(x.rem_euclid(16), y, z.rem_euclid(16)).to_string())
-            .unwrap_or_else(|| crate::chunk::AIR.to_string())
+            .unwrap_or_else(|| "minecraft:plains".to_owned())
     }
 
     fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
@@ -534,7 +534,7 @@ async fn without_the_inbound_request_the_loop_never_learns_and_the_repeater_neve
     assert!(
             !redstone::diode_powered(world.block_state_id(DIODE_X, Y, ROW_Z)),
         "CONTROL FAILED: the repeater at (x={DIODE_X}, y={Y}, z={ROW_Z}) turned on without the \
-         request; it is {}",
+         request; it is {:?}",
         world.block_state_id(DIODE_X, Y, ROW_Z)
     );
 }
@@ -1107,7 +1107,7 @@ async fn the_re_run_shape_the_brokered_patch_specified_cannot_work() {
     );
     // The re-run, performed exactly as the brokered patch's loop body would:
     // same entry point, same origin, the loop's own queue.
-    let mut requeued: crate::scheduled_tick::ScheduledTickQueue<crate::scheduled_tick::ScheduledTickKind> =
+    let mut requeued: crate::scheduled_tick::ScheduledTickQueue<String> =
         crate::scheduled_tick::ScheduledTickQueue::new();
     let mut column = world.column(0, 0);
     let redone = crate::random_tick::react_at_placement(
@@ -1351,7 +1351,7 @@ async fn the_unlocked_shorthand_ignores_the_signal_which_is_what_made_this_an_is
     assert!(
         !redstone::hopper_enabled(world.block_state_id(HOP_X, HOP_UPPER_Y, ROW_Z)),
         "PREMISE FAILED: the upper hopper's block state is not enabled=false, so there is no lock \
-         for the shorthand to ignore: {}",
+         for the shorthand to ignore: {:?}",
         world.block_state_id(HOP_X, HOP_UPPER_Y, ROW_Z)
     );
 

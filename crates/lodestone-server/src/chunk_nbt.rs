@@ -2637,7 +2637,7 @@ mod retained_light_tests {
             1,
             1,
             1,
-            StateId::from_state_str("minecraft:stone").expect("test state must be canonical"),
+            lodestone_data::block::Block::Stone.default_state(),
         );
 
         assert!(column.retained_light().is_none());

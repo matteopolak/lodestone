@@ -91,8 +91,6 @@ use lodestone_model::{
 use uuid::Uuid;
 
 use crate::entity_handoff::{EntityHandoffToken, EntityOwnershipHandoff};
-#[cfg(test)]
-use crate::chunk::AIR;
 use crate::protocol::{EntitySnapshot, MetadataField};
 use crate::mob_spawn::{
     DespawnOutcome, MobCategory, SpawnCandidate, SpawnCandidateSource, SpawnRng, SpawnState,

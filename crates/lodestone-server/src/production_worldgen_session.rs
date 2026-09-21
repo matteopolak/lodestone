@@ -2528,6 +2528,7 @@ mod tests {
 
     struct SettlementPolicy;
     struct SparsePaddingPolicy;
+    struct LiveOrderPolicy;
 
     impl LifecycleWorldgenSource for SettlementSource {
         type ReplayContext = ();
@@ -2736,7 +2737,7 @@ mod tests {
                 local_features: vec![LifecycleSpill {
                     source: target,
                     position: (target.0 * 16, 0, target.1 * 16),
-                    state: sid(state),
+                    state,
                     transient: false,
                 }],
                 block_entities: Vec::new(),
@@ -2814,7 +2815,7 @@ mod tests {
     }
 
     impl RegionGenerationSource for LiveOrderSource {
-        type Policy = SettlementPolicy;
+        type Policy = LiveOrderPolicy;
     }
 
     impl RegionGenerationSource for SparsePaddingSource {
@@ -2830,6 +2831,32 @@ mod tests {
 
         fn prefix_sidecars(
             _source: &SettlementSource,
+            _coordinate: (i32, i32),
+        ) -> Vec<(StageKey, ImmutableSidecar)> {
+            vec![(
+                StageKey::new(Self::DIMENSION, ColumnStage::StructureReferences),
+                ImmutableSidecar::new(SidecarKey::StructureReferences, Vec::<u8>::new()),
+            )]
+        }
+
+        fn has_top_layer() -> bool {
+            true
+        }
+
+        fn target_owned_reverse_settlement() -> bool {
+            true
+        }
+    }
+
+    impl DimensionPolicy<LiveOrderSource> for LiveOrderPolicy {
+        const DIMENSION: Dimension = Dimension::Overworld;
+
+        fn source_schedule() -> SourceSchedule {
+            OVERWORLD_SOURCES
+        }
+
+        fn prefix_sidecars(
+            _source: &LiveOrderSource,
             _coordinate: (i32, i32),
         ) -> Vec<(StageKey, ImmutableSidecar)> {
             vec![(

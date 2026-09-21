@@ -628,12 +628,8 @@ mod tests {
             let cz = z.div_euclid(16);
             let mut columns = self.columns.lock().expect("rig lock");
             let column = columns.entry((cx, cz)).or_insert_with(|| ChunkColumn::new(MIN_Y, HEIGHT));
-            column.set_block(x - cx * 16, y, z - cz * 16, state);
+            column.set_block_id(x - cx * 16, y, z - cz * 16, state);
         }
-    }
-
-    fn state(value: &str) -> StateId {
-        StateId::from_state_str(value).expect("test state must be canonical")
     }
 
     fn rng() -> SpawnRng {
@@ -729,21 +725,21 @@ mod tests {
     /// this by finding nothing.
     #[test]
     fn heightmap_pos_sits_just_above_the_floor() {
-        let rig = Rig::with_floor(state("minecraft:stone"), 4);
+        let rig = Rig::with_floor(Block::Stone.default_state(), 4);
         let pos = motion_blocking_heightmap_pos(&rig, ENV, 0, 0);
         assert_eq!(pos, BlockPos::new(0, 5, 0), "must land directly above the floor top");
     }
 
     #[test]
     fn air_is_not_treated_as_motion_blocking() {
-        assert!(!blocks_motion(state("minecraft:air")));
+        assert!(!blocks_motion(Block::Air.default_state()));
     }
 
     /// With no lightning rod and no candidate entities, target selection
     /// falls through to the heightmap position untouched.
     #[test]
     fn target_selection_falls_back_to_heightmap_with_no_rod_or_entities() {
-        let rig = Rig::with_floor(state("minecraft:stone"), 0);
+        let rig = Rig::with_floor(Block::Stone.default_state(), 0);
         let mut r = rng();
         let target = find_lightning_target_around(&rig, ENV, BlockPos::new(2, 0, 2), None, &[], &mut r);
         assert_eq!(target, BlockPos::new(2, 1, 2));
@@ -754,7 +750,7 @@ mod tests {
     /// (which a draw-count check confirms: the RNG is untouched).
     #[test]
     fn a_nearby_lightning_rod_wins_outright() {
-        let rig = Rig::with_floor(state("minecraft:stone"), 0);
+        let rig = Rig::with_floor(Block::Stone.default_state(), 0);
         let rod_pos = BlockPos::new(9, 40, 9);
         let mut a = rng();
         let target = find_lightning_target_around(
@@ -774,7 +770,7 @@ mod tests {
     /// heightmap; one outside it is not a candidate at all.
     #[test]
     fn a_living_entity_in_range_is_preferred_over_terrain() {
-        let rig = Rig::with_floor(state("minecraft:stone"), 0);
+        let rig = Rig::with_floor(Block::Stone.default_state(), 0);
         let mut r = rng();
         let near = BlockPos::new(3, 10, 3);
         let far = BlockPos::new(500, 10, 500);
@@ -803,7 +799,7 @@ mod tests {
     /// gate were bypassed.
     #[test]
     fn no_strike_without_thunder() {
-        let rig = Rig::with_floor(state("minecraft:stone"), 0);
+        let rig = Rig::with_floor(Block::Stone.default_state(), 0);
         let mut rv = 1;
         let mut r = rng();
         let result = tick_thunder_for_chunk(
@@ -817,7 +813,7 @@ mod tests {
     /// position is directly above the floor.
     #[test]
     fn a_favourable_seed_produces_a_strike_above_the_floor() {
-        let rig = Rig::with_floor(state("minecraft:stone"), 0);
+        let rig = Rig::with_floor(Block::Stone.default_state(), 0);
         // See `strike_gate_fires_on_a_zero_roll_and_consumes_one_draw`'s own
         // comment: `0..5000` was the second of the two known-failing
         // `lightning::tests` on `main` (expected 0.05 hits against the same

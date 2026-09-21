@@ -27,8 +27,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use lodestone_worldgen::generator::ChunkGenerator;
 use lodestone_data::block_states::StateId;
+use lodestone_worldgen::generator::ChunkGenerator;
 
 use crate::chunk::{ChunkColumn, ChunkSource};
 
@@ -187,13 +187,22 @@ mod tests {
             8
         }
         fn generate(&self, cx: i32, cz: i32) -> DenseBlockGrid {
-            let mut grid = DenseBlockGrid::new(cx * 16, 0, cz * 16, 16, 8, 16, "minecraft:air");
+            let mut grid = DenseBlockGrid::with_default(
+                cx * 16,
+                0,
+                cz * 16,
+                16,
+                8,
+                16,
+                StateId::AIR,
+            );
+            let stone = state("minecraft:stone");
             for lx in 0..16 {
                 for lz in 0..16 {
                     let x = cx * 16 + lx;
                     let z = cz * 16 + lz;
                     if (x + z).rem_euclid(2) == 0 {
-                        grid.set(x, 0, z, "minecraft:stone");
+                        grid.set_id(x, 0, z, stone);
                     }
                 }
             }
@@ -209,7 +218,7 @@ mod tests {
         let source = PluginChunkSource::new(Arc::new(Checkerboard));
         let column = source.column(0, 0);
         assert_eq!(column.block_state_id(0, 0, 0), state("minecraft:stone"));
-        assert_eq!(column.block_state_id(1, 0, 0), lodestone_data::block_states::air_state());
+        assert_eq!(column.block_state_id(1, 0, 0), StateId::AIR);
         assert_eq!(column.biome_state(0, 0), "minecraft:the_void");
     }
 
@@ -217,14 +226,14 @@ mod tests {
     fn block_state_reads_agree_with_column_reads() {
         let source = PluginChunkSource::new(Arc::new(Checkerboard));
         assert_eq!(source.block_state_id(0, 0, 0), state("minecraft:stone"));
-        assert_eq!(source.block_state_id(1, 0, 0), lodestone_data::block_states::air_state());
+        assert_eq!(source.block_state_id(1, 0, 0), StateId::AIR);
         assert_eq!(source.biome_state_at(3, 0, 3), "minecraft:the_void");
     }
 
     #[test]
     fn set_block_edits_are_retained_across_reads() {
         let source = PluginChunkSource::new(Arc::new(Checkerboard));
-        assert_eq!(source.block_state_id(1, 0, 0), lodestone_data::block_states::air_state());
+        assert_eq!(source.block_state_id(1, 0, 0), StateId::AIR);
         source.set_block(1, 0, 0, state("minecraft:diamond_block"));
         assert_eq!(source.block_state_id(1, 0, 0), state("minecraft:diamond_block"));
         // A neighbouring, untouched cell in the same edited column keeps the

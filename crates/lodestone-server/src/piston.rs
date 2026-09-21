@@ -115,22 +115,6 @@ use crate::neighbor_update::ALL_DIRECTIONS;
 pub use crate::neighbor_update::Direction;
 use crate::redstone;
 
-/// `minecraft:piston`.
-#[cfg(test)]
-pub const PISTON: &str = "minecraft:piston";
-/// `minecraft:sticky_piston`.
-#[cfg(test)]
-pub const STICKY_PISTON: &str = "minecraft:sticky_piston";
-/// `minecraft:piston_head`.
-#[cfg(test)]
-pub const PISTON_HEAD: &str = "minecraft:piston_head";
-/// `minecraft:slime_block` — one of the two sticky pull blocks.
-#[cfg(test)]
-pub const SLIME_BLOCK: &str = "minecraft:slime_block";
-/// `minecraft:honey_block` — the other, which does **not** stick to slime.
-#[cfg(test)]
-pub const HONEY_BLOCK: &str = "minecraft:honey_block";
-
 /// `PistonStructureResolver.MAX_PUSH_DEPTH`.
 pub const MAX_PUSH_DEPTH: usize = 12;
 
@@ -984,12 +968,6 @@ fn piston_head_state(direction: Direction, sticky: bool) -> StateId {
 
 // --- the two-phase move ---------------------------------------------------
 
-/// `minecraft:moving_piston` — the block that holds a travelling cell for the
-/// duration of a move. Its own render shape is `INVISIBLE`; everything a client
-/// draws there comes from the block entity below.
-#[cfg(test)]
-pub const MOVING_PISTON: &str = "minecraft:moving_piston";
-
 /// The moving-piston block entity uses registry key `minecraft:piston` for its
 /// ticker. This is distinct from block key `minecraft:moving_piston`; using the
 /// block key as the entity type id resolves to a different entity or to none.
@@ -1044,9 +1022,7 @@ pub const TICK_PISTON_FINISH: &str = "redstone:piston_finish";
 /// second source of truth for a value nothing here ever changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MovingBlockEntity {
-    /// The census state used for the client's moving-block NBT, when the
-    /// runtime state belongs to the built-in census. Companion properties the
-    /// server keeps outside that census are intentionally absent here.
+    /// The typed state used for the client's moving-block NBT.
     pub moved_state: Option<StateId>,
     /// The exact state that commits after the animation.
     runtime_state: StateId,
@@ -1143,32 +1119,6 @@ pub fn push_delta(direction: Direction) -> Vec3 {
     }
 }
 
-/// The `moving_piston` block state for a cell.
-///
-/// `sticky` is the *piston's* stickiness and applies only to a `source` cell:
-/// `moveBlocks` writes plain `Blocks.MOVING_PISTON.defaultBlockState()` — i.e.
-/// `type=normal` — for every carried block, and sets `TYPE` from the piston only
-/// for the arm cell it creates itself. Nothing a client draws reads this
-/// property (it takes `type` from the *moved* state), so a wrong value here is
-/// invisible; it is reproduced because the block state is also what a chunk save
-/// and a neighbour query see.
-#[cfg(test)]
-#[must_use]
-pub fn moving_piston_state(direction: Direction, sticky: bool) -> String {
-    format!(
-        "{MOVING_PISTON}[facing={},type={}]",
-        facing_name(direction),
-        if sticky { "sticky" } else { "normal" }
-    )
-}
-
-/// Whether `state` is a `moving_piston`.
-#[cfg(test)]
-#[must_use]
-pub fn is_moving_piston(state: &str) -> bool {
-    redstone::base_name(state) == MOVING_PISTON
-}
-
 #[must_use]
 pub fn is_moving_piston_id(state: StateId) -> bool {
     state.block() == Block::MovingPiston
@@ -1184,9 +1134,7 @@ pub fn is_moving_piston_id(state: StateId) -> bool {
 /// record, and "read the moving block entity at this cell" is "find the pending
 /// commit at this cell". [`parse_finish_kind`] is the other half.
 ///
-/// `|` is the separator because built-in state spellings contain `:`, `[`, `]`,
-/// `,` and `=` but never a pipe. The parser takes the final field whole, so a
-/// data-pack runtime value containing a pipe is still retained verbatim.
+/// The final field is a raw `StateId`, keeping block-state names out of the tick path.
 #[must_use]
 pub fn finish_kind(entity: &MovingBlockEntity) -> String {
     format!(
@@ -1207,8 +1155,7 @@ pub fn is_finish_kind(kind: impl AsRef<str>) -> bool {
 
 /// [`finish_kind`]'s inverse. `None` for any kind this did not write.
 ///
-/// `splitn(4, '|')` rather than `split`: the runtime state is the last field and
-/// is taken whole, including any data-pack text it contains.
+/// The final field must be a valid `StateId` in this build's generated census.
 #[must_use]
 pub fn parse_finish_kind(kind: impl AsRef<str>) -> Option<MovingBlockEntity> {
     let rest = kind.as_ref().strip_prefix(TICK_PISTON_FINISH)?.strip_prefix('|')?;
@@ -1262,8 +1209,7 @@ pub struct MoveStart {
 ///
 /// `piston_state` is the base's state *before* the move — its stickiness and its
 /// other properties are read off it, so a caller must not have rewritten the base
-/// cell yet. The record keeps an exact runtime state for the final write and a
-/// separate validated census projection for visual/NBT consumers when one exists.
+/// cell yet. The carried state remains typed through the finish tick.
 #[must_use]
 pub fn begin_move(
     writes: &[MoveWrite],
@@ -1413,9 +1359,8 @@ mod tests {
     /// A fake world: an explicit position→state map, air everywhere else — the same
     /// "pure decision, fake world via closure" shape `crate::redstone`'s own tests
     /// use.
-    fn world(entries: &[(BlockPos, &str)]) -> impl Fn(BlockPos) -> redstone::WorldState + use<> {
-        let entries: Vec<(BlockPos, redstone::WorldState)> =
-            entries.iter().map(|(p, s)| (*p, state(s))).collect();
+    fn world(entries: &[(BlockPos, StateId)]) -> impl Fn(BlockPos) -> redstone::WorldState + use<> {
+        let entries = entries.to_vec();
         move |p: BlockPos| {
             entries
                 .iter()
@@ -1434,12 +1379,12 @@ mod tests {
     }
 
     fn moving(
-        text: &str,
+        moved_state: StateId,
         direction: Direction,
         extending: bool,
         source: bool,
     ) -> MovingBlockEntity {
-        MovingBlockEntity::new(state(text), direction, extending, source)
+        MovingBlockEntity::new(moved_state, direction, extending, source)
     }
 
     /// The push-reaction table is sorted (both name lists are binary-searched) and
@@ -1497,16 +1442,16 @@ mod tests {
     /// rather than pushing twelve of them.
     #[test]
     fn twelve_pushes_and_thirteen_refuses() {
-        let mut twelve: Vec<(BlockPos, &str)> = vec![(at(0, 0, 0), PISTON)];
+        let mut twelve: Vec<(BlockPos, StateId)> = vec![(at(0, 0, 0), state("minecraft:piston"))];
         for i in 1..=12 {
-            twelve.push((at(i, 0, 0), "minecraft:stone"));
+            twelve.push((at(i, 0, 0), state("minecraft:stone")));
         }
         let resolved = resolve(&world(&twelve), at(0, 0, 0), Direction::East, true)
             .expect("twelve blocks is exactly the limit");
         assert_eq!(resolved.to_push.len(), 12);
 
         let mut thirteen = twelve.clone();
-        thirteen.push((at(13, 0, 0), "minecraft:stone"));
+        thirteen.push((at(13, 0, 0), state("minecraft:stone")));
         assert!(
             resolve(&world(&thirteen), at(0, 0, 0), Direction::East, true).is_none(),
             "a thirteenth block must refuse the move outright, not push twelve"
@@ -1518,9 +1463,9 @@ mod tests {
     #[test]
     fn a_destroy_block_at_the_head_is_destroyed() {
         let w = world(&[
-            (at(0, 0, 0), PISTON),
-            (at(1, 0, 0), "minecraft:stone"),
-            (at(2, 0, 0), "minecraft:torch"),
+            (at(0, 0, 0), state("minecraft:piston")),
+            (at(1, 0, 0), state("minecraft:stone")),
+            (at(2, 0, 0), state("minecraft:torch")),
         ]);
         let resolved = resolve(&w, at(0, 0, 0), Direction::East, true).expect("resolves");
         assert_eq!(resolved.to_push, vec![at(1, 0, 0)]);
@@ -1533,10 +1478,10 @@ mod tests {
     #[test]
     fn sticky_branching_and_the_slime_honey_exception() {
         let w = world(&[
-            (at(0, 0, 0), PISTON),
-            (at(1, 0, 0), SLIME_BLOCK),
+            (at(0, 0, 0), state("minecraft:piston")),
+            (at(1, 0, 0), state("minecraft:slime_block")),
             // Perpendicular to the push axis, so it is dragged along.
-            (at(1, 1, 0), "minecraft:stone"),
+            (at(1, 1, 0), state("minecraft:stone")),
         ]);
         let resolved = resolve(&w, at(0, 0, 0), Direction::East, true).expect("resolves");
         assert!(
@@ -1545,21 +1490,21 @@ mod tests {
             resolved.to_push
         );
 
-        assert!(can_stick_to_each_other(state(SLIME_BLOCK), state("minecraft:stone")));
-        assert!(can_stick_to_each_other(state(HONEY_BLOCK), state("minecraft:stone")));
+        assert!(can_stick_to_each_other(state("minecraft:slime_block"), state("minecraft:stone")));
+        assert!(can_stick_to_each_other(state("minecraft:honey_block"), state("minecraft:stone")));
         assert!(
-            !can_stick_to_each_other(state(SLIME_BLOCK), state(HONEY_BLOCK)),
+            !can_stick_to_each_other(state("minecraft:slime_block"), state("minecraft:honey_block")),
             "slime and honey must not stick to each other"
         );
         assert!(
-            !can_stick_to_each_other(state(HONEY_BLOCK), state(SLIME_BLOCK)),
+            !can_stick_to_each_other(state("minecraft:honey_block"), state("minecraft:slime_block")),
             "and not in the other order either"
         );
 
         let w = world(&[
-            (at(0, 0, 0), PISTON),
-            (at(1, 0, 0), SLIME_BLOCK),
-            (at(1, 1, 0), HONEY_BLOCK),
+            (at(0, 0, 0), state("minecraft:piston")),
+            (at(1, 0, 0), state("minecraft:slime_block")),
+            (at(1, 1, 0), state("minecraft:honey_block")),
         ]);
         let resolved = resolve(&w, at(0, 0, 0), Direction::East, true).expect("resolves");
         assert!(
@@ -1576,9 +1521,9 @@ mod tests {
     #[test]
     fn retraction_starts_two_blocks_out() {
         let w = world(&[
-            (at(0, 0, 0), "minecraft:sticky_piston[extended=true,facing=east]"),
-            (at(1, 0, 0), "minecraft:piston_head[facing=east,short=false,type=sticky]"),
-            (at(2, 0, 0), SLIME_BLOCK),
+            (at(0, 0, 0), state("minecraft:sticky_piston[extended=true,facing=east]")),
+            (at(1, 0, 0), state("minecraft:piston_head[facing=east,short=false,type=sticky]")),
+            (at(2, 0, 0), state("minecraft:slime_block")),
         ]);
         let resolved = resolve(&w, at(0, 0, 0), Direction::East, false).expect("resolves");
         assert_eq!(resolved.push_direction, Direction::West);
@@ -1595,8 +1540,8 @@ mod tests {
         // `pos.above()` loop can see it. That is quasi-connectivity, and it is the
         // whole reason a BUD switch works.
         let above = world(&[
-            (at(0, 0, 0), "minecraft:piston[extended=false,facing=east]"),
-            (at(1, 1, 0), "minecraft:redstone_torch[lit=true]"),
+            (at(0, 0, 0), state("minecraft:piston[extended=false,facing=east]")),
+            (at(1, 1, 0), state("minecraft:redstone_torch[lit=true]")),
         ]);
         assert!(
             has_extend_signal(&above, at(0, 0, 0), Direction::East),
@@ -1605,16 +1550,16 @@ mod tests {
 
         // Directly adjacent, ordinary powering.
         let beside = world(&[
-            (at(0, 0, 0), "minecraft:piston[extended=false,facing=east]"),
-            (at(0, 0, 1), "minecraft:redstone_torch[lit=true]"),
+            (at(0, 0, 0), state("minecraft:piston[extended=false,facing=east]")),
+            (at(0, 0, 1), state("minecraft:redstone_torch[lit=true]")),
         ]);
         assert!(has_extend_signal(&beside, at(0, 0, 0), Direction::East));
 
         // In the push direction: excluded, so the piston is not powered by what it
         // is about to push.
         let ahead = world(&[
-            (at(0, 0, 0), "minecraft:piston[extended=false,facing=east]"),
-            (at(1, 0, 0), "minecraft:redstone_torch[lit=true]"),
+            (at(0, 0, 0), state("minecraft:piston[extended=false,facing=east]")),
+            (at(1, 0, 0), state("minecraft:redstone_torch[lit=true]")),
         ]);
         assert!(
             !has_extend_signal(&ahead, at(0, 0, 0), Direction::East),
@@ -1624,7 +1569,7 @@ mod tests {
         assert!(has_extend_signal(&ahead, at(0, 0, 0), Direction::West));
 
         // Nothing at all.
-        let bare = world(&[(at(0, 0, 0), "minecraft:piston[extended=false,facing=east]")]);
+        let bare = world(&[(at(0, 0, 0), state("minecraft:piston[extended=false,facing=east]"))]);
         assert!(!has_extend_signal(&bare, at(0, 0, 0), Direction::East));
     }
 
@@ -1633,9 +1578,9 @@ mod tests {
     #[test]
     fn extension_writes_shift_the_run_and_place_the_head() {
         let w = world(&[
-            (at(0, 0, 0), "minecraft:piston[extended=false,facing=east]"),
-            (at(1, 0, 0), "minecraft:stone"),
-            (at(2, 0, 0), "minecraft:dirt"),
+            (at(0, 0, 0), state("minecraft:piston[extended=false,facing=east]")),
+            (at(1, 0, 0), state("minecraft:stone")),
+            (at(2, 0, 0), state("minecraft:dirt")),
         ]);
         let resolved = resolve(&w, at(0, 0, 0), Direction::East, true).expect("resolves");
         assert_eq!(resolved.to_push, vec![at(1, 0, 0), at(2, 0, 0)]);
@@ -1645,14 +1590,13 @@ mod tests {
             writes
                 .iter()
                 .find(|w| w.pos == pos)
-                .map(|w| w.to.as_str())
-                .unwrap_or("(unwritten)")
+                .map(|w| w.to)
         };
-        assert_eq!(find(at(3, 0, 0)), "minecraft:dirt", "the far block moves first");
-        assert_eq!(find(at(2, 0, 0)), "minecraft:stone");
+        assert_eq!(find(at(3, 0, 0)), Some(state("minecraft:dirt")), "the far block moves first");
+        assert_eq!(find(at(2, 0, 0)), Some(state("minecraft:stone")));
         assert_eq!(
             find(at(1, 0, 0)),
-            "minecraft:piston_head[facing=east,short=false,type=normal]",
+            Some(state("minecraft:piston_head[facing=east,short=false,type=normal]")),
             "the head fills the cell the run vacated"
         );
         assert!(
@@ -1674,28 +1618,28 @@ mod tests {
     /// compare equal exactly when every cell agrees — an explicit
     /// `"minecraft:air"` entry beside a missing one would read as a mismatch and
     /// make the byte-identity gate fail for a reason that is not about pistons.
-    type FakeWorld = std::collections::BTreeMap<(i32, i32, i32), String>;
+    type FakeWorld = std::collections::BTreeMap<(i32, i32, i32), StateId>;
 
-    fn fake(entries: &[(BlockPos, &str)]) -> FakeWorld {
+    fn fake(entries: &[(BlockPos, StateId)]) -> FakeWorld {
         entries
             .iter()
-            .map(|(p, s)| ((p.x, p.y, p.z), (*s).to_string()))
+            .map(|(p, s)| ((p.x, p.y, p.z), *s))
             .collect()
     }
 
     fn reader(w: &FakeWorld) -> impl Fn(BlockPos) -> redstone::WorldState + '_ {
         move |p: BlockPos| {
             w.get(&(p.x, p.y, p.z))
-                .map(|s| redstone::WorldState::from(s.as_str()))
-                .unwrap_or_else(crate::chunk::air_state_arc)
+                .copied()
+                .unwrap_or_else(crate::chunk::air_state)
         }
     }
 
-    fn put(w: &mut FakeWorld, pos: BlockPos, state: &str) {
-        if redstone::base_name(state) == "minecraft:air" {
+    fn put(w: &mut FakeWorld, pos: BlockPos, state: StateId) {
+        if state.block() == Block::Air {
             w.remove(&(pos.x, pos.y, pos.z));
         } else {
-            w.insert((pos.x, pos.y, pos.z), state.to_string());
+            w.insert((pos.x, pos.y, pos.z), state);
         }
     }
 
@@ -1707,9 +1651,9 @@ mod tests {
         piston: BlockPos,
         facing: Direction,
         extending: bool,
-    ) -> Option<(String, Vec<MoveWrite>)> {
+    ) -> Option<(StateId, Vec<MoveWrite>)> {
         let piston_state = reader(w)(piston);
-        let sticky = is_sticky_piston(&piston_state);
+        let sticky = is_sticky_piston_id(piston_state);
         let resolution = resolve(&reader(w), piston, facing, extending);
         let resolution = match (extending, resolution) {
             (true, None) => return None,
@@ -1726,7 +1670,7 @@ mod tests {
             Resolution { to_push: Vec::new(), ..resolution }
         };
         let writes = apply_move(&reader(w), &resolution, piston, facing, extending, sticky);
-        Some((piston_state.to_string(), writes))
+        Some((piston_state, writes))
     }
 
     /// The world the **one-step** path leaves behind: every write applied at once,
@@ -1734,7 +1678,7 @@ mod tests {
     /// before the animation existed, and it is the expectation the two-phase path
     /// has to land on.
     fn one_step_world(
-        setup: &[(BlockPos, &str)],
+        setup: &[(BlockPos, StateId)],
         piston: BlockPos,
         facing: Direction,
         extending: bool,
@@ -1743,17 +1687,25 @@ mod tests {
         let (piston_state, writes) =
             plan_move(&w, piston, facing, extending).expect("the move must resolve");
         for write in &writes {
-            put(&mut w, write.pos, &write.to);
+            put(&mut w, write.pos, write.to);
         }
-        let flag = if extending { "true" } else { "false" };
-        let base = redstone::with_property(&piston_state, "extended", flag);
-        put(&mut w, piston, &base);
+        let base = redstone::with_property(
+            piston_state,
+            PropertyKey::Extended,
+            lodestone_data::block_properties::PropertyValue::builtin(if extending {
+                BuiltinPropertyValue::True
+            } else {
+                BuiltinPropertyValue::False
+            }),
+        )
+        .expect("piston extended property is generated");
+        put(&mut w, piston, base);
         w
     }
 
     /// The world **during** the animation and the world after the commit.
     fn two_phase_worlds(
-        setup: &[(BlockPos, &str)],
+        setup: &[(BlockPos, StateId)],
         piston: BlockPos,
         facing: Direction,
         extending: bool,
@@ -1761,19 +1713,19 @@ mod tests {
         let mut w = fake(setup);
         let (piston_state, writes) =
             plan_move(&w, piston, facing, extending).expect("the move must resolve");
-        let start = begin_move(&writes, &piston_state, piston, facing, extending);
+        let start = begin_move(&writes, piston_state, piston, facing, extending);
         for pos in &start.cleared {
-            put(&mut w, *pos, "minecraft:air");
+            put(&mut w, *pos, crate::chunk::air_state());
         }
         for (pos, moving_state, _) in &start.moving {
-            put(&mut w, *pos, moving_state);
+            put(&mut w, *pos, *moving_state);
         }
         if let Some(base_now) = &start.base_now {
-            put(&mut w, piston, base_now);
+            put(&mut w, piston, *base_now);
         }
         let mid = w.clone();
         for write in finish_move(&start) {
-            put(&mut w, write.pos, &write.to);
+            put(&mut w, write.pos, write.to);
         }
         (mid, w, start)
     }
@@ -1785,7 +1737,7 @@ mod tests {
     fn mismatches(
         left: &FakeWorld,
         right: &FakeWorld,
-    ) -> Vec<((i32, i32, i32), Option<String>, Option<String>)> {
+    ) -> Vec<((i32, i32, i32), Option<StateId>, Option<StateId>)> {
         let keys: std::collections::BTreeSet<(i32, i32, i32)> =
             left.keys().chain(right.keys()).copied().collect();
         keys.into_iter()
@@ -1810,15 +1762,15 @@ mod tests {
     /// a `begin_move` that defers nothing at all.
     #[allow(clippy::type_complexity)]
     fn scenarios(
-    ) -> Vec<(&'static str, Vec<(BlockPos, &'static str)>, BlockPos, Direction, bool, usize)> {
+    ) -> Vec<(&'static str, Vec<(BlockPos, StateId)>, BlockPos, Direction, bool, usize)> {
         vec![
             (
                 "three blocks pushed east",
                 vec![
-                    (at(0, 0, 0), "minecraft:piston[extended=false,facing=east]"),
-                    (at(1, 0, 0), "minecraft:stone"),
-                    (at(2, 0, 0), "minecraft:dirt"),
-                    (at(3, 0, 0), "minecraft:gravel"),
+                    (at(0, 0, 0), state("minecraft:piston[extended=false,facing=east]")),
+                    (at(1, 0, 0), state("minecraft:stone")),
+                    (at(2, 0, 0), state("minecraft:dirt")),
+                    (at(3, 0, 0), state("minecraft:gravel")),
                 ],
                 at(0, 0, 0),
                 Direction::East,
@@ -1829,10 +1781,10 @@ mod tests {
             (
                 "two blocks pushed into a torch that is destroyed",
                 vec![
-                    (at(0, 0, 0), "minecraft:piston[extended=false,facing=east]"),
-                    (at(1, 0, 0), "minecraft:stone"),
-                    (at(2, 0, 0), "minecraft:dirt"),
-                    (at(3, 0, 0), "minecraft:torch"),
+                    (at(0, 0, 0), state("minecraft:piston[extended=false,facing=east]")),
+                    (at(1, 0, 0), state("minecraft:stone")),
+                    (at(2, 0, 0), state("minecraft:dirt")),
+                    (at(3, 0, 0), state("minecraft:torch")),
                 ],
                 at(0, 0, 0),
                 Direction::East,
@@ -1845,10 +1797,10 @@ mod tests {
             (
                 "a sticky run dragging a perpendicular neighbour",
                 vec![
-                    (at(0, 0, 0), "minecraft:sticky_piston[extended=false,facing=east]"),
-                    (at(1, 0, 0), SLIME_BLOCK),
-                    (at(2, 0, 0), "minecraft:stone"),
-                    (at(1, 1, 0), "minecraft:dirt"),
+                    (at(0, 0, 0), state("minecraft:sticky_piston[extended=false,facing=east]")),
+                    (at(1, 0, 0), state("minecraft:slime_block")),
+                    (at(2, 0, 0), state("minecraft:stone")),
+                    (at(1, 1, 0), state("minecraft:dirt")),
                 ],
                 at(0, 0, 0),
                 Direction::East,
@@ -1860,10 +1812,10 @@ mod tests {
             (
                 "a sticky retraction pulling two blocks home",
                 vec![
-                    (at(0, 0, 0), "minecraft:sticky_piston[extended=true,facing=east]"),
-                    (at(1, 0, 0), "minecraft:piston_head[facing=east,short=false,type=sticky]"),
-                    (at(2, 0, 0), SLIME_BLOCK),
-                    (at(3, 0, 0), "minecraft:stone"),
+                    (at(0, 0, 0), state("minecraft:sticky_piston[extended=true,facing=east]")),
+                    (at(1, 0, 0), state("minecraft:piston_head[facing=east,short=false,type=sticky]")),
+                    (at(2, 0, 0), state("minecraft:slime_block")),
+                    (at(3, 0, 0), state("minecraft:stone")),
                 ],
                 at(0, 0, 0),
                 Direction::East,
@@ -1920,10 +1872,10 @@ mod tests {
                 ));
             }
             for (pos, _, mid_state) in &during {
-                let held = mid_state.as_deref().unwrap_or("(air)");
-                if !is_moving_piston(held) {
+                let held = mid_state.unwrap_or_else(crate::chunk::air_state);
+                if !is_moving_piston_id(held) {
                     failures.push(format!(
-                        "{name}: cell {pos:?} differs mid-animation but holds {held}, \
+                        "{name}: cell {pos:?} differs mid-animation but holds {held:?}, \
                          not a moving_piston"
                     ));
                 }
@@ -1955,11 +1907,11 @@ mod tests {
         // A piston at (4,5,4) facing east with three blocks in front of it, and a
         // lit redstone torch directly beside the base so `has_extend_signal` fires
         // on the ordinary adjacency path rather than through quasi-connectivity.
-        column.set_block(4, 5, 4, "minecraft:piston[extended=false,facing=east]");
-        column.set_block(5, 5, 4, "minecraft:stone");
-        column.set_block(6, 5, 4, "minecraft:dirt");
-        column.set_block(7, 5, 4, "minecraft:gravel");
-        column.set_block(4, 5, 5, "minecraft:redstone_torch[lit=true]");
+        column.set_block_id(4, 5, 4, state("minecraft:piston[extended=false,facing=east]"));
+        column.set_block_id(5, 5, 4, state("minecraft:stone"));
+        column.set_block_id(6, 5, 4, state("minecraft:dirt"));
+        column.set_block_id(7, 5, 4, state("minecraft:gravel"));
+        column.set_block_id(4, 5, 5, state("minecraft:redstone_torch[lit=true]"));
 
         let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         let events =
@@ -1972,7 +1924,7 @@ mod tests {
         // gate failed on it first time.
         let moving_now: Vec<(i32, i32, i32)> = events
             .iter()
-            .filter(|e| is_moving_piston(&e.to))
+            .filter(|e| is_moving_piston_id(e.to))
             .map(|e| e.pos)
             .collect();
         assert_eq!(
@@ -1982,13 +1934,13 @@ mod tests {
              the push tick, far end first; got {events:?}"
         );
         assert_eq!(
-            column.block_state(5, 5, 4),
-            "minecraft:moving_piston[facing=east,type=normal]",
+            column.block_state_id(5, 5, 4),
+            moving_piston_state_id(Direction::East, false),
             "the arm cell holds the animating head, not the head itself, until the commit"
         );
         assert_eq!(
-            column.block_state(4, 5, 4),
-            "minecraft:piston[extended=true,facing=east]",
+            column.block_state_id(4, 5, 4),
+            state("minecraft:piston[extended=true,facing=east]"),
             "the base alone flips immediately on an extension"
         );
 
@@ -2004,24 +1956,16 @@ mod tests {
             if tick == PUSH + PISTON_MOVE_DELAY {
                 // …and each due entry really does carry a parseable record, which is
                 // what `crate::tick`'s commit arm reads.
-                let states: Vec<String> = due
+                let states: Vec<StateId> = due
                     .iter()
                     .filter(|t| is_finish_kind(&t.kind))
-                    .map(|t| {
-                        parse_finish_kind(&t.kind)
-                            .expect("a parseable record")
-                            .committed_state()
-                            .to_string()
-                    })
+                    .map(|t| parse_finish_kind(&t.kind).expect("a parseable record").committed_state())
                     .collect();
                 assert!(
-                    states.contains(&"minecraft:gravel".to_string())
-                        && states.contains(&"minecraft:dirt".to_string())
-                        && states.contains(&"minecraft:stone".to_string())
-                        && states.contains(
-                            &"minecraft:piston_head[facing=east,short=false,type=normal]"
-                                .to_string()
-                        ),
+                    states.contains(&state("minecraft:gravel"))
+                        && states.contains(&state("minecraft:dirt"))
+                        && states.contains(&state("minecraft:stone"))
+                        && states.contains(&state("minecraft:piston_head[facing=east,short=false,type=normal]")),
                     "the commits must carry the four travelling states; got {states:?}"
                 );
             }
@@ -2061,27 +2005,24 @@ mod tests {
         use crate::scheduled_tick::ScheduledTickQueue;
 
         let mut column = ChunkColumn::new(0, 16);
-        column.set_block(4, 5, 4, "minecraft:piston[extended=false,facing=east]");
-        column.set_block(5, 5, 4, "minecraft:stone");
-        column.set_block(6, 5, 4, "minecraft:dirt");
-        column.set_block(4, 5, 5, "minecraft:redstone_torch[lit=true]");
+        column.set_block_id(4, 5, 4, state("minecraft:piston[extended=false,facing=east]"));
+        column.set_block_id(5, 5, 4, state("minecraft:stone"));
+        column.set_block_id(6, 5, 4, state("minecraft:dirt"));
+        column.set_block_id(4, 5, 5, state("minecraft:redstone_torch[lit=true]"));
 
         let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         // Exactly `propagate_placement`'s own two calls, in its own order.
         let _ = crate::random_tick::react_at_placement(&mut column, 0, 0, 4, 5, 5, &mut queue, 0);
         let batch = queue.drain_due(u64::MAX, usize::MAX);
 
-        let commits: Vec<(&(i32, i32, i32), u64, String)> = batch
+        let commits: Vec<(&(i32, i32, i32), u64, StateId)> = batch
             .iter()
             .filter(|pending| is_finish_kind(&pending.kind))
             .map(|pending| {
                 (
                     &pending.pos,
                     pending.trigger_tick,
-                    parse_finish_kind(&pending.kind)
-                        .expect("a parseable record")
-                        .committed_state()
-                        .to_string(),
+                    parse_finish_kind(&pending.kind).expect("a parseable record").committed_state(),
                 )
             })
             .collect();
@@ -2103,23 +2044,23 @@ mod tests {
             "every commit's trigger_tick must be the relative delay {PISTON_MOVE_DELAY}, \
              because the tick loop rebases it; wrong: {wrong_delay:?}"
         );
-        let mut states: Vec<&str> = commits.iter().map(|(_, _, s)| s.as_str()).collect();
+        let mut states: Vec<StateId> = commits.iter().map(|(_, _, s)| *s).collect();
         states.sort_unstable();
         assert_eq!(
             states,
             vec![
-                "minecraft:dirt",
-                "minecraft:piston_head[facing=east,short=false,type=normal]",
-                "minecraft:stone",
+                state("minecraft:dirt"),
+                state("minecraft:piston_head[facing=east,short=false,type=normal]"),
+                state("minecraft:stone"),
             ]
         );
         // And the cells really are holding `moving_piston` right now, so the records
         // above have a state to attach to.
         for x in [5, 6, 7] {
             assert!(
-                is_moving_piston(column.block_state(x, 5, 4)),
-                "cell ({x},5,4) holds {} rather than a moving_piston",
-                column.block_state(x, 5, 4)
+                is_moving_piston_id(column.block_state_id(x, 5, 4)),
+                "cell ({x},5,4) holds {:?} rather than a moving_piston",
+                column.block_state_id(x, 5, 4)
             );
         }
     }
@@ -2145,12 +2086,12 @@ mod tests {
         use crate::chunk::ChunkColumn;
         use crate::scheduled_tick::ScheduledTickQueue;
 
-        fn commits_for(lever_state: &str) -> usize {
+        fn commits_for(lever_state: StateId) -> usize {
             let mut column = ChunkColumn::new(0, 16);
-            column.set_block(4, 5, 4, "minecraft:piston[extended=false,facing=east]");
-            column.set_block(5, 5, 4, "minecraft:stone");
-            column.set_block(6, 5, 4, "minecraft:dirt");
-            column.set_block(4, 5, 5, lever_state);
+            column.set_block_id(4, 5, 4, state("minecraft:piston[extended=false,facing=east]"));
+            column.set_block_id(5, 5, 4, state("minecraft:stone"));
+            column.set_block_id(6, 5, 4, state("minecraft:dirt"));
+            column.set_block_id(4, 5, 5, lever_state);
 
             let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
             let _ = crate::random_tick::react_at_placement(&mut column, 0, 0, 4, 5, 5, &mut queue, 0);
@@ -2161,8 +2102,8 @@ mod tests {
                 .count()
         }
 
-        let on = commits_for("minecraft:lever[face=floor,facing=north,powered=true]");
-        let off = commits_for("minecraft:lever[face=floor,facing=north,powered=false]");
+        let on = commits_for(state("minecraft:lever[face=floor,facing=north,powered=true]"));
+        let off = commits_for(state("minecraft:lever[face=floor,facing=north,powered=false]"));
 
         // Three, exactly as the torch arm: destinations (6,5,4) and (7,5,4) plus
         // the arm (5,5,4). Predicted, not merely "more than zero" — a count of one
@@ -2189,7 +2130,7 @@ mod tests {
     #[test]
     fn a_finish_kind_round_trips_and_a_foreign_kind_does_not_parse() {
         let entity = moving(
-            "minecraft:piston_head[facing=west,short=true,type=sticky]",
+            state("minecraft:piston_head[facing=west,short=true,type=sticky]"),
             Direction::North,
             false,
             true,
@@ -2210,12 +2151,16 @@ mod tests {
             None,
             "an empty moved state is not a record"
         );
-        let unknown = parse_finish_kind("redstone:piston_finish|north|false|true|minecraft:not_a_block")
-            .expect("an unknown runtime state must still survive the scheduler");
-        assert_eq!(unknown.moved_state, None, "only the visual projection is absent");
-        assert_eq!(unknown.committed_state(), "minecraft:not_a_block");
         assert_eq!(
-            parse_finish_kind("redstone:piston_finish|nowhere|false|true|minecraft:stone"),
+            parse_finish_kind("redstone:piston_finish|north|false|true|not-a-state-id"),
+            None,
+            "a malformed runtime state id is not a record"
+        );
+        assert_eq!(
+            parse_finish_kind(format!(
+                "redstone:piston_finish|nowhere|false|true|{}",
+                state("minecraft:stone").raw()
+            )),
             None,
             "an unknown direction is not a record"
         );
@@ -2228,74 +2173,19 @@ mod tests {
         }
     }
 
-    #[test]
-    fn begin_move_preserves_an_unknown_carried_state_through_completion() {
-        let writes = vec![MoveWrite {
-            pos: at(4, 5, 6),
-            to: "example:unregistered_block".to_string(),
-        }];
-
-        let start = begin_move(
-            &writes,
-            "minecraft:piston[extended=false,facing=east]",
-            at(3, 5, 6),
-            Direction::East,
-            true,
-        );
-        let (_, _, entity) = start.moving.first().expect("the unknown state still animates");
-        assert_eq!(entity.moved_state, None, "unknown states have no census visual projection");
-        assert_eq!(entity.committed_state(), "example:unregistered_block");
-        assert_eq!(
-            finish_move(&start),
-            writes,
-            "the completion must replay an unknown runtime state verbatim"
-        );
-    }
-
-    #[test]
-    fn a_synthetic_comparator_output_survives_normal_piston_completion() {
-        let runtime = "minecraft:comparator[facing=east,mode=compare,powered=true,output=9]";
-        let entity = moving(runtime, Direction::East, true, false);
-        assert!(entity.moved_state.is_some(), "the real comparator portion has a typed visual state");
-
-        let parsed = parse_finish_kind(&finish_kind(&entity)).expect("the scheduled record parses");
-        let start = MoveStart {
-            moving: vec![(at(4, 5, 6), moving_piston_state(Direction::East, false), parsed)],
-            cleared: Vec::new(),
-            base_now: None,
-        };
-        assert_eq!(
-            finish_move(&start),
-            vec![MoveWrite { pos: at(4, 5, 6), to: runtime.to_string() }],
-            "completion must retain the server-only output=9 companion property"
-        );
-    }
-
-    #[test]
-    fn a_synthetic_comparator_output_survives_piston_interruption() {
-        let runtime = "minecraft:comparator[facing=east,mode=compare,powered=true,output=9]";
-        let entity = moving(runtime, Direction::East, true, false);
-
-        assert_eq!(
-            interrupt(at(4, 5, 6), &entity),
-            MoveWrite { pos: at(4, 5, 6), to: runtime.to_string() },
-            "interrupting a carried state must not reset its output companion property"
-        );
-    }
-
     /// `source` is set for the piston's **own** cell and nothing else, and which
     /// cell that is differs between an extension and a retraction. Getting it wrong
     /// makes a client draw an ordinary block where a head belongs.
     #[test]
     fn only_the_pistons_own_cell_is_a_source() {
         let extend = fake(&[
-            (at(0, 0, 0), "minecraft:sticky_piston[extended=false,facing=east]"),
-            (at(1, 0, 0), "minecraft:stone"),
-            (at(2, 0, 0), "minecraft:dirt"),
+            (at(0, 0, 0), state("minecraft:sticky_piston[extended=false,facing=east]")),
+            (at(1, 0, 0), state("minecraft:stone")),
+            (at(2, 0, 0), state("minecraft:dirt")),
         ]);
         let (piston_state, writes) =
             plan_move(&extend, at(0, 0, 0), Direction::East, true).expect("resolves");
-        let start = begin_move(&writes, &piston_state, at(0, 0, 0), Direction::East, true);
+        let start = begin_move(&writes, piston_state, at(0, 0, 0), Direction::East, true);
         let sources: Vec<BlockPos> = start
             .moving
             .iter()
@@ -2318,7 +2208,7 @@ mod tests {
         );
         assert!(arm.extending);
         assert_eq!(
-            moving_state, "minecraft:moving_piston[facing=east,type=sticky]",
+            *moving_state, moving_piston_state_id(Direction::East, true),
             "`moveBlocks` sets TYPE from the piston only for the cell it creates itself"
         );
         let carried = start
@@ -2327,23 +2217,23 @@ mod tests {
             .find(|(pos, _, _)| *pos == at(2, 0, 0))
             .expect("the run's first block moves");
         assert_eq!(
-            carried.1, "minecraft:moving_piston[facing=east,type=normal]",
+            carried.1, moving_piston_state_id(Direction::East, false),
             "a carried block gets the default TYPE, not the piston's"
         );
         assert_eq!(
-            start.base_now.as_deref(),
-            Some("minecraft:sticky_piston[extended=true,facing=east]"),
+            start.base_now,
+            Some(state("minecraft:sticky_piston[extended=true,facing=east]")),
             "an extension flips the base immediately"
         );
 
         let retract = fake(&[
-            (at(0, 0, 0), "minecraft:sticky_piston[extended=true,facing=east]"),
-            (at(1, 0, 0), "minecraft:piston_head[facing=east,short=false,type=sticky]"),
-            (at(2, 0, 0), SLIME_BLOCK),
+            (at(0, 0, 0), state("minecraft:sticky_piston[extended=true,facing=east]")),
+            (at(1, 0, 0), state("minecraft:piston_head[facing=east,short=false,type=sticky]")),
+            (at(2, 0, 0), state("minecraft:slime_block")),
         ]);
         let (piston_state, writes) =
             plan_move(&retract, at(0, 0, 0), Direction::East, false).expect("resolves");
-        let start = begin_move(&writes, &piston_state, at(0, 0, 0), Direction::East, false);
+        let start = begin_move(&writes, piston_state, at(0, 0, 0), Direction::East, false);
         assert_eq!(
             start.base_now, None,
             "a retraction does not write the base now — the base is what animates"
@@ -2354,7 +2244,7 @@ mod tests {
             .find(|(_, _, e)| e.source)
             .expect("a retraction has a source cell");
         assert_eq!(*pos, at(0, 0, 0), "and it is the base cell, not the arm");
-        assert_eq!(moving_state, "minecraft:moving_piston[facing=east,type=sticky]");
+        assert_eq!(*moving_state, moving_piston_state_id(Direction::East, true));
         assert!(!base.extending);
         assert_eq!(
             base.moved_state, Some(state("minecraft:sticky_piston[extended=false,facing=east]")),
@@ -2399,7 +2289,7 @@ mod tests {
     /// direction — which is the ordering a hand-count reaches for.
     #[test]
     fn facing_3d_values_follow_vanillas_declaration_order() {
-        let of = |direction| moving("minecraft:stone", direction, true, false).facing_3d_value();
+        let of = |direction| moving(state("minecraft:stone"), direction, true, false).facing_3d_value();
         assert_eq!(of(Direction::Down), 0);
         assert_eq!(of(Direction::Up), 1);
         assert_eq!(of(Direction::North), 2);
@@ -2426,13 +2316,13 @@ mod tests {
     #[test]
     fn interrupting_a_source_entity_writes_air_never_the_moved_state() {
         let extending_head = moving(
-            &format!("{PISTON_HEAD}[facing=east,short=false,type=normal]"),
+            state("minecraft:piston_head[facing=east,short=false,type=normal]"),
             Direction::East,
             true,
             true,
         );
         let retracting_base = moving(
-            "minecraft:piston[facing=south,extended=false]",
+            state("minecraft:piston[facing=south,extended=false]"),
             Direction::South,
             false,
             true,
@@ -2441,7 +2331,7 @@ mod tests {
             let write = interrupt(at(9, 9, 9), entity);
             assert_eq!(
                 write,
-                MoveWrite { pos: at(9, 9, 9), to: "minecraft:air".to_string() },
+                MoveWrite { pos: at(9, 9, 9), to: state("minecraft:air") },
                 "{label}: a source entity interrupted mid-animation must evaporate to air, not \
                  land at its moved_state {:?}",
                 entity.moved_state
@@ -2458,15 +2348,15 @@ mod tests {
     /// regardless of the arm's interruption happening one cell closer.
     #[test]
     fn interrupting_a_carried_block_writes_its_moved_state_same_as_ordinary_completion() {
-        let carried = moving("minecraft:dirt", Direction::South, true, false);
+        let carried = moving(state("minecraft:dirt"), Direction::South, true, false);
         let write = interrupt(at(3, 4, 5), &carried);
-        assert_eq!(write, MoveWrite { pos: at(3, 4, 5), to: "minecraft:dirt".to_string() });
+        assert_eq!(write, MoveWrite { pos: at(3, 4, 5), to: state("minecraft:dirt") });
 
         // Control: this must be the *same* value `finish_move` reaches through
         // its own, independent path -- proving `interrupt`'s non-source arm is
         // not a different, coincidentally-matching computation.
         let start = MoveStart {
-            moving: vec![(at(3, 4, 5), moving_piston_state(Direction::South, false), carried)],
+            moving: vec![(at(3, 4, 5), moving_piston_state_id(Direction::South, false), carried)],
             cleared: Vec::new(),
             base_now: None,
         };
@@ -2490,12 +2380,12 @@ mod tests {
         let arm_pos = at(1, 1, 1);
         let other_pos = at(9, 1, 1);
         let entity = moving(
-            &format!("{PISTON_HEAD}[facing=east,short=false,type=normal]"),
+            state("minecraft:piston_head[facing=east,short=false,type=normal]"),
             Direction::East,
             true,
             true,
         );
-        let other_entity = moving("minecraft:dirt", Direction::East, true, false);
+        let other_entity = moving(state("minecraft:dirt"), Direction::East, true, false);
 
         let mut ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         ticks.schedule(
@@ -2517,7 +2407,7 @@ mod tests {
         let parsed = parse_finish_kind(&taken.kind).expect("must round-trip back to the entity");
         assert_eq!(parsed, entity, "the interrupted entry must be the one begin_move scheduled");
         let write = interrupt(arm_pos, &parsed);
-        assert_eq!(write.to, "minecraft:air");
+        assert_eq!(write.to, state("minecraft:air"));
 
         // The ordinary drain, run past the original due tick, must produce
         // only the *other* piston's commit -- the interrupted one is gone,

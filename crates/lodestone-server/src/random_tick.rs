@@ -185,20 +185,6 @@ pub(super) const GRASS_BLOCK: &str = "minecraft:grass_block";
 #[cfg(test)]
 pub(super) const DIRT_BLOCK: &str = "minecraft:dirt";
 #[cfg(test)]
-pub(super) const MYCELIUM_BLOCK: &str = "minecraft:mycelium";
-#[cfg(test)]
-pub(super) const PODZOL_BLOCK: &str = "minecraft:podzol";
-
-/// `minecraft:lava` — the one **fluid** whose real is-randomly-ticking flag is true.
-///
-/// The real lava fluid overrides that check to return `true`; water never
-/// does. Its own random tick is what sets fire to flammable blocks near lava, and it
-/// is therefore the only thing in a generated world that starts a fire at all —
-/// see [`RandomTickScheduler::tick_lava`].
-#[cfg(test)]
-pub(super) const LAVA_BLOCK: &str = "minecraft:lava";
-
-#[cfg(test)]
 fn base_name(state: &str) -> &str {
     state.split('[').next().unwrap_or(state)
 }
@@ -370,13 +356,6 @@ pub(crate) fn spreading_snowy_state_id(block: Block, above_state: StateId) -> St
         )
         .expect("snowy property is valid for spreading snowy blocks");
     Properties::state_for_block(target, &properties).expect("snowy block state exists")
-}
-
-/// Test reference for the snowy-family dispatch arm.
-#[cfg(test)]
-#[must_use]
-pub(crate) fn is_snowy_family(base: Block) -> bool {
-    matches!(base, Block::GrassBlock | Block::Mycelium | Block::Podzol)
 }
 
 #[must_use]

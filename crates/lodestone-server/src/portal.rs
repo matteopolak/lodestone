@@ -2349,10 +2349,6 @@ mod tests {
                 .unwrap_or_else(lodestone_data::block_states::air_state)
         }
 
-        fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
-            self.set_calls.fetch_add(1, Ordering::Relaxed);
-            self.put(x, y, z, state);
-        }
     }
 
     impl ChunkSource for ResidentLookupWorld {
@@ -2553,7 +2549,7 @@ mod tests {
         expected.sort_by_key(|p| (p.x, p.y, p.z));
         assert_eq!(removed_positions, expected, "exactly the 2x3 interior, no more and no less");
         for (pos, state) in &removed {
-            assert!(is_portal(state), "each removed cell's *recorded* prior state must have been a real portal block: {pos:?} was {state:?}");
+            assert!(is_portal(*state), "each removed cell's *recorded* prior state must have been a real portal block: {pos:?} was {state:?}");
         }
         for y in 70..73 {
             for x in 0..2 {
@@ -3159,7 +3155,7 @@ mod tests {
         // Every rim cell holds a real frame at the right position, but all
         // facing south — correct only for the three north-edge cells.
         for &(pos, _correct_facing) in &positions {
-            world.put(pos.x, pos.y, pos.z, &end_portal_frame_state(Direction::South, true));
+            world.put(pos.x, pos.y, pos.z, end_portal_frame_state(Direction::South, true));
         }
         // Click a north-edge cell specifically, so the search's own geometry
         // hypothesis is right and the only possible failure is the facing

@@ -568,22 +568,22 @@ mod tests {
     #[test]
     fn blocks_with_no_vanilla_can_survive_are_absent() {
         let mut wrongly_present = Vec::new();
-        for name in [
-            "minecraft:skeleton_skull",
-            "minecraft:zombie_head",
-            "minecraft:turtle_egg",
-            "minecraft:sniffer_egg",
-            "minecraft:tripwire",
-            "minecraft:lily_pad",
-            "minecraft:frogspawn",
-            "minecraft:stone",
-            "minecraft:dirt",
-            "minecraft:cobweb",
-            "minecraft:vine",
-            "minecraft:scaffolding",
+        for block in [
+            Block::SkeletonSkull,
+            Block::ZombieHead,
+            Block::TurtleEgg,
+            Block::SnifferEgg,
+            Block::Tripwire,
+            Block::LilyPad,
+            Block::Frogspawn,
+            Block::Stone,
+            Block::Dirt,
+            Block::Cobweb,
+            Block::Vine,
+            Block::Scaffolding,
         ] {
-            if support_kind(name).is_some() {
-                wrongly_present.push(name);
+            if support_kind(block).is_some() {
+                wrongly_present.push(block);
             }
         }
         assert!(

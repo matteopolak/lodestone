@@ -179,7 +179,7 @@ pub fn run_scheduled_tick(state: StateId) -> Option<StateId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::redstone::fixture_state as state;
+    use crate::redstone::configured_state as state;
     use crate::scheduled_tick::{ScheduledTickQueue, TickPriority};
 
     #[test]
@@ -256,12 +256,13 @@ mod tests {
 
     #[test]
     fn apply_hit_writes_power_and_schedules_the_matching_duration() {
-        let outcome = apply_hit(state("minecraft:target[power=0]"), 12, false, false)
+        let unpowered = state(Block::Target, &[(PropertyKey::Power, BuiltinPropertyValue::Value0)]);
+        let outcome = apply_hit(unpowered, 12, false, false)
             .expect("no pending decay, so the hit must apply");
-        assert_eq!(outcome.new_state, state("minecraft:target[power=12]"));
+        assert_eq!(outcome.new_state, state(Block::Target, &[(PropertyKey::Power, BuiltinPropertyValue::Value12)]));
         assert_eq!(outcome.delay, 8);
 
-        let arrow_outcome = apply_hit(state("minecraft:target[power=0]"), 12, true, false)
+        let arrow_outcome = apply_hit(unpowered, 12, true, false)
             .expect("no pending decay, so the hit must apply");
         assert_eq!(arrow_outcome.delay, 20);
     }
@@ -272,15 +273,16 @@ mod tests {
     /// holding vanilla's steady value until the first decay actually fires.
     #[test]
     fn a_hit_during_a_pending_decay_changes_nothing() {
-        assert_eq!(apply_hit(state("minecraft:target[power=9]"), 3, false, true), None);
+        let powered = state(Block::Target, &[(PropertyKey::Power, BuiltinPropertyValue::Value9)]);
+        assert_eq!(apply_hit(powered, 3, false, true), None);
     }
 
     #[test]
     fn scheduled_tick_decays_a_lit_target_and_leaves_an_unlit_one_alone() {
         assert_eq!(
-            run_scheduled_tick(state("minecraft:target[power=7]")),
-            Some(state("minecraft:target[power=0]"))
+            run_scheduled_tick(state(Block::Target, &[(PropertyKey::Power, BuiltinPropertyValue::Value7)])),
+            Some(state(Block::Target, &[(PropertyKey::Power, BuiltinPropertyValue::Value0)]))
         );
-        assert_eq!(run_scheduled_tick(state("minecraft:target[power=0]")), None);
+        assert_eq!(run_scheduled_tick(state(Block::Target, &[(PropertyKey::Power, BuiltinPropertyValue::Value0)])), None);
     }
 }

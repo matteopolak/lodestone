@@ -112,31 +112,38 @@ pub fn run_scheduled_tick(state: StateId) -> (StateId, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::redstone::fixture_state as state;
+    use crate::redstone::configured_state as state;
+
+    fn observer(facing: BuiltinPropertyValue, powered: BuiltinPropertyValue) -> StateId {
+        state(
+            Block::Observer,
+            &[(PropertyKey::Facing, facing), (PropertyKey::Powered, powered)],
+        )
+    }
 
     #[test]
     fn watch_direction_is_the_opposite_of_facing() {
-        assert_eq!(watch_direction(state("minecraft:observer[facing=north,powered=false]")), Direction::South);
-        assert_eq!(watch_direction(state("minecraft:observer[facing=east,powered=false]")), Direction::West);
+        assert_eq!(watch_direction(observer(BuiltinPropertyValue::North, BuiltinPropertyValue::False)), Direction::South);
+        assert_eq!(watch_direction(observer(BuiltinPropertyValue::East, BuiltinPropertyValue::False)), Direction::West);
     }
 
     #[test]
     fn should_start_signal_is_false_while_already_powered() {
-        assert!(should_start_signal(state("minecraft:observer[facing=north,powered=false]")));
-        assert!(!should_start_signal(state("minecraft:observer[facing=north,powered=true]")));
+        assert!(should_start_signal(observer(BuiltinPropertyValue::North, BuiltinPropertyValue::False)));
+        assert!(!should_start_signal(observer(BuiltinPropertyValue::North, BuiltinPropertyValue::True)));
     }
 
     #[test]
     fn scheduled_tick_turns_on_and_requests_a_reschedule() {
-        let (new_state, reschedule) = run_scheduled_tick(state("minecraft:observer[facing=north,powered=false]"));
-        assert_eq!(new_state, state("minecraft:observer[facing=north,powered=true]"));
+        let (new_state, reschedule) = run_scheduled_tick(observer(BuiltinPropertyValue::North, BuiltinPropertyValue::False));
+        assert_eq!(new_state, observer(BuiltinPropertyValue::North, BuiltinPropertyValue::True));
         assert!(reschedule, "the ON half of the pulse must schedule its own OFF half");
     }
 
     #[test]
     fn scheduled_tick_turns_off_with_no_further_reschedule() {
-        let (new_state, reschedule) = run_scheduled_tick(state("minecraft:observer[facing=north,powered=true]"));
-        assert_eq!(new_state, state("minecraft:observer[facing=north,powered=false]"));
+        let (new_state, reschedule) = run_scheduled_tick(observer(BuiltinPropertyValue::North, BuiltinPropertyValue::True));
+        assert_eq!(new_state, observer(BuiltinPropertyValue::North, BuiltinPropertyValue::False));
         assert!(!reschedule, "control failed: the OFF half must not reschedule itself, or the pulse would never end");
     }
 
@@ -145,7 +152,7 @@ mod tests {
     /// on-then-off), not merely "it changed".
     #[test]
     fn a_full_pulse_is_exactly_two_scheduled_ticks_wide() {
-        let start = state("minecraft:observer[facing=north,powered=false]");
+        let start = observer(BuiltinPropertyValue::North, BuiltinPropertyValue::False);
         let (after_first, reschedule_first) = run_scheduled_tick(start);
         assert!(reschedule_first);
         let (after_second, reschedule_second) = run_scheduled_tick(after_first);

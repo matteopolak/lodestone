@@ -1,5 +1,5 @@
 //! Palette-derived reaction classification: the O(1) answer to "what, if
-//! anything, reacts at this cell", replacing the string-parsed predicate
+//! anything, reacts at this cell", replacing the per-notification predicate
 //! chain that used to open every neighbour notification.
 //!
 //! # What it is
@@ -73,7 +73,7 @@
 //! that dispatches on a *property* instead — `powered=true`, say — cannot be
 //! classified per palette entry unless that property is part of the palette
 //! key, which it is, since a palette entry is a whole canonical state
-//! string. So a property-sensitive predicate is fine; a predicate reading
+//! `StateId`. So a property-sensitive predicate is fine; a predicate reading
 //! any **neighbouring** cell is not, and must stay inside its arm's body.
 //!
 //! # Configuration
@@ -89,8 +89,6 @@
 //! `crate::redstone_note_block`, `crate::piston`, `crate::gravity_tick`,
 //! `crate::command_block`, `crate::mobs::tnt`.
 
-#[cfg(test)]
-use crate::redstone::base_name;
 #[cfg(test)]
 use lodestone_data::block::Block;
 use lodestone_data::block_states::StateId;
@@ -311,8 +309,8 @@ mod tests {
     /// between the two, because every predicate is first-match-wins, and
     /// order is exactly what this reproduces from the dispatch site.
     fn reference_class(state: StateId) -> ReactionClass {
-        // 1. gravity          `if gravity_tick::is_gravity_block(base_name(&state))`
-        // 1b. snowy           `if SNOWY_FAMILY.contains(&base_name(&state))`
+        // 1. gravity          `if gravity_tick::is_gravity_state(state)`
+        // 1b. snowy           `if random_tick::is_snowy_family_id(state)`
         // 2. dust             `if redstone::is_wire(&state)`
         // 3a. torch           `if redstone::is_torch(&state)`
         // 3b. repeater        `if redstone::is_repeater(&state)`
@@ -321,16 +319,15 @@ mod tests {
         // 3d. hopper          `if redstone::is_hopper(&state)`
         // 3e. observer        `if redstone::is_observer(&state)`
         // 3f. openable        `if redstone_openable::is_openable(&state)`
-        // 3g. note block      `if base_name(&state) == redstone_note_block::NOTE_BLOCK`
+        // 3g. note block      `if state.block() == redstone_note_block::NOTE_BLOCK`
         // 3h. rail            `if redstone_rail::is_powered_rail_family(&state)`
         // 3i. dispenser       `if redstone_dispenser::is_dispenser_family(&state)`
         // 3i-bis. tnt         `if crate::mobs::tnt::is_tnt_block(&state)`
         // 3j. command block   `if crate::command_block::is_command_block_family(&state)`
         // fall through        `Vec::new()`
-        let b = base_name(state);
         match () {
-            () if crate::gravity_tick::is_gravity_block(b) => ReactionClass::Gravity,
-            () if crate::random_tick::is_snowy_family(b) => ReactionClass::Snowy,
+            () if crate::gravity_tick::is_gravity_state(state) => ReactionClass::Gravity,
+            () if crate::random_tick::is_snowy_family_id(state) => ReactionClass::Snowy,
             () if crate::redstone::is_wire(state) => ReactionClass::Wire,
             () if crate::redstone::is_torch(state) => ReactionClass::Torch,
             () if crate::redstone::is_repeater(state) => ReactionClass::Repeater,
@@ -339,7 +336,7 @@ mod tests {
             () if crate::redstone::is_hopper(state) => ReactionClass::Hopper,
             () if crate::redstone::is_observer(state) => ReactionClass::Observer,
             () if crate::redstone_openable::is_openable(state) => ReactionClass::Openable,
-            () if b == crate::redstone_note_block::NOTE_BLOCK => ReactionClass::NoteBlock,
+            () if state.block() == crate::redstone_note_block::NOTE_BLOCK => ReactionClass::NoteBlock,
             () if crate::redstone_rail::is_powered_rail_family(state) => ReactionClass::Rail,
             () if crate::redstone_dispenser::is_dispenser_family(state) => ReactionClass::Dispenser,
             () if crate::mobs::tnt::is_tnt_block(state) => ReactionClass::Tnt,
@@ -355,7 +352,7 @@ mod tests {
     /// **The exhaustive differential.** Every block state in 26.2 — not a
     /// sample — classified both ways, and required to agree.
     ///
-    /// This is what licenses replacing the dispatch chain's fifteen string
+    /// This is what licenses replacing the dispatch chain's fifteen state
     /// predicates with one array index: the domain is finite and the whole
     /// of it is checked, so "the two agree on the states I thought of" is
     /// not the claim being made.
@@ -387,7 +384,7 @@ mod tests {
 
         assert_eq!(
             checked, total,
-            "every id in 0..STATE_COUNT must rebuild into a canonical state string"
+            "every id in 0..STATE_COUNT must rebuild into a canonical StateId"
         );
         assert!(
             mismatches.is_empty(),

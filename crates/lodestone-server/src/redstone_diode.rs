@@ -410,7 +410,6 @@ pub fn run_scheduled_comparator_tick_with_output(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::redstone::fixture_state as state;
 
     fn world(entries: &[(BlockPos, StateId)]) -> impl Fn(BlockPos) -> WorldState + use<> {
         let entries = entries.to_vec();
@@ -437,7 +436,7 @@ mod tests {
     fn repeater_should_turn_on_reads_a_lit_torch_facing_into_it() {
         let origin = pos(0, 0, 0);
         let torch_pos = Direction::East.relative(origin);
-        let w = world(&[(torch_pos, state("minecraft:redstone_torch[lit=true]"))]);
+        let w = world(&[(torch_pos, crate::redstone_torch::set_standing_lit(true))]);
         assert!(repeater_should_turn_on(&w, origin, Direction::East));
         assert!(!repeater_should_turn_on(&world(&[]), origin, Direction::East));
     }
@@ -458,29 +457,29 @@ mod tests {
         // `FACING = south`, not `west` (an earlier version of this fixture's
         // mistake — it read `0` instead of the predicted `15`).
         let side_pos = Direction::South.relative(origin);
-        let diode_side = world(&[(side_pos, state("minecraft:repeater[facing=south,delay=1,locked=false,powered=true]"))]);
+        let diode_side = world(&[(side_pos, set_repeater(Direction::South, 1, false, true))]);
         assert!(is_locked(&diode_side, origin, Direction::East));
 
-        let torch_side = world(&[(side_pos, state("minecraft:redstone_torch[lit=true]"))]);
+        let torch_side = world(&[(side_pos, crate::redstone_torch::set_standing_lit(true))]);
         assert!(!is_locked(&torch_side, origin, Direction::East), "control failed: a torch must not lock a repeater");
     }
 
     #[test]
     fn schedule_check_fires_only_on_mismatch_and_never_while_locked() {
-        let off_locked = state("minecraft:repeater[facing=north,delay=1,locked=true,powered=false]");
+        let off_locked = set_repeater(Direction::North, 1, true, false);
         assert!(!should_schedule_repeater_check(off_locked, true), "locked repeaters never schedule, even on a real mismatch");
 
-        let off_unlocked = state("minecraft:repeater[facing=north,delay=1,locked=false,powered=false]");
+        let off_unlocked = set_repeater(Direction::North, 1, false, false);
         assert!(should_schedule_repeater_check(off_unlocked, true));
         assert!(!should_schedule_repeater_check(off_unlocked, false), "already steady: no recheck");
     }
 
     #[test]
     fn scheduled_tick_turns_off_an_on_repeater_when_input_drops() {
-        let on = state("minecraft:repeater[facing=north,delay=1,locked=false,powered=true]");
+        let on = set_repeater(Direction::North, 1, false, true);
         assert_eq!(
             run_scheduled_tick(on, false),
-            RepeaterTickOutcome::TurnedOff(state("minecraft:repeater[facing=north,delay=1,locked=false,powered=false]"))
+            RepeaterTickOutcome::TurnedOff(set_repeater(Direction::North, 1, false, false))
         );
     }
 
@@ -490,10 +489,10 @@ mod tests {
     /// period regardless of the input's state at the instant the tick runs.
     #[test]
     fn scheduled_tick_always_turns_on_and_flags_reschedule_when_input_already_dropped() {
-        let off = state("minecraft:repeater[facing=north,delay=1,locked=false,powered=false]");
+        let off = set_repeater(Direction::North, 1, false, false);
         match run_scheduled_tick(off, false) {
             RepeaterTickOutcome::TurnedOn { new_state, reschedule } => {
-                assert_eq!(new_state, state("minecraft:repeater[facing=north,delay=1,locked=false,powered=true]"));
+                assert_eq!(new_state, set_repeater(Direction::North, 1, false, true));
                 assert!(reschedule, "must flag a reschedule so the pulse still ends after exactly one delay period");
             }
             other => panic!("expected TurnedOn, got {other:?}"),
@@ -505,7 +504,7 @@ mod tests {
     /// case, proving `reschedule` actually discriminates.
     #[test]
     fn scheduled_tick_turns_on_with_no_reschedule_when_input_is_still_high() {
-        let off = state("minecraft:repeater[facing=north,delay=1,locked=false,powered=false]");
+        let off = set_repeater(Direction::North, 1, false, false);
         match run_scheduled_tick(off, true) {
             RepeaterTickOutcome::TurnedOn { reschedule, .. } => assert!(!reschedule),
             other => panic!("expected TurnedOn, got {other:?}"),
@@ -514,7 +513,7 @@ mod tests {
 
     #[test]
     fn locked_repeater_never_changes_state_on_a_scheduled_tick() {
-        let locked = state("minecraft:repeater[facing=north,delay=1,locked=true,powered=false]");
+        let locked = set_repeater(Direction::North, 1, true, false);
         assert_eq!(run_scheduled_tick(locked, true), RepeaterTickOutcome::Locked);
     }
 

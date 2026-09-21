@@ -398,15 +398,27 @@ mod tests {
             self.resident.then(|| ChunkColumn::new(0, 16))
         }
 
-        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-            "minecraft:air".to_owned()
+        fn block_state_id(
+            &self,
+            _x: i32,
+            _y: i32,
+            _z: i32,
+        ) -> lodestone_data::block_states::StateId {
+            lodestone_data::block_states::StateId::AIR
         }
 
         fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
             crate::chunk::DEFAULT_BIOME.to_owned()
         }
 
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        fn set_block(
+            &self,
+            _x: i32,
+            _y: i32,
+            _z: i32,
+            _state: lodestone_data::block_states::StateId,
+        ) {
+        }
 
         fn is_column_resident(&self, _cx: i32, _cz: i32) -> bool {
             self.resident

@@ -3016,6 +3016,7 @@ fn unpack_indices(
 mod tests {
     use std::sync::{Arc, Mutex};
 
+    use lodestone_data::block::Block;
     use lodestone_storage::{RecordKey, RecordWrite};
     use lodestone_storage_schema::{ChunkRecord, ChunkSection, StorageRecord, generated::storage_record};
 
@@ -3695,10 +3696,13 @@ mod tests {
         })
         .expect("open native store");
         let mut later = crate::chunk::ChunkColumn::new(0, 16);
-        later.set_block(3, 4, 5, "minecraft:stone");
+        let stone = Block::Stone.default_state();
+        let oak_log_z = StateId::from_state_str("minecraft:oak_log[axis=z]")
+            .expect("oak log fixture state");
+        later.set_block_id(3, 4, 5, stone);
         let later_light = lodestone_world::ColumnLight::new(later.section_count());
         let mut earlier = crate::chunk::ChunkColumn::new(0, 16);
-        earlier.set_block(7, 8, 9, "minecraft:oak_log[axis=z]");
+        earlier.set_block_id(7, 8, 9, oak_log_z);
         let mut earlier_light = lodestone_world::ColumnLight::new(earlier.section_count());
         *earlier_light.sky_mut(1) = lodestone_world::LightData::Uniform(13);
         let scheduled = crate::scheduled_tick::ScheduledTickHandle::new();
@@ -3734,8 +3738,8 @@ mod tests {
             "the recovered index order must define export order"
         );
         assert_eq!(
-            snapshot[0].record.column.block_state(7, 8, 9),
-            "minecraft:oak_log[axis=z]"
+            snapshot[0].record.column.block_state_id(7, 8, 9),
+            oak_log_z
         );
         assert_eq!(
             snapshot[0].record.light.sky(1),
@@ -3753,8 +3757,8 @@ mod tests {
             "native reload must attach only final light lifecycle state"
         );
         assert_eq!(
-            snapshot[1].record.column.block_state(3, 4, 5),
-            "minecraft:stone"
+            snapshot[1].record.column.block_state_id(3, 4, 5),
+            stone
         );
         drop(storage);
         std::fs::remove_dir_all(directory).expect("remove native test segment");
@@ -3883,11 +3887,16 @@ mod tests {
         })
         .expect("open native store");
         let mut source = crate::chunk::ChunkColumn::new(-16, 32);
+        let stone = Block::Stone.default_state();
+        let oak_log_x = StateId::from_state_str("minecraft:oak_log[axis=x]")
+            .expect("oak log fixture state");
+        let water_level_three = StateId::from_state_str("minecraft:water[level=3]")
+            .expect("water fixture state");
         let light = lodestone_world::ColumnLight::new(source.section_count());
         let scheduled = crate::scheduled_tick::ScheduledTickHandle::new();
-        source.set_block(1, -16, 2, "minecraft:stone");
-        source.set_block(3, -1, 4, "minecraft:oak_log[axis=x]");
-        source.set_block(5, 15, 6, "minecraft:water[level=3]");
+        source.set_block_id(1, -16, 2, stone);
+        source.set_block_id(3, -1, 4, oak_log_x);
+        source.set_block_id(5, 15, 6, water_level_three);
         let opaque_pos = lodestone_model::BlockPos::new(-109, 0, 184);
         let opaque_nbt = lodestone_core::Nbt::Compound(vec![
             ("id".to_owned(), lodestone_core::Nbt::String("example:archive".to_owned())),
@@ -3931,10 +3940,10 @@ mod tests {
             .load_chunk(-7, 11, -16, 32)
             .expect("decode reopened chunk")
             .expect("stored chunk is present");
-        assert_eq!(loaded.column.block_state(1, -16, 2), "minecraft:stone");
-        assert_eq!(loaded.column.block_state(3, -1, 4), "minecraft:oak_log[axis=x]");
-        assert_eq!(loaded.column.block_state(5, 15, 6), "minecraft:water[level=3]");
-        assert_eq!(loaded.column.block_state(0, 0, 0), "minecraft:air");
+        assert_eq!(loaded.column.block_state_id(1, -16, 2), stone);
+        assert_eq!(loaded.column.block_state_id(3, -1, 4), oak_log_x);
+        assert_eq!(loaded.column.block_state_id(5, 15, 6), water_level_three);
+        assert_eq!(loaded.column.block_state_id(0, 0, 0), StateId::AIR);
         assert_eq!(
             loaded.column.block_entities(),
             source.block_entities(),
@@ -3963,7 +3972,7 @@ mod tests {
         })
         .expect("open native store");
         let mut source = crate::chunk::ChunkColumn::new(-16, 32);
-        source.set_block(1, -16, 2, "minecraft:stone");
+        source.set_block_id(1, -16, 2, Block::Stone.default_state());
         let mut light = lodestone_world::ColumnLight::new(source.section_count());
         let scheduled = crate::scheduled_tick::ScheduledTickHandle::new();
         *light.sky_mut(1) = lodestone_world::LightData::Uniform(15);
@@ -3997,7 +4006,10 @@ mod tests {
             .expect("decode reopened chunk and light")
             .map(|record| (record.column, record.light))
             .expect("stored chunk is present");
-        assert_eq!(loaded.block_state(1, -16, 2), "minecraft:stone");
+        assert_eq!(
+            loaded.block_state_id(1, -16, 2),
+            Block::Stone.default_state()
+        );
         assert_eq!(loaded_light.sky(1), &lodestone_world::LightData::Uniform(15));
         assert_eq!(loaded_light.block(1), &lodestone_world::LightData::Uniform(0));
         assert_eq!(
