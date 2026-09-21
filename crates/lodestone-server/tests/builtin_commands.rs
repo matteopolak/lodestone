@@ -18,6 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use lodestone_command_mc::{EntityArg, GameModeArg, SnbtValue};
+use lodestone_data::block_states::StateId;
 use lodestone_model::{GameMode, Rotation, Vec3};
 use lodestone_server::commands::registrar::{Ctx, RuleStore};
 use lodestone_server::commands::{
@@ -39,7 +40,7 @@ use uuid::Uuid;
 /// sharing a code path neither is supposed to depend on.
 #[derive(Default)]
 struct FixedBlockSource {
-    blocks: Mutex<HashMap<(i32, i32, i32), String>>,
+    blocks: Mutex<HashMap<(i32, i32, i32), StateId>>,
     /// Columns [`FixedBlockSource::mark_unloaded`] has named — for
     /// `/execute if`/`unless loaded`. Empty by default, matching
     /// [`ChunkSource::is_column_resident`]'s own `true` default, so every
@@ -56,7 +57,10 @@ struct FixedBlockSource {
 
 impl FixedBlockSource {
     fn set(&self, x: i32, y: i32, z: i32, block: &str) {
-        self.blocks.lock().unwrap().insert((x, y, z), block.to_string());
+        self.blocks
+            .lock()
+            .unwrap()
+            .insert((x, y, z), fixture_state(block));
     }
 
     fn mark_unloaded(&self, cx: i32, cz: i32) {
@@ -73,21 +77,30 @@ impl ChunkSource for FixedBlockSource {
         ChunkColumn::new(0, 16)
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
-        self.blocks.lock().unwrap().get(&(x, y, z)).cloned().unwrap_or_else(|| "minecraft:air".to_string())
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
+        self.blocks
+            .lock()
+            .unwrap()
+            .get(&(x, y, z))
+            .copied()
+            .unwrap_or(StateId::AIR)
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
         self.biomes.lock().unwrap().get(&(x, y, z)).cloned().unwrap_or_else(|| "minecraft:plains".to_string())
     }
 
-    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
-        self.set(x, y, z, name);
+    fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
+        self.blocks.lock().unwrap().insert((x, y, z), state);
     }
 
     fn is_column_resident(&self, cx: i32, cz: i32) -> bool {
         !self.unloaded.lock().unwrap().contains(&(cx, cz))
     }
+}
+
+fn fixture_state(value: &str) -> StateId {
+    StateId::from_state_str(value).expect("fixture block state")
 }
 
 fn uuid(n: u128) -> Uuid {
@@ -1084,7 +1097,7 @@ fn setblock_resolves_position_and_fill_enumerates_the_box_and_caps_it() {
         outcome.effects,
         [DirectedEffect::new(
             uuid(1),
-            Effect::SetBlock { pos: (11, 65, 4), block: "minecraft:stone".to_string() }
+            Effect::SetBlock { pos: (11, 65, 4), block: fixture_state("minecraft:stone") }
         )]
     );
 
@@ -1100,7 +1113,7 @@ fn setblock_resolves_position_and_fill_enumerates_the_box_and_caps_it() {
     .expect("root matched");
     let [directed] = fill.effects.as_slice() else { panic!("{fill:?}") };
     let Effect::Fill { positions, block } = &directed.effect else { panic!("{directed:?}") };
-    assert_eq!(block, "minecraft:dirt");
+    assert_eq!(*block, fixture_state("minecraft:dirt"));
     let mut sorted = positions.clone();
     sorted.sort();
     assert_eq!(
@@ -1402,7 +1415,7 @@ fn summon_warden_lands_on_live_terrain_before_entity_streaming_reads_its_snapsho
 
     mobs.with(|sim| {
         for _ in 0..160 {
-            sim.tick_with_terrain(&|x, y, z| blocks.block_state(x, y, z));
+            sim.tick_with_terrain(&|x, y, z| blocks.block_state_id(x, y, z));
         }
     });
     let snapshots = mobs.snapshots();

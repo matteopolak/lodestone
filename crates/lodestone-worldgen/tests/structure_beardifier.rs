@@ -141,6 +141,7 @@ fn synthetic_start(adjustment: TerrainAdjustment, box_: BoundingBox) -> Structur
         }],
         terrain_adaptation: adjustment,
         pieces_complete: true,
+        mineshaft_tree: None,
     }
 }
 

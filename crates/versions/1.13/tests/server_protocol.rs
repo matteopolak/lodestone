@@ -1,4 +1,5 @@
 use lodestone_core::{Ctx, Reader, State, encode_body};
+use lodestone_data::block_states::StateId;
 use lodestone_model::{
     AnimationAction, BlockFace, BlockPos, ClientAction, ClientEvent, ConnectionState, Directive,
     Hand, Vec3f, VersionAdapter,
@@ -105,7 +106,7 @@ fn join_position_chunk_and_block_update_match_protocol_404_fixtures() {
     assert!(packet.ensure_empty().is_ok());
 
     assert!(matches!(
-        protocol.try_encode_block_update(1, 64, -1, "minecraft:dandelion"),
+        protocol.try_encode_block_update(1, 64, -1, StateId::from_state_str("minecraft:dandelion").unwrap()),
         Ok(ServerDirective::Send { packet_id: 11, payload })
             if payload == vec![0, 0, 0, 0x41, 0x03, 0xFF, 0xFF, 0xFF, 0xD7, 0x08]
     ));
@@ -517,6 +518,6 @@ fn registry_selected_hotbar_selection_reaches_the_inventory_consumer() {
 fn states_missing_from_the_404_table_are_errors_not_air_substitutions() {
     let protocol = V404ServerProtocol;
     assert!(protocol
-        .try_encode_block_update(0, 64, 0, "minecraft:bamboo")
+        .try_encode_block_update(0, 64, 0, StateId::from_state_str("minecraft:bamboo").unwrap())
         .is_err());
 }

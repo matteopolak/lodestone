@@ -6,11 +6,13 @@ use std::mem::size_of;
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
+use lodestone_data::block_states::StateId;
 
 use crate::chunk::{ChunkColumn, ChunkGenerationStage};
 use crate::worldgen_lifecycle::{
     ImmutableComputeExecutor, LifecycleCompletion, LifecycleCompletionMode,
-    LifecycleFeatureDispatch, LifecycleMaterializer, LifecycleSpill, LifecycleWorldgenSource,
+    LifecycleFeatureDispatch, LifecycleMaterializer, LifecycleSpill,
+    LifecycleWorldgenSource, TARGET_FEATURE_RADIUS,
     PersistentWorldgenExecutor,
 };
 use crate::worldgen_session::{
@@ -23,7 +25,7 @@ use lodestone_worldgen::stage_schedule::{
 };
 use lodestone_worldgen::structure::StructureBlocks;
 
-const EXECUTOR_VERSION: u32 = 3;
+const EXECUTOR_VERSION: u32 = 4;
 
 pub(crate) trait DimensionPolicy<S: LifecycleWorldgenSource> {
     const DIMENSION: Dimension;
@@ -65,6 +67,7 @@ pub(crate) trait DimensionPolicy<S: LifecycleWorldgenSource> {
     ) -> Option<[u8; 32]> {
         None
     }
+
 }
 
 pub(crate) struct OverworldPolicy;
@@ -103,7 +106,7 @@ impl DimensionPolicy<crate::chunk::OverworldChunkSource> for OverworldPolicy {
                 StageKey::new(Self::DIMENSION, ColumnStage::StructureReferences),
                 ImmutableSidecar::new(
                     SidecarKey::StructureReferences,
-                    source.generator().structure_references(coordinate.0, coordinate.1),
+                    source.lifecycle_structure_references(coordinate.0, coordinate.1),
                 ),
             ),
         ]
@@ -137,6 +140,7 @@ impl DimensionPolicy<crate::chunk::OverworldChunkSource> for OverworldPolicy {
             .generation_identity()
             .map(|identity| generated_stage_provenance(identity, coordinate, ColumnStage::Features))
     }
+
 }
 
 impl DimensionPolicy<crate::chunk::NetherChunkSource> for NetherPolicy {
@@ -191,7 +195,7 @@ fn column_content_fingerprint(column: &ChunkColumn) -> [u8; 32] {
     digest.update(column.min_y.to_le_bytes());
     digest.update(column.height.to_le_bytes());
     digest.update([column.generation_stage() as u8]);
-    for id in column.palette_state_ids() {
+    for id in column.palette() {
         digest.update(id.raw().to_le_bytes());
     }
     let mut section_indices = [0_u8; 4096 * 2];
@@ -249,11 +253,9 @@ fn generated_column_fingerprint(
     digest.update(column.height().to_le_bytes());
     digest.update([column.stage() as u8]);
     // Palette order plus the compact section indices are the complete block
-    // field. Hash the palette names once and batch each section's indices,
-    // avoiding a canonical-string lookup and two digest calls for every cell.
+    // field. The palette is already canonical, so hash ids directly.
     for state in column.palette() {
-        digest.update((state.len() as u64).to_le_bytes());
-        digest.update(state.as_bytes());
+        digest.update(state.raw().to_le_bytes());
     }
     let mut section_indices = [0_u8; 4096 * 2];
     for section in 0..column.blocks().section_count() {
@@ -353,11 +355,7 @@ fn structure_blocks_retained_bytes(value: &StructureBlocks) -> usize {
     size_of::<StructureBlocks>()
         + value.mutations().len()
             * size_of::<lodestone_worldgen::structure::StructureBlockMutation>()
-        + value
-            .mutations()
-            .iter()
-            .map(|mutation| mutation.state.capacity())
-            .sum::<usize>()
+        + value.mutations().len() * size_of::<StateId>()
         + value.loot().len() * size_of::<lodestone_worldgen::structure::StructureLoot>()
 }
 
@@ -422,10 +420,7 @@ fn target_settlement_plan(
     if !enabled || sessions.is_empty() {
         return Ok(None);
     }
-    let feature_key = StageKey::new(Dimension::Overworld, ColumnStage::Features);
     let mut requested = BTreeSet::new();
-    let mut write_radius = 0_u8;
-    let mut read_radius = 0_u8;
     for session in sessions {
         if session.pipeline().dimension() != Dimension::Overworld
             || session.request().generation_target() != GenerationTarget::Full
@@ -433,24 +428,24 @@ fn target_settlement_plan(
             return Ok(None);
         }
         requested.insert(session.request().target());
-        write_radius = write_radius.max(session.stage_mutable_write_radius(feature_key)?);
-        read_radius = read_radius.max(session.stage_read_radius(feature_key)?);
     }
 
-    let write_radius = i32::from(write_radius);
-    let read_radius = i32::from(read_radius);
+    // The target-owned FEATURES footprint is one chunk in each horizontal
+    // direction. Keep the lifecycle geometry tied to the dispatcher rather
+    // than to independently evolved stage metadata.
+    let radius = TARGET_FEATURE_RADIUS;
     let mut targets = requested.clone();
     for &(x, z) in &requested {
-        for dx in -write_radius..=write_radius {
-            for dz in -write_radius..=write_radius {
+        for dx in -radius..=radius {
+            for dz in -radius..=radius {
                 targets.insert((x + dx, z + dz));
             }
         }
     }
     let mut context = targets.clone();
     for &(x, z) in &targets {
-        for dx in -read_radius..=read_radius {
-            for dz in -read_radius..=read_radius {
+        for dx in -radius..=radius {
+            for dz in -radius..=radius {
                 context.insert((x + dx, z + dz));
             }
         }
@@ -735,7 +730,7 @@ where
                     spill.position.1,
                     spill.position.2,
                 ),
-                spill.state.clone(),
+                spill.state,
             )?;
         }
         session.complete_mutable_source(transaction)?;
@@ -1120,7 +1115,12 @@ where
                     }
                 }
                 self.materializer
-                    .admit_region_with(&self.missing_admissions, executor);
+                    .admit_region_with_prefix(
+                        &self.missing_admissions,
+                        &self.admissions,
+                        0,
+                        executor,
+                    );
                 self.phase = GenerationPhase::ImportShaped;
             }
             GenerationPhase::ImportShaped => {
@@ -1299,18 +1299,16 @@ where
                     return Err(SessionError::Cancelled);
                 }
                 let target = self.session.request().target();
+                self.materializer
+                    .apply_canonical_target_feature_winners(target);
                 let mut output = self.materializer.snapshot_for_packet(target);
                 output.mark_generation_stage(ChunkGenerationStage::Full);
                 let output_key = StageKey::new(self.session.pipeline().dimension(), ColumnStage::Output);
-                let content_fingerprint = if self
-                    .padding_targets
-                    .is_some_and(|padding| !padding.is_empty())
-                {
-                    column_content_fingerprint(&output)
-                } else {
-                    self.target_content_fingerprint
-                        .unwrap_or_else(|| column_content_fingerprint(&output))
-                };
+                let content_fingerprint = self
+                    .materializer
+                    .authenticated_features_digest(target)
+                    .or(self.target_content_fingerprint)
+                    .unwrap_or_else(|| column_content_fingerprint(&output));
                 let fingerprint = stage_fingerprint(target, ColumnStage::Output, content_fingerprint);
                 let maps = output
                     .client_heightmaps_raw()
@@ -1389,14 +1387,14 @@ where
                         if let Some(prefix) = shaped_prefix {
                             return Ok(match &prefix.column {
                                 SharedPrefixColumn::Materialized(column) => {
-                                    PacketNeighbour::materialized_with_overlay(
+                                    PacketNeighbour::materialized_with_id_overlay(
                                         coordinate,
                                         column.as_ref().clone(),
                                         &sparse_overlay,
                                     )
                                 }
                                 SharedPrefixColumn::Generated(column) => {
-                                    PacketNeighbour::generated_with_overlay(
+                                    PacketNeighbour::generated_with_id_overlay(
                                         coordinate,
                                         Arc::clone(column),
                                         sparse_overlay,
@@ -1405,11 +1403,15 @@ where
                             });
                         }
                         if let Some(column) = self.materializer.resident_column(coordinate) {
-                            Ok(PacketNeighbour::materialized(coordinate, column.clone()))
+                            Ok(PacketNeighbour::materialized_with_id_overlay(
+                                coordinate,
+                                column.clone(),
+                                &sparse_overlay,
+                            ))
                         } else if let Some(column) =
                             self.materializer.generated_resident_handle(coordinate)
                         {
-                            Ok(PacketNeighbour::generated_with_overlay(
+                            Ok(PacketNeighbour::generated_with_id_overlay(
                                 coordinate,
                                 column,
                                 sparse_overlay,
@@ -1470,7 +1472,6 @@ where
         let mut region = ProductionGenerationRegion::for_halo(source, &plan.context);
         return region.generate_with_executor(session, executor);
     }
-    source.prepare_generation_batch(&[session.request().target()]);
     let mut materializer = LifecycleMaterializer::new(source);
     generate_request_with_materializer::<S, P>(source, session, executor, &mut materializer)
 }
@@ -1579,6 +1580,16 @@ where
     materializer: LifecycleMaterializer<&'a S>,
     shared_prefixes: SharedPrefixCache,
     settlement_padding: BTreeSet<ChunkCoordinate>,
+    admission_counts: RegionAdmissionCounts,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RegionAdmissionCounts {
+    pub requested: usize,
+    pub mutable: usize,
+    pub read_only: usize,
+    pub generated_residents: usize,
+    pub materialized_residents: usize,
 }
 
 impl<'a, S> ProductionGenerationRegion<'a, S>
@@ -1592,6 +1603,29 @@ where
             materializer: LifecycleMaterializer::new(source),
             shared_prefixes: SharedPrefixCache::new(),
             settlement_padding: BTreeSet::new(),
+            admission_counts: RegionAdmissionCounts::default(),
+        }
+    }
+
+    fn refresh_admission_counts(&mut self) {
+        self.admission_counts.generated_residents =
+            self.materializer.generated_resident_count();
+        self.admission_counts.materialized_residents =
+            self.materializer.materialized_resident_count();
+        debug_assert_eq!(
+            self.admission_counts.mutable + self.admission_counts.read_only,
+            self.declared_halo.len(),
+            "admission partition must cover the declared halo"
+        );
+        debug_assert_eq!(
+            self.admission_counts.generated_residents
+                + self.admission_counts.materialized_residents,
+            self.materializer.resident_count(),
+            "resident counters must cover every retained shaped product"
+        );
+        if self.admission_counts.requested == 16 && self.declared_halo.len() == 64 {
+            debug_assert_eq!(self.admission_counts.mutable, 36);
+            debug_assert_eq!(self.admission_counts.read_only, 28);
         }
     }
 
@@ -1599,6 +1633,25 @@ where
     pub(crate) fn admit_chunks_with_executor(
         &mut self,
         coordinates: &[(i32, i32)],
+        prefix_targets: &[(i32, i32)],
+        prefix_radius: i32,
+        executor: &dyn ImmutableComputeExecutor,
+    ) -> Result<usize, SessionError> {
+        self.admit_chunks_with_context_executor(
+            coordinates,
+            coordinates,
+            prefix_targets,
+            prefix_radius,
+            executor,
+        )
+    }
+
+    fn admit_chunks_with_context_executor(
+        &mut self,
+        coordinates: &[(i32, i32)],
+        lease_coordinates: &[(i32, i32)],
+        prefix_targets: &[(i32, i32)],
+        prefix_radius: i32,
         executor: &dyn ImmutableComputeExecutor,
     ) -> Result<usize, SessionError> {
         if let Some(&coordinate) = coordinates
@@ -1607,7 +1660,19 @@ where
         {
             return Err(SessionError::OutsideHalo(coordinate));
         }
-        Ok(self.materializer.admit_region_with(coordinates, executor))
+        if let Some(&coordinate) = lease_coordinates
+            .iter()
+            .find(|coordinate| !self.declared_halo.contains(coordinate))
+        {
+            return Err(SessionError::OutsideHalo(coordinate));
+        }
+        Ok(self.materializer.admit_region_with_context(
+            coordinates,
+            lease_coordinates,
+            prefix_targets,
+            prefix_radius,
+            executor,
+        ))
     }
 
     /// Advance one full target using its dimension policy.
@@ -1631,16 +1696,27 @@ where
             {
                 return Err(SessionError::OutsideHalo(coordinate));
             }
-            self.source.prepare_generation_batch(&plan.targets);
-            let halo = self.declared_halo.iter().copied().collect::<Vec<_>>();
-            self.admit_chunks_with_executor(&halo, executor)?;
+            self.admit_chunks_with_context_executor(
+                &plan.targets,
+                &plan.context,
+                &plan.targets,
+                TARGET_FEATURE_RADIUS,
+                executor,
+            )?;
+            self.admission_counts = RegionAdmissionCounts {
+                requested: 1,
+                mutable: plan.targets.len(),
+                read_only: plan.context.len().saturating_sub(plan.targets.len()),
+                ..RegionAdmissionCounts::default()
+            };
+            self.refresh_admission_counts();
             let boundary = session
                 .pipeline()
                 .schedule()
                 .target_stage(GenerationTarget::Shaped);
             prime_shared_prefixes::<S, S::Policy>(
                 self.source,
-                &plan.context,
+                &plan.targets,
                 boundary,
                 &mut self.materializer,
                 &mut self.shared_prefixes,
@@ -1666,13 +1742,15 @@ where
                     machine.padding_targets = Some(&self.settlement_padding);
                     machine.advance_mutable(executor)?;
                 } else {
-                    self.materializer.complete_target_features_with_mode_observing(
-                        coordinate,
-                        sequence as u64,
-                        LifecycleCompletionMode::SparsePadding,
-                        |_| {},
-                    );
-                    self.materializer.finish_target(coordinate);
+                    if !self.materializer.target_features_completed(coordinate) {
+                        self.materializer.complete_target_features_with_mode_observing(
+                            coordinate,
+                            sequence as u64,
+                            LifecycleCompletionMode::SparsePadding,
+                            |_| {},
+                        );
+                        self.materializer.finish_target(coordinate);
+                    }
                 }
             }
             let mut machine = GenerationStateMachine::<S, S::Policy>::new(
@@ -1684,10 +1762,9 @@ where
                 1,
             )?;
             machine.padding_targets = Some(&self.settlement_padding);
-            return machine.finalize_batch_target(executor);
+            let snapshot = machine.finalize_batch_target(executor)?;
+            return Ok(snapshot);
         }
-        self.source
-            .prepare_generation_batch(&[session.request().target()]);
         let missing = session
             .admission_order()
             .iter()
@@ -1697,7 +1774,7 @@ where
                     && !self.materializer.is_admitted(*coordinate)
             })
             .collect::<Vec<_>>();
-        self.admit_chunks_with_executor(&missing, executor)?;
+        self.admit_chunks_with_executor(&missing, session.admission_order(), 0, executor)?;
         generate_request_with_materializer::<S, S::Policy>(
             self.source,
             session,
@@ -1726,16 +1803,27 @@ where
             {
                 return Err(SessionError::OutsideHalo(coordinate));
             }
-            self.source.prepare_generation_batch(&plan.targets);
-            let halo = self.declared_halo.iter().copied().collect::<Vec<_>>();
-            self.admit_chunks_with_executor(&halo, &PersistentWorldgenExecutor)?;
+            self.admit_chunks_with_context_executor(
+                &plan.targets,
+                &plan.context,
+                &plan.targets,
+                TARGET_FEATURE_RADIUS,
+                &PersistentWorldgenExecutor,
+            )?;
+            self.admission_counts = RegionAdmissionCounts {
+                requested: 1,
+                mutable: plan.targets.len(),
+                read_only: plan.context.len().saturating_sub(plan.targets.len()),
+                ..RegionAdmissionCounts::default()
+            };
+            self.refresh_admission_counts();
             let boundary = session
                 .pipeline()
                 .schedule()
                 .target_stage(GenerationTarget::Shaped);
             prime_shared_prefixes::<S, S::Policy>(
                 self.source,
-                &plan.context,
+                &plan.targets,
                 boundary,
                 &mut self.materializer,
                 &mut self.shared_prefixes,
@@ -1763,13 +1851,15 @@ where
                         .advance_mutable_yielding(&PersistentWorldgenExecutor)
                         .await?;
                 } else {
-                    self.materializer.complete_target_features_with_mode_observing(
-                        coordinate,
-                        sequence as u64,
-                        LifecycleCompletionMode::SparsePadding,
-                        |_| {},
-                    );
-                    self.materializer.finish_target(coordinate);
+                    if !self.materializer.target_features_completed(coordinate) {
+                        self.materializer.complete_target_features_with_mode_observing(
+                            coordinate,
+                            sequence as u64,
+                            LifecycleCompletionMode::SparsePadding,
+                            |_| {},
+                        );
+                        self.materializer.finish_target(coordinate);
+                    }
                     crate::chunk::yield_to_browser().await;
                 }
             }
@@ -1782,12 +1872,11 @@ where
                 1,
             )?;
             machine.padding_targets = Some(&self.settlement_padding);
-            return machine
+            let snapshot = machine
                 .finalize_batch_target_yielding(&PersistentWorldgenExecutor)
-                .await;
+                .await?;
+            return Ok(snapshot);
         }
-        self.source
-            .prepare_generation_batch(&[session.request().target()]);
         let missing = session
             .admission_order()
             .iter()
@@ -1797,7 +1886,12 @@ where
                     && !self.materializer.is_admitted(*coordinate)
             })
             .collect::<Vec<_>>();
-        self.admit_chunks_with_executor(&missing, &PersistentWorldgenExecutor)?;
+        self.admit_chunks_with_executor(
+            &missing,
+            session.admission_order(),
+            0,
+            &PersistentWorldgenExecutor,
+        )?;
         generate_request_yielding_with_materializer::<S, S::Policy>(
             self.source,
             session,
@@ -1836,22 +1930,31 @@ where
             {
                 return batch_session_error(sessions.len(), SessionError::OutsideHalo(coordinate));
             }
-            self.source.prepare_generation_batch(&plan.targets);
-        } else {
-            self.source.prepare_generation_batch(&targets);
-        }
-        let halo = self.declared_halo.iter().copied().collect::<Vec<_>>();
-        if let Err(error) = self.admit_chunks_with_executor(&halo, executor) {
-            return batch_session_error(sessions.len(), error);
         }
         if let Some(plan) = settlement.as_ref() {
+            if let Err(error) = self.admit_chunks_with_context_executor(
+                &plan.targets,
+                &plan.context,
+                &plan.targets,
+                TARGET_FEATURE_RADIUS,
+                executor,
+            ) {
+                return batch_session_error(sessions.len(), error);
+            }
+            self.admission_counts = RegionAdmissionCounts {
+                requested: targets.len(),
+                mutable: plan.targets.len(),
+                read_only: plan.context.len().saturating_sub(plan.targets.len()),
+                ..RegionAdmissionCounts::default()
+            };
+            self.refresh_admission_counts();
             let boundary = sessions[0]
                 .pipeline()
                 .schedule()
                 .target_stage(GenerationTarget::Shaped);
             if let Err(error) = prime_shared_prefixes::<S, S::Policy>(
                 self.source,
-                &plan.context,
+                &plan.targets,
                 boundary,
                 &mut self.materializer,
                 &mut self.shared_prefixes,
@@ -1866,6 +1969,16 @@ where
             self.materializer
                 .declare_sparse_padding_targets(plan.padding.iter().copied());
         } else {
+            let halo = self.declared_halo.iter().copied().collect::<Vec<_>>();
+            if let Err(error) = self.admit_chunks_with_executor(&halo, &halo, 0, executor) {
+                return batch_session_error(sessions.len(), error);
+            }
+            self.admission_counts = RegionAdmissionCounts {
+                requested: targets.len(),
+                mutable: targets.len(),
+                ..RegionAdmissionCounts::default()
+            };
+            self.refresh_admission_counts();
             self.settlement_padding.clear();
             self.materializer.declare_mutable_targets(targets.iter().copied());
         }
@@ -1906,14 +2019,16 @@ where
                     return batch_session_error(sessions.len(), error);
                 }
             } else if settlement.is_some() {
-                self.materializer
-                    .complete_target_features_with_mode_observing(
-                        target,
-                        sequence as u64,
-                        LifecycleCompletionMode::SparsePadding,
-                        |_| {},
-                    );
-                self.materializer.finish_target(target);
+                if !self.materializer.target_features_completed(target) {
+                    self.materializer
+                        .complete_target_features_with_mode_observing(
+                            target,
+                            sequence as u64,
+                            LifecycleCompletionMode::SparsePadding,
+                            |_| {},
+                        );
+                    self.materializer.finish_target(target);
+                }
             }
         }
 
@@ -1936,10 +2051,10 @@ where
                     true,
                     batch_size,
                 ) {
-                    Ok(machine) => machine,
-                    Err(error) => return batch_session_error(sessions.len(), error),
-                };
-                if settlement.is_some() {
+                Ok(machine) => machine,
+                Err(error) => return batch_session_error(sessions.len(), error),
+            };
+            if settlement.is_some() {
                     machine.padding_targets = Some(&self.settlement_padding);
                 }
                 machine.finalize_batch_target(executor)
@@ -1985,22 +2100,31 @@ where
             {
                 return batch_session_error(sessions.len(), SessionError::OutsideHalo(coordinate));
             }
-            self.source.prepare_generation_batch(&plan.targets);
-        } else {
-            self.source.prepare_generation_batch(&targets);
-        }
-        let halo = self.declared_halo.iter().copied().collect::<Vec<_>>();
-        if let Err(error) = self.admit_chunks_with_executor(&halo, &PersistentWorldgenExecutor) {
-            return batch_session_error(sessions.len(), error);
         }
         if let Some(plan) = settlement.as_ref() {
+            if let Err(error) = self.admit_chunks_with_context_executor(
+                &plan.targets,
+                &plan.context,
+                &plan.targets,
+                TARGET_FEATURE_RADIUS,
+                &PersistentWorldgenExecutor,
+            ) {
+                return batch_session_error(sessions.len(), error);
+            }
+            self.admission_counts = RegionAdmissionCounts {
+                requested: targets.len(),
+                mutable: plan.targets.len(),
+                read_only: plan.context.len().saturating_sub(plan.targets.len()),
+                ..RegionAdmissionCounts::default()
+            };
+            self.refresh_admission_counts();
             let boundary = sessions[0]
                 .pipeline()
                 .schedule()
                 .target_stage(GenerationTarget::Shaped);
             if let Err(error) = prime_shared_prefixes::<S, S::Policy>(
                 self.source,
-                &plan.context,
+                &plan.targets,
                 boundary,
                 &mut self.materializer,
                 &mut self.shared_prefixes,
@@ -2015,6 +2139,21 @@ where
             self.materializer
                 .declare_sparse_padding_targets(plan.padding.iter().copied());
         } else {
+            let halo = self.declared_halo.iter().copied().collect::<Vec<_>>();
+            if let Err(error) = self.admit_chunks_with_executor(
+                &halo,
+                &halo,
+                0,
+                &PersistentWorldgenExecutor,
+            ) {
+                return batch_session_error(sessions.len(), error);
+            }
+            self.admission_counts = RegionAdmissionCounts {
+                requested: targets.len(),
+                mutable: targets.len(),
+                ..RegionAdmissionCounts::default()
+            };
+            self.refresh_admission_counts();
             self.settlement_padding.clear();
             self.materializer.declare_mutable_targets(targets.iter().copied());
         }
@@ -2050,14 +2189,16 @@ where
                 };
                 Some(result)
             } else if settlement.is_some() {
-                self.materializer
-                    .complete_target_features_with_mode_observing(
-                        target,
-                        sequence as u64,
-                        LifecycleCompletionMode::SparsePadding,
-                        |_| {},
-                    );
-                self.materializer.finish_target(target);
+                if !self.materializer.target_features_completed(target) {
+                    self.materializer
+                        .complete_target_features_with_mode_observing(
+                            target,
+                            sequence as u64,
+                            LifecycleCompletionMode::SparsePadding,
+                            |_| {},
+                        );
+                    self.materializer.finish_target(target);
+                }
                 None
             } else {
                 None
@@ -2100,10 +2241,10 @@ where
                     true,
                     batch_size,
                 ) {
-                    Ok(machine) => machine,
-                    Err(error) => return batch_session_error(sessions.len(), error),
-                };
-                if settlement.is_some() {
+                Ok(machine) => machine,
+                Err(error) => return batch_session_error(sessions.len(), error),
+            };
+            if settlement.is_some() {
                     machine.padding_targets = Some(&self.settlement_padding);
                 }
                 machine
@@ -2151,7 +2292,6 @@ where
         let mut region = ProductionGenerationRegion::for_halo(source, &plan.context);
         return region.generate_with_yielding(session).await;
     }
-    source.prepare_generation_batch(&[session.request().target()]);
     let mut materializer = LifecycleMaterializer::new(source);
     generate_request_yielding_with_materializer::<S, P>(
         source,
@@ -2281,13 +2421,17 @@ impl RequestStageDriver for crate::chunk::EndChunkSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sid(name: &str) -> StateId {
+        StateId::from_state_str(name).expect("test state must be canonical")
+    }
     use crate::worldgen_lifecycle::{
-        LifecycleFeatureResult, LifecycleSparseTargetFeatureResult,
+        LifecycleCompletionMode, LifecycleFeatureResult, LifecycleSparseTargetFeatureResult,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
 
     struct CountingSource {
-        prepare_calls: Arc<AtomicUsize>,
         shaped_calls: Arc<AtomicUsize>,
         sidecar_calls: Arc<AtomicUsize>,
     }
@@ -2296,10 +2440,6 @@ mod tests {
 
     impl LifecycleWorldgenSource for CountingSource {
         type ReplayContext = ();
-
-        fn prepare_generation_batch(&self, _targets: &[(i32, i32)]) {
-            self.prepare_calls.fetch_add(1, Ordering::Relaxed);
-        }
 
         fn lifecycle_replay_context(&self, _target: (i32, i32)) -> Arc<Self::ReplayContext> {
             Arc::new(())
@@ -2321,7 +2461,7 @@ mod tests {
         fn feature_result(
             &self,
             _source: (i32, i32),
-            _overrides: &BTreeMap<crate::worldgen_lifecycle::AbsoluteCell, String>,
+            _overrides: &BTreeMap<crate::worldgen_lifecycle::AbsoluteCell, StateId>,
             _resident: &BTreeMap<(i32, i32), ChunkColumn>,
         ) -> LifecycleFeatureResult {
             LifecycleFeatureResult::default()
@@ -2371,11 +2511,20 @@ mod tests {
 
     struct SettlementSource {
         invocations: Arc<AtomicUsize>,
+        source_invocations: Option<Arc<Mutex<BTreeMap<(i32, i32), usize>>>>,
+        include_local: bool,
+        include_east: bool,
+    }
+
+    struct LiveOrderSource {
+        trace: Arc<Mutex<Vec<(i32, i32)>>>,
     }
 
     struct SparsePaddingSource {
         generator: Arc<lodestone_worldgen::overworld::OverworldGenerator>,
     }
+
+    struct OverlappingSparseSource;
 
     struct SettlementPolicy;
     struct SparsePaddingPolicy;
@@ -2406,17 +2555,37 @@ mod tests {
         fn feature_result(
             &self,
             source: (i32, i32),
-            _overrides: &BTreeMap<crate::worldgen_lifecycle::AbsoluteCell, String>,
+            _overrides: &BTreeMap<crate::worldgen_lifecycle::AbsoluteCell, StateId>,
             _resident: &BTreeMap<(i32, i32), ChunkColumn>,
         ) -> LifecycleFeatureResult {
             self.invocations.fetch_add(1, Ordering::Relaxed);
-            LifecycleFeatureResult {
-                spills: vec![LifecycleSpill {
+            if let Some(invocations) = &self.source_invocations {
+                *invocations.lock().unwrap().entry(source).or_default() += 1;
+            }
+            let mut spills = vec![LifecycleSpill {
                     source,
                     position: (source.0 * 16 - 1, 0, source.1 * 16),
-                    state: "minecraft:diorite".to_owned(),
+                    state: sid("minecraft:diorite"),
                     transient: false,
-                }],
+            }];
+            if self.include_local {
+                spills.push(LifecycleSpill {
+                    source,
+                    position: (source.0 * 16 + 1, 0, source.1 * 16),
+                    state: sid("minecraft:gold_block"),
+                    transient: false,
+                });
+            }
+            if self.include_east {
+                spills.push(LifecycleSpill {
+                    source,
+                    position: (source.0 * 16 + 16, 0, source.1 * 16),
+                    state: sid("minecraft:emerald_block"),
+                    transient: false,
+                });
+            }
+            LifecycleFeatureResult {
+                spills,
                 ..LifecycleFeatureResult::default()
             }
         }
@@ -2426,6 +2595,69 @@ mod tests {
         }
 
         fn direct_target_output_requires_authentication(&self) -> bool {
+            true
+        }
+    }
+
+    impl LifecycleWorldgenSource for LiveOrderSource {
+        type ReplayContext = ();
+
+        fn feature_dispatch(&self) -> LifecycleFeatureDispatch {
+            LifecycleFeatureDispatch::TargetOwned
+        }
+
+        fn lifecycle_replay_context(&self, _target: (i32, i32)) -> Arc<Self::ReplayContext> {
+            Arc::new(())
+        }
+
+        fn shaped_column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            ChunkColumn::new(0, 16)
+        }
+
+        fn lifecycle_client_heightmaps(
+            &self,
+            _cx: i32,
+            _cz: i32,
+        ) -> Option<crate::worldgen_lifecycle::LifecycleClientHeightmaps> {
+            Some([[0; 256]; 3])
+        }
+
+        fn feature_result(
+            &self,
+            source: (i32, i32),
+            overrides: &BTreeMap<crate::worldgen_lifecycle::AbsoluteCell, StateId>,
+            _resident: &BTreeMap<(i32, i32), ChunkColumn>,
+        ) -> LifecycleFeatureResult {
+            self.trace.lock().unwrap().push(source);
+            let origin = (source.0 * 16, 0, source.1 * 16);
+            let state = if source.0 == 1
+                && overrides.get(&origin).copied() == Some(sid("minecraft:stone"))
+            {
+                sid("minecraft:diamond_block")
+            } else {
+                sid("minecraft:stone")
+            };
+            let mut spills = vec![LifecycleSpill {
+                source,
+                position: origin,
+                state,
+                transient: false,
+            }];
+            if source.0 == 0 {
+                spills.push(LifecycleSpill {
+                    source,
+                    position: (origin.0 + 16, origin.1, origin.2),
+                    state: sid("minecraft:stone"),
+                    transient: false,
+                });
+            }
+            LifecycleFeatureResult {
+                spills,
+                ..LifecycleFeatureResult::default()
+            }
+        }
+
+        fn target_spills_persist(&self) -> bool {
             true
         }
     }
@@ -2464,7 +2696,7 @@ mod tests {
         fn feature_result(
             &self,
             _source: (i32, i32),
-            _overrides: &BTreeMap<crate::worldgen_lifecycle::AbsoluteCell, String>,
+            _overrides: &BTreeMap<crate::worldgen_lifecycle::AbsoluteCell, StateId>,
             _resident: &BTreeMap<(i32, i32), ChunkColumn>,
         ) -> LifecycleFeatureResult {
             LifecycleFeatureResult::default()
@@ -2473,14 +2705,14 @@ mod tests {
         fn target_feature_result(
             &self,
             target: (i32, i32),
-            _overrides: &BTreeMap<crate::worldgen_lifecycle::AbsoluteCell, String>,
+            _overrides: &BTreeMap<crate::worldgen_lifecycle::AbsoluteCell, StateId>,
             _resident: &BTreeMap<(i32, i32), ChunkColumn>,
         ) -> LifecycleFeatureResult {
             LifecycleFeatureResult {
                 spills: vec![LifecycleSpill {
                     source: target,
                     position: (16, 0, 0),
-                    state: "minecraft:dirt".to_owned(),
+                    state: sid("minecraft:dirt"),
                     transient: false,
                 }],
                 ..LifecycleFeatureResult::default()
@@ -2490,20 +2722,21 @@ mod tests {
         fn target_feature_result_sparse_with_replay_context(
             &self,
             target: (i32, i32),
-            overrides: &BTreeMap<crate::worldgen_lifecycle::AbsoluteCell, String>,
+            overrides: &BTreeMap<crate::worldgen_lifecycle::AbsoluteCell, StateId>,
             _resident: &BTreeMap<(i32, i32), ChunkColumn>,
             _context: &Self::ReplayContext,
         ) -> Option<LifecycleSparseTargetFeatureResult> {
             let state = overrides
                 .get(&(16, 0, 0))
-                .filter(|state| state.as_str() == "minecraft:dirt")
-                .map_or("minecraft:stone", String::as_str);
+                .copied()
+                .filter(|&state| state == sid("minecraft:dirt"))
+                .unwrap_or_else(|| sid("minecraft:stone"));
             Some(LifecycleSparseTargetFeatureResult {
                 spills: Vec::new(),
                 local_features: vec![LifecycleSpill {
                     source: target,
                     position: (target.0 * 16, 0, target.1 * 16),
-                    state: state.to_owned(),
+                    state: sid(state),
                     transient: false,
                 }],
                 block_entities: Vec::new(),
@@ -2515,7 +2748,72 @@ mod tests {
         }
     }
 
+    impl LifecycleWorldgenSource for OverlappingSparseSource {
+        type ReplayContext = ();
+
+        fn feature_dispatch(&self) -> LifecycleFeatureDispatch {
+            LifecycleFeatureDispatch::TargetOwned
+        }
+
+        fn lifecycle_replay_context(&self, _target: (i32, i32)) -> Arc<Self::ReplayContext> {
+            Arc::new(())
+        }
+
+        fn shaped_column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            ChunkColumn::new(0, 16)
+        }
+
+        fn lifecycle_client_heightmaps(
+            &self,
+            _cx: i32,
+            _cz: i32,
+        ) -> Option<crate::worldgen_lifecycle::LifecycleClientHeightmaps> {
+            Some([[0; 256]; 3])
+        }
+
+        fn feature_result(
+            &self,
+            _source: (i32, i32),
+            _overrides: &BTreeMap<crate::worldgen_lifecycle::AbsoluteCell, StateId>,
+            _resident: &BTreeMap<(i32, i32), ChunkColumn>,
+        ) -> LifecycleFeatureResult {
+            LifecycleFeatureResult::default()
+        }
+
+        fn target_feature_result_sparse_with_replay_context(
+            &self,
+            target: (i32, i32),
+            _overrides: &BTreeMap<crate::worldgen_lifecycle::AbsoluteCell, StateId>,
+            _resident: &BTreeMap<(i32, i32), ChunkColumn>,
+            _context: &Self::ReplayContext,
+        ) -> Option<LifecycleSparseTargetFeatureResult> {
+            let state = match target {
+                (1, 0) => sid("minecraft:diamond_block"),
+                (1, 1) => sid("minecraft:gold_block"),
+                _ => return Some(LifecycleSparseTargetFeatureResult {
+                    spills: Vec::new(),
+                    local_features: Vec::new(),
+                    block_entities: Vec::new(),
+                }),
+            };
+            Some(LifecycleSparseTargetFeatureResult {
+                spills: vec![LifecycleSpill {
+                    source: target,
+                    position: (15, 0, 0),
+                    state,
+                    transient: false,
+                }],
+                local_features: Vec::new(),
+                block_entities: Vec::new(),
+            })
+        }
+    }
+
     impl RegionGenerationSource for SettlementSource {
+        type Policy = SettlementPolicy;
+    }
+
+    impl RegionGenerationSource for LiveOrderSource {
         type Policy = SettlementPolicy;
     }
 
@@ -2578,10 +2876,13 @@ mod tests {
     }
 
     #[test]
-    fn target_owned_settlement_keeps_padding_writes_out_of_requested_output() {
+    fn target_owned_settlement_settles_padding_writes_before_output() {
         let invocations = Arc::new(AtomicUsize::new(0));
         let source = SettlementSource {
             invocations: Arc::clone(&invocations),
+            source_invocations: None,
+            include_local: false,
+            include_east: false,
         };
         let targets = [(0, 0), (1, 0)];
         let mut sessions = targets
@@ -2610,13 +2911,13 @@ mod tests {
                 }
             })
             .collect::<Vec<_>>();
-        assert_eq!(snapshots[1].column().block_state(15, 0, 0), "minecraft:air");
+        assert_eq!(snapshots[1].column().block_state_id(15, 0, 0), sid("minecraft:diorite"));
         let padding_neighbour = snapshots[1]
             .neighbours()
             .iter()
             .find(|neighbour| neighbour.coordinate() == (2, 0))
             .expect("right padding is in the packet neighbour domain");
-        assert_eq!(padding_neighbour.column().block_state(0, 0, 0), "minecraft:air");
+        assert_eq!(padding_neighbour.column().block_state_id(0, 0, 0), sid("minecraft:air"));
         let padding_frontier = sessions[1]
             .frontier((2, 0))
             .expect("requested session retains its input halo");
@@ -2632,6 +2933,9 @@ mod tests {
         let invocations = Arc::new(AtomicUsize::new(0));
         let source = SettlementSource {
             invocations: Arc::clone(&invocations),
+            source_invocations: None,
+            include_local: false,
+            include_east: false,
         };
         let targets = (0..8)
             .map(|x| {
@@ -2673,6 +2977,125 @@ mod tests {
     }
 
     #[test]
+    fn target_owned_settlement_promotes_sparse_source_across_batches() {
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let source_invocations = Arc::new(Mutex::new(BTreeMap::new()));
+        let source = SettlementSource {
+            invocations,
+            source_invocations: Some(Arc::clone(&source_invocations)),
+            include_local: true,
+            include_east: true,
+        };
+        let halo = (-2..=4)
+            .flat_map(|x| (-2..=2).map(move |z| (x, z)))
+            .collect::<Vec<_>>();
+        let mut region = ProductionGenerationRegion::for_halo(&source, &halo);
+        let mut first = [(0, 0), (1, 0)]
+            .into_iter()
+            .map(|target| {
+                GenerationSession::new(GenerationRequest::new(
+                    Dimension::Overworld,
+                    target,
+                    GenerationTarget::Full,
+                    1,
+                ))
+            })
+            .collect::<Vec<_>>();
+        let executor = CountingExecutor {
+            dispatches: AtomicUsize::new(0),
+            jobs: AtomicUsize::new(0),
+        };
+        let first_results = region.generate_batch_with_executor(&mut first, &executor);
+        let first_target = first_results[1]
+            .as_ref()
+            .expect("first batch succeeds")
+            .as_ref()
+            .expect("first target generated");
+        let first_target = match first_target {
+            crate::worldgen_session::GenerationRequestResult::Generated(snapshot) => snapshot,
+            crate::worldgen_session::GenerationRequestResult::Existing(_) => {
+                panic!("first target unexpectedly came from persistence")
+            }
+        };
+        assert_eq!(
+            first_target.column().block_state_id(15, 0, 0),
+            sid("minecraft:diorite"),
+            "the sparse east source must settle its west spill before target output",
+        );
+        assert_eq!(
+            source_invocations.lock().unwrap().get(&(2, 0)),
+            Some(&1),
+        );
+
+        let mut second = vec![GenerationSession::new(GenerationRequest::new(
+            Dimension::Overworld,
+            (2, 0),
+            GenerationTarget::Full,
+            1,
+        ))];
+        let second_results = region.generate_batch_with_executor(&mut second, &executor);
+        let second_target = second_results[0]
+            .as_ref()
+            .expect("second batch succeeds")
+            .as_ref()
+            .expect("second target generated");
+        let second_target = match second_target {
+            crate::worldgen_session::GenerationRequestResult::Generated(snapshot) => snapshot,
+            crate::worldgen_session::GenerationRequestResult::Existing(_) => {
+                panic!("second target unexpectedly came from persistence")
+            }
+        };
+        assert_eq!(
+            second_target.column().block_state_id(0, 0, 0),
+            sid("minecraft:emerald_block"),
+            "the later target must promote the incoming spill before output",
+        );
+        assert_eq!(
+            second_target.column().block_state_id(1, 0, 0),
+            sid("minecraft:gold_block"),
+            "the later target must also promote its retained sparse-local state",
+        );
+        assert_eq!(
+            source_invocations.lock().unwrap().get(&(2, 0)),
+            Some(&1),
+            "promotion must not execute the source body again",
+        );
+        assert_eq!(
+            first_target.column().block_state_id(15, 0, 0),
+            sid("minecraft:diorite"),
+            "promoting the later target must not late-mutate the settled output",
+        );
+    }
+
+    #[test]
+    fn target_owned_2x2_dispatch_is_canonical_and_reads_live_writes() {
+        let trace = Arc::new(Mutex::new(Vec::new()));
+        let source = LiveOrderSource {
+            trace: Arc::clone(&trace),
+        };
+        let targets = [(0, 0), (1, 0), (0, 1), (1, 1)];
+        let mut materializer = LifecycleMaterializer::new(&source);
+        materializer.admit_many_parallel(&targets);
+        materializer.declare_mutable_targets(targets);
+        for (sequence, target) in targets.into_iter().enumerate() {
+            materializer.complete_target_features_observing(target, sequence as u64, |_| {});
+            materializer.finish_target(target);
+        }
+
+        assert_eq!(*trace.lock().unwrap(), targets);
+        assert_eq!(
+            materializer.resident_block_state((1, 0), 0, 0, 0),
+            Some(sid("minecraft:diamond_block")),
+            "the second target must read the first target's live east-edge write",
+        );
+        assert_eq!(
+            materializer.resident_block_state((1, 1), 0, 0, 0),
+            Some(sid("minecraft:diamond_block")),
+            "the second row must observe its preceding target's live write",
+        );
+    }
+
+    #[test]
     fn sparse_padding_materializes_local_state_without_future_spills() {
         crate::chunk::reset_generated_materializations();
         let source = SparsePaddingSource {
@@ -2698,7 +3121,7 @@ mod tests {
         assert_eq!(crate::chunk::generated_materializations(), 1);
         assert_eq!(
             materializer.resident_block_state((1, 0), 0, 0, 0),
-            Some("minecraft:stone")
+            Some(sid("minecraft:stone"))
         );
 
         materializer.complete_target_features_observing((0, 0), 1, |_| {});
@@ -2706,12 +3129,54 @@ mod tests {
 
         assert_eq!(
             materializer.resident_block_state((1, 0), 0, 0, 0),
-            Some("minecraft:stone")
+            Some(sid("minecraft:stone"))
         );
         assert_ne!(
             materializer.resident_block_state((1, 0), 0, 0, 0),
-            Some("minecraft:dirt")
+            Some(sid("minecraft:dirt"))
         );
+    }
+
+    #[test]
+    fn sparse_overlapping_writes_settle_by_minimum_provenance_not_completion_order() {
+        fn settled_after(order: &[(i32, i32)]) -> (StateId, StateId) {
+            let source = OverlappingSparseSource;
+            let mut materializer = LifecycleMaterializer::new(&source);
+            let admitted = [(0, 0), (1, 0), (1, 1)];
+            materializer.admit_many_parallel(&admitted);
+            materializer.declare_mutable_targets(admitted);
+            materializer.declare_sparse_padding_targets([(1, 0), (1, 1)]);
+            materializer.prepare_lifecycle_replay_contexts(&[(1, 0), (1, 1)]);
+
+            for (sequence, &target) in order.iter().enumerate() {
+                materializer.complete_target_features_with_mode_observing(
+                    target,
+                    sequence as u64,
+                    LifecycleCompletionMode::SparsePadding,
+                    |_| {},
+                );
+                materializer.finish_target(target);
+            }
+
+            let completion_order_value = materializer
+                .resident_block_state((0, 0), 15, 0, 0)
+                .expect("both sparse writers target the admitted requested column");
+            materializer.apply_canonical_target_feature_winners((0, 0));
+            let canonical_value = materializer
+                .resident_block_state((0, 0), 15, 0, 0)
+                .expect("canonical winner remains in the requested column");
+            (completion_order_value, canonical_value)
+        }
+
+        let diamond = sid("minecraft:diamond_block");
+        let gold = sid("minecraft:gold_block");
+        let forward = settled_after(&[(1, 0), (1, 1)]);
+        let reverse = settled_after(&[(1, 1), (1, 0)]);
+
+        assert_eq!(forward.0, gold, "forward order exposes the later sparse writer");
+        assert_eq!(reverse.0, diamond, "reverse order exposes the other sparse writer");
+        assert_eq!(forward.1, diamond, "minimum target provenance wins in forward order");
+        assert_eq!(reverse.1, diamond, "minimum target provenance wins in reverse order");
     }
 
     #[test]
@@ -2748,8 +3213,8 @@ mod tests {
             .find(|neighbour| neighbour.coordinate() == (1, 0))
             .expect("right padding is in the packet neighbour domain");
         assert_eq!(
-            padding_neighbour.column().block_state(0, 0, 0),
-            "minecraft:stone",
+            padding_neighbour.column().block_state_id(0, 0, 0),
+            sid("minecraft:stone"),
             "the sparse local write must survive lazy packet conversion",
         );
         assert_eq!(crate::chunk::generated_materializations(), 2);
@@ -2767,6 +3232,9 @@ mod tests {
     fn target_owned_settlement_negative_control_excludes_unrequested_writer() {
         let source = SettlementSource {
             invocations: Arc::new(AtomicUsize::new(0)),
+            source_invocations: None,
+            include_local: false,
+            include_east: false,
         };
         let mut materializer = LifecycleMaterializer::new(&source);
         let coordinates = [(0, 0), (1, 0)];
@@ -2777,7 +3245,7 @@ mod tests {
         materializer.complete_target_features_observing((1, 0), 1, |_| {});
         assert_eq!(
             materializer.resident_block_state((1, 0), 15, 0, 0),
-            Some("minecraft:air")
+            Some(sid("minecraft:air"))
         );
     }
 
@@ -2786,6 +3254,9 @@ mod tests {
         let invocations = Arc::new(AtomicUsize::new(0));
         let source = SettlementSource {
             invocations: Arc::clone(&invocations),
+            source_invocations: None,
+            include_local: false,
+            include_east: false,
         };
         let mut session = GenerationSession::new(GenerationRequest::new(
             Dimension::Overworld,
@@ -2804,7 +3275,7 @@ mod tests {
         )
         .expect("scalar settlement request succeeds");
         assert_eq!(invocations.load(Ordering::Relaxed), 9);
-        assert_eq!(snapshot.column().block_state(15, 0, 0), "minecraft:air");
+        assert_eq!(snapshot.column().block_state_id(15, 0, 0), sid("minecraft:air"));
         let output_record = session
             .frontier((0, 0))
             .expect("scalar target frontier exists")
@@ -2834,7 +3305,7 @@ mod tests {
         )
         .expect("terminal scalar request can be replayed");
         assert_eq!(invocations.load(Ordering::Relaxed), 9);
-        assert_eq!(replay.column().block_state(15, 0, 0), "minecraft:air");
+        assert_eq!(replay.column().block_state_id(15, 0, 0), sid("minecraft:air"));
     }
 
     #[test]
@@ -2865,11 +3336,11 @@ mod tests {
     #[test]
     fn prefix_fingerprint_observes_palette_index_position_without_cell_tags() {
         let mut left = ChunkColumn::new(-64, 384);
-        left.set_block(0, 0, 0, "minecraft:stone");
-        left.set_block(1, 0, 0, "minecraft:dirt");
+        left.set_block_id(0, 0, 0, sid("minecraft:stone"));
+        left.set_block_id(1, 0, 0, sid("minecraft:dirt"));
         let mut right = ChunkColumn::new(-64, 384);
-        right.set_block(0, 0, 0, "minecraft:dirt");
-        right.set_block(1, 0, 0, "minecraft:stone");
+        right.set_block_id(0, 0, 0, sid("minecraft:dirt"));
+        right.set_block_id(1, 0, 0, sid("minecraft:stone"));
 
         assert_ne!(
             column_fingerprint((0, 0), ColumnStage::Carvers, &left),
@@ -2881,7 +3352,7 @@ mod tests {
     fn prefix_fingerprint_changes_after_one_block_mutation() {
         let mut column = ChunkColumn::new(-64, 384);
         let before = column_fingerprint((0, 0), ColumnStage::Features, &column);
-        column.set_block(0, 0, 0, "minecraft:stone");
+        column.set_block_id(0, 0, 0, sid("minecraft:stone"));
         let after = column_fingerprint((0, 0), ColumnStage::Features, &column);
 
         assert_ne!(before, after, "a committed block mutation must change the fingerprint");
@@ -2890,6 +3361,7 @@ mod tests {
     #[test]
     fn overworld_request_materializes_each_shaped_halo_once_at_packet_boundary() {
         crate::chunk::reset_generated_materializations();
+        crate::worldgen_lifecycle::reset_region_feature_epoch_counts();
         let source = crate::chunk::OverworldChunkSource::new(crate::overworld_generator(42));
         let mut session = GenerationSession::new(GenerationRequest::new(
             Dimension::Overworld,
@@ -2905,6 +3377,16 @@ mod tests {
         )
         .expect("production Overworld request succeeds");
 
+        assert_eq!(
+            crate::worldgen_lifecycle::region_feature_epoch_counts(),
+            (1, 8),
+            "the production Overworld target and its sparse padding use one request epoch",
+        );
+        assert_eq!(
+            crate::worldgen_lifecycle::region_feature_scalar_fallbacks(),
+            0,
+            "production target settlement must not fall back to scalar feature replay",
+        );
         assert_eq!(snapshot.coordinate(), (0, 0));
         assert_eq!(snapshot.neighbours().len(), 8);
         assert_eq!(
@@ -2972,9 +3454,8 @@ mod tests {
     }
 
     #[test]
-    fn scalar_request_prepares_immutable_products_once() {
+    fn scalar_request_materializes_immutable_products_once() {
         let source = CountingSource {
-            prepare_calls: Arc::new(AtomicUsize::new(0)),
             shaped_calls: Arc::new(AtomicUsize::new(0)),
             sidecar_calls: Arc::new(AtomicUsize::new(0)),
         };
@@ -2997,13 +3478,11 @@ mod tests {
         .expect("request succeeds");
 
         assert_eq!(snapshot.coordinate(), (0, 0));
-        assert_eq!(source.prepare_calls.load(Ordering::Relaxed), 1);
     }
 
     #[test]
     fn contiguous_batch_reuses_region_admission_and_immutable_prefixes() {
         let source = CountingSource {
-            prepare_calls: Arc::new(AtomicUsize::new(0)),
             shaped_calls: Arc::new(AtomicUsize::new(0)),
             sidecar_calls: Arc::new(AtomicUsize::new(0)),
         };
@@ -3027,7 +3506,6 @@ mod tests {
         let results = generate_batch_with_executor(&source, &mut sessions, &executor);
 
         assert_eq!(executor.dispatches.load(Ordering::Relaxed), 1);
-        assert_eq!(source.prepare_calls.load(Ordering::Relaxed), 1);
         assert_eq!(executor.jobs.load(Ordering::Relaxed), 15);
         assert_eq!(source.shaped_calls.load(Ordering::Relaxed), 15);
         assert_eq!(source.sidecar_calls.load(Ordering::Relaxed), 15);
@@ -3053,7 +3531,6 @@ mod tests {
     #[test]
     fn batch_resume_defers_a_retained_output_before_packet_finalization() {
         let source = CountingSource {
-            prepare_calls: Arc::new(AtomicUsize::new(0)),
             shaped_calls: Arc::new(AtomicUsize::new(0)),
             sidecar_calls: Arc::new(AtomicUsize::new(0)),
         };

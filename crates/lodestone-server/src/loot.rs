@@ -125,6 +125,9 @@
 
 use std::str::FromStr;
 
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey, PropertyValue};
+use lodestone_data::block_states::StateId;
 use lodestone_model::{ItemStack, ResourceKey};
 use serde_json::Value;
 use thiserror::Error;
@@ -185,74 +188,34 @@ pub struct LootContext {
     pub block_state: Option<LootBlockState>,
 }
 
-/// The block state a roll happens against — `LootContextParams.BLOCK_STATE`,
-/// reduced to what `LootItemBlockStatePropertyCondition.test` reads off it: the
-/// block's identity and its property values.
-///
-/// # Why the properties are a full, canonical list and not "whatever the state
-/// string spelled"
-///
-/// Vanilla's `StatePropertiesPredicate.PropertyMatcher.match` looks the property
-/// up in the block's `StateDefinition` and then reads the *state's* value for
-/// it — so a property the caller did not mention still has a value, its default.
-/// A matcher against a property the block does not have at all is `false`
-/// (`property != null &&`), never a match.
-///
-/// So a consumer must hand over the **resolved** property set, not the substring
-/// between the brackets: `"minecraft:wheat"` and `"minecraft:wheat[age=0]"` are
-/// the same state and must both fail an `age=7` matcher for the same reason,
-/// rather than one failing because the property is absent.
-/// [`crate::block_drops::loot_block_state`] does that resolution through
-/// `lodestone_data::block_states`, which is the 26.2 server's own state table.
-#[derive(Debug, Clone, PartialEq)]
+/// The block state a roll happens against. The production path carries one
+/// validated state id; its block and typed properties are derived without
+/// reparsing or formatting state text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LootBlockState {
-    /// The block's registry key, e.g. `minecraft:wheat`. Compared against the
-    /// condition's own **required** `block` field, so a table applied to the
-    /// wrong block cannot silently pass.
-    pub block: ResourceKey,
-    /// Every property of this state as `(name, serialized value)`, e.g.
-    /// `[("age", "7")]`. A name absent from this list is a property the block
-    /// does not have, which no matcher matches.
-    pub properties: Vec<(String, String)>,
+    state: StateId,
 }
 
 impl LootBlockState {
-    /// A state with no properties — enough for a block whose table gates only on
-    /// `block`.
+    /// Builds a context from a validated state id.
     #[must_use]
-    pub fn new(block: ResourceKey) -> Self {
-        Self {
-            block,
-            properties: Vec::new(),
-        }
+    pub const fn new(state: StateId) -> Self {
+        Self { state }
     }
 
-    /// A state carrying `properties`, as `(name, value)` pairs.
     #[must_use]
-    pub fn with_properties<I, K, V>(block: ResourceKey, properties: I) -> Self
-    where
-        I: IntoIterator<Item = (K, V)>,
-        K: Into<String>,
-        V: Into<String>,
-    {
-        Self {
-            block,
-            properties: properties
-                .into_iter()
-                .map(|(k, v)| (k.into(), v.into()))
-                .collect(),
-        }
+    pub const fn state_id(self) -> StateId {
+        self.state
     }
 
-    /// This state's value for `name`, or `None` if the block has no such
-    /// property — vanilla's `StateDefinition.getProperty(name)` returning null,
-    /// which makes the matcher fail rather than pass.
     #[must_use]
-    pub fn property(&self, name: &str) -> Option<&str> {
-        self.properties
-            .iter()
-            .find(|(key, _)| key == name)
-            .map(|(_, value)| value.as_str())
+    pub fn block(self) -> Block {
+        self.state.block()
+    }
+
+    #[must_use]
+    pub fn properties(self) -> Properties {
+        Properties::from_state_id(self.state)
     }
 }
 
@@ -1582,7 +1545,7 @@ enum LootCondition {
     /// matcher naming a property the block does not have is `false`, because
     /// `PropertyMatcher.match` starts `property != null &&`.
     BlockStateProperty {
-        block: ResourceKey,
+        block: Block,
         properties: Vec<StatePropertyMatcher>,
     },
     DamageSourceProperties,
@@ -1653,7 +1616,7 @@ impl LootCondition {
                 Ok(Self::EntityProperties)
             }
             "minecraft:block_state_property" => {
-                let block = parse_id(value.get("block"), "block")?;
+                let block = parse_block(value.get("block"))?;
                 let properties = match value.get("properties") {
                     None => Vec::new(),
                     Some(raw) => {
@@ -1727,7 +1690,7 @@ impl LootCondition {
             Self::BlockStateProperty { block, properties } => match context.block_state.as_ref() {
                 None => false,
                 Some(state) => {
-                    state.block == *block && properties.iter().all(|m| m.matches(state))
+                    state.block() == *block && properties.iter().all(|m| m.matches(*state))
                 }
             },
             // The real survives-explosion condition, transcribed as the rule it
@@ -1775,77 +1738,46 @@ impl LootCondition {
     }
 }
 
-/// One entry of a `StatePropertiesPredicate` — `PropertyMatcher(String name,
-/// ValueMatcher valueMatcher)`, i.e. one `"age": "7"` pair out of the condition's
-/// `properties` object.
+/// One typed entry of a block-state property predicate.
 ///
 /// `match` is `definition.getProperty(name) != null && valueMatcher.match(…)`, so
 /// an unknown property name fails the whole predicate rather than being ignored.
 #[derive(Debug, Clone, PartialEq)]
 struct StatePropertyMatcher {
-    name: String,
+    key: PropertyKey,
     matcher: StateValueMatcher,
 }
 
 impl StatePropertyMatcher {
     fn from_value(name: &str, value: &Value) -> Result<Self, LootError> {
+        let key = PropertyKey::from_name(name)
+            .ok_or_else(|| LootError::BadBlockProperty(name.to_string()))?;
         Ok(Self {
-            name: name.to_string(),
-            matcher: StateValueMatcher::from_value(value)?,
+            key,
+            matcher: StateValueMatcher::from_value(key, value)?,
         })
     }
 
-    fn matches(&self, state: &LootBlockState) -> bool {
-        match state.property(&self.name) {
-            None => false,
-            Some(value) => self.matcher.matches(value),
-        }
+    fn matches(&self, state: LootBlockState) -> bool {
+        state.properties().get(self.key)
+            .is_some_and(|value| self.matcher.matches(value))
     }
 }
 
-/// `StatePropertiesPredicate.ValueMatcher` — `Codec.either(ExactMatcher,
-/// RangedMatcher)`, so a property's JSON value is either a bare string or a
-/// `{"min": …, "max": …}` object.
-///
-/// # Both bounds are strings in the record, and the comparison is *typed*
-///
-/// `RangedMatcher(Optional<String> minValue, Optional<String> maxValue)` compares
-/// with `property.getValue(bound)` then `value.compareTo(bound)` — the
-/// **property's own** ordering, which for an `IntegerProperty` is numeric and for
-/// a `BooleanProperty` is `false < true`. Comparing the serialized strings
-/// lexicographically instead would put `"9" > "10"`, so [`Self::matches`] parses
-/// numerically when both sides are integers and compares booleans as booleans.
-///
-/// An `EnumProperty`'s ordering is its **declaration order**, which is not
-/// recoverable from a serialized name, so a ranged matcher over an enum property
-/// fails closed here. That path is unreachable from the bundle: all 258
-/// `block_state_property` conditions across the 1,246 bundled tables use the
-/// exact-string form and **none** uses a range, measured by walking the JSON.
+/// A typed block-state property matcher compiled at loot-table load time.
 #[derive(Debug, Clone, PartialEq)]
 enum StateValueMatcher {
-    /// `ExactMatcher(String value)` — `property.getValue(value)` is present and
-    /// `compareTo == 0`. Every typed value has exactly one serialized form and
-    /// `getValue` is its inverse, so string equality is the same predicate: a
-    /// bound outside the property's domain (`age: "99"`) matches no real state
-    /// under either reading.
-    Exact(String),
-    /// `RangedMatcher(Optional<String>, Optional<String>)`. An absent bound is
-    /// vacuously satisfied; a bound outside the property's domain fails
-    /// (`typedMinValue.isEmpty() → return false`), which the numeric parse
-    /// reproduces by failing to parse.
-    Ranged {
-        min: Option<String>,
-        max: Option<String>,
-    },
+    Exact(PropertyValue),
+    Ranged { values: Vec<PropertyValue> },
 }
 
 impl StateValueMatcher {
-    fn from_value(value: &Value) -> Result<Self, LootError> {
+    fn from_value(key: PropertyKey, value: &Value) -> Result<Self, LootError> {
         match value {
-            Value::String(exact) => Ok(Self::Exact(exact.clone())),
+            Value::String(exact) => Ok(Self::Exact(parse_property_value(key, exact)?)),
             Value::Object(bounds) => {
-                let bound = |key: &str| -> Result<Option<String>, LootError> {
-                    match bounds.get(key) {
+                let bound = |name: &str| -> Result<Option<String>, LootError> {
+                    match bounds.get(name) {
                         None => Ok(None),
                         Some(Value::String(raw)) => Ok(Some(raw.clone())),
                         Some(_) => Err(LootError::UnexpectedType(
@@ -1854,9 +1786,10 @@ impl StateValueMatcher {
                         )),
                     }
                 };
+                let min = bound("min")?;
+                let max = bound("max")?;
                 Ok(Self::Ranged {
-                    min: bound("min")?,
-                    max: bound("max")?,
+                    values: ranged_property_values(key, min.as_deref(), max.as_deref()),
                 })
             }
             _ => Err(LootError::UnexpectedType(
@@ -1866,41 +1799,60 @@ impl StateValueMatcher {
         }
     }
 
-    fn matches(&self, value: &str) -> bool {
+    fn matches(&self, value: PropertyValue) -> bool {
         match self {
-            Self::Exact(expected) => value == expected,
-            Self::Ranged { min, max } => {
-                if let Some(min) = min {
-                    if compare_state_values(value, min).is_none_or(|o| o.is_lt()) {
-                        return false;
-                    }
-                }
-                if let Some(max) = max {
-                    if compare_state_values(value, max).is_none_or(|o| o.is_gt()) {
-                        return false;
-                    }
-                }
-                true
-            }
+            Self::Exact(expected) => value == *expected,
+            Self::Ranged { values } => values.contains(&value),
         }
     }
 }
 
-/// `value.compareTo(bound)` in the property's own ordering, for the two property
-/// kinds whose ordering a serialized name determines: integers compare
-/// numerically, booleans as `false < true`.
-///
-/// `None` means "not comparable" — an enum property, or a bound outside the
-/// property's domain — and every caller treats that as a failed match, matching
-/// `RangedMatcher.match`'s `typedMinValue.isEmpty() → false`.
-fn compare_state_values(value: &str, bound: &str) -> Option<std::cmp::Ordering> {
-    if let (Ok(value), Ok(bound)) = (value.parse::<i64>(), bound.parse::<i64>()) {
-        return Some(value.cmp(&bound));
+fn parse_property_value(key: PropertyKey, raw: &str) -> Result<PropertyValue, LootError> {
+    let value = PropertyValue::from_name(raw)
+        .ok_or_else(|| LootError::BadBlockProperty(raw.to_string()))?;
+    Properties::try_from_pairs(&[(key, value)])
+        .map(|_| value)
+        .map_err(|_| LootError::BadBlockProperty(raw.to_string()))
+}
+
+fn ranged_property_values(
+    key: PropertyKey,
+    min: Option<&str>,
+    max: Option<&str>,
+) -> Vec<PropertyValue> {
+    let candidates = BuiltinPropertyValue::all()
+        .map(PropertyValue::builtin)
+        .filter(|value| Properties::try_from_pairs(&[(key, *value)]).is_ok())
+        .collect::<Vec<_>>();
+    let min_int = min.and_then(|value| value.parse::<i64>().ok());
+    let max_int = max.and_then(|value| value.parse::<i64>().ok());
+    let min_bool = min.and_then(|value| value.parse::<bool>().ok());
+    let max_bool = max.and_then(|value| value.parse::<bool>().ok());
+    if min.is_none() && max.is_none() {
+        return candidates;
     }
-    if let (Ok(value), Ok(bound)) = (value.parse::<bool>(), bound.parse::<bool>()) {
-        return Some(value.cmp(&bound));
+    if min.is_some_and(|_| min_int.is_none() && min_bool.is_none())
+        || max.is_some_and(|_| max_int.is_none() && max_bool.is_none())
+        || (min_int.is_some() && max_bool.is_some())
+        || (min_bool.is_some() && max_int.is_some())
+    {
+        return Vec::new();
     }
-    None
+    candidates
+        .into_iter()
+        .filter(|value| {
+            let Some(raw) = value.name() else { return false };
+            if min_int.is_some() || max_int.is_some() {
+                let Ok(raw) = raw.parse::<i64>() else { return false };
+                min_int.is_none_or(|bound| raw >= bound) && max_int.is_none_or(|bound| raw <= bound)
+            } else if min_bool.is_some() || max_bool.is_some() {
+                let Ok(raw) = raw.parse::<bool>() else { return false };
+                min_bool.is_none_or(|bound| raw >= bound) && max_bool.is_none_or(|bound| raw <= bound)
+            } else {
+                false
+            }
+        })
+        .collect()
 }
 
 /// `advancements/predicates/ItemPredicate` — `(items, count, components)`, of
@@ -2169,6 +2121,9 @@ pub enum LootError {
     /// A namespaced id could not be parsed.
     #[error("invalid identifier {0:?}")]
     BadIdentifier(String),
+    /// A block or property name is not in the generated block-state census.
+    #[error("invalid block-state value {0:?}")]
+    BadBlockProperty(String),
     /// A `table_bonus` condition carried an empty `chances` list.
     #[error("table_bonus condition has no chances")]
     EmptyTableBonus,
@@ -2179,6 +2134,13 @@ fn parse_id(value: Option<&Value>, field: &'static str) -> Result<ResourceKey, L
         .and_then(Value::as_str)
         .ok_or(LootError::MissingField(field))?;
     raw.parse().map_err(|_| LootError::BadIdentifier(raw.to_string()))
+}
+
+fn parse_block(value: Option<&Value>) -> Result<Block, LootError> {
+    let raw = value
+        .and_then(Value::as_str)
+        .ok_or(LootError::MissingField("block"))?;
+    Block::from_name(raw).ok_or_else(|| LootError::BadBlockProperty(raw.to_string()))
 }
 
 fn parse_f32(value: &Value, field: &'static str) -> Result<f32, LootError> {
@@ -3292,11 +3254,13 @@ mod tests {
 
     /// A bare-handed break of `state`, i.e. the context `block_drops` builds.
     fn broken(state: &str) -> LootContext {
+        let state_id = lodestone_data::block_states::StateId::from_state_str(state)
+            .expect("test state is in the generated census");
         LootContext {
             luck: 0.0,
             tool: None,
             explosion_radius: None,
-            block_state: crate::block_drops::loot_block_state(state),
+            block_state: crate::block_drops::loot_block_state(state_id),
         }
     }
 
@@ -3553,7 +3517,10 @@ mod tests {
                     .with_enchantment("minecraft:fortune".parse().unwrap(), level)
             }),
             explosion_radius: None,
-            block_state: crate::block_drops::loot_block_state(ripe),
+            block_state: crate::block_drops::loot_block_state(
+                lodestone_data::block_states::StateId::from_state_str(ripe)
+                    .expect("test state is in the generated census"),
+            ),
         };
         let (level_zero, _) = seed_counts(&with_tool(0), 0..4096);
         assert_eq!(
@@ -3623,7 +3590,10 @@ mod tests {
 
         let mut mismatches = Vec::new();
         for (state, expected) in cases {
-            let id = crate::block_drops::block_loot_table_id(state).expect("state names a block");
+            let state_id = lodestone_data::block_states::StateId::from_state_str(state)
+                .expect("test state is in the generated census");
+            let id = crate::block_drops::block_loot_table_id(state_id)
+                .expect("state names a block");
             let mut rng = SpawnRng::new(42);
             let got = describe(&set.roll(&id, &broken(state), &mut rng));
             let want: Vec<String> = expected.iter().map(|s| (*s).to_string()).collect();

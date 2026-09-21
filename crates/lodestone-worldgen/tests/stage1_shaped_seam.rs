@@ -66,6 +66,7 @@
 //! `stage0_shaped_vs_full_cost.rs` already established and justified) and
 //! `lodestone_worldgen::{overworld, counters}`.
 
+use lodestone_data::block_states::StateId;
 use lodestone_server::overworld_generator;
 use lodestone_worldgen::overworld::{GenStage, OverworldGenerator};
 
@@ -364,12 +365,11 @@ fn column_timed_uses_supplied_center_prefix() {
 // Structure presence — answers the plan's own report question directly
 // ===========================================================================
 
-/// Block-state prefixes that only ever come from a mineshaft's own placed
-/// pieces (`crate::structure::mineshaft`'s real state strings: planks, fence,
+/// Block names that only ever come from a mineshaft's own placed
+/// pieces (`crate::structure::mineshaft`'s generated state metadata: planks, fence,
 /// rail, cobweb, wall torch, iron chain) — never from fill, surface,
 /// materialize or carve, the stages a Shaped column actually runs.
-/// `starts_with` because the palette stores properties (`"minecraft:rail[shape=…]"`).
-const MINESHAFT_TELLTALE_PREFIXES: [&str; 8] = [
+const MINESHAFT_TELLTALE_BLOCKS: [&str; 8] = [
     "minecraft:rail",
     "minecraft:cobweb",
     "minecraft:oak_fence",
@@ -380,10 +380,10 @@ const MINESHAFT_TELLTALE_PREFIXES: [&str; 8] = [
     "minecraft:iron_chain",
 ];
 
-fn palette_has_structure_telltale(palette: &[String]) -> bool {
+fn palette_has_structure_telltale(palette: &[StateId]) -> bool {
     palette
         .iter()
-        .any(|state| MINESHAFT_TELLTALE_PREFIXES.iter().any(|prefix| state.starts_with(prefix)))
+        .any(|state| MINESHAFT_TELLTALE_BLOCKS.contains(&state.name()))
 }
 
 /// Confirms `docs/plans/progressive-chunk-generation.md`'s own claim: "a shaped
@@ -470,7 +470,7 @@ fn stage1_shaped_column_contains_a_real_structure() {
         palette_has_structure_telltale(&palette),
         "STAGE1: chunk ({cx},{cz})'s structure_starts_placed_in reports a real placed \
          {structure_id} start, but its column_shaped output carries none of \
-         {MINESHAFT_TELLTALE_PREFIXES:?} — a shaped column does NOT actually contain the \
+         {MINESHAFT_TELLTALE_BLOCKS:?} — a shaped column does NOT actually contain the \
          structure"
     );
 

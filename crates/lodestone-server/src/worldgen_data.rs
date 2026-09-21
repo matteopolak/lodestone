@@ -58,8 +58,12 @@
 //! yet — see that module's doc). Structures are still unbuilt anywhere in
 //! this repository.
 
-use std::sync::OnceLock;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
+use lodestone_data::block::Block;
+use lodestone_data::block_states::air_state;
 use lodestone_worldgen::density::Resolver;
 use lodestone_worldgen::overworld::OverworldGenerator;
 use lodestone_worldgen::table_resolver::TableResolver;
@@ -457,7 +461,7 @@ fn nether_resolver() -> TableResolver<'static> {
 /// is a structurally different generator (no noise router, no seed, no
 /// carvers — see that module's own doc), so it needs its own entry point
 /// rather than a new arm here. See [`flat_generator`]/[`FlatChunkSource`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum WorldType {
     #[default]
     Overworld,
@@ -538,6 +542,149 @@ pub fn active_world_seed() -> i64 {
 #[must_use]
 pub fn overworld_generator(seed: i64) -> OverworldGenerator {
     overworld_generator_of_type(seed, WorldType::Overworld)
+}
+
+/// A bounded diagnostic snapshot for the bundled compiled-generator cache.
+///
+/// `compilations` counts density/structure configuration builds, while
+/// `hits`/`misses` describe source-factory lookups. The counters never affect
+/// generation and are intentionally process-local; they make it possible for
+/// a production benchmark to prove that repeated source/lease creation does
+/// not parse the immutable worldgen bundle again.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BundledGeneratorCacheStats {
+    pub hits: u64,
+    pub misses: u64,
+    pub compilations: u64,
+    pub evictions: u64,
+}
+
+#[derive(Default)]
+struct BundledGeneratorCacheStatsAtomic {
+    hits: AtomicU64,
+    misses: AtomicU64,
+    compilations: AtomicU64,
+    evictions: AtomicU64,
+}
+
+static BUNDLED_GENERATOR_CACHE_STATS: BundledGeneratorCacheStatsAtomic =
+    BundledGeneratorCacheStatsAtomic {
+        hits: AtomicU64::new(0),
+        misses: AtomicU64::new(0),
+        compilations: AtomicU64::new(0),
+        evictions: AtomicU64::new(0),
+    };
+
+/// Returns diagnostics for the bounded compiled-generator cache.
+#[must_use]
+pub fn bundled_generator_cache_stats() -> BundledGeneratorCacheStats {
+    BundledGeneratorCacheStats {
+        hits: BUNDLED_GENERATOR_CACHE_STATS.hits.load(Ordering::Relaxed),
+        misses: BUNDLED_GENERATOR_CACHE_STATS.misses.load(Ordering::Relaxed),
+        compilations: BUNDLED_GENERATOR_CACHE_STATS
+            .compilations
+            .load(Ordering::Relaxed),
+        evictions: BUNDLED_GENERATOR_CACHE_STATS.evictions.load(Ordering::Relaxed),
+    }
+}
+
+/// Resets compiled-generator cache counters without evicting live entries.
+/// Diagnostics only; generation never calls this function.
+pub fn reset_bundled_generator_cache_stats() {
+    BUNDLED_GENERATOR_CACHE_STATS.hits.store(0, Ordering::Relaxed);
+    BUNDLED_GENERATOR_CACHE_STATS.misses.store(0, Ordering::Relaxed);
+    BUNDLED_GENERATOR_CACHE_STATS
+        .compilations
+        .store(0, Ordering::Relaxed);
+    BUNDLED_GENERATOR_CACHE_STATS.evictions.store(0, Ordering::Relaxed);
+}
+
+const BUNDLED_GENERATOR_CACHE_CAPACITY: usize = 4;
+/// Bump when the production request executor's immutable-input contract
+/// changes. The executor version is part of the cache identity so a live
+/// process never reuses a configuration compiled for an older request shape.
+const BUNDLED_GENERATOR_EXECUTOR_VERSION: u32 = 4;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct BundledGeneratorCacheKey {
+    seed: i64,
+    world_type: WorldType,
+    settings_identity: String,
+    resolver_fingerprint: u64,
+    executor_version: u32,
+}
+
+struct BundledGeneratorCacheEntry {
+    key: BundledGeneratorCacheKey,
+    compiled: Arc<lodestone_worldgen::overworld::CompiledOverworldGenerator>,
+}
+
+#[derive(Default)]
+struct BundledGeneratorCache {
+    entries: VecDeque<BundledGeneratorCacheEntry>,
+}
+
+static BUNDLED_GENERATOR_CACHE: OnceLock<Mutex<BundledGeneratorCache>> = OnceLock::new();
+
+fn bundled_resolver_fingerprint() -> u64 {
+    static FINGERPRINT: OnceLock<u64> = OnceLock::new();
+    *FINGERPRINT.get_or_init(|| embedded_resolver().fingerprint())
+}
+
+fn settings_identity(settings: &Value) -> String {
+    settings.to_string()
+}
+
+fn cached_overworld_generator(seed: i64, world_type: WorldType) -> OverworldGenerator {
+    ACTIVE_WORLD_SEED.store(seed, Ordering::Relaxed);
+    let settings = settings_for(world_type);
+    let resolver = embedded_resolver();
+    let key = BundledGeneratorCacheKey {
+        seed,
+        world_type,
+        settings_identity: settings_identity(settings),
+        resolver_fingerprint: bundled_resolver_fingerprint(),
+        executor_version: BUNDLED_GENERATOR_EXECUTOR_VERSION,
+    };
+    let cache = BUNDLED_GENERATOR_CACHE.get_or_init(|| Mutex::new(BundledGeneratorCache::default()));
+    // Hold this lock across compilation. Construction is intentionally
+    // serialized per process: two simultaneous requests for the same key must
+    // not both parse templates and compile the same density graph.
+    let mut cache = cache.lock().expect("bundled generator cache lock poisoned");
+    if let Some(index) = cache.entries.iter().position(|entry| entry.key == key) {
+        let entry = cache
+            .entries
+            .remove(index)
+            .expect("cache entry disappeared while locked");
+        let compiled = Arc::clone(&entry.compiled);
+        cache.entries.push_front(entry);
+        BUNDLED_GENERATOR_CACHE_STATS.hits.fetch_add(1, Ordering::Relaxed);
+        return OverworldGenerator::from_compiled(compiled);
+    }
+
+    BUNDLED_GENERATOR_CACHE_STATS
+        .misses
+        .fetch_add(1, Ordering::Relaxed);
+    let compiled = OverworldGenerator::compile(
+        seed,
+        settings,
+        &resolver,
+        DEFAULT_BIOME,
+        DEFAULT_BIOME_SNOWS,
+    );
+    BUNDLED_GENERATOR_CACHE_STATS
+        .compilations
+        .fetch_add(1, Ordering::Relaxed);
+    if cache.entries.len() == BUNDLED_GENERATOR_CACHE_CAPACITY {
+        cache.entries.pop_back();
+        BUNDLED_GENERATOR_CACHE_STATS
+            .evictions
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    cache.entries.push_front(BundledGeneratorCacheEntry { key, compiled });
+    OverworldGenerator::from_compiled(
+        Arc::clone(&cache.entries.front().expect("compiled entry was inserted").compiled),
+    )
 }
 
 /// Builds the bundled overworld generator for `seed`, using `world_type`'s
@@ -628,7 +775,7 @@ pub fn overworld_chunk_source_of_type(
     seed: i64,
     world_type: WorldType,
 ) -> crate::chunk::OverworldChunkSource {
-    crate::chunk::OverworldChunkSource::new(overworld_generator_of_type(seed, world_type))
+    crate::chunk::OverworldChunkSource::new(cached_overworld_generator(seed, world_type))
 }
 
 /// `OverworldGenerator::new` treats the typed empty biome-parameter table as
@@ -895,14 +1042,19 @@ impl FlatChunkSource {
         let mut out = crate::chunk::ChunkColumn::new(col.min_y(), col.height());
         let biome_quarts: [String; 16] = std::array::from_fn(|_| col.biome().to_string());
         out.set_biome_quarts(&biome_quarts);
-        for (row, state) in col.rows().iter().enumerate() {
-            if state == "minecraft:air" {
+        for (row, &state) in col.rows().iter().enumerate() {
+            if state == air_state() {
                 continue;
             }
             let y = col.min_y() + row as i32;
             for lz in 0..16i32 {
                 for lx in 0..16i32 {
-                    out.set_block(lx, y, lz, state);
+                    out.set_block_id(
+                        lx,
+                        y,
+                        lz,
+                        state,
+                    );
                 }
             }
         }
@@ -926,12 +1078,17 @@ impl crate::chunk::ChunkSource for FlatChunkSource {
         self.generate(cx, cz)
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> lodestone_data::block_states::StateId {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
-        self.column(cx, cz).block_state(lx, y, lz).to_string()
+        self.column(cx, cz).block_state_id(lx, y, lz)
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -942,7 +1099,13 @@ impl crate::chunk::ChunkSource for FlatChunkSource {
         self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
     }
 
-    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+    fn set_block(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        state: lodestone_data::block_states::StateId,
+    ) {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
@@ -951,7 +1114,7 @@ impl crate::chunk::ChunkSource for FlatChunkSource {
         let column = edits
             .entry((cx, cz))
             .or_insert_with(|| self.generate(cx, cz));
-        column.set_block(lx, y, lz, name);
+        column.set_block_id(lx, y, lz, state);
     }
 
     fn try_store_resident_edit(
@@ -1069,7 +1232,9 @@ pub fn overworld_chunk_source_override(
                 layers: layers
                     .into_iter()
                     .map(|layer| lodestone_worldgen::flat::FlatLayer {
-                        block: layer.block,
+                        block: Block::from_name(&layer.block)
+                            .map(Block::default_state)
+                            .expect("stored flat layer names must be canonical built-in blocks"),
                         // The NBT field is a signed `Int` (matching
                         // `with_overworld_flat_generator`'s own writer);
                         // `FlatLayer::height` is `u32` (row counts are never
@@ -1104,17 +1269,17 @@ pub fn overworld_chunk_source_override(
     }
 }
 
-/// Every block state's canonical string, id `0..STATE_COUNT`, in the vanilla
-/// global-palette order — [`lodestone_worldgen::debug::DebugLevelSource`]'s
-/// `ALL_BLOCKS`. Built once per process from [`lodestone_data::block_states`]
-/// (whose ids are documented as that exact wire/global-palette order) via the
-/// same [`canonical_state`] this module already uses for
-/// [`Resolver::block_freeze_facts`]'s override table.
-fn all_block_states_ordered() -> &'static [String] {
-    static STATES: OnceLock<Vec<String>> = OnceLock::new();
+/// Every registered block state as a typed id in global-palette order. Built
+/// once per process from [`lodestone_data::block_states`] and shared with the
+/// debug-world generator.
+fn all_block_states_ordered() -> &'static [lodestone_data::block_states::StateId] {
+    static STATES: OnceLock<Vec<lodestone_data::block_states::StateId>> = OnceLock::new();
     STATES.get_or_init(|| {
         (0..lodestone_data::block_states::STATE_COUNT)
-            .map(canonical_state)
+            .map(|raw| {
+                lodestone_data::block_states::StateId::new(raw)
+                    .expect("generated state table contains only valid ids")
+            })
             .collect()
     })
 }
@@ -1162,10 +1327,20 @@ impl DebugChunkSource {
         for lz in 0..16i32 {
             for lx in 0..16i32 {
                 let barrier = col.block_state(lx, lodestone_worldgen::debug::BARRIER_Y, lz);
-                out.set_block(lx, lodestone_worldgen::debug::BARRIER_Y, lz, barrier);
+                out.set_block_id(
+                    lx,
+                    lodestone_worldgen::debug::BARRIER_Y,
+                    lz,
+                    barrier,
+                );
                 let grid = col.block_state(lx, lodestone_worldgen::debug::GRID_Y, lz);
-                if grid != "minecraft:air" {
-                    out.set_block(lx, lodestone_worldgen::debug::GRID_Y, lz, grid);
+                if grid != lodestone_data::block::Block::Air.default_state() {
+                    out.set_block_id(
+                        lx,
+                        lodestone_worldgen::debug::GRID_Y,
+                        lz,
+                        grid,
+                    );
                 }
             }
         }
@@ -1189,12 +1364,17 @@ impl crate::chunk::ChunkSource for DebugChunkSource {
         self.generate(cx, cz)
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> lodestone_data::block_states::StateId {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
-        self.column(cx, cz).block_state(lx, y, lz).to_string()
+        self.column(cx, cz).block_state_id(lx, y, lz)
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -1205,7 +1385,13 @@ impl crate::chunk::ChunkSource for DebugChunkSource {
         self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
     }
 
-    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+    fn set_block(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        state: lodestone_data::block_states::StateId,
+    ) {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
@@ -1214,7 +1400,7 @@ impl crate::chunk::ChunkSource for DebugChunkSource {
         let column = edits
             .entry((cx, cz))
             .or_insert_with(|| self.generate(cx, cz));
-        column.set_block(lx, y, lz, name);
+        column.set_block_id(lx, y, lz, state);
     }
 
     fn try_store_resident_edit(
@@ -1424,13 +1610,13 @@ mod tests {
                 self.0.fetch_add(1, Ordering::Relaxed);
                 ChunkColumn::new(-64, 384)
             }
-            fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-                "minecraft:air".to_owned()
+            fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> lodestone_data::block_states::StateId {
+                lodestone_data::block_states::StateId::air_state()
             }
             fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
                 "minecraft:plains".to_owned()
             }
-            fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+            fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: lodestone_data::block_states::StateId) {}
         }
 
         let calls = Arc::new(AtomicUsize::new(0));

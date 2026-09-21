@@ -157,7 +157,10 @@ pub const DEFAULT_BLOCK_DAMAGE_MODIFIER: f32 = 1.0;
 /// The hay bale and honey block landing-rule overrides' shared damage modifier.
 pub const CUSHIONED_BLOCK_DAMAGE_MODIFIER: f32 = 0.2;
 
-/// Whether `state` is in vanilla's `#minecraft:fall_damage_resetting` block tag,
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
+
+/// Whether `state` is in the `fall_damage_resetting` block tag,
 /// i.e. standing in it discards the fall.
 ///
 /// The tag is `#minecraft:climbable` plus `sweet_berry_bush` and `cobweb`
@@ -169,23 +172,20 @@ pub const CUSHIONED_BLOCK_DAMAGE_MODIFIER: f32 = 0.2;
 /// `the_fall_damage_resetting_set_matches_the_jar_tags` reads both JSON files at
 /// test time so drift fails loudly.
 #[must_use]
-pub fn is_fall_damage_resetting(state: &str) -> bool {
-    let base = state.split('[').next().unwrap_or(state);
+pub fn is_fall_damage_resetting(state: StateId) -> bool {
     matches!(
-        base,
-        // #minecraft:climbable
-        "minecraft:ladder"
-            | "minecraft:vine"
-            | "minecraft:scaffolding"
-            | "minecraft:weeping_vines"
-            | "minecraft:weeping_vines_plant"
-            | "minecraft:twisting_vines"
-            | "minecraft:twisting_vines_plant"
-            | "minecraft:cave_vines"
-            | "minecraft:cave_vines_plant"
-            // and the two direct entries
-            | "minecraft:sweet_berry_bush"
-            | "minecraft:cobweb"
+        state.block(),
+        Block::Ladder
+            | Block::Vine
+            | Block::Scaffolding
+            | Block::WeepingVines
+            | Block::WeepingVinesPlant
+            | Block::TwistingVines
+            | Block::TwistingVinesPlant
+            | Block::CaveVines
+            | Block::CaveVinesPlant
+            | Block::SweetBerryBush
+            | Block::Cobweb
     )
 }
 
@@ -203,11 +203,10 @@ pub fn is_fall_damage_resetting(state: &str) -> bool {
 /// is a documented over-approximation in the player's favour rather than an
 /// oversight.
 #[must_use]
-pub fn block_damage_modifier(state: &str) -> f32 {
-    let base = state.split('[').next().unwrap_or(state);
-    match base {
-        "minecraft:hay_block" | "minecraft:honey_block" => CUSHIONED_BLOCK_DAMAGE_MODIFIER,
-        "minecraft:slime_block" | "minecraft:powder_snow" => 0.0,
+pub fn block_damage_modifier(state: StateId) -> f32 {
+    match state.block() {
+        Block::HayBlock | Block::HoneyBlock => CUSHIONED_BLOCK_DAMAGE_MODIFIER,
+        Block::SlimeBlock | Block::PowderSnow => 0.0,
         _ => DEFAULT_BLOCK_DAMAGE_MODIFIER,
     }
 }
@@ -795,7 +794,7 @@ mod tests {
 
         for name in &expected {
             assert!(
-                is_fall_damage_resetting(name),
+                is_fall_damage_resetting(state(name)),
                 "{name} is in the jar's fall_damage_resetting tag but the predicate \
                  says no — a fall through it would still hurt"
             );
@@ -816,14 +815,14 @@ mod tests {
                 "premise: {name} must genuinely be absent from the jar tag"
             );
             assert!(
-                !is_fall_damage_resetting(name),
+                !is_fall_damage_resetting(state(name)),
                 "{name} is not in the tag and must not cancel a fall"
             );
         }
 
         // And the property-suffixed form, which is what a real column carries.
-        assert!(is_fall_damage_resetting("minecraft:ladder[facing=north,waterlogged=false]"));
-        assert!(is_fall_damage_resetting("minecraft:cave_vines[age=5,berries=true]"));
+        assert!(is_fall_damage_resetting(state("minecraft:ladder[facing=north,waterlogged=false]")));
+        assert!(is_fall_damage_resetting(state("minecraft:cave_vines[age=5,berries=true]")));
     }
 
     /// [`block_damage_modifier`]'s non-default values must match the landing-rule
@@ -864,7 +863,7 @@ mod tests {
             );
             let expected: f32 = modifier.trim_end_matches('F').parse().expect("modifier parses");
             assert_eq!(
-                block_damage_modifier(block),
+                block_damage_modifier(state(block)),
                 expected,
                 "{block} must carry {file}'s own modifier"
             );
@@ -883,14 +882,18 @@ mod tests {
             "PowderSnowBlock.fallOn now calls causeFallDamage; powder snow is no \
              longer a complete cancellation and `block_damage_modifier` is stale"
         );
-        assert_eq!(block_damage_modifier("minecraft:powder_snow"), 0.0);
+        assert_eq!(block_damage_modifier(state("minecraft:powder_snow")), 0.0);
         checked += 1;
 
         assert_eq!(checked, 4, "an audit that checked nothing is not a pass");
         // And the default, so the match arm's fallthrough is covered.
         assert_eq!(
-            block_damage_modifier("minecraft:stone"),
+            block_damage_modifier(state("minecraft:stone")),
             DEFAULT_BLOCK_DAMAGE_MODIFIER
         );
+    }
+
+    fn state(text: &str) -> StateId {
+        StateId::from_state_str(text).expect("fixture state must resolve")
     }
 }

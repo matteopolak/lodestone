@@ -64,17 +64,17 @@ impl RandomTickScheduler {
         // Reads a cell through local coordinates, answering air for anything
         // outside this column or outside build height — the same single-accessor
         // invariant `crate::fire` and `crate::fluid` document.
-        let read = |column: &crate::chunk::ChunkColumn, at: BlockPos| -> Option<String> {
+        let read = |column: &crate::chunk::ChunkColumn, at: BlockPos| -> Option<StateId> {
             let lx = at.x - min_x;
             let lz = at.z - min_z;
             if !(0..16).contains(&lx) || !(0..16).contains(&lz) || at.y < min_y || at.y >= max_y {
                 return None;
             }
-            Some(column.block_state(lx, at.y, lz).to_string())
+            Some(column.block_state_id(lx, at.y, lz))
         };
         let flammable = |column: &crate::chunk::ChunkColumn, at: BlockPos| -> bool {
             read(column, at).is_some_and(|state| {
-                lodestone_data::block_blast::blast_or_inert(&state).ignited_by_lava
+                lodestone_data::block_blast::blast_for_block(state.block()).ignited_by_lava
             })
         };
         let mut light = |column: &mut crate::chunk::ChunkColumn,
@@ -85,8 +85,8 @@ impl RandomTickScheduler {
             // `BaseFireBlock::getState(level, support)` — soul fire over a soul
             // base, otherwise ordinary fire with its connected faces derived from
             // `support`'s neighbourhood.
-            let new_state = fire_state_in_column(column, min_x, min_z, min_y, max_y, support);
-            column.set_block(at.x - min_x, at.y, at.z - min_z, &new_state);
+            let new_state = fire_state_in_column_id(column, min_x, min_z, min_y, max_y, support);
+            column.set_block_id(at.x - min_x, at.y, at.z - min_z, new_state);
             events.push(RandomTickEvent {
                 pos: (at.x, at.y, at.z),
                 from,
@@ -113,7 +113,7 @@ impl RandomTickScheduler {
                 let Some(state) = read(column, test) else {
                     return events;
                 };
-                if is_air_variant(&state) {
+                if is_air_variant_id(state) {
                     let has_flammable_neighbour = [
                         (0, -1, 0),
                         (0, 1, 0),
@@ -130,10 +130,7 @@ impl RandomTickScheduler {
                         light(column, test, test, &mut events);
                         return events;
                     }
-                } else if lodestone_data::block_states::state_id(&state)
-                    .and_then(lodestone_data::block_states::StateId::new)
-                    .is_some_and(lodestone_data::block_solidity::blocks_motion)
-                {
+                } else if crate::fire::blocks_motion_id(state) {
                     return events;
                 }
             }
@@ -146,7 +143,7 @@ impl RandomTickScheduler {
                 if read(column, test).is_none() {
                     return events;
                 }
-                let above_is_air = read(column, above).is_some_and(|s| is_air_variant(&s));
+                let above_is_air = read(column, above).is_some_and(is_air_variant_id);
                 if above_is_air && flammable(column, test) {
                     // Vanilla passes `testPos`, not `testPos.above()`, to
                     // `BaseFireBlock::getState` here while writing to
@@ -168,39 +165,54 @@ impl RandomTickScheduler {
 /// holds a column instead — [`RandomTickScheduler::tick_lava`]. A cell outside the
 /// column reads as air, so a fire lit at a chunk border simply has fewer connected
 /// faces than vanilla would give it, which is cosmetic.
-fn fire_state_in_column(
+fn fire_state_in_column_id(
     column: &crate::chunk::ChunkColumn,
     min_x: i32,
     min_z: i32,
     min_y: i32,
     max_y: i32,
     pos: BlockPos,
-) -> String {
-    let read = |at: BlockPos| -> String {
+) -> StateId {
+    let read = |at: BlockPos| -> StateId {
         let lx = at.x - min_x;
         let lz = at.z - min_z;
         if !(0..16).contains(&lx) || !(0..16).contains(&lz) || at.y < min_y || at.y >= max_y {
-            return crate::chunk::AIR.to_owned();
+            return lodestone_data::block_states::air_state();
         }
-        column.block_state(lx, at.y, lz).to_string()
+        column.block_state_id(lx, at.y, lz)
     };
     let below = read(BlockPos::new(pos.x, pos.y - 1, pos.z));
-    if crate::fire::SOUL_FIRE_BASE.contains(&base_name(&below)) {
-        return crate::fire::SOUL_FIRE.to_owned();
+    if matches!(below.block(), Block::SoulSand | Block::SoulSoil) {
+        return Block::SoulFire.default_state();
     }
-    if !crate::fire::can_burn(&below) && !crate::fire::face_sturdy_up(&below) {
-        let up = crate::fire::can_burn(&read(BlockPos::new(pos.x, pos.y + 1, pos.z)));
-        let north = crate::fire::can_burn(&read(BlockPos::new(pos.x, pos.y, pos.z - 1)));
-        let south = crate::fire::can_burn(&read(BlockPos::new(pos.x, pos.y, pos.z + 1)));
-        let west = crate::fire::can_burn(&read(BlockPos::new(pos.x - 1, pos.y, pos.z)));
-        let east = crate::fire::can_burn(&read(BlockPos::new(pos.x + 1, pos.y, pos.z)));
-        return format!(
-            "{}[age=0,east={east},north={north},south={south},up={up},west={west}]",
-            crate::fire::FIRE
-        );
-    }
-    format!(
-        "{}[age=0,east=false,north=false,south=false,up=false,west=false]",
-        crate::fire::FIRE
-    )
+    let (up, north, south, west, east) = if !crate::fire::can_burn_id(below)
+        && !crate::fire::face_sturdy_up_id(below)
+    {
+        (
+            crate::fire::can_burn_id(read(BlockPos::new(pos.x, pos.y + 1, pos.z))),
+            crate::fire::can_burn_id(read(BlockPos::new(pos.x, pos.y, pos.z - 1))),
+            crate::fire::can_burn_id(read(BlockPos::new(pos.x, pos.y, pos.z + 1))),
+            crate::fire::can_burn_id(read(BlockPos::new(pos.x - 1, pos.y, pos.z))),
+            crate::fire::can_burn_id(read(BlockPos::new(pos.x + 1, pos.y, pos.z))),
+        )
+    } else {
+        (false, false, false, false, false)
+    };
+    let bool_value = |value| {
+        PropertyValue::builtin(if value {
+            BuiltinPropertyValue::True
+        } else {
+            BuiltinPropertyValue::False
+        })
+    };
+    let properties = Properties::try_from_pairs(&[
+        (PropertyKey::Age, PropertyValue::builtin(BuiltinPropertyValue::Value0)),
+        (PropertyKey::East, bool_value(east)),
+        (PropertyKey::North, bool_value(north)),
+        (PropertyKey::South, bool_value(south)),
+        (PropertyKey::Up, bool_value(up)),
+        (PropertyKey::West, bool_value(west)),
+    ])
+    .expect("generated fire properties");
+    Properties::state_for_block(Block::Fire, &properties).expect("generated fire state")
 }

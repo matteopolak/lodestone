@@ -19,6 +19,8 @@
 
 use std::io::ErrorKind;
 
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 use lodestone_server::{
     ChunkColumn, ChunkSource, CommandDispatch, IntegratedServer, RconConfig, ServerBound,
     ServerDirective, ServerProtocol,
@@ -124,14 +126,21 @@ impl ChunkSource for EmptyWorld {
     fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
         ChunkColumn::new(0, 1)
     }
-    fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-        "minecraft:air".to_string()
+    fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
+        Block::Air.default_state()
     }
 
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
         "minecraft:plains".to_string()
     }
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+    fn set_block(
+        &self,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+        _state: StateId,
+    ) {
+    }
 }
 
 /// AUTH_RESPONSE for a correct password: real vanilla and our own listener

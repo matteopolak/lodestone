@@ -34,6 +34,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use lodestone_model::BlockPos;
+use lodestone_data::block_states::StateId;
 
 use crate::ChunkSource;
 use crate::chunk::ChunkColumn;
@@ -49,12 +50,16 @@ struct RigWorld {
     columns: Mutex<HashMap<(i32, i32), ChunkColumn>>,
 }
 
+fn state(value: &str) -> StateId {
+    StateId::from_state_str(value).expect("support-collapse state is canonical")
+}
+
 impl RigWorld {
     fn new() -> Self {
         let mut column = ChunkColumn::new(MIN_Y, HEIGHT);
         for x in 0..16 {
             for z in 0..16 {
-                column.set_block(x, FLOOR_Y, z, "minecraft:dirt");
+                column.set_block(x, FLOOR_Y, z, state("minecraft:dirt"));
             }
         }
         let mut columns = HashMap::new();
@@ -64,12 +69,12 @@ impl RigWorld {
         }
     }
 
-    fn put(&self, pos: BlockPos, state: &str) {
-        self.set_block(pos.x, pos.y, pos.z, state);
+    fn put(&self, pos: BlockPos, state_name: &str) {
+        self.set_block(pos.x, pos.y, pos.z, state(state_name));
     }
 
-    fn at(&self, pos: BlockPos) -> String {
-        self.block_state(pos.x, pos.y, pos.z)
+    fn at(&self, pos: BlockPos) -> StateId {
+        self.block_state_id(pos.x, pos.y, pos.z)
     }
 }
 
@@ -83,17 +88,16 @@ impl ChunkSource for RigWorld {
             .clone()
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
         self.columns
             .lock()
             .expect("rig world poisoned")
             .get(&(cx, cz))
             .map(|c| {
-                c.block_state(x.rem_euclid(16), y, z.rem_euclid(16))
-                    .to_string()
+                c.block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
             })
-            .unwrap_or_else(|| crate::chunk::AIR.to_string())
+            .unwrap_or_else(|| state(crate::chunk::AIR))
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -109,14 +113,14 @@ impl ChunkSource for RigWorld {
             .unwrap_or_else(|| crate::chunk::AIR.to_string())
     }
 
-    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+    fn set_block(&self, x: i32, y: i32, z: i32, state_id: StateId) {
         let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
         self.columns
             .lock()
             .expect("rig world poisoned")
             .entry((cx, cz))
             .or_insert_with(|| ChunkColumn::new(MIN_Y, HEIGHT))
-            .set_block(x.rem_euclid(16), y, z.rem_euclid(16), name);
+            .set_block(x.rem_euclid(16), y, z.rem_euclid(16), state_id);
     }
 }
 
@@ -127,12 +131,12 @@ impl ChunkSource for RigWorld {
 fn the_rig_world_reflects_its_own_edits() {
     let world = RigWorld::new();
     let pos = BlockPos::new(3, FLOOR_Y + 1, 3);
-    assert_eq!(world.at(pos), "minecraft:air");
+    assert_eq!(world.at(pos), state("minecraft:air"));
     world.put(pos, "minecraft:torch");
-    assert_eq!(world.at(pos), "minecraft:torch");
+    assert_eq!(world.at(pos), state("minecraft:torch"));
     assert_eq!(
         world.at(BlockPos::new(3, FLOOR_Y, 3)),
-        "minecraft:dirt",
+        state("minecraft:dirt"),
         "the floor must be there, or 'the support went away' is not a change"
     );
 }
@@ -246,9 +250,9 @@ fn collapse_family_shapes() {
                     removed.iter().map(|(p, _)| *p).collect::<Vec<_>>()
                 ));
             }
-            if world.at(*cell) != "minecraft:air" {
+            if world.at(*cell) != state("minecraft:air") {
                 mismatches.push(format!(
-                    "{}: {cell:?} still holds {} in the world",
+                    "{}: {cell:?} still holds {:?} in the world",
                     arm.label,
                     world.at(*cell)
                 ));
@@ -287,8 +291,8 @@ fn nothing_collapses_when_the_support_is_intact_or_unmodelled() {
         removed.is_empty(),
         "nothing here has a lost support, yet {removed:?} was collapsed"
     );
-    assert_eq!(world.at(torch), "minecraft:torch");
-    assert_eq!(world.at(stone), "minecraft:stone");
+    assert_eq!(world.at(torch), state("minecraft:torch"));
+    assert_eq!(world.at(stone), state("minecraft:stone"));
 }
 
 /// A collapsed plant must **drop**, not merely vanish — removal alone passes for
@@ -310,7 +314,8 @@ fn a_collapsed_plant_rolls_its_loot() {
     let mut rng = crate::mob_spawn::SpawnRng::new(0x5EED_C0DE);
     let popped = crate::block_drops::drop_block_loot(
         crate::block_drops::bundled_tables(),
-        &removed[0].1,
+        state(&removed[0].1)
+            .expect("collapsed state is canonical"),
         removed[0].0,
         None,
         &mut rng,
@@ -387,12 +392,12 @@ fn a_collapsed_waterlogged_block_keeps_its_water_source_while_a_dry_one_goes_to_
 
     assert_eq!(
         world.at(dry_rail),
-        "minecraft:air",
+        state("minecraft:air"),
         "a dry block's cell must become air"
     );
     assert_eq!(
         world.at(wet_rail),
-        "minecraft:water[level=0]",
+        state("minecraft:water[level=0]"),
         "a waterlogged block's cell must keep its water source, not go to air \
          — the level=0 legacy encoding is vanilla's own get-legacy-level rule's \
          value for a source"

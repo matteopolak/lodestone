@@ -70,7 +70,7 @@ fn resolved_seeds_from_different_world_creation_configs_generate_different_terra
     for lz in 0..16usize {
         for lx in 0..16usize {
             for y in (column_a.min_y()..column_a.min_y() + column_a.height()).step_by(4) {
-                if column_a.block_state(lx, y, lz) != column_b.block_state(lx, y, lz) {
+                if column_a.block_state_id(lx, y, lz) != column_b.block_state_id(lx, y, lz) {
                     differences += 1;
                 }
             }
@@ -94,8 +94,8 @@ fn resolved_seeds_from_different_world_creation_configs_generate_different_terra
         for lx in 0..16usize {
             for y in column_a.min_y()..column_a.min_y() + column_a.height() {
                 assert_eq!(
-                    column_a.block_state(lx, y, lz),
-                    column_a_again.block_state(lx, y, lz),
+                    column_a.block_state_id(lx, y, lz),
+                    column_a_again.block_state_id(lx, y, lz),
                     "the same seed must reproduce identical terrain at ({lx},{y},{lz})"
                 );
             }

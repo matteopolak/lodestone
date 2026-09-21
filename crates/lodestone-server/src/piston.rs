@@ -98,12 +98,14 @@
 //!
 //! ## Dependencies
 //!
-//! [`crate::redstone`] for the signal query and the state-string helpers, and
+//! [`crate::redstone`] for the signal query and the typed state helpers, and
 //! [`crate::neighbor_update::Direction`]. No block-state census: push reaction is
-//! per *block*, not per state, so a name table is the right shape.
+//! per *block*, not per state, so generated `Block` tables are the right shape.
 
-use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockPos, Vec3};
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey};
+use lodestone_data::block_states::StateId;
 
 use crate::neighbor_update::ALL_DIRECTIONS;
 // Re-exported: `MovingBlockEntity` and `piston_facing` both name this type in
@@ -114,14 +116,19 @@ pub use crate::neighbor_update::Direction;
 use crate::redstone;
 
 /// `minecraft:piston`.
+#[cfg(test)]
 pub const PISTON: &str = "minecraft:piston";
 /// `minecraft:sticky_piston`.
+#[cfg(test)]
 pub const STICKY_PISTON: &str = "minecraft:sticky_piston";
 /// `minecraft:piston_head`.
+#[cfg(test)]
 pub const PISTON_HEAD: &str = "minecraft:piston_head";
 /// `minecraft:slime_block` — one of the two sticky pull blocks.
+#[cfg(test)]
 pub const SLIME_BLOCK: &str = "minecraft:slime_block";
 /// `minecraft:honey_block` — the other, which does **not** stick to slime.
+#[cfg(test)]
 pub const HONEY_BLOCK: &str = "minecraft:honey_block";
 
 /// `PistonStructureResolver.MAX_PUSH_DEPTH`.
@@ -145,80 +152,250 @@ pub enum PushReaction {
 }
 
 /// Blocks whose `Properties` set `pushReaction(PushReaction.DESTROY)`.
-static DESTROY: &[&str] = &[
-    "minecraft:acacia_door", "minecraft:acacia_pressure_plate", "minecraft:acacia_sapling", "minecraft:allium",
-    "minecraft:amethyst_cluster", "minecraft:attached_melon_stem", "minecraft:attached_pumpkin_stem", "minecraft:azalea",
-    "minecraft:azure_bluet", "minecraft:bamboo", "minecraft:bamboo_door", "minecraft:bamboo_pressure_plate",
-    "minecraft:bamboo_sapling", "minecraft:beetroots", "minecraft:bell", "minecraft:big_dripleaf",
-    "minecraft:big_dripleaf_stem", "minecraft:birch_door", "minecraft:birch_pressure_plate", "minecraft:birch_sapling",
-    "minecraft:blue_orchid", "minecraft:brain_coral", "minecraft:brain_coral_fan", "minecraft:brain_coral_wall_fan",
-    "minecraft:brown_mushroom", "minecraft:bubble_column", "minecraft:bubble_coral", "minecraft:bubble_coral_fan",
-    "minecraft:bubble_coral_wall_fan", "minecraft:budding_amethyst", "minecraft:bush", "minecraft:cactus",
-    "minecraft:cactus_flower", "minecraft:cake", "minecraft:carrots", "minecraft:carved_pumpkin",
-    "minecraft:cave_vines", "minecraft:cave_vines_plant", "minecraft:cherry_door", "minecraft:cherry_leaves",
-    "minecraft:cherry_pressure_plate", "minecraft:cherry_sapling", "minecraft:chorus_flower", "minecraft:chorus_plant",
-    "minecraft:closed_eyeblossom", "minecraft:cobweb", "minecraft:cocoa", "minecraft:comparator",
-    "minecraft:copper_torch", "minecraft:copper_wall_torch", "minecraft:cornflower", "minecraft:creeper_head",
-    "minecraft:creeper_wall_head", "minecraft:crimson_door", "minecraft:crimson_fungus", "minecraft:crimson_pressure_plate",
-    "minecraft:crimson_roots", "minecraft:dandelion", "minecraft:dark_oak_door", "minecraft:dark_oak_pressure_plate",
-    "minecraft:dark_oak_sapling", "minecraft:dead_bush", "minecraft:decorated_pot", "minecraft:dragon_egg",
-    "minecraft:dragon_head", "minecraft:dragon_wall_head", "minecraft:fern", "minecraft:fire",
-    "minecraft:fire_coral", "minecraft:fire_coral_fan", "minecraft:fire_coral_wall_fan", "minecraft:firefly_bush",
-    "minecraft:flowering_azalea", "minecraft:frogspawn", "minecraft:glow_lichen", "minecraft:golden_dandelion",
-    "minecraft:hanging_roots", "minecraft:heavy_weighted_pressure_plate", "minecraft:horn_coral", "minecraft:horn_coral_fan",
-    "minecraft:horn_coral_wall_fan", "minecraft:iron_door", "minecraft:jack_o_lantern", "minecraft:jungle_door",
-    "minecraft:jungle_pressure_plate", "minecraft:jungle_sapling", "minecraft:kelp", "minecraft:kelp_plant",
-    "minecraft:ladder", "minecraft:lantern", "minecraft:large_fern", "minecraft:lava",
-    "minecraft:leaf_litter", "minecraft:lever", "minecraft:light_weighted_pressure_plate", "minecraft:lilac",
-    "minecraft:lily_of_the_valley", "minecraft:lily_pad", "minecraft:mangrove_door", "minecraft:mangrove_pressure_plate",
-    "minecraft:mangrove_propagule", "minecraft:melon", "minecraft:melon_stem", "minecraft:moss_block",
-    "minecraft:moss_carpet", "minecraft:nether_sprouts", "minecraft:nether_wart", "minecraft:oak_door",
-    "minecraft:oak_pressure_plate", "minecraft:oak_sapling", "minecraft:open_eyeblossom", "minecraft:orange_tulip",
-    "minecraft:oxeye_daisy", "minecraft:pale_hanging_moss", "minecraft:pale_moss_block", "minecraft:pale_moss_carpet",
-    "minecraft:pale_oak_door", "minecraft:pale_oak_leaves", "minecraft:pale_oak_pressure_plate", "minecraft:pale_oak_sapling",
-    "minecraft:peony", "minecraft:piglin_head", "minecraft:piglin_wall_head", "minecraft:pink_petals",
-    "minecraft:pink_tulip", "minecraft:pitcher_crop", "minecraft:pitcher_plant", "minecraft:player_head",
-    "minecraft:player_wall_head", "minecraft:pointed_dripstone", "minecraft:polished_blackstone_pressure_plate", "minecraft:poppy",
-    "minecraft:potatoes", "minecraft:pumpkin", "minecraft:pumpkin_stem", "minecraft:red_mushroom",
-    "minecraft:red_tulip", "minecraft:redstone_torch", "minecraft:redstone_wall_torch", "minecraft:redstone_wire",
-    "minecraft:repeater", "minecraft:resin_clump", "minecraft:rose_bush", "minecraft:scaffolding",
-    "minecraft:sculk_vein", "minecraft:sea_pickle", "minecraft:seagrass", "minecraft:short_dry_grass",
-    "minecraft:short_grass", "minecraft:skeleton_skull", "minecraft:skeleton_wall_skull", "minecraft:small_dripleaf",
-    "minecraft:snow", "minecraft:soul_fire", "minecraft:soul_lantern", "minecraft:soul_torch",
-    "minecraft:soul_wall_torch", "minecraft:spore_blossom", "minecraft:spruce_door", "minecraft:spruce_pressure_plate",
-    "minecraft:spruce_sapling", "minecraft:stone_pressure_plate", "minecraft:structure_void", "minecraft:sugar_cane",
-    "minecraft:sulfur_spike", "minecraft:sunflower", "minecraft:suspicious_gravel", "minecraft:suspicious_sand",
-    "minecraft:sweet_berry_bush", "minecraft:tall_dry_grass", "minecraft:tall_grass", "minecraft:tall_seagrass",
-    "minecraft:torch", "minecraft:torchflower", "minecraft:torchflower_crop", "minecraft:tripwire",
-    "minecraft:tripwire_hook", "minecraft:tube_coral", "minecraft:tube_coral_fan", "minecraft:tube_coral_wall_fan",
-    "minecraft:turtle_egg", "minecraft:twisting_vines", "minecraft:twisting_vines_plant", "minecraft:vine",
-    "minecraft:wall_torch", "minecraft:warped_door", "minecraft:warped_fungus", "minecraft:warped_pressure_plate",
-    "minecraft:warped_roots", "minecraft:water", "minecraft:weeping_vines", "minecraft:weeping_vines_plant",
-    "minecraft:wheat", "minecraft:white_tulip", "minecraft:wildflowers", "minecraft:wither_rose",
-    "minecraft:wither_skeleton_skull", "minecraft:wither_skeleton_wall_skull", "minecraft:zombie_head", "minecraft:zombie_wall_head",
+static DESTROY: &[Block] = &[
+    Block::OakSapling,
+    Block::SpruceSapling,
+    Block::BirchSapling,
+    Block::JungleSapling,
+    Block::AcaciaSapling,
+    Block::CherrySapling,
+    Block::DarkOakSapling,
+    Block::PaleOakSapling,
+    Block::MangrovePropagule,
+    Block::Water,
+    Block::Lava,
+    Block::SuspiciousSand,
+    Block::SuspiciousGravel,
+    Block::CherryLeaves,
+    Block::PaleOakLeaves,
+    Block::Cobweb,
+    Block::ShortGrass,
+    Block::Fern,
+    Block::DeadBush,
+    Block::Bush,
+    Block::ShortDryGrass,
+    Block::TallDryGrass,
+    Block::Seagrass,
+    Block::TallSeagrass,
+    Block::Dandelion,
+    Block::GoldenDandelion,
+    Block::Torchflower,
+    Block::Poppy,
+    Block::BlueOrchid,
+    Block::Allium,
+    Block::AzureBluet,
+    Block::RedTulip,
+    Block::OrangeTulip,
+    Block::WhiteTulip,
+    Block::PinkTulip,
+    Block::OxeyeDaisy,
+    Block::Cornflower,
+    Block::WitherRose,
+    Block::LilyOfTheValley,
+    Block::BrownMushroom,
+    Block::RedMushroom,
+    Block::Torch,
+    Block::WallTorch,
+    Block::Fire,
+    Block::SoulFire,
+    Block::RedstoneWire,
+    Block::Wheat,
+    Block::OakDoor,
+    Block::Ladder,
+    Block::Lever,
+    Block::StonePressurePlate,
+    Block::IronDoor,
+    Block::OakPressurePlate,
+    Block::SprucePressurePlate,
+    Block::BirchPressurePlate,
+    Block::JunglePressurePlate,
+    Block::AcaciaPressurePlate,
+    Block::CherryPressurePlate,
+    Block::DarkOakPressurePlate,
+    Block::PaleOakPressurePlate,
+    Block::MangrovePressurePlate,
+    Block::BambooPressurePlate,
+    Block::RedstoneTorch,
+    Block::RedstoneWallTorch,
+    Block::Snow,
+    Block::Cactus,
+    Block::CactusFlower,
+    Block::SugarCane,
+    Block::SoulTorch,
+    Block::SoulWallTorch,
+    Block::CopperTorch,
+    Block::CopperWallTorch,
+    Block::CarvedPumpkin,
+    Block::JackOLantern,
+    Block::Cake,
+    Block::Repeater,
+    Block::Pumpkin,
+    Block::Melon,
+    Block::AttachedPumpkinStem,
+    Block::AttachedMelonStem,
+    Block::PumpkinStem,
+    Block::MelonStem,
+    Block::Vine,
+    Block::GlowLichen,
+    Block::ResinClump,
+    Block::LilyPad,
+    Block::NetherWart,
+    Block::DragonEgg,
+    Block::Cocoa,
+    Block::TripwireHook,
+    Block::Tripwire,
+    Block::Carrots,
+    Block::Potatoes,
+    Block::SkeletonSkull,
+    Block::SkeletonWallSkull,
+    Block::WitherSkeletonSkull,
+    Block::WitherSkeletonWallSkull,
+    Block::ZombieHead,
+    Block::ZombieWallHead,
+    Block::PlayerHead,
+    Block::PlayerWallHead,
+    Block::CreeperHead,
+    Block::CreeperWallHead,
+    Block::DragonHead,
+    Block::DragonWallHead,
+    Block::PiglinHead,
+    Block::PiglinWallHead,
+    Block::LightWeightedPressurePlate,
+    Block::HeavyWeightedPressurePlate,
+    Block::Comparator,
+    Block::Sunflower,
+    Block::Lilac,
+    Block::RoseBush,
+    Block::Peony,
+    Block::TallGrass,
+    Block::LargeFern,
+    Block::SpruceDoor,
+    Block::BirchDoor,
+    Block::JungleDoor,
+    Block::AcaciaDoor,
+    Block::CherryDoor,
+    Block::DarkOakDoor,
+    Block::PaleOakDoor,
+    Block::MangroveDoor,
+    Block::BambooDoor,
+    Block::ChorusPlant,
+    Block::ChorusFlower,
+    Block::TorchflowerCrop,
+    Block::PitcherCrop,
+    Block::PitcherPlant,
+    Block::Beetroots,
+    Block::StructureVoid,
+    Block::Kelp,
+    Block::KelpPlant,
+    Block::TurtleEgg,
+    Block::TubeCoral,
+    Block::BrainCoral,
+    Block::BubbleCoral,
+    Block::FireCoral,
+    Block::HornCoral,
+    Block::TubeCoralFan,
+    Block::BrainCoralFan,
+    Block::BubbleCoralFan,
+    Block::FireCoralFan,
+    Block::HornCoralFan,
+    Block::TubeCoralWallFan,
+    Block::BrainCoralWallFan,
+    Block::BubbleCoralWallFan,
+    Block::FireCoralWallFan,
+    Block::HornCoralWallFan,
+    Block::SeaPickle,
+    Block::BambooSapling,
+    Block::Bamboo,
+    Block::BubbleColumn,
+    Block::Scaffolding,
+    Block::Bell,
+    Block::Lantern,
+    Block::SoulLantern,
+    Block::SweetBerryBush,
+    Block::WarpedFungus,
+    Block::WarpedRoots,
+    Block::NetherSprouts,
+    Block::CrimsonFungus,
+    Block::WeepingVines,
+    Block::WeepingVinesPlant,
+    Block::TwistingVines,
+    Block::TwistingVinesPlant,
+    Block::CrimsonRoots,
+    Block::CrimsonPressurePlate,
+    Block::WarpedPressurePlate,
+    Block::CrimsonDoor,
+    Block::WarpedDoor,
+    Block::PolishedBlackstonePressurePlate,
+    Block::BuddingAmethyst,
+    Block::AmethystCluster,
+    Block::SculkVein,
+    Block::PointedDripstone,
+    Block::SulfurSpike,
+    Block::CaveVines,
+    Block::CaveVinesPlant,
+    Block::SporeBlossom,
+    Block::Azalea,
+    Block::FloweringAzalea,
+    Block::MossCarpet,
+    Block::PinkPetals,
+    Block::Wildflowers,
+    Block::LeafLitter,
+    Block::MossBlock,
+    Block::BigDripleaf,
+    Block::BigDripleafStem,
+    Block::SmallDripleaf,
+    Block::HangingRoots,
+    Block::Frogspawn,
+    Block::DecoratedPot,
+    Block::PaleMossBlock,
+    Block::PaleMossCarpet,
+    Block::PaleHangingMoss,
+    Block::OpenEyeblossom,
+    Block::ClosedEyeblossom,
+    Block::FireflyBush,
 ];
 
 /// Blocks whose `Properties` set `pushReaction(PushReaction.BLOCK)`.
-static BLOCKED: &[&str] = &[
-    "minecraft:anvil", "minecraft:barrier", "minecraft:chipped_anvil", "minecraft:damaged_anvil",
-    "minecraft:end_gateway", "minecraft:end_portal", "minecraft:grindstone", "minecraft:lodestone",
-    "minecraft:moving_piston", "minecraft:nether_portal", "minecraft:piston_head",
+static BLOCKED: &[Block] = &[
+    Block::PistonHead,
+    Block::MovingPiston,
+    Block::NetherPortal,
+    Block::EndPortal,
+    Block::Anvil,
+    Block::ChippedAnvil,
+    Block::DamagedAnvil,
+    Block::Barrier,
+    Block::EndGateway,
+    Block::Grindstone,
+    Block::Lodestone,
 ];
 
 /// `pushReaction(PushReaction.PUSH_ONLY)` — the sixteen glazed terracottas, the
 /// only blocks in the game that use it.
-static PUSH_ONLY: &[&str] = &[
-    "minecraft:black_glazed_terracotta", "minecraft:blue_glazed_terracotta", "minecraft:brown_glazed_terracotta", "minecraft:cyan_glazed_terracotta",
-    "minecraft:gray_glazed_terracotta", "minecraft:green_glazed_terracotta", "minecraft:light_blue_glazed_terracotta", "minecraft:light_gray_glazed_terracotta",
-    "minecraft:lime_glazed_terracotta", "minecraft:magenta_glazed_terracotta", "minecraft:orange_glazed_terracotta", "minecraft:pink_glazed_terracotta",
-    "minecraft:purple_glazed_terracotta", "minecraft:red_glazed_terracotta", "minecraft:white_glazed_terracotta", "minecraft:yellow_glazed_terracotta",
+static PUSH_ONLY: &[Block] = &[
+    Block::WhiteGlazedTerracotta,
+    Block::OrangeGlazedTerracotta,
+    Block::MagentaGlazedTerracotta,
+    Block::LightBlueGlazedTerracotta,
+    Block::YellowGlazedTerracotta,
+    Block::LimeGlazedTerracotta,
+    Block::PinkGlazedTerracotta,
+    Block::GrayGlazedTerracotta,
+    Block::LightGrayGlazedTerracotta,
+    Block::CyanGlazedTerracotta,
+    Block::PurpleGlazedTerracotta,
+    Block::BlueGlazedTerracotta,
+    Block::BrownGlazedTerracotta,
+    Block::GreenGlazedTerracotta,
+    Block::RedGlazedTerracotta,
+    Block::BlackGlazedTerracotta,
 ];
 
 /// The `PushReaction` for a block state, defaulting to
 /// [`Normal`](PushReaction::Normal) as `BlockBehaviour.Properties` does.
 #[must_use]
-pub fn push_reaction(state: &str) -> PushReaction {
-    let base = redstone::base_name(state);
+pub fn push_reaction(state: StateId) -> PushReaction {
+    let base = state.block();
     if DESTROY.binary_search(&base).is_ok() {
         PushReaction::Destroy
     } else if BLOCKED.binary_search(&base).is_ok() {
@@ -234,27 +411,47 @@ pub fn push_reaction(state: &str) -> PushReaction {
 
 /// Whether `state` is either piston base.
 #[must_use]
-pub fn is_piston(state: &str) -> bool {
-    matches!(redstone::base_name(state), PISTON | STICKY_PISTON)
+pub fn is_piston(state: StateId) -> bool {
+    is_piston_id(state)
+}
+
+#[must_use]
+pub fn is_piston_id(state: StateId) -> bool {
+    matches!(state.block(), Block::Piston | Block::StickyPiston)
 }
 
 /// Whether `state` is the sticky base.
 #[must_use]
-pub fn is_sticky_piston(state: &str) -> bool {
-    redstone::base_name(state) == STICKY_PISTON
+pub fn is_sticky_piston(state: StateId) -> bool {
+    is_sticky_piston_id(state)
+}
+
+#[must_use]
+pub fn is_sticky_piston_id(state: StateId) -> bool {
+    state.block() == Block::StickyPiston
 }
 
 /// Whether `state` is a piston head.
 #[must_use]
-pub fn is_piston_head(state: &str) -> bool {
-    redstone::base_name(state) == PISTON_HEAD
+pub fn is_piston_head(state: StateId) -> bool {
+    is_piston_head_id(state)
+}
+
+#[must_use]
+pub fn is_piston_head_id(state: StateId) -> bool {
+    state.block() == Block::PistonHead
 }
 
 /// `PistonStructureResolver.isSticky`: slime or honey. Note **not** the piston's
 /// own stickiness — this is about the *pushed* block dragging its neighbours.
 #[must_use]
-pub fn is_sticky_block(state: &str) -> bool {
-    matches!(redstone::base_name(state), SLIME_BLOCK | HONEY_BLOCK)
+pub fn is_sticky_block(state: StateId) -> bool {
+    is_sticky_block_id(state)
+}
+
+#[must_use]
+pub fn is_sticky_block_id(state: StateId) -> bool {
+    matches!(state.block(), Block::SlimeBlock | Block::HoneyBlock)
 }
 
 /// `PistonStructureResolver.canStickToEachOther`: slime and honey each stick to
@@ -262,25 +459,41 @@ pub fn is_sticky_block(state: &str) -> bool {
 /// returns in vanilla is symmetric in effect, and both orders are checked here for
 /// the same reason vanilla writes both.
 #[must_use]
-pub fn can_stick_to_each_other(a: &str, b: &str) -> bool {
-    let (a, b) = (redstone::base_name(a), redstone::base_name(b));
-    if (a == HONEY_BLOCK && b == SLIME_BLOCK) || (a == SLIME_BLOCK && b == HONEY_BLOCK) {
+pub fn can_stick_to_each_other(a: StateId, b: StateId) -> bool {
+    let (a, b) = (a.block(), b.block());
+    if (a == Block::HoneyBlock && b == Block::SlimeBlock)
+        || (a == Block::SlimeBlock && b == Block::HoneyBlock)
+    {
         return false;
     }
-    is_sticky_block(a) || is_sticky_block(b)
+    matches!(a, Block::SlimeBlock | Block::HoneyBlock)
+        || matches!(b, Block::SlimeBlock | Block::HoneyBlock)
 }
 
 /// The `facing` property of a piston, head or moving piston. `Up` for a state
 /// carrying none, matching every other `*_facing` reader in this family.
 #[must_use]
-pub fn piston_facing(state: &str) -> Direction {
+pub fn piston_facing(state: StateId) -> Direction {
+    piston_facing_id(state)
+}
+
+#[must_use]
+pub fn piston_facing_id(state: StateId) -> Direction {
     redstone::diode_facing(state)
 }
 
 /// The `extended` property of a piston base.
 #[must_use]
-pub fn piston_extended(state: &str) -> bool {
-    state.contains("extended=true")
+pub fn piston_extended(state: StateId) -> bool {
+    piston_extended_id(state)
+}
+
+#[must_use]
+pub fn piston_extended_id(state: StateId) -> bool {
+    Properties::from_state_id(state)
+        .get(PropertyKey::Extended)
+        .and_then(|value| value.builtin_value())
+        == Some(BuiltinPropertyValue::True)
 }
 
 /// `PistonBaseBlock.isPushable`.
@@ -294,21 +507,18 @@ pub fn piston_extended(state: &str) -> bool {
 /// obsidian unpushable *and* claim vanilla says so, which it does not.
 #[must_use]
 pub fn is_pushable(
-    state: &str,
+    state: StateId,
     direction: Direction,
     allow_destroyable: bool,
     connection_direction: Direction,
 ) -> bool {
-    let base = redstone::base_name(state);
-    if base == "minecraft:air" {
+    let base = state.block();
+    if base == Block::Air {
         return true;
     }
     if matches!(
         base,
-        "minecraft:obsidian"
-            | "minecraft:crying_obsidian"
-            | "minecraft:respawn_anchor"
-            | "minecraft:reinforced_deepslate"
+        Block::Obsidian | Block::CryingObsidian | Block::RespawnAnchor | Block::ReinforcedDeepslate
     ) {
         return false;
     }
@@ -333,10 +543,8 @@ pub fn is_pushable(
 /// pushable. That is the same direction every other unresolvable-state fallback in
 /// this family takes, and the alternative — refusing to push an unknown block —
 /// would silently freeze contraptions after a version bump.
-fn has_block_entity(state: &str) -> bool {
-    crate::mobs::block_state_id_or_default(state)
-        .and_then(lodestone_data::block_entity_types::block_entity_type)
-        .is_some()
+fn has_block_entity(state: StateId) -> bool {
+    lodestone_data::block_entity_types::block_entity_type(state).is_some()
 }
 
 // --- the structure resolver -----------------------------------------------
@@ -385,8 +593,8 @@ where
     let masked = |p: BlockPos| -> redstone::WorldState {
         if !extending && p == arm_pos {
             let state = lookup(p);
-            if is_piston_head(&state) {
-                return crate::chunk::air_state_arc();
+            if is_piston_head(state) {
+                return crate::chunk::air_state();
             }
         }
         lookup(p)
@@ -403,8 +611,8 @@ where
     };
 
     let start_state = (r.lookup)(start_pos);
-    if !is_pushable(&start_state, push_direction, false, direction) {
-        if extending && push_reaction(&start_state) == PushReaction::Destroy {
+    if !is_pushable(start_state, push_direction, false, direction) {
+        if extending && push_reaction(start_state) == PushReaction::Destroy {
             return Some(Resolution {
                 to_push: Vec::new(),
                 to_destroy: vec![start_pos],
@@ -422,7 +630,7 @@ where
     let mut i = 0;
     while i < r.to_push.len() {
         let pos = r.to_push[i];
-        if is_sticky_block(&(r.lookup)(pos)) && !r.add_branching_blocks(pos) {
+        if is_sticky_block((r.lookup)(pos)) && !r.add_branching_blocks(pos) {
             return None;
         }
         i += 1;
@@ -451,10 +659,10 @@ where
     /// `PistonStructureResolver.addBlockLine`.
     fn add_block_line(&mut self, start: BlockPos, direction: Direction) -> bool {
         let mut next_state = (self.lookup)(start);
-        if redstone::base_name(&next_state) == "minecraft:air" {
+        if next_state.block() == Block::Air {
             return true;
         }
-        if !is_pushable(&next_state, self.push_direction, false, direction) {
+        if !is_pushable(next_state, self.push_direction, false, direction) {
             return true;
         }
         if start == self.piston_pos {
@@ -470,14 +678,14 @@ where
         }
 
         // The sticky *backwards* run: a slime block drags whatever is behind it.
-        while is_sticky_block(&next_state) {
+        while is_sticky_block(next_state) {
             let pos = relative_n(start, self.push_direction.opposite(), block_count as i32);
             let previous_state = next_state.clone();
             next_state = (self.lookup)(pos);
-            if redstone::base_name(&next_state) == "minecraft:air"
-                || !can_stick_to_each_other(&previous_state, &next_state)
+            if next_state.block() == Block::Air
+                || !can_stick_to_each_other(previous_state, next_state)
                 || !is_pushable(
-                    &next_state,
+                    next_state,
                     self.push_direction,
                     false,
                     self.push_direction.opposite(),
@@ -506,7 +714,7 @@ where
                 self.reorder_at_collision(blocks_added, collision_pos);
                 for j in 0..=collision_pos + blocks_added {
                     let block_pos = self.to_push[j];
-                    if is_sticky_block(&(self.lookup)(block_pos))
+                    if is_sticky_block((self.lookup)(block_pos))
                         && !self.add_branching_blocks(block_pos)
                     {
                         return false;
@@ -516,15 +724,15 @@ where
             }
 
             let state = (self.lookup)(pos);
-            if redstone::base_name(&state) == "minecraft:air" {
+            if state.block() == Block::Air {
                 return true;
             }
-            if !is_pushable(&state, self.push_direction, true, self.push_direction)
+            if !is_pushable(state, self.push_direction, true, self.push_direction)
                 || pos == self.piston_pos
             {
                 return false;
             }
-            if push_reaction(&state) == PushReaction::Destroy {
+            if push_reaction(state) == PushReaction::Destroy {
                 self.to_destroy.push(pos);
                 return true;
             }
@@ -564,7 +772,7 @@ where
             }
             let neighbour_pos = direction.relative(from_pos);
             let neighbour_state = (self.lookup)(neighbour_pos);
-            if can_stick_to_each_other(&neighbour_state, &from_state)
+            if can_stick_to_each_other(neighbour_state, from_state)
                 && !self.add_block_line(neighbour_pos, direction)
             {
                 return false;
@@ -650,7 +858,7 @@ pub struct MoveWrite {
     /// Where.
     pub pos: BlockPos,
     /// The state that ends up there.
-    pub to: String,
+    pub to: StateId,
 }
 
 /// Turns a [`Resolution`] into the final cell writes, for a piston at
@@ -675,7 +883,7 @@ where
     F: Fn(BlockPos) -> redstone::WorldState,
 {
     let mut writes = Vec::new();
-    let air = "minecraft:air".to_string();
+    let air = lodestone_data::block_states::air_state();
     let arm_pos = direction.relative(piston_pos);
 
     for pos in &resolution.to_destroy {
@@ -688,7 +896,7 @@ where
     for pos in resolution.to_push.iter().rev() {
         let state = (lookup)(*pos);
         let target = resolution.push_direction.relative(*pos);
-        writes.push(MoveWrite { pos: target, to: state.to_string() });
+        writes.push(MoveWrite { pos: target, to: state });
         vacated.push(*pos);
     }
 
@@ -704,13 +912,9 @@ where
     }
 
     if extending {
-        let kind = if sticky { "sticky" } else { "normal" };
         writes.push(MoveWrite {
             pos: arm_pos,
-            to: format!(
-                "{PISTON_HEAD}[facing={},short=false,type={kind}]",
-                facing_name(direction)
-            ),
+            to: piston_head_state(direction, sticky),
         });
     } else if !occupied.contains(&arm_pos) {
         // The head cell empties on retraction unless the pulled run filled it.
@@ -748,11 +952,42 @@ pub fn direction_named(name: &str) -> Option<Direction> {
     })
 }
 
+#[must_use]
+pub fn moving_piston_state_id(direction: Direction, sticky: bool) -> StateId {
+    let properties = Properties::from_state_id(Block::MovingPiston.default_state())
+        .with_builtin(PropertyKey::Facing, redstone::direction_property(direction))
+        .expect("moving piston facing is a generated property")
+        .with_builtin(
+            PropertyKey::Type,
+            if sticky { BuiltinPropertyValue::Sticky } else { BuiltinPropertyValue::Normal },
+        )
+        .expect("moving piston type is a generated property");
+    Properties::state_for_block(Block::MovingPiston, &properties)
+        .expect("moving piston state is generated")
+}
+
+#[must_use]
+fn piston_head_state(direction: Direction, sticky: bool) -> StateId {
+    let properties = Properties::from_state_id(Block::PistonHead.default_state())
+        .with_builtin(PropertyKey::Facing, redstone::direction_property(direction))
+        .expect("piston head facing is a generated property")
+        .with_builtin(PropertyKey::Short, BuiltinPropertyValue::False)
+        .expect("piston head short is a generated property")
+        .with_builtin(
+            PropertyKey::Type,
+            if sticky { BuiltinPropertyValue::Sticky } else { BuiltinPropertyValue::Normal },
+        )
+        .expect("piston head type is a generated property");
+    Properties::state_for_block(Block::PistonHead, &properties)
+        .expect("piston head state is generated")
+}
+
 // --- the two-phase move ---------------------------------------------------
 
 /// `minecraft:moving_piston` — the block that holds a travelling cell for the
 /// duration of a move. Its own render shape is `INVISIBLE`; everything a client
 /// draws there comes from the block entity below.
+#[cfg(test)]
 pub const MOVING_PISTON: &str = "minecraft:moving_piston";
 
 /// The moving-piston block entity uses registry key `minecraft:piston` for its
@@ -813,11 +1048,8 @@ pub struct MovingBlockEntity {
     /// runtime state belongs to the built-in census. Companion properties the
     /// server keeps outside that census are intentionally absent here.
     pub moved_state: Option<StateId>,
-    /// The exact runtime state that commits after the animation. This is kept
-    /// private so consumers must choose either [`Self::moved_state`] for a
-    /// validated visual projection or [`Self::committed_state`] for the world
-    /// write, rather than accidentally treating the two as interchangeable.
-    runtime_state: String,
+    /// The exact state that commits after the animation.
+    runtime_state: StateId,
     /// `facing` — the **piston's** facing, not the direction blocks travel. The
     /// two differ on every retraction, and a client derives the travel direction
     /// itself from `facing` plus `extending`
@@ -835,21 +1067,16 @@ pub struct MovingBlockEntity {
 }
 
 impl MovingBlockEntity {
-    /// Creates a moving record from the exact runtime state that will commit.
-    ///
-    /// A built-in state gets a validated visual projection. Synthetic companion
-    /// properties and data-pack states remain in `runtime_state` unchanged so a
-    /// piston move has the same world result as its one-step counterpart.
+    /// Creates a moving record from the exact state that will commit.
     #[must_use]
     pub fn new(
-        runtime_state: String,
+        runtime_state: StateId,
         direction: Direction,
         extending: bool,
         source: bool,
     ) -> Self {
-        let moved_state = StateId::from_state_str(&runtime_state);
         Self {
-            moved_state,
+            moved_state: Some(runtime_state),
             runtime_state,
             direction,
             extending,
@@ -857,11 +1084,11 @@ impl MovingBlockEntity {
         }
     }
 
-    /// The exact runtime state to write when the move completes or a carried
-    /// block is interrupted. This can include server-only companion properties.
+    /// The exact state to write when the move completes or a carried block is
+    /// interrupted.
     #[must_use]
-    pub fn committed_state(&self) -> &str {
-        &self.runtime_state
+    pub fn committed_state(&self) -> StateId {
+        self.runtime_state
     }
 
     /// `Direction.get3DDataValue()` — the byte `Direction.LEGACY_ID_CODEC` stores
@@ -925,6 +1152,7 @@ pub fn push_delta(direction: Direction) -> Vec3 {
 /// property (it takes `type` from the *moved* state), so a wrong value here is
 /// invisible; it is reproduced because the block state is also what a chunk save
 /// and a neighbour query see.
+#[cfg(test)]
 #[must_use]
 pub fn moving_piston_state(direction: Direction, sticky: bool) -> String {
     format!(
@@ -935,9 +1163,15 @@ pub fn moving_piston_state(direction: Direction, sticky: bool) -> String {
 }
 
 /// Whether `state` is a `moving_piston`.
+#[cfg(test)]
 #[must_use]
 pub fn is_moving_piston(state: &str) -> bool {
     redstone::base_name(state) == MOVING_PISTON
+}
+
+#[must_use]
+pub fn is_moving_piston_id(state: StateId) -> bool {
+    state.block() == Block::MovingPiston
 }
 
 /// Serialises a [`MovingBlockEntity`] into a scheduled-tick kind.
@@ -960,7 +1194,7 @@ pub fn finish_kind(entity: &MovingBlockEntity) -> String {
         facing_name(entity.direction),
         entity.extending,
         entity.source,
-        entity.committed_state()
+        entity.committed_state().raw()
     )
 }
 
@@ -982,9 +1216,8 @@ pub fn parse_finish_kind(kind: impl AsRef<str>) -> Option<MovingBlockEntity> {
     let direction = direction_named(parts.next()?)?;
     let extending = parse_bool(parts.next()?)?;
     let source = parse_bool(parts.next()?)?;
-    let runtime_state = parts.next()?;
-    (!runtime_state.is_empty())
-        .then(|| MovingBlockEntity::new(runtime_state.to_string(), direction, extending, source))
+    let runtime_state = StateId::new(parts.next()?.parse().ok()?)?;
+    Some(MovingBlockEntity::new(runtime_state, direction, extending, source))
 }
 
 fn parse_bool(text: &str) -> Option<bool> {
@@ -1003,7 +1236,7 @@ pub struct MoveStart {
     ///
     /// A caller writes the state, publishes the entity, and schedules
     /// [`finish_kind`] at `current_tick + PISTON_MOVE_DELAY`.
-    pub moving: Vec<(BlockPos, String, MovingBlockEntity)>,
+    pub moving: Vec<(BlockPos, StateId, MovingBlockEntity)>,
     /// Cells that become air on the push tick — the run's vacated tail and any
     /// destroyed block. Vanilla's `deleteAfterMove` loop uses flag 82, whose
     /// `UPDATE_CLIENTS` bit is set, so these are visible immediately; only the
@@ -1016,7 +1249,7 @@ pub struct MoveStart {
     /// `PistonBaseBlock.triggerEvent`, immediate and client-visible) and `None`
     /// on retraction, where the base cell is itself one of [`moving`](Self::moving)
     /// — that is what animates the head coming home.
-    pub base_now: Option<String>,
+    pub base_now: Option<StateId>,
 }
 
 /// Splits [`apply_move`]'s one-step writes into the two phases vanilla performs.
@@ -1034,17 +1267,17 @@ pub struct MoveStart {
 #[must_use]
 pub fn begin_move(
     writes: &[MoveWrite],
-    piston_state: &str,
+    piston_state: StateId,
     piston_pos: BlockPos,
     direction: Direction,
     extending: bool,
 ) -> MoveStart {
-    let sticky = is_sticky_piston(piston_state);
+    let sticky = is_sticky_piston_id(piston_state);
     let arm_pos = direction.relative(piston_pos);
     let mut start = MoveStart::default();
 
     for write in writes {
-        if redstone::base_name(&write.to) == "minecraft:air" {
+        if write.to == lodestone_data::block_states::air_state() {
             start.cleared.push(write.pos);
             continue;
         }
@@ -1054,13 +1287,17 @@ pub fn begin_move(
         let source = extending && write.pos == arm_pos;
         start.moving.push((
             write.pos,
-            moving_piston_state(direction, source && sticky),
-            MovingBlockEntity::new(write.to.clone(), direction, extending, source),
+            moving_piston_state_id(direction, source && sticky),
+            MovingBlockEntity::new(write.to, direction, extending, source),
         ));
     }
 
     if extending {
-        start.base_now = Some(redstone::with_property(piston_state, "extended", "true"));
+        start.base_now = redstone::with_property(
+            piston_state,
+            PropertyKey::Extended,
+            lodestone_data::block_properties::PropertyValue::builtin(BuiltinPropertyValue::True),
+        );
     } else {
         // `PistonBaseBlock.triggerEvent`'s contract arm: the base cell itself
         // becomes a `moving_piston` carrying the *base* block, which is the only
@@ -1069,9 +1306,14 @@ pub fn begin_move(
         // head from the base's own `facing` and stickiness).
         start.moving.push((
             piston_pos,
-            moving_piston_state(direction, sticky),
+            moving_piston_state_id(direction, sticky),
             MovingBlockEntity::new(
-                redstone::with_property(piston_state, "extended", "false"),
+                redstone::with_property(
+                    piston_state,
+                    PropertyKey::Extended,
+                    lodestone_data::block_properties::PropertyValue::builtin(BuiltinPropertyValue::False),
+                )
+                .expect("piston extended property is generated"),
                 direction,
                 false,
                 true,
@@ -1101,7 +1343,7 @@ pub fn finish_move(start: &MoveStart) -> Vec<MoveWrite> {
         .iter()
         .map(|(pos, _, entity)| MoveWrite {
             pos: *pos,
-            to: entity.committed_state().to_string(),
+            to: entity.committed_state(),
         })
         .collect()
 }
@@ -1158,9 +1400,9 @@ pub fn finish_move(start: &MoveStart) -> Vec<MoveWrite> {
 #[must_use]
 pub fn interrupt(pos: BlockPos, entity: &MovingBlockEntity) -> MoveWrite {
     if entity.source {
-        MoveWrite { pos, to: "minecraft:air".to_string() }
+        MoveWrite { pos, to: lodestone_data::block_states::air_state() }
     } else {
-        MoveWrite { pos, to: entity.committed_state().to_string() }
+        MoveWrite { pos, to: entity.committed_state() }
     }
 }
 
@@ -1172,13 +1414,14 @@ mod tests {
     /// "pure decision, fake world via closure" shape `crate::redstone`'s own tests
     /// use.
     fn world(entries: &[(BlockPos, &str)]) -> impl Fn(BlockPos) -> redstone::WorldState + use<> {
-        let entries: Vec<(BlockPos, redstone::WorldState)> = entries.iter().map(|(p, s)| (*p, redstone::WorldState::from(*s))).collect();
+        let entries: Vec<(BlockPos, redstone::WorldState)> =
+            entries.iter().map(|(p, s)| (*p, state(s))).collect();
         move |p: BlockPos| {
             entries
                 .iter()
                 .find(|(pos, _)| *pos == p)
-                .map(|(_, s)| s.clone())
-                .unwrap_or_else(crate::chunk::air_state_arc)
+                .map(|(_, s)| *s)
+                .unwrap_or_else(crate::chunk::air_state)
         }
     }
 
@@ -1196,7 +1439,7 @@ mod tests {
         extending: bool,
         source: bool,
     ) -> MovingBlockEntity {
-        MovingBlockEntity::new(text.to_string(), direction, extending, source)
+        MovingBlockEntity::new(state(text), direction, extending, source)
     }
 
     /// The push-reaction table is sorted (both name lists are binary-searched) and
@@ -1210,40 +1453,40 @@ mod tests {
         assert_eq!(BLOCKED.len(), 11);
         assert_eq!(PUSH_ONLY.len(), 16);
 
-        assert_eq!(push_reaction("minecraft:torch"), PushReaction::Destroy);
-        assert_eq!(push_reaction("minecraft:anvil"), PushReaction::Block);
+        assert_eq!(push_reaction(state("minecraft:torch")), PushReaction::Destroy);
+        assert_eq!(push_reaction(state("minecraft:anvil")), PushReaction::Block);
         assert_eq!(
-            push_reaction("minecraft:white_glazed_terracotta"),
+            push_reaction(state("minecraft:white_glazed_terracotta")),
             PushReaction::PushOnly
         );
-        assert_eq!(push_reaction("minecraft:stone"), PushReaction::Normal);
+        assert_eq!(push_reaction(state("minecraft:stone")), PushReaction::Normal);
         // The four `isPushable` exceptions are *not* table rows — asserting that
         // keeps the distinction the doc comment claims.
-        assert_eq!(push_reaction("minecraft:obsidian"), PushReaction::Normal);
+        assert_eq!(push_reaction(state("minecraft:obsidian")), PushReaction::Normal);
         assert!(!is_pushable(
-            "minecraft:obsidian",
+            state("minecraft:obsidian"),
             Direction::East,
             false,
             Direction::East
         ));
         // A chest has a block entity, so it is never pushed even though its
         // reaction is NORMAL.
-        assert_eq!(push_reaction("minecraft:chest"), PushReaction::Normal);
+        assert_eq!(push_reaction(state("minecraft:chest")), PushReaction::Normal);
         assert!(!is_pushable(
-            "minecraft:chest[facing=north,type=single,waterlogged=false]",
+            state("minecraft:chest[facing=north,type=single,waterlogged=false]"),
             Direction::East,
             false,
             Direction::East
         ));
         // Glazed terracotta moves along the push axis and refuses sideways drag.
         assert!(is_pushable(
-            "minecraft:white_glazed_terracotta",
+            state("minecraft:white_glazed_terracotta"),
             Direction::East,
             false,
             Direction::East
         ));
         assert!(!is_pushable(
-            "minecraft:white_glazed_terracotta",
+            state("minecraft:white_glazed_terracotta"),
             Direction::East,
             false,
             Direction::North
@@ -1302,14 +1545,14 @@ mod tests {
             resolved.to_push
         );
 
-        assert!(can_stick_to_each_other(SLIME_BLOCK, "minecraft:stone"));
-        assert!(can_stick_to_each_other(HONEY_BLOCK, "minecraft:stone"));
+        assert!(can_stick_to_each_other(state(SLIME_BLOCK), state("minecraft:stone")));
+        assert!(can_stick_to_each_other(state(HONEY_BLOCK), state("minecraft:stone")));
         assert!(
-            !can_stick_to_each_other(SLIME_BLOCK, HONEY_BLOCK),
+            !can_stick_to_each_other(state(SLIME_BLOCK), state(HONEY_BLOCK)),
             "slime and honey must not stick to each other"
         );
         assert!(
-            !can_stick_to_each_other(HONEY_BLOCK, SLIME_BLOCK),
+            !can_stick_to_each_other(state(HONEY_BLOCK), state(SLIME_BLOCK)),
             "and not in the other order either"
         );
 

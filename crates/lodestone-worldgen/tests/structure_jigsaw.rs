@@ -12,6 +12,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use lodestone_data::block::Block;
 use lodestone_worldgen::density::{NoiseParams, Resolver};
 use lodestone_worldgen::overworld::OverworldGenerator;
 use lodestone_worldgen::structure::StructureRegistry;
@@ -345,7 +346,7 @@ fn a_village_chunk_gains_village_blocks_a_structureless_chunk_does_not() {
         "the start has no template-driven piece"
     );
 
-    let village_blocks: HashSet<&str> = [
+    let village_blocks: HashSet<Block> = [
         "minecraft:dirt_path",
         "minecraft:cobblestone",
         "minecraft:mossy_cobblestone",
@@ -357,6 +358,7 @@ fn a_village_chunk_gains_village_blocks_a_structureless_chunk_does_not() {
         "minecraft:composter",
     ]
     .into_iter()
+    .map(|name| Block::from_name(name).expect("known village block"))
     .collect();
     // Only the chunks the pieces actually cover: a village's origin chunk is not
     // necessarily the one carrying most of it.
@@ -371,9 +373,8 @@ fn a_village_chunk_gains_village_blocks_a_structureless_chunk_does_not() {
             for lx in 0..16 {
                 for lz in 0..16 {
                     for y in column.min_y()..(column.min_y() + column.height()) {
-                        let state = column.block_state(lx, y, lz);
-                        let name = state.split_once('[').map_or(state, |(n, _)| n);
-                        if village_blocks.contains(name) {
+                        let state = column.block_state_id(lx, y, lz);
+                        if village_blocks.contains(&state.block()) {
                             n += 1;
                         }
                     }
@@ -395,12 +396,13 @@ fn a_village_chunk_gains_village_blocks_a_structureless_chunk_does_not() {
     // optional, and its absence would leave command-block-textured jigsaws in
     // every wall.
     let mut jigsaws = 0usize;
+    let jigsaw = Block::Jigsaw;
     for &(x, z) in &chunks {
         let column = with.column(x, z);
         for lx in 0..16 {
             for lz in 0..16 {
                 for y in column.min_y()..(column.min_y() + column.height()) {
-                    if column.block_state(lx, y, lz).starts_with("minecraft:jigsaw") {
+                    if column.block_state_id(lx, y, lz).block() == jigsaw {
                         jigsaws += 1;
                     }
                 }

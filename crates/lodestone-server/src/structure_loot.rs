@@ -103,6 +103,7 @@ use std::io::Read as _;
 
 use lodestone_core::{Nbt, Reader};
 use lodestone_model::{BlockPos, ItemStack, ResourceKey};
+use lodestone_data::block::Block;
 use lodestone_worldgen::structure::StructureStart;
 use lodestone_worldgen::structure::template::transform;
 
@@ -351,12 +352,7 @@ pub fn spawners_for_chunk(
     for local_z in 0..16 {
         for local_x in 0..16 {
             for y in column.min_y..column.min_y + column.height {
-                if column
-                    .block_state(local_x, y, local_z)
-                    .split('[')
-                    .next()
-                    != Some("minecraft:spawner")
-                {
+                if column.block_state_id(local_x, y, local_z).block() != Block::Spawner {
                     continue;
                 }
                 let pos = BlockPos::new(cx * 16 + local_x, y, cz * 16 + local_z);
@@ -951,6 +947,7 @@ mod tests {
             pieces: vec![structure_piece],
             terrain_adaptation: TerrainAdjustment::None,
             pieces_complete: true,
+            mineshaft_tree: None,
         });
         let table_key: ResourceKey = expected_table.parse().expect("fixture table key");
         let raw_table = include_str!("../assets/loot_table/chests/end_city_treasure.json");
@@ -1159,6 +1156,7 @@ mod tests {
             }],
             terrain_adaptation: TerrainAdjustment::None,
             pieces_complete: true,
+            mineshaft_tree: None,
         };
 
         let records = spawners_for_chunk(&column, &[std::sync::Arc::new(start.clone())], 0, 1);
@@ -1224,6 +1222,7 @@ mod tests {
             pieces: Vec::new(),
             terrain_adaptation: TerrainAdjustment::None,
             pieces_complete: true,
+            mineshaft_tree: None,
         };
         unknown.pieces.push(StructurePiece {
             id: "minecraft:msroom".to_owned(),

@@ -6,14 +6,14 @@
 use std::collections::HashMap;
 
 use lodestone_data::{
-    block_states::{self, StateId},
+    block_states::StateId,
     collision_shapes, path_types,
 };
 use lodestone_entity::pathfinding::{Aabb, BlockCues, PathType, PathWorld};
 use lodestone_entity::RayView;
 use lodestone_model::Vec3;
 
-use crate::chunk::{AIR, ChunkColumn, ChunkSource};
+use crate::chunk::{ChunkColumn, ChunkSource};
 
 use super::block_ids;
 
@@ -21,8 +21,7 @@ use super::block_ids;
 ///
 /// Backed by a sparse map of [`ChunkColumn`]s keyed by chunk coordinate. Missing
 /// columns and blocks outside the vertical range read as air. Each cell's
-/// canonical block-state string (what [`ChunkColumn::block_state`] stores) is
-/// resolved to its global block-state id and looked up in
+/// global block-state id is looked up in
 /// [`lodestone_data::path_types`] / [`lodestone_data::collision_shapes`] — the
 /// same 32,366-state census `WalkNodeEvaluator.getPathTypeFromState` produces
 /// in vanilla — so water, lava, fences, doors, rails and damaging blocks
@@ -159,13 +158,15 @@ impl ChunkWorld {
         col.set_solid(lx, y, lz, solid);
     }
 
-    /// Sets a single block's canonical state (e.g. `"minecraft:water"`,
-    /// `"minecraft:oak_fence"`, `"minecraft:oak_slab[type=bottom]"`) at world
-    /// coordinates, creating the owning column on demand. The richer sibling of
-    /// [`set_solid`](Self::set_solid): use this when a test or caller needs a
-    /// specific census-distinguishable state (water vs. lava vs. a fence)
-    /// rather than a bare solid/air bit.
+    /// Test-only text fixture boundary. Production callers use [`set_block_id`].
+    #[cfg(test)]
     pub fn set_block(&mut self, x: i32, y: i32, z: i32, name: &str) {
+        let state = StateId::from_state_str(name)
+            .unwrap_or_else(lodestone_data::block_states::air_state);
+        self.set_block_id(x, y, z, state);
+    }
+
+    pub fn set_block_id(&mut self, x: i32, y: i32, z: i32, state: StateId) {
         let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
         let (lx, lz) = (x.rem_euclid(16), z.rem_euclid(16));
         let (min_y, height) = (self.min_y, self.height);
@@ -173,7 +174,7 @@ impl ChunkWorld {
             .columns
             .entry((cx, cz))
             .or_insert_with(|| ChunkColumn::new(min_y, height));
-        col.set_block(lx, y, lz, name);
+        col.set_block_id(lx, y, lz, state);
     }
 
     /// Whether the block at world coordinates is solid (neither air nor a
@@ -191,21 +192,15 @@ impl ChunkWorld {
             .is_some_and(|col| col.is_solid(lx, y, lz))
     }
 
-    /// The canonical block-state string at world coordinates, or
-    /// `"minecraft:air"` for a missing column or an out-of-range Y — matching
-    /// [`ChunkColumn::block_state`]'s own out-of-range behaviour.
-    ///
-    /// **`pub`, alongside [`is_solid`](Self::is_solid), because
-    /// [`MobSim::tick_with_terrain`] consumes a state-name oracle.** The state
-    /// name carries the shape information needed by item settling, while
-    /// `is_solid` remains the coarse pathfinding predicate.
     #[must_use]
-    pub fn block_state(&self, x: i32, y: i32, z: i32) -> &str {
+    pub fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
         let (lx, lz) = (x.rem_euclid(16), z.rem_euclid(16));
         self.columns
             .get(&(cx, cz))
-            .map_or(AIR, |col| col.block_state(lx, y, lz))
+            .map_or_else(lodestone_data::block_states::air_state, |col| {
+                col.block_state_id(lx, y, lz)
+            })
     }
 
     /// The column at chunk coordinates, or `None` when this snapshot does not
@@ -239,7 +234,7 @@ impl ChunkWorld {
         Some(
             (col.min_y..=top)
                 .rev()
-                .find(|&y| col.block_state(lx, y, lz) != AIR)
+                .find(|&y| col.block_state_id(lx, y, lz) != lodestone_data::block_states::air_state())
                 .unwrap_or(col.min_y),
         )
     }
@@ -251,12 +246,10 @@ impl ChunkWorld {
         self.min_y
     }
 
-    /// Resolves the global block-state id at world coordinates through
-    /// [`block_states::state_id`], if the block name at that cell is one the
-    /// 26.2 census knows about.
+    /// Reads the global block-state id at world coordinates.
     #[must_use]
     fn state_id(&self, x: i32, y: i32, z: i32) -> Option<StateId> {
-        block_states::state_id(self.block_state(x, y, z)).and_then(StateId::new)
+        Some(self.block_state_id(x, y, z))
     }
 }
 
@@ -266,12 +259,7 @@ impl PathWorld for ChunkWorld {
     }
 
     fn base_path_type(&self, x: i32, y: i32, z: i32) -> PathType {
-        // Real per-state classification: `WalkNodeEvaluator.getPathTypeFromState`
-        // via `lodestone_data::path_types`. Falls back to the old
-        // solid/air guess only if the state string does not resolve to a known
-        // 26.2 state id — not expected in practice, since every writer of this
-        // world's terrain (worldgen, `set_solid`, `set_block`) emits canonical
-        // vanilla state strings, but a tick must never panic on a lookup miss.
+        // Real per-state classification via `lodestone_data::path_types`.
         self.state_id(x, y, z)
             .map(path_types::path_type)
             .map_or_else(
@@ -311,10 +299,7 @@ impl PathWorld for ChunkWorld {
     /// `grass_block` stays block equality, because vanilla's own eat-block goal
     /// tests equality rather than a tag.
     fn block_cues(&self, x: i32, y: i32, z: i32) -> BlockCues {
-        let state = self.block_state(x, y, z);
-        // `block_state` yields a full state string; strip the property list so
-        // `minecraft:short_grass[...]` compares as its block path.
-        let path = state.split('[').next().unwrap_or(state);
+        let state = self.block_state_id(x, y, z);
         let edible_for_sheep = self
             .state_id(x, y, z)
             .map(StateId::block)
@@ -323,7 +308,7 @@ impl PathWorld for ChunkWorld {
             });
         BlockCues {
             edible_for_sheep,
-            grass_block: path == "minecraft:grass_block",
+            grass_block: state.block().name() == "minecraft:grass_block",
         }
     }
 
@@ -361,7 +346,7 @@ impl PathWorld for ChunkWorld {
         // `moving_piston` is a disclosed narrowing (not the exact carried
         // block's own shape, not interpolated) that fixes the actual symptom the
         // required behavior: a mob does not fall through a block being pushed.
-        if crate::piston::is_moving_piston(self.block_state(x, y, z)) {
+        if self.block_state_id(x, y, z).block().name() == "minecraft:moving_piston" {
             return 1.0;
         }
         self.state_id(x, y, z)

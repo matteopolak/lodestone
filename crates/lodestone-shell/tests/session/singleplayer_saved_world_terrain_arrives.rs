@@ -42,6 +42,7 @@ use std::time::{Duration, Instant};
 
 use lodestone::net::{NetClient, NetUpdate};
 use lodestone_client::{BlockPos, ChunkPos};
+use lodestone_data::block_states::StateId;
 use lodestone_server::region_source::RegionChunkSource;
 use lodestone_server::{ChunkSource, ScheduledTickKind, TickPriority};
 
@@ -116,7 +117,12 @@ fn write_saved_world(dir: &Path) {
     // A pending tick's chunk is written, but the *edit* is what makes the save
     // encode a column rather than pass its old bytes through — and in production
     // whatever scheduled a tick had written a block first.
-    world.set_block(5, 70, 5, "minecraft:redstone_wire");
+    world.set_block(
+        5,
+        70,
+        5,
+        StateId::from_state_str("minecraft:redstone_wire").expect("a real redstone wire state"),
+    );
     world.save_handle().save().expect("save the fixture world");
 
     let region = dir

@@ -16,7 +16,7 @@ use super::*;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GravitySettle {
     /// The state that leaves the world and rides the entity.
-    pub state: lodestone_data::block_states::BlockStateValue,
+    pub state: lodestone_data::block_states::StateId,
     /// Where the entity will come to rest —
     /// [`gravity_tick::find_landing_y`]'s answer against the world as it is now.
     pub landing_y: i32,
@@ -56,16 +56,16 @@ pub(crate) fn settle_gravity_at(
 ) -> Option<GravitySettle> {
     let lx = x - min_x;
     let lz = z - min_z;
-    let state = column.block_state(lx, y, lz).to_string();
-    if !gravity_tick::is_gravity_block(base_name(&state)) {
+    let state = column.block_state_id(lx, y, lz);
+    if !gravity_tick::is_gravity_state(state) {
         return None;
     }
-    let below = column.block_state(lx, y - 1, lz).to_string();
-    if !gravity_tick::is_free(&below) {
+    let below = column.block_state_id(lx, y - 1, lz);
+    if !gravity_tick::is_free_state(below) {
         return None;
     }
     let landing_y = gravity_tick::find_landing_y(
-        |probe_y| gravity_tick::is_free(column.block_state(lx, probe_y, lz)),
+        |probe_y| gravity_tick::is_free_state(column.block_state_id(lx, probe_y, lz)),
         y,
         column.min_y,
     );
@@ -75,7 +75,7 @@ pub(crate) fn settle_gravity_at(
         return None;
     }
     Some(GravitySettle {
-        state: lodestone_data::block_states::BlockStateValue::parse(&state),
+        state,
         landing_y,
     })
 }

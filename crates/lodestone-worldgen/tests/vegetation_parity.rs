@@ -81,6 +81,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use lodestone_data::block_states::StateId;
 use lodestone_worldgen::compose::build_decoration_catalog;
 use lodestone_worldgen::density::{NoiseParams, Resolver};
 use lodestone_worldgen::feature::vegetation::{
@@ -170,17 +171,17 @@ struct Fixture {
     /// `VegetationOracle.java::dumpRegionBaseline`'s own doc comment for why
     /// this widened from the narrower `dumpCentreBaseline` an earlier
     /// version of this oracle shipped with.
-    base: HashMap<(i32, i32, i32), String>,
+    base: HashMap<(i32, i32, i32), StateId>,
     /// Every cell the SINGLE (centre-only) pass changed, local coordinates
     /// (a subset can fall outside `0..16` — see module doc's "single mode's
     /// reads still see the real neighbourhood" scope note; those cells are
     /// filtered out before comparing against our engine, which structurally
     /// cannot produce them).
-    single_diff: HashMap<(i32, i32, i32), String>,
+    single_diff: HashMap<(i32, i32, i32), StateId>,
     single_centre_changed: usize,
     /// Every cell the FULL3X3 pass changed, centre-relative coordinates,
     /// spanning the whole driven `-16..32` region.
-    full_diff: HashMap<(i32, i32, i32), String>,
+    full_diff: HashMap<(i32, i32, i32), StateId>,
     full_centre_changed: usize,
     decoration_seed: i64,
     chunk_x: i32,
@@ -199,6 +200,10 @@ fn parse_xyz(s: &str) -> (i32, i32, i32) {
     let y = it.next().unwrap().parse().unwrap();
     let z = it.next().unwrap().parse().unwrap();
     (x, y, z)
+}
+
+fn state_id(spec: &str) -> StateId {
+    StateId::from_state_str(spec).unwrap_or_else(|| panic!("fixture state is not in the generated table: {spec}"))
 }
 
 fn parse_fixture(text: &str) -> Fixture {
@@ -230,16 +235,16 @@ fn parse_fixture(text: &str) -> Fixture {
             let mut parts = rest.splitn(3, ' ');
             let y_start: i32 = parts.next().unwrap().parse().unwrap();
             let count: i32 = parts.next().unwrap().parse().unwrap();
-            let state = parts.next().unwrap().to_string();
+            let state = state_id(parts.next().unwrap());
             for dy in 0..count {
-                f.base.insert((x, y_start + dy, z), state.clone());
+                f.base.insert((x, y_start + dy, z), state);
             }
         } else if let Some(coords) = tag.strip_prefix("single.diff.") {
             let (x, y, z) = parse_xyz(coords);
-            f.single_diff.insert((x, y, z), rest.to_string());
+            f.single_diff.insert((x, y, z), state_id(rest));
         } else if let Some(coords) = tag.strip_prefix("full3x3.diff.") {
             let (x, y, z) = parse_xyz(coords);
-            f.full_diff.insert((x, y, z), rest.to_string());
+            f.full_diff.insert((x, y, z), state_id(rest));
         } else if tag == "single.meta.centreChanged" {
             f.single_centre_changed = rest.parse().unwrap();
         } else if tag == "full3x3.meta.centreChanged" {
@@ -320,10 +325,10 @@ fn bundled_lush_root_system_reaches_the_nested_tree_dispatch() {
     };
     assert_eq!(cfg.root_column_max_height, 100);
     assert!(matches!(*cfg.feature.feature, ConfiguredFeature::Tree(_)));
-    assert!(cfg.root_replaceable.contains("minecraft:dirt"));
+    assert!(cfg.root_replaceable.contains(&state_id("minecraft:dirt")));
 }
 
-fn run_bundled_root_system(resolver: &FsResolver, nested_noop: bool) -> Vec<String> {
+fn run_bundled_root_system(resolver: &FsResolver, nested_noop: bool) -> Vec<StateId> {
     let parsed = lodestone_worldgen::feature::vegetation::resolve_placed_feature_ref(
         resolver,
         &Value::String("minecraft:rooted_azalea_tree".to_owned()),
@@ -345,22 +350,20 @@ fn run_bundled_root_system(resolver: &FsResolver, nested_noop: bool) -> Vec<Stri
     for x in 5..=11 {
         for z in 5..=11 {
             for y in MIN_Y..=64 {
-                grid.seed(x, y, z, "minecraft:stone".to_owned());
+                grid.seed_id(x, y, z, state_id("minecraft:stone"));
             }
-            grid.seed(x, 64, z, "minecraft:dirt".to_owned());
+            grid.seed_id(x, 64, z, state_id("minecraft:dirt"));
         }
     }
-    grid.seed(8, 63, 8, "minecraft:air".to_owned());
+    grid.seed_id(8, 63, 8, StateId::AIR);
     for y in 65..100 {
-        grid.seed(8, y, 8, "minecraft:air".to_owned());
+        grid.seed_id(8, y, 8, StateId::AIR);
     }
-    grid.seed(8, 100, 8, "minecraft:stone".to_owned());
+    grid.seed_id(8, 100, 8, state_id("minecraft:stone"));
 
     let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
     apply_vegetal_decoration_step(&mut random, 42, 0, 0, &mut grid, &tags, &[(0, root)]);
-    grid.dirty_cells()
-        .map(|(_, _, _, state)| state.to_owned())
-        .collect()
+    grid.dirty_cells().map(|(_, _, _, state)| state).collect()
 }
 
 #[test]
@@ -368,11 +371,11 @@ fn bundled_lush_root_system_writes_only_after_nested_tree_success() {
     let resolver = FsResolver { root: data_dir() };
     let writes = run_bundled_root_system(&resolver, false);
     assert!(
-        writes.iter().any(|state| state.starts_with("minecraft:oak_log")),
+        writes.iter().any(|state| state.name() == "minecraft:oak_log"),
         "the resolved root-system consumer must reach a nested tree log; writes={writes:?}"
     );
     assert!(
-        writes.iter().any(|state| state == "minecraft:rooted_dirt"),
+        writes.iter().any(|state| state.name() == "minecraft:rooted_dirt"),
         "the successful nested tree must enable the intervening rooted-dirt pass"
     );
 
@@ -392,12 +395,12 @@ fn bundled_lush_root_system_writes_only_after_nested_tree_success() {
 /// FEATURES — seeded from `f.base`, and
 /// returns every cell it wrote, local coordinates, matching `f.single_diff`'s
 /// key space.
-fn run_our_engine(f: &Fixture, resolver: &FsResolver) -> HashMap<(i32, i32, i32), String> {
+fn run_our_engine(f: &Fixture, resolver: &FsResolver) -> HashMap<(i32, i32, i32), StateId> {
     let base_x = f.chunk_x * 16;
     let base_z = f.chunk_z * 16;
     let mut grid = VegGrid::new(MIN_Y, HEIGHT, base_x, base_z);
     for (&(lx, y, lz), state) in &f.base {
-        grid.seed(base_x + lx, y, base_z + lz, state.clone());
+        grid.seed_id(base_x + lx, y, base_z + lz, *state);
     }
     let tags = build_veg_tags(resolver);
     let features = vegetal_features_for(resolver, &f.biome);
@@ -407,7 +410,7 @@ fn run_our_engine(f: &Fixture, resolver: &FsResolver) -> HashMap<(i32, i32, i32)
     apply_vegetal_decoration_step(&mut random, f.seed, f.chunk_x, f.chunk_z, &mut grid, &tags, &features);
 
     grid.dirty_cells()
-        .map(|(x, y, z, state)| ((x - base_x, y, z - base_z), state.to_string()))
+        .map(|(x, y, z, state)| ((x - base_x, y, z - base_z), state))
         .collect()
 }
 
@@ -422,12 +425,12 @@ fn run_our_engine(f: &Fixture, resolver: &FsResolver) -> HashMap<(i32, i32, i32)
 /// `FixedBiomeSource` scope (no biome variety anywhere in this oracle), the
 /// per-source ore driver already established for the ore engine's fixed-biome
 /// case.
-fn run_our_engine_full3x3(f: &Fixture, resolver: &FsResolver) -> HashMap<(i32, i32, i32), String> {
+fn run_our_engine_full3x3(f: &Fixture, resolver: &FsResolver) -> HashMap<(i32, i32, i32), StateId> {
     let base_x = f.chunk_x * 16;
     let base_z = f.chunk_z * 16;
     let mut grid = VegGrid::with_footprint(MIN_Y, HEIGHT, base_x, base_z, REGION_MIN, REGION_MAX);
     for (&(lx, y, lz), state) in &f.base {
-        grid.seed(base_x + lx, y, base_z + lz, state.clone());
+        grid.seed_id(base_x + lx, y, base_z + lz, *state);
     }
     let tags = build_veg_tags(resolver);
     let features = vegetal_features_for(resolver, &f.biome);
@@ -446,11 +449,11 @@ fn run_our_engine_full3x3(f: &Fixture, resolver: &FsResolver) -> HashMap<(i32, i
     );
 
     grid.dirty_cells()
-        .map(|(x, y, z, state)| ((x - base_x, y, z - base_z), state.to_string()))
+        .map(|(x, y, z, state)| ((x - base_x, y, z - base_z), state))
         .collect()
 }
 
-fn assert_matches_single(name: &str, f: &Fixture, ours: &HashMap<(i32, i32, i32), String>) {
+fn assert_matches_single(name: &str, f: &Fixture, ours: &HashMap<(i32, i32, i32), StateId>) {
     // `single_diff` can carry a handful of cells outside the centre 16x16
     // (see module doc: SINGLE mode's own placement can, in principle, land
     // just outside the chunk the same way the real engine's writes would —
@@ -461,7 +464,7 @@ fn assert_matches_single(name: &str, f: &Fixture, ours: &HashMap<(i32, i32, i32)
     // is checking.
     // Every in-window cell in `single_diff` is implemented scope and must
     // match exactly, including multiface state layout.
-    let expected: HashMap<(i32, i32, i32), &String> = f
+    let expected: HashMap<(i32, i32, i32), &StateId> = f
         .single_diff
         .iter()
         .filter(|&(&(x, _, z), _)| (0..16).contains(&x) && (0..16).contains(&z))
@@ -472,13 +475,13 @@ fn assert_matches_single(name: &str, f: &Fixture, ours: &HashMap<(i32, i32, i32)
     for (&pos, exp) in &expected {
         match ours.get(&pos) {
             Some(got) if got == *exp => {}
-            Some(got) => mismatches.push(format!("{pos:?}: expected {exp}, got {got}")),
-            None => mismatches.push(format!("{pos:?}: expected {exp}, got <nothing written>")),
+            Some(got) => mismatches.push(format!("{pos:?}: expected {exp:?}, got {got:?}")),
+            None => mismatches.push(format!("{pos:?}: expected {exp:?}, got <nothing written>")),
         }
     }
     for (&pos, got) in ours {
         if !expected.contains_key(&pos) {
-            mismatches.push(format!("{pos:?}: unexpected write {got} (JVM wrote nothing here)"));
+            mismatches.push(format!("{pos:?}: unexpected write {got:?} (JVM wrote nothing here)"));
         }
     }
     assert!(
@@ -573,22 +576,15 @@ fn single_chunk_only_undercounts_real_vanilla_centre_content() {
 // The real 3×3 driver against the JVM's FULL3X3 pass.
 // ---------------------------------------------------------------------------
 
-/// Strips a `distance=N` property (if present) from a canonical block-state
-/// string, so two states that differ ONLY in leaf decay-distance compare
-/// equal — the split this function exists for: [`assert_matches_full3x3`]
-/// requires *base identity* (ignoring `distance`) to match exactly, and
-/// separately measures/bounds `distance`-only drift as its own named
-/// residual (see that function's own doc comment for why one exists at
-/// all).
-fn strip_distance(state: &str) -> String {
-    let Some(idx) = state.find("distance=") else {
-        return state.to_string();
-    };
-    let start = idx + "distance=".len();
-    let end = state[start..].find([',', ']']).map_or(state.len(), |o| start + o);
-    let mut s = state.to_string();
-    s.replace_range(start..end, "N");
-    s
+/// Compares two interned states while ignoring only the leaf decay-distance
+/// property. Every other state identity and property remains exact.
+fn same_state_ignoring_distance(a: StateId, b: StateId) -> bool {
+    a.block() == b.block()
+        && a
+            .properties()
+            .iter()
+            .filter(|property| property.0 != "distance")
+            .eq(b.properties().iter().filter(|property| property.0 != "distance"))
 }
 
 /// Same shape as [`assert_matches_single`], against `f.full_diff` restricted
@@ -602,7 +598,7 @@ fn strip_distance(state: &str) -> String {
 /// `crate::feature::vegetation::update_leaf_distances`'s real vanilla port
 /// (vanilla's own tree-feature update-leaves) gets *which block occupies each
 /// cell* exactly right — checked here as a hard requirement via
-/// [`strip_distance`] — but for a handful of cells, `distance=N` differs by
+/// [`same_state_ignoring_distance`] — but for a handful of cells, `distance=N` differs by
 /// a small amount from the oracle. Investigated directly on the one
 /// concrete case this measured (`vegetation_savanna_chunk20_neg5_jvm.txt`,
 /// an oak tree straddling the centre/east-neighbour boundary): the cell
@@ -626,8 +622,8 @@ fn strip_distance(state: &str) -> String {
 /// finding the mechanism; NOT the same residual as the `distance` one
 /// above (a missing write, not a wrong property on a real write), so
 /// tracked and bounded separately rather than folded in.
-fn assert_matches_full3x3(name: &str, f: &Fixture, ours: &HashMap<(i32, i32, i32), String>) -> (usize, usize) {
-    let expected: HashMap<(i32, i32, i32), &String> = f
+fn assert_matches_full3x3(name: &str, f: &Fixture, ours: &HashMap<(i32, i32, i32), StateId>) -> (usize, usize) {
+    let expected: HashMap<(i32, i32, i32), &StateId> = f
         .full_diff
         .iter()
         .filter(|&(&(x, _, z), _)| (0..16).contains(&x) && (0..16).contains(&z))
@@ -639,11 +635,11 @@ fn assert_matches_full3x3(name: &str, f: &Fixture, ours: &HashMap<(i32, i32, i32
     for (&pos, exp) in &expected {
         match ours.get(&pos) {
             Some(got) if got == *exp => {}
-            Some(got) if strip_distance(got) == strip_distance(exp) => {
-                distance_only.push(format!("{pos:?}: expected {exp}, got {got}"));
+            Some(got) if same_state_ignoring_distance(*got, **exp) => {
+                distance_only.push(format!("{pos:?}: expected {exp:?}, got {got:?}"));
             }
-            Some(got) => identity_mismatches.push(format!("{pos:?}: expected {exp}, got {got}")),
-            None => identity_mismatches.push(format!("{pos:?}: expected {exp}, got <nothing written>")),
+            Some(got) => identity_mismatches.push(format!("{pos:?}: expected {exp:?}, got {got:?}")),
+            None => identity_mismatches.push(format!("{pos:?}: expected {exp:?}, got <nothing written>")),
         }
     }
     // Unlike `assert_matches_single`, `ours` here can legitimately carry
@@ -659,7 +655,7 @@ fn assert_matches_full3x3(name: &str, f: &Fixture, ours: &HashMap<(i32, i32, i32
     for (&pos, got) in ours {
         let (x, _, z) = pos;
         if (0..16).contains(&x) && (0..16).contains(&z) && !expected.contains_key(&pos) {
-            identity_mismatches.push(format!("{pos:?}: unexpected write {got} (JVM's FULL3X3 pass wrote nothing here)"));
+            identity_mismatches.push(format!("{pos:?}: unexpected write {got:?} (JVM's FULL3X3 pass wrote nothing here)"));
         }
     }
     // Residual block-identity mismatches are bounded tightly: measured exactly
@@ -781,12 +777,12 @@ fn mushroom_fields_fixture_proves_both_huge_mushroom_branches_are_consumed() {
         let expected: HashMap<_, _> = fixture
             .full_diff
             .iter()
-            .filter(|(_, state)| state.contains("mushroom_block") || state.contains("mushroom_stem"))
+            .filter(|(_, state)| state.name().contains("mushroom_block") || state.name().contains("mushroom_stem"))
             .map(|(pos, state)| (*pos, state.clone()))
             .collect();
         assert!(!expected.is_empty(), "{name}: external capture must contain the selected huge-mushroom branch");
-        assert!(expected.values().any(|state| state.contains(cap)), "{name}: external capture must contain its selected cap branch");
-        assert!(expected.values().any(|state| state.contains("mushroom_stem")), "{name}: external capture must contain stems");
+        assert!(expected.values().any(|state| state.name() == cap), "{name}: external capture must contain its selected cap branch");
+        assert!(expected.values().any(|state| state.name() == "minecraft:mushroom_stem"), "{name}: external capture must contain stems");
 
         // The production stage uses the widened 3x3 write-radius grid. Compare
         // against its complete external diff so a cap or stem written by a
@@ -794,7 +790,7 @@ fn mushroom_fields_fixture_proves_both_huge_mushroom_branches_are_consumed() {
         let ours = run_our_engine_full3x3(&fixture, &resolver);
         let actual: HashMap<_, _> = ours
             .into_iter()
-            .filter(|(_, state)| state.contains("mushroom_block") || state.contains("mushroom_stem"))
+            .filter(|(_, state)| state.name().contains("mushroom_block") || state.name().contains("mushroom_stem"))
             .collect();
         assert_eq!(actual, expected, "{name}: mushroom-fields production selector must reach the huge-mushroom placer with exact states and no extra mushroom writes");
     }
@@ -821,7 +817,7 @@ fn full3x3_driver_is_deterministic_across_two_independent_generators() {
 
     let mut grid_a = VegGrid::with_footprint(MIN_Y, HEIGHT, base_x, base_z, REGION_MIN, REGION_MAX);
     for (&(lx, y, lz), state) in &f.base {
-        grid_a.seed(base_x + lx, y, base_z + lz, state.clone());
+        grid_a.seed_id(base_x + lx, y, base_z + lz, *state);
     }
     let mut random_a = WorldgenRandom::new(XoroshiroRandomSource::new(1234));
     apply_vegetal_decoration_step_3x3_per_source(
@@ -830,17 +826,17 @@ fn full3x3_driver_is_deterministic_across_two_independent_generators() {
 
     let mut grid_b = VegGrid::with_footprint(MIN_Y, HEIGHT, base_x, base_z, REGION_MIN, REGION_MAX);
     for (&(lx, y, lz), state) in &f.base {
-        grid_b.seed(base_x + lx, y, base_z + lz, state.clone());
+        grid_b.seed_id(base_x + lx, y, base_z + lz, *state);
     }
     let mut random_b = WorldgenRandom::new(XoroshiroRandomSource::new(1234));
     apply_vegetal_decoration_step_3x3_per_source(
         &mut random_b, f.seed, f.chunk_x, f.chunk_z, &mut grid_b, &tags, &features_for_source,
     );
 
-    let cells_a: HashMap<(i32, i32, i32), String> =
-        grid_a.dirty_cells().map(|(x, y, z, s)| ((x, y, z), s.to_string())).collect();
-    let cells_b: HashMap<(i32, i32, i32), String> =
-        grid_b.dirty_cells().map(|(x, y, z, s)| ((x, y, z), s.to_string())).collect();
+    let cells_a: HashMap<(i32, i32, i32), StateId> =
+        grid_a.dirty_cells().map(|(x, y, z, s)| ((x, y, z), s)).collect();
+    let cells_b: HashMap<(i32, i32, i32), StateId> =
+        grid_b.dirty_cells().map(|(x, y, z, s)| ((x, y, z), s)).collect();
     assert!(!cells_a.is_empty(), "control premise: the 3x3 driver must actually write something");
     assert_eq!(cells_a, cells_b, "two independently constructed generators driving the same 3x3 call must agree exactly");
 }

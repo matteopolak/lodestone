@@ -1,4 +1,5 @@
 use lodestone_core::{Ctx, Decode, Reader, State, Writer, encode_body};
+use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Vec3f};
 use lodestone_server::{ChunkColumn, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_v1_20_6::{V766ServerProtocol, packet_ids};
@@ -92,14 +93,14 @@ fn chunk_framing_and_exact_state_rejection() {
     assert_eq!(chunk.column.get_block(3, 101, 5), 1);
     assert_eq!(chunk.column.get_block(4, 101, 5), 0);
     let ServerDirective::Send { payload, .. } =
-        protocol.try_encode_block_update(3, 101, 5, "minecraft:stone").unwrap() else { panic!("update"); };
+        protocol.try_encode_block_update(3, 101, 5, StateId::from_state_str("minecraft:stone").unwrap()).unwrap() else { panic!("update"); };
     let mut reader = Reader::new(&payload);
     // Packed x/z/y arithmetic is independent of the packet codec.
     assert_eq!(reader.i64().unwrap(), (3_i64 << 38) | (5_i64 << 12) | 101);
     assert_eq!(reader.var_i32().unwrap(), 1);
     reader.ensure_empty().unwrap();
     assert!(protocol.try_encode_chunk(0, 0, &ChunkColumn::new(0, 256)).is_err());
-    assert!(protocol.try_encode_block_update(0, 0, 0, "minecraft:does_not_exist").is_err());
+    assert!(StateId::from_state_str("minecraft:does_not_exist").is_none());
     let unsupported = (0..lodestone_data::block_states::STATE_COUNT).find(|state|
         !lodestone_v1_20_6::generated_canonical::STATE_TO_CANONICAL.contains(state)).unwrap();
     let name = lodestone_data::block_states::block_name(unsupported).unwrap();

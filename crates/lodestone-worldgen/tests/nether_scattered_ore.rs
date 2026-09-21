@@ -10,6 +10,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use lodestone_data::block_states::StateId;
 use lodestone_worldgen::density::{NoiseParams, Resolver};
 use lodestone_worldgen::nether::{NetherColumn, NetherGenerator};
 use serde_json::Value;
@@ -141,11 +142,13 @@ fn settings(assets: &ExternalAssets) -> Value {
 }
 
 fn debris_cells(column: &NetherColumn) -> BTreeSet<(usize, i32, usize)> {
+    let ancient_debris = StateId::from_state_str("minecraft:ancient_debris")
+        .expect("ancient debris is a generated block state");
     let mut cells = BTreeSet::new();
     for y in column.min_y()..column.min_y() + column.height() {
         for lz in 0..16 {
             for lx in 0..16 {
-                if column.block_state(lx, y, lz) == "minecraft:ancient_debris" {
+                if column.block_state_id(lx, y, lz) == ancient_debris {
                     cells.insert((lx, y, lz));
                 }
             }

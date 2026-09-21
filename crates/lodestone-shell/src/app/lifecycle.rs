@@ -393,7 +393,10 @@ impl WindowApp {
                 // pacing so an incidental focus notification cannot change the
                 // measured workload; ordinary play keeps the existing option.
                 if should_background_pace(&self.config) && self.nav.pause_on_lost_focus() {
-                    self.ui.pause();
+                    let world_ready = !self.sim.shows_new_world_loading()
+                        && self.sim.world_wait().is_none()
+                        && !self.sim.dimension_transition_pending();
+                    self.ui.pause_for_focus_loss(world_ready);
                 }
                 self.pending_pick = None;
                 self.set_grab(false);

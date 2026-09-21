@@ -96,12 +96,14 @@
 //! and [`super::template::BlockState`] supplies the mirror/rotate transform.
 
 use lodestone_worldgen_core::rng::RandomSource;
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, PropertyKey};
 
 use super::coded::Facing;
-use super::template::{BlockState, Mirror, Rotation};
+use super::template::{state_with, BlockState, Mirror, Rotation};
 use super::{
-    BoundingBox, CodedBlock, CodedLoot, PieceRefinement, StartContext, StructureMutationContext,
-    StructurePiece,
+    BoundingBox, CodedBlock, CodedLoot, PieceRefinement, StartContext,
+    StructureMutationContext, StructurePiece,
 };
 
 /// The deepest a child piece may recurse.
@@ -151,18 +153,20 @@ pub fn place_post_surface_blocks_with_sink(
 ) {
     for write in writes {
         let [x, y, z] = write.block.pos;
-        let existing = world.get(x, y, z);
+        let existing = world.get_id(x, y, z);
         let existing_is_air = matches!(
-            existing.split('[').next(),
-            Some("minecraft:air" | "minecraft:cave_air" | "minecraft:void_air")
+            existing.block(),
+            lodestone_data::block::Block::Air
+                | lodestone_data::block::Block::CaveAir
+                | lodestone_data::block::Block::VoidAir
         );
         if write.only_if_non_air && existing_is_air {
             continue;
         }
         if let Some(mutation) = mutation.as_deref_mut() {
-            mutation.write(world, x, y, z, &write.block.state);
+            mutation.write(world, x, y, z, write.block.state);
         } else {
-            world.set(x, y, z, &write.block.state);
+            world.set_id(x, y, z, write.block.state);
         }
     }
 }
@@ -967,7 +971,7 @@ impl Place<'_> {
         self.writes.push(PostSurfaceWrite {
             block: CodedBlock {
                 pos,
-                state: transformed.canonical(),
+                state: transformed.id,
             },
             only_if_non_air,
         });
@@ -1025,7 +1029,7 @@ impl Place<'_> {
         only_if_non_air: bool,
         random: &mut R,
     ) {
-        let cave_air = BlockState::of("minecraft:cave_air");
+        let cave_air = BlockState::from_block(Block::CaveAir);
         for y in y0..=y1 {
             for x in x0..=x1 {
                 for z in z0..=z1 {
@@ -1034,13 +1038,13 @@ impl Place<'_> {
                         // The smooth-stone selector's own float draw.
                         let selection = random.next_float();
                         let state = if selection < 0.2 {
-                            BlockState::of("minecraft:cracked_stone_bricks")
+                            BlockState::from_block(Block::CrackedStoneBricks)
                         } else if selection < 0.5 {
-                            BlockState::of("minecraft:mossy_stone_bricks")
+                            BlockState::from_block(Block::MossyStoneBricks)
                         } else if selection < 0.55 {
-                            BlockState::of("minecraft:infested_stone_bricks")
+                            BlockState::from_block(Block::InfestedStoneBricks)
                         } else {
-                            BlockState::of("minecraft:stone_bricks")
+                            BlockState::from_block(Block::StoneBricks)
                         };
                         if only_if_non_air {
                             self.place_only_if_non_air(&state, x, y, z);
@@ -1101,10 +1105,10 @@ impl Place<'_> {
     /// `random` parameter it never reads either, kept here only so every call
     /// site has one signature.
     fn generate_small_door<R: RandomSource>(&mut self, _random: &mut R, door: SmallDoorType, fx: i32, fy: i32, fz: i32) {
-        let stone_bricks = BlockState::of("minecraft:stone_bricks");
+        let stone_bricks = BlockState::from_block(Block::StoneBricks);
         match door {
             SmallDoorType::Opening => {
-                let cave_air = BlockState::of("minecraft:cave_air");
+                let cave_air = BlockState::from_block(Block::CaveAir);
                 self.generate_box(fx, fy, fz, fx + 2, fy + 2, fz, &cave_air, &cave_air);
             }
             SmallDoorType::WoodDoor => {
@@ -1129,7 +1133,7 @@ impl Place<'_> {
                 );
             }
             SmallDoorType::Grates => {
-                let cave_air = BlockState::of("minecraft:cave_air");
+                let cave_air = BlockState::from_block(Block::CaveAir);
                 self.place(&cave_air, fx + 1, fy, fz);
                 self.place(&cave_air, fx + 1, fy + 1, fz);
                 self.place(
@@ -1196,7 +1200,14 @@ impl Place<'_> {
         self.writes.push(PostSurfaceWrite {
             block: CodedBlock {
                 pos,
-                state: "minecraft:chest[facing=north,type=single,waterlogged=false]".to_string(),
+                state: state_with(
+                    Block::Chest,
+                    &[
+                        (PropertyKey::Facing, BuiltinPropertyValue::North),
+                        (PropertyKey::Type, BuiltinPropertyValue::Single),
+                        (PropertyKey::Waterlogged, BuiltinPropertyValue::False),
+                    ],
+                ),
             },
             only_if_non_air: false,
         });
@@ -1210,9 +1221,9 @@ impl Place<'_> {
 
 /// `StrongholdPieces::*::postProcess`, dispatched per kind.
 fn post_process<R: RandomSource>(p: &mut Place<'_>, random: &mut R) {
-    let stone_bricks = BlockState::of("minecraft:stone_bricks");
-    let smooth_slab = BlockState::of("minecraft:smooth_stone_slab");
-    let cave_air = BlockState::of("minecraft:cave_air");
+    let stone_bricks = BlockState::from_block(Block::StoneBricks);
+    let smooth_slab = BlockState::from_block(Block::SmoothStoneSlab);
+    let cave_air = BlockState::from_block(Block::CaveAir);
     match p.node.kind.clone() {
         Kind::Straight {
             door,
@@ -1310,10 +1321,10 @@ fn post_process<R: RandomSource>(p: &mut Place<'_>, random: &mut R) {
                     p.place(&stone_bricks, 5, 1, 5);
                     p.place(&stone_bricks, 5, 2, 5);
                     p.place(&stone_bricks, 5, 3, 5);
-                    p.place(&BlockState::of("minecraft:water"), 5, 4, 5);
+                    p.place(&BlockState::from_block(Block::Water), 5, 4, 5);
                 }
                 2 => {
-                    let cobble = BlockState::of("minecraft:cobblestone");
+                    let cobble = BlockState::from_block(Block::Cobblestone);
                     for z in 1..=9 {
                         p.place(&cobble, 1, 3, z);
                         p.place(&cobble, 9, 3, z);
@@ -1336,8 +1347,8 @@ fn post_process<R: RandomSource>(p: &mut Place<'_>, random: &mut R) {
                         p.place(&cobble, 4, y, 6);
                         p.place(&cobble, 6, y, 6);
                     }
-                    p.place(&BlockState::of("minecraft:wall_torch"), 5, 3, 5);
-                    let planks = BlockState::of("minecraft:oak_planks");
+                    p.place(&BlockState::from_block(Block::WallTorch), 5, 3, 5);
+                    let planks = BlockState::from_block(Block::OakPlanks);
                     for z in 2..=8 {
                         p.place(&planks, 2, 3, z);
                         p.place(&planks, 3, 3, z);
@@ -1452,10 +1463,10 @@ fn post_process<R: RandomSource>(p: &mut Place<'_>, random: &mut R) {
             let current_height = if is_tall { 11 } else { 6 };
             p.generate_shell(0, 0, 0, 13, current_height - 1, 14, true, random);
             p.generate_small_door(random, door, 4, 1, 0);
-            let cobweb = BlockState::of("minecraft:cobweb");
+            let cobweb = BlockState::from_block(Block::Cobweb);
             p.generate_maybe_box(random, 0.07, 2, 1, 1, 11, 4, 13, &cobweb, &cobweb);
-            let planks = BlockState::of("minecraft:oak_planks");
-            let bookshelf = BlockState::of("minecraft:bookshelf");
+            let planks = BlockState::from_block(Block::OakPlanks);
+            let bookshelf = BlockState::from_block(Block::Bookshelf);
             for d in 1..=13 {
                 if (d - 1) % 4 == 0 {
                     p.generate_box(1, 1, d, 1, 4, d, &planks, &planks);
@@ -1536,7 +1547,7 @@ fn post_process<R: RandomSource>(p: &mut Place<'_>, random: &mut R) {
                 p.place(&BlockState::parse("minecraft:oak_fence[east=true,north=false,south=true,waterlogged=false,west=false]"), 6, 7, 8);
                 p.place(&BlockState::parse("minecraft:oak_fence[east=false,north=true,south=false,waterlogged=false,west=true]"), 7, 7, 6);
                 p.place(&BlockState::parse("minecraft:oak_fence[east=false,north=false,south=true,waterlogged=false,west=true]"), 7, 7, 8);
-                let torch = BlockState::of("minecraft:torch");
+                let torch = BlockState::from_block(Block::Torch);
                 p.place(&torch, 5, 8, 7);
                 p.place(&torch, 8, 8, 7);
                 p.place(&torch, 6, 8, 6);
@@ -1559,7 +1570,7 @@ fn post_process<R: RandomSource>(p: &mut Place<'_>, random: &mut R) {
             p.generate_shell(2, 6, 14, 8, 6, 14, false, random);
             p.generate_shell(1, 1, 1, 2, 1, 4, false, random);
             p.generate_shell(8, 1, 1, 9, 1, 4, false, random);
-            let lava = BlockState::of("minecraft:lava");
+            let lava = BlockState::from_block(Block::Lava);
             p.generate_box(1, 1, 1, 1, 1, 3, &lava, &lava);
             p.generate_box(9, 1, 1, 9, 1, 3, &lava, &lava);
             p.generate_shell(3, 1, 8, 7, 1, 12, false, random);
@@ -1600,21 +1611,34 @@ fn post_process<R: RandomSource>(p: &mut Place<'_>, random: &mut R) {
                 *eye = random.next_float() > 0.9;
                 all_eyes &= *eye;
             }
-            let frame = |facing: &str, eye: bool| BlockState::parse(&format!("minecraft:end_portal_frame[eye={eye},facing={facing}]"));
-            p.place(&frame("north", eyes[0]), 4, 3, 8);
-            p.place(&frame("north", eyes[1]), 5, 3, 8);
-            p.place(&frame("north", eyes[2]), 6, 3, 8);
-            p.place(&frame("south", eyes[3]), 4, 3, 12);
-            p.place(&frame("south", eyes[4]), 5, 3, 12);
-            p.place(&frame("south", eyes[5]), 6, 3, 12);
-            p.place(&frame("east", eyes[6]), 3, 3, 9);
-            p.place(&frame("east", eyes[7]), 3, 3, 10);
-            p.place(&frame("east", eyes[8]), 3, 3, 11);
-            p.place(&frame("west", eyes[9]), 7, 3, 9);
-            p.place(&frame("west", eyes[10]), 7, 3, 10);
-            p.place(&frame("west", eyes[11]), 7, 3, 11);
+            let frame = |facing: Facing, eye: bool| BlockState {
+                id: state_with(
+                    Block::EndPortalFrame,
+                    &[
+                        (PropertyKey::Eye, if eye { BuiltinPropertyValue::True } else { BuiltinPropertyValue::False }),
+                        (PropertyKey::Facing, match facing {
+                            Facing::North => BuiltinPropertyValue::North,
+                            Facing::East => BuiltinPropertyValue::East,
+                            Facing::South => BuiltinPropertyValue::South,
+                            Facing::West => BuiltinPropertyValue::West,
+                        }),
+                    ],
+                ),
+            };
+            p.place(&frame(Facing::North, eyes[0]), 4, 3, 8);
+            p.place(&frame(Facing::North, eyes[1]), 5, 3, 8);
+            p.place(&frame(Facing::North, eyes[2]), 6, 3, 8);
+            p.place(&frame(Facing::South, eyes[3]), 4, 3, 12);
+            p.place(&frame(Facing::South, eyes[4]), 5, 3, 12);
+            p.place(&frame(Facing::South, eyes[5]), 6, 3, 12);
+            p.place(&frame(Facing::East, eyes[6]), 3, 3, 9);
+            p.place(&frame(Facing::East, eyes[7]), 3, 3, 10);
+            p.place(&frame(Facing::East, eyes[8]), 3, 3, 11);
+            p.place(&frame(Facing::West, eyes[9]), 7, 3, 9);
+            p.place(&frame(Facing::West, eyes[10]), 7, 3, 10);
+            p.place(&frame(Facing::West, eyes[11]), 7, 3, 11);
             if all_eyes {
-                let portal = BlockState::of("minecraft:end_portal");
+                let portal = BlockState::from_block(Block::EndPortal);
                 for (x, z) in [
                     (4, 9), (5, 9), (6, 9),
                     (4, 10), (5, 10), (6, 10),
@@ -1626,7 +1650,7 @@ fn post_process<R: RandomSource>(p: &mut Place<'_>, random: &mut R) {
             // `SpawnerBlockEntity::setEntityId` — no entity-spawning layer
             // exists in this crate yet, see the module doc's
             // `coded:worldgen_entities` deviation.
-            p.place(&BlockState::of("minecraft:spawner"), 5, 3, 6);
+            p.place(&BlockState::from_block(Block::Spawner), 5, 3, 6);
         }
         Kind::FillerCorridor { steps } => {
             for i in 0..steps {
@@ -1693,17 +1717,17 @@ mod tests {
             };
             let frames: Vec<_> = writes
                 .iter()
-                .filter(|write| write.block.state.starts_with("minecraft:end_portal_frame"))
+                .filter(|write| write.block.state.canonical_state().starts_with("minecraft:end_portal_frame"))
                 .collect();
             assert_eq!(frames.len(), 12, "seed {seed}: expected 12 end portal frames");
             for f in &frames {
                 assert!(
-                    f.block.state.contains("facing=north")
-                        || f.block.state.contains("facing=south")
-                        || f.block.state.contains("facing=east")
-                        || f.block.state.contains("facing=west"),
+                    f.block.state.canonical_state().contains("facing=north")
+                        || f.block.state.canonical_state().contains("facing=south")
+                        || f.block.state.canonical_state().contains("facing=east")
+                        || f.block.state.canonical_state().contains("facing=west"),
                     "seed {seed}: frame with no recognised facing: {}",
-                    f.block.state
+                    f.block.state.canonical_state()
                 );
             }
         }
@@ -1782,28 +1806,28 @@ mod tests {
             PostSurfaceWrite {
                 block: CodedBlock {
                     pos: [0, 0, 0],
-                    state: "minecraft:stone_bricks".to_string(),
+                    state: Block::StoneBricks.default_state(),
                 },
                 only_if_non_air: true,
             },
             PostSurfaceWrite {
                 block: CodedBlock {
                     pos: [1, 0, 0],
-                    state: "minecraft:mossy_stone_bricks".to_string(),
+                    state: Block::MossyStoneBricks.default_state(),
                 },
                 only_if_non_air: true,
             },
             PostSurfaceWrite {
                 block: CodedBlock {
                     pos: [2, 0, 0],
-                    state: "minecraft:cracked_stone_bricks".to_string(),
+                    state: Block::CrackedStoneBricks.default_state(),
                 },
                 only_if_non_air: true,
             },
             PostSurfaceWrite {
                 block: CodedBlock {
                     pos: [0, 0, 0],
-                    state: "minecraft:smooth_stone_slab".to_string(),
+                    state: Block::SmoothStoneSlab.default_state(),
                 },
                 only_if_non_air: false,
             },
@@ -1828,14 +1852,14 @@ mod tests {
             PostSurfaceWrite {
                 block: CodedBlock {
                     pos: [0, 0, 0],
-                    state: "minecraft:stone_bricks".to_string(),
+                    state: Block::StoneBricks.default_state(),
                 },
                 only_if_non_air: true,
             },
             PostSurfaceWrite {
                 block: CodedBlock {
                     pos: [1, 0, 0],
-                    state: "minecraft:mossy_stone_bricks".to_string(),
+                    state: Block::MossyStoneBricks.default_state(),
                 },
                 only_if_non_air: true,
             },
@@ -1854,7 +1878,7 @@ mod tests {
             if write.only_if_non_air && !existing_is_air {
                 continue;
             }
-            inverted.set(x, y, z, &write.block.state);
+            inverted.set(x, y, z, &write.block.state.canonical_state());
         }
 
         assert_eq!(expected.get(0, 0, 0), "minecraft:air");

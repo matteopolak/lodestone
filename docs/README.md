@@ -114,6 +114,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   sand, piston heads, primed TNT) and flat "ground-plate" blocks (carpets, pressure
   plates, leaf litter, rails) whose flicker problems turned out to be a
   mipmap/sampling issue rather than a geometry one.
+- [Exact block membership](./block-membership.md) —
+  `lodestone_data::block::BlockMask` is an exact membership representation for hot,
+  repeatedly queried sets in the built-in block registry. It replaces hash tables only
+  where measurement justifies paying for the full fixed-width mask.
 - [Typed block properties](./block-properties.md) — The lodestone-data
   block_properties module represents built-in block-state keys and values as generated
   enums and exposes complete states through the Properties domain type. Its storage is
@@ -333,6 +337,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   unit-face occluder. It supplies the directional enclosure predicate used by
   underwater floor decoration without confusing occlusion with collision, outline, or
   motion-blocking behavior.
+- [Flat world generation](./flat-worldgen.md) — The flat generator expands a
+  preset's layer stack into one immutable row per height position. Layer blocks are
+  resolved to canonical `StateId` values while the preset is parsed, so generated
+  columns never carry or compare block-state text.
 - [Friends service](./friends-service.md) — `lodestone-auth::friends` is the
   credential-safe HTTP boundary for the Java 26.2 Friends List. It turns an
   already-resolved account session into typed friend lists, relationship changes,
@@ -744,6 +752,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   protocol 776. Its `level_chunk_with_light` encoder turns a server `ChunkColumn` into
   a complete 26.2 chunk body: state and biome sections, client heightmaps, block
   entities, and light.
+- [Protocol Block Updates](./protocol-block-updates.md) — The server protocol seam
+  encodes one block edit confirmation for each hosted protocol family. Runtime callers
+  provide the canonical `lodestone_data::block_states::StateId`; the selected protocol
+  maps that id directly to its local wire registry.
 - [Protocol packet ranges and data-driven dispatch](./protocol-dispatch.md) — Two
   additions that let one packet definition serve a range of protocol versions, and let
   a family's clientbound dispatch be checked at construction time instead of falling
@@ -1031,6 +1043,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   the placement path. They are diagnostic gates: a warm pass must not grow the pooled
   scratch containers, while the total allocation gate remains strict until every
   placement-side allocation is removed.
+- [Aquifer region cache](./worldgen-aquifer-region-cache.md) — `AquiferRegionCache`
+  is a bounded, request-owned memo for aquifer candidate locations and fluid statuses.
+  It lets chunk-bound `AquiferSystem` values reuse candidates whose absolute aquifer
+  grid coordinates cross a chunk boundary while retaining each chunk's own shortcut
+  and working caches.
 - [Worldgen Biome Types](./worldgen-biome-types.md) — Worldgen biome cells carry
   generated `BuiltinBiome` identities and compact `BiomeRef` handles instead of one
   owned string per sampled cell. The name view exists only at display, packet, and
@@ -1042,10 +1059,19 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   (`biome/`), a full 3-D biome grid plus ore veins (`overworld/biome_cells.rs`,
   `overworld/veins.rs`), surface rule application (`surface/`), and the final
   `TOP_LAYER_MODIFICATION` decoration step (`feature/top_layer.rs`).
+- [Compiled worldgen configuration cache](./worldgen-compiled-cache.md) — The
+  bundled Overworld source factory retains a bounded cache of immutable, compiled
+  generator configurations. Repeated production source/lease creation for the same
+  seed and world configuration reuses parsed templates, pools, structures and density
+  programs while each source receives fresh mutable column state.
 - [Worldgen coral features](./worldgen-coral-features.md) — The coral feature module
   places the three configured warm-ocean geometries: a branching tree, a claw-shaped
   set of branches, and a hollow shell-like mushroom. They share the registry-selected
   coral-block state and water survival rules.
+- [Worldgen decoration plan](./worldgen-decoration-plan.md) — The decoration plan is
+  the generator-scoped, numeric execution index for configured placed features. It
+  removes per-column string sets and repeated per-step index reconstruction while
+  preserving the source data's global `(step, index)` seed identity.
 - [Decoration: features, vegetation, ores and generation-time mob spawns](./worldgen-decoration.md) —
   Everything that runs after terrain shape and biome assignment to make a chunk look
   inhabited: the `GenerationStep.Decoration` driver and its placement-modifier
@@ -1148,6 +1174,14 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   `lodestone_worldgen::nether::NetherGenerator` produces a complete Nether column from
   the bundled noise, biome, feature, tag and structure documents. It uses the legacy
   world-generation random family required by the Nether settings.
+- [World-generation noise kernels](./worldgen-noise-kernels.md) — The numeric
+  world-generation core samples improved noise through an eight-lane `std::simd`
+  kernel. This document records the parity boundary and the small layout control used
+  to measure changes without conflating kernel cost with the rest of production column
+  generation.
+- [Ore placement biome lookup grid](./worldgen-ore-biome-grid.md) — The
+  source-ordered Overworld ore pass uses a typed, request-scoped grid to memoize the
+  three-dimensional nearby-corner biome selected for each candidate block position.
 - [Ore placement JSON boundary](./worldgen-ore-json.md) — The ore decoration parser
   decodes placed-feature modifiers and ore target predicates through closed Serde
   schemas. Known JSON shapes become the existing `Placement` and `RuleTest` runtime
@@ -1158,10 +1192,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   surface scan. It keeps the immutable operation graph shareable while `PointScratch`
   supplies a bounded memo for one aquifer request.
 - [World-generation predicate fast path](./worldgen-predicate-fast-path.md) —
-  `StatePredicate` keeps its existing text lookup for extension values while caching
-  answers for canonical built-in states as compact local-ID bitsets. Repeated
-  top-layer generation predicates therefore test an interned integer instead of
-  hashing or comparing a state string.
+  `StatePredicate` stores canonical built-in defaults and exact overrides, then caches
+  their answers as compact state-id bitsets. Repeated top-layer generation predicates
+  therefore test a canonical integer instead of hashing or comparing a state string;
+  unsupported extension states are rejected at ingress.
 - [Preliminary surface cache](./worldgen-preliminary-surface-cache.md) —
   `PreliminarySurfaceCache` is the bounded request memo for the low-detail surface
   estimate used by Overworld aquifer and surface stages. A production
@@ -1209,6 +1243,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   Overworld. Its `production_request` metric measures one genuinely serial generation
   worker through the server's request/session boundary, including the full terrain,
   structure, feature, and ordered mutable stages.
+- [Overworld source-once FEATURES experiment](./worldgen-source-once-experiment.md) —
+  This diagnostic seam executes the absolute source bodies for a bounded Overworld
+  settlement once against one request-scoped mutable `VegGrid` region, then projects
+  the final overlay into requested full columns and compact padding mutations.
+  Production settlement uses the separate target-owned `RegionFeatureEpoch` path.
 - [Worldgen Stage Schedule](./worldgen-stage-schedule.md) —
   `lodestone_worldgen::stage_schedule` names the ordered passes that turn a
   dimension's density field into a packet-ready chunk. The table is shared by the
@@ -1220,6 +1259,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   order, dependency radius, mutable state, randomness scope, and resumable completion
   status explicit for the Overworld, Nether, and End without merging their
   dimension-specific generators.
+- [Worldgen StateId Guard](./worldgen-state-id-guard.md) — `cargo xtask
+  check-worldgen-state-ids` is a source-level guard that keeps generated block states
+  in canonical `lodestone_data::block_states::StateId` form. It prevents runtime stage
+  and materializer products from reintroducing state text allocations.
 - [Structure generation](./worldgen-structures.md) — The structure engine: deciding
   which chunk gets which structure for a seed, and turning that decision into real
   blocks — jittered-grid and concentric-ring placement, `.nbt` structure templates

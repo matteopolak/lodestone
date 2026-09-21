@@ -34,6 +34,7 @@
 
 use lodestone_server::chunk_nbt;
 use lodestone_server::{ChunkColumn, overworld_generator};
+use lodestone_data::block_states::StateId;
 
 /// Chunk coordinates for every arm. Land with a real surface at the default seed —
 /// see the `enough_variety` precondition, which is what actually holds it to that.
@@ -48,7 +49,7 @@ const SEED: i64 = 0x5EED_1234;
 struct Reference {
     min_y: i32,
     height: i32,
-    palette: Vec<String>,
+    palette: Vec<StateId>,
     cells: Vec<u16>,
 }
 
@@ -70,15 +71,15 @@ impl Reference {
         }
     }
 
-    fn state(&self, x: i32, y_local: i32, z: i32) -> &str {
-        &self.palette[self.cells[((y_local * 16 + z) * 16 + x) as usize] as usize]
+    fn state(&self, x: i32, y_local: i32, z: i32) -> StateId {
+        self.palette[self.cells[((y_local * 16 + z) * 16 + x) as usize] as usize]
     }
 
     /// Distinct block states, and how many cells are non-air. Both are the
     /// anti-vacuity numbers: an all-air or single-state column would pass the
     /// comparison under a completely broken packer.
     fn variety(&self) -> (usize, usize) {
-        let air = self.palette.iter().position(|p| p == "minecraft:air");
+        let air = self.palette.iter().position(|&p| p == StateId::AIR);
         let non_air = self
             .cells
             .iter()
@@ -128,7 +129,7 @@ fn assert_cell_identical(reference: &Reference, column: &ChunkColumn, what: &str
         for z in 0..16 {
             for x in 0..16 {
                 let expected = reference.state(x, y_local, z);
-                let actual = column.block_state(x, y_local + reference.min_y, z);
+                let actual = column.block_state_id(x, y_local + reference.min_y, z);
                 assert_eq!(
                     actual, expected,
                     "{what}: cell (x {x}, y {}, z {z}) — the packed grid disagrees with \
@@ -210,51 +211,15 @@ fn the_packed_grid_costs_a_fraction_of_the_flat_one_on_a_real_column() {
     );
 }
 
-/// Built-in state text is immutable registry data, not column-local data.  A
-/// retained column still exposes its original `&str` palette for persistence,
-/// but the allocation handed to hot redstone lookups must be shared across
-/// columns; otherwise every streamed column owns a second copy of every state
-/// string just to avoid allocating during a lookup.
 #[test]
-fn built_in_block_state_arc_storage_is_shared_between_columns() {
-    use std::sync::Arc;
-
+fn built_in_block_state_ids_are_retained_between_columns() {
     let mut first = ChunkColumn::new(0, 16);
     let mut second = ChunkColumn::new(0, 16);
-    first.set_block(0, 0, 0, "minecraft:stone");
-    second.set_block(0, 0, 0, "minecraft:stone");
-
-    let first_state = first.block_state_arc(0, 0, 0);
-    let second_state = second.block_state_arc(0, 0, 0);
-    assert_eq!(first_state.as_ref(), "minecraft:stone");
-    assert_eq!(second_state.as_ref(), "minecraft:stone");
-    assert!(
-        Arc::ptr_eq(&first_state, &second_state),
-        "built-in state text must use the process-wide canonical allocation"
-    );
-}
-
-/// Plugin/data-pack state text is outside the generated registry and therefore
-/// remains column-owned.  The sharing optimisation must not silently coerce
-/// it to air or return a canonical built-in string.
-#[test]
-fn custom_block_state_arc_storage_keeps_column_text() {
-    use std::sync::Arc;
-
-    let mut first = ChunkColumn::new(0, 16);
-    let mut second = ChunkColumn::new(0, 16);
-    let custom = "example:custom_block[property=value]";
-    first.set_block(0, 0, 0, custom);
-    second.set_block(0, 0, 0, custom);
-
-    let first_state = first.block_state_arc(0, 0, 0);
-    let second_state = second.block_state_arc(0, 0, 0);
-    assert_eq!(first_state.as_ref(), custom);
-    assert_eq!(second_state.as_ref(), custom);
-    assert!(
-        !Arc::ptr_eq(&first_state, &second_state),
-        "unknown state text must remain owned by each column"
-    );
+    let stone = StateId::from_state_str("minecraft:stone").expect("stone fixture state");
+    first.set_block_id(0, 0, 0, stone);
+    second.set_block_id(0, 0, 0, stone);
+    assert_eq!(first.block_state_id(0, 0, 0), stone);
+    assert_eq!(second.block_state_id(0, 0, 0), stone);
 }
 
 /// The all-air control has a known storage shape: every section is uniform and

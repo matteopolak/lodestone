@@ -57,9 +57,11 @@
 
 use std::sync::Arc;
 
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, PropertyKey};
 use lodestone_worldgen_core::rng::RandomSource;
 
-use super::template::{BlockState, Mirror, Rotation};
+use super::template::{state_with, BlockState, Mirror, Rotation};
 use super::{
     BoundingBox, CodedBlock, HeightmapKind, StartContext, StructurePiece, free_height,
 };
@@ -304,7 +306,7 @@ impl Builder {
         let pos = self.world_pos(x, y, z);
         self.blocks.push(CodedBlock {
             pos,
-            state: transformed.canonical(),
+            state: transformed.id,
         });
     }
 
@@ -343,7 +345,7 @@ impl Builder {
     /// the property that makes a 300-statement piece reviewable at all.
     #[allow(clippy::too_many_arguments)]
     pub fn generate_air_box(&mut self, x0: i32, y0: i32, z0: i32, x1: i32, y1: i32, z1: i32) {
-        let air = BlockState::of("minecraft:air");
+        let air = BlockState::from_block(Block::Air);
         for y in y0..=y1 {
             for x in x0..=x1 {
                 for z in z0..=z1 {
@@ -419,7 +421,14 @@ impl Builder {
         let pos = self.world_pos(x, y, z);
         self.blocks.push(CodedBlock {
             pos,
-            state: "minecraft:chest[facing=north,type=single,waterlogged=false]".to_string(),
+            state: state_with(
+                Block::Chest,
+                &[
+                    (PropertyKey::Facing, BuiltinPropertyValue::North),
+                    (PropertyKey::Type, BuiltinPropertyValue::Single),
+                    (PropertyKey::Waterlogged, BuiltinPropertyValue::False),
+                ],
+            ),
         });
         let seed = random.next_long();
         self.loot.push(super::CodedLoot {
@@ -439,11 +448,29 @@ impl Builder {
         x: i32,
         y: i32,
         z: i32,
-        facing: &str,
+        facing: Facing,
         table: &str,
     ) {
+        let state = match facing {
+            Facing::North => state_with(
+                Block::Dispenser,
+                &[(PropertyKey::Facing, BuiltinPropertyValue::North), (PropertyKey::Triggered, BuiltinPropertyValue::False)],
+            ),
+            Facing::East => state_with(
+                Block::Dispenser,
+                &[(PropertyKey::Facing, BuiltinPropertyValue::East), (PropertyKey::Triggered, BuiltinPropertyValue::False)],
+            ),
+            Facing::South => state_with(
+                Block::Dispenser,
+                &[(PropertyKey::Facing, BuiltinPropertyValue::South), (PropertyKey::Triggered, BuiltinPropertyValue::False)],
+            ),
+            Facing::West => state_with(
+                Block::Dispenser,
+                &[(PropertyKey::Facing, BuiltinPropertyValue::West), (PropertyKey::Triggered, BuiltinPropertyValue::False)],
+            ),
+        };
         self.place(
-            &BlockState::parse(&format!("minecraft:dispenser[facing={facing},triggered=false]")),
+            &BlockState { id: state },
             x,
             y,
             z,
@@ -477,7 +504,7 @@ impl Builder {
             let transformed = state.mirror(self.mirror).rotate(self.rotation);
             self.blocks.push(CodedBlock {
                 pos,
-                state: transformed.canonical(),
+                state: transformed.id,
             });
             pos[1] -= 1;
         }
@@ -985,15 +1012,15 @@ fn after_place_suspicious_sand(
     world_seed: i64,
 ) {
     use lodestone_worldgen_core::rng::{LegacyRandomSource, PositionalRandomFactory};
-    let suspicious = "minecraft:suspicious_sand[dusted=0]";
-    let plain = "minecraft:sand";
+    let suspicious = state_with(Block::SuspiciousSand, &[(PropertyKey::Dusted, BuiltinPropertyValue::Value0)]);
+    let plain = Block::Sand.default_state();
     let mut out: Vec<CodedBlock> = Vec::new();
     // The guaranteed collapsed-roof suspicious-sand placement runs
     // *before* the shuffled walk, so a roof position that is also a candidate is
     // overwritten by the walk's verdict. Order preserved.
     out.push(CodedBlock {
         pos: collapsed_roof_pos,
-        state: suspicious.to_string(),
+        state: suspicious,
     });
     // A unique, sorted set — sorted
     // lexicographically by **y, then z, then x**. The order is the
@@ -1028,7 +1055,7 @@ fn after_place_suspicious_sand(
         };
         out.push(CodedBlock {
             pos,
-            state: state.to_string(),
+            state,
         });
     }
     let blocks = piece.blocks.take().map(|b| (*b).clone()).unwrap_or_default();
@@ -1257,7 +1284,7 @@ pub fn jungle_pyramid_pieces<R: RandomSource>(
     b.place(&wire("none", "side", "none", "side"), 5, -3, 1);
     b.place(&wire("side", "none", "none", "side"), 4, -3, 1);
     b.place(&mossy.clone(), 3, -3, 1);
-    b.create_dispenser(random, 3, -2, 1, "north", JUNGLE_TEMPLE_DISPENSER_LOOT);
+    b.create_dispenser(random, 3, -2, 1, Facing::North, JUNGLE_TEMPLE_DISPENSER_LOOT);
     b.place(
         &s("minecraft:vine[east=false,north=false,south=true,up=false,west=false]"),
         3,
@@ -1274,7 +1301,7 @@ pub fn jungle_pyramid_pieces<R: RandomSource>(
     b.place(&wire("none", "side", "up", "none"), 9, -3, 5);
     b.place(&mossy.clone(), 9, -3, 4);
     b.place(&wire_ns, 9, -2, 4);
-    b.create_dispenser(random, 9, -2, 3, "west", JUNGLE_TEMPLE_DISPENSER_LOOT);
+    b.create_dispenser(random, 9, -2, 3, Facing::West, JUNGLE_TEMPLE_DISPENSER_LOOT);
     let vine_east = s("minecraft:vine[east=true,north=false,south=false,up=false,west=false]");
     b.place(&vine_east, 8, -1, 3);
     b.place(&vine_east, 8, -2, 3);
@@ -1425,7 +1452,7 @@ mod tests {
             &s("minecraft:dirt"),
         );
         assert_eq!(b.len(), 27);
-        let dirt = b.blocks.iter().filter(|x| x.state == "minecraft:dirt").count();
+        let dirt = b.blocks.iter().filter(|x| x.state.canonical_state() == "minecraft:dirt").count();
         assert_eq!(dirt, 1, "a 3-cube has exactly one interior cell");
 
         let mut flat = Builder::new(0, 64, 0, Facing::North, 8, 8, 8);
@@ -1441,7 +1468,7 @@ mod tests {
         );
         assert_eq!(flat.len(), 25);
         assert!(
-            flat.blocks.iter().all(|x| x.state == "minecraft:stone"),
+            flat.blocks.iter().all(|x| x.state.canonical_state() == "minecraft:stone"),
             "a 1-thick box has no interior"
         );
     }
@@ -1459,11 +1486,11 @@ mod tests {
         // `free_height` is `first_occupied + 1` = 72, and the offset is 0.
         assert_eq!(piece.bounding_box.min[1], 72);
         assert!(
-            blocks.iter().any(|b| b.state == "minecraft:spruce_planks"),
+            blocks.iter().any(|b| b.state.canonical_state() == "minecraft:spruce_planks"),
             "no planks"
         );
-        assert!(blocks.iter().any(|b| b.state.starts_with("minecraft:spruce_stairs")));
-        assert!(blocks.iter().any(|b| b.state == "minecraft:cauldron"));
+        assert!(blocks.iter().any(|b| b.state.canonical_state().starts_with("minecraft:spruce_stairs")));
+        assert!(blocks.iter().any(|b| b.state.canonical_state() == "minecraft:cauldron"));
         // Every block is inside the piece's own box — the invariant the clip
         // depends on, and the one an orientation bug breaks.
         for block in blocks.iter() {
@@ -1492,20 +1519,23 @@ mod tests {
             assert_eq!(pieces.len(), 1);
             let blocks = pieces[0].blocks.as_ref().expect("blocks");
             assert!(
-                blocks.iter().any(|b| b.state == "minecraft:sandstone"),
+                blocks.iter().any(|b| b.state.canonical_state() == "minecraft:sandstone"),
                 "no sandstone"
             );
-            assert!(blocks.iter().any(|b| b.state.starts_with("minecraft:tnt")));
-            assert!(blocks.iter().any(|b| b.state == "minecraft:blue_terracotta"));
+            assert!(blocks.iter().any(|b| b.state.canonical_state().starts_with("minecraft:tnt")));
+            assert!(blocks.iter().any(|b| b.state.canonical_state() == "minecraft:blue_terracotta"));
             // Last-write-wins, so count the *final* state per position.
-            let mut final_state: std::collections::HashMap<[i32; 3], &str> =
+            let mut final_state: std::collections::HashMap<
+                [i32; 3],
+                lodestone_data::block_states::StateId,
+            > =
                 std::collections::HashMap::new();
             for block in blocks.iter() {
-                final_state.insert(block.pos, block.state.as_str());
+                final_state.insert(block.pos, block.state);
             }
             let suspicious = final_state
                 .values()
-                .filter(|s| s.starts_with("minecraft:suspicious_sand"))
+                .filter(|s| s.name() == "minecraft:suspicious_sand")
                 .count();
             assert!(
                 (5..=8).contains(&suspicious),
@@ -1607,7 +1637,7 @@ mod tests {
                 .iter()
                 .filter(|block| {
                     block.pos[1] == corner[1]
-                        && block.state.starts_with("minecraft:suspicious_sand")
+                        && block.state.canonical_state().starts_with("minecraft:suspicious_sand")
                 })
                 .map(|block| block.pos)
                 .collect();
@@ -1622,7 +1652,7 @@ mod tests {
                 .iter()
                 .filter(|block| {
                     block.pos[1] < corner[1]
-                        && block.state.starts_with("minecraft:suspicious_sand")
+                        && block.state.canonical_state().starts_with("minecraft:suspicious_sand")
                 })
                 .map(|block| block.pos)
                 .collect();
@@ -1646,7 +1676,7 @@ mod tests {
         let control_roof = control_blocks
             .iter()
             .find(|block| {
-                block.pos[1] == 74 && block.state.starts_with("minecraft:suspicious_sand")
+                block.pos[1] == 74 && block.state.canonical_state().starts_with("minecraft:suspicious_sand")
             })
             .map(|block| block.pos)
             .expect("control roof position");
@@ -1693,10 +1723,10 @@ mod tests {
         let blocks = pieces[0].blocks.as_ref().expect("blocks");
         // Every *write*, not the final state per position: the draws happened once
         // per write and last-write-wins would hide most of them.
-        let cobble = blocks.iter().filter(|b| b.state == "minecraft:cobblestone").count();
+        let cobble = blocks.iter().filter(|b| b.state.canonical_state() == "minecraft:cobblestone").count();
         let mossy = blocks
             .iter()
-            .filter(|b| b.state == "minecraft:mossy_cobblestone")
+            .filter(|b| b.state.canonical_state() == "minecraft:mossy_cobblestone")
             .count();
         // 12 `placeBlock(MOSSY_COBBLESTONE, …)` statements are unconditional and are
         // *not* selector draws, so the predicted fraction is 0.4·n/(n+12).

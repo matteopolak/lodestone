@@ -17,6 +17,7 @@
 use lodestone_entity::ai::goals::MeleeAttackGoal;
 use lodestone_entity::pathfinding::MobShape;
 use lodestone_entity::{AttributeMap, DamageFlags, Defenses};
+use lodestone_data::block_states::StateId;
 use lodestone_model::ResourceKey;
 use lodestone_model::Vec3;
 use lodestone_model::action::ClientAction;
@@ -1208,9 +1209,12 @@ fn a_mob_standing_in_water_is_driven_to_jump_and_one_on_dry_land_is_not() {
     // `ChunkWorld` block states, real `path_types` classification, real
     // `MobSim::tick`.
     let mut world = breeding_pen();
-    // The canonical state string `ChunkColumn` stores, resolved through
-    // `lodestone_data::block_states` to the id `path_types` classifies.
-    world.set_block(0, 0, 0, "minecraft:water[level=0]");
+    world.set_block_id(
+        0,
+        0,
+        0,
+        StateId::from_state_str("minecraft:water[level=0]").expect("fixture water state"),
+    );
 
     let mut sim = MobSim::new(&world);
     let id = sim.spawn_species(rk("minecraft:cow"), Vec3::new(0.5, 0.0, 0.5)).id();

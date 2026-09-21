@@ -340,9 +340,7 @@ static FOODS: &[(&str, Food)] = &[
 // synchronization point for the selected hotbar slot.
 
 /// The item [`try_pick_item`] receives for a middle-click on the block
-/// whose canonical state string is `block_state` (bare `"minecraft:stone"` or
-/// with properties, `"minecraft:oak_stairs[facing=east,...]"` — only the base
-/// name matters). This covers the default block-to-item mapping; see
+/// whose validated state is `block_state`. This covers the default block-to-item mapping; see
 /// [`lodestone_data::block_items::item_for_block`]'s own doc comment for the
 /// per-block overrides (crops, flower pots, banners, beehives, ...) this does
 /// not model.
@@ -350,9 +348,8 @@ static FOODS: &[(&str, Food)] = &[
 /// `None` for a state naming no built-in block and for a block with no
 /// registered item at all (air, fluids, redstone wire, portal blocks, ...).
 #[must_use]
-pub(crate) fn clone_item_stack_for_block(block_state: &str) -> Option<ItemStack> {
-    let name = block_state.split('[').next().unwrap_or(block_state);
-    let block = lodestone_data::block::Block::from_name(name)?;
+pub(crate) fn clone_item_stack_for_block(block_state: lodestone_data::block_states::StateId) -> Option<ItemStack> {
+    let block = block_state.block();
     let item = lodestone_data::block_items::item_for_block(block)?;
     Some(ItemStack::new(item.name().parse().ok()?, 1))
 }
@@ -753,18 +750,21 @@ mod tests {
     /// `None`.
     #[test]
     fn clone_item_stack_for_block_resolves_the_default_arm() {
+        let state = |text: &str| {
+            lodestone_data::block_states::StateId::from_state_str(text)
+                .expect("fixture block state")
+        };
         assert_eq!(
-            clone_item_stack_for_block("minecraft:dirt").map(|s| s.item.to_string()),
+            clone_item_stack_for_block(state("minecraft:dirt")).map(|s| s.item.to_string()),
             Some("minecraft:dirt".to_string())
         );
         assert_eq!(
-            clone_item_stack_for_block("minecraft:oak_stairs[facing=east,half=bottom,shape=straight,waterlogged=false]")
+            clone_item_stack_for_block(state("minecraft:oak_stairs[facing=east,half=bottom,shape=straight,waterlogged=false]"))
                 .map(|s| s.item.to_string()),
             Some("minecraft:oak_stairs".to_string()),
             "properties must be stripped before the name lookup"
         );
-        assert_eq!(clone_item_stack_for_block("minecraft:water"), None);
-        assert_eq!(clone_item_stack_for_block("minecraft:not_a_real_block"), None);
+        assert_eq!(clone_item_stack_for_block(state("minecraft:water")), None);
     }
 
     /// [`spawn_egg_for_entity_type`]: a real mob resolves to its real spawn

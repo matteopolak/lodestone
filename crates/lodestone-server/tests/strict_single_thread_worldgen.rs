@@ -19,6 +19,7 @@ use lodestone_server::worldgen_session::{
 use lodestone_server::{ChunkColumn, ChunkSource, ServerProtocol, overworld_chunk_source};
 use lodestone_v26_2::V770ServerProtocol;
 use lodestone_server::dimension::Dimension as ServerDimension;
+use lodestone_worldgen::counters;
 use lodestone_worldgen::stage_schedule::{Dimension as WorldgenDimension, GenerationTarget};
 
 #[cfg(target_os = "macos")]
@@ -155,6 +156,63 @@ fn report<T>(
     }
 }
 
+fn report_generation_counters(
+    before: Option<counters::Snapshot>,
+    after: Option<counters::Snapshot>,
+    columns: usize,
+    phase: &str,
+) {
+    if std::env::var("LODESTONE_WORLDGEN_BENCH_COUNTERS").as_deref() != Ok("1") {
+        return;
+    }
+    let Some((before, after)) = before.zip(after) else {
+        println!("STRICT_WORLDGEN metric=gen_counters phase={phase} counters=unavailable");
+        return;
+    };
+    let per_column = columns.max(1) as f64;
+    let delta = |a: u64, b: u64| b.saturating_sub(a);
+    let stage = |index| delta(before.stage_entered[index], after.stage_entered[index]);
+    let prefix_computed = delta(before.pre_ore_computed, after.pre_ore_computed);
+    let prefix_hits = delta(before.pre_ore_hits, after.pre_ore_hits);
+    let ore = stage(counters::Stage::Ore as usize);
+    let vegetation = stage(counters::Stage::Vegetation as usize);
+    let top_layer = stage(counters::Stage::TopLayer as usize);
+    let intern = stage(counters::Stage::Intern as usize);
+    let conversions = delta(before.full_column_conversions, after.full_column_conversions);
+    let conversion_cells = delta(
+        before.full_column_conversion_cells,
+        after.full_column_conversion_cells,
+    );
+    println!(
+        "STRICT_WORLDGEN metric=gen_counters phase={phase} columns={columns} immutable_prefix_computed={prefix_computed} immutable_prefix_hits={prefix_hits} immutable_prefix_per_column={:.3} mutable_feature_execution_ore={ore} mutable_feature_execution_vegetation={vegetation} mutable_feature_execution_top_layer={top_layer} finalization_packing_intern={intern} finalization_packing_conversions={conversions} finalization_packing_cells={conversion_cells} instructions=unavailable cycles=unavailable replay_context_construction=unavailable context_product_count=unavailable",
+        (prefix_computed + prefix_hits) as f64 / per_column,
+    );
+    println!(
+        "STRICT_WORLDGEN metric=gen_work phase={phase} block_at={} full_scans={} full_scan_cells={} biome_searches={} biome_rows={} climate_grids={} preliminary_requests={} preliminary_unique={} preliminary_computations={} corner_lookups={} corner_evals={} cell_fills={} slot_hits={} slot_misses={} noise_batches={} structure_starts={} structure_height_probes={} structure_probe_blocks={} structure_context_blocks={} structure_references={} structure_candidate_cells={}",
+        delta(before.block_at, after.block_at),
+        delta(before.full_column_scans, after.full_column_scans),
+        delta(before.full_column_scan_cells, after.full_column_scan_cells),
+        delta(before.biome_searches, after.biome_searches),
+        delta(before.biome_rows_compared, after.biome_rows_compared),
+        delta(before.climate_grid_preparations, after.climate_grid_preparations),
+        delta(before.preliminary_surface_requests, after.preliminary_surface_requests),
+        delta(before.preliminary_surface_unique, after.preliminary_surface_unique),
+        delta(before.preliminary_surface_computations, after.preliminary_surface_computations),
+        delta(before.corner_lookups, after.corner_lookups),
+        delta(before.corner_evals, after.corner_evals),
+        delta(before.cell_fills, after.cell_fills),
+        delta(before.slot_hits, after.slot_hits),
+        delta(before.slot_misses, after.slot_misses),
+        delta(before.noise_corner_batches, after.noise_corner_batches),
+        delta(before.structure_starts_computed, after.structure_starts_computed),
+        delta(before.structure_height_probes, after.structure_height_probes),
+        delta(before.structure_probe_block_at, after.structure_probe_block_at),
+        delta(before.structure_context_block_at, after.structure_context_block_at),
+        delta(before.structure_reference_computations, after.structure_reference_computations),
+        delta(before.structure_candidate_cell_probes, after.structure_candidate_cell_probes),
+    );
+}
+
 fn request_for(coordinate: (i32, i32)) -> GenerationRequest {
     GenerationRequest::new(
         WorldgenDimension::Overworld,
@@ -219,6 +277,8 @@ fn strict_single_thread_production_worldgen() {
     } else {
         "line"
     };
+    let production_only =
+        std::env::var("LODESTONE_WORLDGEN_BENCH_PHASES").as_deref() == Ok("production");
 
     let calibration = measure_request(retired(), || calibration_kernel(0x1234_5678_9abc_def0));
     report("pmu_calibration", "fixed_inline_never", &calibration, 1, 1, "fixed");
@@ -236,32 +296,35 @@ fn strict_single_thread_production_worldgen() {
         std::env::var("LODESTONE_WORLDGEN_WORKERS").unwrap_or_default(),
     );
 
-    let cold_coordinate = (10_000, -10_000);
-    let cold_request = request_for(cold_coordinate);
-    let cold = measure_request(retired(), || request_one(&source, cold_request));
-    report("production_request", "cold", &cold, 1, 1, "single");
-    let cold_result = expect_generated(cold.value, cold_coordinate);
-    let cold_column = match cold_result {
-        GenerationRequestResult::Generated(snapshot) => snapshot.column().clone(),
-        GenerationRequestResult::Existing(_) => unreachable!(),
-    };
-    assert_eq!(
-        cold_column.generation_stage(),
-        lodestone_server::ChunkGenerationStage::Full
-    );
-    black_box(cold_column);
+    if !production_only {
+        let cold_coordinate = (10_000, -10_000);
+        let cold_request = request_for(cold_coordinate);
+        let cold = measure_request(retired(), || request_one(&source, cold_request));
+        report("production_request", "cold", &cold, 1, 1, "single");
+        let cold_result = expect_generated(cold.value, cold_coordinate);
+        let cold_column = match cold_result {
+            GenerationRequestResult::Generated(snapshot) => snapshot.column().clone(),
+            GenerationRequestResult::Existing(_) => unreachable!(),
+        };
+        assert_eq!(
+            cold_column.generation_stage(),
+            lodestone_server::ChunkGenerationStage::Full
+        );
+        black_box(cold_column);
 
-    let retained = measure_request(retired(), || request_one(&source, request_for(cold_coordinate)));
-    report("retained_target_control", "immediate", &retained, 1, 1, "single");
-    assert!(
-        matches!(
-            retained.value
-                .expect("retained request must succeed")
-                .expect("retained source must return a result"),
-            GenerationRequestResult::Existing(_)
-        ),
-        "immediate repeat must use the retained target"
-    );
+        let retained =
+            measure_request(retired(), || request_one(&source, request_for(cold_coordinate)));
+        report("retained_target_control", "immediate", &retained, 1, 1, "single");
+        assert!(
+            matches!(
+                retained.value
+                    .expect("retained request must succeed")
+                    .expect("retained source must return a result"),
+                GenerationRequestResult::Existing(_)
+            ),
+            "immediate repeat must use the retained target"
+        );
+    }
 
     let coordinates: Vec<(i32, i32)> = if std::env::var("LODESTONE_WORLDGEN_BENCH_LAYOUT").as_deref()
         == Ok("square")
@@ -298,6 +361,12 @@ fn strict_single_thread_production_worldgen() {
         layout,
     );
     let mut session_batches = session_initialization.value;
+    let counters_enabled = counters::enabled()
+        && std::env::var("LODESTONE_WORLDGEN_BENCH_COUNTERS").as_deref() == Ok("1");
+    if counters_enabled {
+        counters::reset();
+    }
+    let generation_counter_before = counters_enabled.then(counters::snapshot);
     base_source.generator().reset_store_lease_stats();
     let sustained = measure_request(retired(), || {
         let mut results = Vec::with_capacity(count);
@@ -330,18 +399,44 @@ fn strict_single_thread_production_worldgen() {
         batch_size,
         layout,
     );
+    report_generation_counters(
+        generation_counter_before,
+        counters_enabled.then(counters::snapshot),
+        count,
+        "sustained_batch",
+    );
     let mut columns = Vec::<((i32, i32), ChunkColumn)>::with_capacity(count);
+    let mut generated_count = 0usize;
+    let mut promoted_count = 0usize;
     for (coordinate, result) in coordinates.iter().copied().zip(sustained.value) {
-        let result = expect_generated(result, coordinate);
+        let result = result
+            .unwrap_or_else(|error| {
+                panic!("production generation request {coordinate:?} failed: {error}")
+            })
+            .unwrap_or_else(|| panic!("production source returned no snapshot for {coordinate:?}"));
         let column = match result {
-            GenerationRequestResult::Generated(snapshot) => snapshot.column().clone(),
-            GenerationRequestResult::Existing(_) => unreachable!(),
+            GenerationRequestResult::Generated(snapshot) => {
+                generated_count += 1;
+                snapshot.column().clone()
+            }
+            GenerationRequestResult::Existing(column) => {
+                promoted_count += 1;
+                column
+            }
         };
         assert_eq!(
             column.generation_stage(),
             lodestone_server::ChunkGenerationStage::Full
         );
         columns.push((coordinate, column));
+    }
+    println!(
+        "STRICT_WORLDGEN metric=request_results phase=sustained_batch layout={layout} batch_size={batch_size} columns={count} generated={generated_count} promoted={promoted_count}"
+    );
+    assert_eq!(generated_count + promoted_count, count);
+    if production_only {
+        black_box(columns);
+        return;
     }
 
     let fresh_source = overworld_chunk_source(seed);
@@ -356,6 +451,48 @@ fn strict_single_thread_production_worldgen() {
         assert_eq!(column.generation_stage(), lodestone_server::ChunkGenerationStage::Full);
         black_box(column);
     }
+
+    let source_once_source = overworld_chunk_source(seed);
+    if counters_enabled {
+        counters::reset();
+    }
+    let source_once_counter_before = counters_enabled.then(counters::snapshot);
+    let source_once = measure_request(retired(), || {
+        source_once_source
+            .generator()
+            .source_once_features(&coordinates)
+    });
+    report(
+        "source_once_features",
+        "experimental",
+        &source_once,
+        count,
+        batch_size,
+        layout,
+    );
+    report_generation_counters(
+        source_once_counter_before,
+        counters_enabled.then(counters::snapshot),
+        count,
+        "source_once",
+    );
+    let expected_sources = if layout == "square" {
+        let side = (count as f64).sqrt() as usize;
+        (side + 2) * (side + 2)
+    } else {
+        3 * (count + 2)
+    };
+    assert_eq!(source_once.value.source_execution_count(), expected_sources);
+    println!(
+        "STRICT_WORLDGEN metric=source_once_products phase=source_once layout={layout} requested_products={} mutable_products={} context_products=unavailable heavy_products={} mutable_writes={} retained_bytes={} padding_mutations={}",
+        source_once.value.requested().len(),
+        source_once.value.mutable_write_count(),
+        source_once.value.source_execution_count(),
+        source_once.value.mutable_write_count(),
+        source_once.value.region_retained_bytes(),
+        source_once.value.padding_mutations().len(),
+    );
+    black_box(source_once.value);
 
     let protocol = V770ServerProtocol;
     let before = retired();
@@ -377,4 +514,62 @@ fn strict_single_thread_production_worldgen() {
         }),
     };
     report("light_encode", "post_generation", &measurement, columns.len(), 1, layout);
+}
+
+#[test]
+#[ignore = "source-once worldgen benchmark"]
+fn strict_single_thread_source_once_worldgen() {
+    assert_eq!(
+        std::env::var("LODESTONE_WORLDGEN_WORKERS").as_deref(),
+        Ok("1")
+    );
+    let seed = std::env::var("LODESTONE_WORLDGEN_BENCH_SEED")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(42_i64);
+    let count = parse("LODESTONE_WORLDGEN_BENCH_COLUMNS", 64);
+    let side = (count as f64).sqrt() as usize;
+    assert_eq!(side * side, count, "source-once benchmark needs a square count");
+    let coordinates = (0..side)
+        .flat_map(|z| (0..side).map(move |x| (20_000 + x as i32, -20_000 + z as i32)))
+        .collect::<Vec<_>>();
+    let source = overworld_chunk_source(seed);
+    let capture = std::env::var("LODESTONE_WORLDGEN_BENCH_CAPTURE").as_deref() == Ok("1");
+    let counters_enabled = counters::enabled()
+        && std::env::var("LODESTONE_WORLDGEN_BENCH_COUNTERS").as_deref() == Ok("1");
+    if counters_enabled {
+        counters::reset();
+    }
+    let counter_before = counters_enabled.then(counters::snapshot);
+    let measurement = measure_request(retired(), || {
+        source
+            .generator()
+            .source_once_features_with_capture(&coordinates, capture)
+    });
+    report(
+        "source_once_features",
+        if capture { "capture" } else { "isolated" },
+        &measurement,
+        count,
+        count,
+        "square",
+    );
+    report_generation_counters(
+        counter_before,
+        counters_enabled.then(counters::snapshot),
+        count,
+        "source_once",
+    );
+    println!(
+        "STRICT_WORLDGEN metric=source_once_products phase=source_once capture={capture} requested_products={} mutable_products={} context_products=unavailable heavy_products={} sources={} final_mutations={} mutable_writes={} retained_bytes={} padding_mutations={}",
+        measurement.value.requested().len(),
+        measurement.value.mutable_write_count(),
+        measurement.value.source_execution_count(),
+        measurement.value.source_execution_count(),
+        measurement.value.global_overrides().len(),
+        measurement.value.mutable_write_count(),
+        measurement.value.region_retained_bytes(),
+        measurement.value.padding_mutations().len(),
+    );
+    black_box(measurement.value);
 }

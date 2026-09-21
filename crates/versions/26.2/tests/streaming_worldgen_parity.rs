@@ -16,10 +16,13 @@ use std::time::{Duration, Instant};
 use lodestone_core::Reader;
 use lodestone_server::{ChunkColumn, EndChunkSource, NetherChunkSource, OverworldChunkSource, end_chunk_source, nether_chunk_source, overworld_chunk_source};
 use lodestone_world::{ChunkColumn as WorldChunkColumn, Heightmaps};
+use lodestone_worldgen::stage_schedule::{
+    NETHER_FEATURE_SOURCE_RADIUS, NETHER_FEATURE_WRITE_RADIUS,
+};
 use lodestone_worldgen_parity::lifecycle::{
-    FEATURES_SOURCE_RADIUS, FEATURES_WRITE_RADIUS, LifecycleCompletion, LifecycleFeatureDispatch,
-    LifecycleMaterializer, LifecycleFeatureResult, LifecycleReplayEvent, LifecycleResidentStage,
-    LifecycleResidentTransition, LifecycleWorldgenSource,
+    LifecycleCompletion, LifecycleFeatureDispatch, LifecycleFeatureResult, LifecycleMaterializer,
+    LifecycleReplayEvent, LifecycleResidentStage, LifecycleResidentTransition,
+    LifecycleWorldgenSource,
 };
 use lodestone_server::{ServerDirective, ServerProtocol};
 use lodestone_server::dimension::Dimension as ServerDimension;
@@ -690,9 +693,9 @@ fn lifecycle_admissions(targets: &[(i32, i32)]) -> Vec<(i32, i32)> {
     let max_x = targets.iter().map(|&(x, _)| x).max().expect("non-empty target batch");
     let min_z = targets.iter().map(|&(_, z)| z).min().expect("non-empty target batch");
     let max_z = targets.iter().map(|&(_, z)| z).max().expect("non-empty target batch");
-    (min_z - FEATURES_WRITE_RADIUS..=max_z + FEATURES_WRITE_RADIUS)
+    (min_z - NETHER_FEATURE_WRITE_RADIUS..=max_z + NETHER_FEATURE_WRITE_RADIUS)
         .flat_map(|z| {
-            (min_x - FEATURES_WRITE_RADIUS..=max_x + FEATURES_WRITE_RADIUS)
+            (min_x - NETHER_FEATURE_WRITE_RADIUS..=max_x + NETHER_FEATURE_WRITE_RADIUS)
                 .map(move |x| (x, z))
         })
         .collect()
@@ -704,8 +707,12 @@ fn lifecycle_admissions(targets: &[(i32, i32)]) -> Vec<(i32, i32)> {
 fn lifecycle_completion_wavefront(targets: &[(i32, i32)]) -> Vec<((i32, i32), (i32, i32))> {
     let mut order = Vec::new();
     for &(target_x, target_z) in targets {
-        for source_x in target_x - FEATURES_SOURCE_RADIUS..=target_x + FEATURES_SOURCE_RADIUS {
-            for source_z in target_z - FEATURES_SOURCE_RADIUS..=target_z + FEATURES_SOURCE_RADIUS {
+        for source_x in
+            target_x - NETHER_FEATURE_SOURCE_RADIUS..=target_x + NETHER_FEATURE_SOURCE_RADIUS
+        {
+            for source_z in
+                target_z - NETHER_FEATURE_SOURCE_RADIUS..=target_z + NETHER_FEATURE_SOURCE_RADIUS
+            {
                 order.push(((target_x, target_z), (source_x, source_z)));
             }
         }
@@ -973,12 +980,16 @@ fn nether_target_completion_replays_the_captured_source_wavefront() {
     assert_eq!(
         materializer
             .snapshot_for_packet(target)
-            .block_state(8, 50, 1),
+            .block_state_id(8, 50, 1)
+            .name(),
         "minecraft:crimson_roots",
         "the captured source wavefront must retain the target's external root witness",
     );
     assert_eq!(
-        materializer.snapshot_for_packet(target).block_state(15, 77, 5),
+        materializer
+            .snapshot_for_packet(target)
+            .block_state_id(15, 77, 5)
+            .name(),
         "minecraft:netherrack",
         "the first captured packet must not inherit the later east-neighbour root",
     );
@@ -1025,7 +1036,7 @@ fn nether_stream_replays_prior_targets_before_magma_gravel_target() {
             None,
         );
         if target == (5, 3) {
-            observed = Some(columns[0].block_state(15, 32, 15).to_owned());
+            observed = Some(columns[0].block_state_id(15, 32, 15).name());
         }
     }
 
@@ -1771,7 +1782,7 @@ fn first_terrain_difference_from_column(
         let y = min_y + (cell / 4096 * 16 + section_cell / 256) as i32;
         let z = (section_cell / 16 % 16) as i32;
         let x = (section_cell % 16) as i32;
-        let actual_id = column.block_state_id(x, y, z);
+        let actual_id = column.block_state_id(x, y, z).raw();
         if expected_id != actual_id {
             return Some((expected_offset, x, y, z, expected_id, actual_id));
         }
@@ -2088,7 +2099,7 @@ impl LifecycleWorldgenSource for EndP06ControlSource {
     fn feature_result(
         &self,
         _source: (i32, i32),
-        _overrides: &BTreeMap<(i32, i32, i32), String>,
+        _overrides: &BTreeMap<(i32, i32, i32), lodestone_data::block_states::StateId>,
         _resident: &BTreeMap<(i32, i32), ChunkColumn>,
     ) -> LifecycleFeatureResult {
         LifecycleFeatureResult::default()
@@ -2428,7 +2439,7 @@ fn stream_external_oracle_matches_lodestone() {
                             let low = expected_height.min(actual_height).saturating_sub(1) as i32;
                             let high = expected_height.max(actual_height) as i32;
                             let states = (low..=high)
-                                .map(|y| (y, column.block_state(x, y, z)))
+                                .map(|y| (y, column.block_state_id(x, y, z).canonical_state()))
                                 .collect::<Vec<_>>();
                             eprintln!("Lodestone heightmap column states: {states:?}");
                         }

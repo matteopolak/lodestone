@@ -43,6 +43,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use lodestone_core::State;
+use lodestone_data::block_states::StateId;
 use lodestone_model::BlockPos;
 use lodestone_server::dimension::Dimension;
 use lodestone_server::portal::{self, Axis, PortalIndex};
@@ -91,23 +92,23 @@ struct FlatWorld;
 impl ChunkSource for FlatWorld {
     fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
         let mut column = ChunkColumn::new(MIN_Y, HEIGHT);
+        let stone = fixture_state("minecraft:stone");
         for z in 0..16 {
             for x in 0..16 {
                 for y in MIN_Y..63 {
-                    column.set_block(x, y, z, "minecraft:stone");
+                    column.set_block_id(x, y, z, stone);
                 }
-                column.set_block(x, 63, z, "minecraft:grass_block[snowy=false]");
+                column.set_block_id(x, 63, z, fixture_state("minecraft:grass_block[snowy=false]"));
             }
         }
         column
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
         self.column(x.div_euclid(16), z.div_euclid(16))
-            .block_state(lx, y, lz)
-            .to_string()
+            .block_state_id(lx, y, lz)
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -118,7 +119,7 @@ impl ChunkSource for FlatWorld {
             .to_string()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
         // No storage on the seed source itself — `RegionChunkSource` is what
         // retains an edit. See `world_persistence_round_trip.rs`'s identical
         // fixture for the same reasoning.
@@ -131,12 +132,12 @@ impl ChunkSource for FlatWorld {
 struct BlockMapWorld {
     dimension: Dimension,
     floor_top: i32,
-    filler: &'static str,
-    blocks: Mutex<HashMap<(i32, i32, i32), String>>,
+    filler: StateId,
+    blocks: Mutex<HashMap<(i32, i32, i32), StateId>>,
 }
 
 impl BlockMapWorld {
-    fn new(dimension: Dimension, floor_top: i32, filler: &'static str) -> Self {
+    fn new(dimension: Dimension, floor_top: i32, filler: StateId) -> Self {
         Self {
             dimension,
             floor_top,
@@ -151,30 +152,34 @@ impl ChunkSource for BlockMapWorld {
         ChunkColumn::new(self.dimension.min_y(), self.dimension.height())
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         if let Some(state) = self.blocks.lock().unwrap().get(&(x, y, z)) {
-            return state.clone();
+            return *state;
         }
         if y <= self.floor_top && y >= self.dimension.min_y() {
-            return self.filler.to_owned();
+            return self.filler;
         }
-        "minecraft:air".to_owned()
+        StateId::AIR
     }
 
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
         "minecraft:plains".to_string()
     }
 
-    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+    fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
         self.blocks
             .lock()
             .unwrap()
-            .insert((x, y, z), name.to_owned());
+            .insert((x, y, z), state);
     }
 
     fn dimension(&self) -> Option<Dimension> {
         Some(self.dimension)
     }
+}
+
+fn fixture_state(value: &str) -> StateId {
+    StateId::from_state_str(value).expect("fixture block state")
 }
 
 /// An obsidian frame — `TestWorld::frame` in `nether_portal_round_trip.rs`,
@@ -196,7 +201,12 @@ fn build_frame(
     for across in -1..=width {
         for up in -1..=height {
             if across == -1 || across == width || up == -1 || up == height {
-                world.set_block(x + ax * across, y + up, z + az * across, "minecraft:obsidian");
+                world.set_block(
+                    x + ax * across,
+                    y + up,
+                    z + az * across,
+                    fixture_state("minecraft:obsidian"),
+                );
             }
         }
     }
@@ -214,7 +224,7 @@ fn light_portal(
 ) -> Vec<BlockPos> {
     let cells = portal::ignite(world, dimension, at).expect("a hand-built frame lights");
     for (pos, state) in &cells {
-        world.set_block(pos.x, pos.y, pos.z, state);
+        world.set_block(pos.x, pos.y, pos.z, *state);
     }
     let positions: Vec<BlockPos> = cells.iter().map(|(pos, _)| *pos).collect();
     portals.extend(dimension, positions.iter().copied());
@@ -288,7 +298,8 @@ async fn a_portal_survives_restart_in_both_dimensions_and_is_reused_not_duplicat
     // The Nether half: a synthetic terrain, but the **one real** portal
     // index — see the module doc for why this still exercises the property
     // under test.
-    let nether_seed_world = BlockMapWorld::new(Dimension::Nether, 31, "minecraft:netherrack");
+    let nether_seed_world =
+        BlockMapWorld::new(Dimension::Nether, 31, fixture_state("minecraft:netherrack"));
     build_frame(&nether_seed_world, NETHER_PORTAL.0, NETHER_PORTAL.1, NETHER_PORTAL.2, Axis::X, 2, 3);
     let nether_cells = light_portal(
         &nether_seed_world,
@@ -356,8 +367,8 @@ async fn a_portal_survives_restart_in_both_dimensions_and_is_reused_not_duplicat
     // hundreds of columns; doing that against the bare persistent source
     // turned this test into a multi-minute disk-bound scan on first sight.
     for cell in &overworld_cells {
-        let state = world2.block_state(cell.x, cell.y, cell.z);
-        assert!(portal::is_portal(&state), "overworld cell {cell:?} lost its block: {state}");
+        let state = world2.block_state_id(cell.x, cell.y, cell.z);
+        assert!(portal::is_portal(state), "overworld cell {cell:?} lost its block: {state:?}");
     }
     // The searches below run against cheap in-memory stand-ins instead,
     // seeded from the disk-confirmed positions — the same substitution
@@ -366,13 +377,15 @@ async fn a_portal_survives_restart_in_both_dimensions_and_is_reused_not_duplicat
     // index changes `find_exit_portal`'s answer, not whether terrain I/O is
     // fast; `world_persistence_round_trip.rs` already covers the terrain
     // round trip itself.
-    let overworld_terrain2 = BlockMapWorld::new(Dimension::Overworld, 62, "minecraft:stone");
+    let overworld_terrain2 =
+        BlockMapWorld::new(Dimension::Overworld, 62, fixture_state("minecraft:stone"));
     for cell in &overworld_cells {
-        overworld_terrain2.set_block(cell.x, cell.y, cell.z, &portal::portal_state(Axis::X));
+        overworld_terrain2.set_block(cell.x, cell.y, cell.z, portal::portal_state(Axis::X));
     }
-    let nether_terrain2 = BlockMapWorld::new(Dimension::Nether, 31, "minecraft:netherrack");
+    let nether_terrain2 =
+        BlockMapWorld::new(Dimension::Nether, 31, fixture_state("minecraft:netherrack"));
     for cell in restored.cells(Dimension::Nether) {
-        nether_terrain2.set_block(cell.x, cell.y, cell.z, &portal::portal_state(Axis::X));
+        nether_terrain2.set_block(cell.x, cell.y, cell.z, portal::portal_state(Axis::X));
     }
 
     // --- reuse, not duplication: overworld --------------------------------

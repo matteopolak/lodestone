@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockPos, Vec3};
 use uuid::Uuid;
 
@@ -136,7 +137,7 @@ impl<'w> MobSim<'w> {
     /// live world, which the caller has and this sim does not.
     pub fn spawn_falling_block(
         &mut self,
-        state: String,
+        state: StateId,
         origin: BlockPos,
         landing_y: i32,
     ) -> (i32, Vec<FallingBlockEffect>) {
@@ -308,6 +309,10 @@ mod falling_block_tests {
     use crate::gravity_tick::{FALLING_BLOCK_ENTITY_TYPE, FallingBlockEffect};
     use lodestone_data::block_states;
 
+    fn state(name: &str) -> StateId {
+        StateId::from_state_str(name).expect("fixture state must be in the built-in registry")
+    }
+
     /// A sim over a world with a solid floor at `y = -1` and nothing else. The
     /// world's contents are irrelevant here: `MobSim` never resolves a falling
     /// block's landing itself (`crate::random_tick::settle_gravity_at` does, from
@@ -330,7 +335,7 @@ mod falling_block_tests {
     fn a_spawn_clears_the_origin_cell_before_it_broadcasts_the_entity() {
         let mut sim = sim();
         let origin = BlockPos::new(3, 70, -8);
-        let (id, effects) = sim.spawn_falling_block("minecraft:sand".to_string(), origin, 64);
+        let (id, effects) = sim.spawn_falling_block(state("minecraft:sand"), origin, 64);
 
         let expected = vec![
             FallingBlockEffect::ClearedOrigin {
@@ -378,7 +383,7 @@ mod falling_block_tests {
     fn a_landing_places_the_block_before_it_discards_the_entity() {
         let mut sim = sim();
         let origin = BlockPos::new(3, 70, -8);
-        let (id, _) = sim.spawn_falling_block("minecraft:gravel".to_string(), origin, 64);
+        let (id, _) = sim.spawn_falling_block(state("minecraft:gravel"), origin, 64);
 
         // Step until the landing. 18 ticks is the predicted count for a 6-block
         // drop (see `crate::gravity_tick`'s own gate, which derives it from the
@@ -397,7 +402,7 @@ mod falling_block_tests {
         let expected = vec![
             FallingBlockEffect::Placed {
                 pos: BlockPos::new(3, 64, -8),
-                state: "minecraft:gravel".to_string(),
+                state: state("minecraft:gravel"),
                 entity_id: id,
             },
             FallingBlockEffect::Discarded { entity_id: id },
@@ -422,7 +427,7 @@ mod falling_block_tests {
                  landed block, and streams forever",
                 vec![FallingBlockEffect::Placed {
                     pos: BlockPos::new(3, 64, -8),
-                    state: "minecraft:gravel".to_string(),
+                    state: state("minecraft:gravel"),
                     entity_id: id,
                 }],
             ),
@@ -449,17 +454,17 @@ mod falling_block_tests {
         // completion therefore differs from that sequence instead of passing
         // vacuously because each owner has only one landing.
         sim.spawn_falling_block(
-            "minecraft:sand".to_string(),
+            state("minecraft:sand"),
             BlockPos::new(-1, 70, -1),
             64,
         );
         sim.spawn_falling_block(
-            "minecraft:gravel".to_string(),
+            state("minecraft:gravel"),
             BlockPos::new(16, 70, 0),
             64,
         );
         sim.spawn_falling_block(
-            "minecraft:red_sand".to_string(),
+            state("minecraft:red_sand"),
             BlockPos::new(-2, 70, -2),
             64,
         );
@@ -551,7 +556,7 @@ mod falling_block_tests {
         assert_eq!((-7.5_f64).floor() as i32, -8);
         assert_eq!(-7.5_f64 as i32, -7, "the wrong reading, stated so it is excluded");
 
-        sim.spawn_falling_block("minecraft:red_sand".to_string(), origin, 64);
+        sim.spawn_falling_block(state("minecraft:red_sand"), origin, 64);
         let mut placed = None;
         for _ in 0..40 {
             for effect in sim.tick_falling_blocks() {
@@ -565,7 +570,7 @@ mod falling_block_tests {
         }
         assert_eq!(
             placed,
-            Some((BlockPos::new(-8, 64, -3), "minecraft:red_sand".to_string()))
+            Some((BlockPos::new(-8, 64, -3), state("minecraft:red_sand")))
         );
     }
 
@@ -583,7 +588,7 @@ mod falling_block_tests {
     fn a_live_falling_block_streams_with_its_block_state_as_object_data() {
         let mut sim = sim();
         let (id, _) = sim.spawn_falling_block(
-            "minecraft:sand".to_string(),
+            state("minecraft:sand"),
             BlockPos::new(2, 70, 2),
             64,
         );
@@ -631,8 +636,8 @@ mod falling_block_tests {
     #[test]
     fn simultaneous_landings_keep_each_entitys_place_before_its_own_discard() {
         let mut sim = sim();
-        let (a, _) = sim.spawn_falling_block("minecraft:sand".to_string(), BlockPos::new(0, 70, 0), 64);
-        let (b, _) = sim.spawn_falling_block("minecraft:gravel".to_string(), BlockPos::new(1, 70, 0), 64);
+        let (a, _) = sim.spawn_falling_block(state("minecraft:sand"), BlockPos::new(0, 70, 0), 64);
+        let (b, _) = sim.spawn_falling_block(state("minecraft:gravel"), BlockPos::new(1, 70, 0), 64);
         assert!(a < b, "ids are assigned in spawn order");
 
         let mut effects = Vec::new();
@@ -667,7 +672,7 @@ mod falling_block_tests {
     #[test]
     fn a_discarded_falling_block_leaves_the_snapshot_set() {
         let mut sim = sim();
-        let (id, _) = sim.spawn_falling_block("minecraft:sand".to_string(), BlockPos::new(0, 66, 0), 64);
+        let (id, _) = sim.spawn_falling_block(state("minecraft:sand"), BlockPos::new(0, 66, 0), 64);
         assert!(
             sim.snapshots().iter().any(|s| s.id == id),
             "control: the entity must be streamed before this test can show it stops"

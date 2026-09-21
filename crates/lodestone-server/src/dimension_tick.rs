@@ -248,7 +248,7 @@ mod tests {
     /// test checks for rather than merely "the block changed".
     #[derive(Debug, Default)]
     struct StubSource {
-        edits: std::sync::Mutex<std::collections::HashMap<(i32, i32, i32), String>>,
+        edits: std::sync::Mutex<std::collections::HashMap<(i32, i32, i32), lodestone_data::block_states::StateId>>,
     }
 
     impl ChunkSource for StubSource {
@@ -256,25 +256,32 @@ mod tests {
             let mut column = ChunkColumn::new(MIN_Y, HEIGHT);
             for z in 0..16 {
                 for x in 0..16 {
-                    column.set_block(x, 60, z, "minecraft:netherrack");
+                    column.set_block_id(
+                        x,
+                        60,
+                        z,
+                        lodestone_data::block_states::StateId::from_state_str(
+                            "minecraft:netherrack",
+                        )
+                        .expect("netherrack is canonical"),
+                    );
                 }
             }
             for (&(x, y, z), state) in self.edits.lock().expect("edits lock poisoned").iter() {
                 let bcx = x.div_euclid(16);
                 let bcz = z.div_euclid(16);
                 if bcx == cx && bcz == cz {
-                    column.set_block(x.rem_euclid(16), y, z.rem_euclid(16), state);
+                    column.set_block_id(x.rem_euclid(16), y, z.rem_euclid(16), *state);
                 }
             }
             column
         }
 
-        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> lodestone_data::block_states::StateId {
             let cx = x.div_euclid(16);
             let cz = z.div_euclid(16);
             self.column(cx, cz)
-                .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
-                .to_string()
+                .block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
         }
 
         fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -285,11 +292,11 @@ mod tests {
                 .to_string()
         }
 
-        fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+        fn set_block(&self, x: i32, y: i32, z: i32, state: lodestone_data::block_states::StateId) {
             self.edits
                 .lock()
                 .expect("edits lock poisoned")
-                .insert((x, y, z), name.to_string());
+                .insert((x, y, z), state);
         }
     }
 

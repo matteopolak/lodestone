@@ -163,7 +163,7 @@ fn walk_at(at: i32) -> Band {
         let column = generator.column(cx, at);
         // Read something out of the result so nothing above can be optimised
         // away as dead: a discarded `GeneratedColumn` is a real risk in release.
-        std::hint::black_box(column.block_state(0, 0, 0));
+        std::hint::black_box(column.block_state_id(0, 0, 0));
         per_column_ms.push(start.elapsed().as_secs_f64() * 1000.0);
     }
     Band {
@@ -341,7 +341,7 @@ fn age_curve() {
     for i in 0..AGE_WALK_COLUMNS {
         let start = Instant::now();
         let column = generator.column(i as i32, 0);
-        std::hint::black_box(column.block_state(0, 0, 0));
+        std::hint::black_box(column.block_state_id(0, 0, 0));
         window.push(start.elapsed().as_secs_f64() * 1000.0);
 
         if window.len() == AGE_REPORT_EVERY {
@@ -423,7 +423,7 @@ fn view_walk_curve() {
     // The initial view, as a join would produce it.
     for dz in -VIEW_RADIUS..=VIEW_RADIUS {
         for dx in -VIEW_RADIUS..=VIEW_RADIUS {
-            std::hint::black_box(generator.column(dx, dz).block_state(0, 0, 0));
+            std::hint::black_box(generator.column(dx, dz).block_state_id(0, 0, 0));
         }
     }
     println!(
@@ -438,7 +438,7 @@ fn view_walk_curve() {
         // Walking +x by one chunk exposes exactly the leading edge strip.
         let cx = step + VIEW_RADIUS;
         for dz in -VIEW_RADIUS..=VIEW_RADIUS {
-            std::hint::black_box(generator.column(cx, dz).block_state(0, 0, 0));
+            std::hint::black_box(generator.column(cx, dz).block_state_id(0, 0, 0));
         }
         if step % 20 == 0 {
             let rss = rss_mib();

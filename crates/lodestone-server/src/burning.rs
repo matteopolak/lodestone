@@ -117,6 +117,9 @@
 //! None beyond `std`. The caller supplies what block the entity is standing in and
 //! whether it has Fire Resistance.
 
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
+
 /// The real ignite-for-seconds rule's ticks-per-second factor.
 const TICKS_PER_SECOND: f32 = 20.0;
 
@@ -165,14 +168,14 @@ pub enum BurnSource {
 }
 
 impl BurnSource {
-    /// The [`BurnSource`] for a block-state string, or `None` for anything that does
-    /// not burn.
+    /// The [`BurnSource`] for a canonical block state, or `None` for anything
+    /// that does not burn.
     #[must_use]
-    pub fn for_block(state: &str) -> Option<Self> {
-        match state.split('[').next().unwrap_or(state) {
-            "minecraft:fire" => Some(Self::Fire),
-            "minecraft:soul_fire" => Some(Self::SoulFire),
-            "minecraft:lava" | "minecraft:flowing_lava" => Some(Self::Lava),
+    pub fn for_block(state: StateId) -> Option<Self> {
+        match state.block() {
+            Block::Fire => Some(Self::Fire),
+            Block::SoulFire => Some(Self::SoulFire),
+            Block::Lava => Some(Self::Lava),
             _ => None,
         }
     }
@@ -375,6 +378,10 @@ impl BurnState {
 mod tests {
     use super::*;
 
+    fn state(value: &str) -> StateId {
+        StateId::from_state_str(value).expect("test state must be canonical")
+    }
+
     /// The durations come from the real ignite-for-seconds rule's own floor, and
     /// fire and lava are **different**: 160 against 300.
     #[test]
@@ -407,13 +414,12 @@ mod tests {
 
     #[test]
     fn burn_sources_resolve_from_block_states() {
-        assert_eq!(BurnSource::for_block("minecraft:fire[age=3]"), Some(BurnSource::Fire));
-        assert_eq!(BurnSource::for_block("minecraft:soul_fire"), Some(BurnSource::SoulFire));
-        assert_eq!(BurnSource::for_block("minecraft:lava[level=0]"), Some(BurnSource::Lava));
-        assert_eq!(BurnSource::for_block("minecraft:flowing_lava"), Some(BurnSource::Lava));
-        assert_eq!(BurnSource::for_block("minecraft:water"), None);
-        assert_eq!(BurnSource::for_block("minecraft:stone"), None);
-        assert_eq!(BurnSource::for_block("minecraft:campfire"), None, "not modelled yet");
+        assert_eq!(BurnSource::for_block(state("minecraft:fire[age=3]")), Some(BurnSource::Fire));
+        assert_eq!(BurnSource::for_block(state("minecraft:soul_fire")), Some(BurnSource::SoulFire));
+        assert_eq!(BurnSource::for_block(state("minecraft:lava[level=0]")), Some(BurnSource::Lava));
+        assert_eq!(BurnSource::for_block(state("minecraft:water")), None);
+        assert_eq!(BurnSource::for_block(state("minecraft:stone")), None);
+        assert_eq!(BurnSource::for_block(state("minecraft:campfire")), None, "not modelled yet");
     }
 
     /// **The magnitude gate for the burn cadence.** An 8-second ignition, left to burn

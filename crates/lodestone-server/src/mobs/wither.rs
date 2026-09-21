@@ -56,6 +56,7 @@
 //!   than silently wrong: `crate::wither::wither_effect_ticks` is real and
 //!   tested for all four difficulties, just not fed a real one yet.
 
+use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockPos, ResourceKey, Rotation, Vec3};
 use uuid::Uuid;
 
@@ -196,7 +197,7 @@ impl<'w> MobSim<'w> {
     /// `try_construct_golem`'s real call site in `crate::server`.
     pub fn try_construct_wither(
         &mut self,
-        block_at: &dyn Fn(i32, i32, i32) -> String,
+        block_at: &dyn Fn(i32, i32, i32) -> StateId,
         skull_pos: (i32, i32, i32),
     ) -> Option<WitherConstruction> {
         let found = wither_pattern::find_wither_pattern(block_at, skull_pos)?;
@@ -938,7 +939,7 @@ mod tests {
     #[test]
     fn the_summon_pattern_spawns_a_real_wither() {
         let mut sim = sim();
-        let world = |x: i32, y: i32, z: i32| -> String {
+        let world = |x: i32, y: i32, z: i32| -> StateId {
             let cells: &[((i32, i32, i32), &str)] = &[
                 ((9, 6, 10), "minecraft:wither_skeleton_skull"),
                 ((10, 6, 10), "minecraft:wither_skeleton_skull"),
@@ -951,8 +952,8 @@ mod tests {
             cells
                 .iter()
                 .find(|(p, _)| *p == (x, y, z))
-                .map(|(_, n)| (*n).to_owned())
-                .unwrap_or_else(|| "minecraft:air".to_owned())
+                .map(|(_, n)| StateId::from_state_str(n).unwrap())
+                .unwrap_or_else(lodestone_data::block_states::air_state)
         };
         let result = sim
             .try_construct_wither(&world, (10, 6, 10))
@@ -966,11 +967,11 @@ mod tests {
     #[test]
     fn control_an_incomplete_pattern_spawns_nothing() {
         let mut sim = sim();
-        let world = |x: i32, y: i32, z: i32| -> String {
+        let world = |x: i32, y: i32, z: i32| -> StateId {
             if (x, y, z) == (10, 6, 10) {
-                "minecraft:wither_skeleton_skull".to_owned()
+                StateId::from_state_str("minecraft:wither_skeleton_skull").unwrap()
             } else {
-                "minecraft:air".to_owned()
+                lodestone_data::block_states::air_state()
             }
         };
         assert!(sim.try_construct_wither(&world, (10, 6, 10)).is_none());

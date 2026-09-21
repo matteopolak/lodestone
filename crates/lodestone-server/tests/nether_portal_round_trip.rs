@@ -31,6 +31,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 use lodestone_server::dimension::{Dimension, DimensionalSource, teleport_scale};
 use lodestone_server::portal::{self, Axis, PortalIndex};
 use lodestone_server::{ChunkColumn, ChunkSource};
@@ -45,12 +47,12 @@ const SPAWN_Z: f64 = -523.25;
 struct TestWorld {
     dimension: Dimension,
     floor_top: i32,
-    filler: &'static str,
-    blocks: Mutex<HashMap<(i32, i32, i32), String>>,
+    filler: StateId,
+    blocks: Mutex<HashMap<(i32, i32, i32), StateId>>,
 }
 
 impl TestWorld {
-    fn new(dimension: Dimension, floor_top: i32, filler: &'static str) -> Self {
+    fn new(dimension: Dimension, floor_top: i32, filler: StateId) -> Self {
         Self {
             dimension,
             floor_top,
@@ -59,11 +61,11 @@ impl TestWorld {
         }
     }
 
-    fn put(&self, x: i32, y: i32, z: i32, state: &str) {
+    fn put(&self, x: i32, y: i32, z: i32, state: StateId) {
         self.blocks
             .lock()
             .unwrap()
-            .insert((x, y, z), state.to_owned());
+            .insert((x, y, z), state);
     }
 
     /// An obsidian frame with a `width × height` interior whose lower-left interior
@@ -76,7 +78,12 @@ impl TestWorld {
         for across in -1..=width {
             for up in -1..=height {
                 if across == -1 || across == width || up == -1 || up == height {
-                    self.put(x + ax * across, y + up, z + az * across, "minecraft:obsidian");
+                    self.put(
+                        x + ax * across,
+                        y + up,
+                        z + az * across,
+                        Block::Obsidian.default_state(),
+                    );
                 }
             }
         }
@@ -91,15 +98,15 @@ impl ChunkSource for SharedWorld {
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
         self.0.column(cx, cz)
     }
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
-        self.0.block_state(x, y, z)
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
+        self.0.block_state_id(x, y, z)
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
         self.0.biome_state_at(x, y, z)
     }
-    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
-        self.0.set_block(x, y, z, name);
+    fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
+        self.0.set_block(x, y, z, state);
     }
     fn dimension(&self) -> Option<Dimension> {
         self.0.dimension()
@@ -121,22 +128,22 @@ impl ChunkSource for TestWorld {
         ChunkColumn::new(self.dimension.min_y(), self.dimension.height())
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         if let Some(state) = self.blocks.lock().unwrap().get(&(x, y, z)) {
-            return state.clone();
+            return *state;
         }
         if y <= self.floor_top && y >= self.dimension.min_y() {
-            return self.filler.to_owned();
+            return self.filler;
         }
-        "minecraft:air".to_owned()
+        StateId::AIR
     }
 
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
         "minecraft:plains".to_string()
     }
 
-    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
-        self.put(x, y, z, name);
+    fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
+        self.put(x, y, z, state);
     }
 
     fn dimension(&self) -> Option<Dimension> {
@@ -151,12 +158,12 @@ fn linked_worlds() -> (DimensionalSource<SharedWorld>, SharedWorld, PortalIndex)
     let overworld = SharedWorld(Arc::new(TestWorld::new(
         Dimension::Overworld,
         63,
-        "minecraft:stone",
+        Block::Stone.default_state(),
     )));
     let nether = SharedWorld(Arc::new(TestWorld::new(
         Dimension::Nether,
         31,
-        "minecraft:netherrack",
+        Block::Netherrack.default_state(),
     )));
     let portals = PortalIndex::new();
 
@@ -220,7 +227,7 @@ fn a_portal_round_trips_from_a_spawn_far_from_the_origin() {
     )
     .expect("the hand-built frame must be a valid portal");
     for (pos, state) in &lit {
-        linked.primary().set_block(pos.x, pos.y, pos.z, state);
+        linked.primary().set_block(pos.x, pos.y, pos.z, *state);
     }
     portals.extend(Dimension::Overworld, lit.iter().map(|(pos, _)| *pos));
 
@@ -242,7 +249,7 @@ fn a_portal_round_trips_from_a_spawn_far_from_the_origin() {
         .as_ref()
         .expect("an empty Nether must have a portal built for it");
     for (pos, block) in &created.blocks {
-        nether.set_block(pos.x, pos.y, pos.z, block);
+        nether.set_block(pos.x, pos.y, pos.z, *block);
     }
     portals.extend(Dimension::Nether, created.portal_cells.iter().copied());
 
@@ -363,14 +370,14 @@ fn the_nether_source_serves_the_dimensions_full_window() {
     // Real terrain below 128, and nothing but air above it. Both halves matter: the
     // first says the generator ran, the second says the padding is padding.
     let solid_below = (0..128)
-        .filter(|&y| column.block_state(8, y, 8) != "minecraft:air")
+        .filter(|&y| column.block_state_id(8, y, 8) != StateId::AIR)
         .count();
     assert!(
         solid_below > 0,
         "a Nether column with no non-air block below 128 means the generator did not run"
     );
     let solid_above = (128..256)
-        .filter(|&y| column.block_state(8, y, 8) != "minecraft:air")
+        .filter(|&y| column.block_state_id(8, y, 8) != StateId::AIR)
         .count();
     assert_eq!(
         solid_above, 0,

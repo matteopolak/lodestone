@@ -49,7 +49,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lodestone_client::{BlockPos, ClientBuilder, Hand, LoginProfile, ServerAddress};
-use lodestone_data::block_states::block_name;
+use lodestone_data::block::Block;
+use lodestone_data::block_states::{StateId, block_name};
 use lodestone_model::{BlockFace, ClientAction, CommandBlockMode, GameMode, ItemStack, Vec3f};
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
 use lodestone_v26_2::{V770ServerProtocol, adapter};
@@ -58,7 +59,7 @@ use lodestone_v26_2::{V770ServerProtocol, adapter};
 /// inspect changes made by the server's command execution.
 #[derive(Clone, Default)]
 struct SharedAirSource {
-    edits: Arc<Mutex<HashMap<(i32, i32, i32), String>>>,
+    edits: Arc<Mutex<HashMap<(i32, i32, i32), StateId>>>,
 }
 
 impl ChunkSource for SharedAirSource {
@@ -66,24 +67,24 @@ impl ChunkSource for SharedAirSource {
         ChunkColumn::new(0, 32)
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         self.edits
             .lock()
             .expect("edits lock poisoned")
             .get(&(x, y, z))
-            .cloned()
-            .unwrap_or_else(|| "minecraft:air".to_string())
+            .copied()
+            .unwrap_or(StateId::AIR)
     }
 
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
         "minecraft:plains".to_string()
     }
 
-    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+    fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
         self.edits
             .lock()
             .expect("edits lock poisoned")
-            .insert((x, y, z), name.to_string());
+            .insert((x, y, z), state);
     }
 }
 
@@ -178,11 +179,11 @@ async fn an_always_active_command_block_runs_its_command() {
     // The server's own world — the ground truth a `SetBlock` effect is
     // applied against, independent of anything the client happens to decode.
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while source.block_state(target.x, target.y, target.z) != "minecraft:diamond_block" {
+    while source.block_state_id(target.x, target.y, target.z) != Block::DiamondBlock.default_state() {
         assert!(std::time::Instant::now() < deadline, "the always-active command block never ran");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert_eq!(source.block_state(target.x, target.y, target.z), "minecraft:diamond_block");
+    assert_eq!(source.block_state_id(target.x, target.y, target.z), Block::DiamondBlock.default_state());
 
     // The client-visible half: the real client's own decoded world, reachable
     // only through a real `block_update` the tick loop's effect must have
@@ -240,8 +241,8 @@ async fn an_unpowered_impulse_command_block_never_runs() {
     tokio::time::sleep(Duration::from_millis(400)).await;
 
     assert_eq!(
-        source.block_state(target.x, target.y, target.z),
-        "minecraft:air",
+        source.block_state_id(target.x, target.y, target.z),
+        StateId::AIR,
         "an unpowered, non-automatic command block must never run its command"
     );
 
@@ -287,8 +288,8 @@ async fn a_conditional_always_active_command_block_with_no_predecessor_never_run
     tokio::time::sleep(Duration::from_millis(400)).await;
 
     assert_eq!(
-        source.block_state(target.x, target.y, target.z),
-        "minecraft:air",
+        source.block_state_id(target.x, target.y, target.z),
+        StateId::AIR,
         "a conditional command block with no predecessor behind it must never run, \
          even though it is Always Active"
     );

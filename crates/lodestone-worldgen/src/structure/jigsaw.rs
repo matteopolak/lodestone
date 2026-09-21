@@ -323,7 +323,10 @@ impl JigsawBlockInfo {
     pub fn of(info: TemplateBlockInfo) -> Self {
         let (front, top) = info
             .state
-            .front_and_top()
+            .properties()
+            .iter()
+            .find(|(key, _)| *key == "orientation")
+            .and_then(|(_, value)| value.split_once('_'))
             .map_or((JigsawDirection::North, JigsawDirection::Up), |(f, t)| {
                 (JigsawDirection::parse(f), JigsawDirection::parse(t))
             });
@@ -1517,9 +1520,10 @@ mod tests {
         ]);
         let info = JigsawBlockInfo::of(TemplateBlockInfo {
             pos: [1, 2, 3],
-            state: super::super::template::BlockState::parse(
+            state: lodestone_data::block_states::StateId::from_state_str(
                 "minecraft:jigsaw[orientation=east_up]",
-            ),
+            )
+            .expect("jigsaw state"),
             local: [0, 0, 0],
             nbt: Some(Arc::clone(&nbt)),
         });

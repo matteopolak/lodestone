@@ -132,11 +132,15 @@
 //! decaying predicate over that fixed value is modeled.
 
 use crate::mob_spawn::SpawnRng;
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, PropertyKey, Properties};
+use lodestone_data::block_states::StateId;
 
 /// Strips a `[...]` block-state property suffix — the same convention
 /// `random_tick.rs`'s own private `base_name` uses, duplicated here (rather
 /// than shared) so this module has no dependency on `random_tick.rs`'s
 /// private items; both copies do the identical, trivial thing.
+#[cfg(test)]
 fn base_name(state: &str) -> &str {
     state.split('[').next().unwrap_or(state)
 }
@@ -147,6 +151,7 @@ fn base_name(state: &str) -> &str {
 /// missing case (age `0`, stage `0`), which is *also* Minecraft's own
 /// registered default for these properties, so "absent suffix" and
 /// "explicitly `=0`" are handled identically on purpose.
+#[cfg(test)]
 fn get_u32_property(state: &str, key: &str) -> Option<u32> {
     let (_, props) = state.split_once('[')?;
     let props = props.strip_suffix(']').unwrap_or(props);
@@ -164,6 +169,7 @@ fn get_u32_property(state: &str, key: &str) -> Option<u32> {
 /// (see [`get_u32_property`]'s doc comment for the same "absent means the
 /// vanilla default" handling — `persistent`'s vanilla default is `false`,
 /// per the real leaves block's own constructor).
+#[cfg(test)]
 fn get_bool_property(state: &str, key: &str) -> Option<bool> {
     let (_, props) = state.split_once('[')?;
     let props = props.strip_suffix(']').unwrap_or(props);
@@ -185,31 +191,52 @@ fn get_bool_property(state: &str, key: &str) -> Option<bool> {
 // Crop growth
 // ---------------------------------------------------------------------------
 
-pub const WHEAT: &str = "minecraft:wheat";
-pub const CARROTS: &str = "minecraft:carrots";
-pub const POTATOES: &str = "minecraft:potatoes";
-pub const BEETROOTS: &str = "minecraft:beetroots";
-
-/// `Some(max_age)` for a canonical crop base name, `None` otherwise. `7` for
+/// `Some(max_age)` for a crop state, `None` otherwise. `7` for
 /// wheat/carrots/potatoes (the real crop block's max age, plain crop-block
 /// subclasses
 /// with no override); `3` for beetroots (the real beetroot's own max age).
 #[must_use]
-pub fn crop_max_age(base: &str) -> Option<u32> {
-    match base {
-        WHEAT | CARROTS | POTATOES => Some(7),
-        BEETROOTS => Some(3),
+pub(crate) fn crop_max_age(state: StateId) -> Option<u32> {
+    match state.block() {
+        Block::Wheat | Block::Carrots | Block::Potatoes => Some(7),
+        Block::Beetroots => Some(3),
         _ => None,
     }
 }
 
-/// `true` iff `block_state` is a crop strictly below its own max age —
+#[must_use]
+pub(crate) fn crop_max_age_id(state: StateId) -> Option<u32> {
+    crop_max_age(state)
+}
+
+#[must_use]
+pub(crate) fn get_age_id(state: StateId) -> u32 {
+    property_number_id(state, PropertyKey::Age).unwrap_or(0)
+}
+
+#[must_use]
+pub(crate) fn set_age_id(state: StateId, age: u32) -> Option<StateId> {
+    let value = match age {
+        0 => BuiltinPropertyValue::Value0,
+        1 => BuiltinPropertyValue::Value1,
+        2 => BuiltinPropertyValue::Value2,
+        3 => BuiltinPropertyValue::Value3,
+        4 => BuiltinPropertyValue::Value4,
+        5 => BuiltinPropertyValue::Value5,
+        6 => BuiltinPropertyValue::Value6,
+        7 => BuiltinPropertyValue::Value7,
+        _ => return None,
+    };
+    Properties::state_for_block(state.block(), &Properties::from_state_id(state).with_builtin(PropertyKey::Age, value).ok()?)
+}
+
+/// `true` iff a text fixture is a crop strictly below its own max age —
 /// mirrors the real crop block's is-randomly-ticking query
 /// (`!this.isMaxAge(state)`).
 #[must_use]
+#[cfg(test)]
 pub fn is_growable_crop(block_state: &str) -> bool {
-    let base = base_name(block_state);
-    match crop_max_age(base) {
+    match StateId::from_state_str(block_state).and_then(crop_max_age) {
         Some(max) => get_u32_property(block_state, "age").unwrap_or(0) < max,
         None => false,
     }
@@ -218,12 +245,14 @@ pub fn is_growable_crop(block_state: &str) -> bool {
 /// The crop's current age (real default `0` — the real crop block's own constructor,
 /// `registerDefaultState(... setValue(AGE, 0))`).
 #[must_use]
+#[cfg(test)]
 pub fn get_age(block_state: &str) -> u32 {
     get_u32_property(block_state, "age").unwrap_or(0)
 }
 
 /// Builds the canonical block-state string for `base` at `age`.
 #[must_use]
+#[cfg(test)]
 pub fn set_age(base: &str, age: u32) -> String {
     format!("{base}[age={age}]")
 }
@@ -233,7 +262,7 @@ pub fn set_age(base: &str, age: u32) -> String {
 pub enum CropOutcome {
     /// Beetroot's own extra gate (`nextInt(3) == 0`) rejected this tick
     /// before the real crop block's own body ever ran. Only reachable for
-    /// [`BEETROOTS`].
+    /// a beetroot state.
     SkippedByOuterGate,
     /// `above_is_air` was `false` (the light-check proxy) — zero further
     /// draws, per the real crop block's random tick's light check wrapping the whole
@@ -247,13 +276,13 @@ pub enum CropOutcome {
 }
 
 /// The pure crop-growth decision — see this module's doc comment for the jar
-/// citation and the growth-speed proxy this crate substitutes. `base` must
-/// be one of the four constants above and `age` its current age (callers
+/// citation and the growth-speed proxy this crate substitutes. `state` must
+/// be a crop state and `age` its current age (callers
 /// gate on [`crop_max_age`]/[`is_growable_crop`] first, exactly like
 /// `random_tick.rs`'s own dispatch gates on `is_randomly_ticking` before
 /// calling any per-block handler).
-pub fn crop_random_tick(base: &str, age: u32, above_is_air: bool, rng: &mut SpawnRng) -> CropOutcome {
-    if base == BEETROOTS {
+pub(crate) fn crop_random_tick(state: StateId, age: u32, above_is_air: bool, rng: &mut SpawnRng) -> CropOutcome {
+    if state.block() == Block::Beetroots {
         // The real beetroot's random tick: a draw with bound 3 that must be
         // non-zero — unconditional,
         // before any light check.
@@ -284,19 +313,52 @@ pub fn crop_random_tick(base: &str, age: u32, above_is_air: bool, rng: &mut Spaw
 /// instance (no override narrowing it, unlike leaves/crop blocks), so
 /// this predicate alone is the full selection gate.
 #[must_use]
+#[cfg(test)]
 pub fn is_sapling(block_state: &str) -> bool {
     base_name(block_state).ends_with("_sapling")
+}
+
+#[must_use]
+pub(crate) fn is_sapling_id(state: StateId) -> bool {
+    matches!(
+        state.block(),
+        Block::OakSapling
+            | Block::SpruceSapling
+            | Block::BirchSapling
+            | Block::JungleSapling
+            | Block::AcaciaSapling
+            | Block::CherrySapling
+            | Block::DarkOakSapling
+            | Block::PaleOakSapling
+    )
+}
+
+#[must_use]
+pub(crate) fn get_stage_id(state: StateId) -> u32 {
+    property_number_id(state, PropertyKey::Stage).unwrap_or(0)
+}
+
+#[must_use]
+pub(crate) fn set_stage_id(state: StateId, stage: u32) -> Option<StateId> {
+    let value = match stage {
+        0 => BuiltinPropertyValue::Value0,
+        1 => BuiltinPropertyValue::Value1,
+        _ => return None,
+    };
+    Properties::state_for_block(state.block(), &Properties::from_state_id(state).with_builtin(PropertyKey::Stage, value).ok()?)
 }
 
 /// The sapling's current growth stage (vanilla default `0` —
 /// the real sapling block's own constructor).
 #[must_use]
+#[cfg(test)]
 pub fn get_stage(block_state: &str) -> u32 {
     get_u32_property(block_state, "stage").unwrap_or(0)
 }
 
 /// Builds the canonical block-state string for `base` at `stage`.
 #[must_use]
+#[cfg(test)]
 pub fn set_stage(base: &str, stage: u32) -> String {
     format!("{base}[stage={stage}]")
 }
@@ -343,8 +405,34 @@ pub fn sapling_random_tick(above_is_air: bool, stage: u32, rng: &mut SpawnRng) -
 /// `true` for any suffix-`_leaves` block (oak/spruce/birch/jungle/acacia/
 /// dark_oak/mangrove/cherry/azalea leaves all follow this naming).
 #[must_use]
+#[cfg(test)]
 pub fn is_leaves(block_state: &str) -> bool {
     base_name(block_state).ends_with("_leaves")
+}
+
+#[must_use]
+pub(crate) fn is_leaves_id(state: StateId) -> bool {
+    matches!(
+        state.block(),
+        Block::OakLeaves
+            | Block::SpruceLeaves
+            | Block::BirchLeaves
+            | Block::JungleLeaves
+            | Block::AcaciaLeaves
+            | Block::CherryLeaves
+            | Block::DarkOakLeaves
+            | Block::PaleOakLeaves
+            | Block::MangroveLeaves
+            | Block::AzaleaLeaves
+            | Block::FloweringAzaleaLeaves
+    )
+}
+
+#[must_use]
+pub(crate) fn leaves_should_decay_id(state: StateId) -> bool {
+    is_leaves_id(state)
+        && property_number_id(state, PropertyKey::Distance).unwrap_or(7) == 7
+        && !property_bool_id(state, PropertyKey::Persistent).unwrap_or(false)
 }
 
 /// `true` iff this leaves block is currently decaying — the single shared
@@ -355,15 +443,62 @@ pub fn is_leaves(block_state: &str) -> bool {
 /// `distance` written is, by vanilla's own default, maximally far from any
 /// log and therefore eligible), `persistent` defaults to `false`.
 #[must_use]
+#[cfg(test)]
 pub fn leaves_should_decay(block_state: &str) -> bool {
     is_leaves(block_state)
         && get_u32_property(block_state, "distance").unwrap_or(7) == 7
         && !get_bool_property(block_state, "persistent").unwrap_or(false)
 }
 
+fn property_number_id(state: StateId, key: PropertyKey) -> Option<u32> {
+    match Properties::from_state_id(state).get(key)?.builtin_value()? {
+        BuiltinPropertyValue::Value0 => Some(0),
+        BuiltinPropertyValue::Value1 => Some(1),
+        BuiltinPropertyValue::Value2 => Some(2),
+        BuiltinPropertyValue::Value3 => Some(3),
+        BuiltinPropertyValue::Value4 => Some(4),
+        BuiltinPropertyValue::Value5 => Some(5),
+        BuiltinPropertyValue::Value6 => Some(6),
+        BuiltinPropertyValue::Value7 => Some(7),
+        BuiltinPropertyValue::Value8 => Some(8),
+        BuiltinPropertyValue::Value9 => Some(9),
+        BuiltinPropertyValue::Value10 => Some(10),
+        BuiltinPropertyValue::Value11 => Some(11),
+        BuiltinPropertyValue::Value12 => Some(12),
+        BuiltinPropertyValue::Value13 => Some(13),
+        BuiltinPropertyValue::Value14 => Some(14),
+        BuiltinPropertyValue::Value15 => Some(15),
+        BuiltinPropertyValue::Value16 => Some(16),
+        BuiltinPropertyValue::Value17 => Some(17),
+        BuiltinPropertyValue::Value18 => Some(18),
+        BuiltinPropertyValue::Value19 => Some(19),
+        BuiltinPropertyValue::Value20 => Some(20),
+        BuiltinPropertyValue::Value21 => Some(21),
+        BuiltinPropertyValue::Value22 => Some(22),
+        BuiltinPropertyValue::Value23 => Some(23),
+        BuiltinPropertyValue::Value24 => Some(24),
+        BuiltinPropertyValue::Value25 => Some(25),
+        _ => None,
+    }
+}
+
+fn property_bool_id(state: StateId, key: PropertyKey) -> Option<bool> {
+    match Properties::from_state_id(state).get(key)?.builtin_value()? {
+        BuiltinPropertyValue::True => Some(true),
+        BuiltinPropertyValue::False => Some(false),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const WHEAT: &str = "minecraft:wheat";
+
+    fn state(name: &str) -> StateId {
+        StateId::from_state_str(name).expect("fixture state must be in the built-in registry")
+    }
     use std::collections::HashSet;
 
     // ---- property parsing ----
@@ -426,7 +561,7 @@ mod tests {
     fn unlit_wheat_draws_nothing() {
         let mut rng = SpawnRng::new(11);
         let before = format!("{rng:?}");
-        let outcome = crop_random_tick(WHEAT, 0, false, &mut rng);
+        let outcome = crop_random_tick(state("minecraft:wheat"), 0, false, &mut rng);
         assert_eq!(outcome, CropOutcome::NoLight);
         assert_eq!(format!("{rng:?}"), before, "an unlit crop must not draw from the behaviour RNG at all");
     }
@@ -452,7 +587,7 @@ mod tests {
         let mut miss_seen = false;
         for seed in 0..500u64 {
             let mut rng = SpawnRng::new(seed);
-            let outcome = crop_random_tick(WHEAT, 3, true, &mut rng);
+            let outcome = crop_random_tick(state("minecraft:wheat"), 3, true, &mut rng);
             let mut replay = SpawnRng::new(seed);
             let draw = replay.next_int(26);
             assert_eq!(
@@ -486,7 +621,7 @@ mod tests {
         let mut no_light_seen = false;
         for seed in 0..500u64 {
             let mut rng = SpawnRng::new(seed);
-            let outcome = crop_random_tick(BEETROOTS, 0, false, &mut rng);
+            let outcome = crop_random_tick(state("minecraft:beetroots"), 0, false, &mut rng);
             let mut replay = SpawnRng::new(seed);
             let outer = replay.next_int(3);
             assert_eq!(format!("{rng:?}"), format!("{replay:?}"), "seed {seed}: unlit beetroot must draw exactly the outer gate");
@@ -515,7 +650,7 @@ mod tests {
         let mut counts: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
         for seed in 0..2000u64 {
             let mut rng = SpawnRng::new(seed);
-            let outcome = crop_random_tick(BEETROOTS, 1, true, &mut rng);
+            let outcome = crop_random_tick(state("minecraft:beetroots"), 1, true, &mut rng);
             let mut replay = SpawnRng::new(seed);
             let outer = replay.next_int(3);
             if outer == 0 {

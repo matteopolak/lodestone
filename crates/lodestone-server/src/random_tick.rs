@@ -145,6 +145,9 @@ use crate::redstone_wire;
 use crate::scheduled_tick::{ScheduledTickKind, ScheduledTickQueueAccess, TickPriority};
 #[cfg(test)]
 use crate::scheduled_tick::ScheduledTickQueue;
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, PropertyKey, Properties, PropertyValue};
+use lodestone_data::block_states::StateId;
 use lodestone_model::BlockPos;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -155,7 +158,9 @@ mod gravity;
 #[path = "random_tick/redstone.rs"]
 mod redstone_family;
 
-pub use grass::{can_propagate_onto, grass_random_tick, GrassOutcome};
+pub use grass::{grass_random_tick, GrassOutcome};
+#[cfg(test)]
+pub(crate) use grass::can_propagate_onto;
 pub(crate) use gravity::settle_gravity_at;
 #[cfg(test)]
 pub(crate) use gravity::GravitySettle;
@@ -175,14 +180,13 @@ pub(crate) use redstone_family::{propagate_and_react, propagate_and_react_with_e
 /// code should pass until a real gamerule store exists.
 pub const DEFAULT_RANDOM_TICK_SPEED: u32 = 3;
 
-/// The one block this crate models a real random tick for today. Mirrors
-/// the real is-randomly-ticking property being set true only on
-/// the grass and mycelium spreading-snowy-block subclasses —
-/// note plain dirt is **not** in this set: dirt does not tick itself, it is
-/// only ever a *target* of a neighbouring grass block's own tick.
+#[cfg(test)]
 pub(super) const GRASS_BLOCK: &str = "minecraft:grass_block";
+#[cfg(test)]
 pub(super) const DIRT_BLOCK: &str = "minecraft:dirt";
+#[cfg(test)]
 pub(super) const MYCELIUM_BLOCK: &str = "minecraft:mycelium";
+#[cfg(test)]
 pub(super) const PODZOL_BLOCK: &str = "minecraft:podzol";
 
 /// `minecraft:lava` — the one **fluid** whose real is-randomly-ticking flag is true.
@@ -191,70 +195,40 @@ pub(super) const PODZOL_BLOCK: &str = "minecraft:podzol";
 /// does. Its own random tick is what sets fire to flammable blocks near lava, and it
 /// is therefore the only thing in a generated world that starts a fire at all —
 /// see [`RandomTickScheduler::tick_lava`].
+#[cfg(test)]
 pub(super) const LAVA_BLOCK: &str = "minecraft:lava";
 
-/// Strips any `[...]` block-state property suffix, mirroring every other
-/// canonical-name comparison in this crate (`crate::chunk::is_air_or_fluid`,
-/// `crate::chunk::is_water`).
+#[cfg(test)]
 fn base_name(state: &str) -> &str {
     state.split('[').next().unwrap_or(state)
 }
 
-/// `true` for any air variant (`minecraft:air`/`cave_air`/`void_air`) —
-/// narrower than [`crate::chunk::is_air_or_fluid`], which also counts
-/// fluids. Still this module's light-level proxy for **crops and saplings**
-/// (`crate::growth_tick`); grass no longer uses it — see
-/// [`grass_can_stay_alive`].
-#[must_use]
-pub fn is_air_variant(state: &str) -> bool {
-    matches!(base_name(state), "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air")
-}
-
-/// `true` iff `state`'s fluid state is **full** — the real "is full" fluid
-/// check, i.e. `amount == 8`.
-///
-/// Three cases, and the third is the one a `base_name == "water"` test misses:
-///
-/// * a source liquid, `minecraft:water[level=0]` / `minecraft:lava[level=0]`:
-///   the real fluid-state query maps `level` to `amount = 8 - level` for
-///   `level < 8`, so only `level=0` is full;
-/// * a **falling** liquid, `level=8..=15`: those map to `amount = 8` and are
-///   full, which is why the check cannot be `level == 0`;
-/// * any state carrying `waterlogged=true` — a waterlogged slab, stair or
-///   fence has a full water fluid state even though its *block* is not water.
-///   The real can-stay-alive check reads the fluid state, not the block, so
-///   waterlogged-anything above grass kills it.
-#[must_use]
-pub fn has_full_fluid(state: &str) -> bool {
-    if property_of(state, "waterlogged") == Some("true") {
-        return true;
-    }
-    if !matches!(base_name(state), "minecraft:water" | "minecraft:lava") {
-        return false;
-    }
-    match property_of(state, "level") {
-        // A bare `minecraft:water` with no properties is the default state,
-        // `level=0`, so full.
-        None => true,
-        Some(level) => level
-            .parse::<u32>()
-            .is_ok_and(|level| level == 0 || level >= 8),
-    }
-}
-
-/// The value of `state`'s `key=` property, if the state string carries one.
-///
-/// Deliberately a substring scan rather than a parse: this module already keys
-/// everything off the canonical state string [`crate::chunk::ChunkColumn`]
-/// stores, and a `key=value` lookup over `a[k=v,k2=v2]` needs no more than
-/// that. Matches on the whole key, so `waterlogged` cannot be found inside
-/// another property's name or value.
+#[cfg(test)]
 fn property_of<'s>(state: &'s str, key: &str) -> Option<&'s str> {
     let props = state.split_once('[')?.1.strip_suffix(']')?;
     props.split(',').find_map(|pair| {
         let (k, v) = pair.split_once('=')?;
         (k.trim() == key).then_some(v.trim())
     })
+}
+
+#[cfg(test)]
+#[must_use]
+pub fn is_air_variant(state: &str) -> bool {
+    matches!(base_name(state), "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air")
+}
+
+/// Strips any `[...]` block-state property suffix, mirroring every other
+/// canonical-name comparison in this crate (`crate::chunk::is_air_or_fluid`,
+/// `crate::chunk::is_water`).
+/// `true` for any air variant (`minecraft:air`/`cave_air`/`void_air`) —
+/// narrower than [`crate::chunk::is_air_or_fluid`], which also counts
+/// fluids. Still this module's light-level proxy for **crops and saplings**
+/// (`crate::growth_tick`); grass no longer uses it — see
+/// [`grass_can_stay_alive`].
+#[must_use]
+pub(crate) fn is_air_variant_id(state: StateId) -> bool {
+    matches!(state.block(), Block::Air | Block::CaveAir | Block::VoidAir)
 }
 
 /// Vanilla's own grass/mycelium can-stay-alive check,
@@ -306,26 +280,45 @@ fn property_of<'s>(state: &'s str, key: &str) -> Option<&'s str> {
 /// An unresolvable state string is treated as air-like (survives), for the same
 /// reason: it cannot destroy a block the player is looking at.
 #[must_use]
-pub fn grass_can_stay_alive(above_state: &str) -> bool {
-    // 1. Snow above with exactly one layer — an explicit `true` that
-    //    precedes both other checks. A single snow layer is *thin enough to see
-    //    through*, so grass under fresh snowfall keeps its `snowy=true` state
-    //    instead of dying.
-    if base_name(above_state) == "minecraft:snow" && property_of(above_state, "layers") == Some("1")
+pub(crate) fn grass_can_stay_alive_id(above_state: StateId) -> bool {
+    if above_state.block() == Block::Snow
+        && property_number(above_state, PropertyKey::Layers) == Some(1)
     {
         return true;
     }
-    // 2. A full fluid state above — drowned grass dies. Checked
-    //    before dampening because water's own dampening is 1, which would
-    //    otherwise pass.
-    if has_full_fluid(above_state) {
+    if matches!(above_state.block(), Block::Water | Block::Lava)
+        && property_number(above_state, PropertyKey::Level)
+            .map_or(true, |level| level == 0 || level >= 8)
+    {
         return false;
     }
-    // 3. The real light-dampening-into query is strictly less than 15.
-    match crate::mobs::block_state_id(above_state) {
-        Some(id) => lodestone_data::light_props::dampening(id) < 15,
-        None => true,
+    lodestone_data::light_props::dampening(above_state) < 15
+}
+
+#[cfg(test)]
+#[must_use]
+pub fn has_full_fluid(state: &str) -> bool {
+    if property_of(state, "waterlogged") == Some("true") {
+        return true;
     }
+    if !matches!(base_name(state), "minecraft:water" | "minecraft:lava") {
+        return false;
+    }
+    property_of(state, "level")
+        .is_none_or(|level| level.parse::<u32>().is_ok_and(|level| level == 0 || level >= 8))
+}
+
+#[cfg(test)]
+#[must_use]
+pub fn grass_can_stay_alive(state: &str) -> bool {
+    if base_name(state) == "minecraft:snow" && property_of(state, "layers") == Some("1") {
+        return true;
+    }
+    if has_full_fluid(state) {
+        return false;
+    }
+    StateId::from_state_str(state)
+        .is_none_or(|state| lodestone_data::light_props::dampening(state) < 15)
 }
 
 /// The real "is snowy setting" check — the block above is tagged as snow,
@@ -335,11 +328,17 @@ pub fn grass_can_stay_alive(above_state: &str) -> bool {
 /// which is the narrower "snow with exactly one layer": the two predicates
 /// live in the same real class and are different on purpose.
 #[must_use]
-pub fn is_snowy_setting(above_state: &str) -> bool {
+pub(crate) fn is_snowy_setting_id(above_state: StateId) -> bool {
     matches!(
-        base_name(above_state),
-        "minecraft:snow" | "minecraft:snow_block" | "minecraft:powder_snow"
+        above_state.block(),
+        Block::Snow | Block::SnowBlock | Block::PowderSnow
     )
+}
+
+#[cfg(test)]
+#[must_use]
+pub fn is_snowy_setting(above_state: &str) -> bool {
+    matches!(base_name(above_state), "minecraft:snow" | "minecraft:snow_block" | "minecraft:powder_snow")
 }
 
 /// `defaultBlockState().setValue(SNOWY, isSnowySetting(above))` for a
@@ -352,32 +351,37 @@ pub fn is_snowy_setting(above_state: &str) -> bool {
 /// *now* correct on the wire — but it is still the wrong value half the time,
 /// and the server's own state string is what everything downstream reads.
 #[must_use]
-fn spreading_snowy_state(block: &str, above_state: &str) -> &'static str {
-    match (block, is_snowy_setting(above_state)) {
-        (GRASS_BLOCK, true) => "minecraft:grass_block[snowy=true]",
-        (GRASS_BLOCK, false) => "minecraft:grass_block[snowy=false]",
-        (MYCELIUM_BLOCK, true) => "minecraft:mycelium[snowy=true]",
-        (MYCELIUM_BLOCK, false) => "minecraft:mycelium[snowy=false]",
-        (PODZOL_BLOCK, true) => "minecraft:podzol[snowy=true]",
-        _ => "minecraft:podzol[snowy=false]",
-    }
+pub(crate) fn spreading_snowy_state_id(block: Block, above_state: StateId) -> StateId {
+    let snowy = is_snowy_setting_id(above_state);
+    let target = match block {
+        Block::GrassBlock => Block::GrassBlock,
+        Block::Mycelium => Block::Mycelium,
+        Block::Podzol => Block::Podzol,
+        _ => return lodestone_data::block_states::air_state(),
+    };
+    let properties = Properties::from_state_id(target.default_state())
+        .with_builtin(
+            PropertyKey::Snowy,
+            if snowy {
+                BuiltinPropertyValue::True
+            } else {
+                BuiltinPropertyValue::False
+            },
+        )
+        .expect("snowy property is valid for spreading snowy blocks");
+    Properties::state_for_block(target, &properties).expect("snowy block state exists")
 }
 
-/// The three blocks carrying `BlockStateProperties.SNOWY` in 26.2 — exactly the
-/// six states `lodestone_data::snow_support::has_snowy_property` marks. Only
-/// `grass_block` is spread-ticked by this crate today (see [`GRASS_BLOCK`]);
-/// the other two still need their `snowy` kept current when snow lands on or
-/// leaves them.
-const SNOWY_FAMILY: [&str; 3] = [GRASS_BLOCK, MYCELIUM_BLOCK, PODZOL_BLOCK];
-
-/// [`SNOWY_FAMILY`] membership as a named predicate, so
-/// [`crate::redstone_graph::classify`] can mirror this dispatcher's own
-/// `snowy` arm without the family list leaving this module. Takes a **base
-/// name**, matching the `SNOWY_FAMILY.contains(&base_name(&state))` guard it
-/// reproduces.
+/// Test reference for the snowy-family dispatch arm.
+#[cfg(test)]
 #[must_use]
-pub(crate) fn is_snowy_family(base: &str) -> bool {
-    SNOWY_FAMILY.contains(&base)
+pub(crate) fn is_snowy_family(base: Block) -> bool {
+    matches!(base, Block::GrassBlock | Block::Mycelium | Block::Podzol)
+}
+
+#[must_use]
+pub(crate) fn is_snowy_family_id(state: StateId) -> bool {
+    matches!(state.block(), Block::GrassBlock | Block::Mycelium | Block::Podzol)
 }
 
 /// `true` iff `block_state` is one this crate models a random tick for.
@@ -387,14 +391,77 @@ pub(crate) fn is_snowy_family(base: &str) -> bool {
 /// the three families added: crop growth, sapling growth, and
 /// leaf decay, all cited in `crate::growth_tick`'s own module doc comment.
 #[must_use]
+pub fn is_randomly_ticking_id(state: StateId) -> bool {
+    match state.block() {
+        Block::GrassBlock | Block::Lava => true,
+        Block::Wheat | Block::Carrots | Block::Potatoes => {
+            property_number(state, PropertyKey::Age).unwrap_or(0) < 7
+        }
+        Block::Beetroots => property_number(state, PropertyKey::Age).unwrap_or(0) < 3,
+        Block::OakSapling
+        | Block::SpruceSapling
+        | Block::BirchSapling
+        | Block::JungleSapling
+        | Block::AcaciaSapling
+        | Block::CherrySapling
+        | Block::DarkOakSapling
+        | Block::PaleOakSapling => true,
+        Block::OakLeaves
+        | Block::SpruceLeaves
+        | Block::BirchLeaves
+        | Block::JungleLeaves
+        | Block::AcaciaLeaves
+        | Block::CherryLeaves
+        | Block::DarkOakLeaves
+        | Block::PaleOakLeaves
+        | Block::MangroveLeaves
+        | Block::AzaleaLeaves
+        | Block::FloweringAzaleaLeaves => growth_tick::leaves_should_decay_id(state),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+#[must_use]
 pub fn is_randomly_ticking(block_state: &str) -> bool {
-    #[cfg(test)]
     predicate_calls::bump();
-    base_name(block_state) == GRASS_BLOCK
-        || base_name(block_state) == LAVA_BLOCK
+    base_name(block_state) == "minecraft:grass_block"
+        || base_name(block_state) == "minecraft:lava"
         || growth_tick::is_growable_crop(block_state)
         || growth_tick::is_sapling(block_state)
         || growth_tick::leaves_should_decay(block_state)
+}
+
+fn property_number(state: StateId, key: PropertyKey) -> Option<u32> {
+    match Properties::from_state_id(state).get(key)?.builtin_value()? {
+        BuiltinPropertyValue::Value0 => Some(0),
+        BuiltinPropertyValue::Value1 => Some(1),
+        BuiltinPropertyValue::Value2 => Some(2),
+        BuiltinPropertyValue::Value3 => Some(3),
+        BuiltinPropertyValue::Value4 => Some(4),
+        BuiltinPropertyValue::Value5 => Some(5),
+        BuiltinPropertyValue::Value6 => Some(6),
+        BuiltinPropertyValue::Value7 => Some(7),
+        BuiltinPropertyValue::Value8 => Some(8),
+        BuiltinPropertyValue::Value9 => Some(9),
+        BuiltinPropertyValue::Value10 => Some(10),
+        BuiltinPropertyValue::Value11 => Some(11),
+        BuiltinPropertyValue::Value12 => Some(12),
+        BuiltinPropertyValue::Value13 => Some(13),
+        BuiltinPropertyValue::Value14 => Some(14),
+        BuiltinPropertyValue::Value15 => Some(15),
+        BuiltinPropertyValue::Value16 => Some(16),
+        BuiltinPropertyValue::Value17 => Some(17),
+        BuiltinPropertyValue::Value18 => Some(18),
+        BuiltinPropertyValue::Value19 => Some(19),
+        BuiltinPropertyValue::Value20 => Some(20),
+        BuiltinPropertyValue::Value21 => Some(21),
+        BuiltinPropertyValue::Value22 => Some(22),
+        BuiltinPropertyValue::Value23 => Some(23),
+        BuiltinPropertyValue::Value24 => Some(24),
+        BuiltinPropertyValue::Value25 => Some(25),
+        _ => None,
+    }
 }
 
 /// An instrument, not a mechanism: how many times [`is_randomly_ticking`] has
@@ -458,10 +525,9 @@ pub fn next_random_tick_pos(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RandomTickEvent {
     pub pos: (i32, i32, i32),
-    pub from: String,
-    pub to: String,
+    pub from: StateId,
+    pub to: StateId,
 }
-
 
 /// The random-tick driver: owns the two independent generators
 /// `ServerLevel` keeps (the position LCG and the behaviour RNG — see this
@@ -531,7 +597,7 @@ impl RandomTickScheduler {
     /// — every family returns through this same `Vec`, so this
     /// function's caller (`tick::run_tick_loop`) needed zero changes to gain
     /// the new families: it already forwards whatever `tick_chunk` hands
-    /// back, generically, one block-state string at a time.
+    /// back, generically, one typed state at a time.
     ///
     /// `block_ticks`/`current_tick` are threaded through to
     /// [`propagate_and_react`] so a mutation
@@ -609,8 +675,8 @@ impl RandomTickScheduler {
                         next_random_tick_pos(&mut self.position_state, min_x, section_min_y, min_z, 15);
                     let lx = x - min_x;
                     let lz = z - min_z;
-                    let state = column.block_state(lx, y, lz).to_string();
-                    if !is_randomly_ticking(&state) {
+                    let state = column.block_state_id(lx, y, lz);
+                    if !is_randomly_ticking_id(state) {
                         continue;
                     }
                     events.extend(self.tick_randomly_ticking_block(
@@ -621,7 +687,7 @@ impl RandomTickScheduler {
                         x,
                         y,
                         z,
-                        &state,
+                        state,
                         block_ticks,
                         current_tick,
                     ));
@@ -649,20 +715,20 @@ impl RandomTickScheduler {
         x: i32,
         y: i32,
         z: i32,
-        state: &str,
+        state: StateId,
         block_ticks: &mut Q,
         current_tick: u64,
     ) -> Vec<RandomTickEvent> {
-        let base = base_name(state);
-        let mut events = if base == GRASS_BLOCK {
+        let block = state.block();
+        let mut events = if block == Block::GrassBlock {
             self.tick_grass_block(column, min_x, min_z, x, y, z, state)
-        } else if base == LAVA_BLOCK {
+        } else if block == Block::Lava {
             self.tick_lava(column, min_x, min_z, x, y, z, block_ticks, current_tick)
-        } else if growth_tick::crop_max_age(base).is_some() {
-            self.tick_crop_block(column, min_x, min_z, x, y, z, state, base)
-        } else if growth_tick::is_sapling(state) {
-            self.tick_sapling_block(column, min_x, min_z, x, y, z, state, base)
-        } else if growth_tick::is_leaves(state) {
+        } else if growth_tick::crop_max_age_id(state).is_some() {
+            self.tick_crop_block(column, min_x, min_z, x, y, z, state)
+        } else if growth_tick::is_sapling_id(state) {
+            self.tick_sapling_block(column, min_x, min_z, x, y, z, state)
+        } else if growth_tick::is_leaves_id(state) {
             self.tick_leaves_block(column, min_x, min_z, x, y, z, state)
         } else {
             Vec::new()
@@ -704,21 +770,22 @@ impl RandomTickScheduler {
         x: i32,
         y: i32,
         z: i32,
-        state: &str,
-        base: &str,
+        state: StateId,
     ) -> Vec<RandomTickEvent> {
         let lx = x - min_x;
         let lz = z - min_z;
-        let above = column.block_state(lx, y + 1, lz).to_string();
-        let above_is_air = is_air_variant(&above);
-        let age = growth_tick::get_age(state);
-        match growth_tick::crop_random_tick(base, age, above_is_air, &mut self.behavior_rng) {
+        let above = column.block_state_id(lx, y + 1, lz);
+        let above_is_air = is_air_variant_id(above);
+        let age = growth_tick::get_age_id(state);
+        match growth_tick::crop_random_tick(state, age, above_is_air, &mut self.behavior_rng) {
             growth_tick::CropOutcome::Grew(new_age) => {
-                let new_state = growth_tick::set_age(base, new_age);
-                column.set_block(lx, y, lz, &new_state);
+                let Some(new_state) = growth_tick::set_age_id(state, new_age) else {
+                    return Vec::new();
+                };
+                column.set_block_id(lx, y, lz, new_state);
                 vec![RandomTickEvent {
                     pos: (x, y, z),
-                    from: state.to_string(),
+                    from: state,
                     to: new_state,
                 }]
             }
@@ -737,21 +804,22 @@ impl RandomTickScheduler {
         x: i32,
         y: i32,
         z: i32,
-        state: &str,
-        base: &str,
+        state: StateId,
     ) -> Vec<RandomTickEvent> {
         let lx = x - min_x;
         let lz = z - min_z;
-        let above = column.block_state(lx, y + 1, lz).to_string();
-        let above_is_air = is_air_variant(&above);
-        let stage = growth_tick::get_stage(state);
+        let above = column.block_state_id(lx, y + 1, lz);
+        let above_is_air = is_air_variant_id(above);
+        let stage = growth_tick::get_stage_id(state);
         match growth_tick::sapling_random_tick(above_is_air, stage, &mut self.behavior_rng) {
             growth_tick::SaplingOutcome::AdvancedToStage1 => {
-                let new_state = growth_tick::set_stage(base, 1);
-                column.set_block(lx, y, lz, &new_state);
+                let Some(new_state) = growth_tick::set_stage_id(state, 1) else {
+                    return Vec::new();
+                };
+                column.set_block_id(lx, y, lz, new_state);
                 vec![RandomTickEvent {
                     pos: (x, y, z),
-                    from: state.to_string(),
+                    from: state,
                     to: new_state,
                 }]
             }
@@ -774,15 +842,16 @@ impl RandomTickScheduler {
         x: i32,
         y: i32,
         z: i32,
-        state: &str,
+        state: StateId,
     ) -> Vec<RandomTickEvent> {
         let lx = x - min_x;
         let lz = z - min_z;
-        column.set_block(lx, y, lz, crate::chunk::AIR);
+        let air = lodestone_data::block_states::air_state();
+        column.set_block_id(lx, y, lz, air);
         vec![RandomTickEvent {
             pos: (x, y, z),
-            from: state.to_string(),
-            to: crate::chunk::AIR.to_string(),
+            from: state,
+            to: air,
         }]
     }
 
@@ -805,20 +874,20 @@ impl RandomTickScheduler {
 /// configurations that use them.
 ///
 /// The prefilter that makes [`section_has_randomly_ticking_block`] affordable.
-/// [`is_randomly_ticking`] is a **string** predicate (four `base_name` splits
-/// in the worst case), and the scan below used to run it on all 4096 blocks of
-/// every section, of every column, on every tick. A column's palette is tens
-/// of entries, so classifying the palette once per column and then comparing
-/// integers reaches the *identical* decision for a small constant instead of a
-/// per-block one — the same argument
+/// The original text predicate performed several property scans and the old
+/// section scan ran it on all 4096 blocks of every section, of every column,
+/// on every tick. A column's palette is tens of entries, so classifying the
+/// palette once per column and then comparing integers reaches the identical
+/// decision for a small constant instead of a per-block one — the same argument
 /// [`ChunkColumn::raw_palette`](crate::chunk::ChunkColumn::raw_palette)
 /// already makes for the save path.
 #[cfg(any(test, debug_assertions))]
 fn randomly_ticking_palette_mask(column: &crate::chunk::ChunkColumn) -> Vec<bool> {
     column
-        .raw_palette()
+        .palette()
         .iter()
-        .map(|state| is_randomly_ticking(state))
+        .copied()
+        .map(is_randomly_ticking_id)
         .collect()
 }
 
@@ -858,6 +927,71 @@ mod tests {
     use crate::chunk::ChunkColumn;
     use std::collections::HashSet;
     use std::sync::Mutex;
+
+    fn sid(text: &str) -> StateId {
+        StateId::from_state_str(text).expect("random-tick fixture state must resolve")
+    }
+
+    trait FixtureState {
+        fn into_state(self) -> StateId;
+    }
+
+    impl FixtureState for StateId {
+        fn into_state(self) -> StateId {
+            self
+        }
+    }
+
+    impl FixtureState for &str {
+        fn into_state(self) -> StateId {
+            sid(self)
+        }
+    }
+
+    impl FixtureState for &&str {
+        fn into_state(self) -> StateId {
+            sid(self)
+        }
+    }
+
+    impl FixtureState for &String {
+        fn into_state(self) -> StateId {
+            sid(self)
+        }
+    }
+
+    impl FixtureState for &StateId {
+        fn into_state(self) -> StateId {
+            *self
+        }
+    }
+
+    impl FixtureState for Block {
+        fn into_state(self) -> StateId {
+            self.default_state()
+        }
+    }
+
+    impl FixtureState for &Block {
+        fn into_state(self) -> StateId {
+            self.default_state()
+        }
+    }
+
+    trait FixtureColumn {
+        fn set_block<S: FixtureState>(&mut self, x: i32, y: i32, z: i32, state: S);
+        fn block_state(&self, x: i32, y: i32, z: i32) -> String;
+    }
+
+    impl FixtureColumn for ChunkColumn {
+        fn set_block<S: FixtureState>(&mut self, x: i32, y: i32, z: i32, state: S) {
+            self.set_block_id(x, y, z, state.into_state());
+        }
+
+        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+            self.block_state_id(x, y, z).canonical_state()
+        }
+    }
 
     // # `next_random_tick_pos`: predicted values computed independently
     //
@@ -1051,7 +1185,7 @@ mod tests {
         let mut converted = false;
         for _ in 0..3000 {
             let events = scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0, &NoNeighbors);
-            if events.iter().any(|e| e.pos == (3, 5, 3) && e.to == DIRT_BLOCK) {
+            if events.iter().any(|e| e.pos == (3, 5, 3) && e.to == sid(DIRT_BLOCK)) {
                 converted = true;
                 break;
             }
@@ -1074,7 +1208,7 @@ mod tests {
         for _ in 0..500 {
             let events = scheduler.tick_chunk(&mut column, 0, 0, 8, &mut block_ticks, 0, &NoNeighbors);
             assert!(
-                !events.iter().any(|e| e.to == DIRT_BLOCK),
+                !events.iter().any(|e| e.to == sid(DIRT_BLOCK)),
                 "an air-exposed grass block must never die to dirt"
             );
         }
@@ -1129,13 +1263,13 @@ mod tests {
             "minecraft:torch",
         ] {
             assert!(
-                crate::mobs::block_state_id(state).is_some(),
+                StateId::from_state_str(state).is_some(),
                 "fixture precondition: {state} must be a real 26.2 block state, or \
                  this test measures the unknown-state fallback instead"
             );
         }
         let dampening = |state: &str| {
-            let id = crate::mobs::block_state_id(state)
+            let id = StateId::from_state_str(state)
                 .unwrap_or_else(|| panic!("{state} is not a known block state"));
             lodestone_data::light_props::dampening(id)
         };
@@ -1259,7 +1393,7 @@ mod tests {
         for _ in 0..3000 {
             let events = scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0, &NoNeighbors);
             assert!(
-                !events.iter().any(|e| e.to == DIRT_BLOCK),
+                !events.iter().any(|e| e.to == sid(DIRT_BLOCK)),
                 "grass under short grass must never die to dirt"
             );
         }
@@ -1297,7 +1431,7 @@ mod tests {
         let mut spread = false;
         for _ in 0..3000 {
             let events = scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0, &NoNeighbors);
-            if events.iter().any(|e| e.pos == (6, 5, 5) && base_name(&e.to) == GRASS_BLOCK) {
+            if events.iter().any(|e| e.pos == (6, 5, 5) && e.to.block() == Block::GrassBlock) {
                 spread = true;
                 break;
             }
@@ -1324,7 +1458,7 @@ mod tests {
         propagate_and_react(&mut column, 0, 0, 5, 6, 5, &mut block_ticks, 0);
         assert_eq!(column.block_state(5, 5, 5), "minecraft:grass_block[snowy=true]");
 
-        column.set_block(5, 6, 5, crate::chunk::AIR);
+        column.set_block(5, 6, 5, StateId::AIR);
         propagate_and_react(&mut column, 0, 0, 5, 6, 5, &mut block_ticks, 0);
         assert_eq!(column.block_state(5, 5, 5), "minecraft:grass_block[snowy=false]");
     }
@@ -1377,7 +1511,7 @@ mod tests {
         let mut grew = false;
         for _ in 0..3000 {
             let events = scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0, &NoNeighbors);
-            if events.iter().any(|e| e.pos == (4, 5, 4) && e.to == "minecraft:wheat[age=1]") {
+            if events.iter().any(|e| e.pos == (4, 5, 4) && e.to == sid("minecraft:wheat[age=1]")) {
                 grew = true;
                 break;
             }
@@ -1429,7 +1563,7 @@ mod tests {
         let mut advanced = false;
         for _ in 0..3000 {
             let events = scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0, &NoNeighbors);
-            if events.iter().any(|e| e.pos == (2, 5, 2) && e.to == "minecraft:oak_sapling[stage=1]") {
+            if events.iter().any(|e| e.pos == (2, 5, 2) && e.to == sid("minecraft:oak_sapling[stage=1]")) {
                 advanced = true;
                 break;
             }
@@ -1469,7 +1603,7 @@ mod tests {
         let mut decayed = false;
         for _ in 0..3000 {
             let events = scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0, &NoNeighbors);
-            if events.iter().any(|e| e.pos == (6, 5, 6) && e.to == "minecraft:air") {
+            if events.iter().any(|e| e.pos == (6, 5, 6) && e.to == sid("minecraft:air")) {
                 decayed = true;
                 break;
             }
@@ -1621,7 +1755,8 @@ mod tests {
         assert_eq!(
             settle_gravity_at(&column, 0, 0, 9, 5, 5),
             Some(GravitySettle {
-                state: lodestone_data::block_states::BlockStateValue::parse("minecraft:sand"),
+                state: lodestone_data::block_states::StateId::from_state_str("minecraft:sand")
+                    .expect("generated sand state"),
                 landing_y: 0,
             }),
             "control failed: the unsupported arm must be `Some`, or the `None` above \
@@ -1735,7 +1870,7 @@ mod tests {
         let mut spread = false;
         for _ in 0..3000 {
             let events = scheduler.tick_chunk(&mut column, CX, CZ, 200, &mut block_ticks, 0, &NoNeighbors);
-            if events.iter().any(|e| e.pos == target_abs && base_name(&e.to) == GRASS_BLOCK) {
+            if events.iter().any(|e| e.pos == target_abs && e.to.block() == Block::GrassBlock) {
                 spread = true;
                 break;
             }
@@ -1786,10 +1921,10 @@ mod tests {
         for _ in 0..3000 {
             let events = scheduler.tick_chunk(&mut column, CX, CZ, 200, &mut block_ticks, 0, &NoNeighbors);
             assert!(
-                !events.iter().any(|e| base_name(&e.to) == GRASS_BLOCK),
+                !events.iter().any(|e| e.to.block() == Block::GrassBlock),
                 "no grass conversion is legal here, but one landed at {:?} (#472: the probe read \
                  the absolute-z alias local (6, 8, 5) and the write used the correct local (6, 5, 5))",
-                events.iter().find(|e| base_name(&e.to) == GRASS_BLOCK).map(|e| e.pos),
+                events.iter().find(|e| e.to.block() == Block::GrassBlock).map(|e| e.pos),
             );
         }
         assert_eq!(column.block_state(6, 5, 5), "minecraft:stone", "at local (6, 5, 5) in chunk (2, 3)");
@@ -2034,7 +2169,7 @@ mod tests {
             }
             let during = predicate_calls::get() - before;
             // Nothing mutated, so the palette never grew: the count is exact.
-            assert_eq!(column.raw_palette().len(), 2);
+            assert_eq!(column.palette().len(), 2);
             (during, sections, ticking)
         }
 
@@ -2088,7 +2223,7 @@ mod tests {
         let column = ChunkColumn::new(0, 32);
         assert_eq!(
             predicate_calls::get() - before_new,
-            column.raw_palette().len() as u64,
+            column.palette().len() as u64,
             "the all-air constructor must classify exactly its one palette entry"
         );
 
@@ -2101,10 +2236,10 @@ mod tests {
         let generated_calls = predicate_calls::get() - before_gen;
         assert_eq!(
             generated_calls,
-            generated.raw_palette().len() as u64,
+            generated.palette().len() as u64,
             "a generated column must classify each of its {} palette entries exactly once — \
              any multiple of that means the classification is being redone",
-            generated.raw_palette().len()
+            generated.palette().len()
         );
         assert!(
             generated_calls > 1,
@@ -2224,7 +2359,7 @@ mod tests {
             column.set_block(7, 5, 5, "minecraft:moving_piston[facing=east,type=normal]");
             let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
             let pending_entity = crate::piston::MovingBlockEntity::new(
-                "minecraft:dirt".to_string(),
+                sid("minecraft:dirt"),
                 Direction::East,
                 true,
                 false,
@@ -2257,7 +2392,7 @@ mod tests {
             assert!(
                 events
                     .iter()
-                    .any(|e| e.pos == (two_pos.x, two_pos.y, two_pos.z) && e.to == "minecraft:dirt"),
+                    .any(|e| e.pos == (two_pos.x, two_pos.y, two_pos.z) && e.to == sid("minecraft:dirt")),
                 "the interrupt's write must be reported as an event"
             );
 
@@ -2302,7 +2437,7 @@ mod tests {
         column.set_block(4, 5, 0, "minecraft:tripwire_hook[facing=west,attached=true,powered=false]");
 
         let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
-        let events = react_at_removal(&mut column, 0, 0, &NoNeighbors, 2, 5, 0, &broken, &mut block_ticks, 0);
+        let events = react_at_removal(&mut column, 0, 0, &NoNeighbors, 2, 5, 0, sid(&broken), &mut block_ticks, 0);
 
         let hook_now = column.block_state(0, 5, 0).to_string();
         assert_eq!(
@@ -2311,7 +2446,10 @@ mod tests {
              middle one must pulse the controlling hook powered=true for one instant"
         );
         assert!(
-            events.iter().any(|e| e.pos == (0, 5, 0) && e.to.contains("powered=true")),
+            events.iter().any(|e| {
+                e.pos == (0, 5, 0)
+                    && crate::redstone::property_bool(e.to, PropertyKey::Powered) == Some(true)
+            }),
             "the hook rewrite must be reported as an event, not just written silently \
              into the column: {events:?}"
         );
@@ -2341,7 +2479,7 @@ mod tests {
         let naive = redstone_tripwire::calculate_state(
             &lookup,
             BlockPos::new(0, 5, 0),
-            "minecraft:tripwire_hook[facing=east,attached=true,powered=false]",
+            sid("minecraft:tripwire_hook[facing=east,attached=true,powered=false]"),
             false,
             None,
         );
@@ -2362,7 +2500,7 @@ mod tests {
         column.set_block(1, 5, 0, "minecraft:tripwire[attached=true,powered=false,disarmed=false]");
         let broken = "minecraft:stone".to_string();
         let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
-        let events = react_at_removal(&mut column, 0, 0, &NoNeighbors, 2, 5, 0, &broken, &mut block_ticks, 0);
+        let events = react_at_removal(&mut column, 0, 0, &NoNeighbors, 2, 5, 0, sid(&broken), &mut block_ticks, 0);
         assert!(events.is_empty(), "breaking stone must not touch any tripwire hook: {events:?}");
         assert!(block_ticks.drain_due(u64::MAX, usize::MAX).is_empty());
     }
@@ -2400,8 +2538,16 @@ mod tests {
             self.columns.lock().expect("test world poisoned").insert((cx, cz), column);
         }
 
+        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+            self.block_state_id(x, y, z).canonical_state()
+        }
+
+        fn set_block<S: FixtureState>(&self, x: i32, y: i32, z: i32, state: S) {
+            <Self as ChunkSource>::set_block(self, x, y, z, state.into_state());
+        }
+
         /// Declares `(cx, cz)` not resident while keeping whatever column
-        /// was inserted for it readable through [`Self::block_state`].
+        /// was inserted for it readable through [`Self::block_state_id`].
         fn unload_but_keep(&self, cx: i32, cz: i32) {
             self.unloaded.lock().expect("test world poisoned").insert((cx, cz));
         }
@@ -2416,26 +2562,26 @@ mod tests {
                 .cloned()
                 .unwrap_or_else(|| ChunkColumn::new(0, 16))
         }
-        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
             let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
             self.columns
                 .lock()
                 .expect("test world poisoned")
                 .get(&(cx, cz))
-                .map(|c| c.block_state(x.rem_euclid(16), y, z.rem_euclid(16)).to_string())
-                .unwrap_or_else(|| "minecraft:air".to_string())
+                .map(|c| c.block_state_id(x.rem_euclid(16), y, z.rem_euclid(16)))
+                .unwrap_or(StateId::AIR)
         }
         fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
             "minecraft:plains".to_string()
         }
-        fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+        fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
             let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
             self.columns
                 .lock()
                 .expect("test world poisoned")
                 .entry((cx, cz))
                 .or_insert_with(|| ChunkColumn::new(0, 16))
-                .set_block(x.rem_euclid(16), y, z.rem_euclid(16), name);
+                .set_block_id(x.rem_euclid(16), y, z.rem_euclid(16), state);
         }
         // The one override that matters here: residency is exactly "this
         // test inserted a column for that chunk", never the trait's own
@@ -2675,7 +2821,7 @@ mod tests {
             .map(|step| {
                 (
                     step,
-                    redstone::wire_power(&world.block_state(SOURCE_X + step, SEAM_ROW_Y, SEAM_ROW_Z)),
+                    redstone::wire_power(world.block_state_id(SOURCE_X + step, SEAM_ROW_Y, SEAM_ROW_Z)),
                 )
             })
             .collect();
@@ -2723,7 +2869,7 @@ mod tests {
         );
         for step in 1..=RUN {
             let x = SOURCE_X + step;
-            let power = redstone::wire_power(&control.block_state(x, SEAM_ROW_Y, SEAM_ROW_Z));
+            let power = redstone::wire_power(control.block_state_id(x, SEAM_ROW_Y, SEAM_ROW_Z));
             if x.div_euclid(16) == 0 {
                 assert_eq!(
                     power,
@@ -2772,7 +2918,7 @@ mod tests {
         let (reference_changed, reference_scheduled) = crate::server::propagate_removal_with_entities(
             &reference,
             BlockPos::new(5, SEAM_ROW_Y, SEAM_ROW_Z),
-            SEAM_TRIPWIRE,
+            sid(SEAM_TRIPWIRE),
         );
         let reference_scanning = reference.block_state(2, SEAM_ROW_Y, SEAM_ROW_Z);
         let reference_receiving = reference.block_state(7, SEAM_ROW_Y, SEAM_ROW_Z);
@@ -2832,7 +2978,7 @@ mod tests {
         let (changed, scheduled) = crate::server::propagate_removal_with_entities(
             &world,
             BlockPos::new(BREAK_X, SEAM_ROW_Y, SEAM_ROW_Z),
-            SEAM_TRIPWIRE,
+            sid(SEAM_TRIPWIRE),
         );
 
         assert_eq!(
@@ -2885,7 +3031,7 @@ mod tests {
         let (control_changed, control_scheduled) = crate::server::propagate_removal_with_entities(
             &control,
             BlockPos::new(BREAK_X, SEAM_ROW_Y, SEAM_ROW_Z),
-            SEAM_TRIPWIRE,
+            sid(SEAM_TRIPWIRE),
         );
         assert!(!control.is_column_resident(0, 0), "control premise: chunk (0, 0) must read as not resident");
         assert!(
@@ -2936,7 +3082,7 @@ mod tests {
             let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
             for _ in 0..3000 {
                 let events = scheduler.tick_chunk(column, 0, 0, 200, &mut block_ticks, CURRENT_TICK, world);
-                if events.iter().any(|e| e.pos == target && base_name(&e.to) == GRASS_BLOCK) {
+            if events.iter().any(|e| e.pos == target && e.to.block() == Block::GrassBlock) {
                     return block_ticks.drain_due(u64::MAX, usize::MAX);
                 }
             }
@@ -3027,7 +3173,7 @@ mod tests {
             "control failed: with the observer's chunk unloaded nothing may be scheduled — got {control_scheduled:?}"
         );
         assert_eq!(
-            control.block_state(16, SEAM_ROW_Y, SEAM_ROW_Z),
+            control.block_state_id(16, SEAM_ROW_Y, SEAM_ROW_Z),
             redstone_observer::set_observer(Direction::West, false),
             "control failed: the unreachable observer must keep the state it was seeded with"
         );

@@ -14,6 +14,7 @@
 //! per call site in vanilla too — there is no shared vanilla abstraction this
 //! port would be dropping by not factoring one out here.
 
+use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockPos, Vec3};
 
 /// One cell of the wither's summon pattern, in the pattern's own local
@@ -29,8 +30,8 @@ pub(super) enum WitherCell {
 }
 
 impl WitherCell {
-    fn matches(self, block: &str) -> bool {
-        let path = block.split('[').next().unwrap_or(block);
+    fn matches(self, block: StateId) -> bool {
+        let path = block.block().name();
         match self {
             WitherCell::Base => path == "minecraft:soul_sand" || path == "minecraft:soul_soil",
             WitherCell::Skull => {
@@ -110,13 +111,13 @@ impl WitherPatternMatch {
 }
 
 fn wither_pattern_matches(
-    block_at: &dyn Fn(i32, i32, i32) -> String,
+    block_at: &dyn Fn(i32, i32, i32) -> StateId,
     candidate: &WitherPatternMatch,
 ) -> bool {
     for (down, row) in WITHER_PATTERN.iter().enumerate() {
         for (right, &cell) in row.iter().enumerate() {
             let (x, y, z) = candidate.translate(right as i32, down as i32, 0);
-            if !cell.matches(&block_at(x, y, z)) {
+            if !cell.matches(block_at(x, y, z)) {
                 return false;
             }
         }
@@ -131,7 +132,7 @@ fn wither_pattern_matches(
 /// orientations, not just "upright", is real vanilla behaviour: a wither can
 /// be summoned lying on its side against a wall too).
 pub(super) fn find_wither_pattern(
-    block_at: &dyn Fn(i32, i32, i32) -> String,
+    block_at: &dyn Fn(i32, i32, i32) -> StateId,
     placed: (i32, i32, i32),
 ) -> Option<WitherPatternMatch> {
     let height = WITHER_PATTERN.len() as i32;
@@ -182,10 +183,16 @@ impl WitherPatternMatch {
 mod tests {
     use super::*;
 
-    fn world_from(blocks: &[((i32, i32, i32), &str)]) -> impl Fn(i32, i32, i32) -> String {
-        let map: std::collections::HashMap<(i32, i32, i32), String> =
-            blocks.iter().map(|(pos, name)| (*pos, (*name).to_owned())).collect();
-        move |x, y, z| map.get(&(x, y, z)).cloned().unwrap_or_else(|| "minecraft:air".to_owned())
+    fn world_from(blocks: &[((i32, i32, i32), &str)]) -> impl Fn(i32, i32, i32) -> StateId {
+        let map: std::collections::HashMap<(i32, i32, i32), StateId> = blocks
+            .iter()
+            .map(|(pos, name)| (*pos, StateId::from_state_str(name).unwrap()))
+            .collect();
+        move |x, y, z| {
+            map.get(&(x, y, z))
+                .copied()
+                .unwrap_or_else(lodestone_data::block_states::air_state)
+        }
     }
 
     /// The real wither shape, standing upright: three skulls over three soul

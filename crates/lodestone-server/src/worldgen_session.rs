@@ -16,7 +16,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 
-use crate::chunk::{ChunkColumn, ColumnLightSettlement};
+use crate::chunk::{ChunkColumn, ChunkGenerationStage, ColumnLightSettlement};
+use lodestone_data::block_states::StateId;
 use lodestone_worldgen::stage_schedule::{
     BarrierPolicy, ChunkRequest, ColumnStage, Dimension, DimensionPipeline, END_PIPELINE,
     GenerationTarget, PipelineOptions, ResourceKey, StageDescriptor, StageFrontier, StageKey,
@@ -651,7 +652,7 @@ impl ProvenanceMutation {
         ordinal: u32,
         destination: BlockCoordinate,
         revision: u64,
-        value: String,
+        value: StateId,
     ) -> Self {
         Self {
             provenance: MutationProvenance {
@@ -662,7 +663,7 @@ impl ProvenanceMutation {
                 destination,
                 revision: SessionRevision(revision),
             },
-            retained_bytes: size_of::<String>() + value.capacity(),
+            retained_bytes: size_of::<StateId>(),
             value: Arc::new(value),
         }
     }
@@ -695,6 +696,7 @@ pub struct MutableTransaction {
     source_order: u64,
     revision: SessionRevision,
     writes: Vec<ProvenanceMutation>,
+    provenance_index: BTreeSet<MutationProvenance>,
 }
 
 impl fmt::Debug for MutableTransaction {
@@ -775,11 +777,7 @@ impl MutableTransaction {
             destination,
             revision: self.revision,
         };
-        if self
-            .writes
-            .iter()
-            .any(|write| write.provenance == provenance)
-        {
+        if !self.provenance_index.insert(provenance) {
             return Err(SessionError::DuplicateMutation(provenance));
         }
         self.writes.push(ProvenanceMutation {
@@ -930,7 +928,7 @@ impl SidecarProductKey {
 /// A packet neighbour retained with a detached target snapshot.
 ///
 /// Shaped generated columns remain in their compact typed representation until
-/// a packet consumer asks for the legacy [`ChunkColumn`] view. This keeps the
+/// a packet consumer asks for a materialized [`ChunkColumn`] view. This keeps the
 /// detached snapshot's radius and readiness contract while avoiding an eager
 /// conversion for callers that only need the target column.
 #[derive(Debug)]
@@ -944,7 +942,9 @@ enum PacketNeighbourColumn {
     Materialized(ChunkColumn),
     Generated {
         column: Arc<lodestone_worldgen::overworld::GeneratedColumn>,
-        overlay: Arc<[(i32, i32, i32, String)]>,
+        overlay: Arc<[(i32, i32, i32, StateId)]>,
+        sidecar: Option<Arc<ChunkColumn>>,
+        terminal: bool,
         materialized: std::sync::OnceLock<ChunkColumn>,
     },
 }
@@ -958,6 +958,8 @@ impl Clone for PacketNeighbour {
             PacketNeighbourColumn::Generated {
                 column,
                 overlay,
+                sidecar,
+                terminal,
                 materialized,
             } => {
                 let copied = std::sync::OnceLock::new();
@@ -967,6 +969,8 @@ impl Clone for PacketNeighbour {
                 PacketNeighbourColumn::Generated {
                     column: Arc::clone(column),
                     overlay: Arc::clone(overlay),
+                    sidecar: sidecar.as_ref().map(Arc::clone),
+                    terminal: *terminal,
                     materialized: copied,
                 }
             }
@@ -986,27 +990,29 @@ impl PacketNeighbour {
         }
     }
 
-    pub(crate) fn generated_with_overlay(
+    pub(crate) fn generated_with_id_overlay(
         coordinate: ChunkCoordinate,
         column: Arc<lodestone_worldgen::overworld::GeneratedColumn>,
-        overlay: Vec<(i32, i32, i32, String)>,
+        overlay: Vec<(i32, i32, i32, StateId)>,
     ) -> Self {
         Self {
             coordinate,
             column: PacketNeighbourColumn::Generated {
                 column,
                 overlay: Arc::from(overlay),
+                sidecar: None,
+                terminal: false,
                 materialized: std::sync::OnceLock::new(),
             },
         }
     }
 
-    pub(crate) fn materialized_with_overlay(
+    pub(crate) fn materialized_with_id_overlay(
         coordinate: ChunkCoordinate,
         mut column: ChunkColumn,
-        overlay: &[(i32, i32, i32, String)],
+        overlay: &[(i32, i32, i32, StateId)],
     ) -> Self {
-        apply_packet_overlay(&mut column, overlay);
+        apply_packet_id_overlay(&mut column, overlay);
         Self::materialized(coordinate, column)
     }
 
@@ -1015,7 +1021,7 @@ impl PacketNeighbour {
         self.coordinate
     }
 
-    /// Borrow the compact generated product without crossing into the legacy
+    /// Borrow the compact generated product without crossing into the materialized
     /// [`ChunkColumn`] carrier. Packet encoders that only need typed terrain
     /// metadata can retain this handle; [`Self::column`] remains the explicit
     /// conversion boundary for light and wire consumers that require the
@@ -1037,18 +1043,33 @@ impl PacketNeighbour {
             PacketNeighbourColumn::Generated {
                 column,
                 overlay,
+                sidecar,
+                terminal,
                 materialized,
             } => materialized.get_or_init(|| {
                 #[cfg(test)]
                 crate::chunk::record_generated_materialization();
                 let mut column = ChunkColumn::from_generated((**column).clone());
-                apply_packet_overlay(&mut column, overlay);
+                apply_packet_id_overlay(&mut column, overlay);
+                if let Some(sidecar) = sidecar {
+                    column.set_structures(
+                        sidecar.structure_starts().to_vec(),
+                        sidecar.structure_references().clone(),
+                    );
+                    let mut entities = column.block_entities().to_vec();
+                    entities.extend(sidecar.block_entities().iter().cloned());
+                    column.set_block_entities(entities);
+                }
+                if *terminal {
+                    column.prime_client_heightmaps();
+                    column.mark_generation_stage(ChunkGenerationStage::Full);
+                }
                 column
             }),
         }
     }
 
-    /// Consume this neighbour into the legacy mutable server column.
+    /// Consume this neighbour into a mutable server column.
     ///
     /// If no borrowed consumer forced conversion, the generated compact
     /// column can be moved directly when its shared handle is unique.
@@ -1059,6 +1080,8 @@ impl PacketNeighbour {
             PacketNeighbourColumn::Generated {
                 column,
                 overlay,
+                sidecar,
+                terminal,
                 materialized,
             } => {
                 if let Some(column) = materialized.into_inner() {
@@ -1070,22 +1093,28 @@ impl PacketNeighbour {
                     Ok(column) => ChunkColumn::from_generated(column),
                     Err(column) => ChunkColumn::from_generated((*column).clone()),
                 };
-                apply_packet_overlay(&mut column, &overlay);
+                apply_packet_id_overlay(&mut column, &overlay);
+                if let Some(sidecar) = sidecar {
+                    column.set_structures(
+                        sidecar.structure_starts().to_vec(),
+                        sidecar.structure_references().clone(),
+                    );
+                    let mut entities = column.block_entities().to_vec();
+                    entities.extend(sidecar.block_entities().iter().cloned());
+                    column.set_block_entities(entities);
+                }
+                if terminal {
+                    column.prime_client_heightmaps();
+                    column.mark_generation_stage(ChunkGenerationStage::Full);
+                }
                 column
             }
         }
     }
 }
 
-fn apply_packet_overlay(
-    column: &mut ChunkColumn,
-    overlay: &[(i32, i32, i32, String)],
-) {
-    let writes = overlay
-        .iter()
-        .map(|(x, y, z, state)| (*x, *y, *z, state.as_str()))
-        .collect::<Vec<_>>();
-    column.apply_ordered_block_batch(&writes);
+fn apply_packet_id_overlay(column: &mut ChunkColumn, overlay: &[(i32, i32, i32, StateId)]) {
+    column.apply_ordered_block_id_batch(overlay);
 }
 
 /// A detached target and its concrete neighbour columns.
@@ -1564,6 +1593,7 @@ pub struct GenerationSession {
     committed_mutation_order: Vec<MutationProvenance>,
     next_revision: u64,
     current_revision: SessionRevision,
+    mutation_index: BTreeSet<MutationProvenance>,
     light_domain_revision: Option<SessionRevision>,
     packet_neighbour_domain: Option<BTreeSet<ChunkCoordinate>>,
 }
@@ -1647,6 +1677,7 @@ impl GenerationSession {
             committed_mutation_order: Vec::new(),
             next_revision: 1,
             current_revision: SessionRevision(0),
+            mutation_index: BTreeSet::new(),
             light_domain_revision: None,
             packet_neighbour_domain: Some(BTreeSet::new()),
         }
@@ -2382,6 +2413,7 @@ impl GenerationSession {
             source_order,
             revision,
             writes: Vec::new(),
+            provenance_index: BTreeSet::new(),
         })
     }
 
@@ -2449,24 +2481,15 @@ impl GenerationSession {
         let (mutation_entries, retained_bytes) = Self::transaction_usage(&transaction);
         self.check_usage(0, 0, mutation_entries, retained_bytes)?;
 
-        let mut provenance = self
-            .committed_mutations
-            .keys()
-            .copied()
-            .collect::<BTreeSet<_>>();
-        for queued in self.pending_mutable.values() {
-            for write in &queued.writes {
-                if !provenance.insert(write.provenance()) {
-                    return Err(SessionError::DuplicateMutation(write.provenance()));
-                }
-            }
-        }
         for write in &transaction.writes {
-            if !provenance.insert(write.provenance()) {
+            if self.mutation_index.contains(&write.provenance()) {
                 return Err(SessionError::DuplicateMutation(write.provenance()));
             }
         }
 
+        for write in &transaction.writes {
+            self.mutation_index.insert(write.provenance());
+        }
         self.pending_mutable
             .insert(transaction.source_order, transaction);
         self.add_usage(0, 0, mutation_entries, retained_bytes);
@@ -2900,13 +2923,13 @@ impl GenerationSession {
             {
                 return Err(SessionError::InvalidCheckpoint);
             }
-            if session
-                .committed_mutations
-                .insert(provenance, mutation)
-                .is_some()
+            if session.mutation_index.contains(&provenance)
+                || session.committed_mutations.contains_key(&provenance)
             {
                 return Err(SessionError::InvalidCheckpoint);
             }
+            session.committed_mutations.insert(provenance, mutation);
+            session.mutation_index.insert(provenance);
         }
         session.committed_mutation_order = checkpoint.committed_mutation_order;
         let ordered_mutations = session
@@ -2998,6 +3021,11 @@ impl GenerationSession {
             .fold((0usize, 0usize), |(m, b), (nm, nb)| {
                 (m.saturating_add(nm), b.saturating_add(nb))
             });
+        for transaction in self.pending_mutable.values() {
+            for write in &transaction.writes {
+                self.mutation_index.remove(&write.provenance());
+            }
+        }
         self.subtract_usage(
             products,
             sidecars,

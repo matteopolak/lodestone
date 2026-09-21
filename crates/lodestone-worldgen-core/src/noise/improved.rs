@@ -273,10 +273,10 @@ impl ImprovedNoise {
     /// The eight gradient dot products of one lattice cell, then vanilla's
     /// own three-axis lerp reduction over them.
     ///
-    /// Lane order is vanilla's own three-axis lerp argument order —
-    /// `d000, d100, d010, d110, d001, d101, d011, d111` — so the reduction below
-    /// is a direct transcription of the nesting `lerp3`/`lerp2` spell out, with
-    /// siblings sharing a vector. See the module doc for why this is
+    /// Lane order groups the x=0 siblings before the x=1 siblings —
+    /// `d000, d010, d001, d011, d100, d110, d101, d111` — so the first
+    /// reduction is contiguous while the later vector swizzles spell out the
+    /// same `lerp3`/`lerp2` nesting. See the module doc for why this is
     /// bit-identical rather than merely close.
     #[allow(clippy::many_single_char_names)]
     fn sample_and_lerp(
@@ -299,14 +299,19 @@ impl ImprovedNoise {
         let xy10 = self.perm(x1 + y);
         let xy11 = self.perm(x1 + y + 1);
 
+        // Group the four x=0 corners before the four x=1 corners. This keeps
+        // each side of the first lerp tree contiguous, so the compiler does
+        // not need a pair of de-interleaving shuffles before the first vector
+        // reduction. The later y/z sibling grouping remains exactly the same
+        // reduction tree and therefore does not change evaluation order.
         let hash: [usize; 8] = [
             (self.perm(xy00 + z) & 15) as usize,
-            (self.perm(xy10 + z) & 15) as usize,
             (self.perm(xy01 + z) & 15) as usize,
-            (self.perm(xy11 + z) & 15) as usize,
             (self.perm(xy00 + z + 1) & 15) as usize,
-            (self.perm(xy10 + z + 1) & 15) as usize,
             (self.perm(xy01 + z + 1) & 15) as usize,
+            (self.perm(xy10 + z) & 15) as usize,
+            (self.perm(xy11 + z) & 15) as usize,
+            (self.perm(xy10 + z + 1) & 15) as usize,
             (self.perm(xy11 + z + 1) & 15) as usize,
         ];
         crate::counters::bump_noise_corner_batch();
@@ -345,9 +350,9 @@ impl ImprovedNoise {
         let xm = xr - 1.0;
         let ym = yr - 1.0;
         let zm = zr - 1.0;
-        let xs = Simd::<f64, 8>::from_array([xr, xm, xr, xm, xr, xm, xr, xm]);
-        let ys = Simd::<f64, 8>::from_array([yr, yr, ym, ym, yr, yr, ym, ym]);
-        let zs = Simd::<f64, 8>::from_array([zr, zr, zr, zr, zm, zm, zm, zm]);
+        let xs = Simd::<f64, 8>::from_array([xr, xr, xr, xr, xm, xm, xm, xm]);
+        let ys = Simd::<f64, 8>::from_array([yr, ym, yr, ym, yr, ym, yr, ym]);
+        let zs = Simd::<f64, 8>::from_array([zr, zr, zm, zm, zr, zr, zm, zm]);
 
         // Per lane: `((gx * x) + (gy * y)) + (gz * z)` — the scalar `dot`'s exact
         // association. No `mul_add`.
@@ -358,10 +363,11 @@ impl ImprovedNoise {
         let z_alpha = smoothstep(zr);
 
         // `lerp3`'s innermost level: the four `lerp(x_alpha, ., .)` siblings that
-        // `lerp2` performs twice. Lanes are (d000,d100), (d010,d110),
-        // (d001,d101), (d011,d111).
-        let p0: Simd<f64, 4> = simd_swizzle!(d, [0, 2, 4, 6]);
-        let p1: Simd<f64, 4> = simd_swizzle!(d, [1, 3, 5, 7]);
+        // `lerp2` performs twice. Lanes are grouped as
+        // `(d000,d010,d001,d011)` then `(d100,d110,d101,d111)`, so these
+        // swizzles are contiguous loads rather than de-interleaves.
+        let p0: Simd<f64, 4> = simd_swizzle!(d, [0, 1, 2, 3]);
+        let p1: Simd<f64, 4> = simd_swizzle!(d, [4, 5, 6, 7]);
         let l = p0 + Simd::<f64, 4>::splat(x_alpha) * (p1 - p0);
 
         // `lerp2`'s outer level: the two `lerp(y_alpha, ., .)` siblings.

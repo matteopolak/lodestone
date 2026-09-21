@@ -10,7 +10,7 @@ motion cannot cross a block that changed after that search snapshot was made.
 ## How it works
 
 `MobHandle` owns `MobSim`, and `crate::tick::run_tick_loop` calls
-`MobSim::tick_with_terrain` with the live `ChunkSource` state-name reader. Navigation runs first
+`MobSim::tick_with_terrain` with the live `ChunkSource` `StateId` reader. Navigation runs first
 against its bounded `ChunkWorld`; `LiveBlockCollision` resolves each queried state through
 `lodestone_data::collision_shapes`, then `settle_mob` sweeps the species' `MobShape` width,
 height, and step height across those real world-space boxes. A `moving_piston` is the narrow

@@ -45,6 +45,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lodestone_core::State;
+use lodestone_data::block_states::StateId;
 use lodestone_net::Connection;
 use lodestone_server::{
     ChunkColumn, ChunkSource, IntegratedServer, ServerBound, ServerDirective, ServerProtocol,
@@ -63,6 +64,10 @@ const FINISH_CONFIGURATION: i32 = 3;
 /// this polls rather than asserting on a fixed tick — but it is a deadline, not a
 /// sleep: the assertion is on what was observed, never on time having passed.
 const DEADLINE: Duration = Duration::from_secs(25);
+
+fn fixture_state(name: &str) -> StateId {
+    StateId::from_state_str(name).expect("fixture state exists")
+}
 
 /// What the two counters below record. Shared with the protocol double so the test
 /// reads the server's own encoder calls rather than parsing a stand-in wire format.
@@ -124,7 +129,7 @@ impl ServerProtocol for WatchingProtocol {
         ServerDirective::None
     }
 
-    fn encode_block_update(&self, x: i32, y: i32, z: i32, _state: &str) -> ServerDirective {
+    fn encode_block_update(&self, x: i32, y: i32, z: i32, _state: StateId) -> ServerDirective {
         self.0
             .block_updates
             .lock()
@@ -170,21 +175,21 @@ impl ChunkSource for GrassWorld {
         let mut column = ChunkColumn::new(MIN_Y, HEIGHT);
         for z in 0..16 {
             for x in 0..16 {
-                column.set_block(x, 4, z, "minecraft:stone");
-                column.set_block(x, 5, z, "minecraft:grass_block");
+                column.set_block_id(x, 4, z, fixture_state("minecraft:stone"));
+                column.set_block_id(x, 5, z, fixture_state("minecraft:grass_block"));
                 // The cover. Without it the grass survives and nothing publishes.
-                column.set_block(x, 6, z, "minecraft:stone");
+                column.set_block_id(x, 6, z, fixture_state("minecraft:stone"));
             }
         }
         column
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
-        self.column(cx, cz).block_state(lx, y, lz).to_string()
+        self.column(cx, cz).block_state_id(lx, y, lz)
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -195,7 +200,7 @@ impl ChunkSource for GrassWorld {
         self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
         // No storage; the tick loop's mutations are observed on the wire, not here.
     }
 }
@@ -211,19 +216,19 @@ impl ChunkSource for InertWorld {
         for z in 0..16 {
             for x in 0..16 {
                 for y in 0..6 {
-                    column.set_block(x, y, z, "minecraft:stone");
+                    column.set_block_id(x, y, z, fixture_state("minecraft:stone"));
                 }
             }
         }
         column
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
-        self.column(cx, cz).block_state(lx, y, lz).to_string()
+        self.column(cx, cz).block_state_id(lx, y, lz)
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -234,7 +239,7 @@ impl ChunkSource for InertWorld {
         self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
         // No storage.
     }
 }

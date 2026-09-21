@@ -82,6 +82,12 @@ check-comment-voice:
 check-worldgen-schedule:
     cargo run -q -p xtask -- check-worldgen-schedule
 
+# cargo xtask check-worldgen-state-ids — runtime worldgen block states stay in
+# canonical StateId form; parser/config/resource and wire boundaries are narrow
+# explicit exceptions in the AST scanner.
+check-worldgen-state-ids:
+    cargo run -q -p xtask -- check-worldgen-state-ids
+
 # All five checks above, in order.
 health: check check-all check-seam test check-comment-voice
 

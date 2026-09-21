@@ -25,12 +25,13 @@
 //! ```
 
 use lodestone_data::biomes::BiomeRef;
+use lodestone_data::block_states::StateId;
 use lodestone_server::{GeneratedColumn, overworld_generator};
 
 /// Sweep extent, matching the counter gate's.
 const SWEEP: i32 = 12;
 
-type ColumnBytes = (i32, i32, Vec<String>, Vec<u16>, Vec<BiomeRef>);
+type ColumnBytes = (i32, i32, Vec<StateId>, Vec<u16>, Vec<BiomeRef>);
 
 fn raw(col: GeneratedColumn) -> ColumnBytes {
     let (min_y, height, palette, blocks, biomes) = col.into_raw();

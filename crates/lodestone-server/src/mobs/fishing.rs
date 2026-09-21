@@ -643,7 +643,7 @@ impl<'w> MobSim<'w> {
             let bx = b.position.x.floor() as i32;
             let by = b.position.y.floor() as i32;
             let bz = b.position.z.floor() as i32;
-            let fluid = crate::fluid::fluid_state_of(world.block_state(bx, by, bz));
+            let fluid = super::block_ids::fluid_state_id(world.block_state_id(bx, by, bz));
             let is_water = fluid.is_some_and(|f| f.kind == crate::fluid::FluidKind::Water);
             let liquid_height = if is_water { f64::from(fluid.expect("checked above").own_height()) } else { 0.0 };
             let in_water = liquid_height > 0.0;
@@ -764,7 +764,7 @@ fn plan_fishing_random(
     let bx = b.position.x.floor() as i32;
     let by = b.position.y.floor() as i32;
     let bz = b.position.z.floor() as i32;
-    let fluid = crate::fluid::fluid_state_of(world.block_state(bx, by, bz));
+    let fluid = super::block_ids::fluid_state_id(world.block_state_id(bx, by, bz));
     let is_water = fluid.is_some_and(|f| f.kind == crate::fluid::FluidKind::Water);
     let damp_roll = (b.state == FishHookState::Bobbing).then(|| rng.next_f32());
     let bite_rolls = if b.state == FishHookState::Bobbing && is_water && b.biting {
@@ -875,11 +875,11 @@ fn calculate_open_water(world: &ChunkWorld, x: i32, y: i32, z: i32) -> bool {
         let mut layer: Option<Layer> = None;
         'cell: for dx in -2..=2 {
             for dz in -2..=2 {
-                let state = world.block_state(x + dx, y + dy, z + dz);
-                let cell = if state == "minecraft:air" || state == "minecraft:lily_pad" {
+                let state = world.block_state_id(x + dx, y + dy, z + dz);
+                let cell = if matches!(state.block().name(), "minecraft:air" | "minecraft:lily_pad") {
                     Layer::Above
                 } else {
-                    match crate::fluid::fluid_state_of(state) {
+                    match super::block_ids::fluid_state_id(state) {
                         Some(f) if f.kind == crate::fluid::FluidKind::Water && f.is_source() => Layer::Inside,
                         _ => Layer::Invalid,
                     }

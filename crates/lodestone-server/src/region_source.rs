@@ -117,6 +117,7 @@ use lodestone_anvil::CompressionScheme;
 use lodestone_anvil::region::{ChunkToWrite, RegionFile, build_region, region_and_local};
 use lodestone_core::{Reader, Writer, read_named_nbt, write_named_nbt};
 use lodestone_model::BlockPos;
+use lodestone_data::block_states::StateId;
 
 use crate::block_entities::BlockEntityHandle;
 use crate::chunk::{ChunkColumn, ChunkSource};
@@ -1444,7 +1445,7 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
         self.inner.reset_packet_replay();
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         // Goes through `self.column()`, which consults `edits` and disk before
         // the inner source — so the answer reflects a `set_block` edit exactly
         // as a `column()` read would. The wrapper above this
@@ -1454,7 +1455,7 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
-        self.column(cx, cz).block_state(lx, y, lz).to_string()
+        self.column(cx, cz).block_state_id(lx, y, lz)
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -1468,7 +1469,7 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
         self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
     }
 
-    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+    fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
@@ -1501,7 +1502,7 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
                 .get_mut(&(cx, cz))
                 .expect("checked present above, and only this lock inserts"),
         };
-        column.set_block(lx, y, lz, name);
+        column.set_block_id(lx, y, lz, state);
 
         // Marked dirty **while still holding `edits`**, and that ordering is
         // load-bearing rather than incidental. The unload sweep in
@@ -2650,13 +2651,18 @@ mod tests {
             let mut column = ChunkColumn::new(MIN_Y, HEIGHT);
             for z in 0..16 {
                 for x in 0..16 {
-                    column.set_block(x, 60, z, "minecraft:stone");
+                column.set_block_id(
+                    x,
+                    60,
+                    z,
+                    StateId::from_state_str("minecraft:stone").expect("stone is canonical"),
+                );
                 }
             }
             column
         }
 
-        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
             // The plain column-regenerating form; the tests drive edits
             // through `RegionChunkSource` (which does not forward to this
             // inner source), so this never needs to reflect a write here.
@@ -2664,7 +2670,7 @@ mod tests {
             let cz = z.div_euclid(16);
             let lx = x.rem_euclid(16);
             let lz = z.rem_euclid(16);
-            self.column(cx, cz).block_state(lx, y, lz).to_string()
+            self.column(cx, cz).block_state_id(lx, y, lz)
         }
 
         fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -2682,7 +2688,7 @@ mod tests {
         // forward `set_block` to its inner source, so this is unreachable in
         // the tests. Explicitly discards rather than inheriting a silent
         // default.
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
             // No storage; edits are discarded by design for this fixture.
         }
     }

@@ -13,6 +13,7 @@ use bevy_ecs::prelude::{ResMut, Resource};
 use bevy_ecs::schedule::IntoScheduleConfigs;
 
 use lodestone_command::{IntegerArgument, ParsedValue};
+use lodestone_data::block_states::StateId;
 use lodestone_server::ecs::{
     run_server_tasks, GameTick, ServerApp, ServerTaskScheduler, TickSet,
 };
@@ -66,10 +67,9 @@ impl ChunkSource for EmptyWorld {
         ChunkColumn::new(0, 1)
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         self.column(x.div_euclid(16), z.div_euclid(16))
-            .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
-            .to_string()
+            .block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -78,7 +78,7 @@ impl ChunkSource for EmptyWorld {
             .to_string()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
 }
 
 fn plugin_dispatch() -> CommandDispatch {

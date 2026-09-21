@@ -26,6 +26,7 @@
 //! A companion test supplies a deliberately broken route and requires the detector
 //! to lose the crossing signature.
 
+use lodestone_data::block_states::StateId;
 use lodestone_worldgen::overworld::GeneratedColumn;
 
 /// Seed and chunk pair, fixed. Both chunks are `minecraft:swamp` at seed 42.
@@ -38,12 +39,13 @@ const EAST: (i32, i32) = (-8, 18);
 /// trunk), so a leaf with no log inside this window has no trunk in this chunk.
 const TRUNK_REACH: i32 = 8;
 
-fn is_leaf(state: &str) -> bool {
-    state.contains("_leaves")
+fn is_leaf(state: StateId) -> bool {
+    state.name().contains("_leaves")
 }
 
-fn is_log(state: &str) -> bool {
-    state.contains("_log") || state.contains("_wood") || state.contains("_stem")
+fn is_log(state: StateId) -> bool {
+    let name = state.name();
+    name.contains("_log") || name.contains("_wood") || name.contains("_stem")
 }
 
 /// `(y, lz)` positions where one canopy spans the seam: tree material at the west
@@ -53,18 +55,18 @@ fn contiguous_crossings(west: &GeneratedColumn, east: &GeneratedColumn) -> Vec<(
     contiguous_crossings_routed(
         |x, y, z| {
             if x < 16 {
-                is_leaf(west.block_state(x as usize, y, z as usize))
-                    || is_log(west.block_state(x as usize, y, z as usize))
+                is_leaf(west.block_state_id(x as usize, y, z as usize))
+                    || is_log(west.block_state_id(x as usize, y, z as usize))
             } else {
-                is_leaf(east.block_state((x - 16) as usize, y, z as usize))
-                    || is_log(east.block_state((x - 16) as usize, y, z as usize))
+                is_leaf(east.block_state_id((x - 16) as usize, y, z as usize))
+                    || is_log(east.block_state_id((x - 16) as usize, y, z as usize))
             }
         },
         |x, y, z| {
             if x < 16 {
-                is_leaf(west.block_state(x as usize, y, z as usize))
+                is_leaf(west.block_state_id(x as usize, y, z as usize))
             } else {
-                is_leaf(east.block_state((x - 16) as usize, y, z as usize))
+                is_leaf(east.block_state_id((x - 16) as usize, y, z as usize))
             }
         },
         west.min_y(),
@@ -103,7 +105,7 @@ fn orphan_west_leaves(col: &GeneratedColumn) -> Vec<(i32, i32)> {
     let mut out = Vec::new();
     for y in col.min_y()..col.min_y() + col.height() {
         for lz in 0..16i32 {
-            if !is_leaf(col.block_state(0, y, lz as usize)) {
+            if !is_leaf(col.block_state_id(0, y, lz as usize)) {
                 continue;
             }
             let mut trunk_in_this_chunk = false;
@@ -114,7 +116,7 @@ fn orphan_west_leaves(col: &GeneratedColumn) -> Vec<(i32, i32)> {
                         continue;
                     }
                     for ty in (y - 12).max(col.min_y())..=y {
-                        if is_log(col.block_state(tx as usize, ty, tz as usize)) {
+                        if is_log(col.block_state_id(tx as usize, ty, tz as usize)) {
                             trunk_in_this_chunk = true;
                         }
                     }
@@ -220,12 +222,12 @@ fn routing_the_east_half_to_air_is_detected() {
     let broken = contiguous_crossings_routed(
         |x, y, z| {
             x < 16 && {
-                let state = west.block_state(x as usize, y, z as usize);
+                let state = west.block_state_id(x as usize, y, z as usize);
                 is_leaf(state) || is_log(state)
             }
         },
         |x, y, z| {
-            x < 16 && is_leaf(west.block_state(x as usize, y, z as usize))
+            x < 16 && is_leaf(west.block_state_id(x as usize, y, z as usize))
         },
         west.min_y(),
         west.height(),
@@ -238,12 +240,12 @@ fn routing_the_east_half_to_air_is_detected() {
     );
 }
 
-fn count(col: &GeneratedColumn, pred: fn(&str) -> bool) -> usize {
+fn count(col: &GeneratedColumn, pred: fn(StateId) -> bool) -> usize {
     let mut n = 0;
     for y in col.min_y()..col.min_y() + col.height() {
         for lz in 0..16usize {
             for lx in 0..16usize {
-                if pred(col.block_state(lx, y, lz)) {
+                if pred(col.block_state_id(lx, y, lz)) {
                     n += 1;
                 }
             }

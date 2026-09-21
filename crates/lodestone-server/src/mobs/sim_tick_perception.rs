@@ -44,8 +44,8 @@ impl<'w> MobSim<'w> {
                 continue;
             }
             if let Some(pos) = mob.workstation {
-                let state = world.block_state(pos.x, pos.y, pos.z);
-                let still_valid = villager::poi_type_for_block(villager::bare_block_id(state))
+                let state = world.block_state_id(pos.x, pos.y, pos.z);
+                let still_valid = villager::poi_type_for_state(state)
                     .and_then(villager::profession_for_poi_type)
                     == Some(mob.profession);
                 if !still_valid {
@@ -108,8 +108,8 @@ impl<'w> MobSim<'w> {
                 continue;
             }
             if let Some(pos) = mob.bed {
-                let state = world.block_state(pos.x, pos.y, pos.z);
-                let still_valid = villager::is_bed_block(villager::bare_block_id(state));
+                let state = world.block_state_id(pos.x, pos.y, pos.z);
+                let still_valid = villager::is_bed_state(state);
                 if !still_valid {
                     claims.remove(pos);
                     mob.bed = None;
@@ -211,8 +211,8 @@ impl<'w> MobSim<'w> {
                 continue;
             }
             if let Some(pos) = mob.meeting_point {
-                let state = world.block_state(pos.x, pos.y, pos.z);
-                let still_valid = villager::is_bell_block(villager::bare_block_id(state));
+                let state = world.block_state_id(pos.x, pos.y, pos.z);
+                let still_valid = villager::is_bell_state(state);
                 if !still_valid {
                     claims.remove(pos);
                     mob.meeting_point = None;
@@ -299,10 +299,12 @@ impl<'w> MobSim<'w> {
                 -Self::CAT_SIT_VERTICAL_RANGE,
                 Self::CAT_SIT_VERTICAL_RANGE,
                 |state| {
-                    let bare = villager::bare_block_id(state);
+                    let bare = state.block().path();
                     bare == "chest"
-                        || (bare == "furnace" && state.contains("lit=true"))
-                        || (bare.ends_with("_bed") && !state.contains("part=head"))
+                        || (bare == "furnace"
+                            && state.properties().iter().any(|&(key, value)| key == "lit" && value == "true"))
+                        || (bare.ends_with("_bed")
+                            && state.properties().iter().all(|&(key, value)| key != "part" || value != "head"))
                 },
             );
             mob.mob.set_cat_sit_target(sit);
@@ -315,7 +317,7 @@ impl<'w> MobSim<'w> {
                 Self::CAT_BED_HORIZONTAL_RANGE,
                 Self::CAT_BED_VERTICAL_MIN,
                 Self::CAT_BED_VERTICAL_MAX,
-                |state| villager::bare_block_id(state).ends_with("_bed"),
+                |state| state.block().path().ends_with("_bed"),
             );
             mob.mob.set_cat_bed_target(bed);
         }
@@ -337,7 +339,7 @@ impl<'w> MobSim<'w> {
         horiz: i32,
         y_min: i32,
         y_max: i32,
-        is_valid: impl Fn(&str) -> bool,
+        is_valid: impl Fn(lodestone_data::block_states::StateId) -> bool,
     ) -> Option<Vec3> {
         let mut best: Option<(i32, Vec3)> = None;
         for dy in y_min..=y_max {
@@ -346,11 +348,11 @@ impl<'w> MobSim<'w> {
                     let x = origin.x + dx;
                     let y = origin.y + dy;
                     let z = origin.z + dz;
-                    let above = world.block_state(x, y + 1, z);
-                    if !matches!(villager::bare_block_id(above), "air" | "cave_air" | "void_air") {
+                    let above = world.block_state_id(x, y + 1, z);
+                    if !matches!(above.block().path(), "air" | "cave_air" | "void_air") {
                         continue;
                     }
-                    let state = world.block_state(x, y, z);
+                    let state = world.block_state_id(x, y, z);
                     if !is_valid(state) {
                         continue;
                     }
@@ -856,11 +858,11 @@ impl<'w> MobSim<'w> {
                 && me.allay_inventory_count > 0
                 && let Some((liked_pos, ticks)) = me.allay_liked_noteblock
                 && ticks > 0
-                && crate::redstone::base_name(self.world.block_state(
+                && self.world.block_state_id(
                     liked_pos.x as i32,
                     liked_pos.y as i32,
                     liked_pos.z as i32,
-                )) == crate::redstone_note_block::NOTE_BLOCK
+                ).block() == crate::redstone_note_block::NOTE_BLOCK
             {
                 delivery_target[i] = Some(Vec3::new(liked_pos.x, liked_pos.y + 1.0, liked_pos.z));
             }

@@ -21,7 +21,8 @@ use std::time::Duration;
 use lodestone_client::{BlockPos, ChunkPos, ClientAction, ClientBuilder, Hand, LoginProfile, ServerAddress};
 use lodestone_model::{BlockActionKind, BlockFace, GameMode, ItemStack, Rotation, Vec3f};
 use lodestone_server::{IntegratedServer, overworld_chunk_source};
-use lodestone_data::block_states::{block_name, properties};
+use lodestone_data::block::Block;
+use lodestone_data::block_states::block_name;
 use lodestone_v26_2::{V770ServerProtocol, adapter};
 
 fn profile(name: &str) -> LoginProfile {
@@ -36,76 +37,6 @@ fn address() -> ServerAddress {
         host: "memory".into(),
         port: 0,
     }
-}
-
-/// The registry id for block-state name `name` (propertyless states only —
-/// exactly the two this test cares about), found the same way
-/// `server_protocol.rs`'s own `stone_id`/`air_id` do: a linear scan by name
-/// over the generated table, rather than a literal id that could silently
-/// desync from a regenerated table.
-fn state_id(name: &str) -> u32 {
-    (0..)
-        .find(|&id| block_name(id) == Some(name))
-        .unwrap_or_else(|| panic!("generated block-state table has no `{name}` entry"))
-}
-
-/// Resolves a **full** block-state string, properties included (e.g.
-/// `"minecraft:deepslate[axis=y]"`), to its protocol-776 registry id —
-/// unlike [`state_id`] above, which only ever finds the first state with a
-/// given name and is therefore only correct for the two propertyless states
-/// it is used for. Same three-tier algorithm as `server_protocol.rs`'s own
-/// (private) `resolve_state_id` (exact match, then the lowest-id state
-/// sharing the block name — its default — then air), duplicated here rather
-/// than exposed: this is a test helper working against the public
-/// `lodestone_data` table, not a reason to widen `lodestone-v26-2`'s public
-/// API surface.
-///
-/// The middle tier matters for this fixture specifically:
-/// `lodestone-worldgen`'s `OverworldGenerator` writes its default fluid as
-/// the **bare** literal `"minecraft:water"` (`overworld.rs`'s
-/// `default_fluid`), with no `level` property — and real water has no
-/// propertyless state (every id in `86..=101` carries `level=0..15`). A
-/// two-tier (exact-or-air) version of this helper would resolve the water
-/// fixture straight to air, the same bug `server_protocol.rs`'s hermetic gate
-/// caught the first time it ran.
-fn resolve_state(state: &str) -> u32 {
-    let (name, raw_props) = match state.split_once('[') {
-        Some((name, rest)) => (name, rest.strip_suffix(']').unwrap_or(rest)),
-        None => (state, ""),
-    };
-    let mut wanted: Vec<(&str, &str)> = if raw_props.is_empty() {
-        Vec::new()
-    } else {
-        raw_props
-            .split(',')
-            .filter_map(|pair| pair.split_once('='))
-            .collect()
-    };
-    wanted.sort_unstable();
-
-    // The middle tier's expectation comes from the jar's own default-state
-    // column, not from a second copy of the resolver's arithmetic. It used to be
-    // "the lowest id sharing the name", which is right for water (`86`) and wrong
-    // for 661 of the 797 multi-state blocks. `block_entities_live`'s
-    // sibling helper broke on exactly that, as a timeout rather than a mismatch.
-    let mut jar_default: Option<u32> = None;
-    for id in 0..lodestone_data::block_states::STATE_COUNT {
-        if block_name(id) != Some(name) {
-            continue;
-        }
-        if lodestone_data::block_states::StateId::new(id)
-            .expect("generated state-table index is valid")
-            .is_default()
-        {
-            jar_default = Some(id);
-        }
-        let mut have: Vec<(&str, &str)> = properties(id).unwrap_or(&[]).to_vec();
-        have.sort_unstable();
-        if have == wanted {
-            return id;
-        }
-    }
-    jar_default.unwrap_or_else(|| state_id("minecraft:air"))
 }
 
 /// The base block name (properties stripped) `lodestone-client`'s `block_at`
@@ -157,8 +88,8 @@ fn base_name_at(handle: &lodestone_client::ClientHandle, pos: BlockPos) -> Strin
 /// `deepslate`/`gravel`/`water` at all — only "solid" (stone) or "not"
 /// (air), for *any* full-column send, edited or not.
 ///
-/// `build_world_column` now resolves each cell's real state via
-/// `ServerChunkColumn::block_state`/`resolve_state_id` (the same
+/// `build_world_column` now copies each cell's real typed state via
+/// `ServerChunkColumn::block_state_id` (the same
 /// [`ServerProtocol::encode_block_update`] already used for a single cell),
 /// so the pre-edit assertions below check the **real** per-block content
 /// directly, at full wire fidelity — no separate "what terrain was actually
@@ -175,17 +106,14 @@ async fn dig_and_place_persist_through_forget_and_reload() {
     // show, per this test's doc comment above.
     let generator = lodestone_server::overworld_generator(seed);
     let real_column = generator.column(0, 0);
-    assert_eq!(
-        real_column.block_state(0, -50, 0).split('[').next(),
-        Some("minecraft:deepslate")
-    );
-    assert_eq!(real_column.block_state(0, 37, 0), "minecraft:gravel");
-    assert_eq!(
-        real_column.block_state(0, 38, 0).split('[').next(),
-        Some("minecraft:water")
-    );
-    let gravel_id = resolve_state(real_column.block_state(0, 37, 0));
-    let water_id = resolve_state(real_column.block_state(0, 38, 0));
+    let deepslate = real_column.block_state_id(0, -50, 0);
+    let gravel = real_column.block_state_id(0, 37, 0);
+    let water = real_column.block_state_id(0, 38, 0);
+    assert_eq!(deepslate.block(), Block::Deepslate);
+    assert_eq!(gravel, Block::Gravel.default_state());
+    assert_eq!(water.block(), Block::Water);
+    let gravel_id = gravel.raw();
+    let water_id = water.raw();
 
     let source = overworld_chunk_source(seed);
     let (server, client_io) = IntegratedServer::open_in_memory(V770ServerProtocol, source, view_radius);
@@ -209,8 +137,8 @@ async fn dig_and_place_persist_through_forget_and_reload() {
     let clicked_pos = break_pos;
     let target_pos = BlockPos::new(0, 38, 0); // clicked_pos.relative(Up)
 
-    let stone_id = state_id("minecraft:stone");
-    let air_id = state_id("minecraft:air");
+    let stone_id = Block::Stone.default_state().raw();
+    let air_id = Block::Air.default_state().raw();
 
     // --- World-species control: the whole-column send now carries real
     // per-block fidelity, so each cell reads as its own
@@ -424,11 +352,11 @@ async fn dig_and_place_persist_through_forget_and_reload() {
     // machinery.
     let untouched_pos = BlockPos::new(2, -50, 0);
     assert_eq!(
-        real_column.block_state(2, -50, 0).split('[').next(),
-        Some("minecraft:deepslate"),
+        real_column.block_state_id(2, -50, 0).block(),
+        Block::Deepslate,
         "fixture assumption broke: expected deepslate at {untouched_pos:?}"
     );
-    let untouched_deepslate_id = resolve_state(real_column.block_state(2, -50, 0));
+    let untouched_deepslate_id = real_column.block_state_id(2, -50, 0).raw();
     assert_eq!(
         handle.block_at(untouched_pos),
         Some(untouched_deepslate_id),

@@ -13,6 +13,17 @@ idle contraption costs literally zero. The relevant cost is the **constant
 factor per notification**; palette-derived classification keeps that decision
 to an array read and a branch for inert cells.
 
+Runtime redstone state is a validated `lodestone_data::block_states::StateId`.
+Property reads use the generated `PropertyKey` and `BuiltinPropertyValue` tables,
+and mutations resolve a replacement through `Properties::state_for_block`.
+Names remain only at protocol, persistence, and legacy-fixture boundaries.
+Comparator analog output is a numeric block-entity sidecar; it is never
+encoded into a block-state id.
+
+Piston push reactions classify `StateId::block()` against generated `Block`
+tables. The hot path therefore never formats a block name or performs a text
+lookup while resolving a movement.
+
 ---
 
 ## The model, as it is

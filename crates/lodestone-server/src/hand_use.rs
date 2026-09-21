@@ -45,8 +45,9 @@
 //!   the client-side particles are cosmetic.
 
 use lodestone_model::BlockPos;
+use lodestone_data::block_properties::{BuiltinPropertyValue, PropertyKey, PropertyValue};
+use lodestone_data::block_states::StateId;
 
-use crate::redstone::with_property;
 use crate::scheduled_tick::ScheduledTickKind;
 
 /// The typed scheduled-tick key a pressed button uses to release itself.
@@ -66,7 +67,7 @@ pub const WOODEN_BUTTON_TICKS: u64 = 30;
 pub struct HandUse {
     /// Every `(position, new state)` the click rewrites. One entry for a
     /// trapdoor/gate/lever/button, **two** for a door (both halves move together).
-    pub changes: Vec<(BlockPos, String)>,
+    pub changes: Vec<(BlockPos, StateId)>,
     /// A delay in ticks after which the `TICK_BUTTON` key should fire at `pos` to release
     /// a pressed button, or `None` for the other four families.
     pub release_after: Option<u64>,
@@ -76,7 +77,7 @@ pub struct HandUse {
 ///
 /// Cheap and total, so `apply_use_item_on` can ask before doing any work.
 #[must_use]
-pub fn is_hand_usable(state: &str) -> bool {
+pub fn is_hand_usable(state: StateId) -> bool {
     crate::redstone_openable::is_openable(state)
         || is_lever(state)
         || is_button(state)
@@ -85,31 +86,28 @@ pub fn is_hand_usable(state: &str) -> bool {
 
 /// `minecraft:note_block`.
 #[must_use]
-pub fn is_note_block(state: &str) -> bool {
-    base(state) == crate::redstone_note_block::NOTE_BLOCK
+pub fn is_note_block(state: StateId) -> bool {
+    state.block() == lodestone_data::block::Block::NoteBlock
 }
 
 /// `minecraft:lever`.
 #[must_use]
-pub fn is_lever(state: &str) -> bool {
-    base(state) == "minecraft:lever"
+pub fn is_lever(state: StateId) -> bool {
+    state.block() == lodestone_data::block::Block::Lever
 }
 
 /// Any of the fourteen button blocks.
 #[must_use]
-pub fn is_button(state: &str) -> bool {
-    base(state).strip_suffix("_button").is_some_and(|rest| {
-        rest.strip_prefix("minecraft:")
-            .is_some_and(|name| !name.is_empty())
-    })
+pub fn is_button(state: StateId) -> bool {
+    state.block().path().ends_with("_button")
 }
 
 /// `ticksToStayPressed` for a button state — 20 for stone and polished
 /// blackstone, 30 for every wooden family.
 #[must_use]
-pub fn button_release_delay(state: &str) -> u64 {
-    match base(state) {
-        "minecraft:stone_button" | "minecraft:polished_blackstone_button" => STONE_BUTTON_TICKS,
+pub fn button_release_delay(state: StateId) -> u64 {
+    match state.block().path() {
+        "stone_button" | "polished_blackstone_button" => STONE_BUTTON_TICKS,
         _ => WOODEN_BUTTON_TICKS,
     }
 }
@@ -117,8 +115,8 @@ pub fn button_release_delay(state: &str) -> u64 {
 /// Whether a hand click may open this block. Gold has neither a door nor a
 /// trapdoor, so the only refused names are the two iron blocks.
 #[must_use]
-pub fn can_open_by_hand(state: &str) -> bool {
-    !matches!(base(state), "minecraft:iron_door" | "minecraft:iron_trapdoor")
+pub fn can_open_by_hand(state: StateId) -> bool {
+    !matches!(state.block(), lodestone_data::block::Block::IronDoor | lodestone_data::block::Block::IronTrapdoor)
 }
 
 /// Resolves one right-click into the state changes it produces, or `None` when
@@ -136,8 +134,8 @@ pub fn can_open_by_hand(state: &str) -> bool {
 #[must_use]
 pub fn hand_use(
     pos: BlockPos,
-    state: &str,
-    other_half: Option<(BlockPos, String)>,
+    state: StateId,
+    other_half: Option<(BlockPos, StateId)>,
     player_yaw: Option<f32>,
 ) -> Option<HandUse> {
     if is_button(state) {
@@ -147,14 +145,14 @@ pub fn hand_use(
             return None;
         }
         return Some(HandUse {
-            changes: vec![(pos, with_property(state, "powered", "true"))],
+            changes: vec![(pos, set_bool(state, PropertyKey::Powered, true))],
             release_after: Some(button_release_delay(state)),
         });
     }
     if is_lever(state) {
         let now = crate::redstone_openable::powered(state);
         return Some(HandUse {
-            changes: vec![(pos, with_property(state, "powered", if now { "false" } else { "true" }))],
+            changes: vec![(pos, set_bool(state, PropertyKey::Powered, !now))],
             release_after: None,
         });
     }
@@ -173,7 +171,7 @@ pub fn hand_use(
 
     let opening = !is_open(state);
     let mut changes = Vec::with_capacity(2);
-    let mut primary = with_property(state, "open", if opening { "true" } else { "false" });
+    let mut primary = set_bool(state, PropertyKey::Open, opening);
     if crate::redstone_openable::is_fence_gate(state) && opening {
         // When the gate is opening and its `facing` is the *opposite* of where
         // the player is
@@ -181,10 +179,10 @@ pub fn hand_use(
         // unknown, and a no-op when the facings already agree.
         if let Some(yaw) = player_yaw {
             let player_facing = facing_from_yaw(yaw);
-            if let Some(current) = property(state, "facing")
-                && current == opposite_facing(player_facing)
+            if crate::redstone::property_direction(state, PropertyKey::Facing)
+                == Some(opposite_facing(player_facing))
             {
-                primary = with_property(&primary, "facing", player_facing);
+                primary = set_direction(primary, player_facing);
             }
         }
     }
@@ -198,7 +196,7 @@ pub fn hand_use(
     {
         changes.push((
             other_pos,
-            with_property(&other_state, "open", if opening { "true" } else { "false" }),
+            set_bool(other_state, PropertyKey::Open, opening),
         ));
     }
 
@@ -215,52 +213,51 @@ pub fn hand_use(
 /// cannot publish a redundant block update (the same `Option` shape every
 /// `run_scheduled_tick` in the redstone families uses).
 #[must_use]
-pub fn release_button(state: &str) -> Option<String> {
+pub fn release_button(state: StateId) -> Option<StateId> {
     if !is_button(state) || !crate::redstone_openable::powered(state) {
         return None;
     }
-    Some(with_property(state, "powered", "false"))
+    Some(set_bool(state, PropertyKey::Powered, false))
 }
 
 /// `open=true` for a state carrying the property, `false` when it is absent (a
 /// bare `minecraft:oak_door` is the default state, which is closed).
-fn is_open(state: &str) -> bool {
-    property(state, "open") == Some("true")
+fn is_open(state: StateId) -> bool {
+    crate::redstone::property_bool(state, PropertyKey::Open).unwrap_or(false)
 }
 
-fn base(state: &str) -> &str {
-    state.split('[').next().unwrap_or(state)
+fn set_bool(state: StateId, key: PropertyKey, value: bool) -> StateId {
+    crate::redstone::with_property(
+        state,
+        key,
+        PropertyValue::builtin(if value { BuiltinPropertyValue::True } else { BuiltinPropertyValue::False }),
+    )
+    .expect("hand-use boolean property is generated")
 }
 
-/// Reads one `key=value` out of a block-state string's property list.
-fn property<'a>(state: &'a str, key: &str) -> Option<&'a str> {
-    let props = state.split_once('[')?.1.strip_suffix(']')?;
-    props
-        .split(',')
-        .filter_map(|pair| pair.split_once('='))
-        .find(|(k, _)| *k == key)
-        .map(|(_, v)| v)
+fn set_direction(state: StateId, direction: crate::neighbor_update::Direction) -> StateId {
+    crate::redstone::with_property(
+        state,
+        PropertyKey::Facing,
+        PropertyValue::builtin(crate::redstone::direction_property(direction)),
+    )
+    .expect("hand-use facing property is generated")
 }
 
 /// The horizontal direction a yaw points at, using the same quadrant arithmetic
 /// `placed_block_state`
 /// already uses for the redstone directional families.
-fn facing_from_yaw(yaw: f32) -> &'static str {
+fn facing_from_yaw(yaw: f32) -> crate::neighbor_update::Direction {
     match (((yaw / 90.0) + 0.5).floor() as i32).rem_euclid(4) {
-        0 => "south",
-        1 => "west",
-        2 => "north",
-        _ => "east",
+        0 => crate::neighbor_update::Direction::South,
+        1 => crate::neighbor_update::Direction::West,
+        2 => crate::neighbor_update::Direction::North,
+        _ => crate::neighbor_update::Direction::East,
     }
 }
 
-fn opposite_facing(facing: &str) -> &'static str {
-    match facing {
-        "north" => "south",
-        "south" => "north",
-        "east" => "west",
-        _ => "east",
-    }
+fn opposite_facing(facing: crate::neighbor_update::Direction) -> crate::neighbor_update::Direction {
+    facing.opposite()
 }
 
 #[cfg(test)]
@@ -269,6 +266,10 @@ mod tests {
 
     fn pos(x: i32, y: i32, z: i32) -> BlockPos {
         BlockPos::new(x, y, z)
+    }
+
+    fn sid(text: &str) -> StateId {
+        StateId::from_state_str(text).expect("hand-use fixture state must resolve")
     }
 
     #[test]
@@ -283,48 +284,46 @@ mod tests {
 
     #[test]
     fn a_click_opens_a_closed_door_and_leaves_powered_alone() {
-        let lower = "minecraft:oak_door[half=lower,open=false,powered=false]";
+        let lower = sid("minecraft:oak_door[half=lower,open=false,powered=false]");
         let out = hand_use(
             pos(1, 64, 1),
             lower,
             Some((
                 pos(1, 65, 1),
-                "minecraft:oak_door[half=upper,open=false,powered=false]".to_string(),
+                sid("minecraft:oak_door[half=upper,open=false,powered=false]"),
             )),
             None,
         )
         .expect("a wooden door opens by hand");
 
         assert_eq!(out.changes.len(), 2, "both halves move together");
-        assert!(out.changes[0].1.contains("open=true"));
-        assert!(out.changes[1].1.contains("open=true"));
-        // The load-bearing half: `powered` must not have moved, or the next
-        // neighbour notification reads the door as redstone-powered and shuts it.
-        assert!(out.changes[0].1.contains("powered=false"));
-        assert!(out.changes[1].1.contains("powered=false"));
+        for (_, state) in &out.changes {
+            assert_eq!(crate::redstone::property_bool(*state, PropertyKey::Open), Some(true));
+            assert_eq!(crate::redstone::property_bool(*state, PropertyKey::Powered), Some(false));
+        }
         assert_eq!(out.release_after, None);
     }
 
     #[test]
     fn a_second_click_closes_it() {
-        let open = "minecraft:oak_door[half=lower,open=true,powered=false]";
+        let open = sid("minecraft:oak_door[half=lower,open=true,powered=false]");
         let out = hand_use(pos(1, 64, 1), open, None, None).expect("closes");
-        assert!(out.changes[0].1.contains("open=false"));
+        assert_eq!(crate::redstone::property_bool(out.changes[0].1, PropertyKey::Open), Some(false));
     }
 
     #[test]
     fn an_iron_door_refuses_a_hand_click_and_a_copper_one_accepts() {
         assert_eq!(
-            hand_use(pos(0, 0, 0), "minecraft:iron_door[open=false]", None, None),
+            hand_use(pos(0, 0, 0), sid("minecraft:iron_door[open=false]"), None, None),
             None,
             "BlockSetType.IRON has canOpenByHand = false"
         );
         assert_eq!(
-            hand_use(pos(0, 0, 0), "minecraft:iron_trapdoor[open=false]", None, None),
+            hand_use(pos(0, 0, 0), sid("minecraft:iron_trapdoor[open=false]"), None, None),
             None
         );
         assert!(
-            hand_use(pos(0, 0, 0), "minecraft:copper_door[open=false]", None, None).is_some(),
+            hand_use(pos(0, 0, 0), sid("minecraft:copper_door[open=false]"), None, None).is_some(),
             "BlockSetType.COPPER has canOpenByHand = true — its `false` field is \
              canButtonBeActivatedByArrows"
         );
@@ -332,18 +331,18 @@ mod tests {
 
     #[test]
     fn a_lever_cycles_powered_both_ways() {
-        let off = "minecraft:lever[face=wall,facing=north,powered=false]";
+        let off = sid("minecraft:lever[face=wall,facing=north,powered=false]");
         let on = hand_use(pos(0, 0, 0), off, None, None).expect("flips");
-        assert!(on.changes[0].1.contains("powered=true"));
-        let back = hand_use(pos(0, 0, 0), &on.changes[0].1, None, None).expect("flips back");
-        assert!(back.changes[0].1.contains("powered=false"));
+        assert_eq!(crate::redstone::property_bool(on.changes[0].1, PropertyKey::Powered), Some(true));
+        let back = hand_use(pos(0, 0, 0), on.changes[0].1, None, None).expect("flips back");
+        assert_eq!(crate::redstone::property_bool(back.changes[0].1, PropertyKey::Powered), Some(false));
     }
 
     #[test]
     fn a_button_presses_once_and_schedules_its_own_release() {
-        let up = "minecraft:stone_button[face=wall,facing=north,powered=false]";
+        let up = sid("minecraft:stone_button[face=wall,facing=north,powered=false]");
         let pressed = hand_use(pos(0, 0, 0), up, None, None).expect("presses");
-        assert!(pressed.changes[0].1.contains("powered=true"));
+        assert_eq!(crate::redstone::property_bool(pressed.changes[0].1, PropertyKey::Powered), Some(true));
         assert_eq!(
             pressed.release_after,
             Some(STONE_BUTTON_TICKS),
@@ -352,9 +351,9 @@ mod tests {
 
         // Already pressed: the click is consumed without changing state, so the
         // timer is not extended and no block update is produced.
-        assert_eq!(hand_use(pos(0, 0, 0), &pressed.changes[0].1, None, None), None);
+        assert_eq!(hand_use(pos(0, 0, 0), pressed.changes[0].1, None, None), None);
 
-        let wooden = "minecraft:oak_button[face=wall,facing=north,powered=false]";
+        let wooden = sid("minecraft:oak_button[face=wall,facing=north,powered=false]");
         assert_eq!(
             hand_use(pos(0, 0, 0), wooden, None, None)
                 .expect("presses")
@@ -367,11 +366,11 @@ mod tests {
     #[test]
     fn release_button_returns_a_pressed_button_and_nothing_else() {
         assert_eq!(
-            release_button("minecraft:stone_button[powered=true]").as_deref(),
-            Some("minecraft:stone_button[powered=false]")
+            release_button(sid("minecraft:stone_button[powered=true]")),
+            Some(sid("minecraft:stone_button[powered=false]"))
         );
-        assert_eq!(release_button("minecraft:stone_button[powered=false]"), None);
-        assert_eq!(release_button("minecraft:lever[powered=true]"), None);
+        assert_eq!(release_button(sid("minecraft:stone_button[powered=false]")), None);
+        assert_eq!(release_button(sid("minecraft:lever[powered=true]")), None);
     }
 
     #[test]
@@ -379,29 +378,30 @@ mod tests {
         // Gate faces north; a player looking north is at yaw 180 in the protocol's
         // convention, so the gate's facing is the opposite of the player's and must
         // swing.
-        let gate = "minecraft:oak_fence_gate[facing=north,in_wall=false,open=false,powered=false]";
+        let gate = sid("minecraft:oak_fence_gate[facing=north,in_wall=false,open=false,powered=false]");
         let out = hand_use(pos(0, 0, 0), gate, None, Some(0.0)).expect("opens");
-        assert!(out.changes[0].1.contains("open=true"));
-        assert!(
-            out.changes[0].1.contains("facing=south"),
-            "a yaw of 0 faces south, and the north-facing gate is its opposite, so it \
-             swings: {}",
-            out.changes[0].1
+        assert_eq!(crate::redstone::property_bool(out.changes[0].1, PropertyKey::Open), Some(true));
+        assert_eq!(
+            crate::redstone::property_direction(out.changes[0].1, PropertyKey::Facing),
+            Some(crate::neighbor_update::Direction::South)
         );
 
         // Unknown yaw keeps the facing rather than guessing.
         let out = hand_use(pos(0, 0, 0), gate, None, None).expect("opens");
-        assert!(out.changes[0].1.contains("facing=north"));
+        assert_eq!(
+            crate::redstone::property_direction(out.changes[0].1, PropertyKey::Facing),
+            Some(crate::neighbor_update::Direction::North)
+        );
     }
 
     #[test]
     fn closing_a_fence_gate_never_re_faces_it() {
-        let gate = "minecraft:oak_fence_gate[facing=north,in_wall=false,open=true,powered=false]";
+        let gate = sid("minecraft:oak_fence_gate[facing=north,in_wall=false,open=true,powered=false]");
         let out = hand_use(pos(0, 0, 0), gate, None, Some(0.0)).expect("closes");
-        assert!(out.changes[0].1.contains("open=false"));
-        assert!(
-            out.changes[0].1.contains("facing=north"),
-            "vanilla's re-face is inside the opening branch only"
+        assert_eq!(crate::redstone::property_bool(out.changes[0].1, PropertyKey::Open), Some(false));
+        assert_eq!(
+            crate::redstone::property_direction(out.changes[0].1, PropertyKey::Facing),
+            Some(crate::neighbor_update::Direction::North)
         );
     }
 
@@ -416,7 +416,7 @@ mod tests {
             "minecraft:polished_blackstone_button",
             "minecraft:note_block",
         ] {
-            assert!(is_hand_usable(yes), "{yes} must be hand-usable");
+            assert!(is_hand_usable(sid(yes)), "{yes} must be hand-usable");
         }
         for no in [
             "minecraft:stone",
@@ -425,7 +425,7 @@ mod tests {
             "minecraft:chest",
             "minecraft:oak_planks",
         ] {
-            assert!(!is_hand_usable(no), "{no} must not be");
+            assert!(!is_hand_usable(sid(no)), "{no} must not be");
         }
     }
 
@@ -436,33 +436,29 @@ mod tests {
     fn a_note_block_click_cycles_its_pitch_and_wraps() {
         let out = hand_use(
             pos(0, 0, 0),
-            "minecraft:note_block[instrument=harp,note=0,powered=false]",
+            sid("minecraft:note_block[instrument=harp,note=0,powered=false]"),
             None,
             None,
         )
         .expect("cycles");
         assert_eq!(out.changes.len(), 1);
-        assert!(out.changes[0].1.contains("note=1"), "{}", out.changes[0].1);
+        assert_eq!(crate::redstone::property_u8(out.changes[0].1, PropertyKey::Note), Some(1));
         assert_eq!(out.release_after, None);
 
         let out = hand_use(
             pos(0, 0, 0),
-            "minecraft:note_block[instrument=harp,note=24,powered=false]",
+            sid("minecraft:note_block[instrument=harp,note=24,powered=false]"),
             None,
             None,
         )
         .expect("wraps");
-        assert!(
-            out.changes[0].1.contains("note=0"),
-            "24 must wrap back to 0: {}",
-            out.changes[0].1
-        );
+        assert_eq!(crate::redstone::property_u8(out.changes[0].1, PropertyKey::Note), Some(0));
     }
 
     #[test]
     fn button_delay_table_matches_the_jar_registrations() {
-        assert_eq!(button_release_delay("minecraft:stone_button"), 20);
-        assert_eq!(button_release_delay("minecraft:polished_blackstone_button"), 20);
+        assert_eq!(button_release_delay(sid("minecraft:stone_button")), 20);
+        assert_eq!(button_release_delay(sid("minecraft:polished_blackstone_button")), 20);
         for wooden in [
             "minecraft:oak_button",
             "minecraft:spruce_button",
@@ -477,7 +473,7 @@ mod tests {
             "minecraft:crimson_button",
             "minecraft:warped_button",
         ] {
-            assert_eq!(button_release_delay(wooden), 30, "{wooden}");
+            assert_eq!(button_release_delay(sid(wooden)), 30, "{wooden}");
         }
     }
 }

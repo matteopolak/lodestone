@@ -12,6 +12,8 @@
 //! are exposed through the client packet type.
 
 use lodestone_core::Reader;
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 use lodestone_server::dimension::Dimension;
 use lodestone_server::{ChunkColumn, ServerDirective, ServerProtocol};
 use lodestone_v26_2::packets::chunk::{ChunkShape, LevelChunkWithLight};
@@ -42,14 +44,20 @@ fn shape_for(dimension: Dimension) -> ChunkShape {
 fn fixture_column(dimension: Dimension) -> ChunkColumn {
     let shape = shape_for(dimension);
     let mut column = ChunkColumn::new(shape.min_y, shape.world_height as i32);
-    column.set_block(0, shape.min_y + 7, 0, "minecraft:stone");
-    column.set_block(
+    column.set_block_id(0, shape.min_y + 7, 0, Block::Stone.default_state());
+    column.set_block_id(
         6,
         shape.min_y + 63,
         0,
-        "minecraft:oak_leaves[persistent=true,distance=7,waterlogged=false]",
+        StateId::from_state_str("minecraft:oak_leaves[persistent=true,distance=7,waterlogged=false]")
+            .expect("oak leaves fixture state"),
     );
-    column.set_block(7, shape.min_y + 31, 0, "minecraft:water[level=0]");
+    column.set_block_id(
+        7,
+        shape.min_y + 31,
+        0,
+        StateId::from_state_str("minecraft:water[level=0]").expect("water fixture state"),
+    );
     column
 }
 

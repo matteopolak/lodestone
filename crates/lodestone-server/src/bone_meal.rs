@@ -75,7 +75,12 @@
 //! draws, transcribe the draw *count* first and assert it — the surrounding
 //! outcome is easy to eyeball and the draw count is not.
 
-use crate::growth_tick;
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{
+    BuiltinPropertyValue, Properties, PropertyKey, PropertyValue,
+};
+use lodestone_data::block_states::StateId;
+
 use crate::mob_spawn::SpawnRng;
 
 /// `SaplingBlock::isBonemealSuccess`'s threshold.
@@ -88,9 +93,6 @@ pub const CROP_AGE_INCREASE_MAX: u32 = 5;
 
 /// `minecraft:bone_meal`.
 pub const BONE_MEAL: &str = "minecraft:bone_meal";
-
-/// `minecraft:grass_block`.
-const GRASS_BLOCK: &str = "minecraft:grass_block";
 
 /// What one bone-meal right-click did, before any world mutation — the same
 /// decide-then-apply split [`crate::hand_use`] uses, so the whole rule is testable
@@ -106,8 +108,8 @@ pub enum BoneMealOutcome {
     ConsumedNoChange,
     /// One bone meal is consumed and the block becomes `state`.
     Grew {
-        /// The new canonical block-state string for the clicked position.
-        state: String,
+        /// The new canonical block state for the clicked position.
+        state: StateId,
     },
     /// A valid vanilla target this crate cannot grow — see the module doc's two
     /// named gaps. Treated as `PASS`: nothing is consumed, because consuming an
@@ -124,9 +126,8 @@ pub enum BoneMealOutcome {
 /// Cheap and total, so a caller can ask before doing any work — the same contract
 /// [`crate::hand_use::is_hand_usable`] has.
 #[must_use]
-pub fn is_bonemealable(state: &str) -> bool {
-    let base = state.split('[').next().unwrap_or(state);
-    growth_tick::crop_max_age(base).is_some() || growth_tick::is_sapling(state) || base == GRASS_BLOCK
+pub fn is_bonemealable(state: StateId) -> bool {
+    crop_max_age(state).is_some() || is_sapling(state) || state.block() == Block::GrassBlock
 }
 
 /// Resolves one bone-meal right-click on `state`.
@@ -139,24 +140,20 @@ pub fn is_bonemealable(state: &str) -> bool {
 /// Draws from `rng` exactly as vanilla does — see the module doc's draw table. A
 /// [`BoneMealOutcome::NotBonemealable`] result draws nothing at all.
 #[must_use]
-pub fn apply_bone_meal(state: &str, above_state: &str, rng: &mut SpawnRng) -> BoneMealOutcome {
-    let base = state.split('[').next().unwrap_or(state);
-
-    if let Some(max_age) = growth_tick::crop_max_age(base) {
-        let age = growth_tick::get_age(state);
+pub fn apply_bone_meal(state: StateId, above_state: StateId, rng: &mut SpawnRng) -> BoneMealOutcome {
+    if let Some(max_age) = crop_max_age(state) {
+        let age = property_u32(state, PropertyKey::Age);
         // `CropBlock::isValidBonemealTarget` — `!isMaxAge`.
         if age >= max_age {
             return BoneMealOutcome::NotBonemealable;
         }
         // `isBonemealSuccess` is a constant `true`: no draw here.
-        let increase = crop_age_increase(base, rng);
+        let increase = crop_age_increase(state, rng);
         let new_age = max_age.min(age + increase);
-        return BoneMealOutcome::Grew {
-            state: growth_tick::set_age(base, new_age),
-        };
+        return BoneMealOutcome::Grew { state: with_u32_property(state, PropertyKey::Age, new_age) };
     }
 
-    if growth_tick::is_sapling(state) {
+    if is_sapling(state) {
         // `SaplingBlock::isValidBonemealTarget` is a build-height check on
         // `pos.above(minimumHeight)`, which is true everywhere a sapling can
         // actually be standing, so it is not modelled as a rejection.
@@ -165,19 +162,17 @@ pub fn apply_bone_meal(state: &str, above_state: &str, rng: &mut SpawnRng) -> Bo
         }
         // `advanceTree`: stage 0 cycles to 1 with no further draw; stage 1 grows a
         // real tree, which needs a feature placer this crate has none of.
-        return match growth_tick::get_stage(state) {
-            0 => BoneMealOutcome::Grew {
-                state: growth_tick::set_stage(base, 1),
-            },
+        return match property_u32(state, PropertyKey::Stage) {
+            0 => BoneMealOutcome::Grew { state: with_u32_property(state, PropertyKey::Stage, 1) },
             _ => BoneMealOutcome::NotModelled {
                 reason: "a stage-1 sapling needs TreeGrower::growTree, and no tree feature exists here",
             },
         };
     }
 
-    if base == GRASS_BLOCK {
+    if state.block() == Block::GrassBlock {
         // `GrassBlock::isValidBonemealTarget` — the cell above must be air.
-        if !crate::random_tick::is_air_variant(above_state) {
+        if !matches!(above_state.block(), Block::Air | Block::CaveAir | Block::VoidAir) {
             return BoneMealOutcome::NotBonemealable;
         }
         return BoneMealOutcome::NotModelled {
@@ -188,16 +183,71 @@ pub fn apply_bone_meal(state: &str, above_state: &str, rng: &mut SpawnRng) -> Bo
     BoneMealOutcome::NotBonemealable
 }
 
+fn crop_max_age(state: StateId) -> Option<u32> {
+    match state.block() {
+        Block::Wheat | Block::Carrots | Block::Potatoes => Some(7),
+        Block::Beetroots => Some(3),
+        _ => None,
+    }
+}
+
+fn is_sapling(state: StateId) -> bool {
+    matches!(
+        state.block(),
+        Block::OakSapling
+            | Block::SpruceSapling
+            | Block::BirchSapling
+            | Block::JungleSapling
+            | Block::AcaciaSapling
+            | Block::CherrySapling
+            | Block::DarkOakSapling
+            | Block::PaleOakSapling
+    )
+}
+
+fn property_u32(state: StateId, key: PropertyKey) -> u32 {
+    Properties::from_state_id(state)
+        .get(key)
+        .and_then(PropertyValue::name)
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(0)
+}
+
+fn with_u32_property(state: StateId, key: PropertyKey, value: u32) -> StateId {
+    let value = BuiltinPropertyValue::from_name(
+        [
+            "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13",
+            "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25",
+        ]
+        .get(value as usize)
+        .copied()
+        .unwrap_or("0"),
+    )
+    .expect("generated numeric property value");
+    let properties = Properties::from_state_id(state);
+    let mut pairs = Vec::with_capacity(properties.len());
+    for property in properties.iter() {
+        if property.key() != key {
+            pairs.push((property.key(), property.value()));
+        }
+    }
+    pairs.push((key, PropertyValue::builtin(value)));
+    Properties::try_from_pairs(&pairs)
+        .ok()
+        .and_then(|properties| Properties::state_for_block(state.block(), &properties))
+        .expect("generated block-state property transition")
+}
+
 /// `getBonemealAgeIncrease` — `Mth.nextInt(random, 2, 5)`, and for beetroot that
 /// same value divided by three.
 ///
 /// **One draw either way.** `Mth::nextInt(random, min, max)` is
 /// `nextInt(max - min + 1) + min`, so the draw is `nextInt(4)`.
 #[must_use]
-pub fn crop_age_increase(base: &str, rng: &mut SpawnRng) -> u32 {
+pub fn crop_age_increase(state: StateId, rng: &mut SpawnRng) -> u32 {
     let bound = (CROP_AGE_INCREASE_MAX - CROP_AGE_INCREASE_MIN + 1) as i32;
     let raw = CROP_AGE_INCREASE_MIN + rng.next_int(bound) as u32;
-    if base == growth_tick::BEETROOTS {
+    if state.block() == Block::Beetroots {
         raw / 3
     } else {
         raw
@@ -217,18 +267,22 @@ mod tests {
         SpawnRng::new(SEED)
     }
 
+    fn id(state: &str) -> StateId {
+        StateId::from_state_str(state).expect("built-in test state")
+    }
+
     /// Every recognised family, and a control that is not one.
     #[test]
     fn recognises_exactly_the_three_families() {
-        assert!(is_bonemealable("minecraft:wheat[age=0]"));
-        assert!(is_bonemealable("minecraft:carrots[age=3]"));
-        assert!(is_bonemealable("minecraft:potatoes[age=3]"));
-        assert!(is_bonemealable("minecraft:beetroots[age=1]"));
-        assert!(is_bonemealable("minecraft:oak_sapling[stage=0]"));
-        assert!(is_bonemealable("minecraft:grass_block[snowy=false]"));
-        assert!(!is_bonemealable("minecraft:stone"));
-        assert!(!is_bonemealable("minecraft:dirt"));
-        assert!(!is_bonemealable("minecraft:oak_leaves[distance=1,persistent=false]"));
+        assert!(is_bonemealable(id("minecraft:wheat[age=0]")));
+        assert!(is_bonemealable(id("minecraft:carrots[age=3]")));
+        assert!(is_bonemealable(id("minecraft:potatoes[age=3]")));
+        assert!(is_bonemealable(id("minecraft:beetroots[age=1]")));
+        assert!(is_bonemealable(id("minecraft:oak_sapling[stage=0]")));
+        assert!(is_bonemealable(id("minecraft:grass_block[snowy=false]")));
+        assert!(!is_bonemealable(id("minecraft:stone")));
+        assert!(!is_bonemealable(id("minecraft:dirt")));
+        assert!(!is_bonemealable(id("minecraft:oak_leaves[distance=1,persistent=false]")));
     }
 
     /// A wheat crop advances by 2..=5 in one step and never past its max age of
@@ -240,9 +294,9 @@ mod tests {
         let mut r = rng();
         let mut seen = std::collections::BTreeSet::new();
         for _ in 0..400 {
-            match apply_bone_meal("minecraft:wheat[age=0]", "minecraft:air", &mut r) {
+            match apply_bone_meal(id("minecraft:wheat[age=0]"), id("minecraft:air"), &mut r) {
                 BoneMealOutcome::Grew { state } => {
-                    let age = growth_tick::get_age(&state);
+                    let age = property_u32(state, PropertyKey::Age);
                     assert!((2..=5).contains(&age), "age {age} outside 2..=5");
                     seen.insert(age);
                 }
@@ -266,7 +320,7 @@ mod tests {
     fn one_crop_use_draws_exactly_one_value() {
         let mut used = rng();
         for _ in 0..100 {
-            let _ = apply_bone_meal("minecraft:wheat[age=0]", "minecraft:air", &mut used);
+            let _ = apply_bone_meal(id("minecraft:wheat[age=0]"), id("minecraft:air"), &mut used);
         }
         let mut reference = rng();
         for _ in 0..100 {
@@ -299,15 +353,15 @@ mod tests {
     fn wheat_clamps_at_max_age_and_refuses_when_already_there() {
         let mut r = rng();
         for _ in 0..50 {
-            match apply_bone_meal("minecraft:wheat[age=5]", "minecraft:air", &mut r) {
+            match apply_bone_meal(id("minecraft:wheat[age=5]"), id("minecraft:air"), &mut r) {
                 BoneMealOutcome::Grew { state } => {
-                    assert_eq!(growth_tick::get_age(&state), 7, "must clamp to the max age");
+                    assert_eq!(property_u32(state, PropertyKey::Age), 7, "must clamp to the max age");
                 }
                 other => panic!("expected growth, got {other:?}"),
             }
         }
         assert_eq!(
-            apply_bone_meal("minecraft:wheat[age=7]", "minecraft:air", &mut r),
+            apply_bone_meal(id("minecraft:wheat[age=7]"), id("minecraft:air"), &mut r),
             BoneMealOutcome::NotBonemealable,
             "a fully grown crop is not a bone-meal target"
         );
@@ -323,8 +377,8 @@ mod tests {
         let mut zero = 0usize;
         let mut one = 0usize;
         for _ in 0..4000 {
-            match apply_bone_meal("minecraft:beetroots[age=0]", "minecraft:air", &mut r) {
-                BoneMealOutcome::Grew { state } => match growth_tick::get_age(&state) {
+            match apply_bone_meal(id("minecraft:beetroots[age=0]"), id("minecraft:air"), &mut r) {
+                BoneMealOutcome::Grew { state } => match property_u32(state, PropertyKey::Age) {
                     0 => zero += 1,
                     1 => one += 1,
                     other => panic!("beetroot cannot advance to age {other} from one use"),
@@ -347,16 +401,16 @@ mod tests {
     fn beetroot_clamps_at_three() {
         let mut r = rng();
         for _ in 0..50 {
-            match apply_bone_meal("minecraft:beetroots[age=3]", "minecraft:air", &mut r) {
+            match apply_bone_meal(id("minecraft:beetroots[age=3]"), id("minecraft:air"), &mut r) {
                 BoneMealOutcome::NotBonemealable => {}
                 other => panic!("a max-age beetroot is not a target, got {other:?}"),
             }
         }
         for _ in 0..50 {
             if let BoneMealOutcome::Grew { state } =
-                apply_bone_meal("minecraft:beetroots[age=2]", "minecraft:air", &mut r)
+                apply_bone_meal(id("minecraft:beetroots[age=2]"), id("minecraft:air"), &mut r)
             {
-                assert!(growth_tick::get_age(&state) <= 3);
+                assert!(property_u32(state, PropertyKey::Age) <= 3);
             }
         }
     }
@@ -370,9 +424,9 @@ mod tests {
         let mut grew = 0usize;
         let mut wasted = 0usize;
         for _ in 0..4000 {
-            match apply_bone_meal("minecraft:oak_sapling[stage=0]", "minecraft:air", &mut r) {
+            match apply_bone_meal(id("minecraft:oak_sapling[stage=0]"), id("minecraft:air"), &mut r) {
                 BoneMealOutcome::Grew { state } => {
-                    assert_eq!(growth_tick::get_stage(&state), 1);
+                    assert_eq!(property_u32(state, PropertyKey::Stage), 1);
                     grew += 1;
                 }
                 BoneMealOutcome::ConsumedNoChange => wasted += 1,
@@ -395,7 +449,7 @@ mod tests {
         let mut not_modelled = 0usize;
         let mut wasted = 0usize;
         for _ in 0..2000 {
-            match apply_bone_meal("minecraft:oak_sapling[stage=1]", "minecraft:air", &mut r) {
+            match apply_bone_meal(id("minecraft:oak_sapling[stage=1]"), id("minecraft:air"), &mut r) {
                 BoneMealOutcome::NotModelled { reason } => {
                     assert!(reason.contains("TreeGrower"));
                     not_modelled += 1;
@@ -415,12 +469,12 @@ mod tests {
     #[test]
     fn grass_block_reports_the_feature_gap_only_when_air_is_above() {
         let mut r = rng();
-        match apply_bone_meal("minecraft:grass_block[snowy=false]", "minecraft:air", &mut r) {
+        match apply_bone_meal(id("minecraft:grass_block[snowy=false]"), id("minecraft:air"), &mut r) {
             BoneMealOutcome::NotModelled { reason } => assert!(reason.contains("feature")),
             other => panic!("unexpected {other:?}"),
         }
         assert_eq!(
-            apply_bone_meal("minecraft:grass_block[snowy=false]", "minecraft:stone", &mut r),
+            apply_bone_meal(id("minecraft:grass_block[snowy=false]"), id("minecraft:stone"), &mut r),
             BoneMealOutcome::NotBonemealable,
             "grass with a block above it is not a bone-meal target"
         );
@@ -432,11 +486,11 @@ mod tests {
     fn a_non_target_draws_no_rng() {
         let mut r = rng();
         assert_eq!(
-            apply_bone_meal("minecraft:stone", "minecraft:air", &mut r),
+            apply_bone_meal(id("minecraft:stone"), id("minecraft:air"), &mut r),
             BoneMealOutcome::NotBonemealable
         );
         assert_eq!(
-            apply_bone_meal("minecraft:wheat[age=7]", "minecraft:air", &mut r),
+            apply_bone_meal(id("minecraft:wheat[age=7]"), id("minecraft:air"), &mut r),
             BoneMealOutcome::NotBonemealable
         );
         let mut reference = rng();
@@ -450,8 +504,8 @@ mod tests {
             let mut r = rng();
             let mut out = Vec::new();
             for _ in 0..100 {
-                out.push(apply_bone_meal("minecraft:wheat[age=0]", "minecraft:air", &mut r));
-                out.push(apply_bone_meal("minecraft:oak_sapling[stage=0]", "minecraft:air", &mut r));
+                out.push(apply_bone_meal(id("minecraft:wheat[age=0]"), id("minecraft:air"), &mut r));
+                out.push(apply_bone_meal(id("minecraft:oak_sapling[stage=0]"), id("minecraft:air"), &mut r));
             }
             out
         };

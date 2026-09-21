@@ -47,6 +47,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
 
+use lodestone_data::block_states::StateId;
 use lodestone_server::dimension::Dimension;
 use lodestone_server::region_source::RegionChunkSource;
 use lodestone_server::{ChunkColumn, ChunkSource};
@@ -87,19 +88,23 @@ const WIDE_PALETTE: [&str; 20] = [
 #[derive(Debug)]
 struct EmptyWorld;
 
+fn state_id(name: &str) -> StateId {
+    StateId::from_state_str(name).expect("oracle fixture state is built in")
+}
+
 impl ChunkSource for EmptyWorld {
     fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
         ChunkColumn::new(MIN_Y, HEIGHT)
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         // The column-regenerating form (correct, just not cheap); this
         // fixture is all air and this path is not hot.
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
-        self.column(cx, cz).block_state(lx, y, lz).to_string()
+        self.column(cx, cz).block_state_id(lx, y, lz)
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -116,7 +121,7 @@ impl ChunkSource for EmptyWorld {
     // design (an edit a test needs to survive goes through a source with real
     // retention). The no-op is explicit so the fixture's retention behavior is
     // clear at the implementation boundary.
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
         // No storage; edits are discarded by design.
     }
 }
@@ -147,7 +152,7 @@ fn a_real_mojang_server_can_read_the_region_file_we_wrote() {
         let x = i as i32 % 16;
         let z = (i as i32 / 16) % 16;
         let y = 64 + i as i32 % 4;
-        world.set_block(x, y, z, state);
+        world.set_block(x, y, z, state_id(state));
         expected.insert((x, y, z), (*state).to_owned());
     }
     for (x, y, z, state) in [
@@ -156,7 +161,7 @@ fn a_real_mojang_server_can_read_the_region_file_we_wrote() {
         (-5, 100, -9, "minecraft:redstone_ore[lit=false]"),
         (-16, 0, -16, "minecraft:diamond_block"),
     ] {
-        world.set_block(x, y, z, state);
+        world.set_block(x, y, z, state_id(state));
         expected.insert((x, y, z), state.to_owned());
     }
 

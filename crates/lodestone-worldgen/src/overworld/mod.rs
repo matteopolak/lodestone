@@ -202,7 +202,9 @@ mod biome;
 pub mod biome_cells;
 pub mod block_entities;
 mod decorate;
-mod fill;
+pub(crate) mod fill;
+mod fused_features;
+mod region_prefix;
 mod output;
 pub mod store;
 pub mod structures;
@@ -210,13 +212,31 @@ mod veins;
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::ops::Deref;
 use std::sync::Arc;
 
 use serde_json::Value;
 
 use crate::biome::ClimateSampler;
 use crate::carver::CarverConfig;
-use crate::density::{Builder, Resolver};
+
+/// Request-local callback for transitions in the mutable pre-ore centre
+/// chunk. The callback is short-lived and never retained by a generator cache.
+pub(crate) type BlockMutationObserverHandle = std::rc::Rc<
+    dyn Fn(
+        i32,
+        i32,
+        i32,
+        crate::dense_grid::BaseStateFacts,
+        lodestone_data::block_states::StateId,
+    ),
+>;
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey};
+use lodestone_data::block_states::StateId;
+use lodestone_data::block_states::StateId as CanonicalStateId;
+use lodestone_worldgen_core::hash::FastSet;
+use crate::density::{Builder, Density, Resolver, Spline, XzMemoId};
 use crate::feature::PlacedOre;
 use crate::surface::{SurfaceSystem, identity_canon};
 
@@ -225,14 +245,21 @@ use self::fill::AquiferTrees;
 
 pub use self::biome_cells::BiomeCells;
 pub use self::block_entities::{BeeOccupant, GeneratedBlockEntity};
-pub(crate) use self::biome::{zoomed_biome, zoomed_biome_flat};
+pub(crate) use self::biome::{zoomed_biome_flat, zoomed_biome_ref};
 #[cfg(test)]
 pub(crate) use self::biome::biome_zoom_seed;
 pub use self::output::{
     CompactGeneratedColumn, CompactGeneratedColumnParts, GenStage, GeneratedColumn,
     HEIGHTMAP_COLUMNS, MOTION_BLOCKING_HEIGHTMAP_TYPE_ID,
 };
-pub use self::decorate::{DirectDecorationResult, MixedReplayBatch, MixedReplayContext};
+pub use self::decorate::{
+    DirectDecorationResult, MixedReplayBatch, MixedReplayContext, RegionFeatureEpoch,
+    SparseDirectDecorationResult,
+};
+pub use self::fused_features::{
+    SourceExecutionCount, SourceOnceBatchResult, SourceOnceExecution, SourceOnceMutation,
+    SourceOnceTargetResult,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use self::output::StageTimes;
 pub use self::structures::{BEARD_REACH, REFS_RADIUS, StructureRefs};
@@ -384,6 +411,48 @@ impl OverworldBatchLease<'_> {
             .prepare_pre_ore_targets_with_lease(targets, radius, self)
     }
 
+    /// Reads one chunk's persisted structure sidecars from the live lease.
+    /// These are the same memoised stages used by the scalar accessors, but
+    /// the lease keeps their dependency walk from opening nested views.
+    pub fn structure_starts(
+        &self,
+        cx: i32,
+        cz: i32,
+    ) -> Vec<Arc<crate::structure::StructureStart>> {
+        self.assert_covers_radius((cx, cz), 0);
+        self.generator
+            .structure_starts_stage(cx, cz)
+            .iter()
+            .filter(|start| start.pieces_complete)
+            .map(Arc::clone)
+            .collect()
+    }
+
+    /// Reads one chunk's narrowed structure references from the live lease.
+    #[must_use]
+    pub fn structure_references(
+        &self,
+        cx: i32,
+        cz: i32,
+    ) -> std::collections::BTreeMap<String, Vec<i64>> {
+        self.assert_covers_radius((cx, cz), REFS_RADIUS);
+        let refs = self.generator.structure_refs_stage(cx, cz);
+        let (bx, bz) = (cx * 16, cz * 16);
+        let mut narrowed = StructureRefs::default();
+        for (sx, sz, start) in &refs.entries {
+            if start.pieces_complete
+                && start
+                    .bounding_box
+                    .intersects_xz(bx, bz, bx + 15, bz + 15)
+            {
+                narrowed
+                    .entries
+                    .push((*sx, *sz, Arc::clone(start)));
+            }
+        }
+        narrowed.packed_by_structure()
+    }
+
     fn assert_covers(&self, centre: (i32, i32)) {
         self.assert_covers_radius(centre, STRUCTURE_CLOSURE_RADIUS);
     }
@@ -469,52 +538,37 @@ const STORE_RETENTION: usize = store::retention_for_window(
 /// [`column`](Self::column) per chunk.
 #[allow(missing_debug_implementations)]
 pub struct OverworldGenerator {
+    /// Immutable compiled worldgen configuration shared by source instances.
+    compiled: Arc<CompiledOverworldGenerator>,
+    /// Runtime-only height probe cache; it must not be retained in the shared
+    /// immutable configuration.
+    preliminary_region: Arc<crate::aquifer::PreliminarySurfaceCache>,
+    /// Runtime-only staged products. Each source gets its own bounded store.
+    store: store::StagedStore<ChunkStages>,
+}
+
+/// Immutable, compiled Overworld configuration.
+///
+/// Resolver documents, density programs, structure blueprints, feature
+/// catalogs and tag closures are all built once here. Independent sources for
+/// the same authenticated seed/config can share this value by [`Arc`], while
+/// request-local stores remain on [`OverworldGenerator`].
+#[allow(missing_debug_implementations)]
+pub struct CompiledOverworldGenerator {
     /// Shared slot-index upper bound for every `Density` tree this generator
     /// built (final_density, surface, climate, aquifer) — see
     /// [`AquiferTrees`]'s doc comment.
     slot_count: usize,
     surface: SurfaceSystem,
-    /// Block-state string to [`crate::interner::StateId`] table, shared by
-    /// **every** grid this generator builds — that sharing is what lets a cell
-    /// move between two grids as a `u16` instead of a fresh `String`, which is
-    /// where Unit 3's 884,736-allocations-per-column saving comes from
-    /// (`docs/plans/worldgen-rewrite.md` D2).
-    ///
-    /// Owned per generator rather than globally, and it outlives every column,
-    /// so interning is a warmup cost and steady-state serving allocates nothing
-    /// here. See [`crate::interner`]'s module doc for why id-assignment order
-    /// cannot reach the wire.
-    interner: Arc<crate::interner::StateInterner>,
     min_y: i32,
     height: i32,
     sea_level: i32,
-    default_block: String,
-    default_fluid: String,
-    /// Vanilla hardcodes lava as the aquifer's second fluid regardless of the
-    /// dimension's configured `default_fluid` (the aquifer's fluid-status
-    /// type is built from the game's fixed lava block state, not from the
-    /// noise-generator settings) — not a simplification, this is vanilla's
-    /// own behaviour.
-    default_lava: String,
-    /// The three `default_*` strings above as [`PreState`]s — interned id plus
-    /// air/fluid/stone class — resolved once here.
-    ///
-    /// [`Self::surface_stage`]'s `pre` closure and [`Self::materialize_world`]
-    /// both need a block-state per position and used to `clone()` / re-hash one
-    /// of the strings above per call; these make both a 4-byte copy.
-    ///
-    /// **Both halves come from [`PreState::from_name`]**, i.e. from
-    /// `class_of_name` applied to the very string the settings supplied — so
-    /// the class is *derived*, never hand-written at the use site. That is
-    /// deliberate: a hand-written class would be a fully-connected wire
-    /// carrying the wrong value (`CLAUDE.md`'s own phrase) — the scan would
-    /// branch differently and still produce a plausible column. The `String`
-    /// forms are kept as the definition `surface_stage` re-derives against on
-    /// every entry under `debug_assertions`.
     /// The ore-vein sampler's three router channels plus its positional RNG,
     /// or `None` when the settings do not enable veins. Consumed by
     /// [`Self::materialize_world`]. See [`veins`].
     veins: Option<veins::VeinPrograms>,
+    /// Pre-surface classes for the configured default states, bound once
+    /// during generator construction.
     default_block_pre: crate::surface::PreState,
     default_fluid_pre: crate::surface::PreState,
     default_lava_pre: crate::surface::PreState,
@@ -539,14 +593,13 @@ pub struct OverworldGenerator {
     /// cross-request shaped-product identity reuse.
     generation_identity: Option<OverworldGenerationIdentity>,
     aquifer_trees: AquiferTrees,
-    preliminary_region: Arc<crate::aquifer::PreliminarySurfaceCache>,
     /// `#overworld_carver_replaceables` tag closure — which
     /// blocks a carver is allowed to overwrite. Empty when the [`Resolver`]
     /// supplies no tag data (`Resolver::block_tag`'s default), in which case
     /// `carver::apply_carvers`'s own `can_replace` is always false and
     /// carving becomes a harmless no-op rather than a panic — matching the
     /// "no data supplied" convention every resolver method establishes.
-    carver_replaceable: HashSet<String>,
+    carver_replaceable: FastSet<StateId>,
     /// Per-biome carver list, resolved once at construction for every biome
     /// name the [`Resolver`]'s biome-parameter table (or the fallback biome)
     /// can produce — see `crate::compose::build_biome_carvers`.
@@ -559,27 +612,6 @@ pub struct OverworldGenerator {
     /// Block-tag closures for every tag referenced by any biome's ore
     /// targets, resolved once — see `crate::compose::build_ore_tag_map`.
     ore_tag_map: HashMap<String, HashSet<String>>,
-    /// The staged per-chunk store: this generator's memoisation of the terrain
-    /// prefix produced by [`Self::pre_ore_stage`], and Unit 6's replacement for
-    /// the `Mutex`-guarded FIFO cache that preceded it.
-    ///
-    /// The memoisation itself is not new and its motivation is unchanged:
-    /// The unified FEATURES dispatcher needs the centre plus the surrounding
-    /// pre-ore pipelines on every [`column`](Self::column) call, so without
-    /// memoisation a sweep would redo each terrain prefix up to 9×.
-    ///
-    /// What **is** new is that computing once is now structural rather than
-    /// best-effort. The old caches took one global `Mutex` each and released it
-    /// across the computation, so two threads racing the same key both ran the
-    /// whole pipeline — `pre_ore_stage`'s own comment conceded "the work really
-    /// was done twice". Under a 289-column join burst that produced ~5,000
-    /// concurrent attempts on a single `Arc<Mutex>` and forced
-    /// `lodestone-server`'s per-ring barrier back in (`4307b59`). Here the map
-    /// is sharded [`store::SHARD_COUNT`] ways and each stage has its own
-    /// once-only guard, so a racing thread *waits for the value* instead of
-    /// computing a second copy. See [`store`]'s module doc for the full
-    /// argument, the exact-key rule, and why eviction is view-scoped.
-    store: store::StagedStore<ChunkStages>,
     /// Per-biome decoration list, resolved alongside the generator's ore
     /// definitions and global [`crate::compose::DecorationCatalog`]. Empty
     /// (whole map) when the resolver supplies no biome documents with any driven
@@ -647,40 +679,231 @@ pub struct OverworldGenerator {
     structures: Option<crate::structure::StructureRegistry>,
 }
 
-/// Renders a noise-settings block-state object (`{"Name": ..., "Properties": {...}}`)
-/// as this engine's canonical state string, `name[k=v,...]` with properties
-/// **sorted by key**.
-///
-/// The properties are not optional decoration: vanilla's own
-/// `noise_settings/overworld.json` carries
-/// `"default_fluid": {"Name": "minecraft:water", "Properties": {"level": "0"}}`,
-/// and reading only `["Name"]` produces `minecraft:water` — a *different string*
-/// from the `minecraft:water[level=0]` that `crate::carver` writes for the same
-/// block state. One column then holds two palette entries for one state, which
-/// costs a palette slot each (and a bit of index width for the whole section once
-/// the palette crosses 16), and makes every downstream `match` on the full state
-/// string miss for the bare form.
-fn canonical_state_from_settings(value: &Value, fallback: &str) -> String {
+impl Deref for OverworldGenerator {
+    type Target = CompiledOverworldGenerator;
+
+    fn deref(&self) -> &Self::Target {
+        &self.compiled
+    }
+}
+
+fn state_from_settings(value: &Value, fallback: CanonicalStateId) -> CanonicalStateId {
     let Some(name) = value["Name"].as_str() else {
-        return fallback.to_string();
+        return fallback;
     };
-    match value["Properties"].as_object() {
-        Some(properties) if !properties.is_empty() => {
-            let mut rendered: Vec<String> = properties
-                .iter()
-                .map(|(key, value)| {
-                    let value = value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string());
-                    format!("{key}={value}")
-                })
-                .collect();
-            rendered.sort();
-            format!("{name}[{}]", rendered.join(","))
+    let Some(block) = Block::from_name(name) else {
+        return fallback;
+    };
+    let mut properties = Properties::from_state_id(block.default_state());
+    if let Some(entries) = value["Properties"].as_object() {
+        for (key, value) in entries {
+            let Some(key) = PropertyKey::from_name(key) else {
+                return fallback;
+            };
+            let Some(value) = value.as_str().and_then(BuiltinPropertyValue::from_name) else {
+                return fallback;
+            };
+            properties = properties
+                .with_builtin(key, value)
+                .expect("generated block-state property is valid");
         }
-        _ => name.to_string(),
+    }
+    Properties::state_for_block(block, &properties).unwrap_or(fallback)
+}
+
+/// Finds a density-function reference whose path ends in `suffix` in one of
+/// the route documents. The standard overworld routes inline their factor and
+/// offset references, while small fixture routes often contain no such pair;
+/// returning `None` for the latter keeps those routes on their exact ordinary
+/// program without requiring the resolver to provide unrelated assets.
+fn density_reference_with_suffix(values: &[&Value], suffix: &str) -> Option<String> {
+    fn visit(value: &Value, suffix: &str) -> Option<String> {
+        match value {
+            Value::String(id) if id.ends_with(suffix) => Some(id.clone()),
+            Value::Array(values) => values.iter().find_map(|value| visit(value, suffix)),
+            Value::Object(values) => values.values().find_map(|value| visit(value, suffix)),
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => None,
+        }
+    }
+
+    values.iter().find_map(|value| visit(value, suffix))
+}
+
+fn density_signature(density: &Density) -> Vec<u64> {
+    let mut signature = Vec::new();
+    density.write_signature(&mut signature);
+    signature
+}
+
+/// Adds transparent `cache_2d` boundaries around pure factor/offset nodes
+/// that a final route expanded without an explicit wrapper. The field graph
+/// treats this marker as value-transparent, while the compiled product plan
+/// needs a clear admission boundary to seed its request lattice. The marker's
+/// memo id is intentionally `NONE`: only the request-scoped lattice owns the
+/// retained values.
+fn wrap_xz_product_nodes(
+    density: &mut Density,
+    factor_signature: &[u64],
+    offset_signature: &[u64],
+) {
+    if let Density::FlatCache { inner, .. } | Density::Cache2D { inner, .. } = density {
+        if inner.is_xz_pure() {
+            let signature = density_signature(inner);
+            if signature == factor_signature || signature == offset_signature {
+                return;
+            }
+        }
+        wrap_xz_product_nodes(inner, factor_signature, offset_signature);
+        return;
+    }
+    if density.is_xz_pure() {
+        let signature = density_signature(density);
+        if signature == factor_signature || signature == offset_signature {
+            let original = std::mem::replace(density, Density::Const(0.0));
+            *density = Density::Cache2D {
+                inner: Box::new(original),
+                memo: XzMemoId::NONE,
+            };
+            return;
+        }
+    }
+
+    match density {
+        Density::Add(a, b)
+        | Density::Mul(a, b)
+        | Density::Min(a, b)
+        | Density::Max(a, b) => {
+            wrap_xz_product_nodes(a, factor_signature, offset_signature);
+            wrap_xz_product_nodes(b, factor_signature, offset_signature);
+        }
+        Density::Abs(a)
+        | Density::Square(a)
+        | Density::Cube(a)
+        | Density::HalfNegative(a)
+        | Density::QuarterNegative(a)
+        | Density::Squeeze(a)
+        | Density::Invert(a)
+        | Density::Marker(a) => wrap_xz_product_nodes(a, factor_signature, offset_signature),
+        Density::Clamp { input, .. }
+        | Density::Interpolated { inner: input, .. } => {
+            wrap_xz_product_nodes(input, factor_signature, offset_signature)
+        }
+        Density::FlatCache { .. } | Density::Cache2D { .. } => unreachable!(
+            "transparent X/Z wrappers return before recursive route matching"
+        ),
+        Density::ShiftedNoise {
+            shift_x,
+            shift_y,
+            shift_z,
+            ..
+        } => {
+            wrap_xz_product_nodes(shift_x, factor_signature, offset_signature);
+            wrap_xz_product_nodes(shift_y, factor_signature, offset_signature);
+            wrap_xz_product_nodes(shift_z, factor_signature, offset_signature);
+        }
+        Density::RangeChoice {
+            input,
+            when_in_range,
+            when_out_of_range,
+            ..
+        } => {
+            wrap_xz_product_nodes(input, factor_signature, offset_signature);
+            wrap_xz_product_nodes(when_in_range, factor_signature, offset_signature);
+            wrap_xz_product_nodes(when_out_of_range, factor_signature, offset_signature);
+        }
+        Density::IntervalSelect {
+            input, functions, ..
+        } => {
+            wrap_xz_product_nodes(input, factor_signature, offset_signature);
+            for function in functions {
+                wrap_xz_product_nodes(function, factor_signature, offset_signature);
+            }
+        }
+        Density::FindTopSurface {
+            density,
+            upper_bound,
+            ..
+        } => {
+            wrap_xz_product_nodes(density, factor_signature, offset_signature);
+            wrap_xz_product_nodes(upper_bound, factor_signature, offset_signature);
+        }
+        Density::Spline(spline) => wrap_xz_product_spline(
+            spline,
+            factor_signature,
+            offset_signature,
+        ),
+        Density::Const(_)
+        | Density::BlendAlpha
+        | Density::BlendOffset
+        | Density::Beardifier
+        | Density::YClampedGradient { .. }
+        | Density::Noise { .. }
+        | Density::ShiftA(_)
+        | Density::ShiftB(_)
+        | Density::Shift(_)
+        | Density::Blended(_)
+        | Density::EndIslands(_) => {}
+    }
+}
+
+fn wrap_xz_product_spline(
+    spline: &mut Spline,
+    factor_signature: &[u64],
+    offset_signature: &[u64],
+) {
+    if let Spline::Multipoint { coordinate, points } = spline {
+        wrap_xz_product_nodes(coordinate, factor_signature, offset_signature);
+        for point in points {
+            wrap_xz_product_spline(&mut point.value, factor_signature, offset_signature);
+        }
+    }
+}
+
+fn pre_state_from_canonical(canonical: CanonicalStateId) -> crate::surface::PreState {
+    let class = match canonical.block() {
+        Block::Air | Block::CaveAir | Block::VoidAir => crate::surface::PreClass::Air,
+        Block::Water | Block::Lava => crate::surface::PreClass::Fluid,
+        _ => crate::surface::PreClass::Stone,
+    };
+    crate::surface::PreState {
+        state: canonical,
+        class,
     }
 }
 
 impl OverworldGenerator {
+    /// Creates a generator with fresh bounded runtime state from an immutable
+    /// compiled configuration.
+    #[must_use]
+    pub fn from_compiled(compiled: Arc<CompiledOverworldGenerator>) -> Self {
+        let preliminary_region = Arc::new(
+            crate::aquifer::PreliminarySurfaceCache::with_program(
+                Arc::clone(&compiled.aquifer_trees.prelim_program),
+                crate::aquifer::PRELIMINARY_CACHE_REGION_CAPACITY,
+            ),
+        );
+        Self {
+            compiled,
+            preliminary_region,
+            store: store::StagedStore::new(STORE_RETENTION),
+        }
+    }
+
+    /// Compiles an immutable configuration once without retaining any
+    /// request-local staged products. Callers that need several independent
+    /// sources may retain the returned [`Arc`] and pass it to
+    /// [`Self::from_compiled`].
+    #[must_use]
+    pub fn compile(
+        seed: i64,
+        settings: &Value,
+        resolver: &dyn Resolver,
+        biome: &str,
+        cold_enough_to_snow: bool,
+    ) -> Arc<CompiledOverworldGenerator> {
+        Arc::clone(&Self::new(seed, settings, resolver, biome, cold_enough_to_snow).compiled)
+    }
+
     /// The named pass order consumed by this generator and its parity tools.
     #[must_use]
     pub const fn stage_schedule() -> &'static crate::stage_schedule::StageSchedule {
@@ -718,36 +941,33 @@ impl OverworldGenerator {
         let resolver_fingerprint = resolver.asset_fingerprint();
         let settings_identity = settings.to_string();
         let router = &settings["noise_router"];
-        let final_density = builder
+        let mut final_density = builder
             .build(&router["final_density"])
             .expect("bundled final_density density-function document");
         let canon = identity_canon(settings);
-        // Built here rather than in the `Self { .. }` literal below because
-        // `SurfaceSystem::new` interns its whole result-state set into it at
-        // parse time — see that method's own note on why a set
-        // walked out of the parsed data cannot drift the way a hand-maintained
-        // pre-intern list would.
-        let interner = Arc::new(crate::interner::StateInterner::new());
-        let surface = SurfaceSystem::new(settings, &builder, &canon, &interner);
+        let surface = SurfaceSystem::new(settings, &builder, &canon);
 
         let min_y = settings["noise"]["min_y"].as_i64().unwrap_or(-64) as i32;
         let height = settings["noise"]["height"].as_i64().unwrap_or(384) as i32;
         let sea_level = settings["sea_level"].as_i64().unwrap_or(63) as i32;
         let (cell_width, cell_height) = crate::aquifer::cell_geometry(settings);
-        let default_block = settings["default_block"]["Name"]
-            .as_str()
-            .unwrap_or("minecraft:stone")
-            .to_string();
-        let default_fluid =
-            canonical_state_from_settings(&settings["default_fluid"], "minecraft:water[level=0]");
-        let default_lava = "minecraft:lava[level=0]".to_string();
+        let default_block = state_from_settings(
+            &settings["default_block"],
+            Block::Stone.default_state(),
+        );
+        let default_fluid = state_from_settings(
+            &settings["default_fluid"],
+            Block::Water.default_state(),
+        );
+        // The aquifer always uses lava for its second fluid.
+        let default_lava = Block::Lava.default_state();
         // Built from the same `builder` every other router channel uses,
         // so `vein_toggle`'s slot indices share one address space with
         // `final_density`'s -- the property `slot_count` below depends on.
-        let veins = veins::VeinPrograms::build(&builder, settings, &interner);
-        let default_block_pre = crate::surface::PreState::from_name(&interner, &default_block);
-        let default_fluid_pre = crate::surface::PreState::from_name(&interner, &default_fluid);
-        let default_lava_pre = crate::surface::PreState::from_name(&interner, &default_lava);
+        let veins = veins::VeinPrograms::build(&builder, settings);
+        let default_block_pre = pre_state_from_canonical(default_block);
+        let default_fluid_pre = pre_state_from_canonical(default_fluid);
+        let default_lava_pre = pre_state_from_canonical(default_lava);
 
         let dynamic_biome = if let Some(table) = crate::biome::overworld_table(resolver) {
             let temperatures = crate::biome::parse_temperatures(&resolver.biome_temperatures());
@@ -788,9 +1008,85 @@ impl OverworldGenerator {
                 .build(&router["preliminary_surface_level"])
                 .expect("bundled preliminary_surface_level density-function document"),
         );
-        let prelim_program = std::sync::Arc::new(crate::engine::PointProgram::compile(&prelim));
+        // The factor/offset references are present in the stock overworld
+        // routes, but deliberately absent from compact fixture routes. Build
+        // them only when the route documents advertise the pair, so a fixture
+        // resolver is not queried for assets its settings cannot consume.
+        // The manifest remains only an admission token; the engine verifies
+        // every route's structural signatures before using a lattice.
+        let factor_id = density_reference_with_suffix(
+            &[&router["final_density"], &router["preliminary_surface_level"]],
+            "/factor",
+        );
+        let offset_id = density_reference_with_suffix(
+            &[&router["final_density"], &router["preliminary_surface_level"]],
+            "/offset",
+        );
+        let xz_product_manifest = factor_id
+            .zip(offset_id)
+            .and_then(|(factor_id, offset_id)| {
+                let factor = builder.build(&Value::String(factor_id)).ok()?;
+                let offset = builder.build(&Value::String(offset_id)).ok()?;
+                // Some compact route documents expose the pure products only
+                // through a shared route reference.  Preserve their value
+                // order while adding the same transparent admission boundary
+                // that the product-aware field compiler recognizes.
+                let factor_signature = density_signature(&factor);
+                let offset_signature = density_signature(&offset);
+                wrap_xz_product_nodes(
+                    &mut final_density,
+                    &factor_signature,
+                    &offset_signature,
+                );
+                crate::engine::XzProductManifest::from_routes(
+                    seed,
+                    &prelim,
+                    &final_density,
+                    &factor,
+                    &offset,
+                )
+            });
+        let prelim_program = std::sync::Arc::new(match &xz_product_manifest {
+            Some(manifest) => crate::engine::PointProgram::compile_with_xz_products(
+                &prelim,
+                manifest.clone(),
+            ),
+            None => crate::engine::PointProgram::compile(&prelim),
+        });
+        let barrier = std::sync::Arc::new(
+            builder
+                .build(&router["barrier"])
+                .expect("bundled barrier density-function document"),
+        );
+        let floodedness = std::sync::Arc::new(
+            builder
+                .build(&router["fluid_level_floodedness"])
+                .expect("bundled fluid_level_floodedness density-function document"),
+        );
+        let spread = std::sync::Arc::new(
+            builder
+                .build(&router["fluid_level_spread"])
+                .expect("bundled fluid_level_spread density-function document"),
+        );
+        let lava = std::sync::Arc::new(
+            builder
+                .build(&router["lava"])
+                .expect("bundled lava density-function document"),
+        );
+        let point_programs = crate::aquifer::CompiledAquiferPointRoutes::from_trees(
+            &barrier,
+            &floodedness,
+            &spread,
+            &lava,
+        );
         let aquifer_trees = AquiferTrees {
-            final_density: crate::engine::Program::compile(&final_density),
+            final_density: match &xz_product_manifest {
+                Some(manifest) => crate::engine::Program::compile_with_xz_products(
+                    &final_density,
+                    manifest.clone(),
+                ),
+                None => crate::engine::Program::compile(&final_density),
+            },
             erosion: crate::engine::Program::compile(
                 &builder
                     .build(&router["erosion"])
@@ -801,28 +1097,16 @@ impl OverworldGenerator {
                     .build(&router["depth"])
                     .expect("bundled depth density-function document"),
             ),
-            barrier: std::sync::Arc::new(
-                builder
-                    .build(&router["barrier"])
-                    .expect("bundled barrier density-function document"),
-            ),
-            floodedness: std::sync::Arc::new(
-                builder
-                    .build(&router["fluid_level_floodedness"])
-                    .expect("bundled fluid_level_floodedness density-function document"),
-            ),
-            spread: std::sync::Arc::new(
-                builder
-                    .build(&router["fluid_level_spread"])
-                    .expect("bundled fluid_level_spread density-function document"),
-            ),
-            lava: std::sync::Arc::new(
-                builder
-                    .build(&router["lava"])
-                    .expect("bundled lava density-function document"),
-            ),
+            barrier,
+            floodedness,
+            spread,
+            lava,
+            point_programs,
             prelim,
             prelim_program,
+            xz_product_fingerprint: xz_product_manifest
+                .as_ref()
+                .map(crate::engine::XzProductManifest::fingerprint),
             positional: {
                 use crate::rng::{PositionalRandomFactory, RandomSource};
                 let mut src = builder
@@ -838,16 +1122,24 @@ impl OverworldGenerator {
         // populated, every carve write is rejected (`can_replace` always
         // false) — the same trap `CarverOracle.java`'s own header warns
         // about for the isolated oracle.
-        let mut carver_replaceable = HashSet::new();
+        let mut carver_replaceable_names = HashSet::new();
         {
             let mut seen = HashSet::new();
         crate::compose::resolve_block_tag(
-                resolver,
-                "minecraft:overworld_carver_replaceables",
-                &mut carver_replaceable,
+            resolver,
+            "minecraft:overworld_carver_replaceables",
+                &mut carver_replaceable_names,
                 &mut seen,
             );
         }
+        let carver_replaceable: FastSet<StateId> = carver_replaceable_names
+            .iter()
+            .map(|name| {
+                Block::from_name(name)
+                    .map(Block::default_state)
+                    .expect("unknown carver replaceable block")
+            })
+            .collect();
 
         // Per-biome carver composition data: resolved once for
         // every biome name that can appear (every distinct name in the usable
@@ -907,13 +1199,6 @@ impl OverworldGenerator {
         // surface, climate, the eight aquifer trees) — see `AquiferTrees`'s
         // doc comment for why this is always a safe bound.
         let slot_count = builder.slot_count();
-        let preliminary_region = Arc::new(
-            crate::aquifer::PreliminarySurfaceCache::with_program(
-                Arc::clone(&aquifer_trees.prelim_program),
-                crate::aquifer::PRELIMINARY_CACHE_REGION_CAPACITY,
-            ),
-        );
-
         // Structure placement's S1. Built here, from the same `resolver` borrow every
         // other composition table above uses, because the registry parses ~54
         // JSON documents plus their biome-tag closures and must not do that per
@@ -933,27 +1218,12 @@ impl OverworldGenerator {
                 fallback_cold_enough_to_snow: cold_enough_to_snow,
             }
         });
-        let generator = Self {
+        let compiled = Arc::new(CompiledOverworldGenerator {
             slot_count,
             surface,
-            // Fresh per generator, built just above so `SurfaceSystem::new`
-            // could intern into it. Still deliberately *not* pre-populated
-            // from a hand-written list of everything the resolver's data can
-            // produce: the allocation budget is written against a steady-state
-            // column, by which point every state the data can produce has been
-            // interned by ordinary generation, and a hand-maintained
-            // pre-intern list that drifted out of sync with the data would be
-            // a stale claim of exactly the kind CLAUDE.md's rule 2 is about.
-            // U21's additions are not that: the surface rule's result states,
-            // the clay bands and the three `default_*` blocks are all walked
-            // out of the parsed data itself, so they cannot drift from it.
-            interner,
             min_y,
             height,
             sea_level,
-            default_block,
-            default_fluid,
-            default_lava,
             veins,
             default_block_pre,
             default_fluid_pre,
@@ -965,12 +1235,10 @@ impl OverworldGenerator {
             seed,
             generation_identity,
             aquifer_trees,
-            preliminary_region,
             carver_replaceable,
             carvers_by_biome,
             ore_definitions,
             ore_tag_map,
-            store: store::StagedStore::new(STORE_RETENTION),
             decoration_catalog,
             veg_tags,
             biome_climates,
@@ -979,8 +1247,8 @@ impl OverworldGenerator {
             snow_support,
             climate_noise: crate::noise::ClimateNoise::new(),
             structures,
-        };
-        generator
+        });
+        Self::from_compiled(compiled)
     }
 
     /// The SPAWN generation's part 1: one biome's parsed `MobSpawnSettings`, or `None` when
@@ -1178,6 +1446,15 @@ impl OverworldGenerator {
     #[must_use]
     pub fn preliminary_surface_program_nodes(&self) -> usize {
         self.aquifer_trees.prelim_program.node_count()
+    }
+
+    /// Structural fingerprint shared by the generator's final-density and
+    /// preliminary-surface programs when the pure-X/Z factor-and-offset plan
+    /// was admitted. A production region can use this as a cheap witness that
+    /// one lattice is safe for both routes.
+    #[must_use]
+    pub fn xz_product_fingerprint(&self) -> Option<u64> {
+        self.aquifer_trees.xz_product_fingerprint
     }
 
     /// Distinct chunks currently held in the staged store. **Diagnostics and

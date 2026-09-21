@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use lodestone_worldgen::density::{NoiseParams, Resolver};
 use lodestone_worldgen::nether::NetherGenerator;
 use lodestone_worldgen::stage_schedule::{DecorationStep, Dimension, NETHER_FEATURES};
+use lodestone_data::block_states::StateId;
 use serde_json::Value;
 
 const EXTERNAL: &str = include_str!("support/nether_gold_ore_external.txt");
@@ -138,6 +139,10 @@ fn gold_spills(generator: &NetherGenerator) -> Vec<lodestone_worldgen::nether::P
     generator.parity_source_spills_with_overrides(TARGET.0, TARGET.1, SOURCE.0, SOURCE.1, &[])
 }
 
+fn gold_ore_state() -> StateId {
+    StateId::from_state_str("minecraft:nether_gold_ore").expect("nether gold ore state")
+}
+
 #[test]
 fn external_gold_witness_has_typed_step_seven_attribution() {
     let cell = external_cell();
@@ -154,8 +159,9 @@ fn external_gold_witness_reaches_production_source_spill() {
     let settings = assets.read("noise_settings", "nether");
     let generator = NetherGenerator::new(SEED, &settings, &assets);
     let absolute = (TARGET.0 * 16 + lx, y, TARGET.1 * 16 + lz);
+    let gold_ore = gold_ore_state();
     assert!(gold_spills(&generator).iter().any(|spill| {
-        spill.position == absolute && spill.state == "minecraft:nether_gold_ore" && !spill.transient
+        spill.position == absolute && spill.state == gold_ore && !spill.transient
     }), "production source spill lost external gold witness {absolute:?}");
 }
 
@@ -167,6 +173,7 @@ fn withholding_gold_entry_is_a_live_detector_control() {
     let full = NetherGenerator::new(SEED, &settings, &assets);
     let without = NetherGenerator::new(SEED, &settings, &WithoutGoldOre(Assets::new()));
     let absolute = (TARGET.0 * 16 + lx, y, TARGET.1 * 16 + lz);
-    assert!(gold_spills(&full).iter().any(|spill| spill.position == absolute && spill.state == "minecraft:nether_gold_ore"));
-    assert!(gold_spills(&without).iter().all(|spill| spill.position != absolute || spill.state != "minecraft:nether_gold_ore"), "detector control: withholding ore_gold_nether must remove the external witness");
+    let gold_ore = gold_ore_state();
+    assert!(gold_spills(&full).iter().any(|spill| spill.position == absolute && spill.state == gold_ore));
+    assert!(gold_spills(&without).iter().all(|spill| spill.position != absolute || spill.state != gold_ore), "detector control: withholding ore_gold_nether must remove the external witness");
 }

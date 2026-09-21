@@ -16,6 +16,7 @@
 
 use std::collections::BTreeMap;
 
+use lodestone_data::block_states::StateId;
 use lodestone_server::{
     ChunkColumn, ChunkSource, RandomTickEvent, RandomTickScheduler, ScheduledTickKind,
     ScheduledTickQueue,
@@ -48,7 +49,7 @@ struct Fixture {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TickOutcome {
     updates: Vec<RandomTickEvent>,
-    watched_states: BTreeMap<BlockPos, String>,
+    watched_states: BTreeMap<BlockPos, StateId>,
 }
 
 #[derive(Debug, Clone)]
@@ -67,7 +68,7 @@ impl ChunkSource for NoNeighbors {
         unreachable!("the fixture reports every neighbour column unavailable")
     }
 
-    fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+    fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
         unreachable!("the fixture reports every neighbour column unavailable")
     }
 
@@ -75,13 +76,17 @@ impl ChunkSource for NoNeighbors {
         unreachable!("the fixture reports every neighbour column unavailable")
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
         unreachable!("the fixture reports every neighbour column unavailable")
     }
 
     fn is_column_resident(&self, _cx: i32, _cz: i32) -> bool {
         false
     }
+}
+
+fn state(name: &str) -> StateId {
+    StateId::from_state_str(name).expect("fixture block state exists")
 }
 
 fn fixture() -> Fixture {
@@ -96,14 +101,14 @@ fn fixture() -> Fixture {
         // solid cap. Only the first section has ticking content and therefore
         // consumes the one seeded position draw for this chunk.
         let mut column = ChunkColumn::new(0, 32);
-        column.set_block(pos.0 - cx * 16, pos.1, pos.2 - cz * 16, GRASS);
-        column.set_block(pos.0 - cx * 16, pos.1 + 1, pos.2 - cz * 16, STONE);
+        column.set_block_id(pos.0 - cx * 16, pos.1, pos.2 - cz * 16, state(GRASS));
+        column.set_block_id(pos.0 - cx * 16, pos.1 + 1, pos.2 - cz * 16, state(STONE));
         assert!(columns.insert((cx, cz), column).is_none(), "fixture chunks must be unique");
         assert!(watched.insert((cx, cz), pos).is_none(), "fixture watched cells must be unique");
         expected_events.push(RandomTickEvent {
             pos,
-            from: GRASS.to_owned(),
-            to: DIRT.to_owned(),
+            from: state(GRASS),
+            to: state(DIRT),
         });
     }
 
@@ -141,7 +146,7 @@ fn independently_scheduled_region_reference(fixture: &Fixture) -> TickOutcome {
     for (owner, jobs) in owner_batches {
         for job in jobs {
             assert_eq!(job.owner, owner, "a reference job escaped its physical owner");
-            watched_states.insert(job.event.pos, job.event.to.clone());
+            watched_states.insert(job.event.pos, job.event.to);
             emitted.push((job.serial, job.event));
         }
     }
@@ -189,9 +194,7 @@ fn run_owner_sequence(sequence: &[TickOwnedChunk], mut fixture: Fixture) -> Tick
             let column = fixture.columns.get(&chunk).expect("watched chunk must remain resident");
             (
                 pos,
-                column
-                    .block_state(pos.0 - chunk.0 * 16, pos.1, pos.2 - chunk.1 * 16)
-                    .to_owned(),
+                column.block_state_id(pos.0 - chunk.0 * 16, pos.1, pos.2 - chunk.1 * 16),
             )
         })
         .collect();
@@ -226,7 +229,10 @@ fn serial_chunk_owner_plan_matches_independently_scheduled_region_reference() {
 
     assert_eq!(actual.updates.len(), FIXTURE_ORDER.len(), "every seeded owner must publish one update");
     assert!(
-        actual.watched_states.values().all(|state| state == DIRT),
+        actual
+            .watched_states
+            .values()
+            .all(|actual_state| *actual_state == state(DIRT)),
         "each watched grass block must persist as dirt after its published update"
     );
     compare_outcomes(&actual, &reference).expect("serial owner plan parity");

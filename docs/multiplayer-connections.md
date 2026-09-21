@@ -75,11 +75,17 @@ queued. Keep-alives and other non-movement actions remain live across the
 boundary. This keeps a delayed pre-correction claim off the wire without
 rewriting a valid post-correction position.
 
-The client driver polls inbound packets and outbound actions fairly. The action
-queue is intentionally unbounded so user input never blocks the render thread,
-but it must not be given a biased select priority: a held attack action can keep
-that queue permanently ready, which would otherwise stop the reader from
-receiving and automatically answering a keep-alive. The focused
+The client driver polls inbound packets and outbound actions fairly. The shell's
+outbound relay never blocks the render thread: movement and the empty
+`EndClientTick` boundary marker use newest-value replacement lanes, while chat,
+commands, drops, uses, and other controls use a bounded FIFO. Sequence tags
+merge those lanes without moving a retained action across a control that was
+queued before or after it. The marker is coalescible because the server uses it
+only to close the latest movement sample; movement itself is already
+replaceable when the consumer falls behind. A held attack action can still keep
+the action side ready, so the client driver must not give outbound work a
+biased select priority: the reader needs chances to receive and automatically
+answer a keep-alive. The focused
 `lodestone_keepalive` debug target records the challenge id at client receive,
 before/after its automatic write, and at the server send/acknowledgement sites.
 Use `RUST_LOG=warn,lodestone_keepalive=debug` for this narrow trace.

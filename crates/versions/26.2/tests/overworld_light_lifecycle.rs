@@ -8,6 +8,7 @@
 //! decoded values so a local decode/encode cycle cannot hide a mask mistake.
 
 use lodestone_core::Reader;
+use lodestone_data::block::Block;
 use lodestone_server::dimension::Dimension;
 use lodestone_server::{ChunkColumn, ServerDirective, ServerProtocol};
 use lodestone_v26_2::packets::chunk::{ChunkShape, LevelChunkWithLight};
@@ -25,7 +26,7 @@ fn terrain_column() -> ChunkColumn {
     for index in 0..TERRAIN_CELLS {
         let x = (index % 8) as i32;
         let z = (index / 8) as i32;
-        column.set_block(x, 0, z, "minecraft:stone");
+        column.set_block_id(x, 0, z, Block::Stone.default_state());
     }
     column
 }

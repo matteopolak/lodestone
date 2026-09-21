@@ -45,21 +45,20 @@
 //! [`IntProvider`] and [`RandomSource`] provide the configured radius and
 //! random stream; [`Resolver`] expands the replacement tag.
 
-use std::collections::HashSet;
-
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::density::Resolver;
 use crate::feature::{BlockPos, IntProvider};
+use lodestone_data::block_states::StateId;
 use crate::math;
 use crate::rng::RandomSource;
+use lodestone_worldgen_core::hash::FastSet;
 
-use super::base_id;
-use super::config::{is_air, is_fluid, resolve_block_set, try_parse_int_provider};
+use super::config::{resolve_canonical_block_set, try_parse_int_provider};
 use super::grid::VegGrid;
 
-const DRIPSTONE_BLOCK: &str = "minecraft:dripstone_block";
+const DRIPSTONE_BLOCK: lodestone_data::block::Block = lodestone_data::block::Block::DripstoneBlock;
 
 /// The float-provider subset used by the bundled large-dripstone record.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -139,7 +138,7 @@ fn finite_f32(value: f64) -> Option<f32> {
 /// Parsed parameters for one large-dripstone configured feature.
 #[derive(Clone, Debug)]
 pub struct LargeDripstoneCfg {
-    pub(super) replaceable_blocks: HashSet<String>,
+    pub(super) replaceable_blocks: FastSet<StateId>,
     pub(super) floor_to_ceiling_search_range: i32,
     pub(super) column_radius: IntProvider,
     pub(super) height_scale: FloatRange,
@@ -155,7 +154,8 @@ impl LargeDripstoneCfg {
     /// Parses the configured record without turning malformed datapack data
     /// into a panic or a permissive feature.
     pub(super) fn try_parse(resolver: &dyn Resolver, config: &Value) -> Option<Self> {
-        let replaceable_blocks = resolve_block_set(resolver, config.get("replaceable_blocks")?)?;
+        let replaceable_blocks =
+            resolve_canonical_block_set(resolver, config.get("replaceable_blocks")?)?;
         if replaceable_blocks.is_empty() {
             return None;
         }
@@ -271,27 +271,31 @@ impl CaveColumn {
 }
 
 fn empty_or_water(grid: &VegGrid, pos: BlockPos) -> bool {
-    let base = base_id(grid.get(pos.x, pos.y, pos.z));
-    is_air(base) || base == "minecraft:water"
+    let block = grid.get_id(pos.x, pos.y, pos.z).block();
+    matches!(block, lodestone_data::block::Block::Air | lodestone_data::block::Block::CaveAir | lodestone_data::block::Block::VoidAir | lodestone_data::block::Block::Water)
 }
 
 fn empty_or_water_or_lava(grid: &VegGrid, pos: BlockPos) -> bool {
-    let base = base_id(grid.get(pos.x, pos.y, pos.z));
-    is_air(base) || is_fluid(base)
+    let block = grid.get_id(pos.x, pos.y, pos.z).block();
+    matches!(block, lodestone_data::block::Block::Air | lodestone_data::block::Block::CaveAir | lodestone_data::block::Block::VoidAir | lodestone_data::block::Block::Water | lodestone_data::block::Block::Lava)
 }
 
 fn is_lava(grid: &VegGrid, pos: BlockPos) -> bool {
-    base_id(grid.get(pos.x, pos.y, pos.z)) == "minecraft:lava"
+    grid.get_id(pos.x, pos.y, pos.z).block() == lodestone_data::block::Block::Lava
 }
 
-fn valid_edge(grid: &VegGrid, config: &LargeDripstoneCfg, pos: BlockPos) -> bool {
-    let base = base_id(grid.get(pos.x, pos.y, pos.z));
-    base == DRIPSTONE_BLOCK || base == "minecraft:lava" || config.replaceable_blocks.contains(base)
+fn valid_edge(grid: &VegGrid, replaceable: &FastSet<StateId>, pos: BlockPos) -> bool {
+    let base = grid.get_id(pos.x, pos.y, pos.z).block().default_state();
+    let block = base.block();
+    block == lodestone_data::block::Block::DripstoneBlock
+        || block == lodestone_data::block::Block::Lava
+        || replaceable.contains(&base)
 }
 
 fn scan_column(
     grid: &VegGrid,
-    config: &LargeDripstoneCfg,
+    floor_to_ceiling_search_range: i32,
+    replaceable: &FastSet<StateId>,
     origin: BlockPos,
 ) -> Option<CaveColumn> {
     if !empty_or_water(grid, origin) {
@@ -300,7 +304,7 @@ fn scan_column(
 
     let scan = |dy: i32| {
         let mut y = origin.y;
-        for _ in 1..config.floor_to_ceiling_search_range {
+        for _ in 1..floor_to_ceiling_search_range {
             if !empty_or_water(
                 grid,
                 BlockPos {
@@ -314,7 +318,7 @@ fn scan_column(
         }
         valid_edge(
             grid,
-            config,
+            replaceable,
             BlockPos {
                 y,
                 ..origin
@@ -404,9 +408,9 @@ impl Dripstone {
         random: &mut R,
         grid: &mut VegGrid,
         wind: WindOffset,
-        replaceable_blocks: &HashSet<String>,
+        replaceable_blocks: &FastSet<StateId>,
     ) {
-        let state_id = grid.interner().id_of(DRIPSTONE_BLOCK);
+        let state_id = DRIPSTONE_BLOCK.default_state();
         for dx in -self.radius..=self.radius {
             for dz in -self.radius..=self.radius {
                 let distance = ((dx * dx + dz * dz) as f32).sqrt();
@@ -438,7 +442,10 @@ impl Dripstone {
                         break;
                     }
                     let shifted = wind.at(pos);
-                    let base = base_id(grid.get(shifted.x, shifted.y, shifted.z));
+                    let base = grid
+                        .get_id(shifted.x, shifted.y, shifted.z)
+                        .block()
+                        .default_state();
                     if empty_or_water_or_lava(grid, shifted) {
                         has_been_out = true;
                         let _ = grid.set_id_if_in_bounds(
@@ -447,7 +454,7 @@ impl Dripstone {
                             shifted.z,
                             state_id,
                         );
-                    } else if has_been_out && replaceable_blocks.contains(base) {
+                    } else if has_been_out && replaceable_blocks.contains(&base) {
                         break;
                     }
                     pos.y += if self.pointing_up { 1 } else { -1 };
@@ -499,7 +506,12 @@ pub(super) fn place_large_dripstone<R: RandomSource>(
     config: &LargeDripstoneCfg,
     grid: &mut VegGrid,
 ) -> bool {
-    let Some(column) = scan_column(grid, config, origin) else {
+    let Some(column) = scan_column(
+        grid,
+        config.floor_to_ceiling_search_range,
+        &config.replaceable_blocks,
+        origin,
+    ) else {
         return false;
     };
     if column.height() < 4 {
@@ -577,12 +589,16 @@ mod tests {
     use crate::feature::vegetation::{place_configured_feature, ConfiguredFeature, VegTags};
     use crate::rng::XoroshiroPositionalFactory;
 
+    fn state(spec: &str) -> StateId {
+        StateId::from_state_str(spec).expect("test state is in the generated table")
+    }
+
     const EXTERNAL: &str = include_str!("../../../tests/support/large_dripstone_feature_external.txt");
 
     #[derive(Debug)]
     struct Expected {
         origin: BlockPos,
-        states: HashMap<(i32, i32, i32), String>,
+        states: HashMap<(i32, i32, i32), StateId>,
     }
 
     fn fixture() -> Expected {
@@ -607,7 +623,7 @@ mod tests {
                     pos.next().expect("state y").parse().expect("state y int"),
                     pos.next().expect("state z").parse().expect("state z int"),
                 );
-                states.insert(key, rest.to_owned());
+                states.insert(key, state(rest));
             }
         }
         Expected {
@@ -618,7 +634,7 @@ mod tests {
 
     fn cfg() -> LargeDripstoneCfg {
         LargeDripstoneCfg {
-            replaceable_blocks: HashSet::from(["minecraft:stone".to_owned()]),
+            replaceable_blocks: [state("minecraft:stone")].into_iter().collect(),
             floor_to_ceiling_search_range: 30,
             column_radius: IntProvider::Constant(3),
             height_scale: FloatRange::Constant(1.0),
@@ -663,14 +679,14 @@ mod tests {
         for x in 0..16 {
             for z in 0..16 {
                 for y in -16..48 {
-                    grid.seed(x, y, z, "minecraft:stone".to_owned());
+                    grid.seed_id(x, y, z, state("minecraft:stone"));
                 }
             }
         }
         for x in 5..=11 {
             for z in 5..=11 {
                 for y in 0..=10 {
-                    grid.seed(x, y, z, "minecraft:air".to_owned());
+                    grid.seed_id(x, y, z, state("minecraft:air"));
                 }
             }
         }
@@ -758,7 +774,7 @@ mod tests {
         let got: HashMap<_, _> = expected
             .states
             .keys()
-            .map(|&pos| (pos, grid.get(pos.0, pos.1, pos.2).to_owned()))
+            .map(|&pos| (pos, grid.get(pos.0, pos.1, pos.2)))
             .collect();
         assert_eq!(got, expected.states);
         let written: HashSet<_> = grid
@@ -773,10 +789,10 @@ mod tests {
         let origin = BlockPos { x: 8, y: 1, z: 8 };
         let mut grid = cave_grid(BlockPos { x: 8, y: 5, z: 8 });
         for y in 0..=10 {
-            grid.seed(origin.x, y, origin.z, "minecraft:stone".to_owned());
+            grid.seed_id(origin.x, y, origin.z, state("minecraft:stone"));
         }
         for y in 0..=2 {
-            grid.seed(origin.x, y, origin.z, "minecraft:air".to_owned());
+            grid.seed_id(origin.x, y, origin.z, state("minecraft:air"));
         }
         let mut random = ScriptedRandom::new(&[]);
         assert!(!place_large_dripstone(&mut random, origin, &cfg(), &mut grid));
@@ -801,7 +817,7 @@ mod tests {
         assert_eq!(random.next_int, 1);
         assert_eq!(random.floats, 26);
         for (&(x, y, z), state) in &expected.states {
-            assert_eq!(grid.get(x, y, z), state);
+            assert_eq!(grid.get(x, y, z), *state);
         }
     }
 
@@ -862,7 +878,9 @@ mod tests {
         };
         assert_eq!(config.floor_to_ceiling_search_range, 30);
         assert_eq!(provider_bounds(&config.column_radius), Some((3, 16)));
-        assert!(config.replaceable_blocks.contains("minecraft:stone"));
+        assert!(config
+            .replaceable_blocks
+            .contains(&StateId::from_state_str("minecraft:stone").unwrap()));
 
         let catalog = build_decoration_catalog(&resolver, &["minecraft:dripstone_caves".to_owned()]);
         let selected = catalog

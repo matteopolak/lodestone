@@ -52,6 +52,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use lodestone_core::{Reader, State, Writer};
+use lodestone_data::block_states::StateId;
 use lodestone_net::{Connection, Transport};
 use lodestone_server::{
     ChunkColumn, ChunkSource, IntegratedServer, STORE_CAPACITY_CEILING as MAX_CAPACITY,
@@ -175,7 +176,7 @@ impl ServerProtocol for FakeProtocol {
 /// **Not** the real 384. Production columns are 192 KiB and this gate's control
 /// arm generates thousands of them; the count is what is under test, not the
 /// column's size, and `chunk_store`'s own `measure_rss_with_retention` pair is
-/// where the size is measured. 16 keeps `ChunkColumn::block_state` in range for
+/// where the size is measured. 16 keeps `ChunkColumn::block_state_id` in range for
 /// any probe at `y = 8`.
 const RIG_HEIGHT: i32 = 16;
 
@@ -214,10 +215,10 @@ impl ChunkSource for CountingSource {
         ChunkColumn::new(0, RIG_HEIGHT)
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
         let (lx, lz) = (x.rem_euclid(16), z.rem_euclid(16));
-        self.column(cx, cz).block_state(lx, y, lz).to_string()
+        self.column(cx, cz).block_state_id(lx, y, lz)
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -226,7 +227,7 @@ impl ChunkSource for CountingSource {
         self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
         // No storage; this is a counter, and edits are discarded by design.
         // Explicit rather than inherited.
     }

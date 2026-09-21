@@ -4,6 +4,7 @@
 //! re-exported helpers preserve the existing public API and wire behaviour.
 
 use super::*;
+use lodestone_core::{Decode, Reader};
 
 /// Decodes a packet body, asserting the payload was consumed to the last
 /// byte. Returns `None` on any decode error or trailing bytes rather than

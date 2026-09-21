@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 
 use lodestone_canonical::inverse;
+use lodestone_data::block_states::StateId;
 use lodestone_core::{Ctx, Decode, Encode, Reader, State, Writer, encode_body};
 use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ItemStack, Rotation, Vec3f};
 use lodestone_server::{
@@ -584,12 +585,9 @@ impl V340ServerProtocol {
         x: i32,
         y: i32,
         z: i32,
-        state: &str,
+        state: StateId,
     ) -> Result<ServerDirective, ChunkEncodeError> {
-        let canonical = lodestone_data::block_states::state_id(state).ok_or_else(|| {
-            ChunkEncodeError::new(format!("unknown canonical block state {state}"))
-        })?;
-        let legacy = legacy_state(PROTOCOL, canonical)?;
+        let legacy = legacy_state(PROTOCOL, state.raw())?;
         let mut payload = Writer::default();
         payload.i64(pack_position(BlockPos::new(x, y, z)));
         payload.var_i32(i32::try_from(legacy).expect("legacy state fits in i32"));
@@ -608,12 +606,9 @@ impl V110ServerProtocol {
         x: i32,
         y: i32,
         z: i32,
-        state: &str,
+        state: StateId,
     ) -> Result<ServerDirective, ChunkEncodeError> {
-        let canonical = lodestone_data::block_states::state_id(state).ok_or_else(|| {
-            ChunkEncodeError::new(format!("unknown canonical block state {state}"))
-        })?;
-        let legacy = legacy_state(PROTOCOL_1_9_4, canonical)?;
+        let legacy = legacy_state(PROTOCOL_1_9_4, state.raw())?;
         let mut payload = Writer::default();
         payload.i64(pack_position(BlockPos::new(x, y, z)));
         payload.var_i32(i32::try_from(legacy).expect("legacy state fits in i32"));
@@ -632,12 +627,9 @@ impl V210ServerProtocol {
         x: i32,
         y: i32,
         z: i32,
-        state: &str,
+        state: StateId,
     ) -> Result<ServerDirective, ChunkEncodeError> {
-        let canonical = lodestone_data::block_states::state_id(state).ok_or_else(|| {
-            ChunkEncodeError::new(format!("unknown canonical block state {state}"))
-        })?;
-        let legacy = legacy_state(PROTOCOL_1_10_2, canonical)?;
+        let legacy = legacy_state(PROTOCOL_1_10_2, state.raw())?;
         let mut payload = Writer::default();
         payload.i64(pack_position(BlockPos::new(x, y, z)));
         payload.var_i32(i32::try_from(legacy).expect("legacy state fits in i32"));
@@ -656,12 +648,9 @@ impl V316ServerProtocol {
         x: i32,
         y: i32,
         z: i32,
-        state: &str,
+        state: StateId,
     ) -> Result<ServerDirective, ChunkEncodeError> {
-        let canonical = lodestone_data::block_states::state_id(state).ok_or_else(|| {
-            ChunkEncodeError::new(format!("unknown canonical block state {state}"))
-        })?;
-        let legacy = legacy_state(PROTOCOL_1_11_2, canonical)?;
+        let legacy = legacy_state(PROTOCOL_1_11_2, state.raw())?;
         let mut payload = Writer::default();
         payload.i64(pack_position(BlockPos::new(x, y, z)));
         payload.var_i32(i32::try_from(legacy).expect("legacy state fits in i32"));
@@ -1224,7 +1213,7 @@ macro_rules! impl_server_protocol {
                 x: i32,
                 y: i32,
                 z: i32,
-                state: &str,
+                state: StateId,
             ) -> ServerDirective {
                 self.try_encode_block_update(x, y, z, state).unwrap_or_else(|_| {
                     panic!(

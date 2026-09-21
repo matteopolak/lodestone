@@ -56,7 +56,6 @@ pub fn place_feature_pool_elements_with_sink<R: RandomSource>(
     debug_assert_eq!(size_x, size_z, "structure feature grids are square chunks");
     let source = Arc::new(world.clone());
     let mut grid = VegGrid::with_sources(
-        Arc::clone(world.interner()),
         min_y,
         size_y,
         min_x,
@@ -72,11 +71,6 @@ pub fn place_feature_pool_elements_with_sink<R: RandomSource>(
         placement.place(random, world_seed, &mut grid, tags);
     }
 
-    debug_assert_eq!(
-        grid.interner().instance_id(),
-        world.interner().instance_id(),
-        "feature overlay and structure grid must share a state interner",
-    );
     if let Some(mutation) = mutation {
         for (x, y, z, state) in grid
             .take_structure_mutation_capture()
@@ -85,7 +79,7 @@ pub fn place_feature_pool_elements_with_sink<R: RandomSource>(
             mutation.write_id(world, x, y, z, state);
         }
     } else {
-        for (x, y, z, state) in grid.dirty_cell_ids() {
+        for (x, y, z, state) in grid.dirty_cells() {
             world.set_id(x, y, z, state);
         }
     }
@@ -100,6 +94,7 @@ mod tests {
     use super::*;
     use crate::feature::vegetation::{ConfiguredFeature, PlacedRef};
     use crate::structure::pool::Projection;
+    use lodestone_data::block::Block;
 
     #[test]
     fn resolved_feature_reaches_the_dense_grid() {
@@ -110,7 +105,7 @@ mod tests {
                 placements: Vec::new(),
                 feature: Box::new(ConfiguredFeature::SimpleBlock(
                     crate::feature::vegetation::BlockStateProvider::Simple(
-                        "minecraft:gold_block".to_string(),
+                        Block::GoldBlock.default_state(),
                     ),
                 )),
             }),
@@ -120,7 +115,7 @@ mod tests {
         let mut world = DenseBlockGrid::new(0, 0, 0, 16, 16, 16, "minecraft:air");
         world.set(3, 0, 5, "minecraft:dirt");
         let mut tags = VegTags::default();
-        tags.supports_vegetation.insert("minecraft:dirt".to_string());
+        tags.supports_vegetation.insert(Block::Dirt);
         let mut random = LegacyRandomSource::new(0);
         place_feature_pool_elements(&mut random, 0, &[placement], &mut world, &tags);
         assert_eq!(world.get(3, 1, 5), "minecraft:gold_block");
@@ -134,7 +129,10 @@ mod tests {
                 registry_id: None,
                 placements: Vec::new(),
                 feature: Box::new(ConfiguredFeature::SimpleBlock(
-                    crate::feature::vegetation::BlockStateProvider::Simple(state.to_owned()),
+                    crate::feature::vegetation::BlockStateProvider::Simple(
+                        lodestone_data::block_states::StateId::from_state_str(state)
+                            .expect("fixture state is generated"),
+                    ),
                 )),
             }),
             origin: crate::feature::BlockPos { x: 3, y: 1, z: 5 },
@@ -157,17 +155,17 @@ mod tests {
             &tags,
             Some(&mut mutation),
         );
-        let blocks = recorder.finish(world.interner());
+        let blocks = recorder.finish();
         assert_eq!(
             blocks
                 .mutations()
                 .iter()
-                .map(|write| (write.ordinal, write.position, write.state.as_str()))
+                .map(|write| (write.ordinal, write.position, write.state))
                 .collect::<Vec<_>>(),
             vec![
-                (0, [3, 1, 5], "minecraft:tuff"),
-                (1, [3, 1, 5], "minecraft:pumpkin"),
-                (2, [3, 1, 5], "minecraft:pumpkin"),
+                (0, [3, 1, 5], lodestone_data::block::Block::Tuff.default_state()),
+                (1, [3, 1, 5], lodestone_data::block::Block::Pumpkin.default_state()),
+                (2, [3, 1, 5], lodestone_data::block::Block::Pumpkin.default_state()),
             ]
         );
         assert_eq!(world.get(3, 1, 5), "minecraft:pumpkin");

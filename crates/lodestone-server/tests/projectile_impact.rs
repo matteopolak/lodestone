@@ -20,6 +20,7 @@
 
 use std::str::FromStr;
 
+use lodestone_data::block::Block;
 use lodestone_entity::projectile::Projectile;
 use lodestone_model::{ResourceKey, Vec3};
 use lodestone_server::{ChunkWorld, MobSim};
@@ -390,7 +391,7 @@ fn a_skeleton_with_a_target_shoots_an_arrow_that_damages_it() {
     let mut world = empty_world();
     for x in -2..=8 {
         for z in -2..=2 {
-            world.set_block(x, -1, z, "minecraft:stone");
+            world.set_block_id(x, -1, z, Block::Stone.default_state());
         }
     }
     let mut sim = MobSim::new(&world);

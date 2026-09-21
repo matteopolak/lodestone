@@ -8,6 +8,8 @@ use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 use lodestone_core::{Reader, State, Writer};
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 use lodestone_entity::item_entity::ItemLifecycle;
 use lodestone_net::Connection;
 use lodestone_model::{ResourceKey, Vec3};
@@ -20,16 +22,15 @@ impl ChunkSource for FlatFloor {
         let mut column = ChunkColumn::new(-64, 384);
         for x in 0..16 {
             for z in 0..16 {
-                column.set_block(x, 0, z, "minecraft:stone");
+                column.set_block_id(x, 0, z, Block::Stone.default_state());
             }
         }
         column
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         self.column(x.div_euclid(16), z.div_euclid(16))
-            .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
-            .to_string()
+            .block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -38,7 +39,7 @@ impl ChunkSource for FlatFloor {
             .to_string()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: &str) {}
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -281,15 +281,32 @@ impl SectionedBlocks {
     /// each real cell for server metadata. Packed words move directly into the
     /// server sections; unlike the compatibility flat path, no 98,304-cell
     /// expansion is created in between.
+    #[cfg(test)]
     pub(crate) fn from_compact_with_observer(
         blocks: lodestone_worldgen::generated_storage::CompactBlockStorage,
         mut observer: impl FnMut(usize, Id),
     ) -> Self {
         for section in 0..blocks.section_count() {
             blocks.for_each_section(section, |cell, id| {
+                #[cfg(test)]
+                crate::chunk::record_generated_metadata_cell_read();
                 observer(section * CELLS + cell, id);
             });
         }
+        Self::from_compact_parts(blocks)
+    }
+
+    /// Adopts generated section storage without walking its cells. Generated
+    /// metadata arrives as a separate transient summary from worldgen.
+    pub(crate) fn from_compact(
+        blocks: lodestone_worldgen::generated_storage::CompactBlockStorage,
+    ) -> Self {
+        Self::from_compact_parts(blocks)
+    }
+
+    fn from_compact_parts(
+        blocks: lodestone_worldgen::generated_storage::CompactBlockStorage,
+    ) -> Self {
         let (_, height, sections) = blocks.into_sections();
         let sections = sections
             .into_iter()

@@ -4,6 +4,7 @@
 //! re-exported helpers preserve the existing public API and wire behaviour.
 
 use super::*;
+use lodestone_core::{Nbt, NbtTag, Writer, write_network_nbt};
 
 /// Hand-written encoder for the clientbound `player_position` (teleport)
 /// packet, which has no existing struct in `packets::game` because it is

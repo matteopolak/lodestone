@@ -36,10 +36,8 @@
 //!
 //! 1. The flat `StateId`-indexed resistance lookup is **a small minority** of the
 //!    per-step cost — it is one bounds-checked index into 65 KB of rodata.
-//! 2. `ChunkSource::block_state` (which allocates a `String` per cell) plus
-//!    `block_states::state_id` (which parses that string back to an id) together
-//!    **dominate** it. If that holds, the section-level dense cache described in
-//!    the performance doc is the whole optimisation and everything else is noise.
+//! 2. The explosion path reads a typed `StateId` from `ChunkSource`; the text
+//!    parser below is a separate boundary-cost control, not part of each cell read.
 //!
 //! See `docs/explosion-performance.md` for what the run actually said.
 
@@ -52,7 +50,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use lodestone_data::{block_blast, block_states};
+use lodestone_data::{block::Block, block_blast, block_states};
 use lodestone_model::Vec3;
 use lodestone_server::explosion_blocks::{self, BlastEnv, RAY_COUNT};
 use lodestone_server::{ChunkColumn, ChunkSource, SpawnRng};
@@ -166,18 +164,16 @@ fn measure(body: impl FnOnce()) -> u64 {
 const MIN_Y: i32 = -64;
 const HEIGHT: i32 = 384;
 
-/// The production column behind a `Mutex`, so `block_state` pays the real
-/// `String` allocation and the real bit-packed section read rather than a test
-/// shortcut. Anything cheaper here would understate the world-read share, which is
-/// the number the whole profile turns on.
+/// The production column behind a `Mutex`, so `block_state_id` pays the real
+/// bit-packed section read rather than a test shortcut.
 struct Rig {
     columns: Mutex<HashMap<(i32, i32), ChunkColumn>>,
-    fill: &'static str,
+    fill: block_states::StateId,
     floor_y: Option<i32>,
 }
 
 impl Rig {
-    fn new(fill: &'static str, floor_y: Option<i32>) -> Self {
+    fn new(fill: block_states::StateId, floor_y: Option<i32>) -> Self {
         Self {
             columns: Mutex::new(HashMap::new()),
             fill,
@@ -191,7 +187,7 @@ impl Rig {
             for y in MIN_Y..=floor_y {
                 for lz in 0..16 {
                     for lx in 0..16 {
-                        column.set_block(lx, y, lz, self.fill);
+                        column.set_block_id(lx, y, lz, self.fill);
                     }
                 }
             }
@@ -209,12 +205,12 @@ impl ChunkSource for Rig {
             .clone()
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> block_states::StateId {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let mut columns = self.columns.lock().expect("rig lock");
         let column = columns.entry((cx, cz)).or_insert_with(|| self.fresh_column());
-        column.block_state(x - cx * 16, y, z - cz * 16).to_string()
+        column.block_state_id(x - cx * 16, y, z - cz * 16)
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -225,12 +221,12 @@ impl ChunkSource for Rig {
         column.biome_state_at(x - cx * 16, y, z - cz * 16).to_string()
     }
 
-    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+    fn set_block(&self, x: i32, y: i32, z: i32, state: block_states::StateId) {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let mut columns = self.columns.lock().expect("rig lock");
         let column = columns.entry((cx, cz)).or_insert_with(|| self.fresh_column());
-        column.set_block(x - cx * 16, y, z - cz * 16, name);
+        column.set_block_id(x - cx * 16, y, z - cz * 16, state);
     }
 }
 
@@ -245,11 +241,11 @@ fn explosion_instruction_profile() {
     };
 
     // --- stage 1: one creeper blast in solid stone (short rays) ---------------
-    let stone = Rig::new("minecraft:stone", Some(64));
-    stone.set_block(8, 8, 8, "minecraft:air");
+    let stone = Rig::new(Block::Stone.default_state(), Some(64));
+    stone.set_block(8, 8, 8, block_states::StateId::AIR);
     // Warm the column cache so the measurement is the blast, not the rig's
     // one-off 16x16x129 fill.
-    let _ = stone.block_state(8, 8, 8);
+    let _ = stone.block_state_id(8, 8, 8);
     let mut rng = SpawnRng::new(SEED);
     let mut cells = 0usize;
     let stone_instructions = measure(|| {
@@ -264,8 +260,8 @@ fn explosion_instruction_profile() {
     });
 
     // --- stage 2: one creeper blast in open air (longest rays) ----------------
-    let air = Rig::new("minecraft:stone", None);
-    let _ = air.block_state(0, 100, 0);
+    let air = Rig::new(Block::Stone.default_state(), None);
+    let _ = air.block_state_id(0, 100, 0);
     let mut rng = SpawnRng::new(SEED);
     let mut air_cells = 0usize;
     let air_instructions = measure(|| {
@@ -283,8 +279,8 @@ fn explosion_instruction_profile() {
     // Overlapping deliberately: this is the case a section-level cache shared
     // across one tick's explosions is meant to collapse, so the per-blast cost
     // here is the baseline that change would be judged against.
-    let cannon = Rig::new("minecraft:stone", Some(64));
-    let _ = cannon.block_state(8, 40, 8);
+    let cannon = Rig::new(Block::Stone.default_state(), Some(64));
+    let _ = cannon.block_state_id(8, 40, 8);
     let mut rng = SpawnRng::new(SEED);
     let mut cannon_cells = 0usize;
     let cannon_instructions = measure(|| {
@@ -329,8 +325,8 @@ fn explosion_instruction_profile() {
     let mut sink = 0u64;
     let read_instructions = measure(|| {
         for i in 0..PROBES {
-            let state = stone.block_state(i as i32 % 16, 20, 0);
-            sink = sink.wrapping_add(state.len() as u64);
+            let state = stone.block_state_id(i as i32 % 16, 20, 0);
+            sink = sink.wrapping_add(u64::from(state.raw()));
         }
     });
     let resolve_instructions = measure(|| {
@@ -356,8 +352,6 @@ fn explosion_instruction_profile() {
     let per_read = read_instructions as f64 / PROBES as f64;
     let per_resolve = resolve_instructions as f64 / PROBES as f64;
     let per_lookup = lookup_instructions as f64 / PROBES as f64;
-    let per_step_total = per_read + per_resolve + per_lookup;
-
     println!("--- explosion instruction profile (radius 3.0, {RAY_COUNT} rays) ---");
     println!("stone blast      : {stone_instructions:>12} instructions, {cells} cells claimed");
     println!("open-air blast   : {air_instructions:>12} instructions, {air_cells} cells claimed");
@@ -366,23 +360,10 @@ fn explosion_instruction_profile() {
         "per ray (air)    : {:>12.0}",
         air_instructions as f64 / RAY_COUNT as f64
     );
-    println!("--- the innermost three, per call, over {PROBES} probes ---");
-    println!(
-        "block_state read : {per_read:>12.1}  ({:.1}% of the three)",
-        100.0 * per_read / per_step_total
-    );
-    println!(
-        "state_id resolve : {per_resolve:>12.1}  ({:.1}% of the three)",
-        100.0 * per_resolve / per_step_total
-    );
-    println!(
-        "flat table index : {per_lookup:>12.1}  ({:.1}% of the three)",
-        100.0 * per_lookup / per_step_total
-    );
-    println!(
-        "world read+resolve share: {:.1}%",
-        100.0 * (per_read + per_resolve) / per_step_total
-    );
+    println!("--- isolated operations, per call, over {PROBES} probes ---");
+    println!("typed block-state read : {per_read:>12.1} instructions");
+    println!("text state resolution  : {per_resolve:>12.1} instructions");
+    println!("flat table index       : {per_lookup:>12.1} instructions");
 
     // Structural assertions only — the numbers above are the deliverable.
     assert!(

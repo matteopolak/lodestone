@@ -76,6 +76,8 @@ use std::time::{Duration, Instant};
 
 use criterion::{Criterion, criterion_group, criterion_main};
 
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 use lodestone_model::{ResourceKey, Vec3};
 use lodestone_server::{
     ChunkColumn, ChunkSource, IntegratedServer, OverworldChunkSource, PhaseStats, TICK_HISTORY_LEN,
@@ -116,7 +118,7 @@ const GENERATED_TICKS: u64 = 48;
 const RESEED_POLLS: usize = 100_000;
 
 /// Exclusive top of the fixture world's solid floor. The one place the floor's
-/// extent is written down, so `column()` and `block_state()` cannot disagree
+/// extent is written down, so `column()` and `block_state_id()` cannot disagree
 /// about what the world contains -- a disagreement that would show up as
 /// mobs falling through a floor the block reads insist is there.
 const FLOOR_TOP: i32 = 4;
@@ -159,17 +161,17 @@ impl ChunkSource for CountingGeneratedWorld {
         self.source.column_at(cx, cz, stage)
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         self.columns.fetch_add(1, Ordering::Relaxed);
-        self.source.block_state(x, y, z)
+        self.source.block_state_id(x, y, z)
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
         self.source.biome_state_at(x, y, z)
     }
 
-    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
-        self.source.set_block(x, y, z, name);
+    fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
+        self.source.set_block(x, y, z, state);
     }
 }
 
@@ -184,7 +186,7 @@ impl CountingFlatWorld {
         for y in 0..FLOOR_TOP {
             for z in 0..16i32 {
                 for x in 0..16i32 {
-                    col.set_block(x, y, z, "minecraft:stone");
+                    col.set_block_id(x, y, z, Block::Stone.default_state());
                 }
             }
         }
@@ -198,12 +200,12 @@ impl ChunkSource for CountingFlatWorld {
         self.build()
     }
 
-    fn block_state(&self, _x: i32, y: i32, _z: i32) -> String {
+    fn block_state_id(&self, _x: i32, y: i32, _z: i32) -> StateId {
         self.block_reads.fetch_add(1, Ordering::Relaxed);
         if (0..FLOOR_TOP).contains(&y) {
-            "minecraft:stone".to_string()
+            Block::Stone.default_state()
         } else {
-            "minecraft:air".to_string()
+            StateId::AIR
         }
     }
 
@@ -211,7 +213,7 @@ impl ChunkSource for CountingFlatWorld {
         "minecraft:plains".to_string()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
         // No storage: this fixture serves a fixed world and discards edits by
         // design, so a tick that writes a block cannot change what a later
         // tick reads. That keeps the sweep points comparable to each other.

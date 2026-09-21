@@ -38,7 +38,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use serde_json::Value;
 
 use crate::density::{Builder, Context as DfContext, Density, NoiseChunkSampler};
-use crate::engine::{Bounds, PointProgram, PointScratch, Program};
+use crate::engine::{Bounds, PointProgram, PointScratch, Program, XzProductLattice};
 use crate::math::{clamp, clamped_map, floor, map};
 use crate::rng::{PositionalRandomFactory, RandomSource};
 pub use crate::rng::AnyPositionalFactory;
@@ -154,6 +154,113 @@ enum PointDensity {
     },
 }
 
+/// Generator-owned point evaluators shared by every chunk-bound aquifer.
+/// Unsupported opaque leaves stay on the source tree path instead of being
+/// compiled into a program that would immediately recurse back into it.
+#[derive(Clone)]
+pub(crate) struct CompiledAquiferPointRoutes {
+    pub(crate) barrier: Option<Arc<PointProgram>>,
+    pub(crate) floodedness: Option<Arc<PointProgram>>,
+    pub(crate) spread: Option<Arc<PointProgram>>,
+    pub(crate) lava: Option<Arc<PointProgram>>,
+}
+
+impl CompiledAquiferPointRoutes {
+    pub(crate) fn from_trees(
+        barrier: &Arc<Density>,
+        floodedness: &Arc<Density>,
+        spread: &Arc<Density>,
+        lava: &Arc<Density>,
+    ) -> Self {
+        Self {
+            barrier: compile_point_route(barrier),
+            floodedness: compile_point_route(floodedness),
+            spread: compile_point_route(spread),
+            lava: compile_point_route(lava),
+        }
+    }
+}
+
+fn compile_point_route(node: &Arc<Density>) -> Option<Arc<PointProgram>> {
+    (!matches!(node.as_ref(), Density::Noise { .. }) && point_route_is_compilable(node))
+        .then(|| Arc::new(PointProgram::compile(node)))
+}
+
+fn point_route_is_compilable(node: &Density) -> bool {
+    match node {
+        Density::Blended(_) | Density::EndIslands(_) => false,
+        Density::Add(left, right)
+        | Density::Mul(left, right)
+        | Density::Min(left, right)
+        | Density::Max(left, right) => {
+            point_route_is_compilable(left) && point_route_is_compilable(right)
+        }
+        Density::Abs(inner)
+        | Density::Square(inner)
+        | Density::Cube(inner)
+        | Density::HalfNegative(inner)
+        | Density::QuarterNegative(inner)
+        | Density::Squeeze(inner)
+        | Density::Invert(inner)
+        | Density::Interpolated { inner, .. }
+        | Density::FlatCache { inner, .. }
+        | Density::Cache2D { inner, .. }
+        | Density::Marker(inner) => point_route_is_compilable(inner),
+        Density::Clamp { input, .. } => point_route_is_compilable(input),
+        Density::ShiftedNoise {
+            shift_x,
+            shift_y,
+            shift_z,
+            ..
+        } => {
+            point_route_is_compilable(shift_x)
+                && point_route_is_compilable(shift_y)
+                && point_route_is_compilable(shift_z)
+        }
+        Density::RangeChoice {
+            input,
+            when_in_range,
+            when_out_of_range,
+            ..
+        } => {
+            point_route_is_compilable(input)
+                && point_route_is_compilable(when_in_range)
+                && point_route_is_compilable(when_out_of_range)
+        }
+        Density::IntervalSelect {
+            input, functions, ..
+        } => {
+            point_route_is_compilable(input)
+                && functions.iter().all(point_route_is_compilable)
+        }
+        Density::Spline(spline) => spline_is_compilable(spline),
+        Density::FindTopSurface {
+            density,
+            upper_bound,
+            ..
+        } => point_route_is_compilable(density) && point_route_is_compilable(upper_bound),
+        Density::Const(_)
+        | Density::BlendAlpha
+        | Density::BlendOffset
+        | Density::Beardifier
+        | Density::YClampedGradient { .. }
+        | Density::Noise { .. }
+        | Density::ShiftA(_)
+        | Density::ShiftB(_)
+        | Density::Shift(_) => true,
+    }
+}
+
+fn spline_is_compilable(spline: &crate::density::Spline) -> bool {
+    match spline {
+        crate::density::Spline::Constant(_) => true,
+        crate::density::Spline::Multipoint { coordinate, points } => {
+            point_route_is_compilable(coordinate)
+                && points.iter().all(|point| spline_is_compilable(&point.value))
+        }
+    }
+}
+
 impl PointDensity {
     fn from_arc(node: Arc<Density>) -> Self {
         if matches!(node.as_ref(), Density::Noise { .. }) {
@@ -161,6 +268,16 @@ impl PointDensity {
             Self::SimpleNoise { node, kind }
         } else {
             Self::Tree(node)
+        }
+    }
+
+    fn from_arc_and_program(node: Arc<Density>, program: Option<Arc<PointProgram>>) -> Self {
+        if matches!(node.as_ref(), Density::Noise { .. }) {
+            Self::from_arc(node)
+        } else if let Some(program) = program {
+            Self::from_program(program)
+        } else {
+            Self::from_arc(node)
         }
     }
 
@@ -204,6 +321,130 @@ impl PointDensity {
             Self::Tree(node) => node.compute(ctx),
             Self::Compiled { program, scratch } => {
                 program.compute(ctx, &mut scratch.borrow_mut())
+            }
+        }
+    }
+
+    #[inline]
+    fn compute_with_xz_products(
+        &self,
+        ctx: DfContext,
+        products: Option<&XzProductLattice>,
+    ) -> f64 {
+        match (self, products) {
+            (Self::Compiled { program, scratch }, Some(products)) => {
+                program.compute_with_xz_products(ctx, &mut scratch.borrow_mut(), products)
+            }
+            _ => self.compute(ctx),
+        }
+    }
+}
+
+/// The preliminary route is normally served by `PreliminarySurfaceCache`.
+/// Keep its compiled scratch optional so constructing an aquifer does not
+/// reserve a 4096-entry memo before a fallback cache miss needs to evaluate.
+enum PreliminaryPointDensity {
+    Fallback(PointDensity),
+    Compiled {
+        program: Arc<PointProgram>,
+        scratch: RefCell<Option<PointScratch>>,
+        #[cfg(feature = "gen-counters")]
+        scratch_allocations: Cell<u64>,
+    },
+}
+
+impl PreliminaryPointDensity {
+    fn from_arc_and_program(node: Arc<Density>, program: Option<Arc<PointProgram>>) -> Self {
+        program.map_or_else(
+            || Self::Fallback(PointDensity::from_arc(node)),
+            |program| Self::Compiled {
+                program,
+                scratch: RefCell::new(None),
+                #[cfg(feature = "gen-counters")]
+                scratch_allocations: Cell::new(0),
+            },
+        )
+    }
+
+    #[cfg(test)]
+    fn is_compiled(&self) -> bool {
+        matches!(self, Self::Compiled { .. })
+    }
+
+    #[cfg(test)]
+    fn scratch_allocated(&self) -> bool {
+        matches!(self, Self::Compiled { scratch, .. } if scratch.borrow().is_some())
+    }
+
+    #[cfg(feature = "gen-counters")]
+    fn scratch_allocations(&self) -> u64 {
+        match self {
+            Self::Fallback(_) => 0,
+            Self::Compiled {
+                scratch_allocations,
+                ..
+            } => scratch_allocations.get(),
+        }
+    }
+
+    #[cfg(test)]
+    #[inline]
+    fn compute(&self, ctx: DfContext) -> f64 {
+        match self {
+            Self::Fallback(density) => density.compute(ctx),
+            Self::Compiled {
+                program,
+                scratch,
+                #[cfg(feature = "gen-counters")]
+                scratch_allocations,
+            } => {
+                let mut scratch = scratch.borrow_mut();
+                program.compute(
+                    ctx,
+                    scratch.get_or_insert_with(|| {
+                        #[cfg(feature = "gen-counters")]
+                        scratch_allocations.set(scratch_allocations.get() + 1);
+                        PointScratch::new()
+                    }),
+                )
+            }
+        }
+    }
+
+    #[inline]
+    fn compute_with_xz_products(
+        &self,
+        ctx: DfContext,
+        products: Option<&XzProductLattice>,
+    ) -> f64 {
+        match self {
+            Self::Fallback(density) => density.compute_with_xz_products(ctx, products),
+            Self::Compiled {
+                program,
+                scratch,
+                #[cfg(feature = "gen-counters")]
+                scratch_allocations,
+            } => {
+                let mut scratch = scratch.borrow_mut();
+                match products {
+                    Some(products) => program.compute_with_xz_products(
+                        ctx,
+                        scratch.get_or_insert_with(|| {
+                            #[cfg(feature = "gen-counters")]
+                            scratch_allocations.set(scratch_allocations.get() + 1);
+                            PointScratch::new()
+                        }),
+                        products,
+                    ),
+                    None => program.compute(
+                        ctx,
+                        scratch.get_or_insert_with(|| {
+                            #[cfg(feature = "gen-counters")]
+                            scratch_allocations.set(scratch_allocations.get() + 1);
+                            PointScratch::new()
+                        }),
+                    ),
+                }
             }
         }
     }
@@ -279,7 +520,13 @@ struct VerticalRunScratch {
 }
 
 impl VerticalRunScratch {
-    fn new(aquifer: &AquiferSystem, x: i32, y: i32, z: i32) -> Self {
+    fn new(
+        aquifer: &AquiferSystem,
+        x: i32,
+        y: i32,
+        z: i32,
+        mut region_cache: Option<&mut AquiferRegionCache>,
+    ) -> Self {
         VERTICAL_RUN_SCRATCH_INITIALIZATIONS.with(|count| count.set(count.get() + 1));
         let anchor_x = grid_x(x - 5);
         let anchor_y = grid_y(y + 1);
@@ -295,12 +542,21 @@ impl VerticalRunScratch {
                     let spaced_grid_y = anchor_y + y1;
                     let spaced_grid_z = anchor_z + z1;
                     let index = aquifer.get_index(spaced_grid_x, spaced_grid_y, spaced_grid_z);
-                    let (lx, ly, lz) = aquifer.location(
-                        spaced_grid_x,
-                        spaced_grid_y,
-                        spaced_grid_z,
-                        index,
-                    );
+                    let (lx, ly, lz) = match region_cache.as_deref_mut() {
+                        Some(cache) => aquifer.location_with_region_cache(
+                            spaced_grid_x,
+                            spaced_grid_y,
+                            spaced_grid_z,
+                            index,
+                            cache,
+                        ),
+                        None => aquifer.location(
+                            spaced_grid_x,
+                            spaced_grid_y,
+                            spaced_grid_z,
+                            index,
+                        ),
+                    };
                     let dx = lx - x;
                     let dy = ly - y;
                     let dz = lz - z;
@@ -413,6 +669,240 @@ fn vertical_run_scratch_initializations() -> u64 {
 struct AquiferScratch {
     aquifer: Vec<Option<FluidStatus>>,
     locations: Vec<Option<(i32, i32, i32)>>,
+}
+
+/// Request-local candidate locations and fluid statuses keyed by absolute
+/// aquifer-grid coordinates.
+#[derive(Debug)]
+pub(crate) struct AquiferRegionCache {
+    entries: Vec<AquiferRegionEntry>,
+    used: usize,
+    #[cfg(test)]
+    location_lookups: u64,
+    #[cfg(test)]
+    location_hits: u64,
+    #[cfg(test)]
+    location_computes: u64,
+    #[cfg(test)]
+    status_lookups: u64,
+    #[cfg(test)]
+    status_hits: u64,
+    #[cfg(test)]
+    status_computes: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AquiferRegionEntry {
+    grid_x: i32,
+    grid_y: i32,
+    grid_z: i32,
+    location: (i32, i32, i32),
+    has_location: bool,
+    status: FluidStatus,
+    has_status: bool,
+    occupied: bool,
+}
+
+impl AquiferRegionEntry {
+    const EMPTY: Self = Self {
+        grid_x: 0,
+        grid_y: 0,
+        grid_z: 0,
+        location: (0, 0, 0),
+        has_location: false,
+        status: FluidStatus {
+            fluid_level: 0,
+            fluid_type: Fluid::Air,
+        },
+        has_status: false,
+        occupied: false,
+    };
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AquiferRegionCacheStats {
+    pub location_lookups: u64,
+    pub location_hits: u64,
+    pub location_computes: u64,
+    pub status_lookups: u64,
+    pub status_hits: u64,
+    pub status_computes: u64,
+    pub retained_entries: usize,
+    pub capacity: usize,
+}
+
+const AQUIFER_REGION_CACHE_CAPACITY: usize = 8_192;
+
+impl AquiferRegionCache {
+    #[must_use]
+    pub(crate) fn new() -> Self {
+        Self::with_capacity(AQUIFER_REGION_CACHE_CAPACITY)
+    }
+
+    #[must_use]
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        let capacity = capacity.max(1).next_power_of_two();
+        Self {
+            entries: vec![AquiferRegionEntry::EMPTY; capacity],
+            used: 0,
+            #[cfg(test)]
+            location_lookups: 0,
+            #[cfg(test)]
+            location_hits: 0,
+            #[cfg(test)]
+            location_computes: 0,
+            #[cfg(test)]
+            status_lookups: 0,
+            #[cfg(test)]
+            status_hits: 0,
+            #[cfg(test)]
+            status_computes: 0,
+        }
+    }
+
+    #[inline]
+    fn hash(grid_x: i32, grid_y: i32, grid_z: i32) -> usize {
+        let x = (grid_x as i64 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let y = (grid_y as i64 as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+        let z = (grid_z as i64 as u64).wrapping_mul(0x1656_67B1_9E37_79F9);
+        let mut hash = x ^ y.rotate_left(21) ^ z.rotate_left(42);
+        hash ^= hash >> 32;
+        hash = (hash ^ (hash >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        hash = (hash ^ (hash >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        (hash ^ (hash >> 31)) as usize
+    }
+
+    #[inline]
+    fn find_slot(&self, grid_x: i32, grid_y: i32, grid_z: i32) -> Option<usize> {
+        let mut index = Self::hash(grid_x, grid_y, grid_z) & (self.entries.len() - 1);
+        for _ in 0..self.entries.len() {
+            let entry = self.entries[index];
+            if !entry.occupied {
+                return None;
+            }
+            if entry.grid_x == grid_x && entry.grid_y == grid_y && entry.grid_z == grid_z {
+                return Some(index);
+            }
+            index = (index + 1) & (self.entries.len() - 1);
+        }
+        None
+    }
+
+    #[inline]
+    fn insert_slot(&mut self, grid_x: i32, grid_y: i32, grid_z: i32) -> usize {
+        assert!(
+            self.used < self.entries.len(),
+            "aquifer region cache capacity exceeded"
+        );
+        let mut index = Self::hash(grid_x, grid_y, grid_z) & (self.entries.len() - 1);
+        loop {
+            if !self.entries[index].occupied {
+                self.entries[index] = AquiferRegionEntry {
+                    grid_x,
+                    grid_y,
+                    grid_z,
+                    occupied: true,
+                    ..AquiferRegionEntry::EMPTY
+                };
+                self.used += 1;
+                return index;
+            }
+            index = (index + 1) & (self.entries.len() - 1);
+        }
+    }
+
+    fn get_or_compute_location(
+        &mut self,
+        grid_x: i32,
+        grid_y: i32,
+        grid_z: i32,
+        positional: AnyPositionalFactory,
+    ) -> (i32, i32, i32) {
+        #[cfg(test)]
+        {
+            self.location_lookups += 1;
+        }
+        if let Some(index) = self.find_slot(grid_x, grid_y, grid_z) {
+            if self.entries[index].has_location {
+                #[cfg(test)]
+                {
+                    self.location_hits += 1;
+                }
+                return self.entries[index].location;
+            }
+        }
+        #[cfg(test)]
+        {
+            self.location_computes += 1;
+        }
+        let mut random = positional.at(grid_x, grid_y, grid_z);
+        let location = (
+            from_grid_x(grid_x, random.next_int_bounded(10)),
+            from_grid_y(grid_y, random.next_int_bounded(9)),
+            from_grid_z(grid_z, random.next_int_bounded(10)),
+        );
+        let index = self
+            .find_slot(grid_x, grid_y, grid_z)
+            .unwrap_or_else(|| self.insert_slot(grid_x, grid_y, grid_z));
+        self.entries[index].location = location;
+        self.entries[index].has_location = true;
+        location
+    }
+
+    fn get_or_compute_status(
+        &mut self,
+        grid_x: i32,
+        grid_y: i32,
+        grid_z: i32,
+        compute: impl FnOnce() -> FluidStatus,
+    ) -> FluidStatus {
+        #[cfg(test)]
+        {
+            self.status_lookups += 1;
+        }
+        if let Some(index) = self.find_slot(grid_x, grid_y, grid_z) {
+            if self.entries[index].has_status {
+                #[cfg(test)]
+                {
+                    self.status_hits += 1;
+                }
+                return self.entries[index].status;
+            }
+        }
+        #[cfg(test)]
+        {
+            self.status_computes += 1;
+        }
+        let status = compute();
+        let index = self
+            .find_slot(grid_x, grid_y, grid_z)
+            .unwrap_or_else(|| self.insert_slot(grid_x, grid_y, grid_z));
+        self.entries[index].status = status;
+        self.entries[index].has_status = true;
+        status
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn stats(&self) -> AquiferRegionCacheStats {
+        AquiferRegionCacheStats {
+            location_lookups: self.location_lookups,
+            location_hits: self.location_hits,
+            location_computes: self.location_computes,
+            status_lookups: self.status_lookups,
+            status_hits: self.status_hits,
+            status_computes: self.status_computes,
+            retained_entries: self.used,
+            capacity: self.entries.len(),
+        }
+    }
+}
+
+impl Default for AquiferRegionCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -658,6 +1148,16 @@ impl PreliminarySurfaceCache {
         qz: i32,
         fallback: impl FnOnce() -> i32,
     ) -> i32 {
+        self.get_or_compute_preliminary_with_products(qx, qz, None, fallback)
+    }
+
+    pub(crate) fn get_or_compute_preliminary_with_products(
+        &self,
+        qx: i32,
+        qz: i32,
+        products: Option<&XzProductLattice>,
+        fallback: impl FnOnce() -> i32,
+    ) -> i32 {
         let mut fallback = Some(fallback);
         let (shard_index, _) = Self::locate(qx, qz, self.shard_capacity);
         let mut state = self.shards[shard_index]
@@ -693,7 +1193,15 @@ impl PreliminarySurfaceCache {
             let value = match program {
                 Some(program) => {
                     crate::counters::bump_preliminary_surface_compute();
-                    floor(program.compute(DfContext::new(qx, 0, qz), &mut state.scratch))
+                    let context = DfContext::new(qx, 0, qz);
+                    floor(match products {
+                        Some(products) => program.compute_with_xz_products(
+                            context,
+                            &mut state.scratch,
+                            products,
+                        ),
+                        None => program.compute(context, &mut state.scratch),
+                    })
                 }
                 None => fallback.take().expect("preliminary fallback consumed")(),
             };
@@ -707,6 +1215,16 @@ impl PreliminarySurfaceCache {
         &self,
         keys: &[(i32, i32)],
         output: &mut [i32],
+        fallback: impl FnMut(i32, i32) -> i32,
+    ) {
+        self.get_or_compute_preliminary_batch_with_products(keys, output, None, fallback);
+    }
+
+    pub(crate) fn get_or_compute_preliminary_batch_with_products(
+        &self,
+        keys: &[(i32, i32)],
+        output: &mut [i32],
+        products: Option<&XzProductLattice>,
         mut fallback: impl FnMut(i32, i32) -> i32,
     ) {
         assert_eq!(keys.len(), output.len());
@@ -792,11 +1310,20 @@ impl PreliminarySurfaceCache {
                     .batch_scratch
                     .lock()
                     .unwrap_or_else(|error| error.into_inner());
-                program.compute_batch(
-                    &contexts[..missing_len],
-                    &mut computed[..missing_len],
-                    &mut scratch,
-                );
+                if let Some(products) = products {
+                    program.compute_batch_with_xz_products(
+                        &contexts[..missing_len],
+                        &mut computed[..missing_len],
+                        &mut scratch,
+                        products,
+                    );
+                } else {
+                    program.compute_batch(
+                        &contexts[..missing_len],
+                        &mut computed[..missing_len],
+                        &mut scratch,
+                    );
+                }
                 for lane in 0..missing_len {
                     crate::counters::bump_preliminary_surface_compute();
                     values[lane] = floor(computed[lane]);
@@ -841,11 +1368,16 @@ impl PreliminarySurfaceCache {
         }
         for &key_index in &waiting[..waiting_len] {
             let (qx, qz) = keys[key_index];
-            output[key_index] = self.wait_for_preliminary(qx, qz, &mut fallback);
+            output[key_index] = self.wait_for_preliminary(qx, qz, products, &mut fallback);
         }
         for &key_index in &deferred[..deferred_len] {
             let (qx, qz) = keys[key_index];
-            output[key_index] = self.get_or_compute_preliminary(qx, qz, || fallback(qx, qz));
+            output[key_index] = self.get_or_compute_preliminary_with_products(
+                qx,
+                qz,
+                products,
+                || fallback(qx, qz),
+            );
         }
     }
 
@@ -853,6 +1385,7 @@ impl PreliminarySurfaceCache {
         &self,
         qx: i32,
         qz: i32,
+        products: Option<&XzProductLattice>,
         fallback: &mut impl FnMut(i32, i32) -> i32,
     ) -> i32 {
         let (shard_index, _) = Self::locate(qx, qz, self.shard_capacity);
@@ -875,7 +1408,12 @@ impl PreliminarySurfaceCache {
                     .unwrap_or_else(|error| error.into_inner());
             } else {
                 drop(state);
-                return self.get_or_compute_preliminary(qx, qz, || fallback(qx, qz));
+                return self.get_or_compute_preliminary_with_products(
+                    qx,
+                    qz,
+                    products,
+                    || fallback(qx, qz),
+                );
             }
         }
     }
@@ -1008,12 +1546,12 @@ pub struct AquiferSystem {
     /// The four point-evaluated router outputs and the preliminary-surface
     /// tree, behind `Arc` so a per-chunk `AquiferSystem` shares them instead of
     /// deep-copying five `Density` trees. Direct `noise` roots use the compact
-    /// point path; all other roots retain the `Density::compute` fallback.
+    /// point path; compound roots use an indexed `PointProgram` walk.
     barrier: PointDensity,
     floodedness: PointDensity,
     spread: PointDensity,
     lava: PointDensity,
-    prelim: PointDensity,
+    prelim: PreliminaryPointDensity,
 
     positional: AnyPositionalFactory,
     sea_level: i32,
@@ -1044,6 +1582,7 @@ pub struct AquiferSystem {
     location_cache: RefCell<Vec<Option<(i32, i32, i32)>>>,
     prelim_cache: RefCell<PreliminaryLocalCache>,
     preliminary_shared: Arc<PreliminarySurfaceCache>,
+    xz_products: Option<Arc<XzProductLattice>>,
 }
 
 impl AquiferSystem {
@@ -1054,9 +1593,18 @@ impl AquiferSystem {
     #[must_use]
     pub fn preliminary_surface_program_nodes(&self) -> usize {
         match &self.prelim {
-            PointDensity::Compiled { program, .. } => program.node_count(),
-            PointDensity::SimpleNoise { .. } | PointDensity::Tree(_) => 0,
+            PreliminaryPointDensity::Compiled { program, .. } => program.node_count(),
+            PreliminaryPointDensity::Fallback(_) => 0,
         }
+    }
+
+    /// Number of fallback `PointScratch` instances allocated by this aquifer's
+    /// preliminary route. A shared compiled preliminary cache should leave this
+    /// at zero; a direct fallback evaluation increments it once.
+    #[cfg(feature = "gen-counters")]
+    #[must_use]
+    pub fn preliminary_surface_scratch_allocations(&self) -> u64 {
+        self.prelim.scratch_allocations()
     }
 
     /// Builds the aquifer + fill for chunk `(chunk_x, chunk_z)` from a
@@ -1182,6 +1730,12 @@ impl AquiferSystem {
         cell_width: i32,
         cell_height: i32,
     ) -> Self {
+        let point_programs = CompiledAquiferPointRoutes::from_trees(
+            &barrier,
+            &floodedness,
+            &spread,
+            &lava,
+        );
         let prelim_program = Arc::new(PointProgram::compile(&prelim));
         let preliminary_shared = Arc::new(PreliminarySurfaceCache::with_program(
             Arc::clone(&prelim_program),
@@ -1197,6 +1751,7 @@ impl AquiferSystem {
             lava,
             prelim,
             Some(prelim_program),
+            Some(point_programs),
             positional,
             sea_level,
             min_y,
@@ -1207,14 +1762,14 @@ impl AquiferSystem {
             cell_width,
             cell_height,
             preliminary_shared,
+            None,
         )
     }
 
-    /// Builds a chunk-bound aquifer while sharing preliminary-surface values
-    /// with other chunks from the same generator/session.
+    /// Builds a chunk-bound aquifer using generator-owned compiled point routes.
     #[allow(clippy::too_many_arguments)]
     #[must_use]
-    pub(crate) fn from_parts_with_preliminary_cache(
+    pub(crate) fn from_parts_with_preliminary_cache_and_point_programs(
         final_density_node: Program,
         erosion_node: Program,
         depth_node: Program,
@@ -1224,6 +1779,7 @@ impl AquiferSystem {
         lava: Arc<Density>,
         prelim: Arc<Density>,
         prelim_program: Arc<PointProgram>,
+        point_programs: CompiledAquiferPointRoutes,
         positional: AnyPositionalFactory,
         sea_level: i32,
         min_y: i32,
@@ -1234,6 +1790,7 @@ impl AquiferSystem {
         cell_width: i32,
         cell_height: i32,
         preliminary_shared: Arc<PreliminarySurfaceCache>,
+        xz_products: Option<Arc<XzProductLattice>>,
     ) -> Self {
         Self::from_parts_internal(
             final_density_node,
@@ -1245,6 +1802,7 @@ impl AquiferSystem {
             lava,
             prelim,
             Some(prelim_program),
+            Some(point_programs),
             positional,
             sea_level,
             min_y,
@@ -1255,6 +1813,7 @@ impl AquiferSystem {
             cell_width,
             cell_height,
             preliminary_shared,
+            xz_products,
         )
     }
 
@@ -1287,6 +1846,7 @@ impl AquiferSystem {
         lava: Arc<Density>,
         prelim: Arc<Density>,
         prelim_program: Option<Arc<PointProgram>>,
+        point_programs: Option<CompiledAquiferPointRoutes>,
         positional: AnyPositionalFactory,
         sea_level: i32,
         min_y: i32,
@@ -1297,6 +1857,7 @@ impl AquiferSystem {
         cell_width: i32,
         cell_height: i32,
         preliminary_shared: Arc<PreliminarySurfaceCache>,
+        xz_products: Option<Arc<XzProductLattice>>,
     ) -> Self {
         // Grid bounds, verbatim from NoiseBasedAquifer's constructor.
         let min_block_x = chunk_x * 16;
@@ -1319,7 +1880,7 @@ impl AquiferSystem {
         // locations that legitimately range outside this chunk's own bounds
         // (the padded grid-cell search `Self::compute_aquifer_fluid` walks),
         // so bounding them would violate `new_bounded`'s contract.
-        let final_density = NoiseChunkSampler::from_program(
+        let final_density = NoiseChunkSampler::from_program_with_xz_products(
             final_density_node,
             slots,
             cell_width,
@@ -1329,6 +1890,7 @@ impl AquiferSystem {
                 y: (min_y, min_y + height - 1),
                 z: (min_block_z, max_block_z),
             }),
+            xz_products.clone(),
         );
         let erosion =
             NoiseChunkSampler::from_program(erosion_node, slots, cell_width, cell_height, None);
@@ -1350,17 +1912,28 @@ impl AquiferSystem {
         scratch.aquifer.resize(total, None);
         scratch.locations.resize(total, None);
 
+        let point_programs = point_programs.as_ref();
         let mut system = Self {
             final_density,
             erosion,
             depth,
-            barrier: PointDensity::from_arc(barrier),
-            floodedness: PointDensity::from_arc(floodedness),
-            spread: PointDensity::from_arc(spread),
-            lava: PointDensity::from_arc(lava),
-            prelim: prelim_program
-                .map(PointDensity::from_program)
-                .unwrap_or_else(|| PointDensity::from_arc(prelim)),
+            barrier: PointDensity::from_arc_and_program(
+                barrier,
+                point_programs.and_then(|programs| programs.barrier.clone()),
+            ),
+            floodedness: PointDensity::from_arc_and_program(
+                floodedness,
+                point_programs.and_then(|programs| programs.floodedness.clone()),
+            ),
+            spread: PointDensity::from_arc_and_program(
+                spread,
+                point_programs.and_then(|programs| programs.spread.clone()),
+            ),
+            lava: PointDensity::from_arc_and_program(
+                lava,
+                point_programs.and_then(|programs| programs.lava.clone()),
+            ),
+            prelim: PreliminaryPointDensity::from_arc_and_program(prelim, prelim_program),
             positional,
             sea_level,
             default_fluid: Fluid::Water,
@@ -1375,6 +1948,7 @@ impl AquiferSystem {
             location_cache: RefCell::new(scratch.locations),
             prelim_cache: RefCell::new(PreliminaryLocalCache::new()),
             preliminary_shared,
+            xz_products,
         };
 
         let max_prelim = system.max_preliminary_surface_level(
@@ -1482,7 +2056,7 @@ impl AquiferSystem {
             floodedness: PointDensity::from_arc(stub()),
             spread: PointDensity::from_arc(stub()),
             lava: PointDensity::from_arc(stub()),
-            prelim: PointDensity::from_arc(stub()),
+            prelim: PreliminaryPointDensity::Fallback(PointDensity::from_arc(stub())),
             // Vanilla's own disabled-aquifer constructor takes no
             // `PositionalRandomFactory` at all; this
             // is the cheapest inert stand-in and is never sampled.
@@ -1500,6 +2074,7 @@ impl AquiferSystem {
             location_cache: RefCell::new(Vec::new()),
             prelim_cache: RefCell::new(PreliminaryLocalCache::new()),
             preliminary_shared: Arc::new(PreliminarySurfaceCache::new()),
+            xz_products: None,
         }
     }
 
@@ -1549,7 +2124,15 @@ impl AquiferSystem {
         output: &mut [BlockKind],
     ) {
         let mut state = VerticalRunState::default();
-        self.block_at_density_vertical_slice(x, z, y_start, densities, output, &mut state);
+        self.block_at_density_vertical_slice_impl(
+            x,
+            z,
+            y_start,
+            densities,
+            output,
+            &mut state,
+            None,
+        );
     }
 
     /// Resolves one consecutive density slice using caller-owned request state.
@@ -1568,6 +2151,49 @@ impl AquiferSystem {
         output: &mut [BlockKind],
         state: &mut VerticalRunState,
     ) {
+        self.block_at_density_vertical_slice_impl(
+            x,
+            z,
+            y_start,
+            densities,
+            output,
+            state,
+            None,
+        );
+    }
+
+    /// Region-only counterpart of [`Self::block_at_density_vertical_slice`].
+    pub(crate) fn block_at_density_vertical_slice_with_region_cache(
+        &self,
+        x: i32,
+        z: i32,
+        y_start: i32,
+        densities: &[f64],
+        output: &mut [BlockKind],
+        state: &mut VerticalRunState,
+        region_cache: &mut AquiferRegionCache,
+    ) {
+        self.block_at_density_vertical_slice_impl(
+            x,
+            z,
+            y_start,
+            densities,
+            output,
+            state,
+            Some(region_cache),
+        );
+    }
+
+    fn block_at_density_vertical_slice_impl(
+        &self,
+        x: i32,
+        z: i32,
+        y_start: i32,
+        densities: &[f64],
+        output: &mut [BlockKind],
+        state: &mut VerticalRunState,
+        mut region_cache: Option<&mut AquiferRegionCache>,
+    ) {
         assert_eq!(densities.len(), output.len());
         for (offset, (&density, block)) in densities.iter().zip(output.iter_mut()).enumerate() {
             let y = y_start + offset as i32;
@@ -1581,7 +2207,17 @@ impl AquiferSystem {
                 || y > self.skip_sampling_above_y
                 || global_fluid.at(y) == Fluid::Lava
             {
-                *block = self.block_at_density_with_global(x, y, z, density, global_fluid);
+                *block = match region_cache.as_deref_mut() {
+                    Some(cache) => self.block_at_density_with_global_region_cache(
+                        x,
+                        y,
+                        z,
+                        density,
+                        global_fluid,
+                        cache,
+                    ),
+                    None => self.block_at_density_with_global(x, y, z, density, global_fluid),
+                };
                 state.scratch = None;
                 continue;
             }
@@ -1595,17 +2231,34 @@ impl AquiferSystem {
                     run
                 }
                 Some(_) => {
-                    *block = self.block_at_density_with_global(x, y, z, density, global_fluid);
+                    *block = match region_cache.as_deref_mut() {
+                        Some(cache) => self.block_at_density_with_global_region_cache(
+                            x,
+                            y,
+                            z,
+                            density,
+                            global_fluid,
+                            cache,
+                        ),
+                        None => self.block_at_density_with_global(x, y, z, density, global_fluid),
+                    };
                     state.scratch = None;
                     continue;
                 }
-                None => state.scratch.insert(VerticalRunScratch::new(self, x, y, z)),
+                None => state.scratch.insert(VerticalRunScratch::new(
+                    self,
+                    x,
+                    y,
+                    z,
+                    region_cache.as_deref_mut(),
+                )),
             };
             let (closest1, closest2, closest3, distance1, distance2, distance3) =
                 run.closest_three();
             crate::counters::bump_block_at();
-            let fluid = self.compute_substance_with_closest(
+            let fluid = self.compute_substance_with_closest_optional(
                 x, y, z, density, closest1, closest2, closest3, distance1, distance2, distance3,
+                region_cache.as_deref_mut(),
             );
             *block = match fluid {
                 None => BlockKind::Stone,
@@ -1664,6 +2317,30 @@ impl AquiferSystem {
         }
     }
 
+    #[inline]
+    fn block_at_density_with_global_region_cache(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        density: f64,
+        global_fluid: FluidStatus,
+        region_cache: &mut AquiferRegionCache,
+    ) -> BlockKind {
+        crate::counters::bump_block_at();
+        match self.compute_substance_with_global_optional(
+            x,
+            y,
+            z,
+            density,
+            global_fluid,
+            Some(region_cache),
+        ) {
+            None => BlockKind::Stone,
+            Some(fluid) => fluid.to_block(),
+        }
+    }
+
     /// Vanilla's own world-carver carve-state lookup's aquifer branch:
     /// its aquifer's combined substance computation at this single point, threshold 0.0. `None` means
     /// "do not carve — keep the existing block" (only reachable if the local
@@ -1686,9 +2363,12 @@ impl AquiferSystem {
             return v;
         }
         let prelim = &self.prelim;
-        let v = self.preliminary_shared.get_or_compute_preliminary(qx, qz, || {
+        let products = self.xz_products.as_deref();
+        let v = self
+            .preliminary_shared
+            .get_or_compute_preliminary_with_products(qx, qz, products, || {
             crate::counters::bump_preliminary_surface_compute();
-            floor(prelim.compute(DfContext::new(qx, 0, qz)))
+            floor(prelim.compute_with_xz_products(DfContext::new(qx, 0, qz), products))
         });
         self.prelim_cache.borrow_mut().insert(qx, qz, v);
         v
@@ -1715,12 +2395,17 @@ impl AquiferSystem {
                 batch_len += 1;
                 if batch_len == PRELIMINARY_BATCH_WIDTH {
                     let prelim = &self.prelim;
-                    self.preliminary_shared.get_or_compute_preliminary_batch(
+                    self.preliminary_shared
+                        .get_or_compute_preliminary_batch_with_products(
                         &keys,
                         &mut values,
+                        self.xz_products.as_deref(),
                         |qx, qz| {
                             crate::counters::bump_preliminary_surface_compute();
-                            floor(prelim.compute(DfContext::new(qx, 0, qz)))
+                            floor(prelim.compute_with_xz_products(
+                                DfContext::new(qx, 0, qz),
+                                self.xz_products.as_deref(),
+                            ))
                         },
                     );
                     for (key, &surface_level) in keys.iter().zip(values.iter()) {
@@ -1735,12 +2420,17 @@ impl AquiferSystem {
         }
         if batch_len != 0 {
             let prelim = &self.prelim;
-            self.preliminary_shared.get_or_compute_preliminary_batch(
+            self.preliminary_shared
+                .get_or_compute_preliminary_batch_with_products(
                 &keys[..batch_len],
                 &mut values[..batch_len],
+                self.xz_products.as_deref(),
                 |qx, qz| {
                     crate::counters::bump_preliminary_surface_compute();
-                    floor(prelim.compute(DfContext::new(qx, 0, qz)))
+                    floor(prelim.compute_with_xz_products(
+                        DfContext::new(qx, 0, qz),
+                        self.xz_products.as_deref(),
+                    ))
                 },
             );
             for (key, &surface_level) in keys[..batch_len].iter().zip(values[..batch_len].iter()) {
@@ -1788,12 +2478,65 @@ impl AquiferSystem {
         loc
     }
 
+    fn location_with_region_cache(
+        &self,
+        grid_x: i32,
+        grid_y: i32,
+        grid_z: i32,
+        index: usize,
+        region_cache: &mut AquiferRegionCache,
+    ) -> (i32, i32, i32) {
+        if let Some(loc) = self.location_cache.borrow()[index] {
+            return loc;
+        }
+        let loc = region_cache.get_or_compute_location(
+            grid_x,
+            grid_y,
+            grid_z,
+            self.positional,
+        );
+        self.location_cache.borrow_mut()[index] = Some(loc);
+        loc
+    }
+
+    #[inline]
+    fn grid_coordinate(&self, index: usize) -> (i32, i32, i32) {
+        let grid_size_x = self.grid_size_x as usize;
+        let grid_size_z = self.grid_size_z as usize;
+        let grid_x = index % grid_size_x;
+        let index = index / grid_size_x;
+        let grid_z = index % grid_size_z;
+        let grid_y = index / grid_size_z;
+        (
+            self.min_grid_x + grid_x as i32,
+            self.min_grid_y + grid_y as i32,
+            self.min_grid_z + grid_z as i32,
+        )
+    }
+
     fn aquifer_status(&self, index: usize) -> FluidStatus {
         if let Some(status) = self.aquifer_cache.borrow()[index] {
             return status;
         }
         let (x, y, z) = self.location_cache.borrow()[index].expect("location computed first");
         let status = self.compute_aquifer_fluid(x, y, z);
+        self.aquifer_cache.borrow_mut()[index] = Some(status);
+        status
+    }
+
+    fn aquifer_status_with_region_cache(
+        &self,
+        index: usize,
+        region_cache: &mut AquiferRegionCache,
+    ) -> FluidStatus {
+        if let Some(status) = self.aquifer_cache.borrow()[index] {
+            return status;
+        }
+        let (x, y, z) = self.location_cache.borrow()[index].expect("location computed first");
+        let (grid_x, grid_y, grid_z) = self.grid_coordinate(index);
+        let status = region_cache.get_or_compute_status(grid_x, grid_y, grid_z, || {
+            self.compute_aquifer_fluid(x, y, z)
+        });
         self.aquifer_cache.borrow_mut()[index] = Some(status);
         status
     }
@@ -1821,6 +2564,26 @@ impl AquiferSystem {
         pos_z: i32,
         density: f64,
         global_fluid: FluidStatus,
+    ) -> Option<Fluid> {
+        self.compute_substance_with_global_optional(
+            pos_x,
+            pos_y,
+            pos_z,
+            density,
+            global_fluid,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn compute_substance_with_global_optional(
+        &self,
+        pos_x: i32,
+        pos_y: i32,
+        pos_z: i32,
+        density: f64,
+        global_fluid: FluidStatus,
+        mut region_cache: Option<&mut AquiferRegionCache>,
     ) -> Option<Fluid> {
         if !self.enabled {
             // Vanilla's own disabled-aquifer constructor's entire body. Deliberately before the
@@ -1854,8 +2617,16 @@ impl AquiferSystem {
                     let spaced_grid_y = y_anchor + y1;
                     let spaced_grid_z = z_anchor + z1;
                     let index = self.get_index(spaced_grid_x, spaced_grid_y, spaced_grid_z);
-                    let (lx, ly, lz) =
-                        self.location(spaced_grid_x, spaced_grid_y, spaced_grid_z, index);
+                    let (lx, ly, lz) = match region_cache.as_deref_mut() {
+                        Some(cache) => self.location_with_region_cache(
+                            spaced_grid_x,
+                            spaced_grid_y,
+                            spaced_grid_z,
+                            index,
+                            cache,
+                        ),
+                        None => self.location(spaced_grid_x, spaced_grid_y, spaced_grid_z, index),
+                    };
                     let dx = lx - pos_x;
                     let dy = ly - pos_y;
                     let dz = lz - pos_z;
@@ -1880,7 +2651,7 @@ impl AquiferSystem {
             }
         }
 
-        self.compute_substance_with_closest(
+        self.compute_substance_with_closest_optional(
             pos_x,
             pos_y,
             pos_z,
@@ -1891,11 +2662,12 @@ impl AquiferSystem {
             distance_sqr1,
             distance_sqr2,
             distance_sqr3,
+            region_cache,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn compute_substance_with_closest(
+    fn compute_substance_with_closest_optional(
         &self,
         pos_x: i32,
         pos_y: i32,
@@ -1907,8 +2679,12 @@ impl AquiferSystem {
         distance_sqr1: i32,
         distance_sqr2: i32,
         distance_sqr3: i32,
+        mut region_cache: Option<&mut AquiferRegionCache>,
     ) -> Option<Fluid> {
-        let closest_status1 = self.aquifer_status(closest_index1);
+        let closest_status1 = match region_cache.as_deref_mut() {
+            Some(cache) => self.aquifer_status_with_region_cache(closest_index1, cache),
+            None => self.aquifer_status(closest_index1),
+        };
         let similarity12 = similarity(distance_sqr1, distance_sqr2);
         let fluid_state = closest_status1.at(pos_y);
         if similarity12 <= 0.0 {
@@ -1921,7 +2697,10 @@ impl AquiferSystem {
         }
 
         let mut barrier_noise_value = f64::NAN;
-        let closest_status2 = self.aquifer_status(closest_index2);
+        let closest_status2 = match region_cache.as_deref_mut() {
+            Some(cache) => self.aquifer_status_with_region_cache(closest_index2, cache),
+            None => self.aquifer_status(closest_index2),
+        };
         let barrier12 = similarity12
             * self.calculate_pressure(
                 pos_x,
@@ -1935,7 +2714,10 @@ impl AquiferSystem {
             return None;
         }
 
-        let closest_status3 = self.aquifer_status(closest_index3);
+        let closest_status3 = match region_cache.as_deref_mut() {
+            Some(cache) => self.aquifer_status_with_region_cache(closest_index3, cache),
+            None => self.aquifer_status(closest_index3),
+        };
         let similarity13 = similarity(distance_sqr1, distance_sqr3);
         if similarity13 > 0.0 {
             let barrier13 = similarity12
@@ -2187,12 +2969,13 @@ impl Drop for AquiferSystem {
 mod tests {
     use super::{
         reset_vertical_run_scratch_initializations, vertical_run_scratch_initializations,
-        AquiferSystem, BlockKind, VerticalRunScratch, VERTICAL_CANDIDATE_COUNT,
+        AquiferRegionCache, AquiferSystem, BlockKind, Fluid, FluidStatus, VerticalRunScratch,
+        VERTICAL_CANDIDATE_COUNT,
     };
     use crate::density::{Builder, Context, Context as DfContext, Density, NoiseParams, Resolver};
     use crate::engine::{PointProgram, PointScratch};
     use crate::math::floor;
-    use crate::noise::NormalNoise;
+    use crate::noise::{BlendedNoise, NormalNoise};
     use crate::rng::LegacyRandomSource;
     use serde_json::Value;
     use std::sync::Arc;
@@ -2279,6 +3062,27 @@ mod tests {
     }
 
     #[test]
+    fn preliminary_compiled_route_allocates_scratch_only_on_first_compute() {
+        let tree = Arc::new(Density::YClampedGradient {
+            from_y: -16.0,
+            to_y: 16.0,
+            from_value: -1.0,
+            to_value: 1.0,
+        });
+        let route = super::PreliminaryPointDensity::from_arc_and_program(
+            Arc::clone(&tree),
+            Some(Arc::new(PointProgram::compile(&tree))),
+        );
+        assert!(route.is_compiled());
+        assert!(!route.scratch_allocated());
+        assert_eq!(route.scratch_allocations(), 0);
+        let context = Context::new(7, 3, -11);
+        assert_eq!(route.compute(context).to_bits(), tree.compute(context).to_bits());
+        assert!(route.scratch_allocated());
+        assert_eq!(route.scratch_allocations(), 1);
+    }
+
+    #[test]
     fn production_preliminary_route_is_compiled_and_bit_exact() {
         let mut settings = test_settings(constant_density(), 8);
         settings["noise_router"]["preliminary_surface_level"] = preliminary_find_top_density();
@@ -2291,6 +3095,11 @@ mod tests {
 
         assert!(system.prelim.is_compiled());
         assert!(system.preliminary_surface_program_nodes() > 0);
+        assert_eq!(
+            system.preliminary_surface_scratch_allocations(),
+            0,
+            "shared preliminary cache should own compiled scratch"
+        );
 
         // This is the negative control for the production-consumption witness:
         // constructing a point route directly from the tree remains recursive,
@@ -2314,6 +3123,233 @@ mod tests {
                 "compiled preliminary mismatch at ({x}, {y}, {z})"
             );
         }
+    }
+
+    #[test]
+    fn production_compound_aquifer_routes_are_compiled_and_bit_exact() {
+        let route = nonlinear_density();
+        let mut settings = test_settings(constant_density(), 8);
+        for name in [
+            "barrier",
+            "fluid_level_floodedness",
+            "fluid_level_spread",
+            "lava",
+        ] {
+            settings["noise_router"][name] = route.clone();
+        }
+        let resolver = NoReferences;
+        let builder = Builder::new(0, &resolver);
+        let expected = [
+            builder
+                .build(&settings["noise_router"]["barrier"])
+                .expect("barrier fixture density"),
+            builder
+                .build(&settings["noise_router"]["fluid_level_floodedness"])
+                .expect("floodedness fixture density"),
+            builder
+                .build(&settings["noise_router"]["fluid_level_spread"])
+                .expect("spread fixture density"),
+            builder
+                .build(&settings["noise_router"]["lava"])
+                .expect("lava fixture density"),
+        ];
+        let system = AquiferSystem::new(&settings, &builder, 0, 0);
+        assert!(system.barrier.is_compiled());
+        assert!(system.floodedness.is_compiled());
+        assert!(system.spread.is_compiled());
+        assert!(system.lava.is_compiled());
+
+        let routes = [&system.barrier, &system.floodedness, &system.spread, &system.lava];
+        for (route, expected) in routes.into_iter().zip(expected) {
+            for context in [
+                Context::new(-9, -17, 4),
+                Context::new(0, 0, 0),
+                Context::new(7, 15, -6),
+                Context::new(23, 64, 11),
+            ] {
+                assert_eq!(
+                    route.compute(context).to_bits(),
+                    expected.compute(context).to_bits(),
+                    "compiled aquifer route mismatch at ({},{},{})",
+                    context.x,
+                    context.y,
+                    context.z,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compiled_aquifer_route_bundle_is_reusable_and_has_exact_fallback() {
+        let resolver = NoReferences;
+        let builder = Builder::new(0, &resolver);
+        let route = Arc::new(
+            builder
+                .build(&nonlinear_density())
+                .expect("compound route fixture density"),
+        );
+        let routes = super::CompiledAquiferPointRoutes::from_trees(
+            &route,
+            &route,
+            &route,
+            &route,
+        );
+        assert!(routes.barrier.is_some());
+        assert!(routes.floodedness.is_some());
+        assert!(routes.spread.is_some());
+        assert!(routes.lava.is_some());
+
+        let first = super::PointDensity::from_arc_and_program(
+            Arc::clone(&route),
+            routes.barrier.clone(),
+        );
+        let second = super::PointDensity::from_arc_and_program(
+            Arc::clone(&route),
+            routes.barrier.clone(),
+        );
+        let (first_program, second_program) = match (&first, &second) {
+            (
+                super::PointDensity::Compiled { program: first, .. },
+                super::PointDensity::Compiled { program: second, .. },
+            ) => (first, second),
+            _ => panic!("compound route did not select the compiled path"),
+        };
+        assert!(Arc::ptr_eq(first_program, second_program));
+
+        let contexts = [
+            Context::new(-9, -17, 4),
+            Context::new(0, 0, 0),
+            Context::new(7, 15, -6),
+            Context::new(23, 64, 11),
+        ];
+        let mut recursive_digest = 0xcbf2_9ce4_8422_2325u64;
+        let mut compiled_digest = recursive_digest;
+        for context in contexts {
+            let expected = route.compute(context);
+            let actual = first.compute(context);
+            assert_eq!(actual.to_bits(), expected.to_bits());
+            recursive_digest = recursive_digest
+                .wrapping_mul(0x1000_0000_01b3)
+                .wrapping_add(expected.to_bits());
+            compiled_digest = compiled_digest
+                .wrapping_mul(0x1000_0000_01b3)
+                .wrapping_add(actual.to_bits());
+        }
+        assert_eq!(compiled_digest, recursive_digest);
+
+        let mut random = LegacyRandomSource::new(17);
+        let unsupported = Arc::new(Density::Blended(BlendedNoise::new(
+            &mut random,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+        )));
+        let fallback_routes = super::CompiledAquiferPointRoutes::from_trees(
+            &unsupported,
+            &unsupported,
+            &unsupported,
+            &unsupported,
+        );
+        assert!(fallback_routes.barrier.is_none());
+        let fallback = super::PointDensity::from_arc_and_program(
+            Arc::clone(&unsupported),
+            fallback_routes.barrier,
+        );
+        assert!(!fallback.is_compiled());
+        for context in contexts {
+            assert_eq!(fallback.compute(context).to_bits(), unsupported.compute(context).to_bits());
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "local instruction/cycle control for compiled aquifer routes"]
+    #[allow(unsafe_code)]
+    fn compiled_aquifer_route_instruction_cycle_control() {
+        use std::hint::black_box;
+        use std::mem::size_of;
+
+        #[repr(C)]
+        #[derive(Default, Clone, Copy)]
+        struct RusageInfoV4 {
+            uuid: [u8; 16],
+            prefix: [u64; 29],
+            instructions: u64,
+            cycles: u64,
+            suffix: [u64; 5],
+        }
+
+        unsafe extern "C" {
+            fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut core::ffi::c_void) -> i32;
+        }
+
+        fn usage() -> (u64, u64) {
+            assert_eq!(size_of::<RusageInfoV4>(), 304);
+            let mut info = RusageInfoV4::default();
+            let result = unsafe {
+                proc_pid_rusage(
+                    i32::try_from(std::process::id()).expect("pid fits in i32"),
+                    4,
+                    (&raw mut info).cast::<core::ffi::c_void>(),
+                )
+            };
+            assert_eq!(result, 0, "proc_pid_rusage failed with {result}");
+            (info.instructions, info.cycles)
+        }
+
+        let mut tree = Density::YClampedGradient {
+            from_y: -64.0,
+            to_y: 320.0,
+            from_value: -1.0,
+            to_value: 1.0,
+        };
+        for index in 0..16 {
+            tree = Density::Add(
+                Box::new(tree),
+                Box::new(Density::Const(f64::from(index) * 0.03125)),
+            );
+        }
+        let tree = Arc::new(tree);
+        let program = Arc::new(PointProgram::compile(&tree));
+        let recursive = super::PointDensity::from_arc(Arc::clone(&tree));
+        let compiled = super::PointDensity::from_arc_and_program(
+            Arc::clone(&tree),
+            Some(program),
+        );
+        let contexts: Vec<_> = (0..16_384)
+            .map(|index| {
+                Context::new(
+                    index % 257 - 128,
+                    index % 385 - 64,
+                    (index * 3) % 257 - 128,
+                )
+            })
+            .collect();
+
+        let mut recursive_digest = 0_u64;
+        let before_recursive = usage();
+        for context in &contexts {
+            recursive_digest ^= black_box(recursive.compute(*context).to_bits());
+        }
+        let after_recursive = usage();
+
+        let mut compiled_digest = 0_u64;
+        let before_compiled = usage();
+        for context in &contexts {
+            compiled_digest ^= black_box(compiled.compute(*context).to_bits());
+        }
+        let after_compiled = usage();
+        assert_eq!(compiled_digest, recursive_digest);
+        println!(
+            "AQUIFER_POINT_CONTROL samples={} recursive_instructions={} compiled_instructions={} recursive_cycles={} compiled_cycles={} digest={compiled_digest:016x}",
+            contexts.len(),
+            after_recursive.0.saturating_sub(before_recursive.0),
+            after_compiled.0.saturating_sub(before_compiled.0),
+            after_recursive.1.saturating_sub(before_recursive.1),
+            after_compiled.1.saturating_sub(before_compiled.1),
+        );
     }
 
     fn test_settings(final_density: Value, sea_level: i32) -> Value {
@@ -2497,6 +3533,107 @@ mod tests {
     #[test]
     fn vertical_run_scratch_fits_request_local_budget() {
         assert!(std::mem::size_of::<VerticalRunScratch>() <= 256);
+    }
+
+    #[test]
+    fn aquifer_region_cache_keys_locations_and_statuses_by_absolute_grid_coordinate() {
+        use std::cell::Cell;
+
+        let mut cache = AquiferRegionCache::with_capacity(32);
+        let positional = crate::rng::Algorithm::Legacy.root_positional(17);
+        let first = cache.get_or_compute_location(-1, -2, 3, positional);
+        assert_eq!(
+            cache.get_or_compute_location(-1, -2, 3, positional),
+            first
+        );
+        let _translated = cache.get_or_compute_location(0, -2, 3, positional);
+
+        let status_calls = Cell::new(0);
+        let first_status = cache.get_or_compute_status(-1, -2, 3, || {
+            status_calls.set(status_calls.get() + 1);
+            FluidStatus {
+                fluid_level: -54,
+                fluid_type: Fluid::Lava,
+            }
+        });
+        let second_status = cache.get_or_compute_status(-1, -2, 3, || {
+            status_calls.set(status_calls.get() + 1);
+            panic!("cached status should not invoke its fallback")
+        });
+        assert_eq!(first_status, second_status);
+        assert_eq!(status_calls.get(), 1);
+
+        let stats = cache.stats();
+        assert_eq!(stats.location_computes, 2);
+        assert_eq!(stats.location_hits, 1);
+        assert_eq!(stats.status_computes, 1);
+        assert_eq!(stats.status_hits, 1);
+        assert!(stats.retained_entries <= stats.capacity);
+    }
+
+    #[test]
+    fn aquifer_region_cache_reduces_4x4_candidate_work_without_changing_blocks() {
+        fn run(shared: bool) -> (Vec<BlockKind>, super::AquiferRegionCacheStats) {
+            let settings = test_settings(constant_density(), 8);
+            let resolver = NoReferences;
+            let builder = Builder::new(0, &resolver);
+            let mut shared_cache = AquiferRegionCache::new();
+            let mut blocks = Vec::with_capacity(4 * 4 * 16 * 16 * 16);
+            let mut scalar_stats = super::AquiferRegionCacheStats::default();
+            for cz in 0..4 {
+                for cx in 0..4 {
+                    let mut local_cache = AquiferRegionCache::new();
+                    let cache = if shared {
+                        &mut shared_cache
+                    } else {
+                        &mut local_cache
+                    };
+                    let system = AquiferSystem::new(&settings, &builder, cx, cz);
+                    let mut densities = [0.0; 16];
+                    let mut column_blocks = [BlockKind::Air; 16];
+                    for z in 0..16 {
+                        for x in 0..16 {
+                            let mut state = system.vertical_run_state();
+                            system.final_density_column(
+                                cx * 16 + x,
+                                cz * 16 + z,
+                                0,
+                                &mut densities,
+                            );
+                            system.block_at_density_vertical_slice_with_region_cache(
+                                cx * 16 + x,
+                                cz * 16 + z,
+                                0,
+                                &densities,
+                                &mut column_blocks,
+                                &mut state,
+                                cache,
+                            );
+                            blocks.extend(column_blocks);
+                        }
+                    }
+                    if !shared {
+                        let stats = cache.stats();
+                        scalar_stats.location_computes += stats.location_computes;
+                        scalar_stats.status_computes += stats.status_computes;
+                    }
+                }
+            }
+            if shared {
+                (blocks, shared_cache.stats())
+            } else {
+                (blocks, scalar_stats)
+            }
+        }
+
+        let (scalar_blocks, scalar_stats) = run(false);
+        let (shared_blocks, shared_stats) = run(true);
+        assert_eq!(shared_blocks, scalar_blocks);
+        assert_eq!(scalar_stats.location_computes, 576);
+        assert_eq!(shared_stats.location_computes, 144);
+        assert_eq!(scalar_stats.status_computes, 286);
+        assert_eq!(shared_stats.status_computes, 98);
+        assert!(shared_stats.retained_entries <= shared_stats.capacity);
     }
 
     #[test]

@@ -38,6 +38,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
+use lodestone_data::block_states::StateId;
 use lodestone_worldgen::density::{NoiseParams, Resolver};
 use lodestone_worldgen::overworld::OverworldGenerator;
 use serde_json::Value;
@@ -348,10 +349,13 @@ fn buried_treasure_chests_place_a_real_chest_in_both_oracle_chunks() {
     let generator = generator();
     for (cx, cz) in [(10, 33), (52, -10)] {
         let column = generator.column(cx, cz);
-        let chest = "minecraft:chest[facing=north,type=single,waterlogged=false]";
+        let chest = StateId::from_state_str(
+            "minecraft:chest[facing=north,type=single,waterlogged=false]",
+        )
+        .expect("chest state is generated");
         let mut found: Vec<i32> = Vec::new();
         for y in column.min_y()..(column.min_y() + column.height()) {
-            if column.block_state(9, y, 9) == chest {
+            if column.block_state_id(9, y, 9) == chest {
                 found.push(y);
             }
         }
@@ -370,7 +374,7 @@ fn buried_treasure_chests_place_a_real_chest_in_both_oracle_chunks() {
                     continue;
                 }
                 for y in column.min_y()..(column.min_y() + column.height()) {
-                    if column.block_state(lx, y, lz) == chest {
+                    if column.block_state_id(lx, y, lz) == chest {
                         elsewhere += 1;
                     }
                 }

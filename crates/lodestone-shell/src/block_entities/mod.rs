@@ -108,6 +108,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use glam::Vec3;
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey};
 use lodestone_data::block_states::StateId;
 use lodestone_render::{
     BannerAttachment, BannerSpawn, BeaconSpawn, BeamSection, BellShakeDirection, BellSpawn,
@@ -3275,8 +3277,8 @@ impl PistonMoves {
 /// five load fields.
 #[derive(Debug, Clone, PartialEq)]
 struct MovingPistonNbt {
-    /// `blockState`, resolved through [`lodestone_data::block_states::state_id`].
-    moved_state: u32,
+    /// `blockState`, resolved at the NBT boundary into a canonical `StateId`.
+    moved_state: StateId,
     /// `facing`, as a unit step. Vanilla's own legacy direction-id codec is a byte over
     /// the 3D data value, so this is an [`lodestone_core::Nbt::Byte`], **not** an
     /// int — reading it as one silently defaults every piston to `DOWN`.
@@ -3311,20 +3313,11 @@ fn direction_step_from_3d(id: i8) -> Option<[i32; 3]> {
     })
 }
 
-/// Renders vanilla's own block-state codec's NBT compound — `{Name: "...", Properties: {...}}`
-/// — as the canonical state string [`lodestone_data::block_states::state_id`]
-/// parses.
-///
-/// Going via the string rather than a direct table lookup is not a detour: that
-/// function's three-tier fallback (exact, default-plus-overrides, then the bare
-/// default) is exactly what a hand-rolled property match would have to
-/// reimplement, and it is the tier-2 arm that makes a *synthesised* state such as
-/// `piston_head[facing=up,short=true,type=normal]` resolve at all.
-///
-/// Properties are sorted, because tier 1 compares against the generated table's
-/// own sorted slice.
+/// Resolves a block-state NBT compound at the serialization boundary. Runtime
+/// piston state carries the resulting `StateId`; no canonical state text is
+/// retained after this function returns.
 #[must_use]
-fn nbt_block_state_string(nbt: &lodestone_core::Nbt) -> Option<String> {
+fn nbt_block_state_id(nbt: &lodestone_core::Nbt) -> Option<StateId> {
     use lodestone_core::Nbt;
 
     let Nbt::Compound(fields) = nbt else {
@@ -3334,25 +3327,19 @@ fn nbt_block_state_string(nbt: &lodestone_core::Nbt) -> Option<String> {
     let Some(Nbt::String(name)) = field("Name") else {
         return None;
     };
-    let mut props: Vec<(&str, &str)> = match field("Properties") {
-        Some(Nbt::Compound(pairs)) => pairs
-            .iter()
-            .filter_map(|(key, value)| match value {
-                Nbt::String(value) => Some((key.as_str(), value.as_str())),
-                _ => None,
-            })
-            .collect(),
-        _ => Vec::new(),
-    };
-    if props.is_empty() {
-        return Some(name.clone());
+    let block = Block::from_name(name)?;
+    let mut properties = Properties::from_state_id(block.default_state());
+    if let Some(Nbt::Compound(pairs)) = field("Properties") {
+        for (key, value) in pairs {
+            let Nbt::String(value) = value else {
+                continue;
+            };
+            let key = PropertyKey::from_name(key)?;
+            let value = BuiltinPropertyValue::from_name(value)?;
+            properties = properties.with_builtin(key, value).ok()?;
+        }
     }
-    props.sort_unstable();
-    let rendered: Vec<String> = props
-        .iter()
-        .map(|(key, value)| format!("{key}={value}"))
-        .collect();
-    Some(format!("{name}[{}]", rendered.join(",")))
+    Properties::state_for_block(block, &properties)
 }
 
 /// Decodes one moving piston's NBT, or `None` if any required field is missing or
@@ -3371,9 +3358,8 @@ fn moving_piston_nbt(nbt: &lodestone_core::Nbt) -> Option<MovingPistonNbt> {
     };
     let field = |key: &str| fields.iter().find(|(name, _)| name == key).map(|(_, v)| v);
 
-    let moved_state =
-        lodestone_data::block_states::state_id(&nbt_block_state_string(field("blockState")?)?)?;
-    if moved_state == lodestone_data::block_states::air_state_id() {
+    let moved_state = nbt_block_state_id(field("blockState")?)?;
+    if moved_state == lodestone_data::block_states::air_state() {
         return None;
     }
     let Some(Nbt::Byte(facing)) = field("facing") else {
@@ -3405,16 +3391,25 @@ fn moving_piston_nbt(nbt: &lodestone_core::Nbt) -> Option<MovingPistonNbt> {
 /// Whether a block state is `minecraft:moving_piston`.
 #[must_use]
 fn is_moving_piston(state_id: u32) -> bool {
-    lodestone_data::block_states::block_name(state_id) == Some("minecraft:moving_piston")
+    StateId::new(state_id).is_some_and(|state| state.block() == Block::MovingPiston)
 }
 
-/// One block state's named property value, or `None`.
+/// One block state's typed property value, or `None`.
 #[must_use]
-fn state_property(state_id: u32, key: &str) -> Option<&'static str> {
-    lodestone_data::block_states::properties(state_id)?
-        .iter()
-        .find(|(name, _)| *name == key)
-        .map(|(_, value)| *value)
+fn state_property(state_id: StateId, key: PropertyKey) -> Option<BuiltinPropertyValue> {
+    Properties::from_state_id(state_id).get(key)?.builtin_value()
+}
+
+#[must_use]
+fn state_with_builtin_property(
+    state_id: StateId,
+    key: PropertyKey,
+    value: BuiltinPropertyValue,
+) -> Option<StateId> {
+    let properties = Properties::from_state_id(state_id)
+        .with_builtin(key, value)
+        .ok()?;
+    Properties::state_for_block(state_id.block(), &properties)
 }
 
 /// Vanilla's own piston-head render-state extraction's three-way branch: which state to draw
@@ -3440,37 +3435,57 @@ fn state_property(state_id: u32, key: &str) -> Option<&'static str> {
 /// of 12/16), and getting arm 2's comparison backwards produces a head that pops
 /// long at the wrong moment — plausible enough to survive a screenshot.
 #[must_use]
-fn moving_piston_states(nbt: &MovingPistonNbt, progress: f32) -> Option<(u32, Option<u32>)> {
-    use lodestone_data::block_states::{block_name, state_id};
-
-    let moved_name = block_name(nbt.moved_state)?;
-    if moved_name == "minecraft:piston_head" {
-        let facing = state_property(nbt.moved_state, "facing")?;
-        let head_type = state_property(nbt.moved_state, "type")?;
+fn moving_piston_states(nbt: &MovingPistonNbt, progress: f32) -> Option<(StateId, Option<StateId>)> {
+    let moved_block = nbt.moved_state.block();
+    if moved_block == Block::PistonHead {
+        let facing = state_property(nbt.moved_state, PropertyKey::Facing)?;
+        let head_type = state_property(nbt.moved_state, PropertyKey::Type)?;
         let short = progress <= 0.5;
-        return Some((
-            state_id(&format!(
-                "minecraft:piston_head[facing={facing},short={short},type={head_type}]"
-            ))?,
-            None,
-        ));
-    }
-    if nbt.source && !nbt.extending {
-        // Vanilla's own default piston-type's serialized name is `"normal"`, not `"default"`.
-        let head_type = if moved_name == "minecraft:sticky_piston" {
-            "sticky"
+        let state = state_with_builtin_property(
+            nbt.moved_state,
+            PropertyKey::Short,
+            if short {
+                BuiltinPropertyValue::True
+            } else {
+                BuiltinPropertyValue::False
+            },
+        )?;
+        let state = state_with_builtin_property(state, PropertyKey::Facing, facing)?;
+        Some((state_with_builtin_property(state, PropertyKey::Type, head_type)?, None))
+    } else if nbt.source && !nbt.extending {
+        let head_type = if moved_block == Block::StickyPiston {
+            BuiltinPropertyValue::Sticky
+        } else if moved_block == Block::Piston {
+            BuiltinPropertyValue::Normal
         } else {
-            "normal"
+            return Some((nbt.moved_state, None));
         };
-        let facing = state_property(nbt.moved_state, "facing")?;
+        let facing = state_property(nbt.moved_state, PropertyKey::Facing)?;
         let short = progress >= 0.5;
-        let head = state_id(&format!(
-            "minecraft:piston_head[facing={facing},short={short},type={head_type}]"
-        ))?;
-        let base = state_id(&format!("{moved_name}[extended=true,facing={facing}]"))?;
-        return Some((head, Some(base)));
+        let head = state_with_builtin_property(
+            Block::PistonHead.default_state(),
+            PropertyKey::Facing,
+            facing,
+        )?;
+        let head = state_with_builtin_property(head, PropertyKey::Type, head_type)?;
+        let head = state_with_builtin_property(
+            head,
+            PropertyKey::Short,
+            if short {
+                BuiltinPropertyValue::True
+            } else {
+                BuiltinPropertyValue::False
+            },
+        )?;
+        let base = state_with_builtin_property(
+            nbt.moved_state,
+            PropertyKey::Extended,
+            BuiltinPropertyValue::True,
+        )?;
+        Some((head, Some(base)))
+    } else {
+        Some((nbt.moved_state, None))
     }
-    Some((nbt.moved_state, None))
 }
 
 /// Every `moving_piston` block entity in the world, paired with the `progress` its
@@ -3613,8 +3628,8 @@ pub fn moving_piston_spawns(
             .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
         out.push(lodestone_render::MovingPistonSpawn {
             pos: block,
-            state_id,
-            base_state_id,
+            state_id: state_id.raw(),
+            base_state_id: base_state_id.map(StateId::raw),
             direction: decoded.direction,
             progress,
             extending: decoded.extending,
@@ -4926,7 +4941,7 @@ mod piston_tests {
     /// `Properties` must resolve to that block's *default* state, which is the arm
     /// where "lowest id sharing the name" used to be wrong for 661 blocks.
     #[test]
-    fn a_codec_block_state_compound_renders_a_string_the_real_table_resolves() {
+    fn a_codec_block_state_compound_resolves_a_typed_state() {
         use lodestone_core::Nbt;
 
         let compound = Nbt::Compound(vec![
@@ -4941,18 +4956,9 @@ mod piston_tests {
                 ]),
             ),
         ]);
-        let rendered = nbt_block_state_string(&compound).expect("a renderable compound");
-        assert_eq!(
-            rendered, "minecraft:piston_head[facing=up,short=true,type=sticky]",
-            "properties must be sorted by key, which is what the generated table's \
-             own slice comparison assumes"
-        );
-        let id = lodestone_data::block_states::state_id(&rendered).expect("a real state");
-        assert_eq!(
-            lodestone_data::block_states::block_name(id),
-            Some("minecraft:piston_head")
-        );
-        let props = lodestone_data::block_states::properties(id).expect("properties");
+        let id = nbt_block_state_id(&compound).expect("a real state");
+        assert_eq!(id.block(), Block::PistonHead);
+        let props = id.properties();
         assert!(props.contains(&("facing", "up")), "{props:?}");
         assert!(props.contains(&("short", "true")), "{props:?}");
         assert!(props.contains(&("type", "sticky")), "{props:?}");
@@ -4963,13 +4969,10 @@ mod piston_tests {
             "Name".into(),
             Nbt::String("minecraft:sticky_piston".into()),
         )]);
-        let bare_id = lodestone_data::block_states::state_id(
-            &nbt_block_state_string(&bare).expect("a renderable bare compound"),
-        )
-        .expect("a real state");
+        let bare_id = nbt_block_state_id(&bare).expect("a real state");
         assert_eq!(
-            lodestone_data::block_states::properties(bare_id),
-            Some(&[("extended", "false"), ("facing", "north")][..]),
+            bare_id.properties(),
+            &[("extended", "false"), ("facing", "north")][..],
             "`PistonBaseBlock`'s registered default is `facing=north, extended=false`"
         );
     }
@@ -4984,7 +4987,7 @@ mod piston_tests {
     /// a hardcoded `short`.
     #[test]
     fn a_moved_piston_head_takes_its_short_from_the_progress() {
-        let head = lodestone_data::block_states::state_id(
+        let head = StateId::from_state_str(
             "minecraft:piston_head[facing=up,short=false,type=normal]",
         )
         .expect("a real head state");
@@ -4997,20 +5000,23 @@ mod piston_tests {
         };
 
         let mut wrong: Vec<String> = Vec::new();
-        for (progress, expected_short) in [(0.25_f32, "true"), (0.75, "false")] {
+        for (progress, expected_short) in [
+            (0.25_f32, BuiltinPropertyValue::True),
+            (0.75, BuiltinPropertyValue::False),
+        ] {
             let (state, base) = moving_piston_states(&nbt, progress).expect("a resolvable state");
             if base.is_some() {
                 wrong.push(format!("progress {progress}: an extension drew a base"));
             }
-            let short = state_property(state, "short");
+            let short = state_property(state, PropertyKey::Short);
             if short != Some(expected_short) {
                 wrong.push(format!(
-                    "progress {progress}: short={short:?}, expected {expected_short}"
+                    "progress {progress}: short={short:?}, expected {expected_short:?}"
                 ));
             }
             // Facing and type must survive the rewrite untouched.
-            if state_property(state, "facing") != Some("up")
-                || state_property(state, "type") != Some("normal")
+            if state_property(state, PropertyKey::Facing) != Some(BuiltinPropertyValue::Up)
+                || state_property(state, PropertyKey::Type) != Some(BuiltinPropertyValue::Normal)
             {
                 wrong.push(format!("progress {progress}: facing/type were rewritten"));
             }
@@ -5034,14 +5040,19 @@ mod piston_tests {
     #[test]
     fn a_retracting_source_piston_synthesises_a_head_and_draws_its_base() {
         let mut wrong: Vec<String> = Vec::new();
-        for (base_block, expected_type) in [
-            ("minecraft:sticky_piston", "sticky"),
-            ("minecraft:piston", "normal"),
+        for (base_block, expected_type, state_text) in [
+            (
+                Block::StickyPiston,
+                BuiltinPropertyValue::Sticky,
+                "minecraft:sticky_piston[extended=false,facing=west]",
+            ),
+            (
+                Block::Piston,
+                BuiltinPropertyValue::Normal,
+                "minecraft:piston[extended=false,facing=west]",
+            ),
         ] {
-            let base_state = lodestone_data::block_states::state_id(&format!(
-                "{base_block}[extended=false,facing=west]"
-            ))
-            .expect("a real base state");
+            let base_state = StateId::from_state_str(state_text).expect("a real base state");
             let nbt = MovingPistonNbt {
                 moved_state: base_state,
                 direction: [-1, 0, 0],
@@ -5050,46 +5061,46 @@ mod piston_tests {
                 source: true,
             };
             let (head, base) = moving_piston_states(&nbt, 0.25).expect("a resolvable state");
-            if lodestone_data::block_states::block_name(head) != Some("minecraft:piston_head") {
-                wrong.push(format!("{base_block}: head is not a piston head"));
+            if head.block() != Block::PistonHead {
+                wrong.push(format!("{base_block:?}: head is not a piston head"));
             }
-            if state_property(head, "type") != Some(expected_type) {
+            if state_property(head, PropertyKey::Type) != Some(expected_type) {
                 wrong.push(format!(
-                    "{base_block}: head type is {:?}, expected {expected_type}",
-                    state_property(head, "type")
+                    "{base_block:?}: head type is {:?}, expected {expected_type:?}",
+                    state_property(head, PropertyKey::Type)
                 ));
             }
-            if state_property(head, "facing") != Some("west") {
-                wrong.push(format!("{base_block}: head facing did not follow the base"));
+            if state_property(head, PropertyKey::Facing) != Some(BuiltinPropertyValue::West) {
+                wrong.push(format!("{base_block:?}: head facing did not follow the base"));
             }
             // Branch 2's comparison is `>= 0.5`, so a quarter of the way through a
             // retraction the head is still long.
-            if state_property(head, "short") != Some("false") {
+            if state_property(head, PropertyKey::Short) != Some(BuiltinPropertyValue::False) {
                 wrong.push(format!(
-                    "{base_block}: short is {:?} at progress 0.25 — branch 1's \
+                    "{base_block:?}: short is {:?} at progress 0.25 — branch 1's \
                      `<= 0.5` rule was used instead of branch 2's `>= 0.5`",
-                    state_property(head, "short")
+                    state_property(head, PropertyKey::Short)
                 ));
             }
             match base {
                 Some(base) => {
-                    if lodestone_data::block_states::block_name(base) != Some(base_block) {
-                        wrong.push(format!("{base_block}: base block changed identity"));
+                    if base.block() != base_block {
+                        wrong.push(format!("{base_block:?}: base block changed identity"));
                     }
-                    if state_property(base, "extended") != Some("true") {
-                        wrong.push(format!("{base_block}: base was not forced extended"));
+                    if state_property(base, PropertyKey::Extended) != Some(BuiltinPropertyValue::True) {
+                        wrong.push(format!("{base_block:?}: base was not forced extended"));
                     }
-                    if state_property(base, "facing") != Some("west") {
-                        wrong.push(format!("{base_block}: base facing changed"));
+                    if state_property(base, PropertyKey::Facing) != Some(BuiltinPropertyValue::West) {
+                        wrong.push(format!("{base_block:?}: base facing changed"));
                     }
                 }
-                None => wrong.push(format!("{base_block}: no base drew")),
+                None => wrong.push(format!("{base_block:?}: no base drew")),
             }
             // And at 0.75 the head has gone short — so `short` is a function of the
             // progress here and not a constant that happened to read correctly.
             let (late_head, _) = moving_piston_states(&nbt, 0.75).expect("a resolvable state");
-            if state_property(late_head, "short") != Some("true") {
-                wrong.push(format!("{base_block}: short did not flip by progress 0.75"));
+            if state_property(late_head, PropertyKey::Short) != Some(BuiltinPropertyValue::True) {
+                wrong.push(format!("{base_block:?}: short did not flip by progress 0.75"));
             }
         }
         assert!(wrong.is_empty(), "{wrong:?}");
@@ -5104,7 +5115,7 @@ mod piston_tests {
     /// would not be caught anywhere.
     #[test]
     fn an_ordinary_pushed_block_is_drawn_as_stored() {
-        let stone = lodestone_data::block_states::state_id("minecraft:stone").expect("stone");
+        let stone = StateId::from_state_str("minecraft:stone").expect("stone");
         let nbt = MovingPistonNbt {
             moved_state: stone,
             direction: [0, 0, 1],

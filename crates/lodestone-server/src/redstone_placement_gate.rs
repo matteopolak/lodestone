@@ -73,6 +73,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, PropertyKey, PropertyValue, Properties};
+use lodestone_data::block_states::StateId;
 use lodestone_model::BlockPos;
 
 use crate::block_entities::BlockEntityHandle;
@@ -118,6 +121,21 @@ const ORACLE_FULL_POWER: u8 = 15;
 /// rather than as silence.
 const DRIVE_TICKS: u64 = 16;
 
+fn hopper_state(enabled: bool) -> StateId {
+    let state = redstone::with_property(
+        Block::Hopper.default_state(),
+        PropertyKey::Enabled,
+        PropertyValue::builtin(if enabled { BuiltinPropertyValue::True } else { BuiltinPropertyValue::False }),
+    )
+    .expect("hopper enabled property is generated");
+    redstone::with_property(
+        state,
+        PropertyKey::Facing,
+        PropertyValue::builtin(BuiltinPropertyValue::Down),
+    )
+    .expect("hopper facing property is generated")
+}
+
 // ---------------------------------------------------------------------------
 // The rig world
 // ---------------------------------------------------------------------------
@@ -148,8 +166,8 @@ impl RigWorld {
     /// every "did the outcome change" comparison below is made over.
     /// Deliberately a *named list of coordinates* rather than a whole-column
     /// hash: a mismatch must be able to say **where**.
-    fn row(&self) -> Vec<(i32, String)> {
-        (0..8).map(|x| (x, self.block_state(x, Y, ROW_Z))).collect()
+    fn row(&self) -> Vec<(i32, StateId)> {
+        (0..8).map(|x| (x, self.block_state_id(x, Y, ROW_Z))).collect()
     }
 }
 
@@ -168,14 +186,14 @@ impl ChunkSource for RigWorld {
     // is the efficient case the trait now wants an implementor to provide.
     // A column that has never been touched is, by
     // construction, all air — the same value `column()` would materialise.
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
         self.columns
             .lock()
             .expect("rig world poisoned")
             .get(&(cx, cz))
-            .map(|c| c.block_state(x.rem_euclid(16), y, z.rem_euclid(16)).to_string())
-            .unwrap_or_else(|| crate::chunk::AIR.to_string())
+            .map(|c| c.resolved_block_state_id(x.rem_euclid(16), y, z.rem_euclid(16)))
+            .unwrap_or_else(lodestone_data::block_states::air_state)
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -188,14 +206,14 @@ impl ChunkSource for RigWorld {
             .unwrap_or_else(|| crate::chunk::AIR.to_string())
     }
 
-    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+    fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
         let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
         self.columns
             .lock()
             .expect("rig world poisoned")
             .entry((cx, cz))
             .or_insert_with(|| ChunkColumn::new(MIN_Y, HEIGHT))
-            .set_block(x.rem_euclid(16), y, z.rem_euclid(16), name);
+            .set_block_id(x.rem_euclid(16), y, z.rem_euclid(16), state);
     }
 }
 
@@ -203,7 +221,7 @@ fn column_with_floor() -> ChunkColumn {
     let mut column = ChunkColumn::new(MIN_Y, HEIGHT);
     for x in 0..16 {
         for z in 0..16 {
-            column.set_block(x, FLOOR_Y, z, "minecraft:stone");
+            column.set_block_id(x, FLOOR_Y, z, Block::Stone.default_state());
         }
     }
     column
@@ -222,21 +240,21 @@ fn column_with_floor() -> ChunkColumn {
 /// for it here.
 fn edge_rig(delay: u32, source_lit: bool, repeater_powered: bool) -> Arc<RigWorld> {
     let world = Arc::new(RigWorld::new());
-    world.set_block(SRC_X, Y, ROW_Z, &redstone_torch::set_standing_lit(source_lit));
+    world.set_block(SRC_X, Y, ROW_Z, redstone_torch::set_standing_lit(source_lit));
     let (near, far) = if source_lit { (0, 0) } else { (15, 14) };
-    world.set_block(2, Y, ROW_Z, &redstone_wire::set_power(near));
-    world.set_block(3, Y, ROW_Z, &redstone_wire::set_power(far));
+    world.set_block(2, Y, ROW_Z, redstone_wire::set_power(near));
+    world.set_block(3, Y, ROW_Z, redstone_wire::set_power(far));
     world.set_block(
         DIODE_X,
         Y,
         ROW_Z,
-        &redstone_diode::set_repeater(Direction::West, delay, false, repeater_powered),
+        redstone_diode::set_repeater(Direction::West, delay, false, repeater_powered),
     );
     world.set_block(
         OUT_X,
         Y,
         ROW_Z,
-        &redstone_wire::set_power(if repeater_powered { ORACLE_FULL_POWER } else { 0 }),
+        redstone_wire::set_power(if repeater_powered { ORACLE_FULL_POWER } else { 0 }),
     );
     world
 }
@@ -261,16 +279,16 @@ fn edge_rig(delay: u32, source_lit: bool, repeater_powered: bool) -> Arc<RigWorl
 /// break.
 fn falling_rig(delay: u32) -> Arc<RigWorld> {
     let world = Arc::new(RigWorld::new());
-    world.set_block(SRC_X, Y, ROW_Z, &redstone_torch::set_standing_lit(true));
-    world.set_block(2, Y, ROW_Z, &redstone_wire::set_power(15));
-    world.set_block(3, Y, ROW_Z, &redstone_wire::set_power(14));
+    world.set_block(SRC_X, Y, ROW_Z, redstone_torch::set_standing_lit(true));
+    world.set_block(2, Y, ROW_Z, redstone_wire::set_power(15));
+    world.set_block(3, Y, ROW_Z, redstone_wire::set_power(14));
     world.set_block(
         DIODE_X,
         Y,
         ROW_Z,
-        &redstone_diode::set_repeater(Direction::West, delay, false, true),
+        redstone_diode::set_repeater(Direction::West, delay, false, true),
     );
-    world.set_block(OUT_X, Y, ROW_Z, &redstone_wire::set_power(ORACLE_FULL_POWER));
+    world.set_block(OUT_X, Y, ROW_Z, redstone_wire::set_power(ORACLE_FULL_POWER));
     world
 }
 
@@ -279,10 +297,10 @@ fn falling_rig(delay: u32) -> Arc<RigWorld> {
 /// output dust.
 fn settled_line_with_a_gap() -> Arc<RigWorld> {
     let world = Arc::new(RigWorld::new());
-    world.set_block(SRC_X, Y, ROW_Z, &redstone_torch::set_standing_lit(true));
-    world.set_block(2, Y, ROW_Z, &redstone_wire::set_power(15));
-    world.set_block(3, Y, ROW_Z, &redstone_wire::set_power(14));
-    world.set_block(OUT_X, Y, ROW_Z, &redstone_wire::set_power(0));
+    world.set_block(SRC_X, Y, ROW_Z, redstone_torch::set_standing_lit(true));
+    world.set_block(2, Y, ROW_Z, redstone_wire::set_power(15));
+    world.set_block(3, Y, ROW_Z, redstone_wire::set_power(14));
+    world.set_block(OUT_X, Y, ROW_Z, redstone_wire::set_power(0));
     world
 }
 
@@ -296,7 +314,7 @@ fn settled_line_with_a_gap() -> Arc<RigWorld> {
 struct Published {
     tick: u64,
     pos: (i32, i32, i32),
-    state: String,
+    state: StateId,
 }
 
 fn spawn_loop(world: Arc<RigWorld>, feed: &BlockTickFeed) {
@@ -351,7 +369,7 @@ async fn drive(world: Arc<RigWorld>, feed: &BlockTickFeed, ticks: u64) -> Vec<Pu
 fn tick_dust_reached(published: &[Published], pos: (i32, i32, i32), power: u8) -> Option<u64> {
     published
         .iter()
-        .find(|p| p.pos == pos && redstone::is_wire(&p.state) && redstone::wire_power(&p.state) == power)
+        .find(|p| p.pos == pos && redstone::is_wire(p.state) && redstone::wire_power(p.state) == power)
         .map(|p| p.tick)
 }
 
@@ -364,7 +382,7 @@ fn log(published: &[Published]) -> String {
     }
     published
         .iter()
-        .map(|p| format!("    tick {:>2}: {:?} -> {}", p.tick, p.pos, p.state))
+        .map(|p| format!("    tick {:>2}: {:?} -> {}", p.tick, p.pos, p.state.canonical_state()))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -374,7 +392,7 @@ fn log(published: &[Published]) -> String {
 /// loop. Returns the cells the inline half rewrote — production delivers those
 /// through its own `encode_block_update` loop, not through the feed, so a
 /// computed-vs-delivered comparison has to count them.
-fn trigger(world: &RigWorld, feed: &BlockTickFeed, pos: BlockPos) -> Vec<(BlockPos, String)> {
+fn trigger(world: &RigWorld, feed: &BlockTickFeed, pos: BlockPos) -> Vec<(BlockPos, StateId)> {
     let (changed, scheduled) = crate::server::propagate_placement(world, pos);
     feed.request_scheduled_ticks(scheduled);
     changed
@@ -417,21 +435,21 @@ fn assert_wrong_models_are_separated(edge: &str, oracle: &[Option<u64>], wrong: 
 fn the_rig_world_reflects_its_own_edits() {
     let world = settled_line_with_a_gap();
     assert_eq!(
-        world.block_state(2, Y, ROW_Z),
+        world.block_state_id(2, Y, ROW_Z),
         redstone_wire::set_power(15),
         "PREMISE FAILED: the rig world does not serve back its own set_block at (x=2, y={Y}, z={ROW_Z})"
     );
     let column = world.column(0, 0);
     assert_eq!(
-        column.block_state(2, Y, ROW_Z),
+        column.block_state_id(2, Y, ROW_Z),
         redstone_wire::set_power(15),
         "PREMISE FAILED: the rig world's column() ignores its own edits at (x=2, y={Y}, z={ROW_Z}) \
          -- exactly the SharedAirSource defect, and every gate in this file would then pass against \
          a circuit that is not there"
     );
     assert_eq!(
-        column.block_state(DIODE_X, Y, ROW_Z),
-        "minecraft:air",
+        column.block_state_id(DIODE_X, Y, ROW_Z),
+        lodestone_data::block_states::air_state(),
         "PREMISE FAILED: the repeater cell is not air, so placing into it tests nothing"
     );
 }
@@ -448,29 +466,29 @@ fn the_rig_world_reflects_its_own_edits() {
 fn the_rigs_start_in_the_state_their_edge_actually_needs() {
     let rising = edge_rig(1, true, false);
     assert_eq!(
-        redstone::wire_power(&rising.block_state(3, Y, ROW_Z)),
+        redstone::wire_power(rising.block_state_id(3, Y, ROW_Z)),
         0,
         "PREMISE FAILED: the rising rig's input dust is already powered, so the rising edge is over \
          before the gate starts"
     );
     assert!(
-        !redstone::diode_powered(&rising.block_state(DIODE_X, Y, ROW_Z)),
+        !redstone::diode_powered(rising.block_state_id(DIODE_X, Y, ROW_Z)),
         "PREMISE FAILED: the rising rig's repeater is already on"
     );
 
     let falling = falling_rig(1);
     assert_eq!(
-        redstone::wire_power(&falling.block_state(3, Y, ROW_Z)),
+        redstone::wire_power(falling.block_state_id(3, Y, ROW_Z)),
         14,
         "PREMISE FAILED: the falling rig's input dust is not powered, so there is no edge to cut"
     );
     assert_eq!(
-        redstone::wire_power(&falling.block_state(OUT_X, Y, ROW_Z)),
+        redstone::wire_power(falling.block_state_id(OUT_X, Y, ROW_Z)),
         ORACLE_FULL_POWER,
         "PREMISE FAILED: the falling rig's output dust is not powered"
     );
     assert!(
-        redstone::diode_powered(&falling.block_state(DIODE_X, Y, ROW_Z)),
+        redstone::diode_powered(falling.block_state_id(DIODE_X, Y, ROW_Z)),
         "PREMISE FAILED: the falling rig's repeater is not on, so it cannot release"
     );
 }
@@ -514,10 +532,10 @@ async fn without_the_inbound_request_the_loop_never_learns_and_the_repeater_neve
         log(&published)
     );
     assert!(
-        !redstone::diode_powered(&world.block_state(DIODE_X, Y, ROW_Z)),
+            !redstone::diode_powered(world.block_state_id(DIODE_X, Y, ROW_Z)),
         "CONTROL FAILED: the repeater at (x={DIODE_X}, y={Y}, z={ROW_Z}) turned on without the \
          request; it is {}",
-        world.block_state(DIODE_X, Y, ROW_Z)
+        world.block_state_id(DIODE_X, Y, ROW_Z)
     );
 }
 
@@ -605,13 +623,13 @@ async fn a_repeater_releases_its_output_on_the_tick_the_live_server_measured() {
         // Premise: there must be something to fall from, and the repeater must
         // currently be reading a real input.
         assert_eq!(
-            redstone::wire_power(&world.block_state(OUT_X, Y, ROW_Z)),
+            redstone::wire_power(world.block_state_id(OUT_X, Y, ROW_Z)),
             ORACLE_FULL_POWER,
             "PREMISE FAILED: delay={delay}'s output dust is not powered, so a drop to zero is \
              indistinguishable from never having been on"
         );
         assert_eq!(
-            redstone::wire_power(&world.block_state(3, Y, ROW_Z)),
+            redstone::wire_power(world.block_state_id(3, Y, ROW_Z)),
             14,
             "PREMISE FAILED: delay={delay}'s input dust is not powered, so cutting it changes \
              nothing"
@@ -626,7 +644,7 @@ async fn a_repeater_releases_its_output_on_the_tick_the_live_server_measured() {
         // not necessarily a zero input in this model, so the repeater's
         // `should_turn_on` never changed and it never scheduled. Removing the
         // source leaves nothing for any intermediate block to conduct.
-        world.set_block(SRC_X, Y, ROW_Z, "minecraft:stone");
+        world.set_block(SRC_X, Y, ROW_Z, Block::Stone.default_state());
         trigger(&world, &feed, BlockPos::new(SRC_X, Y, ROW_Z));
 
         let published = drive(Arc::clone(&world), &feed, DRIVE_TICKS).await;
@@ -701,7 +719,7 @@ async fn a_repeater_placed_into_a_live_line_lights_one_tick_later_at_every_delay
             DIODE_X,
             Y,
             ROW_Z,
-            &redstone_diode::set_repeater(Direction::West, delay, false, false),
+            redstone_diode::set_repeater(Direction::West, delay, false, false),
         );
         // Exactly the pair `apply_use_item_on` performs after a successful
         // placement: the synchronous fan-out inline, the delayed one requested.
@@ -799,19 +817,15 @@ async fn every_cell_the_delayed_flip_changed_is_also_delivered_to_the_wire() {
     // delayed flip goes out through `BlockTickFeed`. Counting only the feed
     // reports the synchronous half as undelivered, which is a false positive —
     // observed while building this, at (x=2) and (x=3).
-    let last_delivered = |x: i32, now: &str| -> Option<String> {
+    let last_delivered = |x: i32, _now: StateId| -> Option<StateId> {
         if let Some(p) = published.iter().filter(|p| p.pos == (x, Y, ROW_Z)).next_back() {
-            return Some(p.state.clone());
+            return Some(p.state);
         }
         inline
             .iter()
             .filter(|(p, _)| p.x == x && p.y == Y && p.z == ROW_Z)
             .next_back()
-            .map(|(_, s)| s.clone())
-            .or_else(|| {
-                let _ = now;
-                None
-            })
+            .map(|(_, s)| *s)
     };
 
     let mut mismatches: Vec<String> = Vec::new();
@@ -820,15 +834,19 @@ async fn every_cell_the_delayed_flip_changed_is_also_delivered_to_the_wire() {
         if was == now {
             continue;
         }
-        match last_delivered(*x, now) {
-            Some(state) if &state == now => delivered += 1,
+        match last_delivered(*x, *now) {
+            Some(state) if state == *now => delivered += 1,
             Some(state) => mismatches.push(format!(
-                "  (x={x}, y={Y}, z={ROW_Z}): the client was last told {state}, the server computed \
-                 {now}"
+                "  (x={x}, y={Y}, z={ROW_Z}): the client was last told {}, the server computed \
+                 {}",
+                state.canonical_state(),
+                now.canonical_state()
             )),
             None => mismatches.push(format!(
-                "  (x={x}, y={Y}, z={ROW_Z}): the client was told NOTHING, the server computed {now} \
-                 (was {was})"
+                "  (x={x}, y={Y}, z={ROW_Z}): the client was told NOTHING, the server computed {} \
+                 (was {})",
+                now.canonical_state(),
+                was.canonical_state()
             )),
         }
     }
@@ -860,136 +878,60 @@ async fn every_cell_the_delayed_flip_changed_is_also_delivered_to_the_wire() {
 /// jar census rather than against our own encoder — and it finds a second,
 /// still-live instance.
 ///
-/// `v770::resolve_state_id` matches a state string against
-/// `lodestone_data::block_states` by exact property set first, then (since
-/// `8f2d912`) by **subset**: a candidate must carry every property the caller
-/// named. Dust could never hit the exact tier — one property against the real
-/// block's five — and degraded to the lowest id, `power=0`, until the subset
-/// tier was added.
-///
-/// Where each family stands, measured here rather than assumed:
-///
-/// * **repeater** — `set_repeater` emits all four real properties, so the exact
-///   tier hits and no degradation is possible.
-/// * **redstone torch** — same.
-/// * **comparator** — `set_comparator` emits `output=N`, which **is not a
-///   property of `minecraft:comparator` at all**: vanilla keeps that value in a
-///   `ComparatorBlockEntity`, and `redstone::comparator_output`'s own doc
-///   records the decision to encode it as a synthetic block-state property
-///   instead. The consequence for delivery was not recorded, and it is severe:
-///   a synthetic property fails the exact tier *and* the subset tier (no real
-///   state carries `output`), so every comparator state this server sends still
-///   resolves to the lowest-id comparator. That is patch B's bug, alive, in a
-///   different family. Tracked separately — the fix is either to strip
-///   synthetic properties at the encode boundary or to give
-///   `resolve_state_id` a third tier that ignores properties the block does not
-///   have, and the latter lives in `crates/protocol/v770`.
-///
-/// The comparator case is asserted **as it actually is**, with the exact-match
-/// check applied to the state minus its synthetic property. That records the
-/// finding precisely and proves the one-property strip is sufficient, instead
-/// of leaving a red test or silently dropping the family from the sweep.
+/// Every state emitted by these producers is already a generated `StateId`, so
+/// the packet boundary cannot silently degrade a partial property set. The
+/// comparator's numeric output is checked separately as its sidecar.
 #[test]
-fn every_state_the_delayed_families_publish_resolves_exactly_once_synthetic_properties_are_removed() {
-    let mut fully_real: Vec<String> = Vec::new();
+fn every_delayed_family_emits_a_generated_state_and_comparator_sidecar() {
+    let mut states: Vec<StateId> = Vec::new();
     for &(delay, _) in ORACLE_REPEATER_DELAY {
         for powered in [false, true] {
             for locked in [false, true] {
-                fully_real.push(redstone_diode::set_repeater(Direction::West, delay, locked, powered));
+                states.push(redstone_diode::set_repeater(Direction::West, delay, locked, powered));
             }
         }
     }
     for lit in [false, true] {
-        fully_real.push(redstone_torch::set_standing_lit(lit));
+        states.push(redstone_torch::set_standing_lit(lit));
     }
 
-    let unmatched: Vec<&String> = fully_real.iter().filter(|s| !has_exact_state_in_census(s)).collect();
+    let unmatched: Vec<StateId> = states.iter().copied().filter(|&state| !has_exact_state_in_census(state)).collect();
     assert!(
         unmatched.is_empty(),
-        "{} repeater/torch state string(s) have no exact property-set match in the 26.2 block-state \
-         census, so `resolve_state_id` must fall back and the value delivered to the client is not \
-         the value computed:\n  {:?}",
+        "{} repeater/torch state(s) are not present in the generated state table: {:?}",
         unmatched.len(),
         unmatched
     );
 
-    // The comparator, recorded as it is. Both halves are asserted, so neither
-    // the finding nor its fix can rot unnoticed.
-    let mut comparators: Vec<String> = Vec::new();
+    let mut comparators = Vec::new();
     for subtract in [false, true] {
         for powered in [false, true] {
             for output in [0u8, 9, 15] {
-                comparators.push(redstone_diode::set_comparator(Direction::West, subtract, powered, output));
+                comparators.push(redstone_diode::set_comparator_state(Direction::West, subtract, powered, output));
             }
         }
     }
-    for state in &comparators {
+    for comparator in comparators {
         assert!(
-            !has_exact_state_in_census(state),
-            "the comparator finding has changed: {state} now matches the census exactly. If \
-             `output` stopped being emitted, delete this arm and move comparators into the \
-             fully-real sweep above."
+            has_exact_state_in_census(comparator.state),
+            "comparator state is not present in the generated state table: {:?}",
+            comparator.state
         );
-        let stripped = without_property(state, "output");
-        assert!(
-            has_exact_state_in_census(&stripped),
-            "{stripped} does not match the census either, so `output` is NOT the only synthetic \
-             property on a comparator state and stripping it is not a sufficient fix"
-        );
+        assert!(comparator.output <= 15);
     }
 
-    // The control for the detector itself: dust is the string the subset tier
-    // was added for, and it must still miss the exact tier. If this ever starts
-    // matching, the check above has stopped discriminating.
     let dust = redstone_wire::set_power(9);
     assert!(
-        !has_exact_state_in_census(&dust),
-        "CONTROL FAILED: {dust} now has an exact property-set match, so the assertions above no \
-         longer distinguish a fully-stated block from a partially-stated one"
+        has_exact_state_in_census(dust),
+        "wire state is not present in the generated state table"
     );
 }
 
 /// Whether `state` has a block state in the 26.2 census whose property set is
 /// **exactly** the one it names.
-fn has_exact_state_in_census(state: &str) -> bool {
-    let (name, wanted) = split_state(state);
-    (0..lodestone_data::block_states::STATE_COUNT).any(|id| {
-        if lodestone_data::block_states::block_name(id) != Some(name.as_str()) {
-            return false;
-        }
-        let mut have: Vec<(&str, &str)> = lodestone_data::block_states::properties(id).unwrap_or(&[]).to_vec();
-        have.sort_unstable();
-        have == wanted
-    })
-}
-
-/// `minecraft:repeater[delay=2,facing=west]` -> `("minecraft:repeater",
-/// [("delay","2"),("facing","west")])`, sorted.
-fn split_state(state: &str) -> (String, Vec<(&str, &str)>) {
-    let Some((name, rest)) = state.split_once('[') else {
-        return (state.to_owned(), Vec::new());
-    };
-    let mut props: Vec<(&str, &str)> = rest
-        .trim_end_matches(']')
-        .split(',')
-        .filter_map(|kv| kv.split_once('='))
-        .collect();
-    props.sort_unstable();
-    (name.to_owned(), props)
-}
-
-fn without_property(state: &str, key: &str) -> String {
-    let (name, props) = split_state(state);
-    let kept: Vec<String> = props
-        .iter()
-        .filter(|(k, _)| *k != key)
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect();
-    if kept.is_empty() {
-        name
-    } else {
-        format!("{name}[{}]", kept.join(","))
-    }
+fn has_exact_state_in_census(state: StateId) -> bool {
+    let properties = Properties::from_state_id(state);
+    Properties::state_for_block(state.block(), &properties) == Some(state)
 }
 
 // ---------------------------------------------------------------------------
@@ -1103,7 +1045,7 @@ async fn the_synchronous_half_costs_zero_ticks_and_only_the_schedule_is_deferred
     let inline = trigger(&world, &feed, BlockPos::new(SRC_X, Y, ROW_Z));
 
     let settled: Vec<(i32, u8)> = (2..=3)
-        .map(|x| (x, redstone::wire_power(&world.block_state(x, Y, ROW_Z))))
+        .map(|x| (x, redstone::wire_power(world.block_state_id(x, Y, ROW_Z))))
         .collect();
     assert_eq!(
         settled,
@@ -1120,7 +1062,7 @@ async fn the_synchronous_half_costs_zero_ticks_and_only_the_schedule_is_deferred
     // ...and the repeater has NOT flipped yet, or there would be no delayed half
     // left to measure.
     assert!(
-        !redstone::diode_powered(&world.block_state(DIODE_X, Y, ROW_Z)),
+        !redstone::diode_powered(world.block_state_id(DIODE_X, Y, ROW_Z)),
         "PREMISE FAILED: the repeater flipped inside the synchronous half, so this test is not \
          measuring a split at all"
     );
@@ -1165,7 +1107,7 @@ async fn the_re_run_shape_the_brokered_patch_specified_cannot_work() {
     );
     // The re-run, performed exactly as the brokered patch's loop body would:
     // same entry point, same origin, the loop's own queue.
-    let mut requeued: crate::scheduled_tick::ScheduledTickQueue<String> =
+    let mut requeued: crate::scheduled_tick::ScheduledTickQueue<crate::scheduled_tick::ScheduledTickKind> =
         crate::scheduled_tick::ScheduledTickQueue::new();
     let mut column = world.column(0, 0);
     let redone = crate::random_tick::react_at_placement(
@@ -1229,19 +1171,19 @@ const HOPPER_ACTS_ON_TICKS: usize = 2;
 fn hopper_rig(power_the_upper: bool) -> (Arc<RigWorld>, BlockEntityHandle) {
     let world = Arc::new(RigWorld::new());
     // Support for the torch, then the torch itself beside the upper hopper.
-    world.set_block(HOP_X + 1, HOP_LOWER_Y, ROW_Z, "minecraft:stone");
+    world.set_block(HOP_X + 1, HOP_LOWER_Y, ROW_Z, Block::Stone.default_state());
     if power_the_upper {
         world.set_block(
             HOP_X + 1,
             HOP_UPPER_Y,
             ROW_Z,
-            &redstone_torch::set_standing_lit(true),
+            redstone_torch::set_standing_lit(true),
         );
     }
     // Both hoppers start `enabled=true`, as vanilla's `HopperBlock` constructor's
     // default state does; the lock is what has to change one of them.
     for y in [HOP_LOWER_Y, HOP_UPPER_Y] {
-        world.set_block(HOP_X, y, ROW_Z, "minecraft:hopper[enabled=true,facing=down]");
+        world.set_block(HOP_X, y, ROW_Z, hopper_state(true));
     }
 
     let block_entities = BlockEntityHandle::default();
@@ -1407,10 +1349,10 @@ async fn the_unlocked_shorthand_ignores_the_signal_which_is_what_made_this_an_is
 
     // The state really does say locked...
     assert!(
-        !redstone::hopper_enabled(&world.block_state(HOP_X, HOP_UPPER_Y, ROW_Z)),
+        !redstone::hopper_enabled(world.block_state_id(HOP_X, HOP_UPPER_Y, ROW_Z)),
         "PREMISE FAILED: the upper hopper's block state is not enabled=false, so there is no lock \
          for the shorthand to ignore: {}",
-        world.block_state(HOP_X, HOP_UPPER_Y, ROW_Z)
+        world.block_state_id(HOP_X, HOP_UPPER_Y, ROW_Z)
     );
 
     // ...and the shorthand ignores it, ticking 16 times by hand.
@@ -1495,29 +1437,34 @@ async fn the_hopper_lock_is_delivered_and_resolves_exactly() {
             panic!(
                 "the lock is COMPUTED but not DELIVERED at (x={HOP_X}, y={HOP_UPPER_Y}, z={ROW_Z}): \
                  the server's own state is {} and the cells reported to the client were {:?}",
-                world.block_state(HOP_X, HOP_UPPER_Y, ROW_Z),
-                changed.iter().map(|(p, s)| (p.x, p.y, p.z, s.as_str())).collect::<Vec<_>>()
+                world.block_state_id(HOP_X, HOP_UPPER_Y, ROW_Z).canonical_state(),
+                changed
+                    .iter()
+                    .map(|(p, s)| (p.x, p.y, p.z, s.canonical_state()))
+                    .collect::<Vec<_>>()
             )
         });
 
     assert!(
-        !redstone::hopper_enabled(&delivered),
-        "the client was told {delivered}, which is still enabled"
+        !redstone::hopper_enabled(delivered),
+        "the client was told {:?}, which is still enabled",
+        delivered
     );
     assert_eq!(
         delivered,
-        world.block_state(HOP_X, HOP_UPPER_Y, ROW_Z),
+        world.block_state_id(HOP_X, HOP_UPPER_Y, ROW_Z),
         "the state delivered to the client differs from the one the server kept"
     );
     assert!(
-        delivered.contains("facing=down"),
+        redstone::get_str_property(delivered, PropertyKey::Facing) == Some(BuiltinPropertyValue::Down),
         "the lock rewrite dropped `facing`, so the client will be handed a hopper pointing \
-         elsewhere (see #476 for that failure mode): {delivered}"
+         elsewhere: {:?}",
+        delivered
     );
     assert!(
-        has_exact_state_in_census(&delivered),
-        "{delivered} has no exact property-set match in the 26.2 census, so `resolve_state_id` must \
-         fall back and the hopper the client renders is not the one computed"
+        has_exact_state_in_census(delivered),
+        "the delivered hopper state is not present in the generated state table: {:?}",
+        delivered
     );
 }
 
@@ -1527,7 +1474,7 @@ async fn the_hopper_lock_is_delivered_and_resolves_exactly() {
 fn the_hopper_rig_starts_unlocked() {
     let (world, _entities) = hopper_rig(true);
     assert!(
-        redstone::hopper_enabled(&world.block_state(HOP_X, HOP_UPPER_Y, ROW_Z)),
+        redstone::hopper_enabled(world.block_state_id(HOP_X, HOP_UPPER_Y, ROW_Z)),
         "PREMISE FAILED: the hopper is already enabled=false before any fan-out runs, so a gate \
          asserting it becomes false proves nothing"
     );
@@ -1598,11 +1545,11 @@ async fn a_tick_the_loop_schedules_is_visible_in_the_handle_the_save_path_reads(
     trigger(&world, &feed, BlockPos::new(SRC_X, Y, ROW_Z));
     let published = drive_with_handle(Arc::clone(&world), &feed, &scheduled, 3).await;
 
-    let pending: Vec<((i32, i32, i32), String, u64)> = scheduled.with(|queues| {
+    let pending: Vec<((i32, i32, i32), crate::scheduled_tick::ScheduledTickKind, u64)> = scheduled.with(|queues| {
         queues
             .block
             .iter()
-            .map(|t| (t.pos, t.kind.name().into_owned(), t.trigger_tick))
+            .map(|t| (t.pos, t.kind.clone(), t.trigger_tick))
             .collect()
     });
     assert_eq!(
@@ -1619,7 +1566,7 @@ async fn a_tick_the_loop_schedules_is_visible_in_the_handle_the_save_path_reads(
         "the pending tick is at the wrong position: {pending:?}"
     );
     assert_eq!(
-        pending[0].1, redstone::TICK_REPEATER,
+        pending[0].1, crate::scheduled_tick::ScheduledTickKind::Repeater,
         "the pending tick is the wrong kind: {pending:?}"
     );
     assert_eq!(
@@ -1650,7 +1597,7 @@ async fn a_tick_pre_loaded_into_the_handle_is_drained_by_the_loop_at_its_own_tri
         DIODE_X,
         Y,
         ROW_Z,
-        &redstone_diode::set_repeater(Direction::West, 4, false, false),
+        redstone_diode::set_repeater(Direction::West, 4, false, false),
     );
     let feed = BlockTickFeed::default();
     let scheduled = crate::region_source::ScheduledTickHandle::default();

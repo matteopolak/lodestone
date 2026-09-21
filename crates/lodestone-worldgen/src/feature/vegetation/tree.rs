@@ -12,10 +12,11 @@ use serde_json::Value;
 
 use crate::feature::{BlockPos, IntProvider};
 use crate::rng::RandomSource;
+use lodestone_data::block_states::StateId as CanonicalStateId;
 
 use super::config::{BlockStateProvider, VegTags, try_parse_int_provider};
 use super::grid::VegGrid;
-use super::ids::{Rewrite, Tag};
+use super::ids::{Axis, Rewrite, Tag};
 
 /// The reference trunk-placer base kind (the
 /// `Straight`/`Forking` subset — the savanna/acacia increment adds `Forking`, acacia's real
@@ -354,8 +355,7 @@ pub(super) fn place_forking_trunk<R: RandomSource>(
 /// of the six call sites it had, so the predicate cannot drift between trunk kinds.
 pub(super) fn valid_tree_pos(grid: &VegGrid, tags: &VegTags, x: i32, y: i32, z: i32) -> bool {
     let id = grid.get_id(x, y, z);
-    let interner = grid.interner();
-    tags.has(interner, Tag::Air, id) || tags.has(interner, Tag::ReplaceableByTrees, id)
+    tags.has(Tag::Air, id) || tags.has(Tag::ReplaceableByTrees, id)
 }
 
 /// A narrow trunk which takes its horizontal turn only in the final two
@@ -489,8 +489,8 @@ pub(super) fn place_dark_oak_trunk<R: RandomSource>(
         // checks the valid-tree-position check (air or `#replaceable_by_trees`) below,
         // matching a faithful implementation exactly.
         let anchor = grid.get_id(tx, yy, tz);
-        if tags.has(grid.interner(), Tag::Air, anchor)
-            || tags.has(grid.interner(), Tag::Leaves, anchor)
+        if tags.has(Tag::Air, anchor)
+            || tags.has(Tag::Leaves, anchor)
         {
             for (dx, dz) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
                 let (lx, lz) = (tx + dx, tz + dz);
@@ -724,7 +724,7 @@ pub(super) fn place_mega_jungle_trunk<R: RandomSource>(
 /// as its own accept/reject verdict, with no follow-up log placement to fall
 /// back on, so the "OR already a log" half is load-bearing here.
 fn is_free(grid: &VegGrid, tags: &VegTags, x: i32, y: i32, z: i32) -> bool {
-    valid_tree_pos(grid, tags, x, y, z) || tags.has(grid.interner(), Tag::Logs, grid.get_id(x, y, z))
+    valid_tree_pos(grid, tags, x, y, z) || tags.has(Tag::Logs, grid.get_id(x, y, z))
 }
 
 /// The fancy trunk placer's own log-axis resolution: the log axis a limb step should carry,
@@ -732,14 +732,14 @@ fn is_free(grid: &VegGrid, tags: &VegTags, x: i32, y: i32, z: i32) -> bool {
 /// own start — `Axis::Y` only when the step hasn't moved horizontally at
 /// all (`maxdiff == 0`), matching a faithful implementation exactly (not merely "usually Y for
 /// a vertical trunk").
-fn fancy_log_axis(start_pos: BlockPos, pos: BlockPos) -> &'static str {
+fn fancy_log_axis(start_pos: BlockPos, pos: BlockPos) -> Axis {
     let xdiff = (pos.x - start_pos.x).abs();
     let zdiff = (pos.z - start_pos.z).abs();
     let maxdiff = xdiff.max(zdiff);
     if maxdiff > 0 {
-        if xdiff == maxdiff { "x" } else { "z" }
+        if xdiff == maxdiff { Axis::X } else { Axis::Z }
     } else {
-        "y"
+        Axis::Y
     }
 }
 
@@ -792,7 +792,7 @@ fn make_limb<R: RandomSource>(
                 if let Some(state) = trunk_provider.get_state_id(grid, tags, random, pos) {
                     let axis = fancy_log_axis(start_pos, pos);
                     let state = tags
-                        .rewrite(grid.interner(), state, Rewrite::Axis(axis))
+                        .rewrite(state, Rewrite::Axis(axis))
                         .unwrap_or(state);
                     grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state);
                     *placed_any = true;
@@ -997,8 +997,8 @@ pub(super) fn place_fancy_trunk<R: RandomSource>(
 /// A direction's own axis for one of [`place_forking_trunk`]'s `STEP` vectors —
 /// `x` for EAST/WEST, `z` for NORTH/SOUTH. Shared by [`place_cherry_trunk`]'s
 /// own sideways state modifier (the rotated-pillar-block axis property).
-fn horizontal_axis(direction: (i32, i32)) -> &'static str {
-    if direction.0 != 0 { "x" } else { "z" }
+fn horizontal_axis(direction: (i32, i32)) -> Axis {
+    if direction.0 != 0 { Axis::X } else { Axis::Z }
 }
 
 /// The cherry trunk placer's own branch generation — walks one side branch out from the
@@ -1044,7 +1044,7 @@ fn generate_cherry_branch<R: RandomSource>(
         let bp = BlockPos { x: pos.0, y: pos.1, z: pos.2 };
         if valid_tree_pos(grid, tags, bp.x, bp.y, bp.z) {
             if let Some(state) = trunk_provider.get_state_id(grid, tags, random, bp) {
-                let state = tags.rewrite(grid.interner(), state, Rewrite::Axis(axis)).unwrap_or(state);
+                let state = tags.rewrite(state, Rewrite::Axis(axis)).unwrap_or(state);
                 grid.set_id_if_in_bounds(bp.x, bp.y, bp.z, state);
                 *placed_any = true;
                 trunk_positions.push(bp);
@@ -1372,7 +1372,7 @@ fn place_upwards_branching_valid(
     y: i32,
     z: i32,
 ) -> bool {
-    valid_tree_pos(grid, tags, x, y, z) || tags.has(grid.interner(), can_grow_through, grid.get_id(x, y, z))
+    valid_tree_pos(grid, tags, x, y, z) || tags.has(can_grow_through, grid.get_id(x, y, z))
 }
 
 /// The mangrove root placer's optional extra block dropped above a root, e.g.
@@ -1396,7 +1396,7 @@ pub(super) enum RootPlacerCfg {
         root_provider: BlockStateProvider,
         above_root_placement: Option<AboveRootPlacementCfg>,
         can_grow_through: Tag,
-        muddy_roots_in: Vec<String>,
+        muddy_roots_in: FastSet<CanonicalStateId>,
         muddy_roots_provider: BlockStateProvider,
         max_root_width: i32,
         max_root_length: i32,
@@ -1405,6 +1405,23 @@ pub(super) enum RootPlacerCfg {
 }
 
 impl RootPlacerCfg {
+    pub(super) fn bind_states(&self) {
+        match self {
+            Self::Mangrove {
+                root_provider,
+                above_root_placement,
+                muddy_roots_provider,
+                ..
+            } => {
+                root_provider.bind();
+                if let Some(above) = above_root_placement {
+                    above.provider.bind();
+                }
+                muddy_roots_provider.bind();
+            }
+        }
+    }
+
     pub(super) fn try_parse(v: &Value) -> Option<Self> {
         let ty = v["type"].as_str()?;
         match ty.strip_prefix("minecraft:").unwrap_or(ty) {
@@ -1419,7 +1436,8 @@ impl RootPlacerCfg {
                     _ => None,
                 };
                 let mrp = &v["mangrove_root_placement"];
-                let muddy_roots_in = super::config::parse_id_list(&mrp["muddy_roots_in"]);
+                let muddy_roots_in =
+                    super::config::parse_canonical_id_list(&mrp["muddy_roots_in"])?;
                 let muddy_roots_provider = BlockStateProvider::try_parse(&mrp["muddy_roots_provider"])?;
                 let max_root_width = mrp["max_root_width"].as_i64()? as i32;
                 let max_root_length = mrp["max_root_length"].as_i64()? as i32;
@@ -1454,7 +1472,7 @@ impl RootPlacerCfg {
 /// [`valid_tree_pos`] OR the species' `can_grow_through` tag.
 pub(super) fn can_place_root(grid: &VegGrid, tags: &VegTags, can_grow_through: Tag, pos: BlockPos) -> bool {
     valid_tree_pos(grid, tags, pos.x, pos.y, pos.z)
-        || tags.has(grid.interner(), can_grow_through, grid.get_id(pos.x, pos.y, pos.z))
+        || tags.has(can_grow_through, grid.get_id(pos.x, pos.y, pos.z))
 }
 
 /// The mangrove root placer's own candidate-root-position search — up to two candidate
@@ -1638,7 +1656,6 @@ pub(super) fn update_leaf_distances(
                 // `docs/worldgen-state-interning.md` names as this unit's residual.
                 let id = grid.get_id(x, y, z);
                 let new_state = tags.rewrite(
-                    grid.interner(),
                     id,
                     Rewrite::Distance(u8::try_from(smallest).unwrap_or(0)),
                 );
@@ -1664,10 +1681,10 @@ pub(super) fn update_leaf_distances(
                     continue;
                 }
                 let neighbor = grid.get_id(nx, ny, nz);
-                let current_distance = if tags.has(grid.interner(), Tag::Logs, neighbor) {
+                let current_distance = if tags.has(Tag::Logs, neighbor) {
                     Some(0)
                 } else {
-                    tags.distance_of(grid.interner(), neighbor)
+                    tags.distance_of(neighbor)
                 };
                 if let Some(current_distance) = current_distance {
                     let new_distance = (smallest + 1).min(current_distance);
@@ -2673,10 +2690,9 @@ pub(super) fn try_place_leaf<R: RandomSource>(
     // `state.find("waterlogged=")` miss meant — leave the state alone. Unit 8;
     // this is the third of the three sites `docs/worldgen-state-interning.md`
     // names, and it used to allocate on every single leaf placed.
-    let is_water_source = tags.has(grid.interner(), Tag::Water, existing);
+    let is_water_source = tags.has(Tag::Water, existing);
     let state = tags
         .rewrite(
-            grid.interner(),
             state,
             Rewrite::Waterlogged(is_water_source),
         )
@@ -2735,6 +2751,12 @@ mod tests {
     #[test]
     fn external_leaf_distance_control_keeps_stale_queue_write() {
         let mut grid = VegGrid::with_footprint(70, 8, -120, -126, 0, 4);
+        let log = CanonicalStateId::from_state_str("minecraft:dark_oak_log[axis=y]")
+            .expect("fixture log state");
+        let leaves_state = CanonicalStateId::from_state_str(
+            "minecraft:dark_oak_leaves[distance=7,persistent=false,waterlogged=false]",
+        )
+        .expect("fixture leaf state");
         let logs = [
             BlockPos { x: -120, y: 73, z: -124 },
             BlockPos { x: -119, y: 73, z: -124 },
@@ -2746,21 +2768,10 @@ mod tests {
             BlockPos { x: -119, y: 73, z: -126 },
         ];
         for pos in logs {
-            grid.seed(
-                pos.x,
-                pos.y,
-                pos.z,
-                "minecraft:dark_oak_log[axis=y]".to_owned(),
-            );
+            grid.seed_id(pos.x, pos.y, pos.z, log);
         }
         for pos in leaves {
-            grid.seed(
-                pos.x,
-                pos.y,
-                pos.z,
-                "minecraft:dark_oak_leaves[distance=7,persistent=false,waterlogged=false]"
-                    .to_owned(),
-            );
+            grid.seed_id(pos.x, pos.y, pos.z, leaves_state);
         }
 
         update_leaf_distances(
@@ -2771,9 +2782,10 @@ mod tests {
         );
 
         assert!(
-            grid.get(-120, 73, -126).contains("distance=3"),
+            grid.get(-120, 73, -126).canonical_state().contains("distance=3"),
             "external leaf-distance control expected distance=3, got {}",
             grid.get(-120, 73, -126)
+                .canonical_state()
         );
     }
 }

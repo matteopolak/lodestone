@@ -88,6 +88,7 @@
 //! (spread and burnout) and `explosion_blocks` (blast destruction).
 
 use crate::block::Block;
+use crate::block_properties::{Properties, PropertyKey, PropertyValue};
 use crate::block_states::StateId;
 use crate::generated_block_blast as table;
 
@@ -150,14 +151,19 @@ fn property_of<'s>(state: &'s str, key: &str) -> Option<&'s str> {
 #[must_use]
 pub fn blast(block: &str) -> Option<BlockBlast> {
     let block = Block::from_name(base_name(block))?;
+    Some(blast_for_block(block))
+}
+
+#[must_use]
+pub fn blast_for_block(block: Block) -> BlockBlast {
     let entry = table::ENTRY_BY_REGISTRY_ID[usize::from(block.registry_id())];
     let (bits, ignite_odds, burn_odds, ignited_by_lava) = table::ENTRIES[entry as usize];
-    Some(BlockBlast {
+    BlockBlast {
         explosion_resistance: f32::from_bits(bits),
         ignite_odds,
         burn_odds,
         ignited_by_lava,
-    })
+    }
 }
 
 /// [`blast`], with [`BlockBlast::INERT`] for an unknown name.
@@ -180,6 +186,19 @@ pub fn ignite_odds_for_state(state: &str) -> u8 {
     blast_or_inert(state).ignite_odds
 }
 
+/// The flammability lookup for an already validated state. State-specific
+/// work stays numeric; text is only used by the resource-facing companion.
+#[must_use]
+pub fn ignite_odds_for_state_id(state: StateId) -> u8 {
+    if Properties::from_state_id(state)
+        .get(PropertyKey::Waterlogged)
+        .is_some_and(|value| value == PropertyValue::builtin(crate::block_properties::BuiltinPropertyValue::True))
+    {
+        return 0;
+    }
+    blast_for_block(state.block()).ignite_odds
+}
+
 /// `FireBlock::getBurnOdds` — the block's burn odds, **or `0` when the state is
 /// `waterlogged=true`**.
 #[must_use]
@@ -188,6 +207,17 @@ pub fn burn_odds_for_state(state: &str) -> u8 {
         return 0;
     }
     blast_or_inert(state).burn_odds
+}
+
+#[must_use]
+pub fn burn_odds_for_state_id(state: StateId) -> u8 {
+    if Properties::from_state_id(state)
+        .get(PropertyKey::Waterlogged)
+        .is_some_and(|value| value == PropertyValue::builtin(crate::block_properties::BuiltinPropertyValue::True))
+    {
+        return 0;
+    }
+    blast_for_block(state.block()).burn_odds
 }
 
 /// The fluid explosion resistance both vanilla fluids report

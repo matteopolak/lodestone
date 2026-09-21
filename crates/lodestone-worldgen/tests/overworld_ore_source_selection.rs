@@ -10,6 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
+use lodestone_data::block_states::StateId;
 use lodestone_worldgen::density::{NoiseParams, Resolver};
 #[cfg(feature = "gen-counters")]
 use lodestone_worldgen::feature::vegetation::census;
@@ -127,9 +128,10 @@ fn source_biome_selection_does_not_import_neighbour_copper_into_the_ne_edge() {
     );
 
     for (x, y, z, state) in expected {
+        let expected = StateId::from_state_str(state).expect("known oracle state");
         assert_eq!(
-            column.block_state(x, y, z),
-            state,
+            column.block_state_id(x, y, z),
+            expected,
             "external packet control differs at chunk (250,-250), local ({x},{y},{z})",
         );
     }

@@ -80,35 +80,38 @@
 
 use crate::neighbor_update::Direction;
 use crate::redstone::{best_neighbor_signal, get_bool_property, get_str_property, with_property, WorldState};
+use lodestone_data::block_properties::{BuiltinPropertyValue, PropertyKey, PropertyValue};
+use lodestone_data::block_states::StateId;
 use lodestone_model::BlockPos;
 
 /// `true` for any of the three redstone-openable families — see this module's
 /// doc comment for why suffix matching, not an enumerated species list.
 #[must_use]
-pub fn is_openable(state: &str) -> bool {
+pub fn is_openable(state: StateId) -> bool {
     is_door(state) || is_trapdoor(state) || is_fence_gate(state)
 }
 
 #[must_use]
-pub fn is_door(state: &str) -> bool {
-    base_name(state).ends_with("_door")
+pub fn is_door(state: StateId) -> bool {
+    let path = base_name(state).path();
+    path.ends_with("_door") && !path.ends_with("_trapdoor")
 }
 
 #[must_use]
-pub fn is_trapdoor(state: &str) -> bool {
-    base_name(state).ends_with("_trapdoor")
+pub fn is_trapdoor(state: StateId) -> bool {
+    base_name(state).path().ends_with("_trapdoor")
 }
 
 #[must_use]
-pub fn is_fence_gate(state: &str) -> bool {
-    base_name(state).ends_with("_fence_gate")
+pub fn is_fence_gate(state: StateId) -> bool {
+    base_name(state).path().ends_with("_fence_gate")
 }
 
 /// Strips a `[...]` block-state property suffix — the same local convention
 /// every other per-family module in this crate duplicates rather than sharing
 /// (see `crate::redstone`'s own `base_name` doc comment).
-fn base_name(state: &str) -> &str {
-    state.split('[').next().unwrap_or(state)
+fn base_name(state: StateId) -> lodestone_data::block::Block {
+    state.block()
 }
 
 /// The door's `HALF` property (the real double-block-half enum, `lower`/`upper`). Defaults
@@ -118,8 +121,8 @@ fn base_name(state: &str) -> &str {
 /// matching the real door block's own constructor registering its default
 /// state with the lower half.
 #[must_use]
-pub fn door_half(state: &str) -> &str {
-    get_str_property(state, "half").unwrap_or("lower")
+pub fn door_half(state: StateId) -> BuiltinPropertyValue {
+    get_str_property(state, PropertyKey::Half).unwrap_or(BuiltinPropertyValue::Lower)
 }
 
 /// The `POWERED` block-state property — the real shared power property.
@@ -130,8 +133,8 @@ pub fn door_half(state: &str) -> &str {
 /// value and only ever *read* `powered` to decide — the real engine reads `OPEN`
 /// solely for its sound-emission decision, which this crate omits.
 #[must_use]
-pub fn powered(state: &str) -> bool {
-    get_bool_property(state, "powered").unwrap_or(false)
+pub fn powered(state: StateId) -> bool {
+    get_bool_property(state, PropertyKey::Powered).unwrap_or(false)
 }
 
 /// `state` with both `open` and `powered` set to `v`, every other property
@@ -139,10 +142,10 @@ pub fn powered(state: &str) -> bool {
 /// absent. Setting both to the same value is the whole contract of all three
 /// real neighbor-changed hook bodies.
 #[must_use]
-pub fn with_open_and_powered(state: &str, v: bool) -> String {
-    let value = if v { "true" } else { "false" };
-    let with_open = with_property(state, "open", value);
-    with_property(&with_open, "powered", value)
+pub fn with_open_and_powered(state: StateId, v: bool) -> Option<StateId> {
+    let value = PropertyValue::builtin(if v { BuiltinPropertyValue::True } else { BuiltinPropertyValue::False });
+    let with_open = with_property(state, PropertyKey::Open, value)?;
+    with_property(with_open, PropertyKey::Powered, value)
 }
 
 /// The position of the *other* half of a two-high door, or `None` for a
@@ -150,11 +153,11 @@ pub fn with_open_and_powered(state: &str, v: bool) -> String {
 /// looks up, upper half looks down" rule
 /// from the real door's neighbor-changed hook, transcribed above.
 #[must_use]
-pub fn other_door_half_pos(pos: BlockPos, state: &str) -> Option<BlockPos> {
+pub fn other_door_half_pos(pos: BlockPos, state: StateId) -> Option<BlockPos> {
     if !is_door(state) {
         return None;
     }
-    let direction = if door_half(state) == "lower" { Direction::Up } else { Direction::Down };
+    let direction = if door_half(state) == BuiltinPropertyValue::Lower { Direction::Up } else { Direction::Down };
     Some(direction.relative(pos))
 }
 
@@ -165,7 +168,7 @@ pub fn other_door_half_pos(pos: BlockPos, state: &str) -> Option<BlockPos> {
 /// property this module models; trapdoor/fence gate check only the one
 /// position.
 #[must_use]
-pub fn has_neighbor_signal<F>(lookup: &F, pos: BlockPos, state: &str) -> bool
+pub fn has_neighbor_signal<F>(lookup: &F, pos: BlockPos, state: StateId) -> bool
 where
     F: Fn(BlockPos) -> WorldState,
 {
@@ -188,9 +191,9 @@ where
 /// the caller writes the result right away (the way `crate::random_tick`'s
 /// hopper arm already treats an immediate reaction).
 #[must_use]
-pub fn react(state: &str, signal: bool) -> Option<String> {
+pub fn react(state: StateId, signal: bool) -> Option<StateId> {
     if signal != powered(state) {
-        Some(with_open_and_powered(state, signal))
+        with_open_and_powered(state, signal)
     } else {
         None
     }
@@ -199,18 +202,16 @@ pub fn react(state: &str, signal: bool) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::redstone::fixture_state as state;
 
-    /// A tiny fake world: an explicit map from position to block-state
-    /// string, air everywhere unset — the same "pure decision, fake world
-    /// via closure" style every redstone module in this crate uses.
-    fn world(entries: &[(BlockPos, &str)]) -> impl Fn(BlockPos) -> WorldState + use<> {
-        let entries: Vec<(BlockPos, WorldState)> = entries.iter().map(|(p, s)| (*p, WorldState::from(*s))).collect();
+    fn world(entries: &[(BlockPos, StateId)]) -> impl Fn(BlockPos) -> WorldState + use<> {
+        let entries = entries.to_vec();
         move |p: BlockPos| {
             entries
                 .iter()
                 .find(|(pos, _)| *pos == p)
-                .map(|(_, s)| s.clone())
-                .unwrap_or_else(crate::chunk::air_state_arc)
+                .map(|(_, s)| *s)
+                .unwrap_or_else(lodestone_data::block_states::air_state)
         }
     }
 
@@ -224,41 +225,41 @@ mod tests {
     /// however its state string was written.
     #[test]
     fn is_openable_recognizes_all_three_families_and_rejects_non_openable_blocks() {
-        assert!(is_openable("minecraft:oak_door[half=lower,open=false,powered=false]"));
-        assert!(is_openable("minecraft:iron_door"));
-        assert!(is_openable("minecraft:oak_trapdoor[half=bottom,open=false,powered=false,waterlogged=false]"));
-        assert!(is_openable("minecraft:iron_trapdoor"));
-        assert!(is_openable("minecraft:oak_fence_gate[open=false,powered=false,in_wall=false]"));
-        assert!(is_openable("minecraft:crimson_fence_gate"));
-        assert!(!is_openable("minecraft:stone"));
-        assert!(!is_openable("minecraft:redstone_wire[power=15]"));
-        assert!(!is_openable("minecraft:air"));
-        assert!(!is_openable("minecraft:oak_doorway"), "a `_door`-suffixed lookalike must not classify");
+        assert!(is_openable(state("minecraft:oak_door[half=lower,open=false,powered=false]")));
+        assert!(is_openable(state("minecraft:iron_door")));
+        assert!(is_openable(state("minecraft:oak_trapdoor[half=bottom,open=false,powered=false,waterlogged=false]")));
+        assert!(is_openable(state("minecraft:iron_trapdoor")));
+        assert!(is_openable(state("minecraft:oak_fence_gate[open=false,powered=false,in_wall=false]")));
+        assert!(is_openable(state("minecraft:crimson_fence_gate")));
+        assert!(!is_openable(state("minecraft:stone")));
+        assert!(!is_openable(state("minecraft:redstone_wire[power=15]")));
+        assert!(!is_openable(state("minecraft:air")));
+        assert!(!is_openable(state("minecraft:oak_doorway")), "a `_door`-suffixed lookalike must not classify");
     }
 
     #[test]
     fn each_family_has_its_own_predicate() {
-        assert!(is_door("minecraft:spruce_door[half=upper]"));
-        assert!(!is_door("minecraft:spruce_trapdoor"));
-        assert!(is_trapdoor("minecraft:mangrove_trapdoor"));
-        assert!(!is_trapdoor("minecraft:mangrove_door"));
-        assert!(is_fence_gate("minecraft:acacia_fence_gate"));
-        assert!(!is_fence_gate("minecraft:acacia_door"));
+        assert!(is_door(state("minecraft:spruce_door[half=upper]")));
+        assert!(!is_door(state("minecraft:spruce_trapdoor")));
+        assert!(is_trapdoor(state("minecraft:mangrove_trapdoor")));
+        assert!(!is_trapdoor(state("minecraft:mangrove_door")));
+        assert!(is_fence_gate(state("minecraft:acacia_fence_gate")));
+        assert!(!is_fence_gate(state("minecraft:acacia_door")));
     }
 
     #[test]
     fn powered_reads_the_property_with_a_sane_default() {
-        let closed = "minecraft:oak_door[half=lower,open=false,powered=false]";
+        let closed = state("minecraft:oak_door[half=lower,open=false,powered=false]");
         assert!(!powered(closed));
-        let open_door = "minecraft:oak_door[half=upper,open=true,powered=true]";
+        let open_door = state("minecraft:oak_door[half=upper,open=true,powered=true]");
         assert!(powered(open_door));
         // A state that does not name the property reads its default.
-        assert!(!powered("minecraft:oak_door"));
+        assert!(!powered(state("minecraft:oak_door")));
         // The `open` property (written alongside `powered`, read nowhere in
         // production) is still surfaced through the shared property helper
         // `with_open_and_powered` produces and `react`'s decision consumes.
         assert_eq!(
-            crate::redstone::get_bool_property(&open_door, "open"),
+            crate::redstone::get_bool_property(open_door, PropertyKey::Open),
             Some(true),
             "the written `open` property must be readable back through the crate's property helper"
         );
@@ -271,43 +272,46 @@ mod tests {
     /// tier and hand the client a door pointing somewhere else.
     #[test]
     fn with_open_and_powered_preserves_unrelated_properties() {
-        let door = "minecraft:oak_door[facing=east,half=lower,hinge=left,open=false,powered=false]";
+        let door = state("minecraft:oak_door[facing=east,half=lower,hinge=left,open=false,powered=false]");
         let opened = with_open_and_powered(door, true);
         assert_eq!(
             opened,
-            "minecraft:oak_door[facing=east,half=lower,hinge=left,open=true,powered=true]"
+            Some(state("minecraft:oak_door[facing=east,half=lower,hinge=left,open=true,powered=true]"))
         );
-        let closed = with_open_and_powered(&opened, false);
+        let closed = with_open_and_powered(opened.unwrap(), false);
         assert_eq!(
             closed,
-            "minecraft:oak_door[facing=east,half=lower,hinge=left,open=false,powered=false]"
+            Some(state("minecraft:oak_door[facing=east,half=lower,hinge=left,open=false,powered=false]"))
         );
         // Bare name: both properties appended.
-        assert_eq!(with_open_and_powered("minecraft:oak_door", true), "minecraft:oak_door[open=true,powered=true]");
+        assert_eq!(
+            with_open_and_powered(state("minecraft:oak_door"), true),
+            Some(state("minecraft:oak_door[open=true,powered=true]"))
+        );
     }
 
     #[test]
     fn other_door_half_pos_pairs_lower_and_upper() {
-        let bottom = "minecraft:oak_door[half=lower,open=false,powered=false]";
+        let bottom = state("minecraft:oak_door[half=lower,open=false,powered=false]");
         assert_eq!(other_door_half_pos(pos(1, 5, 2), bottom), Some(pos(1, 6, 2)));
-        let top = "minecraft:oak_door[half=upper,open=false,powered=false]";
+        let top = state("minecraft:oak_door[half=upper,open=false,powered=false]");
         assert_eq!(other_door_half_pos(pos(1, 5, 2), top), Some(pos(1, 4, 2)));
         // Single-block families have no other half.
-        assert_eq!(other_door_half_pos(pos(1, 5, 2), "minecraft:oak_trapdoor[open=false,powered=false]"), None);
-        assert_eq!(other_door_half_pos(pos(1, 5, 2), "minecraft:oak_fence_gate[open=false,powered=false]"), None);
+        assert_eq!(other_door_half_pos(pos(1, 5, 2), state("minecraft:oak_trapdoor[open=false,powered=false]")), None);
+        assert_eq!(other_door_half_pos(pos(1, 5, 2), state("minecraft:oak_fence_gate[open=false,powered=false]")), None);
     }
 
     /// The pure flip decision: exactly the two `signal != powered` branches —
     /// a magnitude-style prediction, both the change and the no-change rows.
     #[test]
     fn react_flips_open_and_powered_exactly_when_signal_differs() {
-        let closed = "minecraft:oak_door[half=lower,open=false,powered=false]";
-        assert_eq!(react(closed, true), Some(with_open_and_powered(closed, true)));
-        let opened = "minecraft:oak_door[half=lower,open=true,powered=true]";
-        assert_eq!(react(&opened, false), Some(with_open_and_powered(&opened, false)));
+        let closed = state("minecraft:oak_door[half=lower,open=false,powered=false]");
+        assert_eq!(react(closed, true), with_open_and_powered(closed, true));
+        let opened = state("minecraft:oak_door[half=lower,open=true,powered=true]");
+        assert_eq!(react(opened, false), with_open_and_powered(opened, false));
         // Steady states are no-ops, both ways.
         assert_eq!(react(closed, false), None, "unpowered AND unsignaled: steady state");
-        assert_eq!(react(&opened, true), None, "powered AND signaled: steady state");
+        assert_eq!(react(opened, true), None, "powered AND signaled: steady state");
     }
 
     /// A trapdoor reads its own neighbours only (single block) — a lit torch
@@ -316,11 +320,11 @@ mod tests {
     fn has_neighbor_signal_finds_an_adjacent_lit_torch_for_a_single_block_family() {
         let origin = pos(3, 5, 3);
         let torch_pos = Direction::West.relative(origin);
-        let w = world(&[(torch_pos, "minecraft:redstone_torch[lit=true]")]);
-        let state = "minecraft:oak_trapdoor[half=bottom,open=false,powered=false]";
-        assert!(has_neighbor_signal(&w, origin, state));
+        let w = world(&[(torch_pos, state("minecraft:redstone_torch[lit=true]"))]);
+        let trapdoor = state("minecraft:oak_trapdoor[half=bottom,open=false,powered=false]");
+        assert!(has_neighbor_signal(&w, origin, trapdoor));
         // Negative control: empty world reads no signal.
-        assert!(!has_neighbor_signal(&world(&[]), origin, state));
+        assert!(!has_neighbor_signal(&world(&[]), origin, trapdoor));
     }
 
     /// The two-high door power check, end to end: a source adjacent to the
@@ -331,14 +335,14 @@ mod tests {
     fn a_door_powers_from_a_signal_adjacent_to_either_half() {
         let bottom = pos(3, 5, 3);
         let top = pos(3, 6, 3);
-        let bottom_state = "minecraft:oak_door[half=lower,open=false,powered=false]";
-        let top_state = "minecraft:oak_door[half=upper,open=false,powered=false]";
+        let bottom_state = state("minecraft:oak_door[half=lower,open=false,powered=false]");
+        let top_state = state("minecraft:oak_door[half=upper,open=false,powered=false]");
         // Source west of the BOTTOM half.
-        let w_bottom = world(&[(Direction::West.relative(bottom), "minecraft:redstone_torch[lit=true]")]);
+        let w_bottom = world(&[(Direction::West.relative(bottom), state("minecraft:redstone_torch[lit=true]"))]);
         assert!(has_neighbor_signal(&w_bottom, bottom, bottom_state));
         assert!(has_neighbor_signal(&w_bottom, top, top_state), "the top half must read the bottom half's signal");
         // Source west of the TOP half.
-        let w_top = world(&[(Direction::West.relative(top), "minecraft:redstone_torch[lit=true]")]);
+        let w_top = world(&[(Direction::West.relative(top), state("minecraft:redstone_torch[lit=true]"))]);
         assert!(has_neighbor_signal(&w_top, top, top_state));
         assert!(has_neighbor_signal(&w_top, bottom, bottom_state), "the bottom half must read the top half's signal");
         // Negative control: neither half is powered with no source.
@@ -352,10 +356,10 @@ mod tests {
     #[test]
     fn has_neighbor_signal_distinguishes_powered_from_unpowered_neighbourhoods() {
         let origin = pos(0, 0, 0);
-        let w_powered = world(&[(Direction::East.relative(origin), "minecraft:redstone_torch[lit=true]")]);
-        let w_unpowered = world(&[(Direction::East.relative(origin), "minecraft:redstone_torch[lit=false]")]);
-        let state = "minecraft:oak_fence_gate[open=false,powered=false]";
-        assert!(has_neighbor_signal(&w_powered, origin, state));
-        assert!(!has_neighbor_signal(&w_unpowered, origin, state), "an unlit torch is not a signal");
+        let w_powered = world(&[(Direction::East.relative(origin), state("minecraft:redstone_torch[lit=true]"))]);
+        let w_unpowered = world(&[(Direction::East.relative(origin), state("minecraft:redstone_torch[lit=false]"))]);
+        let gate = state("minecraft:oak_fence_gate[open=false,powered=false]");
+        assert!(has_neighbor_signal(&w_powered, origin, gate));
+        assert!(!has_neighbor_signal(&w_unpowered, origin, gate), "an unlit torch is not a signal");
     }
 }

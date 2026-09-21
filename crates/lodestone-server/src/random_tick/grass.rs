@@ -89,11 +89,23 @@ pub fn grass_random_tick(
 /// collapsed both conditions into the same proxy [`grass_can_stay_alive`]
 /// documents.
 #[must_use]
+#[cfg(test)]
 pub fn can_propagate_onto(target_state: &str, above_target_state: &str) -> bool {
     base_name(target_state) == DIRT_BLOCK
         && grass_can_stay_alive(above_target_state)
         && base_name(above_target_state) != "minecraft:water"
         && property_of(above_target_state, "waterlogged") != Some("true")
+}
+
+#[must_use]
+pub(crate) fn can_propagate_onto_id(target_state: StateId, above_target_state: StateId) -> bool {
+    target_state.block() == lodestone_data::block::Block::Dirt
+        && grass_can_stay_alive_id(above_target_state)
+        && above_target_state.block() != lodestone_data::block::Block::Water
+        && !Properties::from_state_id(above_target_state)
+            .get(PropertyKey::Waterlogged)
+            .and_then(|value| value.builtin_value())
+            .is_some_and(|value| value == BuiltinPropertyValue::True)
 }
 
 impl RandomTickScheduler {
@@ -109,17 +121,17 @@ impl RandomTickScheduler {
         x: i32,
         y: i32,
         z: i32,
-        current_state: &str,
+        current_state: StateId,
     ) -> Vec<RandomTickEvent> {
         let lx = x - min_x;
         let lz = z - min_z;
-        let above = column.block_state(lx, y + 1, lz).to_string();
+        let above = column.block_state_id(lx, y + 1, lz);
         // The light-dampening predicate, rather than the old
         // `is_air_variant` proxy. The proxy killed grass under *any* non-air
         // block, and vanilla's own vegetation step puts `minecraft:short_grass`
         // on top of grass blocks — so every decorated patch turned to dirt on
         // its first random tick.
-        let can_stay_alive = grass_can_stay_alive(&above);
+        let can_stay_alive = grass_can_stay_alive_id(above);
 
         // `try_propagate` only reads `column` (via the immutable reborrow
         // below) — no mutation happens until after `grass_random_tick`
@@ -152,20 +164,21 @@ impl RandomTickScheduler {
                 // `z` of `min_z + tlz` reads local z `tlz` at a y-level
                 // `min_z / 16` sections higher. Invisible at chunk (0, 0),
                 // where the two coordinates coincide.
-                let target_state = column_ref.block_state(tlx, ty, tlz);
-                let above_target = column_ref.block_state(tlx, ty + 1, tlz);
-                can_propagate_onto(target_state, above_target)
+                let target_state = column_ref.block_state_id(tlx, ty, tlz);
+                let above_target = column_ref.block_state_id(tlx, ty + 1, tlz);
+                can_propagate_onto_id(target_state, above_target)
             })
         };
 
         let mut events = Vec::new();
         match outcome {
             GrassOutcome::DiesToDirt => {
-                column.set_block(lx, y, lz, DIRT_BLOCK);
+                let dirt = lodestone_data::block::Block::Dirt.default_state();
+                column.set_block_id(lx, y, lz, dirt);
                 events.push(RandomTickEvent {
                     pos: (x, y, z),
-                    from: current_state.to_string(),
-                    to: DIRT_BLOCK.to_string(),
+                    from: current_state,
+                    to: dirt,
                 });
             }
             GrassOutcome::NoPropagationTargetAccepted => {}
@@ -176,13 +189,16 @@ impl RandomTickScheduler {
                     let tz = z + dz;
                     let tlx = tx - min_x;
                     let tlz = tz - min_z;
-                    let above_target = column.block_state(tlx, ty + 1, tlz).to_string();
-                    let spread_state = spreading_snowy_state(GRASS_BLOCK, &above_target);
-                    column.set_block(tlx, ty, tlz, spread_state);
+                    let above_target = column.block_state_id(tlx, ty + 1, tlz);
+                    let spread_state = spreading_snowy_state_id(
+                        lodestone_data::block::Block::GrassBlock,
+                        above_target,
+                    );
+                    column.set_block_id(tlx, ty, tlz, spread_state);
                     events.push(RandomTickEvent {
                         pos: (tx, ty, tz),
-                        from: DIRT_BLOCK.to_string(),
-                        to: spread_state.to_string(),
+                        from: lodestone_data::block::Block::Dirt.default_state(),
+                        to: spread_state,
                     });
                 }
             }

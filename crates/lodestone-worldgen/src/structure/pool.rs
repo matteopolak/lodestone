@@ -56,6 +56,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId as CanonicalStateId;
 use serde_json::Value;
 
 use super::jigsaw::JigsawBlockInfo;
@@ -198,7 +200,7 @@ impl PoolFeaturePlacement {
         // contain several feature elements and calls this bridge directly, so
         // bind idempotently here instead of making every placement-stage caller
         // remember a vegetation-internal cache invariant.
-        tags.bind(grid.interner());
+        tags.bind();
         crate::feature::vegetation::place_placed_feature_at_seed(
             random,
             world_seed,
@@ -306,11 +308,7 @@ impl PoolElement {
         random: &mut R,
     ) -> Vec<JigsawBlockInfo> {
         let mut blocks = match self {
-            Self::Single { decoded, .. } => decoded
-                .filter_blocks("minecraft:jigsaw", position, rotation)
-                .into_iter()
-                .map(JigsawBlockInfo::of)
-                .collect(),
+            Self::Single { decoded, .. } => decoded.jigsaw_blocks(position, rotation),
             // `ListPoolElement` delegates to `elements.get(0)` only.
             Self::List { elements, .. } => elements
                 .first()
@@ -433,7 +431,7 @@ impl TemplatePool {
 pub struct PoolStore {
     pools: HashMap<String, Arc<TemplatePool>>,
     processor_lists: HashMap<String, Arc<Vec<super::processor::Processor>>>,
-    block_tags: HashMap<String, Arc<HashSet<String>>>,
+    block_tags: HashMap<String, Arc<HashSet<Block>>>,
 }
 
 /// The alias names and targets of one jigsaw structure, as
@@ -681,26 +679,32 @@ impl PoolStore {
         use super::processor::Processor;
         match value["processor_type"].as_str().unwrap_or_default() {
             "minecraft:nop" => Ok(Processor::BlockIgnore(Vec::new())),
-            "minecraft:block_ignore" => Ok(Processor::BlockIgnore(
-                value["blocks"]
+            "minecraft:block_ignore" => {
+                let blocks = value["blocks"]
                     .as_array()
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|b| b["Name"].as_str().or_else(|| b.as_str()))
-                            .map(str::to_string)
-                            .collect()
+                    .map(|entries| {
+                        entries
+                            .iter()
+                            .filter_map(|entry| entry["Name"].as_str().or_else(|| entry.as_str()))
+                            .map(|name| {
+                                Block::from_name(name)
+                                    .ok_or_else(|| format!("unsupported block_ignore block: {name}"))
+                            })
+                            .collect::<Result<Vec<_>, _>>()
                     })
-                    .unwrap_or_default(),
-            )),
+                    .transpose()?
+                    .unwrap_or_default();
+                Ok(Processor::BlockIgnore(blocks))
+            }
             "minecraft:block_rot" => Ok(Processor::BlockRot {
                 rottable: match value.get("rottable_blocks") {
                     None | Some(Value::Null) => None,
-                    Some(set) => Some(self.block_set(resolver, set)),
+                    Some(set) => Some(self.block_set(resolver, set)?),
                 },
                 integrity: value["integrity"].as_f64().unwrap_or(1.0) as f32,
             }),
             "minecraft:protected_blocks" => {
-                Ok(Processor::ProtectedBlocks(self.block_set(resolver, &value["value"])))
+                Ok(Processor::ProtectedBlocks(self.block_set(resolver, &value["value"])?))
             }
             "minecraft:rule" => {
                 let mut rules = Vec::new();
@@ -753,17 +757,19 @@ impl PoolStore {
         match value["predicate_type"].as_str().unwrap_or("minecraft:always_true") {
             "minecraft:always_true" => Ok(RuleTest::AlwaysTrue),
             "minecraft:block_match" => Ok(RuleTest::BlockMatch(
-                value["block"].as_str().unwrap_or_default().to_string(),
+                Block::from_name(value["block"].as_str().unwrap_or_default())
+                    .ok_or_else(|| "unsupported block_match block".to_string())?,
             )),
             "minecraft:blockstate_match" => Ok(RuleTest::BlockStateMatch(
-                parse_state(&value["block_state"]).canonical(),
+                parse_state(&value["block_state"]),
             )),
             "minecraft:random_block_match" => Ok(RuleTest::RandomBlockMatch(
-                value["block"].as_str().unwrap_or_default().to_string(),
+                Block::from_name(value["block"].as_str().unwrap_or_default())
+                    .ok_or_else(|| "unsupported random_block_match block".to_string())?,
                 value["probability"].as_f64().unwrap_or(1.0) as f32,
             )),
             "minecraft:random_blockstate_match" => Ok(RuleTest::RandomBlockStateMatch(
-                parse_state(&value["block_state"]).canonical(),
+                parse_state(&value["block_state"]),
                 value["probability"].as_f64().unwrap_or(1.0) as f32,
             )),
             // `tag_match`'s `tag` field is a bare tag *name* (`"minecraft:doors"`),
@@ -773,24 +779,24 @@ impl PoolStore {
             "minecraft:tag_match" => Ok(RuleTest::TagMatch(self.block_set(
                 resolver,
                 &Value::String(format!("#{}", value["tag"].as_str().unwrap_or_default())),
-            ))),
+            )?)),
             other => Err(format!("predicate_type '{other}'")),
         }
     }
 
     /// A `HolderSet<Block>`-shaped field — a `#tag`, a bare id, or a list of
     /// either — flattened to block ids, memoised per spelling.
-    fn block_set(&mut self, resolver: &dyn Resolver, value: &Value) -> Arc<HashSet<String>> {
+    fn block_set(&mut self, resolver: &dyn Resolver, value: &Value) -> Result<Arc<HashSet<Block>>, String> {
         let key = value.to_string();
         if let Some(existing) = self.block_tags.get(&key) {
-            return Arc::clone(existing);
+            return Ok(Arc::clone(existing));
         }
         let mut out = HashSet::new();
         let mut seen = BTreeSet::new();
-        collect_blocks(resolver, value, &mut out, &mut seen);
+        collect_blocks(resolver, value, &mut out, &mut seen)?;
         let out = Arc::new(out);
         self.block_tags.insert(key, Arc::clone(&out));
-        out
+        Ok(out)
     }
 }
 
@@ -800,14 +806,14 @@ impl PoolStore {
 fn collect_blocks(
     resolver: &dyn Resolver,
     value: &Value,
-    out: &mut HashSet<String>,
+    out: &mut HashSet<Block>,
     seen: &mut BTreeSet<String>,
-) {
+) -> Result<(), String> {
     match value {
         Value::String(entry) => match entry.strip_prefix('#') {
             Some(tag) => {
                 if !seen.insert(tag.to_string()) {
-                    return;
+                    return Ok(());
                 }
                 let document = resolver.block_tag(tag);
                 if let Some(values) = document["values"].as_array() {
@@ -815,25 +821,28 @@ fn collect_blocks(
                         match v {
                             Value::Object(o) => {
                                 if let Some(id) = o.get("id") {
-                                    collect_blocks(resolver, id, out, seen);
+                                    collect_blocks(resolver, id, out, seen)?;
                                 }
                             }
-                            other => collect_blocks(resolver, other, out, seen),
+                            other => collect_blocks(resolver, other, out, seen)?,
                         }
                     }
                 }
             }
             None => {
-                out.insert(entry.clone());
+                let block = Block::from_name(entry)
+                    .ok_or_else(|| format!("unsupported block in structure processor set: {entry}"))?;
+                out.insert(block);
             }
         },
         Value::Array(entries) => {
             for entry in entries {
-                collect_blocks(resolver, entry, out, seen);
+                collect_blocks(resolver, entry, out, seen)?;
             }
         }
         _ => {}
     }
+    Ok(())
 }
 
 /// A `PosRuleTest` document, or why it cannot be modelled.
@@ -873,7 +882,7 @@ fn parse_pos_test(value: &Value) -> Result<super::processor::PosTest, String> {
 }
 
 /// `BlockState.CODEC` — `{"Name": "...", "Properties": {...}}`.
-fn parse_state(value: &Value) -> BlockState {
+fn parse_state(value: &Value) -> CanonicalStateId {
     let name = value["Name"].as_str().unwrap_or("minecraft:air").to_string();
     let mut properties = BTreeMap::new();
     if let Some(map) = value["Properties"].as_object() {
@@ -883,7 +892,22 @@ fn parse_state(value: &Value) -> BlockState {
             }
         }
     }
-    BlockState { name, properties }
+    let mut spec = name;
+    if !properties.is_empty() {
+        let mut suffix = String::new();
+        suffix.push('[');
+        for (index, (key, value)) in properties.iter().enumerate() {
+            if index != 0 {
+                suffix.push(',');
+            }
+            suffix.push_str(key);
+            suffix.push('=');
+            suffix.push_str(value);
+        }
+        suffix.push(']');
+        spec.push_str(&suffix);
+    }
+    BlockState::parse(&spec).id
 }
 
 /// The `PlaceSettings` one pool element places itself with, assembled in
@@ -1048,6 +1072,8 @@ mod tests {
     /// detectable no-op.
     #[test]
     fn bundled_feature_pool_element_resolves_and_places_at_its_origin() {
+        use lodestone_data::block::Block;
+
         struct Resolver;
 
         impl crate::density::Resolver for Resolver {
@@ -1130,11 +1156,11 @@ mod tests {
         let mut grid = VegGrid::with_footprint(0, 32, 0, 0, -8, 24);
         for x in -8..24 {
             for z in -8..24 {
-                grid.seed(x, 0, z, "minecraft:dirt".to_string());
+                grid.seed_id(x, 0, z, Block::Dirt.default_state());
             }
         }
         let mut tags = VegTags::default();
-        tags.supports_vegetation.insert("minecraft:dirt".to_string());
+        tags.supports_vegetation.insert(Block::Dirt);
         let mut random = LegacyRandomSource::new(0);
         placement.place(&mut random, 0, &mut grid, &tags);
         let writes: Vec<_> = grid.dirty_cells().collect();
@@ -1142,14 +1168,14 @@ mod tests {
         assert!(
             writes
                 .iter()
-                .any(|(_, _, _, state)| (*state).starts_with("minecraft:oak_log")),
+                .any(|(_, _, _, state)| *state == Block::OakLog.default_state()),
             "bundled oak feature must place at least one trunk block: {writes:?}"
         );
 
         let mut no_op_grid = VegGrid::with_footprint(0, 32, 0, 0, -8, 24);
         for x in -8..24 {
             for z in -8..24 {
-                no_op_grid.seed(x, 0, z, "minecraft:dirt".to_string());
+                no_op_grid.seed_id(x, 0, z, Block::Dirt.default_state());
             }
         }
         let no_op = PoolElement::Feature {

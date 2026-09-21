@@ -7,30 +7,37 @@
 
 use crate::feature::BlockPos;
 use crate::rng::RandomSource;
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 
 use super::grid::VegGrid;
 
 /// Parsed state for one iceberg configured feature.
 #[derive(Clone, Debug)]
 pub struct IcebergCfg {
-    pub(super) state: String,
+    pub(super) state: StateId,
 }
 
 const SEA_LEVEL: i32 = super::features::SEA_LEVEL;
-const AIR: &str = "minecraft:air";
-const WATER: &str = "minecraft:water";
-const SNOW_BLOCK: &str = "minecraft:snow_block";
-const PACKED_ICE: &str = "minecraft:packed_ice";
-const BLUE_ICE: &str = "minecraft:blue_ice";
-const ICE: &str = "minecraft:ice";
-const SNOW: &str = "minecraft:snow";
 
-fn base_at(grid: &VegGrid, x: i32, y: i32, z: i32) -> &str {
-    super::base_id(grid.get(x, y, z))
+fn base_at(grid: &VegGrid, x: i32, y: i32, z: i32) -> StateId {
+    grid.get_id(x, y, z).block().default_state()
 }
 
-fn iceberg_state(state: &str) -> bool {
-    matches!(state, PACKED_ICE | SNOW_BLOCK | BLUE_ICE)
+#[derive(Clone, Copy)]
+struct IcebergStates {
+    air: StateId,
+    water: StateId,
+    snow_block: StateId,
+    packed_ice: StateId,
+    blue_ice: StateId,
+    ice: StateId,
+    snow: StateId,
+    main: StateId,
+}
+
+fn iceberg_state(state: StateId, ids: IcebergStates) -> bool {
+    matches!(state, s if s == ids.packed_ice || s == ids.snow_block || s == ids.blue_ice)
 }
 
 fn circle_distance(x: i32, z: i32, radius: i32, random: &mut impl RandomSource) -> f64 {
@@ -72,8 +79,8 @@ fn steep_radius(random: &mut impl RandomSource, y: i32, height: i32, width: i32)
     (((1.0 - y as f32 / (height as f32 * k)) * width as f32) / 2.0).ceil() as i32
 }
 
-fn set_block(grid: &mut VegGrid, x: i32, y: i32, z: i32, state: &str) {
-    let _ = grid.set_state_if_in_bounds(x, y, z, state);
+fn set_block(grid: &mut VegGrid, x: i32, y: i32, z: i32, state: StateId) {
+    let _ = grid.set_id_if_in_bounds(x, y, z, state);
 }
 
 fn set_iceberg_block(
@@ -84,23 +91,23 @@ fn set_iceberg_block(
     height: i32,
     ellipse: bool,
     snow_on_top: bool,
-    main_state: &str,
+    ids: IcebergStates,
 ) {
     let current = base_at(grid, pos.x, pos.y, pos.z);
-    if !matches!(current, AIR | SNOW_BLOCK | ICE | WATER) {
+    if !matches!(current, s if s == ids.air || s == ids.snow_block || s == ids.ice || s == ids.water) {
         return;
     }
     let randomness = !ellipse || random.next_double() > 0.05;
     let divisor = if ellipse { 3 } else { 2 };
     if snow_on_top
-        && current != WATER
+        && current != ids.water
         && f64::from(h_diff) <= f64::from(random.next_int_bounded((height / divisor).max(1)))
             + f64::from(height) * 0.6
         && randomness
     {
-        set_block(grid, pos.x, pos.y, pos.z, SNOW_BLOCK);
+        set_block(grid, pos.x, pos.y, pos.z, ids.snow_block);
     } else {
-        set_block(grid, pos.x, pos.y, pos.z, main_state);
+        set_block(grid, pos.x, pos.y, pos.z, ids.main);
     }
 }
 
@@ -118,7 +125,7 @@ fn generate_block(
     shape_c: i32,
     angle: f64,
     snow_on_top: bool,
-    main_state: &str,
+    ids: IcebergStates,
 ) {
     let signed = if ellipse {
         ellipse_distance(x, z, a, ellipse_c(y, height, shape_c), angle)
@@ -144,26 +151,26 @@ fn generate_block(
         height,
         ellipse,
         snow_on_top,
-        main_state,
+        ids,
     );
 }
 
-fn smooth(grid: &mut VegGrid, origin: BlockPos, width: i32, height: i32, ellipse: bool, ellipse_a: i32) {
+fn smooth(grid: &mut VegGrid, origin: BlockPos, width: i32, height: i32, ellipse: bool, ellipse_a: i32, ids: IcebergStates) {
     let a = if ellipse { ellipse_a } else { width / 2 };
     for x in -a..=a {
         for z in -a..=a {
             for y in 0..=height {
                 let pos = BlockPos { x: origin.x + x, y: origin.y + y, z: origin.z + z };
                 let current = base_at(grid, pos.x, pos.y, pos.z);
-                if !iceberg_state(current) && current != SNOW {
+                if !iceberg_state(current, ids) && current != ids.snow {
                     continue;
                 }
-                if base_at(grid, pos.x, pos.y - 1, pos.z) == AIR {
-                    set_block(grid, pos.x, pos.y, pos.z, AIR);
-                    set_block(grid, pos.x, pos.y + 1, pos.z, AIR);
+                if base_at(grid, pos.x, pos.y - 1, pos.z) == ids.air {
+                    set_block(grid, pos.x, pos.y, pos.z, ids.air);
+                    set_block(grid, pos.x, pos.y + 1, pos.z, ids.air);
                     continue;
                 }
-                if !iceberg_state(current) {
+                if !iceberg_state(current, ids) {
                     continue;
                 }
                 let sides = [
@@ -172,8 +179,8 @@ fn smooth(grid: &mut VegGrid, origin: BlockPos, width: i32, height: i32, ellipse
                     base_at(grid, pos.x, pos.y, pos.z - 1),
                     base_at(grid, pos.x, pos.y, pos.z + 1),
                 ];
-                if sides.iter().filter(|state| !iceberg_state(state)).count() >= 3 {
-                    set_block(grid, pos.x, pos.y, pos.z, AIR);
+                if sides.iter().filter(|state| !iceberg_state(**state, ids)).count() >= 3 {
+                    set_block(grid, pos.x, pos.y, pos.z, ids.air);
                 }
             }
         }
@@ -190,6 +197,7 @@ fn carve(
     ellipse_a: i32,
     ellipse_c_value: i32,
     global_origin: BlockPos,
+    ids: IcebergStates,
 ) {
     let a = radius + 1 + ellipse_a / 3;
     let c = (radius - 3).min(3) + ellipse_c_value / 2 - 1;
@@ -201,10 +209,10 @@ fn carve(
             }
             let pos = BlockPos { x: global_origin.x + x, y: global_origin.y + y, z: global_origin.z + z };
             let current = base_at(grid, pos.x, pos.y, pos.z);
-            if iceberg_state(current) || current == SNOW_BLOCK {
-                set_block(grid, pos.x, pos.y, pos.z, if under_water { WATER } else { AIR });
-                if !under_water && base_at(grid, pos.x, pos.y + 1, pos.z) == SNOW {
-                    set_block(grid, pos.x, pos.y + 1, pos.z, AIR);
+            if iceberg_state(current, ids) || current == ids.snow_block {
+                set_block(grid, pos.x, pos.y, pos.z, if under_water { ids.water } else { ids.air });
+                if !under_water && base_at(grid, pos.x, pos.y + 1, pos.z) == ids.snow {
+                    set_block(grid, pos.x, pos.y + 1, pos.z, ids.air);
                 }
             }
         }
@@ -221,6 +229,7 @@ fn cut_out(
     ellipse_a: i32,
     angle: f64,
     ellipse_c_value: i32,
+    ids: IcebergStates,
 ) {
     let sign_x = if random.next_bool() { -1 } else { 1 };
     let sign_z = if random.next_bool() { -1 } else { 1 };
@@ -240,18 +249,28 @@ fn cut_out(
     let cut_angle = if ellipse { angle + std::f64::consts::FRAC_PI_2 } else { random.next_double() * std::f64::consts::TAU };
     for y in 0..height - 3 {
         let radius = round_radius(random, y, height, width);
-        carve(grid, radius, y, false, cut_angle, local_origin, ellipse_a, ellipse_c_value, origin);
+        carve(grid, radius, y, false, cut_angle, local_origin, ellipse_a, ellipse_c_value, origin, ids);
     }
     let mut y = -1;
     while y > -height + random.next_int_bounded(5) {
         let radius = steep_radius(random, -y, height, width);
-        carve(grid, radius, y, true, cut_angle, local_origin, ellipse_a, ellipse_c_value, origin);
+        carve(grid, radius, y, true, cut_angle, local_origin, ellipse_a, ellipse_c_value, origin, ids);
         y -= 1;
     }
 }
 
 /// Places one iceberg at the overworld sea level.
 pub(super) fn place_iceberg<R: RandomSource>(random: &mut R, origin: BlockPos, cfg: &IcebergCfg, grid: &mut VegGrid) {
+    let ids = IcebergStates {
+        air: Block::Air.default_state(),
+        water: Block::Water.default_state(),
+        snow_block: Block::SnowBlock.default_state(),
+        packed_ice: Block::PackedIce.default_state(),
+        blue_ice: Block::BlueIce.default_state(),
+        ice: Block::Ice.default_state(),
+        snow: Block::Snow.default_state(),
+        main: cfg.state,
+    };
     let origin = BlockPos { x: origin.x, y: SEA_LEVEL, z: origin.z };
     let snow_on_top = random.next_double() > 0.7;
     let angle = random.next_double() * std::f64::consts::TAU;
@@ -271,12 +290,12 @@ pub(super) fn place_iceberg<R: RandomSource>(random: &mut R, origin: BlockPos, c
             for y in 0..over_height {
                 let radius = if ellipse { ellipse_radius(y, over_height, width) } else { round_radius(random, y, over_height, width) };
                 if ellipse || x < radius {
-                    generate_block(grid, random, origin, over_height, x, y, z, radius, a, ellipse, ellipse_c_value, angle, snow_on_top, &cfg.state);
+                    generate_block(grid, random, origin, over_height, x, y, z, radius, a, ellipse, ellipse_c_value, angle, snow_on_top, ids);
                 }
             }
         }
     }
-    smooth(grid, origin, width, over_height, ellipse, ellipse_a);
+    smooth(grid, origin, width, over_height, ellipse, ellipse_a, ids);
     for x in -a..a {
         for z in -a..a {
             for y in (-under_height + 1..=-1).rev() {
@@ -285,20 +304,22 @@ pub(super) fn place_iceberg<R: RandomSource>(random: &mut R, origin: BlockPos, c
                 } else { a };
                 let radius = steep_radius(random, -y, under_height, width);
                 if x < radius {
-                    generate_block(grid, random, origin, under_height, x, y, z, radius, new_a, ellipse, ellipse_c_value, angle, snow_on_top, &cfg.state);
+                    generate_block(grid, random, origin, under_height, x, y, z, radius, new_a, ellipse, ellipse_c_value, angle, snow_on_top, ids);
                 }
             }
         }
     }
     let do_cutout = if ellipse { random.next_double() > 0.1 } else { random.next_double() > 0.7 };
     if do_cutout {
-        cut_out(grid, random, width, over_height, origin, ellipse, ellipse_a, angle, ellipse_c_value);
+        cut_out(grid, random, width, over_height, origin, ellipse, ellipse_a, angle, ellipse_c_value, ids);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+
+    use lodestone_data::block_states::StateId;
 
     use super::{place_iceberg, IcebergCfg, SEA_LEVEL};
     use crate::feature::BlockPos;
@@ -311,7 +332,16 @@ mod tests {
         for x in -16..=16 {
             for z in -16..=16 {
                 for y in -32..=100 {
-                    grid.seed(x, y, z, if y <= SEA_LEVEL { "minecraft:water" } else { "minecraft:air" }.to_owned());
+                    grid.seed_id(
+                        x,
+                        y,
+                        z,
+                        if y <= SEA_LEVEL {
+                            StateId::from_state_str("minecraft:water").unwrap()
+                        } else {
+                            StateId::AIR
+                        },
+                    );
                 }
             }
         }
@@ -319,7 +349,9 @@ mod tests {
         place_iceberg(
             &mut random,
             BlockPos { x: 0, y: 0, z: 0 },
-            &IcebergCfg { state: "minecraft:packed_ice".to_owned() },
+            &IcebergCfg {
+                state: StateId::from_state_str("minecraft:packed_ice").unwrap(),
+            },
             &mut grid,
         );
 
@@ -332,17 +364,24 @@ mod tests {
             let x = coords.next().unwrap().parse::<i32>().unwrap();
             let y = coords.next().unwrap().parse::<i32>().unwrap();
             let z = coords.next().unwrap().parse::<i32>().unwrap();
-            expected.insert((x, y, z), state.to_owned());
+            expected.insert(
+                (x, y, z),
+                StateId::from_state_str(state).expect("fixture state is in the generated table"),
+            );
         }
 
         let mut actual = BTreeMap::new();
         for x in -16..=16 {
             for z in -16..=16 {
                 for y in -32..=100 {
-                    let baseline = if y <= SEA_LEVEL { "minecraft:water" } else { "minecraft:air" };
+                    let baseline = if y <= SEA_LEVEL {
+                        StateId::from_state_str("minecraft:water").unwrap()
+                    } else {
+                        StateId::AIR
+                    };
                     let state = grid.get(x, y, z);
                     if state != baseline {
-                        actual.insert((x, y, z), state.to_owned());
+                        actual.insert((x, y, z), state);
                     }
                 }
             }

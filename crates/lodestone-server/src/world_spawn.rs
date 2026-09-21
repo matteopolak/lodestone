@@ -5,10 +5,13 @@
 //! back to the world spawn when the bed or its clearance is no longer valid.
 
 use lodestone_model::{BlockPos, Vec3};
+use lodestone_data::block::Block;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::chunk::{ChunkColumn, ChunkSource, is_air_or_fluid};
+use crate::chunk::{ChunkColumn, ChunkSource, is_air_or_fluid_id};
+
+type BlockStateId = lodestone_data::block_states::StateId;
 
 type SpawnAabb = lodestone_data::collision_shapes::Aabb;
 
@@ -145,7 +148,7 @@ fn get_level_respawn_pos(column: &ChunkColumn, lx: i32, lz: i32) -> Option<i32> 
         .map(|stored| column.min_y + i32::from(stored) - 1)
         .map_or(top_y, |y| y.min(top_y));
     for y in (column.min_y..=scan_top).rev() {
-        let state = column.block_state(lx, y, lz);
+        let state = column.block_state_id(lx, y, lz);
         if spawn_has_fluid_state(state) {
             return None;
         }
@@ -156,17 +159,9 @@ fn get_level_respawn_pos(column: &ChunkColumn, lx: i32, lz: i32) -> Option<i32> 
     None
 }
 
-/// The authoritative collision boxes for a state string, or `None` when the
-/// built-in census cannot identify the state.
-///
-/// Unknown states are deliberately distinct from known empty shapes. A custom
-/// block or a state introduced by a data pack may be solid, so treating an
-/// unrecognised value as an empty shape would put a player into it. The spawn
-/// search fails closed instead.
-fn spawn_collision_boxes(state: &str) -> Option<&'static [SpawnAabb]> {
-    let id = spawn_state_id(state)?;
-    let id = lodestone_data::block_states::StateId::new(id)?;
-    Some(lodestone_data::collision_shapes::collision_boxes(id))
+/// The authoritative collision boxes for a validated built-in state.
+fn spawn_collision_boxes(state: BlockStateId) -> &'static [SpawnAabb] {
+    lodestone_data::collision_shapes::collision_boxes(state)
 }
 
 /// Whether the player's standing body fits at an integer column position.
@@ -182,7 +177,7 @@ fn spawn_position_is_clear_in_column(
     y: i32,
 ) -> bool {
     spawn_aabb_is_clear(
-        |x, block_y, z| column.block_state(x, block_y, z).to_owned(),
+        |x, block_y, z| column.block_state_id(x, block_y, z),
         Vec3::new(
             f64::from(lx) + 0.5,
             f64::from(y),
@@ -200,7 +195,7 @@ fn spawn_position_is_clear_in_column(
 /// while any fluid in the body footprint rejects the position even when that
 /// fluid has no collision boxes. A missing state in the census is fail-closed.
 fn spawn_aabb_is_clear(
-    mut state_at: impl FnMut(i32, i32, i32) -> String,
+    mut state_at: impl FnMut(i32, i32, i32) -> BlockStateId,
     pos: Vec3,
 ) -> bool {
     const HALF_WIDTH: f64 = 0.3;
@@ -228,12 +223,10 @@ fn spawn_aabb_is_clear(
         for block_y in y0..y1 {
             for z in z0..z1 {
                 let state = state_at(x, block_y, z);
-                if spawn_has_fluid_state(&state) {
+                if spawn_has_fluid_state(state) {
                     return false;
                 }
-                let Some(boxes) = spawn_collision_boxes(&state) else {
-                    return false;
-                };
+                let boxes = spawn_collision_boxes(state);
                 for block in boxes {
                     let block_min_x = f64::from(x) + f64::from(block.min[0]);
                     let block_max_x = f64::from(x) + f64::from(block.max[0]);
@@ -267,74 +260,17 @@ pub(crate) fn is_spawn_position_clear<S: ChunkSource + ?Sized>(
     source: &S,
     pos: Vec3,
 ) -> bool {
-    spawn_aabb_is_clear(|x, y, z| source.block_state(x, y, z), pos)
+    spawn_aabb_is_clear(|x, y, z| source.block_state_id(x, y, z), pos)
 }
 
-/// Lookup tables map canonical state strings and bare block names to state ids.
-fn spawn_state_tables() -> &'static (
-    std::collections::HashMap<String, u32>,
-    std::collections::HashMap<&'static str, u32>,
-) {
-    use std::sync::OnceLock;
-    #[allow(clippy::type_complexity)]
-    static TABLES: OnceLock<(
-        std::collections::HashMap<String, u32>,
-        std::collections::HashMap<&'static str, u32>,
-    )> = OnceLock::new();
-    TABLES.get_or_init(|| {
-        use lodestone_data::{block_states, snow_support};
-        let mut exact = std::collections::HashMap::new();
-        let mut defaults = std::collections::HashMap::new();
-        for id in 0..snow_support::STATE_COUNT {
-            let state = block_states::StateId::new(id)
-                .expect("generated state-table index is valid");
-            let Some(name) = block_states::block_name(id) else {
-                continue;
-            };
-            exact.insert(spawn_canonical_state(id), id);
-            if state.is_default() {
-                defaults.insert(name, id);
-            }
-        }
-        (exact, defaults)
-    })
+/// Whether a block state carries a fluid.
+fn spawn_has_fluid_state(state: BlockStateId) -> bool {
+    lodestone_data::snow_support::has_fluid_state(state)
 }
 
-/// Formats a state with properties in the canonical sorted order.
-fn spawn_canonical_state(id: u32) -> String {
-    use lodestone_data::block_states;
-    let name = block_states::block_name(id).unwrap_or("minecraft:air");
-    let props = block_states::properties(id).unwrap_or(&[]);
-    if props.is_empty() {
-        return name.to_owned();
-    }
-    let body: Vec<String> = props.iter().map(|(k, v)| format!("{k}={v}")).collect();
-    format!("{name}[{}]", body.join(","))
-}
-
-/// The census state id for a block-state string: the exact state where the
-/// census has it, otherwise the block's default state.
-fn spawn_state_id(state: &str) -> Option<u32> {
-    let (exact, defaults) = spawn_state_tables();
-    if let Some(&id) = exact.get(state) {
-        return Some(id);
-    }
-    let base = state.split('[').next().unwrap_or(state);
-    defaults.get(base).copied()
-}
-
-/// Whether a block-state string represents a fluid.
-fn spawn_has_fluid_state(state: &str) -> bool {
-    spawn_state_id(state)
-        .and_then(lodestone_data::block_states::StateId::new)
-        .is_some_and(lodestone_data::snow_support::has_fluid_state)
-}
-
-/// Whether a block-state string has a full upper support face.
-fn spawn_face_full_up(state: &str) -> bool {
-    spawn_state_id(state)
-        .and_then(lodestone_data::block_states::StateId::new)
-        .is_some_and(lodestone_data::snow_support::face_full_up)
+/// Whether a block state has a full upper support face.
+fn spawn_face_full_up(state: BlockStateId) -> bool {
+    lodestone_data::snow_support::face_full_up(state)
 }
 
 /// Returns the first safe position in x-then-z order.
@@ -595,30 +531,26 @@ pub(crate) async fn find_initial_spawn_yielding<S: ChunkSource + ?Sized>(source:
     result
 }
 
-/// Returns `true` for the sixteen bed block ids (`minecraft:white_bed` …
-/// `minecraft:red_bed`, including their block-state suffix). Right-clicking
-/// one is a "set my respawn point" interaction, not a placement — see
-/// [`crate::server`]'s `apply_use_item_on`.
-pub(crate) fn is_bed_block(name: &str) -> bool {
-    let base = name.split('[').next().unwrap_or(name);
+/// Whether a block state belongs to the bed family.
+pub(crate) fn is_bed_block(state: BlockStateId) -> bool {
     matches!(
-        base,
-        "minecraft:white_bed"
-            | "minecraft:orange_bed"
-            | "minecraft:magenta_bed"
-            | "minecraft:light_blue_bed"
-            | "minecraft:yellow_bed"
-            | "minecraft:lime_bed"
-            | "minecraft:pink_bed"
-            | "minecraft:gray_bed"
-            | "minecraft:light_gray_bed"
-            | "minecraft:cyan_bed"
-            | "minecraft:purple_bed"
-            | "minecraft:blue_bed"
-            | "minecraft:brown_bed"
-            | "minecraft:green_bed"
-            | "minecraft:red_bed"
-            | "minecraft:black_bed"
+        state.block(),
+        Block::WhiteBed
+            | Block::OrangeBed
+            | Block::MagentaBed
+            | Block::LightBlueBed
+            | Block::YellowBed
+            | Block::LimeBed
+            | Block::PinkBed
+            | Block::GrayBed
+            | Block::LightGrayBed
+            | Block::CyanBed
+            | Block::PurpleBed
+            | Block::BlueBed
+            | Block::BrownBed
+            | Block::GreenBed
+            | Block::RedBed
+            | Block::BlackBed
     )
 }
 
@@ -633,10 +565,10 @@ pub(crate) fn is_legal_bed_respawn<S: ChunkSource + ?Sized>(
     bed: BlockPos,
     player_pos: Option<Vec3>,
 ) -> bool {
-    if !is_bed_block(&source.block_state(bed.x, bed.y, bed.z)) {
+    if !is_bed_block(source.block_state_id(bed.x, bed.y, bed.z)) {
         return false;
     }
-    if !is_air_or_fluid(&source.block_state(bed.x, bed.y + 1, bed.z)) {
+    if !is_air_or_fluid_id(source.block_state_id(bed.x, bed.y + 1, bed.z)) {
         return false;
     }
     if let Some(player) = player_pos {
@@ -668,12 +600,11 @@ const BED_STAND_UP_OFFSETS: [(i32, i32); 12] = [
 
 /// The `(dx, dz)` step vector for a bed's `facing` property, or `None` for a
 /// state carrying no recognisable facing.
-fn bed_facing_steps(state: &str) -> Option<(i32, i32)> {
-    let props = state.split_once('[')?.1.strip_suffix(']')?;
-    let facing = props.split(',').find_map(|pair| {
-        let (k, v) = pair.split_once('=')?;
-        (k.trim() == "facing").then(|| v.trim())
-    })?;
+fn bed_facing_steps(state: BlockStateId) -> Option<(i32, i32)> {
+    let facing = state
+        .properties()
+        .iter()
+        .find_map(|(key, value)| (*key == "facing").then_some(*value))?;
     match facing {
         "north" => Some((0, -1)),
         "south" => Some((0, 1)),
@@ -685,10 +616,10 @@ fn bed_facing_steps(state: &str) -> Option<(i32, i32)> {
 
 /// Whether a player can stand at `pos` using the available block-state facts.
 pub(crate) fn is_standable<S: ChunkSource + ?Sized>(source: &S, pos: BlockPos) -> bool {
-    let feet = source.block_state(pos.x, pos.y, pos.z);
-    let head = source.block_state(pos.x, pos.y + 1, pos.z);
-    let below = source.block_state(pos.x, pos.y - 1, pos.z);
-    is_air_or_fluid(&feet) && is_air_or_fluid(&head) && spawn_face_full_up(&below)
+    let feet = source.block_state_id(pos.x, pos.y, pos.z);
+    let head = source.block_state_id(pos.x, pos.y + 1, pos.z);
+    let below = source.block_state_id(pos.x, pos.y - 1, pos.z);
+    is_air_or_fluid_id(feet) && is_air_or_fluid_id(head) && spawn_face_full_up(below)
 }
 
 /// Resolves a stored bed point by re-reading the bed and checking ordered
@@ -698,11 +629,11 @@ pub(crate) fn resolve_bed_respawn<S: ChunkSource + ?Sized>(
     point: RespawnPoint,
 ) -> Option<Vec3> {
     let bed = point.pos;
-    let state = source.block_state(bed.x, bed.y, bed.z);
-    if !is_bed_block(&state) {
+    let state = source.block_state_id(bed.x, bed.y, bed.z);
+    if !is_bed_block(state) {
         return None;
     }
-    let (fx, fz) = bed_facing_steps(&state).unwrap_or((0, -1));
+    let (fx, fz) = bed_facing_steps(state).unwrap_or((0, -1));
     let (sx, sz) = (-fz, fx);
     for (forward_steps, side_steps) in BED_STAND_UP_OFFSETS {
         let candidate = BlockPos::new(
@@ -736,12 +667,12 @@ impl ChunkSource for MapSource {
             .unwrap_or_else(|| ChunkColumn::new(0, 128))
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> lodestone_data::block_states::StateId {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
-        self.column(cx, cz).block_state(lx, y, lz).to_string()
+        self.column(cx, cz).block_state_id(lx, y, lz)
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -752,7 +683,7 @@ impl ChunkSource for MapSource {
         self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: lodestone_data::block_states::StateId) {
         // Fixture: the gates never edit terrain.
     }
 }
@@ -765,7 +696,7 @@ fn land_column(surface_y: i32) -> ChunkColumn {
     for x in 0..16 {
         for z in 0..16 {
             for y in 0..=surface_y {
-                column.set_block(x, y, z, "minecraft:stone");
+                column.set_block_id(x, y, z, BlockStateId::from_state_str("minecraft:stone").unwrap());
             }
         }
     }
@@ -779,7 +710,7 @@ fn ocean_column() -> ChunkColumn {
     for x in 0..16 {
         for z in 0..16 {
             for y in 0..32 {
-                column.set_block(x, y, z, "minecraft:water");
+                column.set_block_id(x, y, z, BlockStateId::from_state_str("minecraft:water").unwrap());
             }
         }
     }
@@ -845,17 +776,17 @@ mod tests {
             "a body whose feet cell is solid must be rejected"
         );
 
-        column.set_block(0, 11, 0, "minecraft:water");
+        column.set_block_id(0, 11, 0, BlockStateId::from_state_str("minecraft:water").unwrap());
         assert!(
             !spawn_position_is_clear_in_column(&column, 0, 0, 11),
             "fluid is unsafe even though water has no collision boxes"
         );
 
-        column.set_block(0, 11, 0, "minecraft:oak_slab[type=bottom,waterlogged=false]");
+        column.set_block_id(0, 11, 0, BlockStateId::from_state_str("minecraft:oak_slab[type=bottom,waterlogged=false]").unwrap());
         let slab = spawn_collision_boxes(
-            "minecraft:oak_slab[type=bottom,waterlogged=false]",
-        )
-        .expect("the collision census must know the slab state");
+            BlockStateId::from_state_str("minecraft:oak_slab[type=bottom,waterlogged=false]")
+                .expect("the collision census must know the slab state"),
+        );
         assert!(!slab.is_empty(), "the partial-collider premise must hold");
         assert!(
             !spawn_position_is_clear_in_column(&column, 0, 0, 11),
@@ -863,7 +794,7 @@ mod tests {
         );
         for x in 0..16 {
             for z in 0..16 {
-                column.set_block(x, 11, z, "minecraft:oak_slab[type=bottom,waterlogged=false]");
+                column.set_block_id(x, 11, z, BlockStateId::from_state_str("minecraft:oak_slab[type=bottom,waterlogged=false]").unwrap());
             }
         }
         assert_eq!(
@@ -878,13 +809,32 @@ mod tests {
         );
     }
 
+    #[cfg(test)]
+    fn spawn_aabb_is_clear_named(
+        mut state_at: impl FnMut(i32, i32, i32) -> String,
+        pos: Vec3,
+    ) -> bool {
+        let mut known = true;
+        let clear = spawn_aabb_is_clear(
+            |x, y, z| match BlockStateId::from_state_str(&state_at(x, y, z)) {
+                Some(state) => state,
+                None => {
+                    known = false;
+                    BlockStateId::from_state_str("minecraft:air").expect("air state")
+                }
+            },
+            pos,
+        );
+        known && clear
+    }
+
     /// Unknown states are not silently treated as air by the body check. This
     /// is the fail-closed control for custom/data-pack blocks that are outside
-    /// the built-in collision census.
+    /// the built-in state vocabulary.
     #[test]
     fn spawn_body_clearance_rejects_an_unknown_state() {
         assert!(
-            !spawn_aabb_is_clear(
+            !spawn_aabb_is_clear_named(
                 |_, _, _| "minecraft:custom_unlisted_block".to_owned(),
                 Vec3::new(0.5, 11.0, 0.5),
             ),
@@ -898,7 +848,7 @@ mod tests {
         for x in 0..16 {
             for z in 0..16 {
                 for y in 0..16 {
-                    column.set_block(x, y, z, "minecraft:stone");
+                column.set_block_id(x, y, z, BlockStateId::from_state_str("minecraft:stone").unwrap());
                 }
             }
         }
@@ -928,7 +878,7 @@ mod tests {
     #[test]
     fn centered_spawn_avoids_a_neighboring_column_wall() {
         let mut neighbour = land_column(10);
-        neighbour.set_block(15, 11, 15, "minecraft:stone");
+        neighbour.set_block_id(15, 11, 15, BlockStateId::from_state_str("minecraft:stone").unwrap());
         let mut columns = std::collections::HashMap::new();
         columns.insert((0, 0), land_column(10));
         columns.insert((-1, -1), neighbour);
@@ -955,8 +905,8 @@ mod tests {
             "minecraft:snow[layers=1]",
         ] {
             let mut column = land_column(SURFACE_Y);
-            column.set_block(0, SURFACE_Y, 0, "minecraft:grass_block[snowy=false]");
-            column.set_block(0, SURFACE_Y + 1, 0, plant);
+            column.set_block_id(0, SURFACE_Y, 0, BlockStateId::from_state_str("minecraft:grass_block[snowy=false]").unwrap());
+            column.set_block_id(0, SURFACE_Y + 1, 0, BlockStateId::from_state_str(plant).unwrap());
 
             let correct = SURFACE_Y + 1;
             let suspected_wrong = SURFACE_Y + 2;
@@ -977,7 +927,7 @@ mod tests {
     fn a_face_full_block_above_the_surface_does_raise_the_spawn() {
         const SURFACE_Y: i32 = 70;
         let mut column = land_column(SURFACE_Y);
-        column.set_block(0, SURFACE_Y + 1, 0, "minecraft:oak_leaves[distance=3]");
+        column.set_block_id(0, SURFACE_Y + 1, 0, BlockStateId::from_state_str("minecraft:oak_leaves[distance=3]").unwrap());
         assert_eq!(
             get_level_respawn_pos(&column, 0, 0),
             Some(SURFACE_Y + 2),
@@ -1017,32 +967,27 @@ mod tests {
                 states_checked += 1;
                 let state = block_states::StateId::new(id)
                     .expect("generated state-table index is valid");
-                let canonical = spawn_canonical_state(id);
                 assert_eq!(
-                    spawn_state_id(&canonical),
-                    Some(id),
-                    "{canonical} must resolve to its own state id, not another state's"
-                );
-                assert_eq!(
-                    spawn_face_full_up(&canonical),
+                    spawn_face_full_up(state),
                     snow_support::face_full_up(state),
-                    "face_full_up disagrees with the census for {canonical}"
+                    "face_full_up disagrees with the census for state {id}"
                 );
                 assert_eq!(
-                    spawn_has_fluid_state(&canonical),
+                    spawn_has_fluid_state(state),
                     snow_support::has_fluid_state(state),
-                    "has_fluid_state disagrees with the census for {canonical}"
+                    "has_fluid_state disagrees with the census for state {id}"
                 );
             }
             assert!(states > 0, "{name} must exist in the 26.2 census");
             if states > 1 {
                 multi_state_blocks += 1;
             }
-            // The generator's fluid spelling: bare, no `level`. It must still
-            // resolve, via the base-name half.
             assert!(
-                spawn_state_id(name).is_some(),
-                "the bare base name {name} must resolve through the default-state map"
+                (0..snow_support::STATE_COUNT).any(|id| {
+                    block_states::block_name(id) == Some(name)
+                        && BlockStateId::new(id).is_some_and(BlockStateId::is_default)
+                }),
+                "the census must provide a default state for {name}"
             );
         }
         // Preconditions. The first would be a vacuous pass with an empty list; the
@@ -1108,12 +1053,11 @@ mod tests {
                     .unwrap_or_else(|| ChunkColumn::new(0, 128))
             }
 
-            fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+            fn block_state_id(&self, x: i32, y: i32, z: i32) -> BlockStateId {
                 let cx = x.div_euclid(16);
                 let cz = z.div_euclid(16);
                 self.column(cx, cz)
-                    .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
-                    .to_string()
+                    .block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
             }
 
             fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -1124,7 +1068,7 @@ mod tests {
                     .to_string()
             }
 
-            fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+            fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: BlockStateId) {}
         }
 
         let mut columns = std::collections::HashMap::new();
@@ -1174,12 +1118,12 @@ mod tests {
         let mut ocean = ChunkColumn::new(MIN_Y, HEIGHT);
         for x in 0..16 {
             for z in 0..16 {
-                ocean.set_block(x, MIN_Y, z, "minecraft:bedrock");
+                ocean.set_block_id(x, MIN_Y, z, BlockStateId::from_state_str("minecraft:bedrock").unwrap());
                 for y in (MIN_Y + 1)..=(MIN_Y + 3) {
-                    ocean.set_block(x, y, z, "minecraft:deepslate");
+                    ocean.set_block_id(x, y, z, BlockStateId::from_state_str("minecraft:deepslate").unwrap());
                 }
                 for y in (MIN_Y + 4)..=62 {
-                    ocean.set_block(x, y, z, "minecraft:water");
+                    ocean.set_block_id(x, y, z, BlockStateId::from_state_str("minecraft:water").unwrap());
                 }
             }
         }
@@ -1200,12 +1144,12 @@ mod tests {
         );
 
         assert!(
-            spawn_face_full_up(&source.block_state(8, MIN_Y + 1, 8)),
+            spawn_face_full_up(source.block_state_id(8, MIN_Y + 1, 8)),
             "premise: `min_y + 1` must sit inside a collidable block for this gate to \
              mean anything (it is deepslate in the fixture)"
         );
         assert!(
-            !spawn_face_full_up(&source.block_state(8, spawn.pos.y as i32, 8)),
+            !spawn_face_full_up(source.block_state_id(8, spawn.pos.y as i32, 8)),
             "the fallback must not place the player inside a collidable block"
         );
         assert!(
@@ -1230,28 +1174,29 @@ mod tests {
                 player_pos.z.floor() as i32,
             );
 
-            let feet = source.block_state(sx, sy, sz);
-            let head = source.block_state(sx, sy + 1, sz);
-            let support = source.block_state(sx, sy - 1, sz);
+            let feet = source.block_state_id(sx, sy, sz);
+            let head = source.block_state_id(sx, sy + 1, sz);
+            let support = source.block_state_id(sx, sy - 1, sz);
             println!(
-                "seed {seed}: spawn=({sx}, {sy}, {sz}) support={support} feet={feet} head={head}"
+                "seed {seed}: spawn=({sx}, {sy}, {sz}) support={support:?} feet={feet:?} head={head:?}"
             );
 
             assert!(
-                !spawn_face_full_up(&feet),
-                "seed {seed}: spawn feet at ({sx}, {sy}, {sz}) are inside {feet}"
+                !spawn_face_full_up(feet),
+                "seed {seed}: spawn feet at ({sx}, {sy}, {sz}) are inside {:?}", feet
             );
             assert!(
-                !spawn_face_full_up(&head),
-                "seed {seed}: spawn head at ({sx}, {}, {sz}) is inside {head}",
-                sy + 1
+                !spawn_face_full_up(head),
+                "seed {seed}: spawn head at ({sx}, {}, {sz}) is inside {:?}",
+                sy + 1,
+                head
             );
             assert!(
                 is_spawn_position_clear(&source, player_pos),
                 "seed {seed}: the complete player body at {player_pos:?} overlaps terrain"
             );
 
-            if spawn_face_full_up(&support) {
+            if spawn_face_full_up(support) {
                 found_in_box += 1;
             } else {
                 assert_eq!(
@@ -1273,7 +1218,7 @@ mod tests {
     #[test]
     fn legal_bed_accepts_a_clear_bed_in_reach() {
         let mut column = land_column(20);
-        column.set_block(8, 20, 8, "minecraft:red_bed[part=foot,facing=north]");
+        column.set_block_id(8, 20, 8, BlockStateId::from_state_str("minecraft:red_bed[part=foot,facing=north]").unwrap());
         let mut columns = std::collections::HashMap::new();
         columns.insert((0, 0), column);
         let source = MapSource { columns };
@@ -1292,9 +1237,9 @@ mod tests {
     #[test]
     fn obstructed_bed_is_illegal() {
         let mut column = land_column(20);
-        column.set_block(8, 20, 8, "minecraft:red_bed");
+        column.set_block_id(8, 20, 8, BlockStateId::from_state_str("minecraft:red_bed").unwrap());
         // A solid block directly above the bed blocks the sleeping AABB.
-        column.set_block(8, 21, 8, "minecraft:stone");
+        column.set_block_id(8, 21, 8, BlockStateId::from_state_str("minecraft:stone").unwrap());
         let mut columns = std::collections::HashMap::new();
         columns.insert((0, 0), column);
         let source = MapSource { columns };
@@ -1308,7 +1253,7 @@ mod tests {
     #[test]
     fn out_of_reach_bed_is_illegal() {
         let mut column = land_column(20);
-        column.set_block(8, 20, 8, "minecraft:red_bed");
+        column.set_block_id(8, 20, 8, BlockStateId::from_state_str("minecraft:red_bed").unwrap());
         let mut columns = std::collections::HashMap::new();
         columns.insert((0, 0), column);
         let source = MapSource { columns };
@@ -1337,19 +1282,22 @@ mod tests {
 
     #[test]
     fn is_bed_block_recognises_every_bed_and_nothing_else() {
-        assert!(is_bed_block("minecraft:red_bed[part=head,facing=north]"));
-        assert!(is_bed_block("minecraft:white_bed"));
-        assert!(is_bed_block("minecraft:black_bed"));
-        assert!(!is_bed_block("minecraft:stone"));
-        assert!(!is_bed_block("minecraft:air"));
-        assert!(!is_bed_block("minecraft:bedrock"), "bedrock ends in -rock, not -bed");
-        assert!(!is_bed_block("minecraft:respawn_anchor"));
+        let state = |value: &str| {
+            BlockStateId::from_state_str(value).expect("test state is in the generated table")
+        };
+        assert!(is_bed_block(state("minecraft:red_bed[part=head,facing=north]")));
+        assert!(is_bed_block(state("minecraft:white_bed")));
+        assert!(is_bed_block(state("minecraft:black_bed")));
+        assert!(!is_bed_block(state("minecraft:stone")));
+        assert!(!is_bed_block(state("minecraft:air")));
+        assert!(!is_bed_block(state("minecraft:bedrock")));
+        assert!(!is_bed_block(state("minecraft:respawn_anchor")));
     }
     /// A bed on open ground resolves to the first ordered candidate.
     #[test]
     fn a_bed_on_open_ground_resolves_to_the_first_offset() {
         let mut column = land_column(20);
-        column.set_block(8, 21, 8, "minecraft:red_bed[facing=north,part=foot]");
+        column.set_block_id(8, 21, 8, BlockStateId::from_state_str("minecraft:red_bed[facing=north,part=foot]").unwrap());
         let mut columns = std::collections::HashMap::new();
         columns.insert((0, 0), column);
         let source = MapSource { columns };
@@ -1369,7 +1317,7 @@ mod tests {
     #[test]
     fn a_broken_bed_resolves_to_nothing() {
         let mut column = land_column(20);
-        column.set_block(8, 21, 8, "minecraft:stone");
+        column.set_block_id(8, 21, 8, BlockStateId::from_state_str("minecraft:stone").unwrap());
         let mut columns = std::collections::HashMap::new();
         columns.insert((0, 0), column);
         let source = MapSource { columns };
@@ -1391,11 +1339,11 @@ mod tests {
         for x in 0..16 {
             for z in 0..16 {
                 for y in 21..=23 {
-                    column.set_block(x, y, z, "minecraft:stone");
+                    column.set_block_id(x, y, z, BlockStateId::from_state_str("minecraft:stone").unwrap());
                 }
             }
         }
-        column.set_block(8, 21, 8, "minecraft:red_bed[facing=north,part=foot]");
+        column.set_block_id(8, 21, 8, BlockStateId::from_state_str("minecraft:red_bed[facing=north,part=foot]").unwrap());
         let mut columns = std::collections::HashMap::new();
         columns.insert((0, 0), column);
         let source = MapSource { columns };
@@ -1414,7 +1362,13 @@ mod tests {
     fn the_beds_facing_decides_which_side_the_player_wakes_on() {
         let resolve = |facing: &str| {
             let mut column = land_column(20);
-            column.set_block(8, 21, 8, &format!("minecraft:red_bed[facing={facing},part=foot]"));
+            let state = match facing {
+                "north" => "minecraft:red_bed[facing=north,part=foot]",
+                "south" => "minecraft:red_bed[facing=south,part=foot]",
+                "east" => "minecraft:red_bed[facing=east,part=foot]",
+                _ => unreachable!(),
+            };
+            column.set_block_id(8, 21, 8, BlockStateId::from_state_str(state).unwrap());
             let mut columns = std::collections::HashMap::new();
             columns.insert((0, 0), column);
             resolve_bed_respawn(&MapSource { columns }, RespawnPoint {

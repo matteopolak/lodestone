@@ -1,6 +1,6 @@
 use lodestone_canonical::inverse;
 use lodestone_core::{Ctx, Reader, State, encode_body};
-use lodestone_data::block_states::{self, block_name, properties};
+use lodestone_data::block_states::{self, StateId};
 use lodestone_model::{
     AnimationAction, BlockFace, BlockPos, ClientAction, ClientEvent, ConnectionState, Directive,
     Hand, Vec3f, VersionAdapter,
@@ -86,17 +86,17 @@ fn protocol_110_uses_its_captured_ids_and_rejects_1_11_only_states() {
         Ok(ServerDirective::Send { packet_id: 32, .. })
     ));
     assert!(matches!(
-        protocol.try_encode_block_update(1, 64, -1, "minecraft:stone"),
+        protocol.try_encode_block_update(1, 64, -1, StateId::from_state_str("minecraft:stone").unwrap()),
         Ok(ServerDirective::Send { packet_id: 11, .. })
     ));
 
     // The committed 1.9 registry has structure block at legacy id 255, but
     // the 1.11-only magma-block range begins at 213.
     assert!(protocol
-        .try_encode_block_update(0, 64, 0, "minecraft:structure_block[mode=save]")
+        .try_encode_block_update(0, 64, 0, StateId::from_state_str("minecraft:structure_block[mode=save]").unwrap())
         .is_ok());
     assert!(protocol
-        .try_encode_block_update(0, 64, 0, "minecraft:magma_block")
+        .try_encode_block_update(0, 64, 0, StateId::from_state_str("minecraft:magma_block").unwrap())
         .is_err());
     column.set_block(1, 0, 0, "minecraft:magma_block");
     assert!(protocol.try_encode_chunk(0, 0, &column).is_err());
@@ -170,17 +170,17 @@ fn protocol_210_uses_its_captured_ids_and_rejects_1_11_only_states() {
         Ok(ServerDirective::Send { packet_id: 32, .. })
     ));
     assert!(matches!(
-        protocol.try_encode_block_update(1, 64, -1, "minecraft:stone"),
+        protocol.try_encode_block_update(1, 64, -1, StateId::from_state_str("minecraft:stone").unwrap()),
         Ok(ServerDirective::Send { packet_id: 11, .. })
     ));
 
     // The committed 1.10 registry has structure block at legacy id 255, but
     // the 1.11-only magma-block range begins at 213.
     assert!(protocol
-        .try_encode_block_update(0, 64, 0, "minecraft:structure_block[mode=save]")
+        .try_encode_block_update(0, 64, 0, StateId::from_state_str("minecraft:structure_block[mode=save]").unwrap())
         .is_ok());
     assert!(protocol
-        .try_encode_block_update(0, 64, 0, "minecraft:magma_block")
+        .try_encode_block_update(0, 64, 0, StateId::from_state_str("minecraft:magma_block").unwrap())
         .is_err());
     column.set_block(1, 0, 0, "minecraft:magma_block");
     assert!(protocol.try_encode_chunk(0, 0, &column).is_err());
@@ -254,17 +254,17 @@ fn protocol_316_uses_its_captured_ids_and_rejects_1_12_only_states() {
         Ok(ServerDirective::Send { packet_id: 32, .. })
     ));
     assert!(matches!(
-        protocol.try_encode_block_update(1, 64, -1, "minecraft:stone"),
+        protocol.try_encode_block_update(1, 64, -1, StateId::from_state_str("minecraft:stone").unwrap()),
         Ok(ServerDirective::Send { packet_id: 11, .. })
     ));
 
     // The committed 1.11 registry has structure block at legacy id 255, but
     // the 1.12-only glazed-terracotta range 235..=254 is absent.
     assert!(protocol
-        .try_encode_block_update(0, 64, 0, "minecraft:structure_block[mode=save]")
+        .try_encode_block_update(0, 64, 0, StateId::from_state_str("minecraft:structure_block[mode=save]").unwrap())
         .is_ok());
     assert!(protocol
-        .try_encode_block_update(0, 64, 0, "minecraft:white_glazed_terracotta[facing=north]")
+        .try_encode_block_update(0, 64, 0, StateId::from_state_str("minecraft:white_glazed_terracotta[facing=north]").unwrap())
         .is_err());
     column.set_block(1, 0, 0, "minecraft:white_glazed_terracotta[facing=north]");
     assert!(protocol.try_encode_chunk(0, 0, &column).is_err());
@@ -720,7 +720,7 @@ fn play_join_chunk_and_block_update_have_340_wire_ids() {
     assert_eq!(packet.var_i32(), Ok(0));
     assert!(packet.ensure_empty().is_ok());
     assert!(matches!(
-        protocol.encode_block_update(1, 64, -1, "minecraft:stone"),
+        protocol.encode_block_update(1, 64, -1, StateId::from_state_str("minecraft:stone").unwrap()),
         ServerDirective::Send { packet_id: 11, payload }
             if payload == vec![0, 0, 0, 0x41, 0x03, 0xFF, 0xFF, 0xFF, 16]
     ));
@@ -729,31 +729,13 @@ fn play_join_chunk_and_block_update_have_340_wire_ids() {
 #[test]
 fn unsupported_states_are_errors_not_air_substitutions() {
     let protocol = V340ServerProtocol;
-    assert!(protocol
-        .try_encode_block_update(0, 64, 0, "minecraft:not_a_real_state")
-        .is_err());
+    assert!(StateId::from_state_str("minecraft:not_a_real_state").is_none());
 
     let unsupported = (0..block_states::STATE_COUNT)
         .find(|&state| inverse::resolve(state).is_err())
         .expect("the canonical registry has states outside the legacy image");
-    let mut state = block_name(unsupported)
-        .expect("state is in the canonical registry")
-        .to_owned();
-    let props = properties(unsupported).expect("state is in the canonical registry");
-    if !props.is_empty() {
-        state.push('[');
-        for (index, (name, value)) in props.iter().enumerate() {
-            if index != 0 {
-                state.push(',');
-            }
-            state.push_str(name);
-            state.push('=');
-            state.push_str(value);
-        }
-        state.push(']');
-    }
-    assert_eq!(block_states::state_id(&state), Some(unsupported));
-    assert!(protocol.try_encode_block_update(0, 64, 0, &state).is_err());
+    let state = StateId::new(unsupported as u32).expect("state is in the canonical registry");
+    assert!(protocol.try_encode_block_update(0, 64, 0, state).is_err());
 }
 
 #[test]

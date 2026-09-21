@@ -155,20 +155,20 @@ impl ChunkSource for CountingAirSource {
         let mut column = ChunkColumn::new(0, 16);
         for lx in 0..16 {
             for lz in 0..16 {
-                column.set_block(lx, FLOOR_Y, lz, "minecraft:stone");
+                column.set_block_id(lx, FLOOR_Y, lz, fixture_state("minecraft:stone"));
             }
         }
         column
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         // The column-regenerating form (correct, just not cheap); this fixture
         // counts generations, not reads.
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
-        self.column(cx, cz).block_state(lx, y, lz).to_string()
+        self.column(cx, cz).block_state_id(lx, y, lz)
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -184,7 +184,7 @@ impl ChunkSource for CountingAirSource {
     // No storage: this fixture serves fresh columns and edits are discarded by
     // design (an edit a test needs to survive goes through a source with real
     // retention). Explicit rather than inherited.
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
         // No storage; edits are discarded by design.
     }
 }

@@ -34,11 +34,13 @@
 //!
 //! ## How to change it
 //!
-//! * **The walk must stay a recursive descent.** `Mul` does not evaluate its
-//!   second operand when the first is exactly `0.0`, and a skipped subtree can
-//!   contain a cache-slot write, so a bottom-up sweep over the `Op` table would
-//!   change what *later* queries return, not just the cost. Three other kinds
-//!   branch too.
+//! * **The scalar walk must stay a recursive descent.** `Mul` does not evaluate
+//!   its second operand when the first is exactly `0.0`, and a skipped subtree
+//!   can contain a cache-slot write, so a bottom-up sweep over the `Op` table
+//!   would change what *later* queries return, not just the cost. The bundled
+//!   final-density bulk path is separate: it is structurally admitted only for
+//!   pure subgraphs, seeds existing slot results, and keeps the scalar route as
+//!   its fallback.
 //! * **Adding a `Density` variant means three edits, and only one of them is a
 //!   compile error.** The `match` in `graph.rs`'s `compile_node` is exhaustive so
 //!   it will fail to build; `field.rs`'s `eval` match on `OpKind` will also fail.
@@ -46,11 +48,12 @@
 //!   `Density::kind_index()`, and *that* is only caught by
 //!   `graph::tests::op_kind_discriminants_match_density_kind_index`. Insert at
 //!   the end of both tables, never in the middle.
-//! * **Do not flatten beneath `spline` / `old_blended_noise` /
-//!   `find_top_surface`.** They are leaves to this evaluator by vanilla's own
-//!   semantics: it calls the *point* interpreter, so everything under them is
-//!   evaluated without quart snapping or interpolation. They hold an untouched
-//!   `Density` subtree for exactly that reason.
+//! * **Preserve point semantics beneath `spline` / `old_blended_noise` /
+//!   `find_top_surface`.** The field evaluator must not apply quart snapping or
+//!   interpolation to those subtrees. Splines use a compact indexed
+//!   [`PointProgram`] side table to retain that boundary without walking their
+//!   boxed source payload on every sample; the other opaque leaves retain their
+//!   original `Density` subtree.
 //! * **No `mul_add`, no FMA, no reassociation.** The field walk uses only
 //!   IEEE-exact operations and the `Mth.lerp*` family; unlike the noise-init
 //!   constants there is no 1-ulp question in it at all, and keeping it that way
@@ -69,8 +72,7 @@
 //!
 //! ## Dependencies
 //!
-//! `crate::density` (for the `Density` tree it compiles from and the point
-//! interpreter it calls at leaves), `crate::noise`, `crate::math` and
+//! `crate::density` (for the `Density` tree it compiles from), `crate::noise`, `crate::math` and
 //! `crate::counters`. Nothing outside this crate. Evidence:
 //! `crates/lodestone-worldgen/tests/{chunk_parity,interpolation_order,engine_semantics}.rs`
 //! and `docs/worldgen-density-engine.md`.
@@ -80,9 +82,13 @@ mod graph;
 mod point;
 pub mod redundancy_probe;
 mod scratch;
+mod xz_products;
 
 pub(crate) use field::Field;
 pub use field::Geom;
 pub use graph::Program;
 pub use point::{PointProgram, PointScratch};
 pub use scratch::{Bounds, Scratch, leaf_memo_stats, reset_leaf_memo_stats};
+pub use xz_products::{
+    XzProductIdentity, XzProductKind, XzProductLattice, XzProductManifest, XzRect,
+};

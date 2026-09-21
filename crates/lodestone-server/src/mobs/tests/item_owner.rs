@@ -85,7 +85,7 @@ fn item_owner_batches_restore_registration_order_after_reversed_completion() {
     let mut serial = fixture();
     let serial_world = serial.world;
     let (serial_batches, serial_probes) = serial.tick_item_owner_batches(&|x, y, z| {
-        serial_world.block_state(x, y, z).to_owned()
+        serial_world.block_state_id(x, y, z)
     });
     assert_eq!(
         serial_batches.iter().map(|batch| batch.owner).collect::<Vec<_>>(),
@@ -101,7 +101,7 @@ fn item_owner_batches_restore_registration_order_after_reversed_completion() {
     let mut completed = fixture();
     let completed_world = completed.world;
     let (mut batches, completed_probes) = completed.tick_item_owner_batches(&|x, y, z| {
-        completed_world.block_state(x, y, z).to_owned()
+        completed_world.block_state_id(x, y, z)
     });
     batches.reverse();
     let raw_slots = batches
@@ -137,7 +137,7 @@ fn moving_items_crossing_negative_and_positive_boundaries_use_one_barrier_and_ke
         Vec3::new(1.0, 0.0, 0.0),
         ItemLifecycle::newly_dropped(1, 64),
     );
-    let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
+    let state_at = |x, y, z| world.block_state_id(x, y, z);
     let (mut batches, _) = sim.tick_item_owner_batches(&state_at);
     assert_eq!(
         batches.iter().map(|batch| batch.owner).collect::<Vec<_>>(),
@@ -220,14 +220,14 @@ fn serial_and_four_lane_boundary_crossing_have_identical_owner_and_id_results() 
     let mut serial = crossing_fixture();
     serial.item_owner_plan = 1;
     let serial_world = serial.world;
-    let serial_state_at = |x, y, z| serial_world.block_state(x, y, z).to_owned();
+    let serial_state_at = |x, y, z| serial_world.block_state_id(x, y, z);
     let serial_batches = serial.tick_item_owner_batches_with_workers(&serial_state_at, 1).0;
     serial.apply_item_tick_owner_batches(serial_batches);
 
     let mut parallel = crossing_fixture();
     parallel.item_owner_plan = 1;
     let parallel_world = parallel.world;
-    let parallel_state_at = |x, y, z| parallel_world.block_state(x, y, z).to_owned();
+    let parallel_state_at = |x, y, z| parallel_world.block_state_id(x, y, z);
     let parallel_batches = parallel.tick_item_owner_batches_with_workers(&parallel_state_at, 4).0;
     parallel.apply_item_tick_owner_batches(parallel_batches);
 
@@ -245,7 +245,7 @@ fn item_owner_batch_merge_rejects_a_missing_owner() {
     let mut sim = fixture();
     let world = sim.world;
     let (mut batches, _) =
-        sim.tick_item_owner_batches(&|x, y, z| world.block_state(x, y, z).to_owned());
+        sim.tick_item_owner_batches(&|x, y, z| world.block_state_id(x, y, z));
     batches.pop();
     let _ = merge_item_tick_owner_batches(batches);
 }
@@ -256,7 +256,7 @@ fn item_owner_batch_merge_rejects_a_duplicate_owner() {
     let mut sim = fixture();
     let world = sim.world;
     let (mut batches, _) =
-        sim.tick_item_owner_batches(&|x, y, z| world.block_state(x, y, z).to_owned());
+        sim.tick_item_owner_batches(&|x, y, z| world.block_state_id(x, y, z));
     batches[1] = batches[0].clone();
     let _ = merge_item_tick_owner_batches(batches);
 }
@@ -267,14 +267,14 @@ fn parallel_item_owner_batches_match_one_lane_with_interleaved_negative_owners()
     let mut serial = dense_item_owner_fixture(256);
     serial.item_owner_plan = 1;
     let serial_world = serial.world;
-    let serial_state_at = |x, y, z| serial_world.block_state(x, y, z).to_owned();
+    let serial_state_at = |x, y, z| serial_world.block_state_id(x, y, z);
     let serial_batches = serial.tick_item_owner_batches_with_workers(&serial_state_at, 1).0;
     serial.apply_item_tick_owner_batches(serial_batches);
 
     let mut parallel = dense_item_owner_fixture(256);
     parallel.item_owner_plan = 1;
     let parallel_world = parallel.world;
-    let parallel_state_at = |x, y, z| parallel_world.block_state(x, y, z).to_owned();
+    let parallel_state_at = |x, y, z| parallel_world.block_state_id(x, y, z);
     let parallel_batches = parallel.tick_item_owner_batches_with_workers(&parallel_state_at, 4).0;
     assert_eq!(
         parallel_batches.iter().map(|batch| batch.owner).collect::<Vec<_>>(),
@@ -300,7 +300,7 @@ fn parallel_item_owner_batches_match_one_lane_with_interleaved_negative_owners()
 fn item_owner_batches_reject_stale_plan_completions() {
     let mut sim = fixture();
     let world = sim.world;
-    let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
+    let state_at = |x, y, z| world.block_state_id(x, y, z);
     let (stale, _) = sim.tick_item_owner_batches(&state_at);
     let _current = sim.tick_item_owner_batches(&state_at);
     sim.apply_item_tick_owner_batches(stale);
@@ -311,7 +311,7 @@ fn item_owner_batches_reject_stale_plan_completions() {
 fn item_owner_batches_reject_replayed_completions() {
     let mut sim = fixture();
     let world = sim.world;
-    let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
+    let state_at = |x, y, z| world.block_state_id(x, y, z);
     let (batches, _) = sim.tick_item_owner_batches(&state_at);
     sim.apply_item_tick_owner_batches(batches.clone());
     sim.apply_item_tick_owner_batches(batches);
@@ -324,7 +324,7 @@ fn measure_dense_item_owner_workers() {
     for item_count in [256, 2_048] {
         let sim = dense_item_owner_fixture(item_count);
         let world = sim.world;
-        let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
+        let state_at = |x, y, z| world.block_state_id(x, y, z);
         let started = lodestone_time::Instant::now();
         let _ = sim.tick_item_owner_batches_with_workers(&state_at, 1);
         let serial = started.elapsed();

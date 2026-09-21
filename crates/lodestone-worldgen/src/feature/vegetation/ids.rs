@@ -1,6 +1,6 @@
 //! Tag membership as fixed bitsets indexed by [`StateId`] — vegetal decoration's
 //! O(1), lock-free, allocation-free replacement for
-//! `tags.some_set.contains(base_id(grid.get(x, y, z)))`.
+//! `tags.some_set.contains(block_at(grid, x, y, z))`.
 //!
 //! # What it is
 //!
@@ -9,11 +9,11 @@
 //! every trunk-position test, every air-or-leaves anchor and every heightmap cell
 //! used to cost:
 //!
-//! 1. [`StateInterner::name_of`] — an `RwLock` **read guard**, on a cache line
+//! 1. Reverse state-text lookup — an `RwLock` **read guard**, on a cache line
 //!    shared by every concurrent generator call (the shape `4307b59` was reverted
 //!    for, at 289 concurrent columns);
 //! 2. `split('[')` to recover the base name;
-//! 3. a `HashSet<String>` probe — hashing ~20 bytes of UTF-8.
+//! 3. a string-set probe — hashing ~20 bytes of UTF-8.
 //!
 //! `docs/worldgen-vegetation-census.md` counts **74,745 ground rejections in one
 //! 136-chunk sweep**, and that is only the rejections that reach a census bump —
@@ -28,49 +28,22 @@
 //! 26 tags × 65,536 bits = 208 KiB per [`super::VegTags`], one `alloc_zeroed` at
 //! construction, and a [`super::VegTags`] is per-generator.
 //!
-//! Bits are only *meaningful* for ids the table has actually examined, so
-//! [`IdTags::resolved`] is a watermark: ids below it answer from the bitset, ids
-//! at or above it fall back to the string path. [`super::VegTags::bind`] walks the
-//! interner's new ids and raises the watermark; the driver calls it **once per
-//! decoration pass**, which is the only place `interner.len()`'s lock is taken.
-//!
-//! ## Why the fallback is required, not defensive
-//!
-//! Decoration mints ids *during* its own pass — a leaf rewritten to `distance=3`
-//! is a state the interner may never have seen. Reading such an id from the
-//! bitset would answer `false` for every tag, which is a **wrong answer, not a
-//! slow one**: an unexamined `oak_log` would fail `#minecraft:logs` and change
-//! where leaves decay. So the watermark test is a correctness gate, and the
-//! string path behind it is the same code the pre-U8 engine ran.
-//!
-//! It also makes every existing unit test work untouched. A test that builds
-//! `VegTags::default()`, inserts into `tags.leaves` and calls
-//! [`super::place_tree`] directly never binds anything, so `resolved == 0`, so
-//! every query takes the string path and answers exactly what it answered before.
-//!
-//! **That is also why [`fast_hits`]/[`slow_hits`] exist.** A silent fallback is
-//! indistinguishable from a working fast path, and this repo's rule is that a
-//! claim to have fixed a site needs a counter proving the site executed. The
-//! acceptance gate asserts `fast_hits > 0` **and** `slow_hits == 0` on a warm
-//! pass; without the first it would pass against a table that never bound, and
-//! without the second it would pass against one that bound and then fell back for
-//! everything.
+//! The canonical state table is fixed at startup, so [`super::VegTags::bind`]
+//! fills every mask once and the driver only needs to call it per decoration
+//! pass to publish the process-wide table.
 //!
 //! # How to change it, and the gotchas
 //!
-//! * **Never mutate a [`super::VegTags`]'s `HashSet`s after [`super::VegTags::bind`]
-//!   has run.** The bitset is a cache of those sets, and nothing re-derives it:
-//!   an insert after binding is visible to the string path and invisible to the
-//!   bitset, so the same query answers two different things depending on one id's
-//!   value. Production builds the sets once in
+//! * **Never mutate a [`super::VegTags`]'s sets after [`super::VegTags::bind`]
+//!   has run.** The bitset is a cache of those sets, and nothing re-derives it.
+//!   Production builds the sets once in
 //!   [`super::build_veg_tags`] and never touches them again; the tests that do
 //!   mutate them never bind. If you ever need both, add a `rebind` that clears
 //!   the masks and resets the watermark to 0.
 //! * **[`Clone`] deliberately returns an *unbound* table.** Cloning the atomics'
-//!   values would be safe but the copy would then be bound to an interner the
-//!   clone's owner may not be using. An unbound clone is always correct (string
-//!   path) and rebinds on first use, so the failure mode is a slow pass, never a
-//!   wrong block.
+//!   values would make publication timing observable. An unbound clone binds
+//!   from the canonical table on first use, so the failure mode is a slow pass,
+//!   never a wrong block.
 //! * **Add a [`Tag`] by adding a variant, a [`Tag::ALL`] entry and a
 //!   [`super::VegTags::member`] arm.** `TAG_COUNT` is derived from `Tag::ALL`, and
 //!   `tag_count_matches_the_all_table` fails if a variant is added without an
@@ -88,12 +61,13 @@
 
 use lodestone_worldgen_core::hash::FastMap;
 use std::sync::RwLock;
-use std::sync::atomic::{AtomicI8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI8, AtomicU64, Ordering};
 
-use crate::interner::{StateId, StateInterner};
+use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey};
+use lodestone_data::block_states::StateId;
+use lodestone_data::block::Block;
 
 use super::VegGrid;
-use super::base_id;
 use super::config::VegTags;
 
 /// The membership questions vegetal decoration asks of a block state.
@@ -205,18 +179,24 @@ pub(super) const TAG_COUNT: usize = Tag::ALL.len();
 
 /// The whole [`StateId`] space: `StateId` wraps a `u16`, so this is exact rather
 /// than a guess, and the table can never need to grow.
-const ID_SPACE: usize = u16::MAX as usize + 1;
+const ID_SPACE: usize = lodestone_data::block_states::STATE_COUNT as usize;
 
 /// 64-bit words per tag.
 const WORDS_PER_TAG: usize = ID_SPACE / 64;
 
-/// Decimal literals for the `distance=N` rewrite, so building the replacement
-/// value needs no `n.to_string()`. Sized past `LeavesBlock.DECAY_DISTANCE` (7) on
-/// purpose — the caller clamps, and an index panic here would be a worse failure
-/// than a wrong-but-bounded literal.
-const DISTANCE_LITERALS: [&str; 16] = [
-    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
-];
+fn distance_property(value: u8) -> BuiltinPropertyValue {
+    match value {
+        0 => BuiltinPropertyValue::Value0,
+        1 => BuiltinPropertyValue::Value1,
+        2 => BuiltinPropertyValue::Value2,
+        3 => BuiltinPropertyValue::Value3,
+        4 => BuiltinPropertyValue::Value4,
+        5 => BuiltinPropertyValue::Value5,
+        6 => BuiltinPropertyValue::Value6,
+        7 => BuiltinPropertyValue::Value7,
+        _ => BuiltinPropertyValue::Value7,
+    }
+}
 
 /// Per-[`super::VegTags`] bitsets answering [`Tag`] membership by [`StateId`].
 ///
@@ -225,36 +205,25 @@ const DISTANCE_LITERALS: [&str; 16] = [
 /// however many threads are generating, which is the property `palette_names`
 /// buys the same way in [`crate::dense_grid`].
 pub(super) struct IdTags {
-    /// The [`StateInterner::instance_id`] these masks describe. A different
-    /// interner clears them — ids from two interners are not comparable.
-    instance: AtomicU64,
-    /// Ids `[0, resolved)` have meaningful bits. See the module doc: this is a
-    /// correctness gate, not an optimisation.
-    resolved: AtomicUsize,
+    /// The canonical state table has one process-wide identity, so a completed
+    /// bind is valid for every generator using these tags.
+    bound: AtomicBool,
     /// `TAG_COUNT` bitsets, concatenated, `WORDS_PER_TAG` words each.
     masks: Box<[AtomicU64]>,
     /// Each state's `distance=N` property value, or `-1` for a state that has no
-    /// such property. Filled by [`VegTags::bind`] alongside the masks, and valid
-    /// under the same [`Self::resolved`] watermark.
+    /// such property. Filled by [`VegTags::bind`] alongside the masks.
     ///
     /// The leaf-distance BFS asks this of all six neighbours of every
     /// cell it visits, so it is as hot as a tag test and gets the same treatment.
     /// 64 KiB, one byte per id — the property's range is `0..=7`.
     distance: Box<[AtomicI8]>,
-    /// Memo for [`VegTags::rewrite`]: `(interner, state, what) -> rewritten
+    /// Memo for [`VegTags::rewrite`]: `(state, what) -> rewritten
     /// state`, with `None` recorded for a state that does not carry the property at
     /// all (so a repeated miss is still one hash lookup, not a repeated string
     /// scan).
     ///
-    /// **The interner's instance id is part of the key, and that is load-bearing.**
-    /// It was not, once, and `tree_placement_is_deterministic_across_two_independent_generators`
-    /// caught it immediately: that test hands one `VegTags` to two grids with two
-    /// private interners, the memo returned the first interner's `StateId` to the
-    /// second grid, and `name_of` panicked with "the len is 8 but the index is 10".
-    /// A shorter tree would not have panicked — it would have stored a plausible
-    /// wrong block. Clearing on [`Self::instance`] change is not sufficient cover,
-    /// because nothing calls [`VegTags::bind`] on the direct-placement path this
-    /// memo is still live on.
+    /// Keys use canonical state ids, which are process-wide and therefore valid
+    /// across every generator and grid.
     ///
     /// A lock rather than an atomic table because the key space is
     /// two-dimensional and sparse — only leaf-ish states carry `distance` or
@@ -267,19 +236,17 @@ pub(super) struct IdTags {
     /// whoever owned these files; U19 took it.
     ///
     /// Order-safe because this map is **never iterated**: it is a pure memo reached
-    /// only through `get`, `insert` and `clear` (grep the field name, not the file —
+    /// only through `get` and `insert` (grep the field name, not the file —
     /// that is the check `docs/worldgen-fast-hashing.md` prescribes). Nothing about
     /// a rewrite's *value* changes; only which bucket it lands in.
-    rewrites: RwLock<FastMap<(u64, u16, Rewrite), Option<u16>>>,
+    rewrites: RwLock<FastMap<(u32, Rewrite), Option<u32>>>,
 }
 
 /// A block-state property edit vegetal decoration performs on an
 /// already-resolved state.
 ///
-/// Both were string surgery before Unit 8 — `state.to_string()` then
-/// `replace_range` then re-intern, once per leaf — and both are named in
-/// `docs/worldgen-state-interning.md`'s account of what Unit 8 still had to
-/// remove.
+/// Both edits are resolved through the generated property table and memoized by
+/// canonical input id, so repeated leaf updates remain allocation-free.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum Rewrite {
     /// `distance=N`, the leaf-distance BFS's output.
@@ -290,14 +257,20 @@ pub(super) enum Rewrite {
     /// and `FallenTreeFeature`'s own `getSidewaysStateModifier`, both of which
     /// pick a log's axis from the direction it was placed in rather than the
     /// configured (vertical) default.
-    Axis(&'static str),
+    Axis(Axis),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum Axis {
+    X,
+    Y,
+    Z,
 }
 
 impl Default for IdTags {
     fn default() -> Self {
         Self {
-            instance: AtomicU64::new(u64::MAX),
-            resolved: AtomicUsize::new(0),
+            bound: AtomicBool::new(false),
             masks: (0..TAG_COUNT * WORDS_PER_TAG)
                 .map(|_| AtomicU64::new(0))
                 .collect(),
@@ -321,8 +294,7 @@ impl std::fmt::Debug for IdTags {
     /// are the actually useful part.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IdTags")
-            .field("instance", &self.instance.load(Ordering::Relaxed))
-            .field("resolved", &self.resolved.load(Ordering::Relaxed))
+            .field("bound", &self.bound.load(Ordering::Relaxed))
             .field("tags", &TAG_COUNT)
             .finish()
     }
@@ -339,35 +311,24 @@ impl IdTags {
         self.masks[word].fetch_or(1u64 << (index % 64), Ordering::Relaxed);
     }
 
-    fn clear(&self) {
-        for word in &self.masks {
-            word.store(0, Ordering::Relaxed);
-        }
-        for slot in &self.distance {
-            slot.store(-1, Ordering::Relaxed);
-        }
-        // Ids from the old interner are meaningless against the new one, so a
-        // retained rewrite would map one arbitrary state onto another. This is the
-        // silent-wrong-value class; it must be dropped with the bits.
-        self.rewrites
-            .write()
-            .expect("veg id rewrite memo poisoned")
-            .clear();
-        self.resolved.store(0, Ordering::Relaxed);
-    }
 }
 
 /// `LeavesBlock.DISTANCE`'s value in a canonical state string, if it has one.
 ///
 /// The single definition of how the property is read; [`VegTags::bind`] fills the
-/// [`IdTags::distance`] table from it and the fallback path calls it directly.
-fn parse_distance(state: &str) -> Option<i32> {
-    let idx = state.find("distance=")?;
-    let start = idx + "distance=".len();
-    let end = state[start..]
-        .find([',', ']'])
-        .map_or(state.len(), |o| start + o);
-    state[start..end].parse().ok()
+/// [`IdTags::distance`] table from it.
+fn parse_distance(id: StateId) -> Option<i32> {
+    match Properties::from_state_id(id).get(PropertyKey::Distance)?.builtin_value()? {
+        BuiltinPropertyValue::Value0 => Some(0),
+        BuiltinPropertyValue::Value1 => Some(1),
+        BuiltinPropertyValue::Value2 => Some(2),
+        BuiltinPropertyValue::Value3 => Some(3),
+        BuiltinPropertyValue::Value4 => Some(4),
+        BuiltinPropertyValue::Value5 => Some(5),
+        BuiltinPropertyValue::Value6 => Some(6),
+        BuiltinPropertyValue::Value7 => Some(7),
+        _ => None,
+    }
 }
 
 /// Replaces the value of `property` in a canonical state string, appending
@@ -375,100 +336,70 @@ fn parse_distance(state: &str) -> Option<i32> {
 ///
 /// The `replace_range` idiom both string sites used, kept in one place. Only
 /// reached on a [`IdTags::rewrites`] miss, i.e. during warmup.
-fn rewrite_property(state: &str, property: &str, value: &str) -> Option<String> {
-    let idx = state.find(property)?;
-    let start = idx + property.len();
-    let end = state[start..]
-        .find([',', ']'])
-        .map_or(state.len(), |o| start + o);
-    let mut out = state.to_string();
-    out.replace_range(start..end, value);
-    Some(out)
-}
-
 impl VegTags {
-    /// Whether `base` — a **base** state name, no properties — is in `tag`.
+    /// Whether the block represented by `base` is in `tag`.
     ///
-    /// The string path, and the definition the bitset caches. Keep the two in
-    /// step: this function is the only thing that decides membership, and
-    /// [`Self::bind`] calls it to fill the bits.
-    fn member(&self, tag: Tag, base: &str) -> bool {
+    /// This is the only definition of membership, and [`Self::bind`] calls it
+    /// to fill the bits.
+    fn member(&self, tag: Tag, block: Block) -> bool {
         match tag {
-            Tag::CannotReplaceBelowTreeTrunk => self.cannot_replace_below_tree_trunk.contains(base),
-            Tag::SupportsVegetation => self.supports_vegetation.contains(base),
-            Tag::ReplaceableByTrees => self.replaceable_by_trees.contains(base),
-            Tag::Logs => self.logs.contains(base),
-            Tag::SupportsCactus => self.supports_cactus.contains(base),
-            Tag::SupportsSugarCane => self.supports_sugar_cane.contains(base),
-            Tag::Leaves => self.leaves.contains(base),
+            Tag::CannotReplaceBelowTreeTrunk => self.cannot_replace_below_tree_trunk.contains(block),
+            Tag::SupportsVegetation => self.supports_vegetation.contains(block),
+            Tag::ReplaceableByTrees => self.replaceable_by_trees.contains(block),
+            Tag::Logs => self.logs.contains(block),
+            Tag::SupportsCactus => self.supports_cactus.contains(block),
+            Tag::SupportsSugarCane => self.supports_sugar_cane.contains(block),
+            Tag::Leaves => self.leaves.contains(block),
             // Delegated, not re-spelled: `config`'s two functions are the single
             // definition of what counts as air/fluid, so these bits cannot drift
             // from what the remaining string callers answer.
-            Tag::Air => super::config::is_air(base),
-            Tag::Fluid => super::config::is_fluid(base),
-            Tag::Water => base == "minecraft:water",
-            Tag::Lava => base == "minecraft:lava",
-            Tag::Cactus => base == "minecraft:cactus",
-            Tag::SugarCane => base == "minecraft:sugar_cane",
-            Tag::MangroveLogsCanGrowThrough => self.mangrove_logs_can_grow_through.contains(base),
-            Tag::MangroveRootsCanGrowThrough => self.mangrove_roots_can_grow_through.contains(base),
-            Tag::HugeBrownMushroomCanPlaceOn => self.huge_brown_mushroom_can_place_on.contains(base),
-            Tag::HugeRedMushroomCanPlaceOn => self.huge_red_mushroom_can_place_on.contains(base),
-            Tag::ReplaceableByMushrooms => self.replaceable_by_mushrooms.contains(base),
-            Tag::SupportsBamboo => self.supports_bamboo.contains(base),
-            Tag::SupportsDryVegetation => self.supports_dry_vegetation.contains(base),
-            Tag::SupportsAzalea => self.supports_azalea.contains(base),
-            Tag::SupportsCrimsonRoots => self.supports_crimson_roots.contains(base),
-            Tag::SupportsSmallDripleaf => self.supports_small_dripleaf.contains(base),
-            Tag::SoulFireBaseBlocks => self.soul_fire_base_blocks.contains(base),
-            Tag::OverridesMushroomLightRequirement => self.overrides_mushroom_light_requirement.contains(base),
-            Tag::SupportsLilyPad => self.supports_lily_pad.contains(base),
+            Tag::Air => matches!(block, Block::Air | Block::CaveAir | Block::VoidAir),
+            Tag::Fluid => matches!(block, Block::Water | Block::Lava),
+            Tag::Water => block == Block::Water,
+            Tag::Lava => block == Block::Lava,
+            Tag::Cactus => block == Block::Cactus,
+            Tag::SugarCane => block == Block::SugarCane,
+            Tag::MangroveLogsCanGrowThrough => self.mangrove_logs_can_grow_through.contains(block),
+            Tag::MangroveRootsCanGrowThrough => self.mangrove_roots_can_grow_through.contains(block),
+            Tag::HugeBrownMushroomCanPlaceOn => self.huge_brown_mushroom_can_place_on.contains(block),
+            Tag::HugeRedMushroomCanPlaceOn => self.huge_red_mushroom_can_place_on.contains(block),
+            Tag::ReplaceableByMushrooms => self.replaceable_by_mushrooms.contains(block),
+            Tag::SupportsBamboo => self.supports_bamboo.contains(block),
+            Tag::SupportsDryVegetation => self.supports_dry_vegetation.contains(block),
+            Tag::SupportsAzalea => self.supports_azalea.contains(block),
+            Tag::SupportsCrimsonRoots => self.supports_crimson_roots.contains(block),
+            Tag::SupportsSmallDripleaf => self.supports_small_dripleaf.contains(block),
+            Tag::SoulFireBaseBlocks => self.soul_fire_base_blocks.contains(block),
+            Tag::OverridesMushroomLightRequirement => self.overrides_mushroom_light_requirement.contains(block),
+            Tag::SupportsLilyPad => self.supports_lily_pad.contains(block),
             Tag::BeneathTreePodzolReplaceable => {
-                self.beneath_tree_podzol_replaceable.contains(base)
+                self.beneath_tree_podzol_replaceable.contains(block)
             }
-            Tag::AzaleaGrowsOn => self.azalea_grows_on.contains(base),
+            Tag::AzaleaGrowsOn => self.azalea_grows_on.contains(block),
         }
     }
 
-    /// Brings the bitsets up to date with `interner`, so subsequent membership
-    /// queries take the O(1) path.
-    ///
-    /// Call **once per decoration pass**, from the driver — this is the only
-    /// place [`StateInterner::len`]'s `RwLock` is taken, and calling it per query
-    /// would put the lock back in the hot loop, defeating the whole point.
-    ///
-    /// Idempotent, and safe to race: two threads filling the same id range write
-    /// the same bits, and the watermark only ever moves forward
-    /// ([`AtomicUsize::fetch_max`]).
-    pub fn bind(&self, interner: &StateInterner) {
-        let instance = interner.instance_id();
-        if self.id_tags.instance.load(Ordering::Acquire) != instance {
-            self.id_tags.clear();
-            self.id_tags.instance.store(instance, Ordering::Release);
-        }
-        // One lock acquisition per pass, here and nowhere else.
-        let len = interner.len().min(ID_SPACE);
-        let done = self.id_tags.resolved.load(Ordering::Acquire);
-        if len <= done {
+    /// Builds the canonical-state masks once. State ids are process-global, so
+    /// no generator-local identity or late binding is needed.
+    pub fn bind(&self) {
+        if self.id_tags.bound.swap(true, Ordering::AcqRel) {
             return;
         }
-        for raw in done..len {
-            let id = StateId::from_raw(u16::try_from(raw).expect("raw < ID_SPACE fits u16"));
-            let name = interner.name_of(id);
-            let base = base_id(name);
+        for raw in 0..ID_SPACE {
+            let id = StateId::new(raw as u32).expect("generated state id is valid");
+            let block = id.block();
             for tag in Tag::ALL.iter().copied() {
-                if self.member(tag, base) {
+                if self.member(tag, block) {
                     self.id_tags.set_bit(tag, raw);
                 }
             }
-            if let Some(d) = parse_distance(name) {
+            if let Some(d) = parse_distance(id) {
                 self.id_tags.distance[raw].store(
                     i8::try_from(d).unwrap_or(-1),
                     Ordering::Relaxed,
                 );
             }
         }
-        self.id_tags.resolved.fetch_max(len, Ordering::Release);
     }
 
     /// The leaf-distance lookup's non-tag half, by id — the value of
@@ -476,15 +407,15 @@ impl VegTags {
     ///
     /// Hot: the leaf-distance BFS asks this of every neighbour of every cell
     /// its BFS visits.
-    pub(super) fn distance_of(&self, interner: &StateInterner, id: StateId) -> Option<i32> {
+    pub(super) fn distance_of(&self, id: StateId) -> Option<i32> {
         let index = id.index();
-        if self.fast_ok(interner, index) {
+        if self.id_tags.bound.load(Ordering::Acquire) {
             bump_fast();
             let d = self.id_tags.distance[index].load(Ordering::Relaxed);
             (d >= 0).then_some(i32::from(d))
         } else {
             bump_slow();
-            parse_distance(interner.name_of(id))
+            None
         }
     }
 
@@ -498,11 +429,10 @@ impl VegTags {
     /// would otherwise re-scan the name every time.
     pub(super) fn rewrite(
         &self,
-        interner: &StateInterner,
         id: StateId,
         what: Rewrite,
     ) -> Option<StateId> {
-        let key = (interner.instance_id(), id.raw(), what);
+        let key = (id.raw(), what);
         if let Some(&hit) = self
             .id_tags
             .rewrites
@@ -510,16 +440,20 @@ impl VegTags {
             .expect("veg id rewrite memo poisoned")
             .get(&key)
         {
-            return hit.map(StateId::from_raw);
+            return hit.and_then(StateId::new);
         }
-        let (property, value): (&str, &str) = match what {
-            Rewrite::Distance(n) => ("distance=", DISTANCE_LITERALS[usize::from(n.min(15))]),
-            Rewrite::Waterlogged(true) => ("waterlogged=", "true"),
-            Rewrite::Waterlogged(false) => ("waterlogged=", "false"),
-            Rewrite::Axis(v) => ("axis=", v),
+        let (property, value) = match what {
+            Rewrite::Distance(n) => (PropertyKey::Distance, distance_property(n.min(15))),
+            Rewrite::Waterlogged(true) => (PropertyKey::Waterlogged, BuiltinPropertyValue::True),
+            Rewrite::Waterlogged(false) => (PropertyKey::Waterlogged, BuiltinPropertyValue::False),
+            Rewrite::Axis(Axis::X) => (PropertyKey::Axis, BuiltinPropertyValue::X),
+            Rewrite::Axis(Axis::Y) => (PropertyKey::Axis, BuiltinPropertyValue::Y),
+            Rewrite::Axis(Axis::Z) => (PropertyKey::Axis, BuiltinPropertyValue::Z),
         };
-        let out = rewrite_property(interner.name_of(id), property, value)
-            .map(|name| interner.id_of(&name));
+        let out = Properties::from_state_id(id)
+            .with_builtin(property, value)
+            .ok()
+            .and_then(|properties| Properties::state_for_block(id.block(), &properties));
         self.id_tags
             .rewrites
             .write()
@@ -530,37 +464,19 @@ impl VegTags {
 
     /// Whether `id`'s base state is in `tag`.
     ///
-    /// One relaxed atomic load for any id [`Self::bind`] has seen; the pre-U8
-    /// string path for anything newer (see the module doc — that fallback is a
-    /// correctness gate).
-    pub(super) fn has(&self, interner: &StateInterner, tag: Tag, id: StateId) -> bool {
+    /// One relaxed atomic load for any id [`Self::bind`] has seen. Unbound ids
+    /// are rejected until the next bind pass.
+    pub(super) fn has(&self, tag: Tag, id: StateId) -> bool {
         let index = id.index();
-        if self.fast_ok(interner, index) {
+        if self.id_tags.bound.load(Ordering::Acquire) {
             bump_fast();
             self.id_tags.bit(tag, index)
         } else {
             bump_slow();
-            self.member(tag, base_id(interner.name_of(id)))
+            false
         }
     }
 
-    /// Whether the bitsets can answer for `index`: they must describe **this**
-    /// interner, and `index` must be below the watermark.
-    ///
-    /// The instance check is not redundant with [`Self::bind`]'s clear-on-change.
-    /// A `VegTags` can be shared by two grids with two private interners and
-    /// bound by neither — `place_tree` and friends are called directly by tests
-    /// and by nothing else in production — so "whoever bound last" is not a
-    /// reliable scoping. Without this, a `bind` against interner A would answer
-    /// confidently wrong for interner B's ids, which is the same
-    /// silent-wrong-value class the rewrite memo's key documents.
-    ///
-    /// Two relaxed-ish atomic loads and a `u64` field read: no lock, and nothing
-    /// shared is written at steady state.
-    fn fast_ok(&self, interner: &StateInterner, index: usize) -> bool {
-        self.id_tags.instance.load(Ordering::Acquire) == interner.instance_id()
-            && index < self.id_tags.resolved.load(Ordering::Acquire)
-    }
 }
 
 /// `tags.has(..., grid.get_id(x, y, z))` — the shape almost every call site wants.
@@ -570,7 +486,7 @@ impl VegTags {
 /// Unit 7 owns, and the coordinate-space bug recorded in [`VegGrid`]'s own doc
 /// comment is reason enough not to grow its responsibilities.
 pub(super) fn tag_at(grid: &VegGrid, tags: &VegTags, tag: Tag, x: i32, y: i32, z: i32) -> bool {
-    tags.has(grid.interner(), tag, grid.get_id(x, y, z))
+    tags.has(tag, grid.get_id(x, y, z))
 }
 
 thread_local! {
@@ -585,7 +501,7 @@ thread_local! {
     /// `thread_local!` allocates on first touch, which the allocation gate would
     /// then count.
     static FAST: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    /// Queries that fell back to the string path.
+    /// Queries that arrived before the id was bound.
     static SLOW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
@@ -640,22 +556,16 @@ mod tests {
         }
     }
 
-    /// The bitset and the string path must answer identically for every state the
-    /// table has bound — and the *control* is that they must also answer
-    /// identically for an id past the watermark, which exercises the fallback.
-    ///
-    /// This is the differential gate for the whole file: a wrong `member` arm, a
-    /// wrong `slot()`, or an off-by-one in the watermark all show up here as a
-    /// disagreement between two implementations of one question.
+    /// The bitset must answer the same membership questions as the canonical
+    /// state metadata for every generated state it covers.
     #[test]
-    fn the_bitset_answers_what_the_string_path_answers() {
-        let interner = StateInterner::new();
+    fn the_bitset_answers_canonical_state_membership() {
         let mut tags = VegTags::default();
-        tags.logs.insert("minecraft:oak_log".to_string());
-        tags.logs.insert("minecraft:acacia_log".to_string());
-        tags.replaceable_by_trees.insert("minecraft:short_grass".to_string());
-        tags.supports_vegetation.insert("minecraft:grass_block".to_string());
-        tags.leaves.insert("minecraft:oak_leaves".to_string());
+        tags.logs.insert(Block::OakLog);
+        tags.logs.insert(Block::AcaciaLog);
+        tags.replaceable_by_trees.insert(Block::ShortGrass);
+        tags.supports_vegetation.insert(Block::GrassBlock);
+        tags.leaves.insert(Block::OakLeaves);
 
         let names = [
             "minecraft:oak_log[axis=y]",
@@ -672,148 +582,52 @@ mod tests {
             "minecraft:cactus[age=0]",
             "minecraft:sugar_cane",
         ];
-        let ids: Vec<StateId> = names.iter().map(|n| interner.id_of(n)).collect();
+        let ids: Vec<StateId> = names
+            .iter()
+            .map(|name| StateId::from_state_str(name).expect("test state is generated"))
+            .collect();
 
-        tags.bind(&interner);
+        tags.bind();
         assert!(
-            tags.id_tags.resolved.load(Ordering::Relaxed) >= ids.len(),
-            "bind must cover every id interned before it ran"
+            tags.id_tags.bound.load(Ordering::Relaxed),
+            "bind must publish the canonical state masks"
         );
 
         reset_counts();
         for (name, &id) in names.iter().zip(&ids) {
-            let base = base_id(name);
+            let block = id.block();
             for tag in Tag::ALL.iter().copied() {
                 assert_eq!(
-                    tags.has(&interner, tag, id),
-                    tags.member(tag, base),
-                    "bitset and string path disagree for {name:?} on {tag:?}"
+                    tags.has(tag, id),
+                    tags.member(tag, block),
+                    "bitset membership disagrees for {name:?} on {tag:?}"
                 );
             }
         }
         assert_eq!(
             slow_hits(), 0,
-            "every id above was interned before bind, so none may take the fallback"
+            "every id above was queried after the canonical masks were bound"
         );
         assert!(fast_hits() > 0, "the bitset path must actually have been used");
 
-        // Control for the fallback: an id minted AFTER bind is past the
-        // watermark, so it must take the string path -- and still answer right.
-        let late = interner.id_of("minecraft:oak_log[axis=z]");
-        reset_counts();
-        assert!(
-            tags.has(&interner, Tag::Logs, late),
-            "an id minted after bind must still resolve through the string path"
-        );
-        assert_eq!(slow_hits(), 1, "and it must be the fallback that answered it");
-        assert_eq!(fast_hits(), 0);
-
-        // ...and after a rebind the same id is on the fast path.
-        tags.bind(&interner);
-        reset_counts();
-        assert!(tags.has(&interner, Tag::Logs, late));
-        assert_eq!(fast_hits(), 1, "rebinding must promote the late id");
-        assert_eq!(slow_hits(), 0);
     }
 
-    /// Ids from a different interner are not comparable, so a rebind against one
-    /// must throw the old bits away rather than answer from them. Without the
-    /// clear, `oak_log`'s id in interner A could be `stone`'s in interner B and
-    /// the tag test would answer confidently wrong — the silent-wrong-value class.
     #[test]
-    fn binding_a_second_interner_discards_the_first_ones_bits() {
-        let a = StateInterner::new();
-        let mut tags = VegTags::default();
-        tags.logs.insert("minecraft:oak_log".to_string());
-        // In `a`, pad so that oak_log lands at some id > 0.
-        for pad in 0..5 {
-            let _ = a.id_of(&format!("minecraft:pad{pad}"));
-        }
-        let log_a = a.id_of("minecraft:oak_log");
-        tags.bind(&a);
-        assert!(tags.has(&a, Tag::Logs, log_a));
-
-        // A fresh interner where the SAME numeric id is a non-log.
-        let b = StateInterner::new();
-        let stone_b = b.id_of("minecraft:stone");
-        assert_eq!(
-            stone_b.index(),
-            1,
-            "air is 0, so the first state interned after it is 1 -- the fixture \
-             depends on this to make the ids collide"
-        );
-        let log_b = b.id_of("minecraft:oak_log");
-        tags.bind(&b);
-        assert!(tags.has(&b, Tag::Logs, log_b));
-        assert!(
-            !tags.has(&b, Tag::Logs, stone_b),
-            "stone must not inherit a log bit set for the same id in another interner"
-        );
-
-        // ...and the reverse direction, which `bind`'s clear-on-change does NOT
-        // cover: after binding to `b`, a query about `a`'s ids must fall back to
-        // the string path rather than read `b`'s bits. This is what `fast_ok`'s
-        // instance check buys.
-        reset_counts();
-        assert!(tags.has(&a, Tag::Logs, log_a));
-        assert_eq!(
-            slow_hits(), 1,
-            "a query against the interner that is NOT bound must take the string path"
-        );
-    }
-
-    /// The regression this file's worst bug left behind.
-    ///
-    /// One `VegTags` shared by two grids with two private interners — the exact
-    /// shape of `tree_placement_is_deterministic_across_two_independent_generators`
-    /// — must not let the first interner's rewritten id escape into the second.
-    /// Before the interner's instance id became part of the memo key, this
-    /// returned interner `a`'s `StateId` for interner `b` and `name_of` panicked
-    /// with "the len is 8 but the index is 10". Held here rather than only in that
-    /// distant test because the *mechanism* is local to this file.
-    #[test]
-    fn a_rewrite_never_escapes_the_interner_it_was_computed_in() {
+    fn a_rewrite_preserves_the_canonical_state_identity() {
         let tags = VegTags::default();
-        let leaf = "minecraft:oak_leaves[distance=7,persistent=false,waterlogged=false]";
-
-        let a = StateInterner::new();
-        // Pad `a` so the same state has different ids in the two interners; without
-        // this the bug would be invisible because the wrong id would be right.
-        for pad in 0..6 {
-            let _ = a.id_of(&format!("minecraft:pad{pad}"));
-        }
-        let leaf_a = a.id_of(leaf);
-        let out_a = tags
-            .rewrite(&a, leaf_a, Rewrite::Distance(3))
+        let leaf = StateId::from_state_str(
+            "minecraft:oak_leaves[distance=7,persistent=false,waterlogged=false]",
+        )
+        .expect("test state is generated");
+        let out = tags
+            .rewrite(leaf, Rewrite::Distance(3))
             .expect("a leaf state carries a distance property");
-
-        let b = StateInterner::new();
-        let leaf_b = b.id_of(leaf);
-        assert_ne!(
-            leaf_a.raw(),
-            leaf_b.raw(),
-            "the fixture needs the same state to have different ids in the two \
-             interners, or it cannot detect the leak"
-        );
-        let out_b = tags
-            .rewrite(&b, leaf_b, Rewrite::Distance(3))
-            .expect("a leaf state carries a distance property");
-
-        // The names must agree; the ids must not have been shared.
-        assert_eq!(a.name_of(out_a), b.name_of(out_b));
-        assert!(
-            a.name_of(out_a).contains("distance=3"),
-            "the rewrite must actually have changed the property, got {:?}",
-            a.name_of(out_a)
-        );
-        // The real assertion: `out_b` must be a valid id IN `b`. Before the fix
-        // this was `out_a`, an id past the end of `b`'s table.
-        assert!(
-            out_b.index() < b.len(),
-            "rewrite returned id {} for an interner holding only {} states — the \
-             first interner's id leaked",
-            out_b.index(),
-            b.len()
+        assert_eq!(out.block(), leaf.block());
+        assert_eq!(
+            Properties::from_state_id(out)
+                .get(PropertyKey::Distance)
+                .and_then(|value| value.builtin_value()),
+            Some(BuiltinPropertyValue::Value3),
         );
     }
 }

@@ -7,14 +7,16 @@
 //! parent configured-feature dispatcher; this module must not create a second
 //! feature-routing path or re-seed the caller's generator.
 
-use std::collections::HashSet;
+use lodestone_worldgen_core::hash::FastSet;
+use lodestone_data::block_states::StateId;
 
 use crate::feature::BlockPos;
 use crate::rng::RandomSource;
 
 use super::config::{
-    BlockPredicate, BlockStateProvider, PlacedRef, VegTags, blocks_motion, is_air, is_fluid,
+    BlockPredicate, BlockStateProvider, PlacedRef, VegTags,
 };
+use super::ids::Tag;
 use super::grid::VegGrid;
 
 /// Parsed configuration for the cave root-column feature.
@@ -29,7 +31,7 @@ pub struct RootSystemCfg {
     pub level_test_distance: i32,
     pub max_level_deviation: i32,
     pub root_radius: i32,
-    pub root_replaceable: HashSet<String>,
+    pub root_replaceable: FastSet<StateId>,
     pub root_state_provider: BlockStateProvider,
     pub root_placement_attempts: i32,
     pub root_column_max_height: i32,
@@ -76,7 +78,8 @@ where
         return true;
     };
 
-    place_column_roots(random, origin, target_height, cfg, grid, tags);
+    let root_replaceable = cfg.root_replaceable.clone();
+    place_column_roots(random, origin, target_height, cfg, grid, tags, &root_replaceable);
     place_hanging_roots(random, origin, cfg, grid, tags);
     true
 }
@@ -114,7 +117,7 @@ where
             z: candidate.z,
         };
         let below_base = base_at(grid, below);
-        if below_base == "minecraft:lava" || !solid_at(grid, tags, below) {
+        if tags.has(Tag::Lava, below_base) || !solid_at(grid, tags, below) {
             return None;
         }
 
@@ -144,6 +147,7 @@ fn place_column_roots<R: RandomSource>(
     cfg: &RootSystemCfg,
     grid: &mut VegGrid,
     tags: &VegTags,
+    root_replaceable: &FastSet<StateId>,
 ) {
     for y in origin.y..target_height {
         for _ in 0..cfg.root_placement_attempts {
@@ -157,7 +161,7 @@ fn place_column_roots<R: RandomSource>(
                 z: origin.z + random.next_int_bounded(cfg.root_radius)
                     - random.next_int_bounded(cfg.root_radius),
             };
-            if !cfg.root_replaceable.contains(base_at(grid, pos)) {
+            if !root_replaceable.contains(&base_at(grid, pos)) {
                 continue;
             }
             if let Some(state) = cfg.root_state_provider.get_state_id(grid, tags, random, pos) {
@@ -211,11 +215,11 @@ fn place_hanging_roots<R: RandomSource>(
 fn hanging_state_can_survive(
     grid: &VegGrid,
     tags: &VegTags,
-    state: crate::interner::StateId,
+    state: StateId,
     pos: BlockPos,
 ) -> bool {
-    match super::base_id(grid.interner().name_of(state)) {
-        "minecraft:hanging_roots" => solid_at(
+    match state.block() {
+        lodestone_data::block::Block::HangingRoots => solid_at(
             grid,
             tags,
             BlockPos {
@@ -224,7 +228,7 @@ fn hanging_state_can_survive(
                 z: pos.z,
             },
         ),
-        "minecraft:sulfur" => true,
+        lodestone_data::block::Block::Sulfur => true,
         _ => false,
     }
 }
@@ -236,7 +240,12 @@ fn space_for_nested_feature(pos: BlockPos, cfg: &RootSystemCfg, grid: &VegGrid) 
             y: pos.y + distance,
             z: pos.z,
         };
-        if !allowed_tree_space(base_at(grid, at), distance, cfg.allowed_vertical_water_for_tree) {
+        if !allowed_tree_space(
+            grid,
+            grid.get_id(at.x, at.y, at.z),
+            distance,
+            cfg.allowed_vertical_water_for_tree,
+        ) {
             return false;
         }
     }
@@ -268,35 +277,63 @@ fn space_for_nested_feature(pos: BlockPos, cfg: &RootSystemCfg, grid: &VegGrid) 
     true
 }
 
-fn allowed_tree_space(base: &str, distance: i32, allowed_water_height: i32) -> bool {
-    is_air(base)
-        || (distance + 1 <= allowed_water_height && (base == "minecraft:water"))
+fn allowed_tree_space(
+    grid: &VegGrid,
+    state: StateId,
+    distance: i32,
+    allowed_water_height: i32,
+) -> bool {
+    tags_for_grid(grid, Tag::Air, state)
+        || (distance + 1 <= allowed_water_height && tags_for_grid(grid, Tag::Water, state))
 }
 
-fn base_at(grid: &VegGrid, pos: BlockPos) -> &str {
-    super::base_id(grid.get(pos.x, pos.y, pos.z))
+fn tags_for_grid(_grid: &VegGrid, tag: Tag, state: StateId) -> bool {
+    // Root placement has no separate tag table at this helper boundary; these
+    // built-in identities are exact canonical block-state facts.
+    match tag {
+        Tag::Air => matches!(
+            state.block(),
+            lodestone_data::block::Block::Air
+                | lodestone_data::block::Block::CaveAir
+                | lodestone_data::block::Block::VoidAir
+        ),
+        Tag::Water => state.block() == lodestone_data::block::Block::Water,
+        Tag::Lava => state.block() == lodestone_data::block::Block::Lava,
+        Tag::Fluid => matches!(
+            state.block(),
+            lodestone_data::block::Block::Water | lodestone_data::block::Block::Lava
+        ),
+        _ => false,
+    }
+}
+
+fn base_at(grid: &VegGrid, pos: BlockPos) -> StateId {
+    grid.get_id(pos.x, pos.y, pos.z).block().default_state()
 }
 
 fn air_at(grid: &VegGrid, pos: BlockPos) -> bool {
-    is_air(base_at(grid, pos))
+    tags_for_grid(grid, Tag::Air, grid.get_id(pos.x, pos.y, pos.z))
 }
 
 /// The root column's support and hanging-root ceiling both need a full solid
 /// surface. Production tags carry the exact per-state solidity predicate;
 /// compact fixtures without that census use the base-id motion approximation.
 fn solid_at(grid: &VegGrid, tags: &VegTags, pos: BlockPos) -> bool {
-    let state = grid.get(pos.x, pos.y, pos.z);
+    let state = grid.get_id(pos.x, pos.y, pos.z);
     if !tags.solid.is_empty() {
-        tags.solid.test(state)
+        tags.solid.test_id(state)
     } else {
-        let base = super::base_id(state);
-        !is_air(base) && !is_fluid(base) && blocks_motion(base)
+        !tags_for_grid(grid, Tag::Air, state)
+            && !tags_for_grid(grid, Tag::Fluid, state)
+            && lodestone_data::block_solidity::blocks_motion(state)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, HashSet};
+    use std::collections::BTreeMap;
+
+    use lodestone_data::block::Block;
 
     use crate::LegacyRandomSource;
     use crate::feature::BlockPos;
@@ -304,25 +341,29 @@ mod tests {
     use super::*;
     use super::super::config::{BlockPredicate, BlockStateProvider, ConfiguredFeature, PlacedRef};
 
-    fn fixture_grid(origin_state: &str) -> VegGrid {
+    fn state(value: &str) -> StateId {
+        StateId::from_state_str(value).expect("fixture state is in the generated table")
+    }
+
+    fn fixture_grid(origin_state: StateId) -> VegGrid {
         fixture_grid_at(0, origin_state)
     }
 
-    fn fixture_grid_at(origin_x: i32, origin_state: &str) -> VegGrid {
+    fn fixture_grid_at(origin_x: i32, origin_state: StateId) -> VegGrid {
         let mut grid = VegGrid::with_footprint(-64, 384, 0, 0, -16, 32);
         for x in -16..32 {
             for y in -64..=64 {
                 for z in -16..32 {
-                    grid.seed(x, y, z, "minecraft:stone".to_string());
+                    grid.seed_id(x, y, z, Block::Stone.default_state());
                 }
             }
         }
         for x in origin_x - 3..=origin_x + 3 {
             for z in -3..=3 {
-                grid.seed(x, 62, z, "minecraft:air".to_string());
+                grid.seed_id(x, 62, z, StateId::AIR);
             }
         }
-        grid.seed(origin_x, 63, 0, origin_state.to_string());
+        grid.seed_id(origin_x, 63, 0, origin_state);
         grid
     }
 
@@ -331,36 +372,34 @@ mod tests {
             feature: PlacedRef {
                 registry_id: None,
                 placements: Vec::new(),
-                feature: Box::new(ConfiguredFeature::SimpleBlock(BlockStateProvider::Simple(
-                    "minecraft:oak_log".to_string(),
+                feature: Box::new(ConfiguredFeature::SimpleBlock(BlockStateProvider::simple(
+                    "minecraft:oak_log",
                 ))),
             },
             required_vertical_space_for_tree: 3,
             level_test_distance: 0,
             max_level_deviation: 0,
             root_radius: 3,
-            root_replaceable: HashSet::from(["minecraft:stone".to_string()]),
-            root_state_provider: BlockStateProvider::Simple("minecraft:rooted_dirt".to_string()),
+            root_replaceable: [Block::Stone.default_state()].into_iter().collect(),
+            root_state_provider: BlockStateProvider::simple("minecraft:rooted_dirt"),
             root_placement_attempts: 20,
             root_column_max_height: 8,
             hanging_root_radius: 3,
             hanging_roots_vertical_span: 2,
-            hanging_root_state_provider: BlockStateProvider::Simple(
-                "minecraft:hanging_roots".to_string(),
-            ),
+            hanging_root_state_provider: BlockStateProvider::simple("minecraft:hanging_roots"),
             hanging_root_placement_attempts: 20,
             allowed_vertical_water_for_tree: 2,
             allowed_tree_position: BlockPredicate::MatchingBlocks {
-                blocks: vec!["minecraft:air".to_string()],
+                blocks: [Block::Air].into_iter().collect(),
                 offset: (0, 0, 0),
             },
         }
     }
 
-    fn fixture_tags(grid: &VegGrid) -> VegTags {
+    fn fixture_tags() -> VegTags {
         let mut tags = VegTags::default();
-        tags.supports_vegetation.insert("minecraft:stone".to_string());
-        tags.bind(grid.interner());
+        tags.supports_vegetation.insert(Block::Stone);
+        tags.bind();
         tags
     }
 
@@ -374,7 +413,10 @@ mod tests {
                 let row = words.next()?;
                 let pos = words.next()?;
                 let state = words.next()?;
-                (row == "normal").then_some((pos.to_string(), state.to_string()))
+                (row == "normal").then_some((
+                    pos.to_string(),
+                    StateId::from_state_str(state).expect("fixture state is in the generated table"),
+                ))
             })
             .collect();
         assert!(
@@ -382,8 +424,8 @@ mod tests {
             "external fixture must exercise a hanging root below the root column"
         );
 
-        let mut grid = fixture_grid("minecraft:air");
-        let tags = fixture_tags(&grid);
+        let mut grid = fixture_grid(StateId::AIR);
+        let tags = fixture_tags();
         let mut random = LegacyRandomSource::new(19);
         let result = place_root_system(
             &mut random,
@@ -392,12 +434,12 @@ mod tests {
             &mut grid,
             &tags,
             |_, pos, _, grid, _| {
-                grid.set_state_if_in_bounds(pos.x, pos.y, pos.z, "minecraft:oak_log");
+                grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state("minecraft:oak_log"));
             },
         );
         let got: BTreeMap<_, _> = grid
             .dirty_cells()
-            .map(|(x, y, z, state)| (format!("{x},{y},{z}"), state.to_string()))
+            .map(|(x, y, z, state)| (format!("{x},{y},{z}"), state))
             .collect();
         assert!(result);
         assert_eq!(got, expected, "root-system placement diverged from the external prediction");
@@ -410,8 +452,8 @@ mod tests {
             fixture.contains("blocked 0,63,0 minecraft:stone"),
             "external fixture must retain the occupied-origin negative control"
         );
-        let mut grid = fixture_grid("minecraft:stone");
-        let tags = fixture_tags(&grid);
+        let mut grid = fixture_grid(Block::Stone.default_state());
+        let tags = fixture_tags();
         let mut random = LegacyRandomSource::new(19);
         let mut nested_calls = 0;
         assert!(!place_root_system(
@@ -429,8 +471,8 @@ mod tests {
 
     #[test]
     fn root_writes_cross_the_source_chunk_edge_when_the_region_owns_the_neighbour() {
-        let mut grid = fixture_grid_at(15, "minecraft:air");
-        let tags = fixture_tags(&grid);
+        let mut grid = fixture_grid_at(15, StateId::AIR);
+        let tags = fixture_tags();
         let mut random = LegacyRandomSource::new(19);
         assert!(place_root_system(
             &mut random,
@@ -439,7 +481,7 @@ mod tests {
             &mut grid,
             &tags,
             |_, pos, _, grid, _| {
-                grid.set_state_if_in_bounds(pos.x, pos.y, pos.z, "minecraft:oak_log");
+                grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state("minecraft:oak_log"));
             },
         ));
         assert!(
@@ -450,26 +492,26 @@ mod tests {
 
     #[test]
     fn failed_nested_candidate_retries_on_the_same_random_stream() {
-        let mut grid = fixture_grid("minecraft:air");
+        let mut grid = fixture_grid(StateId::AIR);
         // Candidate y=64 is intentionally rejected by the configured
         // predicate. Candidate y=65 is viable but its nested feature returns
         // no writes. Candidate y=66 is viable and succeeds, proving that a
         // failed nested attempt does not terminate the vertical scan.
-        grid.seed(0, 64, 0, "minecraft:dirt".to_string());
-        grid.seed(0, 65, 0, "minecraft:stone".to_string());
-        grid.seed(0, 66, 0, "minecraft:air".to_string());
-        grid.seed(0, 67, 0, "minecraft:air".to_string());
-        grid.seed(0, 68, 0, "minecraft:stone".to_string());
+        grid.seed_id(0, 64, 0, state("minecraft:dirt"));
+        grid.seed_id(0, 65, 0, Block::Stone.default_state());
+        grid.seed_id(0, 66, 0, StateId::AIR);
+        grid.seed_id(0, 67, 0, StateId::AIR);
+        grid.seed_id(0, 68, 0, Block::Stone.default_state());
 
         let mut cfg = fixture_cfg();
         cfg.root_column_max_height = 8;
         cfg.allowed_tree_position = BlockPredicate::AnyOf(vec![
             BlockPredicate::MatchingBlocks {
-                blocks: vec!["minecraft:stone".to_string()],
+                blocks: [Block::Stone].into_iter().collect(),
                 offset: (0, 0, 0),
             },
             BlockPredicate::MatchingBlocks {
-                blocks: vec!["minecraft:air".to_string()],
+                blocks: [Block::Air].into_iter().collect(),
                 offset: (0, 0, 0),
             },
         ]);
@@ -477,7 +519,7 @@ mod tests {
         cfg.root_placement_attempts = 0;
         cfg.hanging_root_placement_attempts = 0;
 
-        let tags = fixture_tags(&grid);
+        let tags = fixture_tags();
         let mut random = LegacyRandomSource::new(7);
         let mut expected_random = LegacyRandomSource::new(7);
         let expected_draws = [expected_random.next_int(), expected_random.next_int()];
@@ -493,13 +535,16 @@ mod tests {
                 callback_positions.push(pos.y);
                 callback_draws.push(random.next_int());
                 if pos.y == 66 {
-                    grid.set_state_if_in_bounds(pos.x, pos.y, pos.z, "minecraft:oak_log");
+                    grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state("minecraft:oak_log"));
                 }
             },
         ));
         assert_eq!(callback_positions, [65, 66]);
         assert_eq!(callback_draws, expected_draws);
         assert_eq!(random.next_int(), expected_random.next_int());
-        assert_eq!(grid.get(0, 66, 0), "minecraft:oak_log");
+        assert_eq!(
+            grid.get(0, 66, 0),
+            state("minecraft:oak_log")
+        );
     }
 }

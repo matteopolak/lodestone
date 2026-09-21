@@ -130,24 +130,28 @@ pub fn react_at_placement_with_entities<Q: ScheduledTickQueueAccess<ScheduledTic
             // `checkPoweredState` its `neighborChanged` does, so a hopper placed
             // into an already-powered cell must come up locked. The
             // neighbour pass cannot do this: it never notifies the origin.
-            if redstone::is_hopper(&state) {
+            if redstone::is_hopper(state) {
                 let should_be_on =
                     redstone::best_neighbor_signal(&redstone::make_columns_lookup(&columns), pos, false) == 0;
-                if should_be_on != redstone::hopper_enabled(&state) {
-                    let new_state = redstone::with_property(&state, "enabled", if should_be_on { "true" } else { "false" });
-                    columns.set_block(pos, &new_state);
-                    own.push(RandomTickEvent { pos: (x, y, z), from: state.to_string(), to: new_state });
+                if should_be_on != redstone::hopper_enabled(state) {
+                    let new_state = redstone::with_property(
+                        state,
+                        PropertyKey::Enabled,
+                        PropertyValue::builtin(if should_be_on { BuiltinPropertyValue::True } else { BuiltinPropertyValue::False }),
+                    ).expect("hopper enabled property is a generated state");
+                    columns.set_block(pos, new_state);
+                    own.push(RandomTickEvent { pos: (x, y, z), from: state, to: new_state });
                 }
             }
-            let placed_kind = if redstone::is_repeater(&state) {
-                let facing = redstone::diode_facing(&state);
+            let placed_kind = if redstone::is_repeater(state) {
+                let facing = redstone::diode_facing(state);
                 redstone_diode::repeater_should_turn_on(&redstone::make_columns_lookup(&columns), pos, facing)
                     .then_some(ScheduledTickKind::Repeater)
-            } else if redstone::is_comparator(&state) {
-                let facing = redstone::diode_facing(&state);
+            } else if redstone::is_comparator(state) {
+                let facing = redstone::diode_facing(state);
                 let input = redstone::input_signal(&redstone::make_columns_lookup(&columns), pos, facing);
                 let side = redstone::alternate_signal(&redstone::make_columns_lookup(&columns), pos, facing, false);
-                let subtract = redstone::comparator_mode_subtract(&state);
+                let subtract = redstone::comparator_mode_subtract(state);
                 redstone_diode::comparator_should_turn_on(input, side, subtract)
                     .then_some(ScheduledTickKind::Comparator)
             } else {
@@ -165,7 +169,7 @@ pub fn react_at_placement_with_entities<Q: ScheduledTickQueueAccess<ScheduledTic
             // because every later tick comes from the previous one's reschedule.
             // This is the same "the placed block owes itself a reaction the
             // neighbour pass cannot deliver" case as the hopper above.
-            if crate::fire::is_ordinary_fire(&state) {
+            if crate::fire::is_ordinary_fire_id(state) {
                 for pending in crate::fire::ticks_after_edit(pos) {
                     if !block_ticks.has_scheduled(pending.pos, &pending.kind) {
                         block_ticks.schedule(
@@ -183,15 +187,15 @@ pub fn react_at_placement_with_entities<Q: ScheduledTickQueueAccess<ScheduledTic
             // owes itself a reaction the neighbour pass cannot deliver" shape as the
             // hopper arm above. `crate::redstone_rail`'s own module doc names why
             // only `POWERED` (not `SHAPE`/connectivity) is modelled.
-            if redstone_rail::is_powered_rail_family(&state) {
+            if redstone_rail::is_powered_rail_family(state) {
                 let new_state = {
                     let lookup = redstone::make_columns_lookup(&columns);
                     let has_signal = |p: BlockPos| redstone::best_neighbor_signal(&lookup, p, false) > 0;
-                    redstone_rail::update_state(&lookup, &has_signal, pos, &state)
+                    redstone_rail::update_state(&lookup, &has_signal, pos, state)
                 };
                 if let Some(new_state) = new_state {
-                    columns.set_block(pos, &new_state);
-                    own.push(RandomTickEvent { pos: (x, y, z), from: state.to_string(), to: new_state });
+                    columns.set_block(pos, new_state);
+                    own.push(RandomTickEvent { pos: (x, y, z), from: state, to: new_state });
                 }
             }
             // `TripWireHookBlock.setPlacedBy` (`:104-106`) calls `calculateState`
@@ -199,29 +203,29 @@ pub fn react_at_placement_with_entities<Q: ScheduledTickQueueAccess<ScheduledTic
             // all — see `crate::redstone_tripwire`'s own module doc for why this
             // family lives in `react_at_placement` rather than
             // `react_to_notification`.
-            if redstone::is_tripwire_hook(&state) {
+            if redstone::is_tripwire_hook(state) {
                 let result = {
                     let lookup = redstone::make_columns_lookup(&columns);
-                    redstone_tripwire::calculate_state(&lookup, pos, &state, false, None)
+                    redstone_tripwire::calculate_state(&lookup, pos, state, false, None)
                 };
                 apply_tripwire_result(&columns, &result, &mut own);
             }
             // `TripWireBlock.onPlace` (`:101-105`) calls `updateSource`, which
             // scans south/west for a controlling hook and recalculates *that*
             // hook's state with this wire cell as its `wireSource`.
-            if base_name(&state) == redstone_tripwire::TRIPWIRE {
+            if state.block() == Block::Tripwire {
                 let found = {
                     let lookup = redstone::make_columns_lookup(&columns);
-                    redstone_tripwire::find_controlling_hooks(&lookup, pos, &state)
+                    redstone_tripwire::find_controlling_hooks(&lookup, pos, state)
                 };
                 for (hook_pos, source) in found {
                     let hook_state = redstone::make_columns_lookup(&columns)(hook_pos);
-                    if base_name(&hook_state) != redstone_tripwire::TRIPWIRE_HOOK {
+                    if hook_state.block() != Block::TripwireHook {
                         continue;
                     }
                     let result = {
                         let lookup = redstone::make_columns_lookup(&columns);
-                        redstone_tripwire::calculate_state(&lookup, hook_pos, &hook_state, false, Some(&source))
+                        redstone_tripwire::calculate_state(&lookup, hook_pos, hook_state, false, Some(&source))
                     };
                     apply_tripwire_result(&columns, &result, &mut own);
                     if result.reschedule_recheck
@@ -259,7 +263,7 @@ fn apply_tripwire_result(
     result: &redstone_tripwire::CalculatedState,
     own: &mut Vec<RandomTickEvent>,
 ) {
-    let mut writes: Vec<(BlockPos, String)> = Vec::new();
+    let mut writes: Vec<(BlockPos, StateId)> = Vec::new();
     if let Some(w) = &result.hook_write {
         writes.push(w.clone());
     }
@@ -273,13 +277,13 @@ fn apply_tripwire_result(
             continue;
         }
         let from = columns.raw_state(pos);
-        if from.as_ref() == new_state {
+        if from == new_state {
             continue;
         }
-        columns.set_block(pos, &new_state);
+        columns.set_block(pos, new_state);
         own.push(RandomTickEvent {
             pos: (pos.x, pos.y, pos.z),
-            from: from.to_string(),
+            from,
             to: new_state,
         });
     }
@@ -309,12 +313,12 @@ pub(crate) fn run_tripwire_recheck(
         return Vec::new();
     }
     let state = columns.raw_state(pos);
-    if base_name(&state) != redstone_tripwire::TRIPWIRE_HOOK {
+    if state.block() != Block::TripwireHook {
         return Vec::new();
     }
     let result = {
         let lookup = redstone::make_columns_lookup(&columns);
-        redstone_tripwire::calculate_state(&lookup, pos, &state, false, None)
+        redstone_tripwire::calculate_state(&lookup, pos, state, false, None)
     };
     let mut own = Vec::new();
     apply_tripwire_result(&columns, &result, &mut own);
@@ -342,12 +346,12 @@ pub(crate) fn react_at_removal<Q: ScheduledTickQueueAccess<ScheduledTickKind> + 
     x: i32,
     y: i32,
     z: i32,
-    wire_state_before_removal: &str,
+    wire_state_before_removal: StateId,
     block_ticks: &mut Q,
     current_tick: u64,
 ) -> Vec<RandomTickEvent> {
     let mut own = Vec::new();
-    if base_name(wire_state_before_removal) != redstone_tripwire::TRIPWIRE {
+    if wire_state_before_removal.block() != Block::Tripwire {
         return own;
     }
     let pos = BlockPos::new(x, y, z);
@@ -363,12 +367,12 @@ pub(crate) fn react_at_removal<Q: ScheduledTickQueueAccess<ScheduledTickKind> + 
     };
     for (hook_pos, source) in found {
         let hook_state = redstone::make_columns_lookup(&columns)(hook_pos);
-        if base_name(&hook_state) != redstone_tripwire::TRIPWIRE_HOOK {
+        if hook_state.block() != Block::TripwireHook {
             continue;
         }
         let result = {
             let lookup = redstone::make_columns_lookup(&columns);
-            redstone_tripwire::calculate_state(&lookup, hook_pos, &hook_state, false, Some(&source))
+            redstone_tripwire::calculate_state(&lookup, hook_pos, hook_state, false, Some(&source))
         };
         apply_tripwire_result(&columns, &result, &mut own);
         if result.reschedule_recheck
@@ -403,7 +407,7 @@ pub(crate) fn react_at_removal<Q: ScheduledTickQueueAccess<ScheduledTickKind> + 
 /// stays a wrapped `&mut` reference instead — behind a `RefCell` only so a
 /// read closure built from a shared `&RedstoneColumns` (the shape every
 /// `redstone::*`/`redstone_wire::*`/… signal-computation function already
-/// requires: `F: Fn(BlockPos) -> String`) can still reach it.
+/// requires: `F: Fn(BlockPos) -> StateId`) can still reach it.
 ///
 /// # The residency boundary
 ///
@@ -505,25 +509,25 @@ impl<'h, 'w> RedstoneColumns<'h, 'w> {
         if self.is_home(key) {
             let home = self.home.borrow();
             if pos.y < home.min_y || pos.y >= home.min_y + home.height {
-                return crate::chunk::air_state_arc();
+                return lodestone_data::block_states::air_state();
             }
             if counted {
                 crate::redstone_counters::bump_cell_read();
             }
-            return home.block_state_arc(pos.x - self.home_cx * 16, pos.y, pos.z - self.home_cz * 16);
+            return home.block_state_id(pos.x - self.home_cx * 16, pos.y, pos.z - self.home_cz * 16);
         }
         if !self.ensure(key) {
-            return crate::chunk::air_state_arc();
+            return lodestone_data::block_states::air_state();
         }
         let neighbors = self.neighbors.borrow();
         let col = &neighbors[&key];
         if pos.y < col.min_y || pos.y >= col.min_y + col.height {
-            return crate::chunk::air_state_arc();
+            return lodestone_data::block_states::air_state();
         }
         if counted {
             crate::redstone_counters::bump_cell_read();
         }
-        col.block_state_arc(pos.x - key.0 * 16, pos.y, pos.z - key.1 * 16)
+        col.block_state_id(pos.x - key.0 * 16, pos.y, pos.z - key.1 * 16)
     }
 
     /// The palette-derived reaction classification at `pos` (see
@@ -555,14 +559,14 @@ impl<'h, 'w> RedstoneColumns<'h, 'w> {
     /// writes nothing) for a position that is not reachable, or outside its
     /// column's build-height range — the same "the write cannot happen"
     /// outcome the old bounds check produced by skipping the write.
-    pub(crate) fn set_block(&self, pos: BlockPos, new_state: &str) -> bool {
+    pub(crate) fn set_block(&self, pos: BlockPos, new_state: StateId) -> bool {
         let key = Self::key_of(pos);
         if self.is_home(key) {
             let mut home = self.home.borrow_mut();
             if pos.y < home.min_y || pos.y >= home.min_y + home.height {
                 return false;
             }
-            home.set_block(pos.x - self.home_cx * 16, pos.y, pos.z - self.home_cz * 16, new_state);
+            home.set_block_id(pos.x - self.home_cx * 16, pos.y, pos.z - self.home_cz * 16, new_state);
             return true;
         }
         if !self.ensure(key) {
@@ -573,7 +577,7 @@ impl<'h, 'w> RedstoneColumns<'h, 'w> {
         if pos.y < col.min_y || pos.y >= col.min_y + col.height {
             return false;
         }
-        col.set_block(pos.x - key.0 * 16, pos.y, pos.z - key.1 * 16, new_state);
+        col.set_block_id(pos.x - key.0 * 16, pos.y, pos.z - key.1 * 16, new_state);
         true
     }
 }
@@ -602,13 +606,13 @@ impl ChunkSource for NoNeighbors {
     fn column(&self, _cx: i32, _cz: i32) -> crate::chunk::ChunkColumn {
         unreachable!("NoNeighbors::is_column_resident is always false, so RedstoneColumns never calls this")
     }
-    fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+    fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
         unreachable!("NoNeighbors::is_column_resident is always false, so RedstoneColumns never calls this")
     }
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
         unreachable!("NoNeighbors::is_column_resident is always false, so RedstoneColumns never calls this")
     }
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
         unreachable!("NoNeighbors::is_column_resident is always false, so RedstoneColumns never calls this")
     }
     fn is_column_resident(&self, _cx: i32, _cz: i32) -> bool {
@@ -729,7 +733,7 @@ fn propagate_and_react_over<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Si
     // there (origin somehow outside every loaded column) reads
     // `"minecraft:air"`, which is never a wire, so `origin_is_wire` is
     // `false` exactly as the old bounds check produced by construction.
-    let origin_is_wire = redstone::is_wire(&columns.raw_state(origin));
+    let origin_is_wire = redstone::is_wire(columns.raw_state(origin));
     let centres = if origin_is_wire { wire_update_centres(origin) } else { vec![origin] };
 
     for centre in centres {
@@ -839,17 +843,17 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
         // further fan-out, hence the empty return.
         if class == crate::redstone_graph::ReactionClass::Snowy {
             let above = columns.raw_state(Direction::Up.relative(n.pos));
-            let want_snowy = is_snowy_setting(&above);
+            let want_snowy = is_snowy_setting_id(above);
             // Compared on the *value*, not on the whole string: a property-less
             // `minecraft:grass_block` already means the default, `snowy=false`,
             // so this rewrites only when the value really has to flip.
-            if (property_of(&state, "snowy") == Some("true")) != want_snowy {
-                let want = spreading_snowy_state(base_name(&state), &above);
+            if (redstone::property_bool(state, PropertyKey::Snowy).unwrap_or(false)) != want_snowy {
+                let want = spreading_snowy_state_id(state.block(), above);
                 columns.set_block(n.pos, want);
                 events.push(RandomTickEvent {
                     pos: (n.pos.x, n.pos.y, n.pos.z),
-                    from: state.to_string(),
-                    to: want.to_string(),
+                    from: state,
+                    to: want,
                 });
             }
             return Vec::new();
@@ -860,11 +864,11 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
             crate::redstone_counters::bump_reaction(crate::redstone_counters::ReactionKind::Dust);
             crate::redstone_counters::bump_wire_recompute();
             let new_power = redstone_wire::calculate_target_strength(&redstone::make_columns_lookup(columns), n.pos);
-            let old_power = redstone::wire_power(&state);
+            let old_power = redstone::wire_power(state);
             if new_power != old_power {
                 let new_state = redstone_wire::set_power(new_power);
-                columns.set_block(n.pos, &new_state);
-                events.push(RandomTickEvent { pos: (n.pos.x, n.pos.y, n.pos.z), from: state.to_string(), to: new_state });
+                columns.set_block(n.pos, new_state);
+                events.push(RandomTickEvent { pos: (n.pos.x, n.pos.y, n.pos.z), from: state, to: new_state });
                 return wire_update_fan_out(n.pos);
             }
             return Vec::new();
@@ -873,8 +877,8 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
         // 3a. Redstone torches.
         if class == crate::redstone_graph::ReactionClass::Torch {
             crate::redstone_counters::bump_reaction(crate::redstone_counters::ReactionKind::Torch);
-            let has_signal = redstone_torch::has_neighbor_signal(&redstone::make_columns_lookup(columns), n.pos, &state);
-            if redstone_torch::should_schedule_check(&state, has_signal) {
+            let has_signal = redstone_torch::has_neighbor_signal(&redstone::make_columns_lookup(columns), n.pos, state);
+            if redstone_torch::should_schedule_check(state, has_signal) {
                 if block_ticks.has_scheduled((n.pos.x, n.pos.y, n.pos.z), &ScheduledTickKind::Torch) {
                     crate::redstone_counters::bump_schedule_deduped();
                 } else {
@@ -893,15 +897,15 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
         // 3b. Repeaters.
         if class == crate::redstone_graph::ReactionClass::Repeater {
             crate::redstone_counters::bump_reaction(crate::redstone_counters::ReactionKind::Repeater);
-            let facing = redstone::diode_facing(&state);
-            let recomputed_lock = redstone_diode::recompute_locked(&redstone::make_columns_lookup(columns), n.pos, &state);
+            let facing = redstone::diode_facing(state);
+            let recomputed_lock = redstone_diode::recompute_locked(&redstone::make_columns_lookup(columns), n.pos, state);
             if let Some(new_state) = recomputed_lock {
-                columns.set_block(n.pos, &new_state);
-                events.push(RandomTickEvent { pos: (n.pos.x, n.pos.y, n.pos.z), from: state.to_string(), to: new_state });
+                columns.set_block(n.pos, new_state);
+                events.push(RandomTickEvent { pos: (n.pos.x, n.pos.y, n.pos.z), from: state, to: new_state });
             }
             let state_now = columns.raw_state(n.pos);
             let should_on = redstone_diode::repeater_should_turn_on(&redstone::make_columns_lookup(columns), n.pos, facing);
-            if redstone_diode::should_schedule_repeater_check(&state_now, should_on) {
+            if redstone_diode::should_schedule_repeater_check(state_now, should_on) {
                 if block_ticks.has_scheduled((n.pos.x, n.pos.y, n.pos.z), &ScheduledTickKind::Repeater) {
                     crate::redstone_counters::bump_schedule_deduped();
                 } else {
@@ -910,9 +914,9 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
                         &redstone::make_columns_lookup(columns),
                         n.pos,
                         facing,
-                        redstone::diode_powered(&state_now),
+                        redstone::diode_powered(state_now),
                     );
-                    let delay = redstone_diode::repeater_delay(&state_now);
+                    let delay = redstone_diode::repeater_delay(state_now);
                     block_ticks.schedule(
                         (n.pos.x, n.pos.y, n.pos.z),
                         ScheduledTickKind::Repeater,
@@ -947,12 +951,12 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
         // interrupted by a zero-tick pulse, and entity shoving is not modeled.
         // `crate::piston` documents both limitations.
         if class == crate::redstone_graph::ReactionClass::Piston {
-            let facing = crate::piston::piston_facing(&state);
-            let extended = crate::piston::piston_extended(&state);
+            let facing = crate::piston::piston_facing(state);
+            let extended = crate::piston::piston_extended(state);
             let want_extended =
                 crate::piston::has_extend_signal(&redstone::make_columns_lookup(columns), n.pos, facing);
             if want_extended != extended {
-                let sticky = crate::piston::is_sticky_piston(&state);
+                let sticky = crate::piston::is_sticky_piston(state);
 
                 // Finish a matching pending commit before applying a retraction.
                 // `PistonBaseBlock.triggerEvent`'s retract branch always looks at
@@ -982,12 +986,12 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
                             let write = crate::piston::interrupt(arm_pos, &entity);
                             if columns.reachable(write.pos) {
                                 let from = columns.raw_state(write.pos);
-                                if from.as_ref() != write.to {
-                                    columns.set_block(write.pos, &write.to);
+                                if from != write.to {
+                                    columns.set_block(write.pos, write.to);
                                     events.push(RandomTickEvent {
                                         pos: (write.pos.x, write.pos.y, write.pos.z),
-                                        from: from.to_string(),
-                                        to: write.to.clone(),
+                                        from,
+                                        to: write.to,
                                     });
                                     interrupt_fan_out.push(Notification { pos: write.pos, from: Direction::Down });
                                 }
@@ -1025,12 +1029,12 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
                         let write = crate::piston::interrupt(two_pos, &entity);
                         if columns.reachable(write.pos) {
                             let from = columns.raw_state(write.pos);
-                            if from.as_ref() != write.to {
-                                columns.set_block(write.pos, &write.to);
+                            if from != write.to {
+                                columns.set_block(write.pos, write.to);
                                 events.push(RandomTickEvent {
                                     pos: (write.pos.x, write.pos.y, write.pos.z),
-                                    from: from.to_string(),
-                                    to: write.to.clone(),
+                                    from,
+                                    to: write.to,
                                 });
                                 interrupt_fan_out.push(Notification { pos: write.pos, from: Direction::Down });
                             }
@@ -1075,20 +1079,20 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
                     want_extended,
                     sticky,
                 );
-                let start = crate::piston::begin_move(&writes, &state, n.pos, facing, want_extended);
+                let start = crate::piston::begin_move(&writes, state, n.pos, facing, want_extended);
 
                 // Destinations first, then the cells the run vacated, then the
                 // base's own immediate write — `apply_move`'s own order, kept
                 // because it is the order that never overwrites a block still
                 // waiting to move. Each entry carries the block entity to schedule,
                 // or `None` for a plain write.
-                let mut plan: Vec<(BlockPos, String, Option<crate::piston::MovingBlockEntity>)> =
+                let mut plan: Vec<(BlockPos, StateId, Option<crate::piston::MovingBlockEntity>)> =
                     Vec::with_capacity(start.moving.len() + start.cleared.len() + 1);
                 for (pos, moving_state, entity) in &start.moving {
                     plan.push((*pos, moving_state.clone(), Some(entity.clone())));
                 }
                 for pos in &start.cleared {
-                    plan.push((*pos, "minecraft:air".to_string(), None));
+                    plan.push((*pos, lodestone_data::block_states::air_state(), None));
                 }
                 if let Some(base_now) = &start.base_now {
                     plan.push((n.pos, base_now.clone(), None));
@@ -1122,13 +1126,13 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
                         );
                     }
                     let from = columns.raw_state(pos);
-                    if from.as_ref() == to {
+                    if from == to {
                         continue;
                     }
-                    columns.set_block(pos, &to);
+                    columns.set_block(pos, to);
                     events.push(RandomTickEvent {
                         pos: (pos.x, pos.y, pos.z),
-                        from: from.to_string(),
+                        from,
                         to,
                     });
                     fan_out.push(Notification { pos, from: Direction::Down });
@@ -1141,10 +1145,10 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
         // 3c. Comparators.
         if class == crate::redstone_graph::ReactionClass::Comparator {
             crate::redstone_counters::bump_reaction(crate::redstone_counters::ReactionKind::Comparator);
-            let facing = redstone::diode_facing(&state);
+            let facing = redstone::diode_facing(state);
             let input = redstone::input_signal(&redstone::make_columns_lookup(columns), n.pos, facing);
             let side = redstone::alternate_signal(&redstone::make_columns_lookup(columns), n.pos, facing, false);
-            if redstone_diode::should_schedule_comparator_check(&state, input, side) {
+            if redstone_diode::should_schedule_comparator_check(state, input, side) {
                 if block_ticks.has_scheduled((n.pos.x, n.pos.y, n.pos.z), &ScheduledTickKind::Comparator) {
                     crate::redstone_counters::bump_schedule_deduped();
                 } else {
@@ -1184,10 +1188,14 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
         if class == crate::redstone_graph::ReactionClass::Hopper {
             let should_be_on =
                 redstone::best_neighbor_signal(&redstone::make_columns_lookup(columns), n.pos, false) == 0;
-            if should_be_on != redstone::hopper_enabled(&state) {
-                let new_state = redstone::with_property(&state, "enabled", if should_be_on { "true" } else { "false" });
-                columns.set_block(n.pos, &new_state);
-                events.push(RandomTickEvent { pos: (n.pos.x, n.pos.y, n.pos.z), from: state.to_string(), to: new_state });
+            if should_be_on != redstone::hopper_enabled(state) {
+                let new_state = redstone::with_property(
+                    state,
+                    PropertyKey::Enabled,
+                    PropertyValue::builtin(if should_be_on { BuiltinPropertyValue::True } else { BuiltinPropertyValue::False }),
+                ).expect("hopper enabled property is a generated state");
+                columns.set_block(n.pos, new_state);
+                events.push(RandomTickEvent { pos: (n.pos.x, n.pos.y, n.pos.z), from: state, to: new_state });
             }
             return Vec::new();
         }
@@ -1195,8 +1203,8 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
         // 3d. Observers.
         if class == crate::redstone_graph::ReactionClass::Observer {
             crate::redstone_counters::bump_reaction(crate::redstone_counters::ReactionKind::Observer);
-            let watch = redstone_observer::watch_direction(&state);
-            if n.from == watch && redstone_observer::should_start_signal(&state) {
+            let watch = redstone_observer::watch_direction(state);
+            if n.from == watch && redstone_observer::should_start_signal(state) {
                 if block_ticks.has_scheduled((n.pos.x, n.pos.y, n.pos.z), &ScheduledTickKind::Observer) {
                     crate::redstone_counters::bump_schedule_deduped();
                 } else {
@@ -1226,17 +1234,17 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
             let has_signal = redstone_openable::has_neighbor_signal(
                 &redstone::make_columns_lookup(columns),
                 n.pos,
-                &state,
+                    state,
             );
-            if let Some(new_state) = redstone_openable::react(&state, has_signal) {
+            if let Some(new_state) = redstone_openable::react(state, has_signal) {
                 // Resolve the other door half before `state` is moved into
                 // the event below (this function has no `updateShape`, so the
                 // half-sync vanilla performs there is done right here).
-                let other_half = redstone_openable::other_door_half_pos(n.pos, &state);
-                columns.set_block(n.pos, &new_state);
+                let other_half = redstone_openable::other_door_half_pos(n.pos, state);
+                columns.set_block(n.pos, new_state);
                 events.push(RandomTickEvent {
                     pos: (n.pos.x, n.pos.y, n.pos.z),
-                    from: state.to_string(),
+                    from: state,
                     to: new_state,
                 });
                 // A door occupies two cells; both halves must flip together.
@@ -1247,12 +1255,12 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
                 if let Some(other) = other_half {
                     if columns.reachable(other) {
                         let other_state = columns.raw_state(other);
-                        if redstone_openable::is_door(&other_state) {
-                            if let Some(other_new) = redstone_openable::react(&other_state, has_signal) {
-                                columns.set_block(other, &other_new);
+                        if redstone_openable::is_door(other_state) {
+                            if let Some(other_new) = redstone_openable::react(other_state, has_signal) {
+                                columns.set_block(other, other_new);
                                 events.push(RandomTickEvent {
                                     pos: (other.x, other.y, other.z),
-                                    from: other_state.to_string(),
+                                    from: other_state,
                                     to: other_new,
                                 });
                             }
@@ -1274,14 +1282,14 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
                 let lookup = redstone::make_columns_lookup(columns);
                 let has_signal = redstone::best_neighbor_signal(&lookup, n.pos, false) > 0;
                 let above_state = lookup(Direction::Up.relative(n.pos));
-                (has_signal, is_air_variant(&above_state))
+                (has_signal, is_air_variant_id(above_state))
             };
-            if let Some(reaction) = redstone_note_block::on_neighbor_changed(&state, has_signal, above_is_air) {
-                columns.set_block(n.pos, &reaction.new_state);
+            if let Some(reaction) = redstone_note_block::on_neighbor_changed(state, has_signal, above_is_air) {
+                columns.set_block(n.pos, reaction.new_state);
                 events.push(RandomTickEvent {
                     pos: (n.pos.x, n.pos.y, n.pos.z),
-                    from: state.to_string(),
-                    to: reaction.new_state.to_string(),
+                    from: state,
+                    to: reaction.new_state,
                 });
             }
             return Vec::new();
@@ -1296,14 +1304,14 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
             let new_state = {
                 let lookup = redstone::make_columns_lookup(columns);
                 let has_signal = |p: BlockPos| redstone::best_neighbor_signal(&lookup, p, false) > 0;
-                redstone_rail::update_state(&lookup, &has_signal, n.pos, &state)
+                redstone_rail::update_state(&lookup, &has_signal, n.pos, state)
             };
             if let Some(new_state) = new_state {
-                columns.set_block(n.pos, &new_state);
-                let shape = redstone_rail::shape_of(&new_state);
+                columns.set_block(n.pos, new_state);
+                let shape = redstone_rail::shape_of(new_state);
                 events.push(RandomTickEvent {
                     pos: (n.pos.x, n.pos.y, n.pos.z),
-                    from: state.to_string(),
+                    from: state,
                     to: new_state,
                 });
                 if let Some(shape) = shape {
@@ -1324,12 +1332,12 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
                 redstone::best_neighbor_signal(&lookup, n.pos, false) > 0
                     || redstone::best_neighbor_signal(&lookup, Direction::Up.relative(n.pos), false) > 0
             };
-            if let Some(reaction) = redstone_dispenser::on_neighbor_changed(&state, should_trigger) {
-                columns.set_block(n.pos, &reaction.new_state);
+            if let Some(reaction) = redstone_dispenser::on_neighbor_changed(state, should_trigger) {
+                columns.set_block(n.pos, reaction.new_state);
                 events.push(RandomTickEvent {
                     pos: (n.pos.x, n.pos.y, n.pos.z),
-                    from: state.to_string(),
-                    to: reaction.new_state.to_string(),
+                    from: state,
+                    to: reaction.new_state,
                 });
                 if reaction.schedule_fire
                     && !block_ticks.has_scheduled(
@@ -1401,7 +1409,7 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
                     let lookup = redstone::make_columns_lookup(columns);
                     redstone::best_neighbor_signal(&lookup, n.pos, false) > 0
                 };
-                let mode = crate::command_block::mode_for_block(&state);
+                let mode = crate::command_block::mode_for_block(state);
                 let snapshot = block_entities.with(|reg| match reg.get(n.pos) {
                     Some(crate::block_entities::BlockEntity::CommandBlock(d)) => Some(d.clone()),
                     _ => None,
@@ -1419,7 +1427,7 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
                             // split between `markConditionMet` (called from
                             // `setPoweredAndUpdate`) and `wasConditionMet` (read
                             // later by `tick`).
-                            let conditional = crate::command_block::is_conditional(&state);
+                            let conditional = crate::command_block::is_conditional(state);
                             // The predecessor read reaches an already-loaded
                             // neighbour column exactly like every other read
                             // in this function: a conditional
@@ -1435,10 +1443,10 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
                             // ignores `predecessor_succeeded` unless
                             // `conditional` is true.
                             let predecessor_succeeded = conditional.then(|| {
-                                let behind = crate::command_block::facing(&state).opposite().relative(n.pos);
+                                let behind = crate::command_block::facing(state).opposite().relative(n.pos);
                                 if columns.reachable(behind) {
                                     let behind_state = columns.raw_state(behind);
-                                    crate::command_block::is_command_block_family(&behind_state)
+                                    crate::command_block::is_command_block_family(behind_state)
                                         && block_entities.with(|reg| {
                                             matches!(
                                                 reg.get(behind),

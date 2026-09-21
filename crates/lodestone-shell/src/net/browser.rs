@@ -374,6 +374,7 @@ pub(super) async fn launch_browser_worker(
     // wake a client read after startup. A MessagePort itself has no close event.
     let transport = lodestone_net::MessagePortTransport::new(page_port);
     let port_shutdown = transport.shutdown_handle();
+    let progress_started = crate::platform::Instant::now();
     let on_progress = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
         let value = event.data();
         if js_sys::Reflect::get(&value, &JsValue::from_str("kind"))
@@ -393,6 +394,7 @@ pub(super) async fn launch_browser_worker(
                     committed = progress.committed,
                     queue = progress.queue,
                     bytes = progress.bytes,
+                    elapsed_ms = progress_started.elapsed().as_secs_f64() * 1000.0,
                     "browser worldgen progress",
                 );
             }

@@ -41,6 +41,16 @@ OUTPUT products or packet snapshots. `ChunkStore` gates, pins, and admits that
 complete context. Adjacent targets share one request-owned replay product, so
 overlapping terrain prefixes and source-selection plans are prepared once.
 
+The Overworld materializer then creates one typed `RegionFeatureEpoch` from that
+already-prepared replay window. It owns the mutable feature overlay for the
+complete canonical target sequence, including sparse padding targets. Each
+target applies the epoch's prior writes before running its feature and top-layer
+passes, records new local and cross-column writes, and advances the same ordered
+overlay. Padding uses the same epoch but discards its dense working column
+without compacting it into a `ChunkColumn`; only sparse writes and entities
+needed by requested targets are retained. Nether, End, and fixture sources use
+the typed no-op hook and keep their existing scalar path.
+
 Settlement padding uses the explicit `LifecycleCompletionMode::SparsePadding`
 boundary. A padding writer still runs the mixed FEATURES stream followed by
 TOP_LAYER in order, but retains only final local writes, outward spills, and
@@ -53,6 +63,11 @@ are not folded into it. A generated `PacketNeighbour` owns that overlay and
 applies it once, lazily at its first `column()` or `into_column()` call, so
 repeated packet or light reads reuse the same materialized column and its
 incremental heightmaps.
+Once sparse settlement has completed the local mutable sequence, the region
+retains its generated prefix, overlay, and output sidecars as a compact
+terminal neighbour. A later request for that coordinate promotes this retained
+value instead of replaying FEATURES against an older frontier. Conversion to a
+`ChunkColumn` remains lazy and the retained value is evicted with its coordinate.
 Deferred future-target entries in the CARVERS read overlay are rolled back by
 the same transaction boundary, while sparse padding-local entries remain.
 
@@ -102,6 +117,12 @@ precedence path is used. Target-owned transactional writes into untouched
 generated neighbours remain ordered sparse overrides until a later consumer
 actually needs a mutable `ChunkColumn`; persistent, already-materialized, and
 source-ordered destinations still cross that boundary immediately.
+The same lease prepares the admitted structure-start and structure-reference
+sidecars before shaped columns are materialized. A bounded source-owned cache
+then lets lifecycle attachment and chest reconciliation consume those products
+without opening one scalar lease per target or referenced origin; edits and
+hydrated columns retain their existing precedence and may use the scalar
+fallback.
 
 The Overworld target-owned path can return its finished dense target column
 directly after FEATURES and top-layer work. The materializer adopts that
@@ -124,9 +145,12 @@ The generated resident map is request/region scoped and bounded by the
 admission halo. It preserves block access, stage identity, structures,
 heightmaps, sidecars, fingerprints, mutation transactions, and packet output
 through the existing materialization boundary; it is not a completed-column
-cache. This boundary also leaves room for a future producer to hand off
-section-aligned compact storage without forcing an intermediate flat-grid
-repack.
+cache. When the typed product has no other outstanding handle, materialization
+consumes it directly into the mutable `ChunkColumn`; a concurrently shared
+product takes the existing clone fallback, with both paths preserving the same
+observable column output. This boundary also leaves room for a future producer
+to hand off section-aligned compact storage without forcing an intermediate
+flat-grid repack.
 
 `SessionBudget` bounds product, sidecar, mutation, and explicitly accounted
 retained-byte usage. `new` accounts inline value size; heap-backed values use
@@ -242,8 +266,9 @@ section at a time instead of through one digest call per cell.
 Mutable stage and packet-output identities wrap that content digest with the
 stage boundary and coordinate. When a later stage only carries the same block
 field, production reuses the prior content digest instead of rescanning the
-column; stages with writes still compute a fresh content digest. This keeps
-content hashing separate from the smaller lifecycle identity chain.
+column. Authenticated generated stages fold ordered writes into a smaller
+lifecycle identity; unauthenticated stages with writes compute a fresh content
+digest. This keeps content hashing separate from lifecycle identity.
 For pristine Overworld generated prefixes, an authenticated resolver identity
 also covers the seed, settings, fallback biome, and asset bundle, so the
 request records use a coordinate/stage provenance digest without scanning the
@@ -257,6 +282,11 @@ control remains on the exact path and must change the resulting fingerprint.
 When an authenticated target receives a persistent cross-target write, the
 lifecycle folds that ordered `(position, state)` event into the resident
 identity in constant work; temporary speculative writes are never folded.
+The FEATURES identity is seeded from both the generated result and the current
+prefix identity, retaining writes that arrived before target completion. Once
+the region finishes its canonical mutable sequence, OUTPUT reads that terminal
+identity directly; dynamic, edited, and persisted columns retain the complete
+block-field scan.
 
 ## Dependencies
 

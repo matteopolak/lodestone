@@ -1680,6 +1680,13 @@ impl UiState {
         }
     }
 
+    /// Pause on focus loss only after terrain is presentable.
+    pub fn pause_for_focus_loss(&mut self, world_ready: bool) {
+        if world_ready {
+            self.pause();
+        }
+    }
+
     /// Return to the world from the pause overlay (e.g. a click). Only from
     /// paused — never resurrects a failed or loading session.
     pub fn resume(&mut self) {
@@ -2060,8 +2067,22 @@ mod tests {
         let mut ui = UiState::new();
         ui.enter_dev_world();
         assert_eq!(ui.screen(), Screen::Playing);
-        ui.pause();
+        ui.pause_for_focus_loss(true);
         assert_eq!(ui.screen(), Screen::Paused);
+    }
+
+    #[test]
+    fn focus_loss_during_loading_keeps_the_world_loading_screen() {
+        let mut ui = UiState::new();
+        ui.begin(SessionKind::Singleplayer);
+        ui.session_ready();
+        ui.pause_for_focus_loss(false);
+        assert_eq!(ui.screen(), Screen::Playing);
+
+        let mut connecting = UiState::new();
+        connecting.begin(SessionKind::Singleplayer);
+        connecting.pause_for_focus_loss(true);
+        assert_eq!(connecting.screen(), Screen::Connecting);
     }
 
     #[test]

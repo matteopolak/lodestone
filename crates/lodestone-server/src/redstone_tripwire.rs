@@ -68,11 +68,14 @@
 //! described as the point of [`on_wire_removed`].
 
 use crate::neighbor_update::Direction;
-use crate::redstone::{base_name, direction_to_str, get_bool_property, tripwire_hook_facing, with_property, WorldState};
+use crate::redstone::{base_name, get_bool_property, tripwire_hook_facing, with_property, WorldState};
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, PropertyKey, PropertyValue};
+use lodestone_data::block_states::StateId;
 use lodestone_model::BlockPos;
 
-pub const TRIPWIRE: &str = "minecraft:tripwire";
-pub const TRIPWIRE_HOOK: &str = crate::redstone::TRIPWIRE_HOOK;
+pub const TRIPWIRE: Block = Block::Tripwire;
+pub const TRIPWIRE_HOOK: Block = crate::redstone::TRIPWIRE_HOOK;
 
 /// `TripWireHookBlock.WIRE_DIST_MAX` (`:40`) — the scan runs `1..42`, so the
 /// farthest a receiving hook can sit is 41 cells away.
@@ -117,17 +120,17 @@ pub struct CalculatedState {
     /// The hook at the scanned position's own new state, unless the scan was
     /// itself a "this hook is being destroyed" call (vanilla's `!isBeingDestroyed`
     /// guard on the final `setBlock`).
-    pub hook_write: Option<(BlockPos, String)>,
+    pub hook_write: Option<(BlockPos, StateId)>,
     /// The receiving hook's new state, if the scan found one
     /// (`receiver_pos > 0`) — always present together with a facing set to
     /// the *opposite* of the scanning hook's.
-    pub receiver_write: Option<(BlockPos, String)>,
+    pub receiver_write: Option<(BlockPos, StateId)>,
     /// Every scanned wire segment between the two hooks whose `attached`
     /// property must flip to match the freshly computed value — vanilla's
     /// `if (wasAttached != attached)` fan-out, already narrowed to "only
     /// cells the scan actually recorded as real wire", matching
     /// `wireStates[i] != null`.
-    pub wire_writes: Vec<(BlockPos, String)>,
+    pub wire_writes: Vec<(BlockPos, StateId)>,
     /// Vanilla's `level.scheduleTick(pos, block, RECHECK_DELAY)` — `true`
     /// only when this scan was driven by a [`WireSource`] (`i == wireSource`
     /// in the jar).
@@ -146,12 +149,12 @@ pub struct CalculatedState {
 /// scanned cell whose state the caller supplies directly rather than asking
 /// `lookup` — see [`WireSource`].
 #[must_use]
-pub fn calculate_state<F>(lookup: &F, pos: BlockPos, state: &str, is_being_destroyed: bool, wire_source: Option<&WireSource>) -> CalculatedState
+pub fn calculate_state<F>(lookup: &F, pos: BlockPos, state: StateId, is_being_destroyed: bool, wire_source: Option<&WireSource>) -> CalculatedState
 where
     F: Fn(BlockPos) -> WorldState,
 {
     let facing = tripwire_hook_facing(state);
-    let was_attached = get_bool_property(state, "attached").unwrap_or(false);
+    let was_attached = get_bool_property(state, PropertyKey::Attached).unwrap_or(false);
     let mut attached = !is_being_destroyed;
     let mut powered = false;
     let mut receiver_pos: i32 = 0;
@@ -165,25 +168,25 @@ where
         let test_pos = step(pos, facing, i);
         let is_source = wire_source.is_some_and(|s| s.distance == i);
         let raw_state = if is_source {
-            wire_source.unwrap().state.clone()
+            wire_source.unwrap().state
         } else {
             lookup(test_pos)
         };
 
-        if base_name(&raw_state) == TRIPWIRE_HOOK {
-            if tripwire_hook_facing(&raw_state) == facing.opposite() {
+        if base_name(raw_state) == TRIPWIRE_HOOK {
+            if tripwire_hook_facing(raw_state) == facing.opposite() {
                 receiver_pos = i;
             }
             break;
         }
 
-        if base_name(&raw_state) != TRIPWIRE && !is_source {
+        if base_name(raw_state) != TRIPWIRE && !is_source {
             attached = false;
             continue;
         }
 
-        let wire_armed = !get_bool_property(&raw_state, "disarmed").unwrap_or(false);
-        let wire_powered = get_bool_property(&raw_state, "powered").unwrap_or(false);
+        let wire_armed = !get_bool_property(raw_state, PropertyKey::Disarmed).unwrap_or(false);
+        let wire_powered = get_bool_property(raw_state, PropertyKey::Powered).unwrap_or(false);
         powered |= wire_armed && wire_powered;
         wire_cells.push((i, test_pos));
         if is_source {
@@ -214,8 +217,14 @@ where
                 break;
             }
             let current = lookup(*wire_pos);
-            if base_name(&current) == TRIPWIRE || base_name(&current) == TRIPWIRE_HOOK {
-                wire_writes.push((*wire_pos, with_property(&current, "attached", if attached { "true" } else { "false" })));
+            if base_name(current) == TRIPWIRE || base_name(current) == TRIPWIRE_HOOK {
+                if let Some(next) = with_property(
+                    current,
+                    PropertyKey::Attached,
+                    PropertyValue::builtin(if attached { BuiltinPropertyValue::True } else { BuiltinPropertyValue::False }),
+                ) {
+                    wire_writes.push((*wire_pos, next));
+                }
             }
         }
     }
@@ -230,13 +239,25 @@ where
     }
 }
 
-fn hook_state(facing: Direction, attached: bool, powered: bool) -> String {
-    format!(
-        "minecraft:tripwire_hook[facing={},attached={},powered={}]",
-        direction_to_str(facing),
-        attached,
-        powered
+fn hook_state(facing: Direction, attached: bool, powered: bool) -> StateId {
+    let mut state = with_property(
+        Block::TripwireHook.default_state(),
+        PropertyKey::Facing,
+        PropertyValue::builtin(crate::redstone::direction_property(facing)),
     )
+    .expect("tripwire hook facing property is a generated state");
+    state = with_property(
+        state,
+        PropertyKey::Attached,
+        PropertyValue::builtin(if attached { BuiltinPropertyValue::True } else { BuiltinPropertyValue::False }),
+    )
+    .expect("tripwire hook attached property is a generated state");
+    with_property(
+        state,
+        PropertyKey::Powered,
+        PropertyValue::builtin(if powered { BuiltinPropertyValue::True } else { BuiltinPropertyValue::False }),
+    )
+    .expect("tripwire hook powered property is a generated state")
 }
 
 /// Vanilla's own `TripWireBlock.updateSource` — from a wire
@@ -250,7 +271,7 @@ fn hook_state(facing: Direction, attached: bool, powered: bool) -> String {
 /// synthetically-repowered) wire's own state — vanilla's `state` parameter,
 /// threaded through as each found hook's `wireSourceState`.
 #[must_use]
-pub fn find_controlling_hooks<F>(lookup: &F, pos: BlockPos, wire_state: &str) -> Vec<(BlockPos, WireSource)>
+pub fn find_controlling_hooks<F>(lookup: &F, pos: BlockPos, wire_state: StateId) -> Vec<(BlockPos, WireSource)>
 where
     F: Fn(BlockPos) -> WorldState,
 {
@@ -259,19 +280,19 @@ where
         for i in 1..WIRE_DIST_MAX {
             let test_pos = step(pos, direction, i);
             let block = lookup(test_pos);
-            if base_name(&block) == TRIPWIRE_HOOK {
-                if tripwire_hook_facing(&block) == direction.opposite() {
+            if base_name(block) == TRIPWIRE_HOOK {
+                if tripwire_hook_facing(block) == direction.opposite() {
                     found.push((
                         test_pos,
                         WireSource {
                             distance: i,
-                            state: WorldState::from(wire_state),
+                            state: wire_state,
                         },
                     ));
                 }
                 break;
             }
-            if base_name(&block) != TRIPWIRE {
+            if base_name(block) != TRIPWIRE {
                 break;
             }
         }
@@ -288,31 +309,63 @@ where
 /// `crate::server::propagate_removal_with_entities` — the block-removal hook
 /// this module's own doc comment named as missing.
 #[must_use]
-pub fn on_wire_removed<F>(lookup: &F, pos: BlockPos, wire_state_before_removal: &str) -> Vec<(BlockPos, WireSource)>
+pub fn on_wire_removed<F>(lookup: &F, pos: BlockPos, wire_state_before_removal: StateId) -> Vec<(BlockPos, WireSource)>
 where
     F: Fn(BlockPos) -> WorldState,
 {
-    let forced = with_property(wire_state_before_removal, "powered", "true");
-    find_controlling_hooks(lookup, pos, &forced)
+    let forced = with_property(
+        wire_state_before_removal,
+        PropertyKey::Powered,
+        PropertyValue::builtin(BuiltinPropertyValue::True),
+    )
+    .expect("tripwire powered property is a generated state");
+    find_controlling_hooks(lookup, pos, forced)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn world(entries: &[(BlockPos, &str)]) -> impl Fn(BlockPos) -> WorldState + use<> {
-        let entries: Vec<(BlockPos, WorldState)> = entries.iter().map(|(p, s)| (*p, WorldState::from(*s))).collect();
+    fn world(entries: &[(BlockPos, StateId)]) -> impl Fn(BlockPos) -> WorldState + use<> {
+        let entries = entries.to_vec();
         move |p: BlockPos| {
             entries
                 .iter()
                 .find(|(pos, _)| *pos == p)
-                .map(|(_, s)| s.clone())
-                .unwrap_or_else(crate::chunk::air_state_arc)
+                .map(|(_, s)| *s)
+                .unwrap_or_else(lodestone_data::block_states::air_state)
         }
     }
 
-    fn hook(facing: &str) -> String {
-        format!("minecraft:tripwire_hook[facing={facing},attached=false,powered=false]")
+    fn hook(facing: Direction) -> StateId {
+        let state = with_property(
+            Block::TripwireHook.default_state(),
+            PropertyKey::Facing,
+            PropertyValue::builtin(crate::redstone::direction_property(facing)),
+        )
+        .expect("tripwire hook facing is a generated state");
+        state
+    }
+
+    fn wire(attached: bool, powered: bool, disarmed: bool) -> StateId {
+        let mut state = with_property(
+            Block::Tripwire.default_state(),
+            PropertyKey::Attached,
+            PropertyValue::builtin(if attached { BuiltinPropertyValue::True } else { BuiltinPropertyValue::False }),
+        )
+        .expect("tripwire attached is a generated state");
+        state = with_property(
+            state,
+            PropertyKey::Powered,
+            PropertyValue::builtin(if powered { BuiltinPropertyValue::True } else { BuiltinPropertyValue::False }),
+        )
+        .expect("tripwire powered is a generated state");
+        with_property(
+            state,
+            PropertyKey::Disarmed,
+            PropertyValue::builtin(if disarmed { BuiltinPropertyValue::True } else { BuiltinPropertyValue::False }),
+        )
+        .expect("tripwire disarmed is a generated state")
     }
 
     /// Two hooks facing each other with three armed, powered wire segments
@@ -323,23 +376,23 @@ mod tests {
     fn a_complete_powered_run_attaches_and_powers_both_hooks() {
         let origin = BlockPos::new(0, 64, 0);
         let receiver = BlockPos::new(4, 64, 0);
-        let wire = "minecraft:tripwire[attached=false,powered=true,disarmed=false]";
+        let wire = wire(false, true, false);
         let w = world(&[
             (BlockPos::new(1, 64, 0), wire),
             (BlockPos::new(2, 64, 0), wire),
             (BlockPos::new(3, 64, 0), wire),
-            (receiver, &hook("west")),
+            (receiver, hook(Direction::West)),
         ]);
-        let result = calculate_state(&w, origin, &hook("east"), false, None);
+        let result = calculate_state(&w, origin, hook(Direction::East), false, None);
         assert!(result.attached, "three unbroken wire cells and a facing hook must attach");
         assert!(result.powered, "every wire cell reports powered=true");
         assert_eq!(
             result.hook_write,
-            Some((origin, "minecraft:tripwire_hook[facing=east,attached=true,powered=true]".to_string()))
+            Some((origin, hook_state(Direction::East, true, true)))
         );
         assert_eq!(
             result.receiver_write,
-            Some((receiver, "minecraft:tripwire_hook[facing=west,attached=true,powered=true]".to_string())),
+            Some((receiver, hook_state(Direction::West, true, true))),
             "the receiving hook's own FACING is untouched by the scanning hook's FACING"
         );
         assert_eq!(result.wire_writes.len(), 3, "all three wire cells must have their `attached` flag written");
@@ -352,8 +405,8 @@ mod tests {
     #[test]
     fn two_adjacent_hooks_with_no_wire_between_them_do_not_attach() {
         let origin = BlockPos::new(0, 64, 0);
-        let w = world(&[(BlockPos::new(1, 64, 0), &hook("west"))]);
-        let result = calculate_state(&w, origin, &hook("east"), false, None);
+        let w = world(&[(BlockPos::new(1, 64, 0), hook(Direction::West))]);
+        let result = calculate_state(&w, origin, hook(Direction::East), false, None);
         assert!(!result.attached, "receiverPos == 1 must fail the `> 1` floor");
         assert!(!result.powered, "powered is masked by attached regardless of anything else");
     }
@@ -365,14 +418,14 @@ mod tests {
     #[test]
     fn a_gap_in_the_run_prevents_attachment_even_with_a_hook_beyond_it() {
         let origin = BlockPos::new(0, 64, 0);
-        let wire = "minecraft:tripwire[attached=false,powered=false,disarmed=false]";
+        let wire = wire(false, false, false);
         let w = world(&[
             (BlockPos::new(1, 64, 0), wire),
             // (2,64,0) left as air: the gap.
             (BlockPos::new(3, 64, 0), wire),
-            (BlockPos::new(4, 64, 0), &hook("west")),
+            (BlockPos::new(4, 64, 0), hook(Direction::West)),
         ]);
-        let result = calculate_state(&w, origin, &hook("east"), false, None);
+        let result = calculate_state(&w, origin, hook(Direction::East), false, None);
         assert!(!result.attached, "the air gap at distance 2 must break attachment");
     }
 
@@ -383,12 +436,12 @@ mod tests {
     #[test]
     fn a_disarmed_segment_cannot_power_the_run_even_if_marked_powered() {
         let origin = BlockPos::new(0, 64, 0);
-        let disarmed_but_marked_powered = "minecraft:tripwire[attached=false,powered=true,disarmed=true]";
+        let disarmed_but_marked_powered = wire(false, true, true);
         let w = world(&[
             (BlockPos::new(1, 64, 0), disarmed_but_marked_powered),
-            (BlockPos::new(2, 64, 0), &hook("west")),
+            (BlockPos::new(2, 64, 0), hook(Direction::West)),
         ]);
-        let result = calculate_state(&w, origin, &hook("east"), false, None);
+        let result = calculate_state(&w, origin, hook(Direction::East), false, None);
         assert!(result.attached, "the run itself is unbroken (one armed-check aside)");
         assert!(!result.powered, "a disarmed segment must not contribute power");
     }
@@ -401,14 +454,14 @@ mod tests {
         let wire_pos = BlockPos::new(5, 64, 5);
         let west_hook = BlockPos::new(2, 64, 5);
         let north_hook = BlockPos::new(5, 64, 2);
-        let wire = "minecraft:tripwire[attached=false,powered=false,disarmed=false]";
+        let wire = wire(false, false, false);
         let w = world(&[
             (BlockPos::new(3, 64, 5), wire),
             (BlockPos::new(4, 64, 5), wire),
-            (west_hook, &hook("east")),
+            (west_hook, hook(Direction::East)),
             (BlockPos::new(5, 64, 3), wire),
             (BlockPos::new(5, 64, 4), wire),
-            (north_hook, &hook("south")),
+            (north_hook, hook(Direction::South)),
         ]);
         let found = find_controlling_hooks(&w, wire_pos, wire);
         let positions: Vec<BlockPos> = found.iter().map(|(p, _)| *p).collect();
@@ -431,13 +484,13 @@ mod tests {
         let hook_a = BlockPos::new(0, 64, 0);
         let wire_pos = BlockPos::new(1, 64, 0);
         let hook_b = BlockPos::new(2, 64, 0);
-        let unpowered_wire = "minecraft:tripwire[attached=true,powered=false,disarmed=false]";
-        let w = world(&[(hook_a, &hook("east")), (hook_b, &hook("west"))]);
+        let unpowered_wire = wire(true, false, false);
+        let w = world(&[(hook_a, hook(Direction::East)), (hook_b, hook(Direction::West))]);
 
         let sources = on_wire_removed(&w, wire_pos, unpowered_wire);
         let (found_hook, source) = sources.into_iter().find(|(p, _)| *p == hook_a).expect("the west-scanning hook must be found");
         assert_eq!(found_hook, hook_a);
-        let result = calculate_state(&w, hook_a, &hook("east"), false, Some(&source));
+        let result = calculate_state(&w, hook_a, hook(Direction::East), false, Some(&source));
         assert!(result.attached, "a receiver two cells out clears the `receiverPos > 1` floor");
         assert!(result.powered, "the destroyed cell reports powered=true regardless of its stored value");
         assert!(result.reschedule_recheck, "the wire-source branch always schedules the 10-tick recheck");

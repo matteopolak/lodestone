@@ -56,6 +56,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lodestone_client::{BlockPos, ClientBuilder, Hand, LoginProfile, ServerAddress};
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockFace, ClientAction, GameMode, ItemStack, Vec3f};
 use lodestone_net::{Connection, memory_pair};
 use lodestone_server::{
@@ -70,10 +72,6 @@ const DUST_Y: i32 = 1;
 const PLACE_X: i32 = 1;
 const RUN_END_X: i32 = 15;
 
-const WIRE: &str = "minecraft:redstone_wire";
-const TORCH_LIT: &str = "minecraft:redstone_torch[lit=true]";
-const UNPOWERED_DUST: &str = "minecraft:redstone_wire[power=0]";
-const FLOOR: &str = "minecraft:stone";
 
 /// Measured against a live vanilla 26.2 server (see
 /// `lodestone_server::redstone_oracle_gate`'s own `ORACLE_DUST_ATTENUATION`,
@@ -109,8 +107,7 @@ const ORACLE_DUST_ATTENUATION: &[(i32, u8)] = &[
 /// The gate would then fail for a reason that has nothing to do with the
 /// neighbour-update defect it exists to catch, and (worse) a *passing* variant
 /// of it would prove nothing at all.
-/// `SharedWorld`'s edit log: `(x, y, z) -> block name`.
-type EditMap = Arc<Mutex<HashMap<(i32, i32, i32), String>>>;
+type EditMap = Arc<Mutex<HashMap<(i32, i32, i32), StateId>>>;
 
 #[derive(Clone, Default)]
 struct SharedWorld {
@@ -118,40 +115,40 @@ struct SharedWorld {
 }
 
 impl SharedWorld {
-    fn seed(&self, x: i32, y: i32, z: i32, name: &str) {
-        self.set_block(x, y, z, name);
+    fn seed(&self, x: i32, y: i32, z: i32, state: StateId) {
+        self.set_block(x, y, z, state);
     }
 }
 
 impl ChunkSource for SharedWorld {
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
         let mut column = ChunkColumn::new(0, 16);
-        for (&(x, y, z), name) in self.edits.lock().expect("edits lock poisoned").iter() {
+        for (&(x, y, z), &state) in self.edits.lock().expect("edits lock poisoned").iter() {
             if x.div_euclid(16) == cx && z.div_euclid(16) == cz && (0..16).contains(&y) {
-                column.set_block(x.rem_euclid(16), y, z.rem_euclid(16), name);
+                column.set_block_id(x.rem_euclid(16), y, z.rem_euclid(16), state);
             }
         }
         column
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         self.edits
             .lock()
             .expect("edits lock poisoned")
             .get(&(x, y, z))
-            .cloned()
-            .unwrap_or_else(|| "minecraft:air".to_string())
+            .copied()
+            .unwrap_or(StateId::AIR)
     }
 
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
         "minecraft:plains".to_string()
     }
 
-    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+    fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
         self.edits
             .lock()
             .expect("edits lock poisoned")
-            .insert((x, y, z), name.to_string());
+            .insert((x, y, z), state);
     }
 }
 
@@ -169,36 +166,34 @@ fn address() -> ServerAddress {
     }
 }
 
-/// Reads the `power` property out of a block-state string like
-/// `minecraft:redstone_wire[power=12]`. Returns `None` for anything that is
-/// not dust, and `Some(0)` for a bare `minecraft:redstone_wire` — which is
-/// what placement writes, and is also the correct initial power for freshly
-/// placed dust.
-fn dust_power_from_state(state: &str) -> Option<u8> {
-    let (base, rest) = match state.split_once('[') {
-        Some((base, rest)) => (base, Some(rest.trim_end_matches(']'))),
-        None => (state, None),
-    };
-    if base != WIRE {
+/// Reads the `power` property from a redstone-wire state. Returns `None` for
+/// anything else and defaults missing power to zero, matching bare wire.
+///
+/// `Some(0)` is the initial power of freshly placed dust.
+fn dust_power_from_state(state: StateId) -> Option<u8> {
+    if state.block() != Block::RedstoneWire {
         return None;
     }
-    let Some(rest) = rest else { return Some(0) };
-    for pair in rest.split(',') {
-        if let Some(("power", value)) = pair.split_once('=') {
-            return value.parse().ok();
-        }
-    }
-    Some(0)
+    state
+        .properties()
+        .iter()
+        .find(|(key, _)| *key == "power")
+        .map(|(_, value)| *value)
+        .unwrap_or("0")
+        .parse()
+        .ok()
 }
 
 /// The `power` the *client* believes a cell has, decoded from the block-state
 /// id its own world holds. `None` means the client has no block there at all.
 fn client_dust_power(handle: &lodestone_client::ClientHandle, pos: BlockPos) -> Option<u8> {
     let id = handle.block_at(pos)?;
-    if lodestone_data::block_states::block_name(id) != Some(WIRE) {
+    let state = StateId::new(id)?;
+    if state.block() != Block::RedstoneWire {
         return None;
     }
-    lodestone_data::block_states::properties(id)?
+    state
+        .properties()
         .iter()
         .find(|(key, _)| *key == "power")
         .and_then(|(_, value)| value.parse().ok())
@@ -208,13 +203,25 @@ fn client_dust_power(handle: &lodestone_client::ClientHandle, pos: BlockPos) -> 
 fn seed_rig(world: &SharedWorld) {
     for x in 0..16 {
         for z in (ROW_Z - 1)..=(ROW_Z + 1) {
-            world.seed(x, FLOOR_Y, z, FLOOR);
+            world.seed(x, FLOOR_Y, z, Block::Stone.default_state());
         }
     }
-    world.seed(0, DUST_Y, ROW_Z, TORCH_LIT);
+    world.seed(
+        0,
+        DUST_Y,
+        ROW_Z,
+        StateId::from_state_str("minecraft:redstone_torch[lit=true]")
+            .expect("lit torch fixture state"),
+    );
     // The gap at PLACE_X is deliberately left as air.
     for x in (PLACE_X + 1)..=RUN_END_X {
-        world.seed(x, DUST_Y, ROW_Z, UNPOWERED_DUST);
+        world.seed(
+            x,
+            DUST_Y,
+            ROW_Z,
+            StateId::from_state_str("minecraft:redstone_wire[power=0]")
+                .expect("unpowered dust fixture state"),
+        );
     }
 }
 /// One run of the whole scenario: seed the rig, connect a real client, place
@@ -261,17 +268,17 @@ async fn place_one_dust_into_the_gap() -> (Vec<(i32, Option<u8>)>, Vec<(i32, Opt
     // without the placement doing anything — the precondition species of
     // vacuous test.
     for &(x, _) in ORACLE_DUST_ATTENUATION.iter().skip(1) {
-        let state = world.block_state(x, DUST_Y, ROW_Z);
+        let state = world.block_state_id(x, DUST_Y, ROW_Z);
         assert_eq!(
-            dust_power_from_state(&state),
+            dust_power_from_state(state),
             Some(0),
             "precondition: dust at (x={x}, y={DUST_Y}, z={ROW_Z}) must be unpowered before \
              the placement, but the rig seeded it as {state:?}"
         );
     }
     assert_eq!(
-        world.block_state(PLACE_X, DUST_Y, ROW_Z),
-        "minecraft:air",
+        world.block_state_id(PLACE_X, DUST_Y, ROW_Z),
+        StateId::AIR,
         "precondition: the gap at (x={PLACE_X}, y={DUST_Y}, z={ROW_Z}) must be open"
     );
 
@@ -315,8 +322,8 @@ async fn place_one_dust_into_the_gap() -> (Vec<(i32, Option<u8>)>, Vec<(i32, Opt
     handle
         .wait_for(Duration::from_secs(30), |h| {
             h.block_at(placed)
-                .and_then(lodestone_data::block_states::block_name)
-                == Some(WIRE)
+                .and_then(StateId::new)
+                .is_some_and(|state| state.block() == Block::RedstoneWire)
         })
         .await
         .expect("the placed dust was never confirmed to the client at all");
@@ -340,7 +347,7 @@ async fn place_one_dust_into_the_gap() -> (Vec<(i32, Option<u8>)>, Vec<(i32, Opt
         .map(|&(x, _)| {
             (
                 x,
-                dust_power_from_state(&world.block_state(x, DUST_Y, ROW_Z)),
+                dust_power_from_state(world.block_state_id(x, DUST_Y, ROW_Z)),
             )
         })
         .collect();

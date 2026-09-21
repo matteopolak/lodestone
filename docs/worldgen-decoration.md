@@ -55,14 +55,17 @@ value. The catalog must therefore use the biome source's possible-biome order
 and use biome membership only when selecting which already-indexed features run.
 
 Adjacent Overworld replay targets can use `OverworldGenerator::mixed_replay_batch` to
-build one request-owned `MixedReplayBatch`. The product admits the union of each target's
-radius-two read windows, so every unique `PreOreResult` is computed once, then shares each
-source's immutable feature/ore selection across target contexts. `write_contexts` preserves
-the caller's first-occurrence target order for production writers; `with_mixed_replay_batch`
-is the scoped convenience form. The product is not retained on the generator and its
-`retained_bytes` report covers the dependency union and source plans, so callers should
-drop it at the end of the request. A target context still carries the full global
-`(step,index)` ordering and remains compatible with the scalar source-replay methods.
+build one request-owned `MixedReplayBatch`. General feature diagnostics may retain the
+broader radius-two window, but the production lifecycle calls
+`mixed_replay_batch_with_radius` with the authoritative target radius (one). Every unique
+`PreOreResult` in that request context is computed once, then shares each source's immutable
+feature/ore selection across target contexts. The product is not retained on the generator and
+its `retained_bytes` report covers the dependency union and source plans, so callers should
+drop it at the end of the request. Radius-one production batches retain complete plans for each
+target origin in `W`; the broader diagnostic batch retains the complete 3x3 source set used by
+scalar source replay. Radius-one contexts leave non-target source-plan slots empty rather than
+widening `C`; target-owned dispatch never executes those slots. Every context still carries the
+full global `(step,index)` ordering.
 
 The catalog also materializes each placed feature's eligible-biome map once and
 shares it by `Arc` with replay contexts and vegetation grids. This map is immutable
@@ -74,14 +77,11 @@ Built-in disk, block-pile, vegetation-patch ground, and huge-mushroom stem place
 their selected provider state as the grid's `StateId`: `BlockStateProvider::get_state_id`
 feeds `VegGrid::set_id_if_in_bounds` directly, preserving the provider draw and write-log
 order without cloning a state string per successful cell. A canonical built-in mushroom cap
-still uses the compatibility property rewrite because converting all 32 generated property
-variants to local ids currently rebuilds canonical names at the interner boundary; partial and
-extension cap states therefore retain the same fallback. Lake fluid and barrier providers use the
-same numeric selection; the mould's fluid/air checks compare interned base IDs, and its repeated
-fills never clone a state string.
-This is an intermediate write-path optimization, not the final provider representation: provider
-configuration still uses its current textual form. A later generated built-in block/property type
-and explicit extension registry handle can remove that representation from runtime state entirely.
+uses typed property variants; its already-bound canonical ids cross the interner boundary through
+the direct typed map. Lake fluid and barrier providers use the same numeric selection; the mould's
+fluid/air checks compare interned base IDs, and its repeated fills never clone a state string.
+Provider configuration accepts text only at the explicit generated-data boundary, then binds
+canonical ids before placement; runtime providers carry ids exclusively.
 
 `UNDERGROUND_ORES` is dispatched through the same catalog rather than treated as an ore-only
 list. `select_ores` emits the configured ore entries, while `select_step6_disks` emits disk
@@ -103,19 +103,24 @@ direction mapping is explicit: below→up, north→south, south→north, west→
 
 Each synthetic 3x3 source pass resets the random wrapper's Gaussian cache before reseeding that source. This keeps cached paired draws local to one source, matching independent source wrappers; sharing the cache would leak a prior source's spare Gaussian into the next feature stream.
 
-The production Overworld dispatcher runs the target origin once over its
-admitted radius-one CARVERS read/write region. The neighbouring columns supply
-context and may receive boundary writes, but their origins are not additional
-production FEATURES bodies. Source-local parity controls can still select one
-explicit origin; the nine-coordinate schedule remains useful there for
-source-ordered dimensions and diagnostics, not as a target-owned replay loop.
+The production Overworld dispatcher runs exactly one target-origin body for each
+mutable target `W`, in canonical `(z,x)` order. The requested set `R` is expanded by
+the authoritative `TARGET_DECORATION_RADIUS` (one) to form `W`; the immutable CARVERS
+context `C` is `W` expanded by that same radius. Neighbours in `C` supply reads, while
+the sparse padding writers `W\R` retain only local state and outward writes. A neighbouring
+origin is never an extra body for a target-owned completion. The dispatcher keeps the
+global `(step,index)` stream and one live overlay, so a later target reads writes made by
+earlier targets.
 
-Lifecycle packet replay treats Overworld FEATURES as one target-owned status
-completion. The admitted radius-one CARVERS columns provide the read/write
-region, and the replay plan must contain exactly one event naming the requested
-centre. Writes into that region remain resident for later target packets. This
-distinction is covered by the seed-42 target-owned and nine-event rejection
-controls in `overworld_tuff_lifecycle`.
+Lifecycle packet replay treats Overworld FEATURES as one target-owned status completion.
+The replay plan must contain exactly one event naming the requested centre; a nine-origin
+trace is a negative control. Full requested targets retain their direct output and sidecars,
+while padding targets use the sparse writer. Top-layer writes run only after the target's
+FEATURES body, and block entities and persistence sidecars follow the same completion.
+For a narrow production performance check, run
+`just worldgen-bench column_timed_overhead -- --noplot`;
+compare instruction-retired medians over three cycles on an otherwise idle machine, then
+repeat the 2×2 lifecycle control to confirm the measured path is still target-owned.
 
 Collections traversed while consuming that random stream must have explicit order. Vegetation patches
 use `CompatBlockPosSet` for successful surface positions: its compact membership index and insertion
@@ -360,17 +365,10 @@ Vegetation-patch configurations may name block tags in `replaceable`, including
 IDs silently makes patches skip terrain such as deepslate, so preserve tag expansion when extending
 the configuration parser.
 
-Placement is off block-state strings only at the edges: tag-membership questions are answered by
-fixed bitsets indexed by `StateId`,
-exact and never needing to grow since a `StateId` is a `u16`. A bit above the interner's watermark
-(minted *during* the current decoration pass — a rewritten leaf's `distance=N` state, for instance)
-falls back to the pre-bitset string path, which is a correctness requirement, not a slow path: an
-unexamined id would answer every tag query `false`, which changes what decorates where. Two derived
-per-position values (`distance=N` leaf rewrite, `waterlogged` fix-up) are memoised `id -> id`
-lookups rather than re-derived per call.
-Synthesized state formatting reuses one thread-local string, cleared both before and after every
-format operation. Leaving prior contents in that buffer concatenates two individually valid states
-and makes output depend on which features previously ran on a worker.
+After the input boundary, placement is off block-state strings: tag membership is answered by fixed
+bitsets indexed by `StateId`, and newly bound states extend the typed table before the scan. Unknown
+states are rejected rather than guessed. Two derived per-position values (`distance=N` leaf rewrite,
+`waterlogged` fix-up) are memoised `id -> id` lookups rather than re-derived per call.
 
 The spring, block-blob and replacement-blob configuration carriers validate their state object into
 the global `lodestone_data::block_states::StateId` while parsing. A malformed object, unknown block,

@@ -9,9 +9,13 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::OnceLock;
 
 use serde_json::Value;
 use lodestone_data::biomes::BuiltinBiome;
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue as V, Properties, PropertyKey};
+use lodestone_data::block_states::StateId;
 
 use crate::dense_grid::DenseBlockGrid;
 use crate::density::Resolver;
@@ -97,15 +101,11 @@ pub struct EndGateway {
 }
 
 /// Final state written by one End FEATURES source.
-///
-/// The lifecycle materializer applies these absolute transitions to its
-/// resident columns in admission order. Text is intentional at this boundary:
-/// state ids belong to one generator's interner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EndDecorationSpill {
     pub source: (i32, i32),
     pub position: (i32, i32, i32),
-    pub state: String,
+    pub state: StateId,
 }
 
 /// Complete output of one source-filtered End FEATURES invocation.
@@ -168,7 +168,7 @@ pub(crate) struct EndDecoration {
     outer_island_index: Option<usize>,
     chorus: bool,
     chorus_index: Option<usize>,
-    chorus_supports: HashSet<String>,
+    chorus_supports: HashSet<Block>,
     gateway_return: Option<GatewayConfig>,
     gateway_index: Option<usize>,
     /// `None` means the End biome has no spike feature. An empty list means
@@ -180,13 +180,19 @@ pub(crate) struct EndDecoration {
 
 impl EndDecoration {
     pub(crate) fn from_resolver(resolver: &dyn Resolver) -> Self {
-        let mut chorus_supports = HashSet::new();
+        let _ = chorus_plant_states();
+        let _ = decoration_states();
+        let mut chorus_support_names = HashSet::new();
         crate::compose::resolve_block_tag(
             resolver,
             "minecraft:supports_chorus_plant",
-            &mut chorus_supports,
+            &mut chorus_support_names,
             &mut HashSet::new(),
         );
+        let chorus_supports = chorus_support_names
+            .into_iter()
+            .filter_map(|name| Block::from_name(&name))
+            .collect();
         let document = resolver.biome_document(THE_END);
         let platform_entries = document
             .get("features")
@@ -584,7 +590,7 @@ impl EndDecoration {
             for spike in spikes {
                 if spike.center_x.div_euclid(16) == source_x && spike.center_z.div_euclid(16) == source_z {
                     for block in end_spike_blocks(spike, 0) {
-                        set_with_observer(world, block.x, block.y, block.z, &block.state, observe);
+                        set_with_observer(world, block.x, block.y, block.z, block.state, observe);
                     }
                 }
             }
@@ -600,8 +606,8 @@ impl EndDecoration {
                 let z = source_z * 16 + random.next_int_bounded(16);
                 let y = surface_y(world, x, z);
                 if biome_source.biome_at_block_typed(x, y, z) == BuiltinBiome::EndHighlands
-                    && world.get(x, y, z) == "minecraft:air"
-                    && world.get(x, y - 1, z) == "minecraft:end_stone"
+                    && world.get_id(x, y, z) == lodestone_data::block_states::air_state()
+                    && world.get_id(x, y - 1, z).block() == Block::EndStone
                 {
                     grow_chorus_with_observer(
                         world,
@@ -683,11 +689,12 @@ fn apply_platform_with_observer<F>(
 ) where
     F: FnMut(&DenseBlockGrid, i32, i32, i32),
 {
+    let states = decoration_states();
     for dz in -2..=2 {
         for dx in -2..=2 {
-            set_with_observer(world, origin.x + dx, origin.y - 1, origin.z + dz, "minecraft:obsidian", observe);
+            set_with_observer(world, origin.x + dx, origin.y - 1, origin.z + dz, states.obsidian, observe);
             for dy in 0..3 {
-                set_with_observer(world, origin.x + dx, origin.y + dy, origin.z + dz, "minecraft:air", observe);
+                set_with_observer(world, origin.x + dx, origin.y + dy, origin.z + dz, states.air, observe);
             }
         }
     }
@@ -698,50 +705,108 @@ fn set_with_observer<F>(
     x: i32,
     y: i32,
     z: i32,
-    state: &str,
+    state: StateId,
     observe: &mut F,
 ) where
     F: FnMut(&DenseBlockGrid, i32, i32, i32),
 {
-    world.set(x, y, z, state);
+    world.set_id(x, y, z, state);
     observe(world, x, y, z);
 }
 
-fn is_chorus(state: &str) -> bool {
-    state.starts_with("minecraft:chorus_plant") || state.starts_with("minecraft:chorus_flower")
+fn is_chorus(world: &DenseBlockGrid, x: i32, y: i32, z: i32) -> bool {
+    matches!(world.get_id(x, y, z).block(), Block::ChorusPlant | Block::ChorusFlower)
 }
 
-fn chorus_plant_state(world: &DenseBlockGrid, pos: (i32, i32, i32), supports: &HashSet<String>) -> String {
-    let chorus_at = |x, y, z| is_chorus(world.get(x, y, z));
-    let down = world.get(pos.0, pos.1 - 1, pos.2);
+fn typed_state(block: Block, properties: &[(PropertyKey, V)]) -> StateId {
+    let mut typed = Properties::empty();
+    for &(key, value) in properties {
+        typed = typed
+            .with_builtin(key, value)
+            .expect("generated block property is valid");
+    }
+    Properties::state_for_block(block, &typed).expect("generated block state is valid")
+}
+
+#[derive(Clone, Copy)]
+struct DecorationStates {
+    air: StateId,
+    bedrock: StateId,
+    end_stone: StateId,
+    end_gateway: StateId,
+    obsidian: StateId,
+    chorus_flower: StateId,
+}
+
+fn decoration_states() -> DecorationStates {
+    static STATES: OnceLock<DecorationStates> = OnceLock::new();
+    *STATES.get_or_init(|| DecorationStates {
+        air: Block::Air.default_state(),
+        bedrock: Block::Bedrock.default_state(),
+        end_stone: Block::EndStone.default_state(),
+        end_gateway: Block::EndGateway.default_state(),
+        obsidian: Block::Obsidian.default_state(),
+        chorus_flower: typed_state(Block::ChorusFlower, &[(PropertyKey::Age, V::Value5)]),
+    })
+}
+
+fn chorus_plant_states() -> &'static [StateId; 64] {
+    static STATES: OnceLock<[StateId; 64]> = OnceLock::new();
+    STATES.get_or_init(|| {
+        std::array::from_fn(|bits| {
+            let down = bits & 1 != 0;
+            let east = bits & 2 != 0;
+            let north = bits & 4 != 0;
+            let south = bits & 8 != 0;
+            let up = bits & 16 != 0;
+            let west = bits & 32 != 0;
+            let bool_value = |value| if value { V::True } else { V::False };
+            typed_state(
+                Block::ChorusPlant,
+                &[
+                    (PropertyKey::Down, bool_value(down)),
+                    (PropertyKey::East, bool_value(east)),
+                    (PropertyKey::North, bool_value(north)),
+                    (PropertyKey::South, bool_value(south)),
+                    (PropertyKey::Up, bool_value(up)),
+                    (PropertyKey::West, bool_value(west)),
+                ],
+            )
+        })
+    })
+}
+
+fn chorus_plant_state(world: &DenseBlockGrid, pos: (i32, i32, i32), supports: &HashSet<Block>) -> StateId {
+    let chorus_at = |x, y, z| is_chorus(world, x, y, z);
+    let down = world.get_id(pos.0, pos.1 - 1, pos.2);
     let down_connected = chorus_at(pos.0, pos.1 - 1, pos.2)
-        || supports.contains(down.split('[').next().unwrap_or(down));
-    format!(
-        "minecraft:chorus_plant[down={},east={},north={},south={},up={},west={}]",
-        down_connected,
-        chorus_at(pos.0 + 1, pos.1, pos.2),
-        chorus_at(pos.0, pos.1, pos.2 - 1),
-        chorus_at(pos.0, pos.1, pos.2 + 1),
-        chorus_at(pos.0, pos.1 + 1, pos.2),
-        chorus_at(pos.0 - 1, pos.1, pos.2),
-    )
+        || supports.contains(&down.block());
+    let bits = u8::from(down_connected)
+        | (u8::from(chorus_at(pos.0 + 1, pos.1, pos.2)) << 1)
+        | (u8::from(chorus_at(pos.0, pos.1, pos.2 - 1)) << 2)
+        | (u8::from(chorus_at(pos.0, pos.1, pos.2 + 1)) << 3)
+        | (u8::from(chorus_at(pos.0, pos.1 + 1, pos.2)) << 4)
+        | (u8::from(chorus_at(pos.0 - 1, pos.1, pos.2)) << 5);
+    chorus_plant_states()[bits as usize]
 }
 
 fn set_chorus_plant_with_observer<F>(
     world: &mut DenseBlockGrid,
     pos: (i32, i32, i32),
-    supports: &HashSet<String>,
+    supports: &HashSet<Block>,
     observe: &mut F,
 ) where
     F: FnMut(&DenseBlockGrid, i32, i32, i32),
 {
     let state = chorus_plant_state(world, pos, supports);
-    set_with_observer(world, pos.0, pos.1, pos.2, &state, observe);
+    set_with_observer(world, pos.0, pos.1, pos.2, state, observe);
 }
 
 fn horizontally_empty(world: &DenseBlockGrid, pos: (i32, i32, i32), ignore: Option<(i32, i32)>) -> bool {
     [(-1, 0), (1, 0), (0, -1), (0, 1)].into_iter().all(|(dx, dz)| {
-        ignore == Some((dx, dz)) || world.get(pos.0 + dx, pos.1, pos.2 + dz) == "minecraft:air"
+        ignore == Some((dx, dz))
+            || world.get_id(pos.0 + dx, pos.1, pos.2 + dz)
+                == lodestone_data::block_states::air_state()
     })
 }
 
@@ -752,7 +817,7 @@ fn grow_chorus<R: RandomSource>(
     current: (i32, i32, i32),
     start: (i32, i32, i32),
     depth: i32,
-    supports: &HashSet<String>,
+    supports: &HashSet<Block>,
 ) {
     let mut observe = |_: &DenseBlockGrid, _: i32, _: i32, _: i32| {};
     grow_chorus_with_observer(world, random, current, start, depth, supports, &mut observe);
@@ -764,7 +829,7 @@ fn grow_chorus_with_observer<R: RandomSource, F>(
     current: (i32, i32, i32),
     start: (i32, i32, i32),
     depth: i32,
-    supports: &HashSet<String>,
+    supports: &HashSet<Block>,
     observe: &mut F,
 ) where
     F: FnMut(&DenseBlockGrid, i32, i32, i32),
@@ -785,8 +850,10 @@ fn grow_chorus_with_observer<R: RandomSource, F>(
             let target = (current.0 + dx, current.1 + height, current.2 + dz);
             if (target.0 - start.0).abs() < 8
                 && (target.2 - start.2).abs() < 8
-                && world.get(target.0, target.1, target.2) == "minecraft:air"
-                && world.get(target.0, target.1 - 1, target.2) == "minecraft:air"
+                && world.get_id(target.0, target.1, target.2)
+                    == lodestone_data::block_states::air_state()
+                && world.get_id(target.0, target.1 - 1, target.2)
+                    == lodestone_data::block_states::air_state()
                 && horizontally_empty(world, target, Some((-dx, -dz)))
             {
                 branched = true;
@@ -802,7 +869,7 @@ fn grow_chorus_with_observer<R: RandomSource, F>(
             current.0,
             current.1 + height,
             current.2,
-            "minecraft:chorus_flower[age=5]",
+            decoration_states().chorus_flower,
             observe,
         );
     }
@@ -1050,20 +1117,16 @@ fn update_client_heightmaps(
         return;
     }
     let stored = (local_y + 1) as u16;
-    let state = world
-        .interner()
-        .canonical_id(world.get_id(x, y, z));
-    let motion = state.is_some_and(|state| {
+    let state = world.get_id(x, y, z);
+    let motion = {
         lodestone_data::block_solidity::blocks_motion(state)
             || lodestone_data::snow_support::has_fluid_state(state)
-    });
+    };
     let values = [
-        state.is_some_and(|state| state != lodestone_data::block_states::air_state()),
+        state != lodestone_data::block_states::air_state(),
         motion,
         motion
-            && state.is_some_and(|state| {
-                !lodestone_data::tool::builtin_block_tag_contains("minecraft:leaves", state.block())
-            }),
+            && !lodestone_data::tool::builtin_block_tag_contains("minecraft:leaves", state.block()),
     ];
     for (map_index, includes) in values.into_iter().enumerate() {
         if includes {
@@ -1074,12 +1137,7 @@ fn update_client_heightmaps(
             maps[map_index][index] = (0..local_y)
                 .rev()
                 .find(|&candidate| {
-                    let Some(candidate_state) = world
-                        .interner()
-                        .canonical_id(world.get_id(x, min_y + candidate, z))
-                    else {
-                        return false;
-                    };
+                    let candidate_state = world.get_id(x, min_y + candidate, z);
                     match map_index {
                         0 => candidate_state != lodestone_data::block_states::air_state(),
                         1 => lodestone_data::block_solidity::blocks_motion(candidate_state)
@@ -1105,9 +1163,6 @@ fn surface_y(world: &DenseBlockGrid, x: i32, z: i32) -> i32 {
     let (_, min_y, _, _, height, _) = world.bounds();
     for y in (min_y..min_y + height).rev() {
         let state = world.get_id(x, y, z);
-        let Some(state) = world.interner().canonical_id(state) else {
-            continue;
-        };
         if lodestone_data::block_solidity::blocks_motion(state)
             || lodestone_data::snow_support::has_fluid_state(state)
         {
@@ -1130,6 +1185,7 @@ fn write_gateway_with_observer<F>(
 ) where
     F: FnMut(&DenseBlockGrid, i32, i32, i32),
 {
+    let states = decoration_states();
     for y in origin.1 - 2..=origin.1 + 2 {
         for x in origin.0 - 1..=origin.0 + 1 {
             for z in origin.2 - 1..=origin.2 + 1 {
@@ -1138,13 +1194,13 @@ fn write_gateway_with_observer<F>(
                 let same_z = z == origin.2;
                 let end = (y - origin.1).abs() == 2;
                 let state = if same_x && same_y && same_z {
-                    "minecraft:end_gateway"
+                    states.end_gateway
                 } else if same_y {
-                    "minecraft:air"
+                    states.air
                 } else if (end && same_x && same_z) || ((same_x || same_z) && !end) {
-                    "minecraft:bedrock"
+                    states.bedrock
                 } else {
-                    "minecraft:air"
+                    states.air
                 };
                 set_with_observer(world, x, y, z, state, observe);
             }
@@ -1174,6 +1230,7 @@ fn place_outer_island_with_observer<R: RandomSource, F>(
 ) where
     F: FnMut(&DenseBlockGrid, i32, i32, i32),
 {
+    let end_stone = decoration_states().end_stone;
     let mut radius = random.next_int_bounded(3) as f32 + 4.0;
     let mut y_offset = 0;
     while radius > 0.5 {
@@ -1187,7 +1244,7 @@ fn place_outer_island_with_observer<R: RandomSource, F>(
                         origin.0 + x_offset,
                         origin.1 + y_offset,
                         origin.2 + z_offset,
-                        "minecraft:end_stone",
+                        end_stone,
                         observe,
                     );
                 }
@@ -1387,13 +1444,13 @@ mod tests {
     fn chorus_plant_uses_the_resolved_support_tag_only_for_down() {
         let mut world = DenseBlockGrid::new(-1, 0, -1, 3, 3, 3, "minecraft:air");
         world.set(0, 0, 0, "minecraft:end_stone");
-        let supports = HashSet::from(["minecraft:end_stone".to_owned()]);
+        let supports = HashSet::from([Block::EndStone]);
         assert_eq!(
-            chorus_plant_state(&world, (0, 1, 0), &supports),
+            chorus_plant_state(&world, (0, 1, 0), &supports).canonical_state(),
             "minecraft:chorus_plant[down=true,east=false,north=false,south=false,up=false,west=false]",
         );
         assert_eq!(
-            chorus_plant_state(&world, (0, 1, 0), &HashSet::new()),
+            chorus_plant_state(&world, (0, 1, 0), &HashSet::new()).canonical_state(),
             "minecraft:chorus_plant[down=false,east=false,north=false,south=false,up=false,west=false]",
         );
     }
@@ -1653,7 +1710,7 @@ mod tests {
         );
         assert!(gateways.is_empty(), "this source does not produce a return gateway");
         assert!(
-            (1392..1440).any(|z| (2944..2992).any(|x| is_chorus(world.get(x, 64, z)))),
+            (1392..1440).any(|z| (2944..2992).any(|x| is_chorus(&world, x, 64, z))),
             "a sampled highlands origin must remain eligible even when the source centre has another biome",
         );
     }
@@ -1672,7 +1729,7 @@ mod tests {
         let mut gated = world.clone();
         decoration.apply_source(seed, 185, 87, &mut gated, EndBiomeSet::default());
         assert!(
-            (1392..1440).all(|z| (2944..2992).all(|x| !is_chorus(gated.get(x, 64, z)))),
+            (1392..1440).all(|z| (2944..2992).all(|x| !is_chorus(&gated, x, 64, z))),
             "a source with no possible highlands must not consume or apply chorus",
         );
 
@@ -1687,7 +1744,7 @@ mod tests {
             }),
         );
         assert!(
-            (1392..1440).any(|z| (2944..2992).any(|x| is_chorus(world.get(x, 64, z)))),
+            (1392..1440).any(|z| (2944..2992).any(|x| is_chorus(&world, x, 64, z))),
             "the positive possible-biome arm must still place chorus",
         );
     }

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lodestone_core::{Reader, State, Writer};
+use lodestone_data::block_states::StateId;
 use lodestone_entity::item_entity::ItemLifecycle;
 use lodestone_model::{
     BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack, ResourceKey, Vec3,
@@ -31,6 +32,10 @@ const CHUNK: i32 = 0x27;
 const CHUNK_BATCH_FINISHED: i32 = 11;
 const ENCRYPTION_REQUEST_S2C: i32 = 70;
 const ENCRYPTION_RESPONSE_C2S: i32 = 71;
+
+fn fixture_state(value: &str) -> StateId {
+    StateId::from_state_str(value).expect("fixture block state")
+}
 
 // Play-state wire ids this stand-in protocol adds on top of the join
 // sequence above — a private vocabulary distinct from any real protocol's,
@@ -110,14 +115,8 @@ impl ChunkSource for AirSource {
         ChunkColumn::new(0, 16)
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
-        // The column-regenerating form (correct, just not cheap); this
-        // fixture is small and this path is not hot.
-        let cx = x.div_euclid(16);
-        let cz = z.div_euclid(16);
-        let lx = x.rem_euclid(16);
-        let lz = z.rem_euclid(16);
-        self.column(cx, cz).block_state(lx, y, lz).to_string()
+    fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
+        StateId::AIR
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -130,11 +129,8 @@ impl ChunkSource for AirSource {
         self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
     }
 
-    // No storage: this fixture serves fresh columns and edits are discarded by
-    // design (an edit a test needs to survive goes through a source with real
-    // retention). Explicit rather than inherited.
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
-        // No storage; edits are discarded by design.
+    // No storage: edits are discarded by design.
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
     }
 }
 
@@ -149,24 +145,25 @@ struct WaterSource;
 impl ChunkSource for WaterSource {
     fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
         let mut col = ChunkColumn::new(0, 16);
+        let water = fixture_state("minecraft:water");
         for x in 0..16 {
             for z in 0..16 {
                 for y in 0..16 {
-                    col.set_block(x, y, z, "minecraft:water");
+                    col.set_block_id(x, y, z, water);
                 }
             }
         }
         col
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         // The column-regenerating form (correct, just not cheap); this
         // fixture is small and this path is not hot.
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
-        self.column(cx, cz).block_state(lx, y, lz).to_string()
+        self.column(cx, cz).block_state_id(lx, y, lz)
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -182,7 +179,7 @@ impl ChunkSource for WaterSource {
     // No storage: this fixture serves fresh columns and edits are discarded by
     // design (an edit a test needs to survive goes through a source with real
     // retention). Explicit rather than inherited.
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
         // No storage; edits are discarded by design.
     }
 }

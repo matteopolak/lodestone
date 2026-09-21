@@ -525,7 +525,7 @@ pub(crate) fn run_command_as(
                         if let (Some(source), Some(block_ticks)) =
                             (config.world_source.as_ref(), config.block_ticks.as_ref())
                         {
-                            source.set_block(x, y, z, &block);
+                            source.set_block(x, y, z, block);
                             block_ticks.publish(x, y, z, block);
                         }
                     }
@@ -534,8 +534,8 @@ pub(crate) fn run_command_as(
                             (config.world_source.as_ref(), config.block_ticks.as_ref())
                         {
                             for (x, y, z) in positions {
-                                source.set_block(x, y, z, &block);
-                                block_ticks.publish(x, y, z, block.clone());
+                                source.set_block(x, y, z, block);
+                                block_ticks.publish(x, y, z, block);
                             }
                         }
                     }

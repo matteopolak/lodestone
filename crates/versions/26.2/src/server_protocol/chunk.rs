@@ -4,6 +4,7 @@
 //! re-exported helpers preserve the existing public API and wire behaviour.
 
 use super::*;
+use lodestone_core::{Nbt, Writer, write_network_nbt};
 
 /// Converts one `lodestone-server` [`ServerChunkColumn`] into the
 /// version-free [`WorldChunkColumn`] the wire codec speaks, carrying the
@@ -16,22 +17,8 @@ use super::*;
 /// [`biome_registry_id`] — a real per-`y` grid, not one surface
 /// sample broadcast down the column.
 ///
-/// # This function does no string work at all, and that is recent
-///
-/// It used to read [`ServerChunkColumn::block_state`] — a `&str` — 98,304 times
-/// per column, probe each through a per-column `HashMap<&str, u32>` (std's
-/// SipHash), and resolve each *distinct* entry through what was then a
-/// 32,366-row scan doing a string compare per row: order 10⁶ string comparisons
-/// per served column, paid on every join and every view-tracker resend. It was
-/// invisible to the 21-unit worldgen optimisation drive because the generation
-/// cost metric excludes protocol encode by definition.
-///
-/// The resolution now happens **once per palette entry, on the server side**, at
-/// column-adoption time (`ChunkColumn::palette_state_ids`), so the inner loop
-/// here is a range check and two array indexes. `resolve_state_id` still exists
-/// for the per-*edit* callers and is the same `lodestone_data` function the
-/// palette resolves through, so the two cannot drift. `DESIGN.md` §12.131 has
-/// the measurement.
+/// State ids are read directly from the canonical column palette, so the inner
+/// block loop is a range check and two array indexes.
 ///
 /// [`biome_registry_id`] uses a cached name-to-id map, and it is called once per
 /// entry in the column's own biome *palette* (`biome_palette_ids` below), never
@@ -66,27 +53,19 @@ pub(super) fn build_world_column(shape: &ChunkShape, source: &ServerChunkColumn)
         .map(|name| biome_registry_id(name))
         .collect();
 
+    let mut block_values = vec![
+        shape.air_id;
+        ChunkSection::EDGE * ChunkSection::EDGE * ChunkSection::EDGE
+    ];
+    let mut biome_values = vec![shape.biome_id; 4 * 4 * 4];
     for section_index in 0..shape.section_count {
         let base_y = shape.min_y + (section_index * ChunkSection::EDGE) as i32;
-        let mut section = ChunkSection::new(
-            shape.block_kind,
-            shape.biome_kind,
-            shape.air_id,
-            shape.biome_id,
-        );
         for ly in 0..ChunkSection::EDGE {
             let wy = base_y + ly as i32;
             for lz in 0..ChunkSection::EDGE {
                 for lx in 0..ChunkSection::EDGE {
-                    let id = source.block_state_id(lx as i32, wy, lz as i32);
-                    // `air_id` is already the container's own default (see
-                    // `ChunkSection::new`), so a cell resolving to it needs
-                    // no explicit write — same short-circuit the old
-                    // `is_solid` check gave air cells, just derived from the
-                    // real state now.
-                    if id != shape.air_id {
-                        section.set_block(lx, ly, lz, id);
-                    }
+                    let index = (ly << 8) | (lz << 4) | lx;
+                    block_values[index] = source.block_state_id(lx as i32, wy, lz as i32).raw();
                 }
             }
         }
@@ -95,16 +74,137 @@ pub(super) fn build_world_column(shape: &ChunkShape, source: &ServerChunkColumn)
             for qz in 0..4usize {
                 for qx in 0..4usize {
                     let cell = source.biome_cell_index(qx, column_qy, qz) as usize;
-                    section.set_biome(qx, qy, qz, biome_palette_ids[cell]);
+                    biome_values[(qy << 4) | (qz << 2) | qx] = biome_palette_ids[cell];
                 }
             }
         }
+        let section = ChunkSection::from_containers(
+            lodestone_world::PalettedContainer::from_values(shape.block_kind, &block_values),
+            lodestone_world::PalettedContainer::from_values(shape.biome_kind, &biome_values),
+            shape.air_id,
+        );
         if !section.is_empty(shape.biome_id) {
             column.set_section(section_index, Some(section));
         }
     }
 
     column
+}
+
+#[cfg(test)]
+mod conversion_tests {
+    use super::*;
+
+    fn cellwise_column(shape: &ChunkShape, source: &ServerChunkColumn) -> WorldChunkColumn {
+        let mut column = WorldChunkColumn::new(
+            shape.min_y,
+            shape.section_count,
+            shape.block_kind,
+            shape.biome_kind,
+            shape.air_id,
+            shape.biome_id,
+        );
+        let biome_ids: Vec<u32> = source
+            .biome_cell_palette()
+            .iter()
+            .map(|name| biome_registry_id(name))
+            .collect();
+        for section_index in 0..shape.section_count {
+            let base_y = shape.min_y + (section_index * ChunkSection::EDGE) as i32;
+            let mut section = ChunkSection::new(
+                shape.block_kind,
+                shape.biome_kind,
+                shape.air_id,
+                shape.biome_id,
+            );
+            for ly in 0..ChunkSection::EDGE {
+                for lz in 0..ChunkSection::EDGE {
+                    for lx in 0..ChunkSection::EDGE {
+                        let id = source
+                            .block_state_id(lx as i32, base_y + ly as i32, lz as i32)
+                            .raw();
+                        if id != shape.air_id {
+                            section.set_block(lx, ly, lz, id);
+                        }
+                    }
+                }
+            }
+            for qy in 0..4usize {
+                for qz in 0..4usize {
+                    for qx in 0..4usize {
+                        let cell = source.biome_cell_index(qx, section_index * 4 + qy, qz);
+                        section.set_biome(qx, qy, qz, biome_ids[cell as usize]);
+                    }
+                }
+            }
+            if !section.is_empty(shape.biome_id) {
+                column.set_section(section_index, Some(section));
+            }
+        }
+        column
+    }
+
+    #[test]
+    fn buffered_conversion_matches_cellwise_control_across_shapes() {
+        for shape in [ChunkShape::overworld_1_21(), ChunkShape::nether_or_end_1_21()] {
+            let mut source = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
+            source.set_block_id(
+                1,
+                shape.min_y,
+                2,
+                lodestone_data::block_states::StateId::from_state_str("minecraft:stone")
+                    .expect("stone state"),
+            );
+            source.set_block_id(
+                3,
+                shape.min_y + 17,
+                4,
+                lodestone_data::block_states::StateId::from_state_str("minecraft:water[level=7]")
+                    .expect("water state"),
+            );
+            source.set_block_id(
+                5,
+                shape.min_y + shape.world_height as i32 - 1,
+                6,
+                lodestone_data::block_states::StateId::from_state_str("minecraft:cave_air")
+                    .expect("cave air state"),
+            );
+            source.set_biome_cell(0, 0, 0, "minecraft:desert");
+            assert_eq!(build_world_column(&shape, &source), cellwise_column(&shape, &source));
+        }
+    }
+}
+
+#[cfg(test)]
+mod packet_count_tests {
+    use super::*;
+
+    #[test]
+    fn section_packet_counts_share_one_cell_census() {
+        let kind = lodestone_world::PaletteKind::block_states();
+        let biomes = lodestone_world::PaletteKind::biomes();
+        let mut section = ChunkSection::new(kind, biomes, 0, 0);
+        for (x, state) in [
+            (0, "minecraft:stone"),
+            (1, "minecraft:water[level=7]"),
+            (2, "minecraft:cave_air"),
+            (3, "minecraft:void_air"),
+        ] {
+            section.set_block(
+                x,
+                0,
+                0,
+                lodestone_data::block_states::state_id(state).expect("state"),
+            );
+        }
+        assert_eq!(
+            section_packet_counts(&section),
+            SectionPacketCounts {
+                non_empty: 2,
+                fluid: 1,
+            }
+        );
+    }
 }
 
 /// Encodes one [`WorldChunkColumn`] into the `level_chunk_with_light` body,
@@ -156,8 +256,9 @@ pub(super) fn encode_column_body(
                 &synthesized
             }
         };
-        section_blob.i16(packet_non_empty_block_count(section) as i16);
-        section_blob.i16(fluid_count(section) as i16);
+        let counts = section_packet_counts(section);
+        section_blob.i16(counts.non_empty as i16);
+        section_blob.i16(counts.fluid as i16);
         section.block_states().encode(&mut section_blob);
         section.biomes().encode(&mut section_blob);
     }
@@ -206,7 +307,7 @@ pub(super) fn served_heightmaps(shape: &ChunkShape, source: &ServerChunkColumn) 
             for x in 0..16i32 {
                 let stored = (shape.min_y..shape.min_y + shape.world_height as i32)
                     .rev()
-                    .find(|&y| client_heightmap_includes(type_id, source.resolved_block_state_id(x, y, z)))
+                    .find(|&y| client_heightmap_includes(type_id, source.block_state_id(x, y, z)))
                     .map_or(0, |y| (y + 1 - shape.min_y) as u32);
                 map.set(x as usize, z as usize, stored);
             }
@@ -249,36 +350,32 @@ pub(super) fn is_leaves(block: Block) -> bool {
     lodestone_data::tool::builtin_block_tag_contains("minecraft:leaves", block)
 }
 
-/// Counts states with a non-empty fluid state in one section. The field counts
-/// waterlogged blocks as well as liquid blocks, and is derived from the exact
-/// container the encoder writes so it cannot disagree with the following state
-/// bytes even when a short test column is padded to a dimension window.
-pub(super) fn fluid_count(section: &ChunkSection) -> u16 {
-    (0..section.block_states().entry_count())
-        .filter(|&index| {
-            lodestone_data::block_states::StateId::new(section.block_states().get(index))
-                .is_some_and(lodestone_data::snow_support::has_fluid_state)
-        })
-        .count() as u16
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SectionPacketCounts {
+    non_empty: u16,
+    fluid: u16,
 }
 
-/// Counts the states the protocol considers non-empty for its section header.
-/// The world section deliberately has one version-neutral default-air count;
-/// this wire field additionally excludes cave air and void air, whose payload
-/// states must still be retained in an otherwise air-only section.
-pub(super) fn packet_non_empty_block_count(section: &ChunkSection) -> u16 {
-    (0..section.block_states().entry_count())
-        .filter(|&index| is_non_air_state_id(section.block_states().get(index)))
-        .count() as u16
-}
-
-pub(super) fn is_non_air_state_id(id: u32) -> bool {
-    lodestone_data::block_states::StateId::new(id).is_some_and(|state| {
-        !matches!(
-            state.block(),
-            Block::Air | Block::CaveAir | Block::VoidAir
-        )
-    })
+/// Counts both section header fields while reading each packed cell once.
+fn section_packet_counts(section: &ChunkSection) -> SectionPacketCounts {
+    let mut counts = SectionPacketCounts {
+        non_empty: 0,
+        fluid: 0,
+    };
+    for index in 0..section.block_states().entry_count() {
+        let Some(state) = lodestone_data::block_states::StateId::new(
+            section.block_states().get(index),
+        ) else {
+            continue;
+        };
+        if !matches!(state.block(), Block::Air | Block::CaveAir | Block::VoidAir) {
+            counts.non_empty += 1;
+        }
+        if lodestone_data::snow_support::has_fluid_state(state) {
+            counts.fluid += 1;
+        }
+    }
+    counts
 }
 
 /// Writes the chunk packet's block-entity array: a VarInt count

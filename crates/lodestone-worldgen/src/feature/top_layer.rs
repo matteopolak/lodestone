@@ -102,36 +102,15 @@
 //!   "Known scope".
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-
-use lodestone_data::block_states::{BlockStateValue, StateId as CanonicalStateId};
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey};
+use lodestone_data::block_states::{BlockStateValue, StateId, STATE_COUNT};
 use lodestone_worldgen_core::hash::{FastMap, FastSet};
 use serde_json::Value;
 
 use crate::dense_grid::DenseBlockGrid;
-use crate::interner::{StateId, StateInterner};
 use crate::noise::ClimateNoise;
 use crate::stage_schedule::DecorationStep;
-
-#[cfg(test)]
-thread_local! {
-    static PREDICATE_STRING_FALLBACKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-fn bump_predicate_string_fallback() {
-    PREDICATE_STRING_FALLBACKS.with(|count| count.set(count.get().wrapping_add(1)));
-}
-
-#[cfg(test)]
-fn predicate_string_fallbacks() -> u64 {
-    PREDICATE_STRING_FALLBACKS.with(std::cell::Cell::get)
-}
-
-#[cfg(test)]
-fn reset_predicate_string_fallbacks() {
-    PREDICATE_STRING_FALLBACKS.with(|count| count.set(0));
-}
 
 /// Vanilla's own decoration-step ordinal — the eleventh
 /// and last decoration step. One past `VEGETAL_DECORATION`
@@ -141,11 +120,11 @@ pub const STEP_TOP_LAYER_MODIFICATION: i32 = DecorationStep::TopLayerModificatio
 /// The block state vanilla's own feature writes at `topPos`:
 /// one snow layer (vanilla's snow-layer block registers a single layer as
 /// its default state).
-pub const SNOW_LAYER: &str = "minecraft:snow[layers=1]";
+pub const SNOW_LAYER: StateId = StateId::from_raw(6919);
 
 /// The block state written at `belowPos` when a column freezes: vanilla's
 /// default ice state. Ice has no properties.
-pub const ICE: &str = "minecraft:ice";
+pub const ICE: StateId = StateId::from_raw(6927);
 
 /// Vanilla's own "warm enough to rain" threshold. A column snows when
 /// its height-adjusted temperature is **strictly below** this.
@@ -226,7 +205,7 @@ pub struct BiomeClimate {
 /// representation gap") — so a column's water reads as `minecraft:water`, not
 /// `minecraft:water[level=0]`. Since `is_water_source_liquid_block` is true for
 /// exactly one water state, an exact-string lookup would silently stop every
-/// ocean from freezing. [`StatePredicate::test`] therefore falls back from the
+/// ocean from freezing. [`StatePredicate::test_id`] therefore falls back from the
 /// exact state to the block's **default state**'s answer, which is what a
 /// property-less name means.
 #[derive(Clone, Debug, Default)]
@@ -241,10 +220,12 @@ pub struct SnowSupport {
     pub face_full_up: StatePredicate,
     /// Vanilla's own `snowy` block-state property presence check.
     pub snowy_property: StatePredicate,
-    /// `BlockTags.CANNOT_SUPPORT_SNOW_LAYER`, by block base name.
+    /// `BlockTags.CANNOT_SUPPORT_SNOW_LAYER`, by block resource id.
     pub cannot_support_snow_layer: HashSet<String>,
-    /// `BlockTags.SUPPORT_OVERRIDE_SNOW_LAYER`, by block base name.
+    /// `BlockTags.SUPPORT_OVERRIDE_SNOW_LAYER`, by block resource id.
     pub support_override_snow_layer: HashSet<String>,
+    cannot_support_blocks: FastSet<Block>,
+    support_override_blocks: FastSet<Block>,
 }
 
 /// A per-block-state boolean, stored as "the answer for each block's default
@@ -255,100 +236,25 @@ pub struct SnowSupport {
 /// plus a short override list is two orders of magnitude smaller than a
 /// per-state map — while staying **exact**, because the overrides are complete
 /// rather than a curated subset.
-/// The local-id cache for one [`StatePredicate`]. A fixed `u16` domain avoids
-/// touching the interner lock or reconstructing a state string in a repeated
-/// generation predicate. `resolved` is a watermark because generation can
-/// mint a new state after the cache was bound.
-#[derive(Debug)]
-struct PredicateIds {
-    instance: AtomicU64,
-    resolved: AtomicUsize,
-    builtin: Box<[AtomicU64]>,
-    answers: Box<[AtomicU64]>,
-}
-
-const LOCAL_ID_SPACE: usize = u16::MAX as usize + 1;
-const LOCAL_ID_WORDS: usize = LOCAL_ID_SPACE / 64;
-
-impl Default for PredicateIds {
-    fn default() -> Self {
-        Self {
-            // The interner starts at zero, so MAX is an unambiguous unbound
-            // marker.
-            instance: AtomicU64::new(u64::MAX),
-            resolved: AtomicUsize::new(0),
-            builtin: (0..LOCAL_ID_WORDS).map(|_| AtomicU64::new(0)).collect(),
-            answers: (0..LOCAL_ID_WORDS).map(|_| AtomicU64::new(0)).collect(),
-        }
-    }
-}
-
-impl PredicateIds {
-    fn clear(&self) {
-        for word in self.builtin.iter().chain(self.answers.iter()) {
-            word.store(0, Ordering::Relaxed);
-        }
-        self.resolved.store(0, Ordering::Relaxed);
-    }
-
-    #[inline]
-    fn set(&self, index: usize, answer: bool) {
-        let word = index / 64;
-        let bit = 1u64 << (index & 63);
-        self.builtin[word].fetch_or(bit, Ordering::Relaxed);
-        if answer {
-            self.answers[word].fetch_or(bit, Ordering::Relaxed);
-        }
-    }
-
-    #[inline]
-    fn is_builtin(&self, index: usize) -> bool {
-        (self.builtin[index / 64].load(Ordering::Relaxed) & (1u64 << (index & 63))) != 0
-    }
-
-    #[inline]
-    fn answer(&self, index: usize) -> bool {
-        (self.answers[index / 64].load(Ordering::Relaxed) & (1u64 << (index & 63))) != 0
-    }
-}
-
-/// A state predicate retains its text maps as the extension fallback. The
-/// cache is not cloned: a clone may be used with another generator interner,
-/// and an unbound cache is always correct while a copied one could answer with
-/// the other interner's local IDs.
+/// A state predicate retains resolver text maps only at its input boundary and
+/// stores the complete answer table in canonical state-id order.
 #[derive(Debug)]
 pub struct StatePredicate {
-    /// Answer for each block's default state, keyed by base name
-    /// (`minecraft:water`). Absent means `false`.
-    ///
-    /// [`FastSet`], not the default hasher: [`Self::test`] runs per column of
-    /// every top-layer chunk on a `String` key, and U17's profile measured this
-    /// type at 15% of the pipeline's remaining SipHash time. Safe because both
-    /// fields are private and used only through `get`/`contains`/`is_empty` —
-    /// never iterated, so no order is observable. See
-    /// [`lodestone_worldgen_core::hash::fast`] for why that argument has to be
-    /// made per map rather than assumed.
-    by_block_default: FastSet<String>,
-    /// Every state whose answer differs from its block's default, keyed by full
-    /// canonical state string (`minecraft:water[level=0]`).
-    by_state: FastMap<String, bool>,
     /// Built-in defaults parsed once into the generated state's typed domain.
     /// Each entry is a block's canonical default state; all of that block's
     /// states inherit the answer unless an exact typed override exists.
-    builtin_defaults: FastSet<CanonicalStateId>,
+    builtin_defaults: FastSet<StateId>,
     /// Exact built-in overrides parsed once from the resolver document.
-    builtin_states: FastMap<CanonicalStateId, bool>,
-    ids: PredicateIds,
+    builtin_states: FastMap<StateId, bool>,
+    answers: Box<[bool]>,
 }
 
 impl Clone for StatePredicate {
     fn clone(&self) -> Self {
         Self {
-            by_block_default: self.by_block_default.clone(),
-            by_state: self.by_state.clone(),
             builtin_defaults: self.builtin_defaults.clone(),
             builtin_states: self.builtin_states.clone(),
-            ids: PredicateIds::default(),
+            answers: self.answers.clone(),
         }
     }
 }
@@ -356,17 +262,15 @@ impl Clone for StatePredicate {
 impl Default for StatePredicate {
     fn default() -> Self {
         Self {
-            by_block_default: FastSet::default(),
-            by_state: FastMap::default(),
             builtin_defaults: FastSet::default(),
             builtin_states: FastMap::default(),
-            ids: PredicateIds::default(),
+            answers: vec![false; STATE_COUNT as usize].into_boxed_slice(),
         }
     }
 }
 
 impl StatePredicate {
-    /// Builds from the two halves. `by_state` must list **every** disagreeing
+    /// Builds from the two halves. `overrides` must list **every** disagreeing
     /// state; a partial list is silently wrong, which is why it is produced by a
     /// full walk of the state registry rather than by hand.
     ///
@@ -377,111 +281,58 @@ impl StatePredicate {
     /// and never again. Changing the signature would push a hasher choice across
     /// a crate boundary for no gain.
     #[must_use]
-    pub fn new(by_block_default: HashSet<String>, by_state: HashMap<String, bool>) -> Self {
+    pub fn new(by_block_default: HashSet<String>, overrides: HashMap<String, bool>) -> Self {
         let builtin_defaults = by_block_default
             .iter()
             .filter_map(|state| exact_builtin_state(state))
             .map(|state| state.block().default_state())
             .collect();
-        let builtin_states = by_state
+        let builtin_states = overrides
             .iter()
             .filter_map(|(state, &answer)| {
                 exact_builtin_state(state).map(|state| (state, answer))
             })
             .collect();
-        Self {
-            by_block_default: by_block_default.into_iter().collect(),
-            by_state: by_state.into_iter().collect(),
+        let mut predicate = Self {
             builtin_defaults,
             builtin_states,
-            ids: PredicateIds::default(),
+            answers: vec![false; STATE_COUNT as usize].into_boxed_slice(),
+        };
+        for raw in 0..STATE_COUNT {
+            let state = StateId::new(raw as u32).expect("generated state id");
+            predicate.answers[state.index()] = predicate.builtin_answer(state);
         }
+        predicate
     }
 
-    /// The answer for a canonical block-state string.
-    ///
-    /// Exact state first, then the block's default-state answer — see
-    /// [`SnowSupport`]'s "Why lookups are two-level".
+    /// Text lookup is retained only for unit tests at the config boundary.
+    #[cfg(test)]
     #[must_use]
-    pub fn test(&self, state: &str) -> bool {
-        if let Some(&answer) = self.by_state.get(state) {
-            return answer;
-        }
-        self.by_block_default.contains(base_id(state))
+    fn test(&self, state: &str) -> bool {
+        exact_builtin_state(state).is_some_and(|state| self.builtin_answer(state))
     }
 
-    /// The built-in answer in the typed state domain. The text maps remain
-    /// authoritative for extension values; this is only called after a
-    /// canonical table ID has already proved the value is built-in.
+    /// The built-in answer in the typed state domain.
     #[inline]
-    fn builtin_answer(&self, state: CanonicalStateId) -> bool {
+    fn builtin_answer(&self, state: StateId) -> bool {
         self.builtin_states
             .get(&state)
             .copied()
             .unwrap_or_else(|| self.builtin_defaults.contains(&state.block().default_state()))
     }
 
-    /// Binds this predicate to the states currently interned by `interner`.
-    /// Built-in states are answered by compact local-ID bitsets; extension
-    /// states deliberately remain on [`Self::test`] so plugin/data-pack
-    /// semantics cannot be confused with a built-in default.
-    ///
-    /// The call is cheap when no new IDs were interned and is intended once per
-    /// generation pass, never per cell. Late state synthesis is safe: IDs past
-    /// the watermark use the string fallback until the next bind.
-    pub fn bind(&self, interner: &StateInterner) {
-        let instance = interner.instance_id();
-        if self.ids.instance.load(Ordering::Acquire) != instance {
-            self.ids.clear();
-            self.ids.instance.store(instance, Ordering::Release);
-        }
-        let len = interner.len().min(LOCAL_ID_SPACE);
-        let done = self.ids.resolved.load(Ordering::Acquire);
-        if len <= done {
-            return;
-        }
-        for raw in done..len {
-            let id = StateId::from_raw(u16::try_from(raw).expect("local state id fits u16"));
-            // Extension values never get a bit, even if they have a matching
-            // base name. That keeps the exact string fallback as the extension
-            // compatibility boundary.
-            if let Some(canonical) = interner.canonical_id(id) {
-                self.ids.set(raw, self.builtin_answer(canonical));
-            }
-        }
-        self.ids.resolved.fetch_max(len, Ordering::Release);
-    }
-
-    /// Tests an interned state without resolving its spelling. Built-in IDs
-    /// are one bitset load; extension IDs and states interned after the last
-    /// bind use the pre-existing string semantics.
+    /// Tests a canonical state without resolving its spelling.
     #[inline]
     #[must_use]
-    pub fn test_id(&self, interner: &StateInterner, id: StateId) -> bool {
-        let index = id.index();
-        if self.ids.instance.load(Ordering::Acquire) == interner.instance_id()
-            && index < self.ids.resolved.load(Ordering::Acquire)
-            && self.ids.is_builtin(index)
-        {
-            return self.ids.answer(index);
-        }
-        #[cfg(test)]
-        bump_predicate_string_fallback();
-        self.test(interner.name_of(id))
-    }
-
-    #[cfg(test)]
-    fn cache_answers_builtin(&self, interner: &StateInterner, id: StateId) -> bool {
-        self.ids.instance.load(Ordering::Acquire) == interner.instance_id()
-            && id.index() < self.ids.resolved.load(Ordering::Acquire)
-            && self.ids.is_builtin(id.index())
+    pub fn test_id(&self, id: StateId) -> bool {
+        self.answers[id.index()]
     }
 
     /// `true` when nothing was supplied — the "no data supplied" convention
     /// every other resolver-fed table in this crate follows.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.by_block_default.is_empty() && self.by_state.is_empty()
+        self.builtin_defaults.is_empty() && self.builtin_states.is_empty()
     }
 
     /// Parses one column of the resolver's `block_freeze_facts` document:
@@ -504,7 +355,7 @@ impl StatePredicate {
                     .collect()
             })
             .unwrap_or_default();
-        let by_state = value
+        let overrides = value
             .get("states")
             .and_then(Value::as_object)
             .map(|o| {
@@ -518,28 +369,21 @@ impl StatePredicate {
                     .collect()
             })
             .unwrap_or_default();
-        Self::new(by_block_default, by_state)
+        Self::new(by_block_default, overrides)
     }
 }
 
 /// Parses only an exact generated state. The forgiving `StateId::from_state_str`
 /// API intentionally accepts shorthand/default forms, but a predicate override
-/// with an unknown property must remain an extension fallback rather than being
-/// silently applied to the block's default state.
-fn exact_builtin_state(state: &str) -> Option<CanonicalStateId> {
-    BlockStateValue::parse(state).state_id()
+/// with an unknown property must not be silently applied to a block default.
+fn exact_builtin_state(encoded: &str) -> Option<StateId> {
+    BlockStateValue::parse(encoded).state_id()
 }
 
 impl SnowSupport {
     /// Binds all per-state predicates to one generator's interner. This is a
     /// construction/pass boundary; the repeated queries use local IDs only.
-    pub fn bind(&self, interner: &StateInterner) {
-        self.blocks_motion.bind(interner);
-        self.has_fluid_state.bind(interner);
-        self.water_source.bind(interner);
-        self.face_full_up.bind(interner);
-        self.snowy_property.bind(interner);
-    }
+    pub fn bind(&self) {}
 
     /// Parses the whole `block_freeze_facts` document plus the two already-
     /// resolved tag sets.
@@ -549,6 +393,14 @@ impl SnowSupport {
         cannot_support_snow_layer: HashSet<String>,
         support_override_snow_layer: HashSet<String>,
     ) -> Self {
+        let cannot_support_blocks = cannot_support_snow_layer
+            .iter()
+            .filter_map(|name| Block::from_name(name))
+            .collect();
+        let support_override_blocks = support_override_snow_layer
+            .iter()
+            .filter_map(|name| Block::from_name(name))
+            .collect();
         Self {
             blocks_motion: StatePredicate::parse(&facts["blocks_motion"]),
             has_fluid_state: StatePredicate::parse(&facts["has_fluid_state"]),
@@ -557,6 +409,8 @@ impl SnowSupport {
             snowy_property: StatePredicate::parse(&facts["snowy_property"]),
             cannot_support_snow_layer,
             support_override_snow_layer,
+            cannot_support_blocks,
+            support_override_blocks,
         }
     }
 
@@ -572,18 +426,28 @@ impl SnowSupport {
             || self.face_full_up.is_empty()
     }
 
-    /// Vanilla's own `MOTION_BLOCKING` heightmap predicate:
-    /// a block that blocks motion, or has a non-empty fluid state.
-    #[must_use]
-    pub fn motion_blocking(&self, state: &str) -> bool {
-        self.blocks_motion.test(state) || self.has_fluid_state.test(state)
-    }
-
-    /// ID form of [`Self::motion_blocking`] for the generation scan.
+    /// Motion-blocking lookup for the generation scan.
     #[inline]
     #[must_use]
-    pub fn motion_blocking_id(&self, interner: &StateInterner, state: StateId) -> bool {
-        self.blocks_motion.test_id(interner, state) || self.has_fluid_state.test_id(interner, state)
+    pub fn motion_blocking_id(&self, state: StateId) -> bool {
+        self.blocks_motion.test_id(state) || self.has_fluid_state.test_id(state)
+    }
+
+    #[inline]
+    fn snow_can_survive_id(&self, state: StateId) -> bool {
+        let block = state.block();
+        if self.cannot_support_blocks.contains(&block) {
+            return false;
+        }
+        if self.support_override_blocks.contains(&block) {
+            return true;
+        }
+        self.face_full_up.test_id(state)
+            || (block == Block::Snow
+                && state
+                    .properties()
+                    .iter()
+                    .any(|(name, value)| *name == "layers" && *value == "8"))
     }
 
     /// Vanilla's own snow-layer survival check, where
@@ -599,16 +463,20 @@ impl SnowSupport {
     /// a full UP collision face (a full snow layer is 14/16 tall), so without
     /// that clause snow could never stack on a full layer.
     #[must_use]
-    pub fn snow_can_survive(&self, below_state: &str) -> bool {
-        let base = base_id(below_state);
-        if self.cannot_support_snow_layer.contains(base) {
+    #[cfg(test)]
+    fn snow_can_survive(&self, below_state: &str) -> bool {
+        let Some(canonical) = exact_builtin_state(below_state) else {
+            return false;
+        };
+        let block = canonical.block();
+        if self.cannot_support_blocks.contains(&block) {
             return false;
         }
-        if self.support_override_snow_layer.contains(base) {
+        if self.support_override_blocks.contains(&block) {
             return true;
         }
-        self.face_full_up.test(below_state)
-            || (base == "minecraft:snow" && snow_layers(below_state) == Some(8))
+        self.face_full_up.builtin_answer(canonical)
+            || (block == Block::Snow && snow_layers(below_state) == Some(8))
     }
 }
 
@@ -678,14 +546,15 @@ pub fn parse_biome_climate(document: &Value) -> Option<BiomeClimate> {
     })
 }
 
-/// The base block id of a canonical state string: `minecraft:snow[layers=2]` ->
-/// `minecraft:snow`.
+/// Test helper for the legacy textual fixture assertions.
+#[cfg(test)]
 #[must_use]
 pub fn base_id(state: &str) -> &str {
     state.split('[').next().unwrap_or(state)
 }
 
-/// The `layers` property of a `minecraft:snow[...]` state, if present.
+/// Test helper for the legacy textual fixture assertions.
+#[cfg(test)]
 fn snow_layers(state: &str) -> Option<u32> {
     let props = state.split_once('[')?.1.strip_suffix(']')?;
     props
@@ -818,7 +687,7 @@ pub fn motion_blocking_first_free(
 ) -> i32 {
     let mut y = min_y + height - 1;
     while y >= min_y {
-        if support.motion_blocking_id(grid.interner(), grid.get_id(x, y, z)) {
+        if support.motion_blocking_id(grid.get_id(x, y, z)) {
             return y + 1;
         }
         y -= 1;
@@ -877,7 +746,7 @@ pub fn apply_freeze_top_layer<'b>(
     support: &SnowSupport,
     noise: &ClimateNoise,
 ) -> FreezeCounts {
-    let mut discard_write = |_x: i32, _y: i32, _z: i32, _state: &str| {};
+    let mut discard_write = |_x: i32, _y: i32, _z: i32, _state: StateId| {};
     apply_freeze_top_layer_with_observer(
         grid,
         chunk_x,
@@ -909,15 +778,25 @@ pub fn apply_freeze_top_layer_with_observer<'b>(
     climates: &HashMap<String, BiomeClimate>,
     support: &SnowSupport,
     noise: &ClimateNoise,
-    observer: &mut dyn FnMut(i32, i32, i32, &str),
+    observer: &mut dyn FnMut(i32, i32, i32, StateId),
 ) -> FreezeCounts {
     let mut counts = FreezeCounts::default();
     if support.is_empty() {
         return counts;
     }
-    // Resolve the generator's local IDs once before entering the 256-column
-    // scan. New states synthesized later still use the exact string fallback.
-    support.bind(grid.interner());
+    let ice_id = ICE;
+    let snow_layer_id = SNOW_LAYER;
+    let snow_base_id = snow_layer_id;
+    let air_ids = [
+        Block::Air.default_state(),
+        Block::CaveAir.default_state(),
+        Block::VoidAir.default_state(),
+    ];
+    let snowy_states = [
+        bind_snowy_pair(Block::GrassBlock),
+        bind_snowy_pair(Block::Podzol),
+        bind_snowy_pair(Block::Mycelium),
+    ];
     let base_x = chunk_x * 16;
     let base_z = chunk_z * 16;
     let max_y = min_y + height - 1;
@@ -941,10 +820,15 @@ pub fn apply_freeze_top_layer_with_observer<'b>(
                 // worldgen — see this module's "Approximations, named".
                 if support
                     .water_source
-                    .test_id(grid.interner(), grid.get_id(x, below_y, z))
+                    .test_id(grid.get_id(x, below_y, z))
                 {
-                    grid.set(x, below_y, z, ICE);
-                    observer(x, below_y, z, ICE);
+                    grid.set_id(x, below_y, z, ice_id);
+                    observer(
+                        x,
+                        below_y,
+                        z,
+                        ice_id,
+                    );
                     counts.ice += 1;
                 }
             }
@@ -957,34 +841,48 @@ pub fn apply_freeze_top_layer_with_observer<'b>(
             if !inside_top || warm_enough_to_rain(climate, noise, x, top_y, z, sea_level) {
                 continue;
             }
-            let top_state = grid.get(x, top_y, z).to_owned();
-            let top_base = base_id(&top_state);
+            let top_base = grid.get_id(x, top_y, z);
             // Vanilla's own check: air, or already a snow layer.
-            if !(is_air(top_base) || top_base == "minecraft:snow") {
+            if !(air_ids.contains(&top_base) || top_base == snow_base_id) {
                 continue;
             }
             // `canSurvive` reads the block BELOW topPos — which the ice write
             // above may just have changed. Reading it here rather than earlier is
             // what makes frozen oceans bare ice instead of snow-covered ice.
             let below_state = if inside_below {
-                grid.get(x, below_y, z).to_owned()
+                grid.get_id(x, below_y, z)
             } else {
-                "minecraft:air".to_owned()
+                StateId::AIR
             };
-            if !support.snow_can_survive(&below_state) {
+            if !support.snow_can_survive_id(below_state) {
                 continue;
             }
-            grid.set(x, top_y, z, SNOW_LAYER);
-            observer(x, top_y, z, SNOW_LAYER);
+            grid.set_id(x, top_y, z, snow_layer_id);
+            observer(
+                x,
+                top_y,
+                z,
+                snow_layer_id,
+            );
             counts.snow += 1;
             if inside_below
                 && support
                     .snowy_property
-                    .test_id(grid.interner(), grid.get_id(x, below_y, z))
+                    .test_id(below_state)
             {
-                let snowy_state = with_snowy_true(&below_state);
-                grid.set(x, below_y, z, &snowy_state);
-                observer(x, below_y, z, &snowy_state);
+                let Some((_, snowy)) = snowy_states
+                    .iter()
+                    .find(|(plain, _)| *plain == below_state)
+                else {
+                    continue;
+                };
+                grid.set_id(x, below_y, z, *snowy);
+                observer(
+                    x,
+                    below_y,
+                    z,
+                    *snowy,
+                );
                 counts.snowy_flips += 1;
             }
         }
@@ -992,7 +890,21 @@ pub fn apply_freeze_top_layer_with_observer<'b>(
     counts
 }
 
-/// Vanilla's own `snowy` property set to `true`, on a canonical state string.
+fn bind_snowy_pair(block: Block) -> (StateId, StateId) {
+    let plain_properties = Properties::empty()
+        .with_builtin(PropertyKey::Snowy, BuiltinPropertyValue::False)
+        .expect("snowy=false property");
+    let plain = Properties::state_for_block(block, &plain_properties)
+        .expect("snowy=false state");
+    let snowy_properties = Properties::empty()
+        .with_builtin(PropertyKey::Snowy, BuiltinPropertyValue::True)
+        .expect("snowy=true property");
+    let snowy = Properties::state_for_block(block, &snowy_properties)
+        .expect("snowy=true state");
+    (plain, snowy)
+}
+
+/// Test-only text rewrite control for the input predicate.
 ///
 /// Property order in a canonical string is alphabetical (see
 /// [`super::canon_state`]), and `snowy` is only ever carried by `grass_block`,
@@ -1002,6 +914,7 @@ pub fn apply_freeze_top_layer_with_observer<'b>(
 /// than special-casing those three, so a future block with `snowy` alongside
 /// other properties keeps working.
 #[must_use]
+#[cfg(test)]
 fn with_snowy_true(state: &str) -> String {
     let Some((base, rest)) = state.split_once('[') else {
         return format!("{state}[snowy=true]");
@@ -1018,13 +931,6 @@ fn with_snowy_true(state: &str) -> String {
     kv.sort_by(|a, b| a.0.cmp(b.0));
     let body: Vec<String> = kv.iter().map(|(k, v)| format!("{k}={v}")).collect();
     format!("{base}[{}]", body.join(","))
-}
-
-fn is_air(base: &str) -> bool {
-    matches!(
-        base,
-        "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air"
-    )
 }
 
 #[cfg(test)]
@@ -1102,15 +1008,22 @@ mod tests {
             &climates,
             &support,
             &ClimateNoise::new(),
-            &mut |x, y, z, state| writes.push((x, y, z, state.to_owned())),
+            &mut |x, y, z, state| writes.push((x, y, z, state)),
         );
         assert_eq!(counts.snow, 1);
         assert_eq!(
             writes,
-            vec![(0, 1, 0, SNOW_LAYER.to_owned())],
+            vec![
+                (
+                    0,
+                    1,
+                    0,
+                    SNOW_LAYER,
+                ),
+            ],
             "the observer must expose the exact top-layer write order",
         );
-        assert_eq!(grid.get(0, 1, 0), SNOW_LAYER);
+        assert_eq!(grid.get_id(0, 1, 0), SNOW_LAYER);
     }
 
     /// The two-level lookup: an exact state wins, and a property-less name falls
@@ -1134,35 +1047,12 @@ mod tests {
     }
 
     #[test]
-    fn state_predicate_binds_builtins_but_preserves_extension_fallback() {
+    #[should_panic(expected = "unknown or malformed built-in block state")]
+    fn state_predicate_rejects_extension_state_at_ingress() {
         let mut defaults = HashSet::new();
         defaults.insert("minecraft:water".to_owned());
-        defaults.insert("plugin:test_block".to_owned());
         let predicate = StatePredicate::new(defaults, HashMap::new());
-        let interner = StateInterner::new();
-        let water = interner.id_of("minecraft:water");
-        let extension = interner.id_of("plugin:test_block");
-
-        predicate.bind(&interner);
-
-        assert!(predicate.cache_answers_builtin(&interner, water));
-        assert!(predicate.test_id(&interner, water));
-        assert!(!predicate.cache_answers_builtin(&interner, extension));
-        assert!(
-            predicate.test_id(&interner, extension),
-            "extension values must retain the string fallback semantics"
-        );
-
-        // Test-only thread-local instrumentation is the positive control for
-        // the hot-path claim: built-ins must not use the string fallback, while
-        // extensions must. It is thread-local so a full parallel test run does
-        // not race over the repository's process-wide structural counters.
-        reset_predicate_string_fallbacks();
-        predicate.bind(&interner);
-        assert!(predicate.test_id(&interner, water));
-        assert_eq!(predicate_string_fallbacks(), 0);
-        assert!(predicate.test_id(&interner, extension));
-        assert_eq!(predicate_string_fallbacks(), 1);
+        let _ = predicate;
     }
 
     #[test]
@@ -1170,19 +1060,10 @@ mod tests {
         let mut defaults = HashSet::new();
         defaults.insert("minecraft:stone".to_owned());
         let predicate = StatePredicate::new(defaults, HashMap::new());
-        let interner = StateInterner::new();
-        let stone = interner.id_of("minecraft:stone");
-        predicate.bind(&interner);
-
-        let dirt = interner.id_of("minecraft:dirt");
-        assert!(!predicate.cache_answers_builtin(&interner, dirt));
-        assert!(!predicate.test_id(&interner, dirt));
-
-        predicate.bind(&interner);
-        assert!(predicate.cache_answers_builtin(&interner, dirt));
-        assert!(predicate.cache_answers_builtin(&interner, stone));
-        assert!(predicate.test_id(&interner, stone));
-        assert!(!predicate.test_id(&interner, dirt));
+        let stone = StateId::from_state_str("minecraft:stone").expect("stone state");
+        let dirt = StateId::from_state_str("minecraft:dirt").expect("dirt state");
+        assert!(predicate.test_id(stone));
+        assert!(!predicate.test_id(dirt));
     }
 
     /// The height adjustment must be inert at or below `seaLevel + 17` and active
@@ -1274,6 +1155,8 @@ mod tests {
             face_full_up: StatePredicate::new(face_full, HashMap::new()),
             cannot_support_snow_layer: ["minecraft:ice".to_owned()].into_iter().collect(),
             support_override_snow_layer: ["minecraft:mud".to_owned()].into_iter().collect(),
+            cannot_support_blocks: [Block::Ice].into_iter().collect(),
+            support_override_blocks: [Block::Mud].into_iter().collect(),
             ..SnowSupport::default()
         };
         assert!(support.snow_can_survive("minecraft:grass_block[snowy=false]"));

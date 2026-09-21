@@ -29,6 +29,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use lodestone_data::block_states::StateId;
 use lodestone_worldgen::aquifer::AquiferSystem;
 use lodestone_worldgen::carver::{CarveGrid, CarveObserver, CarverConfig, apply_carvers};
 use lodestone_worldgen::density::{Builder, NoiseParams, Resolver};
@@ -290,13 +291,14 @@ fn run_fixture(label: &str, surface_text: &str, carver_text: &str) {
 
     // Rebuild the surface rule so carvers can re-cap dirt exposed beneath a
     // carved grass block via `topMaterial`. plains is not cold enough to snow.
-    // U21: `SurfaceSystem` interns its result states, so it takes the table.
-    // `top_material` still returns `Option<String>` — the carver seam was
-    // deliberately left on strings — so nothing else here changes.
-    let interner = std::sync::Arc::new(lodestone_worldgen::interner::StateInterner::new());
-    let surface = SurfaceSystem::new(&settings, &builder, &si.canon, &interner);
+    // Surface rules and carvers share the generated canonical state table.
+    let replaceable_ids = replaceable
+        .iter()
+        .map(|name| StateId::from_state_str(name).expect("replaceable state is canonical"))
+        .collect::<lodestone_worldgen_core::hash::FastSet<StateId>>();
+    let surface = SurfaceSystem::new(&settings, &builder, &si.canon);
     let hm_fn = |x: i32, z: i32| -> i32 { *si.hm.get(&(x, z)).expect("heightmap") };
-    let top_material = |x: i32, y: i32, z: i32, under_fluid: bool| -> Option<String> {
+    let top_material = |x: i32, y: i32, z: i32, under_fluid: bool| {
         surface.top_material(x, y, z, under_fluid, &hm_fn, &si.biome, false)
     };
 
@@ -308,11 +310,14 @@ fn run_fixture(label: &str, surface_text: &str, carver_text: &str) {
         for z in 0..16 {
             for y in MIN_Y..(MIN_Y + HEIGHT) {
                 let block = post.get(&(x, y, z)).expect("post block");
-                world_blocks.insert((origin_x + x, y, origin_z + z), block.clone());
+                world_blocks.insert(
+                    (origin_x + x, y, origin_z + z),
+                    StateId::from_state_str(block).expect("post state is canonical"),
+                );
             }
         }
     }
-    let mut grid = CarveGrid::new(world_blocks);
+    let mut grid = CarveGrid::new(std::sync::Arc::new(()), world_blocks);
 
     let mut recorder = Recorder {
         center_x: r.chunk_x,
@@ -332,7 +337,7 @@ fn run_fixture(label: &str, surface_text: &str, carver_text: &str) {
         &mut carvers_for_source,
         &mut grid,
         &aquifer,
-        &replaceable,
+        &replaceable_ids,
         &top_material,
         &mut recorder,
     );
@@ -388,14 +393,15 @@ fn run_fixture(label: &str, surface_text: &str, carver_text: &str) {
                 let got = result
                     .get(&(origin_x + x, y, origin_z + z))
                     .expect("result block");
+                let got_name = got.canonical_state();
                 let input = post.get(&(x, y, z)).expect("post block");
                 if want != input {
                     changed += 1;
                 }
-                if want == got {
+                if want == &got_name {
                     matching += 1;
                 } else if first_divergence.is_none() {
-                    first_divergence = Some((x, y, z, want.clone(), got.clone()));
+                    first_divergence = Some((x, y, z, want.clone(), got_name));
                 }
             }
         }

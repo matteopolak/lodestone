@@ -1,6 +1,7 @@
 //! Focused initial Nether block-light lifecycle controls.
 
 use lodestone_core::Reader;
+use lodestone_data::block::Block;
 use lodestone_server::{ChunkColumn, ServerDirective, ServerProtocol};
 use lodestone_v26_2::V770ServerProtocol;
 use lodestone_v26_2::packets::chunk::{ChunkShape, LevelChunkWithLight};
@@ -46,7 +47,7 @@ fn neighbour_emitter_is_deferred_but_center_emitter_is_retained() {
     let shape = ChunkShape::nether_or_end_1_21();
     let mut center = ChunkColumn::new(shape.min_y, shape.world_height as i32);
     let mut north = ChunkColumn::new(shape.min_y, shape.world_height as i32);
-    north.set_block(8, 64, 0, "minecraft:glowstone");
+    north.set_block_id(8, 64, 0, Block::Glowstone.default_state());
 
     let deferred = initial_packet(&center, &[(0, 1, north)]);
     assert_eq!(
@@ -55,7 +56,7 @@ fn neighbour_emitter_is_deferred_but_center_emitter_is_retained() {
         "a north-neighbour emitter must not cross the initial Nether seam"
     );
 
-    center.set_block(8, 64, 15, "minecraft:glowstone");
+    center.set_block_id(8, 64, 15, Block::Glowstone.default_state());
     let retained = initial_packet(&center, &[]);
     assert_eq!(
         retained.light.section_light(5).block_at(8, 0, 15),
@@ -69,7 +70,7 @@ fn wrong_direction_neighbor_does_not_change_the_north_seam_control() {
     let shape = ChunkShape::nether_or_end_1_21();
     let center = ChunkColumn::new(shape.min_y, shape.world_height as i32);
     let mut east = ChunkColumn::new(shape.min_y, shape.world_height as i32);
-    east.set_block(0, 64, 8, "minecraft:glowstone");
+    east.set_block_id(0, 64, 8, Block::Glowstone.default_state());
 
     let packet = initial_packet(&center, &[(1, 0, east)]);
     assert_eq!(

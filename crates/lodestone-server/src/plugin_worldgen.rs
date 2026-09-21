@@ -28,6 +28,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use lodestone_worldgen::generator::ChunkGenerator;
+use lodestone_data::block_states::StateId;
 
 use crate::chunk::{ChunkColumn, ChunkSource};
 
@@ -87,9 +88,9 @@ impl PluginChunkSource {
             let y = min_y + ly;
             for lz in 0..16i32 {
                 for lx in 0..16i32 {
-                    let state = grid.get(cx * 16 + lx, y, cz * 16 + lz);
-                    if state != "minecraft:air" {
-                        column.set_block(lx, y, lz, state);
+                    let state = grid.get_id(cx * 16 + lx, y, cz * 16 + lz);
+                    if state != lodestone_data::block_states::air_state() {
+                        column.set_block_id(lx, y, lz, state);
                     }
                 }
             }
@@ -114,12 +115,12 @@ impl ChunkSource for PluginChunkSource {
         self.generate_column(cx, cz)
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
-        self.column(cx, cz).block_state(lx, y, lz).to_string()
+        self.column(cx, cz).block_state_id(lx, y, lz)
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -130,7 +131,7 @@ impl ChunkSource for PluginChunkSource {
         self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
     }
 
-    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+    fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
@@ -139,7 +140,7 @@ impl ChunkSource for PluginChunkSource {
         let column = edits
             .entry((cx, cz))
             .or_insert_with(|| self.generate_column(cx, cz));
-        column.set_block(lx, y, lz, name);
+        column.set_block_id(lx, y, lz, state);
     }
 
     fn try_store_resident_edit(
@@ -166,6 +167,10 @@ impl ChunkSource for PluginChunkSource {
 mod tests {
     use super::*;
     use lodestone_worldgen::dense_grid::DenseBlockGrid;
+
+    fn state(value: &str) -> StateId {
+        StateId::from_state_str(value).expect("test state is in the generated table")
+    }
 
     /// A tiny checkerboard generator — stone on `(x+z)` even, air odd — used
     /// only to prove [`PluginChunkSource`]'s bridging is correct in
@@ -203,28 +208,28 @@ mod tests {
     fn column_reflects_the_generators_checkerboard() {
         let source = PluginChunkSource::new(Arc::new(Checkerboard));
         let column = source.column(0, 0);
-        assert_eq!(column.block_state(0, 0, 0), "minecraft:stone");
-        assert_eq!(column.block_state(1, 0, 0), "minecraft:air");
+        assert_eq!(column.block_state_id(0, 0, 0), state("minecraft:stone"));
+        assert_eq!(column.block_state_id(1, 0, 0), lodestone_data::block_states::air_state());
         assert_eq!(column.biome_state(0, 0), "minecraft:the_void");
     }
 
     #[test]
     fn block_state_reads_agree_with_column_reads() {
         let source = PluginChunkSource::new(Arc::new(Checkerboard));
-        assert_eq!(source.block_state(0, 0, 0), "minecraft:stone");
-        assert_eq!(source.block_state(1, 0, 0), "minecraft:air");
+        assert_eq!(source.block_state_id(0, 0, 0), state("minecraft:stone"));
+        assert_eq!(source.block_state_id(1, 0, 0), lodestone_data::block_states::air_state());
         assert_eq!(source.biome_state_at(3, 0, 3), "minecraft:the_void");
     }
 
     #[test]
     fn set_block_edits_are_retained_across_reads() {
         let source = PluginChunkSource::new(Arc::new(Checkerboard));
-        assert_eq!(source.block_state(1, 0, 0), "minecraft:air");
-        source.set_block(1, 0, 0, "minecraft:diamond_block");
-        assert_eq!(source.block_state(1, 0, 0), "minecraft:diamond_block");
+        assert_eq!(source.block_state_id(1, 0, 0), lodestone_data::block_states::air_state());
+        source.set_block(1, 0, 0, state("minecraft:diamond_block"));
+        assert_eq!(source.block_state_id(1, 0, 0), state("minecraft:diamond_block"));
         // A neighbouring, untouched cell in the same edited column keeps the
         // generator's own answer — proof the edit did not blow away the rest
         // of the column.
-        assert_eq!(source.block_state(0, 0, 0), "minecraft:stone");
+        assert_eq!(source.block_state_id(0, 0, 0), state("minecraft:stone"));
     }
 }

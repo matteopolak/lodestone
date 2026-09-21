@@ -841,14 +841,8 @@ const MAX_BLOCKS_REGION_AREA: i64 = 32768;
 /// box's own **minimum** corner maps to, matching the real destination-box
 /// construction (the destination corner offset by the source box's length).
 ///
-/// The block-state comparison is the raw canonical string — including any
-/// `[...]` property suffix the store's own state string may carry, unlike
-/// [`register_block_condition`]'s own user-typed-literal comparison (which
-/// must strip it, since [`lodestone_command_mc::BlockArg`] cannot parse one
-/// in). Both sides here come from the same [`crate::chunk::ChunkSource::block_state`]
-/// accessor, so a raw compare is well-defined and closer to the real
-/// full-state comparison than the base-id reduction elsewhere in this
-/// file.
+/// State equality includes properties because both reads use the canonical
+/// `StateId` returned by the resident chunk source.
 fn compare_regions(
     ctx: &Ctx<'_>,
     start_key: ArgKey<lodestone_command_mc::Coordinates>,
@@ -889,12 +883,12 @@ fn compare_regions(
     for z in min_z..=max_z {
         for y in min_y..=max_y {
             for x in min_x..=max_x {
-                let source_state = blocks.block_state(x, y, z);
-                if skip_air && source_state == "minecraft:air" {
+                let source_state = blocks.block_state_id(x, y, z);
+                if skip_air && crate::random_tick::is_air_variant_id(source_state) {
                     continue;
                 }
                 let (dx, dy, dz) = (x + offset.0, y + offset.1, z + offset.2);
-                if source_state != blocks.block_state(dx, dy, dz) {
+                if source_state != blocks.block_state_id(dx, dy, dz) {
                     return Ok(None);
                 }
                 if blocks.block_entity(x, y, z) != blocks.block_entity(dx, dy, dz) {
@@ -979,7 +973,8 @@ fn register_loaded_condition(registrar: &mut Registrar, parent: NodeId, execute:
 /// `block <pos> <block>` — the real block-predicate's own boolean shape
 /// (the real `block` branch uses a boolean condition registration, same as
 /// `dimension`, not the count-shaped
-/// `if entity`). Compares only the base block id, matching
+/// `if entity`). Compares the block identity carried by the canonical state,
+/// matching
 /// [`lodestone_command_mc::BlockArg`]'s own v1 reduction (no property list —
 /// `minecraft:furnace[facing=north]` matches `if block ~ ~ ~ furnace`
 /// regardless of `facing`), and refuses cleanly rather than panicking when no
@@ -1004,12 +999,12 @@ fn register_block_condition(
         let rotation = (ctx.source.rotation.yaw, ctx.source.rotation.pitch);
         let (x, y, z) = coords.resolve(origin, rotation);
         let (x, y, z) = (x.floor() as i32, y.floor() as i32, z.floor() as i32);
-        let state = blocks.block_state(x, y, z);
-        // The base id, stripping any `[...]` property suffix the store's
-        // canonical state string may carry — see this function's own doc.
-        let actual = state.split('[').next().unwrap_or(state.as_str());
-        let expected_id = ctx.get(block_key).block.to_string();
-        Ok(actual == expected_id)
+        let state = blocks.block_state_id(x, y, z);
+        let expected = &ctx.get(block_key).block;
+        let expected_block = (expected.namespace() == "minecraft")
+            .then(|| lodestone_data::block::Block::from_name(expected.path()))
+            .flatten();
+        Ok(expected_block.is_some_and(|block| state.block() == block))
     });
 }
 

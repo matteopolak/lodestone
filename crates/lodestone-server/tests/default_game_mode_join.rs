@@ -26,6 +26,7 @@
 use std::sync::Mutex;
 
 use lodestone_core::{Reader, State, Writer};
+use lodestone_data::block_states::StateId;
 use lodestone_model::{GameMode, Vec3};
 use lodestone_net::{Connection, memory_pair};
 use lodestone_server::{
@@ -51,15 +52,15 @@ impl ChunkSource for FlatSource {
         ChunkColumn::new(0, 16)
     }
 
-    fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-        "minecraft:air".to_string()
+    fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
+        StateId::AIR
     }
 
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
         "minecraft:plains".to_string()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
 }
 
 /// Emits only what this gate reads: the game mode `begin_play_at` was called

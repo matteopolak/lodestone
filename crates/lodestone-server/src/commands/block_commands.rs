@@ -35,6 +35,7 @@
 //! multiplication rather than an allocation.
 
 use lodestone_command_mc::{BlockArg, BlockPosArg, Coordinates};
+use lodestone_data::block::Block;
 
 use super::registrar::{Ctx, Registrar};
 
@@ -65,7 +66,8 @@ pub(super) fn register(registrar: &mut Registrar) {
         let uuid = ctx.source.uuid().unwrap_or(uuid::Uuid::nil());
         let pos = resolve_block_pos(ctx, *ctx.get(pos_key));
         let block = ctx.get(block_key).block.to_string();
-        ctx.effect(uuid, crate::commands::Effect::SetBlock { pos, block: block.clone() });
+        let state = Block::from_name(&block).expect("BlockArg validates the block id").default_state();
+        ctx.effect(uuid, crate::commands::Effect::SetBlock { pos, block: state });
         ctx.send_success(format!("Changed the block at {}, {}, {} to {block}", pos.0, pos.1, pos.2));
         Ok(1)
     });
@@ -106,7 +108,8 @@ pub(super) fn register(registrar: &mut Registrar) {
             }
         }
         let count = positions.len();
-        ctx.effect(uuid, crate::commands::Effect::Fill { positions, block: block.clone() });
+        let state = Block::from_name(&block).expect("BlockArg validates the block id").default_state();
+        ctx.effect(uuid, crate::commands::Effect::Fill { positions, block: state });
         ctx.send_success(format!("Successfully filled {count} block(s) with {block}"));
         Ok(i32::try_from(count).unwrap_or(i32::MAX))
     });

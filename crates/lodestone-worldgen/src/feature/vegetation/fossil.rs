@@ -46,17 +46,19 @@ use std::sync::Arc;
 use serde::Deserialize;
 use serde_json::Value;
 
+use lodestone_data::block::Block;
+use lodestone_data::block_states::{BlockStateValue, StateId};
+
 use crate::density::Resolver;
 use crate::feature::BlockPos;
 use crate::dense_grid::DenseBlockGrid;
 use crate::rng::RandomSource;
 use crate::structure::processor::{PosTest, Processor, ProcessorRule, RuleTest};
 use crate::structure::template::{
-    BlockState, Mirror, PlaceOrigin, PlaceSettings, Rotation, StructureTemplate,
+    Mirror, PlaceOrigin, PlaceSettings, Rotation, StructureTemplate,
 };
 
-use super::base_id;
-use super::config::{canon_state, is_air, is_fluid, resolve_block_set};
+use super::config::{canon_state, resolve_block_set};
 use super::grid::VegGrid;
 
 /// Parsed lists and processors for one fossil configured feature.
@@ -201,12 +203,12 @@ fn parse_processor(resolver: &dyn Resolver, value: ProcessorDocument) -> Option<
             let integrity = probability_f32(integrity)?;
             let rottable = match rottable_blocks {
                 None | Some(Value::Null) => None,
-                Some(blocks) => Some(Arc::new(resolve_block_set(resolver, &blocks)?)),
+                Some(blocks) => Some(Arc::new(resolve_processor_block_set(resolver, &blocks)?)),
             };
             Some(Processor::BlockRot { rottable, integrity })
         }
         ProcessorDocument::ProtectedBlocks { value } => {
-            let blocks = resolve_block_set(resolver, &value)?;
+            let blocks = resolve_processor_block_set(resolver, &value)?;
             Some(Processor::ProtectedBlocks(Arc::new(blocks)))
         }
         ProcessorDocument::Rule { rules } => {
@@ -231,7 +233,7 @@ fn parse_rule(resolver: &dyn Resolver, value: &RuleDocument) -> Option<Processor
         .as_ref()
         .map(parse_position_test)
         .unwrap_or(Some(PosTest::AlwaysTrue))?;
-    let output = BlockState::parse(&canonical_state(&value.output_state)?);
+    let output = canonical_state_id(&value.output_state)?;
     Some(ProcessorRule {
         input,
         location,
@@ -252,23 +254,30 @@ fn parse_position_test(value: &Value) -> Option<PosTest> {
 fn parse_rule_test(resolver: &dyn Resolver, value: &Value) -> Option<RuleTest> {
     match serde_json::from_value::<RuleTestDocument>(with_default_predicate_type(value)?).ok()? {
         RuleTestDocument::AlwaysTrue {} => Some(RuleTest::AlwaysTrue),
-        RuleTestDocument::BlockMatch { block } => Some(RuleTest::BlockMatch(block)),
+        RuleTestDocument::BlockMatch { block } => {
+            Some(RuleTest::BlockMatch(Block::from_name(&block)?))
+        }
         RuleTestDocument::BlockStateMatch { block_state } => {
-            Some(RuleTest::BlockStateMatch(canonical_state(&block_state)?))
+            Some(RuleTest::BlockStateMatch(canonical_state_id(&block_state)?))
         }
         RuleTestDocument::RandomBlockMatch { block, probability } => {
-            Some(RuleTest::RandomBlockMatch(block, probability_f64(probability)?))
+            Some(RuleTest::RandomBlockMatch(
+                Block::from_name(&block)?,
+                probability_f64(probability)?,
+            ))
         }
         RuleTestDocument::RandomBlockStateMatch {
             block_state,
             probability,
         } => Some(RuleTest::RandomBlockStateMatch(
-            canonical_state(&block_state)?,
+            canonical_state_id(&block_state)?,
             probability_f64(probability)?,
         )),
         RuleTestDocument::TagMatch { tag } => {
             let holder = Value::String(format!("#{tag}"));
-            Some(RuleTest::TagMatch(Arc::new(resolve_block_set(resolver, &holder)?)))
+            Some(RuleTest::TagMatch(Arc::new(resolve_processor_block_set(
+                resolver, &holder,
+            )?)))
         }
     }
 }
@@ -288,9 +297,21 @@ fn with_default_predicate_type(value: &Value) -> Option<Value> {
     Some(Value::Object(value))
 }
 
-fn canonical_state(value: &Value) -> Option<String> {
+fn canonical_state_id(value: &Value) -> Option<StateId> {
     value.get("Name").and_then(Value::as_str)?;
-    Some(canon_state(value))
+    BlockStateValue::parse(&canon_state(value)).state_id()
+}
+
+fn resolve_processor_block_set(
+    resolver: &dyn Resolver,
+    value: &Value,
+) -> Option<std::collections::HashSet<Block>> {
+    Some(
+        resolve_block_set(resolver, value)?
+            .into_iter()
+            .map(|state| state.block())
+            .collect(),
+    )
 }
 
 fn probability_f32(value: f32) -> Option<f32> {
@@ -375,8 +396,15 @@ fn count_empty_corners(grid: &VegGrid, bounds: crate::structure::BoundingBox) ->
     for x in [bounds.min[0], bounds.max[0]] {
         for y in [bounds.min[1], bounds.max[1]] {
             for z in [bounds.min[2], bounds.max[2]] {
-                let base = base_id(grid.interner().name_of(grid.get_id(x, y, z)));
-                if is_air(base) || is_fluid(base) {
+                let canonical = grid.get_id(x, y, z);
+                if matches!(
+                    canonical.block(),
+                    lodestone_data::block::Block::Air
+                        | lodestone_data::block::Block::CaveAir
+                        | lodestone_data::block::Block::VoidAir
+                        | lodestone_data::block::Block::Water
+                        | lodestone_data::block::Block::Lava
+                ) {
                     empty += 1;
                 }
             }
@@ -403,16 +431,14 @@ fn place_template(
     let size_x = bounds.max[0] - bounds.min[0] + 1;
     let size_y = bounds.max[1] - bounds.min[1] + 1;
     let size_z = bounds.max[2] - bounds.min[2] + 1;
-    let air = grid.interner().id_of("minecraft:air");
-    let mut scratch = DenseBlockGrid::with_interner(
-        Arc::clone(grid.interner()),
+    let mut scratch = DenseBlockGrid::with_default(
         bounds.min[0],
         bounds.min[1],
         bounds.min[2],
         size_x,
         size_y,
         size_z,
-        air,
+        Block::Air.default_state(),
     );
     let mut before = Vec::with_capacity((size_x * size_y * size_z) as usize);
     for y in bounds.min[1]..=bounds.max[1] {
@@ -456,6 +482,7 @@ mod tests {
 
     use super::*;
     use crate::rng::XoroshiroPositionalFactory;
+    use crate::structure::template::BlockState;
 
     const EXTERNAL: &str = include_str!("../../../tests/support/fossil_feature_external.txt");
 
@@ -498,10 +525,11 @@ mod tests {
 
     fn flat_grid() -> VegGrid {
         let mut grid = VegGrid::new(-64, 384, 0, 0);
+        let stone = Block::Stone.default_state();
         for x in 0..16 {
             for z in 0..16 {
                 for y in -64..=64 {
-                    grid.seed(x, y, z, "minecraft:stone".to_owned());
+                    grid.seed_id(x, y, z, stone);
                 }
             }
         }
@@ -509,8 +537,8 @@ mod tests {
     }
 
     fn cfg() -> FossilCfg {
-        let bone = BlockState::of("minecraft:bone_block");
-        let coal = BlockState::of("minecraft:coal_ore");
+        let bone = BlockState::of(Block::BoneBlock);
+        let coal = BlockState::of(Block::CoalOre);
         FossilCfg {
             fossil_structures: vec![Arc::new(StructureTemplate::from_blocks(
                 [3, 1, 2],
@@ -604,7 +632,7 @@ mod tests {
         let got: HashMap<_, _> = expected
             .states
             .keys()
-            .map(|&pos| (pos, grid.get(pos.0, pos.1, pos.2).to_owned()))
+            .map(|&pos| (pos, grid.get(pos.0, pos.1, pos.2).canonical_state()))
             .collect();
         assert_eq!(got, expected.states);
         let written: std::collections::HashSet<_> = grid
@@ -799,7 +827,7 @@ mod tests {
         );
         assert_eq!(random.next, 3, "the dispatcher must reach the fossil body's three draws");
         for (&(x, y, z), state) in &expected.states {
-            assert_eq!(grid.get(x, y, z), state);
+            assert_eq!(grid.get(x, y, z).canonical_state().as_str(), state.as_str());
         }
     }
 

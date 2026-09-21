@@ -24,6 +24,7 @@
 use std::sync::Arc;
 
 use lodestone_core::{Ctx, Decode, Encode, Reader, Writer};
+use lodestone_data::block_states::StateId;
 use lodestone_net::{Connection, Transport, memory_pair, rsa_encrypt};
 use lodestone_server::{
     BlockEntityHandle, BlockTickFeed, ChunkColumn, ChunkSource, CommandDispatch, ExplosionFeed,
@@ -46,14 +47,14 @@ impl ChunkSource for UnusedSource {
     fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
         unimplemented!("this test never reaches chunk streaming")
     }
-    fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+    fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
         unimplemented!("this test never reaches chunk streaming")
     }
 
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
         "minecraft:plains".to_string()
     }
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
         unimplemented!("this test never reaches chunk streaming")
     }
 }

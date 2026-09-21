@@ -29,10 +29,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use lodestone_worldgen::density::{Builder, NoiseParams, Resolver};
-use lodestone_worldgen::interner::StateInterner;
 use lodestone_worldgen::surface::{BlockCanon, PreState, SurfaceSystem};
 use serde_json::Value;
 
@@ -149,19 +147,11 @@ fn run_fixture(label: &str, text: &str) {
     assert_eq!(r.biome, "minecraft:plains", "fixture biome");
 
     let builder = Builder::new(SEED, &resolver);
-    // U21: `SurfaceSystem` speaks interned `StateId` now. This fixture path
-    // deliberately goes through `PreState::from_name`, which classifies from the
-    // *string* (`class_of_name`) exactly as the pre-U21 scan did — so what this
-    // test drives is the same classification logic against the same JVM-dumped
-    // expected values, not the `BlockKind` shortcut production takes. The
-    // shortcut's agreement with this path is asserted separately, at the
-    // production seam in `overworld/fill.rs::surface_stage`.
-    let interner = Arc::new(StateInterner::new());
-    let surface = SurfaceSystem::new(&settings, &builder, &r.canon, &interner);
+    let surface = SurfaceSystem::new(&settings, &builder, &r.canon);
 
     let pre_fn = |x: i32, y: i32, z: i32| -> PreState {
         match r.pre.get(&key(x, y, z)) {
-            Some(name) => PreState::from_name(&interner, name),
+            Some(name) => PreState::from_name(name),
             None => PreState::AIR,
         }
     };
@@ -197,11 +187,11 @@ fn run_fixture(label: &str, text: &str) {
                     .get(&key(x, y, z))
                     .copied()
                     .unwrap_or_else(|| pre_fn(x, y, z).state);
-                let got = interner.name_of(got_id);
-                if want == got {
+                let got = got_id.canonical_state();
+                if want == &got {
                     matching += 1;
                 } else if first_divergence.is_none() {
-                    first_divergence = Some((x, y, z, want.clone(), got.to_string()));
+                    first_divergence = Some((x, y, z, want.clone(), got));
                 }
             }
         }

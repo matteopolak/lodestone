@@ -57,9 +57,10 @@
 //! offer is genuinely computed server-side — a player just cannot yet click
 //! "enchant" on a real connection.
 
+use lodestone_data::block::Block;
 use lodestone_model::{BlockPos, ItemStack};
 
-use crate::chunk::{ChunkSource, is_air_or_fluid};
+use crate::chunk::{ChunkSource, is_air_or_fluid_id};
 use crate::enchantment_data::{self, EnchantmentDef};
 use crate::mob_spawn::SpawnRng;
 
@@ -77,12 +78,12 @@ fn bookshelf_offsets() -> impl Iterator<Item = (i32, i32, i32)> {
 /// shelf (`offset / 2`, Java truncating-toward-zero division) is open.
 fn is_valid_bookshelf(source: &dyn ChunkSource, pos: BlockPos, offset: (i32, i32, i32)) -> bool {
     let (ox, oy, oz) = offset;
-    let shelf = source.block_state(pos.x + ox, pos.y + oy, pos.z + oz);
-    if shelf.split('[').next() != Some("minecraft:bookshelf") {
+    let shelf = source.block_state_id(pos.x + ox, pos.y + oy, pos.z + oz);
+    if shelf.block() != Block::Bookshelf {
         return false;
     }
-    let walkway = source.block_state(pos.x + ox / 2, pos.y + oy, pos.z + oz / 2);
-    is_air_or_fluid(&walkway)
+    let walkway = source.block_state_id(pos.x + ox / 2, pos.y + oy, pos.z + oz / 2);
+    is_air_or_fluid_id(walkway)
 }
 
 /// `bookcases` in the real per-slot orchestration — `0..=15` (the real
@@ -286,6 +287,7 @@ fn weighted_pick(rng: &mut SpawnRng, candidates: &[(&'static EnchantmentDef, u32
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lodestone_data::block_states::StateId;
     use std::collections::HashMap;
 
     /// A trivial in-memory world for the bookshelf geometry tests: a name per
@@ -295,14 +297,15 @@ mod tests {
         fn column(&self, _cx: i32, _cz: i32) -> crate::chunk::ChunkColumn {
             unimplemented!("not needed for these tests")
         }
-        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
-            self.0.get(&(x, y, z)).unwrap_or(&"minecraft:air").to_string()
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
+            StateId::from_state_str(self.0.get(&(x, y, z)).copied().unwrap_or("minecraft:air"))
+                .expect("test state is in the generated table")
         }
 
         fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
             crate::chunk::DEFAULT_BIOME.to_string()
         }
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
             unimplemented!("not needed for these tests")
         }
     }

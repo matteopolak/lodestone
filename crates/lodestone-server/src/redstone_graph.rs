@@ -7,7 +7,7 @@
 //! [`ReactionClass`] names every family
 //! [`crate::random_tick::react_to_notification`] dispatches to, plus
 //! [`ReactionClass::Inert`] for a cell that reacts to nothing.
-//! [`classify`] maps a block-state string to its class, mirroring that
+//! [`classify`] maps a block-state id to its class, mirroring that
 //! function's predicate chain **in the same order, first match wins**, so
 //! the two agree by construction rather than by coincidence.
 //!
@@ -89,7 +89,11 @@
 //! `crate::redstone_note_block`, `crate::piston`, `crate::gravity_tick`,
 //! `crate::command_block`, `crate::mobs::tnt`.
 
+#[cfg(test)]
 use crate::redstone::base_name;
+#[cfg(test)]
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 
 /// Which family a neighbour notification landing on a cell dispatches to.
 ///
@@ -234,7 +238,7 @@ impl ReactionClass {
     }
 }
 
-/// Classifies one canonical block-state string.
+/// Classifies one validated block-state id.
 ///
 /// **The arm order is the specification**, not a stylistic choice: it
 /// mirrors `crate::random_tick::react_to_notification`'s own first-match
@@ -242,13 +246,11 @@ impl ReactionClass {
 /// as it resolves there. See this module's doc for the three-edit rule when
 /// adding a family.
 #[must_use]
-pub fn classify(state: &str) -> ReactionClass {
-    let base = base_name(state);
-
-    if crate::gravity_tick::is_gravity_block(base) {
+pub fn classify(state: StateId) -> ReactionClass {
+    if crate::gravity_tick::is_gravity_state(state) {
         return ReactionClass::Gravity;
     }
-    if crate::random_tick::is_snowy_family(base) {
+    if crate::random_tick::is_snowy_family_id(state) {
         return ReactionClass::Snowy;
     }
     if crate::redstone::is_wire(state) {
@@ -275,7 +277,7 @@ pub fn classify(state: &str) -> ReactionClass {
     if crate::redstone_openable::is_openable(state) {
         return ReactionClass::Openable;
     }
-    if base == crate::redstone_note_block::NOTE_BLOCK {
+    if state.block() == crate::redstone_note_block::NOTE_BLOCK {
         return ReactionClass::NoteBlock;
     }
     if crate::redstone_rail::is_powered_rail_family(state) {
@@ -290,7 +292,6 @@ pub fn classify(state: &str) -> ReactionClass {
     if crate::command_block::is_command_block_family(state) {
         return ReactionClass::CommandBlock;
     }
-
     ReactionClass::Inert
 }
 
@@ -309,7 +310,7 @@ mod tests {
     /// expressions** separately. Order is the only thing that can drift
     /// between the two, because every predicate is first-match-wins, and
     /// order is exactly what this reproduces from the dispatch site.
-    fn reference_class(state: &str) -> ReactionClass {
+    fn reference_class(state: StateId) -> ReactionClass {
         // 1. gravity          `if gravity_tick::is_gravity_block(base_name(&state))`
         // 1b. snowy           `if SNOWY_FAMILY.contains(&base_name(&state))`
         // 2. dust             `if redstone::is_wire(&state)`
@@ -347,16 +348,8 @@ mod tests {
         }
     }
 
-    /// Rebuilds the canonical state string for one global 26.2 block-state
-    /// id, in the `name[k=v,k=v]` form this crate's palette holds.
-    fn canonical_state(id: u32) -> Option<String> {
-        let name = lodestone_data::block_states::block_name(id)?;
-        let props = lodestone_data::block_states::properties(id)?;
-        if props.is_empty() {
-            return Some(name.to_string());
-        }
-        let body = props.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(",");
-        Some(format!("{name}[{body}]"))
+    fn canonical_state(id: u32) -> Option<StateId> {
+        StateId::new(id)
     }
 
     /// **The exhaustive differential.** Every block state in 26.2 — not a
@@ -380,14 +373,14 @@ mod tests {
         for id in 0..total {
             let Some(state) = canonical_state(id) else { continue };
             checked += 1;
-            let got = classify(&state);
-            let want = reference_class(&state);
+            let got = classify(state);
+            let want = reference_class(state);
             if got != want {
                 // Collected, not asserted in the loop: an `assert!` inside
                 // the loop proves exactly one arm and leaves the rest
                 // arguments rather than observations.
                 if mismatches.len() < 32 {
-                    mismatches.push((state, got, want));
+                    mismatches.push((state.canonical_state(), got, want));
                 }
             }
         }
@@ -419,7 +412,7 @@ mod tests {
         // it; hoisting a broader arm above it is what a careless insertion
         // looks like. Simulated here rather than by editing `classify`,
         // since the point is to prove the *comparison* fires.
-        fn wrong(state: &str) -> ReactionClass {
+        fn wrong(state: StateId) -> ReactionClass {
             if crate::mobs::tnt::is_tnt_block(state) {
                 // Wrong verdict for exactly one family.
                 return ReactionClass::Inert;
@@ -431,7 +424,7 @@ mod tests {
         let mut disagreements = 0u32;
         for id in 0..total {
             let Some(state) = canonical_state(id) else { continue };
-            if wrong(&state) != reference_class(&state) {
+            if wrong(state) != reference_class(state) {
                 disagreements += 1;
             }
         }
@@ -527,44 +520,44 @@ mod tests {
     /// notified into a reaction.
     #[test]
     fn named_states_land_in_the_class_the_dispatch_site_handles_them_in() {
-        let rows: &[(&str, ReactionClass)] = &[
-            ("minecraft:sand", ReactionClass::Gravity),
-            ("minecraft:gravel", ReactionClass::Gravity),
-            ("minecraft:grass_block[snowy=false]", ReactionClass::Snowy),
-            ("minecraft:redstone_wire[power=0]", ReactionClass::Wire),
-            ("minecraft:redstone_torch[lit=true]", ReactionClass::Torch),
-            ("minecraft:redstone_wall_torch[facing=north,lit=true]", ReactionClass::Torch),
-            ("minecraft:repeater[delay=1,facing=north,locked=false,powered=false]", ReactionClass::Repeater),
-            ("minecraft:piston[extended=false,facing=up]", ReactionClass::Piston),
-            ("minecraft:sticky_piston[extended=false,facing=up]", ReactionClass::Piston),
-            ("minecraft:comparator[facing=north,mode=compare,powered=false]", ReactionClass::Comparator),
-            ("minecraft:hopper[enabled=true,facing=down]", ReactionClass::Hopper),
-            ("minecraft:observer[facing=north,powered=false]", ReactionClass::Observer),
-            ("minecraft:oak_door[facing=north,half=lower,hinge=left,open=false,powered=false]", ReactionClass::Openable),
-            ("minecraft:oak_trapdoor[facing=north,half=bottom,open=false,powered=false,waterlogged=false]", ReactionClass::Openable),
-            ("minecraft:oak_fence_gate[facing=north,in_wall=false,open=false,powered=false]", ReactionClass::Openable),
-            ("minecraft:note_block[instrument=harp,note=0,powered=false]", ReactionClass::NoteBlock),
-            ("minecraft:powered_rail[powered=false,shape=north_south,waterlogged=false]", ReactionClass::Rail),
-            ("minecraft:activator_rail[powered=false,shape=north_south,waterlogged=false]", ReactionClass::Rail),
-            ("minecraft:dispenser[facing=north,triggered=false]", ReactionClass::Dispenser),
-            ("minecraft:dropper[facing=north,triggered=false]", ReactionClass::Dispenser),
-            ("minecraft:tnt[unstable=false]", ReactionClass::Tnt),
-            ("minecraft:command_block[conditional=false,facing=north]", ReactionClass::CommandBlock),
-            ("minecraft:chain_command_block[conditional=false,facing=north]", ReactionClass::CommandBlock),
+        let rows: &[(StateId, ReactionClass)] = &[
+            (Block::Sand.default_state(), ReactionClass::Gravity),
+            (Block::Gravel.default_state(), ReactionClass::Gravity),
+            (Block::GrassBlock.default_state(), ReactionClass::Snowy),
+            (Block::RedstoneWire.default_state(), ReactionClass::Wire),
+            (Block::RedstoneTorch.default_state(), ReactionClass::Torch),
+            (Block::RedstoneWallTorch.default_state(), ReactionClass::Torch),
+            (Block::Repeater.default_state(), ReactionClass::Repeater),
+            (Block::Piston.default_state(), ReactionClass::Piston),
+            (Block::StickyPiston.default_state(), ReactionClass::Piston),
+            (Block::Comparator.default_state(), ReactionClass::Comparator),
+            (Block::Hopper.default_state(), ReactionClass::Hopper),
+            (Block::Observer.default_state(), ReactionClass::Observer),
+            (Block::OakDoor.default_state(), ReactionClass::Openable),
+            (Block::OakTrapdoor.default_state(), ReactionClass::Openable),
+            (Block::OakFenceGate.default_state(), ReactionClass::Openable),
+            (Block::NoteBlock.default_state(), ReactionClass::NoteBlock),
+            (Block::PoweredRail.default_state(), ReactionClass::Rail),
+            (Block::ActivatorRail.default_state(), ReactionClass::Rail),
+            (Block::Dispenser.default_state(), ReactionClass::Dispenser),
+            (Block::Dropper.default_state(), ReactionClass::Dispenser),
+            (Block::Tnt.default_state(), ReactionClass::Tnt),
+            (Block::CommandBlock.default_state(), ReactionClass::CommandBlock),
+            (Block::ChainCommandBlock.default_state(), ReactionClass::CommandBlock),
             // Near-misses that react to nothing.
-            ("minecraft:air", ReactionClass::Inert),
-            ("minecraft:stone", ReactionClass::Inert),
-            ("minecraft:redstone_lamp[lit=false]", ReactionClass::Inert),
-            ("minecraft:redstone_block", ReactionClass::Inert),
-            ("minecraft:rail[shape=north_south,waterlogged=false]", ReactionClass::Inert),
-            ("minecraft:lever[face=wall,facing=north,powered=false]", ReactionClass::Inert),
-            ("minecraft:piston_head[facing=up,short=false,type=normal]", ReactionClass::Inert),
+            (Block::Air.default_state(), ReactionClass::Inert),
+            (Block::Stone.default_state(), ReactionClass::Inert),
+            (Block::RedstoneLamp.default_state(), ReactionClass::Inert),
+            (Block::RedstoneBlock.default_state(), ReactionClass::Inert),
+            (Block::Rail.default_state(), ReactionClass::Inert),
+            (Block::Lever.default_state(), ReactionClass::Inert),
+            (Block::PistonHead.default_state(), ReactionClass::Inert),
         ];
         let mut wrong = Vec::new();
         for (state, want) in rows {
-            let got = classify(state);
+            let got = classify(*state);
             if got != *want {
-                wrong.push((*state, got, *want));
+                wrong.push((state.canonical_state(), got, *want));
             }
         }
         assert!(wrong.is_empty(), "misclassified: {wrong:?}");

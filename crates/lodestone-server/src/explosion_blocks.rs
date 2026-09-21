@@ -143,7 +143,7 @@
 
 use std::collections::BTreeSet;
 
-use lodestone_data::{block_blast, block_states};
+use lodestone_data::{block::Block, block_blast, block_states};
 use lodestone_model::{BlockPos, Vec3};
 
 use crate::chunk::ChunkSource;
@@ -177,6 +177,11 @@ pub const RAY_COUNT: usize = 1352;
 
 /// `Level::isInWorldBounds`'s horizontal half — vanilla's ±30,000,000 limit.
 pub const HORIZONTAL_LIMIT: i32 = 30_000_000;
+
+#[must_use]
+pub fn is_tnt_state(state: block_states::StateId) -> bool {
+    state.block() == Block::Tnt
+}
 
 /// The dimension's build height, so a blast on the world floor cannot read
 /// outside the column.
@@ -232,15 +237,13 @@ impl BlastEnv {
 ///
 /// **The single world-read point of this module**, deliberately: it is where a
 /// future section-level dense cache goes, and it is what keeps the march off
-/// `ChunkColumn::block_state`'s unguarded index. `Some(None)` is vanilla's
+/// `ChunkColumn::block_state_id`'s unguarded index. `Some(None)` is vanilla's
 /// `Optional.empty()` — the cell is air and holds no fluid, so no resistance term
 /// is subtracted at all.
 ///
 /// The resistance itself comes from
 /// [`block_blast::explosion_resistance_for_state_id`], a flat array index with the
-/// fluid `max` already folded in, rather than from any string comparison. The one
-/// remaining string cost is `ChunkSource::block_state`'s own `String` plus the
-/// registry resolution — see `docs/explosion-performance.md`.
+/// fluid `max` already folded in.
 fn cell_resistance<S: ChunkSource>(
     world: &S,
     env: BlastEnv,
@@ -249,11 +252,8 @@ fn cell_resistance<S: ChunkSource>(
     if !env.contains(pos) {
         return None;
     }
-    let state = world.block_state(pos.x, pos.y, pos.z);
-    Some(match block_states::StateId::from_state_str(&state) {
-        Some(id) => block_blast::explosion_resistance_for_state_id(id),
-        None => block_blast::explosion_resistance_for_state(&state),
-    })
+    let state = world.block_state_id(pos.x, pos.y, pos.z);
+    Some(block_blast::explosion_resistance_for_state_id(state))
 }
 
 /// The per-step power cost of traversing a cell that holds a **block** of
@@ -388,15 +388,16 @@ pub fn destroy_blocks<S: ChunkSource>(
     centre: Vec3,
     radius: f32,
     rng: &mut SpawnRng,
-) -> Vec<(BlockPos, String)> {
+) -> Vec<(BlockPos, block_states::StateId)> {
     let mut changes = Vec::new();
     for pos in exploded_positions(world, env, centre, radius, rng) {
-        let state = world.block_state(pos.x, pos.y, pos.z);
-        if crate::random_tick::is_air_variant(&state) {
+        let state = world.block_state_id(pos.x, pos.y, pos.z);
+        if crate::random_tick::is_air_variant_id(state) {
             continue;
         }
-        world.set_block(pos.x, pos.y, pos.z, crate::chunk::AIR);
-        changes.push((pos, crate::chunk::AIR.to_owned()));
+        let air = crate::chunk::air_state();
+        world.set_block(pos.x, pos.y, pos.z, air);
+        changes.push((pos, air));
     }
     changes
 }
@@ -434,16 +435,33 @@ mod tests {
 
         fn fresh_column(&self) -> ChunkColumn {
             let mut column = ChunkColumn::new(MIN_Y, HEIGHT);
+            let fill = block_states::StateId::from_state_str(self.fill)
+                .expect("fixture block state is canonical");
             if let Some(floor_y) = self.floor_y {
                 for y in MIN_Y..=floor_y {
                     for lz in 0..16 {
                         for lx in 0..16 {
-                            column.set_block(lx, y, lz, self.fill);
+                            column.set_block_id(lx, y, lz, fill);
                         }
                     }
                 }
             }
             column
+        }
+
+        fn block_state(&self, x: i32, y: i32, z: i32) -> block_states::StateId {
+            let cx = x.div_euclid(16);
+            let cz = z.div_euclid(16);
+            self.column(cx, cz)
+                .block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
+        }
+
+        fn set_block(&self, x: i32, y: i32, z: i32, state: block_states::StateId) {
+            let cx = x.div_euclid(16);
+            let cz = z.div_euclid(16);
+            let mut columns = self.columns.lock().expect("rig lock");
+            let column = columns.entry((cx, cz)).or_insert_with(|| self.fresh_column());
+            column.set_block_id(x.rem_euclid(16), y, z.rem_euclid(16), state);
         }
     }
 
@@ -456,12 +474,12 @@ mod tests {
                 .clone()
         }
 
-        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> block_states::StateId {
             let cx = x.div_euclid(16);
             let cz = z.div_euclid(16);
             let mut columns = self.columns.lock().expect("rig lock");
             let column = columns.entry((cx, cz)).or_insert_with(|| self.fresh_column());
-            column.block_state(x - cx * 16, y, z - cz * 16).to_string()
+            column.block_state_id(x - cx * 16, y, z - cz * 16)
         }
 
         fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -472,12 +490,12 @@ mod tests {
             column.biome_state_at(x - cx * 16, y, z - cz * 16).to_string()
         }
 
-        fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+        fn set_block(&self, x: i32, y: i32, z: i32, state: block_states::StateId) {
             let cx = x.div_euclid(16);
             let cz = z.div_euclid(16);
             let mut columns = self.columns.lock().expect("rig lock");
             let column = columns.entry((cx, cz)).or_insert_with(|| self.fresh_column());
-            column.set_block(x - cx * 16, y, z - cz * 16, name);
+            column.set_block_id(x - cx * 16, y, z - cz * 16, state);
         }
     }
 
@@ -495,9 +513,11 @@ mod tests {
     #[test]
     fn the_rig_retains_its_own_edits() {
         let rig = Rig::new("minecraft:stone", Some(0));
-        assert_eq!(rig.block_state(3, 0, 3), "minecraft:stone");
-        rig.set_block(3, 0, 3, crate::chunk::AIR);
-        assert_eq!(rig.block_state(3, 0, 3), crate::chunk::AIR);
+        let stone = block_states::StateId::from_state_str("minecraft:stone").unwrap();
+        let air = crate::chunk::air_state();
+        assert_eq!(rig.block_state(3, 0, 3), stone);
+        rig.set_block(3, 0, 3, air);
+        assert_eq!(rig.block_state(3, 0, 3), air);
     }
 
     /// The ray count is `16³ − 14³`, and it is also the RNG draw count. Counted
@@ -630,7 +650,7 @@ mod tests {
     #[test]
     fn a_creeper_blast_in_stone_destroys_the_predicted_cells() {
         let rig = Rig::new("minecraft:stone", Some(64));
-        rig.set_block(8, 8, 8, crate::chunk::AIR);
+        rig.set_block(8, 8, 8, crate::chunk::air_state());
         let mut r = rng();
         let destroyed = exploded_positions(
             &rig,
@@ -773,7 +793,7 @@ mod tests {
     #[test]
     fn destroy_blocks_writes_air_and_reports_the_changes() {
         let rig = Rig::new("minecraft:stone", Some(64));
-        rig.set_block(8, 8, 8, crate::chunk::AIR);
+        rig.set_block(8, 8, 8, crate::chunk::air_state());
         let mut r = rng();
         let changes = destroy_blocks(
             &rig,
@@ -788,7 +808,7 @@ mod tests {
         // of vanilla's `!state.isAir()` guard.
         let mut probe = rng();
         let rig_probe = Rig::new("minecraft:stone", Some(64));
-        rig_probe.set_block(8, 8, 8, crate::chunk::AIR);
+        rig_probe.set_block(8, 8, 8, crate::chunk::air_state());
         let claimed = exploded_positions(
             &rig_probe,
             BlastEnv::OVERWORLD,
@@ -802,10 +822,10 @@ mod tests {
             "exactly the one already-air cell is skipped"
         );
         for (pos, state) in &changes {
-            assert_eq!(state, crate::chunk::AIR);
+            assert_eq!(*state, crate::chunk::air_state());
             assert_eq!(
                 rig.block_state(pos.x, pos.y, pos.z),
-                crate::chunk::AIR,
+                crate::chunk::air_state(),
                 "{pos:?} must actually be air in the world now"
             );
         }
@@ -821,7 +841,7 @@ mod tests {
     #[test]
     fn an_obsidian_shell_survives_a_creeper_entirely() {
         let rig = Rig::new("minecraft:obsidian", Some(64));
-        rig.set_block(8, 8, 8, crate::chunk::AIR);
+        rig.set_block(8, 8, 8, crate::chunk::air_state());
         let mut r = rng();
         let changes = destroy_blocks(
             &rig,
@@ -840,7 +860,7 @@ mod tests {
     fn two_independent_blasts_from_one_seed_agree() {
         let build = || {
             let rig = Rig::new("minecraft:stone", Some(64));
-            rig.set_block(8, 8, 8, crate::chunk::AIR);
+            rig.set_block(8, 8, 8, crate::chunk::air_state());
             let mut r = rng();
             exploded_positions(&rig, BlastEnv::OVERWORLD, Vec3::new(8.5, 8.5, 8.5), 3.0, &mut r)
         };

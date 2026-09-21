@@ -11,6 +11,8 @@
 //! End structure attachment is covered by the worldgen lane.
 
 use lodestone_core::{Nbt, Reader};
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 use lodestone_model::BlockPos;
 use lodestone_server::dimension::Dimension;
 use lodestone_server::{BlockEntity, ChunkColumn, ChunkSource, ServerDirective, ServerProtocol};
@@ -102,7 +104,7 @@ fn generated_spawner_sidecars_survive_each_dimension_packet_shape() {
 
     for dimension in Dimension::ALL {
         let mut source = ChunkColumn::new(dimension.min_y(), dimension.height());
-        source.set_block(position.x, position.y, position.z, "minecraft:spawner");
+        source.set_block_id(position.x, position.y, position.z, Block::Spawner.default_state());
         let generated = GeneratedBlockEntity::DungeonSpawner {
             x: position.x,
             y: position.y,
@@ -158,9 +160,21 @@ fn generated_spawner_sidecars_survive_each_dimension_packet_shape() {
 #[test]
 fn generated_overworld_block_entities_use_stable_packet_order_and_nbt_keys() {
     let mut source = ChunkColumn::new(Dimension::Overworld.min_y(), Dimension::Overworld.height());
-    source.set_block(2, -24, 12, "minecraft:chest[facing=east,type=single,waterlogged=false]");
-    source.set_block(5, -24, 12, "minecraft:spawner");
-    source.set_block(6, -24, 14, "minecraft:chest[facing=north,type=single,waterlogged=false]");
+    source.set_block_id(
+        2,
+        -24,
+        12,
+        StateId::from_state_str("minecraft:chest[facing=east,type=single,waterlogged=false]")
+            .expect("east chest fixture state"),
+    );
+    source.set_block_id(5, -24, 12, Block::Spawner.default_state());
+    source.set_block_id(
+        6,
+        -24,
+        14,
+        StateId::from_state_str("minecraft:chest[facing=north,type=single,waterlogged=false]")
+            .expect("north chest fixture state"),
+    );
 
     let chest_a = GeneratedBlockEntity::DungeonChest {
         x: 34,
@@ -235,8 +249,20 @@ fn generated_beehive_and_dungeon_chest_sidecars_reach_the_overworld_packet() {
         loot_table_seed: 17,
     };
     let mut source = ChunkColumn::new(Dimension::Overworld.min_y(), Dimension::Overworld.height());
-    source.set_block(2, 70, 3, "minecraft:bee_nest[facing=north,honey_level=0]");
-    source.set_block(4, 70, 5, "minecraft:chest[facing=north,type=single,waterlogged=false]");
+    source.set_block_id(
+        2,
+        70,
+        3,
+        StateId::from_state_str("minecraft:bee_nest[facing=north,honey_level=0]")
+            .expect("bee nest fixture state"),
+    );
+    source.set_block_id(
+        4,
+        70,
+        5,
+        StateId::from_state_str("minecraft:chest[facing=north,type=single,waterlogged=false]")
+            .expect("north chest fixture state"),
+    );
     source.add_generated_block_entities(&[beehive, chest]);
 
     let packet = decode_encoded_chunk(Dimension::Overworld, &source);
@@ -254,11 +280,12 @@ fn generated_beehive_and_dungeon_chest_sidecars_reach_the_overworld_packet() {
 fn metadata_only_furnace_fallback_uses_the_literal_null_update_tag() {
     let position = BlockPos::new(2, 70, 2);
     let mut source = ChunkColumn::new(Dimension::Overworld.min_y(), Dimension::Overworld.height());
-    source.set_block(
+    source.set_block_id(
         position.x,
         position.y,
         position.z,
-        "minecraft:furnace[facing=north,lit=false]",
+        StateId::from_state_str("minecraft:furnace[facing=north,lit=false]")
+            .expect("furnace fixture state"),
     );
     source.set_block_entities(vec![
         (
@@ -289,7 +316,7 @@ fn metadata_only_furnace_fallback_uses_the_literal_null_update_tag() {
 #[test]
 fn state_owned_potent_sulfur_uses_registry_slot_48_and_an_empty_update_tag() {
     let mut source = ChunkColumn::new(Dimension::Overworld.min_y(), Dimension::Overworld.height());
-    source.set_block(4, 14, 1, "minecraft:potent_sulfur");
+    source.set_block_id(4, 14, 1, Block::PotentSulfur.default_state());
     source.populate_missing_block_entity_states(-25, -25);
 
     let packet = decode_encoded_chunk_at(-25, -25, Dimension::Overworld, &source);
@@ -302,7 +329,7 @@ fn state_owned_potent_sulfur_uses_registry_slot_48_and_an_empty_update_tag() {
     // Negative control: the adjacent ordinary sulfur state owns no block
     // entity and must not create a trailing packet record.
     let mut control = ChunkColumn::new(Dimension::Overworld.min_y(), Dimension::Overworld.height());
-    control.set_block(4, 14, 1, "minecraft:sulfur");
+    control.set_block_id(4, 14, 1, Block::Sulfur.default_state());
     control.populate_missing_block_entity_states(-25, -25);
     let packet = decode_encoded_chunk_at(-25, -25, Dimension::Overworld, &control);
     assert!(packet.block_entities.is_empty());
@@ -313,7 +340,12 @@ fn end_gateway_sidecar_keeps_registry_id_and_destination_metadata() {
     let position = BlockPos::new(7, 80, 9);
     let exit = BlockPos::new(100, 50, 0);
     let mut source = ChunkColumn::new(Dimension::End.min_y(), Dimension::End.height());
-    source.set_block(position.x, position.y, position.z, "minecraft:end_gateway");
+    source.set_block_id(
+        position.x,
+        position.y,
+        position.z,
+        Block::EndGateway.default_state(),
+    );
     source.set_block_entities(vec![(
         position,
         BlockEntity::EndGateway {

@@ -7,6 +7,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use lodestone_data::block_states::StateId;
 use lodestone_worldgen::density::{NoiseParams, Resolver};
 use lodestone_worldgen::nether::{NetherColumn, NetherGenerator};
 use serde_json::Value;
@@ -150,12 +151,17 @@ fn settings(assets: &ExternalAssets) -> Value {
     assets.read("noise_settings", "nether")
 }
 
+fn glowstone_state() -> StateId {
+    StateId::from_state_str("minecraft:glowstone").expect("glowstone is a generated block state")
+}
+
 fn glowstone_cells(column: &NetherColumn) -> BTreeSet<(usize, i32, usize)> {
+    let glowstone = glowstone_state();
     let mut cells = BTreeSet::new();
     for y in column.min_y()..column.min_y() + column.height() {
         for lz in 0..16 {
             for lx in 0..16 {
-                if column.block_state(lx, y, lz) == "minecraft:glowstone" {
+                if column.block_state_id(lx, y, lz) == glowstone {
                     cells.insert((lx, y, lz));
                 }
             }
@@ -296,6 +302,7 @@ fn external_glowstone_cells_reach_the_production_nether_column() {
         &WithoutGlowstoneExtra(ExternalAssets::new()),
     );
     let with_column = with_glowstone.column(CHUNK_X, CHUNK_Z);
+    let glowstone = glowstone_state();
     let with = glowstone_cells(&with_column);
     let without = glowstone_cells(&without_glowstone.column(CHUNK_X, CHUNK_Z));
     let produced: BTreeSet<_> = with.difference(&without).copied().collect();
@@ -311,7 +318,9 @@ fn external_glowstone_cells_reach_the_production_nether_column() {
         fixture
             .cells
             .iter()
-            .all(|&(x, y, z)| with_column.block_state(x, y, z) == "minecraft:glowstone"),
+            .all(|&(x, y, z)| {
+                with_column.block_state_id(x, y, z) == glowstone
+            }),
         "every captured cell must be the configured target state in the production column"
     );
 }

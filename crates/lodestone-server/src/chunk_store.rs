@@ -239,6 +239,8 @@ use std::collections::hash_map::Entry as MapEntry;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 
+use lodestone_data::block_states::StateId;
+
 use crate::chunk::{
     ChunkColumn, ChunkGenerationStage, ColumnLightSettlement, ColumnLightSettlementError,
     ChunkSource,
@@ -2070,8 +2072,22 @@ impl GenerationLedger {
             return Ok(());
         }
 
+        let mut winners = BTreeMap::<
+            BlockCoordinate,
+            (DimensionPipeline, &ProvenanceMutation),
+        >::new();
         for &(pipeline, session) in sessions {
             for mutation in session.committed_mutations() {
+                let destination = mutation.provenance().destination();
+                if winners
+                    .get(&destination)
+                    .is_none_or(|(_, current)| mutation.provenance() < current.provenance())
+                {
+                    winners.insert(destination, (pipeline, mutation));
+                }
+            }
+        }
+        for (pipeline, mutation) in winners.values() {
                 let destination = mutation.provenance().destination();
                 let coordinate = (
                     destination.x().div_euclid(16),
@@ -2080,14 +2096,14 @@ impl GenerationLedger {
                 let Some(column) = final_outputs.get(&coordinate) else {
                     continue;
                 };
-                let Some(state) = mutation.get::<String>() else {
+                let Some(state) = mutation.get::<StateId>() else {
                     return Err(GenerationLedgerError::CheckpointMismatch);
                 };
-                if column.block_state(
+                if column.block_state_id(
                     destination.x().rem_euclid(16),
                     destination.y(),
                     destination.z().rem_euclid(16),
-                ) != state.as_str()
+                ) != *state
                 {
                     return Err(GenerationLedgerError::CheckpointMismatch);
                 }
@@ -2104,16 +2120,15 @@ impl GenerationLedger {
                     .get(&output_key)
                     .and_then(|product| product.get::<ChunkColumn>())
                 {
-                    if existing.block_state(
+                    if existing.block_state_id(
                         destination.x().rem_euclid(16),
                         destination.y(),
                         destination.z().rem_euclid(16),
-                    ) != state.as_str()
+                    ) != *state
                     {
                         return Err(GenerationLedgerError::CheckpointMismatch);
                     }
                 }
-            }
         }
 
         let mut journals = Vec::new();
@@ -2487,42 +2502,39 @@ impl GenerationLedger {
             ),
             ResourceKey::OutputColumn,
         );
-        let completed_state = state
+        if let Some(column) = state
             .products
             .get(&key)
             .and_then(|product| product.get::<ChunkColumn>())
-            .map(|column| {
-                mutation.get::<String>().is_some_and(|value| {
-                    column.block_state(
-                        destination.x().rem_euclid(16),
-                        destination.y(),
-                        destination.z().rem_euclid(16),
-                    ) == value.as_str()
-                })
+        {
+            let same_state = mutation.get::<StateId>().is_some_and(|value| {
+                column.block_state_id(
+                    destination.x().rem_euclid(16),
+                    destination.y(),
+                    destination.z().rem_euclid(16),
+                ) == *value
             });
-        if let Some(same_state) = completed_state {
             if !same_state {
                 if generation_ledger_trace_enabled() {
-                    let column = state.products[&key]
-                        .get::<ChunkColumn>()
-                        .expect("completed output product was checked");
-                    let current = column.block_state(
+                    let current = column.block_state_id(
                         destination.x().rem_euclid(16),
                         destination.y(),
                         destination.z().rem_euclid(16),
                     );
                     let next = mutation
-                        .get::<String>()
-                        .expect("worldgen block mutation carries a state string");
+                        .get::<StateId>()
+                        .expect("worldgen block mutation carries StateId");
                     eprintln!(
-                        "worldgen ledger mismatch: late output write target={:?} source={:?} destination={destination:?} current={current} next={next}",
+                        "worldgen ledger mismatch: late output write target={:?} source={:?} destination={destination:?} current={current:?} next={next:?}",
                         provenance.target(),
                         provenance.source(),
                     );
                 }
                 return Err(GenerationLedgerError::CheckpointMismatch);
             }
-            return Ok(found);
+            if same_state {
+                return Ok(found);
+            }
         }
         if let Some(existing) = state.overlay(destination) {
             if existing.provenance() == provenance {
@@ -2552,11 +2564,8 @@ impl GenerationLedger {
         Ok(Self::bump_revision(state, coordinate))
     }
 
-    /// Drop overlays whose complete destination snapshot has been accepted by
-    /// the wrapped source. The destination bucket is the ownership boundary:
-    /// removing an entry never changes its target revision, and a later write
-    /// to the same coordinate remains visible because it carries a different
-    /// authenticated provenance value.
+    /// Retire mutations only after their source state is persisted or their
+    /// destination is already present in the immutable output product.
     pub(crate) fn settle_mutations(
         &mut self,
         pipeline: DimensionPipeline,
@@ -2623,69 +2632,50 @@ impl GenerationLedger {
                 ),
                 ResourceKey::OutputColumn,
             );
-            let product_update = state.products.get(&key).and_then(|product| {
-                let column = product.get::<ChunkColumn>()?;
-                let mut column = (*column).clone();
-                let mut writes = Vec::<(i32, i32, i32, Arc<String>)>::new();
-                for mutation in mutations.values() {
-                    let state = mutation.get::<String>()?;
+            let output = state
+                .products
+                .get(&key)
+                .and_then(|product| product.get::<ChunkColumn>());
+            let output_matches = output.as_ref().is_some_and(|column| {
+                mutations.values().all(|mutation| {
                     let destination = mutation.provenance().destination();
-                    writes.push((
+                    let expected = mutation
+                        .get::<StateId>()
+                        .expect("worldgen block mutation carries StateId");
+                    column.block_state_id(
                         destination.x().rem_euclid(16),
                         destination.y(),
                         destination.z().rem_euclid(16),
-                        state,
-                    ));
-                }
-                let ordered_writes = writes
-                    .iter()
-                    .map(|(x, y, z, state)| (*x, *y, *z, state.as_str()))
-                    .collect::<Vec<_>>();
-                column.apply_ordered_block_batch(&ordered_writes);
-                let retained_bytes = column.memory_census().logical_total();
-                Some((column, retained_bytes))
+                    ) == *expected
+                })
             });
-            let product_updated = if let Some((column, retained_bytes)) = product_update {
-                state.products.insert(
-                    key,
-                    ImmutableProduct::new_with_retained_bytes(
-                        ResourceKey::OutputColumn,
-                        column,
-                        retained_bytes,
-                    ),
-                );
-                true
-            } else {
-                false
-            };
-            if source_stored || product_updated {
-                for mutation in mutations.values() {
-                    let destination = mutation.provenance().destination();
-                    let remove = state
-                        .overlays
-                        .get(&coordinate)
-                        .and_then(|bucket| bucket.get(&destination))
-                        .is_some_and(|existing| {
-                            existing.provenance() == mutation.provenance()
-                        });
-                    let source_remove = source_stored
-                        && source_candidates.contains(&(coordinate, destination));
-                    if !remove || (!product_updated && !source_remove) {
-                        continue;
-                    }
-                    let empty = state
-                        .overlays
-                        .get_mut(&coordinate)
-                        .map(|bucket| {
-                            bucket.remove(&destination);
-                            bucket.is_empty()
-                        })
-                        .unwrap_or(false);
-                    if empty {
-                        state.overlays.remove(&coordinate);
-                    }
-                    settled += 1;
+            for mutation in mutations.values() {
+                let destination = mutation.provenance().destination();
+                let is_current = state
+                    .overlays
+                    .get(&coordinate)
+                    .and_then(|bucket| bucket.get(&destination))
+                    .is_some_and(|existing| {
+                        existing.provenance() == mutation.provenance()
+                    });
+                let source_persisted = source_stored
+                    && output.is_none()
+                    && source_candidates.contains(&(coordinate, destination));
+                if !is_current || (!output_matches && !source_persisted) {
+                    continue;
                 }
+                let empty = state
+                    .overlays
+                    .get_mut(&coordinate)
+                    .map(|bucket| {
+                        bucket.remove(&destination);
+                        bucket.is_empty()
+                    })
+                    .unwrap_or(false);
+                if empty {
+                    state.overlays.remove(&coordinate);
+                }
+                settled += 1;
             }
         }
         settled
@@ -3508,14 +3498,14 @@ impl<S: ChunkSource> ChunkStore<S> {
             let mut column = self
                 .resident_column(coordinate.0, coordinate.1)
                 .unwrap_or_else(|| self.source.column(coordinate.0, coordinate.1));
-            let mut writes = Vec::<(i32, i32, i32, Arc<String>)>::new();
+            let mut writes = Vec::<(i32, i32, i32, StateId)>::new();
             for mutation in session.committed_mutations().filter(|mutation| {
                 let destination = mutation.provenance().destination();
                 (destination.x().div_euclid(16), destination.z().div_euclid(16)) == coordinate
             }) {
-                let state = mutation
-                    .get::<String>()
-                    .expect("worldgen mutations carry block-state strings");
+                let state = *mutation
+                    .get::<StateId>()
+                    .expect("worldgen mutations carry StateId");
                 let destination = mutation.provenance().destination();
                 writes.push((
                     destination.x().rem_euclid(16),
@@ -3526,9 +3516,9 @@ impl<S: ChunkSource> ChunkStore<S> {
             }
             let writes = writes
                 .iter()
-                .map(|(x, y, z, state)| (*x, *y, *z, state.as_str()))
+                .map(|(x, y, z, state)| (*x, *y, *z, *state))
                 .collect::<Vec<_>>();
-            column.apply_ordered_block_batch(&writes);
+            column.apply_ordered_block_id_batch(&writes);
             retained.push((coordinate.0, coordinate.1, column));
         }
         if !retained.is_empty() {
@@ -3541,11 +3531,11 @@ impl<S: ChunkSource> ChunkStore<S> {
         columns: &mut [(ChunkCoordinate, ChunkColumn)],
         mutations: &[ProvenanceMutation],
     ) {
-        let mut writes = BTreeMap::<ChunkCoordinate, Vec<(i32, i32, i32, Arc<String>)>>::new();
+        let mut writes = BTreeMap::<ChunkCoordinate, Vec<(i32, i32, i32, StateId)>>::new();
         for mutation in mutations {
-            let state = mutation
-                .get::<String>()
-                .expect("worldgen mutations carry block-state strings");
+            let state = *mutation
+                .get::<StateId>()
+                .expect("worldgen mutations carry StateId");
             let destination = mutation.provenance().destination();
             let coordinate = (
                 destination.x().div_euclid(16),
@@ -3565,13 +3555,20 @@ impl<S: ChunkSource> ChunkStore<S> {
                 .iter_mut()
                 .find(|(candidate, _)| *candidate == coordinate)
             {
-                let writes = writes
-                    .iter()
-                    .map(|(x, y, z, state)| (*x, *y, *z, state.as_str()))
-                    .collect::<Vec<_>>();
-                column.apply_ordered_block_batch(&writes);
+                Self::apply_generation_writes(column, &writes);
             }
         }
+    }
+
+    fn apply_generation_writes(
+        column: &mut ChunkColumn,
+        writes: &[(i32, i32, i32, StateId)],
+    ) {
+        let writes = writes
+            .iter()
+            .map(|(x, y, z, state)| (*x, *y, *z, *state))
+            .collect::<Vec<_>>();
+        column.apply_ordered_block_id_batch(&writes);
     }
 
     fn generation_key(request: crate::worldgen_session::GenerationRequest) -> GenerationRequestKey {
@@ -3588,8 +3585,7 @@ impl<S: ChunkSource> ChunkStore<S> {
         pipeline: DimensionPipeline,
         coordinate: (i32, i32),
     ) -> Option<ChunkColumn> {
-        let ledger = self.generation_ledger();
-        ledger.output_column(pipeline, coordinate)
+        self.generation_ledger().output_column(pipeline, coordinate)
     }
 
     fn prepare_generation_batch(
@@ -3985,6 +3981,51 @@ impl<S: ChunkSource> ChunkStore<S> {
             }
         }
 
+        let mut winning_finalized_writes = BTreeMap::<
+            BlockCoordinate,
+            (MutationProvenance, StateId),
+        >::new();
+        for mutation in &committed_mutations {
+            let destination = mutation.provenance().destination();
+            let coordinate = (
+                destination.x().div_euclid(16),
+                destination.z().div_euclid(16),
+            );
+            if finalized_coordinates.contains(&coordinate) {
+                let state = *mutation
+                    .get::<StateId>()
+                    .expect("worldgen mutations carry StateId");
+                let provenance = mutation.provenance();
+                if winning_finalized_writes
+                    .get(&destination)
+                    .is_none_or(|(current, _)| provenance < *current)
+                {
+                    winning_finalized_writes.insert(destination, (provenance, state));
+                }
+            }
+        }
+        let mut finalized_writes = BTreeMap::<
+            ChunkCoordinate,
+            Vec<(i32, i32, i32, StateId)>,
+        >::new();
+        for (destination, (_, state)) in winning_finalized_writes {
+            let coordinate = (
+                destination.x().div_euclid(16),
+                destination.z().div_euclid(16),
+            );
+            finalized_writes.entry(coordinate).or_default().push((
+                destination.x().rem_euclid(16),
+                destination.y(),
+                destination.z().rem_euclid(16),
+                state,
+            ));
+        }
+        for (coordinate, writes) in finalized_writes {
+            if let Some(column) = commit_columns.get_mut(&coordinate) {
+                Self::apply_generation_writes(column, &writes);
+            }
+        }
+
         let final_outputs: BTreeMap<ChunkCoordinate, &ChunkColumn> = finalized_coordinates
             .iter()
             .filter_map(|&coordinate| {
@@ -3993,7 +4034,6 @@ impl<S: ChunkSource> ChunkStore<S> {
                     .map(|column| (coordinate, column))
             })
             .collect();
-
         let publication_error = if generated_snapshots.is_empty() && failed_entries.is_empty() {
             None
         } else {
@@ -5276,7 +5316,7 @@ impl<S: ChunkSource> ChunkStore<S> {
             let local_y = i64::from(y) - i64::from(column.min_y);
             (0..i64::from(column.height))
                 .contains(&local_y)
-                .then(|| column.resolved_block_state_id(lx, y, lz))
+                .then(|| column.block_state_id(lx, y, lz))
         }) {
             Err(()) => TryResident::Busy,
             Ok(None) | Ok(Some(None)) => self
@@ -5307,7 +5347,7 @@ impl<S: ChunkSource> ChunkStore<S> {
         x: i32,
         y: i32,
         z: i32,
-        name: &str,
+        state: lodestone_data::block_states::StateId,
     ) -> TryBlockMutation {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
@@ -5342,7 +5382,7 @@ impl<S: ChunkSource> ChunkStore<S> {
                 return TryBlockMutation::Absent;
             }
             let mut retained = entry.column.clone();
-            retained.set_block(lx, y, lz, name);
+            retained.set_block_id(lx, y, lz, state);
             retained.clear_retained_light();
 
             // Keep the cache lock while the typed hook commits the source edit
@@ -5661,7 +5701,7 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
             if !(0..i64::from(column.height)).contains(&local_y) {
                 return None;
             }
-            Some(column.resolved_block_state_id(x.rem_euclid(16), y, z.rem_euclid(16)))
+            Some(column.block_state_id(x.rem_euclid(16), y, z.rem_euclid(16)))
         })
         .flatten()
         .or_else(|| self.source.resident_block_state_id(x, y, z))
@@ -5704,9 +5744,9 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
         x: i32,
         y: i32,
         z: i32,
-        name: &str,
+        state: lodestone_data::block_states::StateId,
     ) -> Option<crate::chunk_store::TryBlockMutation> {
-        Some(ChunkStore::try_set_block(self, x, y, z, name))
+        Some(ChunkStore::try_set_block(self, x, y, z, state))
     }
 
     fn try_store_resident_edit(
@@ -5995,7 +6035,7 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
     /// regenerate a whole column for every read, and
     /// `crate::server`'s `vitals_tick` calls this every 50 ms on the
     /// connection task. See the module docs.
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> lodestone_data::block_states::StateId {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
@@ -6005,10 +6045,10 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
             cz,
             crate::chunk::ChunkGenerationStage::Full,
         ) {
-            return fresh.block_state(lx, y, lz).to_string();
+            return fresh.block_state_id(lx, y, lz);
         }
-        self.read(cx, cz, |column| column.block_state(lx, y, lz).to_string())
-            .unwrap_or_else(|| self.source.block_state(x, y, z))
+        self.read(cx, cz, |column| column.block_state_id(lx, y, lz))
+            .unwrap_or_else(|| self.source.block_state_id(x, y, z))
     }
 
     /// One biome cell out of the retained column, without cloning the whole
@@ -6151,7 +6191,7 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
     /// one: the next read regenerates through the inner source, which for
     /// [`crate::chunk::OverworldChunkSource`] consults its `edits` map and so
     /// returns the edited column.
-    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+    fn set_block(&self, x: i32, y: i32, z: i32, state: lodestone_data::block_states::StateId) {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
@@ -6174,7 +6214,7 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
                 // own update rather than relying on the source to reject
                 // out-of-range `y`.
                 if y >= entry.column.min_y && y < entry.column.min_y + entry.column.height {
-                    entry.column.set_block(lx, y, lz, name);
+                    entry.column.set_block_id(lx, y, lz, state);
                     entry.last_used = stamp;
                     Some(entry.column.clone())
                 } else {
@@ -6197,7 +6237,7 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
             .as_ref()
             .is_some_and(|column| self.source.store_resident_column(cx, cz, column))
         {
-            self.source.set_block(x, y, z, name);
+            self.source.set_block(x, y, z, state);
         }
         lease.release_and_prune();
         for &coordinate in &coordinates {
@@ -6339,15 +6379,15 @@ mod tests {
                 .collect()
         }
 
-        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-            crate::chunk::AIR.to_owned()
+        fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> lodestone_data::block_states::StateId {
+            crate::chunk::air_state()
         }
 
         fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
             crate::chunk::DEFAULT_BIOME.to_owned()
         }
 
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: lodestone_data::block_states::StateId) {}
     }
 
     /// The worst per-coordinate generation count, with its coordinate — the
@@ -6384,12 +6424,12 @@ mod tests {
         // `repeated_single_block_probes_generate_one_column_not_forty` relies
         // on one probe costing exactly one generation. This is the explicit
         // column-regenerating form.
-        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> lodestone_data::block_states::StateId {
             let cx = x.div_euclid(16);
             let cz = z.div_euclid(16);
             let lx = x.rem_euclid(16);
             let lz = z.rem_euclid(16);
-            self.column(cx, cz).block_state(lx, y, lz).to_string()
+            self.column(cx, cz).block_state_id(lx, y, lz)
         }
 
         fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -6405,7 +6445,7 @@ mod tests {
         // source has no storage (its `column()` is a fresh blank column plus a
         // counter), so the edit is deliberately discarded. Explicit rather than
         // inherited — this stub must make the discarded-edit behavior explicit.
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: lodestone_data::block_states::StateId) {
             // No storage; edits are discarded by design for this counting stub.
         }
 
@@ -6575,10 +6615,9 @@ mod tests {
             ChunkColumn::new(0, 16)
         }
 
-        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> lodestone_data::block_states::StateId {
             ChunkColumn::new(0, 16)
-                .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
-                .to_owned()
+                .block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
         }
 
         fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -6587,7 +6626,7 @@ mod tests {
                 .to_owned()
         }
 
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: lodestone_data::block_states::StateId) {}
 
         fn request_stage_driver(
             &self,
@@ -6727,15 +6766,15 @@ mod tests {
             ChunkColumn::new(0, 16)
         }
 
-        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-            "minecraft:air".to_owned()
+        fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> lodestone_data::block_states::StateId {
+            crate::chunk::air_state()
         }
 
         fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
             "minecraft:the_void".to_owned()
         }
 
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: lodestone_data::block_states::StateId) {}
 
         fn request_stage_driver(
             &self,
@@ -6771,15 +6810,15 @@ mod tests {
             ChunkColumn::new(0, 16)
         }
 
-        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-            "minecraft:air".to_owned()
+        fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> lodestone_data::block_states::StateId {
+            crate::chunk::air_state()
         }
 
         fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
             "minecraft:the_void".to_owned()
         }
 
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: lodestone_data::block_states::StateId) {}
 
         fn request_stage_driver(
             &self,
@@ -7193,10 +7232,9 @@ mod tests {
                 ChunkColumn::new(0, 16)
             }
 
-            fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+            fn block_state_id(&self, x: i32, y: i32, z: i32) -> lodestone_data::block_states::StateId {
                 self.column(x.div_euclid(16), z.div_euclid(16))
-                    .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
-                    .to_owned()
+                    .block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
             }
 
             fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -7205,7 +7243,7 @@ mod tests {
                     .to_owned()
             }
 
-            fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+            fn set_block(&self, x: i32, y: i32, z: i32, state: lodestone_data::block_states::StateId) {
                 let mut edits = self
                     .edits
                     .lock()
@@ -7213,7 +7251,7 @@ mod tests {
                 edits
                     .entry((x.div_euclid(16), z.div_euclid(16)))
                     .or_insert_with(|| ChunkColumn::new(0, 16))
-                    .set_block(x.rem_euclid(16), y, z.rem_euclid(16), name);
+                    .set_block_id(x.rem_euclid(16), y, z.rem_euclid(16), state);
             }
 
             fn try_store_resident_edit(
@@ -7711,7 +7749,11 @@ mod tests {
                         .wrapping_mul(31)
                         .wrapping_add((z as usize).wrapping_mul(7))
                         .wrapping_add((y - min_y) as usize);
-                    column.set_block(x, y, z, STATES[n % STATES.len()]);
+                    let state = lodestone_data::block_states::StateId::from_state_str(
+                        STATES[n % STATES.len()],
+                    )
+                    .expect("fixture state is canonical");
+                    column.set_block_id(x, y, z, state);
                 }
             }
         }
@@ -7724,14 +7766,14 @@ mod tests {
             touched_column(REAL_MIN_Y, REAL_HEIGHT)
         }
 
-        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> lodestone_data::block_states::StateId {
             // Only `column()` is exercised here (the RSS measurement); this is
             // the plain column-regenerating form, kept for completeness.
             let cx = x.div_euclid(16);
             let cz = z.div_euclid(16);
             let lx = x.rem_euclid(16);
             let lz = z.rem_euclid(16);
-            self.column(cx, cz).block_state(lx, y, lz).to_string()
+            self.column(cx, cz).block_state_id(lx, y, lz)
         }
 
         fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -7746,7 +7788,7 @@ mod tests {
 
         // A memory-measurement fixture; nothing here writes blocks. Explicitly
         // discards rather than inheriting a silent default.
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: lodestone_data::block_states::StateId) {
             // No storage; edits are discarded by design for this fixture.
         }
     }
@@ -7761,10 +7803,9 @@ mod tests {
             self.0.as_ref().clone()
         }
 
-        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> lodestone_data::block_states::StateId {
             self.0
-                .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
-                .to_owned()
+                .block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
         }
 
         fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -7773,7 +7814,7 @@ mod tests {
                 .to_owned()
         }
 
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: lodestone_data::block_states::StateId) {}
     }
 
     /// Fills a store to `capacity` and holds it, so an external
@@ -8008,14 +8049,14 @@ mod tests {
                 ChunkColumn::new(0, 16)
             }
 
-            fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+            fn block_state_id(&self, x: i32, y: i32, z: i32) -> lodestone_data::block_states::StateId {
                 // Only `column()` is exercised here (the lock-serialisation
                 // gate); the plain column-regenerating form, for completeness.
                 let cx = x.div_euclid(16);
                 let cz = z.div_euclid(16);
                 let lx = x.rem_euclid(16);
                 let lz = z.rem_euclid(16);
-                self.column(cx, cz).block_state(lx, y, lz).to_string()
+                self.column(cx, cz).block_state_id(lx, y, lz)
             }
 
             fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -8030,7 +8071,7 @@ mod tests {
 
             // A wall-clock-only fixture; nothing here writes blocks. Explicitly
             // discards rather than inheriting a silent default.
-            fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+            fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: lodestone_data::block_states::StateId) {
                 // No storage; edits are discarded by design for this fixture.
             }
         }
@@ -8499,10 +8540,9 @@ mod tests {
                     .clone()
             }
 
-            fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+            fn block_state_id(&self, x: i32, y: i32, z: i32) -> lodestone_data::block_states::StateId {
                 self.column(x.div_euclid(16), z.div_euclid(16))
-                    .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
-                    .to_owned()
+                    .block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
             }
 
             fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -8511,7 +8551,7 @@ mod tests {
                     .to_owned()
             }
 
-            fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+            fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: lodestone_data::block_states::StateId) {}
 
             fn store_resident_column(
                 &self,
@@ -8667,10 +8707,9 @@ mod tests {
                     .clone()
             }
 
-            fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+            fn block_state_id(&self, x: i32, y: i32, z: i32) -> lodestone_data::block_states::StateId {
                 self.column(x.div_euclid(16), z.div_euclid(16))
-                    .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
-                    .to_owned()
+                    .block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
             }
 
             fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -8679,7 +8718,7 @@ mod tests {
                     .to_owned()
             }
 
-            fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+            fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: lodestone_data::block_states::StateId) {}
 
             fn store_resident_column(
                 &self,
@@ -9109,23 +9148,22 @@ mod tests {
                 generated
             }
 
-            fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+            fn block_state_id(&self, x: i32, y: i32, z: i32) -> lodestone_data::block_states::StateId {
                 self.persisted
                     .lock()
                     .expect("ensure race persistence lock poisoned")
-                    .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
-                    .to_owned()
+                    .block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
             }
 
             fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
                 crate::chunk::DEFAULT_BIOME.to_owned()
             }
 
-            fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+            fn set_block(&self, x: i32, y: i32, z: i32, state: lodestone_data::block_states::StateId) {
                 self.persisted
                     .lock()
                     .expect("ensure race persistence lock poisoned")
-                    .set_block(x.rem_euclid(16), y, z.rem_euclid(16), name);
+                    .set_block_id(x.rem_euclid(16), y, z.rem_euclid(16), state);
             }
         }
 
@@ -9219,10 +9257,9 @@ mod tests {
                     .unwrap_or_else(|| ChunkColumn::new(0, 16))
             }
 
-            fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+            fn block_state_id(&self, x: i32, y: i32, z: i32) -> lodestone_data::block_states::StateId {
                 self.column(x.div_euclid(16), z.div_euclid(16))
-                    .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
-                    .to_owned()
+                    .block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
             }
 
             fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -9231,14 +9268,14 @@ mod tests {
                     .to_owned()
             }
 
-            fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+            fn set_block(&self, x: i32, y: i32, z: i32, state: lodestone_data::block_states::StateId) {
                 let cx = x.div_euclid(16);
                 let cz = z.div_euclid(16);
                 let mut edits = self.edits.lock().expect("edit ledger lock poisoned");
                 edits
                     .entry((cx, cz))
                     .or_insert_with(|| ChunkColumn::new(0, 16))
-                    .set_block(x.rem_euclid(16), y, z.rem_euclid(16), name);
+                    .set_block_id(x.rem_euclid(16), y, z.rem_euclid(16), state);
             }
         }
 
@@ -10557,7 +10594,20 @@ mod tests {
         assert_eq!(ledger.stats().overlays, 1);
 
         let mut destination_session = end_shaped_session_at(destination, 3, 1);
-        complete_end_suffix(&mut destination_session, 4);
+        let mut destination_output = ChunkColumn::new(0, 16);
+        destination_output.set_block_id(
+            0,
+            4,
+            0,
+            StateId::from_state_str("minecraft:stone").expect("test state is canonical"),
+        );
+        complete_end_suffix_inner_with_state_and_output(
+            &mut destination_session,
+            4,
+            None,
+            "minecraft:air",
+            Some(destination_output),
+        );
         ledger
             .admit(END_PIPELINE, destination_session.admission_order())
             .expect("the completed destination request extends the line by one halo");
@@ -10567,7 +10617,7 @@ mod tests {
         assert_eq!(
             ledger.settle_mutations(END_PIPELINE, &[], false, &[destination]),
             1,
-            "the destination output folds its bucket in one product update"
+            "the destination output verifies and retires its canonical spill"
         );
         assert_eq!(ledger.stats().overlays, 0);
         let output = ledger

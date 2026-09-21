@@ -63,6 +63,7 @@ use crate::density::Density;
 
 const KINDS: usize = Density::KIND_COUNT;
 
+
 /// One window's worth of redundancy counts.
 #[derive(Clone, Debug)]
 pub struct Redundancy {
@@ -160,13 +161,12 @@ impl Redundancy {
 
 #[cfg(feature = "gen-counters")]
 mod live {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::collections::{HashMap, HashSet};
 
     use super::Redundancy;
 
     struct State {
-        on: bool,
         counts: Redundancy,
         last_xz: HashMap<u64, (i32, i32)>,
         last_xyz: HashMap<u64, (i32, i32, i32)>,
@@ -183,7 +183,6 @@ mod live {
     impl State {
         fn new() -> Self {
             Self {
-                on: false,
                 counts: Redundancy::default(),
                 last_xz: HashMap::new(),
                 last_xyz: HashMap::new(),
@@ -197,6 +196,7 @@ mod live {
     }
 
     thread_local! {
+        static ACTIVE: Cell<bool> = const { Cell::new(false) };
         static STATE: RefCell<State> = RefCell::new(State::new());
     }
 
@@ -207,9 +207,6 @@ mod live {
     fn record(node: u64, kind: usize, x: i32, y: i32, z: i32, field: bool, scope: u64) {
         STATE.with(|s| {
             let s = &mut *s.borrow_mut();
-            if !s.on {
-                return;
-            }
             if kind < super::KINDS {
                 let one_slot_xyz = match s.last_xyz.insert(node, (x, y, z)) {
                     Some(prev) => prev == (x, y, z),
@@ -268,8 +265,13 @@ mod live {
     }
 
     /// Records one point-interpreter node visit.
+    #[inline(always)]
     pub fn visit_point(node: *const (), kind: usize, x: i32, y: i32, z: i32) {
-        record(node as u64 & !FIELD_TAG, kind, x, y, z, false, 0);
+        ACTIVE.with(|active| {
+            if active.get() {
+                record(node as u64 & !FIELD_TAG, kind, x, y, z, false, 0);
+            }
+        });
     }
 
     /// Records one field-evaluator node visit.
@@ -278,6 +280,7 @@ mod live {
     /// several (`final_density`, `depth`, `erosion`, the climate channels), so the
     /// graph's own address is folded in. Keying on the id alone would merge
     /// unrelated nodes and over-report every hit rate.
+    #[inline(always)]
     pub fn visit_field(
         graph: *const (),
         node: u32,
@@ -287,18 +290,22 @@ mod live {
         z: i32,
         scope: u64,
     ) {
-        let key = (graph as u64).rotate_left(17) ^ u64::from(node);
-        record(key | FIELD_TAG, kind, x, y, z, true, scope);
+        ACTIVE.with(|active| {
+            if active.get() {
+                let key = (graph as u64).rotate_left(17) ^ u64::from(node);
+                record(key | FIELD_TAG, kind, x, y, z, true, scope);
+            }
+        });
     }
 
     /// Starts recording on this thread.
     pub fn enable() {
-        STATE.with(|s| s.borrow_mut().on = true);
+        ACTIVE.with(|active| active.set(true));
     }
 
     /// Stops recording on this thread.
     pub fn disable() {
-        STATE.with(|s| s.borrow_mut().on = false);
+        ACTIVE.with(|active| active.set(false));
     }
 
     /// Clears the window (counts *and* the seen-sets).
@@ -320,6 +327,7 @@ mod live {
     pub fn snapshot() -> Redundancy {
         STATE.with(|s| s.borrow().counts.clone())
     }
+
 }
 
 #[cfg(not(feature = "gen-counters"))]
@@ -348,4 +356,6 @@ mod live {
     }
 }
 
-pub use live::{disable, enable, reset, snapshot, visit_field, visit_point};
+pub use live::{
+    disable, enable, reset, snapshot, visit_field, visit_point,
+};

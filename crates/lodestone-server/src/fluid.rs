@@ -128,6 +128,7 @@
 use std::collections::HashMap;
 
 use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey, PropertyValue};
 use lodestone_data::block_states::StateId;
 use lodestone_model::BlockPos;
 
@@ -185,20 +186,6 @@ pub enum FluidKind {
     Water,
     /// `minecraft:lava` / `minecraft:flowing_lava`.
     Lava,
-}
-
-impl FluidKind {
-    /// The block name this fluid writes. One name for both the source and the
-    /// flowing form, because 26.2's *block* registry has only
-    /// `minecraft:water`/`minecraft:lava` — the `flowing_` split is a *fluid*
-    /// registry distinction, carried on the block by `level`.
-    #[must_use]
-    pub fn block_name(self) -> &'static str {
-        match self {
-            FluidKind::Water => "minecraft:water",
-            FluidKind::Lava => "minecraft:lava",
-        }
-    }
 }
 
 /// One entry of the real **fluid registry** — the distinction [`FluidKind`]
@@ -312,11 +299,44 @@ impl FluidState {
         }
     }
 
-    /// The canonical block-state string [`crate::chunk::ChunkColumn`] stores for
-    /// this fluid — the real "create legacy block" derivation.
     #[must_use]
-    pub fn block_state(self) -> String {
-        format!("{}[level={}]", self.kind.block_name(), self.legacy_level())
+    pub fn block_state_id(self) -> StateId {
+        let block = match self.kind {
+            FluidKind::Water => Block::Water,
+            FluidKind::Lava => Block::Lava,
+        };
+        let level = match self.legacy_level() {
+            0 => BuiltinPropertyValue::Value0,
+            1 => BuiltinPropertyValue::Value1,
+            2 => BuiltinPropertyValue::Value2,
+            3 => BuiltinPropertyValue::Value3,
+            4 => BuiltinPropertyValue::Value4,
+            5 => BuiltinPropertyValue::Value5,
+            6 => BuiltinPropertyValue::Value6,
+            7 => BuiltinPropertyValue::Value7,
+            8 => BuiltinPropertyValue::Value8,
+            9 => BuiltinPropertyValue::Value9,
+            10 => BuiltinPropertyValue::Value10,
+            11 => BuiltinPropertyValue::Value11,
+            12 => BuiltinPropertyValue::Value12,
+            13 => BuiltinPropertyValue::Value13,
+            14 => BuiltinPropertyValue::Value14,
+            15 => BuiltinPropertyValue::Value15,
+            _ => unreachable!("fluid legacy level is bounded to 0..=15"),
+        };
+        let properties = Properties::try_from_pairs(&[
+            (
+                PropertyKey::Level,
+                PropertyValue::builtin(level),
+            ),
+        ])
+        .expect("generated fluid properties");
+        Properties::state_for_block(block, &properties).expect("generated fluid state")
+    }
+
+    #[cfg(test)]
+    fn to_text(self) -> String {
+        self.block_state_id().canonical_state()
     }
 }
 
@@ -470,10 +490,10 @@ impl FluidEnv {
 }
 
 // ---------------------------------------------------------------------------
-// State-string <-> fluid-state
+// StateId <-> fluid-state
 // ---------------------------------------------------------------------------
 
-/// The block state at `pos`, or air when `pos` is outside the dimension's build
+/// The block state id at `pos`, or air when `pos` is outside the dimension's build
 /// height — the real block-state query, whose own first line checks whether the
 /// position is outside build height and returns void air's default state if so.
 ///
@@ -482,14 +502,15 @@ impl FluidEnv {
 /// whatever it is looking at, `ChunkColumn::block_state` indexes unguarded, and a
 /// fluid resting on the floor of the world would therefore panic the world tick
 /// thread. See [`FluidEnv::min_y`].
-fn block_at<S: ChunkSource + ?Sized>(world: &S, env: FluidEnv, pos: BlockPos) -> String {
+fn block_at<S: ChunkSource + ?Sized>(world: &S, env: FluidEnv, pos: BlockPos) -> StateId {
     if env.contains_y(pos.y) {
-        world.block_state(pos.x, pos.y, pos.z)
+        world.block_state_id(pos.x, pos.y, pos.z)
     } else {
-        crate::chunk::AIR.to_owned()
+        crate::chunk::air_state()
     }
 }
 
+#[cfg(test)]
 /// Strips a `[...]` property suffix, the same way every other canonical-name
 /// comparison in this crate does.
 fn base_name(state: &str) -> &str {
@@ -498,6 +519,7 @@ fn base_name(state: &str) -> &str {
 
 /// The value of `state`'s `key=` property. A whole-key match, so `level` cannot
 /// be found inside another property's name.
+#[cfg(test)]
 fn property_of<'s>(state: &'s str, key: &str) -> Option<&'s str> {
     let props = state.split_once('[')?.1.strip_suffix(']')?;
     props.split(',').find_map(|pair| {
@@ -517,6 +539,7 @@ fn property_of<'s>(state: &'s str, key: &str) -> Option<&'s str> {
 /// * any state carrying `waterlogged=true`, whose fluid state is a **water
 ///   source** even though its block is a slab or a fence;
 /// * everything else, `None`.
+#[cfg(test)]
 #[must_use]
 pub fn fluid_state_of(state: &str) -> Option<FluidState> {
     let kind = match base_name(state) {
@@ -555,15 +578,69 @@ pub fn fluid_state_of(state: &str) -> Option<FluidState> {
     })
 }
 
+#[must_use]
+pub fn fluid_state_of_id(state: StateId) -> Option<FluidState> {
+    let kind = match state.block() {
+        Block::Water => FluidKind::Water,
+        Block::Lava => FluidKind::Lava,
+        _ => {
+            let waterlogged = Properties::from_state_id(state)
+                .get(PropertyKey::Waterlogged)
+                .is_some_and(|value| {
+                    value
+                        == PropertyValue::builtin(BuiltinPropertyValue::True)
+                });
+            return waterlogged.then_some(FluidState {
+                kind: FluidKind::Water,
+                amount: 8,
+                falling: false,
+            });
+        }
+    };
+    let level = Properties::from_state_id(state)
+        .get(PropertyKey::Level)
+        .and_then(PropertyValue::builtin_value)
+        .map(level_value)
+        .unwrap_or(0)
+        .min(8);
+    Some(match level {
+        0 => FluidState { kind, amount: 8, falling: false },
+        8 => FluidState { kind, amount: 8, falling: true },
+        other => FluidState { kind, amount: 8 - other, falling: false },
+    })
+}
+
+fn level_value(value: BuiltinPropertyValue) -> u8 {
+    match value {
+        BuiltinPropertyValue::Value0 => 0,
+        BuiltinPropertyValue::Value1 => 1,
+        BuiltinPropertyValue::Value2 => 2,
+        BuiltinPropertyValue::Value3 => 3,
+        BuiltinPropertyValue::Value4 => 4,
+        BuiltinPropertyValue::Value5 => 5,
+        BuiltinPropertyValue::Value6 => 6,
+        BuiltinPropertyValue::Value7 => 7,
+        BuiltinPropertyValue::Value8 => 8,
+        BuiltinPropertyValue::Value9 => 9,
+        BuiltinPropertyValue::Value10 => 10,
+        BuiltinPropertyValue::Value11 => 11,
+        BuiltinPropertyValue::Value12 => 12,
+        BuiltinPropertyValue::Value13 => 13,
+        BuiltinPropertyValue::Value14 => 14,
+        BuiltinPropertyValue::Value15 => 15,
+        _ => 0,
+    }
+}
+
 /// `true` iff `state`'s fluid is `kind` — the real "is same fluid" check,
 /// which treats a fluid and its flowing twin as one.
-fn is_same_fluid(state: &str, kind: FluidKind) -> bool {
-    fluid_state_of(state).is_some_and(|fluid| fluid.kind == kind)
+fn is_same_fluid(state: StateId, kind: FluidKind) -> bool {
+    fluid_state_of_id(state).is_some_and(|fluid| fluid.kind == kind)
 }
 
 /// The real "is source block of this type" check.
-fn is_source_of_type(state: &str, kind: FluidKind) -> bool {
-    fluid_state_of(state).is_some_and(|fluid| fluid.kind == kind && fluid.is_source())
+fn is_source_of_type(state: StateId, kind: FluidKind) -> bool {
+    fluid_state_of_id(state).is_some_and(|fluid| fluid.kind == kind && fluid.is_source())
 }
 
 // ---------------------------------------------------------------------------
@@ -585,11 +662,17 @@ fn is_source_of_type(state: &str, kind: FluidKind) -> bool {
 /// that would be a real bug (griefing a block that should have survived),
 /// and this cannot do that.
 #[must_use]
+#[cfg(test)]
 pub fn is_bucket_emptiable_target(state: &str) -> bool {
     matches!(
         base_name(state),
         "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air"
     )
+}
+
+#[must_use]
+pub fn is_bucket_emptiable_target_id(state: StateId) -> bool {
+    crate::random_tick::is_air_variant_id(state)
 }
 
 /// The source [`FluidKind`] a filled bucket item empties, or `None` for a
@@ -604,10 +687,11 @@ pub fn bucket_empty_item_kind(item: &str) -> Option<FluidKind> {
     }
 }
 
-/// The block-state string to place at a target that
+/// The test-only block-state spelling to place at a target that
 /// [`is_bucket_emptiable_target`] accepts — always the source state,
 /// `FluidState::is_source`'s own shape (`amount == 8`, not falling).
 #[must_use]
+#[cfg(test)]
 pub fn bucket_empty_state(kind: FluidKind) -> &'static str {
     match kind {
         FluidKind::Water => "minecraft:water[level=0]",
@@ -615,13 +699,25 @@ pub fn bucket_empty_state(kind: FluidKind) -> &'static str {
     }
 }
 
+#[must_use]
+pub fn bucket_empty_state_id(kind: FluidKind) -> StateId {
+    FluidState { kind, amount: 8, falling: false }.block_state_id()
+}
+
 /// The real bucket-pickup water/lava half: the fluid kind at
 /// `target_state`, if it is a **source** (the real pickup refuses
 /// a flowing, non-source cell — an empty bucket dipped in a stream's middle
 /// comes back empty, matching the real engine exactly).
 #[must_use]
+#[cfg(test)]
 pub fn bucket_pickup_kind(target_state: &str) -> Option<FluidKind> {
     let fluid = fluid_state_of(target_state)?;
+    fluid.is_source().then_some(fluid.kind)
+}
+
+#[must_use]
+pub fn bucket_pickup_kind_id(target_state: StateId) -> Option<FluidKind> {
+    let fluid = fluid_state_of_id(target_state)?;
     fluid.is_source().then_some(fluid.kind)
 }
 
@@ -636,7 +732,7 @@ pub fn filled_bucket_item(kind: FluidKind) -> &'static str {
 
 /// The real "get height" query — `hasSameAbove ? 1.0 : ownHeight`.
 /// Only lava's can-be-replaced-with check needs it.
-fn fluid_height(fluid: FluidState, above_state: &str) -> f32 {
+fn fluid_height(fluid: FluidState, above_state: StateId) -> f32 {
     if is_same_fluid(above_state, fluid.kind) {
         1.0
     } else {
@@ -654,25 +750,8 @@ fn fluid_height(fluid: FluidState, above_state: &str) -> f32 {
 ///
 /// Doors and the real sign tag are matched by suffix rather than listed,
 /// because both are per-wood families of a dozen-plus blocks.
-const NEVER_HOLDS_FLUID: [&str; 6] = [
-    "minecraft:ladder",
-    "minecraft:sugar_cane",
-    "minecraft:bubble_column",
-    "minecraft:nether_portal",
-    "minecraft:end_portal",
-    "minecraft:end_gateway",
-];
-
-/// `state`'s global 26.2 block-state id, air for anything the census does not
-/// carry — [`crate::chunk::resolve_palette_state_id`], deliberately not a
-/// re-derivation of it (CLAUDE.md: two test helpers hand-duplicated an older
-/// version of that fallback and became silent callers when it changed).
-fn state_id(state: &str) -> lodestone_data::block_states::StateId {
-    crate::chunk::resolve_palette_state_id(state)
-}
-
-fn collision_boxes_for(state: &str) -> &'static [lodestone_data::collision_shapes::Aabb] {
-    lodestone_data::collision_shapes::collision_boxes(state_id(state))
+fn collision_boxes_for(state: StateId) -> &'static [lodestone_data::collision_shapes::Aabb] {
+    lodestone_data::collision_shapes::collision_boxes(state)
 }
 
 /// The real blocks-motion query, out of `lodestone_data`'s jar-derived census.
@@ -681,15 +760,106 @@ fn collision_boxes_for(state: &str) -> &'static [lodestone_data::collision_shape
 /// palette boundary. That deliberately matches this crate's existing palette
 /// convention; a plugin or data-pack name remains in the string palette for
 /// its owner to interpret rather than becoming a forged built-in `StateId`.
-fn blocks_motion(state: &str) -> bool {
-    lodestone_data::block_solidity::blocks_motion(state_id(state))
+fn blocks_motion(state: StateId) -> bool {
+    lodestone_data::block_solidity::blocks_motion(state)
 }
 
 /// `true` iff this block is a real liquid-block-container — in 26.2 that is
 /// anything implementing the waterloggable-block interface, i.e. anything
 /// with a `waterlogged` property.
-fn is_waterloggable(state: &str) -> bool {
-    property_of(state, "waterlogged").is_some()
+fn is_waterloggable(state: StateId) -> bool {
+    Properties::from_state_id(state)
+        .get(PropertyKey::Waterlogged)
+        .is_some()
+}
+
+fn is_waterlogged(state: StateId) -> bool {
+    Properties::from_state_id(state)
+        .get(PropertyKey::Waterlogged)
+        .and_then(PropertyValue::builtin_value)
+        == Some(BuiltinPropertyValue::True)
+}
+
+fn cannot_hold_fluid(block: Block) -> bool {
+    match block {
+        Block::Ladder
+        | Block::SugarCane
+        | Block::BubbleColumn
+        | Block::NetherPortal
+        | Block::EndPortal
+        | Block::EndGateway
+        | Block::StructureVoid
+        | Block::OakSign
+        | Block::SpruceSign
+        | Block::BirchSign
+        | Block::AcaciaSign
+        | Block::CherrySign
+        | Block::JungleSign
+        | Block::DarkOakSign
+        | Block::PaleOakSign
+        | Block::MangroveSign
+        | Block::BambooSign
+        | Block::OakDoor
+        | Block::OakWallSign
+        | Block::SpruceWallSign
+        | Block::BirchWallSign
+        | Block::AcaciaWallSign
+        | Block::CherryWallSign
+        | Block::JungleWallSign
+        | Block::DarkOakWallSign
+        | Block::PaleOakWallSign
+        | Block::MangroveWallSign
+        | Block::BambooWallSign
+        | Block::OakHangingSign
+        | Block::SpruceHangingSign
+        | Block::BirchHangingSign
+        | Block::AcaciaHangingSign
+        | Block::CherryHangingSign
+        | Block::JungleHangingSign
+        | Block::DarkOakHangingSign
+        | Block::PaleOakHangingSign
+        | Block::MangroveHangingSign
+        | Block::BambooHangingSign
+        | Block::CrimsonHangingSign
+        | Block::WarpedHangingSign
+        | Block::OakWallHangingSign
+        | Block::SpruceWallHangingSign
+        | Block::BirchWallHangingSign
+        | Block::AcaciaWallHangingSign
+        | Block::CherryWallHangingSign
+        | Block::JungleWallHangingSign
+        | Block::DarkOakWallHangingSign
+        | Block::PaleOakWallHangingSign
+        | Block::MangroveWallHangingSign
+        | Block::CrimsonWallHangingSign
+        | Block::WarpedWallHangingSign
+        | Block::BambooWallHangingSign
+        | Block::CrimsonDoor
+        | Block::WarpedDoor
+        | Block::CrimsonSign
+        | Block::WarpedSign
+        | Block::CrimsonWallSign
+        | Block::WarpedWallSign
+        | Block::IronDoor
+        | Block::SpruceDoor
+        | Block::BirchDoor
+        | Block::JungleDoor
+        | Block::AcaciaDoor
+        | Block::CherryDoor
+        | Block::DarkOakDoor
+        | Block::PaleOakDoor
+        | Block::MangroveDoor
+        | Block::BambooDoor
+        | Block::CopperDoor
+        | Block::ExposedCopperDoor
+        | Block::WeatheredCopperDoor
+        | Block::OxidizedCopperDoor
+        | Block::WaxedCopperDoor
+        | Block::WaxedExposedCopperDoor
+        | Block::WaxedWeatheredCopperDoor
+        | Block::WaxedOxidizedCopperDoor => true,
+        _ => false,
+    }
 }
 
 /// The real can-hold-any-fluid check.
@@ -697,22 +867,14 @@ fn is_waterloggable(state: &str) -> bool {
 /// Order matters and is the real engine's: the liquid-block-container test comes
 /// **first**, so a waterloggable slab qualifies even though it very much blocks
 /// motion.
-fn can_hold_any_fluid(state: &str) -> bool {
+fn can_hold_any_fluid(state: StateId) -> bool {
     if is_waterloggable(state) {
         return true;
     }
     if blocks_motion(state) {
         return false;
     }
-    let name = base_name(state);
-    if NEVER_HOLDS_FLUID.contains(&name) || name == "minecraft:structure_void" {
-        return false;
-    }
-    // Doors and the real sign tag, both per-wood families.
-    !(name.ends_with("_door")
-        || name.ends_with("_sign")
-        || name.ends_with("_hanging_sign")
-        || name.ends_with("_wall_sign"))
+    !cannot_hold_fluid(state.block())
 }
 
 /// The real can-hold-specific-fluid check, which delegates to the real
@@ -732,7 +894,7 @@ fn can_hold_any_fluid(state: &str) -> bool {
 /// can-maybe-pass-through check
 /// excludes it first) but it misplaces the rule, and the rule that matters is
 /// the one above.
-fn can_hold_specific_fluid(state: &str, fluid: FluidType) -> bool {
+fn can_hold_specific_fluid(state: StateId, fluid: FluidType) -> bool {
     if !is_waterloggable(state) {
         return true;
     }
@@ -740,7 +902,7 @@ fn can_hold_specific_fluid(state: &str, fluid: FluidType) -> bool {
 }
 
 /// The real can-hold-fluid check.
-fn can_hold_fluid(state: &str, fluid: FluidType) -> bool {
+fn can_hold_fluid(state: StateId, fluid: FluidType) -> bool {
     can_hold_any_fluid(state) && can_hold_specific_fluid(state, fluid)
 }
 
@@ -759,7 +921,7 @@ fn can_hold_fluid(state: &str, fluid: FluidType) -> bool {
 ///   i.e. lava at least four ninths deep yields to water from any direction.
 fn can_be_replaced_with(
     existing: Option<FluidState>,
-    above_state: &str,
+    above_state: StateId,
     incoming: FluidKind,
     direction: Direction,
 ) -> bool {
@@ -793,7 +955,7 @@ type FaceRect = (f32, f32, f32, f32);
 /// 1.0" is exactly "the 2D projection of every box whose `max[axis]` is 1.0", and
 /// the coverage test is an exact coordinate sweep rather than a rasterisation —
 /// see [`covers_unit_square`].
-fn merged_face_occludes(source_state: &str, target_state: &str, direction: Direction) -> bool {
+fn merged_face_occludes(source_state: StateId, target_state: StateId, direction: Direction) -> bool {
     let (axis, positive) = match direction {
         Direction::West => (0, false),
         Direction::East => (0, true),
@@ -876,7 +1038,7 @@ fn covers_unit_square(rects: &[FaceRect]) -> bool {
 
 /// `true` iff the state's collision shape is exactly the full cube —
 /// the real full-block-shape identity test.
-fn is_full_cube(state: &str) -> bool {
+fn is_full_cube(state: StateId) -> bool {
     let boxes = collision_boxes_for(state);
     boxes.len() == 1
         && boxes[0].min.iter().all(|&c| c.abs() <= 1.0e-7)
@@ -889,7 +1051,7 @@ fn is_full_cube(state: &str) -> bool {
 /// The three early exits are the real check's own and they are the whole hot path: a
 /// full-cube target or source blocks unconditionally, and two empty shapes pass
 /// unconditionally. Only the mixed case reaches the face merge.
-fn can_pass_through_wall(direction: Direction, source_state: &str, target_state: &str) -> bool {
+fn can_pass_through_wall(direction: Direction, source_state: StateId, target_state: StateId) -> bool {
     if is_full_cube(target_state) || is_full_cube(source_state) {
         return false;
     }
@@ -905,8 +1067,8 @@ fn can_pass_through_wall(direction: Direction, source_state: &str, target_state:
 fn can_maybe_pass_through(
     kind: FluidKind,
     direction: Direction,
-    source_state: &str,
-    target_state: &str,
+    source_state: StateId,
+    target_state: StateId,
 ) -> bool {
     !is_source_of_type(target_state, kind)
         && can_hold_any_fluid(target_state)
@@ -925,8 +1087,8 @@ fn can_maybe_pass_through(
 fn can_pass_through(
     kind: FluidKind,
     direction: Direction,
-    source_state: &str,
-    target_state: &str,
+    source_state: StateId,
+    target_state: StateId,
 ) -> bool {
     can_maybe_pass_through(kind, direction, source_state, target_state)
         && can_hold_specific_fluid(target_state, FluidType::flowing(kind))
@@ -947,7 +1109,7 @@ struct SpreadContext {
     origin: BlockPos,
     kind: FluidKind,
     env: FluidEnv,
-    states: HashMap<(i32, i32), String>,
+    cache: HashMap<(i32, i32), StateId>,
     holes: HashMap<(i32, i32), bool>,
 }
 
@@ -957,7 +1119,7 @@ impl SpreadContext {
             origin,
             kind,
             env,
-            states: HashMap::new(),
+            cache: HashMap::new(),
             holes: HashMap::new(),
         }
     }
@@ -966,10 +1128,10 @@ impl SpreadContext {
         (pos.x - self.origin.x, pos.z - self.origin.z)
     }
 
-    fn block_state<S: ChunkSource + ?Sized>(&mut self, world: &S, pos: BlockPos) -> String {
+    fn read_cached<S: ChunkSource + ?Sized>(&mut self, world: &S, pos: BlockPos) -> StateId {
         let key = self.key(pos);
         let env = self.env;
-        self.states
+        self.cache
             .entry(key)
             .or_insert_with(|| block_at(world, env, pos))
             .clone()
@@ -980,10 +1142,10 @@ impl SpreadContext {
         if let Some(&cached) = self.holes.get(&key) {
             return cached;
         }
-        let state = self.block_state(world, pos);
+        let state = self.read_cached(world, pos);
         let below = Direction::Down.relative(pos);
         let below_state = block_at(world, self.env, below);
-        let answer = is_water_hole(&state, &below_state, self.kind);
+        let answer = is_water_hole(state, below_state, self.kind);
         self.holes.insert(key, answer);
         answer
     }
@@ -993,7 +1155,7 @@ impl SpreadContext {
 /// `top` fall out the bottom?".
 ///
 /// Despite the name it is fluid-agnostic; lava uses it too.
-fn is_water_hole(top_state: &str, bottom_state: &str, kind: FluidKind) -> bool {
+fn is_water_hole(top_state: StateId, bottom_state: StateId, kind: FluidKind) -> bool {
     if !can_pass_through_wall(Direction::Down, top_state, bottom_state) {
         return false;
     }
@@ -1024,7 +1186,7 @@ fn new_liquid<S: ChunkSource + ?Sized>(
     world: &S,
     env: FluidEnv,
     pos: BlockPos,
-    state: &str,
+    state: StateId,
     kind: FluidKind,
 ) -> Option<FluidState> {
     let mut highest_neighbour = 0u8;
@@ -1032,13 +1194,13 @@ fn new_liquid<S: ChunkSource + ?Sized>(
     for direction in HORIZONTAL {
         let relative = direction.relative(pos);
         let neighbour_state = block_at(world, env, relative);
-        let Some(neighbour) = fluid_state_of(&neighbour_state) else {
+        let Some(neighbour) = fluid_state_of_id(neighbour_state) else {
             continue;
         };
         if neighbour.kind != kind {
             continue;
         }
-        if !can_pass_through_wall(direction, state, &neighbour_state) {
+        if !can_pass_through_wall(direction, state, neighbour_state) {
             continue;
         }
         if neighbour.is_source() {
@@ -1052,7 +1214,7 @@ fn new_liquid<S: ChunkSource + ?Sized>(
         let below_state = block_at(world, env, below);
         // The real "is solid" check is "the collision shape
         // is a full cube", which is what stops a source forming over a hole.
-        if is_full_cube(&below_state) || is_source_of_type(&below_state, kind) {
+        if is_full_cube(below_state) || is_source_of_type(below_state, kind) {
             return Some(FluidState {
                 kind,
                 amount: 8,
@@ -1063,8 +1225,8 @@ fn new_liquid<S: ChunkSource + ?Sized>(
 
     let above = Direction::Up.relative(pos);
     let above_state = block_at(world, env, above);
-    if is_same_fluid(&above_state, kind)
-        && can_pass_through_wall(Direction::Up, state, &above_state)
+    if is_same_fluid(above_state, kind)
+        && can_pass_through_wall(Direction::Up, state, above_state)
     {
         return Some(FluidState {
             kind,
@@ -1095,7 +1257,7 @@ fn slope_distance<S: ChunkSource + ?Sized>(
     pos: BlockPos,
     pass: u32,
     from: Direction,
-    state: &str,
+    state: StateId,
     context: &mut SpreadContext,
 ) -> u32 {
     let mut lowest = 1000;
@@ -1104,8 +1266,8 @@ fn slope_distance<S: ChunkSource + ?Sized>(
             continue;
         }
         let test_pos = direction.relative(pos);
-        let test_state = context.block_state(world, test_pos);
-        if !can_pass_through(kind, direction, state, &test_state) {
+        let test_state = context.read_cached(world, test_pos);
+        if !can_pass_through(kind, direction, state, test_state) {
             continue;
         }
         if context.is_hole(world, test_pos) {
@@ -1119,7 +1281,7 @@ fn slope_distance<S: ChunkSource + ?Sized>(
                 test_pos,
                 pass + 1,
                 direction.opposite(),
-                &test_state,
+                test_state,
                 context,
             );
             lowest = lowest.min(value);
@@ -1140,7 +1302,7 @@ fn spread_targets<S: ChunkSource + ?Sized>(
     world: &S,
     env: FluidEnv,
     pos: BlockPos,
-    state: &str,
+    state: StateId,
     kind: FluidKind,
 ) -> Vec<(Direction, FluidState)> {
     let mut lowest = 1000;
@@ -1150,17 +1312,17 @@ fn spread_targets<S: ChunkSource + ?Sized>(
     for direction in HORIZONTAL {
         let test_pos = direction.relative(pos);
         let test_state = block_at(world, env, test_pos);
-        if !can_maybe_pass_through(kind, direction, state, &test_state) {
+        if !can_maybe_pass_through(kind, direction, state, test_state) {
             continue;
         }
-        let Some(new_fluid) = new_liquid(world, env, test_pos, &test_state, kind) else {
+        let Some(new_fluid) = new_liquid(world, env, test_pos, test_state, kind) else {
             continue;
         };
         // The real can-hold-specific-fluid check against the *new liquid's
         // own* instance, which is what makes a waterloggable
         // neighbour a candidate only when this cell's new-liquid derivation answered
         // with a source.
-        if !can_hold_specific_fluid(&test_state, new_fluid.fluid_type()) {
+        if !can_hold_specific_fluid(test_state, new_fluid.fluid_type()) {
             continue;
         }
         let context = context.get_or_insert_with(|| SpreadContext::new(pos, kind, env));
@@ -1174,7 +1336,7 @@ fn spread_targets<S: ChunkSource + ?Sized>(
                 test_pos,
                 1,
                 direction.opposite(),
-                &test_state,
+                test_state,
                 context,
             )
         };
@@ -1185,8 +1347,8 @@ fn spread_targets<S: ChunkSource + ?Sized>(
             let above = Direction::Up.relative(test_pos);
             let above_state = block_at(world, env, above);
             if can_be_replaced_with(
-                fluid_state_of(&test_state),
-                &above_state,
+                fluid_state_of_id(test_state),
+                above_state,
                 new_fluid.kind,
                 direction,
             ) {
@@ -1218,29 +1380,34 @@ fn spread_to<S: ChunkSource + ?Sized>(
     world: &S,
     env: FluidEnv,
     pos: BlockPos,
-    target_state: &str,
+    target_state: StateId,
     direction: Direction,
     fluid: FluidState,
-    changes: &mut Vec<(BlockPos, String)>,
+    changes: &mut Vec<(BlockPos, StateId)>,
 ) {
     if fluid.kind == FluidKind::Lava
         && direction == Direction::Down
-        && fluid_state_of(target_state).is_some_and(|existing| existing.kind == FluidKind::Water)
-        && matches!(base_name(target_state), "minecraft:water")
+        && fluid_state_of_id(target_state)
+            .is_some_and(|existing| existing.kind == FluidKind::Water)
+        && target_state.block() == Block::Water
     {
-        write_block(world, env, pos, "minecraft:stone", changes);
+        write_block(world, env, pos, Block::Stone.default_state(), changes);
         return;
     }
     if is_waterloggable(target_state) {
         if fluid.fluid_type() == FluidType::source(FluidKind::Water)
-            && property_of(target_state, "waterlogged") != Some("true")
+            && !is_waterlogged(target_state)
         {
-            let waterlogged = crate::redstone::with_property(target_state, "waterlogged", "true");
-            write_block(world, env, pos, &waterlogged, changes);
+            let properties = Properties::from_state_id(target_state)
+                .with_builtin(PropertyKey::Waterlogged, BuiltinPropertyValue::True)
+                .expect("waterlogged property belongs to the target block");
+            let waterlogged = Properties::state_for_block(target_state.block(), &properties)
+                .expect("waterlogged target state is generated");
+            write_block(world, env, pos, waterlogged, changes);
         }
         return;
     }
-    write_block(world, env, pos, &fluid.block_state(), changes);
+    write_block(world, env, pos, fluid.block_state_id(), changes);
 }
 
 /// The real "source neighbor count" query.
@@ -1254,7 +1421,7 @@ fn source_neighbour_count<S: ChunkSource + ?Sized>(
         .into_iter()
         .filter(|direction| {
             let relative = direction.relative(pos);
-            is_source_of_type(&block_at(world, env, relative), kind)
+            is_source_of_type(block_at(world, env, relative), kind)
         })
         .count() as u32
 }
@@ -1269,8 +1436,8 @@ fn spread_to_sides<S: ChunkSource + ?Sized>(
     env: FluidEnv,
     pos: BlockPos,
     fluid: FluidState,
-    state: &str,
-    changes: &mut Vec<(BlockPos, String)>,
+    state: StateId,
+    changes: &mut Vec<(BlockPos, StateId)>,
 ) {
     let neighbour_amount = if fluid.falling {
         7
@@ -1283,7 +1450,7 @@ fn spread_to_sides<S: ChunkSource + ?Sized>(
     for (direction, new_fluid) in spread_targets(world, env, pos, state, fluid.kind) {
         let target = direction.relative(pos);
         let target_state = block_at(world, env, target);
-        spread_to(world, env, target, &target_state, direction, new_fluid, changes);
+        spread_to(world, env, target, target_state, direction, new_fluid, changes);
     }
 }
 
@@ -1299,27 +1466,27 @@ fn spread<S: ChunkSource + ?Sized>(
     world: &S,
     env: FluidEnv,
     pos: BlockPos,
-    state: &str,
+    state: StateId,
     fluid: FluidState,
-    changes: &mut Vec<(BlockPos, String)>,
+    changes: &mut Vec<(BlockPos, StateId)>,
 ) {
     let below = Direction::Down.relative(pos);
     let below_state = block_at(world, env, below);
-    if can_maybe_pass_through(fluid.kind, Direction::Down, state, &below_state) {
-        if let Some(new_below) = new_liquid(world, env, below, &below_state, fluid.kind) {
+    if can_maybe_pass_through(fluid.kind, Direction::Down, state, below_state) {
+        if let Some(new_below) = new_liquid(world, env, below, below_state, fluid.kind) {
             let below_above_state = block_at(world, env, pos);
             if can_be_replaced_with(
-                fluid_state_of(&below_state),
-                &below_above_state,
+                fluid_state_of_id(below_state),
+                below_above_state,
                 new_below.kind,
                 Direction::Down,
-            ) && can_hold_specific_fluid(&below_state, new_below.fluid_type())
+            ) && can_hold_specific_fluid(below_state, new_below.fluid_type())
             {
                 spread_to(
                     world,
                     env,
                     below,
-                    &below_state,
+                    below_state,
                     Direction::Down,
                     new_below,
                     changes,
@@ -1332,7 +1499,7 @@ fn spread<S: ChunkSource + ?Sized>(
         }
     }
 
-    if fluid.is_source() || !is_water_hole(state, &below_state, fluid.kind) {
+    if fluid.is_source() || !is_water_hole(state, below_state, fluid.kind) {
         spread_to_sides(world, env, pos, fluid, state, changes);
     }
 }
@@ -1355,25 +1522,24 @@ fn quench_lava<S: ChunkSource + ?Sized>(
     env: FluidEnv,
     pos: BlockPos,
     fluid: FluidState,
-) -> Option<&'static str> {
+) -> Option<StateId> {
     if fluid.kind != FluidKind::Lava {
         return None;
     }
     let below = Direction::Down.relative(pos);
-    let over_soul_soil =
-        base_name(&block_at(world, env, below)) == "minecraft:soul_soil";
+    let over_soul_soil = block_at(world, env, below).block() == Block::SoulSoil;
     for direction in POSSIBLE_FLOW_DIRECTIONS {
         let neighbour = direction.opposite().relative(pos);
         let neighbour_state = block_at(world, env, neighbour);
-        if is_same_fluid(&neighbour_state, FluidKind::Water) {
+        if is_same_fluid(neighbour_state, FluidKind::Water) {
             return Some(if fluid.is_source() {
-                "minecraft:obsidian"
+                Block::Obsidian.default_state()
             } else {
-                "minecraft:cobblestone"
+                Block::Cobblestone.default_state()
             });
         }
-        if over_soul_soil && base_name(&neighbour_state) == "minecraft:blue_ice" {
-            return Some("minecraft:basalt");
+        if over_soul_soil && neighbour_state.block() == Block::BlueIce {
+            return Some(Block::Basalt.default_state());
         }
     }
     None
@@ -1389,8 +1555,8 @@ fn write_block<S: ChunkSource + ?Sized>(
     world: &S,
     env: FluidEnv,
     pos: BlockPos,
-    state: &str,
-    changes: &mut Vec<(BlockPos, String)>,
+    state: StateId,
+    changes: &mut Vec<(BlockPos, StateId)>,
 ) {
     // The real block-write function opens with the same guard and returns
     // `false`
@@ -1401,7 +1567,7 @@ fn write_block<S: ChunkSource + ?Sized>(
         return;
     }
     world.set_block(pos.x, pos.y, pos.z, state);
-    changes.push((pos, state.to_owned()));
+    changes.push((pos, state));
 }
 
 /// One due fluid tick — the real flowing-fluid tick with
@@ -1421,10 +1587,10 @@ pub fn run_scheduled_tick<S: ChunkSource + ?Sized, Q: ScheduledTickSink<Schedule
     pos: BlockPos,
     fluid_ticks: &mut Q,
     current_tick: u64,
-    changes: &mut Vec<(BlockPos, String)>,
+    changes: &mut Vec<(BlockPos, StateId)>,
 ) {
     let state = block_at(world, env, pos);
-    let Some(fluid) = fluid_state_of(&state) else {
+    let Some(fluid) = fluid_state_of_id(state) else {
         return;
     };
     // A waterlogged block reads as a water source and is skipped here, so it
@@ -1442,7 +1608,7 @@ pub fn run_scheduled_tick<S: ChunkSource + ?Sized, Q: ScheduledTickSink<Schedule
     // Left as-is because the error direction is inert: water reaches fewer cells
     // than the real engine, never more, and removing this line without a gate on the
     // spread it unlocks would trade a measured behaviour for an unmeasured one.
-    if !matches!(base_name(&state), "minecraft:water" | "minecraft:lava") {
+    if !matches!(state.block(), Block::Water | Block::Lava) {
         return;
     }
 
@@ -1461,9 +1627,9 @@ pub fn run_scheduled_tick<S: ChunkSource + ?Sized, Q: ScheduledTickSink<Schedule
         write_block(world, env, pos, quenched, changes);
         still_fluid = false;
     } else if !fluid.is_source() {
-        match new_liquid(world, env, pos, &state, fluid.kind) {
+        match new_liquid(world, env, pos, state, fluid.kind) {
             None => {
-                write_block(world, env, pos, crate::chunk::AIR, changes);
+                write_block(world, env, pos, crate::chunk::air_state(), changes);
                 // The real engine falls through to `spread` with an *empty*
                 // fluid state
                 // and `spread`'s own first line rejects it; this flag is that
@@ -1472,8 +1638,8 @@ pub fn run_scheduled_tick<S: ChunkSource + ?Sized, Q: ScheduledTickSink<Schedule
             }
             Some(new_fluid) if new_fluid != fluid => {
                 fluid = new_fluid;
-                state = fluid.block_state();
-                write_block(world, env, pos, &state, changes);
+                state = fluid.block_state_id();
+                write_block(world, env, pos, state, changes);
                 fluid_ticks.schedule_tick(
                     (pos.x, pos.y, pos.z),
                     ScheduledTickKind::Fluid,
@@ -1486,7 +1652,7 @@ pub fn run_scheduled_tick<S: ChunkSource + ?Sized, Q: ScheduledTickSink<Schedule
     }
 
     if still_fluid {
-        spread(world, env, pos, &state, fluid, changes);
+        spread(world, env, pos, state, fluid, changes);
     }
 
     // Every cell this wrote, **and every neighbour of one**, owes itself a tick.
@@ -1561,7 +1727,7 @@ pub fn run_scheduled_tick<S: ChunkSource + ?Sized, Q: ScheduledTickSink<Schedule
                 continue;
             }
             let holds_fluid = notified == changed
-                || fluid_state_of(&world.block_state(notified.x, notified.y, notified.z)).is_some();
+                || fluid_state_of_id(world.block_state_id(notified.x, notified.y, notified.z)).is_some();
             if holds_fluid {
                 fluid_ticks.schedule_tick(
                     (notified.x, notified.y, notified.z),
@@ -1597,10 +1763,9 @@ pub(crate) fn schedule_generated_ticks<
 ) -> usize {
     let mut scheduled = 0;
     for_each_generated_liquid(column, |x, y, z, fluid| {
-        // The expensive spread admission still consumes the canonical text at
-        // its boundary, but only after the numeric palette classifier admitted
-        // this cell. No string is parsed for air, terrain, or waterlogged cells.
-        let state = column.block_state(x, y, z);
+        // Only the numeric palette classifier admits this cell. Air, terrain,
+        // and waterlogged cells never enter the spread path.
+        let state = column.block_state_id(x, y, z);
         let pos = BlockPos::new(chunk_x * 16 + x, y, chunk_z * 16 + z);
         // A generated column is normally a settled snapshot. Avoid the
         // expensive shape/slope walk for interior cells whose immediate
@@ -1635,7 +1800,7 @@ pub(crate) fn schedule_generated_ticks<
 }
 
 /// The generated-column fluid classifier, keyed by the column palette's
-/// resolved [`StateId`] rather than by a state string. Packed cells still have
+/// resolved [`StateId`]. Packed cells still have
 /// to be visited to obtain their coordinates, but uniform non-fluid sections
 /// stop at this cheap integer classification and never expand into cell indices
 /// or enter the shape/slope admission walk.
@@ -1644,7 +1809,7 @@ fn for_each_generated_liquid(
     mut visit: impl FnMut(i32, i32, i32, FluidState),
 ) {
     let palette: Vec<Option<FluidState>> = column
-        .palette_state_ids()
+        .palette()
         .iter()
         .copied()
         .map(fluid_state_for_generated_id)
@@ -1748,14 +1913,14 @@ fn has_possible_destination<S: ChunkSource + ?Sized>(
             continue;
         }
         if target.x.div_euclid(16) == chunk_x && target.z.div_euclid(16) == chunk_z {
-            if neighbour_has_destination(column.block_state(
+            if neighbour_has_destination(column.block_state_id(
                 target.x.rem_euclid(16),
                 target.y,
                 target.z.rem_euclid(16),
             ), kind) {
                 return true;
             }
-        } else if neighbour_has_destination(&world.block_state(target.x, target.y, target.z), kind) {
+        } else if neighbour_has_destination(world.block_state_id(target.x, target.y, target.z), kind) {
             // Only a horizontal chunk seam needs an external source read here;
             // vertical bounds were handled above and same-column neighbours
             // came from the already-cloned generated column.
@@ -1765,8 +1930,8 @@ fn has_possible_destination<S: ChunkSource + ?Sized>(
     false
 }
 
-fn neighbour_has_destination(state: &str, kind: FluidKind) -> bool {
-    match fluid_state_of(state) {
+fn neighbour_has_destination(state: StateId, kind: FluidKind) -> bool {
+    match fluid_state_of_id(state) {
         Some(neighbour) if neighbour.kind != kind => true,
         Some(_) => false,
         None => can_hold_any_fluid(state),
@@ -1783,27 +1948,27 @@ fn would_spread<S: ChunkSource + ?Sized>(
     world: &S,
     env: FluidEnv,
     pos: BlockPos,
-    state: &str,
+    state: StateId,
     fluid: FluidState,
 ) -> bool {
     let below = Direction::Down.relative(pos);
     let below_state = block_at(world, env, below);
-    if can_maybe_pass_through(fluid.kind, Direction::Down, state, &below_state) {
-        if let Some(new_below) = new_liquid(world, env, below, &below_state, fluid.kind) {
+    if can_maybe_pass_through(fluid.kind, Direction::Down, state, below_state) {
+        if let Some(new_below) = new_liquid(world, env, below, below_state, fluid.kind) {
             let below_above_state = block_at(world, env, pos);
             if can_be_replaced_with(
-                fluid_state_of(&below_state),
-                &below_above_state,
+                fluid_state_of_id(below_state),
+                below_above_state,
                 new_below.kind,
                 Direction::Down,
-            ) && can_hold_specific_fluid(&below_state, new_below.fluid_type())
+            ) && can_hold_specific_fluid(below_state, new_below.fluid_type())
             {
                 return true;
             }
         }
     }
 
-    if fluid.is_source() || !is_water_hole(state, &below_state, fluid.kind) {
+    if fluid.is_source() || !is_water_hole(state, below_state, fluid.kind) {
         !spread_targets(world, env, pos, state, fluid.kind).is_empty()
     } else {
         false
@@ -1853,7 +2018,7 @@ pub fn ticks_after_edit<S: ChunkSource + ?Sized>(
         Direction::West.relative(pos),
         Direction::East.relative(pos),
     ] {
-        if let Some(fluid) = fluid_state_of(&block_at(world, env, candidate)) {
+        if let Some(fluid) = fluid_state_of_id(block_at(world, env, candidate)) {
             pending.schedule(
                 (candidate.x, candidate.y, candidate.z),
                 ScheduledTickKind::Fluid,
@@ -1899,7 +2064,7 @@ mod tests {
                     let mut column = ChunkColumn::new(MIN_Y, HEIGHT);
                     for x in 0..16 {
                         for z in 0..16 {
-                            column.set_block(x, FLOOR_Y, z, "minecraft:stone");
+                            column.set_block_id(x, FLOOR_Y, z, Block::Stone.default_state());
                         }
                     }
                     columns.insert((cx, cz), column);
@@ -1921,17 +2086,16 @@ mod tests {
                 .clone()
         }
 
-        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
             let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
             self.columns
                 .lock()
                 .expect("rig poisoned")
                 .get(&(cx, cz))
                 .map(|c| {
-                    c.block_state(x.rem_euclid(16), y, z.rem_euclid(16))
-                        .to_string()
+                    c.block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
                 })
-                .unwrap_or_else(|| crate::chunk::AIR.to_owned())
+                .unwrap_or_else(crate::chunk::air_state)
         }
 
         fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -1944,17 +2108,28 @@ mod tests {
                     c.biome_state_at(x.rem_euclid(16), y, z.rem_euclid(16))
                         .to_string()
                 })
-                .unwrap_or_else(|| crate::chunk::AIR.to_owned())
+                .unwrap_or_else(|| crate::chunk::DEFAULT_BIOME.to_owned())
         }
 
-        fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+        fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
             let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
             self.columns
                 .lock()
                 .expect("rig poisoned")
                 .entry((cx, cz))
                 .or_insert_with(|| ChunkColumn::new(MIN_Y, HEIGHT))
-                .set_block(x.rem_euclid(16), y, z.rem_euclid(16), name);
+                .set_block_id(x.rem_euclid(16), y, z.rem_euclid(16), state);
+        }
+    }
+
+    impl Rig {
+        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+            self.block_state_id(x, y, z).canonical_state()
+        }
+
+        fn set_block(&self, x: i32, y: i32, z: i32, state: &str) {
+            let state = StateId::from_state_str(state).expect("fixture state is generated");
+            <Self as ChunkSource>::set_block(self, x, y, z, state);
         }
     }
 
@@ -1985,17 +2160,24 @@ mod tests {
             self.inner.column(cx, cz)
         }
 
-        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
             self.external_probes.fetch_add(1, Ordering::Relaxed);
-            self.inner.block_state(x, y, z)
+            self.inner.block_state_id(x, y, z)
         }
 
         fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
             self.inner.biome_state_at(x, y, z)
         }
 
-        fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
-            self.inner.set_block(x, y, z, name);
+        fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
+            <Rig as ChunkSource>::set_block(&self.inner, x, y, z, state);
+        }
+    }
+
+    impl ProbeRig {
+        fn set_block(&self, x: i32, y: i32, z: i32, state: &str) {
+            let state = StateId::from_state_str(state).expect("fixture state is generated");
+            <Self as ChunkSource>::set_block(self, x, y, z, state);
         }
     }
 
@@ -2326,12 +2508,18 @@ mod tests {
     fn generated_scan_counts_candidates_not_all_cells() {
         let mut column = ChunkColumn::new(MIN_Y, HEIGHT);
         let water_y = FLOOR_Y + 1;
-        column.set_block(2, water_y, 3, "minecraft:water[level=0]");
-        column.set_block(
+        column.set_block_id(
+            2,
+            water_y,
+            3,
+            StateId::from_state_str("minecraft:water[level=0]").expect("fixture state"),
+        );
+        column.set_block_id(
             4,
             water_y,
             3,
-            "minecraft:oak_slab[type=bottom,waterlogged=true]",
+            StateId::from_state_str("minecraft:oak_slab[type=bottom,waterlogged=true]")
+                .expect("fixture state"),
         );
 
         let mut callbacks = 0;
@@ -2353,7 +2541,7 @@ mod tests {
     fn generated_scan_skips_uniform_air_without_index_visits() {
         let column = ChunkColumn::new(MIN_Y, HEIGHT);
         let palette: Vec<_> = column
-            .palette_state_ids()
+            .palette()
             .iter()
             .copied()
             .map(fluid_state_for_generated_id)
@@ -2485,7 +2673,7 @@ mod tests {
             assert!(!fluid.falling, "level {level}");
             assert!(!fluid.is_source(), "level {level}");
             assert_eq!(fluid.legacy_level(), u32::from(level));
-            assert_eq!(fluid.block_state(), state);
+            assert_eq!(fluid.to_text(), state);
         }
         // Falling: 8..=15 all clamp to the one full falling state, which is
         // NOT a source despite amount 8.
@@ -2716,7 +2904,7 @@ mod tests {
         let rig = Rig::flat();
         let y = FLOOR_Y + 1;
         // A one-cell pit two east of the source: remove the floor at x = 2.
-        rig.set_block(2, FLOOR_Y, 0, crate::chunk::AIR);
+        rig.set_block(2, FLOOR_Y, 0, "minecraft:air");
         let source = BlockPos::new(0, y, 0);
         rig.set_block(source.x, source.y, source.z, "minecraft:water[level=0]");
         settle(&rig, source, 400);
@@ -2862,7 +3050,7 @@ mod tests {
             "precondition: the flow reached x = 3"
         );
 
-        rig.set_block(source.x, source.y, source.z, crate::chunk::AIR);
+        rig.set_block(source.x, source.y, source.z, "minecraft:air");
         settle(&rig, source, 800);
 
         for x in 1..=7 {

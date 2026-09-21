@@ -10,7 +10,15 @@ The moving-block model pass renders baked block geometry at an entity or block-e
 
 Falling-block and block-display states originate as `BlockStateRef` values. Their ECS components (`FallingBlockState` and `DisplayBlockState`) and extracted draw records preserve whether an id came from the built-in 26.2 registry or a protocol-local/dynamic registry. `built_in_state_id` is the boundary to the built-in model table: it accepts only `Canonical` values that pass `lodestone_data::block_states::StateId::new`. A protocol-local value is skipped even when its raw number overlaps a built-in id, preventing an older or custom registry from drawing the wrong model.
 
-Moving-piston records are a different ingress: their gather resolves state strings and currently stores the resulting raw values in `MovingPistonSpawn`. `merge_piston_heads` validates those values with `StateId::new` immediately before constructing `MovingBlock`; no raw piston value reaches the baked-quad snapshot, and an unresolved or future source can still be declined at that boundary.
+Moving-piston records are a different ingress: the NBT boundary resolves the
+compound into `StateId`, and typed property replacement synthesizes the short
+head and retracting base states without formatting or parsing state text.
+`MovingPistonSpawn` converts to its raw numeric transport field only at the
+render-crate boundary; `merge_piston_heads` validates it before model lookup.
+
+Minecart contents and fixed TNT models likewise start from generated `Block`
+defaults and typed properties, so their per-frame paths do not parse state
+names.
 
 Primed TNT keeps its block state fixed to the default TNT model, but its fuse is not fixed. The protocol adapter type-gates the ambiguous index-8 integer as `tnt_fuse`, ECS folds it into `TntFuse`, and `extract_entity_draws` adjusts it by the frame partial tick. `primed_tnt_pose` applies the final-ten-tick fourth-power swell (`0` at fuse `10`, `0.3` at `0`), while the model vertex's dedicated white-flash marker applies the fixed white-overlay blend in alternating five-tick windows. Until the first fuse metadata packet arrives, extraction preserves `None`; the merge renders that short startup window at scale one with no flash instead of treating the accessor default (`80`) as a lit cadence. The blend retains `63/255` of the textured material before world shading; it is not opaque white. This path intentionally shares the ordinary model pipeline, so a flash does not allocate a second mesh or draw call.
 

@@ -20,6 +20,8 @@ use lodestone_net::Connection;
 use tokio::io::DuplexStream;
 use lodestone_model::BlockPos;
 use lodestone_model::{ResourceKey, Vec3};
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 
 use crate::{
     BlockEntity, ChunkColumn, ChunkSource, IntegratedServer, MobHandle, NoEntities, ServerProtocol,
@@ -896,7 +898,7 @@ struct HeavySourceStats {
     translucent_cells: std::sync::atomic::AtomicU64,
     liquid_cells: std::sync::atomic::AtomicU64,
     light_emitters: std::sync::atomic::AtomicU64,
-    state_names: Mutex<HashSet<String>>,
+    state_ids: Mutex<HashSet<StateId>>,
     by_column: Mutex<HashMap<(i32, i32), SourceColumnMetrics>>,
 }
 
@@ -906,7 +908,7 @@ struct SourceColumnMetrics {
     translucent_cells: u64,
     liquid_cells: u64,
     light_emitters: u64,
-    state_names: HashSet<String>,
+    state_ids: HashSet<StateId>,
 }
 
 /// A bounded, retained source used by the profiling harness. It is deliberately
@@ -933,13 +935,28 @@ impl HeavyChunkSource {
         // Keep each column distinguishable without introducing a dependency on
         // the scenario command interpreter.
         let marker = if (cx + cz).rem_euclid(3) == 0 {
-            "minecraft:glass"
+            Block::Glass.default_state()
         } else {
-            "minecraft:oak_planks"
+            Block::OakPlanks.default_state()
         };
-        column.set_block(cx.rem_euclid(16), 64, cz.rem_euclid(16), marker);
-        column.set_block(0, 65, 0, "minecraft:chest");
-        column.set_block(1, 65, 0, "minecraft:oak_sign");
+        column.set_block_id(
+            cx.rem_euclid(16),
+            64,
+            cz.rem_euclid(16),
+            marker,
+        );
+        column.set_block_id(
+            0,
+            65,
+            0,
+            Block::Chest.default_state(),
+        );
+        column.set_block_id(
+            1,
+            65,
+            0,
+            Block::OakSign.default_state(),
+        );
         column.set_block_entities(vec![
             (
                 BlockPos::new(cx * 16, 65, cz * 16),
@@ -975,7 +992,7 @@ impl HeavyChunkSource {
             translucent_cells: self.stats.translucent_cells.load(std::sync::atomic::Ordering::Relaxed),
             liquid_cells: self.stats.liquid_cells.load(std::sync::atomic::Ordering::Relaxed),
             light_emitters: self.stats.light_emitters.load(std::sync::atomic::Ordering::Relaxed),
-            distinct_states: self.stats.state_names.lock().expect("heavy source state lock").len() as u64,
+            distinct_states: self.stats.state_ids.lock().expect("heavy source state lock").len() as u64,
         }
     }
 
@@ -994,7 +1011,7 @@ impl HeavyChunkSource {
                 metrics.translucent_cells += column_metrics.translucent_cells;
                 metrics.liquid_cells += column_metrics.liquid_cells;
                 metrics.light_emitters += column_metrics.light_emitters;
-                states.extend(column_metrics.state_names.iter().cloned());
+                states.extend(column_metrics.state_ids.iter().copied());
             }
         }
         metrics.distinct_states = states.len() as u64;
@@ -1032,49 +1049,48 @@ impl ChunkSource for HeavyChunkSource {
         self.column_for(cx, cz)
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> lodestone_data::block_states::StateId {
         let column = self.column_for(x.div_euclid(16), z.div_euclid(16));
         column
-            .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
-            .to_string()
+            .block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
     }
 
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
         "minecraft:plains".to_string()
     }
 
-    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+    fn set_block(&self, x: i32, y: i32, z: i32, state: lodestone_data::block_states::StateId) {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let mut columns = self.columns.lock().expect("heavy source lock");
         let column = columns
             .entry((cx, cz))
             .or_insert_with(|| Self::fresh_column(cx, cz));
-        column.set_block(x.rem_euclid(16), y, z.rem_euclid(16), name);
+        column.set_block_id(x.rem_euclid(16), y, z.rem_euclid(16), state);
         self.stats
-            .state_names
+            .state_ids
             .lock()
             .expect("heavy source state lock")
-            .insert(name.to_string());
+            .insert(state);
         let mut by_column = self.stats.by_column.lock().expect("heavy source metric lock");
         let column_metrics = by_column.entry((cx, cz)).or_default();
-        column_metrics.state_names.insert(name.to_string());
-        if is_translucent_heavy_state(name) {
+        column_metrics.state_ids.insert(state);
+        if is_translucent_heavy_state(state) {
             self.stats
                 .translucent_cells
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             column_metrics.translucent_cells += 1;
-        } else if name == "minecraft:water" {
+        } else if state.block() == Block::Water {
             self.stats
                 .liquid_cells
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             column_metrics.liquid_cells += 1;
-        } else if name == "minecraft:sea_lantern" {
+        } else if state.block() == Block::SeaLantern {
             self.stats
                 .light_emitters
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             column_metrics.light_emitters += 1;
-        } else if name != "minecraft:air" {
+        } else if state.block() != Block::Air {
             self.stats
                 .opaque_cells
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1083,11 +1099,11 @@ impl ChunkSource for HeavyChunkSource {
     }
 }
 
-/// The transparency scene's two generated state names. The source records
+/// The transparency scene's two generated state IDs. The source records
 /// them at installation time and the harness only accepts the count after the
 /// matching column coordinates have been decoded from chunk packets.
-fn is_translucent_heavy_state(name: &str) -> bool {
-    matches!(name, "minecraft:white_stained_glass" | "minecraft:glass_pane")
+fn is_translucent_heavy_state(state: StateId) -> bool {
+    matches!(state.block(), Block::WhiteStainedGlass | Block::GlassPane)
 }
 
 /// Drives one finite join against the production integrated server and records
@@ -1411,19 +1427,19 @@ fn counts_for(
     consumed_entities: u64,
 ) -> (HeavyCounts, HeavyCounts, HeavyCounts) {
     let mut requested_cells = HeavyCounts::default();
-    for name in plan
+    for state in plan
         .commands
         .setup
         .iter()
-        .filter_map(|command| setblock_state_name(command))
+        .filter_map(|command| setblock_state_id(command))
     {
-        if is_translucent_heavy_state(name) {
+        if is_translucent_heavy_state(state) {
             requested_cells.translucent_cells += 1;
-        } else if name == "minecraft:water" {
+        } else if state.block() == Block::Water {
             requested_cells.liquid_cells += 1;
-        } else if name == "minecraft:sea_lantern" {
+        } else if state.block() == Block::SeaLantern {
             requested_cells.light_emitters += 1;
-        } else if name != "minecraft:air" {
+        } else if state.block() != Block::Air {
             requested_cells.opaque_cells += 1;
         }
     }
@@ -1528,11 +1544,13 @@ fn apply_setblock_commands(source: &HeavyChunkSource, commands: &[String]) {
             continue;
         };
         let name = raw_name.split(['[', '{']).next().unwrap_or(raw_name);
-        source.set_block(x, y, z, name);
+        if let Some(state) = StateId::from_state_str(name) {
+            source.set_block(x, y, z, state);
+        }
     }
 }
 
-fn setblock_state_name(command: &str) -> Option<&str> {
+fn setblock_state_id(command: &str) -> Option<StateId> {
     let mut fields = command.split_whitespace();
     if fields.next() != Some("setblock") {
         return None;
@@ -1541,7 +1559,7 @@ fn setblock_state_name(command: &str) -> Option<&str> {
     let _y = fields.next()?;
     let _z = fields.next()?;
     let name = fields.next()?;
-    Some(name.split(['[', '{']).next().unwrap_or(name))
+    StateId::from_state_str(name.split(['[', '{']).next().unwrap_or(name))
 }
 
 async fn drive_v770_join(

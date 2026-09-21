@@ -1,4 +1,5 @@
 use lodestone_core::{Ctx, Decode, Reader, State, encode_body};
+use lodestone_data::block_states::StateId;
 use lodestone_data::block_states;
 use lodestone_model::{
     AnimationAction, BlockFace, BlockPos, ClientAction, ClientEvent, ConnectionState, Directive,
@@ -606,11 +607,11 @@ fn protocol_756_uses_its_capture_ids_and_encodes_a_1_17_chunk() {
     assert_eq!(decoded.column.get_block(3, 100, 5), block_states::state_id("minecraft:stone").unwrap());
 
     assert!(matches!(
-        protocol.try_encode_block_update(3, 100, 5, "minecraft:stone"),
+        protocol.try_encode_block_update(3, 100, 5, StateId::from_state_str("minecraft:stone").unwrap()),
         Ok(ServerDirective::Send { packet_id: 12, .. })
     ));
     let error = protocol
-        .try_encode_block_update(3, 100, 5, "minecraft:sculk")
+        .try_encode_block_update(3, 100, 5, StateId::from_state_str("minecraft:sculk").unwrap())
         .expect_err("a post-1.17 state must not substitute into an older packet");
     assert!(error.to_string().contains("protocol-756"));
 }
@@ -680,11 +681,11 @@ fn protocol_758_uses_its_capture_ids_and_encodes_an_inline_light_chunk() {
     assert_eq!(decoded.column.get_block(3, 100, 5), block_states::state_id("minecraft:stone").unwrap());
 
     assert!(matches!(
-        protocol.try_encode_block_update(3, 100, 5, "minecraft:stone"),
+        protocol.try_encode_block_update(3, 100, 5, StateId::from_state_str("minecraft:stone").unwrap()),
         Ok(ServerDirective::Send { packet_id: 12, .. })
     ));
     let error = protocol
-        .try_encode_block_update(3, 100, 5, "minecraft:sculk")
+        .try_encode_block_update(3, 100, 5, StateId::from_state_str("minecraft:sculk").unwrap())
         .expect_err("a post-1.18 state must not substitute into an older packet");
     assert!(error.to_string().contains("protocol-758"));
 }

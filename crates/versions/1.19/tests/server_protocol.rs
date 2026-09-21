@@ -1,5 +1,5 @@
 use lodestone_core::{Ctx, Decode, Reader, State, encode_body};
-use lodestone_data::block_states;
+use lodestone_data::block_states::{self, StateId};
 use lodestone_model::{
     AnimationAction, BlockActionKind, BlockFace, BlockPos, ClientAction, ClientEvent,
     ConnectionState, Directive, Hand, Rotation, Vec3f, VersionAdapter,
@@ -104,7 +104,7 @@ fn protocol_762_uses_its_capture_ids_and_encodes_a_registry_shaped_chunk() {
     );
 
     let ServerDirective::Send { packet_id, payload } = protocol
-        .try_encode_block_update(3, 100, 5, "minecraft:stone")
+        .try_encode_block_update(3, 100, 5, StateId::from_state_str("minecraft:stone").unwrap())
         .expect("stone block update has an exact 1.19.4 representation")
     else {
         panic!("block update encoder must produce a packet");
@@ -140,7 +140,7 @@ fn protocol_762_uses_its_capture_ids_and_encodes_a_registry_shaped_chunk() {
         }
     );
     let error = protocol
-        .try_encode_block_update(3, 100, 5, "minecraft:creaking_heart")
+        .try_encode_block_update(3, 100, 5, StateId::from_state_str("minecraft:creaking_heart").unwrap())
         .expect_err("a newer state must not substitute into a protocol-762 packet");
     assert!(error.to_string().contains("protocol-762"));
 }

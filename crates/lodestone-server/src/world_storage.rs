@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use lodestone_core::{Nbt, Reader, Writer, read_named_nbt, read_network_nbt, write_named_nbt};
+use lodestone_data::block_states::StateId;
 use lodestone_storage::{
     Compaction, ExtensionRegistration, NativeChunkCoordinate, NativeStore, RecordKey, RecordWrite,
     StoreError,
@@ -1751,7 +1752,7 @@ fn encode_chunk_inner(
             let mut palette_state_ids = Vec::new();
             let mut local_indices = Vec::with_capacity(cells.len());
             for &column_palette_index in &cells {
-                let state_id = column.palette_state_ids()[column_palette_index as usize].raw();
+                let state_id = column.palette()[column_palette_index as usize].raw();
                 let local = match palette_state_ids.iter().position(|&id| id == state_id) {
                     Some(index) => index,
                     None => {
@@ -1979,12 +1980,13 @@ fn decode_chunk(
         let local_palette = section
             .palette_state_ids
             .iter()
-            .map(|&state_id| state_string(state_id))
+            .map(|&state_id| {
+                StateId::new(state_id).ok_or(ChunkRecordError::UnknownBlockStateId(state_id))
+            })
             .collect::<Result<Vec<_>, _>>()?;
-        let local_palette_refs: Vec<_> = local_palette.iter().map(String::as_str).collect();
         column.set_section_from_local_palette(
             min_y + section_index as i32 * 16,
-            &local_palette_refs,
+            &local_palette,
             &local_indices,
         );
     }
@@ -3008,26 +3010,6 @@ fn unpack_indices(
         indices.push(value);
     }
     Ok(indices)
-}
-
-fn state_string(state_id: u32) -> Result<String, ChunkRecordError> {
-    let state = lodestone_data::block_states::StateId::new(state_id)
-        .ok_or(ChunkRecordError::UnknownBlockStateId(state_id))?;
-    let mut value = state.name().to_string();
-    let properties = state.properties();
-    if !properties.is_empty() {
-        value.push('[');
-        for (index, (key, property)) in properties.iter().enumerate() {
-            if index != 0 {
-                value.push(',');
-            }
-            value.push_str(key);
-            value.push('=');
-            value.push_str(property);
-        }
-        value.push(']');
-    }
-    Ok(value)
 }
 
 #[cfg(test)]

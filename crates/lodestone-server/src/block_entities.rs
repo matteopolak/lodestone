@@ -481,16 +481,16 @@ pub const CONTAINER_3X3_SIZE: usize = 9;
 /// not one of the plain-inventory containers this crate models (`generic_9x3`
 /// or `generic_3x3` — see [`BlockEntity::container`]/[`container_of_size`]).
 ///
-/// Keyed on the block *name* with no properties, so a caller holding a canonical
-/// state string must split it first.
+/// Keyed on the block registry value, so callers never parse a state string just
+/// to identify a container.
 #[must_use]
-pub fn container_type_for_block(block: &str) -> Option<&'static str> {
+pub fn container_type_for_block(block: lodestone_data::block::Block) -> Option<&'static str> {
     match block {
-        "minecraft:chest" => Some("minecraft:chest"),
-        "minecraft:trapped_chest" => Some("minecraft:trapped_chest"),
-        "minecraft:barrel" => Some("minecraft:barrel"),
-        "minecraft:dispenser" => Some("minecraft:dispenser"),
-        "minecraft:dropper" => Some("minecraft:dropper"),
+        lodestone_data::block::Block::Chest => Some("minecraft:chest"),
+        lodestone_data::block::Block::TrappedChest => Some("minecraft:trapped_chest"),
+        lodestone_data::block::Block::Barrel => Some("minecraft:barrel"),
+        lodestone_data::block::Block::Dispenser => Some("minecraft:dispenser"),
+        lodestone_data::block::Block::Dropper => Some("minecraft:dropper"),
         _ => None,
     }
 }
@@ -950,7 +950,7 @@ impl BlockEntity {
 /// id, e.g. `"minecraft:furnace"`, matching [`ItemStack::item`]'s `Display` —
 /// the same string vocabulary [`crate::composter::compostable_chance`] and
 /// [`crate::furnace::base_burn_duration`] already key on) should create,
-/// alongside the canonical block-state string to write through
+/// alongside the validated block state to write through
 /// [`crate::chunk::ChunkSource::set_block`] for it. `None` for any item that
 /// is not one of the four block-entity blocks this crate models — the
 /// caller's cue to fall back to its existing plain-block placement.
@@ -960,9 +960,10 @@ impl BlockEntity {
 /// orientation rules, see `docs/block-edit.md`'s scope note; this is the same
 /// simplification, not a new one).
 #[must_use]
-pub fn block_entity_for_item(item: &str) -> Option<(&'static str, BlockEntity)> {
-    let (block, placed) = placed_block_entity_for_item(item)?;
-    Some((block, placed.instantiate(block)))
+pub fn block_entity_for_item(item: &str) -> Option<(lodestone_data::block_states::StateId, BlockEntity)> {
+    let (block_name, placed) = placed_block_entity_for_item(item)?;
+    let block = lodestone_data::block::Block::from_name(block_name)?;
+    Some((block.default_state(), placed.instantiate(block.name())))
 }
 
 /// The stack, in bytes, one [`block_entity_for_item`] call must fit inside —
@@ -1049,7 +1050,7 @@ impl PlacedBlockEntity {
     }
 }
 
-/// The canonical block-state string a placement of `item` writes, paired with
+/// The validated block state a placement of `item` writes, paired with
 /// the [`PlacedBlockEntity`] describing what to register at that position —
 /// [`block_entity_for_item`]'s item-id half, kept separate from the
 /// construction half for the stack-frame reason [`PlacedBlockEntity`]'s own doc
@@ -1911,36 +1912,6 @@ impl BlockEntityHandle {
     }
 }
 
-/// # Block-state NBT representation
-///
-/// Renders a serialized runtime state as the `{Name, Properties}` compound
-/// used by NBT fields that hold a block state.
-///
-/// `Properties` is omitted entirely for a state with none, matching vanilla's own
-/// codec (an empty map would still decode, but writing one where vanilla writes
-/// nothing is a gratuitous divergence in a payload we may one day compare byte for
-/// byte against a capture). Every property value is a `String`, including numeric
-/// and boolean ones — `Properties` is a map of the property's *serialized name*,
-/// never its typed value.
-#[must_use]
-pub fn block_state_nbt(state: &str) -> Nbt {
-    let (name, properties) = match state.split_once('[') {
-        Some((name, rest)) => (name, rest.strip_suffix(']').unwrap_or(rest)),
-        None => (state, ""),
-    };
-    let mut fields = vec![("Name".to_string(), Nbt::String(name.to_string()))];
-    let pairs: Vec<(String, Nbt)> = properties
-        .split(',')
-        .filter(|pair| !pair.is_empty())
-        .filter_map(|pair| pair.split_once('='))
-        .map(|(key, value)| (key.to_string(), Nbt::String(value.to_string())))
-        .collect();
-    if !pairs.is_empty() {
-        fields.push(("Properties".to_string(), Nbt::Compound(pairs)));
-    }
-    Nbt::Compound(fields)
-}
-
 /// Renders a validated census state without reparsing serialized text.
 #[must_use]
 pub fn block_state_id_nbt(state: lodestone_data::block_states::StateId) -> Nbt {
@@ -1976,10 +1947,7 @@ pub fn moving_piston_nbt(entity: &crate::piston::MovingBlockEntity) -> Nbt {
     Nbt::Compound(vec![
         (
             "blockState".to_string(),
-            entity.moved_state.map_or_else(
-                || block_state_nbt(entity.committed_state()),
-                block_state_id_nbt,
-            ),
+            block_state_id_nbt(entity.moved_state.unwrap_or_else(|| entity.committed_state())),
         ),
         ("facing".to_string(), Nbt::Byte(entity.facing_3d_value())),
         (
@@ -2103,7 +2071,7 @@ mod tests {
                 .spawn(|| {
                     for item in ONE_ITEM_PER_PLACED_KIND {
                         let (block, entity) = block_entity_for_item(item).expect(item);
-                        assert_eq!(block, *item, "the block name is the item's own name");
+                        assert_eq!(block.name(), *item, "the block name is the item's own name");
                         // Reading the entity back keeps the value live past the
                         // call, so the frame under test is a real one.
                         assert!(!entity.type_id().is_empty());
@@ -2132,27 +2100,27 @@ mod tests {
     #[test]
     fn block_entity_for_item_resolves_all_four_kinds_and_rejects_a_plain_block() {
         let (block, entity) = block_entity_for_item("minecraft:furnace").expect("furnace");
-        assert_eq!(block, "minecraft:furnace");
+        assert_eq!(block.name(), "minecraft:furnace");
         assert!(matches!(entity, BlockEntity::Furnace(f) if f.kind() == FurnaceKind::Furnace));
 
         let (block, entity) = block_entity_for_item("minecraft:smoker").expect("smoker");
-        assert_eq!(block, "minecraft:smoker");
+        assert_eq!(block.name(), "minecraft:smoker");
         assert!(matches!(entity, BlockEntity::Furnace(f) if f.kind() == FurnaceKind::Smoker));
 
         let (block, entity) = block_entity_for_item("minecraft:blast_furnace").expect("blast furnace");
-        assert_eq!(block, "minecraft:blast_furnace");
+        assert_eq!(block.name(), "minecraft:blast_furnace");
         assert!(matches!(entity, BlockEntity::Furnace(f) if f.kind() == FurnaceKind::BlastFurnace));
 
         let (block, entity) = block_entity_for_item("minecraft:composter").expect("composter");
-        assert_eq!(block, "minecraft:composter");
+        assert_eq!(block.name(), "minecraft:composter");
         assert!(matches!(entity, BlockEntity::Composter(_)));
 
         let (block, entity) = block_entity_for_item("minecraft:hopper").expect("hopper");
-        assert_eq!(block, "minecraft:hopper");
+        assert_eq!(block.name(), "minecraft:hopper");
         assert!(matches!(entity, BlockEntity::Hopper(_)));
 
         let (block, entity) = block_entity_for_item("minecraft:brewing_stand").expect("brewing stand");
-        assert_eq!(block, "minecraft:brewing_stand");
+        assert_eq!(block.name(), "minecraft:brewing_stand");
         assert!(matches!(entity, BlockEntity::BrewingStand(_)));
 
         assert!(
@@ -2167,13 +2135,13 @@ mod tests {
     #[test]
     fn sign_items_resolve_to_the_right_block_entity_type() {
         let (block, entity) = block_entity_for_item("minecraft:oak_sign").expect("oak sign");
-        assert_eq!(block, "minecraft:oak_sign");
+        assert_eq!(block.name(), "minecraft:oak_sign");
         assert_eq!(entity.type_id(), "minecraft:sign");
         assert!(matches!(entity, BlockEntity::Sign(ref s) if !s.hanging));
 
         let (block, entity) =
             block_entity_for_item("minecraft:warped_hanging_sign").expect("warped hanging sign");
-        assert_eq!(block, "minecraft:warped_hanging_sign");
+        assert_eq!(block.name(), "minecraft:warped_hanging_sign");
         assert_eq!(entity.type_id(), "minecraft:hanging_sign");
         assert!(matches!(entity, BlockEntity::Sign(ref s) if s.hanging));
 
@@ -2335,12 +2303,12 @@ mod tests {
     #[test]
     fn dispenser_and_dropper_get_a_nine_slot_generic_3x3_container() {
         let (block, entity) = block_entity_for_item("minecraft:dispenser").expect("dispenser");
-        assert_eq!(block, "minecraft:dispenser");
+        assert_eq!(block.name(), "minecraft:dispenser");
         assert_eq!(entity.menu_name(), Some("minecraft:generic_3x3"));
         assert_eq!(entity.container_slots().len(), CONTAINER_3X3_SIZE);
 
         let (block, entity) = block_entity_for_item("minecraft:dropper").expect("dropper");
-        assert_eq!(block, "minecraft:dropper");
+        assert_eq!(block.name(), "minecraft:dropper");
         assert_eq!(entity.menu_name(), Some("minecraft:generic_3x3"));
         assert_eq!(entity.container_slots().len(), CONTAINER_3X3_SIZE);
 
@@ -2351,8 +2319,8 @@ mod tests {
         assert_eq!(chest.menu_name(), Some("minecraft:generic_9x3"));
         assert_eq!(chest.container_slots().len(), CONTAINER_9X3_SIZE);
 
-        assert_eq!(container_type_for_block("minecraft:dispenser"), Some("minecraft:dispenser"));
-        assert_eq!(container_type_for_block("minecraft:dropper"), Some("minecraft:dropper"));
+        assert_eq!(container_type_for_block(lodestone_data::block::Block::Dispenser), Some("minecraft:dispenser"));
+        assert_eq!(container_type_for_block(lodestone_data::block::Block::Dropper), Some("minecraft:dropper"));
     }
 
     /// **Control**: composter and brewing stand have no menu at all
@@ -2864,7 +2832,10 @@ mod tests {
     #[test]
     fn moving_piston_nbt_matches_the_vanilla_update_tag() {
         let entity = crate::piston::MovingBlockEntity::new(
-            "minecraft:piston_head[facing=east,short=false,type=sticky]".to_string(),
+            lodestone_data::block_states::StateId::from_state_str(
+                "minecraft:piston_head[facing=east,short=false,type=sticky]",
+            )
+            .expect("piston fixture state must resolve"),
             crate::neighbor_update::Direction::East,
             // Distinct on purpose: equal flags would let a transposition of the two
             // adjacent booleans through unnoticed.

@@ -32,6 +32,8 @@
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 use lodestone_worldgen::density::{NoiseParams, Resolver};
 use lodestone_worldgen::nether::NetherGenerator;
 use serde_json::Value;
@@ -233,7 +235,7 @@ fn find_the_nearest_bastion() {
 }
 
 /// Every block name in the columns the start's bounding box covers.
-fn palette_over(generator: &NetherGenerator, bb: lodestone_worldgen::structure::BoundingBox) -> BTreeSet<String> {
+fn palette_over(generator: &NetherGenerator, bb: lodestone_worldgen::structure::BoundingBox) -> BTreeSet<Block> {
     let mut names = BTreeSet::new();
     for cx in (bb.min[0] >> 4)..=(bb.max[0] >> 4) {
         for cz in (bb.min[2] >> 4)..=(bb.max[2] >> 4) {
@@ -241,9 +243,7 @@ fn palette_over(generator: &NetherGenerator, bb: lodestone_worldgen::structure::
             for lx in 0..16 {
                 for lz in 0..16 {
                     for y in column.min_y()..(column.min_y() + column.height()) {
-                        let state = column.block_state(lx, y, lz);
-                        let name = state.split_once('[').map_or(state, |(n, _)| n);
-                        names.insert(name.to_string());
+                        names.insert(column.block_state_id(lx, y, lz).block());
                     }
                 }
             }
@@ -256,7 +256,7 @@ fn palette_over(generator: &NetherGenerator, bb: lodestone_worldgen::structure::
 fn count_blocks(
     generator: &NetherGenerator,
     bb: lodestone_worldgen::structure::BoundingBox,
-    names: &HashSet<&str>,
+    names: &HashSet<Block>,
 ) -> usize {
     let mut n = 0usize;
     for cx in (bb.min[0] >> 4)..=(bb.max[0] >> 4) {
@@ -265,9 +265,7 @@ fn count_blocks(
             for lx in 0..16 {
                 for lz in 0..16 {
                     for y in column.min_y()..(column.min_y() + column.height()) {
-                        let state = column.block_state(lx, y, lz);
-                        let name = state.split_once('[').map_or(state, |(n, _)| n);
-                        if names.contains(name) {
+                        if names.contains(&column.block_state_id(lx, y, lz).block()) {
                             n += 1;
                         }
                     }
@@ -293,10 +291,10 @@ fn print_the_bastion_palette_difference() {
     println!("box = {:?}", start.bounding_box);
     println!("pieces = {}", start.pieces.len());
     for name in a.difference(&b) {
-        println!("only with structures: {name}");
+        println!("only with structures: {}", name.name());
     }
     for name in b.difference(&a) {
-        println!("only without structures: {name}");
+        println!("only without structures: {}", name.name());
     }
 }
 
@@ -315,13 +313,13 @@ fn print_the_bastion_palette_difference() {
 /// reports 16 names at [`BASTION_CHUNK`], of which `basalt`, `blackstone` and
 /// `nether_wart` are excluded here because a different Nether column really can
 /// produce them.
-const BASTION_ONLY: &[&str] = &[
-    "minecraft:polished_blackstone_bricks",
-    "minecraft:cracked_polished_blackstone_bricks",
-    "minecraft:polished_blackstone_brick_stairs",
-    "minecraft:chiseled_polished_blackstone",
-    "minecraft:gilded_blackstone",
-    "minecraft:gold_block",
+const BASTION_ONLY: &[Block] = &[
+    Block::PolishedBlackstoneBricks,
+    Block::CrackedPolishedBlackstoneBricks,
+    Block::PolishedBlackstoneBrickStairs,
+    Block::ChiseledPolishedBlackstone,
+    Block::GildedBlackstone,
+    Block::GoldBlock,
 ];
 
 /// Names no Nether terrain stage can produce, for the fossil arm.
@@ -331,7 +329,7 @@ const BASTION_ONLY: &[&str] = &[
 /// `surface_rule` by `the_discriminating_blocks_are_not_terrain`, the same way
 /// [`BASTION_ONLY`] is — and unlike `basalt`, neither is a product of vanilla's own bundled Nether surface-rule data,
 /// which is what makes this list two names rather than a narrowing exercise.
-const FOSSIL_ONLY: &[&str] = &["minecraft:bone_block", "minecraft:dried_ghast"];
+const FOSSIL_ONLY: &[Block] = &[Block::BoneBlock, Block::DriedGhast];
 
 /// The nearest `nether_fossil` placement cell that really starts one, **measured** by
 /// [`find_the_nearest_fossil`].
@@ -416,8 +414,7 @@ fn find_the_nearest_fossil() {
                     // vanilla's `isAir()` rejection expressed as an ordering. So the
                     // search asks the world, not the piece.
                     if ghast > 0 && ghast_bearing.is_none() {
-                        let names: HashSet<&str> =
-                            ["minecraft:dried_ghast"].into_iter().collect();
+                        let names: HashSet<Block> = [Block::DriedGhast].into_iter().collect();
                         let in_world = count_blocks(&generator, start.bounding_box, &names);
                         println!("  in world: {in_world}");
                         if in_world == 1 {
@@ -471,7 +468,7 @@ fn nether_fossil_places_its_own_blocks_in_a_nether_column() {
         start.bounding_box.min[1]
     );
 
-    let names: HashSet<&str> = FOSSIL_ONLY.iter().copied().collect();
+    let names: HashSet<Block> = FOSSIL_ONLY.iter().copied().collect();
     let placed = count_blocks(&with, start.bounding_box, &names);
     let control = count_blocks(&without, start.bounding_box, &names);
     assert_eq!(control, 0, "the structureless control holds {control}");
@@ -517,7 +514,7 @@ fn a_fossils_dried_ghast_comes_from_a_positional_fork() {
         "the fossil must carry a placement-time ghast refinement"
     );
 
-    let names: HashSet<&str> = ["minecraft:dried_ghast"].into_iter().collect();
+    let names: HashSet<Block> = [Block::DriedGhast].into_iter().collect();
     let placed = count_blocks(&with, start.bounding_box, &names);
     let control = count_blocks(&without, start.bounding_box, &names);
     assert_eq!(control, 0, "the structureless control holds {control}");
@@ -544,14 +541,16 @@ fn nether_fossil_dried_ghast_rejects_occupied_template_cells() {
     // The measured positional roll for this start chooses (66, 96, -469), a
     // template bone cell. The post-template air predicate must reject it.
     let occupied = with.column(4, -30);
+    let bone_axis_y = StateId::from_state_str("minecraft:bone_block[axis=y]")
+        .expect("bone block axis state is generated");
     assert_eq!(
-        occupied.block_state(2, 96, 11),
-        "minecraft:bone_block[axis=y]",
+        occupied.block_state_id(2, 96, 11),
+        bone_axis_y,
         "the positional candidate is occupied by the fossil template"
     );
     assert_ne!(
-        without.column(4, -30).block_state(2, 96, 11),
-        "minecraft:bone_block[axis=y]",
+        without.column(4, -30).block_state_id(2, 96, 11),
+        bone_axis_y,
         "the structureless control must not manufacture the template cell"
     );
 }
@@ -583,7 +582,7 @@ fn bastion_remnant_places_its_own_blocks_in_a_nether_column() {
     let with = NetherGenerator::new(SEED, &settings, &NetherAssets::new());
     let without = NetherGenerator::new(SEED, &settings, &NoStructures(NetherAssets::new()));
     let start = bastion_start(&with);
-    let names: HashSet<&str> = BASTION_ONLY.iter().copied().collect();
+    let names: HashSet<Block> = BASTION_ONLY.iter().copied().collect();
 
     let placed = count_blocks(&with, start.bounding_box, &names);
     let control = count_blocks(&without, start.bounding_box, &names);
@@ -622,13 +621,14 @@ fn the_discriminating_blocks_are_not_terrain() {
     let default_block = settings["default_block"]["Name"].as_str().unwrap();
     let default_fluid = settings["default_fluid"]["Name"].as_str().unwrap();
     let carver = serde_json::to_string(&assets.try_read("configured_carver", "nether_cave")).unwrap();
-    for name in BASTION_ONLY.iter().chain(FOSSIL_ONLY.iter()) {
+    for block in BASTION_ONLY.iter().chain(FOSSIL_ONLY.iter()) {
+        let name = block.name();
         assert!(
             !surface.contains(name),
             "{name} is a nether surface-rule product and cannot discriminate"
         );
-        assert_ne!(*name, default_block);
-        assert_ne!(*name, default_fluid);
+        assert_ne!(name, default_block);
+        assert_ne!(name, default_fluid);
         assert!(!carver.contains(name), "{name} appears in nether_cave");
     }
     // And the two names that look like the obvious choice really are terrain here,

@@ -47,15 +47,21 @@
 
 use crate::neighbor_update::Direction;
 use crate::redstone::{self, is_redstone_conductor, wire_power, WorldState};
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{PropertyKey, PropertyValue};
+use lodestone_data::block_states::StateId;
 use lodestone_model::BlockPos;
 
-pub use crate::redstone::WIRE;
-
-/// Builds the canonical block-state string for dust at `power` — see this
+/// Builds a canonical dust state at `power` — see this
 /// module's own doc comment for why no connection properties are encoded.
 #[must_use]
-pub fn set_power(power: u8) -> String {
-    format!("{WIRE}[power={}]", power.min(15))
+pub fn set_power(power: u8) -> StateId {
+    redstone::with_property(
+        Block::RedstoneWire.default_state(),
+        PropertyKey::Power,
+        PropertyValue::builtin(redstone::numeric_property_value(power.min(15)).expect("wire power is a generated value")),
+    )
+    .expect("wire power property is a generated state")
 }
 
 /// The real incoming-wire-signal query — see this module's own doc
@@ -66,20 +72,20 @@ where
     F: Fn(BlockPos) -> WorldState,
 {
     let above_state = lookup(Direction::Up.relative(pos));
-    let above_is_conductor = is_redstone_conductor(&above_state);
+    let above_is_conductor = is_redstone_conductor(above_state);
     let mut wire_signal: u8 = 0;
 
     for direction in [Direction::North, Direction::South, Direction::West, Direction::East] {
         let neighbor_pos = direction.relative(pos);
         let neighbor_state = lookup(neighbor_pos);
-        wire_signal = wire_signal.max(wire_power(&neighbor_state));
+        wire_signal = wire_signal.max(wire_power(neighbor_state));
 
-        if is_redstone_conductor(&neighbor_state) && !above_is_conductor {
+        if is_redstone_conductor(neighbor_state) && !above_is_conductor {
             let above_neighbor = lookup(Direction::Up.relative(neighbor_pos));
-            wire_signal = wire_signal.max(wire_power(&above_neighbor));
-        } else if !is_redstone_conductor(&neighbor_state) {
+            wire_signal = wire_signal.max(wire_power(above_neighbor));
+        } else if !is_redstone_conductor(neighbor_state) {
             let below_neighbor = lookup(Direction::Down.relative(neighbor_pos));
-            wire_signal = wire_signal.max(wire_power(&below_neighbor));
+            wire_signal = wire_signal.max(wire_power(below_neighbor));
         }
     }
 
@@ -103,15 +109,16 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::redstone_torch::set_standing_lit;
 
-    fn world(entries: &[(BlockPos, &str)]) -> impl Fn(BlockPos) -> WorldState + use<> {
-        let entries: Vec<(BlockPos, WorldState)> = entries.iter().map(|(p, s)| (*p, WorldState::from(*s))).collect();
+    fn world(entries: &[(BlockPos, StateId)]) -> impl Fn(BlockPos) -> WorldState + use<> {
+        let entries: Vec<(BlockPos, WorldState)> = entries.to_vec();
         move |p: BlockPos| {
             entries
                 .iter()
                 .find(|(pos, _)| *pos == p)
                 .map(|(_, s)| s.clone())
-                .unwrap_or_else(crate::chunk::air_state_arc)
+                .unwrap_or_else(lodestone_data::block_states::air_state)
         }
     }
 
@@ -123,13 +130,13 @@ mod tests {
     fn set_power_round_trips_through_wire_power() {
         for p in 0..=15u8 {
             let state = set_power(p);
-            assert_eq!(wire_power(&state), p);
+            assert_eq!(wire_power(state), p);
         }
     }
 
     #[test]
     fn set_power_clamps_above_fifteen() {
-        assert_eq!(set_power(255), "minecraft:redstone_wire[power=15]");
+        assert_eq!(set_power(255), set_power(15));
     }
 
     /// A lit torch adjacent to a wire gives it target strength 15 directly
@@ -139,7 +146,7 @@ mod tests {
     fn a_wire_next_to_a_lit_torch_reads_full_strength() {
         let wire_pos = pos(0, 0, 0);
         let torch_pos = Direction::West.relative(wire_pos);
-        let w = world(&[(torch_pos, "minecraft:redstone_torch[lit=true]")]);
+        let w = world(&[(torch_pos, set_standing_lit(true))]);
         assert_eq!(calculate_target_strength(&w, wire_pos), 15);
     }
 
@@ -162,8 +169,8 @@ mod tests {
         // where it expected `14` — the code was right, the hand-derived
         // prediction was not.
         let w = world(&[
-            (torch_pos, "minecraft:redstone_torch[lit=true]"),
-            (dust_a, &set_power(15)), // already-settled state, as if placed and updated once
+            (torch_pos, set_standing_lit(true)),
+            (dust_a, set_power(15)), // already-settled state, as if placed and updated once
         ]);
         assert_eq!(calculate_target_strength(&w, dust_a), 15, "dust_a is adjacent to the torch: full strength, no decay yet");
         assert_eq!(calculate_target_strength(&w, dust_b), 14, "dust_b: dust_a(15) - 1 = 14");
@@ -187,7 +194,7 @@ mod tests {
     fn two_adjacent_dust_blocks_with_no_source_do_not_bootstrap_each_other() {
         let a = pos(0, 0, 0);
         let b = pos(1, 0, 0);
-        let w = world(&[(a, &set_power(0)), (b, &set_power(0))]);
+        let w = world(&[(a, set_power(0)), (b, set_power(0))]);
         assert_eq!(calculate_target_strength(&w, a), 0);
         assert_eq!(calculate_target_strength(&w, b), 0);
     }
@@ -205,7 +212,7 @@ mod tests {
         let low_wire = pos(0, 0, 0);
         let step_conductor = pos(1, 0, 0);
         let high_wire = pos(1, 1, 0);
-        let w = world(&[(step_conductor, "minecraft:stone"), (high_wire, &set_power(15))]);
+        let w = world(&[(step_conductor, Block::Stone.default_state()), (high_wire, set_power(15))]);
         assert_eq!(
             calculate_target_strength(&w, low_wire),
             14,
@@ -222,7 +229,7 @@ mod tests {
         let low_wire = pos(1, 4, 0);
         // The neighbour at (1,5,0) is air (not a conductor), so the "look
         // one below" branch fires.
-        let w = world(&[(low_wire, &set_power(15))]);
+        let w = world(&[(low_wire, set_power(15))]);
         assert_eq!(calculate_target_strength(&w, high_wire), 14);
     }
 }

@@ -180,7 +180,7 @@ fn hash_overworld_column(digest: &mut Sha256, column: &lodestone_worldgen::overw
     for y in column.min_y()..column.min_y() + column.height() {
         for z in 0..16 {
             for x in 0..16 {
-                hash_str(digest, column.block_state(x, y, z));
+                hash_str(digest, column.block_state_id(x, y, z).name());
             }
         }
     }
@@ -242,7 +242,7 @@ fn hash_nether_column(digest: &mut Sha256, column: &lodestone_worldgen::nether::
     for y in column.min_y()..column.min_y() + column.height() {
         for z in 0..16 {
             for x in 0..16 {
-                hash_str(digest, column.block_state(x, y, z));
+                hash_str(digest, column.block_state_id(x, y, z).name());
             }
         }
     }
@@ -267,7 +267,7 @@ fn hash_end_column(digest: &mut Sha256, column: &lodestone_worldgen::end::EndCol
     for y in column.min_y()..column.min_y() + column.height() {
         for z in 0..16 {
             for x in 0..16 {
-                hash_str(digest, column.block_state(x, y, z));
+                hash_str(digest, column.block_state_id(x, y, z).name());
             }
         }
     }

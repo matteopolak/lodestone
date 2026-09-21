@@ -36,8 +36,12 @@ must also accept the `lodestone_join_trace` target at `INFO`; for example, use
 same monotonic clock and expose bounded operational diagnostics through the SDK's
 `logLevel` mount option. Use `mount({ ..., logLevel: "debug" })`, or append
 `?log=debug` to the standalone runner. The console then reports spawn-search
-duration and work counts, join-stream progress, the play-loop heartbeat, and
-world-tick phases that exceed one 50 ms tick period.
+duration and work counts, each worldgen session transition with elapsed time
+from worker launch, join-stream progress, the play-loop heartbeat, and world-tick
+phases that exceed one 50 ms tick period. It also records the first column and
+each sixteenth column at packet receipt, mesh admission, and completed meshing,
+so server generation and client rendering stalls can be separated without a
+per-column console flood.
 Supported levels are `off`, `error`, `warn`, `info`, `debug`, and `trace`; the
 default is `warn`.
 

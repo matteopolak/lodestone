@@ -44,9 +44,10 @@
 //! [`ClientAction::Move`] every 20 Hz tick onto the replacement lane; the net
 //! loop drains the newest pose each iteration and hands it to
 //! [`ClientHandle::send_action`], which the version adapter lowers into the
-//! concrete movement packet. Control actions use a separate FIFO lane, so a
-//! movement burst cannot displace chat, commands, or interactions. The shell
-//! never names the concrete packet.
+//! concrete movement packet. The per-tick [`ClientAction::EndClientTick`]
+//! marker uses the same replacement rule, while other control actions use a
+//! separate FIFO lane, so a stalled browser tick cannot displace chat,
+//! commands, or interactions. The shell never names the concrete packet.
 //!
 //! **Seam status (verified 2026-07-27):** the v770 adapter now has a `Move`
 //! encode arm (→ `move_player_pos_rot`) and a `SwingArm` arm (→ `swing`), so the
@@ -359,18 +360,18 @@ const NET_RELAY_CAPACITY: usize = 1024;
 
 /// Depth of the reliable outbound [`ClientAction`] relay ([`NetClient::action_tx`]).
 ///
-/// Movement does not consume this queue: [`ActionRelaySender`] keeps only its
-/// newest movement separately. This prevents the 20 Hz replaceable stream from
-/// crowding out chat, commands, drops, uses, and other control actions. The
-/// queue remains bounded and non-blocking on wasm32; a genuine control burst
-/// beyond this bound is reported as an actionable warning rather than silently
-/// disappearing.
+/// Movement and [`ClientAction::EndClientTick`] do not consume this queue:
+/// [`ActionRelaySender`] keeps only the newest value of each separately. This
+/// prevents replaceable per-tick traffic from crowding out chat, commands,
+/// drops, uses, and other control actions. The queue remains bounded and
+/// non-blocking on wasm32; a genuine control burst beyond this bound is
+/// reported as an actionable warning rather than silently disappearing.
 const ACTION_RELAY_CAPACITY: usize = 256;
 
-/// A movement or control action waiting for the net loop. The sequence is
-/// assigned before a movement can replace its predecessor, so the receiver can
-/// merge the two lanes without moving a retained movement across a control
-/// action that was queued before or after it.
+/// An action waiting for the net loop. The sequence is assigned before a
+/// replaceable action can replace its predecessor, so the receiver can merge
+/// the movement, tick-marker, and control lanes without moving retained
+/// traffic across a control action that was queued before or after it.
 #[derive(Debug)]
 struct QueuedAction {
     sequence: u64,
@@ -381,15 +382,17 @@ struct QueuedAction {
 enum ActionAdmission {
     Accepted,
     MovementCoalesced,
+    TickEndCoalesced,
     ControlQueueFull,
     Closed,
 }
 
-/// Non-blocking sender for the two outbound action lanes.
+/// Non-blocking sender for the three outbound action lanes.
 #[derive(Debug)]
 struct ActionRelaySender {
     control_tx: SyncSender<QueuedAction>,
     latest_move: Arc<Mutex<Option<QueuedAction>>>,
+    latest_tick_end: Arc<Mutex<Option<QueuedAction>>>,
     next_sequence: Arc<AtomicU64>,
     dropped_controls: Arc<AtomicU64>,
 }
@@ -401,6 +404,7 @@ struct ActionRelaySender {
 pub(crate) struct ActionRelayReceiver {
     control_rx: Receiver<QueuedAction>,
     latest_move: Arc<Mutex<Option<QueuedAction>>>,
+    latest_tick_end: Arc<Mutex<Option<QueuedAction>>>,
     pending: Mutex<VecDeque<QueuedAction>>,
     control_closed: AtomicBool,
 }
@@ -408,17 +412,20 @@ pub(crate) struct ActionRelayReceiver {
 fn action_relay() -> (ActionRelaySender, ActionRelayReceiver) {
     let (control_tx, control_rx) = mpsc::sync_channel(ACTION_RELAY_CAPACITY);
     let latest_move = Arc::new(Mutex::new(None));
+    let latest_tick_end = Arc::new(Mutex::new(None));
     let dropped_controls = Arc::new(AtomicU64::new(0));
     (
         ActionRelaySender {
             control_tx,
             latest_move: Arc::clone(&latest_move),
+            latest_tick_end: Arc::clone(&latest_tick_end),
             next_sequence: Arc::new(AtomicU64::new(0)),
             dropped_controls,
         },
         ActionRelayReceiver {
             control_rx,
             latest_move,
+            latest_tick_end,
             pending: Mutex::new(VecDeque::new()),
             control_closed: AtomicBool::new(false),
         },
@@ -437,6 +444,17 @@ impl ActionRelaySender {
             let replaced = latest.replace(queued).is_some();
             if replaced {
                 ActionAdmission::MovementCoalesced
+            } else {
+                ActionAdmission::Accepted
+            }
+        } else if matches!(queued.action, ClientAction::EndClientTick) {
+            let mut latest = self
+                .latest_tick_end
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let replaced = latest.replace(queued).is_some();
+            if replaced {
+                ActionAdmission::TickEndCoalesced
             } else {
                 ActionAdmission::Accepted
             }
@@ -474,6 +492,14 @@ impl ActionRelayReceiver {
         {
             batch.push(action);
         }
+        if let Some(action) = self
+            .latest_tick_end
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            batch.push(action);
+        }
         if batch.is_empty() {
             return;
         }
@@ -505,6 +531,11 @@ impl ActionRelayReceiver {
         if self.control_closed.load(Ordering::Acquire)
             && self
                 .latest_move
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_none()
+            && self
+                .latest_tick_end
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .is_none()
@@ -570,14 +601,16 @@ fn wasm_block_mutation_refusal(
 pub struct NetClient {
     rx: Receiver<NetUpdate>,
     /// Outbound actions queued for the net thread to hand to the client. The
-    /// relay keeps reliable controls FIFO and coalesces replaceable movement;
-    /// see [`ActionRelaySender`].
+    /// relay keeps reliable controls FIFO and coalesces replaceable movement
+    /// and tick-boundary markers; see [`ActionRelaySender`].
     ///
     /// The control lane is bounded ([`ACTION_RELAY_CAPACITY`]) and uses
     /// `try_send`, so a genuine control overflow is reported without blocking
     /// the caller. Movement uses a separate one-slot replacement lane — see
     /// [`NET_RELAY_CAPACITY`]'s doc for why blocking is unsafe on this
-    /// driver's wasm32 path.
+    /// driver's wasm32 path. `EndClientTick` is a replaceable boundary marker,
+    /// not a reliable control, because the latest marker is sufficient after
+    /// the movement lane has already coalesced any intervening poses.
     action_tx: ActionRelaySender,
     /// "Open to LAN" requests: a port to add a TCP listener on,
     /// drained by the net thread's own loop rather than handed to the client
@@ -1454,6 +1487,7 @@ impl NetClient {
                 }
             }
             ActionAdmission::MovementCoalesced => {}
+            ActionAdmission::TickEndCoalesced => {}
             ActionAdmission::ControlQueueFull => {
                 let dropped = self.action_tx.dropped_controls.load(Ordering::Relaxed);
                 if dropped == 1 || dropped.is_multiple_of(32) {
@@ -6577,6 +6611,115 @@ mod tests {
         assert_eq!(actions.try_recv().unwrap(), latest_move.unwrap());
         assert_eq!(actions.try_recv().unwrap(), command);
         assert!(actions.try_recv().is_err());
+    }
+
+    #[test]
+    fn tick_end_burst_coalesces_without_consuming_control_capacity() {
+        use lodestone_client::ClientAction;
+
+        let (sender, receiver) = action_relay();
+        assert_eq!(
+            sender.send(ClientAction::EndClientTick),
+            ActionAdmission::Accepted
+        );
+        for _ in 1..(ACTION_RELAY_CAPACITY * 2) {
+            assert_eq!(
+                sender.send(ClientAction::EndClientTick),
+                ActionAdmission::TickEndCoalesced
+            );
+        }
+
+        for _ in 0..ACTION_RELAY_CAPACITY {
+            assert_eq!(
+                sender.send(ClientAction::SendChat {
+                    text: "queued".into(),
+                }),
+                ActionAdmission::Accepted
+            );
+        }
+        assert_eq!(
+            sender.send(ClientAction::SendChat {
+                text: "overflow".into(),
+            }),
+            ActionAdmission::ControlQueueFull
+        );
+        assert_eq!(sender.dropped_controls.load(Ordering::Relaxed), 1);
+
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            ClientAction::EndClientTick,
+            "the latest tick marker remains ordered before controls queued after it"
+        );
+        for _ in 0..ACTION_RELAY_CAPACITY {
+            assert!(matches!(
+                receiver.try_recv().unwrap(),
+                ClientAction::SendChat { .. }
+            ));
+        }
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn tick_end_coalescing_preserves_sequence_order_around_controls() {
+        use lodestone_client::ClientAction;
+
+        let (sender, receiver) = action_relay();
+        let first = ClientAction::SendChat {
+            text: "first".into(),
+        };
+        let second = ClientAction::DropSelectedItem;
+        assert_eq!(
+            sender.send(ClientAction::EndClientTick),
+            ActionAdmission::Accepted
+        );
+        assert_eq!(sender.send(first.clone()), ActionAdmission::Accepted);
+        assert_eq!(
+            sender.send(ClientAction::EndClientTick),
+            ActionAdmission::TickEndCoalesced
+        );
+        assert_eq!(sender.send(second.clone()), ActionAdmission::Accepted);
+
+        assert_eq!(receiver.try_recv().unwrap(), first);
+        assert_eq!(receiver.try_recv().unwrap(), ClientAction::EndClientTick);
+        assert_eq!(receiver.try_recv().unwrap(), second);
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn latest_movement_and_tick_end_remain_an_ordered_pair() {
+        use lodestone_client::{ClientAction, Rotation, Vec3};
+
+        let (sender, receiver) = action_relay();
+        let first_move = ClientAction::Move {
+            pos: Vec3::new(1.0, 2.0, 3.0),
+            rotation: Rotation::new(10.0, 0.0),
+            on_ground: true,
+            horizontal_collision: false,
+        };
+        let latest_move = ClientAction::Move {
+            pos: Vec3::new(4.0, 5.0, 6.0),
+            rotation: Rotation::new(20.0, 1.0),
+            on_ground: false,
+            horizontal_collision: true,
+        };
+
+        assert_eq!(sender.send(first_move), ActionAdmission::Accepted);
+        assert_eq!(
+            sender.send(ClientAction::EndClientTick),
+            ActionAdmission::Accepted
+        );
+        assert_eq!(
+            sender.send(latest_move.clone()),
+            ActionAdmission::MovementCoalesced
+        );
+        assert_eq!(
+            sender.send(ClientAction::EndClientTick),
+            ActionAdmission::TickEndCoalesced
+        );
+
+        assert_eq!(receiver.try_recv().unwrap(), latest_move);
+        assert_eq!(receiver.try_recv().unwrap(), ClientAction::EndClientTick);
+        assert!(receiver.try_recv().is_err());
     }
 
     #[test]

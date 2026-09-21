@@ -111,8 +111,7 @@
 //! # Dependencies
 //!
 //! [`crate::aquifer`], [`crate::biome`], [`crate::carver`], [`crate::compose`],
-//! [`crate::feature`], [`crate::surface`], [`crate::dense_grid`],
-//! [`crate::interner`], and `lodestone-worldgen-core`'s density interpreter.
+//! [`crate::feature`], [`crate::surface`], and [`crate::dense_grid`].
 //! Nothing version-specific.
 
 use std::cell::{Cell, RefCell};
@@ -132,7 +131,6 @@ use crate::carver::{CarveGrid, CarverConfig, NoObserver};
 use crate::density::{Builder, Resolver};
 use crate::engine::Program;
 use crate::feature::{PlacedOre, PlacedScatteredOre, RuleTest};
-use crate::interner::{StateId, StateInterner};
 use crate::overworld::structures::{BEARD_REACH, REFS_RADIUS, StructureRefs};
 use crate::structure::beardifier::Beardifier;
 use crate::structure::{
@@ -140,12 +138,16 @@ use crate::structure::{
     StructureLoot, StructureMutationContext, StructureMutationRecorder, StructureRegistry,
     StructureStart,
 };
-use crate::surface::{PreState, SurfaceDiff, SurfaceSystem, identity_canon};
+use crate::surface::{PreClass, PreState, SurfaceDiff, SurfaceSystem, identity_canon};
 use crate::stage_schedule::{
     ChunkRequest, ColumnStage, DecorationStep, NETHER_DECORATION_STEPS,
     NETHER_FEATURE_WRITE_RADIUS, NETHER_SOURCES,
 };
 use lodestone_data::biomes::{BiomeRef, BuiltinBiome};
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue as V, Properties, PropertyKey};
+use lodestone_data::block_states::StateId;
+use lodestone_worldgen_core::hash::FastSet;
 
 thread_local! {
     static NETHER_HEIGHT_SCRATCH: RefCell<Option<crate::feature::RegionHeights>> =
@@ -205,7 +207,7 @@ fn return_nether_changed_scratch(mut changed: Vec<(i32, i32, i32, StateId)>) {
 pub struct NetherColumn {
     min_y: i32,
     height: i32,
-    palette: Vec<String>,
+    palette: Vec<StateId>,
     blocks: Vec<u16>,
     /// Typed biome identity per horizontal quart, row-major `qz * 4 + qx` — the whole answer
     /// for this dimension, see the module doc's 2-D section.
@@ -214,7 +216,7 @@ pub struct NetherColumn {
     /// Decoration writes in the dimension's upper 128 rows. The noise carrier
     /// remains 128 rows tall, but vegetation runs against the full 256-row
     /// resident window and may spill into the served chunk above that carrier.
-    decoration_spills: Vec<(i32, i32, i32, String)>,
+    decoration_spills: Vec<(i32, i32, i32, StateId)>,
 }
 
 type NetherBiomeQuarts = [BiomeRef; 16];
@@ -461,6 +463,13 @@ impl NetherOre {
         }
     }
 
+    fn placements_mut(&mut self) -> &mut Vec<crate::feature::Placement> {
+        match self {
+            Self::Standard(ore) => &mut ore.placements,
+            Self::Scattered(ore) => &mut ore.placements,
+        }
+    }
+
     fn with_index(&self, index: usize) -> Self {
         match self {
             Self::Standard(ore) => {
@@ -493,11 +502,9 @@ pub struct ParityDecorationSpill {
     /// Chunk whose raw decoration entries produced this write.
     pub source: (i32, i32),
     /// Absolute block coordinate and canonical final state after that source
-    /// completed. Text is intentional at this public boundary: `StateId` is
-    /// local to this generator's interner and cannot be transferred into the
-    /// packet/source layer by its raw number.
+    /// completed.
     pub position: (i32, i32, i32),
-    pub state: String,
+    pub state: StateId,
     /// A source-crossing huge-fungus write that was transient during the
     /// source pass. Lifecycle replay retains it in the ordered spill stream so
     /// later source reads and the final packet snapshot observe the same state.
@@ -534,16 +541,16 @@ impl NetherColumn {
         self.height
     }
 
-    /// Canonical block-state string at local `(lx, lz)` in `0..16` and world `y`.
-    /// Out-of-range Y is `"minecraft:air"`.
+    /// Canonical block-state id at local `(lx, lz)` in `0..16` and world `y`.
+    /// Out-of-range Y is the canonical air state.
     #[must_use]
-    pub fn block_state(&self, lx: usize, y: i32, lz: usize) -> &str {
+    pub fn block_state_id(&self, lx: usize, y: i32, lz: usize) -> StateId {
         let ly = y - self.min_y;
         if !(0..self.height).contains(&ly) {
-            return "minecraft:air";
+            return lodestone_data::block_states::air_state();
         }
         let idx = ((ly * 16 + lz as i32) * 16 + lx as i32) as usize;
-        &self.palette[self.blocks[idx] as usize]
+        self.palette[self.blocks[idx] as usize]
     }
 
     /// The typed biome at horizontal quart `(qx, qz)`, both in `0..4`.
@@ -573,7 +580,7 @@ impl NetherColumn {
     /// are absolute world coordinates; the server boundary filters them to its
     /// local column before applying them to the padded window.
     #[must_use]
-    pub fn decoration_spills(&self) -> &[(i32, i32, i32, String)] {
+    pub fn decoration_spills(&self) -> &[(i32, i32, i32, StateId)] {
         &self.decoration_spills
     }
 
@@ -593,20 +600,16 @@ impl NetherColumn {
     /// terrain" question, and the one an empty-column bug fails.
     #[must_use]
     pub fn non_air_count(&self) -> usize {
-        let air = self
-            .palette
+        let air = lodestone_data::block_states::air_state();
+        self.blocks
             .iter()
-            .position(|s| s == "minecraft:air")
-            .map(|i| i as u16);
-        match air {
-            Some(air) => self.blocks.iter().filter(|&&b| b != air).count(),
-            None => self.blocks.len(),
-        }
+            .filter(|&&b| self.palette[b as usize] != air)
+            .count()
     }
 
     /// The raw parts, for a caller building a chunk packet or a region file.
     #[must_use]
-    pub fn into_raw(self) -> (i32, i32, Vec<String>, Vec<u16>, [BiomeRef; 16]) {
+    pub fn into_raw(self) -> (i32, i32, Vec<StateId>, Vec<u16>, [BiomeRef; 16]) {
         (
             self.min_y,
             self.height,
@@ -632,7 +635,6 @@ pub struct NetherGenerator {
     /// re-hashing the same seed for every block-biome lookup.
     zoom_seed: i64,
     slot_count: usize,
-    interner: Arc<StateInterner>,
     surface: SurfaceSystem,
     /// `noise_router.final_density`, compiled once. Cloning it per chunk is an
     /// `Arc` bump.
@@ -644,14 +646,12 @@ pub struct NetherGenerator {
     sea_level: i32,
     cell_width: i32,
     cell_height: i32,
-    default_block: String,
-    default_fluid: String,
     default_block_pre: PreState,
     default_fluid_pre: PreState,
     /// `#minecraft:nether_carver_replaceables`. Empty when the resolver supplies
     /// no tag data, in which case carving is a harmless no-op — the same
     /// no-data-supplied convention every other stage here follows.
-    carver_replaceable: HashSet<String>,
+    carver_replaceable: FastSet<StateId>,
     carvers_by_biome: HashMap<String, Vec<CarverConfig>>,
     /// The globally ordered decoration catalog. Feature seeds use the index in
     /// this per-step order, not a biome document's local position; the source
@@ -669,7 +669,7 @@ pub struct NetherGenerator {
     /// Biome membership for each placed feature's biome modifier.  Nether
     /// climate is y-invariant, so the mixed dispatcher can resolve an exact
     /// candidate position from the resident chunk's horizontal quart data.
-    feature_biomes: Arc<HashMap<String, HashSet<String>>>,
+    feature_biomes: Arc<crate::compose::FeatureBiomePlan>,
     ore_tag_map: HashMap<String, HashSet<String>>,
     veg_tags: crate::feature::vegetation::VegTags,
     /// The Nether's structure engine, or `None` for a resolver that supplies no
@@ -1064,7 +1064,7 @@ fn synchronize_mixed_entry_reusing(
         MixedEntryWriter::Decoration => {
             let end = grid.dirty_len();
             changed.clear();
-            changed.extend(grid.dirty_cell_ids().skip(*grid_cursor));
+            changed.extend(grid.dirty_cells().skip(*grid_cursor));
             changed.sort_unstable_by_key(|&(x, y, z, _)| (x, z, y));
             changed.dedup_by(|later, earlier| {
                 if (later.0, later.1, later.2) == (earlier.0, earlier.1, earlier.2) {
@@ -1171,7 +1171,8 @@ fn build_nether_feature_lists(
                 && matches!(configured_type, Some("minecraft:ore" | "minecraft:scattered_ore"))
             {
                 let configured = configured.as_ref().expect("checked above");
-                let config = crate::feature::parse_ore_config(&configured["config"]);
+                let mut config = crate::feature::parse_ore_config(&configured["config"]);
+                crate::feature::compile_ore_targets(resolver, &mut config.targets);
                 let placements = crate::feature::parse_placements(&placed);
                 if configured_type == Some("minecraft:scattered_ore") {
                     ores.push(NetherOre::Scattered(PlacedScatteredOre {
@@ -1230,12 +1231,6 @@ impl NetherGenerator {
         &crate::stage_schedule::NETHER
     }
 
-    /// Shared block-state interner used by resident lifecycle adapters.
-    #[must_use]
-    pub fn interner(&self) -> &Arc<StateInterner> {
-        &self.interner
-    }
-
     /// Builds the generator for `seed` from `noise_settings/nether.json` and a
     /// [`Resolver`] carrying the Nether's density functions, noises, biome
     /// parameter table, biome documents and configured carvers.
@@ -1259,12 +1254,11 @@ impl NetherGenerator {
         );
 
         let router = &settings["noise_router"];
-        let interner = Arc::new(StateInterner::new());
         let canon = identity_canon(settings);
         let final_density = Program::compile(
             &builder.build(&router["final_density"]).expect("bundled final_density density-function document"),
         );
-        let surface = SurfaceSystem::new(settings, &builder, &canon, &interner);
+        let surface = SurfaceSystem::new(settings, &builder, &canon);
         let climate = ClimateSampler::new(settings, &builder);
 
         let min_y = settings["noise"]["min_y"].as_i64().unwrap_or(0) as i32;
@@ -1272,18 +1266,20 @@ impl NetherGenerator {
         let sea_level = settings["sea_level"].as_i64().unwrap_or(32) as i32;
         let (cell_width, cell_height) = crate::aquifer::cell_geometry(settings);
 
-        let default_block = settings["default_block"]["Name"]
-            .as_str()
-            .unwrap_or("minecraft:netherrack")
-            .to_string();
+        let default_block = state_id_from_settings(
+            &settings["default_block"],
+            Block::Netherrack.default_state(),
+        );
         // The Nether's `default_fluid` carries `{"level": "0"}`, and reading only
         // `Name` would produce `minecraft:lava` where the carver writes
         // `minecraft:lava[level=0]` — two palette entries for one state, and every
         // downstream match on the full string missing for the bare form.
-        let default_fluid =
-            canonical_state_from_settings(&settings["default_fluid"], "minecraft:lava[level=0]");
-        let default_block_pre = PreState::from_name(&interner, &default_block);
-        let default_fluid_pre = PreState::from_name(&interner, &default_fluid);
+        let default_fluid = state_id_from_settings(
+            &settings["default_fluid"],
+            Block::Lava.default_state(),
+        );
+        let default_block_pre = pre_state_from_canonical(default_block);
+        let default_fluid_pre = pre_state_from_canonical(default_fluid);
 
         let raw_table = crate::biome::parse_table(&resolver.biome_parameters());
         assert!(
@@ -1292,16 +1288,20 @@ impl NetherGenerator {
         );
         let table = BiomeTable::new_strict(raw_table);
 
-        let mut carver_replaceable = HashSet::new();
+        let mut carver_replaceable_names = HashSet::new();
         {
             let mut seen = HashSet::new();
             crate::compose::resolve_block_tag(
                 resolver,
                 "minecraft:nether_carver_replaceables",
-                &mut carver_replaceable,
+                &mut carver_replaceable_names,
                 &mut seen,
             );
         }
+        let carver_replaceable = carver_replaceable_names
+            .iter()
+            .filter_map(|name| Block::from_name(name).map(Block::default_state))
+            .collect();
 
         let mut carvers_by_biome = HashMap::new();
         let mut ores_by_biome = HashMap::new();
@@ -1342,6 +1342,13 @@ impl NetherGenerator {
             })
             .collect();
         let feature_biomes = decoration_catalog.feature_biomes();
+        for ore in ores_by_biome.values_mut().flatten() {
+            if let Some(id) = ore.registry_id() {
+                if let Some(token) = feature_biomes.token_for(id) {
+                    crate::feature::Placement::bind_membership(&mut ore.placements_mut(), token);
+                }
+            }
+        }
         let mut ore_definitions = HashMap::new();
         for ore in ores_by_biome.values().flatten() {
             if let Some(id) = ore.registry_id() {
@@ -1372,7 +1379,6 @@ impl NetherGenerator {
             seed,
             zoom_seed: nether_zoom_seed(seed),
             slot_count,
-            interner,
             surface,
             final_density,
             climate,
@@ -1382,8 +1388,6 @@ impl NetherGenerator {
             sea_level,
             cell_width,
             cell_height,
-            default_block,
-            default_fluid,
             default_block_pre,
             default_fluid_pre,
             carver_replaceable,
@@ -1525,7 +1529,8 @@ impl NetherGenerator {
             .collect();
 
         let column = schedule.run(ColumnStage::Output, || {
-            let (palette, blocks) = world.into_palette_and_blocks();
+            let (local_palette, blocks) = world.into_id_palette_and_blocks();
+            let palette = local_palette;
             NetherColumn {
             min_y: self.min_y,
             height: self.height,
@@ -1551,7 +1556,8 @@ impl NetherGenerator {
     #[must_use]
     pub fn column_shaped(&self, cx: i32, cz: i32) -> NetherColumn {
         let pre = self.pre_decoration_stage(cx, cz);
-        let (palette, blocks) = (*pre.0).clone().into_palette_and_blocks();
+        let (local_palette, blocks) = (*pre.0).clone().into_id_palette_and_blocks();
+        let palette = local_palette;
         NetherColumn {
             min_y: self.min_y,
             height: self.height,
@@ -1577,7 +1583,7 @@ impl NetherGenerator {
         target_z: i32,
         source_x: i32,
         source_z: i32,
-        overrides: &[(i32, i32, i32, String)],
+        overrides: &[(i32, i32, i32, StateId)],
     ) -> Vec<ParityDecorationSpill> {
         assert!(
             (target_x - source_x).abs() <= 1 && (target_z - source_z).abs() <= 1,
@@ -1609,7 +1615,7 @@ impl NetherGenerator {
         target_z: i32,
         source_x: i32,
         source_z: i32,
-        overrides: &[(i32, i32, i32, String)],
+        overrides: &[(i32, i32, i32, StateId)],
         resident_at: impl FnMut(i32, i32) -> Option<crate::dense_grid::DenseBlockGrid>,
     ) -> Vec<ParityDecorationSpill> {
         self.parity_source_pass_with_resident(
@@ -1632,7 +1638,7 @@ impl NetherGenerator {
         target_z: i32,
         source_x: i32,
         source_z: i32,
-        overrides: &[(i32, i32, i32, String)],
+        overrides: &[(i32, i32, i32, StateId)],
         mut resident_at: impl FnMut(i32, i32) -> Option<crate::dense_grid::DenseBlockGrid>,
     ) -> ParityTargetPass {
         let mut resident: [Option<Arc<crate::dense_grid::DenseBlockGrid>>; 25] =
@@ -1681,7 +1687,7 @@ impl NetherGenerator {
         &self,
         target_x: i32,
         target_z: i32,
-        overrides: &[(i32, i32, i32, String)],
+        overrides: &[(i32, i32, i32, StateId)],
         resident_at: impl FnMut(i32, i32) -> Option<crate::dense_grid::DenseBlockGrid>,
     ) -> Vec<ParityDecorationSpill> {
         self.parity_target_pass_with_resident(
@@ -1702,7 +1708,7 @@ impl NetherGenerator {
         &self,
         target_x: i32,
         target_z: i32,
-        overrides: &[(i32, i32, i32, String)],
+        overrides: &[(i32, i32, i32, StateId)],
         completed_sources: &BTreeSet<(i32, i32)>,
         mut resident_at: impl FnMut(i32, i32) -> Option<crate::dense_grid::DenseBlockGrid>,
     ) -> ParityTargetPass {
@@ -1751,7 +1757,7 @@ impl NetherGenerator {
     ) -> (
         crate::dense_grid::DenseBlockGrid,
         StructureBlocks,
-        Vec<(i32, i32, i32, String)>,
+        Vec<(i32, i32, i32, StateId)>,
     ) {
         let (world, structure_blocks, _, spills) = self.mixed_step7_stage_selected(
             cx,
@@ -1774,12 +1780,12 @@ impl NetherGenerator {
         center_world: crate::dense_grid::DenseBlockGrid,
         center_heights: &[i32; 256],
         selected_source: Option<(i32, i32)>,
-        overrides: &[(i32, i32, i32, String)],
+        overrides: &[(i32, i32, i32, StateId)],
     ) -> (
         crate::dense_grid::DenseBlockGrid,
         StructureBlocks,
         Vec<ParityDecorationSpill>,
-        Vec<(i32, i32, i32, String)>,
+        Vec<(i32, i32, i32, StateId)>,
     ) {
         self.mixed_step7_stage_selected_with_resident(
             cx,
@@ -1802,7 +1808,7 @@ impl NetherGenerator {
         center_world: crate::dense_grid::DenseBlockGrid,
         center_heights: &[i32; 256],
         selected_source: Option<(i32, i32)>,
-        overrides: &[(i32, i32, i32, String)],
+        overrides: &[(i32, i32, i32, StateId)],
         resident: Option<&[Option<Arc<crate::dense_grid::DenseBlockGrid>>; 25]>,
         capture_all_spills: bool,
         completed_sources: Option<&BTreeSet<(i32, i32)>>,
@@ -1810,7 +1816,7 @@ impl NetherGenerator {
         crate::dense_grid::DenseBlockGrid,
         StructureBlocks,
         Vec<ParityDecorationSpill>,
-        Vec<(i32, i32, i32, String)>,
+        Vec<(i32, i32, i32, StateId)>,
     ) {
         let mut center_world = center_world;
         if selected_source.is_some() {
@@ -1822,12 +1828,12 @@ impl NetherGenerator {
                 }
             }
             let (min_x, min_y, min_z, size_x, size_y, size_z) = center_world.bounds();
-            for &(x, y, z, ref state) in overrides {
+            for &(x, y, z, state) in overrides {
                 if (min_x..min_x + size_x).contains(&x)
                     && (min_y..min_y + size_y).contains(&y)
                     && (min_z..min_z + size_z).contains(&z)
                 {
-                    center_world.set(x, y, z, state);
+                    center_world.set_id(x, y, z, state);
                 }
             }
         }
@@ -1874,9 +1880,7 @@ impl NetherGenerator {
             }?;
             let qx = block_x.rem_euclid(16).div_euclid(4) as usize;
             let qz = block_z.rem_euclid(16).div_euclid(4) as usize;
-            source_biomes[qz * 4 + qx]
-                .builtin_or_none()
-                .map(BuiltinBiome::name)
+            Some(source_biomes[qz * 4 + qx])
         };
         let biome_at = |pos: crate::feature::BlockPos| {
             let shifted_x = pos.x - 2;
@@ -1910,12 +1914,8 @@ impl NetherGenerator {
             let qz = if selected & 1 == 0 { parent_z } else { parent_z + 1 };
             biome_quart_at(qx * 4, qz * 4)
         };
-        let biome_allows = |pos: crate::feature::BlockPos, feature_id: &str| {
-            biome_at(pos).is_some_and(|biome| {
-                feature_biomes
-                    .get(feature_id)
-                    .is_some_and(|eligible| eligible.contains(biome))
-            })
+        let biome_allows_membership = |pos: crate::feature::BlockPos, membership: crate::feature::FeatureMembershipId| {
+            biome_at(pos).is_some_and(|biome| feature_biomes.allows(membership, biome))
         };
         let mut heights = take_nether_height_scratch();
         Self::stitch_heights(&mut heights, 0, 0, center_heights);
@@ -1945,7 +1945,7 @@ impl NetherGenerator {
         };
         let centre_source = resident_source(0, 0).unwrap_or(&center_world);
         let mut ore_view = crate::feature::region_view::RegionView::over_wide_sources(
-            Arc::clone(&self.interner), cx, cz, self.min_y, self.height,
+            cx, cz, self.min_y, self.height,
             |dx, dz| resident_source(dx, dz).or_else(|| if dx == 0 && dz == 0 {
                 Some(centre_source)
             } else {
@@ -1961,7 +1961,7 @@ impl NetherGenerator {
         let resident_sources = resident;
         let grid_feature_biomes = self.feature_biomes.clone();
         let mut grid = crate::feature::vegetation::VegGrid::with_sources_and_flat_biome_ids_shared_zoomed(
-            Arc::clone(&self.interner), self.min_y, DECORATION_WINDOW_HEIGHT, cx * 16, cz * 16,
+            self.min_y, DECORATION_WINDOW_HEIGHT, cx * 16, cz * 16,
             crate::feature::REGION_MIN - crate::feature::VEG_PADDING,
             crate::feature::REGION_MAX + crate::feature::VEG_PADDING,
             |dx, dz| {
@@ -1990,11 +1990,11 @@ impl NetherGenerator {
             zoom_seed,
         );
         grid.set_generation_top(self.min_y + self.height);
-        self.veg_tags.bind(grid.interner());
+        self.veg_tags.bind();
         let mut ore_transferred = HashMap::new();
         let mut seeded = BTreeMap::new();
-        for &(x, y, z, ref state) in overrides {
-            let id = self.interner.id_of(state);
+        for &(x, y, z, state) in overrides {
+            let id = state;
             let lx = x - cx * 16;
             let lz = z - cz * 16;
             if ore_view.seed_read_id(lx, y, lz, id) {
@@ -2121,7 +2121,7 @@ impl NetherGenerator {
                             crate::feature::vegetation::ConfiguredFeature::HugeFungus(_)
                         );
                         crate::feature::vegetation::apply_decoration_entry_at_world_seed(&mut decoration_rng, self.seed, decoration_seed, origin, step, *found, placed, &mut grid, &self.veg_tags);
-                        for (x, y, z, _) in grid.dirty_cell_ids().skip(dirty_before) {
+                        for (x, y, z, _) in grid.dirty_cells().skip(dirty_before) {
                             let owned = x.div_euclid(16) == source_x && z.div_euclid(16) == source_z;
                             if is_huge_fungus && !owned {
                                 suppressed_huge.insert((x, y, z));
@@ -2144,24 +2144,26 @@ impl NetherGenerator {
                         );
                         decoration_at = entry_at + 1;
                     } else if let Some(ore) = next_ore.filter(|ore| ore.index() == index) {
-                        let input = crate::feature::OreInput { chunk_x: source_x, chunk_z: source_z, center_x: cx, center_z: cz, min_y: self.min_y, height: self.height, min_gen_y: self.min_y, gen_depth: self.height, read_min: crate::feature::ORE_READ_MIN, read_max: crate::feature::ORE_READ_MAX, ocean_floor_wg: &heights, in_tag: &in_tag, biome_allows: Some(&biome_allows) };
+                        let input = crate::feature::OreInput { chunk_x: source_x, chunk_z: source_z, center_x: cx, center_z: cz, min_y: self.min_y, height: self.height, min_gen_y: self.min_y, gen_depth: self.height, read_min: crate::feature::ORE_READ_MIN, read_max: crate::feature::ORE_READ_MAX, ocean_floor_wg: &heights, in_tag: &in_tag, biome_allows: None };
                         match ore {
-                            NetherOre::Standard(ore) => crate::feature::apply_ore_entry_at_seed(
+                            NetherOre::Standard(ore) => crate::feature::apply_ore_entry_at_seed_with_membership(
                                 &mut ore_random,
                                 ore_seed,
                                 &input,
                                 7,
                                 ore,
                                 &mut ore_view,
+                                Some(&biome_allows_membership),
                             ),
                             NetherOre::Scattered(ore) => {
-                                crate::feature::apply_scattered_ore_entry_at_seed(
+                                crate::feature::apply_scattered_ore_entry_at_seed_with_membership(
                                     &mut ore_random,
                                     ore_seed,
                                     &input,
                                     7,
                                     ore,
                                     &mut ore_view,
+                                    Some(&biome_allows_membership),
                                 );
                             }
                         }
@@ -2186,7 +2188,7 @@ impl NetherGenerator {
         let mut world = resident_source(0, 0).cloned().unwrap_or(center_world);
         let mut decoration_spills = Vec::new();
         let mut aggregate_spills = BTreeMap::new();
-        for (x, y, z, state) in grid.dirty_cell_ids() {
+        for (x, y, z, state) in grid.dirty_cells() {
             let transient = suppressed_huge.contains(&(x, y, z));
             if capture_all_spills
                 && (cx * 16 - 16..cx * 16 + 32).contains(&x)
@@ -2210,7 +2212,7 @@ impl NetherGenerator {
                     x,
                     y,
                     z,
-                    self.interner.name_of(state).to_owned(),
+                    state,
                 ));
             }
         }
@@ -2224,7 +2226,7 @@ impl NetherGenerator {
                         ParityDecorationSpill {
                             source: (cx, cz),
                             position: (x, y, z),
-                            state: self.interner.name_of(state).to_owned(),
+                            state,
                             transient,
                         },
                     );
@@ -2240,13 +2242,13 @@ impl NetherGenerator {
             );
         }
         if let Some(source) = selected_source {
-            for (x, y, z, state) in grid.dirty_cell_ids() {
+            for (x, y, z, state) in grid.dirty_cells() {
                 let transient = suppressed_huge.contains(&(x, y, z));
                 if transient || seeded.get(&(x, y, z)).copied() != Some(state) {
                     final_spills.insert((x, y, z), ParityDecorationSpill {
                         source,
                         position: (x, y, z),
-                        state: self.interner.name_of(state).to_owned(),
+                        state,
                         transient,
                     });
                 }
@@ -2551,15 +2553,6 @@ impl NetherGenerator {
         // Re-derived rather than reasoned about, for the reason `overworld::fill`
         // gives: a wrong `PreClass` changes which surface rules fire and still
         // produces a plausible column.
-        debug_assert_eq!(
-            self.default_block_pre,
-            PreState::from_name(&self.interner, &self.default_block),
-        );
-        debug_assert_eq!(
-            self.default_fluid_pre,
-            PreState::from_name(&self.interner, &self.default_fluid),
-        );
-
         let pre = |lx: i32, y: i32, lz: i32| -> PreState {
             let ly = y - self.min_y;
             if !(0..self.height).contains(&ly) {
@@ -2662,7 +2655,6 @@ impl NetherGenerator {
         // Consume the ordered per-column diff through the fixed materialization
         // cursor; this keeps palette insertion independent of hash iteration.
         let world = crate::compose::materialize_column(
-            &self.interner,
             field,
             &surface_diff,
             base_x,
@@ -2698,7 +2690,7 @@ impl NetherGenerator {
                     .map(Vec::as_slice)
                     .unwrap_or(&[])
             };
-        let top_material = |_: i32, _: i32, _: i32, _: bool| -> Option<String> { None };
+        let top_material = |_: i32, _: i32, _: i32, _: bool| -> Option<StateId> { None };
         crate::carver::apply_carvers(
             self.seed,
             cx,
@@ -2955,8 +2947,7 @@ impl NetherGenerator {
 
         let min_x = source_x * 16;
         let min_z = source_z * 16;
-        let mut source_world = crate::dense_grid::DenseBlockGrid::with_interner(
-            Arc::clone(&self.interner),
+        let mut source_world = crate::dense_grid::DenseBlockGrid::with_default(
             min_x,
             self.min_y,
             min_z,
@@ -3068,8 +3059,12 @@ impl NetherGenerator {
                         random.set_feature_seed(decoration_seed, index as i32, step);
                         random
                     });
-                    let solid_render = |state: &str| {
-                        self.veg_tags.simple_block_support.solid_render.test(state)
+                    self.veg_tags.bind();
+                    let solid_render = |state: StateId| {
+                        self.veg_tags
+                            .simple_block_support
+                            .solid_render
+                            .test_id(state)
                     };
                     let mut cached_fortress = false;
                     for piece in &start.pieces {
@@ -3127,7 +3122,7 @@ impl NetherGenerator {
                 }
                 if let Some(blocks) = &piece.blocks {
                     for block in blocks.iter() {
-                        mutation.write(&mut world, block.pos[0], block.pos[1], block.pos[2], &block.state);
+                        mutation.write(&mut world, block.pos[0], block.pos[1], block.pos[2], block.state);
                     }
                 }
                 if let Some(placement) = &piece.placement {
@@ -3179,12 +3174,8 @@ impl NetherGenerator {
                             && (min_z..min_z + size_z).contains(&z)
                             && world.get_id(x, y, z) == StateId::AIR
                         {
-                            let state = crate::structure::template::BlockState::parse(
-                                "minecraft:dried_ghast[facing=north,hydration=0,waterlogged=false]",
-                            )
-                            .rotate(crate::structure::template::Rotation::random(&mut ghast));
-                            let state = state.canonical();
-                            mutation.write(&mut world, x, y, z, &state);
+                            let facing = ghast.next_int_bounded(4) as usize;
+                            mutation.write(&mut world, x, y, z, dried_ghast_states()[facing]);
                         }
                     }
                 }
@@ -3254,7 +3245,7 @@ impl NetherGenerator {
                 }
             }
         }
-        let structure_blocks = mutation_recorder.finish(world.interner());
+        let structure_blocks = mutation_recorder.finish();
         (world, placement_loot, structure_blocks)
     }
 
@@ -3323,20 +3314,43 @@ impl NetherGenerator {
     }
 }
 
-/// Renders a noise-settings block-state object (`{"Name": …, "Properties": {…}}`)
-/// as this engine's canonical `name[k=v,…]` string, properties **sorted by key**.
-///
-/// The properties are not decoration: `noise_settings/nether.json` carries
-/// `"default_fluid": {"Name": "minecraft:lava", "Properties": {"level": "0"}}`,
-/// and reading only `Name` yields `minecraft:lava` — a *different string* from the
-/// `minecraft:lava[level=0]` [`crate::carver`] writes for the same state. One
-/// column would then hold two palette entries for one block and every downstream
-/// full-state match would miss for the bare form.
-fn canonical_state_from_settings(value: &Value, fallback: &str) -> String {
-    let Some(name) = value["Name"].as_str() else {
-        return fallback.to_string();
+fn pre_state_from_canonical(canonical: StateId) -> PreState {
+    let class = match canonical.block() {
+        Block::Air => PreClass::Air,
+        Block::Water | Block::Lava => PreClass::Fluid,
+        _ => PreClass::Stone,
     };
-    match value["Properties"].as_object() {
+    PreState {
+        state: canonical,
+        class,
+    }
+}
+
+fn dried_ghast_states() -> &'static [StateId; 4] {
+    static STATES: OnceLock<[StateId; 4]> = OnceLock::new();
+    STATES.get_or_init(|| {
+        [V::North, V::East, V::South, V::West].map(|facing| {
+            let mut properties = Properties::empty();
+            properties = properties
+                .with_builtin(PropertyKey::Facing, facing)
+                .expect("generated dried ghast facing property is valid");
+            properties = properties
+                .with_builtin(PropertyKey::Hydration, V::Value0)
+                .expect("generated dried ghast hydration property is valid");
+            properties = properties
+                .with_builtin(PropertyKey::Waterlogged, V::False)
+                .expect("generated dried ghast waterlogged property is valid");
+            Properties::state_for_block(Block::DriedGhast, &properties)
+                .expect("generated dried ghast state is valid")
+        })
+    })
+}
+
+fn state_id_from_settings(value: &Value, fallback: StateId) -> StateId {
+    let Some(name) = value["Name"].as_str() else {
+        return fallback;
+    };
+    let text = match value["Properties"].as_object() {
         Some(properties) if !properties.is_empty() => {
             let mut rendered: Vec<String> = properties
                 .iter()
@@ -3351,8 +3365,9 @@ fn canonical_state_from_settings(value: &Value, fallback: &str) -> String {
             rendered.sort();
             format!("{name}[{}]", rendered.join(","))
         }
-        _ => name.to_string(),
-    }
+        _ => name.to_owned(),
+    };
+    StateId::from_state_str(&text).unwrap_or(fallback)
 }
 
 #[cfg(test)]
@@ -3364,6 +3379,7 @@ mod tests {
 
     use sha2::{Digest as _, Sha256};
     use lodestone_data::biomes::{BiomeRef, BuiltinBiome};
+    use lodestone_data::block_states::StateId;
 
     use super::{
         MixedEntryWriter, NetherGenerator, build_nether_feature_lists, decoration_random,
@@ -3374,7 +3390,6 @@ mod tests {
     use crate::density::{NoiseParams, Resolver};
     use crate::feature::region_view::RegionView;
     use crate::feature::vegetation::VegGrid;
-    use crate::interner::StateInterner;
     use crate::rng::{LegacyRandomSource, RandomSource, WorldgenRandom};
     use serde_json::Value;
 
@@ -3523,7 +3538,14 @@ mod tests {
         for lx in local_lo..local_hi {
             for lz in local_lo..local_hi {
                 for y in min_y..min_y + height {
-                    digest.update(format!("{lx},{y},{lz}={}\n", grid.get(center_x * 16 + lx, y, center_z * 16 + lz)).as_bytes());
+                    digest.update(
+                        format!(
+                            "{lx},{y},{lz}={}\n",
+                            grid.get(center_x * 16 + lx, y, center_z * 16 + lz)
+                                .canonical_state(),
+                        )
+                        .as_bytes(),
+                    );
                 }
             }
         }
@@ -3550,13 +3572,13 @@ mod tests {
             }
         }
         let mut grid = VegGrid::with_sources(
-            Arc::clone(&generator.interner), generator.min_y, generator.height,
+            generator.min_y, generator.height,
             center_x * 16, center_z * 16,
             crate::feature::REGION_MIN - crate::feature::VEG_PADDING,
             crate::feature::REGION_MAX + crate::feature::VEG_PADDING,
             |dx, dz| sources.get(&(dx, dz)).map(|source| Arc::clone(&source.0)),
         );
-        generator.veg_tags.bind(grid.interner());
+        generator.veg_tags.bind();
         for dx in -1..=1 {
             for dz in -1..=1 {
                 let source_x = center_x + dx;
@@ -3579,7 +3601,10 @@ mod tests {
                             "c057c17bc26d8d95038fce12a550f9d58468778cf9854b71465bda9e8eb23a07",
                             "the reference delta's padded input must be identical before local write order can be compared",
                         );
-                        assert_eq!(grid.get(-4_018, 57, -3_972), "minecraft:netherrack");
+                        assert_eq!(
+                            grid.get(-4_018, 57, -3_972),
+                            StateId::from_state_str("minecraft:netherrack").unwrap(),
+                        );
                     }
                     crate::feature::vegetation::apply_decoration_entry_at_seed(
                         &mut random, decoration_seed, origin, 4, *index, placed, &mut grid, &generator.veg_tags,
@@ -3696,10 +3721,8 @@ mod tests {
 
     #[test]
     fn nether_vegetation_biome_gate_has_positive_and_negative_candidate_controls() {
-        let interner = Arc::new(StateInterner::new());
-        let air = interner.id_of("minecraft:air");
-        let source = Arc::new(DenseBlockGrid::with_interner(
-            Arc::clone(&interner),
+        let air = StateId::AIR;
+        let source = Arc::new(DenseBlockGrid::with_default(
             0,
             0,
             0,
@@ -3716,7 +3739,7 @@ mod tests {
             }
         });
         let cells = Arc::new(biome_quarts);
-        let feature_biomes = [(
+        let feature_biomes: HashMap<String, HashSet<String>> = [(
             "minecraft:crimson_fungi".to_owned(),
             ["minecraft:crimson_forest".to_owned()].into_iter().collect(),
         )]
@@ -3724,7 +3747,6 @@ mod tests {
         .collect();
         let feature_biomes = Arc::new(feature_biomes);
         let grid = VegGrid::with_sources_and_flat_biomes_shared_zoomed(
-            Arc::clone(&interner),
             0,
             super::DECORATION_WINDOW_HEIGHT,
             0,
@@ -3765,7 +3787,6 @@ mod tests {
             })
         }));
         let id_grid = VegGrid::with_sources_and_flat_biome_ids_shared_zoomed(
-            Arc::clone(&interner),
             0,
             super::DECORATION_WINDOW_HEIGHT,
             0,
@@ -3791,11 +3812,9 @@ mod tests {
     }
 
     fn mushroom_fixture_source() -> Arc<DenseBlockGrid> {
-        let interner = Arc::new(StateInterner::new());
-        let air = interner.id_of("minecraft:air");
-        let netherrack = interner.id_of("minecraft:netherrack");
-        let mut source = DenseBlockGrid::with_interner(
-            Arc::clone(&interner),
+        let air = StateId::AIR;
+        let netherrack = StateId::from_state_str("minecraft:netherrack").unwrap();
+        let mut source = DenseBlockGrid::with_default(
             -32,
             0,
             -32,
@@ -3813,9 +3832,7 @@ mod tests {
     }
 
     fn mushroom_fixture_grid(source: &Arc<DenseBlockGrid>, height: i32) -> VegGrid {
-        let interner = Arc::clone(source.interner());
         VegGrid::with_sources(
-            Arc::clone(&interner),
             0,
             height,
             0,
@@ -3842,10 +3859,10 @@ mod tests {
         seed: i64,
         index: usize,
         placed: &crate::feature::vegetation::PlacedRef,
-    ) -> Vec<(i32, i32, i32, String)> {
+    ) -> Vec<(i32, i32, i32, StateId)> {
         let mut grid = mushroom_fixture_grid(source, height);
         let tags = mushroom_fixture_tags();
-        tags.bind(grid.interner());
+        tags.bind();
         let mut random = decoration_random();
         random.begin_decoration_source();
         let decoration_seed = random.set_decoration_seed(seed, 0, 0);
@@ -3860,7 +3877,7 @@ mod tests {
             &tags,
         );
         grid.dirty_cells()
-            .map(|(x, y, z, state)| (x, y, z, state.to_owned()))
+            .map(|(x, y, z, state)| (x, y, z, state))
             .collect()
     }
 
@@ -3871,7 +3888,7 @@ mod tests {
         let state = match placed.feature.as_ref() {
             crate::feature::vegetation::ConfiguredFeature::SimpleBlock(
                 crate::feature::vegetation::BlockStateProvider::Simple(state),
-            ) => state.as_str(),
+            ) => state.canonical_state(),
             other => panic!("normal mushroom must be a simple block, got {other:?}"),
         };
         assert_eq!(state, expected_state);
@@ -3914,6 +3931,8 @@ mod tests {
         assert_normal_mushroom_contract(&red, "minecraft:red_mushroom");
 
         let source = mushroom_fixture_source();
+        let brown_state = StateId::from_state_str("minecraft:brown_mushroom").unwrap();
+        let red_state = StateId::from_state_str("minecraft:red_mushroom").unwrap();
         let mut brown_case = None;
         for seed in 0..4096_i64 {
             let full = run_mushroom_fixture(
@@ -3925,7 +3944,7 @@ mod tests {
             );
             if full
                 .iter()
-                .any(|(_, y, _, state)| *y >= 128 && state == "minecraft:brown_mushroom")
+                .any(|(_, y, _, state)| *y >= 128 && *state == brown_state)
             {
                 let narrow = run_mushroom_fixture(&source, 128, seed, 1, &brown);
                 brown_case = Some((seed, full, narrow));
@@ -3937,7 +3956,7 @@ mod tests {
         };
         assert!(
             full.iter().any(|(_, y, _, state)| {
-                *y >= 128 && state == "minecraft:brown_mushroom"
+                *y >= 128 && *state == brown_state
             }),
             "the full resident window must retain the upper brown mushroom",
         );
@@ -3946,7 +3965,7 @@ mod tests {
             "control: the canonical 128-row terrain grid rejects the same upper write",
         );
         assert!(
-            full.iter().all(|(_, _, _, state)| state == "minecraft:brown_mushroom"),
+            full.iter().all(|(_, _, _, state)| *state == brown_state),
             "brown source must not be replaced by the red mushroom body",
         );
 
@@ -3960,19 +3979,17 @@ mod tests {
         assert!(
             red_writes
                 .iter()
-                .all(|(_, _, _, state)| state == "minecraft:red_mushroom"),
+                .all(|(_, _, _, state)| *state == red_state),
             "negative control: red's global index/body must never write brown state",
         );
     }
 
     #[test]
     fn mixed_entry_bridge_transfers_each_final_cell_once_in_both_directions() {
-        let interner = Arc::new(StateInterner::new());
-        let air = interner.id_of("minecraft:air");
-        let basalt = interner.id_of("minecraft:basalt[axis=y]");
-        let blackstone = interner.id_of("minecraft:blackstone");
-        let source = Arc::new(DenseBlockGrid::with_interner(
-            Arc::clone(&interner),
+        let air = StateId::AIR;
+        let basalt = StateId::from_state_str("minecraft:basalt[axis=y]").unwrap();
+        let blackstone = StateId::from_state_str("minecraft:blackstone").unwrap();
+        let source = Arc::new(DenseBlockGrid::with_default(
             -16,
             0,
             -16,
@@ -3983,7 +4000,6 @@ mod tests {
         ));
         let mut ore_view = RegionView::over_region_grid(&source, 0, 8);
         let mut grid = VegGrid::with_sources(
-            Arc::clone(&interner),
             0,
             8,
             0,
@@ -4091,13 +4107,11 @@ mod tests {
 
     #[test]
     fn mixed_entry_bridge_converts_negative_region_view_coordinates_to_world_space() {
-        let interner = Arc::new(StateInterner::new());
-        let air = interner.id_of("minecraft:air");
-        let blackstone = interner.id_of("minecraft:blackstone");
+        let air = StateId::AIR;
+        let blackstone = StateId::from_state_str("minecraft:blackstone").unwrap();
         let centre_x = -250;
         let centre_z = -250;
-        let source = Arc::new(DenseBlockGrid::with_interner(
-            Arc::clone(&interner),
+        let source = Arc::new(DenseBlockGrid::with_default(
             centre_x * 16 - 16,
             0,
             centre_z * 16 - 16,
@@ -4107,10 +4121,9 @@ mod tests {
             air,
         ));
         let mut ore_view = RegionView::over_sources(
-            Arc::clone(&interner), centre_x, centre_z, 0, 8, |_, _| Some(&*source),
+            centre_x, centre_z, 0, 8, |_, _| Some(&*source),
         );
         let mut grid = VegGrid::with_sources(
-            Arc::clone(&interner),
             0,
             8,
             centre_x * 16,
@@ -4149,11 +4162,9 @@ mod tests {
 
     #[test]
     fn mixed_entry_bridge_retains_step9_spill_outside_the_ore_window() {
-        let interner = Arc::new(StateInterner::new());
-        let air = interner.id_of("minecraft:air");
-        let basalt = interner.id_of("minecraft:basalt[axis=y]");
-        let source = Arc::new(DenseBlockGrid::with_interner(
-            Arc::clone(&interner),
+        let air = StateId::AIR;
+        let basalt = StateId::from_state_str("minecraft:basalt[axis=y]").unwrap();
+        let source = Arc::new(DenseBlockGrid::with_default(
             -16,
             0,
             -16,
@@ -4164,7 +4175,6 @@ mod tests {
         ));
         let mut ore_view = RegionView::over_region_grid(&source, 0, 8);
         let mut grid = VegGrid::with_sources(
-            Arc::clone(&interner),
             0,
             8,
             0,
@@ -4198,11 +4208,9 @@ mod tests {
 
     #[test]
     fn mixed_entry_bridge_retains_upper_half_spill_outside_canonical_terrain() {
-        let interner = Arc::new(StateInterner::new());
-        let air = interner.id_of("minecraft:air");
-        let brown = interner.id_of("minecraft:brown_mushroom");
-        let source = Arc::new(DenseBlockGrid::with_interner(
-            Arc::clone(&interner),
+        let air = StateId::AIR;
+        let brown = StateId::from_state_str("minecraft:brown_mushroom").unwrap();
+        let source = Arc::new(DenseBlockGrid::with_default(
             -16,
             0,
             -16,
@@ -4213,7 +4221,6 @@ mod tests {
         ));
         let mut ore_view = RegionView::over_region_grid(&source, 0, 128);
         let mut grid = VegGrid::with_sources(
-            Arc::clone(&interner),
             0,
             super::DECORATION_WINDOW_HEIGHT,
             0,

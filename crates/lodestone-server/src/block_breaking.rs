@@ -84,11 +84,12 @@
 //! # Dependencies
 //!
 //! [`lodestone_data::hardness`] and [`lodestone_data::tool`] for the censuses,
-//! `crate::mobs::block_state_id` to resolve a `ChunkSource` state string to the
-//! global state id both censuses key on, and `lodestone_model` for the
+//! `lodestone_data::block_states::StateId` both censuses key on, and
+//! `lodestone_model` for the
 //! vocabulary. Names no packet and no protocol version.
 
 use lodestone_game::mining::{BreakInputs, efficiency_bonus};
+use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockPos, ItemStack, Vec3};
 
 use crate::vitals::EYE_HEIGHT;
@@ -246,7 +247,7 @@ impl PendingBreak {
 /// * `>= 1.0` — an instant break: the block goes on `StartDestroy`.
 /// * `0.0` — unbreakable (`hardness == -1.0`), so no tick count ever breaks it.
 #[must_use]
-pub(crate) fn progress_per_tick(block_state: &str, held: Option<&ItemStack>) -> Option<f32> {
+pub(crate) fn progress_per_tick(block_state: StateId, held: Option<&ItemStack>) -> Option<f32> {
     progress_per_tick_with_effects(block_state, held, None, None)
 }
 
@@ -255,24 +256,16 @@ pub(crate) fn progress_per_tick(block_state: &str, held: Option<&ItemStack>) -> 
 /// multiplier, so an effect changes the same f32 quantity at both ends.
 #[must_use]
 pub(crate) fn progress_per_tick_with_effects(
-    block_state: &str,
+    block_state: StateId,
     held: Option<&ItemStack>,
     haste_amplifier: Option<u32>,
     mining_fatigue: Option<u32>,
 ) -> Option<f32> {
-    // `_or_default`, not the exact lookup: both censuses read below are keyed by
-    // state id but carry a per-*block* value, and a bare name like
-    // `"minecraft:sugar_cane"` is not in the exact index at all (every state of
-    // it carries `age`). Missing there produced a `None` here, which the caller
-    // reads as "unknown, do not validate" — and that path still waits for a
-    // `StopDestroy` that an instant block never sends. See
-    // `crate::mobs::block_state_id_or_default`.
-    let state_id = crate::mobs::block_state_id_or_default(block_state)?;
-    let hardness = lodestone_data::hardness::hardness(state_id).hardness;
+    let hardness = lodestone_data::hardness::hardness(block_state).hardness;
     if hardness < 0.0 {
         return Some(0.0);
     }
-    let mut mining = lodestone_data::tool::mining(held, state_id);
+    let mut mining = lodestone_data::tool::mining(held, block_state);
     // Efficiency is represented as the typed `mining_efficiency` contribution
     // to dig speed. The stack stores session-local enchantment ids, so resolve
     // the id through the server-owned registry rather than comparing an id
@@ -335,6 +328,10 @@ mod tests {
     use lodestone_model::ItemEnchantment;
     use lodestone_model::{BlockActionKind, BlockFace, ClientAction};
 
+    fn state(name: &str) -> StateId {
+        StateId::from_state_str(name).expect("fixture state must be in the built-in registry")
+    }
+
     fn enchanted_pickaxe(enchantment: &str, level: u32) -> ItemStack {
         let mut stack = ItemStack::new("minecraft:diamond_pickaxe".parse().unwrap(), 1);
         stack.components.enchantments.push(ItemEnchantment {
@@ -355,7 +352,7 @@ mod tests {
             "minecraft:sugar_cane",
             "minecraft:torch",
         ] {
-            let per = progress_per_tick(name, None)
+            let per = progress_per_tick(state(name), None)
                 .unwrap_or_else(|| panic!("{name} is not in the hardness census"));
             assert!(
                 per >= 1.0,
@@ -369,7 +366,7 @@ mod tests {
     /// `None`-clock path that skips the timing test.
     #[test]
     fn an_unbreakable_block_never_breaks() {
-        let per = progress_per_tick("minecraft:bedrock", None).expect("bedrock is in the census");
+        let per = progress_per_tick(state("minecraft:bedrock"), None).expect("bedrock is in the census");
         assert_eq!(per, 0.0, "bedrock must price at zero progress per tick");
         let dig = PendingBreak {
             pos: BlockPos::new(0, 0, 0),
@@ -401,8 +398,8 @@ mod tests {
     fn efficiency_changes_progress_by_its_typed_bonus() {
         let plain = enchanted_pickaxe("minecraft:unbreaking", 3);
         let efficient = enchanted_pickaxe("minecraft:efficiency", 5);
-        let plain_progress = progress_per_tick("minecraft:stone", Some(&plain)).unwrap();
-        let efficient_progress = progress_per_tick("minecraft:stone", Some(&efficient)).unwrap();
+        let plain_progress = progress_per_tick(state("minecraft:stone"), Some(&plain)).unwrap();
+        let efficient_progress = progress_per_tick(state("minecraft:stone"), Some(&efficient)).unwrap();
         let expected_plain = 8.0 / (1.5 * 30.0);
         let expected_efficient = (8.0 + 26.0) / (1.5 * 30.0);
         assert!((plain_progress - expected_plain).abs() < 1e-6, "plain={plain_progress}");
@@ -417,8 +414,8 @@ mod tests {
     fn unrelated_enchantment_does_not_change_mining_progress() {
         let plain = ItemStack::new("minecraft:diamond_pickaxe".parse().unwrap(), 1);
         let fortune = enchanted_pickaxe("minecraft:fortune", 3);
-        let plain_progress = progress_per_tick("minecraft:stone", Some(&plain)).unwrap();
-        let fortune_progress = progress_per_tick("minecraft:stone", Some(&fortune)).unwrap();
+        let plain_progress = progress_per_tick(state("minecraft:stone"), Some(&plain)).unwrap();
+        let fortune_progress = progress_per_tick(state("minecraft:stone"), Some(&fortune)).unwrap();
         assert_eq!(fortune_progress, plain_progress);
     }
 
@@ -460,7 +457,7 @@ mod tests {
 
         for (label, client, effects, expected_progress, expected_ticks) in fixtures {
             let server = progress_per_tick_with_effects(
-                "minecraft:stone",
+                state("minecraft:stone"),
                 None,
                 effects.map(|(haste, _)| haste),
                 effects.map(|(_, fatigue)| fatigue),
@@ -533,7 +530,7 @@ mod tests {
             haste_amplifier: Some(0),
             ..correct
         };
-        let server = progress_per_tick_with_effects("minecraft:stone", None, Some(1), None)
+        let server = progress_per_tick_with_effects(state("minecraft:stone"), None, Some(1), None)
             .expect("stone is in the server census");
         assert_eq!(server, correct.progress_per_tick());
         assert_eq!(correct.ticks_to_break(), Some(108));
@@ -570,7 +567,7 @@ mod tests {
     /// of ticks has passed.
     #[test]
     fn obsidian_rejects_an_instant_stop_and_accepts_a_real_dig() {
-        let per = progress_per_tick("minecraft:obsidian", None).expect("obsidian is in the census");
+        let per = progress_per_tick(state("minecraft:obsidian"), None).expect("obsidian is in the census");
         let dig = PendingBreak {
             pos: BlockPos::new(4, 64, 4),
             progress_per_tick: per,
@@ -604,7 +601,7 @@ mod tests {
     #[test]
     fn a_same_tick_stop_defers_and_then_breaks() {
         let per =
-            progress_per_tick("minecraft:deepslate[axis=y]", None).expect("deepslate is in census");
+            progress_per_tick(state("minecraft:deepslate[axis=y]"), None).expect("deepslate is in census");
         let dig = PendingBreak {
             pos: BlockPos::new(0, -50, 0),
             progress_per_tick: per,

@@ -115,6 +115,7 @@
 
 use std::collections::HashMap;
 
+use lodestone_data::block::Block;
 use lodestone_worldgen_core::rng::RandomSource;
 
 use super::coded::Facing;
@@ -124,14 +125,14 @@ use super::{BoundingBox, CodedBlock, StartContext, StructurePiece};
 mod graph;
 use graph::{RoomDef, generate_room_graph};
 
-const BASE_GRAY: &str = "minecraft:prismarine";
-const BASE_LIGHT: &str = "minecraft:prismarine_bricks";
-const BASE_BLACK: &str = "minecraft:dark_prismarine";
-const LAMP_BLOCK: &str = "minecraft:sea_lantern";
-const WET_SPONGE: &str = "minecraft:wet_sponge";
-const GOLD_BLOCK: &str = "minecraft:gold_block";
-const WATER: &str = "minecraft:water";
-const AIR: &str = "minecraft:air";
+const BASE_GRAY: Block = Block::Prismarine;
+const BASE_LIGHT: Block = Block::PrismarineBricks;
+const BASE_BLACK: Block = Block::DarkPrismarine;
+const LAMP_BLOCK: Block = Block::SeaLantern;
+const WET_SPONGE: Block = Block::WetSponge;
+const GOLD_BLOCK: Block = Block::GoldBlock;
+const WATER: Block = Block::Water;
+const AIR: Block = Block::Air;
 
 /// The six-direction 3D data-value ordinals: `DOWN(0) UP(1) NORTH(2) SOUTH(3)
 /// WEST(4) EAST(5)` — a fixed, standard ordinal order,
@@ -530,7 +531,7 @@ impl<'a> Canvas<'a> {
         let pos = self.piece.world_pos(x, y, z);
         self.blocks.push(CodedBlock {
             pos,
-            state: transformed.canonical(),
+            state: transformed.id,
         });
     }
 

@@ -109,8 +109,9 @@ use lodestone_model::{
 use lodestone_model::command_tree::CommandSuggestionEntry;
 use lodestone_data::{
     block::Block,
+    block_properties::{BuiltinPropertyValue, Properties, PropertyKey, PropertyValue},
     block_items,
-    block_states::BlockStateValue,
+    block_states::StateId,
     item::Item,
     potion::PotionId,
 };
@@ -133,8 +134,8 @@ use crate::brewing::{Bottle, BottleKind, is_ingredient};
 use crate::composter::{InsertOutcome, compostable_chance};
 use crate::command::{CommandCaller, CommandDispatch, CommandSession};
 use crate::chunk::{
-    AIR, ChunkColumn, ChunkGenerationStage, ColumnLightSettlementError, ChunkSource,
-    generate_columns_offloaded, is_air_or_fluid, is_water,
+    ChunkColumn, ChunkGenerationStage, ColumnLightSettlementError, ChunkSource,
+    generate_columns_offloaded,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use crate::chunk::generate_columns_parallel;
@@ -155,7 +156,7 @@ use crate::protocol::{
     Abilities, BossBarSnapshot, ChunkEncodeError, EntitySnapshot, MerchantOfferOut,
     ResourcePackPush, ServerBound, ServerDirective, ServerProtocol,
 };
-use crate::redstone::{WorldState, COMPARATOR, OBSERVER, REPEATER};
+use crate::redstone::WorldState;
 use crate::redstone_diode::{set_comparator, set_repeater};
 use crate::redstone_observer::set_observer;
 use crate::scheduled_tick::{ScheduledTick, ScheduledTickKind, ScheduledTickQueue};
@@ -906,7 +907,7 @@ fn end_gateway_destination<S: ChunkSource + ?Sized>(
     block_entities: &BlockEntityHandle,
     pos: BlockPos,
 ) -> Option<Vec3> {
-    if !crate::portal::is_end_gateway(&source.block_state(pos.x, pos.y, pos.z)) {
+    if !crate::portal::is_end_gateway(source.block_state_id(pos.x, pos.y, pos.z)) {
         return None;
     }
     let configured = block_entities
@@ -926,7 +927,7 @@ fn end_gateway_exit_resident<S: ChunkSource + ?Sized>(
     pos: BlockPos,
 ) -> Option<(BlockPos, bool)> {
     let state = resident_block_state(source, pos.x, pos.y, pos.z)?;
-    if !crate::portal::is_end_gateway(&state) {
+    if !crate::portal::is_end_gateway(state) {
         return None;
     }
     block_entities
@@ -995,7 +996,7 @@ fn resolve_destination_after_admission<S: ChunkSource + ?Sized>(
         index,
         approximate,
     ) {
-        let axis = crate::portal::Axis::from_state(&destination.block_state(
+        let axis = crate::portal::Axis::from_state(destination.block_state_id(
             existing.x,
             existing.y,
             existing.z,
@@ -1189,7 +1190,7 @@ where
     let Some(entry_state) = resident_block_state(current.get(), entry.x, entry.y, entry.z) else {
         return Ok(None);
     };
-    let source_axis = crate::portal::Axis::from_state(&entry_state);
+    let source_axis = crate::portal::Axis::from_state(entry_state);
     // # Why the outbound leg is offloaded and the return leg is not
     //
     // `resolve_destination` is synchronous CPU work whose *reads* may each generate a
@@ -1253,7 +1254,7 @@ where
     // standing in.
     if let Some(created) = &resolved.created {
         for (pos, block) in &created.blocks {
-            destination.set_block(pos.x, pos.y, pos.z, block);
+            destination.set_block(pos.x, pos.y, pos.z, *block);
         }
         if let Some(index) = index.as_ref() {
             index.extend(to, created.portal_cells.iter().copied());
@@ -1407,7 +1408,7 @@ where
             .await;
         }
         for write in &init.block_writes {
-            destination.set_block(write.x, write.y, write.z, &write.state);
+            destination.set_block(write.x, write.y, write.z, write.state);
         }
     }
 
@@ -6057,14 +6058,14 @@ where
     }
     match action {
         BlockActionKind::StartDestroy => {
-            let target = source.block_state(pos.x, pos.y, pos.z);
-            let per_tick = crate::block_breaking::progress_per_tick(&target, held);
+            let target = source.block_state_id(pos.x, pos.y, pos.z);
+            let per_tick = crate::block_breaking::progress_per_tick(target, held);
             // Creative bypasses the hardness clock only for a known, present,
             // breakable block. Air, an unbreakable state, and an unknown state
             // are invalid targets and must not become a write merely because
             // the caller has instant-build abilities.
             if creative
-                && (crate::random_tick::is_air_variant(&target)
+                && (target.block() == Block::Air
                     || per_tick.is_none_or(|per| per <= 0.0))
             {
                 *pending_break = None;
@@ -6198,10 +6199,8 @@ where
     P: ServerProtocol,
     S: ChunkSource + ?Sized,
 {
-    let current = source.block_state(pos.x, pos.y, pos.z);
-    let Some(block_state) = lodestone_data::block_states::StateId::from_state_str(&current) else {
-        return Ok(true);
-    };
+    let current = source.block_state_id(pos.x, pos.y, pos.z);
+    let block_state = current;
     let Some(proposals) = world.proposal_handle() else {
         return Ok(true);
     };
@@ -6220,7 +6219,7 @@ where
         apply(
             conn,
             wire_state,
-            proto.encode_block_update(pos.x, pos.y, pos.z, &current),
+            proto.encode_block_update(pos.x, pos.y, pos.z, current),
         )
         .await?;
     }
@@ -6290,7 +6289,7 @@ where
     // state cannot be recovered. Capture its fluid state before writing the
     // replacement so a waterlogged block leaves its water source rather than
     // unconditional air (see `new_state` below).
-    let broken = source.block_state(pos.x, pos.y, pos.z);
+    let broken = source.block_state_id(pos.x, pos.y, pos.z);
     // The removal write preserves a cell's *fluid* state. For a dry block
     // `fluid_state_of` is `None` and this is plain air, which is why every
     // existing break gate — all of them dry blocks — could not see the
@@ -6298,9 +6297,9 @@ where
     // (`fluid_state_of` reports `amount: 8, falling: false`), so its
     // `block_state()` is `minecraft:water[level=0]`, the source state left
     // behind.
-    let new_state = crate::fluid::fluid_state_of(&broken)
-        .map(crate::fluid::FluidState::block_state)
-        .unwrap_or_else(|| AIR.to_owned());
+    let new_state = crate::fluid::fluid_state_of_id(broken)
+        .map(crate::fluid::FluidState::block_state_id)
+        .unwrap_or_else(|| Block::Air.default_state());
     // The base name, not the state string: `minecraft:mined` is keyed by *block*,
     // so `minecraft:oak_log[axis=y]` and `minecraft:oak_log` must be one counter
     // rather than two. Every other per-block table in this crate strips the suffix
@@ -6309,21 +6308,17 @@ where
         breaker,
         crate::advancements::StatKey::new(
             crate::advancements::StatType::Mined,
-            broken.split('[').next().unwrap_or(&broken),
+            broken.block().name(),
         ),
         1,
     );
     if let Some(vitals) = exhaust {
         vitals.add_exhaustion(crate::food::EXHAUSTION_MINE);
     }
-    if let Some(effect) = crate::effects::block_destroyed(pos, &broken) {
+    if let Some(effect) = crate::effects::block_destroyed(pos, broken) {
         block_ticks.publish_effect_except(breaker, effect);
     }
-    source.set_block(pos.x, pos.y, pos.z, &new_state);
-    debug_assert!(
-        !broken.is_empty(),
-        "`ChunkSource::block_state` returns a state name, never an empty string"
-    );
+    source.set_block(pos.x, pos.y, pos.z, new_state);
     // Roll the broken block's loot table and pop each resulting
     // stack as a real item entity. `MobSim` already ticks item
     // lifecycle and fall dynamics every server tick
@@ -6344,10 +6339,10 @@ where
     // then rides into the roll as the tool loot-context parameter, which is
     // what makes `match_tool`, `apply_bonus` and `table_bonus`
     // evaluate against a real item instead of an absent one.
-    let popped = if drop_loot && crate::block_drops::drops_are_allowed(&broken, held) {
+    let popped = if drop_loot && crate::block_drops::drops_are_allowed(broken, held) {
         crate::block_drops::drop_block_loot(
             crate::block_drops::bundled_tables(),
-            &broken,
+            broken,
             pos,
             held,
             drops_rng,
@@ -6384,7 +6379,7 @@ where
     // No enchantment is modelled here, so no tool-specific experience modifier
     // is applied.
     if drop_loot {
-        let points = crate::experience::block_break_points(&broken, |bound| {
+        let points = crate::experience::block_break_points(broken.block().name(), |bound| {
             drops_rng.next_int(bound)
         });
         if points > 0 {
@@ -6420,14 +6415,14 @@ where
         fluid_env_at(source, pos),
         pos,
     ));
-    let directive = proto.encode_block_update(pos.x, pos.y, pos.z, &new_state);
+    let directive = proto.encode_block_update(pos.x, pos.y, pos.z, new_state);
     apply(conn, state, directive).await?;
     // Breaking a light source has to darken the column, and the `BLOCK_UPDATE`
     // above carries no light. See `crate::light` for why this is a column resend
     // rather than a `LIGHT_UPDATE`. `new_state` rather than a hardcoded `AIR`
     // for the same reason as the write above: a broken waterlogged block keeps
     // a light-dampening fluid in the cell, not empty air.
-    resend_column_for_light(conn, proto, source, state, &broken, &new_state, pos).await?;
+    resend_column_for_light(conn, proto, source, state, broken, new_state, pos).await?;
 
     // A break runs two neighbour passes: shape recomputation (a torch or rail
     // that loses support turns to air) followed by redstone and gravity
@@ -6462,7 +6457,7 @@ where
         for (cell, was) in &collapsed {
             let popped = crate::block_drops::drop_block_loot(
                 crate::block_drops::bundled_tables(),
-                was,
+                *was,
                 *cell,
                 None,
                 drops_rng,
@@ -6483,13 +6478,13 @@ where
             });
         }
     }
-    let mut fanned: Vec<(BlockPos, String)> = Vec::new();
+    let mut fanned: Vec<(BlockPos, StateId)> = Vec::new();
     // Vanilla's own tripwire-block affect-neighbors-after-removal routine — the "the string just broke"
     // instant pulse. `broken` is `pos`'s own state from *before* this function
     // overwrote it, exactly what `propagate_removal_with_entities` needs; a
     // no-op for every block that is not a tripwire.
     {
-        let (mut changed, scheduled) = propagate_removal_with_entities(source, pos, &broken);
+        let (mut changed, scheduled) = propagate_removal_with_entities(source, pos, broken);
         block_ticks.request_scheduled_ticks(scheduled);
         fanned.append(&mut changed);
     }
@@ -6513,8 +6508,8 @@ where
         }
     }
     for cell in notify {
-        let current = source.block_state(cell.x, cell.y, cell.z);
-        let directive = proto.encode_block_update(cell.x, cell.y, cell.z, &current);
+        let current = source.block_state_id(cell.x, cell.y, cell.z);
+        let directive = proto.encode_block_update(cell.x, cell.y, cell.z, current);
         apply(conn, state, directive).await?;
         block_ticks.request_fluid_scheduled_ticks(crate::fluid::ticks_after_edit(
             source,
@@ -6528,8 +6523,8 @@ where
     // may have left a fluid's legacy block behind, which dampens light
     // differently than empty air.
     for (cell, was) in &collapsed {
-        let now = source.block_state(cell.x, cell.y, cell.z);
-        resend_column_for_light(conn, proto, source, state, was, &now, *cell).await?;
+        let now = source.block_state_id(cell.x, cell.y, cell.z);
+        resend_column_for_light(conn, proto, source, state, *was, now, *cell).await?;
     }
     Ok(())
 }
@@ -6553,11 +6548,11 @@ const MAX_SUPPORT_COLLAPSE: usize = 64;
 /// relight. The drops are deliberately **not** rolled here: this function needs no
 /// `MobHandle` and no RNG, which is what lets `crate::support_collapse_gate` drive
 /// the production cascade against a rig world rather than a copy of it.
-pub(crate) fn collapse_unsupported<S>(source: &S, origin: BlockPos) -> Vec<(BlockPos, String)>
+pub(crate) fn collapse_unsupported<S>(source: &S, origin: BlockPos) -> Vec<(BlockPos, StateId)>
 where
     S: ChunkSource + ?Sized,
 {
-    let mut removed: Vec<(BlockPos, String)> = Vec::new();
+    let mut removed: Vec<(BlockPos, StateId)> = Vec::new();
     let mut queue: VecDeque<BlockPos> = crate::neighbor_update::ALL_DIRECTIONS
         .iter()
         .map(|d| d.relative(origin))
@@ -6572,12 +6567,12 @@ where
         if removed.iter().any(|(seen, _)| *seen == cell) {
             continue;
         }
-        let was = source.block_state(cell.x, cell.y, cell.z);
-        if is_air_or_fluid(&was) {
+        let was = source.block_state_id(cell.x, cell.y, cell.z);
+        if crate::chunk::is_air_or_fluid_id(was) {
             continue;
         }
-        if crate::block_support::survives(cell, &was, |probe| {
-            source.block_state(probe.x, probe.y, probe.z).into()
+        if crate::block_support::survives(cell, was, |probe| {
+            source.block_state_id(probe.x, probe.y, probe.z)
         }) {
             continue;
         }
@@ -6585,10 +6580,10 @@ where
         // rather than literal air. A waterlogged sign therefore leaves its
         // water source behind when the support block collapses; see
         // `destroy_block`'s `new_state` for the same rule.
-        let new_state = crate::fluid::fluid_state_of(&was)
-            .map(crate::fluid::FluidState::block_state)
-            .unwrap_or_else(|| AIR.to_owned());
-        source.set_block(cell.x, cell.y, cell.z, &new_state);
+        let new_state = crate::fluid::fluid_state_of_id(was)
+            .map(crate::fluid::FluidState::block_state_id)
+            .unwrap_or_else(|| Block::Air.default_state());
+        source.set_block(cell.x, cell.y, cell.z, new_state);
         removed.push((cell, was));
         // The removed cell's own neighbours: this is what makes a stack of sugar
         // cane collapse all the way up, and a door's upper half follow its lower.
@@ -6642,8 +6637,8 @@ async fn resend_column_for_light<T, P, S>(
     proto: &P,
     source: &S,
     state: &mut State,
-    old_state: &str,
-    new_state: &str,
+    old_state: StateId,
+    new_state: StateId,
     pos: BlockPos,
 ) -> Result<(), ServerError>
 where
@@ -6921,7 +6916,7 @@ async fn send_tick_block_updates<T, P, S>(
     source: &S,
     state: &mut State,
     delivered: &HashSet<(i32, i32)>,
-    changes: Vec<(i32, i32, i32, String)>,
+    changes: Vec<(i32, i32, i32, lodestone_data::block_states::StateId)>,
 ) -> Result<(), ServerError>
 where
     T: Transport,
@@ -6933,7 +6928,7 @@ where
     for (x, y, z, block_state) in changes {
         let column = (x.div_euclid(16), z.div_euclid(16));
         if delivered.contains(&column) {
-            apply(conn, state, proto.encode_block_update(x, y, z, &block_state)).await?;
+            apply(conn, state, proto.encode_block_update(x, y, z, block_state)).await?;
         }
         for dz in -radius..=radius {
             for dx in -radius..=radius {
@@ -7224,7 +7219,7 @@ fn horizontal_look_direction(yaw: f32) -> Direction {
 /// `crate::redstone_observer` models horizontal observers only, so a
 /// `facing=up` observer would be a state the signal model cannot read.
 fn placed_block_state<F>(
-    block: &str,
+    block: Block,
     ctx: &crate::block_placement::PlaceContext,
     block_at: F,
 ) -> Option<crate::block_placement::Placement>
@@ -7234,19 +7229,19 @@ where
     if let Some(yaw) = ctx.yaw {
         let look = horizontal_look_direction(yaw);
         let full = match block {
-            REPEATER => Some(set_repeater(look.opposite(), 1, false, false)),
-            COMPARATOR => Some(set_comparator(look.opposite(), false, false, 0)),
-            OBSERVER => Some(set_observer(look, false)),
+            Block::Repeater => Some(set_repeater(look.opposite(), 1, false, false)),
+            Block::Comparator => Some(set_comparator(look.opposite(), false, false, 0)),
+            Block::Observer => Some(set_observer(look, false)),
             _ => None,
         };
         if let Some(state) = full {
             return Some(crate::block_placement::Placement {
-                state: lodestone_data::block_states::BlockStateValue::parse(&state),
+                state,
                 extra: Vec::new(),
             });
         }
     }
-    crate::block_placement::placement(block, ctx, block_at)
+    crate::block_placement::placement(block.name(), ctx, block_at)
 }
 
 /// The two packets vanilla's own set-game-mode routine sends: the mode itself, then the
@@ -7619,15 +7614,15 @@ where
 /// "same slab, not already double, and the click was on the side the existing
 /// half does not already fill".
 #[must_use]
-fn slab_doubles(clicked: &str, held: &str, face: BlockFace, cursor: Vec3f) -> bool {
+fn slab_doubles(clicked: StateId, held: Block, face: BlockFace, cursor: Vec3f) -> bool {
     if crate::redstone::base_name(clicked) != held {
         return false;
     }
     let above_middle = cursor.y > 0.5;
     let horizontal = !matches!(face, BlockFace::Up | BlockFace::Down);
-    match crate::redstone::get_str_property(clicked, "type") {
-        Some("bottom") => matches!(face, BlockFace::Up) || (above_middle && horizontal),
-        Some("top") => matches!(face, BlockFace::Down) || (!above_middle && horizontal),
+    match crate::redstone::get_str_property(clicked, PropertyKey::Type) {
+        Some(BuiltinPropertyValue::Bottom) => matches!(face, BlockFace::Up) || (above_middle && horizontal),
+        Some(BuiltinPropertyValue::Top) => matches!(face, BlockFace::Down) || (!above_middle && horizontal),
         _ => false,
     }
 }
@@ -7856,12 +7851,12 @@ enum ComposterUseOutcome {
     /// failed roll (the item is still consumed; only the state is unchanged).
     Consumed {
         remainder: Option<ItemStack>,
-        block_state: Option<String>,
+        block_state: Option<StateId>,
     },
     /// Bone meal was extracted (level `8` -> `0`, vanilla's own `extractProduce`)
     /// — the caller spawns the item entity and
     /// writes `block_state`.
-    Extracted { block_state: String },
+    Extracted { block_state: StateId },
 }
 
 /// The decision `apply_composter_use`'s registry-locked step makes; the caller
@@ -7874,7 +7869,7 @@ enum ComposterStep {
     /// Click consumed, nothing changed (level 7 waiting).
     Noop,
     /// One item consumed; `block_state` is `Some` when the fill level advanced.
-    Consumed { block_state: Option<String> },
+    Consumed { block_state: Option<StateId> },
     /// Level 8 reached — extract bone meal, reset to 0.
     Extract,
 }
@@ -7883,8 +7878,25 @@ enum ComposterStep {
 /// `minecraft:composter[level=0..8]`, the string the client's
 /// `resolve_state_id` maps to the composter's per-level ids (block 229 in
 /// `crates/lodestone-data/src/generated/block_states.rs`).
-fn composter_state(level: u8) -> String {
-    format!("minecraft:composter[level={level}]")
+fn composter_state(level: u8) -> StateId {
+    let value = match level {
+        0 => BuiltinPropertyValue::Value0,
+        1 => BuiltinPropertyValue::Value1,
+        2 => BuiltinPropertyValue::Value2,
+        3 => BuiltinPropertyValue::Value3,
+        4 => BuiltinPropertyValue::Value4,
+        5 => BuiltinPropertyValue::Value5,
+        6 => BuiltinPropertyValue::Value6,
+        7 => BuiltinPropertyValue::Value7,
+        8 => BuiltinPropertyValue::Value8,
+        _ => unreachable!("composter level is bounded to 0..=8"),
+    };
+    let properties = Properties::try_from_pairs(&[(
+        PropertyKey::Level,
+        PropertyValue::builtin(value),
+    )])
+    .expect("generated composter properties");
+    Properties::state_for_block(Block::Composter, &properties).expect("generated composter state")
 }
 
 /// Applies one right-click on the composter at `pos` — the wiring that makes
@@ -8098,13 +8110,7 @@ fn apply_composter_use(
 /// the unobstructed check reads the entity's own bounding-box getter at click time, which does
 /// not shrink for the sneaking pose (`1.5`), so this does not model pose
 /// either.
-fn placement_obstructs_placer(target: BlockPos, state: &str, feet: Vec3) -> bool {
-    let Some(id) = lodestone_data::block_states::state_id(state) else {
-        return false;
-    };
-    let Some(state) = lodestone_data::block_states::StateId::new(id) else {
-        return false;
-    };
+fn placement_obstructs_placer(target: BlockPos, state: StateId, feet: Vec3) -> bool {
     let boxes = lodestone_data::collision_shapes::collision_boxes(state);
     let (px0, px1) = (feet.x - 0.3, feet.x + 0.3);
     let (py0, py1) = (feet.y, feet.y + 1.8);
@@ -8243,9 +8249,9 @@ where
     // ordinary right-click does not pay for the lookup.
     let container_here = block_entities.with(|reg| reg.get(pos).is_some());
     if !container_here {
-        let clicked = source.block_state(pos.x, pos.y, pos.z);
-        let name = clicked.split('[').next().unwrap_or(&clicked);
-        if crate::block_entities::container_type_for_block(name).is_some() {
+        let clicked = source.block_state_id(pos.x, pos.y, pos.z);
+        let block = clicked.block();
+        if let Some(name) = crate::block_entities::container_type_for_block(block) {
             let generated = source
                 .block_entity(pos.x, pos.y, pos.z)
                 .unwrap_or_else(|| BlockEntity::container(name));
@@ -8295,12 +8301,7 @@ where
     // see `open_crafting_table_screen`. Ahead of the placement branch for the same
     // reason the `hand_use` block is: right-clicking a table while holding a block
     // opens the table rather than building.
-    if source
-        .block_state(pos.x, pos.y, pos.z)
-        .split('[')
-        .next()
-        .is_some_and(|name| name == "minecraft:crafting_table")
-    {
+    if source.block_state_id(pos.x, pos.y, pos.z).block() == Block::CraftingTable {
         return open_crafting_table_screen(
             conn,
             proto,
@@ -8317,20 +8318,13 @@ where
     // Workstation menus use per-menu input slots rather than block-entity
     // storage. The `existing_menu` branch therefore cannot find these stations;
     // dispatch them through their virtual menu implementations below.
-    let clicked_block = source
-        .block_state(pos.x, pos.y, pos.z)
-        .split('[')
-        .next()
-        .unwrap_or_default()
-        .to_string();
-    if let Some(station) = match clicked_block.as_str() {
-        "minecraft:anvil" | "minecraft:chipped_anvil" | "minecraft:damaged_anvil" => {
-            Some(Station::Anvil)
-        }
-        "minecraft:grindstone" => Some(Station::Grindstone),
-        "minecraft:smithing_table" => Some(Station::Smithing),
-        "minecraft:loom" => Some(Station::Loom),
-        "minecraft:stonecutter" => Some(Station::Stonecutter),
+    let clicked_block = source.block_state_id(pos.x, pos.y, pos.z).block();
+    if let Some(station) = match clicked_block {
+        Block::Anvil | Block::ChippedAnvil | Block::DamagedAnvil => Some(Station::Anvil),
+        Block::Grindstone => Some(Station::Grindstone),
+        Block::SmithingTable => Some(Station::Smithing),
+        Block::Loom => Some(Station::Loom),
+        Block::Stonecutter => Some(Station::Stonecutter),
         _ => None,
     } {
         return open_workstation_screen(
@@ -8347,7 +8341,7 @@ where
         )
         .await;
     }
-    if clicked_block == "minecraft:enchanting_table" {
+    if clicked_block == Block::EnchantingTable {
         return open_enchanting_screen(
             conn,
             proto,
@@ -8402,8 +8396,8 @@ where
             // Write the new fill level — only when it actually advanced; a
             // failed roll consumed the item but left the state alone.
             if let Some(block_state) = block_state {
-                source.set_block(pos.x, pos.y, pos.z, &block_state);
-                apply(conn, state, proto.encode_block_update(pos.x, pos.y, pos.z, &block_state)).await?;
+                source.set_block(pos.x, pos.y, pos.z, block_state);
+                apply(conn, state, proto.encode_block_update(pos.x, pos.y, pos.z, block_state)).await?;
             }
             // Tell the client's window-0 hotbar slot (menu slots `36..=44` ->
             // native `0..=8`, vanilla's `InventoryMenu`) so the held count
@@ -8417,8 +8411,8 @@ where
             return Ok(());
         }
         ComposterUseOutcome::Extracted { block_state } => {
-            source.set_block(pos.x, pos.y, pos.z, &block_state);
-            apply(conn, state, proto.encode_block_update(pos.x, pos.y, pos.z, &block_state)).await?;
+            source.set_block(pos.x, pos.y, pos.z, block_state);
+            apply(conn, state, proto.encode_block_update(pos.x, pos.y, pos.z, block_state)).await?;
             return Ok(());
         }
         ComposterUseOutcome::Noop => return Ok(()),
@@ -8445,11 +8439,11 @@ where
         .selected_item()
         .is_some_and(|held| held.item.to_string() == crate::bone_meal::BONE_MEAL)
     {
-        let clicked = source.block_state(pos.x, pos.y, pos.z);
+        let clicked = source.block_state_id(pos.x, pos.y, pos.z);
         // The cell above supplies the light input for growth checks; it is
         // resolved here because `bone_meal` has no world access of its own.
-        let above = source.block_state(pos.x, pos.y + 1, pos.z);
-        let outcome = crate::bone_meal::apply_bone_meal(&clicked, &above, bone_meal_rng);
+        let above = source.block_state_id(pos.x, pos.y + 1, pos.z);
+        let outcome = crate::bone_meal::apply_bone_meal(clicked, above, bone_meal_rng);
         // One helper for both consuming arms, performing the same one-item
         // shrink as the composter's `Consumed` arm.
         let consume = |inventory: &mut PlayerInventory| {
@@ -8463,11 +8457,11 @@ where
         };
         match outcome {
             crate::bone_meal::BoneMealOutcome::Grew { state: new_state } => {
-                source.set_block(pos.x, pos.y, pos.z, &new_state);
+                source.set_block(pos.x, pos.y, pos.z, new_state);
                 apply(
                     conn,
                     state,
-                    proto.encode_block_update(pos.x, pos.y, pos.z, &new_state),
+                    proto.encode_block_update(pos.x, pos.y, pos.z, new_state),
                 )
                 .await?;
                 let remainder = consume(inventory);
@@ -8508,7 +8502,7 @@ where
     // Notify the client only when the stored point changes; a repeat click on
     // the same bed is silent. This crate has no localization table or action-bar
     // encoder, so the notification uses a plain system-chat line.
-    if is_bed_block(&source.block_state(pos.x, pos.y, pos.z)) {
+    if is_bed_block(source.block_state_id(pos.x, pos.y, pos.z)) {
         // Register the player in the night-skip vote. Bed-entry gates for
         // day/night, nearby monsters, and already-sleeping state are outside
         // this interaction; the 100-tick deep-sleep threshold prevents a
@@ -8532,24 +8526,24 @@ where
     // Returns early like the bed arm: a click that operated a block is not also a
     // placement.
     {
-        let clicked = source.block_state(pos.x, pos.y, pos.z);
-        if crate::hand_use::is_hand_usable(&clicked) {
+        let clicked = source.block_state_id(pos.x, pos.y, pos.z);
+        if crate::hand_use::is_hand_usable(clicked) {
             // The door's partner half, read here because `hand_use` has no world
             // access. `None` for every other family, and for a door whose partner
             // is missing (a half-broken door, which vanilla also tolerates).
-            let other_half = crate::redstone_openable::other_door_half_pos(pos, &clicked)
-                .map(|p| (p, source.block_state(p.x, p.y, p.z)));
-            if let Some(used) = crate::hand_use::hand_use(pos, &clicked, other_half, player_yaw) {
+            let other_half = crate::redstone_openable::other_door_half_pos(pos, clicked)
+                .map(|p| (p, source.block_state_id(p.x, p.y, p.z)));
+            if let Some(used) = crate::hand_use::hand_use(pos, clicked, other_half, player_yaw) {
                 let mut fanout: Vec<BlockPos> = Vec::new();
                 for (p, new_state) in &used.changes {
-                    source.set_block(p.x, p.y, p.z, new_state);
+                    source.set_block(p.x, p.y, p.z, *new_state);
                     fanout.push(*p);
                 }
                 // The placement fan-out notifies neighbouring blocks, so a lever
                 // powers the wire beside it rather than merely looking flipped.
                 // Without this notification, the redstone model stays correct but
                 // is unreachable from a player's hand.
-                let mut changed: Vec<(BlockPos, String)> = Vec::new();
+                let mut changed: Vec<(BlockPos, lodestone_data::block_states::StateId)> = Vec::new();
                 let mut piston_records: Vec<(BlockPos, lodestone_core::Nbt)> = Vec::new();
                 for p in &fanout {
                     let (mut more, scheduled) = propagate_placement_with_entities(source, *p, Some(block_entities));
@@ -8582,8 +8576,8 @@ where
                     }
                 }
                 for p in notify {
-                    let current = source.block_state(p.x, p.y, p.z);
-                    apply(conn, state, proto.encode_block_update(p.x, p.y, p.z, &current)).await?;
+                    let current = source.block_state_id(p.x, p.y, p.z);
+                    apply(conn, state, proto.encode_block_update(p.x, p.y, p.z, current)).await?;
                     if let Some((_, nbt)) = piston_records.iter().find(|(pos, _)| *pos == p) {
                         let directive = proto.encode_block_entity_data(
                             p,
@@ -8605,7 +8599,7 @@ where
     }
 
     let neighbour = relative(pos, face);
-    let clicked = source.block_state(pos.x, pos.y, pos.z);
+    let clicked = source.block_state_id(pos.x, pos.y, pos.z);
     // Which native slot this click reads from. The spawn-egg, flint-and-steel,
     // and block-placement branches below share this one
     // resolution point via `held_item`, so an item held only in the off hand
@@ -8637,7 +8631,7 @@ where
                 difficulty,
                 pos,
                 face,
-                &|x, y, z| source.block_state(x, y, z),
+                &|x, y, z| source.block_state_id(x, y, z),
                 mobs,
             ) {
                 // Not an egg: fall through to the placement branch below.
@@ -8678,9 +8672,9 @@ where
     // through to anything else.
     if let Some(item) = held_item {
         if let Some(kind) = crate::mobs::minecart::MinecartKind::from_item(item.name()) {
-            let clicked = source.block_state(pos.x, pos.y, pos.z);
-            if crate::mobs::minecart::is_rail_block(&clicked) {
-                let shape = crate::mobs::minecart::rail_shape(&clicked);
+            let clicked = source.block_state_id(pos.x, pos.y, pos.z);
+            if crate::mobs::minecart::is_rail_block(clicked) {
+                let shape = crate::mobs::minecart::rail_shape(clicked);
                 let position = crate::mobs::minecart::placement_position(pos, shape);
                 mobs.with(|sim| {
                     sim.spawn_minecart(kind, position);
@@ -8724,11 +8718,11 @@ where
             .unwrap_or(crate::dimension::Dimension::Overworld);
         if let Some(cells) = crate::portal::ignite(source, dimension, neighbour) {
             for (cell, cell_state) in &cells {
-                source.set_block(cell.x, cell.y, cell.z, cell_state);
+                source.set_block(cell.x, cell.y, cell.z, *cell_state);
                 apply(
                     conn,
                     state,
-                    proto.encode_block_update(cell.x, cell.y, cell.z, cell_state),
+                    proto.encode_block_update(cell.x, cell.y, cell.z, *cell_state),
                 )
                 .await?;
             }
@@ -8753,16 +8747,14 @@ where
     // carry no durability at all — see that arm's own comment). Both are
     // therefore true unconditionally, which is the default here.
     if matches!(held_item, Some(Item::FlintAndSteel | Item::FireCharge)) {
-        let clicked = source.block_state(pos.x, pos.y, pos.z);
-        let base = clicked
-            .split_once('[')
-            .map_or(clicked.as_str(), |(base, _)| base);
-        if base == "minecraft:tnt" {
-            source.set_block(pos.x, pos.y, pos.z, crate::chunk::AIR);
+        let clicked = source.block_state_id(pos.x, pos.y, pos.z);
+        if clicked.block() == Block::Tnt {
+            let air = Block::Air.default_state();
+            source.set_block(pos.x, pos.y, pos.z, air);
             apply(
                 conn,
                 state,
-                proto.encode_block_update(pos.x, pos.y, pos.z, crate::chunk::AIR),
+                proto.encode_block_update(pos.x, pos.y, pos.z, air),
             )
             .await?;
             mobs.with(|sim| {
@@ -8804,20 +8796,20 @@ where
     if held_item == Some(Item::EnderEye) {
         if let Some(ignition) = crate::portal::ignite_end_portal_frame(source, pos) {
             let (frame_pos, frame_state) = &ignition.frame;
-            source.set_block(frame_pos.x, frame_pos.y, frame_pos.z, frame_state);
+            source.set_block(frame_pos.x, frame_pos.y, frame_pos.z, *frame_state);
             apply(
                 conn,
                 state,
-                proto.encode_block_update(frame_pos.x, frame_pos.y, frame_pos.z, frame_state),
+                proto.encode_block_update(frame_pos.x, frame_pos.y, frame_pos.z, *frame_state),
             )
             .await?;
             if let Some(fill) = &ignition.portal_fill {
                 for (cell, cell_state) in fill {
-                    source.set_block(cell.x, cell.y, cell.z, cell_state);
+                    source.set_block(cell.x, cell.y, cell.z, *cell_state);
                     apply(
                         conn,
                         state,
-                        proto.encode_block_update(cell.x, cell.y, cell.z, cell_state),
+                        proto.encode_block_update(cell.x, cell.y, cell.z, *cell_state),
                     )
                     .await?;
                 }
@@ -8849,16 +8841,16 @@ where
     // `canBeReplaced` override a hand placement can hit, and without it a slab
     // clicked onto a matching half-slab lands in the cell *above* instead of
     // doubling. Every other block reaches the plain air-or-fluid test.
-    let doubling_slab = placed.is_some_and(|(_, block)| slab_doubles(&clicked, block.name(), face, cursor));
-    let target = if is_air_or_fluid(&clicked) || doubling_slab {
+    let doubling_slab = placed.is_some_and(|(_, block)| slab_doubles(clicked, block, face, cursor));
+    let target = if crate::chunk::is_air_or_fluid_id(clicked) || doubling_slab {
         pos
     } else {
         neighbour
     };
-    let target_state = source.block_state(target.x, target.y, target.z);
+    let target_state = source.block_state_id(target.x, target.y, target.z);
     // Every cell the placement's neighbour fan-out rewrote —
     // empty unless a placement actually happened below.
-    let mut changed: Vec<(BlockPos, String)> = Vec::new();
+    let mut changed: Vec<(BlockPos, StateId)> = Vec::new();
     // Every cell a multi-cell attempt claimed before the atomic legality gate.
     // Re-sending these cells on rejection clears any optimistic partner half
     // the client may have shown, just as the primary and clicked cells do.
@@ -8872,9 +8864,8 @@ where
     // *shadowed* in there by the placed block state — see the `let (state, extra)`
     // below — so `apply` cannot be reached from inside it.
     let mut placement_remainder: Option<Option<ItemStack>> = None;
-    if is_air_or_fluid(&target_state) || doubling_slab {
+    if crate::chunk::is_air_or_fluid_id(target_state) || doubling_slab {
         if let Some((item, block)) = placed {
-            let block_name = block.name();
             // `placed_block_state` applies the block's own
             // `getStateForPlacement` convention (`crate::block_placement`);
             // a block with no convention keeps the census's bare default
@@ -8892,23 +8883,23 @@ where
                 pitch: player_pitch,
                 sneaking,
             };
-            let placement = match placed_block_state(block_name, &ctx, |p| {
-                source.block_state(p.x, p.y, p.z).into()
+            let placement = match placed_block_state(block, &ctx, |p| {
+                source.block_state_id(p.x, p.y, p.z)
             }) {
                 Some(placement) => placement,
                 None => crate::block_placement::Placement {
-                    state: BlockStateValue::parse(block_name),
+                    state: block.default_state(),
                     extra: Vec::new(),
                 },
             };
             let placement = crate::block_placement::apply_waterlogging(
                 placement,
                 target,
-                |p| source.block_state(p.x, p.y, p.z).into(),
+                |p| source.block_state_id(p.x, p.y, p.z),
             );
-            let target_replaceable = is_air_or_fluid(&target_state) || doubling_slab;
-            let occupied: Vec<(BlockPos, &str)> = std::iter::once((target, placement.state.as_str()))
-                .chain(placement.extra.iter().map(|(p, state)| (*p, state.as_str())))
+            let target_replaceable = crate::chunk::is_air_or_fluid_id(target_state) || doubling_slab;
+            let occupied: Vec<(BlockPos, StateId)> = std::iter::once((target, placement.state))
+                .chain(placement.extra.iter().copied())
                 .collect();
             for (cell, _) in &occupied {
                 if !attempted_cells.contains(cell) {
@@ -8931,19 +8922,20 @@ where
             let obstructed = player_pos.is_some_and(|feet| {
                 occupied
                     .iter()
-                    .any(|(p, state)| placement_obstructs_placer(*p, state, feet))
+                    .any(|(p, state)| placement_obstructs_placer(*p, *state, feet))
             });
             let placement_legal = in_build_height
                 && crate::block_placement::validate_placement(
                     &placement,
                     target,
                     target_replaceable,
-                    |p| source.block_state(p.x, p.y, p.z).into(),
+                    |p| source.block_state_id(p.x, p.y, p.z),
                 )
                 && !obstructed;
             if placement_legal {
                 let crate::block_placement::Placement { state, extra } = placement;
-            if let Some((entity_block, mut entity)) = block_entity_for_item(item.name()) {
+                let state_id = state;
+            if let Some((entity_state, mut entity)) = block_entity_for_item(item.name()) {
                 // The two sources must agree on the block name, or we would
                 // register a furnace at a position holding some other block.
                 // `lodestone-data`'s `the_block_entity_blocks_still_resolve_
@@ -8951,7 +8943,7 @@ where
                 // catches a future divergence instead of silently trusting
                 // the older table.
                 debug_assert_eq!(
-                    entity_block, block_name,
+                    entity_state.block(), block,
                     "block-entity table and item census disagree on {item:?}"
                 );
                 // A newly placed sign records the placing player as its editor,
@@ -8960,9 +8952,7 @@ where
                     sign.editor = Some(placer);
                 }
                 block_entities.with(|registry| registry.insert(target, entity));
-            } else if let Some(type_name) = lodestone_data::block_states::state_id(&state)
-                .and_then(lodestone_data::block_states::StateId::new)
-                .and_then(lodestone_data::block_entity_types::block_entity_type)
+            } else if let Some(type_name) = lodestone_data::block_entity_types::block_entity_type(state_id)
                 .map(lodestone_data::block_entity_types::block_entity_type_name)
             {
                 // State-defined block entities need a registry record even when
@@ -8979,11 +8969,11 @@ where
                     );
                 });
             }
-            source.set_block(target.x, target.y, target.z, &state);
+            source.set_block(target.x, target.y, target.z, state_id);
             // Publish the placement sound to every viewer except the placer.
             // `roll` supplies the per-click seed for choosing the sound variant.
             if let Some(effect) =
-                crate::effects::block_placed(target, &state, roll.to_bits() as i64)
+                crate::effects::block_placed(target, state_id, roll.to_bits() as i64)
             {
                 block_ticks.publish_effect_except(placer, effect);
             }
@@ -8991,8 +8981,9 @@ where
             // cells the placement owns but the client did not predict, so each
             // needs its own `block_update` below.
             for (p, s) in &extra {
-                source.set_block(p.x, p.y, p.z, s);
-                changed.push((*p, s.to_string()));
+                let extra_id = *s;
+                source.set_block(p.x, p.y, p.z, extra_id);
+                changed.push((*p, extra_id));
             }
             // A carved pumpkin or jack o'lantern can complete a snow- or
             // iron-golem pattern. The mob simulation reports the consumed
@@ -9000,14 +8991,15 @@ where
             if matches!(block, Block::CarvedPumpkin | Block::JackOLantern) {
                 let construction = mobs.with(|sim| {
                     sim.try_construct_golem(
-                        &|x, y, z| source.block_state(x, y, z).to_owned(),
+                        &|x, y, z| source.block_state_id(x, y, z),
                         (target.x, target.y, target.z),
                     )
                 });
                 if let Some(construction) = construction {
                     for cell in &construction.consumed {
-                        source.set_block(cell.x, cell.y, cell.z, "minecraft:air");
-                        changed.push((*cell, "minecraft:air".to_string()));
+                        let air = Block::Air.default_state();
+                        source.set_block(cell.x, cell.y, cell.z, air);
+                        changed.push((*cell, air));
                     }
                 }
             }
@@ -9017,14 +9009,15 @@ where
             if matches!(block, Block::WitherSkeletonSkull | Block::WitherSkeletonWallSkull) {
                 let construction = mobs.with(|sim| {
                     sim.try_construct_wither(
-                        &|x, y, z| source.block_state(x, y, z).to_owned(),
+                        &|x, y, z| source.block_state_id(x, y, z),
                         (target.x, target.y, target.z),
                     )
                 });
                 if let Some(construction) = construction {
                     for cell in &construction.consumed {
-                        source.set_block(cell.x, cell.y, cell.z, "minecraft:air");
-                        changed.push((*cell, "minecraft:air".to_string()));
+                        let air = Block::Air.default_state();
+                        source.set_block(cell.x, cell.y, cell.z, air);
+                        changed.push((*cell, air));
                     }
                 }
             }
@@ -9057,9 +9050,8 @@ where
             //
             // The scheduled event makes a sand or gravel block fall when it is
             // placed in air. `state` is used instead of the item name because
-            // `gravity_tick::is_gravity_block` matches the block-state base.
-            block_ticks
-                .request_scheduled_ticks(crate::gravity_tick::ticks_after_place(target, &state));
+            // `gravity_tick::is_gravity_state` matches the resolved block state.
+            block_ticks.request_scheduled_ticks(crate::gravity_tick::ticks_after_place_id(target, state_id));
             // A successful placement consumes one held item. Without this update
             // **every placement would be free** — the block would be written,
             // the client would predict its own hotbar and the server would never
@@ -9103,8 +9095,8 @@ where
     // `target` is always one of the first two.
     let notify = placement_update_positions(pos, neighbour, &attempted_cells, &changed);
     for p in notify {
-        let current = source.block_state(p.x, p.y, p.z);
-        let directive = proto.encode_block_update(p.x, p.y, p.z, &current);
+        let current = source.block_state_id(p.x, p.y, p.z);
+        let directive = proto.encode_block_update(p.x, p.y, p.z, current);
         apply(conn, state, directive).await?;
         if let Some((_, nbt)) = piston_records.iter().find(|(pos, _)| *pos == p) {
             let directive =
@@ -9119,8 +9111,8 @@ where
     // placement block above). `target_state` is the cell as it was *before* the
     // placement, captured before the `set_block`.
     {
-        let placed_state = source.block_state(target.x, target.y, target.z);
-        resend_column_for_light(conn, proto, source, state, &target_state, &placed_state, target)
+        let placed_state = source.block_state_id(target.x, target.y, target.z);
+        resend_column_for_light(conn, proto, source, state, target_state, placed_state, target)
             .await?;
     }
     Ok(())
@@ -9136,7 +9128,7 @@ fn placement_update_positions(
     clicked: BlockPos,
     neighbour: BlockPos,
     attempted: &[BlockPos],
-    changed: &[(BlockPos, String)],
+    changed: &[(BlockPos, StateId)],
 ) -> Vec<BlockPos> {
     let mut notify = vec![clicked, neighbour];
     for pos in attempted {
@@ -9214,7 +9206,7 @@ fn moving_piston_records(
 pub(crate) fn propagate_placement<S>(
     source: &S,
     target: BlockPos,
-) -> (Vec<(BlockPos, String)>, Vec<ScheduledTick<ScheduledTickKind>>)
+) -> (Vec<(BlockPos, StateId)>, Vec<ScheduledTick<ScheduledTickKind>>)
 where
     S: ChunkSource + ?Sized,
 {
@@ -9228,7 +9220,7 @@ pub(crate) fn propagate_placement_with_entities<S>(
     source: &S,
     target: BlockPos,
     block_entities: Option<&BlockEntityHandle>,
-) -> (Vec<(BlockPos, String)>, Vec<ScheduledTick<ScheduledTickKind>>)
+) -> (Vec<(BlockPos, StateId)>, Vec<ScheduledTick<ScheduledTickKind>>)
 where
     S: ChunkSource + ?Sized,
 {
@@ -9276,7 +9268,7 @@ where
         .into_iter()
         .map(|event| {
             let (ex, ey, ez) = event.pos;
-            source.set_block(ex, ey, ez, &event.to);
+            source.set_block(ex, ey, ez, event.to);
             (BlockPos::new(ex, ey, ez), event.to)
         })
         .collect();
@@ -9293,8 +9285,8 @@ where
 pub(crate) fn propagate_removal_with_entities<S>(
     source: &S,
     target: BlockPos,
-    wire_state_before_removal: &str,
-) -> (Vec<(BlockPos, String)>, Vec<ScheduledTick<ScheduledTickKind>>)
+    wire_state_before_removal: StateId,
+) -> (Vec<(BlockPos, StateId)>, Vec<ScheduledTick<ScheduledTickKind>>)
 where
     S: ChunkSource + ?Sized,
 {
@@ -9329,7 +9321,7 @@ where
         .into_iter()
         .map(|event| {
             let (ex, ey, ez) = event.pos;
-            source.set_block(ex, ey, ez, &event.to);
+            source.set_block(ex, ey, ez, event.to);
             (BlockPos::new(ex, ey, ez), event.to)
         })
         .collect();
@@ -11968,28 +11960,19 @@ fn resident_fall_sample<S: ChunkSource + ?Sized>(
     Some(FallSample {
         y,
         on_ground,
-        in_water: is_water(&feet),
-        fall_resetting: crate::fall::is_fall_damage_resetting(&feet),
-        block_damage_modifier: crate::fall::block_damage_modifier(&below),
+        in_water: feet.block() == Block::Water,
+        fall_resetting: crate::fall::is_fall_damage_resetting(feet),
+        block_damage_modifier: crate::fall::block_damage_modifier(below),
     })
 }
 
-/// Returns a canonical state string from a retained column when the source has
-/// an atomic residency gate. Sources without that capability retain the
-/// legacy synchronous block-read contract.
-fn resident_block_state<S: ChunkSource + ?Sized>(source: &S, x: i32, y: i32, z: i32) -> Option<String> {
+/// Reads a state id from a retained column without admitting terrain.
+fn resident_block_state<S: ChunkSource + ?Sized>(source: &S, x: i32, y: i32, z: i32) -> Option<StateId> {
     match source.try_resident_block_state_id(x, y, z) {
-        Some(crate::chunk_store::TryResident::Present(state)) => {
-            Some(lodestone_data::block_states::StateId::canonical_state(state))
-        }
+        Some(crate::chunk_store::TryResident::Present(state)) => Some(state),
         Some(crate::chunk_store::TryResident::Busy)
         | Some(crate::chunk_store::TryResident::Absent) => None,
-        None => Some(
-            source
-                .resident_block_state_id(x, y, z)
-                .map(lodestone_data::block_states::StateId::canonical_state)
-                .unwrap_or_else(|| source.block_state(x, y, z)),
-        ),
+        None => Some(source.resident_block_state_id(x, y, z).unwrap_or_else(|| source.block_state_id(x, y, z))),
     }
 }
 
@@ -12022,8 +12005,7 @@ fn resident_beacon_levels<S: ChunkSource + ?Sized>(
         'layer: for lx in (x - step)..=(x + step) {
             for lz in (z - step)..=(z + step) {
                 let state = resident_block_state(source, lx, ly, lz)?;
-                let base = state.split('[').next().unwrap_or(&state);
-                if !crate::beacon::BASE_BLOCKS.contains(&base) {
+                if !crate::beacon::BASE_BLOCKS.contains(&state.block()) {
                     layer_ok = false;
                     break 'layer;
                 }
@@ -12060,13 +12042,10 @@ fn resident_beam_unobstructed<S: ChunkSource + ?Sized>(
             break;
         }
         let state = resident_block_state(source, x, y + dy, z)?;
-        let base = state.split('[').next().unwrap_or(&state);
-        if base == "minecraft:bedrock" {
+        if state.block() == Block::Bedrock {
             continue;
         }
-        let transparent = lodestone_data::block_states::state_id(&state)
-            .and_then(lodestone_data::block_states::StateId::new)
-            .map_or(true, |id| lodestone_data::light_props::dampening(id) < 15);
+        let transparent = lodestone_data::light_props::dampening(state) < 15;
         if !transparent {
             return Some(false);
         }
@@ -13385,21 +13364,21 @@ where
             let is_command_block = can_use_game_master_blocks
                 && block_entities.with(|reg| matches!(reg.get(pos), Some(BlockEntity::CommandBlock(_))));
             if is_command_block {
-                let current_state = source.get().block_state(pos.x, pos.y, pos.z);
-                let facing = crate::command_block::facing(&current_state);
+                let current_state = source.get().block_state_id(pos.x, pos.y, pos.z);
+                let facing = crate::command_block::facing(current_state);
                 let base = crate::command_block::base_name_for_mode(mode);
                 let new_state = crate::command_block::state_with(base, facing, conditional);
                 if new_state != current_state {
-                    source.get().set_block(pos.x, pos.y, pos.z, &new_state);
+                    source.get().set_block(pos.x, pos.y, pos.z, new_state);
                     block_ticks.publish(pos.x, pos.y, pos.z, new_state.clone());
                 }
-                let new_mode = crate::command_block::mode_for_block(&new_state);
+                let new_mode = crate::command_block::mode_for_block(new_state);
                 // A conditional command block checks the block directly behind
                 // its facing. Read that state before taking the registry lock.
                 let predecessor_succeeded = conditional.then(|| {
                     let behind = facing.opposite().relative(pos);
-                    let behind_state = source.get().block_state(behind.x, behind.y, behind.z);
-                    crate::command_block::is_command_block_family(&behind_state)
+                    let behind_state = source.get().block_state_id(behind.x, behind.y, behind.z);
+                    crate::command_block::is_command_block_family(behind_state)
                         && block_entities.with(|reg| {
                             matches!(reg.get(behind), Some(BlockEntity::CommandBlock(d)) if d.success_count > 0)
                         })
@@ -13817,7 +13796,7 @@ where
                     yaw,
                     pitch,
                     crate::boat::block_interaction_range(*game_mode == GameMode::Creative),
-                    &|x, y, z| source.get().block_state(x, y, z),
+                    &|x, y, z| source.get().block_state_id(x, y, z),
                     mobs,
                 );
                 match applied {
@@ -14019,7 +13998,7 @@ where
                         let position = sim.vehicle_dismount_position(
                             vehicle_id,
                             rotation.yaw,
-                            &|x, y, z| terrain.block_state(x, y, z),
+                            &|x, y, z| terrain.block_state_id(x, y, z),
                         );
                         sim.dismount_rider(player_entity_id)
                             .map(|id| (id, position))
@@ -14266,13 +14245,13 @@ where
                         // `apply_own_effect`.
                         match directed.effect {
                             crate::commands::Effect::SetBlock { pos: (x, y, z), block } => {
-                                chunk_source.get().set_block(x, y, z, &block);
+                                chunk_source.get().set_block(x, y, z, block);
                                 block_ticks.publish(x, y, z, block);
                             }
                             crate::commands::Effect::Fill { positions, block } => {
                                 for (x, y, z) in positions {
-                                    chunk_source.get().set_block(x, y, z, &block);
-                                    block_ticks.publish(x, y, z, block.clone());
+                                    chunk_source.get().set_block(x, y, z, block);
+                                    block_ticks.publish(x, y, z, block);
                                 }
                             }
                             crate::commands::Effect::Broadcast { sender, message } => {
@@ -14562,8 +14541,8 @@ where
         ServerBound::PickItemFromBlock { pos, include_data: _ } => {
             let feet = player_pos.map(|(x, y, z)| Vec3::new(x, y, z));
             if crate::block_breaking::within_interaction_range(feet, pos) {
-                let block_state = source.get().block_state(pos.x, pos.y, pos.z);
-                if let Some(stack) = crate::item_use::clone_item_stack_for_block(&block_state) {
+                let block_state = source.get().block_state_id(pos.x, pos.y, pos.z);
+                if let Some(stack) = crate::item_use::clone_item_stack_for_block(block_state) {
                     let creative = *game_mode == GameMode::Creative;
                     let outcome = crate::item_use::try_pick_item(inventory, stack, creative);
                     apply(conn, state, proto.encode_set_held_slot(outcome.selected)).await?;
@@ -15874,7 +15853,7 @@ where
                         dig.pos.z,
                     ) {
                         pending_break = None;
-                        if !crate::random_tick::is_air_variant(&current) {
+                        if current.block() != Block::Air {
                             let allowed = adjudicate_block_break(
                                 conn,
                                 proto,
@@ -16255,7 +16234,7 @@ where
                         // complete air probe rather than treating it as air.
                         let outcome = tick_player_air_supply(
                             &mut vitals,
-                            is_water(&eye_state),
+                            eye_state.block() == Block::Water,
                             invulnerable,
                             &effects,
                         );
@@ -16396,7 +16375,7 @@ where
                         y.floor() as i32,
                         z.floor() as i32,
                     ) {
-                        let standing_in = crate::burning::BurnSource::for_block(&feet);
+                        let standing_in = crate::burning::BurnSource::for_block(feet);
                         let creative = Abilities::for_mode(game_mode).invulnerable;
                         // Fire Resistance refuses the damage and leaves the counter
                         // running — see `crate::burning`'s doc for why that is not the
@@ -16664,6 +16643,8 @@ where
                             .await;
                         }
                         for (pos, state) in &death.exit_portal_blocks {
+                            let state = StateId::from_state_str(state)
+                                .expect("dragon exit portal emits a built-in state");
                             destination.set_block(pos.x, pos.y, pos.z, state);
                         }
                         if death.outcome.place_dragon_egg {
@@ -16680,7 +16661,7 @@ where
                                     egg_y,
                                     death.origin.z,
                                 ) {
-                                    Some(state) if state == "minecraft:air" => egg_y -= 1,
+                                    Some(state) if state.block() == Block::Air => egg_y -= 1,
                                     Some(_) => break,
                                     None => {
                                         resident_scan = false;
@@ -16693,7 +16674,7 @@ where
                                     death.origin.x,
                                     egg_y + 1,
                                     death.origin.z,
-                                    "minecraft:dragon_egg",
+                                    Block::DragonEgg.default_state(),
                                 );
                             }
                         }
@@ -16705,8 +16686,10 @@ where
                         // well as writing the visible structure; the contact
                         // loop resolves its delayed safe exit on use.
                         for (pos, state) in &death.gateway_blocks {
+                            let state = StateId::from_state_str(state)
+                                .expect("dragon gateway emits a built-in state");
                             destination.set_block(pos.x, pos.y, pos.z, state);
-                            if *state == crate::portal::END_GATEWAY_BLOCK
+                            if state.block() == crate::portal::END_GATEWAY_BLOCK
                                 && let Some(registries) = destination.world_registries()
                             {
                                 registries.block_entities.with(|registry| {
@@ -16961,9 +16944,9 @@ where
                     };
                     // End and Nether portals share one counter, so a player
                     // cannot accumulate two transitions simultaneously.
-                    let in_end_portal = crate::portal::is_end_portal(&feet_state);
+                    let in_end_portal = crate::portal::is_end_portal(feet_state);
                     let standing_in =
-                        (in_end_portal || crate::portal::is_portal(&feet_state)).then_some(feet);
+                        (in_end_portal || crate::portal::is_portal(feet_state)).then_some(feet);
                     // A portal can come from generated or persisted terrain rather than
                     // from this server's ignition path. Remember the cell when a player
                     // actually enters it so the world's POI index (and its persistence
@@ -16992,7 +16975,7 @@ where
                             watch.pass("vitals_tick");
                             continue;
                         };
-                        let trip = if crate::portal::is_end_portal(&entry_state) {
+                        let trip = if crate::portal::is_end_portal(entry_state) {
                             // There is no destination for an End portal that
                             // is already inside the End, so leave that case
                             // inert instead of selecting an invalid target.
@@ -17702,7 +17685,7 @@ where
             // timer or movement packet.
             let outcome = tick_player_air_supply(
                 vitals,
-                is_water(&eye_state),
+                eye_state.block() == Block::Water,
                 invulnerable,
                 effects,
             );
@@ -17738,7 +17721,7 @@ where
             y.floor() as i32,
             z.floor() as i32,
         ) {
-            let standing_in = crate::burning::BurnSource::for_block(&feet);
+            let standing_in = crate::burning::BurnSource::for_block(feet);
             let creative = Abilities::for_mode(game_mode).invulnerable;
             let resistant = effects.amplifier_of("minecraft:fire_resistance").is_some();
             if let Some(source_kind) = standing_in
@@ -18489,7 +18472,8 @@ mod tests {
             ServerDirective::Send {
                 packet_id: 1,
                 payload: vec![u8::from(
-                    column.block_state(0, 2, 12) == "minecraft:gravel",
+                    column.block_state_id(0, 2, 12)
+                        == StateId::from_state_str("minecraft:gravel").expect("fixture gravel state"),
                 )],
             }
         }
@@ -18517,8 +18501,8 @@ mod tests {
             "live view admission must retain the shaped stage until packet encoding"
         );
         assert_ne!(
-            shaped.block_state(0, 2, 12),
-            "minecraft:gravel",
+            shaped.block_state_id(0, 2, 12),
+            StateId::from_state_str("minecraft:gravel").expect("fixture gravel state"),
             "the shaped target starts without the source's border ore"
         );
 
@@ -18550,7 +18534,10 @@ mod tests {
             crate::chunk::ChunkGenerationStage::Full,
             "packet admission must replace the shaped cache entry with its full result"
         );
-        assert_eq!(resident.block_state(0, 2, 12), "minecraft:gravel");
+        assert_eq!(
+            resident.block_state_id(0, 2, 12),
+            StateId::from_state_str("minecraft:gravel").expect("fixture gravel state")
+        );
     }
 
     #[test]
@@ -18614,7 +18601,7 @@ mod tests {
             ChunkColumn::new(0, 256)
         }
 
-        fn block_state(&self, x: i32, _y: i32, z: i32) -> String {
+        fn block_state_id(&self, x: i32, _y: i32, z: i32) -> StateId {
             let chunk = (x.div_euclid(16), z.div_euclid(16));
             assert!(
                 self.admitted
@@ -18624,14 +18611,14 @@ mod tests {
                 "an action read must run only after its target column is admitted"
             );
             self.events.lock().expect("event probe lock").push("action");
-            "minecraft:air".to_owned()
+            crate::chunk::air_state()
         }
 
         fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
             crate::chunk::DEFAULT_BIOME.to_owned()
         }
 
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
 
         fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
             self.admitted
@@ -18660,7 +18647,7 @@ mod tests {
             source_ref.get().resident_column(1, -1).is_some(),
             "the target must be resident before the synchronous action read"
         );
-        source_ref.get().block_state(17, 64, -1);
+        source_ref.get().block_state_id(17, 64, -1);
 
         let threads = source
             .column_threads
@@ -18849,7 +18836,7 @@ mod tests {
             }
         }
 
-        fn encode_block_update(&self, x: i32, y: i32, z: i32, _state: &str) -> ServerDirective {
+        fn encode_block_update(&self, x: i32, y: i32, z: i32, _state: StateId) -> ServerDirective {
             ServerDirective::Send {
                 packet_id: 43,
                 payload: vec![x as u8, y as u8, z as u8],
@@ -18864,15 +18851,15 @@ mod tests {
             ChunkColumn::new(0, 256)
         }
 
-        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-            "minecraft:air".to_owned()
+        fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
+            crate::chunk::air_state()
         }
 
         fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
             crate::chunk::DEFAULT_BIOME.to_owned()
         }
 
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
     }
 
     struct ColdColumnSource {
@@ -18915,15 +18902,15 @@ mod tests {
             })
         }
 
-        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-            "minecraft:air".to_owned()
+        fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
+            crate::chunk::air_state()
         }
 
         fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
             crate::chunk::DEFAULT_BIOME.to_owned()
         }
 
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
 
         fn store_resident_column(
             &self,
@@ -19466,8 +19453,8 @@ mod tests {
             ChunkColumn::new(0, 256)
         }
 
-        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-            self.state.clone()
+        fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
+            StateId::from_state_str(&self.state).expect("fixture gateway state")
         }
 
         fn block_entity(&self, x: i32, y: i32, z: i32) -> Option<BlockEntity> {
@@ -19480,7 +19467,7 @@ mod tests {
             crate::chunk::DEFAULT_BIOME.to_owned()
         }
 
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
     }
 
     #[test]
@@ -21473,14 +21460,14 @@ mod tests {
             fn column(&self, _cx: i32, _cz: i32) -> crate::chunk::ChunkColumn {
                 unimplemented!("not needed: bookshelf_power reads block_state only")
             }
-            fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-                "minecraft:air".to_owned()
+            fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
+                crate::chunk::air_state()
             }
 
             fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
                 crate::chunk::DEFAULT_BIOME.to_string()
             }
-            fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+            fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
                 unimplemented!("read-only in this test")
             }
         }
@@ -21579,14 +21566,14 @@ mod tests {
             fn column(&self, _cx: i32, _cz: i32) -> crate::chunk::ChunkColumn {
                 unimplemented!("the stonecutter button click must never read the world")
             }
-            fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+            fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
                 unimplemented!("the stonecutter button click must never read the world")
             }
 
             fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
                 crate::chunk::DEFAULT_BIOME.to_string()
             }
-            fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+            fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
                 unimplemented!("read-only in this test")
             }
         }
@@ -23123,7 +23110,13 @@ mod tests {
         };
         let air = |_: BlockPos| WorldState::from("minecraft:air");
         let state = |block: &str, yaw: Option<f32>| {
-            placed_block_state(block, &looking(yaw), air).map(|placed| placed.state.into_string())
+            placed_block_state(
+                Block::from_name(block.strip_prefix("minecraft:").unwrap_or(block))
+                    .expect("fixture block is built in"),
+                &looking(yaw),
+                air,
+            )
+            .map(|placed| placed.state.canonical_state())
         };
         // Looking north (yaw 180): a repeater and comparator face the player —
         // south — while an observer watches north.
@@ -23162,7 +23155,7 @@ mod tests {
 
         // The accepted path's fan-out may mention the same positions repeatedly,
         // but the wire still carries one update per cell.
-        let changed = vec![(upper, "minecraft:air".to_owned()), (target, "minecraft:air".to_owned())];
+        let changed = vec![(upper, StateId::AIR), (target, StateId::AIR)];
         let updates = placement_update_positions(clicked, target, &[target, upper], &changed);
         assert_eq!(updates, vec![clicked, target, upper]);
     }
@@ -23181,7 +23174,7 @@ mod tests {
     fn placement_obstructs_placer_refuses_a_full_block_at_the_players_feet() {
         let target = BlockPos::new(0, 64, 0);
         let feet = Vec3::new(0.5, 64.0, 0.5);
-        assert!(placement_obstructs_placer(target, "minecraft:stone", feet));
+        assert!(placement_obstructs_placer(target, Block::Stone.default_state(), feet));
     }
 
     /// The discriminating arm: a state with an **empty** collision shape must
@@ -23202,7 +23195,7 @@ mod tests {
             .is_empty(),
             "this test's premise: a torch has no collision boxes"
         );
-        assert!(!placement_obstructs_placer(target, "minecraft:torch", feet));
+        assert!(!placement_obstructs_placer(target, Block::Torch.default_state(), feet));
     }
 
     /// Control: the same full block, far from the player, must not be
@@ -23212,7 +23205,7 @@ mod tests {
     fn placement_obstructs_placer_allows_a_full_block_far_from_the_player() {
         let target = BlockPos::new(50, 64, 50);
         let feet = Vec3::new(0.5, 64.0, 0.5);
-        assert!(!placement_obstructs_placer(target, "minecraft:stone", feet));
+        assert!(!placement_obstructs_placer(target, Block::Stone.default_state(), feet));
     }
 
     /// Boundary control: a full block exactly adjacent to the player (sharing
@@ -23227,7 +23220,7 @@ mod tests {
         // [0.2, 0.8], which shares the x=1.0 boundary with `target` (x in
         // [1.0, 2.0]) without entering it.
         let feet = Vec3::new(0.5, 64.0, 0.5);
-        assert!(!placement_obstructs_placer(target, "minecraft:stone", feet));
+        assert!(!placement_obstructs_placer(target, Block::Stone.default_state(), feet));
     }
 
     /// The state-shaped case a full-cube approximation gets wrong: a top
@@ -23263,11 +23256,11 @@ mod tests {
         let feet_y = f64::from(target.y) + f64::from(box_min_y) - 1.8 - 0.05;
         let feet = Vec3::new(0.5, feet_y, 0.5);
         assert!(
-            !placement_obstructs_placer(target, top_slab, feet),
+            !placement_obstructs_placer(target, state, feet),
             "a top slab should clear the player's head here"
         );
         assert!(
-            placement_obstructs_placer(target, "minecraft:stone", feet),
+            placement_obstructs_placer(target, Block::Stone.default_state(), feet),
             "a full block at the same position should still hit the player's head"
         );
     }
@@ -23289,14 +23282,14 @@ mod tests {
         fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
             ChunkColumn::new(0, 256)
         }
-        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-            "minecraft:air".to_string()
+        fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
+            crate::chunk::air_state()
         }
 
         fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
             crate::chunk::DEFAULT_BIOME.to_string()
         }
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
         fn dimension(&self) -> Option<crate::dimension::Dimension> {
             Some(self.0)
         }
@@ -23316,14 +23309,14 @@ mod tests {
         fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
             ChunkColumn::new(0, 256)
         }
-        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-            "minecraft:air".to_string()
+        fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
+            crate::chunk::air_state()
         }
 
         fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
             crate::chunk::DEFAULT_BIOME.to_string()
         }
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
         fn world_registries(&self) -> Option<crate::chunk::WorldRegistries> {
             self.block_entities.clone().map(|block_entities| crate::chunk::WorldRegistries {
                 block_entities,
@@ -23435,13 +23428,13 @@ mod tests {
         fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
             ChunkColumn::new(0, 256)
         }
-        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-            "minecraft:air".to_owned()
+        fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
+            crate::chunk::air_state()
         }
         fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
             crate::chunk::DEFAULT_BIOME.to_owned()
         }
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
         fn dimension(&self) -> Option<crate::dimension::Dimension> {
             Some(crate::dimension::Dimension::Overworld)
         }

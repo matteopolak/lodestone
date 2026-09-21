@@ -86,8 +86,7 @@ fn dump_columns() {
                 out.extend_from_slice(&(palette.len() as u32).to_le_bytes());
                 for state in &palette {
                     distinct_states.insert(state.clone());
-                    out.extend_from_slice(&(state.len() as u32).to_le_bytes());
-                    out.extend_from_slice(state.as_bytes());
+                    out.extend_from_slice(&state.raw().to_le_bytes());
                 }
                 out.extend_from_slice(&(blocks.len() as u32).to_le_bytes());
                 for b in &blocks {

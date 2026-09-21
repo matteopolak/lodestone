@@ -7,19 +7,21 @@
 //! ordinary vegetation placers because its world-seed noise and its
 //! replace/invalid-block rules are unlike the surface feature families.
 
-use std::{cell::RefCell, collections::HashSet, fmt::Write};
+use std::{cell::RefCell, collections::HashSet};
 
 use serde_json::Value;
 
 use crate::density::Resolver;
 use crate::feature::{BlockPos, IntProvider};
-use crate::interner::StateId;
 use crate::noise::NormalNoise;
 use crate::rng::{LegacyRandomSource, RandomSource, WorldgenRandom};
+use lodestone_worldgen_core::hash::FastSet;
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey};
+use lodestone_data::block_states::{BlockStateValue, StateId};
 
-use super::base_id;
 use super::config::{
-    BlockStateProvider, VegTags, is_air, resolve_block_set, try_parse_int_provider,
+    BlockStateProvider, VegTags, resolve_block_set, try_parse_int_provider,
 };
 use super::grid::VegGrid;
 
@@ -27,7 +29,6 @@ thread_local! {
     static GEODE_POINTS: RefCell<Vec<Vec<(BlockPos, i32)>>> = const { RefCell::new(Vec::new()) };
     static GEODE_CRACK_POINTS: RefCell<Vec<Vec<BlockPos>>> = const { RefCell::new(Vec::new()) };
     static GEODE_CRYSTAL_POINTS: RefCell<Vec<Vec<BlockPos>>> = const { RefCell::new(Vec::new()) };
-    static GEODE_CRYSTAL_STATE: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
 fn return_scratch(
@@ -70,9 +71,9 @@ pub struct GeodeCfg {
     pub(super) alternate_inner_layer_provider: BlockStateProvider,
     pub(super) middle_layer_provider: BlockStateProvider,
     pub(super) outer_layer_provider: BlockStateProvider,
-    pub(super) inner_placements: Vec<String>,
-    pub(super) cannot_replace: HashSet<String>,
-    pub(super) invalid_blocks: HashSet<String>,
+    pub(super) inner_placements: Vec<StateId>,
+    pub(super) cannot_replace: HashSet<StateId>,
+    pub(super) invalid_blocks: HashSet<StateId>,
     pub(super) filling: f64,
     pub(super) inner_layer: f64,
     pub(super) middle_layer: f64,
@@ -108,13 +109,23 @@ impl GeodeCfg {
         let inner_placements = blocks["inner_placements"]
             .as_array()?
             .iter()
-            .map(|state| state["Name"].as_str().map(|_| super::config::canon_state(state)))
+            .map(|state| {
+                state["Name"]
+                    .as_str()
+                    .and_then(|_| {
+                        BlockStateValue::parse(&super::config::canon_state(state)).state_id()
+                    })
+            })
             .collect::<Option<Vec<_>>>()?;
         if inner_placements.is_empty() {
             return None;
         }
-        let cannot_replace = resolve_block_set(resolver, &blocks["cannot_replace"])?;
-        let invalid_blocks = resolve_block_set(resolver, &blocks["invalid_blocks"])?;
+        let cannot_replace = resolve_block_set(resolver, &blocks["cannot_replace"])?
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let invalid_blocks = resolve_block_set(resolver, &blocks["invalid_blocks"])?
+            .into_iter()
+            .collect::<HashSet<_>>();
 
         let layers = c.get("layers")?;
         let filling = layers.get("filling").and_then(Value::as_f64).unwrap_or(1.7);
@@ -312,6 +323,8 @@ pub(super) fn place_geode<R: RandomSource>(
     grid: &mut VegGrid,
     tags: &VegTags,
 ) -> bool {
+    let invalid_blocks = cfg.invalid_blocks.iter().copied().collect::<FastSet<_>>();
+    let cannot_replace = cfg.cannot_replace.iter().copied().collect::<FastSet<_>>();
     let num_points = cfg.distribution_points.sample(random);
     let mut noise_random = WorldgenRandom::new(LegacyRandomSource::new(world_seed));
     let noise = NormalNoise::create(&mut noise_random, -4, &[1.0]);
@@ -343,8 +356,14 @@ pub(super) fn place_geode<R: RandomSource>(
             y: origin.y + y,
             z: origin.z + z,
         };
-        let base = base_id(grid.get(pos.x, pos.y, pos.z));
-        if is_air(base) || cfg.invalid_blocks.contains(base) {
+        let base = grid.get_id(pos.x, pos.y, pos.z);
+        let is_air = matches!(
+                base.block(),
+                lodestone_data::block::Block::Air
+                    | lodestone_data::block::Block::CaveAir
+                    | lodestone_data::block::Block::VoidAir
+            );
+        if is_air || invalid_blocks.contains(&base) {
             invalid_points += 1;
             if invalid_points > cfg.invalid_blocks_threshold {
                 return_scratch(
@@ -411,13 +430,18 @@ pub(super) fn place_geode<R: RandomSource>(
                     });
                 let pos = BlockPos { x, y, z };
                 if should_generate_crack && dist_sum_crack >= crack_size && dist_sum_shell < inner_air {
-                    safe_set_state(grid, &cfg.cannot_replace, pos, grid.interner().id_of("minecraft:air"));
+                    safe_set_state(
+                        grid,
+                        &cannot_replace,
+                        pos,
+                        Block::Air.default_state(),
+                    );
                 } else if dist_sum_shell >= inner_air {
                     safe_set_provider(
                         random,
                         grid,
                         tags,
-                        &cfg.cannot_replace,
+                        &cannot_replace,
                         pos,
                         &cfg.filling_provider,
                     );
@@ -429,7 +453,7 @@ pub(super) fn place_geode<R: RandomSource>(
                     } else {
                         &cfg.inner_layer_provider
                     };
-                    safe_set_provider(random, grid, tags, &cfg.cannot_replace, pos, provider);
+                    safe_set_provider(random, grid, tags, &cannot_replace, pos, provider);
                     if (!cfg.placements_require_layer0_alternate || use_alternate)
                         && f64::from(random.next_float()) < cfg.use_potential_placements_chance
                     {
@@ -440,7 +464,7 @@ pub(super) fn place_geode<R: RandomSource>(
                         random,
                         grid,
                         tags,
-                        &cfg.cannot_replace,
+                        &cannot_replace,
                         pos,
                         &cfg.middle_layer_provider,
                     );
@@ -449,7 +473,7 @@ pub(super) fn place_geode<R: RandomSource>(
                         random,
                         grid,
                         tags,
-                        &cfg.cannot_replace,
+                        &cannot_replace,
                         pos,
                         &cfg.outer_layer_provider,
                     );
@@ -460,20 +484,22 @@ pub(super) fn place_geode<R: RandomSource>(
 
     for &crystal_pos in &potential_crystal_placements {
         let index = random.next_int_bounded(cfg.inner_placements.len() as i32) as usize;
-        let base_state = &cfg.inner_placements[index];
+        let base_state = cfg.inner_placements[index];
         for (direction, (dx, dy, dz)) in DIRECTIONS {
             let place_pos = BlockPos {
                 x: crystal_pos.x + dx,
                 y: crystal_pos.y + dy,
                 z: crystal_pos.z + dz,
             };
-            let place_state = grid.get(place_pos.x, place_pos.y, place_pos.z);
+            let place_state = grid.get_id(place_pos.x, place_pos.y, place_pos.z);
             let waterlogged = is_source_water_state(place_state);
             if can_cluster_grow_at_state(place_state) {
-                let state = geode_crystal_state_id(grid, base_state, direction, waterlogged);
+                let Some(state) = geode_crystal_state_id(base_state, direction, waterlogged) else {
+                    continue;
+                };
                 safe_set_state(
                     grid,
-                    &cfg.cannot_replace,
+                        &cannot_replace,
                     place_pos,
                     state,
                 );
@@ -487,38 +513,28 @@ pub(super) fn place_geode<R: RandomSource>(
 }
 
 fn geode_crystal_state_id(
-    grid: &VegGrid,
-    state: &str,
+    state: StateId,
     direction: &str,
     waterlogged: bool,
-) -> StateId {
-    let Some(open) = state.find('[') else {
-        return grid.interner().id_of(state);
+) -> Option<StateId> {
+    let facing = match direction {
+        "down" => BuiltinPropertyValue::Down,
+        "up" => BuiltinPropertyValue::Up,
+        "north" => BuiltinPropertyValue::North,
+        "south" => BuiltinPropertyValue::South,
+        "west" => BuiltinPropertyValue::West,
+        "east" => BuiltinPropertyValue::East,
+        _ => return None,
     };
-    let mut scratch = GEODE_CRYSTAL_STATE.with(|slot| std::mem::take(&mut *slot.borrow_mut()));
-    scratch.clear();
-    scratch.push_str(&state[..open]);
-    scratch.push('[');
-    let properties = &state[open + 1..state.len().saturating_sub(1)];
-    for (index, property) in properties.split(',').enumerate() {
-        if index != 0 {
-            scratch.push(',');
-        }
-        let Some((name, old_value)) = property.split_once('=') else {
-            scratch.push_str(property);
-            continue;
-        };
-        let value = match name {
-            "facing" => direction,
-            "waterlogged" => if waterlogged { "true" } else { "false" },
-            _ => old_value,
-        };
-        let _ = write!(scratch, "{name}={value}");
-    }
-    scratch.push(']');
-    let id = grid.interner().id_of(&scratch);
-    GEODE_CRYSTAL_STATE.with(|slot| *slot.borrow_mut() = scratch);
-    id
+    let properties = Properties::from_state_id(state)
+        .with_builtin(PropertyKey::Facing, facing)
+        .ok()?
+        .with_builtin(
+            PropertyKey::Waterlogged,
+            if waterlogged { BuiltinPropertyValue::True } else { BuiltinPropertyValue::False },
+        )
+        .ok()?;
+    Properties::state_for_block(state.block(), &properties)
 }
 
 const DIRECTIONS: [(&str, (i32, i32, i32)); 6] = [
@@ -554,7 +570,7 @@ fn safe_set_provider<R: RandomSource>(
     random: &mut R,
     grid: &mut VegGrid,
     tags: &VegTags,
-    cannot_replace: &HashSet<String>,
+    cannot_replace: &FastSet<StateId>,
     pos: BlockPos,
     provider: &BlockStateProvider,
 ) -> bool {
@@ -568,48 +584,31 @@ fn safe_set_provider<R: RandomSource>(
 
 fn safe_set_state(
     grid: &mut VegGrid,
-    cannot_replace: &HashSet<String>,
+    cannot_replace: &FastSet<StateId>,
     pos: BlockPos,
     state: StateId,
 ) -> bool {
-    let current = grid.interner().name_of(grid.get_id(pos.x, pos.y, pos.z));
-    if cannot_replace.contains(base_id(current)) {
+    let current = grid.get_id(pos.x, pos.y, pos.z);
+    if cannot_replace.contains(&current) {
         return false;
     }
     grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state)
 }
 
-fn can_cluster_grow_at_state(state: &str) -> bool {
-    is_air(base_id(state)) || is_source_water_state(state)
+fn can_cluster_grow_at_state(state: StateId) -> bool {
+    matches!(
+        state.block(),
+        lodestone_data::block::Block::Air
+            | lodestone_data::block::Block::CaveAir
+            | lodestone_data::block::Block::VoidAir
+    ) || is_source_water_state(state)
 }
 
-fn is_source_water_state(state: &str) -> bool {
-    if base_id(state) != "minecraft:water" {
-        return false;
-    }
-    let Some(level_start) = state.find("level=") else {
-        return true;
-    };
-    let value_start = level_start + "level=".len();
-    let value_end = state[value_start..]
-        .find([',', ']'])
-        .map_or(state.len(), |offset| value_start + offset);
-    &state[value_start..value_end] == "0"
-}
-
-#[cfg(test)]
-fn replace_state_property(state: &str, property: &str, value: &str) -> String {
-    let needle = format!("{property}=");
-    let Some(start) = state.find(&needle) else {
-        return state.to_string();
-    };
-    let value_start = start + needle.len();
-    let value_end = state[value_start..]
-        .find([',', ']'])
-        .map_or(state.len(), |offset| value_start + offset);
-    let mut out = state.to_string();
-    out.replace_range(value_start..value_end, value);
-    out
+fn is_source_water_state(state: StateId) -> bool {
+    state.block() == lodestone_data::block::Block::Water
+        && Properties::from_state_id(state)
+            .get(PropertyKey::Level)
+            .is_none_or(|value| value.builtin_value() == Some(BuiltinPropertyValue::Value0))
 }
 
 #[cfg(test)]
@@ -617,16 +616,23 @@ mod tests {
     use super::*;
     use crate::rng::LegacyRandomSource;
 
+    fn state(spec: &str) -> StateId {
+        StateId::from_state_str(spec).expect("test state is in the generated table")
+    }
+
     fn cfg() -> GeodeCfg {
         GeodeCfg {
-            filling_provider: BlockStateProvider::Simple("minecraft:air".into()),
-            inner_layer_provider: BlockStateProvider::Simple("minecraft:amethyst_block".into()),
+            filling_provider: BlockStateProvider::simple("minecraft:air"),
+            inner_layer_provider: BlockStateProvider::simple("minecraft:amethyst_block"),
             alternate_inner_layer_provider:
-                BlockStateProvider::Simple("minecraft:budding_amethyst".into()),
-            middle_layer_provider: BlockStateProvider::Simple("minecraft:calcite".into()),
-            outer_layer_provider: BlockStateProvider::Simple("minecraft:smooth_basalt".into()),
+                BlockStateProvider::simple("minecraft:budding_amethyst"),
+            middle_layer_provider: BlockStateProvider::simple("minecraft:calcite"),
+            outer_layer_provider: BlockStateProvider::simple("minecraft:smooth_basalt"),
             inner_placements: vec![
-                "minecraft:amethyst_cluster[facing=up,waterlogged=false]".into(),
+                StateId::from_state_str(
+                    "minecraft:amethyst_cluster[facing=up,waterlogged=false]",
+                )
+                .unwrap(),
             ],
             cannot_replace: HashSet::new(),
             invalid_blocks: HashSet::new(),
@@ -657,14 +663,15 @@ mod tests {
         for x in 0..16 {
             for y in 0..32 {
                 for z in 0..16 {
-                    grid.seed(x, y, z, "minecraft:air".into());
+                    grid.seed_id(x, y, z, StateId::AIR);
                 }
             }
         }
         let mut cfg = cfg();
         cfg.invalid_blocks_threshold = 10;
-        cfg.cannot_replace.insert("minecraft:stone".into());
-        grid.seed(0, 12, 0, "minecraft:stone".into());
+        cfg.cannot_replace
+            .insert(Block::Stone.default_state());
+        grid.seed_id(0, 12, 0, Block::Stone.default_state());
         let tags = VegTags::default();
         let mut random = LegacyRandomSource::new(7);
         assert!(place_geode(
@@ -675,32 +682,24 @@ mod tests {
             &mut grid,
             &tags,
         ));
-        assert_eq!(base_id(grid.get(0, 12, 0)), "minecraft:stone");
+        assert_eq!(grid.get(0, 12, 0).name(), "minecraft:stone");
         assert!(grid.dirty_cells().next().is_some());
     }
 
     #[test]
     fn crystal_state_reorients_and_tracks_waterlogged_property() {
         assert_eq!(
-            replace_state_property(
-                "minecraft:amethyst_cluster[facing=up,waterlogged=false]",
-                "facing",
-                "north",
-            ),
-            "minecraft:amethyst_cluster[facing=north,waterlogged=false]"
+            geode_crystal_state_id(state("minecraft:amethyst_cluster[facing=up,waterlogged=false]"), "north", false),
+            Some(state("minecraft:amethyst_cluster[facing=north,waterlogged=false]"))
         );
         assert_eq!(
-            replace_state_property(
-                "minecraft:amethyst_cluster[facing=up,waterlogged=false]",
-                "waterlogged",
-                "true",
-            ),
-            "minecraft:amethyst_cluster[facing=up,waterlogged=true]"
+            geode_crystal_state_id(state("minecraft:amethyst_cluster[facing=up,waterlogged=false]"), "up", true),
+            Some(state("minecraft:amethyst_cluster[facing=up,waterlogged=true]"))
         );
-        assert!(can_cluster_grow_at_state("minecraft:air"));
-        assert!(can_cluster_grow_at_state("minecraft:water[level=0]"));
-        assert!(!can_cluster_grow_at_state("minecraft:water[level=1]"));
-        assert!(!can_cluster_grow_at_state("minecraft:lava"));
+        assert!(can_cluster_grow_at_state(state("minecraft:air")));
+        assert!(can_cluster_grow_at_state(state("minecraft:water[level=0]")));
+        assert!(!can_cluster_grow_at_state(state("minecraft:water[level=1]")));
+        assert!(!can_cluster_grow_at_state(state("minecraft:lava")));
     }
 
     #[test]
@@ -721,8 +720,8 @@ mod tests {
         assert_eq!((local_lo, local_hi), (-32, 48));
 
         let mut grid = VegGrid::with_footprint(0, 64, 0, 0, local_lo, local_hi);
-        grid.seed(0, 48, 0, "minecraft:stone".into());
-        grid.seed(47, 48, 47, "minecraft:stone".into());
+        grid.seed_id(0, 48, 0, Block::Stone.default_state());
+        grid.seed_id(47, 48, 47, Block::Stone.default_state());
 
         let mut cfg = cfg();
         cfg.distribution_points = IntProvider::Constant(20);
@@ -735,10 +734,10 @@ mod tests {
         cfg.generate_crack_chance = 0.0;
         cfg.use_potential_placements_chance = 0.0;
         cfg.invalid_blocks_threshold = 1;
-        cfg.filling_provider = BlockStateProvider::Simple("minecraft:amethyst_block".into());
-        cfg.inner_layer_provider = BlockStateProvider::Simple("minecraft:amethyst_block".into());
+        cfg.filling_provider = BlockStateProvider::simple("minecraft:amethyst_block");
+        cfg.inner_layer_provider = BlockStateProvider::simple("minecraft:amethyst_block");
         cfg.alternate_inner_layer_provider =
-            BlockStateProvider::Simple("minecraft:budding_amethyst".into());
+            BlockStateProvider::simple("minecraft:budding_amethyst");
 
         super::super::census::reset();
         let mut random = LegacyRandomSource::new(7);
@@ -759,8 +758,8 @@ mod tests {
             &VegTags::default(),
         ));
 
-        assert_eq!(base_id(grid.get(-32, 32, -32)), "minecraft:smooth_basalt");
-        assert_eq!(base_id(grid.get(47, 32, 47)), "minecraft:amethyst_block");
+        assert_eq!(grid.get(-32, 32, -32).name(), "minecraft:smooth_basalt");
+        assert_eq!(grid.get(47, 32, 47).name(), "minecraft:amethyst_block");
         let census = super::super::census::snapshot();
         assert_eq!(census.writes_rejected, 0, "geode edge spills must fit the widened footprint");
         assert!(census.writes > 0);

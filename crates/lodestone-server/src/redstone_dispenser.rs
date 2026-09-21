@@ -104,18 +104,20 @@
 
 use lodestone_data::collision_shapes;
 use lodestone_data::entity_type::EntityType;
-use lodestone_data::block_states::BlockStateValue;
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, PropertyKey, PropertyValue};
+use lodestone_data::block_states::StateId;
 use lodestone_data::item::Item;
 use lodestone_model::{BlockPos, Vec3};
 
 use crate::chunk::ChunkSource;
 use crate::neighbor_update::Direction;
 use crate::redstone::{
-    base_name, direction_from_str, get_bool_property, get_str_property, with_property, WorldState,
+    base_name, get_bool_property, get_str_property, with_property, WorldState,
 };
 
-pub const DISPENSER: &str = "minecraft:dispenser";
-pub const DROPPER: &str = "minecraft:dropper";
+pub const DISPENSER: Block = Block::Dispenser;
+pub const DROPPER: Block = Block::Dropper;
 
 /// `DispenserBlock.TRIGGER_DURATION` (`:56`).
 pub const TRIGGER_DURATION: u32 = 4;
@@ -136,7 +138,7 @@ pub const DISPENSER_BEHAVIOR_SEED: u64 = 0xD15E_5EED;
 pub const DISPENSE_SCALE: f64 = 0.7;
 
 #[must_use]
-pub fn is_dispenser_family(state: &str) -> bool {
+pub fn is_dispenser_family(state: StateId) -> bool {
     matches!(base_name(state), DISPENSER | DROPPER)
 }
 
@@ -145,7 +147,7 @@ pub fn is_dispenser_family(state: &str) -> bool {
 /// ([`is_pushable_container`], [`crate::hopper::try_move_item_into`])
 /// unconditionally rather than consulting the dispenser behaviour table.
 #[must_use]
-pub fn is_dropper(state: &str) -> bool {
+pub fn is_dropper(state: StateId) -> bool {
     base_name(state) == DROPPER
 }
 
@@ -174,19 +176,21 @@ pub fn is_pushable_container(menu_name: &str) -> bool {
 }
 
 #[must_use]
-pub fn facing(state: &str) -> Direction {
-    get_str_property(state, "facing").map(direction_from_str).unwrap_or(Direction::North)
+pub fn facing(state: StateId) -> Direction {
+    get_str_property(state, PropertyKey::Facing)
+        .and_then(crate::redstone::direction_from_property)
+        .unwrap_or(Direction::North)
 }
 
 #[must_use]
-pub fn triggered(state: &str) -> bool {
-    get_bool_property(state, "triggered").unwrap_or(false)
+pub fn triggered(state: StateId) -> bool {
+    get_bool_property(state, PropertyKey::Triggered).unwrap_or(false)
 }
 
 /// The result of a neighbour notification reaching a dispenser or dropper.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NeighborReaction {
-    pub new_state: BlockStateValue,
+    pub new_state: StateId,
     /// `true` only on the rising edge — vanilla schedules the 4-tick fire
     /// tick exactly once per `false -> true` transition, never on the way
     /// back down and never while already `true`.
@@ -200,19 +204,19 @@ pub struct NeighborReaction {
 /// `None` when `state` is not this family, or when `should_trigger` already
 /// matches the stored `TRIGGERED` (nothing to write).
 #[must_use]
-pub fn on_neighbor_changed(state: &str, should_trigger: bool) -> Option<NeighborReaction> {
+pub fn on_neighbor_changed(state: StateId, should_trigger: bool) -> Option<NeighborReaction> {
     if !is_dispenser_family(state) {
         return None;
     }
     let is_triggered = triggered(state);
     if should_trigger && !is_triggered {
         Some(NeighborReaction {
-            new_state: BlockStateValue::parse(&with_property(state, "triggered", "true")),
+            new_state: with_property(state, PropertyKey::Triggered, PropertyValue::builtin(BuiltinPropertyValue::True))?,
             schedule_fire: true,
         })
     } else if !should_trigger && is_triggered {
         Some(NeighborReaction {
-            new_state: BlockStateValue::parse(&with_property(state, "triggered", "false")),
+            new_state: with_property(state, PropertyKey::Triggered, PropertyValue::builtin(BuiltinPropertyValue::False))?,
             schedule_fire: false,
         })
     } else {
@@ -394,10 +398,8 @@ pub fn plain_toss(
 /// comments give the same reason: resolution uses the generated-state boundary,
 /// never a lowest-id fallback, because a bare name's registered default is not
 /// necessarily its lowest state id.
-fn collision_top(state: &str) -> Option<f64> {
-    let boxes = crate::mobs::block_state_id(state)
-        .map(collision_shapes::collision_boxes)
-        .unwrap_or(&[]);
+fn collision_top(state: StateId) -> Option<f64> {
+    let boxes = collision_shapes::collision_boxes(state);
     boxes
         .iter()
         .map(|b| f64::from(b.max[1]))
@@ -423,7 +425,7 @@ pub fn spawn_egg_position(origin: BlockPos, face: Direction, block_state: &dyn F
     let y_off = if matches!(face, Direction::Up) {
         0.0
     } else {
-        crate::spawn_egg::y_offset(collision_top(&block_state(target)), false)
+        crate::spawn_egg::y_offset(collision_top(block_state(target)), false)
     };
     Vec3::new(f64::from(target.x) + 0.5, f64::from(target.y) + y_off, f64::from(target.z) + 0.5)
 }
@@ -447,8 +449,8 @@ fn to_y_rot(face: Direction) -> f32 {
 /// `true` for a block-state string carrying **water** (not lava) —
 /// [`boat_dispense`]'s own `FluidTags.WATER` check, via
 /// [`crate::fluid::fluid_state_of`].
-fn is_water(state: &str) -> bool {
-    crate::fluid::fluid_state_of(state).is_some_and(|f| f.kind == crate::fluid::FluidKind::Water)
+fn is_water(state: StateId) -> bool {
+    state.block() == Block::Water
 }
 
 /// [`boat_dispense`]'s outcome.
@@ -487,11 +489,11 @@ pub fn boat_dispense(origin: BlockPos, face: Direction, boat_width: f64, block_s
 
     let front = face.relative(origin);
     let front_state = block_state(front);
-    let y_offset = if is_water(&front_state) {
+    let y_offset = if is_water(front_state) {
         1.0
-    } else if crate::random_tick::is_air_variant(&front_state) {
+    } else if crate::random_tick::is_air_variant_id(front_state) {
         let below = BlockPos::new(front.x, front.y - 1, front.z);
-        if is_water(&block_state(below)) {
+        if is_water(block_state(below)) {
             0.0
         } else {
             return BoatDispense::Fallback;
@@ -537,20 +539,20 @@ pub fn minecart_dispense(origin: BlockPos, face: Direction, block_state: &dyn Fn
 
     let front = face.relative(origin);
     let front_state = block_state(front);
-    let y_offset = if crate::mobs::minecart::is_rail_block(&front_state) {
-        if crate::mobs::minecart::rail_shape(&front_state).is_some_and(crate::mobs::minecart::RailShape::is_slope) {
+    let y_offset = if crate::mobs::minecart::is_rail_block(front_state) {
+        if crate::mobs::minecart::rail_shape(front_state).is_some_and(crate::mobs::minecart::RailShape::is_slope) {
             0.6
         } else {
             0.1
         }
-    } else if crate::random_tick::is_air_variant(&front_state) {
+    } else if crate::random_tick::is_air_variant_id(front_state) {
         let below = BlockPos::new(front.x, front.y - 1, front.z);
         let below_state = block_state(below);
-        if !crate::mobs::minecart::is_rail_block(&below_state) {
+        if !crate::mobs::minecart::is_rail_block(below_state) {
             return MinecartDispense::Fallback;
         }
         if face != Direction::Down
-            && crate::mobs::minecart::rail_shape(&below_state).is_some_and(crate::mobs::minecart::RailShape::is_slope)
+            && crate::mobs::minecart::rail_shape(below_state).is_some_and(crate::mobs::minecart::RailShape::is_slope)
         {
             -0.4
         } else {
@@ -587,43 +589,54 @@ pub fn flint_and_steel_ignite<S: ChunkSource + ?Sized>(
     env: crate::fire::FireEnv,
     origin: BlockPos,
     face: Direction,
-) -> Option<(BlockPos, String)> {
+) -> Option<(BlockPos, StateId)> {
     let target = face.relative(origin);
-    if !crate::random_tick::is_air_variant(&crate::fire::block_at(world, env, target)) {
+    if !crate::random_tick::is_air_variant_id(crate::fire::block_at_id(world, env, target)) {
         return None;
     }
-    if !crate::fire::can_survive(world, env, target) {
+    if !crate::fire::can_survive_id(world, env, target) {
         return None;
     }
-    Some((target, crate::fire::state_at(world, env, target)))
+    Some((target, crate::fire::state_at_id(world, env, target)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn dispenser(facing: &str, triggered: bool) -> String {
-        format!("minecraft:dispenser[facing={facing},triggered={triggered}]")
+    fn dispenser(facing: Direction, triggered: bool) -> StateId {
+        let state = with_property(
+            Block::Dispenser.default_state(),
+            PropertyKey::Facing,
+            PropertyValue::builtin(crate::redstone::direction_property(facing)),
+        )
+        .expect("dispenser facing is a generated state");
+        with_property(
+            state,
+            PropertyKey::Triggered,
+            PropertyValue::builtin(if triggered { BuiltinPropertyValue::True } else { BuiltinPropertyValue::False }),
+        )
+        .expect("dispenser triggered is a generated state")
     }
 
     #[test]
     fn rising_edge_triggers_and_schedules_the_fire_tick() {
-        let out = on_neighbor_changed(&dispenser("north", false), true).expect("rising edge");
-        assert_eq!(out.new_state, dispenser("north", true));
+        let out = on_neighbor_changed(dispenser(Direction::North, false), true).expect("rising edge");
+        assert_eq!(out.new_state, dispenser(Direction::North, true));
         assert!(out.schedule_fire);
     }
 
     #[test]
     fn falling_edge_untriggers_without_scheduling_anything() {
-        let out = on_neighbor_changed(&dispenser("north", true), false).expect("falling edge");
-        assert_eq!(out.new_state, dispenser("north", false));
+        let out = on_neighbor_changed(dispenser(Direction::North, true), false).expect("falling edge");
+        assert_eq!(out.new_state, dispenser(Direction::North, false));
         assert!(!out.schedule_fire, "vanilla never schedules on the way down");
     }
 
     #[test]
     fn steady_state_is_a_no_op_in_both_directions() {
-        assert_eq!(on_neighbor_changed(&dispenser("north", false), false), None);
-        assert_eq!(on_neighbor_changed(&dispenser("north", true), true), None);
+        assert_eq!(on_neighbor_changed(dispenser(Direction::North, false), false), None);
+        assert_eq!(on_neighbor_changed(dispenser(Direction::North, true), true), None);
     }
 
     /// The reservoir-sampling property: an empty slot between two occupied
@@ -692,8 +705,14 @@ mod tests {
 
     #[test]
     fn is_dropper_distinguishes_the_two_registrations() {
-        assert!(is_dropper("minecraft:dropper[facing=up,triggered=false]"));
-        assert!(!is_dropper("minecraft:dispenser[facing=up,triggered=false]"));
+        let dropper = with_property(
+            Block::Dropper.default_state(),
+            PropertyKey::Facing,
+            PropertyValue::builtin(crate::redstone::direction_property(Direction::Up)),
+        )
+        .expect("dropper facing is a generated state");
+        assert!(is_dropper(dropper));
+        assert!(!is_dropper(dispenser(Direction::Up, false)));
     }
 
     #[test]
@@ -778,7 +797,7 @@ mod tests {
     /// own floor.
     #[test]
     fn spawn_egg_position_over_air_lands_at_the_target_cells_own_floor() {
-        let pos = spawn_egg_position(BlockPos::new(0, 64, 0), Direction::East, &|_| WorldState::from("minecraft:air"));
+        let pos = spawn_egg_position(BlockPos::new(0, 64, 0), Direction::East, &|_| lodestone_data::block_states::air_state());
         assert_eq!(pos, Vec3::new(1.5, 64.0, 0.5));
     }
 
@@ -788,7 +807,7 @@ mod tests {
     /// tell these two apart.
     #[test]
     fn spawn_egg_position_over_solid_stone_stands_on_top_of_it() {
-        let pos = spawn_egg_position(BlockPos::new(0, 64, 0), Direction::East, &|_| WorldState::from("minecraft:stone"));
+        let pos = spawn_egg_position(BlockPos::new(0, 64, 0), Direction::East, &|_| Block::Stone.default_state());
         assert_eq!(pos, Vec3::new(1.5, 65.0, 0.5));
     }
 
@@ -799,25 +818,25 @@ mod tests {
     /// gate rather than trusting the East case to generalise.
     #[test]
     fn spawn_egg_position_facing_up_never_computes_a_collision_offset() {
-        let pos = spawn_egg_position(BlockPos::new(0, 64, 0), Direction::Up, &|_| WorldState::from("minecraft:stone"));
+        let pos = spawn_egg_position(BlockPos::new(0, 64, 0), Direction::Up, &|_| Block::Stone.default_state());
         assert_eq!(pos, Vec3::new(0.5, 65.0, 0.5));
     }
 
     /// A world of water at `y == 63` (source, air above) for `x >= 1`, stone
     /// floor elsewhere, air above `y == 63` everywhere — enough surface
     /// variety to hit every [`boat_dispense`] branch.
-    fn boat_world(overrides: Vec<(BlockPos, String)>) -> impl Fn(BlockPos) -> WorldState {
+    fn boat_world(overrides: Vec<(BlockPos, StateId)>) -> impl Fn(BlockPos) -> WorldState {
         move |p: BlockPos| {
-            if let Some((_, name)) = overrides.iter().find(|(at, _)| *at == p) {
-                return WorldState::from(name.as_str());
+            if let Some((_, state)) = overrides.iter().find(|(at, _)| *at == p) {
+                return *state;
             }
             if p.y == 63 && p.x >= 1 {
-                return WorldState::from("minecraft:water[level=0]");
+                return Block::Water.default_state();
             }
             if p.y <= 62 {
-                return WorldState::from("minecraft:stone");
+                return Block::Stone.default_state();
             }
-            WorldState::from("minecraft:air")
+            lodestone_data::block_states::air_state()
         }
     }
 
@@ -852,8 +871,8 @@ mod tests {
         // it, and the boat must land exactly one block lower.
         let origin = BlockPos::new(0, 63, 4);
         let world = boat_world(vec![
-            (BlockPos::new(1, 63, 4), "minecraft:air".to_owned()),
-            (BlockPos::new(1, 62, 4), "minecraft:water[level=0]".to_owned()),
+            (BlockPos::new(1, 63, 4), lodestone_data::block_states::air_state()),
+            (BlockPos::new(1, 62, 4), Block::Water.default_state()),
         ]);
         let out = boat_dispense(origin, Direction::East, 1.375, &world);
         let BoatDispense::Place { position, .. } = out else {
@@ -870,7 +889,7 @@ mod tests {
     fn boat_dispense_into_solid_stone_falls_back() {
         let origin = BlockPos::new(0, 63, -4);
         let front = Direction::East.relative(origin);
-        let world = boat_world(vec![(front, "minecraft:stone".to_owned())]);
+        let world = boat_world(vec![(front, Block::Stone.default_state())]);
         let out = boat_dispense(origin, Direction::East, 1.375, &world);
         assert_eq!(out, BoatDispense::Fallback);
     }
@@ -880,7 +899,7 @@ mod tests {
     /// `y <= floor_y`, air above, with per-cell overrides.
     struct FireRig {
         floor_y: i32,
-        overrides: Vec<(BlockPos, &'static str)>,
+        overrides: Vec<(BlockPos, StateId)>,
     }
 
     impl crate::chunk::ChunkSource for FireRig {
@@ -889,7 +908,7 @@ mod tests {
             for x in 0..16 {
                 for z in 0..16 {
                     for y in -64..=self.floor_y {
-                        col.set_block(x, y, z, "minecraft:stone");
+                        col.set_block_id(x, y, z, Block::Stone.default_state());
                     }
                 }
             }
@@ -897,15 +916,15 @@ mod tests {
             col
         }
 
-        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
             let pos = BlockPos::new(x, y, z);
-            if let Some((_, name)) = self.overrides.iter().find(|(at, _)| *at == pos) {
-                return (*name).to_owned();
+            if let Some((_, state)) = self.overrides.iter().find(|(at, _)| *at == pos) {
+                return *state;
             }
             if y <= self.floor_y {
-                "minecraft:stone".to_owned()
+                Block::Stone.default_state()
             } else {
-                "minecraft:air".to_owned()
+                lodestone_data::block_states::air_state()
             }
         }
 
@@ -913,7 +932,7 @@ mod tests {
             crate::chunk::DEFAULT_BIOME.to_string()
         }
 
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
     }
 
     fn fire_env() -> crate::fire::FireEnv {
@@ -931,7 +950,7 @@ mod tests {
         let out = flint_and_steel_ignite(&rig, fire_env(), BlockPos::new(0, 64, 0), Direction::East);
         let (target, state) = out.expect("air over a sturdy floor must ignite");
         assert_eq!(target, BlockPos::new(1, 64, 0));
-        assert!(state.starts_with("minecraft:fire["), "{state}");
+        assert_eq!(state.block(), Block::Fire);
     }
 
     /// **Control: no floor and no burnable neighbour** — `canSurvive` fails,
@@ -952,7 +971,7 @@ mod tests {
     fn flint_and_steel_ignite_into_a_solid_block_refuses() {
         let rig = FireRig {
             floor_y: 63,
-            overrides: vec![(BlockPos::new(1, 64, 0), "minecraft:stone")],
+            overrides: vec![(BlockPos::new(1, 64, 0), Block::Stone.default_state())],
         };
         assert_eq!(
             flint_and_steel_ignite(&rig, fire_env(), BlockPos::new(0, 64, 0), Direction::East),

@@ -526,9 +526,9 @@ impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
         x: i32,
         y: i32,
         z: i32,
-        name: &str,
+        state: lodestone_data::block_states::StateId,
     ) -> Option<crate::chunk_store::TryBlockMutation> {
-        self.primary.try_set_block(x, y, z, name)
+        self.primary.try_set_block(x, y, z, state)
     }
 
     fn try_store_resident_edit(
@@ -679,16 +679,16 @@ impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
         self.primary.request_generation_yielding(request, session)
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
-        self.primary.block_state(x, y, z)
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> lodestone_data::block_states::StateId {
+        self.primary.block_state_id(x, y, z)
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
         self.primary.biome_state_at(x, y, z)
     }
 
-    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
-        self.primary.set_block(x, y, z, name);
+    fn set_block(&self, x: i32, y: i32, z: i32, state: lodestone_data::block_states::StateId) {
+        self.primary.set_block(x, y, z, state);
     }
 
     fn block_entity(&self, x: i32, y: i32, z: i32) -> Option<crate::block_entities::BlockEntity> {

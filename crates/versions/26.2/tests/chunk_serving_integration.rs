@@ -15,6 +15,8 @@ use std::sync::{
 use std::time::Duration;
 
 use lodestone_core::{Reader, State, Writer};
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 use lodestone_net::{Connection, Transport, memory_pair};
 use lodestone_server::{
     BlockEntityHandle, ChunkColumn, ChunkSource, MobHandle, NoEntities, ServerBound,
@@ -42,18 +44,27 @@ impl ChunkSource for FlatFluidWorld {
         let mut column = ChunkColumn::new(-64, 384);
         for z in 0..16 {
             for x in 0..16 {
-                column.set_block(x, 63, z, "minecraft:stone");
+                column.set_block_id(x, 63, z, Block::Stone.default_state());
             }
         }
-        column.set_block(3, 100, 3, "minecraft:water[level=7]");
-        column.set_block(11, 100, 3, "minecraft:lava[level=3]");
+        column.set_block_id(
+            3,
+            100,
+            3,
+            StateId::from_state_str("minecraft:water[level=7]").expect("water level fixture"),
+        );
+        column.set_block_id(
+            11,
+            100,
+            3,
+            StateId::from_state_str("minecraft:lava[level=3]").expect("lava level fixture"),
+        );
         column
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         self.column(x.div_euclid(16), z.div_euclid(16))
-            .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
-            .to_string()
+            .block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -62,7 +73,7 @@ impl ChunkSource for FlatFluidWorld {
             .to_string()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
 }
 
 /// A small test-only decorator. The required join methods are forwarded so

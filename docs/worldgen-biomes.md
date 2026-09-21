@@ -51,6 +51,10 @@ the checked 4×4 centre view, while the surface context keeps the full border fo
 lookups; both views borrow the same request-owned storage. The `gen-counters` snapshot exposes the
 preparation count, and the production control requires exactly one for a shaped request. A view
 rejects non-quart coordinates and every coordinate outside its declared subregion before indexing.
+Complete 3-D biome cells are retained only for the admitted pre-ore rectangle. The extra surface
+border resolves its sparse jitter-selected quart queries directly from the same prepared climate
+grid and search cursor. Treating that border as packet data would build 1,536 unused cells per border
+column and increase both memory and climate-search work without changing any served biome container.
 
 **Sampling height matters and is per-consumer, not unified.** Carver and ore selection resolve a
 source chunk's biome at `y = 0`; vegetation resolves at the column's own generated surface height.
@@ -151,6 +155,10 @@ and need no repeated range fallback.
   pass either the 16-entry surface biome array or the direct wire `BiomeCells` lookup to
   `SurfaceSystem::build_surface`; use `OverworldGenerator::surface_biome_context`. Either shortcut
   erases valid cave-biome material rules at boundary cells.
+- The zoom selector's request-bounded lattice caches only the pure `[fx, fy, fz]` offsets for each
+  quart vertex. It must not cache biome rows: row resolution remains lazy and follows the surface
+  walk's stateful cursor order. Use `ZoomFiddleLattice::for_chunk_bounds` when a region caller owns
+  several adjacent chunk queries; the scalar context builds the equivalent block-bounded lattice.
 - **Block-position biome predicates also use the zoomed nearby-cell context.** The direct quart
   answer is the wire cell, not the block biome accessor's answer. Keep the seed-derived fiddle and
   all three axes in `overworld::biome::zoomed_biome`; otherwise an underground feature can consume

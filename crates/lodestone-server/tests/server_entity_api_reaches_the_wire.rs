@@ -13,6 +13,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use lodestone_core::State;
+use lodestone_data::block_states::StateId;
 use lodestone_model::{EntityNetworkId, ResourceKey, Rotation, Vec3};
 use lodestone_net::Connection;
 use lodestone_server::{
@@ -117,15 +118,15 @@ impl ChunkSource for FlatWorld {
         ChunkColumn::new(0, 16)
     }
 
-    fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-        "minecraft:air".to_owned()
+    fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
+        StateId::AIR
     }
 
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
         "minecraft:plains".to_owned()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
 }
 
 async fn nudge(client: &mut Connection<tokio::io::DuplexStream>) {

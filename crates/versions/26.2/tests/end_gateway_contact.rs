@@ -13,6 +13,7 @@ use std::time::Duration;
 use lodestone_client::{
     ChunkPos, ClientBuilder, ClientEvent, ClientHandle, EventStream, LoginProfile, ServerAddress,
 };
+use lodestone_data::block::Block;
 use lodestone_data::block_states::StateId;
 use lodestone_model::{GameMode, Rotation, Vec3};
 use lodestone_server::dimension::Dimension;
@@ -144,11 +145,16 @@ impl ChunkSource for GatewayWorld {
         let mut column = ChunkColumn::new(-64, 384);
         for z in 0..16 {
             for x in 0..16 {
-                column.set_block(x, 99, z, "minecraft:stone");
+                column.set_block_id(x, 99, z, Block::Stone.default_state());
             }
         }
         if self.gateway && (cx, cz) == (0, 0) {
-            column.set_block(GATEWAY.0, GATEWAY.1, GATEWAY.2, "minecraft:end_gateway");
+            column.set_block_id(
+                GATEWAY.0,
+                GATEWAY.1,
+                GATEWAY.2,
+                Block::EndGateway.default_state(),
+            );
         }
         if self.gateway && self.metadata && (cx, cz) == (0, 0) {
             column.set_block_entities(vec![(
@@ -162,10 +168,9 @@ impl ChunkSource for GatewayWorld {
         column
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         self.column(x.div_euclid(16), z.div_euclid(16))
-            .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
-            .to_string()
+            .block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
     }
 
     fn resident_block_state_id(&self, x: i32, y: i32, z: i32) -> Option<StateId> {
@@ -174,7 +179,10 @@ impl ChunkSource for GatewayWorld {
             .lock()
             .expect("resident block-state lock")
             .contains(&(x.div_euclid(16), z.div_euclid(16)));
-        resident.then(|| StateId::from_state_str(&self.block_state(x, y, z)))?
+        resident.then(|| {
+            self.column(x.div_euclid(16), z.div_euclid(16))
+                .block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
+        })
     }
 
     fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
@@ -192,7 +200,7 @@ impl ChunkSource for GatewayWorld {
             .to_string()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
 
     fn block_entity(&self, x: i32, y: i32, z: i32) -> Option<BlockEntity> {
         (self.gateway && self.metadata && (x, y, z) == GATEWAY).then(|| BlockEntity::EndGateway {

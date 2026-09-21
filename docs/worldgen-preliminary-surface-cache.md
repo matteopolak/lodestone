@@ -30,11 +30,13 @@ request into both the chunk-bound aquifer and surface scan. Structure height
 probes are an independent generator-owned consumer, so `OverworldGenerator`
 keeps one bounded 8,192-entry region cache. Batch leases use an equivalent
 request cache; scalar columns and structure probes use the generator-owned
-region cache. Both carry the compiled `PointProgram`. Direct aquifer and
-Nether/End surface constructors retain independent fallback caches for their
-standalone lifetimes. A request never rounds, clamps, or translates its key
-beyond the specified snap; negative and translated coordinates are distinct
-entries.
+region cache. Both carry the compiled `PointProgram`. Chunk-bound aquifers
+retain a typed lazy preliminary route: its 4,096-entry point scratch is created
+only if a cache without a compiled executor asks that aquifer to compute a miss,
+not eagerly for every aquifer that shares the cache. Direct aquifer and Nether/End
+surface constructors retain independent fallback caches for their standalone
+lifetimes. A request never rounds, clamps, or translates its key beyond the
+specified snap; negative and translated coordinates are distinct entries.
 
 The `gen-counters` instrumentation records requests and actual density
 computations. A bounded adjacent-ring control demonstrates the overlap while

@@ -33,16 +33,16 @@
 //!
 //! # The two arms, and why warm is the honest one
 //!
-//! Arm 1 is cold: it interns every state the scene produces, binds the tag
-//! bitsets, fills the property-rewrite memos and grows every thread-local scratch
-//! buffer. All of that is warmup by construction — the interner outlives every
-//! column a generator serves (`docs/worldgen-state-interning.md`) — so arm 1 is
+//! Arm 1 is cold: it warms every state-dependent lookup, binds the tag bitsets,
+//! fills the property-rewrite memos and grows every thread-local scratch buffer.
+//! All of that is warmup by construction — the shared state tables outlive
+//! every column a generator serves — so arm 1 is
 //! expected to allocate and is measured only to prove the instrument is live.
 //!
 //! Arm 2 is the steady state the budget is written against. **It is a fresh
-//! `VegGrid` on the same interner and the same `VegTags`**, which is exactly the
-//! production relationship: `OverworldGenerator` owns one interner and one
-//! `VegTags` and builds a new grid per served column.
+//! `VegGrid` on the same state tables and the same `VegTags`**, which is exactly
+//! the production relationship: the generator builds a new grid per served
+//! column while sharing those tables.
 //!
 //! # Arm 2 now reads literal zero — Unit 19
 //!
@@ -89,12 +89,13 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
 
+use lodestone_data::block::Block;
 use lodestone_worldgen::compose::build_decoration_catalog;
 use lodestone_worldgen::density::{NoiseParams, Resolver};
 use lodestone_worldgen::feature::vegetation::{
     PlacedRef, VegGrid, VegTags,
     apply_vegetal_decoration_step_3x3_per_source, build_veg_tags,
-    census, ids, is_air,
+    census, ids,
 };
 use lodestone_worldgen::feature::{REGION_MAX, REGION_MIN, STEP_VEGETAL_DECORATION};
 use lodestone_worldgen::rng::{WorldgenRandom, XoroshiroRandomSource};
@@ -219,15 +220,11 @@ const BIOME: &str = "minecraft:savanna";
 /// through to (`docs/worldgen-in-place-decoration.md`).
 fn seed_flat_region(grid: &mut VegGrid, base_x: i32, base_z: i32) {
     let pad = 8;
+    let grass = Block::GrassBlock.default_state();
     for lx in (REGION_MIN - pad)..(REGION_MAX + pad) {
         for lz in (REGION_MIN - pad)..(REGION_MAX + pad) {
             for y in (GROUND_Y - 3)..=GROUND_Y {
-                grid.seed(
-                    base_x + lx,
-                    y,
-                    base_z + lz,
-                    "minecraft:grass_block[snowy=false]".to_string(),
-                );
+                grid.seed_id(base_x + lx, y, base_z + lz, grass);
             }
         }
     }
@@ -241,22 +238,10 @@ fn seed_flat_region(grid: &mut VegGrid, base_x: i32, base_z: i32) {
 /// region, i.e. the harness, not the engine. It also read *identically* 16,411
 /// across two scenes with different write counts, which is what gave it away — a
 /// constant where a per-write cost was hypothesised. Keep the seeding out here.
-fn seeded_grid(
-    interner: &std::sync::Arc<lodestone_worldgen::interner::StateInterner>,
-    chunk_x: i32,
-    chunk_z: i32,
-) -> VegGrid {
+fn seeded_grid(chunk_x: i32, chunk_z: i32) -> VegGrid {
     let base_x = chunk_x * 16;
     let base_z = chunk_z * 16;
-    let mut grid = VegGrid::with_footprint_interned(
-        interner.clone(),
-        MIN_Y,
-        HEIGHT,
-        base_x,
-        base_z,
-        REGION_MIN,
-        REGION_MAX,
-    );
+    let mut grid = VegGrid::with_footprint(MIN_Y, HEIGHT, base_x, base_z, REGION_MIN, REGION_MAX);
     seed_flat_region(&mut grid, base_x, base_z);
     grid
 }
@@ -296,12 +281,8 @@ fn a_warm_vegetal_decoration_pass_allocates_only_its_grids_own_container_growth(
         "{BIOME} must resolve a non-empty VEGETAL_DECORATION list, or this gate \
          measures an empty pipeline"
     );
-    // One interner shared by every grid, exactly as `OverworldGenerator` shares one
-    // across every column it serves.
-    let interner = std::sync::Arc::new(lodestone_worldgen::interner::StateInterner::new());
-
-    // ---- Arm 1: cold. Interning, binding, memo fills, scratch growth. --------
-    let mut cold_grid = seeded_grid(&interner, 0, 0);
+    // ---- Arm 1: cold. Binding, memo fills, scratch growth. -------------------
+    let mut cold_grid = seeded_grid(0, 0);
     census::reset();
     ids::reset_counts();
     let (_, cold_allocs) = allocs_of(|| run_pass(&mut cold_grid, &tags, &features, 0, 0));
@@ -310,7 +291,7 @@ fn a_warm_vegetal_decoration_pass_allocates_only_its_grids_own_container_growth(
     assert!(
         cold_allocs > 0,
         "the counting allocator reported ZERO allocations for a cold pass that had \
-         to intern every state in the scene. The instrument is not live — every \
+         to warm every state-dependent lookup in the scene. The instrument is not live — every \
          assertion below would be vacuous."
     );
 
@@ -367,7 +348,7 @@ fn a_warm_vegetal_decoration_pass_allocates_only_its_grids_own_container_growth(
     // allocations" would have attributed the harness to the subject — the same
     // mistake this file's own `seeded_grid` doc records for the 16,384 `to_string()`s.
     // A delta across the window measures the pass without disturbing the map.
-    let mut warm_grid = seeded_grid(&interner, 0, 0);
+    let mut warm_grid = seeded_grid(0, 0);
     ids::reset_counts();
     lodestone_worldgen::feature::region_view::reset_scratch_misses();
     let before = census::snapshot();
@@ -407,8 +388,8 @@ fn a_warm_vegetal_decoration_pass_allocates_only_its_grids_own_container_growth(
         slow, 0,
         "{slow} of {} tag queries fell back to the string path on a WARM pass. \
          A silent fallback is indistinguishable from a working fast path, which is \
-         why this is asserted rather than assumed — the interner should mint no new \
-         state by the second pass.",
+         why this is asserted rather than assumed — the numeric tag tables should \
+         answer every query on the fast path with no new state.",
         fast + slow
     );
 
@@ -511,8 +492,6 @@ fn a_warm_pass_allocates_zero_at_every_scene_size() {
     let resolver = FsResolver { root: data_dir() };
     let tags = build_veg_tags(&resolver);
     let features = vegetal_features_for(&resolver, BIOME);
-    let interner = std::sync::Arc::new(lodestone_worldgen::interner::StateInterner::new());
-
     const SCENES: [(i32, i32); 4] = [(0, 0), (7, 11), (-3, 5), (20, -5)];
 
     // Warm the whole thread, including the free-list's capacity high-water mark.
@@ -526,7 +505,7 @@ fn a_warm_pass_allocates_zero_at_every_scene_size() {
     // explicitly declined to guess a number here for want of a measured target.
     for _ in 0..2 {
         for (cx, cz) in SCENES {
-            let mut grid = seeded_grid(&interner, cx, cz);
+            let mut grid = seeded_grid(cx, cz);
             run_pass(&mut grid, &tags, &features, cx, cz);
         }
     }
@@ -536,7 +515,7 @@ fn a_warm_pass_allocates_zero_at_every_scene_size() {
     // instrument rather than the engine.
     let mut samples: Vec<(usize, u64, u64)> = Vec::new();
     for (cx, cz) in SCENES {
-        let mut grid = seeded_grid(&interner, cx, cz);
+        let mut grid = seeded_grid(cx, cz);
         lodestone_worldgen::feature::region_view::reset_scratch_misses();
         let before = census::snapshot().writes;
         let (_, allocs) = allocs_of(|| run_pass(&mut grid, &tags, &features, cx, cz));
@@ -599,11 +578,9 @@ fn recycling_is_what_removes_the_containers_and_draining_the_free_list_puts_them
     let resolver = FsResolver { root: data_dir() };
     let tags = build_veg_tags(&resolver);
     let features = vegetal_features_for(&resolver, BIOME);
-    let interner = std::sync::Arc::new(lodestone_worldgen::interner::StateInterner::new());
-
     // Converge the thread, exactly as the test above does.
     for _ in 0..2 {
-        let mut grid = seeded_grid(&interner, 0, 0);
+        let mut grid = seeded_grid(0, 0);
         run_pass(&mut grid, &tags, &features, 0, 0);
     }
 
@@ -615,7 +592,7 @@ fn recycling_is_what_removes_the_containers_and_draining_the_free_list_puts_them
          recycled write log on this thread"
     );
     lodestone_worldgen::feature::region_view::reset_scratch_misses();
-    let mut recycled = seeded_grid(&interner, 0, 0);
+    let mut recycled = seeded_grid(0, 0);
     let before_a = census::snapshot().writes;
     let (_, recycled_allocs) = allocs_of(|| run_pass(&mut recycled, &tags, &features, 0, 0));
     let recycled_scratch_misses = lodestone_worldgen::feature::region_view::scratch_misses();
@@ -630,7 +607,7 @@ fn recycling_is_what_removes_the_containers_and_draining_the_free_list_puts_them
         "the drain did not empty the free-list, so arm B is a second arm A"
     );
     lodestone_worldgen::feature::region_view::reset_scratch_misses();
-    let mut fresh = seeded_grid(&interner, 0, 0);
+    let mut fresh = seeded_grid(0, 0);
     let before_b = census::snapshot().writes;
     let (_, fresh_allocs) = allocs_of(|| run_pass(&mut fresh, &tags, &features, 0, 0));
     let fresh_scratch_misses = lodestone_worldgen::feature::region_view::scratch_misses();
@@ -665,10 +642,10 @@ fn recycling_is_what_removes_the_containers_and_draining_the_free_list_puts_them
 
 /// Differential control for the one change Unit 8 made inside `grid.rs`:
 /// `height_world_surface` now tests air by comparing against three cached
-/// `StateId`s instead of resolving each cell's name through the interner.
+/// `StateId`s instead of resolving each cell's name.
 ///
 /// That is only exact because air carries no block-state properties. This
-/// reimplements the *old* string algorithm over a real, decorated scene and
+/// reimplements the equivalent numeric scan over a real, decorated scene and
 /// requires the two to agree at every column — so if the id shortcut is ever wrong
 /// (someone adds a property-carrying state to `is_air`), this fails rather than
 /// silently shifting every heightmap-placed feature by a block.
@@ -677,18 +654,8 @@ fn the_id_based_air_test_answers_what_the_string_scan_answered() {
     let resolver = FsResolver { root: data_dir() };
     let tags = build_veg_tags(&resolver);
     let features = vegetal_features_for(&resolver, BIOME);
-    let interner = std::sync::Arc::new(lodestone_worldgen::interner::StateInterner::new());
-
     let (base_x, base_z) = (0, 0);
-    let mut grid = VegGrid::with_footprint_interned(
-        interner.clone(),
-        MIN_Y,
-        HEIGHT,
-        base_x,
-        base_z,
-        REGION_MIN,
-        REGION_MAX,
-    );
+    let mut grid = VegGrid::with_footprint(MIN_Y, HEIGHT, base_x, base_z, REGION_MIN, REGION_MAX);
     seed_flat_region(&mut grid, base_x, base_z);
     run_pass(&mut grid, &tags, &features, 0, 0);
     assert!(
@@ -697,12 +664,11 @@ fn the_id_based_air_test_answers_what_the_string_scan_answered() {
          and the control is premise-false"
     );
 
-    // The deleted algorithm, rebuilt: topmost cell whose BASE NAME is not air.
-    let string_scan = |x: i32, z: i32| -> i32 {
+    // The deleted algorithm, rebuilt numerically: topmost cell whose block is not air.
+    let id_scan = |x: i32, z: i32| -> i32 {
         for y in (MIN_Y..MIN_Y + HEIGHT).rev() {
-            let state = grid.get(x, y, z);
-            let base = state.split('[').next().unwrap_or(state);
-            if !is_air(base) {
+            let state = grid.get_id(x, y, z);
+            if !matches!(state.block(), Block::Air | Block::CaveAir | Block::VoidAir) {
                 return y + 1;
             }
         }
@@ -715,11 +681,11 @@ fn the_id_based_air_test_answers_what_the_string_scan_answered() {
         for lz in REGION_MIN..REGION_MAX {
             let (x, z) = (base_x + lx, base_z + lz);
             let by_id = grid.height_world_surface(x, z);
-            let by_string = string_scan(x, z);
+            let by_scan = id_scan(x, z);
             assert_eq!(
-                by_id, by_string,
-                "height_world_surface disagrees with the string scan at ({x}, {z}): \
-                 id path says {by_id}, name path says {by_string}"
+                by_id, by_scan,
+                "height_world_surface disagrees with the numeric scan at ({x}, {z}): \
+                 id path says {by_id}, scan says {by_scan}"
             );
             compared += 1;
             if by_id > GROUND_Y + 1 {
@@ -735,7 +701,7 @@ fn the_id_based_air_test_answers_what_the_string_scan_answered() {
          anything but air"
     );
     println!(
-        "height_world_surface: {compared} columns agree with the string scan, \
+        "height_world_surface: {compared} columns agree with the numeric scan, \
          {above_ground} of them carrying decoration"
     );
 }

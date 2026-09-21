@@ -69,14 +69,17 @@
 //! files, and [`crate::dense_grid`] for the write target.
 
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
 use std::io::Read as _;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use lodestone_core::{Nbt, Reader};
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey, PropertyValue};
+use lodestone_data::block_states::StateId as CanonicalStateId;
 use lodestone_worldgen_core::rng::{LegacyRandomSource, RandomSource, get_seed};
 
 use super::BoundingBox;
+use super::jigsaw::JigsawBlockInfo;
 use super::processor::{ProcessCtx, Processor, ProcessedBlock};
 use super::StructureMutationContext;
 use crate::dense_grid::DenseBlockGrid;
@@ -161,66 +164,42 @@ pub enum Mirror {
     FrontBack,
 }
 
-/// A block state as a name plus its property map — the form template palettes
-/// are written in.
-///
-/// The map is a `BTreeMap` because [`Self::canonical`] must emit properties in
-/// alphabetical order: that is the spelling the rest of this engine's block field
-/// holds (`lodestone_worldgen::feature::canon_state`,
-/// `lodestone_server::worldgen_data::canonical_state`), and a differently-ordered
-/// string is a *different palette entry* to [`crate::interner`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A validated built-in block state used while defining coded structures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockState {
-    /// The block id, e.g. `minecraft:oak_stairs`.
-    pub name: String,
-    /// `key -> value`, alphabetical.
-    pub properties: BTreeMap<String, String>,
+    pub id: CanonicalStateId,
 }
 
 impl BlockState {
+    /// Creates the default state for a typed built-in block.
+    #[must_use]
+    pub fn from_block(block: Block) -> Self {
+        Self { id: block.default_state() }
+    }
+
     /// A state with no properties.
     #[must_use]
-    pub fn of(name: &str) -> Self {
-        Self {
-            name: name.to_string(),
-            properties: BTreeMap::new(),
-        }
+    pub fn of(block: Block) -> Self {
+        Self::from_block(block)
     }
 
     /// Parses `minecraft:oak_stairs[facing=north,half=bottom]`.
     #[must_use]
     pub fn parse(spec: &str) -> Self {
         let Some((name, rest)) = spec.split_once('[') else {
-            return Self::of(spec.trim());
+            return Self {
+                id: parse_bound_state(spec.trim())
+                    .unwrap_or_else(|| panic!("unknown structure block state {spec}")),
+            };
         };
-        let mut properties = BTreeMap::new();
+        let mut properties = Vec::new();
         for entry in rest.trim_end_matches(']').split(',') {
             if let Some((key, value)) = entry.split_once('=') {
-                properties.insert(key.trim().to_string(), value.trim().to_string());
+                properties.push((key.trim(), value.trim()));
             }
         }
-        Self {
-            name: name.trim().to_string(),
-            properties,
-        }
-    }
-
-    /// The canonical `name[k=v,…]` string, properties alphabetical.
-    #[must_use]
-    pub fn canonical(&self) -> String {
-        if self.properties.is_empty() {
-            return self.name.clone();
-        }
-        let mut out = self.name.clone();
-        out.push('[');
-        for (i, (key, value)) in self.properties.iter().enumerate() {
-            if i > 0 {
-                out.push(',');
-            }
-            let _ = write!(out, "{key}={value}");
-        }
-        out.push(']');
-        out
+        let id = bind_state(name.trim(), &properties);
+        Self { id }
     }
 
     /// Rotates supported directional properties (see the module documentation
@@ -240,40 +219,43 @@ impl BlockState {
         if rotation == Rotation::None {
             return self;
         }
+        let mut properties = Properties::from_state_id(self.id);
         let turns = rotation.turns();
-        if let Some(facing) = self.properties.get("facing") {
+        if let Some(facing) = property_name(&properties, "facing") {
             if let Some(rotated) = rotate_direction(facing, turns) {
-                self.properties.insert("facing".into(), rotated.into());
+                set_property(&mut properties, "facing", rotated);
             }
         }
-        if let Some(axis) = self.properties.get("axis") {
+        if let Some(axis) = property_name(&properties, "axis") {
             if turns % 2 == 1 {
-                let swapped = match axis.as_str() {
+                let swapped = match axis {
                     "x" => Some("z"),
                     "z" => Some("x"),
                     _ => None,
                 };
                 if let Some(swapped) = swapped {
-                    self.properties.insert("axis".into(), swapped.into());
+                    set_property(&mut properties, "axis", swapped);
                 }
             }
         }
-        if let Some(value) = self.properties.get("rotation").and_then(|r| r.parse::<u32>().ok()) {
+        if let Some(value) = property_name(&properties, "rotation").and_then(|value| value.parse::<u32>().ok()) {
             // Sixteen-step orientation values advance by four per quarter turn.
             let rotated = (value + 4 * turns) % 16;
-            self.properties.insert("rotation".into(), rotated.to_string());
+            let rotated = rotated.to_string();
+            set_property(&mut properties, "rotation", &rotated);
         }
-        if let Some(orientation) = self.properties.get("orientation") {
+        if let Some(orientation) = property_name(&properties, "orientation") {
             if let Some(rotated) = rotate_orientation(orientation, turns) {
-                self.properties.insert("orientation".into(), rotated);
+                set_property(&mut properties, "orientation", &rotated);
             }
         }
-        if let Some(shape) = self.properties.get("shape") {
+        if let Some(shape) = property_name(&properties, "shape") {
             if let Some(rotated) = rotate_rail_shape(shape, turns) {
-                self.properties.insert("shape".into(), rotated.into());
+                set_property(&mut properties, "shape", rotated);
             }
         }
-        rotate_directional_flags(&mut self, turns);
+        rotate_directional_flags(&mut properties, turns);
+        self.id = resolve_properties(self.id.block(), properties);
         self
     }
 
@@ -283,7 +265,7 @@ impl BlockState {
     /// except a jigsaw.
     #[must_use]
     pub fn front_and_top(&self) -> Option<(&str, &str)> {
-        self.properties.get("orientation")?.split_once('_')
+        property_name(&Properties::from_state_id(self.id), "orientation")?.split_once('_')
     }
 
     /// Mirrors supported directional properties.
@@ -298,6 +280,7 @@ impl BlockState {
         if mirror == Mirror::None {
             return self;
         }
+        let mut properties = Properties::from_state_id(self.id);
         let flip = |dir: &str| -> Option<&'static str> {
             match (mirror, dir) {
                 (Mirror::LeftRight, "north") => Some("south"),
@@ -309,11 +292,11 @@ impl BlockState {
         };
         // Stairs require shape-specific handling when the mirror moves their
         // facing. The two mirror axes are intentionally asymmetric here.
-        let is_stair = self.properties.contains_key("shape")
-            && self.properties.contains_key("half")
-            && self.properties.contains_key("facing");
+        let is_stair = property_name(&properties, "shape").is_some()
+            && property_name(&properties, "half").is_some()
+            && property_name(&properties, "facing").is_some();
         if is_stair {
-            let facing = self.properties.get("facing").cloned().unwrap_or_default();
+            let facing = property_name(&properties, "facing").unwrap_or_default();
             let z_axis = facing == "north" || facing == "south";
             let applies = match mirror {
                 Mirror::LeftRight => z_axis,
@@ -321,8 +304,8 @@ impl BlockState {
                 Mirror::None => false,
             };
             if applies {
-                if let Some(shape) = self.properties.get("shape").cloned() {
-                    let swapped = match (mirror, shape.as_str()) {
+                if let Some(shape) = property_name(&properties, "shape") {
+                    let swapped = match (mirror, shape) {
                         (Mirror::LeftRight, "outer_left") | (Mirror::FrontBack, "outer_left") => {
                             Some("outer_right")
                         }
@@ -335,27 +318,24 @@ impl BlockState {
                         _ => None,
                     };
                     if let Some(swapped) = swapped {
-                        self.properties.insert("shape".into(), swapped.into());
+                        set_property(&mut properties, "shape", swapped);
                     }
                 }
             }
         }
-        if let Some(shape) = self.properties.get("shape") {
+        if let Some(shape) = property_name(&properties, "shape") {
             if let Some(flipped) = mirror_rail_shape(shape, mirror) {
-                self.properties.insert("shape".into(), flipped.into());
+                set_property(&mut properties, "shape", flipped);
             }
         }
-        if let Some(facing) = self.properties.get("facing") {
+        if let Some(facing) = property_name(&properties, "facing") {
             if let Some(flipped) = flip(facing) {
-                self.properties.insert("facing".into(), flipped.into());
+                set_property(&mut properties, "facing", flipped);
             }
         }
-        // There are only four directional keys. Snapshot their values in a
-        // stack array so mirroring does not allocate a temporary Vec before
-        // writing the permuted values back.
-        let mut flags: [Option<(usize, String)>; 4] = std::array::from_fn(|_| None);
+        let mut flags: [Option<(usize, &'static str)>; 4] = std::array::from_fn(|_| None);
         for (source, dir) in ["north", "east", "south", "west"].into_iter().enumerate() {
-            let Some(value) = self.properties.get(dir) else {
+            let Some(value) = property_name(&properties, dir) else {
                 continue;
             };
             let target = flip(dir).unwrap_or(dir);
@@ -363,11 +343,12 @@ impl BlockState {
                 .iter()
                 .position(|candidate| *candidate == target)
                 .unwrap_or(source);
-            flags[source] = Some((target, value.clone()));
+            flags[source] = Some((target, value));
         }
         for (target, value) in flags.into_iter().flatten() {
-            self.properties.insert(["north", "east", "south", "west"][target].into(), value);
+            set_property(&mut properties, ["north", "east", "south", "west"][target], value);
         }
+        self.id = resolve_properties(self.id.block(), properties);
         self
     }
 
@@ -375,8 +356,109 @@ impl BlockState {
     /// property and is currently dry.
     #[must_use]
     pub fn is_waterloggable_and_dry(&self) -> bool {
-        self.properties.get("waterlogged").map(String::as_str) == Some("false")
+        property_name(&Properties::from_state_id(self.id), "waterlogged") == Some("false")
     }
+}
+
+fn bind_state(name: &str, properties: &[(&str, &str)]) -> CanonicalStateId {
+    let block = Block::from_name(name).unwrap_or_else(|| panic!("unsupported structure block: {name}"));
+    let pairs = properties
+        .iter()
+        .map(|&(key, value)| {
+            let key = PropertyKey::from_name(key)
+                .unwrap_or_else(|| panic!("unsupported property {key} on structure block {name}"));
+            let value = PropertyValue::from_name(value)
+                .unwrap_or_else(|| panic!("unsupported property value {value} on structure block {name}"));
+            (key, value)
+        })
+        .collect::<Vec<_>>();
+    let typed = Properties::try_from_pairs(&pairs)
+        .unwrap_or_else(|error| panic!("invalid properties for structure block {name}: {error}"));
+    if let Some(state) = Properties::state_for_block(block, &typed) {
+        return state;
+    }
+    let mut spec = name.to_owned();
+    if !properties.is_empty() {
+        spec.push('[');
+        for (index, &(key, value)) in properties.iter().enumerate() {
+            if index != 0 {
+                spec.push(',');
+            }
+            spec.push_str(key);
+            spec.push('=');
+            spec.push_str(value);
+        }
+        spec.push(']');
+    }
+    let state = parse_bound_state(&spec)
+        .unwrap_or_else(|| panic!("unsupported state for structure block {name}"));
+    let generated = Properties::from_state_id(state);
+    if typed.iter().all(|property| generated.get(property.key()) == Some(property.value())) {
+        state
+    } else {
+        panic!("unsupported state for structure block {name}")
+    }
+}
+
+fn parse_bound_state(spec: &str) -> Option<CanonicalStateId> {
+    lodestone_data::block_states::state_id(spec).and_then(CanonicalStateId::new)
+}
+
+fn property_name(properties: &Properties, name: &str) -> Option<&'static str> {
+    let key = PropertyKey::from_name(name)?;
+    properties.get(key)?.name()
+}
+
+fn set_property(properties: &mut Properties, key: &str, value: &str) {
+    let Some(key) = PropertyKey::from_name(key) else { return };
+    let Some(value) = PropertyValue::from_name(value).and_then(PropertyValue::builtin_value) else {
+        return;
+    };
+    if let Ok(updated) = (*properties).with_builtin(key, value) {
+        *properties = updated;
+    }
+}
+
+fn resolve_properties(block: Block, properties: Properties) -> CanonicalStateId {
+    Properties::state_for_block(block, &properties)
+        .unwrap_or_else(|| panic!("transformed structure state is not valid for {}", block.name()))
+}
+
+fn rotate_state(state: CanonicalStateId, rotation: Rotation) -> CanonicalStateId {
+    state_with_transform(state, Mirror::None, rotation)
+}
+
+pub(crate) fn state_with_transform(
+    state: CanonicalStateId,
+    mirror: Mirror,
+    rotation: Rotation,
+) -> CanonicalStateId {
+    if mirror == Mirror::None && rotation == Rotation::None {
+        return state;
+    }
+    BlockState { id: state }
+        .into_mirror(mirror)
+        .into_rotate(rotation)
+        .id
+}
+
+pub(crate) fn state_with(
+    block: Block,
+    values: &[(PropertyKey, BuiltinPropertyValue)],
+) -> CanonicalStateId {
+    let mut pairs = [(PropertyKey::Age, PropertyValue::builtin(BuiltinPropertyValue::Value0)); 7];
+    for (index, &(key, value)) in values.iter().enumerate() {
+        pairs[index] = (key, PropertyValue::builtin(value));
+    }
+    let properties = Properties::try_from_pairs(&pairs[..values.len()])
+        .expect("structure state properties are valid");
+    Properties::state_for_block(block, &properties).expect("structure state exists")
+}
+
+fn with_waterlogged(state: CanonicalStateId, waterlogged: bool) -> CanonicalStateId {
+    let mut properties = Properties::from_state_id(state);
+    set_property(&mut properties, "waterlogged", if waterlogged { "true" } else { "false" });
+    resolve_properties(state.block(), properties)
 }
 
 /// Rotates the ten supported rail shape values.
@@ -505,17 +587,19 @@ pub fn direction_step(dir: &str) -> [i32; 3] {
 /// shape update after all writes in a piece; keeping it here makes the same
 /// ordering observable for ladders, wall banners, and the other wall-mounted
 /// families rather than leaving them permanently attached to a clipped piece.
-fn attached_support_position(pos: [i32; 3], state: &str) -> Option<[i32; 3]> {
-    let parsed = BlockState::parse(state);
-    let name = parsed.name.as_str();
-    let attached = name == "minecraft:ladder"
-        || name == "minecraft:cocoa"
-        || name == "minecraft:tripwire_hook"
-        || name == "minecraft:amethyst_cluster"
-        || name == "minecraft:small_amethyst_bud"
-        || name == "minecraft:medium_amethyst_bud"
-        || name == "minecraft:large_amethyst_bud"
-        || name.ends_with("_wall_banner")
+fn attached_support_position(pos: [i32; 3], state: CanonicalStateId) -> Option<[i32; 3]> {
+    let block = state.block();
+    let name = block.name();
+    let attached = matches!(
+        block,
+        Block::Ladder
+            | Block::Cocoa
+            | Block::TripwireHook
+            | Block::AmethystCluster
+            | Block::SmallAmethystBud
+            | Block::MediumAmethystBud
+            | Block::LargeAmethystBud
+    ) || name.ends_with("_wall_banner")
         || name.ends_with("_wall_hanging_sign")
         || name.ends_with("_wall_sign")
         || name.ends_with("_wall_torch")
@@ -523,45 +607,27 @@ fn attached_support_position(pos: [i32; 3], state: &str) -> Option<[i32; 3]> {
     if !attached {
         return None;
     }
-    let facing = parsed.properties.get("facing")?;
+    let facing = property_name(&Properties::from_state_id(state), "facing")?;
     let step = direction_step(facing);
     Some([pos[0] - step[0], pos[1] - step[1], pos[2] - step[2]])
 }
 
-fn support_is_empty_or_fluid(state: &str) -> bool {
-    matches!(
-        state.split_once('[').map_or(state, |(name, _)| name),
-        "minecraft:air"
-            | "minecraft:cave_air"
-            | "minecraft:void_air"
-            | "minecraft:water"
-            | "minecraft:lava"
-            | "minecraft:bubble_column"
-    )
-}
-
 /// The four directional booleans of a fence/pane/vine, permuted by `turns`.
-fn rotate_directional_flags(state: &mut BlockState, turns: u32) {
+fn rotate_directional_flags(properties: &mut Properties, turns: u32) {
     const CW: [&str; 4] = ["north", "east", "south", "west"];
-    // There are only four directional keys. Keep the temporary inline instead
-    // of allocating a Vec for every rotated fence, pane, or vine state. The
-    // source values are still cloned before any destination is overwritten, so
-    // the permutation has the same snapshot semantics as the old buffer.
     let current = [
-        state.properties.get(CW[0]).cloned(),
-        state.properties.get(CW[1]).cloned(),
-        state.properties.get(CW[2]).cloned(),
-        state.properties.get(CW[3]).cloned(),
+        property_name(properties, CW[0]),
+        property_name(properties, CW[1]),
+        property_name(properties, CW[2]),
+        property_name(properties, CW[3]),
     ];
     if current.iter().all(Option::is_none) {
         return;
     }
     for (i, dir) in CW.iter().enumerate() {
-        // The value that was `turns` quarter-turns counter-clockwise of `dir`
-        // becomes `dir`'s.
         let source = (i + 4 - turns as usize % 4) % 4;
         if let Some(value) = current[source].clone() {
-            state.properties.insert((*dir).to_string(), value);
+            set_property(properties, dir, value);
         }
     }
 }
@@ -602,6 +668,8 @@ pub struct PlaceOrigin {
 }
 
 /// How one piece places its template.
+const JIGSAW_BLOCK_NAME: &str = "minecraft:jigsaw";
+
 #[derive(Debug, Clone)]
 pub struct PlaceSettings {
     /// Template rotation.
@@ -640,6 +708,8 @@ pub struct TemplateBlock {
     /// overwhelming majority of blocks, and behind an `Arc` so cloning a block
     /// info is a refcount bump.
     pub nbt: Option<Arc<BlockNbt>>,
+    /// Parsed once from jigsaw NBT so placement never resolves state text.
+    jigsaw_final_state: Option<CanonicalStateId>,
 }
 
 /// One block of a template, resolved: absolute world position, rotated state and
@@ -649,7 +719,7 @@ pub struct TemplateBlockInfo {
     /// The world position, i.e. `calculateRelativePosition(...).offset(position)`.
     pub pos: [i32; 3],
     /// The **rotated** state (`blockInfo.state.rotate(rotation)`).
-    pub state: BlockState,
+    pub state: CanonicalStateId,
     /// The template-local, unrotated position used by processors that apply a
     /// local displacement.
     pub local: [i32; 3],
@@ -658,21 +728,20 @@ pub struct TemplateBlockInfo {
 }
 
 /// A parsed `.nbt` structure template.
-const JIGSAW_BLOCK_NAME: &str = "minecraft:jigsaw";
-
 #[derive(Debug, Clone)]
 pub struct StructureTemplate {
     size: [i32; 3],
     /// One entry for a single-`palette` template, N for a `palettes` list. Every
     /// palette has the same length and the block list indexes all of them.
-    palettes: Vec<Vec<BlockState>>,
+    palettes: Vec<Vec<CanonicalStateId>>,
     blocks: Vec<TemplateBlock>,
     /// Block-list order for the fixed jigsaw state, once per palette.
     jigsaw_indices: Vec<Vec<usize>>,
+    jigsaw_blocks: Vec<[OnceLock<Vec<JigsawBlockInfo>>; 4]>,
 }
 
 impl StructureTemplate {
-    fn new(size: [i32; 3], palettes: Vec<Vec<BlockState>>, blocks: Vec<TemplateBlock>) -> Self {
+    fn new(size: [i32; 3], palettes: Vec<Vec<CanonicalStateId>>, blocks: Vec<TemplateBlock>) -> Self {
         let jigsaw_indices = palettes
             .iter()
             .map(|palette| {
@@ -682,17 +751,21 @@ impl StructureTemplate {
                     .filter_map(|(index, block)| {
                         (palette
                             .get(block.state as usize)
-                            .is_some_and(|state| state.name == JIGSAW_BLOCK_NAME))
+                            .is_some_and(|state| state.block() == Block::Jigsaw))
                         .then_some(index)
                     })
                     .collect()
             })
+            .collect();
+        let jigsaw_blocks = (0..palettes.len())
+            .map(|_| std::array::from_fn(|_| OnceLock::new()))
             .collect();
         Self {
             size,
             palettes,
             blocks,
             jigsaw_indices,
+            jigsaw_blocks,
         }
     }
 
@@ -748,7 +821,20 @@ impl StructureTemplate {
                     Some(Nbt::Compound(fields)) => Some(Arc::new(fields.clone())),
                     _ => None,
                 };
-                blocks.push(TemplateBlock { pos, state, nbt });
+                let jigsaw_final_state = nbt
+                    .as_deref()
+                    .and_then(|nbt| nbt_string(nbt, "final_state"))
+                    .map(|spec| {
+                        parse_bound_state(spec)
+                            .ok_or_else(|| format!("unsupported jigsaw final state: {spec}"))
+                    })
+                    .transpose()?;
+                blocks.push(TemplateBlock {
+                    pos,
+                    state,
+                    nbt,
+                    jigsaw_final_state,
+                });
             }
         }
         if blocks.is_empty() {
@@ -784,10 +870,15 @@ impl StructureTemplate {
     pub fn from_blocks(size: [i32; 3], palette: Vec<BlockState>, blocks: Vec<([i32; 3], u16)>) -> Self {
         Self::new(
             size,
-            vec![palette],
+            vec![palette.into_iter().map(|state| state.id).collect()],
             blocks
                 .into_iter()
-                .map(|(pos, state)| TemplateBlock { pos, state, nbt: None })
+                .map(|(pos, state)| TemplateBlock {
+                    pos,
+                    state,
+                    nbt: None,
+                    jigsaw_final_state: None,
+                })
                 .collect(),
         )
     }
@@ -859,21 +950,55 @@ impl StructureTemplate {
         self.filter_block_indices(palette, name, position, rotation, 0..self.blocks.len())
     }
 
+    #[must_use]
+    pub fn jigsaw_blocks(
+        &self,
+        position: [i32; 3],
+        rotation: Rotation,
+    ) -> Vec<JigsawBlockInfo> {
+        let palette_index = self.palette_for(position).min(self.palettes.len() - 1);
+        let blocks = self.jigsaw_blocks[palette_index][rotation.turns() as usize].get_or_init(|| {
+            self.filter_block_indices(
+                &self.palettes[palette_index],
+                JIGSAW_BLOCK_NAME,
+                [0, 0, 0],
+                rotation,
+                self.jigsaw_indices[palette_index].iter().copied(),
+            )
+            .into_iter()
+            .map(JigsawBlockInfo::of)
+            .collect()
+        });
+        blocks
+            .iter()
+            .cloned()
+            .map(|mut block| {
+                block.pos[0] += position[0];
+                block.pos[1] += position[1];
+                block.pos[2] += position[2];
+                block
+            })
+            .collect()
+    }
+
     fn filter_block_indices(
         &self,
-        palette: &[BlockState],
+        palette: &[CanonicalStateId],
         name: &str,
         position: [i32; 3],
         rotation: Rotation,
         indices: impl IntoIterator<Item = usize>,
     ) -> Vec<TemplateBlockInfo> {
         let mut out = Vec::new();
+        let Some(wanted) = Block::from_name(name) else {
+            return out;
+        };
         for index in indices {
             let block = &self.blocks[index];
             let Some(state) = palette.get(block.state as usize) else {
                 continue;
             };
-            if state.name != name {
+            if state.block() != wanted {
                 continue;
             }
             let rel = transform(block.pos, Mirror::None, rotation, [0, 0, 0]);
@@ -883,7 +1008,7 @@ impl StructureTemplate {
                     rel[1] + position[1],
                     rel[2] + position[2],
                 ],
-                state: state.rotate(rotation),
+                state: rotate_state(*state, rotation),
                 local: block.pos,
                 nbt: block.nbt.clone(),
             });
@@ -990,7 +1115,11 @@ impl StructureTemplate {
         // The `originalBlockInfoList` half — template-local position and `nbt` per
         // *surviving* block, kept index-parallel with `processed` because that is
         // exactly the invariant `CappedProcessor` checks before doing anything.
-        let mut originals: Vec<([i32; 3], Option<Arc<BlockNbt>>)> = Vec::new();
+        let mut originals: Vec<(
+            [i32; 3],
+            Option<Arc<BlockNbt>>,
+            Option<CanonicalStateId>,
+        )> = Vec::new();
         for block in &self.blocks {
             let rel = transform(block.pos, settings.mirror, settings.rotation, settings.pivot);
             let world = [rel[0] + position[0], rel[1] + position[1], rel[2] + position[2]];
@@ -1008,7 +1137,7 @@ impl StructureTemplate {
             // is how air, rot and jigsaw replacement work.
             let mut current = Some(ProcessedBlock {
                 pos: world,
-                state: state.clone(),
+                state: *state,
             });
             for processor in &settings.processors {
                 let Some(block_now) = current.take() else { break };
@@ -1016,13 +1145,14 @@ impl StructureTemplate {
                     local: block.pos,
                     reference: origin.reference,
                     nbt: block.nbt.as_deref(),
+                    jigsaw_final_state: block.jigsaw_final_state,
                     world: grid,
                 };
                 current = processor.process(&ctx, block_now);
             }
             if let Some(block_now) = current {
                 processed.push(block_now);
-                originals.push((block.pos, block.nbt.clone()));
+                originals.push((block.pos, block.nbt.clone(), block.jigsaw_final_state));
             }
         }
         // Finalize each processor in chain order.
@@ -1043,23 +1173,22 @@ impl StructureTemplate {
             if !inside(block.pos) {
                 continue;
             }
-            let mut final_state = block.state.into_mirror(settings.mirror).into_rotate(settings.rotation);
+            let mut final_state = state_with_transform(block.state, settings.mirror, settings.rotation);
             if settings.waterlogging
-                && final_state.is_waterloggable_and_dry()
-                && grid.get(block.pos[0], block.pos[1], block.pos[2]).starts_with("minecraft:water")
+                && property_name(&Properties::from_state_id(final_state), "waterlogged") == Some("false")
+                && grid.get_id(block.pos[0], block.pos[1], block.pos[2]).block() == Block::Water
             {
-                final_state.properties.insert("waterlogged".into(), "true".into());
+                final_state = with_waterlogged(final_state, true);
             }
-            let canonical = final_state.canonical();
-            if let Some(type_id) = block_entity_type_for_state(&canonical) {
+            if let Some(type_id) = lodestone_data::block_entity_types::block_entity_type(final_state) {
                 on_block_entity(block.pos, type_id);
             }
             if let Some(mutation) = mutation.as_deref_mut() {
-                mutation.write(grid, block.pos[0], block.pos[1], block.pos[2], &canonical);
+                mutation.write(grid, block.pos[0], block.pos[1], block.pos[2], final_state);
             } else {
-                grid.set(block.pos[0], block.pos[1], block.pos[2], &canonical);
+                grid.set_id(block.pos[0], block.pos[1], block.pos[2], final_state);
             }
-            written_states.push((block.pos, canonical));
+            written_states.push((block.pos, final_state));
             written += 1;
         }
         // The structure writer updates shapes after the piece's writes have
@@ -1068,24 +1197,33 @@ impl StructureTemplate {
         // loses the support that was outside this grid.
         loop {
             let mut changed = false;
-            for &(position, ref written_state) in &written_states {
-                if grid.get(position[0], position[1], position[2]) != written_state {
+            for &(position, written_state) in &written_states {
+                if grid.get_id(position[0], position[1], position[2]) != written_state {
                     continue;
                 }
                 let Some(support) = attached_support_position(position, written_state) else {
                     continue;
                 };
-                if support_is_empty_or_fluid(grid.get(support[0], support[1], support[2])) {
+                if matches!(
+                    grid.get_id(support[0], support[1], support[2]).block(),
+                    Block::Air
+                        | Block::CaveAir
+                        | Block::VoidAir
+                        | Block::Water
+                        | Block::Lava
+                        | Block::BubbleColumn
+                )
+                {
                     if let Some(mutation) = mutation.as_deref_mut() {
                         mutation.write(
                             grid,
                             position[0],
                             position[1],
                             position[2],
-                            "minecraft:air",
+                            CanonicalStateId::AIR,
                         );
                     } else {
-                        grid.set(position[0], position[1], position[2], "minecraft:air");
+                        grid.set_id(position[0], position[1], position[2], CanonicalStateId::AIR);
                     }
                     changed = true;
                 }
@@ -1096,14 +1234,6 @@ impl StructureTemplate {
         }
         written
     }
-}
-
-fn block_entity_type_for_state(
-    state: &str,
-) -> Option<lodestone_data::block_entity_types::BlockEntityType> {
-    let state = lodestone_data::block_states::state_id(state)
-        .and_then(lodestone_data::block_states::StateId::new)?;
-    lodestone_data::block_entity_types::block_entity_type(state)
 }
 
 fn compound(value: &Nbt) -> Option<&Vec<(String, Nbt)>> {
@@ -1136,7 +1266,7 @@ fn int_triple(value: &Nbt) -> Option<[i32; 3]> {
     }
 }
 
-fn parse_palette(value: &Nbt) -> Vec<BlockState> {
+fn parse_palette(value: &Nbt) -> Vec<CanonicalStateId> {
     let Nbt::List { elements, .. } = value else {
         return Vec::new();
     };
@@ -1144,7 +1274,7 @@ fn parse_palette(value: &Nbt) -> Vec<BlockState> {
         .iter()
         .map(|entry| {
             let Some(entry) = compound(entry) else {
-                return BlockState::of("minecraft:air");
+                return CanonicalStateId::AIR;
             };
             let name = match field(entry, "Name") {
                 Some(Nbt::String(name)) => name.clone(),
@@ -1158,7 +1288,11 @@ fn parse_palette(value: &Nbt) -> Vec<BlockState> {
                     }
                 }
             }
-            BlockState { name, properties }
+            let pairs = properties
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect::<Vec<_>>();
+            bind_state(&name, &pairs)
         })
         .collect()
 }
@@ -1180,21 +1314,21 @@ mod tests {
     fn rotation_walks_facing_and_swaps_axis() {
         let stair = BlockState::parse("minecraft:oak_stairs[facing=north,half=bottom]");
         assert_eq!(
-            stair.rotate(Rotation::Cw90).canonical(),
+            stair.rotate(Rotation::Cw90).id.canonical_state(),
             "minecraft:oak_stairs[facing=east,half=bottom]"
         );
         let log = BlockState::parse("minecraft:oak_log[axis=x]");
-        assert_eq!(log.rotate(Rotation::Cw90).canonical(), "minecraft:oak_log[axis=z]");
-        assert_eq!(log.rotate(Rotation::Cw180).canonical(), "minecraft:oak_log[axis=x]");
+        assert_eq!(log.rotate(Rotation::Cw90).id.canonical_state(), "minecraft:oak_log[axis=z]");
+        assert_eq!(log.rotate(Rotation::Cw180).id.canonical_state(), "minecraft:oak_log[axis=x]");
         let sign = BlockState::parse("minecraft:oak_sign[rotation=2]");
-        assert_eq!(sign.rotate(Rotation::Cw90).canonical(), "minecraft:oak_sign[rotation=6]");
+        assert_eq!(sign.rotate(Rotation::Cw90).id.canonical_state(), "minecraft:oak_sign[rotation=6]");
     }
 
     #[test]
     fn directional_flags_permute() {
         let fence = BlockState::parse("minecraft:oak_fence[east=true,north=false,south=false,west=false]");
         assert_eq!(
-            fence.rotate(Rotation::Cw90).canonical(),
+            fence.rotate(Rotation::Cw90).id.canonical_state(),
             "minecraft:oak_fence[east=false,north=false,south=true,west=false]"
         );
     }
@@ -1210,8 +1344,8 @@ mod tests {
         for state in states {
             for mirror in [Mirror::None, Mirror::LeftRight, Mirror::FrontBack] {
                 for rotation in [Rotation::None, Rotation::Cw90, Rotation::Cw180, Rotation::Ccw90] {
-                    let expected = state.mirror(mirror).rotate(rotation).canonical();
-                    let actual = state.clone().into_mirror(mirror).into_rotate(rotation).canonical();
+                    let expected = state.mirror(mirror).rotate(rotation).id;
+                    let actual = state.clone().into_mirror(mirror).into_rotate(rotation).id;
                     assert_eq!(actual, expected, "mirror={mirror:?} rotation={rotation:?}");
                 }
             }
@@ -1219,10 +1353,10 @@ mod tests {
     }
 
     #[test]
-    fn canonical_is_alphabetical_regardless_of_insertion_order() {
+    fn bound_state_is_canonical_regardless_of_insertion_order() {
         let state = BlockState::parse("minecraft:oak_trapdoor[open=false,facing=north,half=top]");
         assert_eq!(
-            state.canonical(),
+            state.id.canonical_state(),
             "minecraft:oak_trapdoor[facing=north,half=top,open=false]"
         );
     }
@@ -1259,11 +1393,14 @@ mod tests {
         let palette_index = template.palette_for(position).min(template.palettes.len() - 1);
         let palette = &template.palettes[palette_index];
         let mut out = Vec::new();
+        let Some(wanted) = Block::from_name(name) else {
+            return out;
+        };
         for block in &template.blocks {
-            let Some(state) = palette.get(block.state as usize) else {
+            let Some(&state) = palette.get(block.state as usize) else {
                 continue;
             };
-            if state.name != name {
+            if state.block() != wanted {
                 continue;
             }
             let rel = transform(block.pos, Mirror::None, rotation, [0, 0, 0]);
@@ -1273,7 +1410,7 @@ mod tests {
                     rel[1] + position[1],
                     rel[2] + position[2],
                 ],
-                state: state.rotate(rotation),
+                state: rotate_state(state, rotation),
                 local: block.pos,
                 nbt: block.nbt.clone(),
             });
@@ -1316,12 +1453,12 @@ mod tests {
             [4, 1, 1],
             vec![
                 vec![
-                    BlockState::parse("minecraft:jigsaw[orientation=north_up]"),
-                    BlockState::of("minecraft:stone"),
+                    BlockState::parse("minecraft:jigsaw[orientation=north_up]").id,
+                    Block::Stone.default_state(),
                 ],
                 vec![
-                    BlockState::parse("minecraft:jigsaw[orientation=south_up]"),
-                    BlockState::of("minecraft:dirt"),
+                    BlockState::parse("minecraft:jigsaw[orientation=south_up]").id,
+                    Block::Dirt.default_state(),
                 ],
             ],
             vec![
@@ -1329,21 +1466,25 @@ mod tests {
                     pos: [0, 0, 0],
                     state: 0,
                     nbt: Some(Arc::clone(&nbt_a)),
+                    jigsaw_final_state: None,
                 },
                 TemplateBlock {
                     pos: [1, 0, 0],
                     state: 1,
                     nbt: None,
+                    jigsaw_final_state: None,
                 },
                 TemplateBlock {
                     pos: [2, 0, 0],
                     state: 99,
                     nbt: Some(Arc::clone(&nbt_b)),
+                    jigsaw_final_state: None,
                 },
                 TemplateBlock {
                     pos: [3, 0, 0],
                     state: 0,
                     nbt: Some(Arc::clone(&nbt_b)),
+                    jigsaw_final_state: None,
                 },
             ],
         );
@@ -1391,7 +1532,7 @@ mod tests {
     fn constructors_populate_jigsaw_indices() {
         let template = StructureTemplate::from_blocks(
             [2, 1, 1],
-            vec![BlockState::of(JIGSAW_BLOCK_NAME)],
+            vec![BlockState::from_block(Block::Jigsaw)],
             vec![([0, 0, 0], 0), ([1, 0, 0], 1)],
         );
         assert_eq!(template.jigsaw_indices, vec![vec![0]]);

@@ -49,12 +49,14 @@
 //!   beyond the standard one.
 
 use lodestone_model::BlockPos;
-use lodestone_data::block_states::BlockStateValue;
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, PropertyKey, PropertyValue};
+use lodestone_data::block_states::StateId;
 
 use crate::redstone::{analog_power, base_name, with_property};
 use crate::scheduled_tick::{ScheduledTickKind, ScheduledTickQueueAccess};
 
-pub const TARGET: &str = "minecraft:target";
+pub const TARGET: Block = Block::Target;
 
 /// The typed decay-to-zero scheduled-tick key.
 pub const TICK_TARGET_DECAY: ScheduledTickKind = ScheduledTickKind::TargetDecay;
@@ -125,7 +127,7 @@ pub fn has_pending_decay<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
 /// write entirely (a decay is already pending).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HitOutcome {
-    pub new_state: BlockStateValue,
+    pub new_state: StateId,
     pub delay: u32,
 }
 
@@ -144,12 +146,16 @@ pub struct HitOutcome {
 /// function returns `None` in that case since a caller only wanted to know
 /// "how to change the world", not the advancement side-channel.
 #[must_use]
-pub fn apply_hit(state: &str, strength: u8, is_arrow: bool, has_pending_decay: bool) -> Option<HitOutcome> {
+pub fn apply_hit(state: StateId, strength: u8, is_arrow: bool, has_pending_decay: bool) -> Option<HitOutcome> {
     if base_name(state) != TARGET || has_pending_decay {
         return None;
     }
     Some(HitOutcome {
-        new_state: BlockStateValue::parse(&with_property(state, "power", &strength.to_string())),
+        new_state: with_property(
+            state,
+            PropertyKey::Power,
+            PropertyValue::builtin(crate::redstone::numeric_property_value(strength).expect("target power is a generated value")),
+        )?,
         delay: activation_duration(is_arrow),
     })
 }
@@ -159,16 +165,21 @@ pub fn apply_hit(state: &str, strength: u8, is_arrow: bool, has_pending_decay: b
 /// other `run_scheduled_tick` in this family returning `None` for "no
 /// mutation").
 #[must_use]
-pub fn run_scheduled_tick(state: &str) -> Option<String> {
+pub fn run_scheduled_tick(state: StateId) -> Option<StateId> {
     if base_name(state) != TARGET || analog_power(state) == 0 {
         return None;
     }
-    Some(with_property(state, "power", "0"))
+    with_property(
+        state,
+        PropertyKey::Power,
+        PropertyValue::builtin(BuiltinPropertyValue::Value0),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::redstone::fixture_state as state;
     use crate::scheduled_tick::{ScheduledTickQueue, TickPriority};
 
     #[test]
@@ -245,12 +256,12 @@ mod tests {
 
     #[test]
     fn apply_hit_writes_power_and_schedules_the_matching_duration() {
-        let outcome = apply_hit("minecraft:target[power=0]", 12, false, false)
+        let outcome = apply_hit(state("minecraft:target[power=0]"), 12, false, false)
             .expect("no pending decay, so the hit must apply");
-        assert_eq!(outcome.new_state, "minecraft:target[power=12]");
+        assert_eq!(outcome.new_state, state("minecraft:target[power=12]"));
         assert_eq!(outcome.delay, 8);
 
-        let arrow_outcome = apply_hit("minecraft:target[power=0]", 12, true, false)
+        let arrow_outcome = apply_hit(state("minecraft:target[power=0]"), 12, true, false)
             .expect("no pending decay, so the hit must apply");
         assert_eq!(arrow_outcome.delay, 20);
     }
@@ -261,15 +272,15 @@ mod tests {
     /// holding vanilla's steady value until the first decay actually fires.
     #[test]
     fn a_hit_during_a_pending_decay_changes_nothing() {
-        assert_eq!(apply_hit("minecraft:target[power=9]", 3, false, true), None);
+        assert_eq!(apply_hit(state("minecraft:target[power=9]"), 3, false, true), None);
     }
 
     #[test]
     fn scheduled_tick_decays_a_lit_target_and_leaves_an_unlit_one_alone() {
         assert_eq!(
-            run_scheduled_tick("minecraft:target[power=7]"),
-            Some("minecraft:target[power=0]".to_string())
+            run_scheduled_tick(state("minecraft:target[power=7]")),
+            Some(state("minecraft:target[power=0]"))
         );
-        assert_eq!(run_scheduled_tick("minecraft:target[power=0]"), None);
+        assert_eq!(run_scheduled_tick(state("minecraft:target[power=0]")), None);
     }
 }

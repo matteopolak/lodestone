@@ -35,6 +35,8 @@
 
 use std::collections::HashMap;
 
+use super::point::PointScratch;
+
 /// The caches' hasher.
 ///
 /// The default `HashMap` uses SipHash, which is DoS-resistant but slow; these
@@ -330,6 +332,13 @@ pub struct Scratch {
     /// **side-effect-free** node kinds — the four point-evaluated leaves and
     /// `Noise`. See [`Self::leaf_get`] for why those and no others.
     leaf_memo: [LeafMemo; LEAF_MEMO_LEN],
+    /// Scratch for point-semantics spline programs entered from a field leaf.
+    /// The graph identity is part of each point memo key because one field
+    /// graph may hold several distinct spline programs.
+    point: PointScratch,
+    plan_values: Vec<[f64; 8]>,
+    plan_masks: Vec<u8>,
+    plan_select: Vec<[u16; 8]>,
 }
 
 impl Default for Scratch {
@@ -346,6 +355,10 @@ impl Default for Scratch {
             #[cfg(feature = "gen-counters")]
             retained_bytes: 0,
             leaf_memo: [LEAF_MEMO_EMPTY; LEAF_MEMO_LEN],
+            point: PointScratch::new(),
+            plan_values: Vec::new(),
+            plan_masks: Vec::new(),
+            plan_select: Vec::new(),
         }
     }
 }
@@ -431,6 +444,9 @@ impl Scratch {
         // its worst form: not a stale value from the previous chunk but a value
         // from a different function, at a plausible magnitude.
         self.leaf_memo = [LEAF_MEMO_EMPTY; LEAF_MEMO_LEN];
+        self.point.clear();
+        self.plan_masks.fill(0);
+        self.plan_select.fill([0; 8]);
         if self.config == Some(want) {
             for s in &mut self.slots {
                 match s {
@@ -464,6 +480,9 @@ impl Scratch {
         self.cells.clear();
         self.column_values.clear();
         self.column_cell_y.clear();
+        self.plan_values.clear();
+        self.plan_masks.clear();
+        self.plan_select.clear();
         self.slots.reserve(slot_count);
         self.cells.reserve(slot_count);
         self.column_values.reserve(slot_count);
@@ -547,11 +566,78 @@ impl Scratch {
             .map(Vec::capacity)
             .sum::<usize>()
             * std::mem::size_of::<f64>();
-        (slots + cells + columns + slot_payloads + cell_payloads + column_payloads) as u64
+        let point = self.point.retained_bytes();
+        let plan = self.plan_values.capacity() * std::mem::size_of::<[f64; 8]>()
+            + self.plan_masks.capacity()
+            + self.plan_select.capacity() * std::mem::size_of::<[u16; 8]>();
+        (slots + cells + columns + slot_payloads + cell_payloads + column_payloads + point + plan)
+            as u64
     }
 
     pub(crate) fn begin_column(&mut self) {
         self.column_cell_y.fill(None);
+    }
+
+    pub(crate) fn begin_tile_plan(&mut self, register_count: usize) {
+        #[cfg(feature = "gen-counters")]
+        let old_bytes = self.plan_values.capacity() * std::mem::size_of::<[f64; 8]>()
+            + self.plan_masks.capacity()
+            + self.plan_select.capacity() * std::mem::size_of::<[u16; 8]>();
+        if self.plan_values.len() < register_count {
+            self.plan_values.resize(register_count, [0.0; 8]);
+            self.plan_masks.resize(register_count, 0);
+            self.plan_select.resize(register_count, [0; 8]);
+        } else {
+            self.plan_masks[..register_count].fill(0);
+        }
+        #[cfg(feature = "gen-counters")]
+        self.account_payload_change(
+            old_bytes,
+            self.plan_values.capacity() * std::mem::size_of::<[f64; 8]>()
+                + self.plan_masks.capacity()
+                + self.plan_select.capacity() * std::mem::size_of::<[u16; 8]>(),
+        );
+    }
+
+    #[inline]
+    pub(crate) fn plan_mask(&self, register: u16) -> u8 {
+        self.plan_masks[register as usize]
+    }
+
+    #[inline]
+    pub(crate) fn plan_value(&self, register: u16, lane: usize) -> f64 {
+        self.plan_values[register as usize][lane]
+    }
+
+    #[inline]
+    pub(crate) fn plan_values(&self, register: u16) -> [f64; 8] {
+        self.plan_values[register as usize]
+    }
+
+    #[inline]
+    pub(crate) fn plan_select(&self, register: u16, lane: usize) -> u16 {
+        self.plan_select[register as usize][lane]
+    }
+
+    #[inline]
+    pub(crate) fn plan_set_select(&mut self, register: u16, lane: usize, value: u16) {
+        self.plan_select[register as usize][lane] = value;
+    }
+
+    #[inline]
+    pub(crate) fn plan_put(&mut self, register: u16, mask: u8, values: [f64; 8]) {
+        let index = register as usize;
+        for lane in 0..8 {
+            if mask & (1 << lane) != 0 {
+                self.plan_values[index][lane] = values[lane];
+            }
+        }
+        self.plan_masks[index] |= mask;
+    }
+
+    #[inline]
+    pub(crate) fn point_scratch_mut(&mut self) -> &mut PointScratch {
+        &mut self.point
     }
 
     #[inline]
@@ -566,23 +652,27 @@ impl Scratch {
 
     pub(crate) fn put_column_values(&mut self, slot: usize, cell_y: i32, values: Vec<f64>) {
         #[cfg(feature = "gen-counters")]
-        let old_retained_bytes = self.retained_bytes;
+        let old_payload_bytes = self.column_values[slot].capacity() * std::mem::size_of::<f64>();
         self.column_values[slot] = values;
         self.column_cell_y[slot] = Some(cell_y);
         #[cfg(feature = "gen-counters")]
-        self.refresh_retained_bytes(old_retained_bytes);
+        self.account_payload_change(
+            old_payload_bytes,
+            self.column_values[slot].capacity() * std::mem::size_of::<f64>(),
+        );
     }
 
     #[cfg(feature = "gen-counters")]
-    fn refresh_retained_bytes(&mut self, old_retained_bytes: u64) {
-        let new_retained_bytes = self.logical_retained_bytes();
-        self.retained_bytes = new_retained_bytes;
-        if new_retained_bytes > old_retained_bytes {
-            let delta = new_retained_bytes - old_retained_bytes;
+    fn account_payload_change(&mut self, old_bytes: usize, new_bytes: usize) {
+        if new_bytes > old_bytes {
+            let delta = (new_bytes - old_bytes) as u64;
+            self.retained_bytes += delta;
             crate::counters::bump_scratch_buffer_allocated_bytes(delta);
             crate::counters::bump_scratch_retained_add(delta);
-        } else if old_retained_bytes > new_retained_bytes {
-            crate::counters::bump_scratch_retained_remove(old_retained_bytes - new_retained_bytes);
+        } else if old_bytes > new_bytes {
+            let delta = (old_bytes - new_bytes) as u64;
+            self.retained_bytes -= delta;
+            crate::counters::bump_scratch_retained_remove(delta);
         }
     }
 
@@ -670,7 +760,12 @@ impl Scratch {
     #[inline]
     pub(crate) fn cell_put(&mut self, slot: usize, cx: i32, cy: i32, cz: i32, v: [f64; 8]) {
         #[cfg(feature = "gen-counters")]
-        let old_retained_bytes = self.retained_bytes;
+        let old_payload_bytes = match &self.cells[slot] {
+            CellStore::Hashed(_) => 0,
+            CellStore::Dense { values, has } => {
+                values.capacity() * std::mem::size_of::<[f64; 8]>() + has.capacity()
+            }
+        };
         let shape = self.cell_shape;
         match &mut self.cells[slot] {
             CellStore::Hashed(m) => {
@@ -689,7 +784,15 @@ impl Scratch {
         }
         crate::counters::bump_logical_write(crate::counters::MemoryBoundary::CellCache, 1, 64);
         #[cfg(feature = "gen-counters")]
-        self.refresh_retained_bytes(old_retained_bytes);
+        {
+            let new_payload_bytes = match &self.cells[slot] {
+                CellStore::Hashed(_) => 0,
+                CellStore::Dense { values, has } => {
+                    values.capacity() * std::mem::size_of::<[f64; 8]>() + has.capacity()
+                }
+            };
+            self.account_payload_change(old_payload_bytes, new_payload_bytes);
+        }
     }
 
     /// Reads the one-slot last-`(x, y, z)` memo for a side-effect-free node.
@@ -715,8 +818,9 @@ impl Scratch {
     /// `slot_put`/`cell_put` that a later query depends on — which is why
     /// `engine/mod.rs`'s "the walk must stay a recursive descent" rule exists. The
     /// four point-evaluated leaves and `Noise` are the only kinds with **no field
-    /// children at all**: a leaf hands its whole subtree to the point interpreter,
-    /// which touches no `Scratch`, and `Noise` reads only its own noise and params.
+    /// children at all**: a spline enters its immutable indexed point program,
+    /// the other leaves use their source point semantics, and neither touches
+    /// these field caches; `Noise` reads only its own noise and params.
     /// They also ignore `interpolate`, so the flag is correctly absent from the key —
     /// for any other kind it would have to be part of it.
     #[inline]
@@ -789,7 +893,12 @@ impl Scratch {
     #[inline]
     pub(crate) fn slot_put(&mut self, slot: usize, key: (i32, i32, i32), v: f64) {
         #[cfg(feature = "gen-counters")]
-        let old_retained_bytes = self.retained_bytes;
+        let old_payload_bytes = match &self.slots[slot] {
+            SlotStore::Hashed(_) => 0,
+            SlotStore::Dense { values, has } => {
+                values.capacity() * std::mem::size_of::<f64>() + has.capacity()
+            }
+        };
         let dense = self.dense;
         match &mut self.slots[slot] {
             SlotStore::Hashed(m) => {
@@ -808,7 +917,15 @@ impl Scratch {
         }
         crate::counters::bump_logical_write(crate::counters::MemoryBoundary::SlotCache, 1, 8);
         #[cfg(feature = "gen-counters")]
-        self.refresh_retained_bytes(old_retained_bytes);
+        {
+            let new_payload_bytes = match &self.slots[slot] {
+                SlotStore::Hashed(_) => 0,
+                SlotStore::Dense { values, has } => {
+                    values.capacity() * std::mem::size_of::<f64>() + has.capacity()
+                }
+            };
+            self.account_payload_change(old_payload_bytes, new_payload_bytes);
+        }
     }
 }
 

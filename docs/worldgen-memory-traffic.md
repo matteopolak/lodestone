@@ -28,6 +28,19 @@ carrier that the former `Vec<BlockKind>` to `DenseBlockGrid` handoff required;
 the legacy `fill_stage` adapter still decodes packed output for shape/parity
 callers that explicitly request the enum field.
 
+Both ordered materialisation constructors keep a direct table from canonical
+state id to local palette index. The table is populated lazily, so first-seen
+palette order remains unchanged while repeated cells avoid a hash probe.
+
+The production pre-ore path also keeps a request-local 384-bit ocean-floor
+occupancy set for each centre XZ column. Materialisation sets the baseline bits,
+and carver or structure writes update only the affected bit after comparing the
+old and new predicates. Final heights read the highest set bit in the six words
+for touched columns, so exact post-mutation results no longer probe the dense
+grid vertically. The fixed 12 KiB sidecar is discarded with the prefix; it is
+not shared across chunks or retained in a generator cache. Legacy test adapters
+without the sidecar retain the scalar recount control.
+
 The cell fill's vertical aquifer path now carries the already-evaluated global
 fluid status into its branch and block conversion. Non-positive densities no
 longer evaluate that same Y-only picker twice; positive densities retain their
