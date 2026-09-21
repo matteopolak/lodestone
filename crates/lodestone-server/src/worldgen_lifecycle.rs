@@ -3819,6 +3819,15 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 .expect("committed worldgen mutations carry StateId");
             let position = mutation.provenance().destination();
             let cell = (position.x(), position.y(), position.z());
+            if mutation.provenance().stage().stage() == ColumnStage::Features {
+                self.record_target_feature_winner(
+                    mutation.provenance().target(),
+                    mutation.provenance().source(),
+                    mutation.provenance().ordinal(),
+                    cell,
+                    *state,
+                );
+            }
             if self.source.target_feature_reads_carvers() {
                 self.set_carvers_override(cell, *state);
             }
@@ -5875,6 +5884,45 @@ mod tests {
         materializer.admit(target);
         materializer.restore_committed_mutations([&mutation]);
         materializer.complete_target_features_observing(target, 0, |_| {});
+        assert_eq!(
+            materializer.snapshot_for_packet(target).block_state_id(0, 0, 0),
+            sid("minecraft:stone"),
+        );
+    }
+
+    #[test]
+    fn restored_feature_mutation_remains_the_canonical_winner() {
+        use lodestone_worldgen::stage_schedule::{Dimension, StageKey};
+
+        let target = (0, 0);
+        let cell = (0, 0, 0);
+        let restored = ProvenanceMutation::test_block_state(
+            (-1, 0),
+            (-1, 0),
+            StageKey::new(Dimension::Overworld, ColumnStage::Features),
+            0,
+            crate::worldgen_session::BlockCoordinate::new(cell.0, cell.1, cell.2),
+            1,
+            sid("minecraft:stone"),
+        );
+        let mut materializer = LifecycleMaterializer::new(DirectHeightmapSource);
+        materializer.admit(target);
+        materializer.restore_committed_mutations([&restored]);
+
+        materializer.record_target_feature_winner(
+            target,
+            target,
+            0,
+            cell,
+            sid("minecraft:gold_block"),
+        );
+        materializer
+            .resident
+            .get_mut(&target)
+            .expect("target is resident")
+            .set_block_id(0, 0, 0, sid("minecraft:gold_block"));
+        materializer.apply_canonical_target_feature_winners(target);
+
         assert_eq!(
             materializer.snapshot_for_packet(target).block_state_id(0, 0, 0),
             sid("minecraft:stone"),

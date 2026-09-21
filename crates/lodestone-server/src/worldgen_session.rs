@@ -1117,6 +1117,37 @@ fn apply_packet_id_overlay(column: &mut ChunkColumn, overlay: &[(i32, i32, i32, 
     column.apply_ordered_block_id_batch(overlay);
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FeatureSettlementProof {
+    output: ChunkCoordinate,
+    min: ChunkCoordinate,
+    max: ChunkCoordinate,
+}
+
+impl FeatureSettlementProof {
+    #[must_use]
+    pub(crate) const fn square(output: ChunkCoordinate, radius: i32) -> Self {
+        Self {
+            output,
+            min: (output.0.saturating_sub(radius), output.1.saturating_sub(radius)),
+            max: (output.0.saturating_add(radius), output.1.saturating_add(radius)),
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn output(self) -> ChunkCoordinate {
+        self.output
+    }
+
+    #[must_use]
+    pub(crate) const fn contains(self, coordinate: ChunkCoordinate) -> bool {
+        coordinate.0 >= self.min.0
+            && coordinate.0 <= self.max.0
+            && coordinate.1 >= self.min.1
+            && coordinate.1 <= self.max.1
+    }
+}
+
 /// A detached target and its concrete neighbour columns.
 ///
 /// The snapshot owns every column it exposes, so encoding can run after the
@@ -1175,6 +1206,7 @@ pub struct GenerationCheckpoint {
     committed_mutations: Vec<ProvenanceMutation>,
     committed_mutation_order: Vec<MutationProvenance>,
     source_completions: Vec<SourceCompletionRecord>,
+    feature_settlement: Option<FeatureSettlementProof>,
     current_revision: SessionRevision,
     packet_neighbour_domain: Option<BTreeSet<ChunkCoordinate>>,
 }
@@ -1272,6 +1304,7 @@ impl GenerationCheckpoint {
             committed_mutations,
             committed_mutation_order,
             source_completions,
+            feature_settlement: None,
             current_revision: SessionRevision(current_revision),
             packet_neighbour_domain: Some(BTreeSet::new()),
         }
@@ -1312,6 +1345,11 @@ impl GenerationCheckpoint {
     #[must_use]
     pub(crate) fn source_completions(&self) -> &[SourceCompletionRecord] {
         &self.source_completions
+    }
+
+    #[must_use]
+    pub(crate) const fn feature_settlement(&self) -> Option<FeatureSettlementProof> {
+        self.feature_settlement
     }
 
     #[must_use]
@@ -1596,6 +1634,7 @@ pub struct GenerationSession {
     mutation_index: BTreeSet<MutationProvenance>,
     light_domain_revision: Option<SessionRevision>,
     packet_neighbour_domain: Option<BTreeSet<ChunkCoordinate>>,
+    feature_settlement: Option<FeatureSettlementProof>,
 }
 
 impl fmt::Debug for GenerationSession {
@@ -1680,6 +1719,7 @@ impl GenerationSession {
             mutation_index: BTreeSet::new(),
             light_domain_revision: None,
             packet_neighbour_domain: Some(BTreeSet::new()),
+            feature_settlement: None,
         }
     }
 
@@ -1788,6 +1828,14 @@ impl GenerationSession {
     #[must_use]
     pub fn committed_mutation_order(&self) -> &[MutationProvenance] {
         &self.committed_mutation_order
+    }
+
+    pub(crate) fn mark_target_owned_feature_settlement(
+        &mut self,
+        proof: FeatureSettlementProof,
+    ) {
+        debug_assert_eq!(proof.output(), self.request.target);
+        self.feature_settlement = Some(proof);
     }
 
     fn ensure_active(&self) -> Result<(), SessionError> {
@@ -2666,6 +2714,7 @@ impl GenerationSession {
             committed_mutations: self.committed_mutations.values().cloned().collect(),
             committed_mutation_order: self.committed_mutation_order.clone(),
             source_completions: self.committed_source_completions.clone(),
+            feature_settlement: self.feature_settlement,
             current_revision: self.current_revision,
             packet_neighbour_domain: self.packet_neighbour_domain.clone(),
         }
@@ -2703,6 +2752,13 @@ impl GenerationSession {
                 SessionError::CheckpointPipelineMismatch
             });
         }
+        if checkpoint
+            .feature_settlement
+            .is_some_and(|proof| proof.output() != session.request.target)
+        {
+            return Err(SessionError::InvalidCheckpoint);
+        }
+        session.feature_settlement = checkpoint.feature_settlement;
         let mut restored_frontiers = BTreeMap::new();
         for (coordinate, records) in checkpoint.frontiers {
             if !session.halo.contains(coordinate)
@@ -2945,6 +3001,29 @@ impl GenerationSession {
                 .any(|provenance| !session.committed_mutations.contains_key(provenance))
         {
             return Err(SessionError::InvalidCheckpoint);
+        }
+        if let Some(proof) = session.feature_settlement {
+            let output_stage = StageKey::new(session.pipeline.dimension(), ColumnStage::Output);
+            let output_key = ProductKey::new(
+                session.request.target,
+                output_stage,
+                ResourceKey::OutputColumn,
+            );
+            if proof.output() != session.request.target
+                || !session
+                    .frontiers
+                    .get(&session.request.target)
+                    .is_some_and(|frontier| {
+                        frontier.records().iter().any(|record| record.key() == output_stage)
+                    })
+                || session
+                    .products
+                    .get(&output_key)
+                    .and_then(|product| product.get::<ChunkColumn>())
+                    .is_none()
+            {
+                return Err(SessionError::InvalidCheckpoint);
+            }
         }
         if let Some(domain) = &checkpoint.packet_neighbour_domain {
             if domain
