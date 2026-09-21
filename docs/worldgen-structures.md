@@ -14,7 +14,7 @@ per-structure closures since), on top of a bundled, byte-verified copy of vanill
 ```text
 structure_starts_stage    which chunk starts which structure (placement.rs, mod.rs)
   ↓
-structure_refs_stage      17×17 walk -> which chunks a start's box reaches
+structure_refs_stage      17×17 candidate mask -> which chunks a start's box reaches
   ↓
 beardifier_for(cx, cz)    terrain adaptation input for the fill stage (beardifier.rs)
   ↓
@@ -31,6 +31,19 @@ far-from-ring fast path. The candidate list is sorted by source chunk so retaine
 reference order is unchanged. A placement type without an exact inverse keeps the
 complete rectangular walk as its fallback.
 
+For the bundled catalog, candidate tuples are compacted into a region-local `u32` mask: one bit
+represents one structure-set index at a source chunk. Iterating the rectangular mask in
+source-X/source-Z order and consuming set bits from low to high is byte-equivalent to the prior
+sorted tuple walk. Datapacks exposing more than 32 set indices retain that tuple walk as an
+explicit fallback. Reference computations, placement-cell probes and one-time raw ring-reach
+builds have counters so throughput runs can distinguish fewer candidate probes from faster start
+evaluation.
+`RegionPrefixBatch` builds that mask over the union of its admitted source windows once, then each
+target's `StageSlot<StructureRefs>` consumes only its own 17×17 slice. One request-scoped
+`StartSampler` is threaded through that source-start walk, so its bounded aquifer, height, and biome
+working sets are reused across all targets; scalar callers keep the per-target construction and
+tuple fallback.
+
 Each start-evaluation context reuses an aquifer and compact bounded caches for aquifer and `(x, z)`
 height probes. Both use fixed open-addressed storage, so ordinary lookups do not allocate or scan a
 linear map; a height cursor retains both `_WG` heightmap answers and the point where its downward
@@ -42,6 +55,10 @@ behaviour. The current table capacities are 512 aquifers and 256 height probes. 
 deliberate bounded working set: the 17×17 reference lifecycle can exceed it for large structure
 footprints, so replacements are expected and are counted rather than silently turning into an
 unbounded map.
+
+`gen-counters` exposes sampler construction, cache lookup, miss, hit, eviction, and rebuild counts.
+The region-prefix control expects one sampler for a multi-target request; the scalar control keeps
+one sampler per independent reference call.
 
 The start biome gate uses the context's borrowed membership query, so the production sampler does
 not allocate a biome id for every candidate. Its pre-surface block-kind reads retain only the
@@ -57,11 +74,15 @@ exist yet at start time). Stronghold writes are a fourth, ordered post-surface l
 selector boxes skip a candidate only when the current state is air, while later decorations remain
 unconditional. Keeping the guarded and unguarded writes in one list preserves their source order.
 
-Structure products retain a bounded write trace at the grid boundary. Each in-bounds StateId write
-records its owning start, declared decoration step, per-source ordinal, destination and requested
-state before assignment; repeated writes and same-state writes remain observable while state names
-are resolved only when the product is finalized. Packet-facing consumers should use this trace
-instead of reconstructing history from a final block diff.
+Structure products retain a bounded write trace at the grid boundary. Each in-bounds canonical
+StateId write records its owning start, declared decoration step, per-source ordinal, destination
+and requested state before assignment; repeated writes and same-state writes remain observable.
+The local grid interner is crossed once at the write boundary, and packet-facing consumers should
+use this trace instead of reconstructing history from a final block diff.
+
+Template palettes and processor outputs are bound to canonical StateId values while the template is
+loaded. Placement transforms resolve typed properties back to a state id before the grid boundary,
+so no per-block state string is parsed or interned during structure placement.
 
 Fortress starts retain both their eager `Arc<Vec<CodedBlock>>` piece output and a typed runtime
 descriptor containing piece kind, facing, chest decision, and end-cap seed. Placement reuses the

@@ -59,6 +59,7 @@
 use std::time::Instant;
 
 use lodestone_core::Reader;
+use lodestone_data::block::Block;
 use lodestone_data::block_states;
 use lodestone_server::{ChunkSource, ServerDirective, ServerProtocol, overworld_chunk_source};
 use lodestone_v26_2::V770ServerProtocol;
@@ -114,8 +115,7 @@ impl LightProperties for Props {
     }
 }
 
-fn dampening(id: u32) -> u8 {
-    let id = block_states::StateId::new(id).expect("resolved fixture state is generated");
+fn dampening(id: block_states::StateId) -> u8 {
     lodestone_data::light_props::dampening(id)
 }
 
@@ -135,15 +135,13 @@ fn to_world_column(shape: &ChunkShape, src: &lodestone_server::ChunkColumn) -> W
         shape.air_id,
         shape.biome_id,
     );
-    let mut seen: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
     for si in 0..shape.section_count {
         let base = shape.min_y + (si * EDGE) as i32;
         for ly in 0..EDGE {
             let wy = base + ly as i32;
             for lz in 0..EDGE {
                 for lx in 0..EDGE {
-                    let state = src.block_state(lx as i32, wy, lz as i32);
-                    let id = *seen.entry(state).or_insert_with(|| resolve_state_id(state));
+                    let id = src.block_state_id(lx as i32, wy, lz as i32).raw();
                     if id != shape.air_id {
                         column.set_block(lx, wy, lz, id);
                     }
@@ -170,10 +168,6 @@ fn to_world_column(shape: &ChunkShape, src: &lodestone_server::ChunkColumn) -> W
 /// Since the resolver moved into `lodestone-data` there is a public function to
 /// call, and a light oracle that resolved a state differently from the encoder it
 /// is judging would be comparing two different worlds. Do not re-inline this.
-fn resolve_state_id(state: &str) -> u32 {
-    block_states::state_id(state).unwrap_or_else(block_states::air_state_id)
-}
-
 /// The light payload the real encoder put on the wire for `(cx, cz)`.
 fn served_light(cx: i32, cz: i32, source: &impl ChunkSource, shape: &ChunkShape) -> ColumnLight {
     let column = source.column(cx, cz);
@@ -273,8 +267,8 @@ struct Expectation {
 ///   be reached by any sky source, so its sky light is exactly `0`. 16, not 15:
 ///   light costs at least one level per block crossed, so 15 levels die inside 15
 ///   blocks and the 16th is unreachable.
-fn expectations<'a>(
-    state_at: &dyn Fn(usize, i32, usize) -> &'a str,
+fn expectations(
+    state_at: &dyn Fn(usize, i32, usize) -> block_states::StateId,
     min_y: i32,
     height: i32,
 ) -> Vec<Expectation> {
@@ -284,7 +278,7 @@ fn expectations<'a>(
     for &(x, z) in &[(3usize, 3usize), (8usize, 11usize)] {
         let mut open_y = None;
         for y in (min_y..=top).rev() {
-            let id = resolve_state_id(state_at(x, y, z));
+            let id = state_at(x, y, z);
             if dampening(id) != 0 {
                 open_y = Some(y + 1);
                 break;
@@ -307,7 +301,7 @@ fn expectations<'a>(
         for z in 2..14usize {
             for x in 2..14usize {
                 let capped = (0..=16i32).all(|dy| {
-                    let id = resolve_state_id(state_at(x, y + dy, z));
+                    let id = state_at(x, y + dy, z);
                     dampening(id) == 15
                 });
                 let walled = (1..=16i32).all(|d| {
@@ -320,7 +314,7 @@ fn expectations<'a>(
                         if !(0..16).contains(&nx) || !(0..16).contains(&nz) {
                             return true;
                         }
-                        let id = resolve_state_id(state_at(nx as usize, y, nz as usize));
+                        let id = state_at(nx as usize, y, nz as usize);
                         dampening(id) == 15
                     })
                 });
@@ -386,7 +380,7 @@ fn served_sky_light_reaches_the_wire_with_predicted_levels() {
     let generated = independent.column(CX, CZ);
 
     let want = expectations(
-        &|x: usize, y: i32, z: usize| generated.block_state(x, y, z),
+        &|x: usize, y: i32, z: usize| generated.block_state_id(x, y, z),
         shape.min_y,
         shape.world_height as i32,
     );
@@ -515,7 +509,7 @@ fn served_block_light_carries_a_placed_emitters_halo() {
     }
     println!("control: all three halo cells read 0 before the placement");
 
-    source.set_block(wx, y, wz, "minecraft:glowstone");
+    source.set_block(wx, y, wz, Block::Glowstone.default_state());
     let after = served_light(CX, CZ, &source, &shape);
 
     for (dx, expect, why) in [
@@ -698,7 +692,7 @@ fn seam_detector_fires_when_a_neighbour_holds_the_only_source() {
     let z_local = 8usize;
     let wx = (CX - 1) * 16 + 15;
     let wz = CZ * 16 + z_local as i32;
-    source.set_block(wx, y, wz, "minecraft:glowstone");
+    source.set_block(wx, y, wz, Block::Glowstone.default_state());
 
     let cols = neighbourhood_columns(&source, &shape, CX, CZ);
     let isolated = compute_column_light(centre_of(&cols), &Props);

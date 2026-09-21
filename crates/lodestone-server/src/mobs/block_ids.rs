@@ -1,8 +1,4 @@
-//! Block-state id lookups shared by [`super::ChunkWorld`] and by the wider
-//! crate through the [`block_state_id`]/[`block_state_id_or_default`] doors —
-//! moved out of `mobs/mod.rs` verbatim as part of the `mobs.rs` file split
-//! (see `docs/plans/crate-and-file-splits.md`). No `MobSim` dependency: this
-//! is the pure block-state-id half of the terrain adapter.
+//! Typed block-state helpers shared by mob terrain consumers.
 
 use lodestone_data::block_states;
 use lodestone_entity::pathfinding::PathType;
@@ -50,51 +46,8 @@ pub(super) fn census_to_pathfinding_type(pt: CensusPathType) -> PathType {
     }
 }
 
-/// The validated global block-state id for a canonical state string, or `None`
-/// for a block name this version's census does not carry.
-///
-/// Delegates straight to [`block_states::StateId::from_state_str`]. The
-/// generated table validates its range at this string boundary, so every
-/// downstream census lookup is total. A name owned by a plug-in or data pack is
-/// deliberately still `None`: this server does not invent a built-in state for
-/// it.
-///
-/// Accepts a bare name (`"minecraft:stone"`) or one with properties
-/// (`"minecraft:oak_log[axis=y]"`), since that is exactly what
-/// [`ChunkColumn::block_state`] returns. Unlike the old exact-match map, a bare
-/// or partial name now resolves through vanilla's
-/// `defaultBlockState().setValue(…)` semantics (see
-/// [`block_states::StateId::from_state_str`]'s doc) instead of missing.
-#[must_use]
-pub(crate) fn block_state_id(name: &str) -> Option<block_states::StateId> {
-    block_states::StateId::from_state_str(name)
-}
-
-/// Resolves a bare or partial name to the jar-marked default state with the
-/// caller's named properties overridden on top. Kept as a separate name to
-/// make consumers that intentionally accept partial input explicit.
-///
-/// Do not replace this with a lowest-id fallback: a block's registered default
-/// state is not necessarily its lowest state id.
-#[must_use]
-pub(crate) fn block_state_id_or_default(name: &str) -> Option<block_states::StateId> {
-    block_states::StateId::from_state_str(name)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn server_state_string_boundary_returns_only_generated_ids() {
-        let resolve: fn(&str) -> Option<block_states::StateId> = block_state_id;
-        let air = resolve("minecraft:air").expect("the generated air state resolves");
-        assert_eq!(air.raw(), 0, "air's generated global state id is the fixed literal 0");
-
-        assert_eq!(resolve("lodestone:custom_block"), None);
-        assert_eq!(resolve("minecraft:not_a_real_block"), None);
-
-        assert!(block_states::StateId::new(block_states::STATE_COUNT).is_none());
-        assert!(block_states::StateId::new(u32::MAX).is_none());
-    }
+pub(crate) fn fluid_state_id(
+    state: block_states::StateId,
+) -> Option<crate::fluid::FluidState> {
+    crate::fluid::fluid_state_of_id(state)
 }

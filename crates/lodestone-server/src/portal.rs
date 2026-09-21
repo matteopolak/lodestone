@@ -83,10 +83,14 @@ use std::sync::{Arc, Mutex};
 
 use lodestone_model::{BlockPos, Vec3};
 
-use crate::chunk::{ChunkColumn, ChunkSource, is_air_or_fluid};
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey};
+use lodestone_data::block_states::StateId;
+
+use crate::chunk::{ChunkColumn, ChunkSource, is_air_or_fluid_id};
 use crate::dimension::Dimension;
 use crate::neighbor_update::Direction;
-use crate::redstone::{base_name, direction_from_str, direction_to_str, get_bool_property, get_str_property};
+use crate::redstone::{base_name, direction_from_property, direction_property, get_bool_property, get_str_property};
 use crate::world_spawn::is_standable;
 
 /// The narrowest a portal frame's interior may be.
@@ -99,7 +103,7 @@ pub const MIN_HEIGHT: i32 = 3;
 pub const MAX_HEIGHT: i32 = 21;
 
 /// The block a portal frame is made of.
-pub const FRAME_BLOCK: &str = "minecraft:obsidian";
+pub const FRAME_BLOCK: Block = Block::Obsidian;
 
 /// Ticks a player is immune to portals for after a trip — the real player
 /// dimension-change delay, which is 10 and **not** the 300 every other entity gets.
@@ -124,11 +128,11 @@ impl Axis {
         }
     }
 
-    /// Parses the `axis` property off a `nether_portal` state string, defaulting to
+    /// Reads the `axis` property from a validated `nether_portal` state, defaulting to
     /// `X` — vanilla's own `getOptionalValue(AXIS).orElse(Direction.Axis.X)`.
     #[must_use]
-    pub fn from_state(state: &str) -> Self {
-        if state.contains("axis=z") {
+    pub fn from_state(state: StateId) -> Self {
+        if get_str_property(state, PropertyKey::Axis) == Some(BuiltinPropertyValue::Z) {
             Self::Z
         } else {
             Self::X
@@ -181,20 +185,29 @@ impl Axis {
 
 /// The block state a portal cell holds, for `axis`.
 #[must_use]
-pub fn portal_state(axis: Axis) -> String {
-    format!("minecraft:nether_portal[axis={}]", axis.name())
+pub fn portal_state(axis: Axis) -> StateId {
+    let base = Block::NetherPortal.default_state();
+    let value = match axis {
+        Axis::X => BuiltinPropertyValue::X,
+        Axis::Z => BuiltinPropertyValue::Z,
+    };
+    Properties::from_state_id(base)
+        .with_builtin(PropertyKey::Axis, value)
+        .ok()
+        .and_then(|properties| Properties::state_for_block(Block::NetherPortal, &properties))
+        .expect("nether portal axis is a generated property")
 }
 
 /// Whether `state` is a portal block of any axis.
 #[must_use]
-pub fn is_portal(state: &str) -> bool {
-    state == "minecraft:nether_portal" || state.starts_with("minecraft:nether_portal[")
+pub fn is_portal(state: StateId) -> bool {
+    base_name(state) == Block::NetherPortal
 }
 
 /// Whether `state` is a frame block.
 #[must_use]
-pub fn is_frame(state: &str) -> bool {
-    state == FRAME_BLOCK || state.starts_with("minecraft:obsidian[")
+pub fn is_frame(state: StateId) -> bool {
+    base_name(state) == FRAME_BLOCK
 }
 
 /// The real frame-interior "is empty" rule: air, anything in `#minecraft:fire`, or
@@ -206,12 +219,8 @@ pub fn is_frame(state: &str) -> bool {
 /// decide whether a portal should survive a neighbour change — is false for every
 /// real portal.
 #[must_use]
-pub fn is_empty(state: &str) -> bool {
-    state == "minecraft:air"
-        || state == "minecraft:cave_air"
-        || state == "minecraft:void_air"
-        || state.starts_with("minecraft:fire")
-        || state.starts_with("minecraft:soul_fire")
+pub fn is_empty(state: StateId) -> bool {
+    matches!(base_name(state), Block::Air | Block::CaveAir | Block::VoidAir | Block::Fire | Block::SoulFire)
         || is_portal(state)
 }
 
@@ -277,7 +286,7 @@ impl PortalShape {
     /// changes the world without telling the client leaves an invisible portal that
     /// nonetheless teleports, which is worse than not lighting it at all.
     #[must_use]
-    pub fn fill(&self) -> Vec<(BlockPos, String)> {
+    pub fn fill(&self) -> Vec<(BlockPos, StateId)> {
         let state = portal_state(self.axis);
         let (rx, rz) = self.right;
         let mut cells = Vec::with_capacity((self.width * self.height) as usize);
@@ -397,7 +406,7 @@ pub fn should_extinguish<S: ChunkSource + ?Sized>(
     pos: BlockPos,
     axis: Axis,
     direction_to_neighbour: Direction,
-    neighbour_state: &str,
+    neighbour_state: StateId,
 ) -> bool {
     // The "is horizontal" check: only North/South (Z) and East/West (X)
     // qualify: Up/Down is vertical, so `wrong_axis` is unconditionally
@@ -465,11 +474,11 @@ pub fn extinguish_broken_frames<S: ChunkSource + ?Sized>(
     world: &S,
     dimension: Dimension,
     origin: BlockPos,
-) -> Vec<(BlockPos, String)> {
+) -> Vec<(BlockPos, StateId)> {
     use crate::neighbor_update::{ALL_DIRECTIONS, Notification};
     use std::collections::VecDeque;
 
-    let mut removed: Vec<(BlockPos, String)> = Vec::new();
+    let mut removed: Vec<(BlockPos, StateId)> = Vec::new();
     // Seeded exactly like `NeighborPropagator::propagate`'s own fan-out: one
     // `Notification` per direction off `origin`, `from` carrying the
     // direction that produced it — see that type's own doc comment for the
@@ -491,22 +500,22 @@ pub fn extinguish_broken_frames<S: ChunkSource + ?Sized>(
         if removed.iter().any(|(seen, _)| *seen == n.pos) {
             continue;
         }
-        let state = world.block_state(n.pos.x, n.pos.y, n.pos.z);
-        if !is_portal(&state) {
+        let state = world.block_state_id(n.pos.x, n.pos.y, n.pos.z);
+        if !is_portal(state) {
             continue;
         }
-        let axis = Axis::from_state(&state);
+        let axis = Axis::from_state(state);
         // The direction *from this cell* to whichever neighbour just
         // changed — the opposite of `n.from`, which names the direction
         // *into* `n.pos` the change arrived from. See `Notification`'s own
         // doc comment.
         let direction_to_neighbour = n.from.opposite();
         let causing_pos = direction_to_neighbour.relative(n.pos);
-        let causing_state = world.block_state(causing_pos.x, causing_pos.y, causing_pos.z);
-        if !should_extinguish(world, dimension, n.pos, axis, direction_to_neighbour, &causing_state) {
+        let causing_state = world.block_state_id(causing_pos.x, causing_pos.y, causing_pos.z);
+        if !should_extinguish(world, dimension, n.pos, axis, direction_to_neighbour, causing_state) {
             continue;
         }
-        world.set_block(n.pos.x, n.pos.y, n.pos.z, "minecraft:air");
+        world.set_block(n.pos.x, n.pos.y, n.pos.z, lodestone_data::block_states::air_state());
         removed.push((n.pos, state));
         for &from in &ALL_DIRECTIONS {
             queue.push_back(Notification { pos: from.relative(n.pos), from });
@@ -548,7 +557,7 @@ pub fn ignite<S: ChunkSource + ?Sized>(
     world: &S,
     dimension: Dimension,
     pos: BlockPos,
-) -> Option<Vec<(BlockPos, String)>> {
+) -> Option<Vec<(BlockPos, StateId)>> {
     // The "is a portal-capable dimension" guard: only the overworld and the
     // Nether qualify. An End portal is a different mechanism entirely (an
     // eye-of-ender ring, not fire), so this declines rather than searching for a
@@ -569,7 +578,7 @@ fn calculate_bottom_left<S: ChunkSource + ?Sized>(
     mut pos: BlockPos,
 ) -> Option<BlockPos> {
     let min_y = dimension.min_y().max(pos.y - MAX_HEIGHT);
-    while pos.y > min_y && is_empty(&world.block_state(pos.x, pos.y - 1, pos.z)) {
+    while pos.y > min_y && is_empty(world.block_state_id(pos.x, pos.y - 1, pos.z)) {
         pos = BlockPos::new(pos.x, pos.y - 1, pos.z);
     }
 
@@ -592,14 +601,14 @@ fn distance_until_edge_above_frame<S: ChunkSource + ?Sized>(
     for width in 0..=MAX_WIDTH {
         let x = pos.x + direction.0 * width;
         let z = pos.z + direction.1 * width;
-        let state = world.block_state(x, pos.y, z);
-        if !is_empty(&state) {
-            if is_frame(&state) {
+        let state = world.block_state_id(x, pos.y, z);
+        if !is_empty(state) {
+            if is_frame(state) {
                 return width;
             }
             break;
         }
-        if !is_frame(&world.block_state(x, pos.y - 1, z)) {
+        if !is_frame(world.block_state_id(x, pos.y - 1, z)) {
             break;
         }
     }
@@ -646,7 +655,7 @@ fn has_top_frame<S: ChunkSource + ?Sized>(
     height: i32,
 ) -> bool {
     (0..width).all(|i| {
-        is_frame(&world.block_state(
+        is_frame(world.block_state_id(
             bottom_left.x + right.0 * i,
             bottom_left.y + height,
             bottom_left.z + right.1 * i,
@@ -672,18 +681,18 @@ fn distance_until_top<S: ChunkSource + ?Sized>(
         for across in [-1, width] {
             let x = bottom_left.x + right.0 * across;
             let z = bottom_left.z + right.1 * across;
-            if !is_frame(&world.block_state(x, y, z)) {
+            if !is_frame(world.block_state_id(x, y, z)) {
                 return (height, portal_blocks);
             }
         }
         for i in 0..width {
             let x = bottom_left.x + right.0 * i;
             let z = bottom_left.z + right.1 * i;
-            let state = world.block_state(x, y, z);
-            if !is_empty(&state) {
+            let state = world.block_state_id(x, y, z);
+            if !is_empty(state) {
                 return (height, portal_blocks);
             }
-            if is_portal(&state) {
+            if is_portal(state) {
                 portal_blocks += 1;
             }
         }
@@ -704,8 +713,8 @@ pub fn largest_rectangle_around<S: ChunkSource + ?Sized>(
     pos: BlockPos,
     axis: Axis,
 ) -> (BlockPos, i32, i32) {
-    let state = world.block_state(pos.x, pos.y, pos.z);
-    let matches = |x: i32, y: i32, z: i32| world.block_state(x, y, z) == state;
+    let state = world.block_state_id(pos.x, pos.y, pos.z);
+    let matches = |x: i32, y: i32, z: i32| world.block_state_id(x, y, z) == state;
     let (ax, az) = match axis {
         Axis::X => (1, 0),
         Axis::Z => (0, 1),
@@ -1008,10 +1017,10 @@ fn resident_block_state<'a>(
     x: i32,
     y: i32,
     z: i32,
-) -> Option<&'a str> {
+) -> Option<StateId> {
     columns
         .get(&(x.div_euclid(16), z.div_euclid(16)))
-        .map(|column| column.block_state(x.rem_euclid(16), y, z.rem_euclid(16)))
+        .map(|column| column.block_state_id(x.rem_euclid(16), y, z.rem_euclid(16)))
 }
 
 /// The search radius for arriving in `dimension`.
@@ -1164,7 +1173,7 @@ fn consider_portal_cell<S: ChunkSource + ?Sized>(
     pos: BlockPos,
     best: &mut Option<(i64, i32, BlockPos)>,
 ) {
-    if !is_portal(&world.block_state(pos.x, pos.y, pos.z)) {
+    if !is_portal(world.block_state_id(pos.x, pos.y, pos.z)) {
         return;
     }
     let dx = i64::from(pos.x - origin.x);
@@ -1223,7 +1232,7 @@ pub struct CreatedPortal {
     /// The axis the frame was laid out on.
     pub axis: Axis,
     /// Frame, interior air and portal cells, in write order.
-    pub blocks: Vec<(BlockPos, String)>,
+    pub blocks: Vec<(BlockPos, StateId)>,
     /// Just the portal cells, for [`PortalIndex`].
     pub portal_cells: Vec<BlockPos>,
 }
@@ -1373,7 +1382,7 @@ pub fn create_portal<S: ChunkSource + ?Sized>(
         }
     }
 
-    let mut blocks: Vec<(BlockPos, String)> = Vec::new();
+    let mut blocks: Vec<(BlockPos, StateId)> = Vec::new();
     let site = match closest_full.or(closest_partial) {
         Some((_, pos)) => pos,
         None => {
@@ -1386,9 +1395,9 @@ pub fn create_portal<S: ChunkSource + ?Sized>(
                 for across in 0..2 {
                     for up in -1..3 {
                         let state = if up < 0 {
-                            FRAME_BLOCK.to_owned()
+                            FRAME_BLOCK.default_state()
                         } else {
-                            "minecraft:air".to_owned()
+                            lodestone_data::block_states::air_state()
                         };
                         blocks.push((
                             BlockPos::new(
@@ -1416,7 +1425,7 @@ pub fn create_portal<S: ChunkSource + ?Sized>(
                         site.y + up,
                         site.z + across * forward.1,
                     ),
-                    FRAME_BLOCK.to_owned(),
+                    FRAME_BLOCK.default_state(),
                 ));
             }
         }
@@ -1432,7 +1441,7 @@ pub fn create_portal<S: ChunkSource + ?Sized>(
                 site.z + across * forward.1,
             );
             portal_cells.push(pos);
-            blocks.push((pos, state.clone()));
+            blocks.push((pos, state));
         }
     }
 
@@ -1450,8 +1459,8 @@ pub fn create_portal<S: ChunkSource + ?Sized>(
 /// resolver's air fallback. The original namespaced string remains in the
 /// palette for its owning registry; this complete census is never indexed with
 /// an unvalidated raw value.
-fn blocks_motion(state: &str) -> bool {
-    lodestone_data::block_solidity::blocks_motion(crate::chunk::resolve_palette_state_id(state))
+fn blocks_motion(state: StateId) -> bool {
+    lodestone_data::block_solidity::blocks_motion(state)
 }
 
 /// The real can-portal-replace-block rule: not-solid and no fluid state.
@@ -1464,11 +1473,11 @@ fn blocks_motion(state: &str) -> bool {
 /// fire all qualify), and it errs toward *refusing* a column, which only costs the
 /// search one more candidate.
 fn can_portal_replace<S: ChunkSource + ?Sized>(world: &S, x: i32, y: i32, z: i32) -> bool {
-    let state = world.block_state(x, y, z);
-    if state.starts_with("minecraft:water") || state.starts_with("minecraft:lava") {
+    let state = world.block_state_id(x, y, z);
+    if matches!(base_name(state), Block::Water | Block::Lava) {
         return false;
     }
-    is_empty(&state) || !blocks_motion(&state)
+    is_empty(state) || !blocks_motion(state)
 }
 
 /// The real can-host-frame rule: the `-1..3 × -1..4` box offset sideways by
@@ -1489,7 +1498,7 @@ fn can_host_frame<S: ChunkSource + ?Sized>(
             if up < 0 {
                 // The real is-solid rule, proxied by the motion census — the frame
                 // needs something to stand on.
-                if !blocks_motion(&world.block_state(x, y, z)) {
+                if !blocks_motion(world.block_state_id(x, y, z)) {
                     return false;
                 }
             } else if !can_portal_replace(world, x, y, z) {
@@ -1567,7 +1576,7 @@ pub fn resolve_destination<S: ChunkSource + ?Sized>(
     if let Some(existing) = find_exit_portal(destination, to, index, approximate) {
         // Land at the bottom-centre of the portal's own rectangle, so a wide portal
         // does not dump everyone at its left edge.
-        let axis = Axis::from_state(&destination.block_state(existing.x, existing.y, existing.z));
+        let axis = Axis::from_state(destination.block_state_id(existing.x, existing.y, existing.z));
         let (corner, _, _) = largest_rectangle_around(destination, existing, axis);
         return Some(PortalDestination {
             position: lodestone_model::Vec3::new(
@@ -1595,29 +1604,29 @@ pub fn resolve_destination<S: ChunkSource + ?Sized>(
 /// `minecraft:end_portal` — the block a completed end-portal-frame ring fills its
 /// 3×3 interior with, and the block stepping into which triggers a trip to the
 /// End (the real end-portal entity-inside rule).
-pub const END_PORTAL_BLOCK: &str = "minecraft:end_portal";
+pub const END_PORTAL_BLOCK: Block = Block::EndPortal;
 
 /// `minecraft:end_gateway`, the contact block for a generated outer-island
 /// return gateway.
-pub const END_GATEWAY_BLOCK: &str = "minecraft:end_gateway";
+pub const END_GATEWAY_BLOCK: Block = Block::EndGateway;
 
 /// `minecraft:end_portal_frame` — the block the stronghold portal room's 5×5 ring
 /// is built from. Its `eye` property is what
 /// the real eye-of-ender use-on rule flips true; this crate has no code that flips
 /// it (see this module's doc for exactly what is and is not implemented here).
-pub const END_PORTAL_FRAME_BLOCK: &str = "minecraft:end_portal_frame";
+pub const END_PORTAL_FRAME_BLOCK: Block = Block::EndPortalFrame;
 
 /// Whether `state` is an `end_portal` block. Unlike [`is_portal`], the End's
 /// block has no `axis` (or any other) property, so this is a plain equality.
 #[must_use]
-pub fn is_end_portal(state: &str) -> bool {
-    state == END_PORTAL_BLOCK
+pub fn is_end_portal(state: StateId) -> bool {
+    base_name(state) == END_PORTAL_BLOCK
 }
 
 /// Whether `state` is an End gateway block.
 #[must_use]
-pub fn is_end_gateway(state: &str) -> bool {
-    state == END_GATEWAY_BLOCK
+pub fn is_end_gateway(state: StateId) -> bool {
+    base_name(state) == END_GATEWAY_BLOCK
 }
 
 /// Resolves an exact gateway exit into the player's arrival point.
@@ -1674,13 +1683,12 @@ pub fn end_gateway_required_columns(exit: BlockPos) -> Vec<(i32, i32)> {
 fn is_standable_in_resident_column(column: &ChunkColumn, x: i32, y: i32, z: i32) -> bool {
     let local_x = x.rem_euclid(16);
     let local_z = z.rem_euclid(16);
-    let feet = column.block_state(local_x, y, local_z);
-    let head = column.block_state(local_x, y + 1, local_z);
-    let below = column.block_state(local_x, y - 1, local_z);
-    is_air_or_fluid(feet)
-        && is_air_or_fluid(head)
-        && lodestone_data::block_states::StateId::from_state_str(below)
-            .is_some_and(lodestone_data::snow_support::face_full_up)
+    let feet = column.block_state_id(local_x, y, local_z);
+    let head = column.block_state_id(local_x, y + 1, local_z);
+    let below = column.block_state_id(local_x, y - 1, local_z);
+    is_air_or_fluid_id(feet)
+        && is_air_or_fluid_id(head)
+        && lodestone_data::snow_support::face_full_up(below)
 }
 
 /// Resolves a gateway exit against the destination terrain.
@@ -1792,12 +1800,16 @@ pub fn end_gateway_arrival_in_resident_world<S: ChunkSource + ?Sized>(
 /// stop early on an already-correct cell, unlike vanilla's own `!is(block)` guard
 /// (see [`ensure_end_platform`] for the version that keeps it).
 #[must_use]
-pub fn end_platform_writes(origin: BlockPos) -> Vec<(BlockPos, &'static str)> {
+pub fn end_platform_writes(origin: BlockPos) -> Vec<(BlockPos, StateId)> {
     let mut writes = Vec::with_capacity(5 * 5 * 4);
     for dz in -2..=2 {
         for dx in -2..=2 {
             for dy in -1..3 {
-                let block = if dy == -1 { "minecraft:obsidian" } else { "minecraft:air" };
+                let block = if dy == -1 {
+                    Block::Obsidian.default_state()
+                } else {
+                    lodestone_data::block_states::air_state()
+                };
                 writes.push((BlockPos::new(origin.x + dx, origin.y + dy, origin.z + dz), block));
             }
         }
@@ -1841,7 +1853,7 @@ pub fn end_platform_required_columns(origin: BlockPos) -> Vec<(i32, i32)> {
 /// `platform_origin`.
 pub fn ensure_end_platform<S: ChunkSource + ?Sized>(world: &S, origin: BlockPos) {
     for (pos, block) in end_platform_writes(origin) {
-        if world.block_state(pos.x, pos.y, pos.z) != block {
+        if world.block_state_id(pos.x, pos.y, pos.z) != block {
             world.set_block(pos.x, pos.y, pos.z, block);
         }
     }
@@ -1874,7 +1886,7 @@ pub fn ensure_end_platform_if_resident<S: ChunkSource + ?Sized>(
             // Never turn the defensive failure into a cold read.
             return false;
         };
-        if column.block_state(pos.x.rem_euclid(16), pos.y, pos.z.rem_euclid(16)) != block {
+        if column.block_state_id(pos.x.rem_euclid(16), pos.y, pos.z.rem_euclid(16)) != block {
             world.set_block(pos.x, pos.y, pos.z, block);
         }
     }
@@ -1929,25 +1941,28 @@ pub fn end_portal_arrival() -> (BlockPos, lodestone_model::Vec3) {
 pub struct EndPortalIgnition {
     /// The frame cell's own new state (`eye=true`) — always present, whether
     /// or not this eye completed a ring.
-    pub frame: (BlockPos, String),
+    pub frame: (BlockPos, StateId),
     /// The 3×3 interior `end_portal` cells, present only when this eye
     /// completed a full 5×5 ring of 12 correctly-facing, already-eyed frames.
-    pub portal_fill: Option<Vec<(BlockPos, String)>>,
+    pub portal_fill: Option<Vec<(BlockPos, StateId)>>,
 }
 
 /// Whether `state` is an `end_portal_frame` block, of any facing or eye value.
 #[must_use]
-pub fn is_end_portal_frame(state: &str) -> bool {
+pub fn is_end_portal_frame(state: StateId) -> bool {
     base_name(state) == END_PORTAL_FRAME_BLOCK
 }
 
-/// The canonical `end_portal_frame` state string for `facing`/`eye`.
+/// Builds the validated `end_portal_frame` state for `facing`/`eye`.
 #[must_use]
-pub fn end_portal_frame_state(facing: Direction, eye: bool) -> String {
-    format!(
-        "{END_PORTAL_FRAME_BLOCK}[eye={eye},facing={}]",
-        direction_to_str(facing)
-    )
+pub fn end_portal_frame_state(facing: Direction, eye: bool) -> StateId {
+    let base = END_PORTAL_FRAME_BLOCK.default_state();
+    let properties = Properties::from_state_id(base)
+        .with_builtin(PropertyKey::Eye, if eye { BuiltinPropertyValue::True } else { BuiltinPropertyValue::False })
+        .and_then(|properties| properties.with_builtin(PropertyKey::Facing, direction_property(facing)))
+        .expect("end portal frame properties are generated");
+    Properties::state_for_block(END_PORTAL_FRAME_BLOCK, &properties)
+        .expect("end portal frame properties resolve to a generated state")
 }
 
 /// An eye of ender used on `pos` — the real eye-of-ender use-on rule. `None` when
@@ -1990,13 +2005,15 @@ pub fn ignite_end_portal_frame<S: ChunkSource + ?Sized>(
     world: &S,
     pos: BlockPos,
 ) -> Option<EndPortalIgnition> {
-    let state = world.block_state(pos.x, pos.y, pos.z);
-    if !is_end_portal_frame(&state) || get_bool_property(&state, "eye") == Some(true) {
+    let state = world.block_state_id(pos.x, pos.y, pos.z);
+    if !is_end_portal_frame(state) || get_bool_property(state, PropertyKey::Eye) == Some(true) {
         return None;
     }
-    let facing = direction_from_str(get_str_property(&state, "facing").unwrap_or("north"));
+    let facing = get_str_property(state, PropertyKey::Facing)
+        .and_then(direction_from_property)
+        .unwrap_or(Direction::North);
     let new_state = end_portal_frame_state(facing, true);
-    let portal_fill = find_completed_ring(world, pos, facing, &new_state);
+    let portal_fill = find_completed_ring(world, pos, facing, new_state);
     Some(EndPortalIgnition {
         frame: (pos, new_state),
         portal_fill,
@@ -2031,20 +2048,20 @@ fn ring_is_complete<S: ChunkSource + ?Sized>(
     min_z: i32,
     y: i32,
     override_pos: BlockPos,
-    override_state: &str,
+    override_state: StateId,
 ) -> bool {
-    let read = |x: i32, z: i32| -> String {
+    let read = |x: i32, z: i32| -> StateId {
         if x == override_pos.x && z == override_pos.z {
-            override_state.to_owned()
+            override_state
         } else {
-            world.block_state(x, y, z)
+            world.block_state_id(x, y, z)
         }
     };
     let faces_centre = |x: i32, z: i32, want: Direction| -> bool {
         let state = read(x, z);
-        is_end_portal_frame(&state)
-            && get_bool_property(&state, "eye") == Some(true)
-            && get_str_property(&state, "facing") == Some(direction_to_str(want))
+        is_end_portal_frame(state)
+            && get_bool_property(state, PropertyKey::Eye) == Some(true)
+            && get_str_property(state, PropertyKey::Facing) == Some(direction_property(want))
     };
     let max_x = min_x + 4;
     let max_z = min_z + 4;
@@ -2067,11 +2084,11 @@ fn ring_is_complete<S: ChunkSource + ?Sized>(
 /// `(-3, 0, -3)` plus its `0..3 × 0..3` loop, re-derived from the ring's own
 /// bounding box rather than from a constructed front-top-left corner (which this
 /// module never constructs).
-fn interior_fill(min_x: i32, min_z: i32, y: i32) -> Vec<(BlockPos, String)> {
+fn interior_fill(min_x: i32, min_z: i32, y: i32) -> Vec<(BlockPos, StateId)> {
     let mut cells = Vec::with_capacity(9);
     for x in (min_x + 1)..=(min_x + 3) {
         for z in (min_z + 1)..=(min_z + 3) {
-            cells.push((BlockPos::new(x, y, z), END_PORTAL_BLOCK.to_owned()));
+            cells.push((BlockPos::new(x, y, z), END_PORTAL_BLOCK.default_state()));
         }
     }
     cells
@@ -2084,8 +2101,8 @@ fn find_completed_ring<S: ChunkSource + ?Sized>(
     world: &S,
     pos: BlockPos,
     facing: Direction,
-    new_state_for_pos: &str,
-) -> Option<Vec<(BlockPos, String)>> {
+    new_state_for_pos: StateId,
+) -> Option<Vec<(BlockPos, StateId)>> {
     for offset in 1..=3 {
         let (min_x, min_z) = ring_origin_for(pos, facing, offset)?;
         if ring_is_complete(world, min_x, min_z, pos.y, pos, new_state_for_pos) {
@@ -2187,18 +2204,33 @@ mod tests {
     use std::sync::Mutex as Lock;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    fn sid(state: &str) -> StateId {
+        StateId::from_state_str(state).expect("fixture state")
+    }
+
     /// A block-map world, so the frame tests exercise the search and nothing else.
-    struct FlatWorld(Lock<Map<(i32, i32, i32), String>>);
+    struct FlatWorld(Lock<Map<(i32, i32, i32), StateId>>);
 
     impl FlatWorld {
         fn new() -> Self {
             Self(Lock::new(Map::new()))
         }
-        fn put(&self, x: i32, y: i32, z: i32, state: &str) {
+        fn put(&self, x: i32, y: i32, z: i32, state: StateId) {
             self.0
                 .lock()
                 .unwrap()
-                .insert((x, y, z), state.to_owned());
+                .insert((x, y, z), state.into());
+        }
+        fn block_state(&self, x: i32, y: i32, z: i32) -> StateId {
+            self.0
+                .lock()
+                .unwrap()
+                .get(&(x, y, z))
+                .cloned()
+                .unwrap_or_else(lodestone_data::block_states::air_state)
+        }
+        fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
+            self.put(x, y, z, state);
         }
         /// A frame whose interior is `width × height`, lower-left interior cell at
         /// `(x, y, z)`, lying in the plane of `axis`.
@@ -2211,7 +2243,7 @@ mod tests {
                 for up in -1..=height {
                     let edge = across == -1 || across == width || up == -1 || up == height;
                     if edge {
-                        self.put(x + ax * across, y + up, z + az * across, FRAME_BLOCK);
+                        self.put(x + ax * across, y + up, z + az * across, FRAME_BLOCK.default_state());
                     }
                 }
             }
@@ -2222,20 +2254,15 @@ mod tests {
         fn column(&self, _cx: i32, _cz: i32) -> crate::chunk::ChunkColumn {
             crate::chunk::ChunkColumn::new(0, 256)
         }
-        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
-            self.0
-                .lock()
-                .unwrap()
-                .get(&(x, y, z))
-                .cloned()
-                .unwrap_or_else(|| "minecraft:air".to_owned())
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
+            self.block_state(x, y, z)
         }
 
         fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
             crate::chunk::DEFAULT_BIOME.to_string()
         }
-        fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
-            self.put(x, y, z, name);
+        fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
+            self.put(x, y, z, state);
         }
     }
 
@@ -2263,14 +2290,15 @@ mod tests {
             self.column_calls.fetch_add(1, Ordering::Relaxed);
             crate::chunk::ChunkColumn::new(0, 256)
         }
-        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
             self.block_state_calls.fetch_add(1, Ordering::Relaxed);
-            "minecraft:air".to_owned()
+            let _ = (x, y, z);
+            lodestone_data::block_states::air_state()
         }
         fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
             crate::chunk::DEFAULT_BIOME.to_owned()
         }
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
             self.set_calls.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -2298,12 +2326,32 @@ mod tests {
             }
         }
 
-        fn put(&self, x: i32, y: i32, z: i32, state: &str) {
+        fn put(&self, x: i32, y: i32, z: i32, state: StateId) {
             let mut columns = self.columns.lock().unwrap();
             columns
                 .entry((x.div_euclid(16), z.div_euclid(16)))
                 .or_insert_with(|| crate::chunk::ChunkColumn::new(0, 256))
-                .set_block(x.rem_euclid(16), y, z.rem_euclid(16), state);
+                .set_block_id(
+                    x.rem_euclid(16),
+                    y,
+                    z.rem_euclid(16),
+                    state,
+                );
+        }
+
+        fn block_state(&self, x: i32, y: i32, z: i32) -> StateId {
+            self.block_state_calls.fetch_add(1, Ordering::Relaxed);
+            self.columns
+                .lock()
+                .unwrap()
+                .get(&(x.div_euclid(16), z.div_euclid(16)))
+                .map(|column| column.block_state_id(x.rem_euclid(16), y, z.rem_euclid(16)))
+                .unwrap_or_else(lodestone_data::block_states::air_state)
+        }
+
+        fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
+            self.set_calls.fetch_add(1, Ordering::Relaxed);
+            self.put(x, y, z, state);
         }
     }
 
@@ -2317,14 +2365,8 @@ mod tests {
                 .cloned()
                 .unwrap_or_else(|| crate::chunk::ChunkColumn::new(0, 256))
         }
-        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
-            self.block_state_calls.fetch_add(1, Ordering::Relaxed);
-            self.columns
-                .lock()
-                .unwrap()
-                .get(&(x.div_euclid(16), z.div_euclid(16)))
-                .map(|column| column.block_state(x.rem_euclid(16), y, z.rem_euclid(16)).to_owned())
-                .unwrap_or_else(|| "minecraft:air".to_owned())
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
+            self.block_state(x, y, z)
         }
         fn resident_column(&self, cx: i32, cz: i32) -> Option<crate::chunk::ChunkColumn> {
             self.columns.lock().unwrap().get(&(cx, cz)).cloned()
@@ -2332,7 +2374,7 @@ mod tests {
         fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
             crate::chunk::DEFAULT_BIOME.to_owned()
         }
-        fn set_block(&self, x: i32, y: i32, z: i32, state: &str) {
+        fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
             self.set_calls.fetch_add(1, Ordering::Relaxed);
             self.put(x, y, z, state);
         }
@@ -2353,7 +2395,7 @@ mod tests {
         assert!(
             cells
                 .iter()
-                .all(|(_, state)| state == "minecraft:nether_portal[axis=x]"),
+                .all(|(_, state)| *state == portal_state(Axis::X)),
             "the whole interior is portal blocks on the clicked axis"
         );
 
@@ -2395,7 +2437,7 @@ mod tests {
         let world = FlatWorld::new();
         world.frame(0, 70, 0, Axis::X, 2, 3);
         for (pos, state) in ignite(&world, Dimension::Overworld, BlockPos::new(0, 70, 0)).unwrap() {
-            world.set_block(pos.x, pos.y, pos.z, &state);
+            world.set_block(pos.x, pos.y, pos.z, state);
         }
         assert!(
             ignite(&world, Dimension::Overworld, BlockPos::new(0, 70, 0)).is_none(),
@@ -2418,28 +2460,28 @@ mod tests {
         let world = FlatWorld::new();
         world.frame(0, 70, 0, Axis::X, 2, 3);
         for (pos, state) in ignite(&world, Dimension::Overworld, BlockPos::new(0, 70, 0)).unwrap() {
-            world.set_block(pos.x, pos.y, pos.z, &state);
+            world.set_block(pos.x, pos.y, pos.z, state);
         }
         // Break the bottom-middle frame cell directly, bypassing
         // `extinguish_broken_frames` entirely, so the frame is genuinely
         // incomplete going into this test rather than assumed to be.
-        world.set_block(0, 69, 0, "minecraft:air");
+        world.set_block(0, 69, 0, sid("minecraft:air"));
         let shape = find_any_shape(&world, Dimension::Overworld, BlockPos::new(0, 70, 0), Axis::X);
         assert!(!shape.is_complete(), "fixture setup: the frame must actually be broken here");
 
         let interior = BlockPos::new(0, 70, 0);
         assert!(
-            should_extinguish(&world, Dimension::Overworld, interior, Axis::X, Direction::West, "minecraft:air"),
+            should_extinguish(&world, Dimension::Overworld, interior, Axis::X, Direction::West, sid("minecraft:air")),
             "a same-axis (East/West) neighbour must reach the real, broken frame"
         );
         assert!(
-            !should_extinguish(&world, Dimension::Overworld, interior, Axis::X, Direction::North, "minecraft:air"),
+            !should_extinguish(&world, Dimension::Overworld, interior, Axis::X, Direction::North, sid("minecraft:air")),
             "a perpendicular (North/South) neighbour must decline without consulting \
              the frame at all -- on the *same* broken fixture the same-axis case above \
              correctly extinguishes"
         );
         assert!(
-            should_extinguish(&world, Dimension::Overworld, interior, Axis::X, Direction::Down, "minecraft:air"),
+            should_extinguish(&world, Dimension::Overworld, interior, Axis::X, Direction::Down, sid("minecraft:air")),
             "vertical is never the wrong axis and must also reach the real frame"
         );
     }
@@ -2453,12 +2495,12 @@ mod tests {
         let world = FlatWorld::new();
         world.frame(0, 70, 0, Axis::X, 2, 3);
         for (pos, state) in ignite(&world, Dimension::Overworld, BlockPos::new(0, 70, 0)).unwrap() {
-            world.set_block(pos.x, pos.y, pos.z, &state);
+            world.set_block(pos.x, pos.y, pos.z, state);
         }
-        world.set_block(0, 69, 0, "minecraft:air");
+        world.set_block(0, 69, 0, sid("minecraft:air"));
         let interior = BlockPos::new(0, 70, 0);
         assert!(
-            should_extinguish(&world, Dimension::Overworld, interior, Axis::X, Direction::West, "minecraft:air"),
+            should_extinguish(&world, Dimension::Overworld, interior, Axis::X, Direction::West, sid("minecraft:air")),
             "a non-portal neighbour reaches the real, broken frame"
         );
         assert!(
@@ -2468,7 +2510,7 @@ mod tests {
                 interior,
                 Axis::X,
                 Direction::West,
-                "minecraft:nether_portal[axis=x]"
+                sid("minecraft:nether_portal[axis=x]")
             ),
             "a neighbour that is itself a portal cell must decline, on the same broken fixture"
         );
@@ -2490,7 +2532,7 @@ mod tests {
         let world = FlatWorld::new();
         world.frame(0, 70, 0, Axis::X, 2, 3);
         for (pos, state) in ignite(&world, Dimension::Overworld, BlockPos::new(0, 70, 0)).unwrap() {
-            world.set_block(pos.x, pos.y, pos.z, &state);
+            world.set_block(pos.x, pos.y, pos.z, state);
         }
         let shape_before = find_any_shape(&world, Dimension::Overworld, BlockPos::new(0, 70, 0), Axis::X);
         assert_eq!(shape_before.portal_blocks(), 6, "fixture setup: the full 2x3 interior is lit");
@@ -2499,7 +2541,7 @@ mod tests {
         // -- the caller's own `set_block` (already-broken, matching every real
         // call site: `destroy_block` writes the break before running this).
         let broken = BlockPos::new(0, 69, 0);
-        world.set_block(broken.x, broken.y, broken.z, "minecraft:air");
+        world.set_block(broken.x, broken.y, broken.z, sid("minecraft:air"));
 
         let removed = extinguish_broken_frames(&world, Dimension::Overworld, broken);
         assert_eq!(removed.len(), 6, "every interior cell of the 2x3 portal must extinguish");
@@ -2517,7 +2559,7 @@ mod tests {
             for x in 0..2 {
                 assert_eq!(
                     world.block_state(x, y, 0),
-                    "minecraft:air",
+                    sid("minecraft:air"),
                     "cell ({x}, {y}, 0) must have been written to air"
                 );
             }
@@ -2535,14 +2577,14 @@ mod tests {
         world.frame(0, 70, 0, Axis::X, 2, 3);
         world.frame(500, 70, 500, Axis::X, 2, 3);
         for (pos, state) in ignite(&world, Dimension::Overworld, BlockPos::new(0, 70, 0)).unwrap() {
-            world.set_block(pos.x, pos.y, pos.z, &state);
+            world.set_block(pos.x, pos.y, pos.z, state);
         }
         for (pos, state) in ignite(&world, Dimension::Overworld, BlockPos::new(500, 70, 500)).unwrap() {
-            world.set_block(pos.x, pos.y, pos.z, &state);
+            world.set_block(pos.x, pos.y, pos.z, state);
         }
 
         let broken = BlockPos::new(0, 69, 0);
-        world.set_block(broken.x, broken.y, broken.z, "minecraft:air");
+        world.set_block(broken.x, broken.y, broken.z, sid("minecraft:air"));
         let removed = extinguish_broken_frames(&world, Dimension::Overworld, broken);
         assert_eq!(removed.len(), 6, "the near portal still fully extinguishes");
 
@@ -2623,7 +2665,7 @@ mod tests {
         for x in -20..=20 {
             for z in -20..=20 {
                 for y in 0..=69 {
-                    world.put(x, y, z, "minecraft:netherrack");
+                    world.put(x, y, z, Block::Netherrack.default_state());
                 }
             }
         }
@@ -2635,7 +2677,7 @@ mod tests {
         )
         .expect("the Nether has a placeable band");
         for (pos, state) in &created.blocks {
-            world.set_block(pos.x, pos.y, pos.z, state);
+            world.set_block(pos.x, pos.y, pos.z, *state);
         }
         assert_eq!(created.portal_cells.len(), 6, "a created portal is 2 x 3");
 
@@ -2660,7 +2702,7 @@ mod tests {
     fn the_exit_search_uses_the_index_and_falls_back_to_a_scan() {
         let world = FlatWorld::new();
         let portal = BlockPos::new(40, 71, -12);
-        world.put(portal.x, portal.y, portal.z, "minecraft:nether_portal[axis=x]");
+        world.put(portal.x, portal.y, portal.z, sid("minecraft:nether_portal[axis=x]"));
 
         // Index arm.
         let index = PortalIndex::new();
@@ -2754,8 +2796,8 @@ mod tests {
         let writes = end_platform_writes(origin);
         assert_eq!(writes.len(), 100, "5 * 5 * 4 cells");
 
-        let obsidian = writes.iter().filter(|(_, b)| *b == "minecraft:obsidian").count();
-        let air = writes.iter().filter(|(_, b)| *b == "minecraft:air").count();
+        let obsidian = writes.iter().filter(|(_, b)| *b == Block::Obsidian.default_state()).count();
+        let air = writes.iter().filter(|(_, b)| *b == lodestone_data::block_states::air_state()).count();
         assert_eq!(obsidian, 25, "one 5x5 layer of obsidian, at dy = -1");
         assert_eq!(air, 75, "three 5x5 layers of air, at dy = 0, 1, 2");
 
@@ -2763,13 +2805,13 @@ mod tests {
         // origin.y ..= origin.y + 1.
         let obsidian_y: std::collections::BTreeSet<i32> = writes
             .iter()
-            .filter(|(_, b)| *b == "minecraft:obsidian")
+            .filter(|(_, b)| *b == Block::Obsidian.default_state())
             .map(|(p, _)| p.y)
             .collect();
         assert_eq!(obsidian_y, std::collections::BTreeSet::from([origin.y - 1]));
         let air_y: std::collections::BTreeSet<i32> = writes
             .iter()
-            .filter(|(_, b)| *b == "minecraft:air")
+            .filter(|(_, b)| *b == lodestone_data::block_states::air_state())
             .map(|(p, _)| p.y)
             .collect();
         assert_eq!(air_y, std::collections::BTreeSet::from([origin.y, origin.y + 1, origin.y + 2]));
@@ -2800,18 +2842,18 @@ mod tests {
 
         // Obsidian one block below the platform's own origin — the layer a
         // player standing at the spawn point (100, 50, 0) has underfoot.
-        assert_eq!(world.block_state(100, 48, 0), "minecraft:obsidian");
+        assert_eq!(world.block_state(100, 48, 0), Block::Obsidian.default_state());
         // Air where a player would stand: origin.y itself, and one above.
-        assert_eq!(world.block_state(100, 49, 0), "minecraft:air");
-        assert_eq!(world.block_state(100, 50, 0), "minecraft:air");
+        assert_eq!(world.block_state(100, 49, 0), lodestone_data::block_states::air_state());
+        assert_eq!(world.block_state(100, 50, 0), lodestone_data::block_states::air_state());
         // The platform's far corner, still obsidian, same layer as the centre.
-        assert_eq!(world.block_state(98, 48, -2), "minecraft:obsidian");
+        assert_eq!(world.block_state(98, 48, -2), Block::Obsidian.default_state());
         // One block outside the platform on every axis: untouched (still the
         // world's own default, not written by this call).
-        assert_eq!(world.block_state(103, 48, 0), "minecraft:air");
+        assert_eq!(world.block_state(103, 48, 0), lodestone_data::block_states::air_state());
 
         // A player builds a torch on the platform...
-        world.put(100, 50, 0, "minecraft:torch");
+        world.put(100, 50, 0, Block::Torch.default_state());
         // ...and a second arrival must not clear it: `ensure_end_platform` only
         // rewrites a cell whose state does not already match the target, and
         // torch != air is the one cell in this pass that legitimately does not
@@ -2826,7 +2868,7 @@ mod tests {
         ensure_end_platform(&world, origin);
         assert_eq!(
             world.block_state(100, 50, 0),
-            "minecraft:air",
+            lodestone_data::block_states::air_state(),
             "a repair pass does overwrite a non-matching cell — this is the platform's own \
              guarantee, not a claim that ensure_end_platform preserves player builds inside its \
              footprint"
@@ -2837,10 +2879,10 @@ mod tests {
     /// unlike [`is_portal`]'s axis-aware prefix match.
     #[test]
     fn is_end_portal_matches_only_the_bare_state() {
-        assert!(is_end_portal("minecraft:end_portal"));
-        assert!(!is_end_portal("minecraft:end_portal_frame"));
-        assert!(!is_end_portal("minecraft:end_portal_frame[eye=true,facing=north]"));
-        assert!(!is_end_portal("minecraft:air"));
+        assert!(is_end_portal(sid("minecraft:end_portal")));
+        assert!(!is_end_portal(sid("minecraft:end_portal_frame")));
+        assert!(!is_end_portal(sid("minecraft:end_portal_frame[eye=true,facing=north]")));
+        assert!(!is_end_portal(sid("minecraft:air")));
     }
 
     #[test]
@@ -2860,9 +2902,9 @@ mod tests {
     fn inexact_end_gateway_uses_the_first_safe_neighbour_when_exit_is_blocked() {
         let world = FlatWorld::new();
         for y in 0..256 {
-            world.put(0, y, 0, "minecraft:stone");
+            world.put(0, y, 0, Block::Stone.default_state());
         }
-        world.put(1, 0, 0, "minecraft:stone");
+        world.put(1, 0, 0, Block::Stone.default_state());
 
         assert_eq!(
             end_gateway_arrival_in_world(&world, BlockPos::new(0, 20, 0), false),
@@ -2894,9 +2936,9 @@ mod tests {
         let exit = BlockPos::new(0, 20, 0);
         let world = ResidentLookupWorld::with_columns(end_gateway_required_columns(exit));
         for y in 0..256 {
-            world.put(0, y, 0, "minecraft:stone");
+            world.put(0, y, 0, Block::Stone.default_state());
         }
-        world.put(1, 0, 0, "minecraft:stone");
+        world.put(1, 0, 0, Block::Stone.default_state());
 
         assert_eq!(
             end_gateway_arrival_in_resident_world(&world, exit, false),
@@ -2910,12 +2952,10 @@ mod tests {
     /// [`is_end_portal`]'s bare equality.
     #[test]
     fn is_end_portal_frame_matches_any_facing_or_eye_value() {
-        assert!(is_end_portal_frame("minecraft:end_portal_frame"));
-        assert!(is_end_portal_frame(
-            "minecraft:end_portal_frame[eye=false,facing=west]"
-        ));
-        assert!(!is_end_portal_frame("minecraft:end_portal"));
-        assert!(!is_end_portal_frame("minecraft:obsidian"));
+        assert!(is_end_portal_frame(sid("minecraft:end_portal_frame")));
+        assert!(is_end_portal_frame(sid("minecraft:end_portal_frame[eye=false,facing=west]")));
+        assert!(!is_end_portal_frame(sid("minecraft:end_portal")));
+        assert!(!is_end_portal_frame(sid("minecraft:obsidian")));
     }
 
     /// The eight-cell endpoint of [`end_portal_arrival`]: the platform's own
@@ -2942,12 +2982,12 @@ mod tests {
         );
         assert_eq!(
             world.block_state(feet.x, feet.y - 1, feet.z),
-            "minecraft:obsidian",
+            Block::Obsidian.default_state(),
             "the arrival cell must have solid ground directly underfoot"
         );
         assert_eq!(
             world.block_state(feet.x, feet.y, feet.z),
-            "minecraft:air",
+            lodestone_data::block_states::air_state(),
             "and the arrival cell itself must be clear, not embedded in the platform"
         );
     }
@@ -2979,8 +3019,8 @@ mod tests {
         let platform = world
             .resident_column(6, 0)
             .expect("the platform footprint includes its centre chunk");
-        assert_eq!(platform.block_state(4, 48, 0), "minecraft:obsidian");
-        assert_eq!(platform.block_state(4, 49, 0), "minecraft:air");
+        assert_eq!(platform.block_state_id(4, 48, 0), Block::Obsidian.default_state());
+        assert_eq!(platform.block_state_id(4, 49, 0), lodestone_data::block_states::air_state());
     }
 
     /// A return search over a cold source must not turn the fallback radius into
@@ -3008,7 +3048,7 @@ mod tests {
             find_exit_portal_required_columns(Dimension::Nether, None, origin),
         );
         let portal = BlockPos::new(40, 71, -12);
-        world.put(portal.x, portal.y, portal.z, "minecraft:nether_portal[axis=x]");
+        world.put(portal.x, portal.y, portal.z, sid("minecraft:nether_portal[axis=x]"));
 
         assert_eq!(
             find_exit_portal_resident(&world, Dimension::Nether, None, origin),
@@ -3050,7 +3090,7 @@ mod tests {
 
         // Ten cells already eyed, correctly facing the centre.
         for &(pos, facing) in &positions[..10] {
-            world.put(pos.x, pos.y, pos.z, &end_portal_frame_state(facing, true));
+            world.put(pos.x, pos.y, pos.z, end_portal_frame_state(facing, true));
         }
         // The eleventh: a real frame, correctly facing, not yet eyed — the
         // click under test.
@@ -3059,11 +3099,11 @@ mod tests {
             eleventh_pos.x,
             eleventh_pos.y,
             eleventh_pos.z,
-            &end_portal_frame_state(eleventh_facing, false),
+            end_portal_frame_state(eleventh_facing, false),
         );
         // The twelfth ring cell is left as air entirely.
         let (twelfth_pos, twelfth_facing) = positions[11];
-        assert_eq!(world.block_state(twelfth_pos.x, twelfth_pos.y, twelfth_pos.z), "minecraft:air");
+        assert_eq!(world.block_state(twelfth_pos.x, twelfth_pos.y, twelfth_pos.z), sid("minecraft:air"));
 
         let ignition = ignite_end_portal_frame(&world, eleventh_pos)
             .expect("an unfired frame always accepts the eye");
@@ -3075,7 +3115,7 @@ mod tests {
             ignition.portal_fill.is_none(),
             "eleven eyed, correctly-facing frames plus one missing cell must not complete the ring"
         );
-        world.set_block(eleventh_pos.x, eleventh_pos.y, eleventh_pos.z, &ignition.frame.1);
+        world.set_block(eleventh_pos.x, eleventh_pos.y, eleventh_pos.z, ignition.frame.1);
 
         // Now the twelfth appears (correctly facing, unfired) and is clicked:
         // the ring is finally 12 for 12.
@@ -3083,7 +3123,7 @@ mod tests {
             twelfth_pos.x,
             twelfth_pos.y,
             twelfth_pos.z,
-            &end_portal_frame_state(twelfth_facing, false),
+            end_portal_frame_state(twelfth_facing, false),
         );
         let ignition = ignite_end_portal_frame(&world, twelfth_pos)
             .expect("an unfired frame always accepts the eye");
@@ -3091,7 +3131,7 @@ mod tests {
             .portal_fill
             .expect("the twelfth eye must complete the ring");
         assert_eq!(fill.len(), 9, "a 3x3 interior");
-        assert!(fill.iter().all(|(_, state)| state == END_PORTAL_BLOCK));
+        assert!(fill.iter().all(|(_, state)| state.block() == END_PORTAL_BLOCK));
         let mut got: Vec<(i32, i32)> = fill.iter().map(|(p, _)| (p.x, p.z)).collect();
         got.sort_unstable();
         let mut want: Vec<(i32, i32)> = Vec::new();
@@ -3135,7 +3175,7 @@ mod tests {
             click_pos.x,
             click_pos.y,
             click_pos.z,
-            &end_portal_frame_state(Direction::South, false),
+            end_portal_frame_state(Direction::South, false),
         );
 
         let ignition = ignite_end_portal_frame(&world, click_pos)
@@ -3186,18 +3226,18 @@ mod tests {
             crate::chunk::run_worldgen_jobs(coords.to_vec(), |(cx, cz)| self.column(cx, cz))
         }
 
-        fn block_state(&self, _x: i32, y: i32, _z: i32) -> String {
+        fn block_state_id(&self, _x: i32, y: i32, _z: i32) -> StateId {
             if y <= self.floor_top {
-                "minecraft:netherrack".to_owned()
+                Block::Netherrack.default_state()
             } else {
-                "minecraft:air".to_owned()
+                lodestone_data::block_states::air_state()
             }
         }
 
         fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
             crate::chunk::DEFAULT_BIOME.to_string()
         }
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
         fn is_column_resident(&self, _cx: i32, _cz: i32) -> bool {
             self.resident
         }

@@ -8,11 +8,11 @@ The ore decoration parser decodes placed-feature modifiers and ore target predic
 
 `PlacementJson` accepts the five modifier kinds used by the ore pass: count, rarity filter, in-square, height range, and biome. `RuleTestJson` accepts tag-match and block-match targets. Both enums use namespaced Serde renames plus compatibility aliases for unqualified names, and both reject unknown fields. Nested integer and height-provider documents continue through their established parsers after the outer discriminator has been validated.
 
-`parse_placements` and `parse_ore_config` are the production consumers. They run while resolver data is compiled into the generator, so generation loops receive typed modifiers and target tests rather than repeatedly inspecting JSON keys. Unknown kinds, missing required fields, or extra fields fail at the boundary instead of silently selecting a nearby branch.
+`parse_placements` and `parse_ore_config` are the production consumers. They run while resolver data is compiled into the generator, so generation loops receive typed modifiers and target tests rather than repeatedly inspecting JSON keys. Ore generators bind tag targets to a typed `TagId` plus a built-in `BlockMask`, and block targets to a resolved `Block`; the candidate loop consumes only state ids and numeric masks. Unknown kinds, missing required fields, or extra fields fail at the boundary instead of silently selecting a nearby branch.
 
 ## How to change it
 
-Add a placement variant to `PlacementJson`, convert it to the corresponding `Placement` arm, and add a valid fixture or focused schema test. Keep `deny_unknown_fields`: an extra property can otherwise mask a misspelled field while leaving a plausible modifier in the generated pipeline. Add a `RuleTestJson` variant only when the ore target schema and runtime `RuleTest` both support the new predicate.
+Add a placement variant to `PlacementJson`, convert it to the corresponding `Placement` arm, and add a valid fixture or focused schema test. Keep `deny_unknown_fields`: an extra property can otherwise mask a misspelled field while leaving a plausible modifier in the generated pipeline. Add a `RuleTestJson` variant only when the ore target schema and runtime `RuleTest` both support the new predicate. If a target needs registry data, resolve it in `compile_ore_targets`; do not add a name or tag lookup to the candidate loop.
 
 The nested provider parsers are intentionally separate. Extend those only when the provider's draw semantics and malformed-data behavior have their own evidence; changing a provider is not required to add an outer placement discriminator.
 

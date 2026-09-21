@@ -36,7 +36,7 @@
 //! family whose reaction rewrites *more than its own cell* does not belong
 //! here — fire spread, gravity settling, a tripwire recheck and a dispenser
 //! firing are all handled by their own arms in the caller's drain, before this
-//! is reached, precisely because a single `Option<String>` cannot express
+//! is reached, precisely because a single `Option<StateId>` cannot express
 //! them.
 //!
 //! Gotcha: the cascade is run whenever the decision is `Some`, **including**
@@ -55,6 +55,7 @@
 //! is across a chunk seam sees what the resident neighbour actually holds.
 
 use lodestone_model::BlockPos;
+use lodestone_data::block_states::StateId;
 
 use crate::block_entities::BlockEntityHandle;
 use crate::chunk::{ChunkColumn, ChunkSource};
@@ -67,7 +68,7 @@ pub struct BlockTickReaction {
     /// The state the tick's own position now holds, if the block decided to
     /// change at all. `Some` with a value equal to the old state is a real
     /// outcome, not a no-op — see the module doc.
-    pub new_state: Option<String>,
+    pub new_state: Option<StateId>,
     /// Every *other* cell the change rewrote, in the order the cascade
     /// produced them. Written into the home column already, but **not**
     /// through `world`: the cascade's view of a neighbouring column is a
@@ -95,7 +96,7 @@ pub fn run_due_block_tick<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Size
     world: &dyn ChunkSource,
     kind: &ScheduledTickKind,
     pos: BlockPos,
-    state: &str,
+    state: StateId,
     block_ticks: &mut Q,
     current_tick: u64,
     block_entities: Option<&BlockEntityHandle>,
@@ -123,7 +124,7 @@ pub fn run_due_block_tick<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Size
                 crate::redstone_diode::RepeaterTickOutcome::TurnedOff(s) => Some(s),
                 crate::redstone_diode::RepeaterTickOutcome::TurnedOn { new_state, reschedule } => {
                     if reschedule {
-                        let delay = crate::redstone_diode::repeater_delay(&new_state);
+                        let delay = crate::redstone_diode::repeater_delay(new_state);
                         block_ticks.schedule(
                             (x, y, z),
                             ScheduledTickKind::Repeater,
@@ -179,9 +180,9 @@ pub fn run_due_block_tick<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Size
             // anything else already rewrote it (a player broke it, a second
             // move claimed it), and committing over that would resurrect a
             // block without a matching pending move.
-            if crate::piston::is_moving_piston(state) {
+            if crate::piston::is_moving_piston_id(state) {
                 crate::piston::parse_finish_kind(kind)
-                    .map(|entity| entity.committed_state().to_string())
+                    .map(|entity| entity.committed_state())
             } else {
                 None
             }
@@ -198,8 +199,8 @@ pub fn run_due_block_tick<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Size
     };
     let changed = new_state != state;
     if changed {
-        column.set_block(x - min_x, y, z - min_z, &new_state);
-        world.set_block(x, y, z, &new_state);
+        column.set_block_id(x - min_x, y, z - min_z, new_state);
+        world.set_block(x, y, z, new_state);
     }
     let events = crate::random_tick::propagate_and_react_with_entities_across_chunks(
         column,

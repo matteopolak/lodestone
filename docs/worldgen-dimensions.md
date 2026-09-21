@@ -58,6 +58,12 @@ stage reads a neighbour's *terrain* product (only the starts map, a pure functio
 is memoised), so both are pure functions of `(seed, chunk)` and can be generated in any order on any
 thread.
 
+Generated block fields keep canonical `lodestone_data::block_states::StateId` values in their
+palettes and retain compact `u16` cell indices. Spill records and structure/decorating writes carry
+the same canonical type. State text is resolved only while loading configuration or crossing a
+compatibility boundary; placement and palette extraction do not format or parse block-state strings.
+Dynamic End and Nether variants are resolved once and reused by the hot loops.
+
 ### Nether
 
 Biome assignment is two-dimensional and *is* the map: the Nether's climate-parameter table

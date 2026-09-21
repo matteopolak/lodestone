@@ -7,9 +7,9 @@
 //! # Why the recount here is hand-written
 //!
 //! Every expected value below is produced by code in *this file*, written
-//! against `ChunkColumn`'s two raw accessors
-//! (`append_section_cells`/`raw_palette`) and
-//! the public `is_randomly_ticking` predicate — deliberately **not** by calling
+//! against `ChunkColumn`'s two accessors
+//! (`append_section_cells`/`palette`) and
+//! the public `is_randomly_ticking_id` predicate — deliberately **not** by calling
 //! `random_tick`'s own scan helpers. A shared bookkeeping error cannot then pass
 //! both arms. The predicate itself *is* shared, disclosed: it is the spec's
 //! definition of "randomly ticking", and the thing under test is the
@@ -32,9 +32,10 @@
 //! | `corrupting_a_counter_trips_the_consumption_site_tripwire` | `tick_chunk`'s `debug_assert!` really fires, naming the section |
 //! | `a_wrong_draw_count_does_not_reproduce_the_lcg_stream` | the LCG-stream equality is not satisfiable by an arbitrary draw count |
 
+use lodestone_data::block_states::StateId;
 use lodestone_server::{
     ChunkColumn, ChunkSource, RandomTickEvent, RandomTickScheduler, ScheduledTickQueue,
-    chunk_nbt, is_randomly_ticking, next_random_tick_pos, overworld_chunk_source,
+    chunk_nbt, is_randomly_ticking_id, next_random_tick_pos, overworld_chunk_source,
 };
 
 /// Rows per implicit section. Restated here rather than imported: production's
@@ -58,6 +59,10 @@ const GRASS: &str = "minecraft:grass_block[snowy=false]";
 const STONE: &str = "minecraft:stone";
 const DIRT: &str = "minecraft:dirt";
 
+fn fixture_state(name: &str) -> StateId {
+    StateId::from_state_str(name).expect("fixture block state exists")
+}
+
 // ---------------------------------------------------------------------------
 // The independent recount
 // ---------------------------------------------------------------------------
@@ -67,9 +72,9 @@ const DIRT: &str = "minecraft:dirt";
 /// for why it is written this way.
 fn recount_sections(column: &ChunkColumn) -> Vec<u32> {
     let ticking: Vec<bool> = column
-        .raw_palette()
+        .palette()
         .iter()
-        .map(|state| is_randomly_ticking(state))
+        .map(|&state| is_randomly_ticking_id(state))
         .collect();
     let sections = (column.height as usize).div_ceil(SECTION_ROWS as usize);
     assert_eq!(
@@ -150,13 +155,13 @@ impl ChunkSource for NoNeighbors {
     fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
         unreachable!("is_column_resident is always false, so this is never reached")
     }
-    fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+    fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
         unreachable!("is_column_resident is always false, so this is never reached")
     }
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
         unreachable!("is_column_resident is always false, so this is never reached")
     }
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
         unreachable!("is_column_resident is always false, so this is never reached")
     }
     fn is_column_resident(&self, _cx: i32, _cz: i32) -> bool {
@@ -190,7 +195,7 @@ fn plant_a_named_mutation_source(column: &mut ChunkColumn) {
     let top_grass = |column: &ChunkColumn, lx: i32, lz: i32| -> Option<i32> {
         (column.min_y..column.min_y + column.height)
             .rev()
-            .find(|&y| column.block_state(lx, y, lz).starts_with("minecraft:grass_block"))
+            .find(|&y| column.block_state_id(lx, y, lz).name() == "minecraft:grass_block")
     };
 
     // Trigger 1: stone directly above grass. A full solid has dampening 15, so
@@ -206,7 +211,7 @@ fn plant_a_named_mutation_source(column: &mut ChunkColumn) {
     for lx in 2..8 {
         for lz in 2..8 {
             if let Some(y) = top_grass(column, lx, lz) {
-                column.set_block(lx, y + 1, lz, STONE);
+                column.set_block_id(lx, y + 1, lz, fixture_state(STONE));
                 capped += 1;
             }
         }
@@ -223,8 +228,8 @@ fn plant_a_named_mutation_source(column: &mut ChunkColumn) {
     let mut exposed = 0usize;
     for (lx, lz) in [(11, 11), (11, 12)] {
         if let Some(y) = top_grass(column, lx, lz) {
-            column.set_block(lx, y + 1, lz, "minecraft:air");
-            column.set_block(lx, y, lz, DIRT);
+            column.set_block_id(lx, y + 1, lz, StateId::AIR);
+            column.set_block_id(lx, y, lz, fixture_state(DIRT));
             exposed += 1;
         }
     }
@@ -301,30 +306,33 @@ fn incremental_counters_match_an_independent_recount_through_a_mutation_storm() 
     let mut crossed_down = false;
 
     let mut step = 0usize;
-    let mut apply = |column: &mut ChunkColumn, x, y, z, state: &str, note: &str| {
-        column.set_block(x, y, z, state);
+    let mut apply = |column: &mut ChunkColumn, x, y, z, state: StateId, note: &str| {
+        column.set_block_id(x, y, z, state);
         step += 1;
-        compare_counters(column, &format!("step {step}: {note} ({state} at ({x}, {y}, {z}))"))
-            .expect("counter parity");
+        compare_counters(
+            column,
+            &format!("step {step}: {note} ({} at ({x}, {y}, {z}))", state.canonical_state()),
+        )
+        .expect("counter parity");
     };
 
     // 0 -> 1, then 1 -> 2, in a section that held nothing ticking.
     let before = recount_sections(&column)[quiet_index];
-    apply(&mut column, 1, quiet_min_y + 2, 1, GRASS, "0 -> 1 in a quiet section");
+    apply(&mut column, 1, quiet_min_y + 2, 1, fixture_state(GRASS), "0 -> 1 in a quiet section");
     let after_first = recount_sections(&column)[quiet_index];
     crossed_up = crossed_up || (before == 0 && after_first == 1);
-    apply(&mut column, 2, quiet_min_y + 3, 2, GRASS, "1 -> 2 in the same section");
+    apply(&mut column, 2, quiet_min_y + 3, 2, fixture_state(GRASS), "1 -> 2 in the same section");
 
     // 2 -> 1 -> 0. Dirt does not tick (only grass does), so each of these is a
     // real decrement and the second one crosses back through zero.
-    apply(&mut column, 1, quiet_min_y + 2, 1, DIRT, "2 -> 1");
-    apply(&mut column, 2, quiet_min_y + 3, 2, DIRT, "1 -> 0 (last ticking block removed)");
+    apply(&mut column, 1, quiet_min_y + 2, 1, fixture_state(DIRT), "2 -> 1");
+    apply(&mut column, 2, quiet_min_y + 3, 2, fixture_state(DIRT), "1 -> 0 (last ticking block removed)");
     crossed_down = crossed_down || recount_sections(&column)[quiet_index] == 0;
 
     // ticking -> ticking: a crop age advance. The count must be *unchanged*.
-    apply(&mut column, 5, quiet_min_y + 5, 5, "minecraft:wheat[age=3]", "plant a crop");
+    apply(&mut column, 5, quiet_min_y + 5, 5, fixture_state("minecraft:wheat[age=3]"), "plant a crop");
     let with_crop = recount_sections(&column)[quiet_index];
-    apply(&mut column, 5, quiet_min_y + 5, 5, "minecraft:wheat[age=4]", "ticking -> ticking");
+    apply(&mut column, 5, quiet_min_y + 5, 5, fixture_state("minecraft:wheat[age=4]"), "ticking -> ticking");
     let after_age = recount_sections(&column)[quiet_index];
     assert_eq!(
         with_crop, after_age,
@@ -338,16 +346,16 @@ fn incremental_counters_match_an_independent_recount_through_a_mutation_storm() 
     let ticking_to_ticking = with_crop == after_age && with_crop > 0;
 
     // Same-state rewrite: a no-op delta.
-    apply(&mut column, 5, quiet_min_y + 5, 5, "minecraft:wheat[age=4]", "same-state rewrite");
+    apply(&mut column, 5, quiet_min_y + 5, 5, fixture_state("minecraft:wheat[age=4]"), "same-state rewrite");
     let same_state_rewrite =
         u32::from(column.section_ticking_counts()[quiet_index]) == after_age;
 
     // non-ticking -> non-ticking. Both classifications are checked here so this
     // step cannot silently become a ticking transition if the predicate widens.
-    assert!(!is_randomly_ticking(STONE) && !is_randomly_ticking(DIRT));
-    apply(&mut column, 7, quiet_min_y + 7, 7, STONE, "seed a non-ticking cell");
+    assert!(!is_randomly_ticking_id(fixture_state(STONE)) && !is_randomly_ticking_id(fixture_state(DIRT)));
+    apply(&mut column, 7, quiet_min_y + 7, 7, fixture_state(STONE), "seed a non-ticking cell");
     let before_quiet = column.section_ticking_counts()[quiet_index];
-    apply(&mut column, 7, quiet_min_y + 7, 7, DIRT, "non-ticking -> non-ticking");
+    apply(&mut column, 7, quiet_min_y + 7, 7, fixture_state(DIRT), "non-ticking -> non-ticking");
     let quiet_to_quiet = column.section_ticking_counts()[quiet_index] == before_quiet;
 
     // Partial-window indexing: the bottom and top sections, written and cleared.
@@ -356,9 +364,9 @@ fn incremental_counters_match_an_independent_recount_through_a_mutation_storm() 
     // about section arithmetic, which is the whole point of this arm. Both
     // indices are distinct from `quiet_index` by construction (see its pick).
     assert_eq!(column.section_ticking_counts()[0], 0, "bottom window must start quiet");
-    apply(&mut column, 0, min_y, 0, GRASS, "bottom section, 0 -> 1");
+    apply(&mut column, 0, min_y, 0, fixture_state(GRASS), "bottom section, 0 -> 1");
     let bottom_rose = column.section_ticking_counts()[0] == 1;
-    apply(&mut column, 0, min_y, 0, DIRT, "bottom section, 1 -> 0");
+    apply(&mut column, 0, min_y, 0, fixture_state(DIRT), "bottom section, 1 -> 0");
     let wrote_bottom_section = bottom_rose && column.section_ticking_counts()[0] == 0;
 
     let top_y = (top_section_min_y + 1).min(min_y + column.height - 1);
@@ -368,9 +376,9 @@ fn incremental_counters_match_an_independent_recount_through_a_mutation_storm() 
         "the top-section write must land in the last window"
     );
     assert_eq!(column.section_ticking_counts()[last_index], 0, "top window must start quiet");
-    apply(&mut column, 15, top_y, 15, GRASS, "top section, 0 -> 1");
+    apply(&mut column, 15, top_y, 15, fixture_state(GRASS), "top section, 0 -> 1");
     let top_rose = column.section_ticking_counts()[last_index] == 1;
-    apply(&mut column, 15, top_y, 15, DIRT, "top section, 1 -> 0");
+    apply(&mut column, 15, top_y, 15, fixture_state(DIRT), "top section, 1 -> 0");
     let wrote_top_section = top_rose && column.section_ticking_counts()[last_index] == 0;
 
     assert!(step >= 12, "the storm ran only {step} steps");
@@ -485,14 +493,14 @@ fn gate_b_fixture() -> ChunkColumn {
     // non-empty by design, not by luck, and the run is deterministic anyway.
     for z in 0..16 {
         for x in 0..16 {
-            column.set_block(x, 18, z, GRASS);
-            column.set_block(x, 19, z, STONE);
+            column.set_block_id(x, 18, z, fixture_state(GRASS));
+            column.set_block_id(x, 19, z, fixture_state(STONE));
         }
     }
     // The section's boolean must not depend on how many grass blocks are left,
     // or a mid-tick 1 -> 0 crossing would invalidate the replay's pre-tick
     // snapshot. This one inert ticking cell pins it `true` for the whole run.
-    column.set_block(8, 20, 8, INERT_TICKING);
+    column.set_block_id(8, 20, 8, fixture_state(INERT_TICKING));
     column
 }
 
@@ -542,14 +550,14 @@ fn the_counter_decision_reproduces_the_definitional_draw_sequence() {
     for tick in 0..TICKS {
         // Scripted edits BETWEEN ticks: 0 -> 1 before tick 6, 1 -> 0 before tick 16.
         if tick == 6 {
-            column.set_block(6, flip_y, 6, INERT_TICKING);
+            column.set_block_id(6, flip_y, 6, fixture_state(INERT_TICKING));
             assert!(
                 definitional_booleans(&column)[flip_section_index],
                 "the 0 -> 1 flip did not take"
             );
         }
         if tick == 16 {
-            column.set_block(6, flip_y, 6, STONE);
+            column.set_block_id(6, flip_y, 6, fixture_state(STONE));
             assert!(
                 !definitional_booleans(&column)[flip_section_index],
                 "the 1 -> 0 flip did not take"
@@ -620,7 +628,7 @@ fn the_counter_decision_reproduces_the_definitional_draw_sequence() {
          is vacuous — the grass blocks were never hit"
     );
     assert!(
-        events.iter().any(|e| e.to == DIRT),
+        events.iter().any(|e| e.to == fixture_state(DIRT)),
         "expected at least one grass -> dirt event, got: {events:?}"
     );
 }

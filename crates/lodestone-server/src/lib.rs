@@ -669,8 +669,8 @@ pub mod entity_event {
 }
 pub use random_tick::{
     DEFAULT_RANDOM_TICK_SPEED, GrassOutcome, RandomTickEvent, RandomTickScheduler,
-    can_propagate_onto, grass_random_tick, is_air_variant, is_randomly_ticking,
-    next_random_tick_pos, react_at_placement_with_entities,
+    grass_random_tick, is_randomly_ticking_id, next_random_tick_pos,
+    react_at_placement_with_entities,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use rcon::{DEFAULT_RCON_PORT, RconConfig};
@@ -707,11 +707,12 @@ pub use ticket::{
 pub use weather::{WeatherEvent, WeatherFeed, WeatherState};
 pub use vitals::{DROWN_DAMAGE, EYE_HEIGHT, MAX_AIR_SUPPLY, MAX_HEALTH, PlayerVitals, VitalsTick};
 pub use worldgen_data::{
-    bundled_biome_spawners, bundled_worldgen_serves, end_chunk_source, end_generator,
+    bundled_biome_spawners, bundled_generator_cache_stats, bundled_worldgen_serves,
+    end_chunk_source, end_generator,
     nether_chunk_source, nether_generator,
     overworld_chunk_source, overworld_chunk_source_checked, overworld_chunk_source_of_type,
     overworld_generator, overworld_generator_of_type, retained_chunk_source_for_view_radius,
-    BUNDLED_WORLDGEN_SCOPE, WorldType,
+    reset_bundled_generator_cache_stats, BundledGeneratorCacheStats, BUNDLED_WORLDGEN_SCOPE, WorldType,
     WorldgenScopeMismatch,
 };
 // The remaining three presets (`single_biome_surface`, `flat`/

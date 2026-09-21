@@ -8,6 +8,20 @@ The generation ledger is the world-owned retention lane for resumable world gene
 
 `GenerationLedger` groups state by `PipelineIdentity`. Each pipeline has a bounded coordinate set, a `StageFrontier` for every admitted coordinate, immutable products and sidecars, shaped aggregate prefixes and terminal output products, globally deduplicated `(target, source, stage)` completions with a contiguous source-order cursor, sparse provenance-bearing overlays owned by their absolute destination, and a per-coordinate revision counter. A new pipeline identity evicts the least-recently-used identity; per-pipeline lane caps reject an operation before inserting the overflowing item.
 
+Target-owned settlement may finish a padding coordinate before that coordinate
+is requested directly. The ledger retains its shaped aggregate prefix,
+sidecars, source completions, and sparse provenance overlays. A later request
+resumes mutable stages from that prefix without rerunning completed source
+bodies; shaped packet neighbours remain distinct from full requested outputs.
+
+Before a requested output is captured, its mutable stages finish and the
+canonical provenance winner for each destination cell is applied to the target
+column. The resulting Output product is immutable. Settlement retires an
+overlay only after confirming that the persisted source contains it or that
+the destination Output already contains the same state; it never patches a
+published product. Any differing write that arrives after Output publication
+fails closed.
+
 `ChunkStore::lease_halo` canonicalizes coordinates, captures their write-gate revisions, and pins them in the cache. The lease holds the gate state records but not the gates themselves, so generation may run without blocking unrelated writes. `ChunkStore::execute_generation_session` admits the halo and snapshots a validated ledger checkpoint under the ledger lock, releases that lock while the borrowed driver runs, then publishes the session's immutable records, ordered source completions, and overlays through an atomic clone-and-swap. It rechecks cancellation immediately before `ChunkStore::commit_generation`; a cancelled request therefore leaves any committed ledger prefix and removes only newly admitted coordinates that are still empty. `ChunkStore::commit_generation` reacquires the canonical write gates, rejects any cache revision change, inserts the complete batch, and releases the gates before eviction work. Dropping the lease removes its pins and performs deferred LRU eviction.
 
 ## How to change it

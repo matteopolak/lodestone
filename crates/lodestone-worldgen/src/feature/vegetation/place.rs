@@ -9,8 +9,10 @@ use std::cell::RefCell;
 use lodestone_worldgen_core::hash::FastSet;
 
 use crate::feature::BlockPos;
-use crate::interner::StateId;
 use crate::rng::RandomSource;
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey};
+use lodestone_data::block_states::StateId;
 
 use super::config::{BlockColumnConfig, BlockStateProvider, Decorator, TreeConfig, VegTags};
 use super::grid::VegGrid;
@@ -66,19 +68,10 @@ pub(super) fn place_simple_block<R: RandomSource>(
 /// These are contiguous pairs in the canonical 26.2 state table, with upper
 /// immediately before lower. Checking the exact canonical ids keeps this hot
 /// placement path free of block-name and property-string comparisons.
-fn double_plant_upper_state(grid: &VegGrid, lower: StateId) -> Option<StateId> {
-    let canonical = grid.interner().canonical_id(lower)?;
+fn double_plant_upper_state(_grid: &VegGrid, lower: StateId) -> Option<StateId> {
     const LOWER: [u32; 6] = [12916, 12918, 12920, 12922, 12924, 12926];
-    const UPPER: [&str; 6] = [
-        "minecraft:sunflower[half=upper]",
-        "minecraft:lilac[half=upper]",
-        "minecraft:rose_bush[half=upper]",
-        "minecraft:peony[half=upper]",
-        "minecraft:tall_grass[half=upper]",
-        "minecraft:large_fern[half=upper]",
-    ];
-    let index = LOWER.iter().position(|&id| id == canonical.raw())?;
-    Some(grid.interner().id_of(UPPER[index]))
+    let index = LOWER.iter().position(|&id| id == lower.raw())?;
+    StateId::new(LOWER[index] - 1)
 }
 
 thread_local! {
@@ -195,9 +188,9 @@ pub(super) fn truncate_layers(layer_heights: &mut [i32], total_height: i32, new_
 /// own fix-up.
 fn write_potentially_waterlogged_state(grid: &mut VegGrid, tags: &VegTags, pos: BlockPos, state: StateId) {
     let existing = grid.get_id(pos.x, pos.y, pos.z);
-    let is_water_source = tags.has(grid.interner(), Tag::Water, existing);
+    let is_water_source = tags.has(Tag::Water, existing);
     let state = tags
-        .rewrite(grid.interner(), state, Rewrite::Waterlogged(is_water_source))
+        .rewrite(state, Rewrite::Waterlogged(is_water_source))
         .unwrap_or(state);
     grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state);
 }
@@ -225,16 +218,13 @@ fn place_root<R: RandomSource>(
     pos: BlockPos,
     root_provider: &BlockStateProvider,
     above_root_placement: &Option<AboveRootPlacementCfg>,
-    muddy_roots_in: &[String],
+    muddy_roots_in: &FastSet<StateId>,
     muddy_roots_provider: &BlockStateProvider,
     grid: &mut VegGrid,
     tags: &VegTags,
 ) {
-    let existing_base = grid.interner().base_of(grid.get_id(pos.x, pos.y, pos.z));
-    if muddy_roots_in
-        .iter()
-        .any(|name| grid.interner().id_of(name) == existing_base)
-    {
+    let existing_base = grid.get_id(pos.x, pos.y, pos.z);
+    if muddy_roots_in.contains(&existing_base) {
         if let Some(state) = muddy_roots_provider.get_state_id(grid, tags, random, pos) {
             write_potentially_waterlogged_state(grid, tags, pos, state);
         }
@@ -373,10 +363,9 @@ pub(super) fn place_tree<R: RandomSource>(
                 // `y` here is the loop's tree-relative offset and `clipped` is
                 // derived from it, so the absolute position must NOT shadow it.
                 let id = grid.get_id(trunk_origin.x + dx, trunk_origin.y + y, trunk_origin.z + dz);
-                let interner = grid.interner();
-                let free = tags.has(interner, Tag::Air, id)
-                    || tags.has(interner, Tag::ReplaceableByTrees, id)
-                    || tags.has(interner, Tag::Logs, id);
+                let free = tags.has(Tag::Air, id)
+                    || tags.has(Tag::ReplaceableByTrees, id)
+                    || tags.has(Tag::Logs, id);
                 if !free {
                     clipped = y - 2;
                     break 'scan;
@@ -466,9 +455,8 @@ pub(super) fn place_tree<R: RandomSource>(
                     z: trunk_origin.z,
                 };
                 let id = grid.get_id(pos.x, pos.y, pos.z);
-                let interner = grid.interner();
-                if tags.has(interner, Tag::Air, id)
-                    || tags.has(interner, Tag::ReplaceableByTrees, id)
+                if tags.has(Tag::Air, id)
+                    || tags.has(Tag::ReplaceableByTrees, id)
                 {
                     if let Some(state) = cfg.trunk_provider.get_state_id(grid, tags, random, pos) {
                         grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state);
@@ -704,11 +692,10 @@ pub(super) fn place_tree<R: RandomSource>(
     // root positions), but they are still part of the bbox this loop derives
     // from `grid`'s own dirty range, exactly as vanilla's own
     // encapsulating-positions bound includes them.
-    // `dirty_cell_ids`, not `dirty_cells`: the latter resolves every position's
-    // state to a `&'static str` through the interner's read guard, and this loop
-    // discards the state entirely — it only wants the coordinates. Unit 8.
+    // The state payload is intentionally ignored; this loop only needs the
+    // coordinates written by this tree.
     let mut bbox: Option<(i32, i32, i32, i32, i32, i32)> = None;
-    for (x, y, z, _) in grid.dirty_cell_ids().skip(dirty_start) {
+    for (x, y, z, _) in grid.dirty_cells().skip(dirty_start) {
         bbox = Some(match bbox {
             None => (x, y, z, x, y, z),
             Some((min_x, min_y, min_z, max_x, max_y, max_z)) => {
@@ -778,14 +765,14 @@ fn place_on_ground_decorator<R: RandomSource>(
         };
         let above = BlockPos { y: pos.y + 1, ..pos };
         let above_id = grid.get_id(above.x, above.y, above.z);
-        let above_name = super::base_id(grid.interner().name_of(above_id));
-        if !(tags.has(grid.interner(), Tag::Air, above_id) || above_name == "minecraft:vine") {
+        let above_is_vine = above_id.block() == Block::Vine;
+        if !(tags.has(Tag::Air, above_id) || above_is_vine) {
             continue;
         }
         let below_id = grid.get_id(pos.x, pos.y, pos.z);
-        if tags.has(grid.interner(), Tag::Fluid, below_id)
-            || !tags.simple_block_support.solid_render.test(grid.interner().name_of(below_id))
-            || tags.has(grid.interner(), Tag::Leaves, below_id)
+        if tags.has(Tag::Fluid, below_id)
+            || !tags.simple_block_support.solid_render.test_id(below_id)
+            || tags.has(Tag::Leaves, below_id)
         {
             continue;
         }
@@ -801,13 +788,13 @@ fn place_on_ground_decorator<R: RandomSource>(
 fn height_motion_blocking_no_leaves(grid: &VegGrid, tags: &VegTags, x: i32, z: i32) -> i32 {
     for y in (grid.min_y..grid.min_y + grid.height).rev() {
         let id = grid.get_id(x, y, z);
-        if tags.has(grid.interner(), Tag::Air, id)
-            || tags.has(grid.interner(), Tag::Fluid, id)
-            || tags.has(grid.interner(), Tag::Leaves, id)
+        if tags.has(Tag::Air, id)
+            || tags.has(Tag::Fluid, id)
+            || tags.has(Tag::Leaves, id)
         {
             continue;
         }
-        if super::config::blocks_motion(super::base_id(grid.interner().name_of(id))) {
+        if !tags.has(Tag::Air, id) && !tags.has(Tag::Fluid, id) {
             return y + 1;
         }
     }
@@ -908,6 +895,10 @@ mod tests {
     use crate::feature::top_layer::StatePredicate;
     use crate::rng::XoroshiroPositionalFactory;
 
+    fn state(spec: &str) -> StateId {
+        StateId::from_state_str(spec).expect("test state is in the generated table")
+    }
+
     struct ScriptedRandom {
         ints: Vec<i32>,
         cursor: usize,
@@ -944,18 +935,18 @@ mod tests {
         let mut grid = VegGrid::new(0, 12, 0, 0);
         for x in 0..16 {
             for z in 0..16 {
-                grid.seed(x, 4, z, "minecraft:dirt".to_owned());
+                grid.seed_id(x, 4, z, state("minecraft:dirt"));
             }
         }
         let mut tags = VegTags::default();
-        tags.beneath_tree_podzol_replaceable.insert("minecraft:dirt".to_owned());
+        tags.beneath_tree_podzol_replaceable.insert(Block::Dirt);
         let provider = BlockStateProvider::RuleBased {
             rules: vec![(
                 super::super::config::BlockPredicate::MatchingBlockTag {
                     tag: Some(super::super::ids::Tag::BeneathTreePodzolReplaceable),
                     offset: (0, 0, 0),
                 },
-                Box::new(BlockStateProvider::Simple("minecraft:podzol[snowy=false]".to_owned())),
+                Box::new(BlockStateProvider::simple("minecraft:podzol[snowy=false]")),
             )],
             fallback: None,
         };
@@ -991,8 +982,8 @@ mod tests {
         }
         let actual: std::collections::HashSet<_> = grid
             .dirty_cells()
-            .map(|(x, y, z, state)| {
-                assert_eq!(state, "minecraft:podzol[snowy=false]");
+            .map(|(x, y, z, state_id)| {
+                assert_eq!(state_id, state("minecraft:podzol[snowy=false]"));
                 (x, y, z)
             })
             .collect();
@@ -1002,7 +993,7 @@ mod tests {
     #[test]
     fn alter_ground_stops_below_first_blocked_cell() {
         let (mut grid, tags, provider) = podzol_fixture();
-        grid.seed(8, 5, 8, "minecraft:stone".to_owned());
+        grid.seed_id(8, 5, 8, state("minecraft:stone"));
         let mut random = ScriptedRandom::new(&[]);
         place_alter_ground_at(
             &mut random,
@@ -1011,17 +1002,17 @@ mod tests {
             &mut grid,
             &tags,
         );
-        assert_eq!(grid.get(8, 4, 8), "minecraft:dirt");
+        assert_eq!(grid.get(8, 4, 8), state("minecraft:dirt"));
         assert_eq!(grid.dirty_len(), 0);
     }
 
     #[test]
     fn simple_block_places_both_halves_of_a_double_plant() {
         let mut grid = VegGrid::new(0, 8, 0, 0);
-        grid.seed(3, 0, 4, "minecraft:grass_block".to_string());
+        grid.seed_id(3, 0, 4, state("minecraft:grass_block"));
         let mut tags = VegTags::default();
-        tags.supports_vegetation.insert("minecraft:grass_block".to_string());
-        let provider = BlockStateProvider::Simple("minecraft:tall_grass[half=lower]".to_string());
+        tags.supports_vegetation.insert(Block::GrassBlock);
+        let provider = BlockStateProvider::simple("minecraft:tall_grass[half=lower]");
         let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
 
         place_simple_block(
@@ -1032,18 +1023,18 @@ mod tests {
             &tags,
         );
 
-        assert_eq!(grid.get(3, 1, 4), "minecraft:tall_grass[half=lower]");
-        assert_eq!(grid.get(3, 2, 4), "minecraft:tall_grass[half=upper]");
+        assert_eq!(grid.get(3, 1, 4), state("minecraft:tall_grass[half=lower]"));
+        assert_eq!(grid.get(3, 2, 4), state("minecraft:tall_grass[half=upper]"));
     }
 
     #[test]
     fn simple_block_refuses_a_double_plant_with_a_blocked_upper_cell() {
         let mut grid = VegGrid::new(0, 8, 0, 0);
-        grid.seed(3, 0, 4, "minecraft:grass_block".to_string());
-        grid.seed(3, 2, 4, "minecraft:stone".to_string());
+        grid.seed_id(3, 0, 4, state("minecraft:grass_block"));
+        grid.seed_id(3, 2, 4, state("minecraft:stone"));
         let mut tags = VegTags::default();
-        tags.supports_vegetation.insert("minecraft:grass_block".to_string());
-        let provider = BlockStateProvider::Simple("minecraft:tall_grass[half=lower]".to_string());
+        tags.supports_vegetation.insert(Block::GrassBlock);
+        let provider = BlockStateProvider::simple("minecraft:tall_grass[half=lower]");
         let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
 
         place_simple_block(
@@ -1054,20 +1045,20 @@ mod tests {
             &tags,
         );
 
-        assert_eq!(grid.get(3, 1, 4), "minecraft:air");
-        assert_eq!(grid.get(3, 2, 4), "minecraft:stone");
+        assert_eq!(grid.get(3, 1, 4), state("minecraft:air"));
+        assert_eq!(grid.get(3, 2, 4), state("minecraft:stone"));
     }
 
     #[test]
     fn place_on_ground_mixed_oak_try_counts_and_output_are_stable() {
         let mut grid = VegGrid::new(-4, 9, 0, 0);
-        grid.seed(0, 0, 0, "minecraft:grass_block".to_string());
+        grid.seed_id(0, 0, 0, state("minecraft:grass_block"));
         let mut tags = VegTags::default();
         tags.simple_block_support.solid_render = StatePredicate::new(
             HashSet::from(["minecraft:grass_block".to_string()]),
             HashMap::new(),
         );
-        let provider = BlockStateProvider::Simple("minecraft:short_grass".to_string());
+        let provider = BlockStateProvider::simple("minecraft:short_grass");
         let logs = [BlockPos { x: 0, y: 0, z: 0 }];
         let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
 
@@ -1095,15 +1086,15 @@ mod tests {
         );
 
         assert_eq!(random.count(), (96 + 150) * 3);
-        assert_eq!(grid.get(0, 1, 0), "minecraft:short_grass");
+        assert_eq!(grid.get(0, 1, 0), state("minecraft:short_grass"));
     }
 
     #[test]
     fn place_on_ground_uses_solid_render_and_gates_provider_draws() {
         let logs = [BlockPos { x: 0, y: 0, z: 0 }];
         let provider = BlockStateProvider::Weighted(vec![
-            (1, "minecraft:short_grass".to_string()),
-            (1, "minecraft:fern".to_string()),
+            (1, lodestone_data::block_states::StateId::from_state_str("minecraft:short_grass").unwrap()),
+            (1, lodestone_data::block_states::StateId::from_state_str("minecraft:fern").unwrap()),
         ]);
         let mut tags = VegTags::default();
         tags.simple_block_support.solid_render = StatePredicate::new(
@@ -1112,7 +1103,7 @@ mod tests {
         );
 
         let mut supported = VegGrid::new(-1, 3, 0, 0);
-        supported.seed(0, 0, 0, "minecraft:grass_block".to_string());
+        supported.seed_id(0, 0, 0, state("minecraft:grass_block"));
         let mut supported_random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
         place_on_ground_decorator(
             &mut supported_random,
@@ -1125,7 +1116,7 @@ mod tests {
             &mut supported,
             &tags,
         );
-        assert_eq!(supported.get(0, 1, 0), "minecraft:short_grass");
+        assert_eq!(supported.get(0, 1, 0), state("minecraft:short_grass"));
         // The first attempt accepts and consumes one weighted-provider draw;
         // its write makes the second attempt fail the above-air check.
         assert_eq!(supported_random.count(), 7);
@@ -1134,7 +1125,7 @@ mod tests {
         // the heightmap check but must fail PlaceOnGround's support predicate;
         // the provider's weighted selection must not consume a draw.
         let mut rejected = VegGrid::new(-1, 3, 0, 0);
-        rejected.seed(0, 0, 0, "minecraft:glass".to_string());
+        rejected.seed_id(0, 0, 0, state("minecraft:glass"));
         let mut rejected_random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
         place_on_ground_decorator(
             &mut rejected_random,
@@ -1147,7 +1138,7 @@ mod tests {
             &mut rejected,
             &tags,
         );
-        assert_eq!(rejected.get(0, 1, 0), "minecraft:air");
+        assert_eq!(rejected.get(0, 1, 0), state("minecraft:air"));
         assert_eq!(rejected_random.count(), 6);
     }
 }
@@ -1208,7 +1199,12 @@ pub(super) fn place_beehive_decorator<R: RandomSource>(
 
     // Interned rather than allocated — the name is a constant, so the `String` it
     // used to build was pure waste. Unit 8.
-    let state = grid.interner().id_of("minecraft:bee_nest[facing=south,honey_level=0]");
+    let properties = Properties::empty()
+        .with_builtin(PropertyKey::Facing, BuiltinPropertyValue::South)
+        .and_then(|properties| properties.with_builtin(PropertyKey::HoneyLevel, BuiltinPropertyValue::Value0))
+        .expect("bee nest properties");
+    let state = Properties::state_for_block(Block::BeeNest, &properties)
+        .expect("bee nest state");
     grid.set_id_if_in_bounds(hx, hy, hz, state);
     // The bees. This draw was already here and its result was
     // discarded — the nest reached the client empty — and the fix was never to add
@@ -1272,17 +1268,25 @@ pub(super) fn place_trunk_vine_decorator<R: RandomSource>(
     // back toward the log, so e.g. the log's WEST neighbour gets `east=true`).
     const SIDES: [((i32, i32), &str); 4] =
         [((-1, 0), "east"), ((1, 0), "west"), ((0, -1), "south"), ((0, 1), "north")];
+    let vine = Block::Vine.default_state();
     for pos in y_sorted(logs) {
         for ((dx, dz), prop) in SIDES {
             if random.next_int_bounded(3) > 0 {
                 let (nx, nz) = (pos.x + dx, pos.z + dz);
                 if tag_at(grid, tags, Tag::Air, nx, pos.y, nz) {
-                    grid.set_formatted_state_if_in_bounds(
-                        nx,
-                        pos.y,
-                        nz,
-                        format_args!("minecraft:vine[{prop}=true]"),
-                    );
+                    let key = match prop {
+                        "east" => PropertyKey::East,
+                        "west" => PropertyKey::West,
+                        "north" => PropertyKey::North,
+                        "south" => PropertyKey::South,
+                        _ => unreachable!(),
+                    };
+                    let properties = Properties::from_state_id(vine)
+                        .with_builtin(key, BuiltinPropertyValue::True)
+                        .expect("vine face property");
+                    let state = Properties::state_for_block(Block::Vine, &properties)
+                        .expect("vine face state");
+                    grid.set_id_if_in_bounds(nx, pos.y, nz, state);
                 }
             }
         }

@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 
 use lodestone_server::overworld_generator;
+use lodestone_data::block_states::StateId;
 use lodestone_worldgen::feature::top_layer::SNOW_LAYER;
 use lodestone_worldgen_parity::lifecycle::top_layer_spills;
 
@@ -44,8 +45,9 @@ fn source_top_layer_replay_reads_the_resident_override() {
     // still be emitted.
     let x = witness.position.0;
     let z = witness.position.2;
+    let stone = StateId::from_state_str("minecraft:stone").expect("stone state");
     let overrides = (generator.min_y()..generator.min_y() + generator.height())
-        .map(|y| ((x, y, z), "minecraft:stone".to_owned()))
+        .map(|y| ((x, y, z), stone))
         .collect::<BTreeMap<_, _>>();
     let blocked = top_layer_spills(&generator, source, &overrides);
     assert!(

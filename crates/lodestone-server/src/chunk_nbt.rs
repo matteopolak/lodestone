@@ -109,6 +109,7 @@ use std::collections::HashMap;
 
 use lodestone_core::{Nbt, NbtTag};
 use lodestone_data::potion::potion_name;
+use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockPos, ItemStack};
 use lodestone_world::{ColumnLight, LightData, NibbleArray};
 use lodestone_worldgen::overworld::block_entities::GeneratedBlockEntity;
@@ -283,8 +284,9 @@ fn split_state(state: &str) -> (&str, Option<&str>) {
 /// Turns a canonical state string into vanilla's `{Name, Properties?}` palette
 /// entry.
 #[must_use]
-pub fn state_to_palette_entry(state: &str) -> Nbt {
-    let (name, props) = split_state(state);
+pub fn state_to_palette_entry(state: StateId) -> Nbt {
+    let canonical = state.canonical_state();
+    let (name, props) = split_state(&canonical);
     let mut fields = vec![("Name".to_owned(), Nbt::String(name.to_owned()))];
     if let Some(body) = props.filter(|b| !b.is_empty()) {
         let pairs: Vec<(String, Nbt)> = body
@@ -299,14 +301,10 @@ pub fn state_to_palette_entry(state: &str) -> Nbt {
     Nbt::Compound(fields)
 }
 
-/// Turns vanilla's `{Name, Properties?}` palette entry back into a canonical
-/// state string, **sorting properties by name**.
-///
-/// The sort is required, not tidy: `lodestone_data::block_states::properties`
-/// is documented as sorted and the worldgen strings this server compares
-/// against are sorted, so reconstructing in the file's own field order would
-/// produce a string unequal to the identical state.
-pub fn palette_entry_to_state(entry: &Nbt, path: &str) -> Result<String, Error> {
+/// Turns vanilla's `{Name, Properties?}` palette entry back into its canonical
+/// id. Property matching stays borrowed; no state text is rebuilt between the
+/// NBT boundary and the typed column.
+pub fn palette_entry_to_state(entry: &Nbt, path: &str) -> Result<StateId, Error> {
     let Some(Nbt::String(name)) = field(entry, "Name") else {
         return Err(bad(&format!("{path}.Name")));
     };
@@ -321,22 +319,22 @@ pub fn palette_entry_to_state(entry: &Nbt, path: &str) -> Result<String, Error> 
         _ => Vec::new(),
     };
     if props.is_empty() {
-        return Ok(name.clone());
+        return StateId::from_state_str(name).ok_or_else(|| bad(path));
     }
     props.sort_unstable_by(|a, b| a.0.cmp(b.0));
-    let mut out = String::with_capacity(name.len() + props.len() * 12);
-    out.push_str(name);
-    out.push('[');
-    for (i, (k, v)) in props.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        out.push_str(k);
-        out.push('=');
-        out.push_str(v);
+    let base = StateId::from_state_str(name).ok_or_else(|| bad(path))?;
+    let mut expected: Vec<(&str, &str)> = base.properties().to_vec();
+    for &(key, value) in &props {
+        let Some(slot) = expected.iter_mut().find(|(known, _)| *known == key) else {
+            return Err(bad(path));
+        };
+        slot.1 = value;
     }
-    out.push(']');
-    Ok(out)
+    expected.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    (0..lodestone_data::block_states::STATE_COUNT)
+        .filter_map(StateId::new)
+        .find(|&state| state.name() == name && state.properties() == expected.as_slice())
+        .ok_or_else(|| bad(path))
 }
 
 /// Encodes a column as the chunk NBT tree a 26.2 region file holds, with
@@ -375,7 +373,7 @@ pub fn column_to_nbt_with(
     }
     let min_section = column.min_y.div_euclid(16);
     let section_count = (column.height as usize).div_ceil(SECTION_EDGE);
-    let palette = column.raw_palette();
+    let palette = column.palette();
     // Reused across sections: `append_section_cells` materialises one section at a
     // time (`crate::chunk_blocks` has no flat grid to borrow), so this is one
     // allocation for the whole column rather than one per section.
@@ -392,14 +390,14 @@ pub fn column_to_nbt_with(
         // column-wide palette would inflate `bits` for every section — a
         // 20-entry column palette would force 5 bits on an all-air section
         // that vanilla stores with no `data` array at all.
-        let mut local: Vec<&str> = Vec::new();
+        let mut local: Vec<StateId> = Vec::new();
         let mut remap = vec![u16::MAX; palette.len()];
         let mut indices = Vec::with_capacity(SECTION_VOLUME);
         for &id in cells {
             let id = id as usize;
             if remap[id] == u16::MAX {
                 remap[id] = local.len() as u16;
-                local.push(&palette[id]);
+                local.push(palette[id]);
             }
             indices.push(remap[id]);
         }
@@ -410,7 +408,7 @@ pub fn column_to_nbt_with(
                 element_type: NbtTag::Compound,
                 elements: local
                     .iter()
-                    .map(|state| state_to_palette_entry(state))
+                    .map(|&state| state_to_palette_entry(state))
                     .collect(),
             },
         )];
@@ -844,7 +842,7 @@ fn column_from_nbt_with_status(
         // that remap — not once-per-cell through `ChunkColumn::set_block`,
         // which used to make every loaded column ~98,304 linear scans of the
         // column-wide palette. See `ChunkColumn::set_section_from_local_palette`.
-        let local: Vec<&str> = states.iter().map(String::as_str).collect();
+        let local: Vec<StateId> = states;
         column.set_section_from_local_palette(y_base, &local, &indices);
 
         // Biomes: every section's full 4×4×4 container, into the column's 3-D
@@ -2635,7 +2633,12 @@ mod retained_light_tests {
         column.set_retained_light(ColumnLight::new(column.section_count()));
         assert!(column.retained_light().is_some());
 
-        column.set_block(1, 1, 1, "minecraft:stone");
+        column.set_block_id(
+            1,
+            1,
+            1,
+            StateId::from_state_str("minecraft:stone").expect("test state must be canonical"),
+        );
 
         assert!(column.retained_light().is_none());
     }
@@ -2748,7 +2751,7 @@ mod intern_bound_tests {
                 let column = column_from_nbt(&nbt, MIN_Y, HEIGHT).expect("decode column");
                 let calls = intern_calls();
 
-                let distinct_states = column.raw_palette().len() as u64;
+                let distinct_states = column.palette().len() as u64;
                 let sections = column.section_count() as u64;
                 let bound = distinct_states * sections;
 

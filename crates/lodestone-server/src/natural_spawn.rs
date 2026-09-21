@@ -83,12 +83,14 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 
+use lodestone_data::block_states::StateId;
+use lodestone_data::block::Block;
 use lodestone_model::{Difficulty, ResourceKey, Vec3};
 use lodestone_world::{BlockVolume, LightProperties, compute_column_light};
 
 use crate::chunk::ChunkColumn;
 use crate::mob_spawn::{MobCategory, SpawnCandidate, SpawnCandidateSource, SpawnRng};
-use crate::mobs::{ChunkWorld, block_state_id_or_default};
+use crate::mobs::ChunkWorld;
 
 /// Vanilla's overworld sea level, the anchor for every water-animal Y band. See
 /// the module doc for why this is a constant.
@@ -158,9 +160,9 @@ pub enum Ground {
     /// `Mob.checkMobSpawnRules`: `BlockState.isValidSpawn`, i.e. a sturdy up-face
     /// that emits less than 14.
     ValidSpawn,
-    /// One of these block names (a `*_spawnable_on` tag, flattened — see the
-    /// module doc).
-    OneOf(&'static [&'static str]),
+    /// One of these generated block types (a `*_spawnable_on` tag, flattened —
+    /// see the module doc).
+    OneOf(&'static [Block]),
     /// Water below (the surface water-animal band, and a drowned).
     Water,
     /// Nothing is required.
@@ -259,7 +261,7 @@ impl SpawnRule {
 
     /// `Animal::checkAnimalSpawnRules` and its per-species tag variants: bright
     /// enough (> 8) and standing on `on`.
-    const fn animal(on: &'static [&'static str]) -> Self {
+    const fn animal(on: &'static [Block]) -> Self {
         Self {
             light: LightRule::Bright,
             ground: Ground::OneOf(on),
@@ -281,78 +283,78 @@ impl SpawnRule {
 }
 
 /// `minecraft:grass_block` — `ANIMALS_SPAWNABLE_ON`.
-const ANIMALS_ON: &[&str] = &["minecraft:grass_block"];
+const ANIMALS_ON: &[Block] = &[Block::GrassBlock];
 /// `WOLVES_SPAWNABLE_ON`.
-const WOLVES_ON: &[&str] = &[
-    "minecraft:grass_block",
-    "minecraft:snow",
-    "minecraft:snow_block",
-    "minecraft:coarse_dirt",
-    "minecraft:podzol",
+const WOLVES_ON: &[Block] = &[
+    Block::GrassBlock,
+    Block::Snow,
+    Block::SnowBlock,
+    Block::CoarseDirt,
+    Block::Podzol,
 ];
 /// `FOXES_SPAWNABLE_ON`.
-const FOXES_ON: &[&str] = &[
-    "minecraft:grass_block",
-    "minecraft:snow",
-    "minecraft:snow_block",
-    "minecraft:podzol",
-    "minecraft:coarse_dirt",
+const FOXES_ON: &[Block] = &[
+    Block::GrassBlock,
+    Block::Snow,
+    Block::SnowBlock,
+    Block::Podzol,
+    Block::CoarseDirt,
 ];
 /// `RABBITS_SPAWNABLE_ON`.
-const RABBITS_ON: &[&str] = &[
-    "minecraft:grass_block",
-    "minecraft:snow",
-    "minecraft:snow_block",
-    "minecraft:sand",
+const RABBITS_ON: &[Block] = &[
+    Block::GrassBlock,
+    Block::Snow,
+    Block::SnowBlock,
+    Block::Sand,
 ];
 /// `GOATS_SPAWNABLE_ON` (the `ANIMALS_SPAWNABLE_ON` include flattened in).
-const GOATS_ON: &[&str] = &[
-    "minecraft:grass_block",
-    "minecraft:stone",
-    "minecraft:snow",
-    "minecraft:snow_block",
-    "minecraft:packed_ice",
-    "minecraft:gravel",
+const GOATS_ON: &[Block] = &[
+    Block::GrassBlock,
+    Block::Stone,
+    Block::Snow,
+    Block::SnowBlock,
+    Block::PackedIce,
+    Block::Gravel,
 ];
 /// `FROGS_SPAWNABLE_ON`.
-const FROGS_ON: &[&str] = &[
-    "minecraft:grass_block",
-    "minecraft:mud",
-    "minecraft:mangrove_roots",
-    "minecraft:muddy_mangrove_roots",
+const FROGS_ON: &[Block] = &[
+    Block::GrassBlock,
+    Block::Mud,
+    Block::MangroveRoots,
+    Block::MuddyMangroveRoots,
 ];
 /// `MOOSHROOMS_SPAWNABLE_ON`.
-const MOOSHROOMS_ON: &[&str] = &["minecraft:mycelium"];
+const MOOSHROOMS_ON: &[Block] = &[Block::Mycelium];
 /// `PARROTS_SPAWNABLE_ON`, with the `#leaves`/`#logs` includes reduced to the
 /// two the bundled jungle surface actually produces below a spawn position.
-const PARROTS_ON: &[&str] = &[
-    "minecraft:grass_block",
-    "minecraft:air",
-    "minecraft:jungle_leaves",
-    "minecraft:jungle_log",
-    "minecraft:oak_leaves",
-    "minecraft:oak_log",
+const PARROTS_ON: &[Block] = &[
+    Block::GrassBlock,
+    Block::Air,
+    Block::JungleLeaves,
+    Block::JungleLog,
+    Block::OakLeaves,
+    Block::OakLog,
 ];
 /// `ARMADILLO_SPAWNABLE_ON`.
-const ARMADILLO_ON: &[&str] = &[
-    "minecraft:grass_block",
-    "minecraft:red_sand",
-    "minecraft:coarse_dirt",
-    "minecraft:terracotta",
+const ARMADILLO_ON: &[Block] = &[
+    Block::GrassBlock,
+    Block::RedSand,
+    Block::CoarseDirt,
+    Block::Terracotta,
 ];
 /// `CAMELS_SPAWNABLE_ON` (`#sand`).
-const CAMELS_ON: &[&str] = &["minecraft:sand", "minecraft:red_sand"];
+const CAMELS_ON: &[Block] = &[Block::Sand, Block::RedSand];
 /// `BATS_SPAWNABLE_ON` (`#base_stone_overworld`).
-const BATS_ON: &[&str] = &[
-    "minecraft:stone",
-    "minecraft:granite",
-    "minecraft:diorite",
-    "minecraft:andesite",
-    "minecraft:tuff",
-    "minecraft:deepslate",
+const BATS_ON: &[Block] = &[
+    Block::Stone,
+    Block::Granite,
+    Block::Diorite,
+    Block::Andesite,
+    Block::Tuff,
+    Block::Deepslate,
 ];
 /// `AXOLOTLS_SPAWNABLE_ON`.
-const AXOLOTLS_ON: &[&str] = &["minecraft:clay"];
+const AXOLOTLS_ON: &[Block] = &[Block::Clay];
 
 /// `SpawnPlacements`' registration for every species the bundled 26.2 overworld
 /// and Nether biome spawn lists can name, keyed by path (no `minecraft:`).
@@ -490,7 +492,7 @@ static SPAWN_RULES: &[(&str, SpawnRule)] = &[
     ("turtle", {
         SpawnRule {
             light: LightRule::Bright,
-            ground: Ground::OneOf(&["minecraft:sand", "minecraft:red_sand"]),
+            ground: Ground::OneOf(&[Block::Sand, Block::RedSand]),
             y_range: (i32::MIN, SEA_LEVEL + 3),
             ..SpawnRule::base()
         }
@@ -570,15 +572,9 @@ impl PaletteProps {
     fn of(column: &ChunkColumn) -> Self {
         Self(
             column
-                .raw_palette()
+                .palette()
                 .iter()
-                .map(|name| {
-                    block_state_id_or_default(name)
-                        .map(lodestone_data::light_props::light_props)
-                        // An unresolvable state darkens and occludes, never
-                        // brightens — see `light_props`' own module doc.
-                        .unwrap_or((15, 0))
-                })
+                .map(|&state| lodestone_data::light_props::light_props(state))
                 .collect(),
         )
     }
@@ -858,29 +854,29 @@ impl NaturalSpawner {
             return false;
         };
 
-        let here = world.block_state(x, y, z).to_string();
-        let below = world.block_state(x, y - 1, z).to_string();
-        let above = world.block_state(x, y + 1, z).to_string();
+        let here = world.block_state_id(x, y, z);
+        let below = world.block_state_id(x, y - 1, z);
+        let above = world.block_state_id(x, y + 1, z);
 
         match rule.placement {
             Placement::OnGround => {
-                if !is_valid_spawn_surface(&below) {
+                if !is_valid_spawn_surface_id(below) {
                     return false;
                 }
-                if !is_valid_empty_spawn_block(&here) || !is_valid_empty_spawn_block(&above) {
+                if !is_valid_empty_spawn_block_id(here) || !is_valid_empty_spawn_block_id(above) {
                     return false;
                 }
             }
             Placement::InWater => {
-                if !is_water(&here) {
+                if !is_water_id(here) {
                     return false;
                 }
-                if is_full_solid(&above) {
+                if is_full_solid_id(above) {
                     return false;
                 }
             }
             Placement::InLava => {
-                if !is_lava(&here) {
+                if !is_lava_id(here) {
                     return false;
                 }
             }
@@ -889,18 +885,17 @@ impl NaturalSpawner {
 
         match rule.ground {
             Ground::ValidSpawn => {
-                if !is_valid_spawn_surface(&below) {
+                if !is_valid_spawn_surface_id(below) {
                     return false;
                 }
             }
-            Ground::OneOf(names) => {
-                let base = below.split('[').next().unwrap_or(&below);
-                if !names.contains(&base) {
+            Ground::OneOf(blocks) => {
+                if !blocks.contains(&below.block()) {
                     return false;
                 }
             }
             Ground::Water => {
-                if !is_water(&below) {
+                if !is_water_id(below) {
                     return false;
                 }
             }
@@ -1110,7 +1105,7 @@ impl SpawnCandidateSource for NaturalSpawner {
         let (sx, sy, sz) = start;
         // `if (!state.isRedstoneConductor(...))` — a spawn never starts inside a
         // full solid.
-        if is_full_solid(world.block_state(sx, sy, sz)) {
+        if is_full_solid_id(world.block_state_id(sx, sy, sz)) {
             return out;
         }
 
@@ -1240,69 +1235,47 @@ fn worldgen_category(category: MobCategory) -> lodestone_worldgen::spawners::Mob
     }
 }
 
-/// The block name without its state properties.
-fn base_name(state: &str) -> &str {
-    state.split('[').next().unwrap_or(state)
+fn is_water_id(state: StateId) -> bool {
+    state.block() == Block::Water
+        || state
+            .properties()
+            .iter()
+            .any(|&(key, value)| key == "waterlogged" && value == "true")
 }
 
-fn is_water(state: &str) -> bool {
-    let base = base_name(state);
-    base == "minecraft:water" || state.contains("waterlogged=true")
+fn is_lava_id(state: StateId) -> bool {
+    state.block() == Block::Lava
 }
 
-fn is_lava(state: &str) -> bool {
-    base_name(state) == "minecraft:lava"
+fn is_full_solid_id(state: StateId) -> bool {
+    let boxes = lodestone_data::collision_shapes::collision_boxes(state);
+    boxes.len() == 1
+        && boxes[0].min.iter().all(|&v| v <= 0.0)
+        && boxes[0].max.iter().all(|&v| v >= 1.0)
 }
 
-/// Whether the state's collision shape is a full cube — vanilla's
-/// `isCollisionShapeFullBlock`, and the `isRedstoneConductor` proxy
-/// `spawnCategoryForPosition` opens with.
-fn is_full_solid(state: &str) -> bool {
-    block_state_id_or_default(state)
-        .map(lodestone_data::collision_shapes::collision_boxes)
-        .is_some_and(|boxes| {
-            boxes.len() == 1
-                && boxes[0].min.iter().all(|&v| v <= 0.0)
-                && boxes[0].max.iter().all(|&v| v >= 1.0)
-        })
+fn is_valid_spawn_surface_id(state: StateId) -> bool {
+    is_full_solid_id(state)
+        && lodestone_data::light_props::light_props(state).1 < 14
 }
 
-/// Vanilla `BlockState.isValidSpawn`'s default: a sturdy up-face that emits less
-/// than 14. Approximated as "a full collision cube", which is the only
-/// sturdy-face question this crate's collision census can answer, plus the real
-/// emission from the light census.
-fn is_valid_spawn_surface(state: &str) -> bool {
-    if !is_full_solid(state) {
-        return false;
-    }
-    block_state_id_or_default(state)
-        .map(lodestone_data::light_props::light_props)
-        .is_none_or(|(_, emission)| emission < 14)
-}
-
-/// Vanilla `NaturalSpawner.isValidEmptySpawnBlock`: not a full collision block,
-/// not a signal source, no fluid, and not in `PREVENT_MOB_SPAWNING_INSIDE`
-/// (`#rails`).
-fn is_valid_empty_spawn_block(state: &str) -> bool {
-    let base = base_name(state);
-    if is_full_solid(state) {
-        return false;
-    }
-    if is_water(state) || is_lava(state) {
-        return false;
-    }
-    if base.ends_with("rail") {
+fn is_valid_empty_spawn_block_id(state: StateId) -> bool {
+    if is_full_solid_id(state) || is_water_id(state) || is_lava_id(state) {
         return false;
     }
     !matches!(
-        base,
-        "minecraft:redstone_wire"
-            | "minecraft:redstone_torch"
-            | "minecraft:redstone_wall_torch"
-            | "minecraft:redstone_block"
-            | "minecraft:lever"
-            | "minecraft:comparator"
-            | "minecraft:repeater"
+        state.block(),
+        Block::Rail
+            | Block::PoweredRail
+            | Block::DetectorRail
+            | Block::ActivatorRail
+            | Block::RedstoneWire
+            | Block::RedstoneTorch
+            | Block::Lever
+            | Block::RedstoneWallTorch
+            | Block::RedstoneBlock
+            | Block::Comparator
+            | Block::Repeater
     )
 }
 

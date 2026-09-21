@@ -38,6 +38,9 @@
 
 use crate::feature::BlockPos;
 use crate::rng::RandomSource;
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey};
+use lodestone_data::block_states::StateId;
 
 use super::grid::VegGrid;
 
@@ -50,37 +53,37 @@ pub enum CoralKind {
 }
 
 /// The five states in the coral-block tag, in registry order.
-const CORAL_BLOCKS: [&str; 5] = [
-    "minecraft:tube_coral_block",
-    "minecraft:brain_coral_block",
-    "minecraft:bubble_coral_block",
-    "minecraft:fire_coral_block",
-    "minecraft:horn_coral_block",
+const CORAL_BLOCKS: [Block; 5] = [
+    Block::TubeCoralBlock,
+    Block::BrainCoralBlock,
+    Block::BubbleCoralBlock,
+    Block::FireCoralBlock,
+    Block::HornCoralBlock,
 ];
 
 /// The ten states in the coral tag that may decorate a block's top face. The
 /// registry's plant and fan states all receive the explicit
 /// `waterlogged=true` property when placed in a water-filled feature.
-const CORALS: [&str; 10] = [
-    "minecraft:tube_coral",
-    "minecraft:brain_coral",
-    "minecraft:bubble_coral",
-    "minecraft:fire_coral",
-    "minecraft:horn_coral",
-    "minecraft:tube_coral_fan",
-    "minecraft:brain_coral_fan",
-    "minecraft:bubble_coral_fan",
-    "minecraft:fire_coral_fan",
-    "minecraft:horn_coral_fan",
+const CORALS: [Block; 10] = [
+    Block::TubeCoral,
+    Block::BrainCoral,
+    Block::BubbleCoral,
+    Block::FireCoral,
+    Block::HornCoral,
+    Block::TubeCoralFan,
+    Block::BrainCoralFan,
+    Block::BubbleCoralFan,
+    Block::FireCoralFan,
+    Block::HornCoralFan,
 ];
 
 /// The five states in the wall-corals tag.
-const WALL_CORALS: [&str; 5] = [
-    "minecraft:tube_coral_wall_fan",
-    "minecraft:brain_coral_wall_fan",
-    "minecraft:bubble_coral_wall_fan",
-    "minecraft:fire_coral_wall_fan",
-    "minecraft:horn_coral_wall_fan",
+const WALL_CORALS: [Block; 5] = [
+    Block::TubeCoralWallFan,
+    Block::BrainCoralWallFan,
+    Block::BubbleCoralWallFan,
+    Block::FireCoralWallFan,
+    Block::HornCoralWallFan,
 ];
 
 /// The reference horizontal iteration order is north, east, south, west. The
@@ -96,7 +99,7 @@ pub(super) fn place_coral<R: RandomSource>(
     kind: CoralKind,
     grid: &mut VegGrid,
 ) {
-    let state = CORAL_BLOCKS[random.next_int_bounded(CORAL_BLOCKS.len() as i32) as usize];
+    let state = bound_state(CORAL_BLOCKS[random.next_int_bounded(CORAL_BLOCKS.len() as i32) as usize]);
     match kind {
         CoralKind::Tree => place_tree(random, origin, state, grid),
         CoralKind::Claw => place_claw(random, origin, state, grid),
@@ -111,57 +114,71 @@ pub(super) fn place_coral<R: RandomSource>(
 fn place_coral_block<R: RandomSource>(
     random: &mut R,
     at: BlockPos,
-    state: &str,
+    state: StateId,
     grid: &mut VegGrid,
 ) -> bool {
-    let here = base_at(grid, at.x, at.y, at.z);
-    if !(here == "minecraft:water" || CORALS.iter().any(|name| *name == here))
+    let here = grid.get_id(at.x, at.y, at.z);
+    if !(here.block() == Block::Water || CORALS.contains(&here.block()))
         || !water_at(grid, at.x, at.y + 1, at.z)
     {
         return false;
     }
 
-    grid.set_state_if_in_bounds(at.x, at.y, at.z, state);
+    grid.set_id_if_in_bounds(at.x, at.y, at.z, state);
 
     if random.next_float() < 0.25 {
-        let coral = CORALS[random.next_int_bounded(CORALS.len() as i32) as usize];
-        grid.set_formatted_state_if_in_bounds(
-            at.x,
-            at.y + 1,
-            at.z,
-            format_args!("{coral}[waterlogged=true]"),
+        let coral = bound_variant(
+            CORALS[random.next_int_bounded(CORALS.len() as i32) as usize],
+            &[(PropertyKey::Waterlogged, BuiltinPropertyValue::True)],
         );
+        grid.set_id_if_in_bounds(at.x, at.y + 1, at.z, coral);
     } else if random.next_float() < 0.05 {
         let pickles = random.next_int_bounded(4) + 1;
-        grid.set_formatted_state_if_in_bounds(
-            at.x,
-            at.y + 1,
-            at.z,
-            format_args!("minecraft:sea_pickle[pickles={pickles},waterlogged=true]"),
-        );
+        let pickle = match pickles {
+            1 => bound_variant(Block::SeaPickle, &[(PropertyKey::Pickles, BuiltinPropertyValue::Value1), (PropertyKey::Waterlogged, BuiltinPropertyValue::True)]),
+            2 => bound_variant(Block::SeaPickle, &[(PropertyKey::Pickles, BuiltinPropertyValue::Value2), (PropertyKey::Waterlogged, BuiltinPropertyValue::True)]),
+            3 => bound_variant(Block::SeaPickle, &[(PropertyKey::Pickles, BuiltinPropertyValue::Value3), (PropertyKey::Waterlogged, BuiltinPropertyValue::True)]),
+            _ => bound_variant(Block::SeaPickle, &[(PropertyKey::Pickles, BuiltinPropertyValue::Value4), (PropertyKey::Waterlogged, BuiltinPropertyValue::True)]),
+        };
+        grid.set_id_if_in_bounds(at.x, at.y + 1, at.z, pickle);
     }
 
     for (index, &(dx, dz)) in HORIZONTAL.iter().enumerate() {
         if random.next_float() < 0.2 && water_at(grid, at.x + dx, at.y, at.z + dz) {
             let wall = WALL_CORALS[random.next_int_bounded(WALL_CORALS.len() as i32) as usize];
-            let facing = ["north", "east", "south", "west"][index];
-            grid.set_formatted_state_if_in_bounds(
-                at.x + dx,
-                at.y,
-                at.z + dz,
-                format_args!("{wall}[facing={facing},waterlogged=true]"),
+            let facing = [
+                BuiltinPropertyValue::North,
+                BuiltinPropertyValue::East,
+                BuiltinPropertyValue::South,
+                BuiltinPropertyValue::West,
+            ][index];
+            let wall = bound_variant(
+                wall,
+                &[
+                    (PropertyKey::Facing, facing),
+                    (PropertyKey::Waterlogged, BuiltinPropertyValue::True),
+                ],
             );
+            grid.set_id_if_in_bounds(at.x + dx, at.y, at.z + dz, wall);
         }
     }
     true
 }
 
-fn base_at(grid: &VegGrid, x: i32, y: i32, z: i32) -> &str {
-    super::base_id(grid.get(x, y, z))
+fn water_at(grid: &VegGrid, x: i32, y: i32, z: i32) -> bool {
+    grid.get_id(x, y, z).block() == Block::Water
 }
 
-fn water_at(grid: &VegGrid, x: i32, y: i32, z: i32) -> bool {
-    base_at(grid, x, y, z) == "minecraft:water"
+fn bound_state(block: Block) -> StateId {
+    block.default_state()
+}
+
+fn bound_variant(block: Block, edits: &[(PropertyKey, BuiltinPropertyValue)]) -> StateId {
+    let mut properties = Properties::empty();
+    for &(key, value) in edits {
+        properties = properties.with_builtin(key, value).expect("coral state property");
+    }
+    Properties::state_for_block(block, &properties).expect("coral variant")
 }
 
 fn shuffle<R: RandomSource>(random: &mut R, directions: &mut [(i32, i32)]) {
@@ -174,7 +191,7 @@ fn shuffle<R: RandomSource>(random: &mut R, directions: &mut [(i32, i32)]) {
 fn place_tree<R: RandomSource>(
     random: &mut R,
     origin: BlockPos,
-    state: &str,
+    state: StateId,
     grid: &mut VegGrid,
 ) {
     let trunk_height = random.next_int_bounded(3) + 1;
@@ -227,7 +244,7 @@ fn place_tree<R: RandomSource>(
 fn place_claw<R: RandomSource>(
     random: &mut R,
     origin: BlockPos,
-    state: &str,
+    state: StateId,
     grid: &mut VegGrid,
 ) {
     if !place_coral_block(random, origin, state, grid) {
@@ -291,7 +308,7 @@ fn place_claw<R: RandomSource>(
 fn place_mushroom<R: RandomSource>(
     random: &mut R,
     origin: BlockPos,
-    state: &str,
+    state: StateId,
     grid: &mut VegGrid,
 ) {
     let height = random.next_int_bounded(3) + 3;
@@ -337,10 +354,11 @@ mod tests {
 
     fn water_grid(local_lo: i32, local_hi: i32) -> VegGrid {
         let mut grid = VegGrid::with_footprint(-64, 384, 0, 0, local_lo, local_hi);
+        let water = Block::Water.default_state();
         for x in -16..32 {
             for y in 0..96 {
                 for z in -16..32 {
-                    grid.seed(x, y, z, "minecraft:water".to_owned());
+                    grid.seed_id(x, y, z, water);
                 }
             }
         }
@@ -379,7 +397,9 @@ mod tests {
             );
             let actual: BTreeMap<_, _> = grid
                 .dirty_cells()
-                .map(|(x, y, z, state)| (format!("{x},{y},{z}"), state.to_owned()))
+                .map(|(x, y, z, state)| {
+                    (format!("{x},{y},{z}"), state.canonical_state())
+                })
                 .collect();
             assert_eq!(actual, expected, "changed {label} geometry or draw order");
         }
@@ -398,7 +418,7 @@ mod tests {
         assert!(positive.dirty_cells().count() > 0, "water/water control must place coral");
 
         let mut dry_origin = water_grid(0, 16);
-        dry_origin.seed(8, 64, 8, "minecraft:air".to_owned());
+        dry_origin.seed_id(8, 64, 8, Block::Air.default_state());
         let mut random = LegacyRandomSource::new(11);
         place_coral(
             &mut random,
@@ -409,7 +429,7 @@ mod tests {
         assert_eq!(dry_origin.dirty_cells().count(), 0, "air origin must reject coral");
 
         let mut dry_above = water_grid(0, 16);
-        dry_above.seed(8, 65, 8, "minecraft:air".to_owned());
+        dry_above.seed_id(8, 65, 8, Block::Air.default_state());
         let mut random = LegacyRandomSource::new(11);
         place_coral(
             &mut random,

@@ -16,26 +16,29 @@ impl ChunkSource for RecordingSource {
         let mut column = ChunkColumn::new(0, 16);
         for lx in 0..16 {
             for lz in 0..16 {
-                column.set_block(lx, 8, lz, "minecraft:stone");
+                column.set_block_id(lx, 8, lz, fixture_state("minecraft:stone"));
             }
         }
         column
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, _x: i32, y: i32, _z: i32) -> StateId {
         // Deliberately does NOT record: only whole-column generation is the
         // subject, and a spawn-position probe reading single blocks near the
         // origin would otherwise show up as origin-anchored generation and make
         // this test lie in the alarming direction.
-        let _ = (x, y, z);
-        if y == 8 { "minecraft:stone".to_string() } else { "minecraft:air".to_string() }
+        if y == 8 {
+            fixture_state("minecraft:stone")
+        } else {
+            StateId::AIR
+        }
     }
 
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
         "minecraft:plains".to_string()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
         // No storage; edits are discarded by design.
     }
 }
@@ -157,22 +160,23 @@ struct StoneSource;
 impl ChunkSource for StoneSource {
     fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
         let mut col = ChunkColumn::new(0, 16);
+        let stone = fixture_state("minecraft:stone");
         for x in 0..16 {
             for z in 0..16 {
                 for y in 0..16 {
-                    col.set_block(x, y, z, "minecraft:stone");
+                    col.set_block_id(x, y, z, stone);
                 }
             }
         }
         col
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
-        self.column(cx, cz).block_state(lx, y, lz).to_string()
+        self.column(cx, cz).block_state_id(lx, y, lz)
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -183,7 +187,7 @@ impl ChunkSource for StoneSource {
         self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
         // No storage; edits are discarded by design. Harmless here: the drop is
         // rolled from the state read *before* `set_block`, which is exactly the
         // ordering `apply_block_action` guarantees.
@@ -384,49 +388,50 @@ async fn breaking_stone_streams_add_entity_when_the_mob_handle_is_its_own_source
 /// *what* replaced the broken block, not merely that something did.
 #[derive(Clone)]
 struct SingleBlockSource {
-    at_break_pos: std::sync::Arc<std::sync::Mutex<String>>,
+    at_break_pos: std::sync::Arc<std::sync::Mutex<StateId>>,
 }
 
 impl SingleBlockSource {
     fn new(initial: &str) -> Self {
         Self {
-            at_break_pos: std::sync::Arc::new(std::sync::Mutex::new(initial.to_string())),
+            at_break_pos: std::sync::Arc::new(std::sync::Mutex::new(fixture_state(initial))),
         }
     }
 
-    fn current(&self) -> String {
-        self.at_break_pos.lock().expect("lock").clone()
+    fn current(&self) -> StateId {
+        *self.at_break_pos.lock().expect("lock")
     }
 }
 
 impl ChunkSource for SingleBlockSource {
     fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
         let mut col = ChunkColumn::new(0, 16);
+        let stone = fixture_state("minecraft:stone");
         for x in 0..16 {
             for z in 0..16 {
                 for y in 0..16 {
-                    col.set_block(x, y, z, "minecraft:stone");
+                    col.set_block_id(x, y, z, stone);
                 }
             }
         }
-        col.set_block(BREAK_POS.x, BREAK_POS.y, BREAK_POS.z, &self.current());
+        col.set_block_id(BREAK_POS.x, BREAK_POS.y, BREAK_POS.z, self.current());
         col
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         if (x, y, z) == (BREAK_POS.x, BREAK_POS.y, BREAK_POS.z) {
             return self.current();
         }
-        "minecraft:stone".to_string()
+        fixture_state("minecraft:stone")
     }
 
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
         "minecraft:plains".to_string()
     }
 
-    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+    fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
         if (x, y, z) == (BREAK_POS.x, BREAK_POS.y, BREAK_POS.z) {
-            *self.at_break_pos.lock().expect("lock") = name.to_string();
+            *self.at_break_pos.lock().expect("lock") = state;
         }
         // Everything else discarded, matching `StoneSource`.
     }
@@ -448,7 +453,7 @@ impl ChunkSource for SingleBlockSource {
 /// and is a real vanilla `waterlogged`-carrying block, not a synthetic one.
 #[tokio::test(start_paused = true)]
 async fn breaking_a_waterlogged_block_leaves_water_and_a_dry_one_leaves_air() {
-    async fn break_and_read(initial_state: &str) -> String {
+    async fn break_and_read(initial_state: &str) -> StateId {
         let source = SingleBlockSource::new(initial_state);
         let (client_end, server_end) = memory_pair();
         let mobs = MobHandle::default();
@@ -489,11 +494,11 @@ async fn breaking_a_waterlogged_block_leaves_water_and_a_dry_one_leaves_air() {
     }
 
     let dry = break_and_read("minecraft:oak_slab[type=bottom,waterlogged=false]").await;
-    assert_eq!(dry, "minecraft:air", "a dry block's cell must become air");
+    assert_eq!(dry, StateId::AIR, "a dry block's cell must become air");
 
     let wet = break_and_read("minecraft:oak_slab[type=bottom,waterlogged=true]").await;
     assert_eq!(
-        wet, "minecraft:water[level=0]",
+        wet, fixture_state("minecraft:water[level=0]"),
         "a waterlogged block's cell must keep its water source, not go to air \
          — `level=0` is `FlowingFluid.getLegacyLevel`'s own encoding for a \
          source, matching `fluidState.createLegacyBlock()`"
@@ -518,23 +523,24 @@ const DIRT_POS: BlockPos = BlockPos::new(6, 9, 4);
 impl ChunkSource for StoneWithDirtSource {
     fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
         let mut col = ChunkColumn::new(0, 16);
+        let stone = fixture_state("minecraft:stone");
         for x in 0..16 {
             for z in 0..16 {
                 for y in 0..16 {
-                    col.set_block(x, y, z, "minecraft:stone");
+                    col.set_block_id(x, y, z, stone);
                 }
             }
         }
-        col.set_block(DIRT_POS.x, DIRT_POS.y, DIRT_POS.z, "minecraft:dirt");
+        col.set_block_id(DIRT_POS.x, DIRT_POS.y, DIRT_POS.z, fixture_state("minecraft:dirt"));
         col
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
-        self.column(cx, cz).block_state(lx, y, lz).to_string()
+        self.column(cx, cz).block_state_id(lx, y, lz)
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -545,7 +551,7 @@ impl ChunkSource for StoneWithDirtSource {
         self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
         // As `StoneSource`: no storage, and the drop is rolled from the state
         // read before `set_block`.
     }
@@ -577,13 +583,13 @@ async fn bare_handed_stone_drops_nothing_while_bare_handed_dirt_still_drops() {
     let mobs_for_server = mobs.clone();
     let source = StoneWithDirtSource;
     assert_eq!(
-        source.block_state(BREAK_POS.x, BREAK_POS.y, BREAK_POS.z),
-        "minecraft:stone",
+        source.block_state_id(BREAK_POS.x, BREAK_POS.y, BREAK_POS.z),
+        fixture_state("minecraft:stone"),
         "precondition: BREAK_POS is stone, which requires a correct tool"
     );
     assert_eq!(
-        source.block_state(DIRT_POS.x, DIRT_POS.y, DIRT_POS.z),
-        "minecraft:dirt",
+        source.block_state_id(DIRT_POS.x, DIRT_POS.y, DIRT_POS.z),
+        fixture_state("minecraft:dirt"),
         "precondition: DIRT_POS is dirt, which requires none — without this row \
          the fixture cannot exercise the other side of vanilla's `||`"
     );
@@ -667,23 +673,29 @@ const FLOWER_POS: BlockPos = BlockPos::new(8, 9, 4);
 impl ChunkSource for StoneWithFlowerSource {
     fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
         let mut col = ChunkColumn::new(0, 16);
+        let stone = fixture_state("minecraft:stone");
         for x in 0..16 {
             for z in 0..16 {
                 for y in 0..16 {
-                    col.set_block(x, y, z, "minecraft:stone");
+                    col.set_block_id(x, y, z, stone);
                 }
             }
         }
-        col.set_block(FLOWER_POS.x, FLOWER_POS.y, FLOWER_POS.z, "minecraft:dandelion");
+        col.set_block_id(
+            FLOWER_POS.x,
+            FLOWER_POS.y,
+            FLOWER_POS.z,
+            fixture_state("minecraft:dandelion"),
+        );
         col
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
-        self.column(cx, cz).block_state(lx, y, lz).to_string()
+        self.column(cx, cz).block_state_id(lx, y, lz)
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -694,7 +706,7 @@ impl ChunkSource for StoneWithFlowerSource {
         self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
         // As `StoneSource`: no storage, and the drop is rolled from the state
         // read before `set_block`.
     }
@@ -718,8 +730,8 @@ async fn a_start_action_alone_pops_a_one_shot_flower_but_not_stone() {
     let mobs_for_server = mobs.clone();
     let source = StoneWithFlowerSource;
     assert_eq!(
-        source.block_state(FLOWER_POS.x, FLOWER_POS.y, FLOWER_POS.z),
-        "minecraft:dandelion",
+        source.block_state_id(FLOWER_POS.x, FLOWER_POS.y, FLOWER_POS.z),
+        fixture_state("minecraft:dandelion"),
         "precondition: FLOWER_POS is the zero-hardness block under test"
     );
     let server = tokio::spawn(async move {
@@ -940,7 +952,7 @@ async fn creative_start_breaks_a_hard_block_without_a_stop_or_drop() {
     send_block_action(&mut client, 0, BREAK_POS).await;
     let _ = drain_available(&mut client).await;
 
-    assert_eq!(source.current(), "minecraft:air");
+    assert_eq!(source.current(), StateId::AIR);
     assert_eq!(
         mobs.with(|sim| sim.item_count()),
         0,
@@ -982,48 +994,17 @@ async fn creative_start_does_not_break_an_unbreakable_block() {
     send_block_action(&mut client, 0, BREAK_POS).await;
     let _ = drain_available(&mut client).await;
 
-    assert_eq!(source.current(), "minecraft:bedrock");
+    assert_eq!(source.current(), fixture_state("minecraft:bedrock"));
     assert_eq!(mobs.with(|sim| sim.item_count()), 0);
 
     drop(client);
     let _ = server.await.expect("server task panicked");
 }
 
-/// Invalid-state negative control: an unknown registry state is not an
-/// eligible creative target. This is intentionally a distinct source fixture
-/// from the protected block, so a hard-coded bedrock check cannot satisfy it.
-#[tokio::test(start_paused = true)]
-async fn creative_start_does_not_break_an_unknown_block_state() {
-    let source = SingleBlockSource::new("minecraft:not_a_real_block");
-    let (client_end, server_end) = memory_pair();
-    let mobs = MobHandle::default();
-    let mobs_for_server = mobs.clone();
-    let source_for_server = source.clone();
-    let server = tokio::spawn(async move {
-        let mut conn = Connection::new(server_end);
-        serve_connection(
-            &mut conn,
-            &FakeProtocol,
-            &source_for_server,
-            &NoEntities,
-            0,
-            &BlockEntityHandle::default(),
-            &mobs_for_server,
-        )
-        .await
-    });
-
-    let mut client = Connection::new(client_end);
-    drive_login_and_join(&mut client, "CreativeUnknown", 1).await;
-    send_game_mode(&mut client, 1).await;
-    send_block_action(&mut client, 0, BREAK_POS).await;
-    let _ = drain_available(&mut client).await;
-
-    assert_eq!(source.current(), "minecraft:not_a_real_block");
-    assert_eq!(mobs.with(|sim| sim.item_count()), 0);
-
-    drop(client);
-    let _ = server.await.expect("server task panicked");
+/// Unknown names cannot enter the built-in state seam used by `ChunkSource`.
+#[test]
+fn unknown_block_names_do_not_resolve_to_state_ids() {
+    assert!(StateId::from_state_str("minecraft:not_a_real_block").is_none());
 }
 
 /// Reach negative control: even creative mode cannot break a target outside
@@ -1058,7 +1039,7 @@ async fn creative_start_does_not_break_a_target_out_of_reach() {
     send_block_action(&mut client, 0, BREAK_POS).await;
     let _ = drain_available(&mut client).await;
 
-    assert_eq!(source.current(), "minecraft:stone");
+    assert_eq!(source.current(), fixture_state("minecraft:stone"));
     assert_eq!(mobs.with(|sim| sim.item_count()), 0);
 
     drop(client);

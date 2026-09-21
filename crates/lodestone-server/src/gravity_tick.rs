@@ -141,12 +141,18 @@
 //! than this one.
 
 use lodestone_model::{BlockPos, Vec3};
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 
+#[cfg(test)]
 use crate::chunk::is_air_or_fluid;
 use crate::scheduled_tick::{ScheduledTick, ScheduledTickKind, ScheduledTickQueue, TickPriority};
 
+#[cfg(test)]
 pub const SAND: &str = "minecraft:sand";
+#[cfg(test)]
 pub const RED_SAND: &str = "minecraft:red_sand";
+#[cfg(test)]
 pub const GRAVEL: &str = "minecraft:gravel";
 
 /// `true` for a plain falling-block base name this crate models. The real
@@ -157,6 +163,7 @@ pub const GRAVEL: &str = "minecraft:gravel";
 /// no way to be exercised end to end yet, the same reasoning
 /// `crate::growth_tick` gives for not inventing tree placement).
 #[must_use]
+#[cfg(test)]
 pub fn is_gravity_block(base: &str) -> bool {
     matches!(base, SAND | RED_SAND | GRAVEL)
 }
@@ -172,8 +179,22 @@ pub fn is_gravity_block(base: &str) -> bool {
 /// replace this cell" test) — so the two disjuncts this crate has are the
 /// whole set it can evaluate, not an arbitrarily narrowed subset.
 #[must_use]
+#[cfg(test)]
 pub fn is_free(state: &str) -> bool {
     is_air_or_fluid(state)
+}
+
+#[must_use]
+pub fn is_gravity_state(state: StateId) -> bool {
+    matches!(state.block(), Block::Sand | Block::RedSand | Block::Gravel)
+}
+
+#[must_use]
+pub fn is_free_state(state: StateId) -> bool {
+    matches!(
+        state.block(),
+        Block::Air | Block::CaveAir | Block::VoidAir | Block::Water | Block::Lava
+    )
 }
 
 /// Scans downward from `start_y` (exclusive) for the first non-free
@@ -228,9 +249,8 @@ pub const DELAY_AFTER_PLACE: u64 = 2;
 /// `TickPriority::Normal` is the real default: a scheduled tick with no
 /// priority argument resolves to the normal priority.
 #[must_use]
-pub fn ticks_after_place(pos: BlockPos, state: &str) -> Vec<ScheduledTick<ScheduledTickKind>> {
-    let base = state.split('[').next().unwrap_or(state);
-    if !is_gravity_block(base) {
+pub fn ticks_after_place_id(pos: BlockPos, state: StateId) -> Vec<ScheduledTick<ScheduledTickKind>> {
+    if !is_gravity_state(state) {
         return Vec::new();
     }
     let mut pending: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
@@ -408,7 +428,7 @@ pub enum FallingBlockEffect {
         /// Where the block came to rest.
         pos: BlockPos,
         /// The state written there — the state the entity was imitating.
-        state: String,
+        state: StateId,
         /// The entity that is about to be discarded.
         entity_id: i32,
     },
@@ -496,7 +516,10 @@ mod tests {
     #[test]
     fn placing_a_gravity_block_schedules_one_tick_at_its_own_position_two_ticks_out() {
         let pos = BlockPos::new(12, 70, -5);
-        let scheduled = ticks_after_place(pos, SAND);
+        let scheduled = ticks_after_place_id(
+            pos,
+            StateId::from_state_str(SAND).expect("generated sand state"),
+        );
 
         assert_eq!(scheduled.len(), 1, "one tick, not one per neighbour");
         let tick = &scheduled[0];
@@ -505,7 +528,7 @@ mod tests {
             (12, 70, -5),
             "the tick belongs to the placed block, not to a neighbour"
         );
-        assert_eq!(tick.kind, TICK_GRAVITY);
+        assert_eq!(tick.kind, ScheduledTickKind::Gravity);
         assert_eq!(
             tick.trigger_tick, 2,
             "getDelayAfterPlace is 2: not 1, and not 0 (the immediate settle this replaced)"
@@ -513,37 +536,28 @@ mod tests {
         assert_eq!(DELAY_AFTER_PLACE, 2, "the constant this predicts is vanilla's");
     }
 
-    /// A state string with properties still resolves, and a non-gravity placement
-    /// schedules nothing at all.
-    ///
-    /// The property case is the discriminating input: a placement always arrives as
-    /// the block's real state, so a predicate matching the whole string against
-    /// `"minecraft:sand"` would schedule nothing for a state that carries any
-    /// property — and gravel and sand do reach placement with suffixes. `red_sand`
-    /// is included because it is the family member most likely to be forgotten.
+    /// Every supported gravity state schedules one tick, while unrelated states
+    /// schedule nothing.
     #[test]
-    fn only_gravity_blocks_schedule_and_a_property_suffix_does_not_defeat_it() {
-        for state in [SAND, RED_SAND, GRAVEL, "minecraft:sand[some=prop]"] {
+    fn only_gravity_blocks_schedule() {
+        for state in [SAND, RED_SAND, GRAVEL] {
+            let state = StateId::from_state_str(state).expect("generated test state");
             assert_eq!(
-                ticks_after_place(BlockPos::new(0, 64, 0), state).len(),
+                ticks_after_place_id(BlockPos::new(0, 64, 0), state).len(),
                 1,
-                "{state} is a gravity block and must schedule its own on-place tick"
+                "a gravity block must schedule its own on-place tick"
             );
         }
         for state in [
             "minecraft:stone",
             "minecraft:torch",
             "minecraft:air",
-            // A falling-block subclass this crate deliberately does not model —
-            // see `is_gravity_block`. Listed so widening the table is a visible
-            // decision rather than an accident.
+            // A falling-block subclass this crate deliberately does not model.
             "minecraft:anvil",
             "minecraft:white_concrete_powder",
         ] {
-            assert!(
-                ticks_after_place(BlockPos::new(0, 64, 0), state).is_empty(),
-                "{state} must schedule nothing"
-            );
+            let state = StateId::from_state_str(state).expect("generated test state");
+            assert!(ticks_after_place_id(BlockPos::new(0, 64, 0), state).is_empty());
         }
     }
 

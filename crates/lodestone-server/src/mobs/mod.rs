@@ -52,7 +52,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use lodestone_data::{
-    block_states, collision_shapes, entity_dimensions, entity_type::EntityType, potion::PotionId,
+    collision_shapes, entity_dimensions, entity_type::EntityType, potion::PotionId,
 };
 // `collide` and `CollisionView` are the item pass's swept resolve against the real
 // per-state shape census (see `LiveBlockCollision`); `Vec3d` is the physics crate's own
@@ -400,13 +400,6 @@ fn merge_leash_tick_owner_batches(mut batches: Vec<LeashTickOwnerBatch>) -> Vec<
 }
 
 mod block_ids;
-
-// Re-exported so `crate::mobs::block_state_id`/`block_state_id_or_default` keep
-// resolving for every existing caller outside this module — `block_breaking.rs`,
-// `block_drops.rs`, `boat.rs`, `spawn_egg.rs`, `random_tick.rs`, `effects.rs` and
-// `piston.rs` all name them through that exact path, and none of those files are
-// this split's to touch.
-pub(crate) use block_ids::{block_state_id, block_state_id_or_default};
 
 mod world;
 
@@ -2261,9 +2254,9 @@ struct OrbState {
 /// Wire identity plus motion for one live falling-block entity — the
 /// falling-block analogue of [`ItemState`].
 ///
-/// The `state` string is the block the entity is *imitating*
-/// (vanilla's own block-state field) and is what goes back into the world on
-/// landing. It also resolves the add-entity packet's own object-data field —
+/// The `state` is the block the entity is *imitating* and is what goes back
+/// into the world on landing. It also resolves the add-entity packet's own
+/// object-data field —
 /// vanilla's own add-entity-packet builder passes
 /// the block-state id — which is the **only** channel a client
 /// learns what a falling block looks like: vanilla's own metadata registration registers
@@ -2275,7 +2268,7 @@ struct OrbState {
 struct TrackedFallingBlock {
     uuid: Uuid,
     /// The imitated block state, e.g. `minecraft:sand`.
-    state: String,
+    state: lodestone_data::block_states::StateId,
     motion: crate::gravity_tick::FallingBlockMotion,
     /// Where the fall ends, resolved once by
     /// `crate::gravity_tick::find_landing_y` against the live world at spawn

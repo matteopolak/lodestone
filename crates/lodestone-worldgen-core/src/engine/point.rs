@@ -1,12 +1,19 @@
 //! A compiled point-semantics density evaluator.
 //!
 //! Compiled exact-point evaluation for density trees that contain
-//! `find_top_surface`. The immutable graph is shareable; mutable xz memo state
-//! lives in a bounded caller-owned [`PointScratch`].
+//! `find_top_surface` or `spline`. The immutable graph is shareable; mutable xz
+//! memo state lives in a bounded caller-owned [`PointScratch`]. Spline control
+//! points and nested values are flat indexed payloads rather than boxed source
+//! nodes, while their coordinate density nodes remain in the ordinary point
+//! graph so evaluation order is unchanged. The memo key includes the compiled
+//! graph identity because field programs can share one scratch across splines.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use super::xz_products::{
+    XzProductIdentity, XzProductKind, XzProductLattice, XzProductManifest,
+};
 use crate::density::{Context, Density};
 use crate::noise::NormalNoise;
 
@@ -100,6 +107,26 @@ struct PointOp {
     d: u32,
 }
 
+/// A compact, index-addressed spline node. `coordinate == SPLINE_CONSTANT`
+/// denotes a constant and stores its value in `constant`; otherwise `points`
+/// and `point_count` address the flat control-point table below.
+#[derive(Clone, Copy)]
+struct CompiledSpline {
+    coordinate: NodeId,
+    points: u32,
+    point_count: u32,
+    constant: f32,
+}
+
+#[derive(Clone, Copy)]
+struct CompiledSplinePoint {
+    location: f32,
+    derivative: f32,
+    value: u32,
+}
+
+const SPLINE_CONSTANT: NodeId = u32::MAX;
+
 #[derive(Clone, Copy)]
 struct FindTopSurfaceInfo {
     lower_bound: i32,
@@ -112,11 +139,16 @@ struct PointGraph {
     children: Vec<NodeId>,
     noises: Vec<NormalNoise>,
     leaves: Vec<Density>,
+    splines: Vec<CompiledSpline>,
+    spline_points: Vec<CompiledSplinePoint>,
     find_top_surface: Vec<FindTopSurfaceInfo>,
     interner: HashMap<Vec<u64>, NodeId>,
     noise_interner: HashMap<Vec<u64>, u32>,
     leaf_interner: HashMap<Vec<u64>, u32>,
+    spline_interner: HashMap<Vec<u64>, u32>,
     shared_nodes: usize,
+    product_manifest: Option<XzProductManifest>,
+    product_nodes: Vec<(NodeId, XzProductKind)>,
 }
 
 impl PointGraph {
@@ -127,20 +159,35 @@ impl PointGraph {
             children: Vec::new(),
             noises: Vec::new(),
             leaves: Vec::new(),
+            splines: Vec::new(),
+            spline_points: Vec::new(),
             find_top_surface: Vec::new(),
             interner: HashMap::new(),
             noise_interner: HashMap::new(),
             leaf_interner: HashMap::new(),
+            spline_interner: HashMap::new(),
             shared_nodes: 0,
+            product_manifest: None,
+            product_nodes: Vec::new(),
         }
     }
 
     fn compile(root: &Density) -> (Self, NodeId) {
+        Self::compile_with_manifest(root, None)
+    }
+
+    fn compile_with_manifest(
+        root: &Density,
+        manifest: Option<XzProductManifest>,
+    ) -> (Self, NodeId) {
         let mut graph = Self::new();
+        graph.product_manifest = manifest;
         let root = graph.compile_node(root);
+        graph.product_manifest = None;
         graph.interner.clear();
         graph.noise_interner.clear();
         graph.leaf_interner.clear();
+        graph.spline_interner.clear();
         (graph, root)
     }
 
@@ -190,7 +237,19 @@ impl PointGraph {
             Density::FlatCache { inner, memo, .. } | Density::Cache2D { inner, memo } => {
                 let inner_id = self.compile_node(inner);
                 // Preserve the source builder's memo-presence decision.
-                self.intern(kind, &[], &[inner_id], Some(u64::from(memo.is_some())), None)
+                let id = self.intern(
+                    kind,
+                    &[],
+                    &[inner_id],
+                    Some(u64::from(memo.is_some())),
+                    None,
+                );
+                if let Some(manifest) = self.product_manifest.as_ref()
+                    && let Some(product_kind) = manifest.kind_for(inner)
+                {
+                    self.product_nodes.push((id, product_kind));
+                }
+                id
             }
             Density::Noise {
                 noise,
@@ -257,7 +316,11 @@ impl PointGraph {
                 children.extend(functions);
                 self.intern(kind, thresholds, &children, None, None)
             }
-            Density::Spline(_) | Density::Blended(_) | Density::EndIslands(_) => {
+            Density::Spline(spline) => {
+                let spline = self.push_spline(spline);
+                self.intern(kind, &[], &[], None, Some(spline))
+            }
+            Density::Blended(_) | Density::EndIslands(_) => {
                 let leaf = self.push_leaf(density);
                 self.intern(kind, &[], &[], None, Some(leaf))
             }
@@ -302,6 +365,48 @@ impl PointGraph {
         let index = self.leaves.len() as u32;
         self.leaves.push(density.clone());
         self.leaf_interner.insert(signature, index);
+        index
+    }
+
+    fn push_spline(&mut self, spline: &crate::density::Spline) -> u32 {
+        let mut signature = Vec::new();
+        spline.write_signature(&mut signature);
+        if let Some(&index) = self.spline_interner.get(&signature) {
+            return index;
+        }
+
+        let compiled = match spline {
+            crate::density::Spline::Constant(value) => CompiledSpline {
+                coordinate: SPLINE_CONSTANT,
+                points: 0,
+                point_count: 0,
+                constant: *value,
+            },
+            crate::density::Spline::Multipoint { coordinate, points } => {
+                let coordinate = self.compile_node(coordinate);
+                let values: Vec<_> = points
+                    .iter()
+                    .map(|point| self.push_spline(&point.value))
+                    .collect();
+                let points_at = self.spline_points.len() as u32;
+                for (point, value) in points.iter().zip(values) {
+                    self.spline_points.push(CompiledSplinePoint {
+                        location: point.location,
+                        derivative: point.derivative,
+                        value,
+                    });
+                }
+                CompiledSpline {
+                    coordinate,
+                    points: points_at,
+                    point_count: points.len() as u32,
+                    constant: 0.0,
+                }
+            }
+        };
+        let index = self.splines.len() as u32;
+        self.splines.push(compiled);
+        self.spline_interner.insert(signature, index);
         index
     }
 
@@ -436,6 +541,7 @@ pub struct PointScratch {
 
 #[derive(Clone, Copy, Debug)]
 struct PointMemoEntry {
+    graph: usize,
     node: NodeId,
     x: i32,
     z: i32,
@@ -446,6 +552,7 @@ struct PointMemoEntry {
 const POINT_BATCH_WIDTH: usize = 8;
 
 const POINT_MEMO_EMPTY: PointMemoEntry = PointMemoEntry {
+    graph: 0,
     node: u32::MAX,
     x: 0,
     z: 0,
@@ -474,8 +581,9 @@ impl PointScratch {
     }
 
     #[inline]
-    fn index(&self, node: NodeId, x: i32, z: i32) -> usize {
-        let mut hash = u64::from(node).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    fn index(&self, graph: usize, node: NodeId, x: i32, z: i32) -> usize {
+        let mut hash = (graph as u64).wrapping_mul(0xD6E8_FEB8_6659_FD93);
+        hash ^= u64::from(node).wrapping_mul(0x9E37_79B9_7F4A_7C15);
         hash ^= u64::from(x as u32) << 32;
         hash ^= u64::from(z as u32);
         // Fold X into the low bits before the avalanche used for indexing.
@@ -487,9 +595,9 @@ impl PointScratch {
     }
 
     #[inline]
-    fn get(&mut self, node: NodeId, x: i32, z: i32) -> Option<f64> {
-        let entry = self.entries[self.index(node, x, z)];
-        let hit = entry.node == node && entry.x == x && entry.z == z;
+    fn get(&mut self, graph: usize, node: NodeId, x: i32, z: i32) -> Option<f64> {
+        let entry = self.entries[self.index(graph, node, x, z)];
+        let hit = entry.graph == graph && entry.node == node && entry.x == x && entry.z == z;
         #[cfg(feature = "gen-counters")]
         if hit {
             self.hits += 1;
@@ -500,9 +608,36 @@ impl PointScratch {
     }
 
     #[inline]
-    fn put(&mut self, node: NodeId, x: i32, z: i32, value: f64) {
-        let index = self.index(node, x, z);
-        self.entries[index] = PointMemoEntry { node, x, z, value };
+    fn put(&mut self, graph: usize, node: NodeId, x: i32, z: i32, value: f64) {
+        let index = self.index(graph, node, x, z);
+        self.entries[index] = PointMemoEntry {
+            graph,
+            node,
+            x,
+            z,
+            value,
+        };
+    }
+
+    #[inline]
+    pub(crate) fn seed_xz_product(
+        &mut self,
+        graph: usize,
+        node: NodeId,
+        x: i32,
+        z: i32,
+        value: f64,
+    ) {
+        self.put(graph, node, x, z, value);
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.entries.fill(POINT_MEMO_EMPTY);
+        #[cfg(feature = "gen-counters")]
+        {
+            self.hits = 0;
+            self.misses = 0;
+        }
     }
 
     /// Returns request-local memo hit/miss counts when diagnostics are enabled.
@@ -522,6 +657,15 @@ impl PointScratch {
     #[must_use]
     pub fn batch_buffer_bytes(&self) -> usize {
         self.batch_values.len() * std::mem::size_of::<f64>()
+    }
+
+    /// Bytes reserved by the point memo and its optional batch value table.
+    /// The field scratch uses the memo portion; keeping this accounting here
+    /// avoids making the owning field cache know the point representation.
+    #[cfg(feature = "gen-counters")]
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.entries.capacity() * std::mem::size_of::<PointMemoEntry>()
+            + self.batch_values.capacity() * std::mem::size_of::<f64>()
     }
 
     #[inline]
@@ -551,9 +695,18 @@ impl Default for PointScratch {
 
 /// A compiled point-semantics density tree.
 #[derive(Clone)]
+struct PointProductPlan {
+    factor: Option<NodeId>,
+    offset: Option<NodeId>,
+    identity: XzProductIdentity,
+    fingerprint: u64,
+}
+
+#[derive(Clone)]
 pub struct PointProgram {
     graph: Arc<PointGraph>,
     root: NodeId,
+    product_plan: Option<PointProductPlan>,
 }
 
 impl std::fmt::Debug for PointProgram {
@@ -566,6 +719,11 @@ impl std::fmt::Debug for PointProgram {
 }
 
 impl PointProgram {
+    #[inline]
+    fn graph_key(&self) -> usize {
+        Arc::as_ptr(&self.graph) as usize
+    }
+
     /// Compiles a density tree for exact point evaluation.
     #[must_use]
     pub fn compile(root: &Density) -> Self {
@@ -573,6 +731,36 @@ impl PointProgram {
         Self {
             graph: Arc::new(graph),
             root,
+            product_plan: None,
+        }
+    }
+
+    /// Compiles point semantics while recognizing the manifest's exact factor
+    /// and offset cache nodes. The manifest is only a structural admission
+    /// token; values still come from the request-scoped lattice.
+    #[must_use]
+    pub fn compile_with_xz_products(root: &Density, manifest: XzProductManifest) -> Self {
+        let identity = manifest.identity();
+        let fingerprint = identity.diagnostic_token();
+        let (graph, root) = PointGraph::compile_with_manifest(root, Some(manifest));
+        let mut factor = None;
+        let mut offset = None;
+        for &(node, kind) in &graph.product_nodes {
+            match kind {
+                XzProductKind::Factor => factor = Some(node),
+                XzProductKind::Offset => offset = Some(node),
+            }
+        }
+        let product_plan = (factor.is_some() || offset.is_some()).then_some(PointProductPlan {
+            factor,
+            offset,
+            identity,
+            fingerprint,
+        });
+        Self {
+            graph: Arc::new(graph),
+            root,
+            product_plan,
         }
     }
 
@@ -582,10 +770,31 @@ impl PointProgram {
         self.graph.ops.len()
     }
 
+    /// Number of compiled spline nodes in this point program.
+    #[must_use]
+    pub fn spline_count(&self) -> usize {
+        self.graph.splines.len()
+    }
+
     /// Number of duplicate source nodes answered by the compiler.
     #[must_use]
     pub fn shared_nodes(&self) -> usize {
         self.graph.shared_nodes
+    }
+
+    /// Returns the structural identity of the recognized product manifest when
+    /// this point program contains at least one admitted product.
+    #[must_use]
+    pub fn xz_product_fingerprint(&self) -> Option<u64> {
+        self.product_plan.as_ref().map(|plan| plan.fingerprint)
+    }
+
+    /// Returns the complete structural identity used for product admission.
+    #[must_use]
+    pub fn xz_product_identity(&self) -> Option<XzProductIdentity> {
+        self.product_plan
+            .as_ref()
+            .map(|plan| plan.identity.clone())
     }
 
     /// Number of xz-cache wrappers in the flattened point graph.
@@ -610,6 +819,53 @@ impl PointProgram {
         self.eval(self.root, ctx, scratch)
     }
 
+    /// Computes one factor/offset pair in factor-before-offset order. This is
+    /// the only producer for a request lattice and deliberately uses the same
+    /// point walk as ordinary evaluation.
+    pub fn compute_xz_products(
+        &self,
+        contexts: &[Context],
+        output: &mut [(f64, f64)],
+        scratch: &mut PointScratch,
+    ) -> bool {
+        let Some(plan) = self.product_plan.as_ref() else {
+            return false;
+        };
+        let (Some(factor), Some(offset)) = (plan.factor, plan.offset) else {
+            return false;
+        };
+        assert_eq!(contexts.len(), output.len());
+        for (context, pair) in contexts.iter().copied().zip(output.iter_mut()) {
+            pair.0 = self.eval(factor, context, scratch);
+            pair.1 = self.eval(offset, context, scratch);
+        }
+        true
+    }
+
+    /// Reuses a request-lattice pair by seeding the ordinary point memo before
+    /// descending the root. An identity mismatch or sparse miss takes the
+    /// exact old path.
+    #[must_use]
+    pub fn compute_with_xz_products(
+        &self,
+        ctx: Context,
+        scratch: &mut PointScratch,
+        lattice: &XzProductLattice,
+    ) -> f64 {
+        if let Some(plan) = self.product_plan.as_ref()
+            && lattice.identity_matches(&plan.identity)
+            && let Some((factor, offset)) = lattice.get_pair(ctx.x, ctx.z)
+        {
+            if let Some(node) = plan.factor {
+                scratch.seed_xz_product(self.graph_key(), node, ctx.x, ctx.z, factor);
+            }
+            if let Some(node) = plan.offset {
+                scratch.seed_xz_product(self.graph_key(), node, ctx.x, ctx.z, offset);
+            }
+        }
+        self.compute(ctx, scratch)
+    }
+
     /// Evaluates a bounded batch of contexts into `output`.
     ///
     /// Contexts are visited in input order in fixed groups of eight. Branch and
@@ -624,6 +880,60 @@ impl PointProgram {
         assert_eq!(contexts.len(), output.len());
         scratch.prepare_batch(self.graph.ops.len());
         for (offset, batch) in contexts.chunks(POINT_BATCH_WIDTH).enumerate() {
+            let lanes = batch.len();
+            let mask = if lanes == POINT_BATCH_WIDTH {
+                u8::MAX
+            } else {
+                (1u8 << lanes) - 1
+            };
+            self.eval_batch(self.root, batch, mask, scratch);
+            for lane in 0..lanes {
+                output[offset * POINT_BATCH_WIDTH + lane] =
+                    scratch.batch_value(self.root, lane);
+            }
+        }
+    }
+
+    /// Batch variant of [`Self::compute_with_xz_products`]. Product entries
+    /// are seeded lane-by-lane, then the original branch and lane order runs.
+    pub fn compute_batch_with_xz_products(
+        &self,
+        contexts: &[Context],
+        output: &mut [f64],
+        scratch: &mut PointScratch,
+        lattice: &XzProductLattice,
+    ) {
+        assert_eq!(contexts.len(), output.len());
+        let Some(plan) = self.product_plan.as_ref() else {
+            self.compute_batch(contexts, output, scratch);
+            return;
+        };
+        scratch.prepare_batch(self.graph.ops.len());
+        for (offset, batch) in contexts.chunks(POINT_BATCH_WIDTH).enumerate() {
+            for context in batch.iter().copied() {
+                if lattice.identity_matches(&plan.identity)
+                    && let Some((factor, value)) = lattice.get_pair(context.x, context.z)
+                {
+                    if let Some(node) = plan.factor {
+                        scratch.seed_xz_product(
+                            self.graph_key(),
+                            node,
+                            context.x,
+                            context.z,
+                            factor,
+                        );
+                    }
+                    if let Some(node) = plan.offset {
+                        scratch.seed_xz_product(
+                            self.graph_key(),
+                            node,
+                            context.x,
+                            context.z,
+                            value,
+                        );
+                    }
+                }
+            }
             let lanes = batch.len();
             let mask = if lanes == POINT_BATCH_WIDTH {
                 u8::MAX
@@ -816,7 +1126,7 @@ impl PointProgram {
                             continue;
                         }
                         let ctx = contexts[lane];
-                        if let Some(value) = scratch.get(id, ctx.x, ctx.z) {
+                        if let Some(value) = scratch.get(self.graph_key(), id, ctx.x, ctx.z) {
                             scratch.set_batch_value(id, lane, value);
                         } else {
                             misses |= 1 << lane;
@@ -827,7 +1137,7 @@ impl PointProgram {
                         if misses & (1 << lane) != 0 {
                             let value = scratch.batch_value(op.a, lane);
                             let ctx = contexts[lane];
-                            scratch.put(id, ctx.x, ctx.z, value);
+                            scratch.put(self.graph_key(), id, ctx.x, ctx.z, value);
                             scratch.set_batch_value(id, lane, value);
                         }
                     }
@@ -964,10 +1274,17 @@ impl PointProgram {
                 }
             }
             PointKind::Spline | PointKind::Blended | PointKind::EndIslands => {
-                let leaf = &self.graph.leaves[op.a as usize];
                 for lane in 0..contexts.len() {
                     if mask & (1 << lane) != 0 {
-                        scratch.set_batch_value(id, lane, leaf.compute(contexts[lane]));
+                        let context = contexts[lane];
+                        if op.kind == PointKind::Spline {
+                            self.bump_spline(context);
+                            let value = f64::from(self.eval_spline(op.a, context, scratch));
+                            scratch.set_batch_value(id, lane, value);
+                        } else {
+                            let leaf = &self.graph.leaves[op.a as usize];
+                            scratch.set_batch_value(id, lane, leaf.compute(context));
+                        }
                     }
                 }
             }
@@ -1090,11 +1407,11 @@ impl PointProgram {
                 if op.b == 0 {
                     return self.eval(op.a, ctx, scratch);
                 }
-                if let Some(value) = scratch.get(id, ctx.x, ctx.z) {
+                if let Some(value) = scratch.get(self.graph_key(), id, ctx.x, ctx.z) {
                     return value;
                 }
                 let value = self.eval(op.a, ctx, scratch);
-                scratch.put(id, ctx.x, ctx.z, value);
+                scratch.put(self.graph_key(), id, ctx.x, ctx.z, value);
                 value
             }
             PointKind::Noise => {
@@ -1144,7 +1461,12 @@ impl PointProgram {
                 self.eval(child, ctx, scratch)
             }
             PointKind::Spline | PointKind::Blended | PointKind::EndIslands => {
-                self.graph.leaves[op.a as usize].compute(ctx)
+                if op.kind == PointKind::Spline {
+                    self.bump_spline(ctx);
+                    f64::from(self.eval_spline(op.a, ctx, scratch))
+                } else {
+                    self.graph.leaves[op.a as usize].compute(ctx)
+                }
             }
             PointKind::FindTopSurface => {
                 let upper_bound = self.eval(op.b, ctx, scratch);
@@ -1166,6 +1488,88 @@ impl PointProgram {
             }
         }
     }
+
+    #[inline]
+    fn bump_spline(&self, ctx: Context) {
+        crate::counters::bump_density_point_compute(PointKind::Spline as usize);
+        crate::engine::redundancy_probe::visit_point(
+            std::ptr::from_ref(self.graph.as_ref()).cast::<()>(),
+            PointKind::Spline as usize,
+            ctx.x,
+            ctx.y,
+            ctx.z,
+        );
+    }
+
+    /// Evaluates a compiled spline node. The control points and nested spline
+    /// values are indexed arrays, so this hot path never descends through the
+    /// source `Box<Spline>` representation. Density coordinates still use the
+    /// ordinary indexed point graph, preserving their evaluation order.
+    fn eval_spline(&self, id: u32, ctx: Context, scratch: &mut PointScratch) -> f32 {
+        let spline = self.graph.splines[id as usize];
+        if spline.coordinate == SPLINE_CONSTANT {
+            return spline.constant;
+        }
+
+        let input = self.eval(spline.coordinate, ctx, scratch) as f32;
+        let points = &self.graph.spline_points;
+        let first_point = spline.points as usize;
+        let point_count = spline.point_count as usize;
+        let last = point_count.checked_sub(1).expect("spline has no points");
+        let mut first = point_count;
+        for index in 0..point_count {
+            if input < points[first_point + index].location {
+                first = index;
+                break;
+            }
+        }
+        let start = first as isize - 1;
+        if start < 0 {
+            let point = points[first_point];
+            return spline_linear_extend(
+                input,
+                point.location,
+                point.derivative,
+                self.eval_spline(point.value, ctx, scratch),
+            );
+        }
+        let start = start as usize;
+        if start == last {
+            let point = points[first_point + last];
+            return spline_linear_extend(
+                input,
+                point.location,
+                point.derivative,
+                self.eval_spline(point.value, ctx, scratch),
+            );
+        }
+
+        let p0 = points[first_point + start];
+        let p1 = points[first_point + start + 1];
+        let t = (input - p0.location) / (p1.location - p0.location);
+        // Keep the source order and f32 intermediates explicit. In particular,
+        // evaluate y1 before y2: nested splines may select different branches.
+        let y1 = self.eval_spline(p0.value, ctx, scratch);
+        let y2 = self.eval_spline(p1.value, ctx, scratch);
+        let delta = p1.location - p0.location;
+        let a = p0.derivative * delta - (y2 - y1);
+        let b = -p1.derivative * delta + (y2 - y1);
+        spline_lerp(t, y1, y2) + t * (1.0 - t) * spline_lerp(t, a, b)
+    }
+}
+
+#[inline]
+fn spline_linear_extend(input: f32, location: f32, derivative: f32, value: f32) -> f32 {
+    if derivative == 0.0 {
+        value
+    } else {
+        value + derivative * (input - location)
+    }
+}
+
+#[inline]
+fn spline_lerp(t: f32, a: f32, b: f32) -> f32 {
+    a + t * (b - a)
 }
 
 fn shift(noise: &NormalNoise, x: f64, y: f64, z: f64) -> f64 {
@@ -1175,6 +1579,8 @@ fn shift(noise: &NormalNoise, x: f64, y: f64, z: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::xz_products::XzRect;
+    use crate::density::{Spline, SplinePoint};
 
     fn b(density: Density) -> Box<Density> {
         Box::new(density)
@@ -1211,6 +1617,91 @@ mod tests {
     }
 
     #[test]
+    fn compiled_spline_keeps_ties_nested_values_and_special_bits() {
+        let nested = Spline::Multipoint {
+            coordinate: b(Density::Const(0.5)),
+            points: vec![
+                SplinePoint {
+                    location: 0.0,
+                    derivative: 0.0,
+                    value: Box::new(Spline::Constant(-0.0)),
+                },
+                SplinePoint {
+                    location: 1.0,
+                    derivative: 0.0,
+                    value: Box::new(Spline::Constant(0.75)),
+                },
+            ],
+        };
+        let density = Density::Spline(Spline::Multipoint {
+            coordinate: b(Density::Const(0.0)),
+            points: vec![
+                SplinePoint {
+                    location: -1.0,
+                    derivative: 0.125,
+                    value: Box::new(Spline::Constant(1.25)),
+                },
+                SplinePoint {
+                    location: 0.0,
+                    derivative: -0.25,
+                    value: Box::new(nested),
+                },
+                SplinePoint {
+                    location: 1.0,
+                    derivative: 0.0,
+                    value: Box::new(Spline::Constant(-0.0)),
+                },
+            ],
+        });
+        let program = PointProgram::compile(&density);
+        assert_eq!(program.graph.splines.len(), 5, "outer, nested, and three constant values");
+
+        let mut scratch = PointScratch::with_capacity(32);
+        for coordinate in [
+            Density::Const(-1.0),
+            Density::Const(0.0),
+            Density::Const(-0.0),
+            Density::Const(1.0),
+            Density::Const(f64::NAN),
+        ] {
+            let context = Context::new(0, 0, 0);
+            let mut source = density.clone();
+            if let Density::Spline(Spline::Multipoint { coordinate: target, .. }) = &mut source {
+                *target = Box::new(coordinate.clone());
+            }
+            let expected = source.compute(context);
+            let got = PointProgram::compile(&source).compute(context, &mut scratch);
+            assert_eq!(got.to_bits(), expected.to_bits(), "coordinate={coordinate:?}");
+        }
+
+        // The NaN selector falls through to the last point. Its zero derivative
+        // must preserve the nested value's negative zero rather than producing
+        // a NaN while extending beyond the table.
+        let nan = Density::Spline(Spline::Multipoint {
+            coordinate: b(Density::Const(f64::NAN)),
+            points: vec![
+                SplinePoint {
+                    location: 0.0,
+                    derivative: 1.0,
+                    value: Box::new(Spline::Constant(2.0)),
+                },
+                SplinePoint {
+                    location: 1.0,
+                    derivative: 0.0,
+                    value: Box::new(Spline::Constant(-0.0)),
+                },
+            ],
+        });
+        let nan_program = PointProgram::compile(&nan);
+        assert_eq!(
+            nan_program
+                .compute(Context::new(0, 0, 0), &mut scratch)
+                .to_bits(),
+            (-0.0f64).to_bits()
+        );
+    }
+
+    #[test]
     fn compiled_find_top_surface_matches_point_bits() {
         let density = fixture();
         let program = PointProgram::compile(&density);
@@ -1244,6 +1735,56 @@ mod tests {
         for (context, value) in contexts.iter().copied().zip(output) {
             assert_eq!(value.to_bits(), density.compute(context).to_bits());
         }
+    }
+
+    #[test]
+    fn product_lattice_preserves_aligned_and_sparse_fallback_bits() {
+        let factor = Density::Const(1.25);
+        let offset = Density::Const(-0.5);
+        let wrap = |inner: Density, memo| Density::Cache2D {
+            inner: b(inner),
+            memo,
+        };
+        let density = Density::Add(
+            b(wrap(factor.clone(), crate::density::XzMemoId::allocate())),
+            b(wrap(offset.clone(), crate::density::XzMemoId::allocate())),
+        );
+        let manifest = XzProductManifest::from_routes(
+            7,
+            &density,
+            &density,
+            &factor,
+            &offset,
+        )
+        .expect("test routes must admit the pure product pair");
+        let program = PointProgram::compile_with_xz_products(&density, manifest);
+        let baseline = PointProgram::compile(&density);
+        let lattice = XzProductLattice::new(
+            XzRect::new(0, 0, 2, 2),
+            program.xz_product_fingerprint().unwrap(),
+        );
+        let mut lattice = lattice;
+        lattice.insert_pair(0, 0, 1.25, -0.5);
+        lattice.insert_pair(4, 0, 1.25, -0.5);
+        let lattice = lattice;
+        for context in [
+            Context::new(0, 0, 0),
+            Context::new(4, 13, 0),
+            Context::new(3, 13, 0),
+        ] {
+            let mut optimized_scratch = PointScratch::with_capacity(32);
+            let mut baseline_scratch = PointScratch::with_capacity(32);
+            let optimized = program.compute_with_xz_products(
+                context,
+                &mut optimized_scratch,
+                &lattice,
+            );
+            let expected = baseline.compute(context, &mut baseline_scratch);
+            assert_eq!(optimized.to_bits(), expected.to_bits(), "context={context:?}");
+        }
+        assert_eq!(lattice.computes(), 2);
+        assert_eq!(lattice.hits(), 2);
+        assert_eq!(lattice.misses(), 1);
     }
 
     #[test]

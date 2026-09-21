@@ -11,7 +11,12 @@
 //! structure (along with the obsidian pillars in `spikes.rs`) as "not here,
 //! and it is not terrain" — this is that piece.
 
-use lodestone_data::block_states::BlockStateValue;
+use std::sync::OnceLock;
+
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue as V, Properties, PropertyKey};
+use lodestone_data::block_states::StateId;
+
 
 /// One block this feature writes, in absolute coordinates.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,8 +24,8 @@ pub struct PodiumBlock {
     pub x: i32,
     pub y: i32,
     pub z: i32,
-    /// A parsed block-state value, retained in its original boundary spelling.
-    pub state: BlockStateValue,
+    /// Canonical block-state id.
+    pub state: StateId,
 }
 
 /// The four horizontal directions a wall torch can face, matching vanilla's
@@ -36,8 +41,6 @@ enum Facing {
 }
 
 impl Facing {
-    const ALL: [Facing; 4] = [Facing::North, Facing::South, Facing::West, Facing::East];
-
     /// The unit offset a wall torch on this face sits at, relative to the
     /// block it is attached to.
     fn offset(self) -> (i32, i32) {
@@ -49,14 +52,50 @@ impl Facing {
         }
     }
 
-    fn state_name(self) -> &'static str {
-        match self {
-            Facing::North => "north",
-            Facing::South => "south",
-            Facing::West => "west",
-            Facing::East => "east",
-        }
+    const INDEX: [Facing; 4] = [Facing::North, Facing::South, Facing::West, Facing::East];
+}
+
+fn typed_state(block: Block, properties: &[(PropertyKey, V)]) -> StateId {
+    let mut typed = Properties::empty();
+    for &(key, value) in properties {
+        typed = typed
+            .with_builtin(key, value)
+            .expect("generated block property is valid");
     }
+    Properties::state_for_block(block, &typed).expect("generated block state is valid")
+}
+
+fn wall_torch_states() -> &'static [StateId; 4] {
+    static STATES: OnceLock<[StateId; 4]> = OnceLock::new();
+    STATES.get_or_init(|| {
+        std::array::from_fn(|index| {
+            let facing = match index {
+                0 => V::North,
+                1 => V::South,
+                2 => V::West,
+                _ => V::East,
+            };
+            typed_state(Block::WallTorch, &[(PropertyKey::Facing, facing)])
+        })
+    })
+}
+
+#[derive(Clone, Copy)]
+struct PodiumStates {
+    air: StateId,
+    bedrock: StateId,
+    end_stone: StateId,
+    end_portal: StateId,
+}
+
+fn podium_states() -> PodiumStates {
+    static STATES: OnceLock<PodiumStates> = OnceLock::new();
+    *STATES.get_or_init(|| PodiumStates {
+        air: Block::Air.default_state(),
+        bedrock: Block::Bedrock.default_state(),
+        end_stone: Block::EndStone.default_state(),
+        end_portal: Block::EndPortal.default_state(),
+    })
 }
 
 /// `Vec3i.closerThan`: 3D Euclidean distance, strictly less than.
@@ -79,8 +118,9 @@ fn closer_than(dx: i32, dy: i32, dz: i32, distance: f64) -> bool {
 #[must_use]
 pub fn end_podium(origin_x: i32, origin_y: i32, origin_z: i32, active: bool) -> Vec<PodiumBlock> {
     let mut writes = Vec::new();
-    let push = |writes: &mut Vec<PodiumBlock>, x: i32, y: i32, z: i32, state: &str| {
-        writes.push(PodiumBlock { x, y, z, state: BlockStateValue::parse(state) });
+    let states = podium_states();
+    let push = |writes: &mut Vec<PodiumBlock>, x: i32, y: i32, z: i32, state: StateId| {
+        writes.push(PodiumBlock { x, y, z, state });
     };
 
     for dx in -4..=4 {
@@ -93,18 +133,18 @@ pub fn end_podium(origin_x: i32, origin_y: i32, origin_z: i32, active: bool) -> 
                 let (x, y, z) = (origin_x + dx, origin_y + dy, origin_z + dz);
                 if dy < 0 {
                     if inside_rim {
-                        push(&mut writes, x, y, z, "minecraft:bedrock");
+                        push(&mut writes, x, y, z, states.bedrock);
                     } else {
-                        push(&mut writes, x, y, z, "minecraft:end_stone");
+                        push(&mut writes, x, y, z, states.end_stone);
                     }
                 } else if dy > 0 {
-                    push(&mut writes, x, y, z, "minecraft:air");
+                    push(&mut writes, x, y, z, states.air);
                 } else if !inside_rim {
-                    push(&mut writes, x, y, z, "minecraft:bedrock");
+                    push(&mut writes, x, y, z, states.bedrock);
                 } else if active {
-                    push(&mut writes, x, y, z, "minecraft:end_portal");
+                    push(&mut writes, x, y, z, states.end_portal);
                 } else {
-                    push(&mut writes, x, y, z, "minecraft:air");
+                    push(&mut writes, x, y, z, states.air);
                 }
             }
         }
@@ -116,18 +156,18 @@ pub fn end_podium(origin_x: i32, origin_y: i32, origin_z: i32, active: bool) -> 
     // `dy == 0`): the pillar occupies the ring's exact centre, and vanilla
     // writes it unconditionally over the top for the same reason.
     for dy in 0..4 {
-        push(&mut writes, origin_x, origin_y + dy, origin_z, "minecraft:bedrock");
+        push(&mut writes, origin_x, origin_y + dy, origin_z, states.bedrock);
     }
 
     let center_y = origin_y + 2;
-    for facing in Facing::ALL {
+    for (index, facing) in Facing::INDEX.into_iter().enumerate() {
         let (dx, dz) = facing.offset();
         push(
             &mut writes,
             origin_x + dx,
             center_y,
             origin_z + dz,
-            &format!("minecraft:wall_torch[facing={}]", facing.state_name()),
+            wall_torch_states()[index],
         );
     }
 
@@ -156,7 +196,7 @@ mod tests {
             let writes = end_podium(0, 64, 0, active);
             for dy in 0..4 {
                 let block = find(&writes, 0, 64 + dy, 0).expect("centre column must be written");
-                assert_eq!(block.state, "minecraft:bedrock", "active={active} dy={dy}");
+                assert_eq!(block.state.canonical_state(), "minecraft:bedrock", "active={active} dy={dy}");
             }
         }
     }
@@ -170,8 +210,8 @@ mod tests {
         // column, so the pillar overwrite above does not reach it.
         let active = end_podium(0, 64, 0, true);
         let inactive = end_podium(0, 64, 0, false);
-        assert_eq!(find(&active, 1, 64, 0).unwrap().state, "minecraft:end_portal");
-        assert_eq!(find(&inactive, 1, 64, 0).unwrap().state, "minecraft:air");
+        assert_eq!(find(&active, 1, 64, 0).unwrap().state.canonical_state(), "minecraft:end_portal");
+        assert_eq!(find(&inactive, 1, 64, 0).unwrap().state.canonical_state(), "minecraft:air");
     }
 
     /// The outer bedrock rim (outside 2.5, inside 3.5, at the portal plane)
@@ -182,7 +222,7 @@ mod tests {
         for active in [false, true] {
             let writes = end_podium(0, 64, 0, active);
             let block = find(&writes, 0, 64, 3).expect("outer rim must be written");
-            assert_eq!(block.state, "minecraft:bedrock", "active={active}");
+            assert_eq!(block.state.canonical_state(), "minecraft:bedrock", "active={active}");
         }
     }
 
@@ -193,7 +233,7 @@ mod tests {
         let writes = end_podium(10, 70, -5, true);
         for (dx, dz, facing) in [(0, -1, "north"), (0, 1, "south"), (-1, 0, "west"), (1, 0, "east")] {
             let block = find(&writes, 10 + dx, 72, -5 + dz).unwrap_or_else(|| panic!("missing {facing} torch"));
-            assert_eq!(block.state, format!("minecraft:wall_torch[facing={facing}]"));
+            assert_eq!(block.state.canonical_state(), format!("minecraft:wall_torch[facing={facing}]"));
         }
     }
 

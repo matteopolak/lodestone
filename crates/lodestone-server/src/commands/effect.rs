@@ -32,6 +32,7 @@
 //! is built now rather than when a second command asks for it.
 
 use lodestone_model::{GameMode, ItemStack};
+use lodestone_data::block_states::StateId;
 use uuid::Uuid;
 
 /// One thing a command wants done to one player.
@@ -108,13 +109,13 @@ pub enum Effect {
     /// rather than a panic.
     SetBlock {
         pos: (i32, i32, i32),
-        block: String,
+        block: StateId,
     },
     /// `/fill` — same self-targeted delivery constraint as [`Self::SetBlock`], one
     /// block id over every position in the (already volume-capped) region.
     Fill {
         positions: Vec<(i32, i32, i32)>,
-        block: String,
+        block: StateId,
     },
     /// `/say`, `/me` — a line every connected player should see. Self-targeted for
     /// delivery, like `SetBlock`: it needs the player registry's broadcast, which

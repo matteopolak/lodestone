@@ -33,9 +33,8 @@
 //! verified native generator and an unverified plugin one, not two parallel
 //! systems that happen to look similar.
 
-use std::sync::Arc;
-
 use crate::dense_grid::DenseBlockGrid;
+use std::sync::Arc;
 
 /// A source of chunk terrain, dispatched as `Arc<dyn ChunkGenerator>` from
 /// `lodestone-server`'s plugin-facing chunk source (see
@@ -92,28 +91,15 @@ impl ChunkGenerator for crate::flat::FlatLevelSource {
         let column = crate::flat::FlatLevelSource::column(self, cx, cz);
         let min_y = crate::flat::FlatLevelSource::min_y(self);
         let height = crate::flat::FlatLevelSource::height(self);
-        let mut grid = DenseBlockGrid::new(
+        DenseBlockGrid::from_canonical_states(
             cx * 16,
             min_y,
             cz * 16,
             16,
             height,
             16,
-            "minecraft:air",
-        );
-        for ly in 0..height {
-            let y = min_y + ly;
-            let state = column.block_state(y);
-            if state == "minecraft:air" {
-                continue;
-            }
-            for lz in 0..16 {
-                for lx in 0..16 {
-                    grid.set(cx * 16 + lx, y, cz * 16 + lz, state);
-                }
-            }
-        }
-        grid
+            |_x, y, _z| column.block_state_id(y),
+        )
     }
 
     fn biome(&self) -> &str {
@@ -130,6 +116,11 @@ pub type BoxedChunkGenerator = Arc<dyn ChunkGenerator>;
 mod tests {
     use super::*;
     use crate::flat::{FlatLayer, FlatLevelGeneratorSettings, FlatLevelSource, StructureOverrides};
+    use lodestone_data::block_states::StateId;
+
+    fn state(value: &str) -> StateId {
+        StateId::from_state_str(value).expect("test state is in the generated table")
+    }
 
     fn settings() -> FlatLevelGeneratorSettings {
         FlatLevelGeneratorSettings {
@@ -138,15 +129,15 @@ mod tests {
             lakes: false,
             layers: vec![
                 FlatLayer {
-                    block: "minecraft:bedrock".to_string(),
+                    block: state("minecraft:bedrock"),
                     height: 1,
                 },
                 FlatLayer {
-                    block: "minecraft:stone".to_string(),
+                    block: state("minecraft:stone"),
                     height: 2,
                 },
                 FlatLayer {
-                    block: "minecraft:grass_block".to_string(),
+                    block: state("minecraft:grass_block"),
                     height: 1,
                 },
             ],

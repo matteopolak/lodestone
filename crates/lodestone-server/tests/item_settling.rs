@@ -64,6 +64,7 @@
 //! * [`the_fixture_floor_is_where_the_gates_assume`] — the fixture itself.
 
 use lodestone_entity::item_entity::{ITEM_GRAVITY, ItemLifecycle};
+use lodestone_data::block_states::StateId;
 use lodestone_model::{ResourceKey, Vec3};
 use lodestone_server::{ChunkColumn, ChunkWorld, MobSim};
 use std::str::FromStr;
@@ -87,7 +88,7 @@ fn world_with_floor_and_void() -> ChunkWorld {
     for x in 0..8 {
         for z in 0..16 {
             for y in MIN_Y..=FLOOR_TOP_Y {
-                column.set_block(x, y, z, "minecraft:stone");
+                column.set_block_id(x, y, z, state("minecraft:stone"));
             }
         }
     }
@@ -96,6 +97,10 @@ fn world_with_floor_and_void() -> ChunkWorld {
 
 fn diamond() -> ResourceKey {
     ResourceKey::from_str("minecraft:diamond").expect("valid key")
+}
+
+fn state(name: &str) -> StateId {
+    StateId::from_state_str(name).expect("fixture state is in the built-in table")
 }
 
 /// A stack of `count` diamonds, past its pickup delay so it is mergable — the
@@ -433,7 +438,7 @@ fn far_floor() -> ChunkWorld {
     for x in 0..16 {
         for z in 0..16 {
             for y in MIN_Y..=FLOOR_TOP_Y {
-                column.set_block(x, y, z, "minecraft:stone");
+                column.set_block_id(x, y, z, state("minecraft:stone"));
             }
         }
     }
@@ -485,7 +490,7 @@ fn an_item_outside_the_snapshot_settles_on_the_live_world() {
     );
 
     for _ in 0..200 {
-        sim.tick_with_terrain(&|x, y, z| live.block_state(x, y, z).to_owned());
+        sim.tick_with_terrain(&|x, y, z| live.block_state_id(x, y, z));
     }
 
     let resting = f64::from(FLOOR_TOP_Y + 1);
@@ -502,7 +507,7 @@ fn an_item_outside_the_snapshot_settles_on_the_live_world() {
 
     // Still there 200 ticks later: settled, not passing through.
     for _ in 0..200 {
-        sim.tick_with_terrain(&|x, y, z| live.block_state(x, y, z).to_owned());
+        sim.tick_with_terrain(&|x, y, z| live.block_state_id(x, y, z));
     }
     assert!(
         sim.item_position(id)
@@ -546,12 +551,12 @@ fn world_with_surfaces() -> ChunkWorld {
     for x in 0..16 {
         for z in 0..16 {
             for y in MIN_Y..=FLOOR_TOP_Y {
-                column.set_block(x, y, z, "minecraft:stone");
+                column.set_block_id(x, y, z, state("minecraft:stone"));
             }
         }
     }
     for &(name, x, _) in SURFACES {
-        column.set_block(x, FLOOR_TOP_Y + 1, 8, name);
+        column.set_block_id(x, FLOOR_TOP_Y + 1, 8, state(name));
     }
     ChunkWorld::from_columns([((0, 0), column)])
 }
@@ -571,21 +576,19 @@ fn the_surface_fixtures_resolve_to_the_shapes_the_gates_assume() {
     let world = world_with_surfaces();
     for &(name, x, expected_top) in SURFACES {
         assert_eq!(
-            world.block_state(x, FLOOR_TOP_Y + 1, 8),
+            world.block_state_id(x, FLOOR_TOP_Y + 1, 8).name(),
             name,
             "the fixture must actually hold {name} at x={x}"
         );
-        let id = lodestone_data::block_states::state_id(name)
-            .unwrap_or_else(|| panic!("{name} must be in the 26.2 block-state census"));
-        let state = lodestone_data::block_states::StateId::new(id).expect("fixture state validates");
-        let boxes = lodestone_data::collision_shapes::collision_boxes(state);
+        let state_id = state(name);
+        let boxes = lodestone_data::collision_shapes::collision_boxes(state_id);
         let top = boxes
             .iter()
             .map(|b| f64::from(b.max[1]))
             .fold(0.0_f64, f64::max);
         assert!(
             (top - expected_top).abs() < 1.0e-9,
-            "{name} resolves to state {id} with collision top {top}, but the gate \
+            "{name} resolves to state {state_id:?} with collision top {top}, but the gate \
              asserts a rest height derived from {expected_top}. Either the census \
              moved or the bare name now resolves to a different default state — \
              re-read the table before touching the expected height."
@@ -705,7 +708,7 @@ fn a_thrown_item_stops_against_a_wall_instead_of_passing_through_it() {
     for x in 0..16 {
         for z in 0..16 {
             for y in MIN_Y..=FLOOR_TOP_Y {
-                column.set_block(x, y, z, "minecraft:stone");
+                column.set_block_id(x, y, z, state("minecraft:stone"));
             }
         }
     }
@@ -713,8 +716,8 @@ fn a_thrown_item_stops_against_a_wall_instead_of_passing_through_it() {
     // far side of it by rounding.
     for y in FLOOR_TOP_Y + 1..=FLOOR_TOP_Y + 3 {
         for z in 0..16 {
-            column.set_block(3, y, z, "minecraft:stone");
-            column.set_block(4, y, z, "minecraft:stone");
+            column.set_block_id(3, y, z, state("minecraft:stone"));
+            column.set_block_id(4, y, z, state("minecraft:stone"));
         }
     }
     let world = ChunkWorld::from_columns([((0, 0), column)]);

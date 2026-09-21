@@ -8,6 +8,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use lodestone_data::block_states::StateId;
 use lodestone_worldgen::density::{NoiseParams, Resolver};
 use lodestone_worldgen::nether::{NetherColumn, NetherGenerator};
 use serde_json::Value;
@@ -78,10 +79,12 @@ impl Resolver for WithoutMagma {
 }
 
 fn magma_cells(column: &NetherColumn) -> BTreeSet<(usize, i32, usize)> {
+    let magma = StateId::from_state_str("minecraft:magma_block")
+        .expect("magma block is a generated block state");
     let mut cells = BTreeSet::new();
     for y in column.min_y()..column.min_y() + column.height() {
         for lz in 0..16 { for lx in 0..16 {
-            if column.block_state(lx, y, lz) == "minecraft:magma_block" { cells.insert((lx, y, lz)); }
+            if column.block_state_id(lx, y, lz) == magma { cells.insert((lx, y, lz)); }
         }}
     }
     cells

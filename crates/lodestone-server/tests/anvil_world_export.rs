@@ -9,6 +9,7 @@ use lodestone_anvil::{
     region::RegionFile,
 };
 use lodestone_core::{Nbt, Reader, read_named_nbt};
+use lodestone_data::block_states::StateId;
 use lodestone_server::{
     ChunkColumn, ScheduledTickHandle, TickPriority,
     anvil_world_export::{
@@ -32,7 +33,12 @@ fn scratch(name: &str) -> PathBuf {
 
 fn write_chunk(storage: &WorldStorage, x: i32, z: i32, state: &str, impossible_tick: bool) {
     let mut column = ChunkColumn::new(0, 16);
-    column.set_block(1, 1, 2, state);
+    column.set_block_id(
+        1,
+        1,
+        2,
+        StateId::from_state_str(state).expect("fixture block state"),
+    );
     let light = lodestone_world::ColumnLight::new(column.section_count());
     let scheduled = ScheduledTickHandle::new();
     if impossible_tick {
@@ -186,7 +192,7 @@ fn all_native_snapshot_exports_the_reviewed_records_after_a_later_native_write()
         .expect("read changed source")
         .expect("changed source remains present");
     assert_eq!(
-        changed.column.block_state(1, 1, 2),
+        changed.column.block_state_id(1, 1, 2).canonical_state(),
         "minecraft:emerald_block",
         "the control proves the store no longer contains the reviewed state"
     );
@@ -244,7 +250,7 @@ fn explicit_snapshot_exports_its_reviewed_selection_after_later_native_writes() 
         .expect("read changed source")
         .expect("changed source remains present");
     assert_eq!(
-        changed.column.block_state(1, 1, 2),
+        changed.column.block_state_id(1, 1, 2).canonical_state(),
         "minecraft:emerald_block",
         "the control proves the selected source was replaced after capture"
     );

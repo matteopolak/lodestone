@@ -22,6 +22,8 @@
 use std::time::Duration;
 
 use lodestone_client::{ClientBuilder, EventStream, LoginProfile, ServerAddress};
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 use lodestone_model::{Rotation, Vec3};
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer, WorldgenChunkSource};
 use lodestone_v26_2::{V770ServerProtocol, adapter};
@@ -79,7 +81,7 @@ impl ChunkSource for WaterSource {
         for x in 0..16 {
             for z in 0..16 {
                 for y in -64..320 {
-                    col.set_block(x, y, z, "minecraft:water");
+                    col.set_block_id(x, y, z, Block::Water.default_state());
                 }
             }
         }
@@ -94,8 +96,8 @@ impl ChunkSource for WaterSource {
     /// the cheap answer matters for real (CPU, not virtual) wall-clock test
     /// time; the tests pause their clock after startup, making that virtual
     /// duration free.
-    fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-        "minecraft:water".to_string()
+    fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
+        Block::Water.default_state()
     }
 
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
@@ -106,7 +108,7 @@ impl ChunkSource for WaterSource {
     // design (an edit a test needs to survive goes through a source with real
     // retention). `ChunkSource::set_block` has no default, so this is
     // stated explicitly rather than inherited.
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
         // No storage; edits are discarded by design.
     }
 }

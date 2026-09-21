@@ -108,8 +108,8 @@
 //! # Dependencies
 //!
 //! [`lodestone_physics::entity::move_entity`] for collision (shared with
-//! `tick_vehicles`/`tick_tnt`), `crate::redstone::{base_name,
-//! get_bool_property, is_redstone_conductor}` for reading a powered rail's own
+//! `tick_vehicles`/`tick_tnt`), and `crate::redstone::is_redstone_conductor`
+//! for reading a powered rail's own
 //! state without re-deriving the parser, and [`super::MobSim::explode`]/
 //! [`super::MobSim::pending_detonations`] for a TNT minecart's blast — the
 //! same two calls `crate::mobs::tnt` already makes for a creeper's fuse and a
@@ -117,6 +117,8 @@
 //! existing pipeline, not a new consumer.
 
 use lodestone_entity::DamageFlags;
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, PropertyKey};
 use lodestone_model::{BlockPos, ItemStack, ResourceKey, Vec3};
 use lodestone_physics::{
     Aabb, CollisionView, EntityDimensions, EntityMotion, MoveContext, PhysicsProfile, Vec3d,
@@ -125,9 +127,9 @@ use lodestone_physics::{
 use lodestone_physics::mth::wrap_degrees_f32;
 use uuid::Uuid;
 
-use crate::redstone::{base_name, get_bool_property, get_str_property, is_redstone_conductor};
+use crate::redstone::{get_bool_property, get_str_property, is_redstone_conductor};
 
-use super::{Detonation, MobSim, TrackedMinecart, block_state_id};
+use super::{Detonation, MobSim, TrackedMinecart};
 
 /// The tick-start chunk owner of one minecart.
 ///
@@ -188,18 +190,34 @@ struct MinecartTickInput {
 /// `minecraft:rail` — the one rail block not already named as a constant
 /// somewhere in this crate (`crate::redstone_rail::{POWERED_RAIL,
 /// ACTIVATOR_RAIL}`, `crate::redstone::DETECTOR_RAIL}`).
-pub const RAIL: &str = "minecraft:rail";
+pub const RAIL: Block = Block::Rail;
+
+fn is_rail_block_id(state: lodestone_data::block_states::StateId) -> bool {
+    matches!(
+        state.block(),
+        RAIL
+            | crate::redstone_rail::POWERED_RAIL
+            | crate::redstone_rail::ACTIVATOR_RAIL
+            | crate::redstone::DETECTOR_RAIL
+    )
+}
+
+fn rail_shape_id(state: lodestone_data::block_states::StateId) -> Option<RailShape> {
+    get_str_property(state, PropertyKey::Shape).and_then(RailShape::from_value)
+}
 
 /// `BaseRailBlock.isRail` — `state.is(BlockTags.RAILS) && state.getBlock()
 /// instanceof BaseRailBlock`, narrowed to the four block ids `BlockTags.RAILS`
 /// actually holds in 26.2 (checked against the jar's own block list, not
 /// assumed): plain rail, powered rail, activator rail, detector rail.
 #[must_use]
-pub fn is_rail_block(state: &str) -> bool {
-    matches!(
-        base_name(state),
-        RAIL | crate::redstone_rail::POWERED_RAIL | crate::redstone_rail::ACTIVATOR_RAIL | crate::redstone::DETECTOR_RAIL
-    )
+pub fn is_rail_block(state: lodestone_data::block_states::StateId) -> bool {
+    is_rail_block_id(state)
+}
+
+#[must_use]
+pub fn rail_shape(state: lodestone_data::block_states::StateId) -> Option<RailShape> {
+    rail_shape_id(state)
 }
 
 /// `RailShape`, all ten values — six straight/ascending plus the four curves a
@@ -223,18 +241,18 @@ pub enum RailShape {
 
 impl RailShape {
     #[must_use]
-    pub fn from_str(s: &str) -> Option<Self> {
-        Some(match s {
-            "north_south" => Self::NorthSouth,
-            "east_west" => Self::EastWest,
-            "ascending_east" => Self::AscendingEast,
-            "ascending_west" => Self::AscendingWest,
-            "ascending_north" => Self::AscendingNorth,
-            "ascending_south" => Self::AscendingSouth,
-            "south_east" => Self::SouthEast,
-            "south_west" => Self::SouthWest,
-            "north_west" => Self::NorthWest,
-            "north_east" => Self::NorthEast,
+    pub fn from_value(value: BuiltinPropertyValue) -> Option<Self> {
+        Some(match value {
+            BuiltinPropertyValue::NorthSouth => Self::NorthSouth,
+            BuiltinPropertyValue::EastWest => Self::EastWest,
+            BuiltinPropertyValue::AscendingEast => Self::AscendingEast,
+            BuiltinPropertyValue::AscendingWest => Self::AscendingWest,
+            BuiltinPropertyValue::AscendingNorth => Self::AscendingNorth,
+            BuiltinPropertyValue::AscendingSouth => Self::AscendingSouth,
+            BuiltinPropertyValue::SouthEast => Self::SouthEast,
+            BuiltinPropertyValue::SouthWest => Self::SouthWest,
+            BuiltinPropertyValue::NorthWest => Self::NorthWest,
+            BuiltinPropertyValue::NorthEast => Self::NorthEast,
             _ => return None,
         })
     }
@@ -267,15 +285,6 @@ impl RailShape {
             Self::NorthEast => ((0, 0, -1), (1, 0, 0)),
         }
     }
-}
-
-/// Reads a rail block state's own `shape` property as a full, ten-value
-/// [`RailShape`] — the minecart-following counterpart of
-/// `crate::redstone_rail::shape_of`, which only ever sees the six a
-/// powered/activator rail can hold.
-#[must_use]
-pub fn rail_shape(state: &str) -> Option<RailShape> {
-    get_str_property(state, "shape").and_then(RailShape::from_str)
 }
 
 /// The five `AbstractMinecart` subclasses this crate models.
@@ -414,21 +423,18 @@ pub fn placement_position(pos: BlockPos, shape: Option<RailShape>) -> Vec3 {
 /// [`in_water`], and a raw state-string accessor the rail-following math
 /// needs that the trait itself has no room for.
 struct MinecartCollision<'a> {
-    block_state: &'a dyn Fn(i32, i32, i32) -> String,
+    block_state: &'a dyn Fn(i32, i32, i32) -> lodestone_data::block_states::StateId,
 }
 
 impl MinecartCollision<'_> {
-    fn state_at(&self, x: i32, y: i32, z: i32) -> String {
+    fn state_at(&self, x: i32, y: i32, z: i32) -> lodestone_data::block_states::StateId {
         (self.block_state)(x, y, z)
     }
 }
 
 impl CollisionView for MinecartCollision<'_> {
     fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<Aabb>) {
-        let name = (self.block_state)(x, y, z);
-        let Some(state) = block_state_id(&name) else {
-            return;
-        };
+        let state = (self.block_state)(x, y, z);
         let shape = lodestone_data::collision_shapes::collision_boxes(state);
         let (bx, by, bz) = (f64::from(x), f64::from(y), f64::from(z));
         for b in shape {
@@ -444,8 +450,8 @@ impl CollisionView for MinecartCollision<'_> {
     }
 
     fn is_water(&self, x: i32, y: i32, z: i32) -> bool {
-        let name = (self.block_state)(x, y, z);
-        crate::fluid::fluid_state_of(&name).is_some_and(|s| matches!(s.kind, crate::fluid::FluidKind::Water))
+        super::block_ids::fluid_state_id((self.block_state)(x, y, z))
+            .is_some_and(|s| matches!(s.kind, crate::fluid::FluidKind::Water))
     }
 }
 
@@ -479,7 +485,7 @@ fn current_block_pos_or_rail_below(view: &MinecartCollision<'_>, position: Vec3d
     let xt = position.x.floor() as i32;
     let mut yt = position.y.floor() as i32;
     let zt = position.z.floor() as i32;
-    if is_rail_block(&view.state_at(xt, yt - 1, zt)) {
+    if is_rail_block_id(view.state_at(xt, yt - 1, zt)) {
         yt -= 1;
     }
     BlockPos::new(xt, yt, zt)
@@ -494,14 +500,14 @@ fn current_pos_along_rail(view: &MinecartCollision<'_>, x: f64, y: f64, z: f64) 
     let xt = x.floor() as i32;
     let mut yt = y.floor() as i32;
     let zt = z.floor() as i32;
-    if is_rail_block(&view.state_at(xt, yt - 1, zt)) {
+    if is_rail_block_id(view.state_at(xt, yt - 1, zt)) {
         yt -= 1;
     }
     let state = view.state_at(xt, yt, zt);
-    if !is_rail_block(&state) {
+    if !is_rail_block_id(state) {
         return None;
     }
-    let shape = rail_shape(&state)?;
+    let shape = rail_shape_id(state)?;
     let (exit0, exit1) = shape.exits();
     let x0 = f64::from(xt) + 0.5 + f64::from(exit0.0) * 0.5;
     let y0 = f64::from(yt) + 0.0625 + f64::from(exit0.1) * 0.5;
@@ -727,7 +733,7 @@ impl<'w> MobSim<'w> {
     /// `tick_vehicles`/`tick_tnt`'s own reason: this sim's `world` is a
     /// spawn-time snapshot, so a driver with the real `ChunkSource` supplies
     /// the answer instead (`tick::run_tick_loop`).
-    pub fn tick_minecarts(&mut self, block_state: &dyn Fn(i32, i32, i32) -> String) {
+    pub fn tick_minecarts(&mut self, block_state: &dyn Fn(i32, i32, i32) -> lodestone_data::block_states::StateId) {
         self.clear_disconnected_minecart_riders();
         let mut ids: Vec<i32> = self.minecarts.keys().copied().collect();
         ids.sort_unstable();
@@ -750,7 +756,7 @@ impl<'w> MobSim<'w> {
     /// writer restores the serial slots before it does either.
     pub(crate) fn tick_minecart_owner_batches(
         &mut self,
-        block_state: &(dyn Fn(i32, i32, i32) -> String + Sync),
+        block_state: &(dyn Fn(i32, i32, i32) -> lodestone_data::block_states::StateId + Sync),
     ) -> Vec<MinecartTickOwnerBatch> {
         self.clear_disconnected_minecart_riders();
         self.minecart_owner_plan = self
@@ -773,7 +779,7 @@ impl<'w> MobSim<'w> {
 
     fn tick_minecart_owner_batches_with_workers(
         &self,
-        block_state: &(dyn Fn(i32, i32, i32) -> String + Sync),
+        block_state: &(dyn Fn(i32, i32, i32) -> lodestone_data::block_states::StateId + Sync),
         worker_count: usize,
     ) -> Vec<MinecartTickOwnerBatch> {
         let mut ids: Vec<i32> = self.minecarts.keys().copied().collect();
@@ -955,7 +961,7 @@ fn merge_minecart_tick_owner_batches(
 
 fn tick_one_minecart(
     cart: &mut TrackedMinecart,
-    block_state: &dyn Fn(i32, i32, i32) -> String,
+    block_state: &dyn Fn(i32, i32, i32) -> lodestone_data::block_states::StateId,
 ) -> Option<(Vec3, f32)> {
     let view = MinecartCollision { block_state };
     let profile = PhysicsProfile::default();
@@ -966,10 +972,10 @@ fn tick_one_minecart(
 
     let pos = current_block_pos_or_rail_below(&view, cart.motion.position);
     let state = view.state_at(pos.x, pos.y, pos.z);
-    if is_rail_block(&state) {
-        move_along_track(cart, pos, &state, &view, &profile, wet);
-        if base_name(&state) == crate::redstone_rail::ACTIVATOR_RAIL {
-            let active = get_bool_property(&state, "powered").unwrap_or(false);
+    if is_rail_block_id(state) {
+        move_along_track(cart, pos, state, &view, &profile, wet);
+        if state.block() == crate::redstone_rail::ACTIVATOR_RAIL {
+            let active = get_bool_property(state, PropertyKey::Powered).unwrap_or(false);
             apply_activation(cart, active);
         }
     } else {
@@ -1055,7 +1061,7 @@ fn apply_activation(cart: &mut TrackedMinecart, active: bool) {
 fn move_along_track(
     cart: &mut TrackedMinecart,
     pos: BlockPos,
-    state: &str,
+    state: lodestone_data::block_states::StateId,
     view: &MinecartCollision<'_>,
     profile: &PhysicsProfile,
     wet: bool,
@@ -1065,8 +1071,8 @@ fn move_along_track(
     let mut y = f64::from(pos.y);
     let mut power_track = false;
     let mut halt_track = false;
-    if base_name(state) == crate::redstone_rail::POWERED_RAIL {
-        let powered = get_bool_property(state, "powered").unwrap_or(false);
+    if state.block() == crate::redstone_rail::POWERED_RAIL {
+        let powered = get_bool_property(state, PropertyKey::Powered).unwrap_or(false);
         power_track = powered;
         halt_track = !powered;
     }
@@ -1076,7 +1082,7 @@ fn move_along_track(
         slide_speed *= 0.2;
     }
 
-    let Some(shape) = rail_shape(state) else { return };
+    let Some(shape) = rail_shape_id(state) else { return };
     match shape {
         RailShape::AscendingEast => {
             cart.motion.velocity.x -= slide_speed;
@@ -1187,16 +1193,16 @@ fn move_along_track(
         } else {
             match shape {
                 RailShape::EastWest => {
-                    if is_redstone_conductor(&view.state_at(pos.x - 1, pos.y, pos.z)) {
+                    if is_redstone_conductor(view.state_at(pos.x - 1, pos.y, pos.z)) {
                         cart.motion.velocity.x = POWERED_STALL_NUDGE;
-                    } else if is_redstone_conductor(&view.state_at(pos.x + 1, pos.y, pos.z)) {
+                    } else if is_redstone_conductor(view.state_at(pos.x + 1, pos.y, pos.z)) {
                         cart.motion.velocity.x = -POWERED_STALL_NUDGE;
                     }
                 }
                 RailShape::NorthSouth => {
-                    if is_redstone_conductor(&view.state_at(pos.x, pos.y, pos.z - 1)) {
+                    if is_redstone_conductor(view.state_at(pos.x, pos.y, pos.z - 1)) {
                         cart.motion.velocity.z = POWERED_STALL_NUDGE;
-                    } else if is_redstone_conductor(&view.state_at(pos.x, pos.y, pos.z + 1)) {
+                    } else if is_redstone_conductor(view.state_at(pos.x, pos.y, pos.z + 1)) {
                         cart.motion.velocity.z = -POWERED_STALL_NUDGE;
                     }
                 }
@@ -1261,6 +1267,10 @@ mod tests {
     use super::*;
     use super::super::ChunkWorld;
 
+    fn state(name: &str) -> lodestone_data::block_states::StateId {
+        lodestone_data::block_states::StateId::from_state_str(name).unwrap()
+    }
+
     fn sim() -> MobSim<'static> {
         let world: &'static ChunkWorld = Box::leak(Box::new(ChunkWorld::new(-64, 384)));
         MobSim::new(world)
@@ -1288,12 +1298,12 @@ mod tests {
         sim
     }
 
-    fn flat_world() -> impl Fn(i32, i32, i32) -> String {
+    fn flat_world() -> impl Fn(i32, i32, i32) -> lodestone_data::block_states::StateId {
         |_x, y, _z| {
             if y <= 60 {
-                "minecraft:stone".to_owned()
+                state("minecraft:stone")
             } else {
-                "minecraft:air".to_owned()
+                state("minecraft:air")
             }
         }
     }
@@ -1432,14 +1442,14 @@ mod tests {
     /// A flat stone floor at `y = 60`, plain rail at `y = 61` running
     /// north/south through `x = 8`, air everywhere else — the minimum rig a
     /// cart can sit on.
-    fn straight_rail() -> impl Fn(i32, i32, i32) -> String {
+    fn straight_rail() -> impl Fn(i32, i32, i32) -> lodestone_data::block_states::StateId {
         |x, y, z| {
             if x == 8 && y == 61 && (0..20).contains(&z) {
-                "minecraft:rail[shape=north_south,waterlogged=false]".to_owned()
+                state("minecraft:rail[shape=north_south,waterlogged=false]")
             } else if y <= 60 {
-                "minecraft:stone".to_owned()
+                state("minecraft:stone")
             } else {
-                "minecraft:air".to_owned()
+                state("minecraft:air")
             }
         }
     }
@@ -1469,18 +1479,18 @@ mod tests {
     /// component here.
     #[test]
     fn a_minecart_follows_a_curved_rail_rather_than_going_straight() {
-        let world = |x: i32, y: i32, z: i32| -> String {
+        let world = |x: i32, y: i32, z: i32| -> lodestone_data::block_states::StateId {
             if y == 61 && x == 8 && (5..8).contains(&z) {
-                "minecraft:rail[shape=north_south,waterlogged=false]".to_owned()
+                state("minecraft:rail[shape=north_south,waterlogged=false]")
             } else if y == 61 && x == 8 && z == 8 {
                 // Curve: SOUTH_EAST joins the -z approach to the +x exit.
-                "minecraft:rail[shape=south_east,waterlogged=false]".to_owned()
+                state("minecraft:rail[shape=south_east,waterlogged=false]")
             } else if y == 61 && z == 8 && (9..13).contains(&x) {
-                "minecraft:rail[shape=east_west,waterlogged=false]".to_owned()
+                state("minecraft:rail[shape=east_west,waterlogged=false]")
             } else if y <= 60 {
-                "minecraft:stone".to_owned()
+                state("minecraft:stone")
             } else {
-                "minecraft:air".to_owned()
+                state("minecraft:air")
             }
         };
         let mut sim = sim();
@@ -1514,18 +1524,18 @@ mod tests {
     /// rail cell, not merely "move".
     #[test]
     fn a_minecart_climbs_an_ascending_rail() {
-        let world = |x: i32, y: i32, z: i32| -> String {
+        let world = |x: i32, y: i32, z: i32| -> lodestone_data::block_states::StateId {
             if x == 8 && z == 10 && y == 61 {
-                "minecraft:rail[shape=north_south,waterlogged=false]".to_owned()
+                state("minecraft:rail[shape=north_south,waterlogged=false]")
             } else if x == 8 && z == 9 && y == 61 {
                 // Ascends toward -z (north): the +z exit is the low one.
-                "minecraft:rail[shape=ascending_north,waterlogged=false]".to_owned()
+                state("minecraft:rail[shape=ascending_north,waterlogged=false]")
             } else if x == 8 && z == 8 && y == 62 {
-                "minecraft:rail[shape=north_south,waterlogged=false]".to_owned()
+                state("minecraft:rail[shape=north_south,waterlogged=false]")
             } else if y <= 60 {
-                "minecraft:stone".to_owned()
+                state("minecraft:stone")
             } else {
-                "minecraft:air".to_owned()
+                state("minecraft:air")
             }
         };
         let mut sim = sim();
@@ -1587,13 +1597,13 @@ mod tests {
     /// fires and the cart picks up exactly `0.02` of `+z` velocity.
     #[test]
     fn a_powered_rail_nudges_a_stalled_cart_by_the_real_stall_constant() {
-        let world = |x: i32, y: i32, z: i32| -> String {
+        let world = |x: i32, y: i32, z: i32| -> lodestone_data::block_states::StateId {
             if x == 8 && y == 61 && (0..3).contains(&z) {
-                "minecraft:powered_rail[shape=north_south,powered=true]".to_owned()
+                state("minecraft:powered_rail[shape=north_south,powered=true]")
             } else if y <= 60 {
-                "minecraft:stone".to_owned()
+                state("minecraft:stone")
             } else {
-                "minecraft:air".to_owned()
+                state("minecraft:air")
             }
         };
         let mut sim = sim();
@@ -1631,13 +1641,13 @@ mod tests {
     /// fuse, and running it out must detonate through the shared pipeline.
     #[test]
     fn an_activator_rail_primes_a_tnt_minecart_and_it_detonates() {
-        let world = |x: i32, y: i32, z: i32| -> String {
+        let world = |x: i32, y: i32, z: i32| -> lodestone_data::block_states::StateId {
             if x == 8 && y == 61 && z == 5 {
-                "minecraft:activator_rail[shape=north_south,powered=true]".to_owned()
+                state("minecraft:activator_rail[shape=north_south,powered=true]")
             } else if y <= 60 {
-                "minecraft:stone".to_owned()
+                state("minecraft:stone")
             } else {
-                "minecraft:air".to_owned()
+                state("minecraft:air")
             }
         };
         let mut sim = sim();
@@ -1649,13 +1659,13 @@ mod tests {
         // Move it off the activator rail so the fuse just counts down rather
         // than being re-primed (already primed, priming again is a no-op
         // regardless, but a plain rail is the honest rest-of-track rig).
-        let plain_track = |x: i32, y: i32, z: i32| -> String {
+        let plain_track = |x: i32, y: i32, z: i32| -> lodestone_data::block_states::StateId {
             if x == 8 && y == 61 && z == 5 {
-                "minecraft:rail[shape=north_south,waterlogged=false]".to_owned()
+                state("minecraft:rail[shape=north_south,waterlogged=false]")
             } else if y <= 60 {
-                "minecraft:stone".to_owned()
+                state("minecraft:stone")
             } else {
-                "minecraft:air".to_owned()
+                state("minecraft:air")
             }
         };
         // 79 more ticks to walk the fuse down from 79 to 0 (one decrement per
@@ -1729,11 +1739,11 @@ mod tests {
     /// [`is_rail_block`] accepts exactly the four rail block ids.
     #[test]
     fn is_rail_block_accepts_exactly_the_four_rail_blocks() {
-        assert!(is_rail_block("minecraft:rail[shape=north_south,waterlogged=false]"));
-        assert!(is_rail_block("minecraft:powered_rail[shape=north_south,powered=false]"));
-        assert!(is_rail_block("minecraft:activator_rail[shape=north_south,powered=false]"));
-        assert!(is_rail_block("minecraft:detector_rail[shape=north_south,powered=false]"));
-        assert!(!is_rail_block("minecraft:stone"));
+        assert!(is_rail_block(state("minecraft:rail[shape=north_south,waterlogged=false]")));
+        assert!(is_rail_block(state("minecraft:powered_rail[shape=north_south,powered=false]")));
+        assert!(is_rail_block(state("minecraft:activator_rail[shape=north_south,powered=false]")));
+        assert!(is_rail_block(state("minecraft:detector_rail[shape=north_south,powered=false]")));
+        assert!(!is_rail_block(state("minecraft:stone")));
     }
 
     /// [`placement_position`] — `MinecartItem.useOn`'s own offset: `0.0625`

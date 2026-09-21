@@ -90,6 +90,10 @@ fn block_name_at_alphabetical_index(index: u16) -> &'static str {
 pub struct StateId(u32);
 
 impl StateId {
+    /// The canonical air state. The generated table reserves raw id zero for
+    /// the default air state.
+    pub const AIR: Self = Self(0);
+
     /// Validates a raw global block-state id, or `None` if it is not in
     /// `0..`[`STATE_COUNT`].
     #[must_use]
@@ -101,6 +105,16 @@ impl StateId {
     #[must_use]
     pub const fn raw(self) -> u32 {
         self.0
+    }
+
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+
+    #[must_use]
+    pub const fn from_raw(raw: u16) -> Self {
+        Self(raw as u32)
     }
 
     /// The canonical namespaced block name this state belongs to.

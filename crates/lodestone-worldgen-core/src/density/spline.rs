@@ -1,8 +1,9 @@
 //! Cubic spline evaluation for the `spline` density function.
 //!
-//! Reproduces vanilla's own cubic-spline class — all arithmetic in `f32`, exactly
-//! as vanilla (the coordinate value is cast to `float` before sampling and every
-//! interpolation is single-precision).
+//! This is the source/reference representation — all arithmetic in `f32`,
+//! exactly as the data contract requires (the coordinate value is cast to
+//! `f32` before sampling and every interpolation is single-precision). The
+//! compiled point engine replaces this boxed representation on hot paths.
 
 use super::{Context, Density};
 

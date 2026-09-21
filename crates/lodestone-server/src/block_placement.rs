@@ -27,11 +27,9 @@
 //!
 //! # How to change it
 //!
-//! Add an arm to [`placement`], keyed off [`Shape`] where possible. Never
-//! compute a state **id** here: return a state *string* naming only the
-//! properties you mean and let `v770`'s `resolve_state_id` write them over the
-//! jar-marked default state. Re-deriving id arithmetic is how a past
-//! regression here happened.
+//! Add an arm to [`placement`], keyed off [`Shape`] where possible. Construct
+//! the result through the typed property table so placement never re-parses a
+//! state string on the gameplay path.
 //!
 //! Gotcha: `cursor` is block-local to the **clicked** block, and vanilla's
 //! `getClickLocation().y - getClickedPos().getY()` is relative to the
@@ -42,12 +40,13 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
-use lodestone_data::block_states::{self, BlockStateValue};
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey};
+use lodestone_data::block_states::{self, StateId};
 use lodestone_model::{BlockFace, BlockPos, Vec3f};
 
-use crate::chunk::is_air_or_fluid;
 use crate::neighbor_update::Direction;
-use crate::redstone::{base_name, direction_to_str, get_str_property, with_property, WorldState};
+use crate::redstone::{base_name, direction_from_property, direction_property, get_str_property, with_property, WorldState};
 
 /// Everything a placement decision can read: where it landed, how it was
 /// clicked, and where the player was looking.
@@ -77,40 +76,37 @@ pub(crate) struct PlaceContext {
 /// partner's re-typing).
 #[derive(Debug, Clone)]
 pub(crate) struct Placement {
-    pub state: BlockStateValue,
-    pub extra: Vec<(BlockPos, BlockStateValue)>,
+    pub state: StateId,
+    pub extra: Vec<(BlockPos, StateId)>,
 }
 
 /// Adds the fluid state that belongs to every cell owned by a placement.
 ///
-/// A placement state is intentionally assembled as a partial property string:
-/// the block-state resolver fills registered defaults at the numeric boundary.
-/// Waterlogging is different because it is read from the world at each owned
-/// position, so it must be written before the state reaches storage. The source
-/// check also keeps a flowing cell from being mistaken for a placeable water
-/// source.
+/// Waterlogging is read from the world at each owned position and applied to
+/// the typed state before it reaches storage.
 pub(crate) fn apply_waterlogging<F>(mut placement: Placement, primary: BlockPos, block_at: F) -> Placement
 where
     F: Fn(BlockPos) -> WorldState,
 {
-    let add = |pos: BlockPos, state: BlockStateValue| {
-        let Some(id) = state.state_id() else {
-            return state;
-        };
-        let waterloggable = id
-            .properties()
-            .iter()
-            .any(|&(key, _)| key == "waterlogged");
+    let add = |pos: BlockPos, state: StateId| {
+        let waterloggable = Properties::from_state_id(state)
+            .get(PropertyKey::Waterlogged)
+            .is_some();
         if !waterloggable {
             return state;
         }
-        let waterlogged = crate::fluid::fluid_state_of(&block_at(pos))
+        let waterlogged = crate::fluid::fluid_state_of_id(block_at(pos))
             .is_some_and(|fluid| fluid.kind == crate::fluid::FluidKind::Water && fluid.is_source());
-        BlockStateValue::parse(&with_property(
-            state.as_str(),
-            "waterlogged",
-            if waterlogged { "true" } else { "false" },
-        ))
+        with_property(
+            state,
+            PropertyKey::Waterlogged,
+            lodestone_data::block_properties::PropertyValue::builtin(if waterlogged {
+                BuiltinPropertyValue::True
+            } else {
+                BuiltinPropertyValue::False
+            }),
+        )
+        .unwrap_or(state)
     };
 
     placement.state = add(primary, placement.state);
@@ -135,8 +131,8 @@ pub(crate) fn validate_placement<F>(
 where
     F: Fn(BlockPos) -> WorldState,
 {
-    let mut planned = HashMap::with_capacity(placement.extra.len() + 1);
-    if planned.insert(primary, &placement.state).is_some() {
+    let mut planned: HashMap<BlockPos, StateId> = HashMap::with_capacity(placement.extra.len() + 1);
+    if planned.insert(primary, placement.state).is_some() {
         return false;
     }
 
@@ -151,53 +147,81 @@ where
             return false;
         }
         let current = block_at(*pos);
-        if !is_air_or_fluid(&current) && !can_retype_container(&current, state.as_str()) {
+        if !crate::chunk::is_air_or_fluid_id(current) && !can_retype_container(current, *state) {
             return false;
         }
-        planned.insert(*pos, state);
+        planned.insert(*pos, *state);
     }
 
     let hypothetical = |pos: BlockPos| {
         planned
             .get(&pos)
-            .map(|state| WorldState::from(state.as_str()))
+            .copied()
             .unwrap_or_else(|| block_at(pos))
     };
     planned
         .iter()
-        .all(|(pos, state)| crate::block_support::survives(*pos, state.as_str(), hypothetical))
+        .all(|(pos, state)| crate::block_support::survives(*pos, *state, hypothetical))
 }
 
 /// A paired container is the one intentional exception to the usual
 /// replaceable-cell rule: its existing single half is re-typed as the other
 /// half of the new arrangement. No other occupied cell may be overwritten by
 /// a multi-cell placement.
-fn can_retype_container(existing: &str, replacement: &str) -> bool {
+fn can_retype_container(existing: StateId, replacement: StateId) -> bool {
     base_name(existing) == base_name(replacement)
-        && get_str_property(existing, "type") == Some("single")
+        && get_str_property(existing, PropertyKey::Type) == Some(BuiltinPropertyValue::Single)
         && matches!(
-            get_str_property(replacement, "type"),
-            Some("left" | "right")
+            get_str_property(replacement, PropertyKey::Type),
+            Some(BuiltinPropertyValue::Left | BuiltinPropertyValue::Right)
         )
 }
 
 impl Placement {
-    fn just(state: String) -> Self {
+    fn just(state: StateId) -> Self {
         Self {
-            state: BlockStateValue::parse(&state),
+            state,
             extra: Vec::new(),
         }
     }
 
-    fn with_extra(state: String, extra: Vec<(BlockPos, String)>) -> Self {
+    fn with_extra(state: StateId, extra: Vec<(BlockPos, StateId)>) -> Self {
         Self {
-            state: BlockStateValue::parse(&state),
-            extra: extra
-                .into_iter()
-                .map(|(pos, state)| (pos, BlockStateValue::parse(&state)))
-                .collect(),
+            state,
+            extra,
         }
     }
+}
+
+fn state_with(block: &str, pairs: &[(PropertyKey, BuiltinPropertyValue)]) -> StateId {
+    let block = Block::from_name(block).expect("placement block must be registered");
+    state_with_block(block, pairs)
+}
+
+fn state_with_block(block: Block, pairs: &[(PropertyKey, BuiltinPropertyValue)]) -> StateId {
+    let mut properties = Properties::from_state_id(block.default_state());
+    for &(key, value) in pairs {
+        properties = properties
+            .with_builtin(key, value)
+            .expect("placement property must be valid for the block");
+    }
+    Properties::state_for_block(block, &properties).expect("placement state must exist")
+}
+
+fn direction_value(direction: Direction) -> BuiltinPropertyValue {
+    direction_property(direction)
+}
+
+fn axis_value(face: BlockFace) -> BuiltinPropertyValue {
+    match face {
+        BlockFace::Up | BlockFace::Down => BuiltinPropertyValue::Y,
+        BlockFace::North | BlockFace::South => BuiltinPropertyValue::Z,
+        BlockFace::East | BlockFace::West => BuiltinPropertyValue::X,
+    }
+}
+
+fn numeric_value(value: u8) -> BuiltinPropertyValue {
+    crate::redstone::numeric_property_value(value).expect("generated numeric property value")
 }
 
 /// `Block.getStateForPlacement` for `block`, or `None` when this crate has no
@@ -214,9 +238,9 @@ where
     // the redirect runs before any family dispatch.
     if let Some(wall) = wall_variant(block, ctx.face) {
         let facing = horizontal_face(ctx.face)?;
-        return Some(Placement::just(format!(
-            "{wall}[facing={}]",
-            direction_to_str(facing)
+        return Some(Placement::just(state_with(
+            wall,
+            &[(PropertyKey::Facing, direction_value(facing))],
         )));
     }
 
@@ -231,25 +255,23 @@ where
     // no generic "notify this block when a vertical neighbour changes" seam to
     // hook that into yet, so an already-placed note block's `instrument` goes
     // stale in that case — a real, currently-unclosed gap, not a silent one.
-    if base_name(block) == crate::redstone_note_block::NOTE_BLOCK {
+    if block == "minecraft:note_block" {
         let above = block_at(Direction::Up.relative(ctx.target));
         let below = block_at(Direction::Down.relative(ctx.target));
-        let instrument = crate::redstone_note_block::instrument_for_note_block(&above, &below);
-        return Some(Placement::just(format!(
-            "{block}[instrument={}]",
-            instrument.state_name()
+        let instrument = crate::redstone_note_block::instrument_for_note_block(above, below);
+        return Some(Placement::just(state_with(
+            block,
+            &[(PropertyKey::Instrument, instrument.state_value())],
         )));
     }
 
     let shape = shape_of(block)?;
 
     if shape.pillar_axis {
-        let axis = match ctx.face {
-            BlockFace::Up | BlockFace::Down => "y",
-            BlockFace::North | BlockFace::South => "z",
-            BlockFace::East | BlockFace::West => "x",
-        };
-        return Some(Placement::just(format!("{block}[axis={axis}]")));
+        return Some(Placement::just(state_with(
+            block,
+            &[(PropertyKey::Axis, axis_value(ctx.face))],
+        )));
     }
 
     if shape.slab_type {
@@ -275,23 +297,34 @@ where
     if shape.bed_part {
         let facing = horizontal_look(ctx)?;
         return Some(Placement::with_extra(
-            format!("{block}[facing={},part=foot]", direction_to_str(facing)),
+            state_with(block, &[
+                (PropertyKey::Facing, direction_value(facing)),
+                (PropertyKey::Part, BuiltinPropertyValue::Foot),
+            ]),
             vec![(
                 facing.relative(ctx.target),
-                format!("{block}[facing={},part=head]", direction_to_str(facing)),
+                state_with(block, &[
+                    (PropertyKey::Facing, direction_value(facing)),
+                    (PropertyKey::Part, BuiltinPropertyValue::Head),
+                ]),
             )],
         ));
     }
 
     if block == "minecraft:small_dripleaf" {
         let facing = horizontal_look(ctx)?.opposite();
-        let facing = direction_to_str(facing);
         return Some(Placement::with_extra(
-            format!("{block}[facing={facing},half=lower]"),
+            state_with(block, &[
+                (PropertyKey::Facing, direction_value(facing)),
+                (PropertyKey::Half, BuiltinPropertyValue::Lower),
+            ]),
             vec![
                 (
                     Direction::Up.relative(ctx.target),
-                    format!("{block}[facing={facing},half=upper]"),
+                    state_with(block, &[
+                        (PropertyKey::Facing, direction_value(facing)),
+                        (PropertyKey::Half, BuiltinPropertyValue::Upper),
+                    ]),
                 ),
             ],
         ));
@@ -299,10 +332,10 @@ where
 
     if DOUBLE_CELL_PLANTS.contains(&block) {
         return Some(Placement::with_extra(
-            format!("{block}[half=lower]"),
+            state_with(block, &[(PropertyKey::Half, BuiltinPropertyValue::Lower)]),
             vec![(
                 Direction::Up.relative(ctx.target),
-                format!("{block}[half=upper]"),
+                state_with(block, &[(PropertyKey::Half, BuiltinPropertyValue::Upper)]),
             )],
         ));
     }
@@ -315,27 +348,27 @@ where
         // the floor — so the clicked face stands in for the walk plus the
         // survival filter this crate does not model.
         let (face, facing) = match ctx.face {
-            BlockFace::Up => ("floor", horizontal_look(ctx)?),
-            BlockFace::Down => ("ceiling", horizontal_look(ctx)?),
-            other => ("wall", horizontal_face(other)?),
+            BlockFace::Up => (BuiltinPropertyValue::Floor, horizontal_look(ctx)?),
+            BlockFace::Down => (BuiltinPropertyValue::Ceiling, horizontal_look(ctx)?),
+            other => (BuiltinPropertyValue::Wall, horizontal_face(other)?),
         };
-        return Some(Placement::just(format!(
-            "{block}[face={face},facing={}]",
-            direction_to_str(facing)
-        )));
+        return Some(Placement::just(state_with(block, &[
+            (PropertyKey::Face, face),
+            (PropertyKey::Facing, direction_value(facing)),
+        ])));
     }
 
     if shape.bell_attachment {
         // `BellBlock.getStateForPlacement`.
         let (attachment, facing) = match ctx.face {
-            BlockFace::Up => ("floor", horizontal_look(ctx)?),
-            BlockFace::Down => ("ceiling", horizontal_look(ctx)?),
-            other => ("single_wall", horizontal_face(other)?.opposite()),
+            BlockFace::Up => (BuiltinPropertyValue::Floor, horizontal_look(ctx)?),
+            BlockFace::Down => (BuiltinPropertyValue::Ceiling, horizontal_look(ctx)?),
+            other => (BuiltinPropertyValue::SingleWall, horizontal_face(other)?.opposite()),
         };
-        return Some(Placement::just(format!(
-            "{block}[attachment={attachment},facing={}]",
-            direction_to_str(facing)
-        )));
+        return Some(Placement::just(state_with(block, &[
+            (PropertyKey::Attachment, attachment),
+            (PropertyKey::Facing, direction_value(facing)),
+        ])));
     }
 
     if shape.rotation16 {
@@ -343,25 +376,24 @@ where
         // `BannerBlock.getStateForPlacement` offset the yaw by 180°, `SkullBlock.getStateForPlacement`
         // does not.
         let yaw = ctx.yaw?;
-        let offset = if base_name(block).ends_with("_skull") || base_name(block).ends_with("_head") {
+        let offset = if block.ends_with("_skull") || block.ends_with("_head") {
             0.0
         } else {
             180.0
         };
-        return Some(Placement::just(format!(
-            "{block}[rotation={}]",
-            rotation_segment(yaw + offset)
-        )));
+        return Some(Placement::just(state_with(block, &[
+            (PropertyKey::Rotation, numeric_value(rotation_segment(yaw + offset) as u8)),
+        ])));
     }
 
     if shape.rail_shape {
         // `BaseRailBlock.getStateForPlacement`.
         let facing = horizontal_look(ctx)?;
-        let axis = match facing {
-            Direction::East | Direction::West => "east_west",
-            _ => "north_south",
+        let shape = match facing {
+            Direction::East | Direction::West => BuiltinPropertyValue::EastWest,
+            _ => BuiltinPropertyValue::NorthSouth,
         };
-        return Some(Placement::just(format!("{block}[shape={axis}]")));
+        return Some(Placement::just(state_with(block, &[(PropertyKey::Shape, shape)])));
     }
 
     if shape.facing_vertical {
@@ -370,9 +402,9 @@ where
 
     if shape.facing_horizontal {
         let facing = horizontal_facing(block, ctx)?;
-        return Some(Placement::just(format!(
-            "{block}[facing={}]",
-            direction_to_str(facing)
+        return Some(Placement::just(state_with(
+            block,
+            &[(PropertyKey::Facing, direction_value(facing))],
         )));
     }
 
@@ -430,7 +462,7 @@ fn facing_is_clicked_face(block: &str) -> bool {
 }
 
 /// `DirectionalBlock`-family placement.
-fn six_way_state<F>(block: &str, ctx: &PlaceContext, block_at: &F) -> Option<String>
+fn six_way_state<F>(block: &str, ctx: &PlaceContext, block_at: &F) -> Option<StateId>
 where
     F: Fn(BlockPos) -> WorldState,
 {
@@ -447,8 +479,10 @@ where
         // when the block behind is an end rod already pointing this way, so a
         // chain of rods alternates instead of stacking.
         let behind = block_at(clicked.opposite().relative(ctx.target));
-        let chained = base_name(&behind) == "minecraft:end_rod"
-            && get_str_property(&behind, "facing") == Some(direction_to_str(clicked));
+        let chained = base_name(behind) == Block::EndRod
+            && get_str_property(behind, PropertyKey::Facing)
+                .and_then(direction_from_property)
+                == Some(clicked);
         if chained { clicked.opposite() } else { clicked }
     } else if facing_is_clicked_face(block) {
         clicked
@@ -461,60 +495,66 @@ where
         // `getNearestLookingDirection().getOpposite()`.
         nearest_look(ctx)?.opposite()
     };
-    Some(format!("{block}[facing={}]", direction_to_str(facing)))
+    Some(state_with(
+        block,
+        &[(PropertyKey::Facing, direction_value(facing))],
+    ))
 }
 
 /// `SlabBlock.getStateForPlacement`. The `double` arm fires when the
 /// cell already holds a matching half-slab, which is why the caller must offer
 /// a slab cell as replaceable.
-fn slab_state<F>(block: &str, ctx: &PlaceContext, block_at: &F) -> String
+fn slab_state<F>(block: &str, ctx: &PlaceContext, block_at: &F) -> StateId
 where
     F: Fn(BlockPos) -> WorldState,
 {
     let existing = block_at(ctx.target);
-    if base_name(&existing) == block && get_str_property(&existing, "type") != Some("double") {
-        return format!("{block}[type=double]");
+    if existing.block().name() == block
+        && get_str_property(existing, PropertyKey::Type) != Some(BuiltinPropertyValue::Double)
+    {
+        return state_with(block, &[(PropertyKey::Type, BuiltinPropertyValue::Double)]);
     }
-    let kind = if upper_half(ctx) { "top" } else { "bottom" };
-    format!("{block}[type={kind}]")
+    let kind = if upper_half(ctx) { BuiltinPropertyValue::Top } else { BuiltinPropertyValue::Bottom };
+    state_with(block, &[(PropertyKey::Type, kind)])
 }
 
 /// `StairBlock.getStateForPlacement` — facing from the look
 /// direction, `half` from the click, `shape` from the two neighbours on the
 /// facing axis.
-fn stair_state<F>(block: &str, ctx: &PlaceContext, block_at: &F) -> Option<String>
+fn stair_state<F>(block: &str, ctx: &PlaceContext, block_at: &F) -> Option<StateId>
 where
     F: Fn(BlockPos) -> WorldState,
 {
     let facing = horizontal_look(ctx)?;
-    let half = if upper_half(ctx) { "top" } else { "bottom" };
+    let half = if upper_half(ctx) { BuiltinPropertyValue::Top } else { BuiltinPropertyValue::Bottom };
     let shape = stair_shape(ctx.target, facing, half, block_at);
-    Some(format!(
-        "{block}[facing={},half={half},shape={shape}]",
-        direction_to_str(facing)
-    ))
+    Some(state_with(block, &[
+        (PropertyKey::Facing, direction_value(facing)),
+        (PropertyKey::Half, half),
+        (PropertyKey::Shape, shape),
+    ]))
 }
 
 /// `StairBlock.getStairsShape`, including the `canTakeShape`
 /// guard that stops a run of parallel stairs from cornering.
-fn stair_shape<F>(pos: BlockPos, facing: Direction, half: &str, block_at: &F) -> &'static str
+fn stair_shape<F>(pos: BlockPos, facing: Direction, half: BuiltinPropertyValue, block_at: &F) -> BuiltinPropertyValue
 where
     F: Fn(BlockPos) -> WorldState,
 {
     let stair_facing = |p: BlockPos| -> Option<Direction> {
         let state = block_at(p);
-        if !base_name(&state).ends_with("_stairs") || get_str_property(&state, "half") != Some(half) {
+        if !state.block().path().ends_with("_stairs") || get_str_property(state, PropertyKey::Half) != Some(half) {
             return None;
         }
-        get_str_property(&state, "facing").map(crate::redstone::direction_from_str)
+        get_str_property(state, PropertyKey::Facing).and_then(direction_from_property)
     };
     // `canTakeShape`: the cell one step towards `neighbour` must not be a
     // stair with the same facing *and* half.
     let can_take = |neighbour: Direction| -> bool {
         let state = block_at(neighbour.relative(pos));
-        !base_name(&state).ends_with("_stairs")
-            || get_str_property(&state, "facing") != Some(direction_to_str(facing))
-            || get_str_property(&state, "half") != Some(half)
+        !state.block().path().ends_with("_stairs")
+            || get_str_property(state, PropertyKey::Facing).and_then(direction_from_property) != Some(facing)
+            || get_str_property(state, PropertyKey::Half) != Some(half)
     };
     let axis_differs = |other: Direction| -> bool {
         matches!(
@@ -527,41 +567,41 @@ where
     if let Some(behind) = stair_facing(facing.relative(pos)) {
         if axis_differs(behind) && can_take(behind.opposite()) {
             return if behind == facing.counterclockwise() {
-                "outer_left"
+                BuiltinPropertyValue::OuterLeft
             } else {
-                "outer_right"
+                BuiltinPropertyValue::OuterRight
             };
         }
     }
     if let Some(front) = stair_facing(facing.opposite().relative(pos)) {
         if axis_differs(front) && can_take(front) {
             return if front == facing.counterclockwise() {
-                "inner_left"
+                BuiltinPropertyValue::InnerLeft
             } else {
-                "inner_right"
+                BuiltinPropertyValue::InnerRight
             };
         }
     }
-    "straight"
+    BuiltinPropertyValue::Straight
 }
 
 /// `TrapDoorBlock.getStateForPlacement`.
-fn trapdoor_state(block: &str, ctx: &PlaceContext) -> Option<String> {
+fn trapdoor_state(block: &str, ctx: &PlaceContext) -> Option<StateId> {
     let (facing, half) = match horizontal_face(ctx.face) {
         // Clicked a side: the trapdoor hangs on that side, hinged at whichever
         // half of the block the cursor landed in.
-        Some(side) => (side, if ctx.cursor.y > 0.5 { "top" } else { "bottom" }),
+        Some(side) => (side, if ctx.cursor.y > 0.5 { BuiltinPropertyValue::Top } else { BuiltinPropertyValue::Bottom }),
         // Clicked top or bottom: facing away from the player, hinged opposite
         // the clicked face.
         None => (
             horizontal_look(ctx)?.opposite(),
-            if matches!(ctx.face, BlockFace::Up) { "bottom" } else { "top" },
+            if matches!(ctx.face, BlockFace::Up) { BuiltinPropertyValue::Bottom } else { BuiltinPropertyValue::Top },
         ),
     };
-    Some(format!(
-        "{block}[facing={},half={half}]",
-        direction_to_str(facing)
-    ))
+    Some(state_with(block, &[
+        (PropertyKey::Facing, direction_value(facing)),
+        (PropertyKey::Half, half),
+    ]))
 }
 
 /// `DoorBlock.getStateForPlacement` plus `DoorBlock.setPlacedBy`,
@@ -572,12 +612,19 @@ where
 {
     let facing = horizontal_look(ctx)?;
     let hinge = door_hinge(ctx, facing, block_at);
-    let facing = direction_to_str(facing);
     Some(Placement::with_extra(
-        format!("{block}[facing={facing},half=lower,hinge={hinge}]"),
+        state_with(block, &[
+            (PropertyKey::Facing, direction_value(facing)),
+            (PropertyKey::Half, BuiltinPropertyValue::Lower),
+            (PropertyKey::Hinge, hinge),
+        ]),
         vec![(
             Direction::Up.relative(ctx.target),
-            format!("{block}[facing={facing},half=upper,hinge={hinge}]"),
+            state_with(block, &[
+                (PropertyKey::Facing, direction_value(facing)),
+                (PropertyKey::Half, BuiltinPropertyValue::Upper),
+                (PropertyKey::Hinge, hinge),
+            ]),
         )],
     ))
 }
@@ -585,7 +632,7 @@ where
 /// `DoorBlock.getHinge`: a door pairs with an adjacent door, then
 /// falls back to whichever side has more solid blocks, then to the half of the
 /// block the cursor landed in.
-fn door_hinge<F>(ctx: &PlaceContext, facing: Direction, block_at: &F) -> &'static str
+fn door_hinge<F>(ctx: &PlaceContext, facing: Direction, block_at: &F) -> BuiltinPropertyValue
 where
     F: Fn(BlockPos) -> WorldState,
 {
@@ -594,21 +641,22 @@ where
     let left = facing.counterclockwise();
     let right = facing.clockwise();
     let solid = |p: BlockPos| -> i32 {
-        i32::from(crate::redstone::is_redstone_conductor(&block_at(p)))
+        i32::from(crate::redstone::is_redstone_conductor(block_at(p)))
     };
     let lower_door = |p: BlockPos| -> bool {
         let state = block_at(p);
-        base_name(&state).ends_with("_door") && get_str_property(&state, "half") == Some("lower")
+        state.block().path().ends_with("_door")
+            && get_str_property(state, PropertyKey::Half) == Some(BuiltinPropertyValue::Lower)
     };
     let balance = -solid(left.relative(pos)) - solid(left.relative(above)) + solid(right.relative(pos))
         + solid(right.relative(above));
     let door_left = lower_door(left.relative(pos));
     let door_right = lower_door(right.relative(pos));
     if (door_left && !door_right) || balance > 0 {
-        return "right";
+        return BuiltinPropertyValue::Right;
     }
     if (door_right && !door_left) || balance < 0 {
-        return "left";
+        return BuiltinPropertyValue::Left;
     }
     // The tie-break, verbatim from `DoorBlock.getHinge`: which side of the doorway's
     // own axis the cursor landed on.
@@ -623,7 +671,7 @@ where
         && (step_x <= 0.0 || cz <= 0.5)
         && (step_z >= 0.0 || cx <= 0.5)
         && (step_z <= 0.0 || cx >= 0.5);
-    if keeps_left { "left" } else { "right" }
+    if keeps_left { BuiltinPropertyValue::Left } else { BuiltinPropertyValue::Right }
 }
 
 /// `ChestBlock.getStateForPlacement`, plus the partner's own re-typing that
@@ -633,8 +681,8 @@ where
     F: Fn(BlockPos) -> WorldState,
 {
     let mut facing = horizontal_look(ctx)?.opposite();
-    let mut kind = "single";
-    let mut partner_pos: Option<(BlockPos, &str)> = None;
+    let mut kind = BuiltinPropertyValue::Single;
+    let mut partner_pos: Option<(BlockPos, BuiltinPropertyValue)> = None;
 
     // A side click while secondary-use is active can deliberately line up a
     // new half with an existing single container behind the clicked face. A
@@ -647,46 +695,60 @@ where
     {
         facing = candidate_facing;
         kind = if facing.counterclockwise() == clicked_face.opposite() {
-            "right"
+            BuiltinPropertyValue::Right
         } else {
-            "left"
+            BuiltinPropertyValue::Left
         };
-        partner_pos = Some((candidate_pos, if kind == "left" { "right" } else { "left" }));
+        partner_pos = Some((candidate_pos, if kind == BuiltinPropertyValue::Left {
+            BuiltinPropertyValue::Right
+        } else {
+            BuiltinPropertyValue::Left
+        }));
     }
 
     // Ordinary use scans both sides for a same-facing single container. Sneak
     // use intentionally skips this ordinary pairing scan.
-    if kind == "single" && !ctx.sneaking {
+    if kind == BuiltinPropertyValue::Single && !ctx.sneaking {
         let partner = |side: Direction| -> Option<(BlockPos, Direction)> {
             let p = side.relative(ctx.target);
             let state = block_at(p);
-            if base_name(&state) != block || get_str_property(&state, "type") != Some("single") {
+            if state.block().name() != block
+                || get_str_property(state, PropertyKey::Type) != Some(BuiltinPropertyValue::Single)
+            {
                 return None;
             }
-            let f = crate::redstone::direction_from_str(get_str_property(&state, "facing")?);
+            let f = get_str_property(state, PropertyKey::Facing).and_then(direction_from_property)?;
             (f == facing).then_some((p, side))
         };
         match partner(facing.clockwise()) {
             Some((p, _)) => {
-                kind = "left";
-                partner_pos = Some((p, "right"));
+                kind = BuiltinPropertyValue::Left;
+                partner_pos = Some((p, BuiltinPropertyValue::Right));
             }
             None => {
                 if let Some((p, _)) = partner(facing.counterclockwise()) {
-                    kind = "right";
-                    partner_pos = Some((p, "left"));
+                    kind = BuiltinPropertyValue::Right;
+                    partner_pos = Some((p, BuiltinPropertyValue::Left));
                 }
             }
         }
     }
 
-    let facing_str = direction_to_str(facing);
-    let mut extra = Vec::new();
+    let mut extra: Vec<(BlockPos, StateId)> = Vec::new();
     if let Some((p, partner_kind)) = partner_pos {
-        extra.push((p, format!("{block}[facing={facing_str},type={partner_kind}]")));
+        extra.push((
+            p,
+            state_with(block, &[
+                (PropertyKey::Facing, direction_value(facing)),
+                (PropertyKey::Type, partner_kind),
+            ]),
+        ));
     }
     Some(Placement::with_extra(
-        format!("{block}[facing={facing_str},type={kind}]"),
+        state_with(block, &[
+            (PropertyKey::Facing, direction_value(facing)),
+            (PropertyKey::Type, kind),
+        ]),
         extra,
     ))
 }
@@ -702,10 +764,12 @@ where
 {
     let partner_pos = side.relative(pos);
     let state = block_at(partner_pos);
-    if base_name(&state) != block || get_str_property(&state, "type") != Some("single") {
+    if state.block().name() != block
+        || get_str_property(state, PropertyKey::Type) != Some(BuiltinPropertyValue::Single)
+    {
         return None;
     }
-    let facing = crate::redstone::direction_from_str(get_str_property(&state, "facing")?);
+    let facing = get_str_property(state, PropertyKey::Facing).and_then(direction_from_property)?;
     Some((partner_pos, facing))
 }
 
@@ -961,7 +1025,11 @@ mod tests {
         placement(block, &ctx(face, cursor_y, yaw), air)
             .unwrap_or_else(|| panic!("no convention for {block}"))
             .state
-            .into_string()
+            .canonical_state()
+    }
+
+    fn text(state: StateId) -> String {
+        state.canonical_state()
     }
 
     /// The three conventions that differ from each other, at one yaw: looking
@@ -1019,7 +1087,7 @@ mod tests {
     fn a_slab_on_a_slab_doubles() {
         let existing = |_: BlockPos| WorldState::from("minecraft:oak_slab[type=bottom]");
         let placed = placement("minecraft:oak_slab", &ctx(BlockFace::Up, 0.0, 0.0), existing).unwrap();
-        assert_eq!(placed.state, "minecraft:oak_slab[type=double]");
+        assert_eq!(text(placed.state), "minecraft:oak_slab[type=double]");
     }
 
     /// Vertical-`facing` blocks split three ways, and only one of them reads
@@ -1030,22 +1098,22 @@ mod tests {
         let mut down = ctx(BlockFace::Up, 0.0, 0.0);
         down.pitch = Some(90.0);
         assert_eq!(
-            placement("minecraft:dispenser", &down, air).unwrap().state,
+            text(placement("minecraft:dispenser", &down, air).unwrap().state),
             "minecraft:dispenser[facing=up]"
         );
         // An observer watches where the player looks.
         assert_eq!(
-            placement("minecraft:observer", &down, air).unwrap().state,
+            text(placement("minecraft:observer", &down, air).unwrap().state),
             "minecraft:observer[facing=down]"
         );
         // A shulker box takes the clicked face regardless.
         assert_eq!(
-            placement("minecraft:shulker_box", &down, air).unwrap().state,
+            text(placement("minecraft:shulker_box", &down, air).unwrap().state),
             "minecraft:shulker_box[facing=up]"
         );
         // A hopper takes the clicked face's opposite, folded onto `down`.
         assert_eq!(
-            placement("minecraft:hopper", &down, air).unwrap().state,
+            text(placement("minecraft:hopper", &down, air).unwrap().state),
             "minecraft:hopper[facing=down]"
         );
     }
@@ -1088,19 +1156,19 @@ mod tests {
     #[test]
     fn the_two_cell_families_write_their_second_cell() {
         let door = placement("minecraft:oak_door", &ctx(BlockFace::Up, 0.0, 180.0), air).unwrap();
-        assert!(door.state.contains("half=lower"), "{}", door.state);
+        assert!(text(door.state).contains("half=lower"), "{}", text(door.state));
         assert_eq!(door.extra.len(), 1);
         assert_eq!(door.extra[0].0, BlockPos::new(0, 65, 0));
-        assert!(door.extra[0].1.contains("half=upper"), "{}", door.extra[0].1);
+        assert!(text(door.extra[0].1).contains("half=upper"), "{}", text(door.extra[0].1));
 
         // Looking north, the bed's head is the cell to the north.
         let bed = placement("minecraft:red_bed", &ctx(BlockFace::Up, 0.0, 180.0), air).unwrap();
-        assert_eq!(bed.state, "minecraft:red_bed[facing=north,part=foot]");
+        assert_eq!(text(bed.state), "minecraft:red_bed[facing=north,part=foot]");
         assert_eq!(
             bed.extra,
             vec![(
                 BlockPos::new(0, 64, -1),
-                BlockStateValue::parse("minecraft:red_bed[facing=north,part=head]")
+                StateId::from_state_str("minecraft:red_bed[facing=north,part=head]").unwrap()
             )]
         );
 
@@ -1111,9 +1179,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(dripleaf.extra.len(), 1);
-        assert!(dripleaf.state.contains("half=lower"), "{}", dripleaf.state);
-        assert!(dripleaf.state.contains("facing=north"), "{}", dripleaf.state);
-        assert!(dripleaf.extra[0].1.contains("half=upper"), "{}", dripleaf.extra[0].1);
+        assert!(text(dripleaf.state).contains("half=lower"), "{}", text(dripleaf.state));
+        assert!(text(dripleaf.state).contains("facing=north"), "{}", text(dripleaf.state));
+        assert!(text(dripleaf.extra[0].1).contains("half=upper"), "{}", text(dripleaf.extra[0].1));
     }
 
     /// A chest placed beside a single chest of the same facing pairs, and the
@@ -1131,10 +1199,10 @@ mod tests {
             }
         };
         let placed = placement("minecraft:chest", &ctx(BlockFace::Up, 0.0, 180.0), neighbour).unwrap();
-        assert_eq!(placed.state, "minecraft:chest[facing=south,type=left]");
+        assert_eq!(text(placed.state), "minecraft:chest[facing=south,type=left]");
         assert_eq!(
             placed.extra,
-            vec![(west, BlockStateValue::parse("minecraft:chest[facing=south,type=right]"))]
+            vec![(west, StateId::from_state_str("minecraft:chest[facing=south,type=right]").unwrap())]
         );
     }
 
@@ -1154,7 +1222,7 @@ mod tests {
         let mut sneaking = ctx(BlockFace::Up, 0.0, 180.0);
         sneaking.sneaking = true;
         let placed = placement("minecraft:chest", &sneaking, neighbour).unwrap();
-        assert_eq!(placed.state, "minecraft:chest[facing=south,type=single]");
+        assert_eq!(text(placed.state), "minecraft:chest[facing=south,type=single]");
         assert!(placed.extra.is_empty(), "sneak placement must not re-type its neighbour");
     }
 
@@ -1180,15 +1248,15 @@ mod tests {
             sneaking: true,
         };
         let placed = placement("minecraft:chest", &sneaking, neighbour).unwrap();
-        assert_eq!(placed.state, "minecraft:chest[facing=east,type=left]");
+        assert_eq!(text(placed.state), "minecraft:chest[facing=east,type=left]");
         assert_eq!(placed.extra.len(), 1);
         assert_eq!(placed.extra[0].0, candidate);
-        assert_eq!(placed.extra[0].1, "minecraft:chest[facing=east,type=right]");
+        assert_eq!(text(placed.extra[0].1), "minecraft:chest[facing=east,type=right]");
 
         // The ordinary top-face path remains the single-chest control above.
         sneaking.face = BlockFace::Up;
         let ordinary = placement("minecraft:chest", &sneaking, neighbour).unwrap();
-        assert_eq!(ordinary.state, "minecraft:chest[facing=south,type=single]");
+        assert_eq!(text(ordinary.state), "minecraft:chest[facing=south,type=single]");
         assert!(ordinary.extra.is_empty());
     }
 
@@ -1211,7 +1279,7 @@ mod tests {
                 WorldState::from("minecraft:air")
             }
         });
-        assert_eq!(wet.state, "minecraft:oak_slab[type=bottom,waterlogged=true]");
+        assert_eq!(text(wet.state), "minecraft:oak_slab[type=bottom,waterlogged=true]");
 
         context.target = BlockPos::new(1, 64, 0);
         let flowing = placement("minecraft:oak_slab", &context, |pos| {
@@ -1229,7 +1297,7 @@ mod tests {
                 WorldState::from("minecraft:air")
             }
         });
-        assert_eq!(flowing.state, "minecraft:oak_slab[type=bottom,waterlogged=false]");
+        assert_eq!(text(flowing.state), "minecraft:oak_slab[type=bottom,waterlogged=false]");
 
         let multi = placement(
             "minecraft:small_dripleaf",
@@ -1244,8 +1312,8 @@ mod tests {
                 WorldState::from("minecraft:air")
             }
         });
-        assert!(multi.state.as_str().contains("waterlogged=false"));
-        assert!(multi.extra[0].1.as_str().contains("waterlogged=true"));
+        assert!(text(multi.state).contains("waterlogged=false"));
+        assert!(text(multi.extra[0].1).contains("waterlogged=true"));
     }
 
     #[test]
@@ -1318,7 +1386,7 @@ mod tests {
             }
         };
         let placed = placement("minecraft:note_block", &ctx(BlockFace::Up, 0.0, 0.0), below_gold).unwrap();
-        assert_eq!(placed.state, "minecraft:note_block[instrument=bell]");
+        assert_eq!(text(placed.state), "minecraft:note_block[instrument=bell]");
     }
 
     /// A mob head already sitting on top wins over the block underneath —
@@ -1340,7 +1408,7 @@ mod tests {
             skull_above_gold,
         )
         .unwrap();
-        assert_eq!(placed.state, "minecraft:note_block[instrument=skeleton]");
+        assert_eq!(text(placed.state), "minecraft:note_block[instrument=skeleton]");
     }
 
     /// Every state this module can emit must resolve to a real state id — the
@@ -1388,43 +1456,14 @@ mod tests {
                         continue;
                     };
                     for state in std::iter::once(&placed.state).chain(placed.extra.iter().map(|(_, s)| s)) {
-                        assert_state_exists(state);
+                        assert_state_exists(**state);
                     }
                 }
             }
         }
     }
 
-    /// Asserts a `block[k=v,…]` string names a block in the 26.2 census and,
-    /// for every property it names, a value that block really has.
-    fn assert_state_exists(state: &str) {
-        let block = base_name(state);
-        for id in 0..block_states::STATE_COUNT {
-            if block_states::block_name(id) != Some(block) {
-                continue;
-            }
-            let props = block_states::properties(id).unwrap_or(&[]);
-            let Some((_, rest)) = state.split_once('[') else {
-                return;
-            };
-            for kv in rest.trim_end_matches(']').split(',') {
-                let (k, v) = kv.split_once('=').expect("malformed property");
-                assert!(
-                    props.iter().any(|&(pk, _)| pk == k),
-                    "{block} has no property `{k}` (from `{state}`)"
-                );
-                assert!(
-                    (0..block_states::STATE_COUNT).any(|other| {
-                        block_states::block_name(other) == Some(block)
-                            && block_states::properties(other)
-                                .unwrap_or(&[])
-                                .contains(&(k, v))
-                    }),
-                    "{block}'s `{k}` has no value `{v}` (from `{state}`)"
-                );
-            }
-            return;
-        }
-        panic!("`{block}` is not a block in the 26.2 census");
+    fn assert_state_exists(state: StateId) {
+        assert!(state.block().default_state().block() == state.block());
     }
 }

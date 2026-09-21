@@ -39,6 +39,10 @@ timings: fields a demo/plugin generator has no business answering honestly. Forc
 all of that would make the simplest possible generator (a flat floor, a checkerboard) carry
 placeholder data for fields that nothing reads meaningfully.
 
+The server boundary consumes the grid's canonical `StateId` cells directly. Block reads and writes
+inside generation, retention, and live placement never format or parse block-state strings; textual
+state syntax is limited to a plugin's explicit configuration/template input boundary.
+
 ```rust
 pub trait ChunkGenerator: Send + Sync {
     fn min_y(&self) -> i32;

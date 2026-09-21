@@ -19,8 +19,7 @@ fn column_digest(column: &GeneratedColumn) -> [u8; 32] {
     for y in column.min_y()..column.min_y() + column.height() {
         for lz in 0..16 {
             for lx in 0..16 {
-                digest.update(column.block_state(lx, y, lz).as_bytes());
-                digest.update([0]);
+                digest.update(column.block_state_id(lx, y, lz).raw().to_le_bytes());
             }
         }
     }

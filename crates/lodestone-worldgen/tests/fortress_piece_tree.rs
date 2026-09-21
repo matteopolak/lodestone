@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 
+use lodestone_data::block_states::StateId;
 use lodestone_worldgen::rng::{LegacyRandomSource, WorldgenRandom, XoroshiroRandomSource};
 use lodestone_worldgen::dense_grid::DenseBlockGrid;
 use lodestone_worldgen::structure::{BoundingBox, fortress};
@@ -28,11 +29,33 @@ fn placement_stream(seed: i64, cx: i32, cz: i32) -> WorldgenRandom<XoroshiroRand
     random
 }
 
-fn solid_render(state: &str) -> bool {
+fn solid_render(state: StateId) -> bool {
     !matches!(
-        state.split_once('[').map_or(state, |(base, _)| base),
+        state.name(),
         "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air" | "minecraft:lava"
     )
+}
+
+fn named_grid(
+    min_x: i32,
+    min_y: i32,
+    min_z: i32,
+    size_x: i32,
+    size_y: i32,
+    size_z: i32,
+    default: &str,
+) -> DenseBlockGrid {
+    let default = StateId::from_state_str(default).expect("fixture state is canonical");
+    DenseBlockGrid::with_default(min_x, min_y, min_z, size_x, size_y, size_z, default)
+}
+
+fn set_named(grid: &mut DenseBlockGrid, x: i32, y: i32, z: i32, state: &str) {
+    let id = StateId::from_state_str(state).expect("fixture state is canonical");
+    grid.set_id(x, y, z, id);
+}
+
+fn get_named(grid: &DenseBlockGrid, x: i32, y: i32, z: i32) -> String {
+    grid.get_id(x, y, z).canonical_state()
 }
 
 #[test]
@@ -53,7 +76,9 @@ fn seed_42_control_tree_has_90_children_and_the_recorded_chunk_zero_boxes() {
     assert!(root_blocks.iter().any(|block| {
         (0..16).contains(&block.pos[0])
             && (0..16).contains(&block.pos[2])
-            && block.state == "minecraft:nether_bricks"
+            && block.state
+                == StateId::from_state_str("minecraft:nether_bricks")
+                    .expect("bundled fortress state")
     }), "the control chunk must receive fortress masonry");
     let kinds: BTreeSet<_> = pieces.iter().map(|piece| piece.id.as_str()).collect();
     assert_eq!(
@@ -126,10 +151,14 @@ fn seed_42_external_fixture_covers_tree_orientations_and_terminal_rng() {
         .expect("external terminal-fill box must be in the generated tree");
     let state_at = |pos| {
         end_cap.blocks.as_ref().and_then(|blocks| {
-            blocks.iter().rev().find(|block| block.pos == pos).map(|block| block.state.as_str())
+            blocks
+                .iter()
+                .rev()
+                .find(|block| block.pos == pos)
+                .map(|block| block.state.canonical_state())
         })
     };
-    assert_eq!(state_at([34, 75, 15]), Some("minecraft:nether_bricks"));
+    assert_eq!(state_at([34, 75, 15]), Some("minecraft:nether_bricks".to_owned()));
     assert_eq!(state_at([35, 75, 15]), None, "terminal random walk must not be a solid shell");
     assert!(EXTERNAL.contains("packet_sha256=spawner:"), "fixture must retain packet provenance");
     assert!(EXTERNAL.contains("packet_sha256=chest:"), "fixture must retain packet provenance");
@@ -142,12 +171,12 @@ fn seed_42_external_fixture_covers_tree_orientations_and_terminal_rng() {
 /// the root-only support control.
 #[test]
 fn seed_42_external_castle_support_columns_reach_the_captured_depths() {
-    let mut world = DenseBlockGrid::new(-48, 0, 64, 16, 128, 16, "minecraft:netherrack");
+    let mut world = named_grid(-48, 0, 64, 16, 128, 16, "minecraft:netherrack");
     for y in 41..=50 {
-        world.set(-36, y, 67, "minecraft:cave_air");
+        set_named(&mut world, -36, y, 67, "minecraft:cave_air");
     }
     for y in 22..=60 {
-        world.set(-37, y, 78, "minecraft:cave_air");
+        set_named(&mut world, -37, y, 78, "minecraft:cave_air");
     }
     let mut random = stream(42, 0, 0);
     let mut placement = placement_stream(42, -3, 4);
@@ -162,7 +191,7 @@ fn seed_42_external_castle_support_columns_reach_the_captured_depths() {
         &solid_render,
     );
     for pos in [[-36, 41, 67], [-36, 50, 67], [-37, 22, 78], [-37, 60, 78]] {
-        assert_eq!(world.get(pos[0], pos[1], pos[2]), "minecraft:nether_bricks", "external support {pos:?}");
+        assert_eq!(get_named(&world, pos[0], pos[1], pos[2]), "minecraft:nether_bricks", "external support {pos:?}");
     }
 }
 
@@ -189,7 +218,7 @@ fn seed_42_external_chests_match_facing_and_placement_seed() {
         .collect();
     let mut actual = BTreeSet::new();
     for (cx, cz) in [(-3, 4), (-2, 4), (-1, 5)] {
-        let mut world = DenseBlockGrid::new(cx * 16, 0, cz * 16, 16, 128, 16, "minecraft:netherrack");
+        let mut world = named_grid(cx * 16, 0, cz * 16, 16, 128, 16, "minecraft:netherrack");
         let mut tree = stream(42, 0, 0);
         let mut placement = placement_stream(42, cx, cz);
         for loot in fortress::place_for_chunk(
@@ -202,12 +231,12 @@ fn seed_42_external_chests_match_facing_and_placement_seed() {
             &mut placement,
             &solid_render,
         ) {
-            actual.insert((loot.pos, world.get(loot.pos[0], loot.pos[1], loot.pos[2]).to_string(), loot.seed));
+            actual.insert((loot.pos, get_named(&world, loot.pos[0], loot.pos[1], loot.pos[2]).to_owned(), loot.seed));
         }
     }
     assert_eq!(actual, expected);
 
-    let mut world = DenseBlockGrid::new(-32, 0, 64, 16, 128, 16, "minecraft:netherrack");
+    let mut world = named_grid(-32, 0, 64, 16, 128, 16, "minecraft:netherrack");
     let mut tree = stream(42, 0, 0);
     let mut wrong = WorldgenRandom::new(XoroshiroRandomSource::new(0));
     let decoration_seed = wrong.set_decoration_seed(42, -32, 64);
@@ -238,7 +267,7 @@ fn seed_42_external_chunk_zero_masonry_and_fence_sentinels() {
             .blocks
             .as_ref()
             .and_then(|blocks| blocks.iter().rev().find(|block| block.pos == pos))
-            .map(|block| block.state.clone())
+            .map(|block| block.state.canonical_state())
     };
     let root = &pieces[0];
     assert_eq!(root.id, "minecraft:nebcr");

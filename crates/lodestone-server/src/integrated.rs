@@ -869,25 +869,6 @@ impl std::fmt::Display for PlayerGameModeRefusal {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn canonical_block_state(state: lodestone_data::block_states::StateId) -> String {
-    let mut canonical = state.name().to_string();
-    let properties = state.properties();
-    if !properties.is_empty() {
-        canonical.push('[');
-        for (index, (name, value)) in properties.iter().enumerate() {
-            if index != 0 {
-                canonical.push(',');
-            }
-            canonical.push_str(name);
-            canonical.push('=');
-            canonical.push_str(value);
-        }
-        canonical.push(']');
-    }
-    canonical
-}
-
 /// Validate and persist one state through the authoritative retained source.
 ///
 /// The caller holds only a source handle. No ECS world or chunk guard can
@@ -899,7 +880,7 @@ fn set_resident_block_state(
     source: &dyn ChunkSource,
     pos: lodestone_model::BlockPos,
     state: lodestone_data::block_states::StateId,
-) -> Result<String, BlockMutationRefusal> {
+) -> Result<lodestone_data::block_states::StateId, BlockMutationRefusal> {
     let column_x = pos.x.div_euclid(16);
     let column_z = pos.z.div_euclid(16);
     let column = source
@@ -908,20 +889,19 @@ fn set_resident_block_state(
     if !column.contains_y(pos.y) {
         return Err(BlockMutationRefusal::OutOfBounds);
     }
-    let canonical = canonical_block_state(state);
-    source.set_block(pos.x, pos.y, pos.z, &canonical);
-    Ok(canonical)
+    source.set_block(pos.x, pos.y, pos.z, state);
+    Ok(state)
 }
 
 /// Validate every replacement in an ordered resident batch before mutating
-/// the authoritative source. The returned canonical states are the exact
+/// the authoritative source. The returned typed states are the exact
 /// values published after the whole preflight succeeds.
 #[cfg(not(target_arch = "wasm32"))]
 fn set_resident_block_states(
     source: &dyn ChunkSource,
     writes: &[(lodestone_model::BlockPos, lodestone_data::block_states::StateId)],
-) -> Result<Vec<String>, BlockMutationRefusal> {
-    let canonical = writes
+) -> Result<Vec<lodestone_data::block_states::StateId>, BlockMutationRefusal> {
+    let states = writes
         .iter()
         .map(|(pos, state)| {
             let column = source
@@ -930,13 +910,13 @@ fn set_resident_block_states(
             if !column.contains_y(pos.y) {
                 return Err(BlockMutationRefusal::OutOfBounds);
             }
-            Ok(canonical_block_state(*state))
+            Ok(*state)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    for ((pos, _), state) in writes.iter().zip(&canonical) {
-        source.set_block(pos.x, pos.y, pos.z, state);
+    for (pos, state) in writes {
+        source.set_block(pos.x, pos.y, pos.z, *state);
     }
-    Ok(canonical)
+    Ok(states)
 }
 
 /// The complete production native-save inputs, all shared with the running
@@ -1694,7 +1674,7 @@ impl IntegratedServer {
         // This constructor spawns no tick loop, so it does not suffer the
         // per-tick regeneration `open_in_memory_with_mobs` did — but it does
         // serve a connection, and `serve_connection`'s `vitals_tick` probes a
-        // single block every 50 ms through `ChunkSource::block_state`, whose
+        // single block every 50 ms through `ChunkSource::block_state_id`, whose
         // *default* implementation regenerates a whole column to read one cell.
         // See `crate::chunk_store`'s module docs.
         //
@@ -3543,10 +3523,9 @@ impl IntegratedServer {
 
     /// Replaces one block in an already-resident primary-world column.
     ///
-    /// The method never generates or loads a column. The validated state is
-    /// rendered back to the canonical name-plus-sorted-properties form used by
-    /// [`ChunkSource::set_block`], so the native plugin bridge cannot inject a
-    /// malformed state string or confuse a block-state id with another registry.
+    /// The method never generates or loads a column. The validated state remains
+    /// a registry-typed [`lodestone_data::block_states::StateId`] through the
+    /// source and plugin boundaries.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn set_resident_block_state_id(
         &self,
@@ -3598,9 +3577,9 @@ impl IntegratedServer {
             .world_source
             .as_ref()
             .ok_or(BlockMutationRefusal::PrimaryWorldUnavailable)?;
-        let canonical = set_resident_block_state(&**source, pos, state)?;
+        let state = set_resident_block_state(&**source, pos, state)?;
         if let Some(block_ticks) = &self.block_ticks {
-            block_ticks.publish(pos.x, pos.y, pos.z, canonical);
+            block_ticks.publish(pos.x, pos.y, pos.z, state);
         }
         Ok(())
     }
@@ -3674,10 +3653,10 @@ impl IntegratedServer {
             .world_source
             .as_ref()
             .ok_or(BlockMutationRefusal::PrimaryWorldUnavailable)?;
-        let canonical = set_resident_block_states(&**source, &writes)?;
-        for ((pos, _), state) in writes.iter().zip(&canonical) {
+        let states = set_resident_block_states(&**source, &writes)?;
+        for ((pos, _), state) in writes.iter().zip(&states) {
             if let Some(block_ticks) = &self.block_ticks {
-                block_ticks.publish(pos.x, pos.y, pos.z, state.clone());
+                block_ticks.publish(pos.x, pos.y, pos.z, *state);
             }
         }
         Ok((writes, notify_listeners))
@@ -5260,6 +5239,11 @@ mod tests {
     use crate::chunk::ChunkColumn;
     use crate::protocol::{ServerBound, ServerDirective};
 
+    fn state_id(text: &str) -> lodestone_data::block_states::StateId {
+        lodestone_data::block_states::StateId::from_state_str(text)
+            .expect("test block state must be registered")
+    }
+
     /// The seven required [`ServerProtocol`] methods, each answering with
     /// something inert. Nothing here drives a client, so none of them is ever
     /// actually called — mirrors `crate::ecs::gate`'s `Silent` rather than
@@ -5363,14 +5347,14 @@ mod tests {
             ChunkColumn::new(0, 16)
         }
 
-        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> lodestone_data::block_states::StateId {
             // The plain column-regenerating form; this gate only counts
             // generations, never reads terrain back for content.
             let cx = x.div_euclid(16);
             let cz = z.div_euclid(16);
             let lx = x.rem_euclid(16);
             let lz = z.rem_euclid(16);
-            self.column(cx, cz).block_state(lx, y, lz).to_string()
+            self.column(cx, cz).block_state_id(lx, y, lz)
         }
 
         fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -5387,7 +5371,7 @@ mod tests {
         // `ChunkStore`), so a player action could reach this through the
         // store's write-through. The source has no storage, so the edit is
         // deliberately discarded. Explicit rather than inherited.
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: lodestone_data::block_states::StateId) {
             // No storage; edits are discarded by design for this counting stub.
         }
     }
@@ -5404,8 +5388,8 @@ mod tests {
     impl NativeLifecycleSource {
         fn new() -> Self {
             let mut column = ChunkColumn::new(0, 16);
-            column.set_block(2, 3, 4, "minecraft:stone");
-            column.set_block(9, 14, 10, "minecraft:oak_log[axis=z]");
+            column.set_block_id(2, 3, 4, state_id("minecraft:stone"));
+            column.set_block_id(9, 14, 10, state_id("minecraft:oak_log[axis=z]"));
             column.set_biome_cell(0, 0, 0, "minecraft:desert");
             column.set_biome_cell(3, 3, 3, "minecraft:deep_dark");
             let mut surface = vec!["minecraft:plains".to_string(); 16];
@@ -5506,12 +5490,11 @@ mod tests {
                 .clone()
         }
 
-        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> lodestone_data::block_states::StateId {
             let lx = x.rem_euclid(16);
             let lz = z.rem_euclid(16);
             self.column(x.div_euclid(16), z.div_euclid(16))
-                .block_state(lx, y, lz)
-                .to_string()
+                .block_state_id(lx, y, lz)
         }
 
         fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -5522,7 +5505,7 @@ mod tests {
                 .to_string()
         }
 
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: lodestone_data::block_states::StateId) {}
     }
 
     /// A retained two-column water fixture for the scheduled-fluid consumer
@@ -5539,7 +5522,7 @@ mod tests {
             let mut column = ChunkColumn::new(0, 16);
             for x in 0..16 {
                 for z in 0..16 {
-                    column.set_block(x, 0, z, "minecraft:stone");
+                    column.set_block_id(x, 0, z, state_id("minecraft:stone"));
                 }
             }
             column
@@ -5548,7 +5531,7 @@ mod tests {
         fn water_at_east_edge() -> Self {
             let mut columns = HashMap::new();
             let mut origin = Self::flat_column();
-            origin.set_block(15, 1, 0, "minecraft:water[level=0]");
+            origin.set_block_id(15, 1, 0, state_id("minecraft:water[level=0]"));
             columns.insert((0, 0), origin);
             columns.insert((1, 0), Self::flat_column());
             Self {
@@ -5564,7 +5547,7 @@ mod tests {
                 .expect("fluid fixture columns poisoned")
                 .get_mut(&(1, 0))
                 .expect("the next-column fixture is retained")
-                .set_block(0, 1, 0, "minecraft:redstone_torch[lit=false]");
+                .set_block_id(0, 1, 0, state_id("minecraft:redstone_torch[lit=false]"));
             source
         }
 
@@ -5576,7 +5559,7 @@ mod tests {
                 .expect("fluid fixture columns poisoned")
                 .get_mut(&(0, 0))
                 .expect("the origin fixture is retained")
-                .set_block(1, 1, 1, "minecraft:furnace[facing=north,lit=false]");
+                .set_block_id(1, 1, 1, state_id("minecraft:furnace[facing=north,lit=false]"));
             source
         }
     }
@@ -5591,10 +5574,9 @@ mod tests {
                 .unwrap_or_else(Self::flat_column)
         }
 
-        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> lodestone_data::block_states::StateId {
             self.column(x.div_euclid(16), z.div_euclid(16))
-                .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
-                .to_string()
+                .block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
         }
 
         fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -5603,14 +5585,14 @@ mod tests {
                 .to_string()
         }
 
-        fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+        fn set_block(&self, x: i32, y: i32, z: i32, state: lodestone_data::block_states::StateId) {
             let chunk = (x.div_euclid(16), z.div_euclid(16));
             self.columns
                 .lock()
                 .expect("fluid fixture columns poisoned")
                 .entry(chunk)
                 .or_insert_with(Self::flat_column)
-                .set_block(x.rem_euclid(16), y, z.rem_euclid(16), name);
+                .set_block_id(x.rem_euclid(16), y, z.rem_euclid(16), state);
         }
 
         fn try_store_resident_edit(
@@ -5710,7 +5692,7 @@ mod tests {
         wait_for_integrated_condition(&server, |server| {
             server
                 .resident_block_state_id(16, 1, 0)
-                .is_some_and(|state| state.name() == "minecraft:water")
+                .is_some_and(|state| state == state_id("minecraft:water"))
         })
         .await;
     }
@@ -5745,7 +5727,7 @@ mod tests {
         wait_for_integrated_condition(&server, |server| {
             server
                 .resident_block_state_id(16, 1, 0)
-                .is_some_and(|state| state.name() == "minecraft:water")
+                .is_some_and(|state| state == state_id("minecraft:water"))
         })
         .await;
     }
@@ -5781,8 +5763,7 @@ mod tests {
 
         wait_for_integrated_condition(&server, |server| {
             server.resident_block_state_id(16, 1, 0).is_some_and(|state| {
-                state.name() == "minecraft:redstone_torch"
-                    && state.properties().contains(&("lit", "true"))
+                state == state_id("minecraft:redstone_torch[lit=true]")
             })
         })
         .await;
@@ -5840,8 +5821,7 @@ mod tests {
 
         wait_for_integrated_condition(&server, |server| {
             server.resident_block_state_id(1, 1, 1).is_some_and(|state| {
-                state.name() == "minecraft:furnace"
-                    && state.properties().contains(&("lit", "true"))
+                state == state_id("minecraft:furnace[facing=north,lit=true]")
             })
         })
         .await;
@@ -6006,9 +5986,9 @@ mod tests {
         for across in -1..=2 {
             for up in -1..=3 {
                 let state = if across == -1 || across == 2 || up == -1 || up == 3 {
-                    "minecraft:obsidian"
+                    state_id("minecraft:obsidian")
                 } else {
-                    "minecraft:air"
+                    lodestone_data::block_states::StateId::air_state()
                 };
                 world.set_block(origin.x + across, origin.y + up, origin.z, state);
             }
@@ -6017,7 +5997,7 @@ mod tests {
             .expect("the production portal igniter accepts the test frame");
         let cells: Vec<_> = lit.iter().map(|(pos, _)| *pos).collect();
         for (pos, state) in lit {
-            world.set_block(pos.x, pos.y, pos.z, &state);
+            world.set_block(pos.x, pos.y, pos.z, state);
         }
         portals.extend(dimension, cells.iter().copied());
         cells
@@ -6031,15 +6011,15 @@ mod tests {
             ChunkColumn::new(0, 256)
         }
 
-        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-            "minecraft:air".to_owned()
+        fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> lodestone_data::block_states::StateId {
+            lodestone_data::block_states::StateId::air_state()
         }
 
         fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
             crate::chunk::DEFAULT_BIOME.to_owned()
         }
 
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: lodestone_data::block_states::StateId) {}
     }
 
     /// A lazy, generated Nether sibling must be the same persistent source the
@@ -6074,10 +6054,10 @@ mod tests {
             .expect("the production source lazily builds a Nether sibling");
         let generated = nether.column(0, 0);
         assert_eq!(generated.height, Dimension::Nether.height());
-        assert_eq!(generated.block_state(0, 0, 0), "minecraft:bedrock");
+        assert_eq!(generated.block_state_id(0, 0, 0), state_id("minecraft:bedrock"));
 
         let marker = lodestone_model::BlockPos::new(0, 20, 0);
-        nether.set_block(marker.x, marker.y, marker.z, "minecraft:gold_block");
+        nether.set_block(marker.x, marker.y, marker.z, state_id("minecraft:gold_block"));
         let portals = server.portals().expect("persistent server owns a portal index").clone();
         let overworld_cells = install_test_portal(
             home.as_ref(),
@@ -6115,8 +6095,8 @@ mod tests {
             .sibling(Dimension::Nether)
             .expect("reopened production source rebuilds the Nether sibling");
         assert_eq!(
-            nether.block_state(marker.x, marker.y, marker.z),
-            "minecraft:gold_block",
+            nether.block_state_id(marker.x, marker.y, marker.z),
+            state_id("minecraft:gold_block"),
             "generated Nether edits must survive the integrated-server restart"
         );
 
@@ -6585,7 +6565,7 @@ mod tests {
 
         // This mutation goes through the real RegionChunkSource, which is the
         // same source wrapped by the running connection and save context.
-        world.set_block(2, 3, 4, "minecraft:gold_block");
+        world.set_block(2, 3, 4, state_id("minecraft:gold_block"));
         let entities = world.block_entities();
         entities.with(|registry| {
             registry.insert(
@@ -6635,7 +6615,7 @@ mod tests {
             .reopen_native_chunk(0, 0, 0, 16)
             .expect("reopen complete native record")
             .expect("native lifecycle record is present");
-        assert_eq!(loaded.column.block_state(2, 3, 4), "minecraft:gold_block");
+        assert_eq!(loaded.column.block_state_id(2, 3, 4), state_id("minecraft:gold_block"));
         assert_eq!(loaded.column.biome_state_at(0, 0, 0), "minecraft:desert");
         assert!(loaded.column.motion_blocking().is_some());
         assert_eq!(loaded.column.block_entities().len(), 1);
@@ -6694,7 +6674,7 @@ mod tests {
                 let mut column = source.column(cx, cz);
                 let _consumed_generation_candidates = column.take_generation_spawns();
                 for offset in 0..64 {
-                    column.set_block(offset % 8, 64, offset / 8, "minecraft:gold_block");
+                    column.set_block_id(offset % 8, 64, offset / 8, state_id("minecraft:gold_block"));
                 }
                 let pos = lodestone_model::BlockPos::new(cx * 16 + 8, 65, cz * 16 + 8);
                 column.set_block_entities(vec![(
@@ -7057,8 +7037,8 @@ mod tests {
         )
         .expect("open first persistent server");
         let mut source = crate::chunk::ChunkColumn::new(0, 16);
-        source.set_block(2, 3, 4, "minecraft:stone");
-        source.set_block(9, 14, 10, "minecraft:oak_log[axis=z]");
+        source.set_block_id(2, 3, 4, state_id("minecraft:stone"));
+        source.set_block_id(9, 14, 10, state_id("minecraft:oak_log[axis=z]"));
         source.set_biome_cell(0, 0, 0, "minecraft:desert");
         source.set_biome_cell(3, 3, 3, "minecraft:deep_dark");
         let mut surface = vec!["minecraft:plains".to_string(); 16];
@@ -7161,8 +7141,8 @@ mod tests {
         assert_eq!(fluid_tick.len(), 1);
         assert_eq!(fluid_tick[0].kind, crate::scheduled_tick::ScheduledTickKind::Fluid);
         let loaded = &loaded.column;
-        assert_eq!(loaded.block_state(2, 3, 4), "minecraft:stone");
-        assert_eq!(loaded.block_state(9, 14, 10), "minecraft:oak_log[axis=z]");
+        assert_eq!(loaded.block_state_id(2, 3, 4), state_id("minecraft:stone"));
+        assert_eq!(loaded.block_state_id(9, 14, 10), state_id("minecraft:oak_log[axis=z]"));
         assert_eq!(loaded.biome_state_at(0, 0, 0), "minecraft:desert");
         assert_eq!(loaded.biome_state_at(12, 15, 12), "minecraft:deep_dark");
         assert_eq!(loaded.biome_state(8, 8), "minecraft:cherry_grove");

@@ -27,6 +27,8 @@ use std::sync::atomic::Ordering;
 
 use lodestone_anvil::region::{RegionFile, region_and_local};
 use lodestone_core::{Nbt, Reader, read_named_nbt};
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 use lodestone_server::dimension::Dimension;
 use lodestone_server::region_source::RegionChunkSource;
 use lodestone_server::{ChunkColumn, ChunkSource, ScheduledTickKind, TickPriority};
@@ -49,20 +51,20 @@ impl ChunkSource for Flat {
         let mut column = ChunkColumn::new(MIN_Y, HEIGHT);
         for z in 0..16 {
             for x in 0..16 {
-                column.set_block(x, 60, z, "minecraft:stone");
+                column.set_block_id(x, 60, z, Block::Stone.default_state());
             }
         }
         column
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         // The column-regenerating form (correct, just not cheap); this fixture
         // is small and this path is not hot.
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
-        self.column(cx, cz).block_state(lx, y, lz).to_string()
+        self.column(cx, cz).block_state_id(lx, y, lz)
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -77,7 +79,7 @@ impl ChunkSource for Flat {
 
     // No storage: this fixture serves fresh columns and edits are discarded by
     // design. Tests that need edits to survive use a source with retention.
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
         // No storage; edits are discarded by design.
     }
 }
@@ -186,7 +188,12 @@ fn pending_ticks_survive_a_close_and_reopen_with_the_right_delay_and_priority() 
         // The chunk must be in the edit map for the save to encode it fresh,
         // which in production is always true: whatever scheduled the tick wrote
         // a block first.
-        world.set_block(block_pos.0, block_pos.1, block_pos.2, "minecraft:redstone_wire");
+        world.set_block(
+            block_pos.0,
+            block_pos.1,
+            block_pos.2,
+            StateId::from_state_str("minecraft:redstone_wire").expect("fixture wire state"),
+        );
 
         let handle = world.save_handle();
         handle.save().expect("save");
@@ -341,7 +348,12 @@ fn an_overdue_tick_whose_delay_predates_the_clock_becomes_due_immediately() {
                 TickPriority::Normal
             ));
         });
-        world.set_block(pos.0, pos.1, pos.2, "minecraft:sand");
+        world.set_block(
+            pos.0,
+            pos.1,
+            pos.2,
+            StateId::from_state_str("minecraft:sand").expect("fixture sand state"),
+        );
         world.save_handle().save().expect("save");
     }
 

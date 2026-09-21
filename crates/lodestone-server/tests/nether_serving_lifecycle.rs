@@ -6,6 +6,7 @@
 use std::time::{Duration, Instant};
 
 use lodestone_core::{Ctx, Decode, Encode, Reader, State, Writer};
+use lodestone_data::block_states::StateId;
 use lodestone_model::{GameMode, Vec3};
 use lodestone_net::{Connection, Transport};
 use lodestone_server::{
@@ -43,6 +44,10 @@ const TARGET_POSITION: (f64, f64, f64) = (192.5, 64.0, 264.5);
 const ORACLE: &str =
     include_str!("../../lodestone-worldgen/tests/support/nether_vanilla_oracle.txt");
 
+fn state(text: &str) -> StateId {
+    StateId::from_state_str(text).expect("known fixture block state")
+}
+
 /// A minimal source whose only non-air surface is a cheap stone floor. The
 /// portal is placed in the target Overworld chunk so the production portal
 /// path scales the position into the oracle's Nether chunk `(1, 2)`.
@@ -52,28 +57,28 @@ struct PortalWorld;
 impl ChunkSource for PortalWorld {
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
         let mut column = ChunkColumn::new(0, 256);
+        let stone = state("minecraft:stone");
         for z in 0..16 {
             for x in 0..16 {
-                column.set_block(x, 63, z, "minecraft:stone");
+                column.set_block_id(x, 63, z, stone);
             }
         }
         if (cx, cz) == (12, 16) {
-            column.set_block(0, 64, 8, "minecraft:nether_portal[axis=x]");
+            column.set_block_id(0, 64, 8, state("minecraft:nether_portal[axis=x]"));
         }
         column
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         self.column(x.div_euclid(16), z.div_euclid(16))
-            .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
-            .to_owned()
+            .block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
     }
 
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
         "minecraft:plains".to_owned()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
 }
 
 /// The connection codec carries only the fields needed by this gate. Its
@@ -86,6 +91,7 @@ struct ProbeProtocol;
 impl ProbeProtocol {
     fn encode_column(cx: i32, cz: i32, column: &ChunkColumn) -> Vec<u8> {
         let mut writer = Writer::default();
+        let bedrock = state("minecraft:bedrock");
         writer.var_i32(cx);
         writer.var_i32(cz);
         writer.var_i32(column.min_y);
@@ -93,7 +99,7 @@ impl ProbeProtocol {
         for y in column.min_y..column.min_y + column.height {
             for z in 0..16 {
                 for x in 0..16 {
-                    writer.u8(u8::from(column.block_state(x, y, z) == "minecraft:bedrock"));
+                    writer.u8(u8::from(column.block_state_id(x, y, z) == bedrock));
                 }
             }
         }

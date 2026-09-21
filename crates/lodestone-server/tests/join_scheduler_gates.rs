@@ -38,6 +38,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use lodestone_data::block_states::StateId;
 use lodestone_server::join_scheduler::{ColumnPipeline, generation_window_for};
 use lodestone_server::{ChunkColumn, ChunkSource};
 
@@ -188,15 +189,15 @@ impl ChunkSource for RingProbe {
             .collect()
     }
 
-    fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-        "minecraft:air".to_string()
+    fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
+        StateId::AIR
     }
 
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
         "minecraft:plains".to_string()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
 }
 
 /// What one arm reports.

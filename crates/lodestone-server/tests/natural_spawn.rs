@@ -22,6 +22,7 @@
 
 use std::str::FromStr;
 
+use lodestone_data::block_states::StateId;
 use lodestone_model::{Difficulty, ResourceKey, Vec3};
 use lodestone_server::natural_spawn::NaturalSpawner;
 use lodestone_server::{
@@ -34,6 +35,10 @@ const HEIGHT: i32 = 384;
 /// the water lists do not compete.
 const FLOOR: i32 = 70;
 const RADIUS: i32 = 3;
+
+fn state(value: &str) -> StateId {
+    StateId::from_state_str(value).expect("fixture block state")
+}
 
 /// Chunk coordinates the cycle runs over — a 7×7 area, so the caps are non-zero
 /// (`70 × 49 / 289 = 11` monsters, `10 × 49 / 289 = 1` creature).
@@ -59,11 +64,11 @@ fn plains_world(roof: Option<&str>) -> ChunkWorld {
         for z in 0..16 {
             for x in 0..16 {
                 for y in MIN_Y..FLOOR {
-                    column.set_block(x, y, z, "minecraft:stone");
+                    column.set_block_id(x, y, z, state("minecraft:stone"));
                 }
-                column.set_block(x, FLOOR, z, "minecraft:grass_block[snowy=false]");
+                column.set_block_id(x, FLOOR, z, state("minecraft:grass_block[snowy=false]"));
                 if let Some(roof) = roof {
-                    column.set_block(x, FLOOR + 4, z, roof);
+                    column.set_block_id(x, FLOOR + 4, z, state(roof));
                 }
             }
         }
@@ -195,7 +200,12 @@ fn darkness_spawns_monsters_and_light_suppresses_them() {
     for (cx, cz) in chunks() {
         for z in 0..16 {
             for x in 0..16 {
-                lit.set_block(cx * 16 + x, FLOOR, cz * 16 + z, "minecraft:glowstone");
+                lit.set_block_id(
+                    cx * 16 + x,
+                    FLOOR,
+                    cz * 16 + z,
+                    state("minecraft:glowstone"),
+                );
             }
         }
     }

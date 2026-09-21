@@ -4,6 +4,7 @@
 //! dependency, but structure placement and generated block entities belong to
 //! the FULL completion only.
 
+use lodestone_data::block_states::StateId;
 use lodestone_server::{nether_chunk_source, ChunkGenerationStage, ChunkSource};
 use lodestone_model::BlockPos;
 
@@ -22,8 +23,9 @@ fn shaped_nether_admission_does_not_attach_fortress_chest_sidecar() {
 
     let full = source.column_at(0, 10, ChunkGenerationStage::Full);
     assert_eq!(
-        full.block_state(CHEST.x, CHEST.y, CHEST.z.rem_euclid(16)),
-        "minecraft:chest[facing=south,type=single,waterlogged=false]"
+        full.block_state_id(CHEST.x, CHEST.y, CHEST.z.rem_euclid(16)),
+        StateId::from_state_str("minecraft:chest[facing=south,type=single,waterlogged=false]")
+            .expect("fixture chest state is built in")
     );
     assert!(
         full.block_entities().iter().any(|(position, entity)| {
@@ -35,14 +37,13 @@ fn shaped_nether_admission_does_not_attach_fortress_chest_sidecar() {
     let second = source.column_at(0, 11, ChunkGenerationStage::Full);
     assert_eq!(
         second
-            .block_state(
+            .block_state_id(
                 SECOND_CHEST.x,
                 SECOND_CHEST.y,
                 SECOND_CHEST.z.rem_euclid(16)
             )
-            .split('[')
-            .next(),
-        Some("minecraft:chest"),
+            .name(),
+        "minecraft:chest",
         "the second receiving chunk must retain the fortress chest block"
     );
     let second_entity = second

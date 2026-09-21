@@ -45,7 +45,6 @@ pub mod feature;
 pub mod flat;
 pub mod generator;
 pub mod generated_storage;
-pub mod interner;
 pub mod nether;
 pub mod overworld;
 pub mod profile;

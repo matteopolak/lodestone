@@ -43,17 +43,19 @@ use serde_json::Value;
 use crate::density::Resolver;
 use crate::feature::BlockPos;
 use crate::rng::RandomSource;
+use lodestone_worldgen_core::hash::FastSet;
+use lodestone_data::block::Block;
+use lodestone_data::block_states::{BlockStateValue, StateId};
 
-use super::base_id;
-use super::config::{canon_state, is_air, parse_id_list, resolve_block_set};
+use super::config::{canon_state, parse_id_list, resolve_block_set};
 use super::grid::VegGrid;
 
 /// Parsed support, replacement, and output state for one packed-ice spike.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IceSpikeCfg {
-    pub(super) state: String,
-    pub(super) can_place_on: HashSet<String>,
-    pub(super) can_replace: HashSet<String>,
+    pub(super) state: StateId,
+    pub(super) can_place_on: HashSet<StateId>,
+    pub(super) can_replace: HashSet<StateId>,
 }
 
 impl IceSpikeCfg {
@@ -64,10 +66,14 @@ impl IceSpikeCfg {
         if support_type.strip_prefix("minecraft:").unwrap_or(support_type) != "matching_blocks" {
             return None;
         }
-        let can_place_on: HashSet<String> = parse_id_list(can_place_on.get("blocks")?)
+        let can_place_on: HashSet<StateId> = parse_id_list(can_place_on.get("blocks")?)
             .into_iter()
-            .map(|state| base_id(&state).to_owned())
-            .collect();
+            .map(|state| {
+                BlockStateValue::parse(&state)
+                    .state_id()
+                    .map(|state| state.block().default_state())
+            })
+            .collect::<Option<HashSet<_>>>()?;
         if can_place_on.is_empty() {
             return None;
         }
@@ -82,7 +88,9 @@ impl IceSpikeCfg {
             return None;
         }
         let tag = can_replace.get("tag")?.as_str()?;
-        let can_replace = resolve_block_set(resolver, &Value::String(format!("#{tag}")))?;
+        let can_replace = resolve_block_set(resolver, &Value::String(format!("#{tag}")))?
+            .into_iter()
+            .collect::<HashSet<_>>();
         if can_replace.is_empty() {
             return None;
         }
@@ -91,7 +99,7 @@ impl IceSpikeCfg {
         state.get("Name").and_then(Value::as_str)?;
 
         Some(Self {
-            state: canon_state(state),
+            state: BlockStateValue::parse(&canon_state(state)).state_id()?,
             can_place_on,
             can_replace,
         })
@@ -107,17 +115,21 @@ pub(super) fn place_ice_spike<R: RandomSource>(
     config: &IceSpikeCfg,
     grid: &mut VegGrid,
 ) -> bool {
+    let air_ids = [
+        Block::Air.default_state(),
+        Block::CaveAir.default_state(),
+        Block::VoidAir.default_state(),
+    ];
+    let can_place_on = config.can_place_on.iter().copied().collect::<FastSet<_>>();
+    let can_replace = config.can_replace.iter().copied().collect::<FastSet<_>>();
     let mut origin = candidate;
-    while is_air(base_id(grid.get(origin.x, origin.y, origin.z)))
+    while air_ids.contains(&grid.get_id(origin.x, origin.y, origin.z))
         && origin.y > grid.min_y + 2
     {
         origin.y -= 1;
     }
 
-    if !config
-        .can_place_on
-        .contains(base_id(grid.get(origin.x, origin.y, origin.z)))
-    {
+    if !can_place_on.contains(&grid.get_id(origin.x, origin.y, origin.z)) {
         return false;
     }
 
@@ -128,7 +140,7 @@ pub(super) fn place_ice_spike<R: RandomSource>(
         origin.y += 10 + random.next_int_bounded(30);
     }
 
-    let state_id = grid.interner().id_of(&config.state);
+    let state_id = config.state;
     for y_offset in 0..height {
         let scale = (1.0_f32 - y_offset as f32 / height as f32) * width as f32;
         let new_width = scale.ceil() as i32;
@@ -151,7 +163,7 @@ pub(super) fn place_ice_spike<R: RandomSource>(
                     y: origin.y + y_offset,
                     z: origin.z + z_offset,
                 };
-                if can_replace_at(grid, config, upper) {
+                if can_replace_at(grid, &can_replace, &air_ids, upper) {
                     grid.set_id_if_in_bounds(upper.x, upper.y, upper.z, state_id);
                 }
 
@@ -161,7 +173,7 @@ pub(super) fn place_ice_spike<R: RandomSource>(
                         y: origin.y - y_offset,
                         z: origin.z + z_offset,
                     };
-                    if can_replace_at(grid, config, lower) {
+                    if can_replace_at(grid, &can_replace, &air_ids, lower) {
                         grid.set_id_if_in_bounds(lower.x, lower.y, lower.z, state_id);
                     }
                 }
@@ -178,12 +190,12 @@ pub(super) fn place_ice_spike<R: RandomSource>(
                 run_length = random.next_int_bounded(5);
             }
             while y > 50 {
-                let current = grid.get(origin.x + x_offset, y, origin.z + z_offset);
-                if !can_replace_at(grid, config, BlockPos {
+                let current = grid.get_id(origin.x + x_offset, y, origin.z + z_offset);
+                if !can_replace_at(grid, &can_replace, &air_ids, BlockPos {
                     x: origin.x + x_offset,
                     y,
                     z: origin.z + z_offset,
-                }) && current != config.state
+                }) && current != state_id
                 {
                     break;
                 }
@@ -206,9 +218,14 @@ pub(super) fn place_ice_spike<R: RandomSource>(
     true
 }
 
-fn can_replace_at(grid: &VegGrid, config: &IceSpikeCfg, pos: BlockPos) -> bool {
-    let state = grid.get(pos.x, pos.y, pos.z);
-    is_air(base_id(state)) || config.can_replace.contains(base_id(state))
+fn can_replace_at(
+    grid: &VegGrid,
+    can_replace: &FastSet<StateId>,
+    air_ids: &[StateId; 3],
+    pos: BlockPos,
+) -> bool {
+    let base = grid.get_id(pos.x, pos.y, pos.z);
+    air_ids.contains(&base) || can_replace.contains(&base)
 }
 
 #[cfg(test)]
@@ -265,11 +282,11 @@ mod tests {
 
     fn cfg() -> IceSpikeCfg {
         IceSpikeCfg {
-            state: "minecraft:packed_ice".to_owned(),
-            can_place_on: HashSet::from(["minecraft:snow_block".to_owned()]),
+            state: StateId::from_state_str("minecraft:packed_ice").unwrap(),
+            can_place_on: HashSet::from([Block::SnowBlock.default_state()]),
             can_replace: HashSet::from([
-                "minecraft:snow_block".to_owned(),
-                "minecraft:ice".to_owned(),
+                Block::SnowBlock.default_state(),
+                Block::Ice.default_state(),
             ]),
         }
     }
@@ -279,12 +296,16 @@ mod tests {
         for x in 0..16 {
             for z in 0..16 {
                 for y in -64..origin.y {
-                    grid.seed(x, y, z, "minecraft:stone".to_owned());
+                    grid.seed_id(x, y, z, state("minecraft:stone"));
                 }
             }
         }
-        grid.seed(origin.x, origin.y, origin.z, "minecraft:snow_block".to_owned());
+        grid.seed_id(origin.x, origin.y, origin.z, state("minecraft:snow_block"));
         grid
+    }
+
+    fn state(value: &str) -> StateId {
+        StateId::from_state_str(value).expect("fixture state is in the generated table")
     }
 
     struct ScriptedRandom {
@@ -372,7 +393,7 @@ mod tests {
         let got: HashMap<_, _> = expected
             .states
             .keys()
-            .map(|&pos| (pos, grid.get(pos.0, pos.1, pos.2).to_owned()))
+            .map(|&pos| (pos, grid.get(pos.0, pos.1, pos.2).canonical_state()))
             .collect();
         assert_eq!(got, expected.states);
         let written: std::collections::HashSet<_> = grid
@@ -386,7 +407,7 @@ mod tests {
     fn unsupported_surface_is_rejected_before_random_draws() {
         let origin = BlockPos { x: 8, y: 64, z: 8 };
         let mut grid = flat_grid(origin);
-        grid.seed(origin.x, origin.y, origin.z, "minecraft:stone".to_owned());
+        grid.seed_id(origin.x, origin.y, origin.z, state("minecraft:stone"));
         let mut random = ScriptedRandom::new(&[0, 0, 0]);
         assert!(!place_ice_spike(&mut random, origin, &cfg(), &mut grid));
         assert_eq!(random.next_int, 0);
@@ -410,7 +431,7 @@ mod tests {
         assert_eq!(random.next_int, 3);
         assert_eq!(random.floats, 8);
         for (&(x, y, z), state) in &expected.states {
-            assert_eq!(grid.get(x, y, z), state);
+            assert_eq!(grid.get(x, y, z).canonical_state(), *state);
         }
     }
 
@@ -469,10 +490,12 @@ mod tests {
         let ConfiguredFeature::IceSpike(config) = parsed else {
             panic!("ice_spike must parse as the dedicated feature body");
         };
-        assert_eq!(config.state, "minecraft:packed_ice");
-        assert!(config.can_place_on.contains("minecraft:snow_block"));
-        assert!(config.can_replace.contains("minecraft:dirt"));
-        assert!(config.can_replace.contains("minecraft:ice"));
+        assert_eq!(config.state.name(), "minecraft:packed_ice");
+        assert!(config
+            .can_place_on
+            .contains(&Block::SnowBlock.default_state()));
+        assert!(config.can_replace.contains(&Block::Dirt.default_state()));
+        assert!(config.can_replace.contains(&Block::Ice.default_state()));
 
         let catalog = build_decoration_catalog(&resolver, &["minecraft:ice_spikes".to_owned()]);
         let selected = catalog

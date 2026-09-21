@@ -259,11 +259,14 @@ pub use self::tree::*;
 
 use crate::feature::{BlockPos, STEP_VEGETAL_DECORATION};
 use crate::rng::{RandomSource, WorldgenRandom};
+#[cfg(test)]
+use lodestone_data::block::Block;
 
 use self::grid::census::bump as census_bump;
 
-pub(super) fn base_id(state: &str) -> &str {
-    state.split('[').next().unwrap_or(state)
+#[cfg(test)]
+pub(super) fn base_id(state: lodestone_data::block_states::StateId) -> &'static str {
+    state.block().name()
 }
 
 /// Extra horizontal context required by the geode body. Its bounded scan is
@@ -291,11 +294,9 @@ pub fn apply_vegetal_decoration_step<R: RandomSource>(
     tags: &VegTags,
     features: &[(usize, PlacedRef)],
 ) {
-    // U8: bring `tags`' id bitsets up to date with this grid's interner, once per
-    // pass. This is the only place `StateInterner::len`'s lock is taken on the
-    // decoration path — see [`ids`] for why per-query binding would defeat the
-    // whole mechanism, and why skipping it entirely is merely slow, not wrong.
-    tags.bind(grid.interner());
+    // Bind the target membership tables once per pass so placement queries stay
+    // on canonical state ids instead of rebuilding lookup data in the hot loop.
+    tags.bind();
     let origin = BlockPos {
         x: chunk_x * 16,
         y: grid.min_y,
@@ -331,7 +332,7 @@ pub fn apply_decoration_steps<R: RandomSource>(
     tags: &VegTags,
     features: &[(i32, usize, PlacedRef)],
 ) {
-    tags.bind(grid.interner());
+    tags.bind();
     let origin = BlockPos {
         x: chunk_x * 16,
         y: grid.min_y,
@@ -588,6 +589,7 @@ fn place_configured_feature_with_seed<R: RandomSource>(
     grid: &mut VegGrid,
     tags: &VegTags,
 ) {
+    feature.bind_states();
     match feature {
         ConfiguredFeature::SimpleBlock(provider) => {
             census_bump(|c| c.simple_block += 1);
@@ -841,20 +843,24 @@ mod tests {
     use crate::dense_grid::DenseBlockGrid;
     use crate::density::Resolver;
     use crate::feature::{HeightProvider, IntProvider, VerticalAnchor};
-    use crate::interner::StateInterner;
     use crate::overworld::BiomeCells;
     use serde_json::Value;
     use crate::rng::{LegacyRandomSource, RandomSource, XoroshiroPositionalFactory, XoroshiroRandomSource};
+
+    fn state(spec: &str) -> lodestone_data::block_states::StateId {
+        lodestone_data::block_states::StateId::from_state_str(spec)
+            .expect("test state is in the generated table")
+    }
 
     fn grid_with_flat_ground(min_y: i32, height: i32, ground_y: i32) -> VegGrid {
         let mut grid = VegGrid::new(min_y, height, 0, 0);
         for x in 0..16 {
             for z in 0..16 {
                 for y in min_y..=ground_y {
-                    grid.seed(x, y, z, "minecraft:grass_block".to_string());
+                    grid.seed_id(x, y, z, state("minecraft:grass_block"));
                 }
                 for y in ground_y + 1..min_y + height {
-                    grid.seed(x, y, z, "minecraft:air".to_string());
+                    grid.seed_id(x, y, z, state("minecraft:air"));
                 }
             }
         }
@@ -929,7 +935,7 @@ mod tests {
             ],
             feature: Box::new(ConfiguredFeature::ReplaceBlobs(Box::new(
                 features::ReplaceBlobsCfg {
-                    target: "minecraft:netherrack".to_string(),
+                    target: state("minecraft:netherrack"),
                     state: lodestone_data::block_states::StateId::from_state_str(
                         "minecraft:basalt[axis=y]",
                     )
@@ -1001,11 +1007,8 @@ mod tests {
     /// the feature eligible to run.
     #[test]
     fn biome_modifier_accepts_the_underground_sulfur_cell_and_rejects_plains_above() {
-        let interner = Arc::new(StateInterner::new());
-        let air = interner.id_of("minecraft:air");
-        let terrain = Arc::new(DenseBlockGrid::with_interner(
-            Arc::clone(&interner), 0, -64, 0, 16, 128, 16, air,
-        ));
+        let air = state("minecraft:air");
+        let terrain = Arc::new(DenseBlockGrid::with_default(0, -64, 0, 16, 128, 16, air));
         let cells = Arc::new(BiomeCells::from_fn(-64, 128, |_, qy, _| {
             if qy == 13 {
                 "minecraft:sulfur_caves".to_string()
@@ -1014,7 +1017,6 @@ mod tests {
             }
         }));
         let grid = VegGrid::with_sources_and_biomes(
-            interner,
             -64,
             128,
             0,
@@ -1069,10 +1071,8 @@ mod tests {
 
     #[test]
     fn overworld_biome_modifier_uses_zoomed_corner_not_containing_quart() {
-        let interner = Arc::new(StateInterner::new());
-        let air = interner.id_of("minecraft:air");
-        let terrain = Arc::new(DenseBlockGrid::with_interner(
-            Arc::clone(&interner),
+        let air = state("minecraft:air");
+        let terrain = Arc::new(DenseBlockGrid::with_default(
             0,
             0,
             0,
@@ -1095,7 +1095,6 @@ mod tests {
         let source_at = |_: i32, _: i32| Some(Arc::clone(&terrain));
         let biome_at = |_: i32, _: i32| Some(Arc::clone(&cells));
         let direct = VegGrid::with_sources_and_biomes(
-            Arc::clone(&interner),
             0,
             128,
             0,
@@ -1107,7 +1106,6 @@ mod tests {
             feature_biomes.clone(),
         );
         let zoomed = VegGrid::with_sources_and_biomes_shared_zoomed(
-            interner,
             0,
             128,
             0,
@@ -1160,10 +1158,8 @@ mod tests {
 
     #[test]
     fn overworld_zoomed_biome_gate_routes_every_wide_source_slot() {
-        let interner = Arc::new(StateInterner::new());
-        let air = interner.id_of("minecraft:air");
-        let terrain = Arc::new(DenseBlockGrid::with_interner(
-            Arc::clone(&interner),
+        let air = state("minecraft:air");
+        let terrain = Arc::new(DenseBlockGrid::with_default(
             0,
             0,
             0,
@@ -1215,7 +1211,6 @@ mod tests {
             }
         }
         let grid = VegGrid::with_sources_and_biomes_shared_zoomed(
-            interner,
             0,
             128,
             0,
@@ -1324,8 +1319,8 @@ mod tests {
         let mut grid = VegGrid::with_footprint(-64, 384, 0, 0, -16, 16);
         for x in -1..=1 {
             for z in -1..=1 {
-                grid.seed(x, 60, z, "minecraft:cinnabar".to_string());
-                grid.seed(x, 68, z, "minecraft:cinnabar".to_string());
+                grid.seed_id(x, 60, z, state("minecraft:cinnabar"));
+                grid.seed_id(x, 68, z, state("minecraft:cinnabar"));
             }
         }
         let mut random = LegacyRandomSource::new(0);
@@ -1338,7 +1333,7 @@ mod tests {
         );
         let actual: BTreeMap<_, _> = grid
             .dirty_cells()
-            .map(|(x, y, z, state)| (format!("{x},{y},{z}"), state.to_string()))
+            .map(|(x, y, z, state)| (format!("{x},{y},{z}"), state.canonical_state()))
             .collect();
         assert_eq!(actual, expected, "cluster scan, branch order, base layers, or pointed-state assembly drifted from the external fixture");
     }
@@ -1346,9 +1341,9 @@ mod tests {
     #[test]
     fn speleothem_cluster_wetness_creates_a_substrate_gated_pool() {
         let cfg = features::SpeleothemClusterCfg {
-            base_block: "minecraft:dripstone_block".to_string(),
-            pointed_block: "minecraft:pointed_dripstone".to_string(),
-            replaceable_blocks: HashSet::from(["minecraft:stone".to_string()]),
+            base_block: state("minecraft:dripstone_block"),
+            pointed_block: state("minecraft:pointed_dripstone"),
+            replaceable_blocks: [state("minecraft:stone")].into_iter().collect(),
             floor_to_ceiling_search_range: 12,
             height: IntProvider::Constant(3),
             radius: IntProvider::Constant(0),
@@ -1364,16 +1359,16 @@ mod tests {
         let mut grid = VegGrid::with_footprint(-64, 384, 0, 0, -1, 1);
         for x in -1..=1 {
             for z in -1..=1 {
-                grid.seed(x, 59, z, "minecraft:stone".to_string());
-                grid.seed(x, 60, z, "minecraft:stone".to_string());
+                grid.seed_id(x, 59, z, state("minecraft:stone"));
+                grid.seed_id(x, 60, z, state("minecraft:stone"));
             }
         }
         for y in 61..=67 {
-            grid.seed(0, y, 0, "minecraft:air".to_string());
+            grid.seed_id(0, y, 0, state("minecraft:air"));
         }
-        grid.seed(0, 68, 0, "minecraft:stone".to_string());
+        grid.seed_id(0, 68, 0, state("minecraft:stone"));
         let mut tags = VegTags::default();
-        tags.base_stone_overworld.insert("minecraft:stone".to_string());
+        tags.base_stone_overworld.insert(Block::Stone);
 
         place_configured_feature(
             &mut LegacyRandomSource::new(0),
@@ -1385,7 +1380,7 @@ mod tests {
 
         assert_eq!(
             grid.get(0, 60, 0),
-            "minecraft:pointed_dripstone[thickness=tip,vertical_direction=up,waterlogged=true]",
+            state("minecraft:pointed_dripstone[thickness=tip,vertical_direction=up,waterlogged=true]"),
         );
     }
 
@@ -1415,7 +1410,7 @@ mod tests {
         let mut grid = VegGrid::with_footprint(-64, 384, 0, 0, -16, 32);
         for x in 13..=19 {
             for z in -3..=3 {
-                grid.seed(x, 63, z, "minecraft:cinnabar".to_string());
+                grid.seed_id(x, 63, z, state("minecraft:cinnabar"));
             }
         }
         let mut random = LegacyRandomSource::new(0);
@@ -1428,7 +1423,7 @@ mod tests {
         );
         let actual: BTreeMap<_, _> = grid
             .dirty_cells()
-            .map(|(x, y, z, state)| (format!("{x},{y},{z}"), state.to_string()))
+            .map(|(x, y, z, state)| (format!("{x},{y},{z}"), state.canonical_state()))
             .collect();
         assert_eq!(actual, expected, "base patch, pointed state, or placement RNG order drifted from the external seam fixture");
 
@@ -1447,7 +1442,7 @@ mod tests {
         let mut ceiling = VegGrid::with_footprint(-64, 384, 0, 0, -16, 32);
         for x in -3..=3 {
             for z in -3..=3 {
-                ceiling.seed(x, 65, z, "minecraft:cinnabar".to_string());
+                ceiling.seed_id(x, 65, z, state("minecraft:cinnabar"));
             }
         }
         let mut random = LegacyRandomSource::new(6);
@@ -1460,7 +1455,7 @@ mod tests {
         );
         let actual_ceiling: BTreeMap<_, _> = ceiling
             .dirty_cells()
-            .map(|(x, y, z, state)| (format!("{x},{y},{z}"), state.to_string()))
+            .map(|(x, y, z, state)| (format!("{x},{y},{z}"), state.canonical_state()))
             .collect();
         assert_eq!(actual_ceiling, expected_ceiling, "the ceiling selector branch must preserve downward pointed-state direction and segment order");
 
@@ -1485,8 +1480,8 @@ mod tests {
     #[test]
     fn height_ocean_floor_skips_water() {
         let mut grid = grid_with_flat_ground(-64, 384, 70);
-        grid.seed(5, 71, 5, "minecraft:water".to_string());
-        grid.seed(5, 72, 5, "minecraft:water".to_string());
+        grid.seed_id(5, 71, 5, state("minecraft:water"));
+        grid.seed_id(5, 72, 5, state("minecraft:water"));
         assert_eq!(grid.height_world_surface(5, 5), 73, "world surface counts water as non-air");
         assert_eq!(grid.height_ocean_floor(5, 5), 71, "ocean floor skips water down to solid ground");
     }
@@ -1494,21 +1489,21 @@ mod tests {
     #[test]
     fn writes_outside_chunk_footprint_are_dropped_not_clamped() {
         let mut grid = VegGrid::new(-64, 384, 0, 0);
-        assert!(!grid.set_if_in_bounds(-1, 70, 5, "minecraft:oak_log".to_string()));
-        assert!(!grid.set_if_in_bounds(16, 70, 5, "minecraft:oak_log".to_string()));
-        assert!(grid.set_if_in_bounds(0, 70, 5, "minecraft:oak_log".to_string()));
-        assert!(grid.set_if_in_bounds(15, 70, 5, "minecraft:oak_log".to_string()));
+        assert!(!grid.set_id_if_in_bounds(-1, 70, 5, state("minecraft:oak_log")));
+        assert!(!grid.set_id_if_in_bounds(16, 70, 5, state("minecraft:oak_log")));
+        assert!(grid.set_id_if_in_bounds(0, 70, 5, state("minecraft:oak_log")));
+        assert!(grid.set_id_if_in_bounds(15, 70, 5, state("minecraft:oak_log")));
     }
 
     #[test]
     fn dirty_cells_only_reports_in_bounds_writes_in_write_order() {
         let mut grid = VegGrid::new(-64, 384, 0, 0);
-        assert!(!grid.set_if_in_bounds(-1, 70, 5, "minecraft:oak_log".to_string()));
-        assert!(grid.set_if_in_bounds(3, 70, 5, "minecraft:oak_log".to_string()));
-        assert!(grid.set_if_in_bounds(4, 71, 5, "minecraft:oak_leaves".to_string()));
+        assert!(!grid.set_id_if_in_bounds(-1, 70, 5, state("minecraft:oak_log")));
+        assert!(grid.set_id_if_in_bounds(3, 70, 5, state("minecraft:oak_log")));
+        assert!(grid.set_id_if_in_bounds(4, 71, 5, state("minecraft:oak_leaves")));
         let cells: Vec<(i32, i32, i32, String)> = grid
             .dirty_cells()
-            .map(|(x, y, z, s)| (x, y, z, s.to_string()))
+            .map(|(x, y, z, s)| (x, y, z, s.canonical_state()))
             .collect();
         assert_eq!(
             cells,
@@ -1653,9 +1648,9 @@ mod tests {
     fn straight_trunk_places_exactly_tree_height_logs() {
         let cfg = TreeConfig {
             below_trunk_provider: None,
-            trunk_provider: BlockStateProvider::Simple("minecraft:oak_log[axis=y]".to_string()),
-            foliage_provider: BlockStateProvider::Simple(
-                "minecraft:oak_leaves[distance=7,persistent=false,waterlogged=false]".to_string(),
+            trunk_provider: BlockStateProvider::simple("minecraft:oak_log[axis=y]"),
+            foliage_provider: BlockStateProvider::simple(
+                "minecraft:oak_leaves[distance=7,persistent=false,waterlogged=false]",
             ),
             trunk_placer: TrunkPlacerCfg::Straight {
                 base_height: 5,
@@ -1714,9 +1709,9 @@ mod tests {
         // early-return actually fires, not merely never gets exercised.
         let cfg = TreeConfig {
             below_trunk_provider: None,
-            trunk_provider: BlockStateProvider::Simple("minecraft:oak_log[axis=y]".to_string()),
-            foliage_provider: BlockStateProvider::Simple(
-                "minecraft:oak_leaves[distance=7,persistent=false,waterlogged=false]".to_string(),
+            trunk_provider: BlockStateProvider::simple("minecraft:oak_log[axis=y]"),
+            foliage_provider: BlockStateProvider::simple(
+                "minecraft:oak_leaves[distance=7,persistent=false,waterlogged=false]",
             ),
             trunk_placer: TrunkPlacerCfg::Straight {
                 base_height: 5,
@@ -1739,7 +1734,7 @@ mod tests {
         };
         let mut grid = grid_with_flat_ground(-64, 384, 69);
         // Block the space directly above the trunk's base with stone.
-        grid.seed(8, 71, 8, "minecraft:stone".to_string());
+        grid.seed_id(8, 71, 8, state("minecraft:stone"));
         let tags = VegTags::default();
         let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(42));
         let origin = BlockPos { x: 8, y: 70, z: 8 };
@@ -1762,10 +1757,9 @@ mod tests {
     fn tree_placement_is_deterministic_across_two_independent_generators() {
         let cfg = TreeConfig {
             below_trunk_provider: None,
-            trunk_provider: BlockStateProvider::Simple("minecraft:spruce_log[axis=y]".to_string()),
-            foliage_provider: BlockStateProvider::Simple(
-                "minecraft:spruce_leaves[distance=7,persistent=false,waterlogged=false]"
-                    .to_string(),
+            trunk_provider: BlockStateProvider::simple("minecraft:spruce_log[axis=y]"),
+            foliage_provider: BlockStateProvider::simple(
+                "minecraft:spruce_leaves[distance=7,persistent=false,waterlogged=false]",
             ),
             trunk_placer: TrunkPlacerCfg::Straight {
                 base_height: 5,
@@ -1822,9 +1816,9 @@ mod tests {
     fn dark_oak_trunk_places_a_two_by_two_base_and_canopy() {
         let cfg = TreeConfig {
             below_trunk_provider: None,
-            trunk_provider: BlockStateProvider::Simple("minecraft:dark_oak_log[axis=y]".to_string()),
-            foliage_provider: BlockStateProvider::Simple(
-                "minecraft:dark_oak_leaves[distance=7,persistent=false,waterlogged=false]".to_string(),
+            trunk_provider: BlockStateProvider::simple("minecraft:dark_oak_log[axis=y]"),
+            foliage_provider: BlockStateProvider::simple(
+                "minecraft:dark_oak_leaves[distance=7,persistent=false,waterlogged=false]",
             ),
             trunk_placer: TrunkPlacerCfg::DarkOak {
                 base_height: 5,
@@ -1850,7 +1844,7 @@ mod tests {
         let mut tags = VegTags::default();
         // `place_dark_oak_trunk`'s `isAirOrLeaves` anchor gate needs the
         // leaves tag populated (real vanilla's `#minecraft:leaves`).
-        tags.leaves.insert("minecraft:dark_oak_leaves".to_string());
+        tags.leaves.insert(Block::DarkOakLeaves);
         let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(99));
         let origin = BlockPos { x: 8, y: 70, z: 8 };
         place_tree(&mut random, origin, &cfg, &mut grid, &tags);
@@ -1962,22 +1956,22 @@ mod tests {
     #[test]
     fn grass_patch_survives_only_on_supports_vegetation() {
         let mut grid = VegGrid::new(-64, 384, 0, 0);
-        grid.seed(5, 69, 5, "minecraft:grass_block".to_string());
-        grid.seed(5, 70, 5, "minecraft:air".to_string());
-        grid.seed(5, 69, 6, "minecraft:stone".to_string());
-        grid.seed(5, 70, 6, "minecraft:air".to_string());
+        grid.seed_id(5, 69, 5, state("minecraft:grass_block"));
+        grid.seed_id(5, 70, 5, state("minecraft:air"));
+        grid.seed_id(5, 69, 6, state("minecraft:stone"));
+        grid.seed_id(5, 70, 6, state("minecraft:air"));
         let mut tags = VegTags::default();
-        tags.supports_vegetation.insert("minecraft:grass_block".to_string());
-        let provider = BlockStateProvider::Simple("minecraft:short_grass".to_string());
+        tags.supports_vegetation.insert(Block::GrassBlock);
+        let provider = BlockStateProvider::simple("minecraft:short_grass");
         let mut random = LegacyRandomSource::new(1);
 
         place_simple_block(&mut random, BlockPos { x: 5, y: 70, z: 5 }, &provider, &mut grid, &tags);
-        assert_eq!(grid.get(5, 70, 5), "minecraft:short_grass");
+        assert_eq!(grid.get(5, 70, 5), state("minecraft:short_grass"));
 
         place_simple_block(&mut random, BlockPos { x: 5, y: 70, z: 6 }, &provider, &mut grid, &tags);
         assert_eq!(
             grid.get(5, 70, 6),
-            "minecraft:air",
+            state("minecraft:air"),
             "grass must not survive on a non-supports_vegetation block (stone)"
         );
     }
@@ -1985,12 +1979,12 @@ mod tests {
     #[test]
     fn simple_block_places_both_halves_of_a_double_plant() {
         let mut grid = VegGrid::new(-64, 384, 0, 0);
-        grid.seed(5, 69, 5, "minecraft:grass_block".to_string());
-        grid.seed(5, 70, 5, "minecraft:air".to_string());
-        grid.seed(5, 71, 5, "minecraft:air".to_string());
+        grid.seed_id(5, 69, 5, state("minecraft:grass_block"));
+        grid.seed_id(5, 70, 5, state("minecraft:air"));
+        grid.seed_id(5, 71, 5, state("minecraft:air"));
         let mut tags = VegTags::default();
-        tags.supports_vegetation.insert("minecraft:grass_block".to_string());
-        let provider = BlockStateProvider::Simple("minecraft:tall_grass[half=lower]".to_string());
+        tags.supports_vegetation.insert(Block::GrassBlock);
+        let provider = BlockStateProvider::simple("minecraft:tall_grass[half=lower]");
 
         place_simple_block(
             &mut LegacyRandomSource::new(1),
@@ -2000,19 +1994,19 @@ mod tests {
             &tags,
         );
 
-        assert_eq!(grid.get(5, 70, 5), "minecraft:tall_grass[half=lower]");
-        assert_eq!(grid.get(5, 71, 5), "minecraft:tall_grass[half=upper]");
+        assert_eq!(grid.get(5, 70, 5), state("minecraft:tall_grass[half=lower]"));
+        assert_eq!(grid.get(5, 71, 5), state("minecraft:tall_grass[half=upper]"));
     }
 
     #[test]
     fn simple_block_rejects_a_double_plant_when_the_upper_cell_is_occupied() {
         let mut grid = VegGrid::new(-64, 384, 0, 0);
-        grid.seed(5, 69, 5, "minecraft:grass_block".to_string());
-        grid.seed(5, 70, 5, "minecraft:air".to_string());
-        grid.seed(5, 71, 5, "minecraft:stone".to_string());
+        grid.seed_id(5, 69, 5, state("minecraft:grass_block"));
+        grid.seed_id(5, 70, 5, state("minecraft:air"));
+        grid.seed_id(5, 71, 5, state("minecraft:stone"));
         let mut tags = VegTags::default();
-        tags.supports_vegetation.insert("minecraft:grass_block".to_string());
-        let provider = BlockStateProvider::Simple("minecraft:tall_grass[half=lower]".to_string());
+        tags.supports_vegetation.insert(Block::GrassBlock);
+        let provider = BlockStateProvider::simple("minecraft:tall_grass[half=lower]");
 
         place_simple_block(
             &mut LegacyRandomSource::new(1),
@@ -2022,8 +2016,8 @@ mod tests {
             &tags,
         );
 
-        assert_eq!(grid.get(5, 70, 5), "minecraft:air");
-        assert_eq!(grid.get(5, 71, 5), "minecraft:stone");
+        assert_eq!(grid.get(5, 70, 5), state("minecraft:air"));
+        assert_eq!(grid.get(5, 71, 5), state("minecraft:stone"));
     }
 
     /// Real `configured_feature/cactus.json` (see `crates/lodestone-server
@@ -2073,7 +2067,7 @@ mod tests {
         let cfg = BlockColumnConfig {
             layers: vec![(
                 IntProvider::Constant(3),
-                BlockStateProvider::Simple("minecraft:cactus[age=0]".to_string()),
+                BlockStateProvider::simple("minecraft:cactus[age=0]"),
             )],
             direction: (0, 1, 0),
             allowed_placement: BlockPredicate::MatchingBlockTag {
@@ -2108,7 +2102,7 @@ mod tests {
         let cfg = BlockColumnConfig {
             layers: vec![(
                 IntProvider::Constant(3),
-                BlockStateProvider::Simple("minecraft:cactus[age=0]".to_string()),
+                BlockStateProvider::simple("minecraft:cactus[age=0]"),
             )],
             direction: (0, 1, 0),
             allowed_placement: BlockPredicate::MatchingBlockTag {
@@ -2118,7 +2112,7 @@ mod tests {
             prioritize_tip: false,
         };
         let mut grid = grid_with_flat_ground(-64, 384, 69);
-        grid.seed(8, 72, 8, "minecraft:stone".to_string());
+        grid.seed_id(8, 72, 8, state("minecraft:stone"));
         let tags = VegTags::default();
         let mut random = LegacyRandomSource::new(7);
         let origin = BlockPos { x: 8, y: 70, z: 8 };
@@ -2131,32 +2125,32 @@ mod tests {
     #[test]
     fn would_survive_cactus_requires_supports_cactus_below_and_clear_sides() {
         let mut tags = VegTags::default();
-        tags.supports_cactus.insert("minecraft:sand".to_string());
+        tags.supports_cactus.insert(Block::Sand);
         let pred = BlockPredicate::WouldSurviveCactus;
 
         let mut grid = VegGrid::new(-64, 384, 0, 0);
-        grid.seed(5, 69, 5, "minecraft:sand".to_string());
-        grid.seed(5, 70, 5, "minecraft:air".to_string());
-        grid.seed(6, 70, 5, "minecraft:air".to_string());
-        grid.seed(4, 70, 5, "minecraft:air".to_string());
-        grid.seed(5, 70, 6, "minecraft:air".to_string());
-        grid.seed(5, 70, 4, "minecraft:air".to_string());
-        grid.seed(5, 71, 5, "minecraft:air".to_string());
+        grid.seed_id(5, 69, 5, state("minecraft:sand"));
+        grid.seed_id(5, 70, 5, state("minecraft:air"));
+        grid.seed_id(6, 70, 5, state("minecraft:air"));
+        grid.seed_id(4, 70, 5, state("minecraft:air"));
+        grid.seed_id(5, 70, 6, state("minecraft:air"));
+        grid.seed_id(5, 70, 4, state("minecraft:air"));
+        grid.seed_id(5, 71, 5, state("minecraft:air"));
         assert!(
             pred.test(&grid, &tags, BlockPos { x: 5, y: 70, z: 5 }),
             "sand below, all 4 horizontal neighbours air: must survive"
         );
 
         // Control: a solid neighbour must fail the check that just passed.
-        grid.seed(6, 70, 5, "minecraft:stone".to_string());
+        grid.seed_id(6, 70, 5, state("minecraft:stone"));
         assert!(
             !pred.test(&grid, &tags, BlockPos { x: 5, y: 70, z: 5 }),
             "a solid horizontal neighbour must block cactus survival"
         );
 
         // Control: a non-supports_cactus block below must also fail.
-        grid.seed(6, 70, 5, "minecraft:air".to_string());
-        grid.seed(5, 69, 5, "minecraft:stone".to_string());
+        grid.seed_id(6, 70, 5, state("minecraft:air"));
+        grid.seed_id(5, 69, 5, state("minecraft:stone"));
         assert!(
             !pred.test(&grid, &tags, BlockPos { x: 5, y: 70, z: 5 }),
             "stone below (not in supports_cactus) must block cactus survival"
@@ -2172,15 +2166,15 @@ mod tests {
         // explicit sibling `any_of(matching_fluids)`. This predicate alone
         // must therefore pass on bare sand with NO adjacent water.
         let mut tags = VegTags::default();
-        tags.supports_sugar_cane.insert("minecraft:sand".to_string());
+        tags.supports_sugar_cane.insert(Block::Sand);
         let pred = BlockPredicate::WouldSurviveSugarCane;
         let mut grid = VegGrid::new(-64, 384, 0, 0);
-        grid.seed(5, 69, 5, "minecraft:sand".to_string());
-        grid.seed(5, 70, 5, "minecraft:air".to_string());
+        grid.seed_id(5, 69, 5, state("minecraft:sand"));
+        grid.seed_id(5, 70, 5, state("minecraft:air"));
         assert!(pred.test(&grid, &tags, BlockPos { x: 5, y: 70, z: 5 }));
 
         // Control: stone below (not in supports_sugar_cane) must fail.
-        grid.seed(5, 69, 5, "minecraft:stone".to_string());
+        grid.seed_id(5, 69, 5, state("minecraft:stone"));
         assert!(!pred.test(&grid, &tags, BlockPos { x: 5, y: 70, z: 5 }));
     }
 
@@ -2193,25 +2187,25 @@ mod tests {
         // unrecognised combinator used to (see BlockPredicate::AllOf's doc).
         let pred = BlockPredicate::AnyOf(vec![
             BlockPredicate::MatchingFluid {
-                fluids: vec!["minecraft:water".to_string(), "minecraft:flowing_water".to_string()],
+                fluids: [Block::Water].into_iter().collect(),
                 offset: (1, -1, 0),
             },
             BlockPredicate::MatchingFluid {
-                fluids: vec!["minecraft:water".to_string(), "minecraft:flowing_water".to_string()],
+                fluids: [Block::Water].into_iter().collect(),
                 offset: (-1, -1, 0),
             },
         ]);
         let tags = VegTags::default();
         let mut grid = VegGrid::new(-64, 384, 0, 0);
-        grid.seed(5, 69, 5, "minecraft:sand".to_string());
-        grid.seed(5, 70, 5, "minecraft:air".to_string());
-        grid.seed(6, 69, 5, "minecraft:sand".to_string());
+        grid.seed_id(5, 69, 5, state("minecraft:sand"));
+        grid.seed_id(5, 70, 5, state("minecraft:air"));
+        grid.seed_id(6, 69, 5, state("minecraft:sand"));
         assert!(
             !pred.test(&grid, &tags, BlockPos { x: 5, y: 70, z: 5 }),
             "no adjacent water: must fail"
         );
 
-        grid.seed(6, 69, 5, "minecraft:water".to_string());
+        grid.seed_id(6, 69, 5, state("minecraft:water"));
         assert!(
             pred.test(&grid, &tags, BlockPos { x: 5, y: 70, z: 5 }),
             "water at offset (1,-1,0): must pass"
@@ -2229,9 +2223,9 @@ mod tests {
     fn giant_trunk_places_a_full_two_by_two_base_and_a_single_top_log() {
         let cfg = TreeConfig {
             below_trunk_provider: None,
-            trunk_provider: BlockStateProvider::Simple("minecraft:spruce_log[axis=y]".to_string()),
-            foliage_provider: BlockStateProvider::Simple(
-                "minecraft:spruce_leaves[distance=7,persistent=false,waterlogged=false]".to_string(),
+            trunk_provider: BlockStateProvider::simple("minecraft:spruce_log[axis=y]"),
+            foliage_provider: BlockStateProvider::simple(
+                "minecraft:spruce_leaves[distance=7,persistent=false,waterlogged=false]",
             ),
             trunk_placer: TrunkPlacerCfg::Giant {
                 base_height: 6,
@@ -2297,9 +2291,9 @@ mod tests {
     fn mega_jungle_trunk_places_giant_base_and_at_least_one_branch() {
         let cfg = TreeConfig {
             below_trunk_provider: None,
-            trunk_provider: BlockStateProvider::Simple("minecraft:jungle_log[axis=y]".to_string()),
-            foliage_provider: BlockStateProvider::Simple(
-                "minecraft:jungle_leaves[distance=7,persistent=false,waterlogged=false]".to_string(),
+            trunk_provider: BlockStateProvider::simple("minecraft:jungle_log[axis=y]"),
+            foliage_provider: BlockStateProvider::simple(
+                "minecraft:jungle_leaves[distance=7,persistent=false,waterlogged=false]",
             ),
             trunk_placer: TrunkPlacerCfg::MegaJungle {
                 base_height: 20,
@@ -2363,9 +2357,9 @@ mod tests {
     fn bush_foliage_places_leaves_around_a_straight_trunk() {
         let cfg = TreeConfig {
             below_trunk_provider: None,
-            trunk_provider: BlockStateProvider::Simple("minecraft:jungle_log[axis=y]".to_string()),
-            foliage_provider: BlockStateProvider::Simple(
-                "minecraft:oak_leaves[distance=7,persistent=false,waterlogged=false]".to_string(),
+            trunk_provider: BlockStateProvider::simple("minecraft:jungle_log[axis=y]"),
+            foliage_provider: BlockStateProvider::simple(
+                "minecraft:oak_leaves[distance=7,persistent=false,waterlogged=false]",
             ),
             trunk_placer: TrunkPlacerCfg::Straight {
                 base_height: 1,
@@ -2580,9 +2574,9 @@ mod tests {
     fn fancy_trunk_places_a_deterministic_main_trunk_and_reaches_leaves() {
         let cfg = TreeConfig {
             below_trunk_provider: None,
-            trunk_provider: BlockStateProvider::Simple("minecraft:oak_log[axis=y]".to_string()),
-            foliage_provider: BlockStateProvider::Simple(
-                "minecraft:oak_leaves[distance=7,persistent=false,waterlogged=false]".to_string(),
+            trunk_provider: BlockStateProvider::simple("minecraft:oak_log[axis=y]"),
+            foliage_provider: BlockStateProvider::simple(
+                "minecraft:oak_leaves[distance=7,persistent=false,waterlogged=false]",
             ),
             trunk_placer: TrunkPlacerCfg::Fancy { base_height: 3, height_rand_a: 0, height_rand_b: 0 },
             foliage_placer: FoliagePlacerCfg::Fancy {
@@ -2647,9 +2641,9 @@ mod tests {
     fn fancy_min_clipped_height_cfg() -> TreeConfig {
         TreeConfig {
             below_trunk_provider: None,
-            trunk_provider: BlockStateProvider::Simple("minecraft:oak_log[axis=y]".to_string()),
-            foliage_provider: BlockStateProvider::Simple(
-                "minecraft:oak_leaves[distance=7,persistent=false,waterlogged=false]".to_string(),
+            trunk_provider: BlockStateProvider::simple("minecraft:oak_log[axis=y]"),
+            foliage_provider: BlockStateProvider::simple(
+                "minecraft:oak_leaves[distance=7,persistent=false,waterlogged=false]",
             ),
             trunk_placer: TrunkPlacerCfg::Fancy { base_height: 3, height_rand_a: 0, height_rand_b: 0 },
             foliage_placer: FoliagePlacerCfg::Fancy {
@@ -2677,7 +2671,7 @@ mod tests {
         // placer (not the original 3).
         let cfg = fancy_min_clipped_height_cfg();
         let mut grid = grid_with_flat_ground(-64, 384, 69);
-        grid.seed(8, 74, 8, "minecraft:stone".to_string());
+        grid.seed_id(8, 74, 8, state("minecraft:stone"));
         let tags = VegTags::default();
         let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(1));
         let origin = BlockPos { x: 8, y: 70, z: 8 };
@@ -2706,7 +2700,7 @@ mod tests {
         // outright, matching vanilla's real `doPlace` returning `false`.
         let cfg = fancy_min_clipped_height_cfg();
         let mut grid = grid_with_flat_ground(-64, 384, 69);
-        grid.seed(8, 73, 8, "minecraft:stone".to_string());
+        grid.seed_id(8, 73, 8, state("minecraft:stone"));
         let tags = VegTags::default();
         let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(1));
         let origin = BlockPos { x: 8, y: 70, z: 8 };
@@ -2797,7 +2791,7 @@ mod tests {
     #[test]
     fn fallen_tree_places_a_stump_and_a_horizontal_log_on_flat_ground() {
         let cfg = features::FallenTreeCfg {
-            trunk_provider: BlockStateProvider::Simple("minecraft:jungle_log[axis=y]".to_string()),
+            trunk_provider: BlockStateProvider::simple("minecraft:jungle_log[axis=y]"),
             // `log_length.sample() - 2 = 2`: small enough that the fallen
             // log's worst-case reach (offset 3 + length 2 = 5) stays well
             // inside a 16-wide chunk from a centred origin.
@@ -2898,9 +2892,9 @@ mod tests {
     ) -> TreeConfig {
         TreeConfig {
             below_trunk_provider: None,
-            trunk_provider: BlockStateProvider::Simple("minecraft:cherry_log[axis=y]".to_string()),
-            foliage_provider: BlockStateProvider::Simple(
-                "minecraft:cherry_leaves[distance=7,persistent=false,waterlogged=false]".to_string(),
+            trunk_provider: BlockStateProvider::simple("minecraft:cherry_log[axis=y]"),
+            foliage_provider: BlockStateProvider::simple(
+                "minecraft:cherry_leaves[distance=7,persistent=false,waterlogged=false]",
             ),
             trunk_placer: TrunkPlacerCfg::Cherry {
                 base_height: 10,
@@ -2992,9 +2986,9 @@ mod tests {
     fn mangrove_trunk_cfg(place_branch_per_log_probability: f32) -> TreeConfig {
         TreeConfig {
             below_trunk_provider: None,
-            trunk_provider: BlockStateProvider::Simple("minecraft:mangrove_log[axis=y]".to_string()),
-            foliage_provider: BlockStateProvider::Simple(
-                "minecraft:mangrove_leaves[distance=7,persistent=false,waterlogged=false]".to_string(),
+            trunk_provider: BlockStateProvider::simple("minecraft:mangrove_log[axis=y]"),
+            foliage_provider: BlockStateProvider::simple(
+                "minecraft:mangrove_leaves[distance=7,persistent=false,waterlogged=false]",
             ),
             trunk_placer: TrunkPlacerCfg::UpwardsBranching {
                 base_height: 6,
@@ -3093,14 +3087,16 @@ mod tests {
         let mut cfg = mangrove_trunk_cfg(0.0);
         cfg.root_placer = Some(RootPlacerCfg::Mangrove {
             trunk_offset_y: IntProvider::Constant(trunk_offset_y),
-            root_provider: BlockStateProvider::Simple(
-                "minecraft:mangrove_roots[waterlogged=false]".to_string(),
+            root_provider: BlockStateProvider::simple(
+                "minecraft:mangrove_roots[waterlogged=false]",
             ),
             above_root_placement: None,
             can_grow_through: super::ids::Tag::MangroveRootsCanGrowThrough,
-            muddy_roots_in: vec!["minecraft:mud".to_string(), "minecraft:muddy_mangrove_roots".to_string()],
-            muddy_roots_provider: BlockStateProvider::Simple(
-                "minecraft:muddy_mangrove_roots[axis=y]".to_string(),
+            muddy_roots_in: [state("minecraft:mud"), state("minecraft:muddy_mangrove_roots")]
+                .into_iter()
+                .collect(),
+            muddy_roots_provider: BlockStateProvider::simple(
+                "minecraft:muddy_mangrove_roots[axis=y]",
             ),
             max_root_width: 8,
             max_root_length: 15,
@@ -3162,7 +3158,7 @@ mod tests {
         let cfg = mangrove_root_cfg(4);
         let mut grid = grid_with_flat_ground(-64, 384, 69);
         // Block the column the roots must scan (origin.y..origin.y+4).
-        grid.seed(8, 71, 8, "minecraft:stone".to_string());
+        grid.seed_id(8, 71, 8, state("minecraft:stone"));
         let tags = VegTags::default();
         let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(3));
         let origin = BlockPos { x: 8, y: 70, z: 8 };
@@ -3204,11 +3200,10 @@ mod tests {
 
     fn mushroom_tags() -> VegTags {
         let mut tags = VegTags::default();
-        tags.huge_brown_mushroom_can_place_on.insert("minecraft:grass_block".to_string());
-        tags.huge_red_mushroom_can_place_on.insert("minecraft:grass_block".to_string());
-        for block in ["minecraft:brown_mushroom_block", "minecraft:red_mushroom_block"] {
-            tags.replaceable_by_mushrooms.insert(block.to_string());
-        }
+        tags.huge_brown_mushroom_can_place_on.insert(Block::GrassBlock);
+        tags.huge_red_mushroom_can_place_on.insert(Block::GrassBlock);
+        tags.replaceable_by_mushrooms.insert(Block::BrownMushroomBlock);
+        tags.replaceable_by_mushrooms.insert(Block::RedMushroomBlock);
         tags
     }
 
@@ -3258,7 +3253,7 @@ mod tests {
     #[test]
     fn coral_forms_require_water_above_and_write_distinct_geometries() {
         let mut dry = VegGrid::new(-64, 384, 0, 0);
-        dry.seed(8, 70, 8, "minecraft:water".to_string());
+        dry.seed_id(8, 70, 8, state("minecraft:water"));
         let mut random = LegacyRandomSource::new(3);
         place_configured_feature(
             &mut random,
@@ -3276,7 +3271,7 @@ mod tests {
             (super::coral::CoralKind::Mushroom, 13),
         ] {
             let mut grid = VegGrid::new(-64, 384, 0, 0);
-            for x in 0..16 { for y in 60..96 { for z in 0..16 { grid.seed(x, y, z, "minecraft:water".to_string()); } } }
+            for x in 0..16 { for y in 60..96 { for z in 0..16 { grid.seed_id(x, y, z, state("minecraft:water")); } } }
             let mut random = LegacyRandomSource::new(seed);
             place_configured_feature(&mut random, BlockPos { x: 8, y: 70, z: 8 }, &ConfiguredFeature::Coral(kind), &mut grid, &VegTags::default());
             let writes = grid.dirty_cells().count();
@@ -3304,10 +3299,10 @@ mod tests {
             }).collect();
             assert!(!expected.is_empty(), "{label}: compiled-server fixture must exercise this geometry");
             let mut grid = VegGrid::with_footprint(-64, 384, 0, 0, -16, 32);
-            for x in -16..32 { for y in 0..96 { for z in -16..32 { grid.seed(x, y, z, "minecraft:water".to_string()); } } }
+            for x in -16..32 { for y in 0..96 { for z in -16..32 { grid.seed_id(x, y, z, state("minecraft:water")); } } }
             let mut random = LegacyRandomSource::new(11);
             place_configured_feature(&mut random, BlockPos { x: 0, y: 64, z: 0 }, &ConfiguredFeature::Coral(kind), &mut grid, &VegTags::default());
-            let got: BTreeMap<_, _> = grid.dirty_cells().map(|(x,y,z,state)| (format!("{x},{y},{z}"), state.to_string())).collect();
+            let got: BTreeMap<_, _> = grid.dirty_cells().map(|(x,y,z,state)| (format!("{x},{y},{z}"), state.canonical_state())).collect();
             assert_eq!(got, expected, "{label}: changed coral geometry, tag selection, or water-survival/decorating draw order");
         }
         assert!(fixture.contains("control.dry_origin result=false writes=1"));
@@ -3367,7 +3362,7 @@ mod tests {
         for y in 70..74 {
             assert_eq!(
                 grid.get(8, y, 8),
-                "minecraft:mushroom_stem[down=false,east=true,north=true,south=true,up=false,west=true]",
+                state("minecraft:mushroom_stem[down=false,east=true,north=true,south=true,up=false,west=true]"),
                 "the configured stem must occupy every level below the cap"
             );
         }
@@ -3383,12 +3378,12 @@ mod tests {
         assert_eq!(base_id(grid.get(5, 74, 5)), "minecraft:air", "a brown-cap corner is absent");
         assert_eq!(
             grid.get(5, 74, 8),
-            "minecraft:brown_mushroom_block[down=false,east=false,north=false,south=false,up=true,west=true]",
+            state("minecraft:brown_mushroom_block[down=false,east=false,north=false,south=false,up=true,west=true]"),
             "the west edge must expose only its west face"
         );
         assert_eq!(
             grid.get(8, 74, 8),
-            "minecraft:brown_mushroom_block[down=false,east=false,north=false,south=false,up=true,west=false]",
+            state("minecraft:brown_mushroom_block[down=false,east=false,north=false,south=false,up=true,west=false]"),
             "the cap centre must hide all covered horizontal faces"
         );
     }
@@ -3428,7 +3423,7 @@ mod tests {
         assert_eq!(top, 9, "the top layer is a filled 3×3 cap");
         assert_eq!(
             grid.get(7, 74, 7),
-            "minecraft:red_mushroom_block[down=false,east=false,north=true,south=false,up=true,west=true]",
+            state("minecraft:red_mushroom_block[down=false,east=false,north=true,south=false,up=true,west=true]"),
             "a top corner exposes both outward horizontal faces"
         );
     }
@@ -3446,12 +3441,12 @@ mod tests {
 
         assert_eq!(
             grid.get(6, 74, 8),
-            "minecraft:red_mushroom_block[down=false,east=false,north=false,south=false,up=true,west=true]",
+            state("minecraft:red_mushroom_block[down=false,east=false,north=false,south=false,up=true,west=true]"),
             "the outer top edge exposes west when its offset is beyond radius minus two"
         );
         assert_eq!(
             grid.get(7, 74, 8),
-            "minecraft:red_mushroom_block[down=false,east=false,north=false,south=false,up=true,west=false]",
+            state("minecraft:red_mushroom_block[down=false,east=false,north=false,south=false,up=true,west=false]"),
             "the inner top edge remains covered at the configured radius center"
         );
     }
@@ -3487,11 +3482,11 @@ mod tests {
         let cfg = bundled_huge_mushroom_cfg("brown");
         let mut grid = grid_with_flat_ground(-64, 384, 69);
         let mut tags = mushroom_tags();
-        tags.leaves.insert("minecraft:leaves".to_string());
-        tags.replaceable_by_mushrooms.insert("minecraft:leaves".to_string());
+        tags.leaves.insert(Block::OakLeaves);
+        tags.replaceable_by_mushrooms.insert(Block::OakLeaves);
         let origin = BlockPos { x: 8, y: 70, z: 8 };
-        grid.seed(8, 70, 8, "minecraft:leaves".to_string());
-        grid.seed(8, 74, 8, "minecraft:leaves".to_string());
+        grid.seed_id(8, 70, 8, state("minecraft:oak_leaves"));
+        grid.seed_id(8, 74, 8, state("minecraft:oak_leaves"));
         let mut random = LegacyRandomSource::new(0);
 
         features::place_huge_mushroom_at_height(&mut random, origin, &cfg, 4, &mut grid, &tags);
@@ -3506,7 +3501,7 @@ mod tests {
         let mut grid = grid_with_flat_ground(-64, 384, 69);
         let tags = mushroom_tags();
         let origin = BlockPos { x: 8, y: 70, z: 8 };
-        grid.seed(9, 74, 8, "minecraft:stone".to_string());
+        grid.seed_id(9, 74, 8, state("minecraft:stone"));
         let mut random = LegacyRandomSource::new(0);
 
         features::place_huge_mushroom_at_height(&mut random, origin, &cfg, 4, &mut grid, &tags);
@@ -3536,7 +3531,7 @@ mod tests {
                 "{fixture} fungus must not remain in the unsupported census"
             );
             let mut grid = grid_with_flat_ground(-64, 384, 69);
-            grid.seed(8, 69, 8, format!("minecraft:{}_nylium", fixture));
+            grid.seed_id(8, 69, 8, state(&format!("minecraft:{}_nylium", fixture)));
             let mut random = LegacyRandomSource::new(0);
             place_configured_feature(
                 &mut random,

@@ -23,6 +23,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use lodestone_data::block_states::StateId;
 use lodestone_worldgen::compose::build_decoration_catalog;
 use lodestone_worldgen::density::{NoiseParams, Resolver};
 use lodestone_worldgen::dense_grid::DenseBlockGrid;
@@ -31,7 +32,6 @@ use lodestone_worldgen::feature::vegetation::{
 };
 use lodestone_worldgen::feature::region_view::WIDE_RADIUS;
 use lodestone_worldgen::feature::{REGION_MAX, REGION_MIN, STEP_VEGETAL_DECORATION, VEG_PADDING};
-use lodestone_worldgen::interner::StateInterner;
 use lodestone_worldgen::rng::{WorldgenRandom, XoroshiroRandomSource};
 use serde_json::Value;
 
@@ -179,10 +179,13 @@ impl Resolver for FsResolver {
 }
 
 /// One chunk of flat land: stone, three of dirt, grass on top.
-fn flat_chunk(interner: &Arc<StateInterner>, cx: i32, cz: i32) -> Arc<DenseBlockGrid> {
-    let air = interner.id_of("minecraft:air");
-    let mut g = DenseBlockGrid::with_interner(
-        Arc::clone(interner),
+fn state(spec: &str) -> StateId {
+    StateId::from_state_str(spec).expect("fixture state is in the generated table")
+}
+
+fn flat_chunk(cx: i32, cz: i32) -> Arc<DenseBlockGrid> {
+    let air = StateId::AIR;
+    let mut g = DenseBlockGrid::with_default(
         cx * 16,
         MIN_Y,
         cz * 16,
@@ -191,6 +194,9 @@ fn flat_chunk(interner: &Arc<StateInterner>, cx: i32, cz: i32) -> Arc<DenseBlock
         16,
         air,
     );
+    let stone = state("minecraft:stone");
+    let dirt = state("minecraft:dirt");
+    let grass = state("minecraft:grass_block[snowy=false]");
     for lx in 0..16 {
         for lz in 0..16 {
             let (x, z) = (cx * 16 + lx, cz * 16 + lz);
@@ -198,32 +204,36 @@ fn flat_chunk(interner: &Arc<StateInterner>, cx: i32, cz: i32) -> Arc<DenseBlock
             // down from the sky and stop at the first non-air), so this stops well
             // above `MIN_Y` and the fixture stays cheap.
             for y in SURFACE - 8..SURFACE - 3 {
-                g.set(x, y, z, "minecraft:stone");
+                g.set_id(x, y, z, stone);
             }
             for y in SURFACE - 3..SURFACE {
-                g.set(x, y, z, "minecraft:dirt");
+                g.set_id(x, y, z, dirt);
             }
-            g.set(x, SURFACE, z, "minecraft:grass_block[snowy=false]");
+            g.set_id(x, SURFACE, z, grass);
         }
     }
     Arc::new(g)
 }
 
 /// A flat world spanning the whole 5×5 read neighbourhood of both centres.
-fn flat_world(interner: &Arc<StateInterner>) -> HashMap<(i32, i32), Arc<DenseBlockGrid>> {
+fn flat_world() -> HashMap<(i32, i32), Arc<DenseBlockGrid>> {
     let mut world = HashMap::new();
     let lo = WEST.0 - WIDE_RADIUS;
     let hi = EAST.0 + WIDE_RADIUS;
     for cx in lo..=hi {
         for cz in (WEST.1 - WIDE_RADIUS)..=(WEST.1 + WIDE_RADIUS) {
-            world.insert((cx, cz), flat_chunk(interner, cx, cz));
+            world.insert((cx, cz), flat_chunk(cx, cz));
         }
     }
     world
 }
 
-fn is_tree(s: &str) -> bool {
-    s.contains("_leaves") || s.contains("_log") || s.contains("_wood") || s.contains("_stem")
+fn is_tree(state: StateId) -> bool {
+    let name = state.name();
+    name.ends_with("_leaves")
+        || name.ends_with("_log")
+        || name.ends_with("_wood")
+        || name.ends_with("_stem")
 }
 
 /// One full 3×3 drive centred on `centre`, returning every write it made in absolute
@@ -234,15 +244,13 @@ fn is_tree(s: &str) -> bool {
 /// `None` for every offset outside `±1`. That single argument is the control.
 fn drive(
     world: &HashMap<(i32, i32), Arc<DenseBlockGrid>>,
-    interner: &Arc<StateInterner>,
     centre: (i32, i32),
     features: &[(usize, PlacedRef)],
     tags: &VegTags,
     rim: Rim,
     selected_source: Option<(i32, i32)>,
-) -> HashMap<(i32, i32, i32), String> {
+) -> HashMap<(i32, i32, i32), StateId> {
     let mut grid = VegGrid::with_sources(
-        Arc::clone(interner),
         MIN_Y,
         HEIGHT,
         centre.0 * 16,
@@ -273,9 +281,7 @@ fn drive(
         tags,
         &for_source,
     );
-    grid.dirty_cells()
-        .map(|(x, y, z, s)| ((x, y, z), s.to_string()))
-        .collect()
+    grid.dirty_cells().map(|(x, y, z, s)| ((x, y, z), s)).collect()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -303,23 +309,23 @@ struct Seam {
 }
 
 fn measure_seam(
-    west_drive: &HashMap<(i32, i32, i32), String>,
-    east_drive: &HashMap<(i32, i32, i32), String>,
+    west_drive: &HashMap<(i32, i32, i32), StateId>,
+    east_drive: &HashMap<(i32, i32, i32), StateId>,
 ) -> Seam {
     let border = EAST.0 * 16;
     // Exactly what the client receives: each chunk's own columns from its own drive.
     let served = |x: i32, y: i32, z: i32| -> bool {
         let m = if x < border { west_drive } else { east_drive };
-        m.get(&(x, y, z)).is_some_and(|s| is_tree(s))
+        m.get(&(x, y, z)).is_some_and(|&s| is_tree(s))
     };
     let mut out = Seam::default();
     for d in [west_drive, east_drive] {
-        for (&(x, y, z), state) in d.iter() {
+        for (&(x, y, z), &state) in d.iter() {
             if x != border - 1 || !is_tree(state) {
                 continue;
             }
             // This drive says one canopy occupies both sides of the border here.
-            if !d.get(&(border, y, z)).is_some_and(|s| is_tree(s)) {
+            if !d.get(&(border, y, z)).is_some_and(|&s| is_tree(s)) {
                 continue;
             }
             out.crossings += 1;
@@ -372,8 +378,7 @@ fn biomes_with_vegetation(resolver: &FsResolver) -> Vec<String> {
 fn sweep(rim: Rim) -> (Vec<(String, Seam)>, usize, usize) {
     let resolver = FsResolver { root: prod_dir() };
     let tags = build_veg_tags(&resolver);
-    let interner = Arc::new(StateInterner::new());
-    let world = flat_world(&interner);
+    let world = flat_world();
     let biomes = biomes_with_vegetation(&resolver);
     assert!(
         biomes.len() >= 40,
@@ -386,8 +391,8 @@ fn sweep(rim: Rim) -> (Vec<(String, Seam)>, usize, usize) {
     let mut crossings = 0usize;
     for biome in biomes {
         let features = vegetal_features_for(&resolver, &biome);
-        let w = drive(&world, &interner, WEST, &features, &tags, rim, None);
-        let e = drive(&world, &interner, EAST, &features, &tags, rim, None);
+        let w = drive(&world, WEST, &features, &tags, rim, None);
+        let e = drive(&world, EAST, &features, &tags, rim, None);
         let seam = measure_seam(&w, &e);
         truncated += seam.west_missing + seam.east_missing;
         crossings += seam.crossings;
@@ -425,18 +430,17 @@ fn source_writes_are_canonical_across_adjacent_requests() {
     let tags = build_veg_tags(&resolver);
     let features = vegetal_features_for(&resolver, "minecraft:forest");
     assert!(!features.is_empty(), "control premise: forest must have vegetation features");
-    let interner = Arc::new(StateInterner::new());
-    let world = flat_world(&interner);
+    let world = flat_world();
 
-    let wide_west = drive(&world, &interner, WEST, &features, &tags, Rim::Real, Some(WEST));
-    let wide_east = drive(&world, &interner, EAST, &features, &tags, Rim::Real, Some(WEST));
+    let wide_west = drive(&world, WEST, &features, &tags, Rim::Real, Some(WEST));
+    let wide_east = drive(&world, EAST, &features, &tags, Rim::Real, Some(WEST));
     assert_eq!(
         wide_west, wide_east,
         "the same source changed when requested by an adjacent target; wide source routing is not canonical",
     );
 
-    let narrow_west = drive(&world, &interner, WEST, &features, &tags, Rim::Air, Some(WEST));
-    let narrow_east = drive(&world, &interner, EAST, &features, &tags, Rim::Air, Some(WEST));
+    let narrow_west = drive(&world, WEST, &features, &tags, Rim::Air, Some(WEST));
+    let narrow_east = drive(&world, EAST, &features, &tags, Rim::Air, Some(WEST));
     assert_ne!(
         narrow_west, narrow_east,
         "negative control did not fire: removing the source rim must change the adjacent request",

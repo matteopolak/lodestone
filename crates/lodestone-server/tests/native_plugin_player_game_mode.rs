@@ -9,6 +9,7 @@ use bevy_ecs::message::MessageReader;
 use bevy_ecs::prelude::ResMut;
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use lodestone_core::State;
+use lodestone_data::block_states::StateId;
 use lodestone_model::{GameMode, Vec3};
 use lodestone_net::Connection;
 use lodestone_server::ecs::{
@@ -108,15 +109,15 @@ impl ChunkSource for FlatWorld {
         ChunkColumn::new(0, 16)
     }
 
-    fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-        "minecraft:air".to_string()
+    fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
+        StateId::AIR
     }
 
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
         "minecraft:plains".to_string()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
 }
 
 struct GameModePolicy;

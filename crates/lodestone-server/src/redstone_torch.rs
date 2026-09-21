@@ -41,27 +41,44 @@
 
 use crate::neighbor_update::Direction;
 use crate::redstone::{self, is_wall_torch, torch_lit, wall_torch_facing, WorldState};
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, PropertyKey, PropertyValue};
+use lodestone_data::block_states::StateId;
 use lodestone_model::BlockPos;
 
-pub use crate::redstone::{TORCH, WALL_TORCH};
-
-/// Builds the canonical block-state string for a standing torch at `lit`.
+/// Builds a canonical standing-torch state at `lit`.
 #[must_use]
-pub fn set_standing_lit(lit: bool) -> String {
-    format!("{TORCH}[lit={lit}]")
+pub fn set_standing_lit(lit: bool) -> StateId {
+    redstone::with_property(
+        Block::RedstoneTorch.default_state(),
+        PropertyKey::Lit,
+        PropertyValue::builtin(if lit { BuiltinPropertyValue::True } else { BuiltinPropertyValue::False }),
+    )
+    .expect("redstone torch lit property is a generated state")
 }
 
-/// Builds the canonical block-state string for a wall torch at `lit`,
+/// Builds a canonical wall-torch state at `lit`,
 /// preserving its existing `facing`.
 #[must_use]
-pub fn set_wall_lit(facing: Direction, lit: bool) -> String {
-    format!("{WALL_TORCH}[facing={},lit={lit}]", redstone::direction_to_str(facing))
+pub fn set_wall_lit(facing: Direction, lit: bool) -> StateId {
+    let state = redstone::with_property(
+        Block::RedstoneWallTorch.default_state(),
+        PropertyKey::Facing,
+        PropertyValue::builtin(redstone::direction_property(facing)),
+    )
+    .expect("redstone wall torch facing property is a generated state");
+    redstone::with_property(
+        state,
+        PropertyKey::Lit,
+        PropertyValue::builtin(if lit { BuiltinPropertyValue::True } else { BuiltinPropertyValue::False }),
+    )
+    .expect("redstone wall torch lit property is a generated state")
 }
 
 /// Dispatches to [`set_standing_lit`]/[`set_wall_lit`] based on which torch
 /// `state` already is, preserving a wall torch's `facing`.
 #[must_use]
-pub fn set_lit(state: &str, lit: bool) -> String {
+pub fn set_lit(state: StateId, lit: bool) -> StateId {
     if is_wall_torch(state) {
         set_wall_lit(wall_torch_facing(state), lit)
     } else {
@@ -72,7 +89,7 @@ pub fn set_lit(state: &str, lit: bool) -> String {
 /// The real standing/wall torch has-neighbor-signal checks
 /// — see this module's own doc comment for the full derivation of both.
 #[must_use]
-pub fn has_neighbor_signal<F>(lookup: &F, pos: BlockPos, state: &str) -> bool
+pub fn has_neighbor_signal<F>(lookup: &F, pos: BlockPos, state: StateId) -> bool
 where
     F: Fn(BlockPos) -> WorldState,
 {
@@ -86,7 +103,7 @@ where
 /// pending-tick de-dup, which [`crate::scheduled_tick::ScheduledTickQueue::has_scheduled`]
 /// already provides at the call site).
 #[must_use]
-pub fn should_schedule_check(state: &str, has_signal: bool) -> bool {
+pub fn should_schedule_check(state: StateId, has_signal: bool) -> bool {
     torch_lit(state) == has_signal
 }
 
@@ -99,7 +116,7 @@ pub fn should_schedule_check(state: &str, has_signal: bool) -> bool {
 /// branch applies (a real, faithful no-op: the recheck simply finds nothing
 /// to do).
 #[must_use]
-pub fn run_scheduled_tick(state: &str, has_signal: bool) -> Option<String> {
+pub fn run_scheduled_tick(state: StateId, has_signal: bool) -> Option<StateId> {
     let lit = torch_lit(state);
     if lit && has_signal {
         Some(set_lit(state, false))
@@ -114,14 +131,14 @@ pub fn run_scheduled_tick(state: &str, has_signal: bool) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn world(entries: &[(BlockPos, &str)]) -> impl Fn(BlockPos) -> WorldState + use<> {
-        let entries: Vec<(BlockPos, WorldState)> = entries.iter().map(|(p, s)| (*p, WorldState::from(*s))).collect();
+    fn world(entries: &[(BlockPos, StateId)]) -> impl Fn(BlockPos) -> WorldState + use<> {
+        let entries = entries.to_vec();
         move |p: BlockPos| {
             entries
                 .iter()
                 .find(|(pos, _)| *pos == p)
-                .map(|(_, s)| s.clone())
-                .unwrap_or_else(crate::chunk::air_state_arc)
+                .map(|(_, s)| *s)
+                .unwrap_or_else(lodestone_data::block_states::air_state)
         }
     }
 
@@ -129,11 +146,19 @@ mod tests {
         BlockPos::new(x, y, z)
     }
 
+    fn standing(lit: bool) -> StateId {
+        set_standing_lit(lit)
+    }
+
+    fn wall(facing: Direction, lit: bool) -> StateId {
+        set_wall_lit(facing, lit)
+    }
+
     #[test]
     fn set_lit_preserves_wall_torch_facing() {
-        let wall = set_wall_lit(Direction::East, true);
-        assert_eq!(wall, "minecraft:redstone_wall_torch[facing=east,lit=true]");
-        assert_eq!(set_lit(&wall, false), "minecraft:redstone_wall_torch[facing=east,lit=false]");
+        let wall_state = set_wall_lit(Direction::East, true);
+        assert_eq!(wall_state, wall(Direction::East, true));
+        assert_eq!(set_lit(wall_state, false), wall(Direction::East, false));
     }
 
     /// Standing torch: `has_neighbor_signal` reads the block BELOW it —
@@ -143,7 +168,7 @@ mod tests {
     fn standing_torch_detects_signal_from_below() {
         let torch_pos = pos(0, 1, 0);
         let source_pos = pos(0, 0, 0);
-        let w = world(&[(source_pos, "minecraft:redstone_torch[lit=true]")]);
+        let w = world(&[(source_pos, standing(true))]);
         // The source torch signals DOWN and every horizontal direction, but
         // NOT up — so a standing torch resting on top must see it via the
         // strong-power (direct signal) path since the source is a torch,
@@ -151,13 +176,13 @@ mod tests {
         // NON-conductor position just reads `weak_signal`. The source here
         // is itself a torch (non-conductor), so this exercises `weak_signal`
         // for `direction = Down` — the "every direction except UP" case.
-        assert!(has_neighbor_signal(&w, torch_pos, "minecraft:redstone_torch[lit=true]"));
+        assert!(has_neighbor_signal(&w, torch_pos, standing(true)));
     }
 
     #[test]
     fn standing_torch_detects_no_signal_when_nothing_is_below() {
         let w = world(&[]);
-        assert!(!has_neighbor_signal(&w, pos(0, 1, 0), "minecraft:redstone_torch[lit=true]"));
+        assert!(!has_neighbor_signal(&w, pos(0, 1, 0), standing(true)));
     }
 
     /// Wall torch mounted facing NORTH (attached to the block north of it):
@@ -172,18 +197,18 @@ mod tests {
         // side and failed the assertion below).
         let mount_pos = Direction::South.relative(torch_pos);
         let below_pos = Direction::Down.relative(torch_pos);
-        let state = "minecraft:redstone_wall_torch[facing=north,lit=true]";
-        let w_mount_powered = world(&[(mount_pos, "minecraft:redstone_torch[lit=true]")]);
+        let state = wall(Direction::North, true);
+        let w_mount_powered = world(&[(mount_pos, standing(true))]);
         assert!(has_neighbor_signal(&w_mount_powered, torch_pos, state));
         // Negative control: a source BELOW the wall torch must not count.
-        let w_below_powered = world(&[(below_pos, "minecraft:redstone_torch[lit=true]")]);
+        let w_below_powered = world(&[(below_pos, standing(true))]);
         assert!(!has_neighbor_signal(&w_below_powered, torch_pos, state), "control failed: below must not be checked for a wall torch");
     }
 
     #[test]
     fn schedule_check_fires_exactly_on_the_two_mismatched_combinations() {
-        let lit = "minecraft:redstone_torch[lit=true]";
-        let unlit = "minecraft:redstone_torch[lit=false]";
+        let lit = standing(true);
+        let unlit = standing(false);
         assert!(should_schedule_check(lit, true), "lit AND signaled: should turn off");
         assert!(should_schedule_check(unlit, false), "unlit AND unsignaled: should turn on");
         assert!(!should_schedule_check(lit, false), "lit AND unsignaled: steady state, no recheck");
@@ -192,14 +217,14 @@ mod tests {
 
     #[test]
     fn scheduled_tick_turns_off_a_lit_torch_once_signaled() {
-        let lit = "minecraft:redstone_torch[lit=true]";
-        assert_eq!(run_scheduled_tick(lit, true), Some("minecraft:redstone_torch[lit=false]".to_string()));
+        let lit = standing(true);
+        assert_eq!(run_scheduled_tick(lit, true), Some(standing(false)));
     }
 
     #[test]
     fn scheduled_tick_turns_on_an_unlit_torch_once_unsignaled() {
-        let unlit = "minecraft:redstone_torch[lit=false]";
-        assert_eq!(run_scheduled_tick(unlit, false), Some("minecraft:redstone_torch[lit=true]".to_string()));
+        let unlit = standing(false);
+        assert_eq!(run_scheduled_tick(unlit, false), Some(standing(true)));
     }
 
     /// Negative control: if the signal changed back before the delayed tick
@@ -207,9 +232,9 @@ mod tests {
     /// be a no-op, not force a flip.
     #[test]
     fn scheduled_tick_is_a_no_op_if_the_signal_already_reverted() {
-        let lit = "minecraft:redstone_torch[lit=true]";
+        let lit = standing(true);
         assert_eq!(run_scheduled_tick(lit, false), None);
-        let unlit = "minecraft:redstone_torch[lit=false]";
+        let unlit = standing(false);
         assert_eq!(run_scheduled_tick(unlit, true), None);
     }
 }

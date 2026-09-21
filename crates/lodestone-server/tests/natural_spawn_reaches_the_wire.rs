@@ -35,6 +35,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lodestone_core::State;
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 use lodestone_net::Connection;
 use bevy_app::{App, Plugin};
 use bevy_ecs::message::MessageReader;
@@ -159,9 +161,15 @@ impl PlainsWorld {
         for z in 0..16 {
             for x in 0..16 {
                 for y in FLOOR - 4..FLOOR {
-                    column.set_block(x, y, z, "minecraft:stone");
+                    column.set_block_id(x, y, z, Block::Stone.default_state());
                 }
-                column.set_block(x, FLOOR, z, "minecraft:grass_block[snowy=false]");
+                column.set_block_id(
+                    x,
+                    FLOOR,
+                    z,
+                    StateId::from_state_str("minecraft:grass_block[snowy=false]")
+                        .expect("grass fixture state exists"),
+                );
             }
         }
         column
@@ -173,10 +181,9 @@ impl ChunkSource for PlainsWorld {
         self.build()
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         self.build()
-            .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
-            .to_string()
+            .block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -185,7 +192,7 @@ impl ChunkSource for PlainsWorld {
             .to_string()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
 }
 
 /// Runs a real server for up to [`DEADLINE`], moving the player every 100 ms, and

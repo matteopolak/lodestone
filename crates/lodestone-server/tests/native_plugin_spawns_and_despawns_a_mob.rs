@@ -14,6 +14,7 @@
 use std::time::Duration;
 
 use lodestone_core::State;
+use lodestone_data::block_states::StateId;
 use lodestone_model::{ResourceKey, Vec3};
 use lodestone_server::{
     ChunkColumn, ChunkSource, IntegratedServer, ServerBound, ServerDirective, ServerProtocol,
@@ -62,15 +63,15 @@ impl ChunkSource for FlatWorld {
         ChunkColumn::new(MIN_Y, HEIGHT)
     }
 
-    fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-        "minecraft:air".to_string()
+    fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
+        StateId::AIR
     }
 
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
         "minecraft:plains".to_string()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
         // No storage; this fixture serves fresh columns by design.
     }
 }

@@ -20,6 +20,7 @@ pub mod ptr_const;
 pub mod string_dispatch;
 pub mod world_coverage;
 pub mod worldgen_schedule;
+pub mod worldgen_state_ids;
 
 pub const DEFAULT_PACKET_IDS_OUT: &str = "crates/versions/26.2/src/generated/packet_ids.rs";
 /// Default output for the minecraft-data-sourced protocol 47 (Minecraft 1.8.x).
@@ -131,6 +132,8 @@ pub enum CliCommand {
     ProtocolDup,
     /// Production worldgen entrypoint/schedule metadata guard.
     CheckWorldgenSchedule,
+    /// Runtime worldgen block-state values must remain canonical `StateId`s.
+    CheckWorldgenStateIds,
 
     Planned {
         name: &'static str,
@@ -181,6 +184,7 @@ where
         "check-comment-voice" => parse_check_comment_voice_args(&args[1..]),
         "protocol-dup" => Ok(CliCommand::ProtocolDup),
         "check-worldgen-schedule" => Ok(CliCommand::CheckWorldgenSchedule),
+        "check-worldgen-state-ids" => Ok(CliCommand::CheckWorldgenStateIds),
         "gen-reports" => Ok(CliCommand::Planned {
             name: planned_command_name(command).expect("matched planned command has a name"),
         }),
@@ -466,6 +470,19 @@ pub fn run_cli_command(command: CliCommand) -> Result<()> {
             print!("{}", report.render());
             if report.has_violations() {
                 bail!("worldgen schedule guard found {} violation(s)", report.violations.len());
+            }
+            Ok(())
+        }
+        CliCommand::CheckWorldgenStateIds => {
+            let workspace_root =
+                std::env::current_dir().context("determine current workspace directory")?;
+            let report = worldgen_state_ids::check_worldgen_state_ids(&workspace_root)?;
+            print!("{}", report.render());
+            if report.has_violations() {
+                bail!(
+                    "worldgen state-id guard found {} violation(s)",
+                    report.violations.len()
+                );
             }
             Ok(())
         }

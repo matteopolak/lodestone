@@ -51,10 +51,6 @@ impl Resolver for FsResolver {
     }
 }
 
-fn base(name: &str) -> &str {
-    name.split('[').next().unwrap_or(name)
-}
-
 fn make_resolver_and_settings() -> (FsResolver, Value) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/worldgen_data");
     let resolver = FsResolver { root: root.clone() };
@@ -109,8 +105,8 @@ fn composed_shape_matches_fresh_aquifer_solid_decision() {
     for x in 0..16i32 {
         for z in 0..16i32 {
             for y in generator.min_y()..generator.min_y() + generator.height() {
-                let state = col.block_state(x as usize, y, z as usize);
-                let b = base(state);
+                let state = col.block_state_id(x as usize, y, z as usize);
+                let b = state.name();
                 let gen_solid = b != "minecraft:air" && b != "minecraft:water" && b != "minecraft:lava";
                 let expected_solid = matches!(
                     aquifer.block_at(x, y, z),
@@ -190,7 +186,7 @@ fn composed_surface_and_fluid_are_applied() {
     for lz in 0..16usize {
         for lx in 0..16usize {
             for y in col.min_y()..col.min_y() + col.height() {
-                match base(col.block_state(lx, y, lz)) {
+                match col.block_state_id(lx, y, lz).name() {
                     "minecraft:water" => water += 1,
                     "minecraft:sand"
                     | "minecraft:gravel"
@@ -224,7 +220,7 @@ fn composed_surface_and_fluid_are_applied() {
         for lx in 0..16usize {
             let mut floor_y = None;
             for y in (col.min_y()..col.min_y() + col.height()).rev() {
-                match base(col.block_state(lx, y, lz)) {
+                match col.block_state_id(lx, y, lz).name() {
                     "minecraft:air" | "minecraft:water" | "minecraft:lava" => {}
                     _ => {
                         floor_y = Some(y);
@@ -233,7 +229,7 @@ fn composed_surface_and_fluid_are_applied() {
                 }
             }
             let Some(floor_y) = floor_y else { continue };
-            match base(col.block_state(lx, floor_y, lz)) {
+            match col.block_state_id(lx, floor_y, lz).name() {
                 "minecraft:sand" | "minecraft:gravel" | "minecraft:dirt" => surface_caps += 1,
                 "minecraft:stone" => stone_caps += 1,
                 // grass on a submerged floor would be a surface-rule bug

@@ -50,10 +50,8 @@
 //! computes *both* hypotheses from the same run — `CLAUDE.md`'s *magnitude*
 //! species answered directly, rather than asserting the sign of a change.
 //!
-//! [`nothing_is_interned_during_a_surface_scan`] is the other half, and it is
-//! the more precise of the two: the reason the count is bounded is that the scan
-//! resolves no strings at all, and `StateInterner::len` is the observable that
-//! moves the moment someone puts an `id_of` back on this path.
+//! The per-probe magnitude comparison is the precise half: the reason the count
+//! is bounded is that the scan carries typed states and resolves no strings.
 
 // The counting allocator needs `unsafe impl GlobalAlloc`, and the workspace sets
 // `unsafe_code = "deny"`. Same exemption and same reason as `tests/ore_allocs.rs`
@@ -66,10 +64,8 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use lodestone_worldgen::density::{Builder, NoiseParams, Resolver};
-use lodestone_worldgen::interner::StateInterner;
 use lodestone_worldgen::surface::{BlockCanon, PreState, SurfaceSystem};
 use serde_json::Value;
 
@@ -205,10 +201,9 @@ fn data_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/worldgen_data")
 }
 
-/// A built scene: the interpreter, its interner, and the fixture it scans.
+/// A built scene: the interpreter and fixture it scans.
 struct Scene {
     surface: SurfaceSystem,
-    interner: Arc<StateInterner>,
     fixture: Fixture,
     /// The fixture's pre-surface column, pre-resolved to [`PreState`]s. Resolved
     /// **outside** the measured window on purpose: production hands
@@ -227,16 +222,14 @@ fn scene(text: &str) -> Scene {
     .unwrap();
     let fixture = parse_fixture(text);
     let builder = Builder::new(SEED, &resolver);
-    let interner = Arc::new(StateInterner::new());
-    let surface = SurfaceSystem::new(&settings, &builder, &fixture.canon, &interner);
+    let surface = SurfaceSystem::new(&settings, &builder, &fixture.canon);
     let pre_states = fixture
         .pre
         .iter()
-        .map(|(&k, name)| (k, PreState::from_name(&interner, name)))
+        .map(|(&k, name)| (k, PreState::from_name(name)))
         .collect();
     Scene {
         surface,
-        interner,
         fixture,
         pre_states,
     }
@@ -378,48 +371,6 @@ fn a_whole_chunk_of_surface_rules_allocates_a_bounded_amount_not_one_per_probe()
             run.rewrites,
             run.distinct_results,
             1000.0 * run.allocs as f64 / run.probes as f64,
-        );
-    }
-}
-
-/// The precise statement of *why* the count above is bounded, and the one that
-/// fails the instant an `id_of` returns to this path.
-///
-/// `StateInterner::len` is the observable: a scan that resolved a string would
-/// have to intern it (or hit the table, taking the `RwLock` this conversion
-/// exists to keep off a path shared by ~289 concurrent generator calls —
-/// `4307b59`'s scar). Interning is also the failure mode a naive "return
-/// `StateId` from `pre`" fix would have had: it would have moved the cost from
-/// `String` to `id_of` rather than removing it, and the allocation counter alone
-/// would have looked *better* while the lock traffic got worse.
-#[test]
-fn nothing_is_interned_during_a_surface_scan() {
-    for (label, text) in [
-        ("ocean", include_str!("support/surface_plains_jvm.txt")),
-        ("land", include_str!("support/surface_plains_land_jvm.txt")),
-    ] {
-        let scene = scene(text);
-        let before = scene.interner.len();
-        assert!(
-            before > 1,
-            "[{label}] the interner holds only {before} state(s) after construction — \
-             the surface rule's result states were not pre-interned, so this test \
-             would pass by having nothing to intern"
-        );
-        let run = one_chunk(&scene);
-        assert_eq!(
-            scene.interner.len(),
-            before,
-            "[{label}] a surface scan interned {} new state(s) over {} probes. \
-             Every state this engine can emit is resolved once in \
-             `SurfaceSystem::new`; anything interned here is a string being \
-             resolved inside the scan, which is the cost up-front resolution removed.",
-            scene.interner.len() - before,
-            run.probes
-        );
-        println!(
-            "surface interning [{label}]: {before} states pre-interned, 0 new over {} probes",
-            run.probes
         );
     }
 }

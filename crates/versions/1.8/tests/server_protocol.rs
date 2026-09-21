@@ -2,7 +2,8 @@
 
 use lodestone_canonical::inverse;
 use lodestone_core::{Ctx, Reader, State, encode_body};
-use lodestone_data::block_states::{self, block_name, properties};
+use lodestone_data::block::Block;
+use lodestone_data::block_states::{self, StateId};
 use lodestone_model::{
     AnimationAction, BlockActionKind, BlockFace, BlockPos, ClientAction, ClientEvent,
     ConnectionState, Directive, Hand, ItemStack, PredictionSequence, Vec3f, VersionAdapter,
@@ -128,7 +129,7 @@ fn join_position_chunk_and_block_update_match_protocol_47_layout() {
     ));
 
     let mut column = ChunkColumn::new(-64, 384);
-    column.set_block(0, 0, 0, "minecraft:stone");
+    column.set_block_id(0, 0, 0, Block::Stone.default_state());
     let ServerDirective::Send { packet_id, payload } = protocol
         .try_encode_chunk(0, 0, &column)
         .expect("stone has an exact protocol-47 representation")
@@ -156,7 +157,7 @@ fn join_position_chunk_and_block_update_match_protocol_47_layout() {
     assert!(packet.ensure_empty().is_ok());
 
     assert!(matches!(
-        protocol.encode_block_update(1, 64, -1, "minecraft:stone"),
+        protocol.encode_block_update(1, 64, -1, Block::Stone.default_state()),
         ServerDirective::Send { packet_id: 35, payload }
             if payload == vec![0, 0, 0, 0x41, 0x03, 0xFF, 0xFF, 0xFF, 16]
     ));
@@ -166,7 +167,7 @@ fn join_position_chunk_and_block_update_match_protocol_47_layout() {
 fn projects_only_the_legacy_vertical_window_and_decodes_break_actions() {
     let protocol = V47ServerProtocol;
     let mut covering = ChunkColumn::new(-64, 384);
-    covering.set_block(3, 64, 4, "minecraft:stone");
+    covering.set_block_id(3, 64, 4, Block::Stone.default_state());
     assert!(protocol.try_encode_chunk(0, 0, &covering).is_ok());
     assert!(protocol
         .try_encode_chunk(0, 0, &ChunkColumn::new(-64, 319))
@@ -663,39 +664,20 @@ fn use_entity_lifts_protocol_47_forms_into_shared_consumers() {
 #[test]
 fn unsupported_states_are_errors_not_air_substitutions() {
     let protocol = V47ServerProtocol;
-    assert!(protocol
-        .try_encode_block_update(0, 64, 0, "minecraft:not_a_real_state")
-        .is_err());
+    assert!(StateId::from_state_str("minecraft:not_a_real_state").is_none());
 
     let unsupported = (0..block_states::STATE_COUNT)
         .find(|&state| inverse::resolve(state).is_err())
         .expect("the canonical registry has states outside the legacy image");
-    let mut state = block_name(unsupported)
-        .expect("state is in the canonical registry")
-        .to_owned();
-    let props = properties(unsupported).expect("state is in the canonical registry");
-    if !props.is_empty() {
-        state.push('[');
-        for (index, (name, value)) in props.iter().enumerate() {
-            if index != 0 {
-                state.push(',');
-            }
-            state.push_str(name);
-            state.push('=');
-            state.push_str(value);
-        }
-        state.push(']');
-    }
-    assert_eq!(block_states::state_id(&state), Some(unsupported));
-    assert!(protocol.try_encode_block_update(0, 64, 0, &state).is_err());
+    let state = StateId::new(unsupported as u32).expect("state is in the canonical registry");
+    assert!(protocol.try_encode_block_update(0, 64, 0, state).is_err());
 
-    let later = block_states::state_id("minecraft:end_rod")
-        .expect("the canonical registry includes the protocol-107 addition");
+    let later = Block::EndRod.default_state().raw();
     assert!(
         inverse::resolve(later).is_ok(),
         "the generic pre-flattening inverse alone cannot rule this state out"
     );
     assert!(protocol
-        .try_encode_block_update(0, 64, 0, "minecraft:end_rod")
+        .try_encode_block_update(0, 64, 0, Block::EndRod.default_state())
         .is_err());
 }

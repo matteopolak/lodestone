@@ -100,51 +100,94 @@
 
 use crate::neighbor_update::Direction;
 use crate::redstone::{
-    self, comparator_mode_subtract, comparator_output, diode_facing, diode_powered, direction_to_str, is_diode,
-    repeater_delay_ticks, repeater_locked, WorldState, COMPARATOR, REPEATER,
+    self, comparator_mode_subtract, comparator_output, diode_facing, diode_powered, is_diode,
+    repeater_delay_ticks, repeater_locked, WorldState,
 };
 use crate::scheduled_tick::TickPriority;
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, PropertyKey, PropertyValue};
+use lodestone_data::block_states::StateId;
 use lodestone_model::BlockPos;
 
-/// Builds the canonical block-state string for a repeater.
+/// Builds a canonical repeater state.
 #[must_use]
-pub fn set_repeater(facing: Direction, delay_ticks: u32, locked: bool, powered: bool) -> String {
-    format!(
-        "{REPEATER}[facing={},delay={},locked={},powered={}]",
-        direction_to_str(facing),
-        delay_ticks.clamp(1, 4),
-        locked,
-        powered
+pub fn set_repeater(facing: Direction, delay_ticks: u32, locked: bool, powered: bool) -> StateId {
+    let mut state = redstone::with_property(
+        Block::Repeater.default_state(),
+        PropertyKey::Facing,
+        PropertyValue::builtin(redstone::direction_property(facing)),
     )
+    .expect("repeater facing property is a generated state");
+    state = redstone::with_property(
+        state,
+        PropertyKey::Delay,
+        PropertyValue::builtin(redstone::numeric_property_value(delay_ticks.clamp(1, 4) as u8).expect("repeater delay is a generated value")),
+    )
+    .expect("repeater delay property is a generated state");
+    state = redstone::with_property(
+        state,
+        PropertyKey::Locked,
+        PropertyValue::builtin(if locked { BuiltinPropertyValue::True } else { BuiltinPropertyValue::False }),
+    )
+    .expect("repeater locked property is a generated state");
+    redstone::with_property(
+        state,
+        PropertyKey::Powered,
+        PropertyValue::builtin(if powered { BuiltinPropertyValue::True } else { BuiltinPropertyValue::False }),
+    )
+    .expect("repeater powered property is a generated state")
 }
 
-fn with_repeater_powered(state: &str, powered: bool) -> String {
+fn with_repeater_powered(state: StateId, powered: bool) -> StateId {
     set_repeater(diode_facing(state), repeater_delay_ticks(state), repeater_locked(state), powered)
 }
 
-fn with_repeater_locked(state: &str, locked: bool) -> String {
+fn with_repeater_locked(state: StateId, locked: bool) -> StateId {
     set_repeater(diode_facing(state), repeater_delay_ticks(state), locked, diode_powered(state))
 }
 
-/// Builds the canonical block-state string for a comparator — `output` is
-/// this module's stand-in for the real comparator block entity's own banked
-/// output signal, see this
-/// module's own doc comment and [`crate::redstone::comparator_output`]'s.
+/// Builds a canonical comparator state. The analog output is carried by the
+/// returned sidecar in [`set_comparator_state`].
 #[must_use]
-pub fn set_comparator(facing: Direction, subtract: bool, powered: bool, output: u8) -> String {
-    format!(
-        "{COMPARATOR}[facing={},mode={},powered={},output={}]",
-        direction_to_str(facing),
-        if subtract { "subtract" } else { "compare" },
-        powered,
-        output.min(15)
+pub fn set_comparator(facing: Direction, subtract: bool, powered: bool, _output: u8) -> StateId {
+    let mut state = redstone::with_property(
+        Block::Comparator.default_state(),
+        PropertyKey::Facing,
+        PropertyValue::builtin(redstone::direction_property(facing)),
     )
+    .expect("comparator facing property is a generated state");
+    state = redstone::with_property(
+        state,
+        PropertyKey::Mode,
+        PropertyValue::builtin(if subtract { BuiltinPropertyValue::Subtract } else { BuiltinPropertyValue::Compare }),
+    )
+    .expect("comparator mode property is a generated state");
+    redstone::with_property(
+        state,
+        PropertyKey::Powered,
+        PropertyValue::builtin(if powered { BuiltinPropertyValue::True } else { BuiltinPropertyValue::False }),
+    )
+    .expect("comparator powered property is a generated state")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ComparatorState {
+    pub state: StateId,
+    pub output: u8,
+}
+
+#[must_use]
+pub fn set_comparator_state(facing: Direction, subtract: bool, powered: bool, output: u8) -> ComparatorState {
+    ComparatorState {
+        state: set_comparator(facing, subtract, powered, output),
+        output: output.min(15),
+    }
 }
 
 /// The real delay query for a repeater — `DELAY * 2`, so `2, 4, 6, 8` for
 /// `DELAY = 1..=4`.
 #[must_use]
-pub fn repeater_delay(state: &str) -> u32 {
+pub fn repeater_delay(state: StateId) -> u32 {
     repeater_delay_ticks(state) * 2
 }
 
@@ -157,7 +200,7 @@ where
 {
     let direction = facing.opposite();
     let opposite_state = lookup(direction.relative(pos));
-    is_diode(&opposite_state) && diode_facing(&opposite_state) != direction
+    is_diode(opposite_state) && diode_facing(opposite_state) != direction
 }
 
 /// The real repeater's is-locked check — `alternate_signal` with `only_diodes = true`.
@@ -187,7 +230,7 @@ where
 /// changes entirely, per the real diode's own neighbor-check hook's
 /// not-locked guard).
 #[must_use]
-pub fn should_schedule_repeater_check(state: &str, should_turn_on: bool) -> bool {
+pub fn should_schedule_repeater_check(state: StateId, should_turn_on: bool) -> bool {
     !repeater_locked(state) && diode_powered(state) != should_turn_on
 }
 
@@ -215,18 +258,18 @@ pub enum RepeaterTickOutcome {
     /// reachable if the input reverted between scheduling and running).
     NoChange,
     /// Was on, input dropped: turns off immediately, no reschedule.
-    TurnedOff(String),
+    TurnedOff(StateId),
     /// Was off: turns on unconditionally for one full delay period.
     /// `reschedule` is `true` when the input had *already* dropped again by
     /// the time this tick ran (the should-turn-on check now says no) — the "pulse quantization"
     /// quirk cited in this module's own doc comment.
-    TurnedOn { new_state: String, reschedule: bool },
+    TurnedOn { new_state: StateId, reschedule: bool },
 }
 
 /// The real diode's scheduled-tick hook for a repeater — see this module's
 /// own doc comment for the full derivation.
 #[must_use]
-pub fn run_scheduled_tick(state: &str, should_turn_on: bool) -> RepeaterTickOutcome {
+pub fn run_scheduled_tick(state: StateId, should_turn_on: bool) -> RepeaterTickOutcome {
     if repeater_locked(state) {
         return RepeaterTickOutcome::Locked;
     }
@@ -254,7 +297,7 @@ pub fn run_scheduled_tick(state: &str, should_turn_on: bool) -> RepeaterTickOutc
 /// wrong *value*, only a few redundant recomputes that land on the same
 /// answer).
 #[must_use]
-pub fn recompute_locked<F>(lookup: &F, pos: BlockPos, state: &str) -> Option<String>
+pub fn recompute_locked<F>(lookup: &F, pos: BlockPos, state: StateId) -> Option<StateId>
 where
     F: Fn(BlockPos) -> WorldState,
 {
@@ -300,11 +343,24 @@ pub fn comparator_should_turn_on(input: u8, side: u8, subtract: bool) -> bool {
 
 /// The real comparator's neighbor-check hook's scheduling condition.
 #[must_use]
-pub fn should_schedule_comparator_check(state: &str, input: u8, side: u8) -> bool {
+pub fn should_schedule_comparator_check(state: StateId, input: u8, side: u8) -> bool {
+    should_schedule_comparator_check_with_output(state, input, side, comparator_output(state))
+}
+
+/// Comparator scheduling with the block-entity output supplied explicitly.
+/// Block state carries only mode and powered status; output is a numeric
+/// sidecar and must survive a state transition independently.
+#[must_use]
+pub fn should_schedule_comparator_check_with_output(
+    state: StateId,
+    input: u8,
+    side: u8,
+    stored_output: u8,
+) -> bool {
     let subtract = comparator_mode_subtract(state);
     let output = calculate_comparator_output(input, side, subtract);
     let should_be_on = comparator_should_turn_on(input, side, subtract);
-    output != comparator_output(state) || diode_powered(state) != should_be_on
+    output != stored_output.min(15) || diode_powered(state) != should_be_on
 }
 
 /// The real comparator's neighbor-check hook's priority selection (`HIGH`/`NORMAL`,
@@ -326,14 +382,26 @@ where
 /// comment for why the `!subtract` disjunct (compare mode always cascades)
 /// is real and derived, not an approximation.
 #[must_use]
-pub fn run_scheduled_comparator_tick(state: &str, input: u8, side: u8) -> Option<String> {
+pub fn run_scheduled_comparator_tick(state: StateId, input: u8, side: u8) -> Option<StateId> {
+    run_scheduled_comparator_tick_with_output(state, input, side, comparator_output(state)).map(|result| result.state)
+}
+
+/// Comparator refresh with its numeric block-entity output carried separately
+/// from the block state.
+#[must_use]
+pub fn run_scheduled_comparator_tick_with_output(
+    state: StateId,
+    input: u8,
+    side: u8,
+    stored_output: u8,
+) -> Option<ComparatorState> {
     let subtract = comparator_mode_subtract(state);
     let output = calculate_comparator_output(input, side, subtract);
     let should_be_on = comparator_should_turn_on(input, side, subtract);
-    let old_output = comparator_output(state);
+    let old_output = stored_output.min(15);
     let old_on = diode_powered(state);
     if old_output != output || old_on != should_be_on || !subtract {
-        Some(set_comparator(diode_facing(state), subtract, should_be_on, output))
+        Some(set_comparator_state(diode_facing(state), subtract, should_be_on, output))
     } else {
         None
     }
@@ -342,15 +410,16 @@ pub fn run_scheduled_comparator_tick(state: &str, input: u8, side: u8) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::redstone::fixture_state as state;
 
-    fn world(entries: &[(BlockPos, &str)]) -> impl Fn(BlockPos) -> WorldState + use<> {
-        let entries: Vec<(BlockPos, WorldState)> = entries.iter().map(|(p, s)| (*p, WorldState::from(*s))).collect();
+    fn world(entries: &[(BlockPos, StateId)]) -> impl Fn(BlockPos) -> WorldState + use<> {
+        let entries = entries.to_vec();
         move |p: BlockPos| {
             entries
                 .iter()
                 .find(|(pos, _)| *pos == p)
-                .map(|(_, s)| s.clone())
-                .unwrap_or_else(crate::chunk::air_state_arc)
+                .map(|(_, s)| *s)
+                .unwrap_or_else(lodestone_data::block_states::air_state)
         }
     }
 
@@ -360,15 +429,15 @@ mod tests {
 
     #[test]
     fn repeater_delay_scales_with_the_delay_property() {
-        assert_eq!(repeater_delay(&set_repeater(Direction::North, 1, false, false)), 2);
-        assert_eq!(repeater_delay(&set_repeater(Direction::North, 4, false, false)), 8);
+        assert_eq!(repeater_delay(set_repeater(Direction::North, 1, false, false)), 2);
+        assert_eq!(repeater_delay(set_repeater(Direction::North, 4, false, false)), 8);
     }
 
     #[test]
     fn repeater_should_turn_on_reads_a_lit_torch_facing_into_it() {
         let origin = pos(0, 0, 0);
         let torch_pos = Direction::East.relative(origin);
-        let w = world(&[(torch_pos, "minecraft:redstone_torch[lit=true]")]);
+        let w = world(&[(torch_pos, state("minecraft:redstone_torch[lit=true]"))]);
         assert!(repeater_should_turn_on(&w, origin, Direction::East));
         assert!(!repeater_should_turn_on(&world(&[]), origin, Direction::East));
     }
@@ -389,29 +458,29 @@ mod tests {
         // `FACING = south`, not `west` (an earlier version of this fixture's
         // mistake — it read `0` instead of the predicted `15`).
         let side_pos = Direction::South.relative(origin);
-        let diode_side = world(&[(side_pos, "minecraft:repeater[facing=south,delay=1,locked=false,powered=true]")]);
+        let diode_side = world(&[(side_pos, state("minecraft:repeater[facing=south,delay=1,locked=false,powered=true]"))]);
         assert!(is_locked(&diode_side, origin, Direction::East));
 
-        let torch_side = world(&[(side_pos, "minecraft:redstone_torch[lit=true]")]);
+        let torch_side = world(&[(side_pos, state("minecraft:redstone_torch[lit=true]"))]);
         assert!(!is_locked(&torch_side, origin, Direction::East), "control failed: a torch must not lock a repeater");
     }
 
     #[test]
     fn schedule_check_fires_only_on_mismatch_and_never_while_locked() {
-        let off_locked = "minecraft:repeater[facing=north,delay=1,locked=true,powered=false]";
+        let off_locked = state("minecraft:repeater[facing=north,delay=1,locked=true,powered=false]");
         assert!(!should_schedule_repeater_check(off_locked, true), "locked repeaters never schedule, even on a real mismatch");
 
-        let off_unlocked = "minecraft:repeater[facing=north,delay=1,locked=false,powered=false]";
+        let off_unlocked = state("minecraft:repeater[facing=north,delay=1,locked=false,powered=false]");
         assert!(should_schedule_repeater_check(off_unlocked, true));
         assert!(!should_schedule_repeater_check(off_unlocked, false), "already steady: no recheck");
     }
 
     #[test]
     fn scheduled_tick_turns_off_an_on_repeater_when_input_drops() {
-        let on = "minecraft:repeater[facing=north,delay=1,locked=false,powered=true]";
+        let on = state("minecraft:repeater[facing=north,delay=1,locked=false,powered=true]");
         assert_eq!(
             run_scheduled_tick(on, false),
-            RepeaterTickOutcome::TurnedOff("minecraft:repeater[facing=north,delay=1,locked=false,powered=false]".to_string())
+            RepeaterTickOutcome::TurnedOff(state("minecraft:repeater[facing=north,delay=1,locked=false,powered=false]"))
         );
     }
 
@@ -421,10 +490,10 @@ mod tests {
     /// period regardless of the input's state at the instant the tick runs.
     #[test]
     fn scheduled_tick_always_turns_on_and_flags_reschedule_when_input_already_dropped() {
-        let off = "minecraft:repeater[facing=north,delay=1,locked=false,powered=false]";
+        let off = state("minecraft:repeater[facing=north,delay=1,locked=false,powered=false]");
         match run_scheduled_tick(off, false) {
             RepeaterTickOutcome::TurnedOn { new_state, reschedule } => {
-                assert_eq!(new_state, "minecraft:repeater[facing=north,delay=1,locked=false,powered=true]");
+                assert_eq!(new_state, state("minecraft:repeater[facing=north,delay=1,locked=false,powered=true]"));
                 assert!(reschedule, "must flag a reschedule so the pulse still ends after exactly one delay period");
             }
             other => panic!("expected TurnedOn, got {other:?}"),
@@ -436,7 +505,7 @@ mod tests {
     /// case, proving `reschedule` actually discriminates.
     #[test]
     fn scheduled_tick_turns_on_with_no_reschedule_when_input_is_still_high() {
-        let off = "minecraft:repeater[facing=north,delay=1,locked=false,powered=false]";
+        let off = state("minecraft:repeater[facing=north,delay=1,locked=false,powered=false]");
         match run_scheduled_tick(off, true) {
             RepeaterTickOutcome::TurnedOn { reschedule, .. } => assert!(!reschedule),
             other => panic!("expected TurnedOn, got {other:?}"),
@@ -445,7 +514,7 @@ mod tests {
 
     #[test]
     fn locked_repeater_never_changes_state_on_a_scheduled_tick() {
-        let locked = "minecraft:repeater[facing=north,delay=1,locked=true,powered=false]";
+        let locked = state("minecraft:repeater[facing=north,delay=1,locked=true,powered=false]");
         assert_eq!(run_scheduled_tick(locked, true), RepeaterTickOutcome::Locked);
     }
 
@@ -494,11 +563,11 @@ mod tests {
     fn schedule_check_fires_when_the_output_would_change() {
         // Currently stored output=6 (subtract, 10-4); input now reads 10 and
         // side reads 5, so the fresh output would be 5 — a real change.
-        let state = "minecraft:comparator[facing=north,mode=subtract,powered=true,output=6]";
-        assert!(should_schedule_comparator_check(state, 10, 5));
+        let comparator = set_comparator(Direction::North, true, true, 6);
+        assert!(should_schedule_comparator_check_with_output(comparator, 10, 5, 6));
         // Negative control: identical inputs to what produced the stored
         // state must NOT reschedule.
-        assert!(!should_schedule_comparator_check(state, 10, 4));
+        assert!(!should_schedule_comparator_check_with_output(comparator, 10, 4, 6));
     }
 
     /// The compare-mode quirk end to end: a scheduled tick that computes the
@@ -508,23 +577,23 @@ mod tests {
     /// not decorative.
     #[test]
     fn compare_mode_always_cascades_even_with_no_change_subtract_mode_does_not() {
-        let compare_state = "minecraft:comparator[facing=north,mode=compare,powered=true,output=10]";
+        let compare_state = set_comparator(Direction::North, false, true, 10);
         assert!(
-            run_scheduled_comparator_tick(compare_state, 10, 0).is_some(),
+            run_scheduled_comparator_tick_with_output(compare_state, 10, 0, 10).is_some(),
             "compare mode must cascade even when nothing changed"
         );
 
-        let subtract_state = "minecraft:comparator[facing=north,mode=subtract,powered=true,output=10]";
+        let subtract_state = set_comparator(Direction::North, true, true, 10);
         assert!(
-            run_scheduled_comparator_tick(subtract_state, 10, 0).is_none(),
+            run_scheduled_comparator_tick_with_output(subtract_state, 10, 0, 10).is_none(),
             "control failed: subtract mode must NOT cascade when nothing changed"
         );
     }
 
     #[test]
     fn scheduled_tick_updates_the_stored_output_when_it_changed() {
-        let state = "minecraft:comparator[facing=east,mode=subtract,powered=true,output=6]";
-        let new_state = run_scheduled_comparator_tick(state, 10, 5).expect("output changed from 6 to 5");
-        assert_eq!(new_state, "minecraft:comparator[facing=east,mode=subtract,powered=true,output=5]");
+        let comparator = set_comparator(Direction::East, true, true, 6);
+        let new_state = run_scheduled_comparator_tick_with_output(comparator, 10, 5, 6).expect("output changed from 6 to 5");
+        assert_eq!(new_state, ComparatorState { state: set_comparator(Direction::East, true, true, 5), output: 5 });
     }
 }

@@ -594,7 +594,12 @@ pub fn light_free_record(
                 } else {
                     (column.min_y..column.min_y + column.height)
                         .rev()
-                        .find(|&y| lodestone_v26_2::server_protocol::client_heightmap_includes(type_id, column.resolved_block_state_id(x, y, z)))
+                        .find(|&y| {
+                            lodestone_v26_2::server_protocol::client_heightmap_includes(
+                                type_id,
+                                column.block_state_id(x, y, z),
+                            )
+                        })
                         .map_or(column.min_y, |y| y + 1)
                 };
                 w.i32(height);
@@ -613,7 +618,7 @@ pub fn light_free_record(
         for y in 0..16i32 {
             for z in 0..16i32 {
                 for x in 0..16i32 {
-                    w.u32(column.block_state_id(x, base_y + y, z));
+                    w.u32(column.block_state_id(x, base_y + y, z).raw());
                 }
             }
         }

@@ -52,7 +52,8 @@ use std::cell::RefCell;
 
 use crate::density::NoiseChunkSampler;
 use crate::engine::{Bounds, Program};
-use crate::interner::StateId;
+use lodestone_data::block_states::StateId;
+use lodestone_data::block::Block;
 use crate::math::clamped_map;
 use crate::rng::{PositionalRandomFactory, RandomSource, AnyPositionalFactory};
 
@@ -101,7 +102,6 @@ impl VeinPrograms {
     pub(super) fn build(
         builder: &crate::density::Builder,
         settings: &serde_json::Value,
-        interner: &crate::interner::StateInterner,
     ) -> Option<Self> {
         if !settings["ore_veins_enabled"].as_bool().unwrap_or(false) {
             return None;
@@ -113,7 +113,6 @@ impl VeinPrograms {
             }
         }
         let (cell_width, cell_height) = crate::aquifer::cell_geometry(settings);
-        let id = |name: &str| interner.id_of(name);
         Some(Self {
             toggle: Program::compile(
                 &builder
@@ -135,16 +134,16 @@ impl VeinPrograms {
                 src.fork_positional()
             },
             copper: VeinType {
-                ore: id("minecraft:copper_ore"),
-                raw_ore_block: id("minecraft:raw_copper_block"),
-                filler: id("minecraft:granite"),
+                ore: Block::CopperOre.default_state(),
+                raw_ore_block: Block::RawCopperBlock.default_state(),
+                filler: Block::Granite.default_state(),
                 min_y: 0,
                 max_y: 50,
             },
             iron: VeinType {
-                ore: id("minecraft:deepslate_iron_ore"),
-                raw_ore_block: id("minecraft:raw_iron_block"),
-                filler: id("minecraft:tuff"),
+                ore: Block::DeepslateIronOre.default_state(),
+                raw_ore_block: Block::RawIronBlock.default_state(),
+                filler: Block::Tuff.default_state(),
                 min_y: -60,
                 max_y: -8,
             },
@@ -545,7 +544,6 @@ mod tests {
     use super::VeinPrograms;
     use crate::aquifer::BlockKind;
     use crate::density::{Builder, NoiseParams, Resolver};
-    use crate::interner::StateInterner;
     use serde_json::Value;
 
     struct NoReferences;
@@ -585,8 +583,7 @@ mod tests {
         });
         let resolver = NoReferences;
         let builder = Builder::new(0, &resolver);
-        let interner = StateInterner::new();
-        let programs = VeinPrograms::build(&builder, &settings, &interner)
+        let programs = VeinPrograms::build(&builder, &settings)
             .expect("complete vein settings should build");
 
         assert_eq!((programs.cell_width, programs.cell_height), (8, 4));
@@ -623,8 +620,7 @@ mod tests {
         });
         let resolver = NoReferences;
         let builder = Builder::new(42, &resolver);
-        let interner = StateInterner::new();
-        let programs = VeinPrograms::build(&builder, &settings, &interner)
+        let programs = VeinPrograms::build(&builder, &settings)
             .expect("complete vein settings should build");
         let chunk = programs.for_chunk(builder.slot_count(), 128, -64, 0, 16);
         let mut field = vec![BlockKind::Stone; 16 * 16 * 16];
@@ -691,8 +687,7 @@ mod tests {
         });
         let resolver = NoReferences;
         let builder = Builder::new(42, &resolver);
-        let interner = StateInterner::new();
-        let programs = VeinPrograms::build(&builder, &settings, &interner)
+        let programs = VeinPrograms::build(&builder, &settings)
             .expect("complete vein settings should build");
         let mut chunk = programs.for_chunk(builder.slot_count(), 0, 0, -16, 32);
         // The production bands are disjoint. Widen copper here as a negative

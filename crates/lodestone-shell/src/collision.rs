@@ -50,7 +50,7 @@
 //! | shape of a state | full cube if solid | version collision census |
 //! | fluid kind | [`demo_fluid`] | [`vanilla_fluid`] |
 //! | fluid cell (level) | `None` — the palette has no `level` property | `BlockModels::fluid` |
-//! | vanilla block name | fixed demo id → name table | [`VersionAdapter::block_name`] |
+//! | canonical block state | none for demo ids | [`StateId`] validation |
 //!
 //! # Fluids have one classifier, not one per consumer
 //!
@@ -97,10 +97,10 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
-use lodestone_data::block_states::StateId;
-use lodestone_model::{
-    BlockAabb, BlockPhysics, DEFAULT_BLOCK_PHYSICS, VersionAdapter, block_physics,
-};
+use lodestone_data::{block::Block, block_states::StateId};
+use lodestone_model::{BlockAabb, BlockPhysics, DEFAULT_BLOCK_PHYSICS, VersionAdapter};
+#[cfg(test)]
+use lodestone_model::block_physics;
 use lodestone_physics::{Aabb, CollisionView, FluidCell, HorizontalDir, Vec3d};
 use lodestone_render::{BlockAtlas, BlockClassifier, FluidKind};
 use lodestone_world::{ChunkPos, ChunkSection, World};
@@ -148,12 +148,9 @@ trait BlockView {
     /// See the module table: the demo palette genuinely cannot.
     fn fluid_cell_of(&self, state: u32) -> Option<FluidCell>;
 
-    /// The vanilla block identifier for a state (`"minecraft:ice"`), for the
-    /// name-keyed physics constants. `None` when unresolvable, in which case
-    /// every name-keyed answer falls back to vanilla's *default* for that
-    /// property (0.6 friction, 1.0 factors, no bounce, not climbable) — the same
-    /// value the overwhelming majority of blocks have.
-    fn name_of(&self, state: u32) -> Option<&'static str>;
+    /// The canonical state for this adapter's local id, when it has one.
+    /// Demo ids intentionally have no canonical mapping.
+    fn state_id_of(&self, state: u32) -> Option<StateId>;
 
     /// Vanilla's own block-state blocks-motion check for a state, or `None` when this
     /// adapter has no census for it — in which case [`blocks_motion_at`] falls
@@ -271,40 +268,78 @@ fn shape_face_is_full(shape: &[BlockAabb], dir: HorizontalDir) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Name-keyed physics constants
+// State-keyed physics constants
 // ---------------------------------------------------------------------------
 //
-// Six of `CollisionView`'s answers — friction, speed factor, jump factor, bounce
-// restitution, stuck multiplier and climbable — are vanilla's own per-block
-// behaviour-properties
-// fields and tag memberships rather than geometry, so no collision census can
-// carry them. They are keyed by block *name*, which is why
-// `VersionAdapter::block_name` exists.
-//
-// **They no longer live here.** They used to be six private functions in this
-// module, hand-transcribed from the decompiled block-registration class. Two things were
-// wrong with that: nothing outside the code under test pinned the numbers (every
-// other block table in this repo is dumped from the real server), and a
-// third-party plugin — for which "how expensive is it to walk over this block" is
-// the whole of a pathfinder's cost function — structurally could not reach a
-// private item in the client shell. Both are fixed by
-// `lodestone_model::block_physics`, a `pub fn` in the version-free model crate,
-// anchored to a JVM dump of all 1,196 registered blocks by
-// `crates/lodestone-data/tests/block_physics.rs`. See
-// `docs/block-physics-constants.md`.
-//
-// The lookup is done once per query rather than field by field: `block_physics`
-// returns the whole `BlockPhysics` by value (six words, no allocation), so
-// `friction_at` and friends each pay one name match.
+// These values are pure functions of the generated block registry. Keeping the
+// match on `Block` makes every physics query a StateId -> block-id lookup with
+// no text conversion or allocation.
 
-/// The name-keyed constants for the block at a cell, or vanilla's defaults when
-/// the adapter cannot resolve a name for the state.
-///
-/// `DEFAULT_BLOCK_PHYSICS` is the right answer for an unresolvable name rather
-/// than a fudge: it is what 1,166 of 26.2's 1,196 blocks report.
+/// Movement constants for a validated canonical block state.
+fn block_physics_for_state(state: StateId) -> BlockPhysics {
+    let block = state.block();
+    let friction = match block {
+        Block::Ice | Block::PackedIce | Block::FrostedIce => 0.98,
+        Block::BlueIce => 0.989,
+        Block::SlimeBlock => 0.8,
+        _ => DEFAULT_BLOCK_PHYSICS.friction,
+    };
+    let speed_factor = match block {
+        Block::SoulSand | Block::HoneyBlock => 0.4,
+        _ => DEFAULT_BLOCK_PHYSICS.speed_factor,
+    };
+    let jump_factor = if block == Block::HoneyBlock { 0.5 } else { 1.0 };
+    let bounce_restitution = match block {
+        Block::SlimeBlock => 1.0,
+        Block::WhiteBed
+        | Block::OrangeBed
+        | Block::MagentaBed
+        | Block::LightBlueBed
+        | Block::YellowBed
+        | Block::LimeBed
+        | Block::PinkBed
+        | Block::GrayBed
+        | Block::LightGrayBed
+        | Block::CyanBed
+        | Block::PurpleBed
+        | Block::BlueBed
+        | Block::BrownBed
+        | Block::GreenBed
+        | Block::RedBed
+        | Block::BlackBed => 0.75,
+        _ => DEFAULT_BLOCK_PHYSICS.bounce_restitution,
+    };
+    let stuck_multiplier = match block {
+        Block::Cobweb => Some([0.25, 0.05, 0.25]),
+        Block::PowderSnow => Some([0.9, 1.5, 0.9]),
+        Block::SweetBerryBush => Some([0.8, 0.75, 0.8]),
+        _ => None,
+    };
+    let climbable = matches!(
+        block,
+        Block::Ladder
+            | Block::Vine
+            | Block::Scaffolding
+            | Block::WeepingVines
+            | Block::WeepingVinesPlant
+            | Block::TwistingVines
+            | Block::TwistingVinesPlant
+            | Block::CaveVines
+            | Block::CaveVinesPlant
+    );
+    BlockPhysics {
+        friction,
+        speed_factor,
+        jump_factor,
+        bounce_restitution,
+        stuck_multiplier,
+        climbable,
+    }
+}
+
 fn physics_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> BlockPhysics {
-    v.name_of(v.state_at(x, y, z))
-        .map_or(DEFAULT_BLOCK_PHYSICS, block_physics)
+    v.state_id_of(v.state_at(x, y, z))
+        .map_or(DEFAULT_BLOCK_PHYSICS, block_physics_for_state)
 }
 
 // ---------------------------------------------------------------------------
@@ -351,14 +386,16 @@ fn climbable_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> bool {
 /// it is a single-block identity check, not a `Properties`/tag fold shared
 /// with anything else `physics_at` already answers.
 fn is_scaffolding_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> bool {
-    matches!(v.name_of(v.state_at(x, y, z)), Some("minecraft:scaffolding"))
+    v.state_id_of(v.state_at(x, y, z))
+        .is_some_and(|state| state.block() == Block::Scaffolding)
 }
 
 /// [`CollisionView::is_powder_snow`] — `state.is(Blocks.POWDER_SNOW)`, for the
 /// freezing mechanic. Named directly for the same reason as
 /// [`is_scaffolding_at`]: it is a block identity, not a shared physics fold.
 fn is_powder_snow_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> bool {
-    matches!(v.name_of(v.state_at(x, y, z)), Some("minecraft:powder_snow"))
+    v.state_id_of(v.state_at(x, y, z))
+        .is_some_and(|state| state.block() == Block::PowderSnow)
 }
 
 /// [`CollisionView::bubble_column`] — the `DRAG_DOWN` property of the bubble column
@@ -428,11 +465,12 @@ fn blocks_motion_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> bool {
     if let Some(real) = v.blocks_motion_of(state) {
         return real;
     }
-    match v.name_of(state) {
-        // The two explicit exclusions in `blocksMotion` itself, plus the one
-        // `forceSolidOff` block a player touches every session.
-        Some("minecraft:cobweb" | "minecraft:bamboo_sapling" | "minecraft:ladder") => false,
-        _ => shape_is_solid(v.shape_of(state)),
+    if v.state_id_of(state).is_some_and(|state| {
+        matches!(state.block(), Block::Cobweb | Block::BambooSapling | Block::Ladder)
+    }) {
+        false
+    } else {
+        shape_is_solid(v.shape_of(state))
     }
 }
 
@@ -469,10 +507,9 @@ fn is_solid_face_at(
     }
     // `IceBlock` covers ice, frosted ice and blue ice; packed ice is a plain
     // `Block`, so it is *not* excluded (`IceBlock` subclasses only).
-    if matches!(
-        v.name_of(state),
-        Some("minecraft:ice" | "minecraft:frosted_ice" | "minecraft:blue_ice")
-    ) {
+    if v.state_id_of(state).is_some_and(|state| {
+        matches!(state.block(), Block::Ice | Block::FrostedIce | Block::BlueIce)
+    }) {
         return false;
     }
     shape_face_is_full(v.shape_of(state), dir)
@@ -572,14 +609,8 @@ fn pick_box(b: &BlockAabb) -> PickBox {
     }
 }
 
-/// The vanilla block each demo-palette id stands in for, so the demo world reads
-/// the *same* name-keyed constant tables the live world does.
-///
-/// Every one of these resolves to vanilla's default (0.6 friction, no bounce, not
-/// climbable), so the mapping changes no demo behaviour today. It exists so the
-/// two adapters share one code path rather than one having stubs: if someone adds
-/// ice to the demo palette, it becomes slippery with no further wiring, and if the
-/// name tables gain a row that is wrong, both worlds show it.
+/// Names used only by test fixtures that build an atlas from the demo palette.
+#[cfg(test)]
 fn demo_block_name(state: u32) -> Option<&'static str> {
     Some(match state {
         id::STONE => "minecraft:stone",
@@ -623,8 +654,8 @@ impl BlockView for WorldCollision<'_> {
         None
     }
 
-    fn name_of(&self, state: u32) -> Option<&'static str> {
-        demo_block_name(state)
+    fn state_id_of(&self, _state: u32) -> Option<StateId> {
+        None
     }
 
     /// **Always `None`.** Demo-palette ids are not vanilla block-state ids, so no
@@ -737,8 +768,8 @@ impl CollisionView for WorldCollision<'_> {
 ///   (see [`crate::net::NetClient::sections_at`]), so no world lock is held while
 ///   physics queries it and the many per-tick lookups touch only local memory;
 /// * **the version data** — [`VersionAdapter`], consulted for each state's
-///   collision shape and block name. Both of its accessors are `&'static` rodata
-///   reads, so this adapter holds an `Arc` and copies nothing.
+///   collision shape and motion flags. Its accessors are `&'static` rodata reads,
+///   so this adapter holds an `Arc` and copies nothing.
 ///
 /// Without version data the view degrades to the old coarse behaviour (unit cube
 /// per occluding block) rather than losing collision entirely — a player who
@@ -787,8 +818,7 @@ pub struct LiveCollision {
     /// — see [`vanilla_fluid`] — and `classify(id).occludes` is both the
     /// no-version-data shape fallback and the answer to [`Self::is_solid`].
     atlas: Arc<BlockAtlas>,
-    /// The version data behind [`VersionAdapter::block_collision`] and
-    /// [`VersionAdapter::block_name`]. `None` degrades to unit cubes; see the
+    /// The version data behind [`VersionAdapter::block_collision`]. `None` degrades to unit cubes; see the
     /// type docs.
     version: Option<Arc<dyn VersionAdapter>>,
     /// Resolved state ids of the three air blocks (see [`AIR_BLOCKS`]), for
@@ -797,19 +827,16 @@ pub struct LiveCollision {
     air_states: Vec<u32>,
 }
 
-/// The blocks whose **outline** shape is vanilla's own empty-shape sentinel *and* whose cell holds
+/// The block types whose **outline** shape is the empty-shape sentinel *and* whose cell holds
 /// no fluid, i.e. the ones vanilla's own entity-pick routine must walk straight through without them
 /// being identifiable as "a fluid cell".
 ///
-/// All three register as vanilla's own air block type, whose shape getter
-/// returns vanilla's own empty-shape sentinel, so none of them is targetable
-/// in vanilla. This matters because **`minecraft:air` is not the only air**:
-/// vanilla's own world-carver writes `minecraft:cave_air`, as do lakes,
-/// monster rooms and strongholds, and the end's void column is `void_air`. Each is
-/// a *distinct block-state id*, so a pick predicate written as `state_id != 0`
+/// All three use the empty shape, so none is targetable. This matters because
+/// air is not the only empty block: carved space and the end void use distinct
+/// state ids, so a pick predicate written as `state_id != 0`
 /// targets the empty space one block in front of the player's face in any carved
 /// cave, in preference to whatever real block is behind it.
-const AIR_BLOCKS: [&str; 3] = ["minecraft:air", "minecraft:cave_air", "minecraft:void_air"];
+const AIR_BLOCKS: [Block; 3] = [Block::Air, Block::CaveAir, Block::VoidAir];
 
 /// The process-wide inferred version data, resolved once from the compiled-in
 /// family set. See [`inferred_version_data`].
@@ -1026,22 +1053,11 @@ impl LiveCollision {
         atlas: Arc<BlockAtlas>,
         version: Option<Arc<dyn VersionAdapter>>,
     ) -> Self {
-        // Three `state_id_of` lookups (a hash of a `(name, properties)` key each)
-        // per snapshot. The snapshot itself already clones ~200 `Arc<ChunkSection>`
-        // handles, so this is noise; resolving by *name* rather than hardcoding ids
-        // is what keeps the list checkable against the jar.
-        //
-        // `0` is seeded unconditionally: it is `minecraft:air`, and it is also what
-        // `block_at` returns for a cell outside the snapshot, so a missing name
-        // index must never make unloaded space targetable.
-        let mut air_states = vec![0u32];
-        for name in AIR_BLOCKS {
-            if let Some(id) = atlas.state_id_of(name)
-                && !air_states.contains(&id.raw())
-            {
-                air_states.push(id.raw());
-            }
-        }
+        let air_states: Vec<u32> = AIR_BLOCKS
+            .into_iter()
+            .map(Block::default_state)
+            .map(|state| state.raw())
+            .collect();
         Self {
             grid: sections.cells,
             origin_cx: sections.origin_cx,
@@ -1371,9 +1387,9 @@ impl BlockView for LiveCollision {
         })
     }
 
-    /// The block identifier, `&'static str` from the version crate's rodata.
-    fn name_of(&self, state: u32) -> Option<&'static str> {
-        self.version.as_ref()?.block_name(state)
+    /// Canonical state validation for this live snapshot's global id space.
+    fn state_id_of(&self, state: u32) -> Option<StateId> {
+        StateId::new(state)
     }
 
     /// One bit out of the version crate's `legacySolid`/`blocksMotion` bitset —
@@ -2834,7 +2850,7 @@ mod tests {
     /// surface for the tests below to control directly.
     #[derive(Clone, Default)]
     struct Facts {
-        name: Option<&'static str>,
+        block: Option<Block>,
         fluid: Option<FluidKind>,
         shape: &'static [BlockAabb],
     }
@@ -2871,8 +2887,10 @@ mod tests {
         fn fluid_cell_of(&self, _state: u32) -> Option<FluidCell> {
             None
         }
-        fn name_of(&self, state: u32) -> Option<&'static str> {
-            self.facts.get(state as usize).and_then(|f| f.name)
+        fn state_id_of(&self, state: u32) -> Option<StateId> {
+            self.facts
+                .get(state as usize)
+                .and_then(|f| f.block.map(Block::default_state))
         }
         fn blocks_motion_of(&self, _state: u32) -> Option<bool> {
             None
@@ -2883,14 +2901,14 @@ mod tests {
     }
 
     #[test]
-    fn scaffolding_and_powder_snow_are_told_apart_by_name() {
+    fn scaffolding_and_powder_snow_are_told_apart_by_state_id() {
         let mut w = TestBlocks::default();
         w.set(
             0,
             0,
             0,
             Facts {
-                name: Some("minecraft:scaffolding"),
+                block: Some(Block::Scaffolding),
                 ..Facts::default()
             },
         );
@@ -2899,7 +2917,7 @@ mod tests {
             0,
             1,
             Facts {
-                name: Some("minecraft:powder_snow"),
+                block: Some(Block::PowderSnow),
                 ..Facts::default()
             },
         );
@@ -2908,7 +2926,7 @@ mod tests {
             0,
             2,
             Facts {
-                name: Some("minecraft:stone"),
+                block: Some(Block::Stone),
                 ..Facts::default()
             },
         );
@@ -2950,7 +2968,7 @@ mod tests {
             0,
             0,
             Facts {
-                name: Some("minecraft:stone"),
+                block: Some(Block::Stone),
                 fluid: Some(FluidKind::Water),
                 shape: FULL_CUBE_LOCAL,
             },

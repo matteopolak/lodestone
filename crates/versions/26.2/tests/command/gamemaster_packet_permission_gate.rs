@@ -51,6 +51,8 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use lodestone_client::{ClientBuilder, LoginProfile, ServerAddress};
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 use lodestone_model::{
     BlockPos, ClientAction, ClientEvent, CommandBlockMode, Difficulty, GameMode, ResourceKey,
 };
@@ -387,11 +389,11 @@ impl ChunkSource for CommandBlockSource {
         ChunkColumn::new(-64, 384)
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         if (x, y, z) == (COMMAND_BLOCK_POS.x, COMMAND_BLOCK_POS.y, COMMAND_BLOCK_POS.z) {
-            "minecraft:command_block".to_string()
+            Block::CommandBlock.default_state()
         } else {
-            "minecraft:air".to_string()
+            StateId::AIR
         }
     }
 
@@ -399,7 +401,7 @@ impl ChunkSource for CommandBlockSource {
         "minecraft:plains".to_string()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
         // Edits are not retained — this test only reads back the block
         // *entity* registry, never a re-read of this source.
     }

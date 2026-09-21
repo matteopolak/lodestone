@@ -1,35 +1,13 @@
-//! The block-field evaluator: reference noise-chunk semantics over a flattened
-//! [`Graph`].
+//! Recursive block-field evaluation over a flattened [`Graph`].
 //!
-//! This is a **recursive descent over indices**, not a bottom-up sweep over the
-//! `Vec<Op>`, and that is forced rather than stylistic — see
-//! [`Field::eval`]'s `Mul` arm. Three other node kinds also branch
-//! (`range_choice`, `interval_select`, and `interpolated`'s two regimes), so the
-//! set of nodes an evaluation touches is position-dependent and cannot be known
-//! before walking.
-//!
-//! # Semantics preserved
-//!
-//! 1. **`Mul`'s `v1 == 0.0` short-circuit** — the second operand is not
-//!    evaluated at all.
-//! 2. **`interpolated`-inside-corner transparency** — while filling a corner,
-//!    a nested `interpolated` is transparent.
-//! 3. **`flat_cache`'s quart snap and forced `y = 0`**.
-//! 4. **`cache_2d` / `cache_once` scoping** — transparent *here*; `cache_2d` is
-//!    a real memo only in the point interpreter.
-//! 5. **`cache_all_in_cell`** — transparent as a value, but it selects the
-//!    math-helper trilinear lerp (X-inner) over the incremental chain (Y-inner).
-//!
-//! # Float order
-//!
-//! Every operation here is IEEE-exact: `+`, `-`, `*`, `/`, `min`, `max`, `abs`,
-//! `clamp`, and the math-helper lerp family built from them. No `mul_add`, FMA,
-//! reassociation, or transcendental operation is introduced by this walk.
+//! The walk stays recursive because multiplication and selectors can skip
+//! subtrees, while interpolation mode is specialized at compile time.
 
 use std::simd::prelude::*;
 
-use super::graph::{Graph, NodeId, Op, OpKind, OverworldFinalDensityPlan};
+use super::graph::{Graph, NodeId, Op, OpKind, OverworldFinalDensityPlan, TilePlan};
 use super::scratch::Scratch;
+use super::xz_products::XzProductLattice;
 use crate::density::Context;
 
 /// Cell geometry selected from the owning settings document. The usual values
@@ -55,11 +33,14 @@ pub(crate) struct Field<'a> {
     children: &'a [NodeId],
     noises: &'a [crate::noise::NormalNoise],
     leaves: &'a [crate::density::Density],
+    splines: &'a [super::point::PointProgram],
     geom: Geom,
     scratch: &'a mut Scratch,
+    products: Option<&'a XzProductLattice>,
     column_xz: Option<ColumnXZ>,
     cell_xz: Option<(usize, usize)>,
     column_y: Option<(i32, i32, f64)>,
+    tile_active: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -89,7 +70,22 @@ impl Default for NoodleCorners {
 }
 
 impl<'a> Field<'a> {
+    #[cfg(test)]
     pub(crate) fn new(graph: &'a Graph, geom: Geom, scratch: &'a mut Scratch) -> Self {
+        Self::new_with_products(graph, geom, scratch, None)
+    }
+
+    pub(crate) fn new_with_products(
+        graph: &'a Graph,
+        geom: Geom,
+        scratch: &'a mut Scratch,
+        products: Option<&'a XzProductLattice>,
+    ) -> Self {
+        let products = products.filter(|products| {
+            graph
+                .product_identity()
+                .is_some_and(|identity| products.identity_matches(identity))
+        });
         Self {
             graph,
             ops: graph.ops(),
@@ -97,11 +93,14 @@ impl<'a> Field<'a> {
             children: graph.children(),
             noises: graph.noises(),
             leaves: graph.leaves(),
+            splines: graph.splines(),
             geom,
             scratch,
+            products,
             column_xz: None,
             cell_xz: None,
             column_y: None,
+            tile_active: false,
         }
     }
 
@@ -134,7 +133,7 @@ impl<'a> Field<'a> {
                 y.div_euclid(ch),
                 f64::from(y.rem_euclid(ch)) / f64::from(ch),
             ));
-            *value = self.eval(id, x, y, z, true);
+            *value = self.eval::<true>(id, x, y, z);
         }
         self.column_xz = None;
         self.cell_xz = None;
@@ -156,6 +155,7 @@ impl<'a> Field<'a> {
         debug_assert_eq!(z0.rem_euclid(self.geom.cell_width), 0);
         self.column_xz = None;
         self.column_y = None;
+        self.tile_active = true;
         self.cell_xz = self
             .scratch
             .cell_column_indices(
@@ -178,6 +178,7 @@ impl<'a> Field<'a> {
             .interpolate_shared_noodle_cell(plan, x0, y0, z0, output)
             .is_some()
         {
+            self.tile_active = false;
             self.cell_xz = None;
             return;
         }
@@ -255,11 +256,196 @@ impl<'a> Field<'a> {
                 *terrain = squeezed.min(noodle);
             }
         }
+        self.tile_active = false;
         self.cell_xz = None;
     }
 
-    /// Evaluates `id` at a block through the field wrapper.
-    pub(crate) fn eval(&mut self, id: NodeId, x: i32, y: i32, z: i32, interpolate: bool) -> f64 {
+    /// Proves that every emitted block in one production cell has positive
+    /// final density without materialising the 128 lane values.
+    ///
+    /// The proof uses the eight vertices of the actually emitted sub-box
+    /// (`0..3/4` in X/Z and `0..7/8` in Y), not the enclosing cell's far
+    /// corners. Trilinear interpolation is multi-affine, so those vertices
+    /// bound every emitted lane. A failed proof leaves the same corner and
+    /// slot caches as the ordinary evaluator has populated so the caller can
+    /// immediately fall back to [`Self::eval_overworld_final_density_cell`].
+    pub(crate) fn eval_overworld_final_density_cell_is_positive(
+        &mut self,
+        plan: OverworldFinalDensityPlan,
+        x0: i32,
+        y0: i32,
+        z0: i32,
+    ) -> bool {
+        debug_assert_eq!(self.geom.cell_width, 4);
+        debug_assert_eq!(self.geom.cell_height, 8);
+        debug_assert_eq!(x0.rem_euclid(self.geom.cell_width), 0);
+        debug_assert_eq!(y0.rem_euclid(self.geom.cell_height), 0);
+        debug_assert_eq!(z0.rem_euclid(self.geom.cell_width), 0);
+        self.column_xz = None;
+        self.column_y = None;
+        self.tile_active = true;
+        self.cell_xz = self
+            .scratch
+            .cell_column_indices(
+                x0.div_euclid(self.geom.cell_width),
+                z0.div_euclid(self.geom.cell_width),
+            );
+
+        let cx = x0.div_euclid(self.geom.cell_width);
+        let cy = y0.div_euclid(self.geom.cell_height);
+        let cz = z0.div_euclid(self.geom.cell_width);
+        let terrain = self.cell_corners(
+            plan.terrain_inner,
+            plan.terrain_slot,
+            cx,
+            cy,
+            cz,
+            self.geom.cell_width,
+            self.geom.cell_height,
+        );
+        let result = terrain_subcell_is_positive(
+            self.geom.cell_width,
+            self.geom.cell_height,
+            terrain,
+        ) && self.noodle_subcell_is_positive(plan, cx, cy, cz);
+        self.cell_xz = None;
+        self.tile_active = false;
+        result
+    }
+
+    fn noodle_subcell_is_positive(
+        &mut self,
+        plan: OverworldFinalDensityPlan,
+        cx: i32,
+        cy: i32,
+        cz: i32,
+    ) -> bool {
+        let cw = self.geom.cell_width;
+        let ch = self.geom.cell_height;
+        if let Some((selector, roots)) = self.shared_noodle_ranges(plan) {
+            let roots_present = roots.iter().any(|&(_, slot)| {
+                self.scratch.cell_is_present(slot, cx, cy, cz, self.cell_xz)
+            });
+            if !roots_present {
+                let mut selector_values = [0.0; 8];
+                let mut selector_known = [false; 8];
+                let control = self.cell_corners_shared_range(
+                    roots[0].0,
+                    roots[0].1,
+                    selector,
+                    cx,
+                    cy,
+                    cz,
+                    cw,
+                    ch,
+                    &mut selector_values,
+                    &mut selector_known,
+                );
+                if noodle_control_is_inactive(cw, ch, control) {
+                    return true;
+                }
+                if !subcell_values_are_finite(cw, ch, control) {
+                    return false;
+                }
+                let ridge_a = self.cell_corners_shared_range(
+                    roots[1].0,
+                    roots[1].1,
+                    selector,
+                    cx,
+                    cy,
+                    cz,
+                    cw,
+                    ch,
+                    &mut selector_values,
+                    &mut selector_known,
+                );
+                let ridge_b = self.cell_corners_shared_range(
+                    roots[2].0,
+                    roots[2].1,
+                    selector,
+                    cx,
+                    cy,
+                    cz,
+                    cw,
+                    ch,
+                    &mut selector_values,
+                    &mut selector_known,
+                );
+                let thickness = self.cell_corners_shared_range(
+                    roots[3].0,
+                    roots[3].1,
+                    selector,
+                    cx,
+                    cy,
+                    cz,
+                    cw,
+                    ch,
+                    &mut selector_values,
+                    &mut selector_known,
+                );
+                return noodle_active_lower_bound_is_positive(
+                    cw,
+                    ch,
+                    ridge_a,
+                    ridge_b,
+                    thickness,
+                );
+            }
+        }
+
+        let control = self.cell_corners(
+            plan.noodle_control_inner,
+            plan.noodle_control_slot,
+            cx,
+            cy,
+            cz,
+            cw,
+            ch,
+        );
+        if noodle_control_is_inactive(cw, ch, control) {
+            return true;
+        }
+        if !subcell_values_are_finite(cw, ch, control) {
+            return false;
+        }
+        let ridge_a = self.cell_corners(
+            plan.noodle_ridge_a_inner,
+            plan.noodle_ridge_a_slot,
+            cx,
+            cy,
+            cz,
+            cw,
+            ch,
+        );
+        let ridge_b = self.cell_corners(
+            plan.noodle_ridge_b_inner,
+            plan.noodle_ridge_b_slot,
+            cx,
+            cy,
+            cz,
+            cw,
+            ch,
+        );
+        let thickness = self.cell_corners(
+            plan.noodle_thickness_inner,
+            plan.noodle_thickness_slot,
+            cx,
+            cy,
+            cz,
+            cw,
+            ch,
+        );
+        noodle_active_lower_bound_is_positive(cw, ch, ridge_a, ridge_b, thickness)
+    }
+
+    #[inline]
+    pub(crate) fn eval<const INTERPOLATE: bool>(
+        &mut self,
+        id: NodeId,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> f64 {
         let op = self.ops[id as usize];
         crate::counters::bump_density_eval(op.kind as usize);
         super::redundancy_probe::visit_field(
@@ -271,201 +457,244 @@ impl<'a> Field<'a> {
             z,
             self.scratch.probe_scope(),
         );
+        if op.kind != OpKind::FlatCache && let Some(value) = self.product_value(id, x, z) {
+            return value;
+        }
+        self.eval_op::<INTERPOLATE>(op, id, x, y, z)
+    }
+
+    #[inline(always)]
+    fn eval_op<const INTERPOLATE: bool>(
+        &mut self,
+        op: Op,
+        id: NodeId,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> f64 {
         match op.kind {
             OpKind::Const => self.params[op.a as usize],
             OpKind::BlendAlpha => 1.0,
             OpKind::BlendOffset | OpKind::Beardifier => 0.0,
             OpKind::YClampedGradient => {
-                let p = op.a;
+                let p = op.a as usize;
                 crate::math::clamped_map(
                     f64::from(y),
-                    self.params[p as usize],
-                    self.params[(p + 1) as usize],
-                    self.params[(p + 2) as usize],
-                    self.params[(p + 3) as usize],
+                    self.params[p],
+                    self.params[p + 1],
+                    self.params[p + 2],
+                    self.params[p + 3],
                 )
             }
-
             OpKind::Add => {
-                self.eval(op.a, x, y, z, interpolate) + self.eval(op.b, x, y, z, interpolate)
+                self.eval::<INTERPOLATE>(op.a, x, y, z)
+                    + self.eval::<INTERPOLATE>(op.b, x, y, z)
             }
-            // Semantic 1. The reference evaluator does not evaluate the second operand when the
-            // first is exactly zero. This is why the evaluator is a recursive
-            // descent: a bottom-up sweep over `ops` would evaluate every node,
-            // which is not merely slower — a skipped subtree can contain a
-            // `flat_cache`/`interpolated` slot write, so evaluating it would
-            // populate caches the reference evaluator leaves empty and change what a later
-            // query returns.
             OpKind::Mul => {
-                let v1 = self.eval(op.a, x, y, z, interpolate);
-                if v1 == 0.0 {
+                let left = self.eval::<INTERPOLATE>(op.a, x, y, z);
+                if left == 0.0 {
                     0.0
                 } else {
-                    v1 * self.eval(op.b, x, y, z, interpolate)
+                    left * self.eval::<INTERPOLATE>(op.b, x, y, z)
                 }
             }
             OpKind::Min => self
-                .eval(op.a, x, y, z, interpolate)
-                .min(self.eval(op.b, x, y, z, interpolate)),
+                .eval::<INTERPOLATE>(op.a, x, y, z)
+                .min(self.eval::<INTERPOLATE>(op.b, x, y, z)),
             OpKind::Max => self
-                .eval(op.a, x, y, z, interpolate)
-                .max(self.eval(op.b, x, y, z, interpolate)),
-
-            OpKind::Abs => self.eval(op.a, x, y, z, interpolate).abs(),
-            OpKind::Square => {
-                let v = self.eval(op.a, x, y, z, interpolate);
-                v * v
-            }
-            OpKind::Cube => {
-                let v = self.eval(op.a, x, y, z, interpolate);
-                v * v * v
-            }
-            OpKind::HalfNegative => {
-                let v = self.eval(op.a, x, y, z, interpolate);
-                if v > 0.0 { v } else { v * 0.5 }
-            }
-            OpKind::QuarterNegative => {
-                let v = self.eval(op.a, x, y, z, interpolate);
-                if v > 0.0 { v } else { v * 0.25 }
-            }
-            OpKind::Squeeze => {
-                let c = self.eval(op.a, x, y, z, interpolate).clamp(-1.0, 1.0);
-                c / 2.0 - c * c * c / 24.0
-            }
-            OpKind::Invert => 1.0 / self.eval(op.a, x, y, z, interpolate),
-            OpKind::Clamp => {
-                let v = self.eval(op.a, x, y, z, interpolate);
-                v.clamp(self.params[op.b as usize], self.params[(op.b + 1) as usize])
-            }
-
-            OpKind::Interpolated => {
-                if interpolate {
-                    let slot = op.b as usize;
-                    if self.column_xz.is_some() {
-                        let ch = self.geom.cell_height;
-                        let cy = y.div_euclid(ch);
-                        let offset = y.rem_euclid(ch) as usize;
-                        if let Some(value) = self.scratch.column_value(slot, cy, offset) {
-                            value
-                        } else {
-                            self.interpolate_cell_column(op.a, slot, x, z, cy);
-                            self.scratch
-                                .column_value(slot, cy, offset)
-                                .expect("cell-column interpolation was populated")
-                        }
-                    } else {
-                        self.interpolate(op.a, slot, x, y, z)
-                    }
-                } else {
-                    // Semantic 2. Nested inside a corner sample: the interpolator
-                    // interpolator is transparent when the context is not the
-                    // field wrapper itself. The flag has to thread through the
-                    // descent, which is the only reason `eval` carries it.
-                    self.eval(op.a, x, y, z, false)
-                }
-            }
-            // Semantic 3. XZ snapped to the quart grid (multiples of 4,
-            // hardcoded to four blocks — deliberately *not* `cell_width`) and `y`
-            // forced to exactly 0, so a 2D climate/shift field is sampled once
-            // per 4x4 column. The inner is evaluated with `interpolate = false`.
-            OpKind::FlatCache => {
-                let qx = (x >> 2) << 2;
-                let qz = (z >> 2) << 2;
-                self.slot_get(op.b as usize, (qx, 0, qz), op.a)
-            }
-            // Memoised on the last `(x, y, z)` — see `Scratch::leaf_get`. Safe
-            // here and at the leaf arm below, and at no other arm, because these
-            // are the only kinds with no field children: nothing under them can
-            // write a cache slot a later query depends on.
-            OpKind::Noise => {
-                if let Some(v) = self.scratch.leaf_get(id, x, y, z) {
-                    return v;
-                }
-                crate::counters::bump_cache_compute(crate::counters::CacheKind::Leaf);
-                let n = &self.noises[op.a as usize];
-                let xz = self.params[op.b as usize];
-                let ys = self.params[(op.b + 1) as usize];
-                let v = n.get_value(f64::from(x) * xz, f64::from(y) * ys, f64::from(z) * xz);
-                self.scratch.leaf_put(id, x, y, z, v);
-                v
-            }
-            OpKind::ShiftedNoise => {
-                let (c0, c1, c2) = (
-                    self.children[op.a as usize],
-                    self.children[(op.a + 1) as usize],
-                    self.children[(op.a + 2) as usize],
-                );
-                let xz = self.params[op.c as usize];
-                let ys = self.params[(op.c + 1) as usize];
-                let sx = f64::from(x) * xz + self.eval(c0, x, y, z, interpolate);
-                let sy = f64::from(y) * ys + self.eval(c1, x, y, z, interpolate);
-                let sz = f64::from(z) * xz + self.eval(c2, x, y, z, interpolate);
-                self.noises[op.b as usize].get_value(sx, sy, sz)
-            }
-            OpKind::ShiftA => {
-                shift(&self.noises[op.a as usize], f64::from(x), 0.0, f64::from(z))
-            }
-            OpKind::ShiftB => {
-                shift(&self.noises[op.a as usize], f64::from(z), f64::from(x), 0.0)
-            }
-            OpKind::Shift => shift(
-                &self.noises[op.a as usize],
-                f64::from(x),
-                f64::from(y),
-                f64::from(z),
-            ),
-
-            OpKind::RangeChoice => {
-                let input = self.children[op.a as usize];
-                let v = self.eval(input, x, y, z, interpolate);
-                let lo = self.params[op.b as usize];
-                let hi = self.params[(op.b + 1) as usize];
-                let branch = if v >= lo && v < hi {
-                    self.children[(op.a + 1) as usize]
-                } else {
-                    self.children[(op.a + 2) as usize]
-                };
-                self.eval(branch, x, y, z, interpolate)
-            }
-            // Layout is `children[a] = n`, `children[a + 1] = input`,
-            // `children[a + 2 + i] = functions[i]`; `b` = thresholds offset,
-            // `c` = threshold count. The loop is over the *threshold* count,
-            // matching the tree walker's `thresholds.iter()`, not over the
-            // function count — see the compiler's note on this arm for why the
-            // two are stored separately.
-            OpKind::IntervalSelect => {
-                let n = self.children[op.a as usize];
-                let input = self.children[(op.a + 1) as usize];
-                let v = self.eval(input, x, y, z, interpolate);
-                for i in 0..op.c {
-                    if v < self.params[(op.b + i) as usize] {
-                        let branch = self.children[(op.a + 2 + i) as usize];
-                        return self.eval(branch, x, y, z, interpolate);
-                    }
-                }
-                let branch = self.children[(op.a + 1 + n) as usize];
-                self.eval(branch, x, y, z, interpolate)
-            }
-
-            // The three point-evaluated leaves. The field evaluator does not
-            // recurse into these; it calls the point interpreter, so everything
-            // beneath one of them has point semantics (no quart snapping, no
-            // interpolation). This is an observable semantic — see
-            // `super::graph`'s module doc — and it is why these hold an
-            // untouched `Density` subtree rather than compiled nodes.
-            //
-            // Memoised on the last `(x, y, z)` because these leaves are reached
-            // repeatedly while filling a cell.
+                .eval::<INTERPOLATE>(op.a, x, y, z)
+                .max(self.eval::<INTERPOLATE>(op.b, x, y, z)),
+            OpKind::Abs
+            | OpKind::Square
+            | OpKind::Cube
+            | OpKind::HalfNegative
+            | OpKind::QuarterNegative
+            | OpKind::Squeeze
+            | OpKind::Invert
+            | OpKind::Clamp => self.eval_unary::<INTERPOLATE>(op, x, y, z),
+            OpKind::Interpolated => self.eval_interpolated::<INTERPOLATE>(op, x, y, z),
+            OpKind::FlatCache => self.eval_flat_cache(op, id, x, z),
+            OpKind::Noise => self.eval_noise(op, id, x, y, z),
+            OpKind::ShiftedNoise => self.eval_shifted_noise::<INTERPOLATE>(op, x, y, z),
+            OpKind::ShiftA | OpKind::ShiftB | OpKind::Shift => self.eval_shift(op, x, y, z),
+            OpKind::RangeChoice => self.eval_range_choice::<INTERPOLATE>(op, x, y, z),
+            OpKind::IntervalSelect => self.eval_interval_select::<INTERPOLATE>(op, x, y, z),
             OpKind::Spline | OpKind::Blended | OpKind::FindTopSurface | OpKind::EndIslands => {
-                if let Some(v) = self.scratch.leaf_get(id, x, y, z) {
-                    return v;
-                }
-                crate::counters::bump_cache_compute(crate::counters::CacheKind::Leaf);
-                let v = self.leaves[op.a as usize].compute(Context::new(x, y, z));
-                self.scratch.leaf_put(id, x, y, z, v);
-                v
+                self.eval_leaf(op, id, x, y, z)
             }
         }
+    }
+
+    #[inline(always)]
+    fn eval_unary<const INTERPOLATE: bool>(
+        &mut self,
+        op: Op,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> f64 {
+        let value = self.eval::<INTERPOLATE>(op.a, x, y, z);
+        match op.kind {
+            OpKind::Abs => value.abs(),
+            OpKind::Square => value * value,
+            OpKind::Cube => value * value * value,
+            OpKind::HalfNegative => if value > 0.0 { value } else { value * 0.5 },
+            OpKind::QuarterNegative => if value > 0.0 { value } else { value * 0.25 },
+            OpKind::Squeeze => {
+                let value = value.clamp(-1.0, 1.0);
+                value / 2.0 - value * value * value / 24.0
+            }
+            OpKind::Invert => 1.0 / value,
+            OpKind::Clamp => value.clamp(
+                self.params[op.b as usize],
+                self.params[(op.b + 1) as usize],
+            ),
+            _ => unreachable!(),
+        }
+    }
+
+    #[inline(always)]
+    fn eval_interpolated<const INTERPOLATE: bool>(
+        &mut self,
+        op: Op,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> f64 {
+        if INTERPOLATE {
+            let slot = op.b as usize;
+            if self.column_xz.is_some() {
+                let ch = self.geom.cell_height;
+                let cy = y.div_euclid(ch);
+                let offset = y.rem_euclid(ch) as usize;
+                if let Some(value) = self.scratch.column_value(slot, cy, offset) {
+                    value
+                } else {
+                    self.interpolate_cell_column(op.a, slot, x, z, cy);
+                    self.scratch
+                        .column_value(slot, cy, offset)
+                        .expect("cell-column interpolation was populated")
+                }
+            } else {
+                self.interpolate(op.a, slot, x, y, z)
+            }
+        } else {
+            self.eval::<false>(op.a, x, y, z)
+        }
+    }
+
+    #[inline(always)]
+    fn eval_flat_cache(&mut self, op: Op, id: NodeId, x: i32, z: i32) -> f64 {
+        let qx = (x >> 2) << 2;
+        let qz = (z >> 2) << 2;
+        if let Some(value) = self.product_value(id, qx, qz) {
+            return value;
+        }
+        self.slot_get(op.b as usize, (qx, 0, qz), op.a)
+    }
+
+    #[inline(always)]
+    fn eval_noise(&mut self, op: Op, id: NodeId, x: i32, y: i32, z: i32) -> f64 {
+        if let Some(value) = self.scratch.leaf_get(id, x, y, z) {
+            return value;
+        }
+        crate::counters::bump_cache_compute(crate::counters::CacheKind::Leaf);
+        let noise = &self.noises[op.a as usize];
+        let xz = self.params[op.b as usize];
+        let ys = self.params[(op.b + 1) as usize];
+        let value = noise.get_value(
+            f64::from(x) * xz,
+            f64::from(y) * ys,
+            f64::from(z) * xz,
+        );
+        self.scratch.leaf_put(id, x, y, z, value);
+        value
+    }
+
+    #[inline(always)]
+    fn eval_shifted_noise<const INTERPOLATE: bool>(
+        &mut self,
+        op: Op,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> f64 {
+        let c0 = self.children[op.a as usize];
+        let c1 = self.children[(op.a + 1) as usize];
+        let c2 = self.children[(op.a + 2) as usize];
+        let xz = self.params[op.c as usize];
+        let ys = self.params[(op.c + 1) as usize];
+        let sx = f64::from(x) * xz + self.eval::<INTERPOLATE>(c0, x, y, z);
+        let sy = f64::from(y) * ys + self.eval::<INTERPOLATE>(c1, x, y, z);
+        let sz = f64::from(z) * xz + self.eval::<INTERPOLATE>(c2, x, y, z);
+        self.noises[op.b as usize].get_value(sx, sy, sz)
+    }
+
+    #[inline(always)]
+    fn eval_shift(&self, op: Op, x: i32, y: i32, z: i32) -> f64 {
+        let noise = &self.noises[op.a as usize];
+        match op.kind {
+            OpKind::ShiftA => shift(noise, f64::from(x), 0.0, f64::from(z)),
+            OpKind::ShiftB => shift(noise, f64::from(z), f64::from(x), 0.0),
+            OpKind::Shift => shift(noise, f64::from(x), f64::from(y), f64::from(z)),
+            _ => unreachable!(),
+        }
+    }
+
+    #[inline(always)]
+    fn eval_range_choice<const INTERPOLATE: bool>(
+        &mut self,
+        op: Op,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> f64 {
+        let input = self.children[op.a as usize];
+        let value = self.eval::<INTERPOLATE>(input, x, y, z);
+        let branch = if value >= self.params[op.b as usize]
+            && value < self.params[(op.b + 1) as usize]
+        {
+            self.children[(op.a + 1) as usize]
+        } else {
+            self.children[(op.a + 2) as usize]
+        };
+        self.eval::<INTERPOLATE>(branch, x, y, z)
+    }
+
+    #[inline(always)]
+    fn eval_interval_select<const INTERPOLATE: bool>(
+        &mut self,
+        op: Op,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> f64 {
+        let count = self.children[op.a as usize];
+        let input = self.children[(op.a + 1) as usize];
+        let value = self.eval::<INTERPOLATE>(input, x, y, z);
+        for index in 0..op.c {
+            if value < self.params[(op.b + index) as usize] {
+                let branch = self.children[(op.a + 2 + index) as usize];
+                return self.eval::<INTERPOLATE>(branch, x, y, z);
+            }
+        }
+        self.eval::<INTERPOLATE>(self.children[(op.a + 1 + count) as usize], x, y, z)
+    }
+
+    #[inline(always)]
+    fn eval_leaf(&mut self, op: Op, id: NodeId, x: i32, y: i32, z: i32) -> f64 {
+        if let Some(value) = self.scratch.leaf_get(id, x, y, z) {
+            return value;
+        }
+        crate::counters::bump_cache_compute(crate::counters::CacheKind::Leaf);
+        let context = Context::new(x, y, z);
+        let value = if op.kind == OpKind::Spline {
+            self.splines[op.a as usize].compute(context, self.scratch.point_scratch_mut())
+        } else {
+            self.leaves[op.a as usize].compute(context)
+        };
+        self.scratch.leaf_put(id, x, y, z, value);
+        value
     }
 
     fn interpolate_shared_noodle_cell(
@@ -695,7 +924,7 @@ impl<'a> Field<'a> {
             crate::counters::bump_corner_eval();
             crate::counters::bump_cache_compute(crate::counters::CacheKind::Slot);
             if !selector_known[index] {
-                selector_values[index] = self.eval(selector, key.0, key.1, key.2, false);
+                selector_values[index] = self.eval::<false>(selector, key.0, key.1, key.2);
                 selector_known[index] = true;
             }
             let value = self.eval_range_branch(range, selector_values[index], key);
@@ -731,7 +960,7 @@ impl<'a> Field<'a> {
         } else {
             self.children[(op.a + 2) as usize]
         };
-        self.eval(branch, x, y, z, false)
+        self.eval::<false>(branch, x, y, z)
     }
 
     /// `interpolated`: eight corners of the enclosing
@@ -847,6 +1076,12 @@ impl<'a> Field<'a> {
             return *n;
         }
 
+        if self.tile_active && self.graph.tile_eligible(inner) {
+            if let Some(plan) = self.graph.tile_plan(inner) {
+                return self.eval_tile_plan_cell(plan, slot, cx, cy, cz, cw, ch);
+            }
+        }
+
         crate::counters::bump_cell_fill();
         crate::counters::bump_cache_compute(crate::counters::CacheKind::Cell);
         let (x0, y0, z0) = (cx * cw, cy * ch, cz * cw);
@@ -865,6 +1100,69 @@ impl<'a> Field<'a> {
         n
     }
 
+    fn eval_tile_plan_cell(
+        &mut self,
+        plan: &TilePlan,
+        slot: usize,
+        cx: i32,
+        cy: i32,
+        cz: i32,
+        cw: i32,
+        ch: i32,
+    ) -> [f64; 8] {
+        crate::counters::bump_cell_fill();
+        crate::counters::bump_cache_compute(crate::counters::CacheKind::Cell);
+        let keys = cell_corner_keys(cx, cy, cz, cw, ch);
+        let mut values = [0.0; 8];
+        let mut missing = 0_u8;
+        for (lane, key) in keys.into_iter().enumerate() {
+            crate::counters::bump_corner_lookup();
+            if let Some(value) = self.scratch.slot_get(slot, key) {
+                crate::counters::bump_slot_hit();
+                values[lane] = value;
+            } else {
+                crate::counters::bump_slot_miss(slot);
+                crate::counters::bump_corner_eval();
+                crate::counters::bump_cache_compute(crate::counters::CacheKind::Slot);
+                missing |= 1 << lane;
+            }
+        }
+        if missing != 0 {
+            let computed = self.eval_tile_plan(plan, keys, missing);
+            for (lane, key) in keys.into_iter().enumerate() {
+                if missing & (1 << lane) != 0 {
+                    values[lane] = computed[lane];
+                    self.scratch.slot_put(slot, key, computed[lane]);
+                }
+            }
+        }
+        self.scratch.cell_put(slot, cx, cy, cz, values);
+        values
+    }
+
+    fn eval_tile_plan(
+        &mut self,
+        plan: &TilePlan,
+        contexts: [(i32, i32, i32); 8],
+        active: u8,
+    ) -> [f64; 8] {
+        eval_tile_plan(
+            plan,
+            &contexts,
+            active,
+            self.scratch,
+            self.noises,
+            self.leaves,
+            self.products,
+            std::ptr::from_ref(self.graph),
+        )
+    }
+
+    #[inline(always)]
+    fn product_value(&self, id: NodeId, x: i32, z: i32) -> Option<f64> {
+        self.products?.get(self.graph.product_kind(id)?, x, z)
+    }
+
     /// Fetch one cell corner and keep corner counters separate from slot-cache
     /// counters. The memo lookup stays inline on this hot path.
     fn corner(&mut self, inner: NodeId, slot: usize, x: i32, y: i32, z: i32) -> f64 {
@@ -877,7 +1175,7 @@ impl<'a> Field<'a> {
         crate::counters::bump_slot_miss(slot);
         crate::counters::bump_corner_eval();
         crate::counters::bump_cache_compute(crate::counters::CacheKind::Slot);
-        let v = self.eval(inner, x, y, z, false);
+        let v = self.eval::<false>(inner, x, y, z);
         self.scratch.slot_put(slot, key, v);
         v
     }
@@ -894,10 +1192,376 @@ impl<'a> Field<'a> {
         }
         crate::counters::bump_slot_miss(slot);
         crate::counters::bump_cache_compute(crate::counters::CacheKind::Slot);
-        let v = self.eval(inner, key.0, key.1, key.2, false);
+        let v = self.eval::<false>(inner, key.0, key.1, key.2);
         self.scratch.slot_put(slot, key, v);
         v
     }
+}
+
+fn eval_tile_plan(
+    plan: &TilePlan,
+    contexts: &[(i32, i32, i32); 8],
+    active: u8,
+    scratch: &mut Scratch,
+    noises: &[crate::noise::NormalNoise],
+    leaves: &[crate::density::Density],
+    products: Option<&XzProductLattice>,
+    graph: *const Graph,
+) -> [f64; 8] {
+    scratch.begin_tile_plan(plan.ops.len());
+    eval_tile_plan_node(
+        plan, plan.root, contexts, active, scratch, noises, leaves, products, graph,
+    );
+    scratch.plan_values(plan.root)
+}
+
+fn eval_tile_plan_node(
+    plan: &TilePlan,
+    reg: u16,
+    contexts: &[(i32, i32, i32); 8],
+    active: u8,
+    scratch: &mut Scratch,
+    noises: &[crate::noise::NormalNoise],
+    leaves: &[crate::density::Density],
+    products: Option<&XzProductLattice>,
+    graph: *const Graph,
+) {
+    let missing = active & !scratch.plan_mask(reg);
+    if missing == 0 {
+        return;
+    }
+    let op = plan.ops[reg as usize];
+    for lane in 0..8 {
+        if missing & (1 << lane) != 0 {
+            crate::counters::bump_density_eval(op.kind as usize);
+            let (x, y, z) = contexts[lane];
+            super::redundancy_probe::visit_field(
+                graph.cast::<()>(),
+                op.source,
+                op.kind as usize,
+                x,
+                y,
+                z,
+                scratch.probe_scope(),
+            );
+        }
+    }
+    if op.product != 0 {
+        let kind = if op.product == 1 {
+            super::xz_products::XzProductKind::Factor
+        } else {
+            super::xz_products::XzProductKind::Offset
+        };
+        let mut values = [0.0; 8];
+        let mut product_mask = 0_u8;
+        if let Some(products) = products {
+            for lane in 0..8 {
+                if missing & (1 << lane) == 0 {
+                    continue;
+                }
+                let (x, _, z) = contexts[lane];
+                if let Some(value) = products.get(kind, x, z) {
+                    product_mask |= 1 << lane;
+                    values[lane] = value;
+                }
+            }
+        }
+        scratch.plan_put(reg, product_mask, values);
+    }
+    let missing = missing & !scratch.plan_mask(reg);
+    if missing == 0 {
+        return;
+    }
+    let mut values = [0.0; 8];
+    match op.kind {
+        OpKind::Const => values.fill(plan.params[op.params as usize]),
+        OpKind::BlendAlpha => values.fill(1.0),
+        OpKind::BlendOffset | OpKind::Beardifier => {}
+        OpKind::YClampedGradient => {
+            let p = op.params as usize;
+            for lane in 0..8 {
+                if missing & (1 << lane) != 0 {
+                    values[lane] = crate::math::clamped_map(
+                        f64::from(contexts[lane].1),
+                        plan.params[p],
+                        plan.params[p + 1],
+                        plan.params[p + 2],
+                        plan.params[p + 3],
+                    );
+                }
+            }
+        }
+        OpKind::Add | OpKind::Min | OpKind::Max => {
+            eval_tile_plan_node(
+                plan, op.a, contexts, missing, scratch, noises, leaves, products, graph,
+            );
+            eval_tile_plan_node(
+                plan, op.b, contexts, missing, scratch, noises, leaves, products, graph,
+            );
+            for lane in 0..8 {
+                if missing & (1 << lane) != 0 {
+                    let left = scratch.plan_value(op.a, lane);
+                    let right = scratch.plan_value(op.b, lane);
+                    values[lane] = match op.kind {
+                        OpKind::Add => left + right,
+                        OpKind::Min => left.min(right),
+                        OpKind::Max => left.max(right),
+                        _ => unreachable!(),
+                    };
+                }
+            }
+        }
+        OpKind::Mul => {
+            eval_tile_plan_node(
+                plan, op.a, contexts, missing, scratch, noises, leaves, products, graph,
+            );
+            let mut right = 0_u8;
+            for lane in 0..8 {
+                if missing & (1 << lane) != 0 && scratch.plan_value(op.a, lane) != 0.0 {
+                    right |= 1 << lane;
+                }
+            }
+            eval_tile_plan_node(
+                plan, op.b, contexts, right, scratch, noises, leaves, products, graph,
+            );
+            for lane in 0..8 {
+                if missing & (1 << lane) != 0 {
+                    let left = scratch.plan_value(op.a, lane);
+                    values[lane] = if left == 0.0 {
+                        0.0
+                    } else {
+                        left * scratch.plan_value(op.b, lane)
+                    };
+                }
+            }
+        }
+        OpKind::Abs
+        | OpKind::Square
+        | OpKind::Cube
+        | OpKind::HalfNegative
+        | OpKind::QuarterNegative
+        | OpKind::Squeeze
+        | OpKind::Invert
+        | OpKind::Clamp => {
+            eval_tile_plan_node(
+                plan, op.a, contexts, missing, scratch, noises, leaves, products, graph,
+            );
+            let p = op.params as usize;
+            for lane in 0..8 {
+                if missing & (1 << lane) == 0 {
+                    continue;
+                }
+                let value = scratch.plan_value(op.a, lane);
+                values[lane] = match op.kind {
+                    OpKind::Abs => value.abs(),
+                    OpKind::Square => value * value,
+                    OpKind::Cube => value * value * value,
+                    OpKind::HalfNegative => {
+                        if value > 0.0 { value } else { value * 0.5 }
+                    }
+                    OpKind::QuarterNegative => {
+                        if value > 0.0 { value } else { value * 0.25 }
+                    }
+                    OpKind::Squeeze => {
+                        let value = value.clamp(-1.0, 1.0);
+                        value / 2.0 - value * value * value / 24.0
+                    }
+                    OpKind::Invert => 1.0 / value,
+                    OpKind::Clamp => crate::math::clamp(value, plan.params[p], plan.params[p + 1]),
+                    _ => unreachable!(),
+                };
+            }
+        }
+        OpKind::Noise => {
+            let noise = &noises[op.aux as usize];
+            let p = op.params as usize;
+            for lane in 0..8 {
+                if missing & (1 << lane) == 0 {
+                    continue;
+                }
+                let (x, y, z) = contexts[lane];
+                values[lane] = if let Some(value) = scratch.leaf_get(op.source, x, y, z) {
+                    value
+                } else {
+                    crate::counters::bump_cache_compute(crate::counters::CacheKind::Leaf);
+                    let value = noise.get_value(
+                        f64::from(x) * plan.params[p],
+                        f64::from(y) * plan.params[p + 1],
+                        f64::from(z) * plan.params[p],
+                    );
+                    scratch.leaf_put(op.source, x, y, z, value);
+                    value
+                };
+            }
+        }
+        OpKind::ShiftedNoise => {
+            eval_tile_plan_node(
+                plan, op.a, contexts, missing, scratch, noises, leaves, products, graph,
+            );
+            eval_tile_plan_node(
+                plan, op.b, contexts, missing, scratch, noises, leaves, products, graph,
+            );
+            eval_tile_plan_node(
+                plan, op.c, contexts, missing, scratch, noises, leaves, products, graph,
+            );
+            let noise = &noises[op.aux as usize];
+            let p = op.params as usize;
+            for lane in 0..8 {
+                if missing & (1 << lane) != 0 {
+                    let (x, y, z) = contexts[lane];
+                    values[lane] = noise.get_value(
+                        f64::from(x) * plan.params[p] + scratch.plan_value(op.a, lane),
+                        f64::from(y) * plan.params[p + 1] + scratch.plan_value(op.b, lane),
+                        f64::from(z) * plan.params[p] + scratch.plan_value(op.c, lane),
+                    );
+                }
+            }
+        }
+        OpKind::ShiftA | OpKind::ShiftB | OpKind::Shift => {
+            let noise = &noises[op.aux as usize];
+            for lane in 0..8 {
+                if missing & (1 << lane) != 0 {
+                    let (x, y, z) = contexts[lane];
+                    values[lane] = match op.kind {
+                        OpKind::ShiftA => shift(noise, f64::from(x), 0.0, f64::from(z)),
+                        OpKind::ShiftB => shift(noise, f64::from(z), f64::from(x), 0.0),
+                        OpKind::Shift => shift(noise, f64::from(x), f64::from(y), f64::from(z)),
+                        _ => unreachable!(),
+                    };
+                }
+            }
+        }
+        OpKind::RangeChoice => {
+            eval_tile_plan_node(
+                plan, op.a, contexts, missing, scratch, noises, leaves, products, graph,
+            );
+            let p = op.params as usize;
+            let mut inside = 0_u8;
+            let mut outside = 0_u8;
+            for lane in 0..8 {
+                if missing & (1 << lane) == 0 {
+                    continue;
+                }
+                if scratch.plan_value(op.a, lane) >= plan.params[p]
+                    && scratch.plan_value(op.a, lane) < plan.params[p + 1]
+                {
+                    inside |= 1 << lane;
+                } else {
+                    outside |= 1 << lane;
+                }
+            }
+            eval_tile_plan_node(
+                plan, op.b, contexts, inside, scratch, noises, leaves, products, graph,
+            );
+            eval_tile_plan_node(
+                plan, op.c, contexts, outside, scratch, noises, leaves, products, graph,
+            );
+            for lane in 0..8 {
+                if missing & (1 << lane) != 0 {
+                    let child = if inside & (1 << lane) != 0 { op.b } else { op.c };
+                    values[lane] = scratch.plan_value(child, lane);
+                }
+            }
+        }
+        OpKind::IntervalSelect => {
+            eval_tile_plan_node(
+                plan, op.a, contexts, missing, scratch, noises, leaves, products, graph,
+            );
+            for lane in 0..8 {
+                if missing & (1 << lane) == 0 {
+                    continue;
+                }
+                let value = scratch.plan_value(op.a, lane);
+                let mut selected = op.branch_count;
+                let p = op.params as usize;
+                for index in 0..usize::from(op.threshold_count) {
+                    if value < plan.params[p + index] {
+                        selected = index as u16;
+                        break;
+                    }
+                }
+                scratch.plan_set_select(reg, lane, selected);
+            }
+            for index in 0..usize::from(op.branch_count) {
+                let mut branch_mask = 0_u8;
+                for lane in 0..8 {
+                    if missing & (1 << lane) != 0
+                        && usize::from(scratch.plan_select(reg, lane))
+                            .min(usize::from(op.branch_count.saturating_sub(1)))
+                            == index
+                    {
+                        branch_mask |= 1 << lane;
+                    }
+                }
+                if branch_mask != 0 {
+                    eval_tile_plan_node(
+                        plan,
+                        plan.branches[op.aux as usize + index],
+                        contexts,
+                        branch_mask,
+                        scratch,
+                        noises,
+                        leaves,
+                        products,
+                        graph,
+                    );
+                }
+            }
+            for lane in 0..8 {
+                if missing & (1 << lane) != 0 {
+                    let index = usize::from(scratch.plan_select(reg, lane))
+                        .min(usize::from(op.branch_count.saturating_sub(1)));
+                    values[lane] = scratch.plan_value(plan.branches[op.aux as usize + index], lane);
+                }
+            }
+        }
+        OpKind::EndIslands => {
+            let leaf = &leaves[op.aux as usize];
+            for lane in 0..8 {
+                if missing & (1 << lane) == 0 {
+                    continue;
+                }
+                let (x, y, z) = contexts[lane];
+                values[lane] = if let Some(value) = scratch.leaf_get(op.source, x, y, z) {
+                    value
+                } else {
+                    crate::counters::bump_cache_compute(crate::counters::CacheKind::Leaf);
+                    let value = leaf.compute(Context::new(x, y, z));
+                    scratch.leaf_put(op.source, x, y, z, value);
+                    value
+                };
+            }
+        }
+        OpKind::Interpolated
+        | OpKind::FlatCache
+        | OpKind::Spline
+        | OpKind::Blended
+        | OpKind::FindTopSurface => {
+            unreachable!("cache-bearing node entered compiled tile plan")
+        }
+    }
+    scratch.plan_put(reg, missing, values);
+}
+
+fn cell_corner_keys(
+    cx: i32,
+    cy: i32,
+    cz: i32,
+    cw: i32,
+    ch: i32,
+) -> [(i32, i32, i32); 8] {
+    let (x0, y0, z0) = (cx * cw, cy * ch, cz * cw);
+    let (x1, y1, z1) = (x0 + cw, y0 + ch, z0 + cw);
+    [
+        (x0, y0, z0),
+        (x1, y0, z0),
+        (x0, y1, z0),
+        (x1, y1, z0),
+        (x0, y0, z1),
+        (x1, y0, z1),
+        (x0, y1, z1),
+        (x1, y1, z1),
+    ]
 }
 
 fn write_interpolated_corners(
@@ -1077,6 +1741,93 @@ fn interpolate_lane(cw: i32, ch: i32, index: usize, n: &[f64; 8]) -> f64 {
     )
 }
 
+/// The eight vertices of the rectangular block region actually emitted by a
+/// 4×8×4 cell. The enclosing cell's far face is not sampled: the last block is
+/// at fractions 3/4, 7/8, 3/4.
+#[inline]
+fn subcell_corners(cw: i32, ch: i32, n: [f64; 8]) -> [f64; 8] {
+    let x = f64::from(cw - 1) / f64::from(cw);
+    let y = f64::from(ch - 1) / f64::from(ch);
+    let z = x;
+    [
+        crate::math::lerp3(0.0, 0.0, 0.0, n[0], n[1], n[2], n[3], n[4], n[5], n[6], n[7]),
+        crate::math::lerp3(x, 0.0, 0.0, n[0], n[1], n[2], n[3], n[4], n[5], n[6], n[7]),
+        crate::math::lerp3(0.0, y, 0.0, n[0], n[1], n[2], n[3], n[4], n[5], n[6], n[7]),
+        crate::math::lerp3(x, y, 0.0, n[0], n[1], n[2], n[3], n[4], n[5], n[6], n[7]),
+        crate::math::lerp3(0.0, 0.0, z, n[0], n[1], n[2], n[3], n[4], n[5], n[6], n[7]),
+        crate::math::lerp3(x, 0.0, z, n[0], n[1], n[2], n[3], n[4], n[5], n[6], n[7]),
+        crate::math::lerp3(0.0, y, z, n[0], n[1], n[2], n[3], n[4], n[5], n[6], n[7]),
+        crate::math::lerp3(x, y, z, n[0], n[1], n[2], n[3], n[4], n[5], n[6], n[7]),
+    ]
+}
+
+#[inline]
+fn terrain_subcell_is_positive(cw: i32, ch: i32, n: [f64; 8]) -> bool {
+    subcell_corners(cw, ch, n).into_iter().all(|value| {
+        if !value.is_finite() {
+            return false;
+        }
+        let squeezed = value.clamp(-1.0, 1.0);
+        let squeezed = squeezed / 2.0 - squeezed * squeezed * squeezed / 24.0;
+        squeezed.is_normal() && squeezed > 0.0
+    })
+}
+
+#[inline]
+fn noodle_control_is_inactive(cw: i32, ch: i32, n: [f64; 8]) -> bool {
+    let values = subcell_corners(cw, ch, n);
+    values.iter().all(|value| value.is_finite())
+        && values.iter().all(|value| *value > -1_000_000.0)
+        && values
+            .iter()
+            .all(|value| *value <= -f64::MIN_POSITIVE)
+}
+
+#[inline]
+fn subcell_values_are_finite(cw: i32, ch: i32, n: [f64; 8]) -> bool {
+    subcell_corners(cw, ch, n)
+        .iter()
+        .all(|value| value.is_finite())
+}
+
+#[inline]
+fn positive_abs_lower_bound(values: [f64; 8]) -> Option<f64> {
+    if values.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+    let min = values.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    if min > 0.0 {
+        Some(min)
+    } else if max < 0.0 {
+        Some(-max)
+    } else {
+        Some(0.0)
+    }
+}
+
+#[inline]
+fn noodle_active_lower_bound_is_positive(
+    cw: i32,
+    ch: i32,
+    ridge_a: [f64; 8],
+    ridge_b: [f64; 8],
+    thickness: [f64; 8],
+) -> bool {
+    let thickness = subcell_corners(cw, ch, thickness);
+    if thickness.iter().any(|value| !value.is_finite()) {
+        return false;
+    }
+    let ridge_a = positive_abs_lower_bound(subcell_corners(cw, ch, ridge_a));
+    let ridge_b = positive_abs_lower_bound(subcell_corners(cw, ch, ridge_b));
+    let (Some(ridge_a), Some(ridge_b)) = (ridge_a, ridge_b) else {
+        return false;
+    };
+    let thickness_min = thickness.into_iter().fold(f64::INFINITY, f64::min);
+    let lower = thickness_min + 1.5 * ridge_a.max(ridge_b);
+    lower.is_normal() && lower > 0.0
+}
+
 #[inline]
 fn mask_contains(mask: [u64; 2], index: usize) -> bool {
     (mask[index >> 6] & (1_u64 << (index & 63))) != 0
@@ -1095,10 +1846,159 @@ mod tests {
         write_interpolated_corners, write_interpolated_corners_scalar, write_shared_noodle_output,
         write_shared_noodle_output_scalar,
     };
+    use super::Field;
     #[cfg(feature = "gen-counters")]
     use crate::counters;
     use crate::density::Density;
-    use crate::engine::{Bounds, Program};
+    use crate::engine::{Bounds, Geom, Program, Scratch};
+
+    #[test]
+    fn pure_tile_walk_preserves_branch_bits_and_negative_zero() {
+        let varying = Density::YClampedGradient {
+            from_y: -1.0,
+            to_y: 1.0,
+            from_value: -1.0,
+            to_value: 1.0,
+        };
+        let root = Density::Add(
+            Box::new(Density::Mul(
+                Box::new(varying.clone()),
+                Box::new(Density::Const(f64::NAN)),
+            )),
+            Box::new(Density::RangeChoice {
+                input: Box::new(varying),
+                min_inclusive: -0.5,
+                max_exclusive: 0.5,
+                when_in_range: Box::new(Density::Const(-0.0)),
+                when_out_of_range: Box::new(Density::Const(2.0)),
+            }),
+        );
+        let program = Program::compile(&root);
+        assert!(program.graph().tile_eligible(program.root()));
+        let contexts = [
+            (-1, -1, 0),
+            (0, -1, 0),
+            (1, -1, 0),
+            (0, 0, 0),
+            (1, 0, 0),
+            (0, 1, 0),
+            (1, 1, 0),
+            (-1, 1, 0),
+        ];
+
+        let mut tile_scratch = Scratch::acquire(0, 4, 8, None);
+        let mut tile_field = Field::new(
+            program.graph(),
+            Geom {
+                cell_width: 4,
+                cell_height: 8,
+            },
+            &mut tile_scratch,
+        );
+        let tile_plan = program.graph().compile_tile_plan_for_test(program.root());
+        let actual = tile_field.eval_tile_plan(&tile_plan, contexts, u8::MAX);
+
+        let mut scalar_scratch = Scratch::acquire(0, 4, 8, None);
+        let mut scalar_field = Field::new(
+            program.graph(),
+            Geom {
+                cell_width: 4,
+                cell_height: 8,
+            },
+            &mut scalar_scratch,
+        );
+        for (lane, (x, y, z)) in contexts.into_iter().enumerate() {
+            let expected = scalar_field.eval::<false>(program.root(), x, y, z);
+            assert_eq!(actual[lane].to_bits(), expected.to_bits(), "lane {lane}");
+        }
+        assert!(actual[0].is_nan());
+
+        let branch = Density::RangeChoice {
+            input: Box::new(Density::Const(0.0)),
+            min_inclusive: -1.0,
+            max_exclusive: 1.0,
+            when_in_range: Box::new(Density::Const(-0.0)),
+            when_out_of_range: Box::new(Density::Const(1.0)),
+        };
+        let branch_program = Program::compile(&branch);
+        let mut branch_scratch = Scratch::acquire(0, 4, 8, None);
+        let mut branch_field = Field::new(
+            branch_program.graph(),
+            Geom {
+                cell_width: 4,
+                cell_height: 8,
+            },
+            &mut branch_scratch,
+        );
+        let branch_plan = branch_program
+            .graph()
+            .compile_tile_plan_for_test(branch_program.root());
+        let values = branch_field.eval_tile_plan(&branch_plan, contexts, u8::MAX);
+        assert_eq!(values[0].to_bits(), (-0.0_f64).to_bits());
+
+        let interval = Density::IntervalSelect {
+            input: Box::new(Density::YClampedGradient {
+                from_y: -1.0,
+                to_y: 1.0,
+                from_value: -1.0,
+                to_value: 1.0,
+            }),
+            thresholds: vec![0.0],
+            functions: vec![
+                Density::Const(-1.0),
+                Density::Const(2.0),
+                Density::Const(3.0),
+            ],
+        };
+        let interval_program = Program::compile(&interval);
+        let mut interval_scratch = Scratch::acquire(0, 4, 8, None);
+        let mut interval_field = Field::new(
+            interval_program.graph(),
+            Geom {
+                cell_width: 4,
+                cell_height: 8,
+            },
+            &mut interval_scratch,
+        );
+        let interval_plan = interval_program
+            .graph()
+            .compile_tile_plan_for_test(interval_program.root());
+        let actual = interval_field.eval_tile_plan(&interval_plan, contexts, u8::MAX);
+        let mut scalar_scratch = Scratch::acquire(0, 4, 8, None);
+        let mut scalar_field = Field::new(
+            interval_program.graph(),
+            Geom {
+                cell_width: 4,
+                cell_height: 8,
+            },
+            &mut scalar_scratch,
+        );
+        for (lane, (x, y, z)) in contexts.into_iter().enumerate() {
+            assert_eq!(
+                actual[lane].to_bits(),
+                scalar_field.eval::<false>(interval_program.root(), x, y, z).to_bits(),
+                "interval lane {lane}",
+            );
+        }
+    }
+
+    #[test]
+    fn tile_eligibility_rejects_cache_writers_and_point_boundaries() {
+        let cached = Density::FlatCache {
+            inner: Box::new(Density::YClampedGradient {
+                from_y: 0.0,
+                to_y: 1.0,
+                from_value: 0.0,
+                to_value: 1.0,
+            }),
+            slot: 0,
+            memo: crate::density::XzMemoId::NONE,
+        };
+        let program = Program::compile(&cached);
+        assert!(!program.graph().tile_eligible(program.root()));
+        let program = Program::compile(&Density::Spline(crate::density::Spline::Constant(1.0)));
+        assert!(!program.graph().tile_eligible(program.root()));
+    }
 
     #[test]
     fn interpolated_corner_simd_matches_scalar_for_all_lanes_and_masks() {

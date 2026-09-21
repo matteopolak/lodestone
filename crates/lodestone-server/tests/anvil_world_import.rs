@@ -13,6 +13,7 @@ use lodestone_anvil::{
     region,
 };
 use lodestone_core::{Nbt, Reader, read_named_nbt};
+use lodestone_data::block_states::StateId;
 use lodestone_server::{
     anvil_world_import::{Error, import_world_directory, preflight_world_directory},
     world_storage::{WorldStorage, WorldStorageBackend},
@@ -151,7 +152,10 @@ fn independent_multi_region_fixture_imports_in_coordinate_order_under_one_author
             .load_chunk(column_x, 0, -64, 384)
             .expect("read imported terrain")
             .expect("every fixture chunk is committed");
-        assert_eq!(chunk.column.block_state(1, -59, 7), expected);
+        assert_eq!(
+            chunk.column.block_state_id(1, -59, 7),
+            StateId::from_state_str(expected).expect("fixture block state")
+        );
     }
 
     let _ = std::fs::remove_dir_all(world);

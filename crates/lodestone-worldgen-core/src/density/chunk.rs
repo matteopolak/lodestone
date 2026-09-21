@@ -89,9 +89,10 @@
 //! (our own `scripts/worldgen-oracle/DensityChunkOracle.java` harness).
 
 use std::cell::RefCell;
+use std::sync::Arc;
 
 use super::Density;
-use crate::engine::{Bounds, Field, Geom, Program, Scratch};
+use crate::engine::{Bounds, Field, Geom, Program, Scratch, XzProductLattice};
 
 /// A stateless-per-block reimplementation of vanilla's own per-chunk block field
 /// for one column of density functions.
@@ -110,6 +111,7 @@ pub struct NoiseChunkSampler {
     program: Program,
     geom: Geom,
     bounds: Option<Bounds>,
+    products: Option<Arc<XzProductLattice>>,
     /// `Option` only so [`Drop`] can move the scratch out and return it to the
     /// thread's free list. It is `Some` for the whole of the sampler's life.
     scratch: RefCell<Option<Scratch>>,
@@ -141,13 +143,35 @@ impl NoiseChunkRegionSampler {
         cell_height: i32,
         bounds: Bounds,
     ) -> Self {
+        Self::from_program_with_xz_products(
+            program,
+            slot_count,
+            cell_width,
+            cell_height,
+            bounds,
+            None,
+        )
+    }
+
+    /// Creates a bounded sampler with an immutable request-scoped X/Z product
+    /// lattice. A fingerprint mismatch remains an exact fallback.
+    #[must_use]
+    pub fn from_program_with_xz_products(
+        program: Program,
+        slot_count: usize,
+        cell_width: i32,
+        cell_height: i32,
+        bounds: Bounds,
+        products: Option<Arc<XzProductLattice>>,
+    ) -> Self {
         Self {
-            sampler: NoiseChunkSampler::from_program(
+            sampler: NoiseChunkSampler::from_program_with_xz_products(
                 program,
                 slot_count,
                 cell_width,
                 cell_height,
                 Some(bounds),
+                products,
             ),
             bounds,
         }
@@ -193,6 +217,18 @@ impl NoiseChunkRegionSampler {
         assert!(y0 >= self.bounds.y.0 && y0 + 7 <= self.bounds.y.1);
         assert!(z0 >= self.bounds.z.0 && z0 + 3 <= self.bounds.z.1);
         self.sampler.final_density_cell(x0, y0, z0, output);
+    }
+
+    /// Proves that every emitted block in a production cell has positive
+    /// final density without materialising its 128 values. A false result is
+    /// conservative; callers must use [`Self::final_density_cell`] unchanged
+    /// to obtain the exact lanes.
+    #[must_use]
+    pub fn final_density_cell_is_positive(&self, x0: i32, y0: i32, z0: i32) -> bool {
+        assert!(x0 >= self.bounds.x.0 && x0 + 3 <= self.bounds.x.1);
+        assert!(y0 >= self.bounds.y.0 && y0 + 7 <= self.bounds.y.1);
+        assert!(z0 >= self.bounds.z.0 && z0 + 3 <= self.bounds.z.1);
+        self.sampler.final_density_cell_is_positive(x0, y0, z0)
     }
 }
 
@@ -264,6 +300,27 @@ impl NoiseChunkSampler {
         cell_height: i32,
         bounds: Option<Bounds>,
     ) -> Self {
+        Self::from_program_with_xz_products(
+            program,
+            slot_count,
+            cell_width,
+            cell_height,
+            bounds,
+            None,
+        )
+    }
+
+    /// Creates a sampler over an already-compiled program and an optional
+    /// immutable request-scoped X/Z product lattice.
+    #[must_use]
+    pub fn from_program_with_xz_products(
+        program: Program,
+        slot_count: usize,
+        cell_width: i32,
+        cell_height: i32,
+        bounds: Option<Bounds>,
+        products: Option<Arc<XzProductLattice>>,
+    ) -> Self {
         let scratch = Scratch::acquire(slot_count, cell_width, cell_height, bounds);
         Self {
             program,
@@ -272,6 +329,7 @@ impl NoiseChunkSampler {
                 cell_height,
             },
             bounds,
+            products,
             scratch: RefCell::new(Some(scratch)),
         }
     }
@@ -314,7 +372,13 @@ impl NoiseChunkSampler {
         let scratch = borrow
             .as_mut()
             .expect("the scratch is only taken in Drop, after the last query");
-        Field::new(self.program.graph(), self.geom, scratch).eval_column(
+        Field::new_with_products(
+            self.program.graph(),
+            self.geom,
+            scratch,
+            self.products.as_deref(),
+        )
+        .eval_column(
             self.program.root(),
             x,
             z,
@@ -346,7 +410,12 @@ impl NoiseChunkSampler {
         let scratch = borrow
             .as_mut()
             .expect("the scratch is only taken in Drop, after the last query");
-        let mut field = Field::new(self.program.graph(), self.geom, scratch);
+        let mut field = Field::new_with_products(
+            self.program.graph(),
+            self.geom,
+            scratch,
+            self.products.as_deref(),
+        );
         if self.geom.cell_width == 4
             && self.geom.cell_height == 8
             && x0.rem_euclid(4) == 0
@@ -362,16 +431,46 @@ impl NoiseChunkSampler {
             for lx in 0..4 {
                 for ly in 0..8 {
                     let index = ((lz * 4 + lx) * 8 + ly) as usize;
-                    output[index] = field.eval(
+                    output[index] = field.eval::<true>(
                         self.program.root(),
                         x0 + lx,
                         y0 + ly,
                         z0 + lz,
-                        true,
                     );
                 }
             }
         }
+    }
+
+    /// Proves that every emitted block in a production cell has positive
+    /// final density without materialising its 128 values. A false result is
+    /// conservative; callers must use [`Self::final_density_cell`] unchanged
+    /// to obtain the exact lanes.
+    #[must_use]
+    pub fn final_density_cell_is_positive(&self, x0: i32, y0: i32, z0: i32) -> bool {
+        self.assert_cell_in_bounds(x0, y0, z0);
+        let mut borrow = self.scratch.borrow_mut();
+        let scratch = borrow
+            .as_mut()
+            .expect("the scratch is only taken in Drop, after the last query");
+        let Some(plan) = self.program.overworld_final_density_plan() else {
+            return false;
+        };
+        if self.geom.cell_width != 4
+            || self.geom.cell_height != 8
+            || x0.rem_euclid(4) != 0
+            || y0.rem_euclid(8) != 0
+            || z0.rem_euclid(4) != 0
+        {
+            return false;
+        }
+        Field::new_with_products(
+            self.program.graph(),
+            self.geom,
+            scratch,
+            self.products.as_deref(),
+        )
+        .eval_overworld_final_density_cell_is_positive(plan, x0, y0, z0)
     }
 
     fn assert_cell_in_bounds(&self, x0: i32, y0: i32, z0: i32) {
@@ -388,12 +487,17 @@ impl NoiseChunkSampler {
         let scratch = borrow
             .as_mut()
             .expect("the scratch is only taken in Drop, after the last query");
-        Field::new(self.program.graph(), self.geom, scratch).eval(
+        Field::new_with_products(
+            self.program.graph(),
+            self.geom,
+            scratch,
+            self.products.as_deref(),
+        )
+        .eval::<true>(
             self.program.root(),
             x,
             y,
             z,
-            true,
         )
     }
 }
@@ -710,6 +814,129 @@ mod tests {
         let low = crossing_cell[3];
         let high = crossing_cell[4];
         assert_ne!(low.to_bits(), high.to_bits(), "the control branch did not cross inside the cell");
+    }
+
+    #[test]
+    fn positive_cell_proof_is_bitwise_safe_and_rejects_mixed_negative_noodle() {
+        let positive_program = Program::compile(&final_density_fixture(
+            Density::Const(-1.0),
+            Density::Const(2.0),
+        ));
+        let positive = NoiseChunkSampler::from_program(
+            positive_program.clone(),
+            18,
+            CELL_WIDTH,
+            CELL_HEIGHT,
+            Some(Bounds {
+                x: (0, 3),
+                y: (0, 7),
+                z: (0, 3),
+            }),
+        );
+        assert!(positive.final_density_cell_is_positive(0, 0, 0));
+        let mut positive_cell = [0.0; 128];
+        positive.final_density_cell(0, 0, 0, &mut positive_cell);
+        let positive_scalar = NoiseChunkSampler::from_program(
+            positive_program,
+            18,
+            CELL_WIDTH,
+            CELL_HEIGHT,
+            Some(Bounds {
+                x: (0, 3),
+                y: (0, 7),
+                z: (0, 3),
+            }),
+        );
+        for (index, value) in positive_cell.iter().enumerate() {
+            let lz = index / 32;
+            let lx = (index % 32) / 8;
+            let ly = index % 8;
+            assert!(
+                *value > 0.0,
+                "proven positive lane {index} was not positive"
+            );
+            assert_eq!(
+                value.to_bits(),
+                positive_scalar
+                    .final_density(lx as i32, ly as i32, lz as i32)
+                    .to_bits(),
+                "proven positive lane {index} changed"
+            );
+        }
+
+        let mixed_program = Program::compile(&final_density_fixture(
+            Density::YClampedGradient {
+                from_y: 0.0,
+                to_y: 8.0,
+                from_value: -1.0,
+                to_value: 1.0,
+            },
+            Density::Const(2.0),
+        ));
+        let mixed = NoiseChunkSampler::from_program(
+            mixed_program.clone(),
+            18,
+            CELL_WIDTH,
+            CELL_HEIGHT,
+            Some(Bounds {
+                x: (0, 3),
+                y: (0, 7),
+                z: (0, 3),
+            }),
+        );
+        assert!(!mixed.final_density_cell_is_positive(0, 0, 0));
+        let mut mixed_cell = [0.0; 128];
+        mixed.final_density_cell(0, 0, 0, &mut mixed_cell);
+        let mixed_scalar = NoiseChunkSampler::from_program(
+            mixed_program,
+            18,
+            CELL_WIDTH,
+            CELL_HEIGHT,
+            Some(Bounds {
+                x: (0, 3),
+                y: (0, 7),
+                z: (0, 3),
+            }),
+        );
+        for (index, value) in mixed_cell.iter().enumerate() {
+            let lz = index / 32;
+            let lx = (index % 32) / 8;
+            let ly = index % 8;
+            assert_eq!(
+                value.to_bits(),
+                mixed_scalar
+                    .final_density(lx as i32, ly as i32, lz as i32)
+                    .to_bits(),
+                "mixed-control fallback lane {index} changed"
+            );
+        }
+        assert!(mixed_cell.iter().any(|value| *value <= 0.0));
+    }
+
+    #[test]
+    fn positive_cell_proof_rejects_nonfinite_and_signed_zero_corners() {
+        for terrain in [
+            Density::Const(f64::NAN),
+            Density::Const(f64::INFINITY),
+            Density::Const(-0.0),
+            Density::Const(0.0),
+        ] {
+            let sampler = NoiseChunkSampler::from_program(
+                Program::compile(&final_density_fixture(
+                    Density::Const(-1.0),
+                    terrain,
+                )),
+                18,
+                CELL_WIDTH,
+                CELL_HEIGHT,
+                Some(Bounds {
+                    x: (0, 3),
+                    y: (0, 7),
+                    z: (0, 3),
+                }),
+            );
+            assert!(!sampler.final_density_cell_is_positive(0, 0, 0));
+        }
     }
 
     #[test]

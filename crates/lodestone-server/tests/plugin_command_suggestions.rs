@@ -9,6 +9,7 @@
 use std::sync::Arc;
 
 use lodestone_core::{Reader, State, Writer};
+use lodestone_data::block_states::StateId;
 use lodestone_model::command_tree::CommandSuggestionsResponse;
 use lodestone_net::{memory_pair, Connection};
 use lodestone_server::plugin_commands::{
@@ -36,15 +37,15 @@ impl ChunkSource for EmptyWorld {
         ChunkColumn::new(0, 1)
     }
 
-    fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-        "minecraft:air".to_owned()
+    fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
+        StateId::AIR
     }
 
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
         "minecraft:plains".to_owned()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
 }
 
 /// A tiny value-only protocol: its custom suggestion packet makes the host

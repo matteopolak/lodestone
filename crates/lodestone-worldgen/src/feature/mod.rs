@@ -48,20 +48,21 @@
 //! whole-chunk block output rather than sampled positions.
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::Value;
+use lodestone_data::block::{Block, BlockMask};
+use lodestone_data::block_states::StateId as CanonicalStateId;
 
 use crate::math;
 use crate::rng::{RandomSource, WorldgenRandom};
 use crate::stage_schedule::DecorationStep;
 
-use self::region_view::RegionView;
-
 /// Grass/flower/tree placement — a separate engine from the
 /// rest of this module (ores), sharing only [`BlockPos`]/[`IntProvider`]/
-/// [`canon_state`] and the [`STEP_VEGETAL_DECORATION`] constant below. See
+/// [`canonical_text`] and the [`STEP_VEGETAL_DECORATION`] constant below. See
 /// its own module doc for scope and named gaps.
 pub mod vegetation;
 
@@ -69,8 +70,10 @@ pub mod vegetation;
 /// `docs/plans/worldgen-rewrite.md`): [`region_view::RegionView`], a read/write
 /// surface over the 3×3 neighbourhood's own grids that replaced the stitched
 /// `48 × height × 48` copies this module's ore driver and
-/// [`vegetation`]'s own driver both used to be handed. See its module doc for
-/// the coordinate-space trap it inherits.
+/// [`vegetation`]'s own driver both used to be handed. Scalar ore runs and
+/// fixtures still use that view; the mixed Overworld FEATURES path uses
+/// [`OreWorldAccess`] to run ore directly against [`vegetation::VegGrid`]. See
+/// the view's module doc for the coordinate-space trap it inherits.
 pub mod region_view;
 
 /// `TOP_LAYER_MODIFICATION` — snow layers and surface ice,
@@ -126,6 +129,12 @@ pub struct BlockPos {
     pub y: i32,
     pub z: i32,
 }
+
+/// Generator-scoped identity for one resolved placed-feature membership plan.
+/// Configuration assigns this once; placement modifiers carry the compact
+/// value instead of looking the registry name up for every candidate.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct FeatureMembershipId(pub(crate) u32);
 
 /// Vanilla's own vertical-anchor type.
 #[derive(Clone, Copy, Debug)]
@@ -464,6 +473,10 @@ pub enum Placement {
     InSquare,
     HeightRange(HeightProvider),
     Biome,
+    /// A biome filter bound to the compiled feature membership plan. This is
+    /// distinct from [`Self::Biome`] so fixture callers can retain their
+    /// legacy string callback without keeping it on the production path.
+    BiomeWithMembership(FeatureMembershipId),
 }
 
 /// The closed placement-modifier schema used by the ore pass.
@@ -507,6 +520,14 @@ impl Placement {
         serde_json::from_value::<PlacementJson>(v.clone())
             .expect("placement JSON")
             .into_placement()
+    }
+
+    pub(crate) fn bind_membership(placements: &mut [Self], membership: FeatureMembershipId) {
+        for placement in placements {
+            if matches!(placement, Self::Biome) {
+                *placement = Self::BiomeWithMembership(membership);
+            }
+        }
     }
 
     /// Vanilla's own placement-modifier get-positions: emit the positions this modifier
@@ -555,6 +576,12 @@ impl Placement {
                     (Some(_), None) => false,
                     (Some(biome_allows), Some(feature_id)) => biome_allows(pos, feature_id),
                 };
+                allowed.then_some(pos).map_or(OrePositions::None, OrePositions::One)
+            }
+            Placement::BiomeWithMembership(id) => {
+                let allowed = ctx
+                    .biome_allows_membership
+                    .is_some_and(|allows| allows(pos, *id));
                 allowed.then_some(pos).map_or(OrePositions::None, OrePositions::One)
             }
         }
@@ -621,7 +648,19 @@ pub enum OrePositions {
 pub enum RuleTest {
     TagMatch(String),
     BlockMatch(String),
+    /// A tag predicate resolved once while a generator is constructed. The
+    /// mask is the tag's built-in block closure; the id remains useful for
+    /// diagnostics and keeps the predicate's registry identity typed.
+    TagMatchCompiled { id: TagId, blocks: Arc<BlockMask> },
+    /// A block predicate resolved once while a generator is constructed.
+    BlockMatchCompiled(Option<Block>),
 }
+
+/// Generator-local identity for one ore block tag. Tag names remain at the
+/// resolver boundary only; candidate matching consumes this numeric id's
+/// precomputed [`BlockMask`].
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct TagId(pub(crate) u16);
 
 /// The closed rule-test schema used by ore targets. The target discriminator
 /// is not a free-form string: only the two configured target kinds are valid.
@@ -651,12 +690,52 @@ impl RuleTest {
     }
 }
 
+/// Resolve the string rule tests in one generator's parsed ore definitions.
+///
+/// This is deliberately an explicit setup operation rather than a lazy cache:
+/// the hot candidate loop must not parse names, hash tag strings, or convert a
+/// state back to text. Unknown extension blocks/tags produce an empty built-in
+/// mask, which is the only result representable by the built-in `StateId`
+/// world surface; extension registries must translate their ids before this
+/// boundary.
+pub(crate) fn compile_ore_targets(
+    resolver: &dyn crate::density::Resolver,
+    targets: &mut [OreTarget],
+) {
+    let mut next_tag = 0u16;
+    let mut tag_ids = HashMap::<String, TagId>::new();
+    let mut tag_masks = HashMap::<String, Arc<BlockMask>>::new();
+    for target in targets {
+        let compiled = match &target.target {
+            RuleTest::TagMatch(tag) => {
+                let blocks = Arc::clone(tag_masks.entry(tag.clone()).or_insert_with(|| {
+                    let mut names = HashSet::new();
+                    let mut seen = HashSet::new();
+                    crate::compose::resolve_block_tag(resolver, tag, &mut names, &mut seen);
+                    Arc::new(names.iter().filter_map(|name| Block::from_name(name)).collect())
+                }));
+                let id = *tag_ids.entry(tag.clone()).or_insert_with(|| {
+                    let id = TagId(next_tag);
+                    next_tag = next_tag.checked_add(1).expect("ore tag id space exhausted");
+                    id
+                });
+                RuleTest::TagMatchCompiled { id, blocks }
+            }
+            RuleTest::BlockMatch(name) => {
+                RuleTest::BlockMatchCompiled(Block::from_name(name))
+            }
+            RuleTest::TagMatchCompiled { .. } | RuleTest::BlockMatchCompiled(_) => continue,
+        };
+        target.target = compiled;
+    }
+}
+
 /// One vanilla ore-configuration target-block-state: the block to place and the test the
 /// existing block must pass.
 #[derive(Clone, Debug)]
 pub struct OreTarget {
-    /// Canonicalised placed state (e.g. `minecraft:redstone_ore[lit=false]`).
-    pub state: String,
+    /// Canonical placed state, parsed once while loading the feature data.
+    pub state: CanonicalStateId,
     pub target: RuleTest,
 }
 
@@ -698,6 +777,7 @@ struct Ctx<'a> {
     min_gen_y: i32,
     gen_depth: i32,
     biome_allows: Option<&'a dyn Fn(BlockPos, &str) -> bool>,
+    biome_allows_membership: Option<&'a dyn Fn(BlockPos, FeatureMembershipId) -> bool>,
     feature_id: Option<&'a str>,
 }
 
@@ -705,7 +785,7 @@ struct Ctx<'a> {
 /// the oracle canonicalises a `BlockState`: name plus alphabetically-sorted
 /// `key=value` properties.
 #[must_use]
-pub fn canon_state(state: &Value) -> String {
+pub(crate) fn canonical_text(state: &Value) -> String {
     let name = state["Name"].as_str().expect("state Name");
     let mut out = name.to_string();
     if let Some(props) = state.get("Properties").and_then(Value::as_object) {
@@ -736,7 +816,8 @@ pub fn parse_ore_config(config: &Value) -> OreConfig {
         .expect("ore targets")
         .iter()
         .map(|t| OreTarget {
-            state: canon_state(&t["state"]),
+            state: CanonicalStateId::from_state_str(&canonical_text(&t["state"]))
+                .expect("ore target state is in the generated registry"),
             target: RuleTest::parse(&t["target"]),
         })
         .collect();
@@ -1139,18 +1220,39 @@ impl OreInput<'_> {
     }
 }
 
+/// The small read/write surface the ore body needs from its working world.
+/// Coordinates are centre-relative and already clamped by [`OreInput`], so a
+/// production mixed pass can use the vegetation grid's overlay directly while
+/// fixture callers continue to use [`RegionView`].
+pub trait OreWorldAccess {
+    /// Reads the state at centre-relative `(lx, y, lz)`.
+    fn ore_get_id(&self, lx: i32, y: i32, lz: i32) -> CanonicalStateId;
+
+    /// Writes the state at centre-relative `(lx, y, lz)`, returning whether it
+    /// landed in the ore driver's writer region.
+    fn ore_set_id(&mut self, lx: i32, y: i32, lz: i32, state: CanonicalStateId) -> bool;
+
+    /// Starts one ore entry's write-order scope. Implementations may use this
+    /// to retain the established per-entry ordering without affecting reads.
+    fn ore_entry_begin(&mut self) {}
+
+    /// Finishes one ore entry's write-order scope.
+    fn ore_entry_end(&mut self) {}
+}
+
 /// Runs ONE source chunk's own `UNDERGROUND_ORES` step (`input.chunk_x`/
 /// `chunk_z`'s own origin and decoration seed), writing into `working`
 /// in-place (region-local, centre-relative coordinates — see
 /// [`OreInput::region_local`]). Returns the derived decoration seed, mostly
 /// so callers can cross-check the centre pass's own seed against an oracle.
-fn apply_one_source<R: RandomSource>(
+fn apply_one_source<R: RandomSource, W: OreWorldAccess>(
     random: &mut WorldgenRandom<R>,
     seed: i64,
     input: &OreInput<'_>,
     ores: &[PlacedOre],
     feature_step: i32,
-    working: &mut RegionView<'_>,
+    biome_allows_membership: Option<&dyn Fn(BlockPos, FeatureMembershipId) -> bool>,
+    working: &mut W,
 ) -> i64 {
     ore_probe::bump_source_pass(1);
     let origin = input.origin();
@@ -1160,55 +1262,61 @@ fn apply_one_source<R: RandomSource>(
             min_gen_y: input.min_gen_y,
             gen_depth: input.gen_depth,
             biome_allows: input.biome_allows,
+            biome_allows_membership,
             feature_id: ore.registry_id.as_deref(),
         };
         random.set_feature_seed(decoration_seed, ore.index as i32, feature_step);
+        working.ore_entry_begin();
         place_placed_feature(random, origin, ore, input, &ctx, working);
+        working.ore_entry_end();
     }
     decoration_seed
 }
 
-/// Executes one ore entry after its caller has already derived this source's
-/// decoration seed. This is the seam for dimensions whose ore entries share a
-/// step with non-ore entries: it preserves the caller's raw `(step, index)`
-/// order without deriving a second source seed or walking sibling entries.
-pub(crate) fn apply_ore_entry_at_seed<R: RandomSource>(
+/// Executes one ore entry after its caller has derived this source's
+/// decoration seed, optionally checking precompiled biome membership.
+pub(crate) fn apply_ore_entry_at_seed_with_membership<R: RandomSource, W: OreWorldAccess>(
     random: &mut WorldgenRandom<R>,
     decoration_seed: i64,
     input: &OreInput<'_>,
     feature_step: i32,
     ore: &PlacedOre,
-    view: &mut RegionView<'_>,
+    view: &mut W,
+    biome_allows_membership: Option<&dyn Fn(BlockPos, FeatureMembershipId) -> bool>,
 ) {
     let ctx = Ctx {
         min_gen_y: input.min_gen_y,
         gen_depth: input.gen_depth,
         biome_allows: input.biome_allows,
+        biome_allows_membership,
         feature_id: ore.registry_id.as_deref(),
     };
     random.set_feature_seed(decoration_seed, ore.index as i32, feature_step);
+    view.ore_entry_begin();
     place_placed_feature(random, input.origin(), ore, input, &ctx, view);
+    view.ore_entry_end();
 }
 
-/// Executes one scattered-ore entry after its caller has already derived this
-/// source's decoration seed. The placed-feature modifiers and the feature seed
-/// are shared with standard ore; only the configured feature body differs.
-pub(crate) fn apply_scattered_ore_entry_at_seed<R: RandomSource>(
+pub(crate) fn apply_scattered_ore_entry_at_seed_with_membership<R: RandomSource, W: OreWorldAccess>(
     random: &mut WorldgenRandom<R>,
     decoration_seed: i64,
     input: &OreInput<'_>,
     feature_step: i32,
     ore: &PlacedScatteredOre,
-    view: &mut RegionView<'_>,
+    view: &mut W,
+    biome_allows_membership: Option<&dyn Fn(BlockPos, FeatureMembershipId) -> bool>,
 ) {
     let ctx = Ctx {
         min_gen_y: input.min_gen_y,
         gen_depth: input.gen_depth,
         biome_allows: input.biome_allows,
+        biome_allows_membership,
         feature_id: ore.registry_id.as_deref(),
     };
     random.set_feature_seed(decoration_seed, ore.index as i32, feature_step);
+    view.ore_entry_begin();
     place_scattered_ore_placed_feature(random, input.origin(), ore, input, &ctx, view);
+    view.ore_entry_end();
 }
 
 /// The complete 3×3 neighbourhood driver, generalised to a **per-source**
@@ -1220,7 +1328,7 @@ pub(crate) fn apply_scattered_ore_entry_at_seed<R: RandomSource>(
 /// biome to the centre places (and RNG-consumes) a different feature list,
 /// not the centre's own.
 #[allow(clippy::too_many_arguments)]
-pub fn apply_ore_step_3x3_per_source<'a, R: RandomSource>(
+pub fn apply_ore_step_3x3_per_source<'a, R: RandomSource, W: OreWorldAccess>(
     random: &mut WorldgenRandom<R>,
     seed: i64,
     center_x: i32,
@@ -1234,7 +1342,7 @@ pub fn apply_ore_step_3x3_per_source<'a, R: RandomSource>(
     ocean_floor_wg: &RegionHeights,
     in_tag: &dyn Fn(&str, &str) -> bool,
     biome_allows: Option<&dyn Fn(BlockPos, &str) -> bool>,
-    view: &mut RegionView<'_>,
+    view: &mut W,
     ores_for_source: &dyn Fn(i32, i32) -> &'a [PlacedOre],
 ) -> i64 {
     apply_ore_step_3x3_per_source_at_step(
@@ -1272,7 +1380,7 @@ pub fn apply_ore_step_3x3_per_source<'a, R: RandomSource>(
 /// parity seam cannot drift from production's source construction, carrier
 /// lifecycle or per-source list lookup.
 #[allow(clippy::too_many_arguments)]
-pub fn apply_ore_step_3x3_per_source_at_step<'a, R: RandomSource>(
+pub fn apply_ore_step_3x3_per_source_at_step<'a, R: RandomSource, W: OreWorldAccess>(
     random: &mut WorldgenRandom<R>,
     seed: i64,
     center_x: i32,
@@ -1288,7 +1396,7 @@ pub fn apply_ore_step_3x3_per_source_at_step<'a, R: RandomSource>(
     biome_allows: Option<&dyn Fn(BlockPos, &str) -> bool>,
     feature_step: i32,
     selected_source: Option<(i32, i32)>,
-    view: &mut RegionView<'_>,
+    view: &mut W,
     ores_for_source: &dyn Fn(i32, i32) -> &'a [PlacedOre],
 ) -> i64 {
     apply_ore_step_3x3_per_source_at_step_with_order(
@@ -1305,6 +1413,7 @@ pub fn apply_ore_step_3x3_per_source_at_step<'a, R: RandomSource>(
         ocean_floor_wg,
         in_tag,
         biome_allows,
+        None,
         feature_step,
         selected_source,
         view,
@@ -1313,12 +1422,10 @@ pub fn apply_ore_step_3x3_per_source_at_step<'a, R: RandomSource>(
     )
 }
 
-/// Production Overworld variant of [`apply_ore_step_3x3_per_source_at_step`].
-/// The public fixture wrapper retains its direct-pass order, while the
-/// production column path must follow bounded source admission so a spill from
-/// one source is visible to the next source in the same order as the lifecycle.
+/// Production Overworld ore driver with a precompiled numeric biome
+/// membership callback.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn apply_ore_step_3x3_per_source_overworld<'a, R: RandomSource>(
+pub(crate) fn apply_ore_step_3x3_per_source_overworld_with_membership<'a, R: RandomSource, W: OreWorldAccess>(
     random: &mut WorldgenRandom<R>,
     seed: i64,
     center_x: i32,
@@ -1331,10 +1438,10 @@ pub(crate) fn apply_ore_step_3x3_per_source_overworld<'a, R: RandomSource>(
     read_max: i32,
     ocean_floor_wg: &RegionHeights,
     in_tag: &dyn Fn(&str, &str) -> bool,
-    biome_allows: Option<&dyn Fn(BlockPos, &str) -> bool>,
+    biome_allows_membership: Option<&dyn Fn(BlockPos, FeatureMembershipId) -> bool>,
     feature_step: i32,
     selected_source: Option<(i32, i32)>,
-    view: &mut RegionView<'_>,
+    view: &mut W,
     ores_for_source: &dyn Fn(i32, i32) -> &'a [PlacedOre],
 ) -> i64 {
     apply_ore_step_3x3_per_source_at_step_with_order(
@@ -1350,7 +1457,8 @@ pub(crate) fn apply_ore_step_3x3_per_source_overworld<'a, R: RandomSource>(
         read_max,
         ocean_floor_wg,
         in_tag,
-        biome_allows,
+        None,
+        biome_allows_membership,
         feature_step,
         selected_source,
         view,
@@ -1360,7 +1468,7 @@ pub(crate) fn apply_ore_step_3x3_per_source_overworld<'a, R: RandomSource>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn apply_ore_step_3x3_per_source_at_step_with_order<'a, R: RandomSource>(
+fn apply_ore_step_3x3_per_source_at_step_with_order<'a, R: RandomSource, W: OreWorldAccess>(
     random: &mut WorldgenRandom<R>,
     seed: i64,
     center_x: i32,
@@ -1374,9 +1482,10 @@ fn apply_ore_step_3x3_per_source_at_step_with_order<'a, R: RandomSource>(
     ocean_floor_wg: &RegionHeights,
     in_tag: &dyn Fn(&str, &str) -> bool,
     biome_allows: Option<&dyn Fn(BlockPos, &str) -> bool>,
+    biome_allows_membership: Option<&dyn Fn(BlockPos, FeatureMembershipId) -> bool>,
     feature_step: i32,
     selected_source: Option<(i32, i32)>,
-    view: &mut RegionView<'_>,
+    view: &mut W,
     ores_for_source: &dyn Fn(i32, i32) -> &'a [PlacedOre],
     source_offsets: &[(i32, i32)],
 ) -> i64 {
@@ -1404,7 +1513,15 @@ fn apply_ore_step_3x3_per_source_at_step_with_order<'a, R: RandomSource>(
             biome_allows,
         };
         let ores = ores_for_source(source_x, source_z);
-        let ds = apply_one_source(random, seed, &input, ores, feature_step, view);
+        let ds = apply_one_source(
+            random,
+            seed,
+            &input,
+            ores,
+            feature_step,
+            biome_allows_membership,
+            view,
+        );
         if dx == 0 && dz == 0 {
             center_decoration_seed = ds;
         }
@@ -1433,13 +1550,13 @@ enum OreBody {
 
 /// Reproduce the placed-feature depth-first modifier pipeline for one standard
 /// ore feature, calling [`place_ore_feature`] at each surviving position.
-fn place_placed_feature<R: RandomSource>(
+fn place_placed_feature<R: RandomSource, W: OreWorldAccess>(
     random: &mut R,
     origin: BlockPos,
     ore: &PlacedOre,
     input: &OreInput<'_>,
     ctx: &Ctx,
-    working: &mut RegionView<'_>,
+    working: &mut W,
 ) {
     place_placed_feature_with_body(
         random,
@@ -1456,13 +1573,13 @@ fn place_placed_feature<R: RandomSource>(
 /// Reproduce the placed-feature depth-first modifier pipeline for one
 /// scattered ore feature, calling [`place_scattered_ore_feature`] at each
 /// surviving position.
-fn place_scattered_ore_placed_feature<R: RandomSource>(
+fn place_scattered_ore_placed_feature<R: RandomSource, W: OreWorldAccess>(
     random: &mut R,
     origin: BlockPos,
     ore: &PlacedScatteredOre,
     input: &OreInput<'_>,
     ctx: &Ctx,
-    working: &mut RegionView<'_>,
+    working: &mut W,
 ) {
     place_placed_feature_with_body(
         random,
@@ -1476,17 +1593,17 @@ fn place_scattered_ore_placed_feature<R: RandomSource>(
     );
 }
 
-fn place_placed_feature_with_body<R: RandomSource>(
+fn place_placed_feature_with_body<R: RandomSource, W: OreWorldAccess>(
     random: &mut R,
     origin: BlockPos,
     modifiers: &[Placement],
     config: &OreConfig,
     input: &OreInput<'_>,
     ctx: &Ctx,
-    working: &mut RegionView<'_>,
+    working: &mut W,
     body: OreBody,
 ) {
-    fn recurse<R: RandomSource>(
+    fn recurse<R: RandomSource, W: OreWorldAccess>(
         random: &mut R,
         modifiers: &[Placement],
         i: usize,
@@ -1494,7 +1611,7 @@ fn place_placed_feature_with_body<R: RandomSource>(
         ctx: &Ctx,
         config: &OreConfig,
         input: &OreInput<'_>,
-        working: &mut RegionView<'_>,
+        working: &mut W,
         body: OreBody,
     ) {
         if i == modifiers.len() {
@@ -1532,12 +1649,12 @@ fn place_placed_feature_with_body<R: RandomSource>(
 /// in a neighbour chunk exactly as vanilla's real one-chunk-into-neighbours
 /// spill does; the caller decides which of those matter (only the CENTRE's
 /// own 16×16 is fixture-comparable — see [`OreInput::in_center`]).
-pub fn place_ore_feature<R: RandomSource>(
+pub fn place_ore_feature<R: RandomSource, W: OreWorldAccess>(
     random: &mut R,
     origin: BlockPos,
     config: &OreConfig,
     input: &OreInput<'_>,
-    working: &mut RegionView<'_>,
+    working: &mut W,
 ) {
     let size = config.size;
     let dir = random.next_float() * std::f32::consts::PI;
@@ -1583,12 +1700,12 @@ pub fn place_ore_feature<R: RandomSource>(
 /// then two `next_float` draws per axis for each attempt. Candidate distance
 /// grows with the attempt index and is capped at seven blocks, while target
 /// matching and exposure checks remain shared with standard ore placement.
-pub fn place_scattered_ore_feature<R: RandomSource>(
+pub fn place_scattered_ore_feature<R: RandomSource, W: OreWorldAccess>(
     random: &mut R,
     origin: BlockPos,
     config: &OreConfig,
     input: &OreInput<'_>,
-    working: &mut RegionView<'_>,
+    working: &mut W,
 ) {
     ore_probe::bump_feature(1);
     let number_of_tries = random.next_int_bounded(config.size + 1);
@@ -1647,11 +1764,11 @@ thread_local! {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn do_place<R: RandomSource>(
+fn do_place<R: RandomSource, W: OreWorldAccess>(
     random: &mut R,
     config: &OreConfig,
     input: &OreInput<'_>,
-    working: &mut RegionView<'_>,
+    working: &mut W,
     x0: f64,
     x1: f64,
     z0: f64,
@@ -1927,7 +2044,7 @@ const TARGET_CACHE_SLOTS: usize = 16;
 ///
 /// Direct-mapped on the raw [`StateId`], with a full key compare, holding a
 /// bitmask of which of `config.targets` match that state. A hit is one array
-/// index and one `u16` compare. A miss runs [`match_targets_by_name`] — the
+/// index and one `u32` compare. A miss runs the target matcher — the
 /// original name-based code, unchanged — and stores the answer.
 ///
 /// The mask is only ever *consumed* in ascending target order, so the sequence of
@@ -1946,111 +2063,97 @@ const TARGET_CACHE_SLOTS: usize = 16;
 /// plausible magnitude — unless the config's identity went into the key and was
 /// cleared between generators. Do not hoist it.
 ///
-/// `state_ids` caches the placed state's own [`StateId`] per target, which is the
-/// other string cost this removes: `RegionView::set` interned the target's state
-/// *string* on every one of the 62,796 writes a column performs (measured at 4.2%
-/// of the stage in `StateInterner::id_of`), and a blob writes one or two distinct
-/// states.
+/// Target states are canonical when the configuration is parsed, so the write
+/// path carries the configured id directly.
 struct TargetCache {
     /// Raw [`StateId`] per slot; `u16::MAX` means empty. `u16::MAX` is safe as a
-    /// sentinel because `intern_locked` panics past 65,536 states, so no live id
+    /// sentinel because the canonical registry contains fewer than 65,536 states, so no live id
     /// can equal it.
-    keys: [u16; TARGET_CACHE_SLOTS],
+    keys: [u32; TARGET_CACHE_SLOTS],
     masks: [u8; TARGET_CACHE_SLOTS],
-    /// Lazily-resolved [`StateId`] of each target's placed state; `u16::MAX` means
-    /// not yet resolved.
-    state_ids: [u16; MAX_CACHED_TARGETS],
 }
 
 /// The sentinel both of [`TargetCache`]'s tables use for "empty".
-const NO_ID: u16 = u16::MAX;
+const NO_ID: u32 = u32::MAX;
 
 impl TargetCache {
     fn empty() -> Self {
         Self {
             keys: [NO_ID; TARGET_CACHE_SLOTS],
             masks: [0; TARGET_CACHE_SLOTS],
-            state_ids: [NO_ID; MAX_CACHED_TARGETS],
         }
     }
 
-    /// The bitmask of `config.targets` matching the state at `id`, computed by
-    /// [`match_targets_by_name`] on a miss.
+    /// The bitmask of `config.targets` matching the state at `id`, computed on
+    /// a miss.
     #[inline]
     fn mask_for(
         &mut self,
-        id: crate::interner::StateId,
+        id: CanonicalStateId,
         config: &OreConfig,
         input: &OreInput<'_>,
-        working: &RegionView<'_>,
     ) -> u8 {
         let raw = id.raw();
         let slot = (raw as usize) & (TARGET_CACHE_SLOTS - 1);
         if self.keys[slot] == raw {
             return self.masks[slot];
         }
-        let name = working.interner().name_of(id);
-        let mask = match_targets_by_name(name, config, input);
+        let mask = match_targets(id, config, input);
         self.keys[slot] = raw;
         self.masks[slot] = mask;
         mask
     }
 
-    /// The [`crate::interner::StateId`] of target `i`'s placed state, interned
-    /// against the view's own interner on first use.
-    #[inline]
-    fn state_id_for(
-        &mut self,
-        i: usize,
-        config: &OreConfig,
-        working: &RegionView<'_>,
-    ) -> crate::interner::StateId {
-        let cached = self.state_ids[i];
-        if cached != NO_ID {
-            return crate::interner::StateId::from_raw(cached);
-        }
-        let id = working.interner().id_of(&config.targets[i].state);
-        self.state_ids[i] = id.raw();
-        id
-    }
 }
 
 /// Vanilla's own target-block-state test for every target of `config` against the block
-/// state named `name`, as a bitmask over target index.
+/// state `id`, as a bitmask over target index.
 ///
-/// This is the original `try_place_ore` body's inner test, moved out verbatim so
-/// [`TargetCache`] and the uncached path cannot drift: the tag/block comparison,
-/// the `split('[')` base strip and the `in_tag` closure are all still exactly
-/// what they were. Neither test draws, so hoisting them out of the placement loop
-/// cannot move the RNG.
+/// This is the original `try_place_ore` body's inner test, moved out so
+/// [`TargetCache`] and the uncached path cannot drift. Neither test draws, so
+/// hoisting them out of the placement loop cannot move the RNG.
 #[inline]
-fn target_matches(base: &str, target: &OreTarget, input: &OreInput<'_>) -> bool {
+fn target_matches(
+    id: CanonicalStateId,
+    target: &OreTarget,
+    input: &OreInput<'_>,
+) -> bool {
     ore_probe::bump_target_test(1);
     match &target.target {
         RuleTest::TagMatch(tag) => {
             ore_probe::bump_target_test_tag(1);
-            (input.in_tag)(base, tag)
+            (input.in_tag)(id.block().name(), tag)
         }
-        RuleTest::BlockMatch(block) => base == block.as_str(),
+        RuleTest::BlockMatch(expected) => id.block().name() == expected.as_str(),
+        RuleTest::TagMatchCompiled { blocks, .. } => {
+            ore_probe::bump_target_test_tag(1);
+            blocks.contains(id.block())
+        }
+        RuleTest::BlockMatchCompiled(expected) => {
+            expected.is_some_and(|expected| id.block() == expected)
+        }
     }
 }
 
-fn match_targets_by_name(name: &str, config: &OreConfig, input: &OreInput<'_>) -> u8 {
-    let base = name.split('[').next().unwrap_or(name);
+fn match_targets(
+    id: CanonicalStateId,
+    config: &OreConfig,
+    input: &OreInput<'_>,
+) -> u8 {
     let mut mask = 0u8;
     for (i, target) in config.targets.iter().enumerate().take(MAX_CACHED_TARGETS) {
-        if target_matches(base, target, input) {
+        if target_matches(id, target, input) {
             mask |= 1 << i;
         }
     }
     mask
 }
 
-fn try_place_ore<R: RandomSource>(
+fn try_place_ore<R: RandomSource, W: OreWorldAccess>(
     random: &mut R,
     config: &OreConfig,
     input: &OreInput<'_>,
-    working: &mut RegionView<'_>,
+    working: &mut W,
     x: i32,
     y: i32,
     z: i32,
@@ -2068,7 +2171,7 @@ fn try_place_ore<R: RandomSource>(
     // once per target — three string operations per candidate position, ~79,148
     // candidates per column, all answering the same question about the same
     // handful of terrain states. `TargetCache` answers it from a `u16` compare;
-    // `match_targets_by_name` is still the only implementation of the test
+    // the target matcher is still the only implementation of the test
     // itself.
     //
     // The draw sequence is untouched, as it was by the earlier removal of the
@@ -2078,9 +2181,9 @@ fn try_place_ore<R: RandomSource>(
     let mut chosen: Option<usize> = None;
     {
         ore_probe::bump_region_read(1);
-        let id = working.get_id(lx, y, lz);
+        let id = working.ore_get_id(lx, y, lz);
         if config.targets.len() <= MAX_CACHED_TARGETS {
-            let mut mask = cache.mask_for(id, config, input, working);
+            let mut mask = cache.mask_for(id, config, input);
             while mask != 0 {
                 let i = mask.trailing_zeros() as usize;
                 mask &= mask - 1;
@@ -2101,10 +2204,8 @@ fn try_place_ore<R: RandomSource>(
             // A u8 mask cannot represent the full target list. Keep the same
             // ascending target order and per-match air-check draws as the cached
             // path, but evaluate every target directly.
-            let name = working.interner().name_of(id);
-            let base = name.split('[').next().unwrap_or(name);
             for (i, target) in config.targets.iter().enumerate() {
-                if !target_matches(base, target, input) {
+                if !target_matches(id, target, input) {
                     continue;
                 }
                 let place = should_skip_air_check(random, config.discard_chance_on_air_exposure)
@@ -2123,15 +2224,8 @@ fn try_place_ore<R: RandomSource>(
         ore_probe::bump_write(1);
         // The interned id, resolved once per blob rather than once per write —
         // `RegionView::set` hashed the target's state *string* through
-        // `StateInterner::id_of` on every one of a column's 62,796 ore writes. The
-        // written value is identical: `id_of` is that string's id in this view's
-        // own interner, which is what `set` looked up.
-        let state = if i < MAX_CACHED_TARGETS {
-            cache.state_id_for(i, config, working)
-        } else {
-            working.interner().id_of(&config.targets[i].state)
-        };
-        working.set_id(lx, y, lz, state);
+        let state = config.targets[i].state;
+        working.ore_set_id(lx, y, lz, state);
     }
 }
 
@@ -2152,7 +2246,7 @@ fn should_skip_air_check<R: RandomSource>(random: &mut R, chance: f32) -> bool {
 /// see `OreInput::region_local`), so a read just outside the centre sees the
 /// real neighbour terrain (or an in-flight write from an earlier source
 /// pass), not an assumed-empty scratch chunk.
-fn is_adjacent_to_air(input: &OreInput<'_>, working: &RegionView<'_>, x: i32, y: i32, z: i32) -> bool {
+fn is_adjacent_to_air<W: OreWorldAccess>(input: &OreInput<'_>, working: &W, x: i32, y: i32, z: i32) -> bool {
     const DIRS: [(i32, i32, i32); 6] = [
         (0, -1, 0),
         (0, 1, 0),
@@ -2163,41 +2257,40 @@ fn is_adjacent_to_air(input: &OreInput<'_>, working: &RegionView<'_>, x: i32, y:
     ];
     DIRS.iter().any(|&(dx, dy, dz)| {
         let block = block_at(input, working, x + dx, y + dy, z + dz);
-        let base = block.split('[').next().unwrap_or(block);
-        is_air(base)
+        matches!(
+            block.block(),
+            lodestone_data::block::Block::Air
+                | lodestone_data::block::Block::CaveAir
+                | lodestone_data::block::Block::VoidAir
+        )
     })
 }
 
-fn block_at<'a>(input: &OreInput<'_>, working: &'a RegionView<'_>, x: i32, y: i32, z: i32) -> &'a str {
+fn block_at<W: OreWorldAccess>(input: &OreInput<'_>, working: &W, x: i32, y: i32, z: i32) -> CanonicalStateId {
     if is_outside_build_height(y, input.min_y, input.height) {
-        return "minecraft:air";
+        return CanonicalStateId::AIR;
     }
     ore_probe::bump_region_read(1);
     let (lx, lz) = input.region_local(x, z);
-    working.get(lx, y, lz)
-}
-
-fn is_air(base: &str) -> bool {
-    matches!(
-        base,
-        "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air"
-    )
+    working.ore_get_id(lx, y, lz)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::dense_grid::DenseBlockGrid;
-    use crate::interner::StateInterner;
+    use crate::feature::region_view::RegionView;
     use crate::rng::{LegacyRandomSource, WorldgenRandom, XoroshiroRandomSource};
     use std::collections::HashSet;
-    use std::sync::Arc;
+
+    fn state(spec: &str) -> CanonicalStateId {
+        CanonicalStateId::from_state_str(spec).expect("test state is in the generated table")
+    }
 
     #[test]
     fn uncached_ore_targets_preserve_rules_after_eighth() {
-        let interner = Arc::new(StateInterner::new());
-        let stone = interner.id_of("minecraft:stone");
-        let grid = DenseBlockGrid::with_interner(Arc::clone(&interner), -16, 0, -16, 48, 8, 48, stone);
+        let stone = state("minecraft:stone");
+        let grid = DenseBlockGrid::with_default(-16, 0, -16, 48, 8, 48, stone);
         let mut view = RegionView::over_region_grid(&grid, 0, 8);
         let heights = RegionHeights::unset();
         let input = OreInput {
@@ -2218,12 +2311,12 @@ mod tests {
         let mut targets = Vec::with_capacity(MAX_CACHED_TARGETS + 1);
         for _ in 0..MAX_CACHED_TARGETS {
             targets.push(OreTarget {
-                state: "minecraft:coal_ore".to_string(),
+                state: state("minecraft:coal_ore"),
                 target: RuleTest::BlockMatch("minecraft:dirt".to_string()),
             });
         }
         targets.push(OreTarget {
-            state: "minecraft:gold_ore".to_string(),
+            state: state("minecraft:gold_ore"),
             target: RuleTest::BlockMatch("minecraft:stone".to_string()),
         });
         let config = OreConfig {
@@ -2235,7 +2328,7 @@ mod tests {
         let mut cache = TargetCache::empty();
         try_place_ore(&mut random, &config, &input, &mut view, 0, 1, 0, &mut cache);
 
-        assert_eq!(view.get(0, 1, 0), "minecraft:gold_ore");
+        assert_eq!(view.get(0, 1, 0), state("minecraft:gold_ore"));
     }
 
     #[test]
@@ -2264,9 +2357,8 @@ mod tests {
 
     #[test]
     fn one_entry_ore_seam_keeps_the_callers_seed_and_sibling_streams_separate() {
-        let interner = Arc::new(StateInterner::new());
-        let air = interner.id_of("minecraft:air");
-        let grid = DenseBlockGrid::with_interner(Arc::clone(&interner), -16, 0, -16, 48, 8, 48, air);
+        let air = state("minecraft:air");
+        let grid = DenseBlockGrid::with_default(-16, 0, -16, 48, 8, 48, air);
         let mut view = RegionView::over_region_grid(&grid, 0, 8);
         let mut heights = RegionHeights::unset();
         for z in REGION_MIN..REGION_MAX {
@@ -2308,9 +2400,25 @@ mod tests {
 
         let mut actual = WorldgenRandom::new(XoroshiroRandomSource::new(0));
         let caller_seed = actual.set_decoration_seed(42, 0, 0);
-        apply_ore_entry_at_seed(&mut actual, caller_seed, &input, 7, &entry(2), &mut view);
+        apply_ore_entry_at_seed_with_membership(
+            &mut actual,
+            caller_seed,
+            &input,
+            7,
+            &entry(2),
+            &mut view,
+            None,
+        );
         assert_eq!(actual.next_int(), after_first, "one entry must not derive a second source seed");
-        apply_ore_entry_at_seed(&mut actual, caller_seed, &input, 7, &entry(5), &mut view);
+        apply_ore_entry_at_seed_with_membership(
+            &mut actual,
+            caller_seed,
+            &input,
+            7,
+            &entry(5),
+            &mut view,
+            None,
+        );
         assert_eq!(actual.next_int(), after_second, "one entry must not walk or consume its sibling");
     }
 
@@ -2330,6 +2438,7 @@ mod tests {
             min_gen_y: -64,
             gen_depth: 384,
             biome_allows: Some(&membership),
+            biome_allows_membership: None,
             feature_id: Some("minecraft:ore_copper_large"),
         };
         assert_eq!(Placement::Biome.get_positions(&mut random, large, &ne), OrePositions::None);
@@ -2337,6 +2446,7 @@ mod tests {
             min_gen_y: -64,
             gen_depth: 384,
             biome_allows: Some(&membership),
+            biome_allows_membership: None,
             feature_id: Some("minecraft:ore_copper"),
         };
         assert_eq!(Placement::Biome.get_positions(&mut random, ordinary, &se), OrePositions::One(ordinary));
@@ -2382,13 +2492,11 @@ mod tests {
         assert_eq!(standalone_post_feature_draw(6), EXPECTED_STEP_SIX_DRAW);
         assert_eq!(standalone_post_feature_draw(7), EXPECTED_STEP_SEVEN_DRAW);
 
-        let interner = Arc::new(StateInterner::new());
-        let air = interner.id_of("minecraft:air");
+        let air = state("minecraft:air");
         let grids: Vec<DenseBlockGrid> = (-1..=1)
             .flat_map(|dx| (-1..=1).map(move |dz| (dx, dz)))
             .map(|(dx, dz)| {
-                DenseBlockGrid::with_interner(
-                    Arc::clone(&interner),
+                DenseBlockGrid::with_default(
                     dx * 16,
                     0,
                     dz * 16,
@@ -2399,7 +2507,7 @@ mod tests {
                 )
             })
             .collect();
-        let mut view = RegionView::over_sources(Arc::clone(&interner), 0, 0, 0, 8, |dx, dz| {
+        let mut view = RegionView::over_sources(0, 0, 0, 8, |dx, dz| {
             grids.get(((dx + 1) * 3 + (dz + 1)) as usize)
         });
         let mut heights = RegionHeights::unset();
@@ -2436,10 +2544,10 @@ mod tests {
             },
         }];
         let mut step_six = WorldgenRandom::new(LegacyRandomSource::new(42));
-        apply_one_source(&mut step_six, 42, &input, &ores, 6, &mut view);
+        apply_one_source(&mut step_six, 42, &input, &ores, 6, None, &mut view);
         let six_draw = step_six.next_long();
         let mut step_seven = WorldgenRandom::new(LegacyRandomSource::new(42));
-        apply_one_source(&mut step_seven, 42, &input, &ores, 7, &mut view);
+        apply_one_source(&mut step_seven, 42, &input, &ores, 7, None, &mut view);
         let seven_draw = step_seven.next_long();
         assert_eq!(six_draw, EXPECTED_STEP_SIX_DRAW);
         assert_eq!(seven_draw, EXPECTED_STEP_SEVEN_DRAW);
@@ -2741,5 +2849,53 @@ mod tests {
         let mut boxed = boxed;
         assert!(boxed.insert(1, 1, 1), "first insert must be new");
         assert!(!boxed.insert(1, 1, 1), "second insert must be a duplicate");
+    }
+
+    #[test]
+    fn mixed_ore_reads_and_writes_the_vegetation_overlay_directly() {
+        let mut grid = crate::feature::vegetation::VegGrid::with_footprint(
+            0,
+            8,
+            0,
+            0,
+            ORE_READ_MIN,
+            ORE_READ_MAX,
+        );
+        let vegetation = state("minecraft:stone");
+        let ore = state("minecraft:gold_ore");
+        assert!(grid.set_id_if_in_bounds(0, 1, 0, vegetation));
+
+        let heights = RegionHeights::unset();
+        let in_tag = |_block: &str, _tag: &str| false;
+        let input = OreInput {
+            chunk_x: 0,
+            chunk_z: 0,
+            center_x: 0,
+            center_z: 0,
+            min_y: 0,
+            height: 8,
+            min_gen_y: 0,
+            gen_depth: 8,
+            read_min: ORE_READ_MIN,
+            read_max: ORE_READ_MAX,
+            ocean_floor_wg: &heights,
+            in_tag: &in_tag,
+            biome_allows: None,
+        };
+        let config = OreConfig {
+            size: 1,
+            discard_chance_on_air_exposure: 0.0,
+            targets: vec![OreTarget {
+                state: state("minecraft:gold_ore"),
+                target: RuleTest::BlockMatch("minecraft:stone".to_string()),
+            }],
+        };
+        let mut random = XoroshiroRandomSource::new(0);
+        let mut cache = TargetCache::empty();
+        try_place_ore(&mut random, &config, &input, &mut grid, 0, 1, 0, &mut cache);
+
+        assert_eq!(grid.ore_get_id(0, 1, 0), ore);
+        assert_eq!(grid.get_id(0, 1, 0), ore);
+        assert_eq!(grid.dirty_len(), 2, "one vegetation write and one ore write");
     }
 }

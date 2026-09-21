@@ -25,7 +25,7 @@ impl<'w> MobSim<'w> {
     /// tick that killed it.
     pub fn tick(&mut self) {
         let world = self.world;
-        self.tick_with_terrain(&|x, y, z| world.block_state(x, y, z).to_owned());
+        self.tick_with_terrain(&|x, y, z| world.block_state_id(x, y, z));
     }
 
     /// Produces chunk-owner completions from dropped-item tick-start state.
@@ -35,7 +35,7 @@ impl<'w> MobSim<'w> {
     /// validates the complete plan before publishing any result.
     pub(crate) fn tick_item_owner_batches(
         &mut self,
-        block_state: &(dyn Fn(i32, i32, i32) -> String + Sync),
+        block_state: &(dyn Fn(i32, i32, i32) -> lodestone_data::block_states::StateId + Sync),
     ) -> (Vec<ItemTickOwnerBatch>, u64) {
         self.item_owner_plan = self
             .item_owner_plan
@@ -57,7 +57,7 @@ impl<'w> MobSim<'w> {
 
     pub(super) fn tick_item_owner_batches_with_workers(
         &self,
-        block_state: &(dyn Fn(i32, i32, i32) -> String + Sync),
+        block_state: &(dyn Fn(i32, i32, i32) -> lodestone_data::block_states::StateId + Sync),
         worker_count: usize,
     ) -> (Vec<ItemTickOwnerBatch>, u64) {
         let mut jobs = Vec::<(ItemTickOwner, Vec<ItemTickInput>)>::new();
@@ -243,7 +243,7 @@ impl<'w> MobSim<'w> {
     /// when [`LiveBlockCollision`] computes the resting surface.
     pub fn tick_with_terrain(
         &mut self,
-        block_state: &(dyn Fn(i32, i32, i32) -> String + Sync),
+        block_state: &(dyn Fn(i32, i32, i32) -> lodestone_data::block_states::StateId + Sync),
     ) {
         let live_collision = LiveBlockCollision {
             block_state,

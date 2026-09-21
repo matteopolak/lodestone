@@ -22,6 +22,7 @@ use bevy_ecs::resource::Resource;
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use bevy_ecs::system::Res;
 use lodestone_core::State;
+use lodestone_data::block_states::StateId;
 use uuid::Uuid;
 
 use crate::chunk::{ChunkColumn, ChunkSource};
@@ -59,14 +60,14 @@ impl ChunkSource for AirWorld {
         ChunkColumn::new(0, 16)
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         // The plain column-regenerating form; this gate only drives a server
         // tick, it never places blocks, so a cheap read is not needed.
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
-        self.column(cx, cz).block_state(lx, y, lz).to_string()
+        self.column(cx, cz).block_state_id(lx, y, lz)
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -83,7 +84,7 @@ impl ChunkSource for AirWorld {
     // so a player action could reach this through the store's write-through.
     // The source has no storage — `column()` is a fresh blank column — so the
     // edit is deliberately discarded. Explicit rather than inherited.
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
         // No storage; edits are discarded by design for this fixture.
     }
 }

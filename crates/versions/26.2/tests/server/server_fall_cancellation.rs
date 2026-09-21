@@ -29,6 +29,8 @@
 use std::time::Duration;
 
 use lodestone_core::{Reader, Writer};
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 use lodestone_net::{Connection, Transport, memory_pair};
 use lodestone_server::{
     BlockEntityHandle, ChunkColumn, ChunkSource, MobHandle, NoEntities, serve_connection,
@@ -76,13 +78,19 @@ impl PoolSource {
         for x in 0..16 {
             for z in 0..16 {
                 for y in -64..=FLOOR_Y {
-                    column.set_block(x, y, z, "minecraft:stone");
+                    column.set_block_id(x, y, z, Block::Stone.default_state());
                 }
             }
         }
-        column.set_block(3, WATER_Y, 3, "minecraft:water");
-        column.set_block(5, WATER_Y, 5, "minecraft:hay_block");
-        column.set_block(7, WATER_Y, 7, "minecraft:ladder[facing=north]");
+        column.set_block_id(3, WATER_Y, 3, Block::Water.default_state());
+        column.set_block_id(5, WATER_Y, 5, Block::HayBlock.default_state());
+        column.set_block_id(
+            7,
+            WATER_Y,
+            7,
+            StateId::from_state_str("minecraft:ladder[facing=north]")
+                .expect("ladder fixture state"),
+        );
         column
     }
 }
@@ -96,12 +104,11 @@ impl ChunkSource for PoolSource {
         }
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         self.column(cx, cz)
-            .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
-            .to_string()
+            .block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -112,7 +119,7 @@ impl ChunkSource for PoolSource {
             .to_string()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
         // This fixture is read-only.
     }
 }
@@ -410,22 +417,22 @@ async fn grabbing_a_ladder_mid_fall_cancels_the_damage() {
 #[test]
 fn the_fixture_contains_the_blocks_every_absence_above_depends_on() {
     let source = PoolSource;
-    assert_eq!(source.block_state(3, WATER_Y, 3), "minecraft:water");
-    assert_eq!(source.block_state(5, WATER_Y, 5), "minecraft:hay_block");
+    assert_eq!(source.block_state_id(3, WATER_Y, 3), Block::Water.default_state());
+    assert_eq!(source.block_state_id(5, WATER_Y, 5), Block::HayBlock.default_state());
     assert_eq!(
-        source.block_state(7, WATER_Y, 7),
-        "minecraft:ladder[facing=north]"
+        source.block_state_id(7, WATER_Y, 7),
+        StateId::from_state_str("minecraft:ladder[facing=north]").expect("ladder fixture state")
     );
-    assert_eq!(source.block_state(1, WATER_Y, 1), "minecraft:air");
-    assert_eq!(source.block_state(1, FLOOR_Y, 1), "minecraft:stone");
+    assert_eq!(source.block_state_id(1, WATER_Y, 1), StateId::AIR);
+    assert_eq!(source.block_state_id(1, FLOOR_Y, 1), Block::Stone.default_state());
 
     // And the pool is one block deep, which is what makes the water arm able to
     // distinguish a feet read from an eye read.
     assert_eq!(
-        source.block_state(3, WATER_Y + 1, 3),
-        "minecraft:air",
+        source.block_state_id(3, WATER_Y + 1, 3),
+        StateId::AIR,
         "the cell above the water must be air, or the water arm would also pass \
          against an implementation that reads the eye cell"
     );
-    assert_eq!(source.block_state(3, FLOOR_Y, 3), "minecraft:stone");
+    assert_eq!(source.block_state_id(3, FLOOR_Y, 3), Block::Stone.default_state());
 }

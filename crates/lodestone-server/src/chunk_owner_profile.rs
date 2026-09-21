@@ -2,6 +2,7 @@
 //! hand-off boundaries in the integrated tick loop.
 
 use lodestone_model::{BlockPos, ItemStack, ResourceKey, Vec3};
+use lodestone_data::block_states::StateId;
 
 use crate::{
     BlockEntity, ChunkColumn, ChunkSource, Furnace, FurnaceKind, IntegratedServer, ScheduledTickKind,
@@ -167,20 +168,24 @@ fn seed_scheduled_ticks(server: &IntegratedServer) {
 /// same production readers and writers as a running integrated world.
 struct ProfileWorld;
 
+fn state(value: &str) -> StateId {
+    StateId::from_state_str(value).expect("profile state is canonical")
+}
+
 impl ProfileWorld {
     fn build_column(&self, cx: i32, cz: i32) -> ChunkColumn {
         let mut column = ChunkColumn::new(0, 64);
         for y in 0..FLOOR_TOP {
             for z in 0..16 {
                 for x in 0..16 {
-                    column.set_block(x, y, z, "minecraft:stone");
+                    column.set_block_id(x, y, z, state("minecraft:stone"));
                 }
             }
         }
         if (-1..=2).contains(&cx) && (0..=1).contains(&cz) {
-            column.set_block(8, FLOOR_TOP, 8, "minecraft:furnace[facing=north,lit=false]");
-            column.set_block(9, FLOOR_TOP, 8, "minecraft:repeater[delay=1,facing=north,locked=false,powered=true]");
-            column.set_block(7, FLOOR_TOP, 8, "minecraft:water[level=0]");
+            column.set_block_id(8, FLOOR_TOP, 8, state("minecraft:furnace[facing=north,lit=false]"));
+            column.set_block_id(9, FLOOR_TOP, 8, state("minecraft:repeater[delay=1,facing=north,locked=false,powered=true]"));
+            column.set_block_id(7, FLOOR_TOP, 8, state("minecraft:water[level=0]"));
         }
         column
     }
@@ -191,19 +196,19 @@ impl ChunkSource for ProfileWorld {
         self.build_column(cx, cz)
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let local_x = x.rem_euclid(16);
         let local_z = z.rem_euclid(16);
-        self.build_column(cx, cz).block_state(local_x, y, local_z).to_owned()
+        self.build_column(cx, cz).block_state_id(local_x, y, local_z)
     }
 
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
         "minecraft:plains".to_owned()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
 }
 
 #[cfg(test)]

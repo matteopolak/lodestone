@@ -55,19 +55,34 @@
 //! `crate::gravity_tick`'s own module doc already accepts for its trigger.
 
 use crate::neighbor_update::Direction;
-use crate::redstone::{observer_facing, observer_powered, OBSERVER};
+use crate::redstone::{observer_facing, observer_powered};
+use crate::redstone;
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, PropertyKey, PropertyValue};
+use lodestone_data::block_states::StateId;
 
-/// Builds the canonical block-state string for an observer.
+/// Builds a canonical observer state.
 #[must_use]
-pub fn set_observer(facing: Direction, powered: bool) -> String {
-    format!("{OBSERVER}[facing={},powered={}]", crate::redstone::direction_to_str(facing), powered)
+pub fn set_observer(facing: Direction, powered: bool) -> StateId {
+    let state = redstone::with_property(
+        Block::Observer.default_state(),
+        PropertyKey::Facing,
+        PropertyValue::builtin(redstone::direction_property(facing)),
+    )
+    .expect("observer facing property is a generated state");
+    redstone::with_property(
+        state,
+        PropertyKey::Powered,
+        PropertyValue::builtin(if powered { BuiltinPropertyValue::True } else { BuiltinPropertyValue::False }),
+    )
+    .expect("observer powered property is a generated state")
 }
 
 /// The [`crate::neighbor_update::Notification::from`] value that identifies
 /// "the block this observer watches just changed" — see this module's own
 /// doc comment for the direction-convention derivation.
 #[must_use]
-pub fn watch_direction(state: &str) -> Direction {
+pub fn watch_direction(state: StateId) -> Direction {
     observer_facing(state).opposite()
 }
 
@@ -77,7 +92,7 @@ pub fn watch_direction(state: &str) -> Direction {
 /// [`crate::scheduled_tick::ScheduledTickQueue::has_scheduled`] at the call
 /// site, matching the real engine's own has-scheduled-tick query).
 #[must_use]
-pub fn should_start_signal(state: &str) -> bool {
+pub fn should_start_signal(state: StateId) -> bool {
     !observer_powered(state)
 }
 
@@ -85,7 +100,7 @@ pub fn should_start_signal(state: &str) -> bool {
 /// and whether a follow-up tick must be scheduled (only when turning ON, so
 /// the pulse is always exactly one scheduled-tick period wide).
 #[must_use]
-pub fn run_scheduled_tick(state: &str) -> (String, bool) {
+pub fn run_scheduled_tick(state: StateId) -> (StateId, bool) {
     let facing = observer_facing(state);
     if observer_powered(state) {
         (set_observer(facing, false), false)
@@ -97,30 +112,31 @@ pub fn run_scheduled_tick(state: &str) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::redstone::fixture_state as state;
 
     #[test]
     fn watch_direction_is_the_opposite_of_facing() {
-        assert_eq!(watch_direction("minecraft:observer[facing=north,powered=false]"), Direction::South);
-        assert_eq!(watch_direction("minecraft:observer[facing=east,powered=false]"), Direction::West);
+        assert_eq!(watch_direction(state("minecraft:observer[facing=north,powered=false]")), Direction::South);
+        assert_eq!(watch_direction(state("minecraft:observer[facing=east,powered=false]")), Direction::West);
     }
 
     #[test]
     fn should_start_signal_is_false_while_already_powered() {
-        assert!(should_start_signal("minecraft:observer[facing=north,powered=false]"));
-        assert!(!should_start_signal("minecraft:observer[facing=north,powered=true]"));
+        assert!(should_start_signal(state("minecraft:observer[facing=north,powered=false]")));
+        assert!(!should_start_signal(state("minecraft:observer[facing=north,powered=true]")));
     }
 
     #[test]
     fn scheduled_tick_turns_on_and_requests_a_reschedule() {
-        let (new_state, reschedule) = run_scheduled_tick("minecraft:observer[facing=north,powered=false]");
-        assert_eq!(new_state, "minecraft:observer[facing=north,powered=true]");
+        let (new_state, reschedule) = run_scheduled_tick(state("minecraft:observer[facing=north,powered=false]"));
+        assert_eq!(new_state, state("minecraft:observer[facing=north,powered=true]"));
         assert!(reschedule, "the ON half of the pulse must schedule its own OFF half");
     }
 
     #[test]
     fn scheduled_tick_turns_off_with_no_further_reschedule() {
-        let (new_state, reschedule) = run_scheduled_tick("minecraft:observer[facing=north,powered=true]");
-        assert_eq!(new_state, "minecraft:observer[facing=north,powered=false]");
+        let (new_state, reschedule) = run_scheduled_tick(state("minecraft:observer[facing=north,powered=true]"));
+        assert_eq!(new_state, state("minecraft:observer[facing=north,powered=false]"));
         assert!(!reschedule, "control failed: the OFF half must not reschedule itself, or the pulse would never end");
     }
 
@@ -129,10 +145,10 @@ mod tests {
     /// on-then-off), not merely "it changed".
     #[test]
     fn a_full_pulse_is_exactly_two_scheduled_ticks_wide() {
-        let start = "minecraft:observer[facing=north,powered=false]";
+        let start = state("minecraft:observer[facing=north,powered=false]");
         let (after_first, reschedule_first) = run_scheduled_tick(start);
         assert!(reschedule_first);
-        let (after_second, reschedule_second) = run_scheduled_tick(&after_first);
+        let (after_second, reschedule_second) = run_scheduled_tick(after_first);
         assert!(!reschedule_second);
         assert_eq!(after_second, start, "after exactly two ticks the observer must be back to unpowered");
     }

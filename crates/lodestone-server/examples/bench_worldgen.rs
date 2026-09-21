@@ -332,8 +332,8 @@ fn first_column_difference(serial: &GeneratedColumn, parallel: &GeneratedColumn)
         let y = serial.min_y() + ly;
         for lz in 0..16usize {
             for lx in 0..16usize {
-                let serial_state = serial.block_state(lx, y, lz);
-                let parallel_state = parallel.block_state(lx, y, lz);
+                let serial_state = serial.block_state_id(lx, y, lz);
+                let parallel_state = parallel.block_state_id(lx, y, lz);
                 if serial_state != parallel_state {
                     return Some(format!(
                         "block ({lx}, {y}, {lz}) is {serial_state:?} vs {parallel_state:?}"
@@ -345,7 +345,7 @@ fn first_column_difference(serial: &GeneratedColumn, parallel: &GeneratedColumn)
     None
 }
 
-/// FNV-1a over every cell's canonical block-state string plus the biome at
+/// FNV-1a over every cell's generated block-state id plus the biome at
 /// each horizontal quart, used only for the serial-vs-parallel parity check
 /// above (never in a timed region). Stronger than comparing
 /// `non_air_count()` alone, which the RNG-determinism trap in HANDOFF.md §4
@@ -370,7 +370,7 @@ fn column_fingerprint(col: &GeneratedColumn) -> u64 {
         let y = col.min_y() + ly;
         for lz in 0..16usize {
             for lx in 0..16usize {
-                mix(col.block_state(lx, y, lz).as_bytes());
+                mix(&col.block_state_id(lx, y, lz).raw().to_le_bytes());
             }
         }
     }

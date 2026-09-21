@@ -106,6 +106,7 @@
 //! caller supplies a block-state reader, as `use_spawn_egg` does.
 
 use lodestone_data::{collision_shapes, entity_types, outline_shapes};
+use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockPos, ResourceKey, Vec3};
 
 /// Every boat's width — every boat, chest boat and raft in 26.2 shares
@@ -203,7 +204,7 @@ pub struct ClipHit {
 /// returns no direction — the boat item's use handler reads only the location.
 /// Adding the face later needs `lodestone_data::outline_shapes::interaction_boxes`.
 #[must_use]
-pub fn clip(from: Vec3, to: Vec3, block_state: &dyn Fn(i32, i32, i32) -> String) -> Option<ClipHit> {
+pub fn clip(from: Vec3, to: Vec3, block_state: &dyn Fn(i32, i32, i32) -> StateId) -> Option<ClipHit> {
     if (from.x - to.x).abs() < f64::EPSILON
         && (from.y - to.y).abs() < f64::EPSILON
         && (from.z - to.z).abs() < f64::EPSILON
@@ -298,10 +299,10 @@ fn clip_cell(
     cell: BlockPos,
     from: Vec3,
     to: Vec3,
-    block_state: &dyn Fn(i32, i32, i32) -> String,
+    block_state: &dyn Fn(i32, i32, i32) -> StateId,
 ) -> Option<ClipHit> {
     let state = block_state(cell.x, cell.y, cell.z);
-    let block_t = outline_boxes_for(&state)
+    let block_t = outline_boxes_for(state)
         .iter()
         .filter_map(|b| {
             clip_box(
@@ -315,7 +316,7 @@ fn clip_cell(
         .fold(None::<f64>, |best, t| {
             Some(best.map_or(t, |best| best.min(t)))
         });
-    let fluid_t = fluid_surface_height(&state, block_state, cell).and_then(|height| {
+    let fluid_t = fluid_surface_height(state, block_state, cell).and_then(|height| {
         clip_box(from, to, cell, [0.0, 0.0, 0.0], [1.0, height, 1.0])
     });
     // The real comparison is a squared-distance tie going to the **block**.
@@ -407,13 +408,13 @@ fn clip_box(from: Vec3, to: Vec3, cell: BlockPos, min: [f64; 3], max: [f64; 3]) 
 /// (The real shape's own "amount equals 9" fast path is unreachable for water
 /// and lava, whose maximum amount is 8, and would give the same `1.0` anyway.)
 fn fluid_surface_height(
-    state: &str,
-    block_state: &dyn Fn(i32, i32, i32) -> String,
+    state: StateId,
+    block_state: &dyn Fn(i32, i32, i32) -> StateId,
     cell: BlockPos,
 ) -> Option<f64> {
-    let fluid = crate::fluid::fluid_state_of(state)?;
+    let fluid = crate::fluid::fluid_state_of_id(state)?;
     let above = block_state(cell.x, cell.y + 1, cell.z);
-    let same_above = crate::fluid::fluid_state_of(&above).is_some_and(|a| a.kind == fluid.kind);
+    let same_above = crate::fluid::fluid_state_of_id(above).is_some_and(|a| a.kind == fluid.kind);
     Some(if same_above {
         1.0
     } else {
@@ -421,24 +422,19 @@ fn fluid_surface_height(
     })
 }
 
-/// The **outline** boxes of a full block-state string, empty for air and for a
-/// name outside the table.
+/// The **outline** boxes of a canonical state, empty for air and fluids.
 ///
 /// Resolution uses `block_state_id`, not a lowest-id fallback: a bare name
 /// resolves through its block's registered default state, including only the
 /// properties the input explicitly overrides.
-fn outline_boxes_for(state: &str) -> &'static [lodestone_model::BlockAabb] {
-    crate::mobs::block_state_id(state)
-        .map(outline_shapes::outline_boxes)
-        .unwrap_or(&[])
+fn outline_boxes_for(state: StateId) -> &'static [lodestone_model::BlockAabb] {
+    outline_shapes::outline_boxes(state)
 }
 
-/// The **collision** boxes of a full block-state string, for the obstruction
-/// test. Empty for air, a fluid, and every plant.
-fn collision_boxes_for(state: &str) -> &'static [collision_shapes::Aabb] {
-    crate::mobs::block_state_id(state)
-        .map(collision_shapes::collision_boxes)
-        .unwrap_or(&[])
+/// The **collision** boxes of a canonical state, for the obstruction test.
+/// Empty for air, a fluid, and every plant.
+fn collision_boxes_for(state: StateId) -> &'static [collision_shapes::Aabb] {
+    collision_shapes::collision_boxes(state)
 }
 
 /// What a right-click with the held item means for this module.
@@ -483,7 +479,7 @@ pub fn use_boat_item(
     yaw: f32,
     pitch: f32,
     reach: f64,
-    block_state: &dyn Fn(i32, i32, i32) -> String,
+    block_state: &dyn Fn(i32, i32, i32) -> StateId,
 ) -> BoatUse {
     let Some(entity_type) = ({
         let path = item.split_once(':').map_or(item, |(_, path)| path);
@@ -536,7 +532,7 @@ pub fn use_boat_item(
 #[must_use]
 pub fn boat_box_is_obstructed(
     position: Vec3,
-    block_state: &dyn Fn(i32, i32, i32) -> String,
+    block_state: &dyn Fn(i32, i32, i32) -> StateId,
 ) -> bool {
     let half = BOAT_WIDTH / 2.0;
     let (min_x, max_x) = (position.x - half, position.x + half);
@@ -547,7 +543,7 @@ pub fn boat_box_is_obstructed(
         for cy in (min_y - 1.0).floor() as i32..=(max_y).floor() as i32 {
             for cz in (min_z - 1.0).floor() as i32..=(max_z).floor() as i32 {
                 let state = block_state(cx, cy, cz);
-                for b in collision_boxes_for(&state) {
+                for b in collision_boxes_for(state) {
                     let bx = (
                         f64::from(cx) + f64::from(b.min[0]),
                         f64::from(cx) + f64::from(b.max[0]),
@@ -626,7 +622,7 @@ pub fn apply_boat_item(
     yaw: f32,
     pitch: f32,
     reach: f64,
-    block_state: &dyn Fn(i32, i32, i32) -> String,
+    block_state: &dyn Fn(i32, i32, i32) -> StateId,
     mobs: &crate::MobHandle,
 ) -> BoatApplied {
     match use_boat_item(item, eye, yaw, pitch, reach, block_state) {
@@ -739,23 +735,23 @@ mod tests {
     /// The water is a **source under air**, so its shape tops out at `8/9`, and
     /// the shore at `x < 0` is stone up to `y == 64` — the shape that makes an
     /// angled trace land on either side depending only on the angle.
-    fn shore(overrides: Vec<(BlockPos, &'static str)>) -> impl Fn(i32, i32, i32) -> String {
+    fn shore(overrides: Vec<(BlockPos, &'static str)>) -> impl Fn(i32, i32, i32) -> StateId {
         move |x, y, z| {
             let at = BlockPos::new(x, y, z);
             if let Some((_, name)) = overrides.iter().find(|(p, _)| *p == at) {
-                return (*name).to_owned();
+                return StateId::from_state_str(name).expect("fixture state must be registered");
             }
             if y <= 63 {
-                return "minecraft:stone".to_owned();
+                return StateId::from_state_str("minecraft:stone").expect("fixture state must be registered");
             }
             if y == 64 {
                 return if x >= 0 {
-                    "minecraft:water[level=0]".to_owned()
+                    StateId::from_state_str("minecraft:water[level=0]").expect("fixture state must be registered")
                 } else {
-                    "minecraft:stone".to_owned()
+                    StateId::from_state_str("minecraft:stone").expect("fixture state must be registered")
                 };
             }
-            "minecraft:air".to_owned()
+            StateId::from_state_str("minecraft:air").expect("fixture state must be registered")
         }
     }
 

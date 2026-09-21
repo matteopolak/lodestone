@@ -119,12 +119,11 @@
 //! player; on open-to-LAN a second player sees the torch and not its light until
 //! they leave and re-enter the column.
 
-/// The block-light emission of one canonical block-state string, `0..=15`.
+use lodestone_data::block_states::StateId;
+
+/// The block-light emission of one canonical block state, `0..=15`.
 ///
-/// Straight through [`lodestone_data::light_props`], resolved by
-/// [`crate::chunk::resolve_palette_state_id`] so a state string this crate
-/// stores and one the encoder resolves cannot disagree about what a bare block
-/// name means.
+/// Straight through [`lodestone_data::light_props`] over the canonical state id.
 ///
 /// A state the census does not carry answers `0`. That direction is the safe one
 /// and it is the census's own convention: *every gap in the props census darkens
@@ -132,30 +131,30 @@
 /// here costs one missed relight; a wrong non-zero would fire a column resend on
 /// an ordinary placement.
 #[must_use]
-pub fn emission(state: &str) -> u8 {
-    lodestone_data::light_props::emission(crate::chunk::resolve_palette_state_id(state))
+pub fn emission(state: StateId) -> u8 {
+    lodestone_data::light_props::emission(state)
 }
 
-/// The block-light **dampening** of one canonical block-state string, `0..=15` —
+/// The block-light **dampening** of one canonical block state, `0..=15` —
 /// the real per-state light-dampening rule, raw, before the engine's own
 /// `max(1, ·)` floor.
 ///
-/// The other half of what a light computation reads off a state, resolved the
-/// same way [`emission`] is. Air and glass are `0`; water, ice and leaves are
+/// The other half of what a light computation reads off a state. Air and glass
+/// are `0`; water, ice and leaves are
 /// `1`; a full solid is `15`. A state the census does not carry answers `0`,
 /// which is the transparent direction — see [`emission`] for why every gap in
 /// this census darkens or occludes rather than brightening.
 #[must_use]
-pub fn dampening(state: &str) -> u8 {
-    lodestone_data::light_props::dampening(crate::chunk::resolve_palette_state_id(state))
+pub fn dampening(state: StateId) -> u8 {
+    lodestone_data::light_props::dampening(state)
 }
 
 /// `true` iff replacing `old` with `new` changes the light the cell **emits or
 /// occludes** — the gate on the relight described in this module's own doc
 /// comment.
 ///
-/// Compared on the **values**, not on the state strings: `minecraft:torch` and
-/// `minecraft:wall_torch[facing=north]` both emit 14 and dampen 0, so
+/// Compared on the **values**, not on state identity: a torch and a wall torch
+/// both emit 14 and dampen 0, so
 /// re-orienting a torch is not a relight, while lighting a furnace
 /// (`lit=false` → `lit=true`, `0` → `13`) is. That is also why this cannot be
 /// `emission(new) > 0`: **removing** a light source has to relight too, and a
@@ -189,7 +188,7 @@ pub fn dampening(state: &str) -> u8 {
 /// A state whose *only* change is decorative — `axis`, `facing`, `waterlogged`
 /// on a full solid — still costs nothing, because both quantities compare equal.
 #[must_use]
-pub fn should_relight(old: &str, new: &str) -> bool {
+pub fn should_relight(old: StateId, new: StateId) -> bool {
     emission(old) != emission(new) || dampening(old) != dampening(new)
 }
 
@@ -197,16 +196,20 @@ pub fn should_relight(old: &str, new: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn state(value: &str) -> StateId {
+        StateId::from_state_str(value).expect("test state must be canonical")
+    }
+
     /// The census values this module's gate depends on, predicted from
     /// `lodestone-data/tests/light_props.rs`'s own committed table rather than
     /// from anything here. A change to the census that silently zeroed these
     /// would disable relighting entirely, and nothing else would notice.
     #[test]
     fn the_emissive_blocks_this_gate_exists_for_really_emit() {
-        assert_eq!(emission("minecraft:torch"), 14, "a torch emits 14, not 15");
-        assert_eq!(emission("minecraft:glowstone"), 15);
-        assert_eq!(emission("minecraft:air"), 0);
-        assert_eq!(emission("minecraft:stone"), 0);
+        assert_eq!(emission(state("minecraft:torch")), 14, "a torch emits 14, not 15");
+        assert_eq!(emission(state("minecraft:glowstone")), 15);
+        assert_eq!(emission(state("minecraft:air")), 0);
+        assert_eq!(emission(state("minecraft:stone")), 0);
     }
 
     /// The occlusion half of the census, predicted the same way — from
@@ -219,12 +222,12 @@ mod tests {
     /// water-for-leaves as none, and both answers would be wrong.
     #[test]
     fn the_occluding_blocks_this_gate_exists_for_really_dampen() {
-        assert_eq!(dampening("minecraft:air"), 0, "air occludes nothing");
-        assert_eq!(dampening("minecraft:glass"), 0, "glass casts no shadow");
-        assert_eq!(dampening("minecraft:dirt"), 15, "a full solid occludes fully");
-        assert_eq!(dampening("minecraft:oak_log"), 15);
-        assert_eq!(dampening("minecraft:water"), 1);
-        assert_eq!(dampening("minecraft:oak_leaves"), 1);
+        assert_eq!(dampening(state("minecraft:air")), 0, "air occludes nothing");
+        assert_eq!(dampening(state("minecraft:glass")), 0, "glass casts no shadow");
+        assert_eq!(dampening(state("minecraft:dirt")), 15, "a full solid occludes fully");
+        assert_eq!(dampening(state("minecraft:oak_log")), 15);
+        assert_eq!(dampening(state("minecraft:water")), 1);
+        assert_eq!(dampening(state("minecraft:oak_leaves")), 1);
     }
 
     /// Both directions of an emissive edit fire, and so do both directions of an
@@ -240,61 +243,60 @@ mod tests {
     #[test]
     fn relight_fires_on_any_edit_that_moves_emission_or_occlusion() {
         assert!(
-            should_relight("minecraft:air", "minecraft:torch"),
+            should_relight(state("minecraft:air"), state("minecraft:torch")),
             "placing a torch must relight"
         );
         assert!(
-            should_relight("minecraft:torch", "minecraft:air"),
+            should_relight(state("minecraft:torch"), state("minecraft:air")),
             "breaking a torch must relight — a `emission(new) > 0` gate would miss this"
         );
         assert!(
-            should_relight("minecraft:oak_log[axis=y]", "minecraft:air"),
+            should_relight(state("minecraft:oak_log[axis=y]"), state("minecraft:air")),
             "breaking a tree trunk must relight: sky now reaches the cell"
         );
         assert!(
-            should_relight("minecraft:dirt", "minecraft:air"),
+            should_relight(state("minecraft:dirt"), state("minecraft:air")),
             "breaking the dirt under it must relight for the same reason"
         );
         assert!(
-            should_relight("minecraft:air", "minecraft:stone"),
+            should_relight(state("minecraft:air"), state("minecraft:stone")),
             "and placing a solid must darken what is under it"
         );
     }
 
     /// The other side of the trade, and the reason the predicate compares two
-    /// *values* rather than asking "did the state string change": an edit that
+    /// *values* rather than asking whether state identity changed: an edit that
     /// moves neither quantity must still cost nothing, or every rotation and
     /// every cosmetic swap pays for a flood and a packet.
     ///
-    /// Each pair here is chosen so the naive `old != new` string comparison would
-    /// fire and this one must not.
+    /// Each pair here changes identity without changing either light property.
     #[test]
     fn a_decorative_edit_is_not_a_relight() {
         for (old, new) in [
-            ("minecraft:oak_log[axis=y]", "minecraft:oak_log[axis=x]"),
-            ("minecraft:stone", "minecraft:dirt"),
-            ("minecraft:torch", "minecraft:wall_torch[facing=north]"),
+            (state("minecraft:oak_log[axis=y]"), state("minecraft:oak_log[axis=x]")),
+            (state("minecraft:stone"), state("minecraft:dirt")),
+            (state("minecraft:torch"), state("minecraft:wall_torch[facing=north]")),
         ] {
             assert!(
                 !should_relight(old, new),
-                "{old} -> {new} moves neither emission nor dampening, so it must not relight"
+                "decorative state changes must not relight"
             );
         }
     }
 
     /// A redstone torch's `lit` property really moves the emission, so a state
     /// the redstone model flips is a relight. This is the one family where the
-    /// *same block name* has two different emissions, which is why the gate
-    /// compares resolved values instead of names.
+    /// same block has two different emissions, which is why the gate compares
+    /// resolved values instead of block identity.
     #[test]
     fn lit_and_unlit_states_of_one_block_are_a_relight() {
-        let lit = emission("minecraft:redstone_torch[lit=true]");
-        let unlit = emission("minecraft:redstone_torch[lit=false]");
+        let lit = emission(state("minecraft:redstone_torch[lit=true]"));
+        let unlit = emission(state("minecraft:redstone_torch[lit=false]"));
         assert_eq!(lit, 7, "lit redstone torch");
         assert_eq!(unlit, 0, "unlit redstone torch emits nothing");
         assert!(should_relight(
-            "minecraft:redstone_torch[lit=false]",
-            "minecraft:redstone_torch[lit=true]"
+            state("minecraft:redstone_torch[lit=false]"),
+            state("minecraft:redstone_torch[lit=true]")
         ));
     }
 }

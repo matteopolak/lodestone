@@ -421,6 +421,12 @@ pub struct Snapshot {
     pub structure_context_replaceable_block_at: u64,
     /// Structure-placement calls made by `block_kind_at`.
     pub structure_context_kind_block_at: u64,
+    /// Structure-reference products computed after a store miss.
+    pub structure_reference_computations: u64,
+    /// Random-spread placement cells probed while enumerating origin candidates.
+    pub structure_candidate_cell_probes: u64,
+    /// Raw ring reach lists built for a registry.
+    pub structure_ring_reach_builds: u64,
 }
 
 impl Default for Snapshot {
@@ -480,6 +486,9 @@ impl Default for Snapshot {
             structure_context_block_at: 0,
             structure_context_replaceable_block_at: 0,
             structure_context_kind_block_at: 0,
+            structure_reference_computations: 0,
+            structure_candidate_cell_probes: 0,
+            structure_ring_reach_builds: 0,
         }
     }
 }
@@ -583,6 +592,9 @@ mod imp {
         structure_context_block_at: AtomicU64,
         structure_context_replaceable_block_at: AtomicU64,
         structure_context_kind_block_at: AtomicU64,
+        structure_reference_computations: AtomicU64,
+        structure_candidate_cell_probes: AtomicU64,
+        structure_ring_reach_builds: AtomicU64,
     }
 
     static C: Counters = Counters {
@@ -638,6 +650,9 @@ mod imp {
         structure_context_block_at: AtomicU64::new(0),
         structure_context_replaceable_block_at: AtomicU64::new(0),
         structure_context_kind_block_at: AtomicU64::new(0),
+        structure_reference_computations: AtomicU64::new(0),
+        structure_candidate_cell_probes: AtomicU64::new(0),
+        structure_ring_reach_builds: AtomicU64::new(0),
     };
 
     thread_local! {
@@ -938,6 +953,21 @@ mod imp {
         bump_structure_context_block_at();
     }
 
+    #[inline(always)]
+    pub fn bump_structure_reference_computation() {
+        bump(&C.structure_reference_computations);
+    }
+
+    #[inline(always)]
+    pub fn bump_structure_candidate_cell_probe() {
+        bump(&C.structure_candidate_cell_probes);
+    }
+
+    #[inline(always)]
+    pub fn bump_structure_ring_reach_build() {
+        bump(&C.structure_ring_reach_builds);
+    }
+
     /// Enters `stage` on this thread; the previous tag is restored on drop.
     #[derive(Debug)]
     pub struct StageGuard(Stage);
@@ -1039,6 +1069,9 @@ mod imp {
         C.structure_context_block_at.store(0, Relaxed);
         C.structure_context_replaceable_block_at.store(0, Relaxed);
         C.structure_context_kind_block_at.store(0, Relaxed);
+        C.structure_reference_computations.store(0, Relaxed);
+        C.structure_candidate_cell_probes.store(0, Relaxed);
+        C.structure_ring_reach_builds.store(0, Relaxed);
     }
 
     pub fn snapshot() -> Snapshot {
@@ -1099,6 +1132,9 @@ mod imp {
             structure_context_block_at: C.structure_context_block_at.load(Relaxed),
             structure_context_replaceable_block_at: C.structure_context_replaceable_block_at.load(Relaxed),
             structure_context_kind_block_at: C.structure_context_kind_block_at.load(Relaxed),
+            structure_reference_computations: C.structure_reference_computations.load(Relaxed),
+            structure_candidate_cell_probes: C.structure_candidate_cell_probes.load(Relaxed),
+            structure_ring_reach_builds: C.structure_ring_reach_builds.load(Relaxed),
         }
     }
 }
@@ -1198,6 +1234,12 @@ mod imp {
     pub fn bump_structure_context_replaceable_block_at() {}
     #[inline(always)]
     pub fn bump_structure_context_kind_block_at() {}
+    #[inline(always)]
+    pub fn bump_structure_reference_computation() {}
+    #[inline(always)]
+    pub fn bump_structure_candidate_cell_probe() {}
+    #[inline(always)]
+    pub fn bump_structure_ring_reach_build() {}
 
     /// Zero-sized in the default build: `StageGuard::enter` compiles to nothing.
     #[derive(Debug)]
@@ -1223,7 +1265,8 @@ pub use imp::{
     StageGuard, bump_biome_search, bump_block_at, bump_cache_compute,
     bump_cache_eviction, bump_cache_lookup, bump_cell_fill, bump_corner_eval,
     bump_corner_lookup, bump_density_eval,
-    bump_density_point_compute, bump_noise_active_visits, bump_noise_corner_batch,
+    bump_density_point_compute,
+    bump_noise_active_visits, bump_noise_corner_batch,
     bump_noise_skipped_visits, bump_palette_intern_hit,
     bump_palette_intern_new,
     bump_full_column_conversion, bump_full_column_scan, bump_logical_read, bump_logical_write,
@@ -1235,6 +1278,8 @@ pub use imp::{
     bump_state_name_lookup, bump_stitch_cells, bump_string_allocs, bump_structure_aquifer,
     bump_structure_context_block_at, bump_structure_context_kind_block_at,
     bump_structure_context_replaceable_block_at, bump_structure_height_probe, bump_structure_start,
+    bump_structure_reference_computation, bump_structure_candidate_cell_probe,
+    bump_structure_ring_reach_build,
     current_stage, reset, snapshot,
 };
 
@@ -1274,6 +1319,9 @@ mod tests {
         bump_block_at();
         bump_structure_context_replaceable_block_at();
         bump_structure_context_kind_block_at();
+        bump_structure_reference_computation();
+        bump_structure_candidate_cell_probe();
+        bump_structure_ring_reach_build();
         bump_rng_draw();
         bump_preliminary_surface_request(-4, 8);
         bump_preliminary_surface_compute();
@@ -1311,6 +1359,9 @@ mod tests {
         bump_block_at();
         bump_structure_context_replaceable_block_at();
         bump_structure_context_kind_block_at();
+        bump_structure_reference_computation();
+        bump_structure_candidate_cell_probe();
+        bump_structure_ring_reach_build();
         bump_rng_draw();
         bump_preliminary_surface_request(-4, 8);
         bump_preliminary_surface_compute();
@@ -1349,6 +1400,9 @@ mod tests {
         assert_eq!(s.structure_context_block_at, 2);
         assert_eq!(s.structure_context_replaceable_block_at, 1);
         assert_eq!(s.structure_context_kind_block_at, 1);
+        assert_eq!(s.structure_reference_computations, 1);
+        assert_eq!(s.structure_candidate_cell_probes, 1);
+        assert_eq!(s.structure_ring_reach_builds, 1);
         assert_eq!(s.preliminary_surface_requests, 1);
         assert_eq!(s.preliminary_surface_unique, 1);
         assert_eq!(s.preliminary_surface_computations, 1);

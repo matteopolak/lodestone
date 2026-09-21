@@ -17,6 +17,7 @@
 
 use std::str::FromStr;
 
+use lodestone_data::block_states::StateId;
 use lodestone_entity::pathfinding::MobShape;
 use lodestone_model::{ResourceKey, Vec3};
 use lodestone_server::{
@@ -120,9 +121,10 @@ fn middle_band_mob_despawns_over_time_while_immune_mob_is_immortal() {
     // accidental "distance after a 64-block fall" test. Grounding them
     // restores the fixed-position precondition every assertion here assumes.
     let mut world = ChunkWorld::new(-64, 128);
+    let stone = StateId::from_state_str("minecraft:stone").expect("stone fixture state");
     for x in -5..=135 {
         for z in -2..=2 {
-            world.set_block(x, -1, z, "minecraft:stone");
+            world.set_block_id(x, -1, z, stone);
         }
     }
     let mut sim = MobSim::new(&world);

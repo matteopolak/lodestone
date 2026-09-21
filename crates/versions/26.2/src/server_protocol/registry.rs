@@ -4,6 +4,7 @@
 //! re-exported helpers preserve the existing public API and wire behaviour.
 
 use super::*;
+use lodestone_core::Writer;
 
 // Configuration-phase `registry_data` payloads
 // ---------------------------------------------------------------------------

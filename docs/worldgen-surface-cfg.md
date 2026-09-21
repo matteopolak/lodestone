@@ -19,6 +19,15 @@ path is acyclic and visits each condition node at most once for a block, so a
 Y-cache lookup cannot hit there. X/Z column memoization and all top-material
 cache behavior remain enabled.
 
+`biome` conditions compile generated built-in names into a two-word canonical
+biome bitset. Names outside that registry are retained in an ordered fallback
+vector for extension registries, so built-ins avoid repeated string-set scans
+without changing extension matching; each position resolves its supplied name
+to the typed built-in id at most once. Packed stone spans assert the default
+state invariant in debug builds once per span; release scans therefore do not
+perform a second state read for every block. Both optimizations leave the
+column, descending-Y, short-circuit, and random-draw order unchanged.
+
 ## How to change it
 
 Extend `RuleParser` and both evaluators together when adding a rule or

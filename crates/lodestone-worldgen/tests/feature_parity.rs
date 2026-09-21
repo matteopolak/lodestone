@@ -44,6 +44,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use lodestone_data::block_states::StateId;
 use lodestone_worldgen::dense_grid::DenseBlockGrid;
 use lodestone_worldgen::feature::region_view::RegionView;
 use lodestone_worldgen::feature::{
@@ -66,6 +67,37 @@ fn data_dir() -> PathBuf {
     support_dir().join("worldgen_data")
 }
 
+fn grid_from_named_fixture(
+    min_x: i32,
+    min_y: i32,
+    min_z: i32,
+    size_x: i32,
+    size_y: i32,
+    size_z: i32,
+    map: &HashMap<(i32, i32, i32), String>,
+) -> DenseBlockGrid {
+    let air = StateId::from_state_str("minecraft:air").expect("air state");
+    let states: HashMap<_, _> = map
+        .iter()
+        .map(|(&(x, y, z), state)| {
+            (
+                (x, y, z),
+                StateId::from_state_str(state).expect("fixture state is canonical"),
+            )
+        })
+        .collect();
+    DenseBlockGrid::from_ordered_state_fn(
+        min_x,
+        min_y,
+        min_z,
+        size_x,
+        size_y,
+        size_z,
+        air,
+        |x, y, z| states.get(&(x, y, z)).copied().unwrap_or(air),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Fixture parsing
 // ---------------------------------------------------------------------------
@@ -75,6 +107,7 @@ struct Fixture {
     /// (`inrun.*`, expanded), keyed by **centre-relative** local coordinates
     /// in `REGION_MIN..REGION_MAX` — not just the centre 16x16.
     input: HashMap<(i32, i32, i32), String>,
+    input_ids: HashMap<(i32, i32, i32), StateId>,
     /// `OCEAN_FLOOR_WG` heightmap over the same 3x3 region, same key space.
     ocean_floor_wg: HashMap<(i32, i32), i32>,
     /// Every block that changed inside the CENTRE 16x16 only (`ore.*`).
@@ -101,6 +134,7 @@ fn parse_xyz(s: &str) -> (i32, i32, i32) {
 fn parse_fixture(text: &str) -> Fixture {
     let mut f = Fixture {
         input: HashMap::new(),
+        input_ids: HashMap::new(),
         ocean_floor_wg: HashMap::new(),
         ore: HashMap::new(),
         oredef: Vec::new(),
@@ -131,6 +165,10 @@ fn parse_fixture(text: &str) -> Fixture {
             let state = tok.next().expect("run state").to_string();
             for dy in 0..count {
                 f.input.insert((x, y_start + dy, z), state.clone());
+                f.input_ids.insert(
+                    (x, y_start + dy, z),
+                    StateId::from_state_str(&state).expect("fixture state is canonical"),
+                );
             }
         } else if let Some(coords) = tag.strip_prefix("ore.") {
             f.ore.insert(parse_xyz(coords), rest.to_string());
@@ -277,13 +315,10 @@ fn run_fixture(
     // still be cross-checked against the oracle's `meta.decorationSeed`
     // without a second, separate derivation.
     let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
-    // `RegionGrid` is a `DenseBlockGrid` — build one from this
-    // fixture's own sparse `HashMap` via the test-adapter seam
-    // `crate::dense_grid` documents for exactly this purpose (production
-    // code never goes through `HashMap` at all; only this fixture-driven
-    // test does).
+    // The fixture remains name-keyed at its file boundary, then crosses into
+    // the same typed grid representation used by production.
     let region_size = REGION_MAX - REGION_MIN;
-    let grid = DenseBlockGrid::from_hashmap(
+    let grid = grid_from_named_fixture(
         REGION_MIN, MIN_Y, REGION_MIN, region_size, HEIGHT, region_size, &f.input,
     );
     // Unit 7: the driver now reads and writes through a `RegionView` instead of
@@ -320,7 +355,7 @@ fn run_fixture(
     // output too, just not what this fixture captures). A fixed-order loop
     // over exactly the centre 16x16xheight range, not an iteration over the
     // whole region — `DenseBlockGrid` exposes no `IntoIterator`, only
-    // positional `get`/`set`, so this is the natural (and only) way to walk
+    // positional id accessors, so this is the natural (and only) way to walk
     // it; it also means every column-by-column read is in the same
     // deterministic order every other fixed-loop grid walk in this crate
     // already uses (see `crate::overworld`'s "Performance" module-doc
@@ -329,9 +364,10 @@ fn run_fixture(
     for y in MIN_Y..MIN_Y + HEIGHT {
         for lz in 0..16i32 {
             for lx in 0..16i32 {
-                let block = working.get(lx, y, lz);
-                if f.input.get(&(lx, y, lz)).map(String::as_str) != Some(block) {
-                    changes.insert((lx, y, lz), block.to_string());
+                let block = working.get_id(lx, y, lz);
+                let input = f.input_ids.get(&(lx, y, lz)).copied().unwrap_or(StateId::AIR);
+                if block != input {
+                    changes.insert((lx, y, lz), block.canonical_state());
                 }
             }
         }

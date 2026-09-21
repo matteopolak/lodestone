@@ -49,6 +49,7 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use lodestone_data::block_states::StateId;
 use lodestone_worldgen::dense_grid::DenseBlockGrid;
 use lodestone_worldgen::feature::region_view::RegionView;
 use lodestone_worldgen::feature::{
@@ -289,12 +290,31 @@ struct Scene {
     tag_map: HashMap<String, HashSet<String>>,
 }
 
+fn grid_from_named_fixture(
+    min_x: i32,
+    min_y: i32,
+    min_z: i32,
+    size_x: i32,
+    size_y: i32,
+    size_z: i32,
+    map: &HashMap<(i32, i32, i32), String>,
+) -> DenseBlockGrid {
+    let mut grid = DenseBlockGrid::with_default(
+        min_x, min_y, min_z, size_x, size_y, size_z, StateId::AIR,
+    );
+    for (&(x, y, z), state) in map {
+        let state = StateId::from_state_str(state).expect("fixture state is in the state table");
+        grid.set_id(x, y, z, state);
+    }
+    grid
+}
+
 fn scene() -> Scene {
     let text = std::fs::read_to_string(support_dir().join(FIXTURE))
         .unwrap_or_else(|e| panic!("reading {FIXTURE}: {e}"));
     let fixture = parse_fixture(&text);
     let region_size = REGION_MAX - REGION_MIN;
-    let grid = DenseBlockGrid::from_hashmap(
+    let grid = grid_from_named_fixture(
         REGION_MIN,
         MIN_Y,
         REGION_MIN,

@@ -57,6 +57,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use lodestone_data::block::Block;
 use lodestone_worldgen::compose::build_biome_carvers;
 use lodestone_worldgen::density::{NoiseParams, Resolver};
 use lodestone_worldgen::nether::NetherGenerator;
@@ -641,23 +642,24 @@ fn nether_features_reach_production_columns() {
         for y in with.min_y()..with.min_y() + with.height() {
             for lz in 0..16 {
                 for lx in 0..16 {
-                    if with.block_state(lx, y, lz) != without.block_state(lx, y, lz) {
+                    let with_state = with.block_state_id(lx, y, lz);
+                    let without_state = without.block_state_id(lx, y, lz);
+                    if with_state != without_state {
                         changed += 1;
-                        let state = with.block_state(lx, y, lz);
-                        first.get_or_insert((cx, cz, lx, y, lz, state.to_string()));
+                        first.get_or_insert((cx, cz, lx, y, lz, with_state));
                         if matches!(
-                            state,
-                            "minecraft:nether_quartz_ore"
-                                | "minecraft:nether_gold_ore"
-                                | "minecraft:ancient_debris"
-                                | "minecraft:magma_block"
-                                | "minecraft:gravel"
-                                | "minecraft:blackstone"
+                            with_state.block(),
+                            Block::NetherQuartzOre
+                                | Block::NetherGoldOre
+                                | Block::AncientDebris
+                                | Block::MagmaBlock
+                                | Block::Gravel
+                                | Block::Blackstone
                         ) {
                             ore_changed += 1;
                         }
                     }
-                    if with.block_state(lx, y, lz) != without_late.block_state(lx, y, lz) {
+                    if with_state != without_late.block_state_id(lx, y, lz) {
                         late_decoration_changed += 1;
                     }
                 }
@@ -675,7 +677,7 @@ fn nether_features_reach_production_columns() {
         "non-ore step-7/step-9 entries did not change a production column"
     );
     assert!(
-        state != "minecraft:bedrock",
+        state.block() != Block::Bedrock,
         "feature-stage control found a bedrock write at chunk ({cx},{cz}) local ({lx},{y},{lz})"
     );
 }
@@ -705,7 +707,7 @@ fn generator_bedrock(
             *cache = Some(((cx, cz), generator.column(cx, cz)));
         }
         let (_, column) = cache.as_ref().unwrap();
-        column.block_state(lx, y, lz) == "minecraft:bedrock"
+        column.block_state_id(lx, y, lz).block() == Block::Bedrock
     })
 }
 
@@ -740,7 +742,7 @@ fn a_nether_column_is_real_terrain_not_a_uniform_field() {
     for lz in 0..16 {
         for lx in 0..16 {
             for y in min_y..min_y + height {
-                if column.block_state(lx, y, lz).starts_with("minecraft:lava") {
+                if column.block_state_id(lx, y, lz).block() == Block::Lava {
                     lava += 1;
                     if y >= sea_level {
                         above_sea_lava += 1;
@@ -758,10 +760,13 @@ fn a_nether_column_is_real_terrain_not_a_uniform_field() {
         "lava at or above sea_level {sea_level} means the fluid picker's level is wrong"
     );
     // Bedrock shell, from the surface rules' two hardcoded vertical gradients.
-    assert_eq!(column.block_state(0, min_y, 0), "minecraft:bedrock");
     assert_eq!(
-        column.block_state(0, min_y + height - 1, 0),
-        "minecraft:bedrock"
+        column.block_state_id(0, min_y, 0),
+        Block::Bedrock.default_state()
+    );
+    assert_eq!(
+        column.block_state_id(0, min_y + height - 1, 0),
+        Block::Bedrock.default_state()
     );
 }
 

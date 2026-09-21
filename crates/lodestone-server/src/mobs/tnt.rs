@@ -84,7 +84,7 @@ use uuid::Uuid;
 
 use crate::mob_spawn::SpawnRng;
 
-use super::{Detonation, MobSim, TrackedTnt, block_state_id};
+use super::{Detonation, MobSim, TrackedTnt};
 
 /// The tick-start chunk owner of one primed explosive.
 ///
@@ -211,8 +211,8 @@ pub fn random_short_fuse(fuse: i32, rng: &mut SpawnRng) -> i32 {
 /// detection and `crate::random_tick`'s redstone-signal arm both key off this
 /// rather than duplicating the base-name split.
 #[must_use]
-pub fn is_tnt_block(state: &str) -> bool {
-    state.split_once('[').map_or(state, |(base, _)| base) == "minecraft:tnt"
+pub fn is_tnt_block(state: lodestone_data::block_states::StateId) -> bool {
+    state.block().name() == "minecraft:tnt"
 }
 
 /// The block-tick key [`crate::random_tick`]'s redstone-signal arm schedules
@@ -324,7 +324,10 @@ impl<'w> MobSim<'w> {
     /// [`MobSim::take_detonations`]'s existing driver-side drain already turns
     /// into destroyed blocks, drops and an `EXPLODE` packet — see this
     /// module's own doc comment for why that needs no TNT-specific call site.
-    pub fn tick_tnt(&mut self, block_state: &(dyn Fn(i32, i32, i32) -> String + Sync)) {
+    pub fn tick_tnt(
+        &mut self,
+        block_state: &(dyn Fn(i32, i32, i32) -> lodestone_data::block_states::StateId + Sync),
+    ) {
         let batches = self.tick_tnt_owner_batches(block_state);
         self.apply_tnt_tick_owner_batches(batches);
     }
@@ -339,7 +342,7 @@ impl<'w> MobSim<'w> {
     /// ownership boundary explicit.
     pub(crate) fn tick_tnt_owner_batches(
         &mut self,
-        block_state: &(dyn Fn(i32, i32, i32) -> String + Sync),
+        block_state: &(dyn Fn(i32, i32, i32) -> lodestone_data::block_states::StateId + Sync),
     ) -> Vec<TntTickOwnerBatch> {
         self.tnt_owner_plan = self
             .tnt_owner_plan
@@ -361,7 +364,7 @@ impl<'w> MobSim<'w> {
 
     fn tick_tnt_owner_batches_with_workers(
         &self,
-        block_state: &(dyn Fn(i32, i32, i32) -> String + Sync),
+        block_state: &(dyn Fn(i32, i32, i32) -> lodestone_data::block_states::StateId + Sync),
         worker_count: usize,
     ) -> Vec<TntTickOwnerBatch> {
         let mut ids: Vec<i32> = self.tnt.keys().copied().collect();
@@ -556,15 +559,12 @@ fn ticked_tnt(
 /// TNT does not float; see this module's doc for what fluid interaction is
 /// and is not modelled).
 struct TntCollision<'a> {
-    block_state: &'a dyn Fn(i32, i32, i32) -> String,
+    block_state: &'a dyn Fn(i32, i32, i32) -> lodestone_data::block_states::StateId,
 }
 
 impl CollisionView for TntCollision<'_> {
     fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<Aabb>) {
-        let name = (self.block_state)(x, y, z);
-        let Some(state) = block_state_id(&name) else {
-            return;
-        };
+        let state = (self.block_state)(x, y, z);
         let shape = lodestone_data::collision_shapes::collision_boxes(state);
         let (bx, by, bz) = (f64::from(x), f64::from(y), f64::from(z));
         for b in shape {
@@ -587,12 +587,12 @@ mod tests {
 
     /// A flat stone floor at `y = 60`, air above; matches the falling-block and
     /// vehicle test rigs' shape.
-    fn floor() -> impl Fn(i32, i32, i32) -> String {
+    fn floor() -> impl Fn(i32, i32, i32) -> lodestone_data::block_states::StateId {
         |_x, y, _z| {
             if y <= 60 {
-                "minecraft:stone".to_owned()
+                lodestone_data::block::Block::Stone.default_state()
             } else {
-                "minecraft:air".to_owned()
+                lodestone_data::block_states::StateId::AIR
             }
         }
     }

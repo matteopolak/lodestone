@@ -8,6 +8,7 @@
 use crate::biome::{
     BiomeSearchCursor, BiomeTable, CachedBiomeAnswer, ClimateSampler, PreparedClimateGrid,
 };
+use lodestone_data::biomes::BiomeRef;
 use sha2::{Digest as _, Sha256};
 use std::sync::Arc;
 
@@ -54,7 +55,7 @@ pub(super) struct SurfaceBiomeContext<'a> {
     prepared: Option<Arc<PreparedClimateGrid>>,
     table: Option<&'a BiomeTable>,
     fallback: &'a str,
-    zoom_seed: i64,
+    fiddle_lattice: ZoomFiddleLattice,
     cursor: Option<BiomeSearchCursor>,
     last_quart: Option<(usize, u32)>,
 }
@@ -102,40 +103,8 @@ impl<'a> SurfaceBiomeContext<'a> {
     }
 
     pub(super) fn at_block(&mut self, x: i32, y: i32, z: i32) -> &'a str {
-        let shifted_x = x - 2;
-        let shifted_y = y - 2;
-        let shifted_z = z - 2;
-        let parent_x = shifted_x >> 2;
-        let parent_y = shifted_y >> 2;
-        let parent_z = shifted_z >> 2;
-        let fract_x = f64::from(shifted_x.rem_euclid(4)) / 4.0;
-        let fract_y = f64::from(shifted_y.rem_euclid(4)) / 4.0;
-        let fract_z = f64::from(shifted_z.rem_euclid(4)) / 4.0;
-
-        let mut selected = 0;
-        let mut best = f64::INFINITY;
-        for corner in 0..8 {
-            let x_low = corner & 4 == 0;
-            let y_low = corner & 2 == 0;
-            let z_low = corner & 1 == 0;
-            let qx = if x_low { parent_x } else { parent_x + 1 };
-            let qy = if y_low { parent_y } else { parent_y + 1 };
-            let qz = if z_low { parent_z } else { parent_z + 1 };
-            let dx = if x_low { fract_x } else { fract_x - 1.0 };
-            let dy = if y_low { fract_y } else { fract_y - 1.0 };
-            let dz = if z_low { fract_z } else { fract_z - 1.0 };
-            let distance = fiddled_distance(self.zoom_seed, qx, qy, qz, dx, dy, dz);
-            if best > distance {
-                selected = corner;
-                best = distance;
-            }
-        }
-
-        self.quart(
-            if selected & 4 == 0 { parent_x } else { parent_x + 1 },
-            if selected & 2 == 0 { parent_y } else { parent_y + 1 },
-            if selected & 1 == 0 { parent_z } else { parent_z + 1 },
-        )
+        let (qx, qy, qz) = self.fiddle_lattice.selected_quart_at(x, y, z);
+        self.quart(qx, qy, qz)
     }
 
     /// Performs the reference surface system's initial per-column lookup. The
@@ -150,6 +119,142 @@ impl<'a> SurfaceBiomeContext<'a> {
     }
 }
 
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ZoomFiddleStats {
+    pub(super) vertex_hits: u64,
+    pub(super) vertex_computes: u64,
+}
+
+/// Dense, request-scoped cache of the three pure offsets attached to each
+/// quart vertex. It never stores climate targets or biome rows.
+#[derive(Debug)]
+pub(super) struct ZoomFiddleLattice {
+    min_qx: i32,
+    min_qy: i32,
+    min_qz: i32,
+    width: usize,
+    height: usize,
+    depth: usize,
+    seed: i64,
+    vertices: Vec<Option<[f64; 3]>>,
+    #[cfg(test)]
+    vertex_hits: u64,
+    #[cfg(test)]
+    vertex_computes: u64,
+}
+
+impl ZoomFiddleLattice {
+    pub(super) fn for_block_bounds(
+        seed: i64,
+        min_x: i32,
+        max_x: i32,
+        min_y: i32,
+        max_y: i32,
+        min_z: i32,
+        max_z: i32,
+    ) -> Self {
+        assert!(min_x <= max_x && min_y <= max_y && min_z <= max_z);
+        let min_qx = (min_x - 2).div_euclid(4);
+        let min_qy = (min_y - 2).div_euclid(4);
+        let min_qz = (min_z - 2).div_euclid(4);
+        let max_qx = (max_x - 2).div_euclid(4) + 1;
+        let max_qy = (max_y - 2).div_euclid(4) + 1;
+        let max_qz = (max_z - 2).div_euclid(4) + 1;
+        let width = usize::try_from(max_qx - min_qx + 1).expect("zoom fiddle x footprint");
+        let height = usize::try_from(max_qy - min_qy + 1).expect("zoom fiddle y footprint");
+        let depth = usize::try_from(max_qz - min_qz + 1).expect("zoom fiddle z footprint");
+        let len = width
+            .checked_mul(height)
+            .and_then(|n| n.checked_mul(depth))
+            .expect("zoom fiddle footprint is too large");
+        Self {
+            min_qx,
+            min_qy,
+            min_qz,
+            width,
+            height,
+            depth,
+            seed,
+            vertices: vec![None; len],
+            #[cfg(test)]
+            vertex_hits: 0,
+            #[cfg(test)]
+            vertex_computes: 0,
+        }
+    }
+
+    pub(super) fn for_request_region(
+        seed: i64,
+        min_cx: i32,
+        max_cx: i32,
+        min_cz: i32,
+        max_cz: i32,
+        min_y: i32,
+        height: i32,
+    ) -> Self {
+        assert!(height > 0);
+        Self::for_block_bounds(
+            seed,
+            min_cx * 16,
+            max_cx * 16 + 15,
+            min_y,
+            min_y + height - 1,
+            min_cz * 16,
+            max_cz * 16 + 15,
+        )
+    }
+
+    fn index(&self, qx: i32, qy: i32, qz: i32) -> Option<usize> {
+        let x = usize::try_from(qx - self.min_qx).ok()?;
+        let y = usize::try_from(qy - self.min_qy).ok()?;
+        let z = usize::try_from(qz - self.min_qz).ok()?;
+        (x < self.width && y < self.height && z < self.depth)
+            .then_some((y * self.depth + z) * self.width + x)
+    }
+
+    fn vertex(&mut self, qx: i32, qy: i32, qz: i32) -> [f64; 3] {
+        let Some(index) = self.index(qx, qy, qz) else {
+            return zoom_fiddle_vertex(self.seed, qx, qy, qz);
+        };
+        if let Some(value) = self.vertices[index] {
+            #[cfg(test)]
+            {
+                self.vertex_hits += 1;
+            }
+            return value;
+        }
+        let value = zoom_fiddle_vertex(self.seed, qx, qy, qz);
+        self.vertices[index] = Some(value);
+        #[cfg(test)]
+        {
+            self.vertex_computes += 1;
+        }
+        value
+    }
+
+    pub(super) fn selected_corner(&mut self, x: i32, y: i32, z: i32) -> u8 {
+        select_zoom_corner(x, y, z, |qx, qy, qz| self.vertex(qx, qy, qz))
+    }
+
+    pub(super) fn selected_quart_at(&mut self, x: i32, y: i32, z: i32) -> (i32, i32, i32) {
+        let corner = self.selected_corner(x, y, z);
+        (
+            selected_quart(x, corner, 4),
+            selected_quart(y, corner, 2),
+            selected_quart(z, corner, 1),
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn stats(&self) -> ZoomFiddleStats {
+        ZoomFiddleStats {
+            vertex_hits: self.vertex_hits,
+            vertex_computes: self.vertex_computes,
+        }
+    }
+}
+
 fn next_zoom_random(value: i64, addend: i64) -> i64 {
     value
         .wrapping_mul(value.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407))
@@ -161,7 +266,7 @@ fn zoom_fiddle(value: i64) -> f64 {
     (uniform - 0.5) * 0.9
 }
 
-fn fiddled_distance(seed: i64, x: i32, y: i32, z: i32, dx: f64, dy: f64, dz: f64) -> f64 {
+fn zoom_fiddle_vertex(seed: i64, x: i32, y: i32, z: i32) -> [f64; 3] {
     let mut value = seed;
     for coordinate in [x, y, z, x, y, z] {
         value = next_zoom_random(value, i64::from(coordinate));
@@ -171,35 +276,28 @@ fn fiddled_distance(seed: i64, x: i32, y: i32, z: i32, dx: f64, dy: f64, dz: f64
     let fy = zoom_fiddle(value);
     value = next_zoom_random(value, seed);
     let fz = zoom_fiddle(value);
-    let x = dx + fx;
-    let y = dy + fy;
-    let z = dz + fz;
-    x * x + y * y + z * z
+    [fx, fy, fz]
 }
 
-/// Resolves a block position through the same three-dimensional quart zoom
-/// used by the world biome accessor. The wire biome grid stores the climate
-/// answer at each quart corner, but a block lookup chooses one of the eight
-/// surrounding corners after applying the seed-derived positional fiddle.
-/// Keeping this here makes candidate biome predicates use the same category
-/// lookup as surface rules instead of silently reading only the containing
-/// quart cell.
-pub(crate) fn zoomed_biome<'a, F>(
-    zoom_seed: i64,
-    x: i32,
-    y: i32,
-    z: i32,
-    source_at: F,
-) -> Option<&'a str>
+fn selected_quart(block: i32, corner: u8, mask: u8) -> i32 {
+    let parent = (block - 2).div_euclid(4);
+    if corner & mask == 0 {
+        parent
+    } else {
+        parent + 1
+    }
+}
+
+fn select_zoom_corner<F>(x: i32, y: i32, z: i32, mut vertex: F) -> u8
 where
-    F: Fn(i32, i32) -> Option<&'a BiomeCells>,
+    F: FnMut(i32, i32, i32) -> [f64; 3],
 {
     let shifted_x = x - 2;
     let shifted_y = y - 2;
     let shifted_z = z - 2;
-    let parent_x = shifted_x >> 2;
-    let parent_y = shifted_y >> 2;
-    let parent_z = shifted_z >> 2;
+    let parent_x = shifted_x.div_euclid(4);
+    let parent_y = shifted_y.div_euclid(4);
+    let parent_z = shifted_z.div_euclid(4);
     let fract_x = f64::from(shifted_x.rem_euclid(4)) / 4.0;
     let fract_y = f64::from(shifted_y.rem_euclid(4)) / 4.0;
     let fract_z = f64::from(shifted_z.rem_euclid(4)) / 4.0;
@@ -216,16 +314,73 @@ where
         let dx = if x_low { fract_x } else { fract_x - 1.0 };
         let dy = if y_low { fract_y } else { fract_y - 1.0 };
         let dz = if z_low { fract_z } else { fract_z - 1.0 };
-        let distance = fiddled_distance(zoom_seed, qx, qy, qz, dx, dy, dz);
+        let [fx, fy, fz] = vertex(qx, qy, qz);
+        let x = dx + fx;
+        let y = dy + fy;
+        let z = dz + fz;
+        let distance = x * x + y * y + z * z;
         if best > distance {
             selected = corner;
             best = distance;
         }
     }
+    selected
+}
 
-    let qx = if selected & 4 == 0 { parent_x } else { parent_x + 1 };
-    let qy = if selected & 2 == 0 { parent_y } else { parent_y + 1 };
-    let qz = if selected & 1 == 0 { parent_z } else { parent_z + 1 };
+fn uncached_selected_corner(x: i32, y: i32, z: i32, seed: i64) -> u8 {
+    select_zoom_corner(x, y, z, |qx, qy, qz| {
+        zoom_fiddle_vertex(seed, qx, qy, qz)
+    })
+}
+
+/// Resolves a block position through the same three-dimensional quart zoom
+/// used by the world biome accessor. The wire biome grid stores the climate
+/// answer at each quart corner, but a block lookup chooses one of the eight
+/// surrounding corners after applying the seed-derived positional fiddle.
+/// Keeping this here makes candidate biome predicates use the same category
+/// lookup as surface rules instead of silently reading only the containing
+/// quart cell.
+pub(crate) fn zoomed_biome_ref<'a, F>(
+    zoom_seed: i64,
+    x: i32,
+    y: i32,
+    z: i32,
+    source_at: F,
+) -> Option<BiomeRef>
+where
+    F: Fn(i32, i32) -> Option<&'a BiomeCells>,
+{
+    let selected = uncached_selected_corner(x, y, z, zoom_seed);
+    zoomed_biome_ref_from_corner(selected, x, y, z, source_at)
+}
+
+pub(super) fn zoomed_biome_ref_with_lattice<'a, F>(
+    lattice: &mut ZoomFiddleLattice,
+    x: i32,
+    y: i32,
+    z: i32,
+    source_at: F,
+) -> Option<BiomeRef>
+where
+    F: Fn(i32, i32) -> Option<&'a BiomeCells>,
+{
+    let selected = lattice.selected_corner(x, y, z);
+    zoomed_biome_ref_from_corner(selected, x, y, z, source_at)
+}
+
+pub(super) fn zoomed_biome_ref_from_corner<'a, F>(
+    selected: u8,
+    x: i32,
+    y: i32,
+    z: i32,
+    source_at: F,
+) -> Option<BiomeRef>
+where
+    F: Fn(i32, i32) -> Option<&'a BiomeCells>,
+{
+    let qx = selected_quart(x, selected, 4);
+    let qy = selected_quart(y, selected, 2);
+    let qz = selected_quart(z, selected, 1);
     let block_x = qx * 4;
     let block_z = qz * 4;
     let cells = source_at(block_x.div_euclid(16), block_z.div_euclid(16))?;
@@ -235,7 +390,7 @@ where
     // Height ranges may choose candidates outside the generated window. Keep
     // the body in the stream and use the same edge-layer clamp as `at_block`;
     // a missing horizontal source remains the `None` case above.
-    Some(cells.at_quart(local_qx, local_qy.max(0) as usize, local_qz))
+    Some(cells.at_quart_ref(local_qx, local_qy.max(0) as usize, local_qz))
 }
 
 /// Resolves the same seed-fiddled quart corner for a vertically invariant
@@ -250,35 +405,9 @@ pub(crate) fn zoomed_biome_flat<T, F>(
 where
     F: Fn(i32, i32, usize, usize) -> Option<T>,
 {
-    let shifted_x = x - 2;
-    let shifted_y = y - 2;
-    let shifted_z = z - 2;
-    let parent_x = shifted_x >> 2;
-    let parent_y = shifted_y >> 2;
-    let parent_z = shifted_z >> 2;
-    let fract_x = f64::from(shifted_x.rem_euclid(4)) / 4.0;
-    let fract_y = f64::from(shifted_y.rem_euclid(4)) / 4.0;
-    let fract_z = f64::from(shifted_z.rem_euclid(4)) / 4.0;
-    let mut selected = 0;
-    let mut best = f64::INFINITY;
-    for corner in 0..8 {
-        let x_low = corner & 4 == 0;
-        let y_low = corner & 2 == 0;
-        let z_low = corner & 1 == 0;
-        let qx = if x_low { parent_x } else { parent_x + 1 };
-        let qy = if y_low { parent_y } else { parent_y + 1 };
-        let qz = if z_low { parent_z } else { parent_z + 1 };
-        let dx = if x_low { fract_x } else { fract_x - 1.0 };
-        let dy = if y_low { fract_y } else { fract_y - 1.0 };
-        let dz = if z_low { fract_z } else { fract_z - 1.0 };
-        let distance = fiddled_distance(zoom_seed, qx, qy, qz, dx, dy, dz);
-        if best > distance {
-            selected = corner;
-            best = distance;
-        }
-    }
-    let qx = if selected & 4 == 0 { parent_x } else { parent_x + 1 };
-    let qz = if selected & 1 == 0 { parent_z } else { parent_z + 1 };
+    let selected = uncached_selected_corner(x, y, z, zoom_seed);
+    let qx = selected_quart(x, selected, 4);
+    let qz = selected_quart(z, selected, 1);
     let block_x = qx * 4;
     let block_z = qz * 4;
     source_at(
@@ -356,7 +485,15 @@ impl OverworldGenerator {
             prepared,
             table: self.dynamic_biome.as_ref().map(|dynamic| &dynamic.table),
             fallback: &self.fallback_biome,
-            zoom_seed: zoom_seed(self.seed),
+            fiddle_lattice: ZoomFiddleLattice::for_block_bounds(
+                zoom_seed(self.seed),
+                base_x,
+                base_x + 15,
+                self.min_y,
+                self.min_y + self.height - 1,
+                base_z,
+                base_z + 15,
+            ),
             cursor,
             last_quart: None,
         }
@@ -621,10 +758,12 @@ impl OverworldGenerator {
 #[cfg(test)]
 mod tests {
     use super::{
-        BiomeCells, BiomeTable, SurfaceBiomeContext, zoom_seed, zoomed_biome,
+        BiomeCells, BiomeTable, SurfaceBiomeContext, ZoomFiddleLattice, ZoomFiddleStats,
+        uncached_selected_corner, zoom_seed, zoomed_biome_ref,
     };
     use crate::biome::{BiomeParameterPoint, ClimateSampler, Parameter};
     use crate::density::{Builder, NoiseParams, Resolver};
+    use lodestone_data::biomes::{BiomeRef, BuiltinBiome};
     use serde_json::Value;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -697,7 +836,9 @@ mod tests {
             prepared,
             table: Some(&table),
             fallback: "minecraft:plains",
-            zoom_seed: zoom_seed(42),
+            fiddle_lattice: ZoomFiddleLattice::for_block_bounds(
+                zoom_seed(42), 0, 15, -64, 319, 0, 15,
+            ),
             cursor: Some(table.search_cursor()),
             last_quart: None,
         };
@@ -775,8 +916,8 @@ mod tests {
             }
         });
         assert_eq!(cells.at_quart(3, 22, 1), "minecraft:dripstone_caves");
-        let got = zoomed_biome(zoom_seed(42), -1907, 24, -1914, |_, _| Some(&cells));
-        assert_eq!(got, Some("minecraft:badlands"));
+        let got = zoomed_biome_ref(zoom_seed(42), -1907, 24, -1914, |_, _| Some(&cells));
+        assert_eq!(got, Some(BiomeRef::builtin(BuiltinBiome::Badlands)));
     }
 
     #[test]
@@ -788,26 +929,68 @@ mod tests {
                 "minecraft:badlands".to_string()
             }
         });
-        let bottom = cells.at_quart(0, 0, 0);
-        let top = cells.at_quart(0, cells.y_quarts() - 1, 0);
-
-        let below = zoomed_biome(zoom_seed(42), 0, cells.min_y() - 64, 0, |_, _| {
+        let below = zoomed_biome_ref(zoom_seed(42), 0, cells.min_y() - 64, 0, |_, _| {
             Some(&cells)
         });
-        assert_eq!(below, Some(bottom));
+        assert_eq!(below, Some(BiomeRef::builtin(BuiltinBiome::Plains)));
 
-        let above = zoomed_biome(
+        let above = zoomed_biome_ref(
             zoom_seed(42),
             0,
             cells.min_y() + cells.y_quarts() as i32 * 4 + 64,
             0,
             |_, _| Some(&cells),
         );
-        assert_eq!(above, Some(top));
+        assert_eq!(above, Some(BiomeRef::builtin(BuiltinBiome::Badlands)));
 
         assert_eq!(
-            zoomed_biome(zoom_seed(42), 0, cells.min_y(), 0, |_, _| None),
+            zoomed_biome_ref(zoom_seed(42), 0, cells.min_y(), 0, |_, _| None),
             None
+        );
+    }
+
+    #[test]
+    fn zoom_corner_bits_hold_across_negative_quart_seams() {
+        let seed = zoom_seed(42);
+        for (position, expected) in [
+            ((-1, -64, -1), 0b010),
+            ((-4, -64, -4), 0b100),
+            ((-16, 0, -16), 0b001),
+            ((0, -64, 0), 0b100),
+            ((15, -64, 15), 0b001),
+        ] {
+            assert_eq!(
+                uncached_selected_corner(position.0, position.1, position.2, seed),
+                expected,
+                "selected corner changed at {position:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn zoom_fiddle_lattice_is_an_ab_control_for_selection_and_vertex_work() {
+        let seed = zoom_seed(42);
+        let mut lattice = ZoomFiddleLattice::for_block_bounds(seed, -16, 15, -64, 63, -16, 15);
+        let first = (-1, -64, -1);
+        let second = (3, -64, -1);
+        assert_eq!(
+            lattice.selected_corner(first.0, first.1, first.2),
+            uncached_selected_corner(first.0, first.1, first.2, seed),
+        );
+        assert_eq!(
+            lattice.selected_corner(first.0, first.1, first.2),
+            uncached_selected_corner(first.0, first.1, first.2, seed),
+        );
+        assert_eq!(
+            lattice.selected_corner(second.0, second.1, second.2),
+            uncached_selected_corner(second.0, second.1, second.2, seed),
+        );
+        assert_eq!(
+            lattice.stats(),
+            ZoomFiddleStats {
+                vertex_hits: 12,
+                vertex_computes: 12,
+            },
         );
     }
 }

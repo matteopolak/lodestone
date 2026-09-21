@@ -20,6 +20,7 @@
 //! real `ServerProtocol` implementors must also drive.
 
 use lodestone_core::{Reader, State, Writer};
+use lodestone_data::block_states::StateId;
 use lodestone_net::{Connection, memory_pair};
 use lodestone_server::{
     BlockEntityHandle, ChunkColumn, ChunkSource, EntitySnapshot, EntitySource, IntegratedServer,
@@ -69,7 +70,7 @@ impl FakeProtocol {
         // solidity grid proves the complete column crossed the transport; this
         // marker also lets dimension-specific tests assert a block value from
         // an external fixture rather than comparing two calls to production.
-        w.string(&col.block_state(0, col.min_y, 0));
+        w.string(&col.block_state_id(0, col.min_y, 0).canonical_state());
         w.as_slice().to_vec()
     }
 }
@@ -328,7 +329,7 @@ async fn integrated_server_streams_worldgen_chunks_over_memory_transport() {
         let state_marker = r.string(128).unwrap();
         assert_eq!(
             state_marker,
-            expected.block_state(0, min_y, 0),
+            expected.block_state_id(0, min_y, 0).canonical_state(),
             "state marker mismatch in chunk ({cx},{cz})"
         );
         assert_eq!(r.remaining(), 0, "trailing bytes in chunk ({cx},{cz})");
@@ -550,14 +551,14 @@ async fn integrated_server_streams_entity_lifecycle_over_memory_transport() {
             ChunkColumn::new(0, 1)
         }
 
-        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
             // The column-regenerating form (correct, just not cheap); this
             // fixture is tiny and this path is not hot.
             let cx = x.div_euclid(16);
             let cz = z.div_euclid(16);
             let lx = x.rem_euclid(16);
             let lz = z.rem_euclid(16);
-            self.column(cx, cz).block_state(lx, y, lz).to_string()
+            self.column(cx, cz).block_state_id(lx, y, lz)
         }
 
         fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -572,7 +573,7 @@ async fn integrated_server_streams_entity_lifecycle_over_memory_transport() {
 
         // No storage: this fixture serves fresh columns and edits are
         // discarded by design. Explicit rather than inherited.
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
             // No storage; edits are discarded by design.
         }
     }
@@ -714,14 +715,14 @@ async fn open_in_memory_with_mobs_advances_the_unified_clock_and_reports_stats()
             ChunkColumn::new(0, 1)
         }
 
-        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
             // The column-regenerating form (correct, just not cheap); this
             // fixture is tiny and this path is not hot.
             let cx = x.div_euclid(16);
             let cz = z.div_euclid(16);
             let lx = x.rem_euclid(16);
             let lz = z.rem_euclid(16);
-            self.column(cx, cz).block_state(lx, y, lz).to_string()
+            self.column(cx, cz).block_state_id(lx, y, lz)
         }
 
         fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -736,7 +737,7 @@ async fn open_in_memory_with_mobs_advances_the_unified_clock_and_reports_stats()
 
         // No storage: this fixture serves fresh columns and edits are
         // discarded by design. Explicit rather than inherited.
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
             // No storage; edits are discarded by design.
         }
     }

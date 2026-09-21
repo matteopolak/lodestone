@@ -13,6 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use lodestone_core::{Reader, State, Writer};
+use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockFace, BlockPos, Vec3f};
 use lodestone_server::{ChunkColumn, ChunkSource, ServerBound, ServerDirective, ServerProtocol};
 use uuid::Uuid;
@@ -41,6 +42,10 @@ pub const BUTTON_OFF: &str =
     "minecraft:stone_button[face=floor,facing=north,powered=false]";
 pub const BUTTON_ON: &str =
     "minecraft:stone_button[face=floor,facing=north,powered=true]";
+
+fn fixture_state(name: &str) -> StateId {
+    StateId::from_state_str(name).expect("fixture block state exists")
+}
 
 /// A generation gate that is held by the test until the liveness assertions
 /// have observed progress. The timeout is an intentional control: an
@@ -127,7 +132,7 @@ impl GenerationGate {
 #[derive(Clone, Debug)]
 pub struct LivenessWorld {
     gate: GenerationGate,
-    edits: Arc<Mutex<BTreeMap<(i32, i32, i32), String>>>,
+    edits: Arc<Mutex<BTreeMap<(i32, i32, i32), StateId>>>,
 }
 
 impl LivenessWorld {
@@ -145,16 +150,17 @@ impl LivenessWorld {
             // The spawn search examines local (0, 0) first. A full stone floor
             // there yields feet at y=64; the button is one block away so it
             // does not obstruct the player's body at spawn.
+            let stone = fixture_state("minecraft:stone");
             for z in 0..16 {
                 for x in 0..16 {
-                    column.set_block(x, 63, z, "minecraft:stone");
+                    column.set_block_id(x, 63, z, stone);
                 }
             }
-            column.set_block(
+            column.set_block_id(
                 BUTTON_POS.0.rem_euclid(16),
                 BUTTON_POS.1,
                 BUTTON_POS.2.rem_euclid(16),
-                BUTTON_OFF,
+                fixture_state(BUTTON_OFF),
             );
         }
         column
@@ -164,14 +170,14 @@ impl LivenessWorld {
         let edits = self.edits.lock().expect("world edits lock");
         for (&(x, y, z), state) in edits.iter() {
             if x.div_euclid(16) == cx && z.div_euclid(16) == cz {
-                column.set_block(x.rem_euclid(16), y, z.rem_euclid(16), state);
+                column.set_block_id(x.rem_euclid(16), y, z.rem_euclid(16), *state);
             }
         }
     }
 
     #[must_use]
     pub fn state(&self, pos: (i32, i32, i32)) -> String {
-        self.block_state(pos.0, pos.1, pos.2)
+        self.block_state_id(pos.0, pos.1, pos.2).canonical_state()
     }
 }
 
@@ -185,14 +191,12 @@ impl ChunkSource for LivenessWorld {
         column
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let mut column = Self::base_column(cx, cz);
         self.apply_edits(cx, cz, &mut column);
-        column
-            .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
-            .to_owned()
+        column.block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -203,11 +207,11 @@ impl ChunkSource for LivenessWorld {
             .to_owned()
     }
 
-    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+    fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
         self.edits
             .lock()
             .expect("world edits lock")
-            .insert((x, y, z), name.to_owned());
+            .insert((x, y, z), state);
     }
 }
 
@@ -340,12 +344,12 @@ impl ServerProtocol for LivenessProtocol {
         }
     }
 
-    fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {
+    fn encode_block_update(&self, x: i32, y: i32, z: i32, state: StateId) -> ServerDirective {
         let mut writer = Writer::default();
         writer.i32(x);
         writer.i32(y);
         writer.i32(z);
-        writer.string(state);
+        writer.string(&state.canonical_state());
         ServerDirective::Send {
             packet_id: BLOCK_UPDATE,
             payload: writer.as_slice().to_vec(),

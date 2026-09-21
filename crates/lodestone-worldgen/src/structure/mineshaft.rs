@@ -82,13 +82,16 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, PropertyKey};
+use lodestone_data::block_states::StateId as CanonicalStateId;
 use lodestone_worldgen_core::rng::RandomSource;
 
 use crate::aquifer::BlockKind;
 use crate::dense_grid::DenseBlockGrid;
 
 use super::coded::Facing;
-use super::template::{BlockState, Mirror, Rotation};
+use super::template::{state_with, BlockState, Mirror, Rotation};
 use super::{
     BoundingBox, CodedBlock, HeightmapKind, StartContext, StructurePiece, free_height,
 };
@@ -119,34 +122,40 @@ pub enum Wood {
 }
 
 impl Wood {
-    fn log(self) -> &'static str {
+    fn log(self) -> CanonicalStateId {
         match self {
-            Self::Normal => "minecraft:oak_log[axis=y]",
-            Self::Mesa => "minecraft:dark_oak_log[axis=y]",
+            Self::Normal => Block::OakLog.default_state(),
+            Self::Mesa => Block::DarkOakLog.default_state(),
         }
     }
 
-    fn planks(self) -> &'static str {
+    fn planks(self) -> CanonicalStateId {
         match self {
-            Self::Normal => "minecraft:oak_planks",
-            Self::Mesa => "minecraft:dark_oak_planks",
+            Self::Normal => Block::OakPlanks.default_state(),
+            Self::Mesa => Block::DarkOakPlanks.default_state(),
         }
     }
 
-    /// The fence's *block name* only: support placement sets `west`/`east` on it, so
-    /// the caller spells the properties.
-    fn fence_name(self) -> &'static str {
-        match self {
-            Self::Normal => "minecraft:oak_fence",
-            Self::Mesa => "minecraft:dark_oak_fence",
+    fn fence(self, east: bool, west: bool) -> CanonicalStateId {
+        match (self, east, west) {
+            (wood, east, west) => {
+                assert!(!(east && west), "mineshaft fence has only east or west support");
+                let block = match wood {
+                    Self::Normal => Block::OakFence,
+                    Self::Mesa => Block::DarkOakFence,
+                };
+                state_with(
+                    block,
+                    &[
+                        (PropertyKey::East, if east { BuiltinPropertyValue::True } else { BuiltinPropertyValue::False }),
+                        (PropertyKey::North, BuiltinPropertyValue::False),
+                        (PropertyKey::South, BuiltinPropertyValue::False),
+                        (PropertyKey::Waterlogged, BuiltinPropertyValue::False),
+                        (PropertyKey::West, if west { BuiltinPropertyValue::True } else { BuiltinPropertyValue::False }),
+                    ],
+                )
+            }
         }
-    }
-
-    fn fence(self) -> String {
-        format!(
-            "{}[east=false,north=false,south=false,waterlogged=false,west=false]",
-            self.fence_name()
-        )
     }
 }
 
@@ -316,8 +325,41 @@ pub fn generate<R: RandomSource>(
     random: &mut R,
 ) -> (Vec<StructurePiece>, [i32; 3]) {
     let (shaft, dy) = grow_shaft(cx, cz, ctx, wood, random);
-    let pieces = into_pieces(shaft, ctx, blocking_biomes, random, None, None);
+    let pieces = into_pieces(&shaft, ctx, blocking_biomes, random, None, None);
     (pieces, [cx * 16 + 8, MAGIC_START_Y + dy, cz * 16])
+}
+
+#[must_use]
+pub(crate) fn generate_start<R: RandomSource>(
+    cx: i32,
+    cz: i32,
+    ctx: &dyn StartContext,
+    wood: Wood,
+    random: &mut R,
+) -> (Vec<StructurePiece>, [i32; 3], Arc<Shaft>) {
+    let (shaft, dy) = grow_shaft(cx, cz, ctx, wood, random);
+    let pieces = shaft
+        .pieces
+        .iter()
+        .map(|node| StructurePiece {
+            id: node.piece_id().to_string(),
+            bounding_box: node.box_,
+            orientation: node.orientation.map(Facing::data_2d),
+            gen_depth: node.gen_depth,
+            template: None,
+            placement: None,
+            extra_placements: Vec::new(),
+            blocks: Some(Arc::new(Vec::new())),
+            loot: Vec::new(),
+            beard: None,
+            refine: None,
+        })
+        .collect();
+    (
+        pieces,
+        [cx * 16 + 8, MAGIC_START_Y + dy, cz * 16],
+        Arc::new(shaft),
+    )
 }
 
 /// Regenerates one mineshaft's block-writing pass for one decorating chunk.
@@ -361,32 +403,26 @@ pub(crate) fn generate_for_chunk<TreeRandom: RandomSource, PlacementRandom: Rand
 #[must_use]
 pub(crate) fn generate_for_chunk_with_world<
     'a,
-    TreeRandom: RandomSource,
     PlacementRandom: RandomSource,
 >(
-    cx: i32,
-    cz: i32,
+    shaft: &Shaft,
     decorating_chunk: (i32, i32),
     ctx: &'a dyn StartContext,
     world: &'a DenseBlockGrid,
-    wood: Wood,
     blocking_biomes: &std::collections::HashSet<String>,
-    tree_random: &mut TreeRandom,
     placement_random: &mut PlacementRandom,
 ) -> Vec<StructurePiece> {
-    generate_for_chunk_inner(
-        cx,
-        cz,
-        decorating_chunk,
+    into_pieces(
+        shaft,
         ctx,
-        Some(world),
-        wood,
         blocking_biomes,
-        tree_random,
         placement_random,
+        Some(DecoratingChunk::new(decorating_chunk.0, decorating_chunk.1)),
+        Some(world),
     )
 }
 
+#[cfg(test)]
 fn generate_for_chunk_inner<
     'a,
     TreeRandom: RandomSource,
@@ -404,7 +440,7 @@ fn generate_for_chunk_inner<
 ) -> Vec<StructurePiece> {
     let (shaft, _) = grow_shaft(cx, cz, ctx, wood, tree_random);
     into_pieces(
-        shaft,
+        &shaft,
         ctx,
         blocking_biomes,
         placement_random,
@@ -941,32 +977,25 @@ struct View<'a> {
     world: Option<&'a DenseBlockGrid>,
     decorating_chunk: Option<DecoratingChunk>,
     ocean_floor_heights: RefCell<HashMap<(i32, i32), i32>>,
-    overlay: HashMap<[i32; 3], Arc<str>>,
+    overlay: HashMap<[i32; 3], CanonicalStateId>,
     /// The current piece's own writes, in order. Drained at each piece boundary.
     emitted: Vec<CodedBlock>,
 }
 
 /// The four terrain kinds plus "something a piece wrote", which is all the
 /// resolution any mineshaft predicate needs.
-enum Sample<'a> {
+enum Sample {
     Terrain(BlockKind),
-    World(&'a str),
-    Written(&'a str),
+    World(CanonicalStateId),
+    Written(CanonicalStateId),
 }
 
-fn base_name(state: &str) -> &str {
-    state.split_once('[').map_or(state, |(base, _)| base)
+fn is_air_state(state: CanonicalStateId) -> bool {
+    matches!(state.block(), Block::Air | Block::CaveAir | Block::VoidAir)
 }
 
-fn is_air_state(state: &str) -> bool {
-    matches!(
-        base_name(state),
-        "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air"
-    )
-}
-
-fn is_liquid_state(state: &str) -> bool {
-    matches!(base_name(state), "minecraft:water" | "minecraft:lava")
+fn is_liquid_state(state: CanonicalStateId) -> bool {
+    matches!(state.block(), Block::Water | Block::Lava)
 }
 
 impl<'a> View<'a> {
@@ -975,15 +1004,17 @@ impl<'a> View<'a> {
             .is_none_or(|chunk| chunk.contains(pos[0], pos[2]))
     }
 
-    fn sample(&self, pos: [i32; 3]) -> Sample<'_> {
+    fn sample(&self, pos: [i32; 3]) -> Sample {
         if !self.is_in_decorating_chunk(pos) {
             return Sample::Terrain(BlockKind::Air);
         }
         match self.overlay.get(&pos) {
-            Some(state) => Sample::Written(state),
+            Some(state) => Sample::Written(*state),
             None => self.world.map_or_else(
                 || Sample::Terrain(self.ctx.block_kind_at(pos[0], pos[1], pos[2])),
-                |world| Sample::World(world.get(pos[0], pos[1], pos[2])),
+                |world| {
+                    Sample::World(world.get_id(pos[0], pos[1], pos[2]))
+                },
             ),
         }
     }
@@ -1013,7 +1044,7 @@ impl<'a> View<'a> {
     fn is_lava(&self, pos: [i32; 3]) -> bool {
         match self.sample(pos) {
             Sample::Terrain(kind) => kind == BlockKind::Lava,
-            Sample::World(state) => base_name(state) == "minecraft:lava",
+            Sample::World(state) => state.block() == Block::Lava,
             Sample::Written(_) => false,
         }
     }
@@ -1038,14 +1069,14 @@ impl<'a> View<'a> {
             Sample::Terrain(kind) => kind == BlockKind::Stone,
             Sample::World(state) => !is_air_state(state) && !is_liquid_state(state),
             Sample::Written(state) => {
-                let name = base_name(state);
+                let block = state.block();
                 matches!(
-                    name,
-                    "minecraft:oak_planks"
-                        | "minecraft:dark_oak_planks"
-                        | "minecraft:oak_log"
-                        | "minecraft:dark_oak_log"
-                        | "minecraft:spawner"
+                    block,
+                    Block::OakPlanks
+                        | Block::DarkOakPlanks
+                        | Block::OakLog
+                        | Block::DarkOakLog
+                        | Block::Spawner
                 )
             }
         }
@@ -1054,10 +1085,10 @@ impl<'a> View<'a> {
     /// True when the written block at `pos` is exactly `name` —
     /// used only for the four wood/chain tests the replaceability check and
     /// double lower/upper support placement make. Terrain is never one of these.
-    fn is_block(&self, pos: [i32; 3], name: &str) -> bool {
+    fn is_block(&self, pos: [i32; 3], block: Block) -> bool {
         match self.sample(pos) {
             Sample::Terrain(_) => false,
-            Sample::World(state) | Sample::Written(state) => base_name(state) == name,
+            Sample::World(state) | Sample::Written(state) => state.block() == block,
         }
     }
 
@@ -1074,8 +1105,8 @@ impl<'a> View<'a> {
         let free = (min_y..min_y + height)
             .rev()
             .find_map(|y| {
-                (!is_air_state(world.get(x, y, z)) && !is_liquid_state(world.get(x, y, z)))
-                    .then_some(y + 1)
+                let state = world.get_id(x, y, z);
+                (!is_air_state(state) && !is_liquid_state(state)).then_some(y + 1)
             })
             .unwrap_or(min_y);
         self.ocean_floor_heights.borrow_mut().insert((x, z), free);
@@ -1085,26 +1116,25 @@ impl<'a> View<'a> {
     /// A mineshaft piece's replaceability override that protects a mineshaft's own
     /// woodwork from a neighbouring piece's `cave_air` sweep.
     fn can_be_replaced(&self, pos: [i32; 3], wood: Wood) -> bool {
-        !self.is_block(pos, wood.planks())
-            && !self.is_block(pos, wood.log().split('[').next().unwrap_or(""))
-            && !self.is_block(pos, wood.fence_name())
-            && !self.is_block(pos, "minecraft:iron_chain")
+        !self.is_block(pos, wood.planks().block())
+            && !self.is_block(pos, wood.log().block())
+            && !self.is_block(pos, wood.fence(false, false).block())
+            && !self.is_block(pos, Block::IronChain)
     }
 
     /// The raw write, with no replaceability check and
     /// no transform. Four helpers use it directly.
-    fn set(&mut self, pos: [i32; 3], state: &str) {
+    fn set_id(&mut self, pos: [i32; 3], state: CanonicalStateId) {
         if self
             .decorating_chunk
             .is_some_and(|chunk| !chunk.contains(pos[0], pos[2]))
         {
             return;
         }
-        let shared: Arc<str> = Arc::from(state);
-        self.overlay.insert(pos, Arc::clone(&shared));
+        self.overlay.insert(pos, state);
         self.emitted.push(CodedBlock {
             pos,
-            state: state.to_string(),
+            state,
         });
     }
 
@@ -1130,7 +1160,7 @@ impl Place<'_, '_> {
             return;
         }
         let transformed = state.mirror(self.mirror).rotate(self.rotation);
-        self.view.set(pos, &transformed.canonical());
+        self.view.set_id(pos, transformed.id);
     }
 
     /// `getBlock(x, y, z, chunkBB)`, minus the chunk gate.
@@ -1318,7 +1348,7 @@ impl Place<'_, '_> {
     /// A floor plank wherever the piece is underground and the
     /// existing block cannot be stood on. The raw write directly, so no
     /// replaceability check and no transform.
-    fn set_planks_block(&mut self, planks: &str, x: i32, y: i32, z: i32) {
+    fn set_planks_block(&mut self, planks: CanonicalStateId, x: i32, y: i32, z: i32) {
         if !self.is_interior(x, y, z) {
             return;
         }
@@ -1326,7 +1356,7 @@ impl Place<'_, '_> {
         if self.view.is_sturdy_up(pos) {
             return;
         }
-        self.view.set(pos, planks);
+        self.view.set_id(pos, planks);
     }
 
     /// Whether every block above the span is non-air.
@@ -1349,16 +1379,14 @@ fn place_support<R: RandomSource>(
         return;
     }
     let wood = p.wood;
-    let planks = BlockState::parse(wood.planks());
-    let cave_air = BlockState::of("minecraft:cave_air");
-    let fence_west = BlockState::parse(&format!(
-        "{}[east=false,north=false,south=false,waterlogged=false,west=true]",
-        wood.fence_name()
-    ));
-    let fence_east = BlockState::parse(&format!(
-        "{}[east=true,north=false,south=false,waterlogged=false,west=false]",
-        wood.fence_name()
-    ));
+    let planks = BlockState { id: wood.planks() };
+    let cave_air = BlockState::from_block(Block::CaveAir);
+    let fence_west = BlockState {
+        id: wood.fence(false, true),
+    };
+    let fence_east = BlockState {
+        id: wood.fence(true, false),
+    };
     p.generate_box(x0, y0, z, x0, y1 - 1, z, &fence_west, &cave_air);
     p.generate_box(x1, y0, z, x1, y1 - 1, z, &fence_east, &cave_air);
     if random.next_int_bounded(4) == 0 {
@@ -1368,8 +1396,12 @@ fn place_support<R: RandomSource>(
         p.generate_box(x0, y1, z, x1, y1, z, &planks, &cave_air);
         // The two torch draws happen only on this branch, so a corridor whose
         // supports are all the two-plank variant makes 3/4 of the draws.
-        let south = BlockState::parse("minecraft:wall_torch[facing=south]");
-        let north = BlockState::parse("minecraft:wall_torch[facing=north]");
+        let south = BlockState {
+            id: state_with(Block::WallTorch, &[(PropertyKey::Facing, BuiltinPropertyValue::South)]),
+        };
+        let north = BlockState {
+            id: state_with(Block::WallTorch, &[(PropertyKey::Facing, BuiltinPropertyValue::North)]),
+        };
         p.maybe_generate_block(random, 0.05, x0 + 1, y1, z - 1, &south);
         p.maybe_generate_block(random, 0.05, x0 + 1, y1, z + 1, &north);
     }
@@ -1394,7 +1426,7 @@ fn maybe_place_cobweb<R: RandomSource>(
     if !has_sturdy_neighbours(p, x, y, z, 2) {
         return;
     }
-    let cobweb = BlockState::of("minecraft:cobweb");
+    let cobweb = BlockState::from_block(Block::Cobweb);
     p.place(&cobweb, x, y, z);
 }
 
@@ -1437,8 +1469,8 @@ fn fill_pillar_down_or_chain_up(p: &mut Place<'_, '_>, x: i32, y: i32, z: i32) {
     let world_y = pos[1];
     let min_y = p.view.ctx.min_y();
     let max_y = min_y + p.view.ctx.dimension_height() - 1;
-    let pillar = p.wood.log().to_string();
-    let fence = p.wood.fence();
+    let pillar = p.wood.log();
+    let fence = p.wood.fence(false, false);
     let mut distance = 1;
     let mut check_below = true;
     let mut check_above = true;
@@ -1448,7 +1480,7 @@ fn fill_pillar_down_or_chain_up(p: &mut Place<'_, '_>, x: i32, y: i32, z: i32) {
             let empty_below = p.view.is_replaceable(probe) && !p.view.is_lava(probe);
             if !empty_below && p.view.is_sturdy_up(probe) {
                 for py in (world_y - distance + 1)..world_y {
-                    p.view.set([pos[0], py, pos[2]], &pillar);
+                    p.view.set_id([pos[0], py, pos[2]], pillar);
                 }
                 return;
             }
@@ -1458,10 +1490,18 @@ fn fill_pillar_down_or_chain_up(p: &mut Place<'_, '_>, x: i32, y: i32, z: i32) {
             let probe = [pos[0], world_y + distance, pos[2]];
             let empty_above = p.view.is_replaceable(probe);
             if !empty_above && p.view.is_sturdy_up(probe) {
-                p.view.set([pos[0], world_y + 1, pos[2]], &fence);
+                p.view.set_id([pos[0], world_y + 1, pos[2]], fence);
                 for py in (world_y + 2)..(world_y + distance) {
-                    p.view
-                        .set([pos[0], py, pos[2]], "minecraft:iron_chain[axis=y,waterlogged=false]");
+                    p.view.set_id(
+                        [pos[0], py, pos[2]],
+                        state_with(
+                            Block::IronChain,
+                            &[
+                                (PropertyKey::Axis, BuiltinPropertyValue::Y),
+                                (PropertyKey::Waterlogged, BuiltinPropertyValue::False),
+                            ],
+                        ),
+                    );
                 }
                 return;
             }
@@ -1475,11 +1515,11 @@ fn fill_pillar_down_or_chain_up(p: &mut Place<'_, '_>, x: i32, y: i32, z: i32) {
 /// each only if the floor plank the plank-assignment sweep just laid is actually
 /// there.
 fn place_double_support(p: &mut Place<'_, '_>, x: i32, y: i32, z: i32) {
-    let planks = p.wood.planks().to_string();
-    if p.view.is_block(p.node.world_pos(x, y, z), &planks) {
+    let planks = p.wood.planks().block();
+    if p.view.is_block(p.node.world_pos(x, y, z), planks) {
         fill_pillar_down_or_chain_up(p, x, y, z);
     }
-    if p.view.is_block(p.node.world_pos(x + 2, y, z), &planks) {
+    if p.view.is_block(p.node.world_pos(x + 2, y, z), planks) {
         fill_pillar_down_or_chain_up(p, x + 2, y, z);
     }
 }
@@ -1487,7 +1527,7 @@ fn place_double_support(p: &mut Place<'_, '_>, x: i32, y: i32, z: i32) {
 /// Second pass: every piece's `postProcess`, in list order, against one shared
 /// [`View`].
 fn into_pieces<'a, R: RandomSource>(
-    shaft: Shaft,
+    shaft: &Shaft,
     ctx: &'a dyn StartContext,
     blocking_biomes: &std::collections::HashSet<String>,
     random: &mut R,
@@ -1583,9 +1623,9 @@ fn corridor_post<R: RandomSource>(
     spider_corridor: bool,
     sections: i32,
 ) {
-    let cave_air = BlockState::of("minecraft:cave_air");
-    let cobweb = BlockState::of("minecraft:cobweb");
-    let planks = p.wood.planks().to_string();
+    let cave_air = BlockState::from_block(Block::CaveAir);
+    let cobweb = BlockState::from_block(Block::Cobweb);
+    let planks = p.wood.planks();
     let length = sections * 5 - 1;
 
     p.generate_box(0, 0, 0, 2, 1, length, &cave_air, &cave_air);
@@ -1616,7 +1656,7 @@ fn corridor_post<R: RandomSource>(
             if p.is_interior(1, 0, spider_z) {
                 placed_spider = true;
                 let pos = p.node.world_pos(1, 0, spider_z);
-                p.view.set(pos, "minecraft:spawner");
+                p.view.set_id(pos, Block::Spawner.default_state());
                 // Assigning the spawner's entity type draws nothing from the
                 // random source — the spawn-entry constructor takes the random
                 // only to seed an already-resolved weighted list.
@@ -1626,7 +1666,7 @@ fn corridor_post<R: RandomSource>(
 
     for x in 0..=2 {
         for z in 0..=length {
-            p.set_planks_block(&planks, x, -1, z);
+            p.set_planks_block(planks, x, -1, z);
         }
     }
 
@@ -1639,7 +1679,15 @@ fn corridor_post<R: RandomSource>(
         // The rail's north-south shape, which the piece's own rotation then turns into
         // its east-west shape for an east/west corridor — the reason `BlockState::rotate`
         // grew a rail table with this unit.
-        let rail = BlockState::parse("minecraft:rail[shape=north_south,waterlogged=false]");
+        let rail = BlockState {
+            id: state_with(
+                Block::Rail,
+                &[
+                    (PropertyKey::Shape, BuiltinPropertyValue::NorthSouth),
+                    (PropertyKey::Waterlogged, BuiltinPropertyValue::False),
+                ],
+            ),
+        };
         for z in 0..=length {
             // Not-air and solid-render: two tests, and for the
             // blocks that can be here the second implies the first.
@@ -1673,12 +1721,22 @@ fn create_chest_minecart<R: RandomSource>(
     if !p.view.is_air(pos) || p.view.is_air(below) {
         return;
     }
-    let shape = if random.next_bool() {
-        "north_south"
-    } else {
-        "east_west"
+    let rail = BlockState {
+        id: state_with(
+            Block::Rail,
+            &[
+                (
+                    PropertyKey::Shape,
+                    if random.next_bool() {
+                        BuiltinPropertyValue::NorthSouth
+                    } else {
+                        BuiltinPropertyValue::EastWest
+                    },
+                ),
+                (PropertyKey::Waterlogged, BuiltinPropertyValue::False),
+            ],
+        ),
     };
-    let rail = BlockState::parse(&format!("minecraft:rail[shape={shape},waterlogged=false]"));
     p.place(&rail, x, y, z);
     let seed = random.next_long();
     loot.push(super::CodedLoot {
@@ -1707,9 +1765,9 @@ fn maybe_create_chest_minecart<R: RandomSource>(
 /// A crossing's block-writing walk — absolute coordinates throughout, because the
 /// crossing has no orientation.
 fn crossing_post(p: &mut Place<'_, '_>, two_floored: bool) {
-    let cave_air = BlockState::of("minecraft:cave_air");
+    let cave_air = BlockState::from_block(Block::CaveAir);
     let box_ = p.node.box_;
-    let planks = p.wood.planks().to_string();
+    let planks = p.wood.planks();
     if two_floored {
         p.generate_box(box_.min[0] + 1, box_.min[1], box_.min[2], box_.max[0] - 1, box_.min[1] + 2, box_.max[2], &cave_air, &cave_air);
         p.generate_box(box_.min[0], box_.min[1], box_.min[2] + 1, box_.max[0], box_.min[1] + 2, box_.max[2] - 1, &cave_air, &cave_air);
@@ -1727,7 +1785,7 @@ fn crossing_post(p: &mut Place<'_, '_>, two_floored: bool) {
     let y = box_.min[1] - 1;
     for x in box_.min[0]..=box_.max[0] {
         for z in box_.min[2]..=box_.max[2] {
-            p.set_planks_block(&planks, x, y, z);
+            p.set_planks_block(planks, x, y, z);
         }
     }
 }
@@ -1738,15 +1796,15 @@ fn place_support_pillar(p: &mut Place<'_, '_>, x: i32, y0: i32, z: i32, y1: i32)
     if p.air_at(x, y1 + 1, z) {
         return;
     }
-    let planks = BlockState::parse(p.wood.planks());
-    let cave_air = BlockState::of("minecraft:cave_air");
+    let planks = BlockState { id: p.wood.planks() };
+    let cave_air = BlockState::from_block(Block::CaveAir);
     p.generate_box(x, y0, z, x, y1, z, &planks, &cave_air);
 }
 
 /// A stairs piece's block-writing walk — five stepped boxes plus the two landings, and
 /// the only piece here with no RNG and no world read.
 fn stairs_post(p: &mut Place<'_, '_>) {
-    let cave_air = BlockState::of("minecraft:cave_air");
+    let cave_air = BlockState::from_block(Block::CaveAir);
     p.generate_box(0, 5, 0, 2, 7, 1, &cave_air, &cave_air);
     p.generate_box(0, 0, 7, 2, 2, 8, &cave_air, &cave_air);
     for i in 0..5 {
@@ -1760,7 +1818,7 @@ fn stairs_post(p: &mut Place<'_, '_>) {
 /// A room's block-writing walk — the floor slab, each entrance's lintel, then the
 /// domed ceiling.
 fn room_post(p: &mut Place<'_, '_>, entrances: &[BoundingBox]) {
-    let cave_air = BlockState::of("minecraft:cave_air");
+    let cave_air = BlockState::from_block(Block::CaveAir);
     let box_ = p.node.box_;
     p.generate_box(
         box_.min[0],
@@ -1985,7 +2043,7 @@ mod tests {
         let mut old_stream = random(99);
         let (old_shaft, _) = grow_shaft(0, 0, &ctx, Wood::Normal, &mut old_stream);
         let old = into_pieces(
-            old_shaft,
+            &old_shaft,
             &ctx,
             &HashSet::new(),
             &mut old_stream,
@@ -2124,7 +2182,7 @@ mod tests {
                 .iter()
                 .filter_map(|p| p.blocks.as_ref())
                 .flat_map(|b| b.iter())
-                .map(|b| format!("{:?}{}", b.pos, b.state))
+                .map(|b| format!("{:?}{}", b.pos, b.state.canonical_state()))
                 .collect();
             (start, blocks)
         };
@@ -2220,21 +2278,21 @@ mod tests {
     fn an_east_west_corridor_rotates_its_rail_shape() {
         let rail = BlockState::parse("minecraft:rail[shape=north_south,waterlogged=false]");
         assert_eq!(
-            rail.rotate(Rotation::Cw90).canonical(),
+            rail.rotate(Rotation::Cw90).id.canonical_state(),
             "minecraft:rail[shape=east_west,waterlogged=false]"
         );
         assert_eq!(
-            rail.rotate(Rotation::None).canonical(),
+            rail.rotate(Rotation::None).id.canonical_state(),
             "minecraft:rail[shape=north_south,waterlogged=false]"
         );
         // A diagonal, where the two directions rotate independently.
         let diagonal = BlockState::parse("minecraft:rail[shape=north_east,waterlogged=false]");
         assert_eq!(
-            diagonal.rotate(Rotation::Cw90).canonical(),
+            diagonal.rotate(Rotation::Cw90).id.canonical_state(),
             "minecraft:rail[shape=south_east,waterlogged=false]"
         );
         assert_eq!(
-            diagonal.mirror(Mirror::LeftRight).canonical(),
+            diagonal.mirror(Mirror::LeftRight).id.canonical_state(),
             "minecraft:rail[shape=south_east,waterlogged=false]"
         );
         // A stair's `shape` must be untouched by the rail table.
@@ -2242,7 +2300,7 @@ mod tests {
             "minecraft:oak_stairs[facing=north,half=bottom,shape=outer_left,waterlogged=false]",
         );
         assert_eq!(
-            stair.rotate(Rotation::Cw90).canonical(),
+            stair.rotate(Rotation::Cw90).id.canonical_state(),
             "minecraft:oak_stairs[facing=east,half=bottom,shape=outer_left,waterlogged=false]"
         );
     }
@@ -2261,9 +2319,18 @@ mod tests {
             overlay: HashMap::new(),
             emitted: Vec::new(),
         };
-        view.set([0, 0, 0], "minecraft:oak_planks");
-        view.set([1, 0, 0], "minecraft:iron_chain[axis=y,waterlogged=false]");
-        view.set([2, 0, 0], "minecraft:cave_air");
+        view.set_id([0, 0, 0], Block::OakPlanks.default_state());
+        view.set_id(
+            [1, 0, 0],
+            state_with(
+                Block::IronChain,
+                &[
+                    (PropertyKey::Axis, BuiltinPropertyValue::Y),
+                    (PropertyKey::Waterlogged, BuiltinPropertyValue::False),
+                ],
+            ),
+        );
+        view.set_id([2, 0, 0], Block::CaveAir.default_state());
         assert!(!view.can_be_replaced([0, 0, 0], Wood::Normal));
         assert!(!view.can_be_replaced([1, 0, 0], Wood::Normal));
         assert!(view.can_be_replaced([2, 0, 0], Wood::Normal));

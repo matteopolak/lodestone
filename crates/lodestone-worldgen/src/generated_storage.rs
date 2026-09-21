@@ -6,6 +6,8 @@
 //! names and registries: the palette belongs to the generated column, and this
 //! type only owns its indices.
 
+use std::sync::{Arc, OnceLock};
+
 const SECTION_ROWS: usize = 16;
 const ROW_CELLS: usize = 16 * 16;
 const SECTION_CELLS: usize = SECTION_ROWS * ROW_CELLS;
@@ -134,12 +136,47 @@ pub enum CompactSectionParts {
 }
 
 /// A generated column's compact block-index field.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct CompactBlockStorage {
     min_y: i32,
     height: i32,
-    sections: Vec<CompactSection>,
+    sections: OnceLock<Arc<Vec<CompactSection>>>,
+    dense: OnceLock<Arc<Vec<u16>>>,
 }
+
+impl Clone for CompactBlockStorage {
+    fn clone(&self) -> Self {
+        let sections = OnceLock::new();
+        if let Some(value) = self.sections.get() {
+            sections
+                .set(Arc::clone(value))
+                .expect("new compact storage has no section value");
+        }
+        let dense = OnceLock::new();
+        if let Some(value) = self.dense.get() {
+            dense
+                .set(Arc::clone(value))
+                .expect("new compact storage has no dense value");
+        }
+        Self {
+            min_y: self.min_y,
+            height: self.height,
+            sections,
+            dense,
+        }
+    }
+}
+
+impl PartialEq for CompactBlockStorage {
+    fn eq(&self, other: &Self) -> bool {
+        self.min_y == other.min_y
+            && self.height == other.height
+            && (0..self.height as usize * ROW_CELLS)
+                .all(|index| self.cell_at_flat(index) == other.cell_at_flat(index))
+    }
+}
+
+impl Eq for CompactBlockStorage {}
 
 impl CompactBlockStorage {
     /// Builds section storage from the flat generated-column layout
@@ -151,10 +188,39 @@ impl CompactBlockStorage {
         Self::from_flat_inner(min_y, height, cells, None)
     }
 
+    /// Retains an already palette-indexed column without packing its sections.
+    /// Section storage is built only when a section-oriented consumer asks for
+    /// it. The shared cell buffer lets cloned shaped products remain cheap.
+    #[must_use]
+    pub fn from_shared_flat(min_y: i32, height: i32, cells: Arc<Vec<u16>>) -> Self {
+        assert!(height >= 0, "column height is negative");
+        let expected = (height as usize)
+            .checked_mul(ROW_CELLS)
+            .expect("column cell count overflows usize");
+        assert_eq!(cells.len(), expected, "flat column length does not match height");
+        let sections = OnceLock::new();
+        let dense = OnceLock::new();
+        dense
+            .set(cells)
+            .expect("new lazy storage has no dense value");
+        Self {
+            min_y,
+            height,
+            sections,
+            dense,
+        }
+    }
+
+    /// Whether section packing has happened for this field.
+    #[must_use]
+    pub fn is_compact(&self) -> bool {
+        self.sections.get().is_some()
+    }
+
     /// Builds section storage while observing every final cell in the same
     /// section traversal used for packing. The optional palette predicate is
-    /// indexed by each cell's palette id and produces the two vertical
-    /// summaries needed by the generated-column output boundary.
+    /// indexed by each cell's palette id and produces the vertical summaries
+    /// needed by the generated-column output boundary.
     #[must_use]
     pub fn from_flat_with_summaries(
         min_y: i32,
@@ -162,12 +228,52 @@ impl CompactBlockStorage {
         cells: &[u16],
         motion_blocking: Option<&[bool]>,
     ) -> (Self, GeneratedColumnSummaries) {
-        let mut summaries = GeneratedColumnSummaries::new(motion_blocking.is_some());
+        let mut summaries = GeneratedColumnSummaries::new(
+            height,
+            cells,
+            motion_blocking.is_some(),
+            false,
+            motion_blocking.is_some(),
+        );
         let storage = Self::from_flat_inner(
             min_y,
             height,
             cells,
-            Some((&mut summaries, motion_blocking)),
+            Some((&mut summaries, motion_blocking, None, motion_blocking)),
+        );
+        (storage, summaries)
+    }
+
+    /// Builds section storage and vertical products for both motion-blocking
+    /// heightmap variants. The state histogram is the transient hand-off used
+    /// by the server to derive its per-section ticking counts without rereading
+    /// the generated cells.
+    #[must_use]
+    pub fn from_flat_with_predicates(
+        min_y: i32,
+        height: i32,
+        cells: &[u16],
+        motion_blocking: &[bool],
+        motion_blocking_no_leaves: &[bool],
+        generation_motion_blocking: Option<&[bool]>,
+    ) -> (Self, GeneratedColumnSummaries) {
+        let mut summaries = GeneratedColumnSummaries::new(
+            height,
+            cells,
+            true,
+            true,
+            generation_motion_blocking.is_some(),
+        );
+        let storage = Self::from_flat_inner(
+            min_y,
+            height,
+            cells,
+            Some((
+                &mut summaries,
+                Some(motion_blocking),
+                Some(motion_blocking_no_leaves),
+                generation_motion_blocking,
+            )),
         );
         (storage, summaries)
     }
@@ -176,13 +282,42 @@ impl CompactBlockStorage {
         min_y: i32,
         height: i32,
         cells: &[u16],
-        mut summaries: Option<(&mut GeneratedColumnSummaries, Option<&[bool]>)>,
+        summaries: Option<(
+            &mut GeneratedColumnSummaries,
+            Option<&[bool]>,
+            Option<&[bool]>,
+            Option<&[bool]>,
+        )>,
     ) -> Self {
         assert!(height >= 0, "column height is negative");
         let expected = (height as usize)
             .checked_mul(ROW_CELLS)
             .expect("column cell count overflows usize");
         assert_eq!(cells.len(), expected, "flat column length does not match height");
+        let packed_sections = Self::pack_sections(height, cells, summaries);
+        crate::counters::bump_full_column_conversion(cells.len() as u64);
+        let sections = OnceLock::new();
+        sections
+            .set(Arc::new(packed_sections))
+            .expect("new compact storage has no section value");
+        Self {
+            min_y,
+            height,
+            sections,
+            dense: OnceLock::new(),
+        }
+    }
+
+    fn pack_sections(
+        height: i32,
+        cells: &[u16],
+        mut summaries: Option<(
+            &mut GeneratedColumnSummaries,
+            Option<&[bool]>,
+            Option<&[bool]>,
+            Option<&[bool]>,
+        )>,
+    ) -> Vec<CompactSection> {
         let section_count = (height as usize).div_ceil(SECTION_ROWS);
         let mut sections = Vec::with_capacity(section_count);
         for section in 0..section_count {
@@ -190,16 +325,62 @@ impl CompactBlockStorage {
             let rows = (height as usize - section * SECTION_ROWS).min(SECTION_ROWS);
             let end = start + rows * ROW_CELLS;
             let slice = &cells[start..end];
-            if let Some((summary, motion_blocking)) = summaries.as_mut() {
+            if let Some((
+                summary,
+                motion_blocking,
+                motion_blocking_no_leaves,
+                generation_motion_blocking,
+            )) = summaries.as_mut()
+            {
                 sections.push(CompactSection::pack_observed(slice, rows, |cell, id| {
-                    summary.observe(section * SECTION_ROWS, cell, id, *motion_blocking);
+                    summary.observe(
+                        section * SECTION_ROWS,
+                        cell,
+                        id,
+                        *motion_blocking,
+                        *motion_blocking_no_leaves,
+                        *generation_motion_blocking,
+                    );
                 }));
             } else {
                 sections.push(CompactSection::pack(slice, rows));
             }
         }
+        sections
+    }
+
+    fn compact_sections(&self) -> &[CompactSection] {
+        self.sections
+            .get_or_init(|| {
+                let cells = self
+                    .dense
+                    .get()
+                    .expect("lazy storage must retain its dense cell buffer");
+                crate::counters::bump_full_column_conversion(cells.len() as u64);
+                Arc::new(Self::pack_sections(self.height, cells, None))
+            })
+            .as_slice()
+    }
+
+    #[inline]
+    fn cell_at_flat(&self, index: usize) -> u16 {
+        if let Some(dense) = self.dense.get() {
+            return dense[index];
+        }
+        let section = index / SECTION_CELLS;
+        self.compact_sections()[section].get(index % SECTION_CELLS)
+    }
+
+    fn into_compact_sections(self) -> Vec<CompactSection> {
+        if let Some(sections) = self.sections.into_inner() {
+            return Arc::try_unwrap(sections).unwrap_or_else(|sections| (*sections).clone());
+        }
+        let cells = self
+            .dense
+            .into_inner()
+            .expect("lazy storage must retain its dense cell buffer");
         crate::counters::bump_full_column_conversion(cells.len() as u64);
-        Self { min_y, height, sections }
+        Self::pack_sections(self.height, &cells, None)
     }
 
     /// World Y origin of this storage.
@@ -217,7 +398,7 @@ impl CompactBlockStorage {
     /// Number of 16-row sections, rounded up for a partial top section.
     #[must_use]
     pub fn section_count(&self) -> usize {
-        self.sections.len()
+        (self.height as usize).div_ceil(SECTION_ROWS)
     }
 
     /// Real rows in section `section`, or zero past the top.
@@ -230,20 +411,22 @@ impl CompactBlockStorage {
     /// Borrowed section view for a zero-copy adapter.
     #[must_use]
     pub fn section(&self, section: usize) -> Option<&CompactSection> {
-        self.sections.get(section)
+        self.compact_sections().get(section)
     }
 
     /// Borrowed sections in increasing local-Y order.
     #[must_use]
     pub fn sections(&self) -> &[CompactSection] {
-        &self.sections
+        self.compact_sections()
     }
 
     /// Consumes the storage into its sections and height. Packed word buffers
     /// can be moved into another section implementation without cell copying.
     #[must_use]
     pub fn into_sections(self) -> (i32, i32, Vec<CompactSection>) {
-        (self.min_y, self.height, self.sections)
+        let min_y = self.min_y;
+        let height = self.height;
+        (min_y, height, self.into_compact_sections())
     }
 
     /// Palette index at local `(x, y, z)`.
@@ -252,8 +435,7 @@ impl CompactBlockStorage {
         assert!(x < 16 && z < 16, "column coordinates out of range");
         let ly = y - self.min_y;
         assert!((0..self.height).contains(&ly), "column Y is out of range");
-        let cell = ((ly as usize % SECTION_ROWS) * ROW_CELLS) + z * 16 + x;
-        self.sections[ly as usize / SECTION_ROWS].get(cell)
+        self.cell_at_flat((ly as usize * 16 + z) * 16 + x)
     }
 
     /// Sets one palette index, widening only the affected section when needed.
@@ -264,7 +446,24 @@ impl CompactBlockStorage {
         let section_index = ly as usize / SECTION_ROWS;
         let cell = ((ly as usize % SECTION_ROWS) * ROW_CELLS) + z * 16 + x;
         let rows = self.section_rows(section_index);
-        let section = &mut self.sections[section_index];
+        if let Some(dense) = self.dense.get_mut() {
+            Arc::make_mut(dense)[(ly as usize * 16 + z) * 16 + x] = id;
+            if let Some(sections) = self.sections.get_mut() {
+                let sections = Arc::make_mut(sections);
+                Self::set_compact_section(&mut sections[section_index], rows, cell, id);
+            }
+            return;
+        }
+        let sections: &mut Vec<CompactSection> = Arc::make_mut(
+            self.sections
+                .get_mut()
+                .expect("non-lazy storage must have sections"),
+        );
+        let section = &mut sections[section_index];
+        Self::set_compact_section(section, rows, cell, id);
+    }
+
+    fn set_compact_section(section: &mut CompactSection, rows: usize, cell: usize, id: u16) {
         match section {
             CompactSection::Uniform(current) => {
                 if *current == id {
@@ -316,9 +515,16 @@ impl CompactBlockStorage {
             return;
         }
         let count = rows * ROW_CELLS;
-        let section_ref = &self.sections[section];
-        for cell in 0..count {
-            f(cell, section_ref.get(cell));
+        if let Some(dense) = self.dense.get() {
+            let start = section * SECTION_CELLS;
+            for (cell, &id) in dense[start..start + count].iter().enumerate() {
+                f(cell, id);
+            }
+        } else {
+            let section_ref = &self.compact_sections()[section];
+            for cell in 0..count {
+                f(cell, section_ref.get(cell));
+            }
         }
     }
 
@@ -331,12 +537,21 @@ impl CompactBlockStorage {
     /// Expands the compact field into the compatibility flat layout.
     #[must_use]
     pub fn into_flat(self) -> Vec<u16> {
-        let cells = (self.height as usize) * ROW_CELLS;
+        if let Some(dense) = self.dense.into_inner() {
+            return Arc::unwrap_or_clone(dense);
+        }
+        let height = self.height;
+        let cells = (height as usize) * ROW_CELLS;
         let mut flat = Vec::with_capacity(cells);
-        for section in 0..self.sections.len() {
-            let rows = self.section_rows(section);
+        let sections = self
+            .sections
+            .into_inner()
+            .expect("non-lazy storage must have sections");
+        for section in 0..sections.len() {
+            let start = section.saturating_mul(SECTION_ROWS);
+            let rows = (height as usize).saturating_sub(start).min(SECTION_ROWS);
             for cell in 0..rows * ROW_CELLS {
-                flat.push(self.sections[section].get(cell));
+                flat.push(sections[section].get(cell));
             }
         }
         crate::counters::bump_full_column_conversion(cells as u64);
@@ -346,15 +561,25 @@ impl CompactBlockStorage {
     /// Heap bytes owned by the section spine and packed payloads.
     #[must_use]
     pub fn heap_bytes(&self) -> usize {
-        self.sections.capacity() * std::mem::size_of::<CompactSection>()
-            + self.sections.iter().map(CompactSection::heap_bytes).sum::<usize>()
+        let dense_bytes = self
+            .dense
+            .get()
+            .map_or(0, |dense| dense.capacity() * std::mem::size_of::<u16>());
+        let section_bytes = self.sections.get().map_or(0, |sections| {
+            sections.capacity() * std::mem::size_of::<CompactSection>()
+                + sections.iter().map(CompactSection::heap_bytes).sum::<usize>()
+        });
+        dense_bytes + section_bytes
     }
 
     /// Number of cells that are not palette index zero.
     #[must_use]
     pub fn non_zero_count(&self) -> usize {
+        if let Some(dense) = self.dense.get() {
+            return dense.iter().filter(|&&id| id != 0).count();
+        }
         let mut count = 0;
-        for section in 0..self.sections.len() {
+        for section in 0..self.section_count() {
             self.for_each_section(section, |_, id| count += usize::from(id != 0));
         }
         count
@@ -366,13 +591,70 @@ impl CompactBlockStorage {
 pub struct GeneratedColumnSummaries {
     non_air_first_free: [u16; 256],
     motion_blocking_first_free: Option<[u16; 256]>,
+    motion_blocking_no_leaves_first_free: Option<[u16; 256]>,
+    generation_motion_blocking_first_free: Option<[u16; 256]>,
+    section_state_counts: Vec<Vec<u16>>,
 }
 
 impl GeneratedColumnSummaries {
-    fn new(with_motion_blocking: bool) -> Self {
+    pub(crate) fn from_flat_with_predicates(
+        height: i32,
+        cells: &[u16],
+        motion_blocking: Option<&[bool]>,
+        motion_blocking_no_leaves: Option<&[bool]>,
+        generation_motion_blocking: Option<&[bool]>,
+    ) -> Self {
+        assert!(height >= 0, "column height is negative");
+        assert_eq!(
+            cells.len(),
+            height as usize * ROW_CELLS,
+            "flat column length does not match height"
+        );
+        let mut summaries = Self::new(
+            height,
+            cells,
+            motion_blocking.is_some(),
+            motion_blocking_no_leaves.is_some(),
+            generation_motion_blocking.is_some(),
+        );
+        for section in 0..(height as usize).div_ceil(SECTION_ROWS) {
+            let start = section * SECTION_CELLS;
+            let rows = (height as usize - start / SECTION_CELLS).min(SECTION_ROWS);
+            let end = start + rows * ROW_CELLS;
+            for (cell, &id) in cells[start..end].iter().enumerate() {
+                summaries.observe(
+                    section * SECTION_ROWS,
+                    cell,
+                    id,
+                    motion_blocking,
+                    motion_blocking_no_leaves,
+                    generation_motion_blocking,
+                );
+            }
+        }
+        summaries
+    }
+
+    fn new(
+        height: i32,
+        cells: &[u16],
+        with_motion_blocking: bool,
+        with_motion_blocking_no_leaves: bool,
+        with_generation_motion_blocking: bool,
+    ) -> Self {
+        let palette_len = cells
+            .iter()
+            .copied()
+            .max()
+            .map_or(1, |id| usize::from(id) + 1);
         Self {
             non_air_first_free: [0; 256],
             motion_blocking_first_free: with_motion_blocking.then_some([0; 256]),
+            motion_blocking_no_leaves_first_free:
+                with_motion_blocking_no_leaves.then_some([0; 256]),
+            generation_motion_blocking_first_free:
+                with_generation_motion_blocking.then_some([0; 256]),
+            section_state_counts: vec![vec![0; palette_len]; (height as usize).div_ceil(SECTION_ROWS)],
         }
     }
 
@@ -382,8 +664,11 @@ impl GeneratedColumnSummaries {
         cell: usize,
         id: u16,
         motion_blocking: Option<&[bool]>,
+        motion_blocking_no_leaves: Option<&[bool]>,
+        generation_motion_blocking: Option<&[bool]>,
     ) {
         let ly = section_row + cell / ROW_CELLS;
+        self.section_state_counts[ly / SECTION_ROWS][id as usize] += 1;
         let horizontal = cell % ROW_CELLS;
         let lz = horizontal / 16;
         let lx = horizontal % 16;
@@ -395,6 +680,22 @@ impl GeneratedColumnSummaries {
         if let (Some(out), Some(predicate)) =
             (&mut self.motion_blocking_first_free, motion_blocking)
         {
+            if predicate[id as usize] {
+                out[index] = first_free;
+            }
+        }
+        if let (Some(out), Some(predicate)) = (
+            &mut self.motion_blocking_no_leaves_first_free,
+            motion_blocking_no_leaves,
+        ) {
+            if predicate[id as usize] {
+                out[index] = first_free;
+            }
+        }
+        if let (Some(out), Some(predicate)) = (
+            &mut self.generation_motion_blocking_first_free,
+            generation_motion_blocking,
+        ) {
             if predicate[id as usize] {
                 out[index] = first_free;
             }
@@ -413,6 +714,29 @@ impl GeneratedColumnSummaries {
     #[must_use]
     pub fn motion_blocking_first_free(&self) -> Option<&[u16; 256]> {
         self.motion_blocking_first_free.as_ref()
+    }
+
+    /// Stored first-free row for motion-blocking cells excluding leaves.
+    #[must_use]
+    pub fn motion_blocking_no_leaves_first_free(&self) -> Option<&[u16; 256]> {
+        self.motion_blocking_no_leaves_first_free.as_ref()
+    }
+
+    /// Stored first-free row for the generation-time motion predicate.
+    #[must_use]
+    pub fn generation_motion_blocking_first_free(&self) -> Option<&[u16; 256]> {
+        self.generation_motion_blocking_first_free.as_ref()
+    }
+
+    /// Per-section counts of each generated palette index. This sidecar is
+    /// consumed once by the server and is not retained in the final column.
+    #[must_use]
+    pub fn section_state_counts(&self) -> &[Vec<u16>] {
+        &self.section_state_counts
+    }
+
+    pub(crate) fn into_section_state_counts(self) -> Vec<Vec<u16>> {
+        self.section_state_counts
     }
 }
 
@@ -557,6 +881,11 @@ mod tests {
         assert_eq!(compact.into_flat(), cells);
         assert_eq!(summaries.non_air_first_free(), &non_air);
         assert_eq!(summaries.motion_blocking_first_free(), Some(&motion_control));
+        let mut state_counts = vec![vec![0u16; 4]; 2];
+        for (index, &id) in cells.iter().enumerate() {
+            state_counts[index / SECTION_CELLS][id as usize] += 1;
+        }
+        assert_eq!(summaries.section_state_counts(), state_counts.as_slice());
         assert_eq!(summaries.non_air_first_free()[0], 17);
         assert_eq!(summaries.motion_blocking_first_free().unwrap()[0], 2);
         assert_eq!(min_y + i32::from(summaries.non_air_first_free()[0]), -47);
@@ -611,5 +940,41 @@ mod tests {
             changed_motion.motion_blocking_first_free().unwrap()[0],
             "the motion-blocking control must detect a changed top cell"
         );
+    }
+
+    #[test]
+    fn lazy_dense_storage_defers_section_packing_and_preserves_reads() {
+        let cells = flat(17);
+        let lazy = CompactBlockStorage::from_shared_flat(-64, 17, Arc::new(cells.clone()));
+        assert!(!lazy.is_compact());
+        assert_eq!(lazy.heap_bytes(), cells.len() * std::mem::size_of::<u16>());
+        assert_eq!(lazy.get(7, -64 + 9, 3), cells[(9 * 16 + 3) * 16 + 7]);
+        let mut observed = Vec::with_capacity(cells.len());
+        for section in 0..lazy.section_count() {
+            lazy.for_each_section(section, |_, id| observed.push(id));
+        }
+        assert_eq!(observed, cells);
+        assert!(!lazy.is_compact(), "read-only dense access must not pack sections");
+    }
+
+    #[test]
+    fn section_access_packs_lazy_storage_once_and_matches_compact_control() {
+        let cells = flat(17);
+        let lazy = CompactBlockStorage::from_shared_flat(-64, 17, Arc::new(cells.clone()));
+        let compact = CompactBlockStorage::from_flat(-64, 17, &cells);
+        assert_eq!(lazy.section(0), compact.section(0));
+        assert!(lazy.is_compact());
+        assert_eq!(lazy.clone().into_flat(), cells);
+        assert_eq!(lazy, compact);
+    }
+
+    #[test]
+    fn lazy_dense_mutation_updates_the_dense_read_path() {
+        let cells = vec![0u16; ROW_CELLS];
+        let mut lazy = CompactBlockStorage::from_shared_flat(0, 16, Arc::new(cells));
+        lazy.set(2, 4, 3, 7);
+        assert_eq!(lazy.get(2, 4, 3), 7);
+        assert!(!lazy.is_compact());
+        assert_eq!(lazy.clone().into_flat()[(4 * 16 + 3) * 16 + 2], 7);
     }
 }

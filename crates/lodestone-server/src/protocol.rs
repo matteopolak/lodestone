@@ -128,6 +128,7 @@ impl std::ops::Deref for ResourcePackUrl {
 
 #[cfg(test)]
 mod tests {
+    use lodestone_data::block_states::StateId;
     use lodestone_core::State;
     use lodestone_model::{
         Difficulty, EntityAttributeSnapshot, GameMode, ItemStack, ResourceKey, Rotation, Vec3,
@@ -295,7 +296,7 @@ mod tests {
         fn encode_forget_chunk(&self, cx: i32, cz: i32) -> ServerDirective {
             send(cx * 100 + cz)
         }
-        fn encode_block_update(&self, x: i32, y: i32, z: i32, _state: &str) -> ServerDirective {
+        fn encode_block_update(&self, x: i32, y: i32, z: i32, _state: StateId) -> ServerDirective {
             send(x + y + z)
         }
         fn encode_air_supply_update(&self, air: i32) -> ServerDirective {
@@ -512,9 +513,10 @@ mod tests {
             boxed.encode_forget_chunk(2, 5),
             direct.encode_forget_chunk(2, 5)
         );
+        let stone = StateId::from_state_str("minecraft:stone").expect("stone fixture state");
         assert_eq!(
-            boxed.encode_block_update(1, 2, 3, "minecraft:stone"),
-            direct.encode_block_update(1, 2, 3, "minecraft:stone")
+            boxed.encode_block_update(1, 2, 3, stone),
+            direct.encode_block_update(1, 2, 3, stone)
         );
         assert_eq!(
             boxed.encode_air_supply_update(19),

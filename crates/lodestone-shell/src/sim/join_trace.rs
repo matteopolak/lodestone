@@ -13,9 +13,9 @@ use crate::platform::Instant;
 pub(crate) struct JoinTrace {
     enabled: bool,
     started: Instant,
-    received_seen: bool,
-    remesh_queued_seen: bool,
-    remeshed_seen: bool,
+    received_count: u32,
+    remesh_queued_count: u32,
+    remeshed_count: u32,
 }
 
 impl Default for JoinTrace {
@@ -25,31 +25,29 @@ impl Default for JoinTrace {
 }
 
 impl JoinTrace {
-    /// Create a disabled trace unless the operator explicitly requests the
-    /// dedicated target. Browser builds cannot read a host environment and
-    /// therefore keep this path disabled.
+    /// Create a disabled trace unless the operator explicitly requests it.
     pub(crate) fn new() -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         let enabled = std::env::var_os("LODESTONE_JOIN_TRACE")
             .is_some_and(|value| !value.is_empty() && value != "0")
             && tracing::enabled!(target: "lodestone_join_trace", tracing::Level::INFO);
         #[cfg(target_arch = "wasm32")]
-        let enabled = false;
+        let enabled = tracing::enabled!(target: "lodestone_join_trace", tracing::Level::INFO);
         Self {
             enabled,
             started: Instant::now(),
-            received_seen: false,
-            remesh_queued_seen: false,
-            remeshed_seen: false,
+            received_count: 0,
+            remesh_queued_count: 0,
+            remeshed_count: 0,
         }
     }
 
     /// Restart the timeline at the beginning of a new network session.
     pub(crate) fn restart(&mut self) {
         self.started = Instant::now();
-        self.received_seen = false;
-        self.remesh_queued_seen = false;
-        self.remeshed_seen = false;
+        self.received_count = 0;
+        self.remesh_queued_count = 0;
+        self.remeshed_count = 0;
     }
 
     /// Record a client-side stage for one chunk. The first event in each stage
@@ -59,33 +57,27 @@ impl JoinTrace {
         if !self.enabled {
             return;
         }
-        let first = match stage {
-            "received" => {
-                let previous = self.received_seen;
-                self.received_seen = true;
-                !previous
-            }
-            "remesh_queued" => {
-                let previous = self.remesh_queued_seen;
-                self.remesh_queued_seen = true;
-                !previous
-            }
-            "remeshed" => {
-                let previous = self.remeshed_seen;
-                self.remeshed_seen = true;
-                !previous
-            }
-            _ => false,
+        let count = match stage {
+            "received" => &mut self.received_count,
+            "remesh_queued" => &mut self.remesh_queued_count,
+            "remeshed" => &mut self.remeshed_count,
+            _ => return,
         };
+        *count = count.saturating_add(1);
+        let first = *count == 1;
+        #[cfg(target_arch = "wasm32")]
+        if !first && !count.is_multiple_of(16) {
+            return;
+        }
         tracing::info!(
             target: "lodestone_join_trace",
             stage,
             cx,
             cz,
             first,
+            count = *count,
             elapsed_millis = self.started.elapsed().as_millis() as u64,
             "join chunk stage"
         );
     }
 }
-

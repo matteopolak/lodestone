@@ -59,7 +59,7 @@ impl ServerProtocol for SilentProtocol {
 
 #[derive(Debug, Default)]
 struct FlatWorld {
-    blocks: Mutex<HashMap<(i32, i32, i32), String>>,
+    blocks: Mutex<HashMap<(i32, i32, i32), StateId>>,
 }
 
 impl ChunkSource for FlatWorld {
@@ -67,20 +67,19 @@ impl ChunkSource for FlatWorld {
         ChunkColumn::new(MIN_Y, HEIGHT)
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         self.blocks
             .lock()
             .expect("test world lock")
             .get(&(x, y, z))
             .cloned()
-            .unwrap_or_else(|| "minecraft:air".to_string())
+            .unwrap_or(StateId::AIR)
     }
 
     fn resident_block_state_id(&self, x: i32, y: i32, z: i32) -> Option<StateId> {
         ((x.div_euclid(16), z.div_euclid(16)) == (0, 0)
             && (MIN_Y..MIN_Y + HEIGHT).contains(&y))
-            .then(|| self.block_state(x, y, z))
-            .and_then(|state| StateId::from_state_str(&state))
+            .then(|| self.block_state_id(x, y, z))
     }
 
     fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
@@ -91,11 +90,11 @@ impl ChunkSource for FlatWorld {
         "minecraft:plains".to_string()
     }
 
-    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+    fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
         self.blocks
             .lock()
             .expect("test world lock")
-            .insert((x, y, z), name.to_string());
+            .insert((x, y, z), state);
     }
 }
 

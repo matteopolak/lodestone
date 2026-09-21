@@ -71,6 +71,8 @@
 //! concatenated into a single [`GpuModelMesh`] — one upload and one draw per frame
 //! however many moving blocks exist, versus one of each per block.
 
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey};
 use lodestone_data::block_states::StateId;
 use lodestone_model::BlockStateRef;
 use lodestone_render::{
@@ -290,17 +292,35 @@ fn piston_head_pose(cell: [i32; 3], direction: [i32; 3], progress: f32, extendin
 /// vanilla *unfuelled* default, not a guess — matching how [`merge_primed_tnt`]
 /// already omits the fuse-driven swell/flash for the identical reason.
 #[must_use]
-fn default_minecart_contents(type_path: &str) -> Option<(&'static str, i32)> {
+fn default_minecart_contents(type_path: &str) -> Option<(StateId, i32)> {
     match type_path {
         // Vanilla's own chest-minecart default-display-block-state/offset.
-        "chest_minecart" => Some(("minecraft:chest[facing=north]", 8)),
+        "chest_minecart" => Some((
+            Properties::state_for_block(
+                Block::Chest,
+                &Properties::from_state_id(Block::Chest.default_state())
+                    .with_builtin(PropertyKey::Facing, BuiltinPropertyValue::North)
+                    .ok()?,
+            )?,
+            8,
+        )),
         // Vanilla's own furnace-minecart default-display-block-state; the offset
         // is not overridden, so the abstract minecart's base `6` applies.
-        "furnace_minecart" => Some(("minecraft:furnace[facing=north,lit=false]", 6)),
+        "furnace_minecart" => Some((
+            Properties::state_for_block(
+                Block::Furnace,
+                &Properties::from_state_id(Block::Furnace.default_state())
+                    .with_builtin(PropertyKey::Facing, BuiltinPropertyValue::North)
+                    .ok()?
+                    .with_builtin(PropertyKey::Lit, BuiltinPropertyValue::False)
+                    .ok()?,
+            )?,
+            6,
+        )),
         // Vanilla's own TNT-minecart default-display-block-state; offset not overridden (`6`).
-        "tnt_minecart" => Some(("minecraft:tnt", 6)),
+        "tnt_minecart" => Some((Block::Tnt.default_state(), 6)),
         // Vanilla's own hopper-minecart default-display-block-state/offset.
-        "hopper_minecart" => Some(("minecraft:hopper", 1)),
+        "hopper_minecart" => Some((Block::Hopper.default_state(), 1)),
         _ => None,
     }
 }
@@ -551,9 +571,7 @@ impl RenderState {
         combined: &mut ModelMesh,
         stats: &mut RenderStats,
     ) {
-        let Some(state_id) = StateId::from_state_str("minecraft:tnt") else {
-            return;
-        };
+        let state_id = Block::Tnt.default_state();
         for draw in entities {
             if draw.type_path.as_ref() != PRIMED_TNT_TYPE_PATH {
                 continue;
@@ -616,10 +634,7 @@ impl RenderState {
         stats: &mut RenderStats,
     ) {
         for draw in entities {
-            let Some((block, display_offset)) = default_minecart_contents(&draw.type_path) else {
-                continue;
-            };
-            let Some(state_id) = StateId::from_state_str(block) else {
+            let Some((state_id, display_offset)) = default_minecart_contents(&draw.type_path) else {
                 continue;
             };
             if !frustum.intersects_aabb(
@@ -1551,7 +1566,7 @@ mod tests {
     /// The island this agent closed, at the geometry level: every
     /// content-bearing minecart subtype reaches real, bounded world-space
     /// quads through the production pipeline
-    /// (`default_minecart_contents` → `lodestone_data::block_states::state_id`
+    /// (`default_minecart_contents` → typed `StateId`
     /// → `CrackResolver::state_quads` → `minecart_content_pose` →
     /// `mesh_moving_block_quads`) — and the plain `minecraft:minecart` is the
     /// **negative control**, run through the exact same code, producing none.
@@ -1564,22 +1579,19 @@ mod tests {
     /// "these four draw and this one specifically does not".
     #[test]
     fn minecart_contents_reach_quads_and_the_plain_cart_does_not() {
-        let subtypes: [(&str, &str, i32); 4] = [
-            ("chest_minecart", "minecraft:chest[facing=north]", 8),
-            (
-                "furnace_minecart",
-                "minecraft:furnace[facing=north,lit=false]",
-                6,
-            ),
-            ("tnt_minecart", "minecraft:tnt", 6),
-            ("hopper_minecart", "minecraft:hopper", 1),
+        let subtypes: [(&str, i32); 4] = [
+            ("chest_minecart", 8),
+            ("furnace_minecart", 6),
+            ("tnt_minecart", 6),
+            ("hopper_minecart", 1),
         ];
 
         let ids: Vec<StateId> = subtypes
             .iter()
-            .map(|(_, block, _)| {
-                StateId::from_state_str(block)
-                    .unwrap_or_else(|| panic!("{block} must resolve to a real state id"))
+            .map(|(type_path, _)| {
+                default_minecart_contents(type_path)
+                    .unwrap_or_else(|| panic!("{type_path} must resolve to a default content state"))
+                    .0
             })
             .collect();
         let mut quads = vec![Vec::new(); ids.iter().map(|id| id.raw()).max().unwrap() as usize + 1];
@@ -1597,19 +1609,26 @@ mod tests {
         let expected_max = feet + glam::Vec3::splat(2.0);
 
         let mut bad = Vec::new();
-        for (type_path, block, offset) in subtypes {
-            let (mapped_block, mapped_offset) = default_minecart_contents(type_path)
-                .unwrap_or_else(|| panic!("{type_path} must resolve to a default content block"));
-            if mapped_block != block || mapped_offset != offset {
+        for (type_path, offset) in subtypes {
+            let (mapped_state, mapped_offset) = default_minecart_contents(type_path)
+                .unwrap_or_else(|| panic!("{type_path} must resolve to a default content state"));
+            let expected_block = match type_path {
+                "chest_minecart" => Block::Chest,
+                "furnace_minecart" => Block::Furnace,
+                "tnt_minecart" => Block::Tnt,
+                "hopper_minecart" => Block::Hopper,
+                _ => unreachable!(),
+            };
+            if mapped_state.block() != expected_block || mapped_offset != offset {
                 bad.push(format!(
-                    "{type_path}: mapped to ({mapped_block}, {mapped_offset}), expected \
-                     ({block}, {offset})"
+                    "{type_path}: mapped to ({:?}, {mapped_offset}), expected \
+                     ({expected_block:?}, {offset})",
+                    mapped_state.block()
                 ));
                 continue;
             }
 
-            let state_id = StateId::from_state_str(mapped_block).unwrap();
-            let src_quads = resolver.state_quads(state_id);
+            let src_quads = resolver.state_quads(mapped_state);
             let pose = minecart_content_pose(feet, yaw, mapped_offset);
             let mesh = mesh_moving_block_quads(src_quads, pose, 0xF0);
             if mesh.vertices.is_empty() {

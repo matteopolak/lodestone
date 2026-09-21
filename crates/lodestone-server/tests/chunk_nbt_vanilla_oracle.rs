@@ -42,6 +42,7 @@
 use std::path::{Path, PathBuf};
 
 use lodestone_core::{Nbt, Reader, read_named_nbt};
+use lodestone_data::block_states::StateId;
 use lodestone_server::chunk_nbt;
 
 /// The 26.2 overworld's vertical extent. `yPos = -4` (min *section*) × 16.
@@ -76,9 +77,9 @@ fn unpack_non_spanning(data: &[i64], count: usize, bits: u32) -> Vec<u32> {
 }
 
 /// `!state.isAir()` — the three air block states 26.2 has.
-fn is_air(state: &str) -> bool {
+fn is_air(state: StateId) -> bool {
     matches!(
-        state,
+        state.name(),
         "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air"
     )
 }
@@ -87,7 +88,7 @@ fn is_air(state: &str) -> bool {
 /// biased encoding: highest non-air `y + 1`, minus `min_y`, or 0 for all-air.
 fn our_world_surface(column: &lodestone_server::ChunkColumn, x: i32, z: i32) -> u32 {
     for y in (MIN_Y..MIN_Y + HEIGHT).rev() {
-        if !is_air(column.block_state(x, y, z)) {
+        if !is_air(column.block_state_id(x, y, z)) {
             return u32::try_from(y + 1 - MIN_Y).expect("height fits");
         }
     }

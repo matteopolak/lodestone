@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lodestone_client::{ClientBuilder, EventStream, LoginProfile, PlayerLoadedPolicy, ServerAddress};
+use lodestone_data::{block::Block, block_states::StateId};
 use lodestone_model::{
     BlockFace, BlockPos, ClientAction, ClientEvent, ContainerClickType, ContainerSlotChange,
     ContainerStateId, Vec3f,
@@ -21,8 +22,8 @@ struct FixtureSource {
 impl FixtureSource {
     fn new() -> Self {
         let mut column = ChunkColumn::new(0, 256);
-        column.set_block(TARGET.x, TARGET.y, TARGET.z, "minecraft:dandelion");
-        column.set_block(CHEST.x, CHEST.y, CHEST.z, "minecraft:chest");
+        column.set_block_id(TARGET.x, TARGET.y, TARGET.z, Block::Dandelion.default_state());
+        column.set_block_id(CHEST.x, CHEST.y, CHEST.z, Block::Chest.default_state());
         Self {
             column: Mutex::new(column),
         }
@@ -37,23 +38,22 @@ impl ChunkSource for FixtureSource {
             .clone()
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         self.column
             .lock()
             .expect("fixture column lock poisoned")
-            .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
-            .to_owned()
+            .block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
     }
 
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
         "minecraft:plains".to_owned()
     }
 
-    fn set_block(&self, x: i32, y: i32, z: i32, state: &str) {
+    fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
         self.column
             .lock()
             .expect("fixture column lock poisoned")
-            .set_block(x.rem_euclid(16), y, z.rem_euclid(16), state);
+            .set_block_id(x.rem_euclid(16), y, z.rem_euclid(16), state);
     }
 }
 

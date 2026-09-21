@@ -1,3 +1,4 @@
+use lodestone_data::block_states::StateId;
 use lodestone_server::worldgen_session::{
     BlockCoordinate, GenerationRequest, GenerationSession, ImmutableProduct, ImmutableSidecar,
     ImmutableStageCompletion, ProductKey, SessionBudget,
@@ -138,15 +139,15 @@ impl ChunkSource for DriverSource {
         ChunkColumn::new(-64, 384)
     }
 
-    fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-        "minecraft:air".to_owned()
+    fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
+        StateId::AIR
     }
 
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
         "minecraft:the_void".to_owned()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
 
     fn request_stage_driver(&self) -> Option<&dyn RequestStageDriver> {
         Some(&self.driver)
@@ -418,15 +419,15 @@ impl ChunkSource for LegacySource {
         ChunkColumn::new(0, 16)
     }
 
-    fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-        "minecraft:air".to_owned()
+    fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
+        StateId::AIR
     }
 
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
         "minecraft:the_void".to_owned()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
 }
 
 #[test]
@@ -618,6 +619,22 @@ fn session_budgets_reject_oversized_product_sidecar_and_mutation() {
             kind: lodestone_server::worldgen_session::BudgetKind::Mutations,
             ..
         })
+    ));
+}
+
+#[test]
+fn mutable_transaction_rejects_duplicate_provenance() {
+    let mut session = GenerationSession::new(end_request());
+    advance_end_prefix(&mut session);
+    let target = session.request().target();
+    let stage = StageKey::new(Dimension::End, ColumnStage::Features);
+    session.declare_mutable_sources(stage, [(0, target)]).unwrap();
+    let mut transaction = session.begin_mutable_source(target, stage, 0).unwrap();
+    let destination = BlockCoordinate::new(64, 70, -140);
+    transaction.push(0, destination, 5_u8).unwrap();
+    assert!(matches!(
+        transaction.push(0, destination, 6_u8),
+        Err(lodestone_server::worldgen_session::SessionError::DuplicateMutation(_))
     ));
 }
 

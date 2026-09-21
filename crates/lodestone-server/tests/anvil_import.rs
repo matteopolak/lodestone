@@ -7,6 +7,7 @@
 use std::{collections::BTreeMap, path::PathBuf};
 
 use lodestone_core::{Nbt, Reader, read_named_nbt};
+use lodestone_data::block_states::StateId;
 use lodestone_anvil::import_preflight::{ImportAuthorization, LossDecision, PreflightReport};
 use lodestone_anvil::{CompressionScheme, level_dat, region, world_gen_settings};
 use lodestone_server::anvil_import::{
@@ -287,8 +288,9 @@ fn checked_in_anvil_chunk_maps_supported_terrain_and_reports_dropped_payloads() 
         .expect("load imported chunk")
         .expect("imported chunk exists");
     assert_eq!(
-        loaded.column.block_state(1, -59, 7),
-        "minecraft:blast_furnace[facing=south,lit=false]"
+        loaded.column.block_state_id(1, -59, 7),
+        StateId::from_state_str("minecraft:blast_furnace[facing=south,lit=false]")
+            .expect("blast furnace fixture state")
     );
     assert!(
         loaded.column.motion_blocking().is_some(),
@@ -421,8 +423,9 @@ fn region_file_import_uses_one_aggregate_loss_authorization_and_one_native_batch
             .expect("load imported region member")
             .expect("every present region member becomes a native record");
         assert_eq!(
-            loaded.column.block_state(1, -59, 7),
-            "minecraft:blast_furnace[facing=south,lit=false]"
+        loaded.column.block_state_id(1, -59, 7),
+        StateId::from_state_str("minecraft:blast_furnace[facing=south,lit=false]")
+            .expect("blast furnace fixture state")
         );
         assert!(loaded.column.block_entities().is_empty());
     }

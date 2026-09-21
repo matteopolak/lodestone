@@ -28,6 +28,7 @@
 use lodestone_entity::pathfinding::{
     Aabb, MobShape, PathFinder, PathParams, PathStart, PathType, PathWorld,
 };
+use lodestone_data::block_states::StateId;
 use lodestone_model::BlockPos;
 use lodestone_server::ChunkWorld;
 
@@ -51,6 +52,10 @@ const WATER: &str = "minecraft:water[level=0]";
 const OAK_FENCE: &str =
     "minecraft:oak_fence[east=false,north=false,south=false,waterlogged=false,west=false]";
 const OAK_SLAB_BOTTOM: &str = "minecraft:oak_slab[type=bottom,waterlogged=false]";
+
+fn state(value: &str) -> StateId {
+    StateId::from_state_str(value).expect("fixture block state")
+}
 
 /// Reproduces `ChunkWorld`'s **old, pre-census** `PathWorld` impl exactly: every
 /// solid (non-air, non-fluid) cell is `PathType::Blocked` with a full-cell
@@ -102,7 +107,7 @@ fn lava_band_world() -> ChunkWorld {
         }
     }
     for x in -4..=4 {
-        world.set_block(x, 0, 3, LAVA);
+        world.set_block_id(x, 0, 3, state(LAVA));
     }
     world
 }
@@ -188,9 +193,9 @@ fn real_census_forces_a_lava_detour_the_old_solid_air_model_would_walk_straight_
 fn collision_top_reads_the_real_per_state_shape_not_a_hardcoded_full_cell() {
     let mut world = ChunkWorld::new(-4, 24);
     world.set_solid(0, 0, 0, true); // stone: full cube
-    world.set_block(1, 0, 0, OAK_SLAB_BOTTOM);
-    world.set_block(2, 0, 0, OAK_FENCE);
-    world.set_block(3, 0, 0, WATER);
+    world.set_block_id(1, 0, 0, state(OAK_SLAB_BOTTOM));
+    world.set_block_id(2, 0, 0, state(OAK_FENCE));
+    world.set_block_id(3, 0, 0, state(WATER));
     // (4, 0, 0) is left air by construction.
 
     assert_eq!(world.collision_top(0, 0, 0), 1.0, "full cube must stay 1.0");

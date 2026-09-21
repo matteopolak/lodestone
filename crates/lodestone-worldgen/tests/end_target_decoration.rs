@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use lodestone_data::block_states::StateId;
 use lodestone_worldgen::density::{NoiseParams, Resolver};
 use lodestone_worldgen::end::EndGenerator;
 use serde_json::Value;
@@ -100,7 +101,8 @@ fn target_aware_source_replay_reads_the_target_window() {
     let target = (134, 137);
     let source = (133, 136);
     let target_only_cell = (target.0 * 16 + 31, 70, target.1 * 16 + 31);
-    let override_state = "minecraft:diamond_block".to_owned();
+    let override_state =
+        StateId::from_state_str("minecraft:diamond_block").expect("bundled override state");
 
     let target_result = generator.parity_source_decoration_for_target_with_overrides(
         target.0,

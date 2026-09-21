@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use bevy_app::App;
 use lodestone_core::{Reader, State, Writer};
+use lodestone_data::block::Block;
 use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockActionKind, BlockFace, BlockPos};
 use lodestone_net::Connection;
@@ -44,7 +45,7 @@ const PLAYER_UUID: Uuid = Uuid::from_u128(0x7061_7065_725f_6272_6561_6b); // "pa
 
 #[derive(Clone)]
 struct FlatSource {
-    writes: Arc<Mutex<Vec<(BlockPos, String)>>>,
+    writes: Arc<Mutex<Vec<(BlockPos, StateId)>>>,
 }
 
 impl FlatSource {
@@ -56,11 +57,11 @@ impl FlatSource {
 
     fn column_with_target(&self) -> ChunkColumn {
         let mut column = ChunkColumn::new(MIN_Y, HEIGHT);
-        column.set_block(
+        column.set_block_id(
             TARGET.x.rem_euclid(16),
             TARGET.y,
             TARGET.z.rem_euclid(16),
-            "minecraft:stone",
+            Block::Stone.default_state(),
         );
         column
     }
@@ -71,21 +72,20 @@ impl ChunkSource for FlatSource {
         self.column_with_target()
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         self.column_with_target()
-            .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
-            .to_string()
+            .block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
     }
 
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
         "minecraft:plains".to_owned()
     }
 
-    fn set_block(&self, x: i32, y: i32, z: i32, state: &str) {
+    fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
         self.writes
             .lock()
             .expect("source write log")
-            .push((BlockPos::new(x, y, z), state.to_owned()));
+            .push((BlockPos::new(x, y, z), state));
     }
 }
 
@@ -155,12 +155,12 @@ impl ServerProtocol for SilentProtocol {
         ServerDirective::None
     }
 
-    fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {
+    fn encode_block_update(&self, x: i32, y: i32, z: i32, state: StateId) -> ServerDirective {
         let mut writer = Writer::default();
         writer.i32(x);
         writer.i32(y);
         writer.i32(z);
-        writer.string(state);
+        writer.string(&state.canonical_state());
         ServerDirective::Send {
             packet_id: BLOCK_UPDATE_S2C,
             payload: writer.as_slice().to_vec(),

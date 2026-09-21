@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use lodestone_data::block_states::StateId;
 use lodestone_server::{
     ChunkColumn, ChunkSource, CommandCaller, CommandDispatch, CommandResponse, CommandSink,
     IntegratedServer, LanConfig, RconConfig, ServerBound, ServerDirective, ServerProtocol,
@@ -15,6 +16,10 @@ use lodestone_server::{
 use lodestone_testsupport::{AsyncRconClient, rcon_frame};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
+
+fn fixture_state(name: &str) -> StateId {
+    StateId::from_state_str(name).expect("fixture block state exists")
+}
 
 /// Records every command, and the identity it arrived as, so the tests can
 /// assert both the round-trip and that the console identity reached the sink.
@@ -68,12 +73,12 @@ impl ChunkSource for EmptyWorld {
     fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
         ChunkColumn::new(0, 1)
     }
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
-        self.column(cx, cz).block_state(lx, y, lz).to_string()
+        self.column(cx, cz).block_state_id(lx, y, lz)
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -83,7 +88,7 @@ impl ChunkSource for EmptyWorld {
         let lz = z.rem_euclid(16);
         self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
     }
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
         // No storage; edits are discarded by design.
     }
 }
@@ -109,29 +114,29 @@ fn rcon_server(
 /// this is what a real `IntegratedServer::open_to_lan`-hosted `/setblock`/
 /// `/fill` over RCON actually reaches.
 #[derive(Default)]
-struct RecordingWorld(Arc<Mutex<HashMap<(i32, i32, i32), String>>>);
+struct RecordingWorld(Arc<Mutex<HashMap<(i32, i32, i32), StateId>>>);
 
 impl ChunkSource for RecordingWorld {
     fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
         ChunkColumn::new(0, 16)
     }
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         self.0
             .lock()
             .expect("recording world lock poisoned")
             .get(&(x, y, z))
-            .cloned()
-            .unwrap_or_else(|| "minecraft:air".to_string())
+            .copied()
+            .unwrap_or(StateId::AIR)
     }
 
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
         "minecraft:plains".to_string()
     }
-    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+    fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
         self.0
             .lock()
             .expect("recording world lock poisoned")
-            .insert((x, y, z), name.to_string());
+            .insert((x, y, z), state);
     }
 }
 
@@ -149,7 +154,7 @@ impl ChunkSource for RecordingWorld {
 /// inside `open_to_lan` itself, so there is no way to learn it from the
 /// outside otherwise.
 async fn lan_rcon_server(
-    edits: Arc<Mutex<HashMap<(i32, i32, i32), String>>>,
+    edits: Arc<Mutex<HashMap<(i32, i32, i32), StateId>>>,
 ) -> (IntegratedServer, std::net::SocketAddr) {
     let mut server = IntegratedServer::open_to_lan(
         "127.0.0.1:0",
@@ -334,7 +339,7 @@ async fn one_write_delivers_the_whole_auth_response_to_a_single_read() {
 /// test double standing in for them.
 #[tokio::test]
 async fn rcon_setblock_writes_through_the_real_world_source() {
-    let edits: Arc<Mutex<HashMap<(i32, i32, i32), String>>> = Arc::default();
+    let edits: Arc<Mutex<HashMap<(i32, i32, i32), StateId>>> = Arc::default();
     let (server, addr) = lan_rcon_server(edits.clone()).await;
 
     let mut client = AsyncRconClient::connect(addr, "hunter2")
@@ -348,7 +353,7 @@ async fn rcon_setblock_writes_through_the_real_world_source() {
 
     assert_eq!(
         edits.lock().unwrap().get(&(5, 64, -3)),
-        Some(&"minecraft:stone".to_string()),
+        Some(&fixture_state("minecraft:stone")),
         "the write must reach the world source `set_block` a real connection's own \
          ChatCommand arm would call, not be dropped as it was before RconConfig \
          carried one"
@@ -361,7 +366,7 @@ async fn rcon_setblock_writes_through_the_real_world_source() {
 /// publish-per-block loop and a volume greater than one.
 #[tokio::test]
 async fn rcon_fill_writes_every_position_and_reports_the_real_count() {
-    let edits: Arc<Mutex<HashMap<(i32, i32, i32), String>>> = Arc::default();
+    let edits: Arc<Mutex<HashMap<(i32, i32, i32), StateId>>> = Arc::default();
     let (server, addr) = lan_rcon_server(edits.clone()).await;
 
     let mut client = AsyncRconClient::connect(addr, "hunter2")
@@ -376,7 +381,11 @@ async fn rcon_fill_writes_every_position_and_reports_the_real_count() {
     let recorded = edits.lock().unwrap();
     for x in 0..=1 {
         for z in 0..=1 {
-            assert_eq!(recorded.get(&(x, 64, z)), Some(&"minecraft:glass".to_string()), "({x}, 64, {z})");
+            assert_eq!(
+                recorded.get(&(x, 64, z)),
+                Some(&fixture_state("minecraft:glass")),
+                "({x}, 64, {z})"
+            );
         }
     }
     assert_eq!(recorded.len(), 4, "exactly the four cells in the box, no more");
@@ -391,7 +400,7 @@ async fn rcon_fill_writes_every_position_and_reports_the_real_count() {
 /// attempted.
 #[tokio::test]
 async fn rcon_summon_spawns_into_the_live_mob_handle() {
-    let edits: Arc<Mutex<HashMap<(i32, i32, i32), String>>> = Arc::default();
+    let edits: Arc<Mutex<HashMap<(i32, i32, i32), StateId>>> = Arc::default();
     let (server, addr) = lan_rcon_server(edits).await;
 
     let mut client = AsyncRconClient::connect(addr, "hunter2")
@@ -422,7 +431,7 @@ async fn rcon_summon_spawns_into_the_live_mob_handle() {
 /// LAN connection reads this feed yet).
 #[tokio::test]
 async fn rcon_worldborder_set_and_get_round_trip_the_real_shared_border() {
-    let edits: Arc<Mutex<HashMap<(i32, i32, i32), String>>> = Arc::default();
+    let edits: Arc<Mutex<HashMap<(i32, i32, i32), StateId>>> = Arc::default();
     let (server, addr) = lan_rcon_server(edits).await;
 
     let mut client = AsyncRconClient::connect(addr, "hunter2")

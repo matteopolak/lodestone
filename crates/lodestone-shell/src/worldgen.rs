@@ -50,6 +50,7 @@
 
 use std::sync::OnceLock;
 
+use lodestone_data::block::Block;
 use lodestone_server::{OverworldGenerator, overworld_generator};
 use lodestone_world::{
     ChunkColumn, ChunkPos, Heightmaps, LoadedChunk, PaletteKind, World, compute_column_light,
@@ -80,18 +81,7 @@ fn generator() -> &'static OverworldGenerator {
     GEN.get_or_init(|| overworld_generator(WORLD_SEED))
 }
 
-/// Strips any `[properties]` suffix from a block-state string.
-fn base(name: &str) -> &str {
-    name.split('[').next().unwrap_or(name)
-}
-
-/// Whether a block name is a log-shaped full cube — a log, a stripped log, or a
-/// `_wood` block. All of them take the demo palette's `LOG` sprite pair.
-fn is_log(name: &str) -> bool {
-    name.ends_with("_log") || name.ends_with("_wood") || name.ends_with("_stem")
-}
-
-/// Maps a vanilla block-state name onto the shell's tiny demo palette.
+/// Maps a generated block identity onto the shell's tiny demo palette.
 ///
 /// The arms cover exactly the names the module doc's enumeration says the
 /// composed generator emits; unknown **solid** blocks fall back to stone, a safe
@@ -116,45 +106,83 @@ fn is_log(name: &str) -> bool {
 ///   it blocks the player's movement, and it blocks skylight. Air is the honest
 ///   rendering of "this palette cannot draw a flower", and it is what the old
 ///   sine-terrain world showed.
-fn map_block(name: &str) -> u32 {
-    match base(name) {
-        "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air" => id::AIR,
+fn map_block(block: Block) -> u32 {
+    match block {
+        Block::Air => id::AIR,
         // Non-solid vegetation the demo palette has no model for. See above:
         // air rather than the `_` fallback, which would be a solid cube.
-        "minecraft:bush"
-        | "minecraft:short_grass"
-        | "minecraft:tall_grass"
-        | "minecraft:fern"
-        | "minecraft:large_fern"
-        | "minecraft:dead_bush"
-        | "minecraft:leaf_litter"
-        | "minecraft:wildflowers"
-        | "minecraft:lilac"
-        | "minecraft:peony"
-        | "minecraft:rose_bush"
-        | "minecraft:sunflower"
-        | "minecraft:lily_of_the_valley"
-        | "minecraft:dandelion"
-        | "minecraft:poppy" => id::AIR,
-        "minecraft:grass_block" => id::GRASS,
-        "minecraft:dirt"
-        | "minecraft:coarse_dirt"
-        | "minecraft:rooted_dirt"
-        | "minecraft:mud"
-        | "minecraft:podzol" => id::DIRT,
-        "minecraft:sand"
-        | "minecraft:red_sand"
-        | "minecraft:sandstone"
-        | "minecraft:red_sandstone" => id::SAND,
-        "minecraft:gravel" => id::GRAVEL,
-        "minecraft:water" | "minecraft:lava" => id::WATER,
-        "minecraft:bedrock" => id::BEDROCK,
+        Block::Bush
+        | Block::ShortGrass
+        | Block::TallGrass
+        | Block::Fern
+        | Block::LargeFern
+        | Block::DeadBush
+        | Block::LeafLitter
+        | Block::Wildflowers
+        | Block::Lilac
+        | Block::Peony
+        | Block::RoseBush
+        | Block::Sunflower
+        | Block::LilyOfTheValley
+        | Block::Dandelion
+        | Block::Poppy => id::AIR,
+        Block::GrassBlock => id::GRASS,
+        Block::Dirt | Block::CoarseDirt | Block::RootedDirt | Block::Mud | Block::Podzol => id::DIRT,
+        Block::Sand | Block::RedSand | Block::Sandstone | Block::RedSandstone => id::SAND,
+        Block::Gravel => id::GRAVEL,
+        Block::Water | Block::Lava => id::WATER,
+        Block::Bedrock => id::BEDROCK,
         // Trees. `_log` / `_leaves` catches every wood type the vegetation
         // stage can place, not just the three seed 3 happens to grow, so
         // another biome does not silently reintroduce stone trees. Stripped
         // logs and wood blocks take the same side sprite.
-        _ if is_log(base(name)) => id::LOG,
-        _ if base(name).ends_with("_leaves") => id::LEAVES,
+        Block::OakLog
+        | Block::SpruceLog
+        | Block::BirchLog
+        | Block::JungleLog
+        | Block::AcaciaLog
+        | Block::CherryLog
+        | Block::DarkOakLog
+        | Block::PaleOakLog
+        | Block::MangroveLog
+        | Block::StrippedOakLog
+        | Block::StrippedSpruceLog
+        | Block::StrippedBirchLog
+        | Block::StrippedJungleLog
+        | Block::StrippedAcaciaLog
+        | Block::StrippedCherryLog
+        | Block::StrippedDarkOakLog
+        | Block::StrippedPaleOakLog
+        | Block::StrippedMangroveLog
+        | Block::OakWood
+        | Block::SpruceWood
+        | Block::BirchWood
+        | Block::JungleWood
+        | Block::AcaciaWood
+        | Block::CherryWood
+        | Block::DarkOakWood
+        | Block::PaleOakWood
+        | Block::MangroveWood
+        | Block::StrippedOakWood
+        | Block::StrippedSpruceWood
+        | Block::StrippedBirchWood
+        | Block::StrippedJungleWood
+        | Block::StrippedAcaciaWood
+        | Block::StrippedCherryWood
+        | Block::StrippedDarkOakWood
+        | Block::StrippedPaleOakWood
+        | Block::StrippedMangroveWood => id::LOG,
+        Block::OakLeaves
+        | Block::SpruceLeaves
+        | Block::BirchLeaves
+        | Block::JungleLeaves
+        | Block::AcaciaLeaves
+        | Block::CherryLeaves
+        | Block::DarkOakLeaves
+        | Block::PaleOakLeaves
+        | Block::MangroveLeaves
+        | Block::AzaleaLeaves
+        | Block::FloweringAzaleaLeaves => id::LEAVES,
         // stone, deepslate, tuff, calcite, and any other solid: render as stone.
         _ => id::STONE,
     }
@@ -182,7 +210,7 @@ fn top_mapped(wx: i32, wz: i32, keep: impl Fn(u32) -> bool) -> i32 {
         let block = if y == MIN_Y {
             id::BEDROCK
         } else {
-            map_block(col.block_state(lx, y, lz))
+            map_block(col.block_state_id(lx, y, lz).block())
         };
         if keep(block) {
             return y;
@@ -241,7 +269,7 @@ pub fn generate_column(cx: i32, cz: i32) -> LoadedChunk {
                     // Guaranteed sealed floor regardless of seed/column.
                     id::BEDROCK
                 } else {
-                    map_block(col.block_state(lx, y, lz))
+                    map_block(col.block_state_id(lx, y, lz).block())
                 };
                 if block != id::AIR {
                     column.set_block(lx, y, lz, block);

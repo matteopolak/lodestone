@@ -45,6 +45,7 @@ use std::collections::HashSet;
 use std::sync::Mutex;
 
 use lodestone_core::{Reader, State, Writer};
+use lodestone_data::block_states::StateId;
 use lodestone_model::{GameMode, Vec3};
 use lodestone_net::{Connection, memory_pair};
 use lodestone_server::{
@@ -94,19 +95,19 @@ impl ChunkSource for IslandSource {
         if self.island.is_none_or(|island| island == (cx, cz)) {
             for lx in 0..16 {
                 for lz in 0..16 {
-                    column.set_block(lx, FLOOR_Y, lz, "minecraft:stone");
+                    column.set_block_id(lx, FLOOR_Y, lz, state("minecraft:stone"));
                 }
             }
         }
         column
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
-        self.column(cx, cz).block_state(lx, y, lz).to_string()
+        self.column(cx, cz).block_state_id(lx, y, lz)
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -117,9 +118,13 @@ impl ChunkSource for IslandSource {
         self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
         // No storage; this fixture serves fresh columns by design.
     }
+}
+
+fn state(name: &str) -> StateId {
+    StateId::from_state_str(name).expect("fixture state is in the built-in table")
 }
 
 /// Emits only the two things this gate reads: the chunk-cache centre and one

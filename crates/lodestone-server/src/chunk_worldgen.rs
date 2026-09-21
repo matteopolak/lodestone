@@ -8,7 +8,9 @@
 
 use lodestone_worldgen::density::{Context, Density};
 
-use crate::chunk::{ChunkColumn, ChunkSource, AIR, STONE};
+use lodestone_data::block_states::StateId;
+
+use crate::chunk::{ChunkColumn, ChunkSource, air_state, stone_state};
 
 /// A solidity-only [`ChunkSource`] backed by a bare density node.
 ///
@@ -63,23 +65,23 @@ impl ChunkSource for WorldgenChunkSource {
     // (including air for any y outside the vertical extent). Point-sampling
     // the density node is cheaper than `column()` and gives the same answer,
     // so unlike the column-regenerating form this is the efficient read.
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         if !(self.min_y..self.min_y + self.height).contains(&y) {
-            return AIR.to_string();
+            return air_state();
         }
         if self.final_density.compute(Context::new(x, y, z)) > 0.0 {
-            STONE.to_string()
+            stone_state()
         } else {
-            AIR.to_string()
+            air_state()
         }
     }
 
     /// This source stamps no biome data of its own (a solidity-only
-    /// transport-test source — see [`block_state`](Self::block_state)'s own
+    /// transport-test source — see [`block_state_id`](Self::block_state_id)'s own
     /// doc), so every cell reads [`crate::chunk::DEFAULT_BIOME`] via
     /// [`ChunkColumn::new`]'s own default, through the one path that column
     /// actually exists on: `column()`, not a point-sampled shortcut like
-    /// `block_state`'s (there is no density-shaped biome field to sample).
+    /// `block_state_id`'s (there is no density-shaped biome field to sample).
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
@@ -95,8 +97,8 @@ impl ChunkSource for WorldgenChunkSource {
     /// [`crate::chunk::OverworldChunkSource`] (or
     /// [`crate::region_source::RegionChunkSource`]) when edits must persist.
     /// Panics loudly rather than silently discarding the placement.
-    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
-        let _ = (x, y, z, name);
+    fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
+        let _ = (x, y, z, state);
         todo!("WorldgenChunkSource is a solidity-only, non-retaining source; it cannot accept a set_block edit");
     }
 }

@@ -7,6 +7,11 @@
 //! by the noise's registry id), and evaluates the resulting tree at a block
 //! position.
 //!
+//! The public [`Density::compute`] walk is also the reference implementation for
+//! differential controls. The compiled point and field engines preserve the
+//! spline point-semantics boundary while replacing its hot recursive payload
+//! walk with indexed arrays.
+//!
 //! Point evaluation matches vanilla's `SinglePointContext` *value-wise*: no
 //! marker wrapper ever changes *what* is computed, only how many times. **All
 //! five marker kinds are now transparent here**, which is byte-for-byte what the
@@ -71,9 +76,8 @@
 //!   `column_timed_overhead`, both `linearity` scenes; all p < 0.05). Cause,
 //!   confirmed by reading where `flat_cache` nodes actually sit in this
 //!   crate's data: `continents`/`erosion`/`ridges` are reached almost
-//!   entirely as `spline` `coordinate` inputs (`spline.rs`'s
-//!   `coordinate.compute(ctx)`), and `spline` is one of
-//!   [`NoiseChunkSampler`]'s designated "leaf" node kinds (`chunk.rs`) — i.e.
+//!   entirely as `spline` coordinate inputs, and `spline` is one of
+//!   [`NoiseChunkSampler`]'s designated point-semantics boundaries (`chunk.rs`) — i.e.
 //!   every such call already arrives at a **distinct, already-deduplicated**
 //!   `(x, z)` (one per unique interpolation corner, via
 //!   [`NoiseChunkSampler`]'s own `slot_get` *before* raw `compute` is ever
@@ -526,7 +530,9 @@ pub enum Density {
         /// Branch functions.
         functions: Vec<Density>,
     },
-    /// `spline`.
+    /// `spline`. The source representation remains available for reference
+    /// evaluation; [`crate::engine::PointProgram`] compiles its internals into
+    /// indexed arrays for point and field hot paths.
     Spline(Spline),
     /// `old_blended_noise`.
     Blended(BlendedNoise),

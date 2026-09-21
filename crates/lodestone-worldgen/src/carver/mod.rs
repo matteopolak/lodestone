@@ -19,26 +19,18 @@
 //! and radii accumulate in `f32`, positions in `f64`, and `Mth.sin/cos` take a
 //! `f64` argument (a promoted `f32`) and return `f32`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 use lodestone_worldgen_core::hash::FastSet;
 
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::aquifer::{AquiferSystem, BlockKind};
-use crate::interner::StateId;
 use crate::math;
 use crate::rng::RandomSource;
-
-const AIR: &str = "minecraft:air";
-const WATER: &str = "minecraft:water[level=0]";
-const LAVA: &str = "minecraft:lava[level=0]";
-/// Vanilla's own cave-air constant. Only vanilla's own nether-carver
-/// block-carve writes it — the
-/// Overworld's own carve-state query goes through the aquifer, whose air is plain
-/// `Blocks.AIR`.
-const CAVE_AIR: &str = "minecraft:cave_air";
 
 /// The carver neighbourhood radius (vanilla's own apply-carvers routine: `dx,dz ∈ [-8, 8]`).
 ///
@@ -524,18 +516,18 @@ impl From<RawCanyonConfig> for CanyonConfig {
 /// with air/water/lava.
 ///
 /// Backed by [`crate::dense_grid::DenseBlockGrid`] — a
-/// flat, palette-indexed array instead of a `HashMap<(i32,i32,i32), String>`.
+/// flat, palette-indexed array instead of a coordinate-keyed block-state map.
 /// The measured regression this replaces: composing carvers over the old
-/// `HashMap`-keyed shape (designed for parity-harness fixtures, not a
+/// coordinate-keyed shape (designed for parity-harness fixtures, not a
 /// per-chunk-per-neighbour production hot loop) took a 144-chunk sweep from
 /// sub-second to ~68s in debug. [`CarveGrid::new`]/[`CarveGrid::into_blocks`]
 /// keep the original `HashMap` shape as a **test adapter** (existing
 /// `carver_parity.rs` fixtures build one that way, and hand-writing a sparse
 /// fixture as a map literal is clearer than constructing a dense grid by
-/// hand); the production path
+/// hand); the map carries `StateId`s, and the production path
 /// (`crate::overworld::OverworldGenerator::carve_stage`) uses
 /// [`CarveGrid::from_dense`]/[`CarveGrid::into_dense`] instead, with no
-/// `HashMap<(i32,i32,i32), String>` anywhere in the loop.
+/// coordinate-keyed map anywhere in the loop.
 pub struct CarveGrid {
     dense: crate::dense_grid::DenseBlockGrid,
 }
@@ -547,14 +539,24 @@ impl std::fmt::Debug for CarveGrid {
 }
 impl CarveGrid {
     /// Test-adapter constructor (see struct doc): the bounding box is
-    /// derived from the map's own key range, so this remains a drop-in
-    /// replacement for an earlier `HashMap`-keyed constructor —
-    /// every existing fixture-driven caller is unchanged.
+    /// derived from the map's own key range. State ids must belong to the
+    /// supplied state table marker (retained only for fixture compatibility).
     #[must_use]
-    pub fn new(blocks: HashMap<(i32, i32, i32), String>) -> Self {
+    pub fn new(
+        _marker: std::sync::Arc<impl Sized>,
+        blocks: HashMap<(i32, i32, i32), StateId>,
+    ) -> Self {
         if blocks.is_empty() {
             return CarveGrid {
-                dense: crate::dense_grid::DenseBlockGrid::new(0, 0, 0, 0, 0, 0, AIR),
+                dense: crate::dense_grid::DenseBlockGrid::with_default(
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    lodestone_data::block_states::air_state(),
+                ),
             };
         }
         let (mut min_x, mut min_y, mut min_z) = (i32::MAX, i32::MAX, i32::MAX);
@@ -567,15 +569,18 @@ impl CarveGrid {
             max_y = max_y.max(y);
             max_z = max_z.max(z);
         }
-        let dense = crate::dense_grid::DenseBlockGrid::from_hashmap(
+        let mut dense = crate::dense_grid::DenseBlockGrid::with_default(
             min_x,
             min_y,
             min_z,
             max_x - min_x + 1,
             max_y - min_y + 1,
             max_z - min_z + 1,
-            &blocks,
+            lodestone_data::block_states::air_state(),
         );
+        for (&(x, y, z), &state) in &blocks {
+            dense.set_id(x, y, z, state);
+        }
         CarveGrid { dense }
     }
 
@@ -592,23 +597,30 @@ impl CarveGrid {
     }
 
     #[inline]
-    fn interner(&self) -> &std::sync::Arc<crate::interner::StateInterner> {
-        self.dense.interner()
-    }
-
-    #[inline]
     fn set_id(&mut self, x: i32, y: i32, z: i32, state: StateId) {
         self.dense.set_id(x, y, z, state);
     }
 
-    /// Test-adapter destructor (see struct doc).
+    /// Test-adapter destructor (see struct doc), retaining typed state ids.
     #[must_use]
-    pub fn into_blocks(self) -> HashMap<(i32, i32, i32), String> {
-        self.dense.into_hashmap()
+    pub fn into_blocks(self) -> HashMap<(i32, i32, i32), StateId> {
+        let (min_x, min_y, min_z, size_x, size_y, size_z) = self.dense.bounds();
+        let capacity = (size_x.max(0) as usize)
+            .saturating_mul(size_y.max(0) as usize)
+            .saturating_mul(size_z.max(0) as usize);
+        let mut out = HashMap::with_capacity(capacity);
+        for y in min_y..min_y + size_y {
+            for z in min_z..min_z + size_z {
+                for x in min_x..min_x + size_x {
+                    out.insert((x, y, z), self.dense.get_id(x, y, z));
+                }
+            }
+        }
+        out
     }
 
-    /// Production destructor (see struct doc): no conversion, no
-    /// `HashMap<(i32,i32,i32), String>` ever built.
+    /// Production destructor (see struct doc): no coordinate-keyed map is
+    /// built.
     #[must_use]
     pub fn into_dense(self) -> crate::dense_grid::DenseBlockGrid {
         self.dense
@@ -620,8 +632,9 @@ struct CarveEnv<'a> {
     grid: &'a mut CarveGrid,
     aquifer: &'a AquiferSystem,
     replaceable: &'a FastSet<StateId>,
-    top_material: &'a dyn Fn(i32, i32, i32, bool) -> Option<String>,
+    top_material: &'a dyn Fn(i32, i32, i32, bool) -> Option<StateId>,
     touched: Option<&'a mut TouchedMask>,
+    mutation_observer: Option<crate::overworld::BlockMutationObserverHandle>,
     /// Cells this carve pass has already visited.
     mask: CarveMask,
     min_gen_y: i32,
@@ -691,6 +704,14 @@ impl CarveEnv<'_> {
         }
     }
 
+    #[inline]
+    fn set_id(&mut self, x: i32, y: i32, z: i32, old: StateId, state: StateId) {
+        if let Some(observer) = &self.mutation_observer {
+            observer(x, y, z, crate::dense_grid::base_facts(old), state);
+        }
+        self.grid.set_id(x, y, z, state);
+    }
+
     /// `WorldCarver.getCarveState` for `density == 0.0`: lava below `lava_level`,
     /// otherwise the aquifer's substance (air/water/lava). Never `None` here.
     fn carve_state(&self, x: i32, y: i32, z: i32) -> Option<StateId> {
@@ -725,14 +746,13 @@ impl CarveEnv<'_> {
             None => return false,
             Some(state) => state,
         };
-        self.grid.set_id(x, y, z, state);
+        self.set_id(x, y, z, base, state);
 
         if *has_grass {
             if self.grid.get_base_id(x, y - 1, z) == self.dirt {
                 let under_fluid = state != self.air;
                 if let Some(top) = (self.top_material)(x, y - 1, z, under_fluid) {
-                    let top = self.grid.interner().id_of(&top);
-                    self.grid.set_id(x, y - 1, z, top);
+                    self.set_id(x, y - 1, z, self.dirt, top);
                 }
             }
         }
@@ -763,7 +783,7 @@ impl CarveEnv<'_> {
             return false;
         }
         let state = if y <= self.min_gen_y + 31 { self.lava } else { self.cave_air };
-        self.grid.set_id(x, y, z, state);
+        self.set_id(x, y, z, base, state);
         true
     }
 }
@@ -1273,8 +1293,8 @@ pub fn apply_carvers<'a, O: CarveObserver>(
     carvers_for_source: &mut dyn FnMut(i32, i32) -> &'a [CarverConfig],
     grid: &mut CarveGrid,
     aquifer: &AquiferSystem,
-    replaceable: &HashSet<String>,
-    top_material: &dyn Fn(i32, i32, i32, bool) -> Option<String>,
+    replaceable: &FastSet<StateId>,
+    top_material: &dyn Fn(i32, i32, i32, bool) -> Option<StateId>,
     observer: &mut O,
 ) {
     apply_carvers_with_touched(
@@ -1306,37 +1326,65 @@ pub fn apply_carvers_with_touched<'a, O: CarveObserver>(
     carvers_for_source: &mut dyn FnMut(i32, i32) -> &'a [CarverConfig],
     grid: &mut CarveGrid,
     aquifer: &AquiferSystem,
-    replaceable: &HashSet<String>,
-    top_material: &dyn Fn(i32, i32, i32, bool) -> Option<String>,
+    replaceable: &FastSet<StateId>,
+    top_material: &dyn Fn(i32, i32, i32, bool) -> Option<StateId>,
     observer: &mut O,
     touched: Option<&mut TouchedMask>,
+) {
+    apply_carvers_with_touched_and_observer(
+        seed,
+        chunk_x,
+        chunk_z,
+        min_gen_y,
+        gen_depth,
+        carvers_for_source,
+        grid,
+        aquifer,
+        replaceable,
+        top_material,
+        observer,
+        touched,
+        None,
+    );
+}
+
+/// Applies carvers while also reporting dense-grid transitions to a
+/// request-local metadata observer.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_carvers_with_touched_and_observer<'a, O: CarveObserver>(
+    seed: i64,
+    chunk_x: i32,
+    chunk_z: i32,
+    min_gen_y: i32,
+    gen_depth: i32,
+    carvers_for_source: &mut dyn FnMut(i32, i32) -> &'a [CarverConfig],
+    grid: &mut CarveGrid,
+    aquifer: &AquiferSystem,
+    replaceable: &FastSet<StateId>,
+    top_material: &dyn Fn(i32, i32, i32, bool) -> Option<StateId>,
+    observer: &mut O,
+    touched: Option<&mut TouchedMask>,
+    mutation_observer: Option<crate::overworld::BlockMutationObserverHandle>,
 ) {
     // The outer RNG's initial seed is irrelevant: setLargeFeatureSeed overwrites
     // it before every carver. Seed with 0 for determinism.
     let mut random = crate::rng::WorldgenRandom::new(crate::rng::LegacyRandomSource::new(0));
 
-    // Resolve the tag's base names once at the stage boundary. The carve loop
-    // compares compact numeric ids and never allocates or parses a state
-    // string for its replaceability/grass/dirt checks.
-    let replaceable_ids: FastSet<StateId> = replaceable
-        .iter()
-        .map(|name| grid.interner().id_of(name))
-        .collect();
-    let interner = grid.interner();
-    let air = interner.id_of(AIR);
-    let lava = interner.id_of(LAVA);
-    let cave_air = interner.id_of(CAVE_AIR);
-    let water = interner.id_of(WATER);
-    let grass_block = interner.id_of("minecraft:grass_block");
-    let mycelium = interner.id_of("minecraft:mycelium");
-    let dirt = interner.id_of("minecraft:dirt");
+    let air = Block::Air.default_state();
+    let lava = Block::Lava.default_state();
+    let cave_air = Block::CaveAir.default_state();
+    let water = Block::Water.default_state();
+    let grass_block = Block::GrassBlock.default_state();
+    let mycelium = Block::Mycelium.default_state();
+    let dirt = Block::Dirt.default_state();
 
     let mut env = CarveEnv {
         grid,
         aquifer,
-        replaceable: &replaceable_ids,
+        replaceable,
         top_material,
         touched,
+        mutation_observer,
         mask: CarveMask::new(min_gen_y, gen_depth),
         min_gen_y,
         gen_depth,

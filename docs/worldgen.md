@@ -103,9 +103,9 @@ interpolation must retain its slot write and corner order. Graph controls cover
 IEEE signed zero, selector branch choice, and this cache-write boundary.
 
 The four simple aquifer noise roots use a direct point-noise path while complex
-roots retain the boxed density interpreter. The specialized path keeps the
-same point counter and identity probe, and computes the same scaled coordinates;
-it is a dispatch reduction, not a new cache or a changed route.
+roots use the compiled point evaluator. Both paths keep the same point counter
+and identity probe and compute the same scaled coordinates; the direct arm is a
+dispatch reduction, not a new cache or a changed route.
 
 Everything the graph evaluates must preserve vanilla's IEEE-754 evaluation order exactly: `Mul`
 short-circuits on an exact `0.0` first operand without evaluating the second (so the field walk must
@@ -207,12 +207,18 @@ operation per coordinate while preserving the same retention and eviction bounda
 
 ### Cost attribution
 
-Interning block-state strings into `u16` `StateId`s (below) and moving the surface stage off
-per-probe `String` allocation removed essentially all of worldgen's heap traffic; what remains is
+Keeping canonical `StateId` values in each grid palette while retaining `u16` cell indices, and
+moving the surface stage off per-probe `String` allocation removed essentially all of worldgen's heap traffic; what remains is
 CPU. A steady-state warm column spends roughly a quarter of its time in the density engine itself
 (aquifer + shape), with ore and vegetation placement the largest remaining shares — these numbers
 shift with scene and biome, so re-measure locally (`benches/generation.rs`) rather than trusting a
 recorded split.
+
+`DenseBlockGrid` stores canonical `lodestone_data::block_states::StateId` values in its palette and
+uses compact `u16` indices for cells. Base states and typed heightmap facts are cached beside that
+palette. Text is parsed only at configuration/import ingress, and an unknown or malformed state is
+rejected there. The palette still appends in first-write order, so the numeric carrier cannot affect
+palette or packet bytes.
 
 ## How to change it
 

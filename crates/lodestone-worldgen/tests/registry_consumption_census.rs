@@ -226,6 +226,7 @@ fn placement_type(placement: &VegPlacement) -> &'static str {
         VegPlacement::InSquare => "minecraft:in_square",
         VegPlacement::Heightmap(_) => "minecraft:heightmap",
         VegPlacement::Biome => "minecraft:biome",
+        VegPlacement::BiomeWithMembership(_) => "minecraft:biome",
         VegPlacement::RarityFilter(_) => "minecraft:rarity_filter",
         VegPlacement::SurfaceWaterDepthFilter(_) => "minecraft:surface_water_depth_filter",
         VegPlacement::NoiseThresholdCount { .. } => "minecraft:noise_threshold_count",

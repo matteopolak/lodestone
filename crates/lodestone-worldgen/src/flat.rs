@@ -46,12 +46,14 @@
 
 use serde_json::Value;
 
+use lodestone_data::{block::Block, block_states::StateId};
+
 /// One layer of a flat preset's `layers` list, before height-expansion —
 /// vanilla's own per-layer record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlatLayer {
-    /// Registry id, e.g. `"minecraft:dirt"` — `FlatLayerInfo`'s `block`.
-    pub block: String,
+    /// The block's default state, resolved once while parsing the preset.
+    pub block: StateId,
     /// Row count, e.g. `2` — `FlatLayerInfo::getHeight`.
     pub height: u32,
 }
@@ -107,38 +109,44 @@ impl FlatLevelGeneratorSettings {
     /// `flat_level_generator_preset/<id>.settings` key or a `world_preset`'s
     /// `generator.settings` key — both share this shape byte-for-byte).
     ///
-    /// Missing `biome`/`features`/`lakes` take vanilla's own codec defaults
-    /// (`minecraft:plains`, `false`, `false` —
-    /// vanilla's own settings codec's own lenient-optional and
-    /// always-present-optional field wrappers); a missing or malformed `layers` entry
-    /// is dropped rather than panicking, matching this crate's
-    /// `Resolver`-adjacent convention of "no data" over an abort — a caller
-    /// that needs to know the parse was incomplete has
-    /// [`Self::total_height`] and its own document to cross-check against.
+    /// Missing `biome`/`features`/`lakes` take the codec defaults. A malformed
+    /// layer entry is dropped; an unknown block is rejected because it cannot
+    /// be represented by the built-in state table.
     #[must_use]
     pub fn from_json(v: &Value) -> Self {
+        Self::try_from_json(v).expect("flat settings contain an unknown block state")
+    }
+
+    /// Parses a settings document and rejects a layer whose block is not in
+    /// the built-in state table.
+    pub fn try_from_json(v: &Value) -> Result<Self, FlatSettingsError> {
         let biome = v["biome"]
             .as_str()
             .unwrap_or("minecraft:plains")
             .to_string();
         let features = v["features"].as_bool().unwrap_or(false);
         let lakes = v["lakes"].as_bool().unwrap_or(false);
-        let layers = v["layers"]
-            .as_array()
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter_map(|entry| {
-                        let block = entry["block"].as_str()?.to_string();
-                        let height = entry["height"].as_u64()?;
-                        Some(FlatLayer {
-                            block,
-                            height: height as u32,
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let layers = v["layers"].as_array().map_or_else(
+            || Ok(Vec::new()),
+            |entries| {
+            entries
+                .iter()
+                .enumerate()
+                .filter_map(|(index, entry)| {
+                    let block = entry["block"].as_str()?;
+                    let height = entry["height"].as_u64()?;
+                    let height = u32::try_from(height).ok()?;
+                    let block = default_state_id(block).ok_or_else(|| {
+                        FlatSettingsError::UnknownBlock {
+                            index,
+                            block: block.to_owned(),
+                        }
+                    });
+                    Some(block.map(|block| FlatLayer { block, height }))
+                })
+                .collect::<Result<Vec<_>, _>>()
+            },
+        )?;
         let structure_overrides = match &v["structure_overrides"] {
             Value::String(id) => StructureOverrides::Explicit(vec![id.clone()]),
             Value::Array(entries) => StructureOverrides::Explicit(
@@ -153,13 +161,13 @@ impl FlatLevelGeneratorSettings {
             // vanilla's own fallback.
             _ => StructureOverrides::Default,
         };
-        Self {
+        Ok(Self {
             biome,
             features,
             lakes,
             layers,
             structure_overrides,
-        }
+        })
     }
 
     /// Sum of every layer's height — `FlatLevelGeneratorSettings
@@ -173,30 +181,15 @@ impl FlatLevelGeneratorSettings {
     }
 }
 
-/// The canonical default-state string for a layer block —
-/// `Block::defaultBlockState()`'s string form, for the finite set of blocks
-/// the bundled flat presets actually name.
-///
-/// This crate has no `lodestone-data` dependency (see `Cargo.toml`), so
-/// unlike `lodestone_server::worldgen_data::canonical_state` this cannot
-/// resolve an arbitrary block id's default properties from the real
-/// registry — it only needs to be right for the ids the bundled data names,
-/// and the two with a non-empty default state already have their canonical
-/// form fixed elsewhere in this crate as plain string literals
-/// (`crate::carver::WATER`, `crate::feature::top_layer::SNOW_LAYER`, and the
-/// `[snowy=false]` form `crate::feature::top_layer`'s own tests hardcode for
-/// grass_block); reused here by literal rather than re-derived, so the two
-/// cannot drift apart. Every other id in the bundled set (bedrock, dirt,
-/// stone, sandstone, sand, deepslate, gravel, cobblestone, end_stone,
-/// basalt, air, barrier) has no properties at all, so its bare id **is**
-/// its default state.
-fn canonical_default_state(block: &str) -> String {
-    match block {
-        "minecraft:grass_block" => "minecraft:grass_block[snowy=false]".to_string(),
-        "minecraft:water" => "minecraft:water[level=0]".to_string(),
-        "minecraft:snow" => crate::feature::top_layer::SNOW_LAYER.to_string(),
-        other => other.to_string(),
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FlatSettingsError {
+    UnknownBlock { index: usize, block: String },
+}
+
+/// Resolves a preset block name to its default built-in state once at the
+/// configuration boundary.
+fn default_state_id(block: &str) -> Option<StateId> {
+    Block::from_name(block).map(Block::default_state)
 }
 
 /// One flat world's generated column — the same for every `(x, z)`, so this
@@ -210,7 +203,7 @@ pub struct FlatColumn {
     /// `height` — a preset's `layers` list is not padded, exactly like
     /// vanilla's own `FlatLevelGeneratorSettings::layers`; a row past the end
     /// is air.
-    rows: std::sync::Arc<[String]>,
+    rows: std::sync::Arc<[StateId]>,
 }
 
 impl FlatColumn {
@@ -235,20 +228,18 @@ impl FlatColumn {
         &self.biome
     }
 
-    /// Canonical state at world `y`. `"minecraft:air"` above the layer stack
-    /// or below `min_y` — mirrors vanilla's own flat-level-source
-    /// base-column query's `null`
-    /// → default-air-state substitution.
+    /// Canonical state at world `y`, or the built-in air state above the layer
+    /// stack or below `min_y`.
     #[must_use]
-    pub fn block_state(&self, y: i32) -> &str {
+    pub fn block_state_id(&self, y: i32) -> StateId {
         let row = y - self.min_y;
         if row < 0 {
-            return "minecraft:air";
+            return lodestone_data::block_states::air_state();
         }
         self.rows
             .get(row as usize)
-            .map(String::as_str)
-            .unwrap_or("minecraft:air")
+            .copied()
+            .unwrap_or_else(lodestone_data::block_states::air_state)
     }
 
     /// Highest world Y whose block is not air, or `min_y - 1` for an
@@ -257,8 +248,9 @@ impl FlatColumn {
     /// one code path).
     #[must_use]
     pub fn top_non_air_y(&self) -> i32 {
+        let air = lodestone_data::block_states::air_state();
         for (row, state) in self.rows.iter().enumerate().rev() {
-            if state != "minecraft:air" {
+            if *state != air {
                 return self.min_y + row as i32;
             }
         }
@@ -269,7 +261,7 @@ impl FlatColumn {
     /// the exact layer stack (a flat world is fully determined, so there is
     /// no excuse for a vague assertion — CLAUDE.md).
     #[must_use]
-    pub fn rows(&self) -> &[String] {
+    pub fn rows(&self) -> &[StateId] {
         &self.rows
     }
 }
@@ -287,7 +279,7 @@ pub struct FlatLevelSource {
     /// computed once at construction (`FlatLevelGeneratorSettings
     /// ::updateLayers`'s equivalent) rather than per [`Self::column`] call,
     /// since every column is identical.
-    rows: std::sync::Arc<[String]>,
+    rows: std::sync::Arc<[StateId]>,
     min_y: i32,
     height: i32,
 }
@@ -306,9 +298,9 @@ impl FlatLevelSource {
     pub fn new(settings: FlatLevelGeneratorSettings, min_y: i32, height: i32) -> Self {
         let mut rows = Vec::with_capacity(settings.total_height() as usize);
         for layer in &settings.layers {
-            let state = canonical_default_state(&layer.block);
+            let state = layer.block;
             for _ in 0..layer.height {
-                rows.push(state.clone());
+                rows.push(state);
             }
         }
         Self {
@@ -350,6 +342,10 @@ impl FlatLevelSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn state(value: &str) -> StateId {
+        StateId::from_state_str(value).expect("test state is in the generated table")
+    }
 
     /// `classic_flat.json`'s `settings` object, transcribed verbatim from
     /// `crates/lodestone-server/assets/worldgen/flat_level_generator_preset/classic_flat.json`
@@ -416,15 +412,15 @@ mod tests {
             settings.layers,
             vec![
                 FlatLayer {
-                    block: "minecraft:bedrock".to_string(),
+                    block: state("minecraft:bedrock"),
                     height: 1
                 },
                 FlatLayer {
-                    block: "minecraft:dirt".to_string(),
+                    block: state("minecraft:dirt"),
                     height: 2
                 },
                 FlatLayer {
-                    block: "minecraft:grass_block".to_string(),
+                    block: state("minecraft:grass_block"),
                     height: 1
                 },
             ]
@@ -479,6 +475,20 @@ mod tests {
         assert!(!settings.lakes);
     }
 
+    #[test]
+    fn unknown_layer_block_is_rejected_at_the_configuration_boundary() {
+        let document = serde_json::json!({
+            "layers": [{ "block": "minecraft:not_a_real_block", "height": 1 }]
+        });
+        assert_eq!(
+            FlatLevelGeneratorSettings::try_from_json(&document),
+            Err(FlatSettingsError::UnknownBlock {
+                index: 0,
+                block: "minecraft:not_a_real_block".to_owned(),
+            })
+        );
+    }
+
     /// The load-bearing assertion for the whole module: given
     /// `classic_flat`'s settings and the overworld's real vertical bounds
     /// (-64/384), the generated column must be the *exact* predicted layer
@@ -491,23 +501,23 @@ mod tests {
         let generator = FlatLevelSource::new(settings, -64, 384);
         let column = generator.column(7, -3);
 
-        let mut expected: Vec<(i32, &str)> = vec![
-            (-64, "minecraft:bedrock"),
-            (-63, "minecraft:dirt"),
-            (-62, "minecraft:dirt"),
-            (-61, "minecraft:grass_block[snowy=false]"),
+        let mut expected: Vec<(i32, StateId)> = vec![
+            (-64, state("minecraft:bedrock")),
+            (-63, state("minecraft:dirt")),
+            (-62, state("minecraft:dirt")),
+            (-61, state("minecraft:grass_block[snowy=false]")),
         ];
         // A wide bracket of "must be air" checks: one row below the stack (a
         // negative-index probe) and several rows above it, including the
         // dimension's own top row.
         for y in [-65, -60, -59, 0, 64, 130, 319] {
-            expected.push((y, "minecraft:air"));
+            expected.push((y, state("minecraft:air")));
         }
 
         let mismatches: Vec<String> = expected
             .iter()
             .filter_map(|&(y, want)| {
-                let got = column.block_state(y);
+                let got = column.block_state_id(y);
                 (got != want).then(|| format!("y={y}: expected {want:?}, got {got:?}"))
             })
             .collect();
@@ -521,10 +531,10 @@ mod tests {
         assert_eq!(
             column.rows(),
             &[
-                "minecraft:bedrock".to_string(),
-                "minecraft:dirt".to_string(),
-                "minecraft:dirt".to_string(),
-                "minecraft:grass_block[snowy=false]".to_string(),
+                state("minecraft:bedrock"),
+                state("minecraft:dirt"),
+                state("minecraft:dirt"),
+                state("minecraft:grass_block[snowy=false]"),
             ]
         );
     }
@@ -542,7 +552,7 @@ mod tests {
 
         let mismatches: Vec<i32> = [-64, -63, -1, 0, 63, 100, 319]
             .into_iter()
-            .filter(|&y| column.block_state(y) != "minecraft:air")
+            .filter(|&y| column.block_state_id(y) != state("minecraft:air"))
             .collect();
         assert!(mismatches.is_empty(), "the_void must be air at rows {mismatches:?}");
         assert_eq!(column.top_non_air_y(), -65, "an all-air column reports min_y - 1");
@@ -560,29 +570,29 @@ mod tests {
         let generator = FlatLevelSource::new(settings, -64, 384);
         let column = generator.column(1000, -1000);
 
-        let mut expected: Vec<(i32, &str)> = vec![(-64, "minecraft:bedrock")];
+        let mut expected: Vec<(i32, StateId)> = vec![(-64, state("minecraft:bedrock"))];
         for y in -63..=0 {
-            expected.push((y, "minecraft:deepslate"));
+            expected.push((y, state("minecraft:deepslate")));
         }
         for y in 1..=5 {
-            expected.push((y, "minecraft:stone"));
+            expected.push((y, state("minecraft:stone")));
         }
         for y in 6..=10 {
-            expected.push((y, "minecraft:dirt"));
+            expected.push((y, state("minecraft:dirt")));
         }
         for y in 11..=15 {
-            expected.push((y, "minecraft:gravel"));
+            expected.push((y, state("minecraft:gravel")));
         }
         // Sample rather than enumerate all 90 water rows: first, middle, last.
         for y in [16, 60, 105] {
-            expected.push((y, "minecraft:water[level=0]"));
+            expected.push((y, state("minecraft:water[level=0]")));
         }
-        expected.push((106, "minecraft:air")); // one past the 170-row stack
+        expected.push((106, state("minecraft:air"))); // one past the 170-row stack
 
         let mismatches: Vec<String> = expected
             .iter()
             .filter_map(|&(y, want)| {
-                let got = column.block_state(y);
+                let got = column.block_state_id(y);
                 (got != want).then(|| format!("y={y}: expected {want:?}, got {got:?}"))
             })
             .collect();
@@ -607,10 +617,10 @@ mod tests {
     }
 
     #[test]
-    fn snow_layer_canonicalises_through_the_shared_top_layer_constant() {
+    fn snow_layer_uses_the_generated_default_state() {
         assert_eq!(
-            canonical_default_state("minecraft:snow"),
-            crate::feature::top_layer::SNOW_LAYER
+            default_state_id("minecraft:snow"),
+            Some(Block::from_name("minecraft:snow").unwrap().default_state())
         );
     }
 
@@ -627,7 +637,7 @@ mod tests {
             "minecraft:barrier",
             "minecraft:air",
         ] {
-            assert_eq!(canonical_default_state(id), id);
+            assert_eq!(default_state_id(id), Some(state(id)));
         }
     }
 }

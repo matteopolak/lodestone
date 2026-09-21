@@ -22,7 +22,7 @@
 use std::time::Duration;
 
 use lodestone_client::{BlockPos, ClientBuilder, Hand, LoginProfile, ServerAddress};
-use lodestone_data::block_states::{block_name, properties};
+use lodestone_data::block_states::{StateId, block_name, properties};
 use lodestone_model::{BlockFace, ClientAction, ContainerClickType, GameMode, ItemStack, Vec3f};
 use lodestone_net::{Connection, memory_pair};
 use lodestone_server::{
@@ -48,7 +48,7 @@ use lodestone_v26_2::{V770ServerProtocol, adapter};
 /// `WorldgenChunkSource`.
 #[derive(Default)]
 struct AirSource {
-    edits: std::sync::Mutex<std::collections::HashMap<(i32, i32, i32), String>>,
+    edits: std::sync::Mutex<std::collections::HashMap<(i32, i32, i32), StateId>>,
 }
 
 impl ChunkSource for AirSource {
@@ -56,24 +56,24 @@ impl ChunkSource for AirSource {
         ChunkColumn::new(0, 16)
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         self.edits
             .lock()
             .expect("edits lock poisoned")
             .get(&(x, y, z))
-            .cloned()
-            .unwrap_or_else(|| "minecraft:air".to_string())
+            .copied()
+            .unwrap_or(StateId::AIR)
     }
 
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
         "minecraft:plains".to_string()
     }
 
-    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+    fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
         self.edits
             .lock()
             .expect("edits lock poisoned")
-            .insert((x, y, z), name.to_string());
+            .insert((x, y, z), state);
     }
 }
 

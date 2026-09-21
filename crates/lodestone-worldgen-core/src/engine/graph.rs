@@ -31,14 +31,13 @@
 //!
 //! # What it deliberately does *not* flatten
 //!
-//! `spline`, `old_blended_noise`, `find_top_surface` and `end_islands` are
-//! **leaves** to the block-field evaluator: it does not recurse into them, it
-//! calls the *point* interpreter ([`Density::compute`]). Everything beneath one of those is
-//! therefore evaluated with point semantics — no quart snapping, no
-//! interpolation. That is a real semantic, not an optimisation
-//! (`docs/worldgen-density-engine.md`), so those four kinds compile to an
-//! index into [`Graph::leaves`], which holds the original `Density` subtree
-//! untouched. Flattening beneath them would silently change their semantics.
+//! `old_blended_noise`, `find_top_surface` and `end_islands` remain opaque
+//! leaves to the block-field evaluator. A `spline` is still a point-semantics
+//! boundary, but its control points and nested values are compiled into the
+//! indexed [`PointProgram`] side table instead of retaining a boxed recursive
+//! walk. Everything beneath a spline is therefore still evaluated with point
+//! semantics — no quart snapping or interpolation — while the compiled spline
+//! program avoids the source enum's recursive payload walk.
 //!
 //! # Node kind fidelity
 //!
@@ -63,11 +62,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use super::point::PointProgram;
+use super::xz_products::{XzProductIdentity, XzProductKind, XzProductManifest};
 use crate::density::{Density, Spline};
 use crate::noise::NormalNoise;
 
 /// An index into [`Graph::ops`].
 pub type NodeId = u32;
+
 
 /// The operator of one flattened node.
 ///
@@ -124,6 +126,28 @@ pub(crate) struct Op {
     pub(crate) c: u32,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TileOp {
+    pub(crate) kind: OpKind,
+    pub(crate) a: u16,
+    pub(crate) b: u16,
+    pub(crate) c: u16,
+    pub(crate) params: u32,
+    pub(crate) aux: u32,
+    pub(crate) branch_count: u16,
+    pub(crate) threshold_count: u16,
+    pub(crate) product: u8,
+    pub(crate) source: NodeId,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct TilePlan {
+    pub(crate) ops: Vec<TileOp>,
+    pub(crate) params: Vec<f64>,
+    pub(crate) branches: Vec<u16>,
+    pub(crate) root: u16,
+}
+
 /// A compiled density graph: immutable, `Sync`, and shared by `Arc`.
 ///
 /// Holds no mutable state whatsoever — every cache lives in
@@ -143,17 +167,32 @@ pub struct Graph {
     /// `PerlinNoise` stacks — the very payload whose inlining makes `Density`
     /// wide.
     noises: Vec<NormalNoise>,
-    /// `spline` / `old_blended_noise` / `find_top_surface` / `end_islands`
-    /// subtrees, held as the original `Density` because the block-field evaluator
-    /// treats them as opaque point-evaluated leaves (module doc).
+    /// `old_blended_noise` / `find_top_surface` / `end_islands` subtrees, held
+    /// as original `Density` values because the block-field evaluator treats
+    /// them as opaque point-evaluated leaves.
     leaves: Vec<Density>,
+    /// Compiled point-semantics spline programs. The field evaluator enters one
+    /// of these without calling the source `Spline::compute` walk.
+    splines: Vec<PointProgram>,
     /// Compile-time-only node-sharing tables. Emptied (and its allocations
     /// dropped) by [`Program::compile`] the moment compilation finishes, so a
-    /// live `Graph` carries five empty `HashMap`s — see [`Interner`].
+    /// live `Graph` carries six empty `HashMap`s — see [`Interner`].
     interner: Interner,
     /// The exact production final-density shape, when this graph is eligible
     /// for the bounded cell evaluator.
     overworld_final_density: Option<OverworldFinalDensityPlan>,
+    /// Product labels are collected only during compilation. The compact
+    /// per-node table is immutable after the graph is published.
+    product_manifest: Option<XzProductManifest>,
+    product_nodes: Vec<(NodeId, XzProductKind)>,
+    product_kinds: Vec<Option<XzProductKind>>,
+    product_identity: Option<XzProductIdentity>,
+    product_fingerprint: Option<u64>,
+    /// Nodes whose field evaluation has no sampler-cache side effects and can
+    /// therefore be evaluated once for all eight corners of a cell.
+    tile_eligible: Vec<bool>,
+    tile_plan_ids: Vec<Option<u16>>,
+    tile_plans: Vec<TilePlan>,
 }
 
 /// The five nodes needed by the production final-density cell plan.
@@ -242,6 +281,8 @@ struct Interner {
     noises: HashMap<Box<[u64]>, u32>,
     /// [`Density::write_signature`] → index into [`Graph::leaves`].
     leaves: HashMap<Box<[u64]>, u32>,
+    /// [`Spline::write_signature`] → index into [`Graph::splines`].
+    splines: HashMap<Box<[u64]>, u32>,
     /// `(kind, a, b, c)` → the canonical node with that shape. `b` is replaced by
     /// [`SLOT_WILDCARD`] for `interpolated`/`flat_cache`.
     ops: HashMap<(u8, u32, u32, u32), NodeId>,
@@ -262,6 +303,8 @@ struct Interner {
     shared_noises: u32,
     /// Duplicate point-evaluated leaf subtrees answered from the table.
     shared_leaves: u32,
+    /// Duplicate spline programs answered from the compact side table.
+    shared_splines: u32,
 }
 
 /// Stands in for the `slot` payload in an `interpolated`/`flat_cache` op key, so
@@ -298,18 +341,85 @@ impl Program {
     /// [`shared_nodes`](Self::shared_nodes) for the counter that proves it ran.
     #[must_use]
     pub fn compile(root: &Density) -> Self {
+        Self::compile_inner(root, None, true)
+    }
+
+    /// Compiles a graph with an exact request-scoped X/Z product manifest.
+    #[must_use]
+    pub fn compile_with_xz_products(root: &Density, manifest: XzProductManifest) -> Self {
+        Self::compile_inner(root, Some(manifest), false)
+    }
+
+    fn compile_inner(
+        root: &Density,
+        manifest: Option<XzProductManifest>,
+        enable_tiles: bool,
+    ) -> Self {
         let mut g = Graph {
             ops: Vec::new(),
             params: Vec::new(),
             children: Vec::new(),
             noises: Vec::new(),
             leaves: Vec::new(),
+            splines: Vec::new(),
             interner: Interner::default(),
             overworld_final_density: None,
+            product_manifest: manifest,
+            product_nodes: Vec::new(),
+            product_kinds: Vec::new(),
+            product_identity: None,
+            product_fingerprint: None,
+            tile_eligible: Vec::new(),
+            tile_plan_ids: Vec::new(),
+            tile_plans: Vec::new(),
         };
         let id = g.compile_node(root);
         let overworld_final_density = g.detect_overworld_final_density(id);
         g.overworld_final_density = overworld_final_density;
+        let has_product_nodes = !g.product_nodes.is_empty();
+        let manifest_identity = g
+            .product_manifest
+            .as_ref()
+            .map(XzProductManifest::identity);
+        let manifest_fingerprint = manifest_identity
+            .as_ref()
+            .map(XzProductIdentity::diagnostic_token);
+        g.product_kinds.resize(g.ops.len(), None);
+        for (node, kind) in g.product_nodes.drain(..) {
+            g.product_kinds[node as usize] = Some(kind);
+        }
+        // A route compiled with the shared manifest is only lattice-admitted
+        // when it actually contains a recognized product wrapper. This lets
+        // final density use factor alone while preliminary surface level uses
+        // the factor/offset pair, yet keeps a product-free route on its exact
+        // ordinary path.
+        g.product_identity = has_product_nodes.then_some(manifest_identity).flatten();
+        g.product_fingerprint = has_product_nodes.then_some(manifest_fingerprint).flatten();
+        let pure = g.compute_tile_eligibility(false);
+        if enable_tiles || g.product_manifest.is_some() {
+            g.tile_eligible = pure.clone();
+        } else {
+            g.tile_eligible.resize(g.ops.len(), false);
+        }
+        g.tile_plan_ids.resize(g.ops.len(), None);
+        if let Some(plan) = g.overworld_final_density {
+            for root in [
+                plan.terrain_inner,
+                plan.noodle_control_inner,
+                plan.noodle_thickness_inner,
+                plan.noodle_ridge_a_inner,
+                plan.noodle_ridge_b_inner,
+            ] {
+                if g.tile_plan_ids[root as usize].is_none() && g.tile_eligible[root as usize] {
+                    let index = u16::try_from(g.tile_plans.len())
+                        .expect("too many compiled tile plans");
+                    let compiled = g.compile_tile_plan(root);
+                    g.tile_plans.push(compiled);
+                    g.tile_plan_ids[root as usize] = Some(index);
+                }
+            }
+        }
+        g.product_manifest = None;
         // The tables are only useful while compiling, and they are large (a leaf
         // signature includes every octave's 256-byte permutation table). Dropping
         // them here is most of the point of interning in the first place: the
@@ -319,6 +429,7 @@ impl Program {
         g.interner.children = HashMap::new();
         g.interner.noises = HashMap::new();
         g.interner.leaves = HashMap::new();
+        g.interner.splines = HashMap::new();
         g.interner.ops = HashMap::new();
         Self {
             graph: Arc::new(g),
@@ -336,6 +447,18 @@ impl Program {
     #[must_use]
     pub(crate) fn root(&self) -> NodeId {
         self.root
+    }
+
+    /// Returns the structural identity of the recognized X/Z product pair.
+    #[must_use]
+    pub fn xz_product_fingerprint(&self) -> Option<u64> {
+        self.graph.product_fingerprint
+    }
+
+    /// Returns the complete structural identity used for product admission.
+    #[must_use]
+    pub fn xz_product_identity(&self) -> Option<XzProductIdentity> {
+        self.graph.product_identity.clone()
     }
 
     /// Whether this program has the bounded production final-density shape.
@@ -360,13 +483,40 @@ impl Program {
         self.graph.ops.len()
     }
 
-    /// Number of opaque point-evaluated leaves (`spline`, `old_blended_noise`,
-    /// `find_top_surface`, `end_islands`). Exposed for the same reason as
+    /// Number of pure nodes eligible for eight-corner cell evaluation.
+    /// Cache-bearing and point-boundary nodes remain on the scalar fallback.
+    #[must_use]
+    pub fn tile_eligible_node_count(&self) -> usize {
+        self.graph.tile_eligible.iter().filter(|&&value| value).count()
+    }
+
+    #[must_use]
+    pub fn tile_plan_count(&self) -> usize {
+        self.graph.tile_plans.len()
+    }
+
+
+    /// Number of opaque point-evaluated leaves other than splines
+    /// (`old_blended_noise`, `find_top_surface`, `end_islands`). Exposed for the same reason as
     /// [`node_count`](Self::node_count): a gate needs to be able to see that
     /// the leaf boundary exists where the semantics say it does.
     #[must_use]
     pub fn leaf_count(&self) -> usize {
         self.graph.leaves.len()
+    }
+
+    /// Number of compact compiled spline programs reachable from this graph.
+    /// This is separate from [`Self::leaf_count`] because spline control data
+    /// no longer retains a boxed source subtree.
+    #[must_use]
+    pub fn spline_count(&self) -> usize {
+        self.graph.splines.len()
+    }
+
+    /// Duplicate spline payloads collapsed into one indexed program.
+    #[must_use]
+    pub fn shared_splines(&self) -> usize {
+        self.graph.interner.shared_splines as usize
     }
 
     /// Distinct instantiated noises in the shared graph.
@@ -424,8 +574,9 @@ impl Program {
         self.graph.interner.shared_noises as usize
     }
 
-    /// Duplicate point-evaluated leaf subtrees the pass collapsed. `leaf_count() +
-    /// shared_leaves()` is how many copies `Builder` handed over.
+    /// Duplicate opaque point-evaluated leaf subtrees other than splines that
+    /// the pass collapsed. `leaf_count() + shared_leaves()` is how many copies
+    /// `Builder` handed over for those leaf kinds.
     #[must_use]
     pub fn shared_leaves(&self) -> usize {
         self.graph.interner.shared_leaves as usize
@@ -487,24 +638,10 @@ impl Program {
     /// consequence — instructions flat, IPC 5.46 → 1.32 at a window of 20 — and
     /// the memo is gone; the node is transparent in both evaluators.
     ///
-    /// The count is still worth having, because it now measures something else:
-    /// how many *duplicated expansions* of vanilla's shared `cache_2d` nodes sit
-    /// under the leaves. 708 against vanilla's handful is the compiler expanding
-    /// a DAG into a tree, which is why the memo could never hit — each parent got
-    /// its own copy, so no two parents ever asked one slot for the same `(x, z)`.
-    ///
-    /// **Since [`Interner`] this reads 236 for the real `final_density`, and the
-    /// residual is the interesting part.** Exactly 708 / 3: the leaf *table* held
-    /// three copies of each `cache_2d`-bearing subtree and now holds one. The 236
-    /// that remain are duplication *inside* a single leaf, which an `Op`-level
-    /// pass structurally cannot see — a leaf is an untouched [`Density`] subtree
-    /// evaluated by the point interpreter, so the pass interns it whole or not at
-    /// all. `preliminary_surface_level` is the extreme case: **one** op, **one**
-    /// leaf, **416** `cache_2d` nodes inside it. Removing that needs sharing in
-    /// the `Density` tree itself (`Box` → `Arc` plus hash-consing in `Builder`),
-    /// which is a different unit and carries the RNG-order argument this pass
-    /// deliberately avoids needing. See `docs/worldgen-density-engine.md` and
-    /// DESIGN.md §12.134.
+    /// The count now covers only the remaining source-backed leaves. Spline
+    /// payloads have their own indexed point programs, so their nested cache
+    /// wrappers are intentionally absent from this census; inspect
+    /// [`Program::spline_count`] for that separate representation.
     #[must_use]
     pub fn cache_2d_under_leaves(&self) -> usize {
         self.graph
@@ -690,7 +827,8 @@ fn constant_value(d: &Density) -> Option<f64> {
 
 /// Whether a subtree can write a block-field cache when entered by
 /// [`Field`](super::field::Field). Point-evaluated leaves stop the walk because
-/// the field evaluator calls their point interpreter as one opaque operation.
+/// the field evaluator calls a point program or source point evaluator as one
+/// opaque operation.
 fn contains_field_cache_writer(d: &Density) -> bool {
     match d {
         Density::Interpolated { .. } | Density::FlatCache { .. } => true,
@@ -771,6 +909,18 @@ impl Graph {
         &self.leaves
     }
 
+    pub(crate) fn splines(&self) -> &[PointProgram] {
+        &self.splines
+    }
+
+    pub(crate) fn product_kind(&self, node: NodeId) -> Option<XzProductKind> {
+        self.product_kinds.get(node as usize).copied().flatten()
+    }
+
+    pub(crate) fn product_identity(&self) -> Option<&XzProductIdentity> {
+        self.product_identity.as_ref()
+    }
+
     pub(crate) fn op(&self, id: NodeId) -> Op {
         self.ops[id as usize]
     }
@@ -778,6 +928,192 @@ impl Graph {
     pub(crate) fn child(&self, at: u32) -> NodeId {
         self.children[at as usize]
     }
+
+    #[inline]
+    pub(crate) fn tile_eligible(&self, id: NodeId) -> bool {
+        self.tile_eligible[id as usize]
+    }
+
+    #[inline]
+    pub(crate) fn tile_plan(&self, id: NodeId) -> Option<&TilePlan> {
+        self.tile_plan_ids
+            .get(id as usize)
+            .and_then(|index| index.map(|index| &self.tile_plans[index as usize]))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn compile_tile_plan_for_test(&self, root: NodeId) -> TilePlan {
+        assert!(self.tile_eligible(root));
+        self.compile_tile_plan(root)
+    }
+
+    fn compile_tile_plan(&self, root: NodeId) -> TilePlan {
+        fn visit(graph: &Graph, id: NodeId, plan: &mut TilePlan, ids: &mut [u16]) -> u16 {
+            if ids[id as usize] != u16::MAX {
+                return ids[id as usize];
+            }
+            let op = graph.op(id);
+            let mut tile = TileOp {
+                kind: op.kind,
+                a: 0,
+                b: 0,
+                c: 0,
+                params: 0,
+                aux: 0,
+                branch_count: 0,
+                threshold_count: 0,
+                product: match graph.product_kind(id) {
+                    None => 0,
+                    Some(XzProductKind::Factor) => 1,
+                    Some(XzProductKind::Offset) => 2,
+                },
+                source: id,
+            };
+            match op.kind {
+                OpKind::Add | OpKind::Mul | OpKind::Min | OpKind::Max => {
+                    tile.a = visit(graph, op.a, plan, ids);
+                    tile.b = visit(graph, op.b, plan, ids);
+                }
+                OpKind::Abs
+                | OpKind::Square
+                | OpKind::Cube
+                | OpKind::HalfNegative
+                | OpKind::QuarterNegative
+                | OpKind::Squeeze
+                | OpKind::Invert => {
+                    tile.a = visit(graph, op.a, plan, ids);
+                }
+                OpKind::Clamp => {
+                    tile.a = visit(graph, op.a, plan, ids);
+                    tile.params = copy_params(graph, plan, op.b, 2);
+                }
+                OpKind::ShiftedNoise => {
+                    tile.a = visit(graph, graph.child(op.a), plan, ids);
+                    tile.b = visit(graph, graph.child(op.a + 1), plan, ids);
+                    tile.c = visit(graph, graph.child(op.a + 2), plan, ids);
+                    tile.params = copy_params(graph, plan, op.c, 2);
+                    tile.aux = op.b;
+                }
+                OpKind::RangeChoice => {
+                    tile.a = visit(graph, graph.child(op.a), plan, ids);
+                    tile.b = visit(graph, graph.child(op.a + 1), plan, ids);
+                    tile.c = visit(graph, graph.child(op.a + 2), plan, ids);
+                    tile.params = copy_params(graph, plan, op.b, 2);
+                }
+                OpKind::IntervalSelect => {
+                    let count = graph.child(op.a);
+                    tile.a = visit(graph, graph.child(op.a + 1), plan, ids);
+                    tile.params = copy_params(graph, plan, op.b, op.c);
+                    let first = plan.branches.len();
+                    for index in 0..count {
+                        let branch = visit(
+                            graph,
+                            graph.child(op.a + 2 + index),
+                            plan,
+                            ids,
+                        );
+                        plan.branches.push(branch);
+                    }
+                    tile.aux = u32::try_from(first).expect("too many tile branches");
+                    tile.branch_count = u16::try_from(count).expect("too many interval branches");
+                    tile.threshold_count = u16::try_from(op.c).expect("too many interval thresholds");
+                }
+                OpKind::Const => tile.params = copy_params(graph, plan, op.a, 1),
+                OpKind::YClampedGradient => tile.params = copy_params(graph, plan, op.a, 4),
+                OpKind::Noise => {
+                    tile.params = copy_params(graph, plan, op.b, 2);
+                    tile.aux = op.a;
+                }
+                OpKind::ShiftA | OpKind::ShiftB | OpKind::Shift | OpKind::EndIslands => {
+                    tile.aux = op.a;
+                }
+                OpKind::BlendAlpha
+                | OpKind::BlendOffset
+                | OpKind::Beardifier => {}
+                OpKind::Interpolated
+                | OpKind::FlatCache
+                | OpKind::Spline
+                | OpKind::Blended
+                | OpKind::FindTopSurface => {
+                    unreachable!("cache-bearing node entered compiled tile plan")
+                }
+            }
+            let reg = u16::try_from(plan.ops.len()).expect("tile plan exceeds register limit");
+            ids[id as usize] = reg;
+            plan.ops.push(tile);
+            reg
+        }
+
+        fn copy_params(graph: &Graph, plan: &mut TilePlan, start: u32, count: u32) -> u32 {
+            let at = u32::try_from(plan.params.len()).expect("too many tile parameters");
+            plan.params.extend_from_slice(&graph.params[start as usize..][..count as usize]);
+            at
+        }
+
+        let mut plan = TilePlan {
+            ops: Vec::new(),
+            params: Vec::new(),
+            branches: Vec::new(),
+            root: 0,
+        };
+        let mut ids = vec![u16::MAX; self.ops.len()];
+        plan.root = visit(self, root, &mut plan, &mut ids);
+        plan
+    }
+
+
+    fn compute_tile_eligibility(&self, allow_blended: bool) -> Vec<bool> {
+        let mut eligible = vec![false; self.ops.len()];
+        for (id, op) in self.ops.iter().copied().enumerate() {
+            eligible[id] = match op.kind {
+                OpKind::Const
+                | OpKind::BlendAlpha
+                | OpKind::BlendOffset
+                | OpKind::Beardifier
+                | OpKind::YClampedGradient
+                | OpKind::Noise
+                | OpKind::ShiftA
+                | OpKind::ShiftB
+                | OpKind::Shift
+                | OpKind::EndIslands => true,
+                OpKind::Blended => allow_blended,
+                OpKind::Add | OpKind::Mul | OpKind::Min | OpKind::Max => {
+                    eligible[op.a as usize] && eligible[op.b as usize]
+                }
+                OpKind::Abs
+                | OpKind::Square
+                | OpKind::Cube
+                | OpKind::HalfNegative
+                | OpKind::QuarterNegative
+                | OpKind::Squeeze
+                | OpKind::Invert
+                | OpKind::Clamp => eligible[op.a as usize],
+                OpKind::ShiftedNoise => {
+                    eligible[self.child(op.a) as usize]
+                        && eligible[self.child(op.a + 1) as usize]
+                        && eligible[self.child(op.a + 2) as usize]
+                }
+                OpKind::RangeChoice => {
+                    eligible[self.child(op.a) as usize]
+                        && eligible[self.child(op.a + 1) as usize]
+                        && eligible[self.child(op.a + 2) as usize]
+                }
+                OpKind::IntervalSelect => {
+                    let n = self.child(op.a);
+                    eligible[self.child(op.a + 1) as usize]
+                        && (0..n).all(|index| eligible[self.child(op.a + 2 + index) as usize])
+                }
+                // These kinds either write a sampler cache or cross into a
+                // separate evaluator whose cache state is not tile-local.
+                OpKind::Interpolated
+                | OpKind::FlatCache
+                | OpKind::Spline
+                | OpKind::FindTopSurface => false,
+            };
+        }
+        eligible
+    }
+
 
 
     fn detect_overworld_final_density(&self, root: NodeId) -> Option<OverworldFinalDensityPlan> {
@@ -952,6 +1288,20 @@ impl Graph {
         at
     }
 
+    fn push_spline(&mut self, d: &Density) -> u32 {
+        let mut sig = Vec::new();
+        d.write_signature(&mut sig);
+        let key: Box<[u64]> = sig.into();
+        if let Some(&at) = self.interner.splines.get(&key) {
+            self.interner.shared_splines += 1;
+            return at;
+        }
+        let at = self.splines.len() as u32;
+        self.splines.push(PointProgram::compile(d));
+        self.interner.splines.insert(key, at);
+        at
+    }
+
     /// Compiles one `Density` node and its children, post-order, returning the
     /// new node's id. Children therefore always have *lower* ids than their
     /// parent — a property the evaluator does not rely on (it is a recursive
@@ -975,7 +1325,8 @@ impl Graph {
     /// | `ShiftA`/`ShiftB`/`Shift` | noise idx | — | — |
     /// | `RangeChoice` | children\[3\] | params\[2\] | — |
     /// | `IntervalSelect` | children\[n\] | n | params\[n-1\] |
-    /// | `Spline`/`Blended`/`FindTopSurface`/`EndIslands` | leaf idx | — | — |
+    /// | `Spline` | compiled spline idx | — | — |
+    /// | `Blended`/`FindTopSurface`/`EndIslands` | leaf idx | — | — |
     fn compile_node(&mut self, d: &Density) -> NodeId {
         // Resolve constant-only subtrees before emitting their children. This
         // is deliberately side-effect-aware: interpolated and flat-cache nodes
@@ -1033,13 +1384,30 @@ impl Graph {
             }
             Density::FlatCache { inner, slot, .. } => {
                 let child = self.compile_node(inner);
-                self.push(OpKind::FlatCache, child, u32::try_from(*slot).unwrap(), 0)
+                let id = self.push(OpKind::FlatCache, child, u32::try_from(*slot).unwrap(), 0);
+                if let Some(manifest) = self.product_manifest.as_ref()
+                    && let Some(kind) = manifest.kind_for(inner)
+                {
+                    self.product_nodes.push((id, kind));
+                }
+                id
             }
             // Both wrappers are transparent in the block-field evaluator.
             // `cache_2d` remains meaningful to the point interpreter, but this
             // graph never enters a point leaf, so retaining either wrapper only
-            // adds a dispatch per field visit.
-            Density::Cache2D { inner, .. } | Density::Marker(inner) => self.compile_node(inner),
+            // adds a dispatch per field visit. A product label is retained on
+            // the surviving child so the field evaluator can answer it from
+            // the request lattice without reintroducing the wrapper's cache.
+            Density::Cache2D { inner, .. } => {
+                let child = self.compile_node(inner);
+                if let Some(manifest) = self.product_manifest.as_ref()
+                    && let Some(kind) = manifest.kind_for(inner)
+                {
+                    self.product_nodes.push((child, kind));
+                }
+                child
+            }
+            Density::Marker(inner) => self.compile_node(inner),
             Density::Noise {
                 noise,
                 xz_scale,
@@ -1155,13 +1523,11 @@ impl Graph {
                     u32::try_from(thresholds.len()).unwrap(),
                 )
             }
-            // The three point-evaluated leaves. Held as the original
-            // `Density` and evaluated with `Density::compute`, because the
-            // block-field evaluator does not recurse into them — see the
-            // module doc.
+            // Spline remains a point-semantics boundary, but its recursive
+            // control data is compiled into indexed point arrays.
             Density::Spline(_) => {
-                let l = self.push_leaf(d);
-                self.push(OpKind::Spline, l, 0, 0)
+                let spline = self.push_spline(d);
+                self.push(OpKind::Spline, spline, 0, 0)
             }
             Density::Blended(_) => {
                 let l = self.push_leaf(d);
@@ -1527,7 +1893,7 @@ mod tests {
         for (x, y, z) in [(0, 0, 0), (13, -37, 91), (-5, 200, 7)] {
             let flat =
                 super::super::Field::new(p.graph(), super::super::Geom { cell_width: 4, cell_height: 8 }, &mut scratch)
-                    .eval(p.root(), x, y, z, true);
+                    .eval::<true>(p.root(), x, y, z);
             let tree = d.compute(crate::density::Context::new(x, y, z));
             assert_eq!(flat.to_bits(), tree.to_bits(), "at ({x}, {y}, {z})");
         }
@@ -1593,7 +1959,7 @@ mod tests {
             },
             &mut scratch,
         )
-        .eval(p.root(), 3, 5, 7, true);
+        .eval::<true>(p.root(), 3, 5, 7);
         assert_eq!(actual.to_bits(), 2.0f64.to_bits());
         assert_eq!(d.compute(crate::density::Context::new(3, 5, 7)).to_bits(), actual.to_bits());
         scratch.release();
@@ -1692,7 +2058,7 @@ mod tests {
                 super::super::Geom { cell_width: 4, cell_height: 8 },
                 &mut scratch,
             )
-            .eval(p.root(), x, y, z, true);
+            .eval::<true>(p.root(), x, y, z);
             // `flat_cache` snaps XZ to the quart grid and forces y = 0, so the
             // expectation is the tree walker at the *snapped* position — the
             // semantic the collapse must not disturb.
@@ -1812,7 +2178,7 @@ mod tests {
             super::super::Geom { cell_width: 4, cell_height: 8 },
             &mut scratch,
         )
-        .eval(p.root(), 1, 2, 3, true);
+        .eval::<true>(p.root(), 1, 2, 3);
         assert_eq!(
             flat.to_bits(),
             d.compute(crate::density::Context::new(1, 2, 3)).to_bits()
@@ -1851,7 +2217,7 @@ mod tests {
                 },
                 &mut scratch,
             )
-            .eval(program.root(), x, y, z, true);
+            .eval::<true>(program.root(), x, y, z);
             let expected = density.compute(crate::density::Context::new(x, y, z));
             assert_eq!(actual.to_bits(), expected.to_bits(), "at ({x}, {y}, {z})");
         }
@@ -1870,7 +2236,7 @@ mod tests {
                     },
                     &mut scratch,
                 )
-                .eval(program.root(), x, y, z, true)
+                .eval::<true>(program.root(), x, y, z)
                 .to_bits(),
             );
         }

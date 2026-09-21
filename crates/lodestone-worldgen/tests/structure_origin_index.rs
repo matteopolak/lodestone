@@ -1,4 +1,6 @@
 use lodestone_worldgen::density::{NoiseParams, Resolver};
+#[cfg(feature = "gen-counters")]
+use lodestone_worldgen::counters;
 use lodestone_worldgen::structure::{HeightmapKind, StartContext, StructureRegistry};
 use serde_json::Value;
 
@@ -95,4 +97,21 @@ fn indexed_origins_match_exhaustive_random_spread_walk() {
         indexed, truncated_cell_walk,
         "the negative control must miss an origin from a neighbouring floor-divided cell"
     );
+}
+
+#[cfg(feature = "gen-counters")]
+#[test]
+fn candidate_probe_counter_tracks_cell_window() {
+    let registry = StructureRegistry::new(SEED, &PlacementResolver);
+
+    counters::reset();
+    let _ = registry.origin_candidates_in(-1, 1, -1, 1, &NoWorld);
+    let narrow = counters::snapshot().structure_candidate_cell_probes;
+
+    counters::reset();
+    let _ = registry.origin_candidates_in(-49, 49, -49, 49, &NoWorld);
+    let wide = counters::snapshot().structure_candidate_cell_probes;
+
+    assert!(narrow > 0, "the narrow control must exercise cell probes");
+    assert!(wide > narrow, "a wider source window must probe more cells");
 }

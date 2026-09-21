@@ -22,6 +22,8 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use lodestone_data::block::Block;
+use lodestone_data::block_states::{air_state, StateId};
 use lodestone_worldgen::aquifer::BlockKind;
 use lodestone_worldgen::density::{NoiseParams, Resolver};
 use lodestone_worldgen::end::{EndBiomeSource, EndGenerator};
@@ -144,6 +146,10 @@ fn generator(seed: i64) -> EndGenerator {
     EndGenerator::new(seed, &settings("end"), &EndAssets::new())
 }
 
+fn state(text: &str) -> StateId {
+    StateId::from_state_str(text).unwrap_or_else(|| panic!("unknown block state: {text}"))
+}
+
 #[test]
 fn end_placement_biome_zoom_matches_external_boundary_witnesses() {
     let generator = generator(42);
@@ -177,7 +183,7 @@ fn fixed_end_platform_is_composed_from_the_biome_feature() {
         let mut words = line.split_whitespace();
         assert_eq!(words.next(), Some("block"), "malformed platform fixture: {line}");
         let coordinates = words.next().expect("platform coordinates");
-        let state = words.next().expect("platform state");
+        let state_text = words.next().expect("platform state");
         assert!(words.next().is_none(), "trailing platform fixture data: {line}");
         let mut coordinates = coordinates.split(',');
         let x: i32 = coordinates.next().expect("x").parse().expect("integer x");
@@ -189,9 +195,10 @@ fn fixed_end_platform_is_composed_from_the_biome_feature() {
             columns.insert(chunk, generator.column(chunk.0, chunk.1));
         }
         let column = columns.get(&chunk).expect("generated platform chunk");
+        let expected = state(state_text);
         assert_eq!(
-            column.block_state(x.rem_euclid(16) as usize, y, z.rem_euclid(16) as usize),
-            state,
+            column.block_state_id(x.rem_euclid(16) as usize, y, z.rem_euclid(16) as usize),
+            expected,
             "platform write ({x},{y},{z})"
         );
         writes += 1;
@@ -207,9 +214,11 @@ fn fixed_end_platform_is_composed_from_the_biome_feature() {
 #[test]
 fn end_spikes_are_feature_writes_with_cross_chunk_clipping() {
     let generator = generator(SEED);
+    let obsidian = state("minecraft:obsidian");
+    let air = air_state();
 
     let producer = generator.column(2, 0);
-    assert_eq!(producer.block_state(10, 99, 0), "minecraft:obsidian", "spike centre belongs to its producer chunk");
+    assert_eq!(producer.block_state_id(10, 99, 0), obsidian, "spike centre belongs to its producer chunk");
     assert_eq!(
         producer.motion_blocking_heightmap()[10],
         101,
@@ -220,13 +229,13 @@ fn end_spikes_are_feature_writes_with_cross_chunk_clipping() {
     assert_eq!(batch[0].motion_blocking_heightmap(), producer.motion_blocking_heightmap());
 
     let neighbour = generator.column(2, -1);
-    assert_eq!(neighbour.block_state(10, 99, 15), "minecraft:obsidian", "the source at z=0 writes across the southern chunk edge");
+    assert_eq!(neighbour.block_state_id(10, 99, 15), obsidian, "the source at z=0 writes across the southern chunk edge");
 
     // Negative control: x=48 is just beyond this radius-four spike's last
     // write at x=46. This distinguishes a circular feature footprint from an
     // accidental chunk-wide or square fill.
     let outside = generator.column(3, -1);
-    assert_eq!(outside.block_state(0, 99, 15), "minecraft:air", "one cell outside the independently predicted spike footprint");
+    assert_eq!(outside.block_state_id(0, 99, 15), air, "one cell outside the independently predicted spike footprint");
 }
 
 /// The city fixture is a positive capture from an independently generated End
@@ -281,17 +290,18 @@ fn end_city_pieces_are_composed_into_end_columns() {
         let x: i32 = fields[1].parse().expect("integer x");
         let y: i32 = fields[2].parse().expect("integer y");
         let z: i32 = fields[3].parse().expect("integer z");
+        let expected = state(fields[4]);
         assert_eq!(x.div_euclid(16), cx, "fixture control must lie in served city chunk");
         assert_eq!(z.div_euclid(16), cz, "fixture control must lie in served city chunk");
         let local = (x.rem_euclid(16) as usize, y, z.rem_euclid(16) as usize);
         if index == 0 {
             assert_ne!(
-                shaped.block_state(local.0, local.1, local.2),
-                fields[4],
+                shaped.block_state_id(local.0, local.1, local.2),
+                expected,
                 "shaped prefix must not apply composite structure writes"
             );
         }
-        assert_eq!(column.block_state(local.0, local.1, local.2), fields[4], "city control ({x}, {y}, {z})");
+        assert_eq!(column.block_state_id(local.0, local.1, local.2), expected, "city control ({x}, {y}, {z})");
     }
 }
 
@@ -302,10 +312,12 @@ fn end_city_pieces_are_composed_into_end_columns() {
 #[test]
 fn end_city_upper_window_piece_survives_structure_clipping() {
     let column = generator(42).column(283, 86);
+    let purpur_pillar = state("minecraft:purpur_pillar[axis=z]");
+    let air = air_state();
     assert_eq!(column.height(), 128);
-    assert_eq!(column.block_state(12, 133, 0), "minecraft:purpur_pillar[axis=z]");
-    assert_eq!(column.block_state(12, 175, 0), "minecraft:air");
-    assert_eq!(column.block_state(12, 255, 0), "minecraft:air");
+    assert_eq!(column.block_state_id(12, 133, 0), purpur_pillar);
+    assert_eq!(column.block_state_id(12, 175, 0), air);
+    assert_eq!(column.block_state_id(12, 255, 0), air);
 }
 
 #[derive(Debug)]
@@ -419,10 +431,11 @@ fn end_columns_match_the_independent_server_fixture() {
         assert_eq!(column.min_y(), case.min_y, "seed {} chunk ({},{})", case.seed, case.chunk_x, case.chunk_z);
         assert_eq!(column.height(), case.height, "seed {} chunk ({},{})", case.seed, case.chunk_x, case.chunk_z);
         for run in case.runs {
+            let expected = state(run.state);
             for y in run.y..run.y + run.count {
                 assert_eq!(
-                    column.block_state(run.x, y, run.z),
-                    run.state,
+                    column.block_state_id(run.x, y, run.z),
+                    expected,
                     "seed {} chunk ({},{}) local ({},{},{})",
                     case.seed,
                     case.chunk_x,
@@ -499,6 +512,7 @@ fn the_router_makes_y_0_to_4_a_dead_band_of_air_everywhere() {
     let dead_top = g1["from_y"].as_i64().unwrap() as i32;
 
     let mut positions = 0usize;
+    let air = air_state();
     for seed in [SEED, SEED_B] {
         let generator = generator(seed);
         for &(cx, cz) in SCENE {
@@ -506,12 +520,13 @@ fn the_router_makes_y_0_to_4_a_dead_band_of_air_everywhere() {
             for lx in 0..16 {
                 for lz in 0..16 {
                     for y in column.min_y()..=dead_top {
-                        let state = column.block_state(lx, y, lz);
+                        let state = column.block_state_id(lx, y, lz);
                         assert_eq!(
-                            state, "minecraft:air",
-                            "seed {seed} chunk ({cx},{cz}) ({lx},{y},{lz}) is {state}; \
+                            state, air,
+                            "seed {seed} chunk ({cx},{cz}) ({lx},{y},{lz}) is {}; \
                              the router's g1 clamps to 0 at y <= {dead_top}, so the \
-                             density there is the constant squeeze(-0.15) = -0.0748594"
+                             density there is the constant squeeze(-0.15) = -0.0748594",
+                            state.canonical_state()
                         );
                         positions += 1;
                     }
@@ -549,6 +564,7 @@ fn the_dead_band_gate_fails_under_the_swapped_gradient() {
         g1["to_value"] = Value::from(0.0);
     }
     let wrong = EndGenerator::new(SEED, &mutated, &EndAssets::new());
+    let air_state_id = air_state();
 
     let mut solid = 0usize;
     let mut air = 0usize;
@@ -557,7 +573,7 @@ fn the_dead_band_gate_fails_under_the_swapped_gradient() {
         for lx in 0..16 {
             for lz in 0..16 {
                 for y in column.min_y()..=4 {
-                    if column.block_state(lx, y, lz) == "minecraft:air" {
+                    if column.block_state_id(lx, y, lz) == air_state_id {
                         air += 1;
                     } else {
                         solid += 1;
@@ -622,11 +638,12 @@ fn the_no_fluid_detector_sees_the_nethers_lava_sea() {
         &NetherAssets(EndAssets::new()),
     );
     let column = nether.column(0, 0);
+    let lava_block = Block::Lava;
     let mut lava = 0usize;
     for lx in 0..16 {
         for lz in 0..16 {
             for y in column.min_y()..(column.min_y() + column.height()) {
-                if column.block_state(lx, y, lz).starts_with("minecraft:lava") {
+                if column.block_state_id(lx, y, lz).block() == lava_block {
                     lava += 1;
                 }
             }
@@ -707,6 +724,7 @@ fn a_column_carries_the_biome_sources_own_answer() {
 #[test]
 fn the_end_is_real_terrain_and_the_main_island_is_solid() {
     let generator = generator(SEED);
+    let air = air_state();
     let centre = generator.column(0, 0);
     let solid = centre.non_air_count();
     let total = 16 * 16 * centre.height() as usize;
@@ -722,8 +740,8 @@ fn the_end_is_real_terrain_and_the_main_island_is_solid() {
         for lx in 0..16 {
             for lz in 0..16 {
                 assert_eq!(
-                    centre.block_state(lx, y, lz),
-                    "minecraft:air",
+                    centre.block_state_id(lx, y, lz),
+                    air,
                     "({lx},{y},{lz}) at the top of the End is not air"
                 );
             }
@@ -743,8 +761,7 @@ fn the_end_is_real_terrain_and_the_main_island_is_solid() {
                     centre.height(),
                 )];
                 let solid_here =
-                    centre.block_state(lx as usize, centre.min_y() + ly, lz as usize)
-                        != "minecraft:air";
+                    centre.block_state_id(lx as usize, centre.min_y() + ly, lz as usize) != air;
                 if (kind == BlockKind::Stone) != solid_here {
                     disagreements += 1;
                 }
@@ -766,6 +783,7 @@ fn the_end_is_real_terrain_and_the_main_island_is_solid() {
 #[ignore = "diagnostic; prints per-chunk solid counts and the solid y-range"]
 fn print_the_end_terrain_profile() {
     let generator = generator(SEED);
+    let air = air_state();
     for &(cx, cz) in SCENE {
         let column = generator.column(cx, cz);
         let mut lo = i32::MAX;
@@ -773,7 +791,7 @@ fn print_the_end_terrain_profile() {
         for lx in 0..16 {
             for lz in 0..16 {
                 for y in column.min_y()..(column.min_y() + column.height()) {
-                    if column.block_state(lx, y, lz) != "minecraft:air" {
+                    if column.block_state_id(lx, y, lz) != air {
                         lo = lo.min(y);
                         hi = hi.max(y);
                     }
@@ -925,14 +943,15 @@ fn the_end_has_no_bedrock_and_its_surface_rule_cannot_change_a_block() {
     // Observable half: no bedrock in the scene, and the Nether's own rule *does*
     // carry the construct, so the reading of `vertical_gradient` is not a guess.
     let generator = generator(SEED);
+    let bedrock = state("minecraft:bedrock");
     for &(cx, cz) in SCENE {
         let column = generator.column(cx, cz);
         for lx in 0..16 {
             for lz in 0..16 {
                 for y in column.min_y()..(column.min_y() + column.height()) {
                     assert_ne!(
-                        column.block_state(lx, y, lz),
-                        "minecraft:bedrock",
+                        column.block_state_id(lx, y, lz),
+                        bedrock,
                         "bedrock at ({cx},{cz}) ({lx},{y},{lz})"
                     );
                 }

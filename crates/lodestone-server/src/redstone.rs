@@ -5,7 +5,7 @@
 //! `crate::random_tick`'s reaction dispatch, which calls
 //! `crate::neighbor_update::NeighborPropagator` exactly the way
 //! `crate::gravity_tick` already does. This module is pure queries plus a
-//! handful of per-family state-string helpers.
+//! handful of per-family state helpers.
 //!
 //! # Where this comes from in the jar
 //!
@@ -112,41 +112,120 @@
 //! torch passed.
 
 use crate::neighbor_update::{Direction, ALL_DIRECTIONS};
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey, PropertyValue};
+use lodestone_data::block_states::StateId;
 use lodestone_model::BlockPos;
-use std::sync::Arc;
 
-/// The block-state read a world-lookup closure returns — `F: Fn(BlockPos) ->
-/// WorldState`, the shape every query function in this module (and
-/// `crate::redstone_wire`/`crate::redstone_torch`/`crate::redstone_diode`/
-/// `crate::redstone_observer`/`crate::redstone_rail`/`crate::redstone_tripwire`/
-/// `crate::redstone_openable`/`crate::redstone_dispenser`/`crate::piston`/
-/// `crate::block_support`/`crate::block_placement`/`crate::server`) takes as
-/// `lookup`/`block_at`.
-///
-/// An `Arc<str>` rather than a freshly-allocated `String`: [`make_lookup`] and
-/// [`make_columns_lookup`] both back this with
-/// [`crate::chunk::ChunkColumn::block_state_arc`], which clones an already
-/// -interned palette entry (one atomic increment) instead of allocating and
-/// copying a string on every call — this removes the largest remaining constant-factor
-/// allocation on the redstone dispatch
-/// path (5899 lookups measured in one active tick against 837 notifications).
-/// `Arc<str>` derefs to `&str` exactly like `String` does, so every existing
-/// caller that only *reads* through the lookup (`&state`, `.starts_with(..)`,
-/// `base_name(&state)`, …) needed no body change — only the bound itself.
-pub type WorldState = Arc<str>;
+/// The validated global state read by redstone queries and mutations.
+pub type WorldState = StateId;
 
-pub const WIRE: &str = "minecraft:redstone_wire";
-pub const TORCH: &str = "minecraft:redstone_torch";
-pub const WALL_TORCH: &str = "minecraft:redstone_wall_torch";
-pub const REPEATER: &str = "minecraft:repeater";
-pub const COMPARATOR: &str = "minecraft:comparator";
-pub const OBSERVER: &str = "minecraft:observer";
-pub const LEVER: &str = "minecraft:lever";
-pub const TRIPWIRE_HOOK: &str = "minecraft:tripwire_hook";
-pub const DETECTOR_RAIL: &str = "minecraft:detector_rail";
-pub const TARGET: &str = "minecraft:target";
-pub const DAYLIGHT_DETECTOR: &str = "minecraft:daylight_detector";
-pub const REDSTONE_BLOCK: &str = "minecraft:redstone_block";
+#[cfg(test)]
+pub(crate) fn fixture_state(text: &str) -> StateId {
+    StateId::from_state_str(text).expect("redstone fixture state must resolve")
+}
+
+pub(crate) fn property(state: StateId, key: PropertyKey) -> Option<BuiltinPropertyValue> {
+    Properties::from_state_id(state).get(key)?.builtin_value()
+}
+
+pub(crate) fn property_bool(state: StateId, key: PropertyKey) -> Option<bool> {
+    match property(state, key)? {
+        BuiltinPropertyValue::True => Some(true),
+        BuiltinPropertyValue::False => Some(false),
+        _ => None,
+    }
+}
+
+pub(crate) fn property_u8(state: StateId, key: PropertyKey) -> Option<u8> {
+    match property(state, key)? {
+        BuiltinPropertyValue::Value0 => Some(0),
+        BuiltinPropertyValue::Value1 => Some(1),
+        BuiltinPropertyValue::Value2 => Some(2),
+        BuiltinPropertyValue::Value3 => Some(3),
+        BuiltinPropertyValue::Value4 => Some(4),
+        BuiltinPropertyValue::Value5 => Some(5),
+        BuiltinPropertyValue::Value6 => Some(6),
+        BuiltinPropertyValue::Value7 => Some(7),
+        BuiltinPropertyValue::Value8 => Some(8),
+        BuiltinPropertyValue::Value9 => Some(9),
+        BuiltinPropertyValue::Value10 => Some(10),
+        BuiltinPropertyValue::Value11 => Some(11),
+        BuiltinPropertyValue::Value12 => Some(12),
+        BuiltinPropertyValue::Value13 => Some(13),
+        BuiltinPropertyValue::Value14 => Some(14),
+        BuiltinPropertyValue::Value15 => Some(15),
+        _ => None,
+    }
+}
+
+pub(crate) fn numeric_property_value(value: u8) -> Option<BuiltinPropertyValue> {
+    Some(match value {
+        0 => BuiltinPropertyValue::Value0,
+        1 => BuiltinPropertyValue::Value1,
+        2 => BuiltinPropertyValue::Value2,
+        3 => BuiltinPropertyValue::Value3,
+        4 => BuiltinPropertyValue::Value4,
+        5 => BuiltinPropertyValue::Value5,
+        6 => BuiltinPropertyValue::Value6,
+        7 => BuiltinPropertyValue::Value7,
+        8 => BuiltinPropertyValue::Value8,
+        9 => BuiltinPropertyValue::Value9,
+        10 => BuiltinPropertyValue::Value10,
+        11 => BuiltinPropertyValue::Value11,
+        12 => BuiltinPropertyValue::Value12,
+        13 => BuiltinPropertyValue::Value13,
+        14 => BuiltinPropertyValue::Value14,
+        15 => BuiltinPropertyValue::Value15,
+        16 => BuiltinPropertyValue::Value16,
+        17 => BuiltinPropertyValue::Value17,
+        18 => BuiltinPropertyValue::Value18,
+        19 => BuiltinPropertyValue::Value19,
+        20 => BuiltinPropertyValue::Value20,
+        21 => BuiltinPropertyValue::Value21,
+        22 => BuiltinPropertyValue::Value22,
+        23 => BuiltinPropertyValue::Value23,
+        24 => BuiltinPropertyValue::Value24,
+        25 => BuiltinPropertyValue::Value25,
+        _ => return None,
+    })
+}
+
+pub(crate) fn property_direction(state: StateId, key: PropertyKey) -> Option<Direction> {
+    Some(match property(state, key)? {
+        BuiltinPropertyValue::Down => Direction::Down,
+        BuiltinPropertyValue::Up => Direction::Up,
+        BuiltinPropertyValue::North => Direction::North,
+        BuiltinPropertyValue::South => Direction::South,
+        BuiltinPropertyValue::West => Direction::West,
+        BuiltinPropertyValue::East => Direction::East,
+        _ => return None,
+    })
+}
+
+pub(crate) fn with_property(
+    state: StateId,
+    key: PropertyKey,
+    value: PropertyValue,
+) -> Option<StateId> {
+    let properties = Properties::from_state_id(state)
+        .with_builtin(key, value.builtin_value()?)
+        .ok()?;
+    Properties::state_for_block(state.block(), &properties)
+}
+
+pub const WIRE: Block = Block::RedstoneWire;
+pub const TORCH: Block = Block::RedstoneTorch;
+pub const WALL_TORCH: Block = Block::RedstoneWallTorch;
+pub const REPEATER: Block = Block::Repeater;
+pub const COMPARATOR: Block = Block::Comparator;
+pub const OBSERVER: Block = Block::Observer;
+pub const LEVER: Block = Block::Lever;
+pub const TRIPWIRE_HOOK: Block = Block::TripwireHook;
+pub const DETECTOR_RAIL: Block = Block::DetectorRail;
+pub const TARGET: Block = Block::Target;
+pub const DAYLIGHT_DETECTOR: Block = Block::DaylightDetector;
+pub const REDSTONE_BLOCK: Block = Block::RedstoneBlock;
 
 /// Scheduled-tick `kind` strings (`ScheduledTickQueue<T>` is
 /// keyed by `T = String` in this crate — see `scheduled_tick.rs`'s own doc
@@ -160,107 +239,72 @@ pub const TICK_REPEATER: &str = "redstone:repeater";
 pub const TICK_COMPARATOR: &str = "redstone:comparator";
 pub const TICK_OBSERVER: &str = "redstone:observer";
 
-/// Strips a `[...]` block-state property suffix — the same convention every
-/// other per-family module in this crate duplicates locally rather than
-/// sharing (see `growth_tick.rs`'s own doc comment on `base_name` for why:
-/// no dependency between per-family modules, only on the shared primitives
-/// in `chunk.rs`/`neighbor_update.rs`).
-pub(crate) fn base_name(state: &str) -> &str {
-    state.split('[').next().unwrap_or(state)
+pub(crate) fn base_name(state: StateId) -> Block {
+    state.block()
 }
 
-pub(crate) fn get_u32_property(state: &str, key: &str) -> Option<u32> {
-    let (_, props) = state.split_once('[')?;
-    let props = props.strip_suffix(']').unwrap_or(props);
-    for pair in props.split(',') {
-        if let Some((k, v)) = pair.split_once('=') {
-            if k == key {
-                return v.parse().ok();
-            }
-        }
-    }
-    None
+pub(crate) fn get_u32_property(state: StateId, key: PropertyKey) -> Option<u32> {
+    property_u8(state, key).map(u32::from)
 }
 
-pub(crate) fn get_bool_property(state: &str, key: &str) -> Option<bool> {
-    let (_, props) = state.split_once('[')?;
-    let props = props.strip_suffix(']').unwrap_or(props);
-    for pair in props.split(',') {
-        if let Some((k, v)) = pair.split_once('=') {
-            if k == key {
-                return match v {
-                    "true" => Some(true),
-                    "false" => Some(false),
-                    _ => None,
-                };
-            }
-        }
-    }
-    None
+pub(crate) fn get_bool_property(state: StateId, key: PropertyKey) -> Option<bool> {
+    property_bool(state, key)
 }
 
-pub(crate) fn get_str_property<'a>(state: &'a str, key: &str) -> Option<&'a str> {
-    let (_, props) = state.split_once('[')?;
-    let props = props.strip_suffix(']').unwrap_or(props);
-    for pair in props.split(',') {
-        if let Some((k, v)) = pair.split_once('=') {
-            if k == key {
-                return Some(v);
-            }
-        }
-    }
-    None
+pub(crate) fn get_str_property(state: StateId, key: PropertyKey) -> Option<BuiltinPropertyValue> {
+    property(state, key)
 }
 
-pub(crate) fn direction_from_str(s: &str) -> Direction {
-    match s {
-        "down" => Direction::Down,
-        "up" => Direction::Up,
-        "north" => Direction::North,
-        "south" => Direction::South,
-        "west" => Direction::West,
-        _ => Direction::East,
-    }
+pub(crate) fn direction_from_property(value: BuiltinPropertyValue) -> Option<Direction> {
+    Some(match value {
+        BuiltinPropertyValue::Down => Direction::Down,
+        BuiltinPropertyValue::Up => Direction::Up,
+        BuiltinPropertyValue::North => Direction::North,
+        BuiltinPropertyValue::South => Direction::South,
+        BuiltinPropertyValue::West => Direction::West,
+        BuiltinPropertyValue::East => Direction::East,
+        _ => return None,
+    })
 }
 
-pub(crate) fn direction_to_str(d: Direction) -> &'static str {
+pub(crate) fn direction_property(d: Direction) -> BuiltinPropertyValue {
     match d {
-        Direction::Down => "down",
-        Direction::Up => "up",
-        Direction::North => "north",
-        Direction::South => "south",
-        Direction::West => "west",
-        Direction::East => "east",
+        Direction::Down => BuiltinPropertyValue::Down,
+        Direction::Up => BuiltinPropertyValue::Up,
+        Direction::North => BuiltinPropertyValue::North,
+        Direction::South => BuiltinPropertyValue::South,
+        Direction::West => BuiltinPropertyValue::West,
+        Direction::East => BuiltinPropertyValue::East,
     }
 }
 
 #[must_use]
-pub fn is_wire(state: &str) -> bool {
+pub fn is_wire(state: StateId) -> bool {
     base_name(state) == WIRE
 }
 #[must_use]
-pub fn is_standing_torch(state: &str) -> bool {
+pub fn is_standing_torch(state: StateId) -> bool {
     base_name(state) == TORCH
 }
 #[must_use]
-pub fn is_wall_torch(state: &str) -> bool {
+pub fn is_wall_torch(state: StateId) -> bool {
     base_name(state) == WALL_TORCH
 }
 #[must_use]
-pub fn is_torch(state: &str) -> bool {
+pub fn is_torch(state: StateId) -> bool {
     is_standing_torch(state) || is_wall_torch(state)
 }
 #[must_use]
-pub fn is_repeater(state: &str) -> bool {
+pub fn is_repeater(state: StateId) -> bool {
     base_name(state) == REPEATER
 }
 #[must_use]
-pub fn is_comparator(state: &str) -> bool {
+pub fn is_comparator(state: StateId) -> bool {
     base_name(state) == COMPARATOR
 }
 #[must_use]
-pub fn is_hopper(state: &str) -> bool {
-    base_name(state) == "minecraft:hopper"
+pub fn is_hopper(state: StateId) -> bool {
+    base_name(state) == Block::Hopper
 }
 
 /// `minecraft:lever`.
@@ -270,7 +314,7 @@ pub fn is_hopper(state: &str) -> bool {
 /// *query* half. They are deliberately independent — `hand_use` already depends
 /// on this module, so the reverse edge would be a cycle.
 #[must_use]
-pub fn is_lever(state: &str) -> bool {
+pub fn is_lever(state: StateId) -> bool {
     base_name(state) == LEVER
 }
 
@@ -279,10 +323,24 @@ pub fn is_lever(state: &str) -> bool {
 /// for the same reason `is_weighted_pressure_plate` is not: a new wood species
 /// adds a button and would otherwise silently emit no signal.
 #[must_use]
-pub fn is_button(state: &str) -> bool {
-    base_name(state)
-        .strip_suffix("_button")
-        .is_some_and(|rest| rest.len() > "minecraft:".len() && rest.starts_with("minecraft:"))
+pub fn is_button(state: StateId) -> bool {
+    matches!(
+        base_name(state),
+        Block::StoneButton
+            | Block::PolishedBlackstoneButton
+            | Block::OakButton
+            | Block::SpruceButton
+            | Block::BirchButton
+            | Block::JungleButton
+            | Block::AcaciaButton
+            | Block::CherryButton
+            | Block::DarkOakButton
+            | Block::PaleOakButton
+            | Block::MangroveButton
+            | Block::BambooButton
+            | Block::CrimsonButton
+            | Block::WarpedButton
+    )
 }
 
 /// The two `WeightedPressurePlateBlock` registrations, which carry an analog
@@ -292,41 +350,51 @@ pub fn is_button(state: &str) -> bool {
 /// `_pressure_plate` and reading `powered` off one would always find nothing and
 /// report `0`.
 #[must_use]
-pub fn is_weighted_pressure_plate(state: &str) -> bool {
-    matches!(
-        base_name(state),
-        "minecraft:light_weighted_pressure_plate" | "minecraft:heavy_weighted_pressure_plate"
-    )
+pub fn is_weighted_pressure_plate(state: StateId) -> bool {
+    matches!(base_name(state), Block::LightWeightedPressurePlate | Block::HeavyWeightedPressurePlate)
 }
 
 /// A boolean (`PressurePlateBlock`) pressure plate — every `*_pressure_plate`
 /// that is not one of the two weighted ones.
 #[must_use]
-pub fn is_pressure_plate(state: &str) -> bool {
+pub fn is_pressure_plate(state: StateId) -> bool {
     !is_weighted_pressure_plate(state)
-        && base_name(state)
-            .strip_suffix("_pressure_plate")
-            .is_some_and(|rest| rest.len() > "minecraft:".len() && rest.starts_with("minecraft:"))
+        && matches!(
+            base_name(state),
+            Block::StonePressurePlate
+                | Block::OakPressurePlate
+                | Block::SprucePressurePlate
+                | Block::BirchPressurePlate
+                | Block::JunglePressurePlate
+                | Block::AcaciaPressurePlate
+                | Block::CherryPressurePlate
+                | Block::DarkOakPressurePlate
+                | Block::PaleOakPressurePlate
+                | Block::MangrovePressurePlate
+                | Block::BambooPressurePlate
+                | Block::CrimsonPressurePlate
+                | Block::WarpedPressurePlate
+        )
 }
 
 #[must_use]
-pub fn is_tripwire_hook(state: &str) -> bool {
+pub fn is_tripwire_hook(state: StateId) -> bool {
     base_name(state) == TRIPWIRE_HOOK
 }
 #[must_use]
-pub fn is_detector_rail(state: &str) -> bool {
+pub fn is_detector_rail(state: StateId) -> bool {
     base_name(state) == DETECTOR_RAIL
 }
 #[must_use]
-pub fn is_target(state: &str) -> bool {
+pub fn is_target(state: StateId) -> bool {
     base_name(state) == TARGET
 }
 #[must_use]
-pub fn is_daylight_detector(state: &str) -> bool {
+pub fn is_daylight_detector(state: StateId) -> bool {
     base_name(state) == DAYLIGHT_DETECTOR
 }
 #[must_use]
-pub fn is_redstone_block(state: &str) -> bool {
+pub fn is_redstone_block(state: StateId) -> bool {
     base_name(state) == REDSTONE_BLOCK
 }
 
@@ -335,16 +403,16 @@ pub fn is_redstone_block(state: &str) -> bool {
 /// matching every one of those families' `registerDefaultState(... POWERED,
 /// false)`.
 #[must_use]
-pub fn powered_property(state: &str) -> bool {
-    get_bool_property(state, "powered").unwrap_or(false)
+pub fn powered_property(state: StateId) -> bool {
+    get_bool_property(state, PropertyKey::Powered).unwrap_or(false)
 }
 
 /// The analog `POWER` property (vanilla's own block-state-properties registration, `0..=15`) carried
 /// by a weighted pressure plate, a target and a daylight detector — the same
 /// property dust uses, on blocks that are not dust.
 #[must_use]
-pub fn analog_power(state: &str) -> u8 {
-    get_u32_property(state, "power").unwrap_or(0).min(15) as u8
+pub fn analog_power(state: StateId) -> u8 {
+    get_u32_property(state, PropertyKey::Power).unwrap_or(0).min(15) as u8
 }
 
 /// Vanilla's own face-attached-horizontal-directional-block connected-direction getter — the
@@ -358,19 +426,23 @@ pub fn analog_power(state: &str) -> u8 {
 /// reading for a state naming no `face`, matching vanilla's own wall-attach-face being the
 /// default in both registrations.
 #[must_use]
-pub fn attached_connected_direction(state: &str) -> Direction {
-    match get_str_property(state, "face") {
-        Some("ceiling") => Direction::Down,
-        Some("floor") => Direction::Up,
-        _ => get_str_property(state, "facing").map(direction_from_str).unwrap_or(Direction::North),
+pub fn attached_connected_direction(state: StateId) -> Direction {
+    match get_str_property(state, PropertyKey::Face) {
+        Some(BuiltinPropertyValue::Ceiling) => Direction::Down,
+        Some(BuiltinPropertyValue::Floor) => Direction::Up,
+        _ => get_str_property(state, PropertyKey::Facing)
+            .and_then(direction_from_property)
+            .unwrap_or(Direction::North),
     }
 }
 
 /// Vanilla's own tripwire-hook-block `FACING` — the direction the hook points away from its
 /// wall, and the one direction it strongly powers.
 #[must_use]
-pub fn tripwire_hook_facing(state: &str) -> Direction {
-    get_str_property(state, "facing").map(direction_from_str).unwrap_or(Direction::North)
+pub fn tripwire_hook_facing(state: StateId) -> Direction {
+    get_str_property(state, PropertyKey::Facing)
+        .and_then(direction_from_property)
+        .unwrap_or(Direction::North)
 }
 
 /// Vanilla's own base-pressure-plate-block signal-for-state getter for both plate families:
@@ -386,7 +458,7 @@ pub fn tripwire_hook_facing(state: &str) -> Direction {
 /// here (see this module's own doc comment on which halves are modelled); what
 /// is read here is whatever the property already holds.
 #[must_use]
-pub fn pressure_plate_signal(state: &str) -> u8 {
+pub fn pressure_plate_signal(state: StateId) -> u8 {
     if is_weighted_pressure_plate(state) {
         analog_power(state)
     } else if powered_property(state) {
@@ -404,7 +476,7 @@ pub fn pressure_plate_signal(state: &str) -> u8 {
 /// directions weakly (see [`weak_signal`]), and each restricts only its
 /// *strong* output.
 #[must_use]
-pub fn is_input_source(state: &str) -> bool {
+pub fn is_input_source(state: StateId) -> bool {
     is_lever(state)
         || is_button(state)
         || is_pressure_plate(state)
@@ -424,8 +496,8 @@ pub fn is_input_source(state: &str) -> bool {
 /// a bare `minecraft:hopper` (which is what placement writes today) the
 /// correct unlocked initial value.
 #[must_use]
-pub fn hopper_enabled(state: &str) -> bool {
-    get_bool_property(state, "enabled").unwrap_or(true)
+pub fn hopper_enabled(state: StateId) -> bool {
+    get_bool_property(state, PropertyKey::Enabled).unwrap_or(true)
 }
 
 /// `state` with one property replaced, every other property preserved
@@ -438,35 +510,13 @@ pub fn hopper_enabled(state: &str) -> bool {
 /// rebuild that dropped `facing` would fall to the subset tier and hand the
 /// client a hopper pointing somewhere else. Property *order* does not matter, because that resolver
 /// sorts before comparing.
-#[must_use]
-pub(crate) fn with_property(state: &str, key: &str, value: &str) -> String {
-    let Some((name, rest)) = state.split_once('[') else {
-        return format!("{state}[{key}={value}]");
-    };
-    let mut parts: Vec<String> = Vec::new();
-    let mut replaced = false;
-    for kv in rest.trim_end_matches(']').split(',') {
-        match kv.split_once('=') {
-            Some((k, _)) if k == key => {
-                parts.push(format!("{key}={value}"));
-                replaced = true;
-            }
-            _ => parts.push(kv.to_owned()),
-        }
-    }
-    if !replaced {
-        parts.push(format!("{key}={value}"));
-    }
-    format!("{name}[{}]", parts.join(","))
-}
-
 /// Vanilla's own diode-block is-diode check.
 #[must_use]
-pub fn is_diode(state: &str) -> bool {
+pub fn is_diode(state: StateId) -> bool {
     is_repeater(state) || is_comparator(state)
 }
 #[must_use]
-pub fn is_observer(state: &str) -> bool {
+pub fn is_observer(state: StateId) -> bool {
     base_name(state) == OBSERVER
 }
 /// The blocks this crate models signal-carrying behaviour for that are **not
@@ -485,7 +535,7 @@ pub fn is_observer(state: &str) -> bool {
 /// [`signal_at`]'s conductor wrap, which is how a block of redstone under a
 /// wire-topped stone block works at all.
 #[must_use]
-pub fn is_redstone_component(state: &str) -> bool {
+pub fn is_redstone_component(state: StateId) -> bool {
     is_wire(state)
         || is_torch(state)
         || is_diode(state)
@@ -502,77 +552,81 @@ pub fn is_redstone_component(state: &str) -> bool {
 /// The reduced conductor predicate — see this module's own doc comment for
 /// the full citation and named gap.
 #[must_use]
-pub fn is_redstone_conductor(state: &str) -> bool {
-    !crate::chunk::is_air_or_fluid(state) && !is_redstone_component(state)
+pub fn is_redstone_conductor(state: StateId) -> bool {
+    !matches!(base_name(state), Block::Air | Block::CaveAir | Block::VoidAir | Block::Water | Block::Lava)
+        && !is_redstone_component(state)
 }
 
 /// Dust's own `POWER` property (vanilla's own redstone-wire-block registration,
 /// `0..=15`). `0` for anything that is not
 /// wire — callers gate on [`is_wire`] first when the distinction matters.
 #[must_use]
-pub fn wire_power(state: &str) -> u8 {
+pub fn wire_power(state: StateId) -> u8 {
     if !is_wire(state) {
         return 0;
     }
-    get_u32_property(state, "power").unwrap_or(0).min(15) as u8
+    get_u32_property(state, PropertyKey::Power).unwrap_or(0).min(15) as u8
 }
 
 #[must_use]
-pub fn torch_lit(state: &str) -> bool {
-    get_bool_property(state, "lit").unwrap_or(true)
+pub fn torch_lit(state: StateId) -> bool {
+    get_bool_property(state, PropertyKey::Lit).unwrap_or(true)
 }
 
 /// The wall torch's `FACING` — the face it is mounted against (the
 /// direction pointing *into* the block it's attached to), vanilla's own
 /// horizontal-directional-block `FACING` (its own wall-torch-block registration).
 #[must_use]
-pub fn wall_torch_facing(state: &str) -> Direction {
-    get_str_property(state, "facing").map(direction_from_str).unwrap_or(Direction::North)
+pub fn wall_torch_facing(state: StateId) -> Direction {
+    get_str_property(state, PropertyKey::Facing)
+        .and_then(direction_from_property)
+        .unwrap_or(Direction::North)
 }
 
 #[must_use]
-pub fn diode_facing(state: &str) -> Direction {
-    get_str_property(state, "facing").map(direction_from_str).unwrap_or(Direction::North)
+pub fn diode_facing(state: StateId) -> Direction {
+    get_str_property(state, PropertyKey::Facing)
+        .and_then(direction_from_property)
+        .unwrap_or(Direction::North)
 }
 #[must_use]
-pub fn diode_powered(state: &str) -> bool {
-    get_bool_property(state, "powered").unwrap_or(false)
+pub fn diode_powered(state: StateId) -> bool {
+    get_bool_property(state, PropertyKey::Powered).unwrap_or(false)
 }
 #[must_use]
-pub fn repeater_locked(state: &str) -> bool {
-    get_bool_property(state, "locked").unwrap_or(false)
+pub fn repeater_locked(state: StateId) -> bool {
+    get_bool_property(state, PropertyKey::Locked).unwrap_or(false)
 }
 /// Vanilla's own repeater-block `DELAY`, `1..=4` (vanilla default `1`).
 #[must_use]
-pub fn repeater_delay_ticks(state: &str) -> u32 {
-    get_u32_property(state, "delay").unwrap_or(1).clamp(1, 4)
+pub fn repeater_delay_ticks(state: StateId) -> u32 {
+    get_u32_property(state, PropertyKey::Delay).unwrap_or(1).clamp(1, 4)
 }
 #[must_use]
-pub fn comparator_mode_subtract(state: &str) -> bool {
-    get_str_property(state, "mode") == Some("subtract")
+pub fn comparator_mode_subtract(state: StateId) -> bool {
+    get_str_property(state, PropertyKey::Mode) == Some(BuiltinPropertyValue::Subtract)
 }
-/// The comparator's last-computed analog output, `0..=15` — vanilla stores
-/// this in a `ComparatorBlockEntity`; this
-/// crate has no block-entity storage plumbed into this module (`ChunkColumn`
-/// has no block-entity registry access from here — see
-/// `crate::redstone_diode`'s own module doc for the full citation), so it is
-/// encoded as an ordinary block-state property instead, `output=N`. This
-/// changes *where the value lives*, not what it means or how it is computed
-/// — every value this property ever holds is exactly
-/// [`crate::redstone_diode::calculate_comparator_output`]'s own return
-/// value, the same function a block-entity-backed version would call too.
+/// The comparator's last-computed analog output, `0..=15`.
+///
+/// The value belongs to the comparator's block-entity sidecar, not its block
+/// state. The sidecar is not threaded through this query-only API yet, so
+/// callers without that data see the neutral value until the storage seam is
+/// connected.
 #[must_use]
-pub fn comparator_output(state: &str) -> u8 {
-    get_u32_property(state, "output").unwrap_or(0).min(15) as u8
+pub fn comparator_output(state: StateId) -> u8 {
+    let _ = state;
+    0
 }
 
 #[must_use]
-pub fn observer_facing(state: &str) -> Direction {
-    get_str_property(state, "facing").map(direction_from_str).unwrap_or(Direction::South)
+pub fn observer_facing(state: StateId) -> Direction {
+    get_str_property(state, PropertyKey::Facing)
+        .and_then(direction_from_property)
+        .unwrap_or(Direction::South)
 }
 #[must_use]
-pub fn observer_powered(state: &str) -> bool {
-    get_bool_property(state, "powered").unwrap_or(false)
+pub fn observer_powered(state: StateId) -> bool {
+    get_bool_property(state, PropertyKey::Powered).unwrap_or(false)
 }
 
 /// A diode's own output value while powered — vanilla's own diode-block
@@ -582,7 +636,7 @@ pub fn observer_powered(state: &str) -> bool {
 /// analog output — see
 /// [`comparator_output`]'s own doc comment for where that value lives here.
 #[must_use]
-fn diode_output_signal(state: &str) -> u8 {
+fn diode_output_signal(state: StateId) -> u8 {
     if is_comparator(state) {
         comparator_output(state)
     } else {
@@ -596,7 +650,7 @@ fn diode_output_signal(state: &str) -> u8 {
 /// signal if `POWERED` else `0` (its own diode-block override);
 /// observer -> `15` if `POWERED` else `0` (its own observer-block override).
 #[must_use]
-pub fn own_signal(state: &str) -> u8 {
+pub fn own_signal(state: StateId) -> u8 {
     crate::redstone_counters::bump_state_parse();
     if is_wire(state) {
         wire_power(state)
@@ -659,7 +713,7 @@ pub fn own_signal(state: &str) -> u8 {
 /// sees as `true` — vanilla's own signal-getter control-input-signal routine special-cases wire
 /// before ever reaching this check, so wire never needs this predicate.
 #[must_use]
-pub fn is_signal_source(state: &str) -> bool {
+pub fn is_signal_source(state: StateId) -> bool {
     is_torch(state) || is_diode(state) || is_observer(state) || is_input_source(state)
 }
 
@@ -678,7 +732,7 @@ pub fn is_signal_source(state: &str) -> bool {
 /// separately, and with a `-1` decay, by
 /// [`crate::redstone_wire::incoming_wire_signal`]).
 #[must_use]
-pub fn weak_signal(state: &str, direction: Direction, ignore_wire: bool) -> u8 {
+pub fn weak_signal(state: StateId, direction: Direction, ignore_wire: bool) -> u8 {
     if is_wire(state) {
         if ignore_wire || direction == Direction::Down {
             0
@@ -753,7 +807,7 @@ pub fn weak_signal(state: &str, direction: Direction, ignore_wire: bool) -> u8 {
 /// `crate::redstone_wire::a_wire_reads_a_higher_wire_across_a_one_block_conductor_step`
 /// initially reading `15` instead of the predicted `14`.
 #[must_use]
-pub fn direct_signal(state: &str, direction: Direction, ignore_wire: bool) -> u8 {
+pub fn direct_signal(state: StateId, direction: Direction, ignore_wire: bool) -> u8 {
     if is_torch(state) {
         // RedstoneTorchBlock.getDirectSignal (`:99-101`): only straight DOWN
         // from the querier's perspective — i.e. only the block directly
@@ -835,7 +889,7 @@ where
     let mut best = 0u8;
     for direction in ALL_DIRECTIONS {
         let neighbor_state = lookup(direction.relative(pos));
-        let signal = direct_signal(&neighbor_state, direction, ignore_wire);
+        let signal = direct_signal(neighbor_state, direction, ignore_wire);
         if signal > best {
             best = signal;
         }
@@ -857,8 +911,8 @@ where
     F: Fn(BlockPos) -> WorldState,
 {
     let state = lookup(pos);
-    let weak = weak_signal(&state, direction, ignore_wire);
-    if is_redstone_conductor(&state) {
+    let weak = weak_signal(state, direction, ignore_wire);
+    if is_redstone_conductor(state) {
         weak.max(direct_signal_to(lookup, pos, ignore_wire))
     } else {
         weak
@@ -903,17 +957,17 @@ where
 {
     let state = lookup(pos);
     if only_diodes {
-        if is_diode(&state) {
-            direct_signal(&state, direction, false)
+        if is_diode(state) {
+            direct_signal(state, direction, false)
         } else {
             0
         }
-    } else if is_redstone_block(&state) {
+    } else if is_redstone_block(state) {
         15
-    } else if is_wire(&state) {
-        wire_power(&state)
-    } else if is_signal_source(&state) {
-        direct_signal(&state, direction, false)
+    } else if is_wire(state) {
+        wire_power(state)
+    } else if is_signal_source(state) {
+        direct_signal(state, direction, false)
     } else {
         0
     }
@@ -958,7 +1012,7 @@ where
         return signal;
     }
     let target_state = lookup(target_pos);
-    signal.max(wire_power(&target_state))
+    signal.max(wire_power(target_state))
 }
 
 /// Builds a `Fn(BlockPos) -> WorldState` reading through `column`, the shared
@@ -979,10 +1033,10 @@ pub fn make_lookup(column: &crate::chunk::ChunkColumn, min_x: i32, min_z: i32) -
         let lx = p.x - min_x;
         let lz = p.z - min_z;
         if !(0..16).contains(&lx) || !(0..16).contains(&lz) || p.y < column.min_y || p.y >= column.min_y + column.height {
-            return crate::chunk::air_state_arc();
+            return lodestone_data::block_states::air_state();
         }
         crate::redstone_counters::bump_cell_read();
-        column.block_state_arc(lx, p.y, lz)
+        column.resolved_block_state_id(lx, p.y, lz)
     }
 }
 
@@ -1004,18 +1058,20 @@ pub fn make_columns_lookup<'a>(columns: &'a crate::random_tick::RedstoneColumns<
 mod tests {
     use super::*;
 
-    /// A tiny fake world: an explicit map from position to block-state
-    /// string, air everywhere unset — enough to build every fixture below
-    /// with no `ChunkColumn` in scope, matching `crate::gravity_tick`'s own
-    /// "pure decision, fake world via closure" testing style.
-    fn world(entries: &[(BlockPos, &str)]) -> impl Fn(BlockPos) -> WorldState + use<> {
-        let entries: Vec<(BlockPos, WorldState)> = entries.iter().map(|(p, s)| (*p, WorldState::from(*s))).collect();
+    macro_rules! state {
+        ($text:literal) => {
+            fixture_state($text)
+        };
+    }
+
+    fn world(entries: &[(BlockPos, StateId)]) -> impl Fn(BlockPos) -> WorldState + use<> {
+        let entries = entries.to_vec();
         move |p: BlockPos| {
             entries
                 .iter()
                 .find(|(pos, _)| *pos == p)
-                .map(|(_, s)| s.clone())
-                .unwrap_or_else(crate::chunk::air_state_arc)
+                .map(|(_, s)| *s)
+                .unwrap_or_else(lodestone_data::block_states::air_state)
         }
     }
 
@@ -1025,13 +1081,13 @@ mod tests {
 
     #[test]
     fn conductor_predicate_excludes_air_and_every_redstone_component() {
-        assert!(is_redstone_conductor("minecraft:stone"));
-        assert!(!is_redstone_conductor("minecraft:air"));
-        assert!(!is_redstone_conductor("minecraft:water[level=0]"));
-        assert!(!is_redstone_conductor(WIRE));
-        assert!(!is_redstone_conductor("minecraft:redstone_torch[lit=true]"));
-        assert!(!is_redstone_conductor("minecraft:repeater[facing=north,delay=1,locked=false,powered=false]"));
-        assert!(!is_redstone_conductor("minecraft:observer[facing=south,powered=false]"));
+        assert!(is_redstone_conductor(fixture_state("minecraft:stone")));
+        assert!(!is_redstone_conductor(fixture_state("minecraft:air")));
+        assert!(!is_redstone_conductor(fixture_state("minecraft:water[level=0]")));
+        assert!(!is_redstone_conductor(WIRE.default_state()));
+        assert!(!is_redstone_conductor(fixture_state("minecraft:redstone_torch[lit=true]")));
+        assert!(!is_redstone_conductor(fixture_state("minecraft:repeater[facing=north,delay=1,locked=false,powered=false]")));
+        assert!(!is_redstone_conductor(fixture_state("minecraft:observer[facing=south,powered=false]")));
     }
 
     /// A lit standing torch gives weak signal 15 to every horizontal
@@ -1040,7 +1096,7 @@ mod tests {
     /// `direction = Up`).
     #[test]
     fn lit_standing_torch_signals_every_direction_except_up() {
-        let torch = "minecraft:redstone_torch[lit=true]";
+        let torch = fixture_state("minecraft:redstone_torch[lit=true]");
         assert_eq!(weak_signal(torch, Direction::Up, false), 0, "control: UP must be the one excluded direction");
         for d in [Direction::Down, Direction::North, Direction::South, Direction::East, Direction::West] {
             assert_eq!(weak_signal(torch, d, false), 15, "direction {d:?} must carry full signal");
@@ -1049,7 +1105,7 @@ mod tests {
 
     #[test]
     fn unlit_torch_signals_nothing() {
-        let torch = "minecraft:redstone_torch[lit=false]";
+        let torch = fixture_state("minecraft:redstone_torch[lit=false]");
         for d in [Direction::Down, Direction::North, Direction::South, Direction::East, Direction::West] {
             assert_eq!(weak_signal(torch, d, false), 0);
         }
@@ -1060,7 +1116,7 @@ mod tests {
     /// from vanilla's own torch-block direct-signal getter, `direction == DOWN`.
     #[test]
     fn a_lit_torch_gives_direct_signal_to_the_block_directly_above_it() {
-        let torch = "minecraft:redstone_torch[lit=true]";
+        let torch = fixture_state("minecraft:redstone_torch[lit=true]");
         assert_eq!(direct_signal(torch, Direction::Down, false), 15);
         // Negative control: every other direction gives zero direct signal.
         for d in [Direction::Up, Direction::North, Direction::South, Direction::East, Direction::West] {
@@ -1074,7 +1130,7 @@ mod tests {
     fn best_neighbor_signal_finds_an_adjacent_lit_torch() {
         let origin = pos(0, 0, 0);
         let torch_pos = Direction::West.relative(origin);
-        let w = world(&[(torch_pos, "minecraft:redstone_torch[lit=true]")]);
+        let w = world(&[(torch_pos, state!("minecraft:redstone_torch[lit=true]"))]);
         assert_eq!(best_neighbor_signal(&w, origin, false), 15);
     }
 
@@ -1095,7 +1151,7 @@ mod tests {
     fn a_conductor_relays_strong_power_from_a_torch_below_it_to_every_other_face() {
         let stone_pos = pos(0, 1, 0);
         let torch_pos = pos(0, 0, 0); // directly below the stone
-        let w = world(&[(stone_pos, "minecraft:stone"), (torch_pos, "minecraft:redstone_torch[lit=true]")]);
+        let w = world(&[(stone_pos, state!("minecraft:stone")), (torch_pos, state!("minecraft:redstone_torch[lit=true]"))]);
         // Querying the stone's signal as seen from the EAST (i.e. a wire
         // sitting east of the stone, at the same height) must still read 15
         // — the torch is on the opposite (south... actually below) face,
@@ -1112,8 +1168,8 @@ mod tests {
         let wire_pos = pos(1, 0, 0);
         let torch_pos = pos(-1, 0, 0);
         let w = world(&[
-            (wire_pos, "minecraft:redstone_wire[power=10]"),
-            (torch_pos, "minecraft:redstone_torch[lit=true]"),
+            (wire_pos, state!("minecraft:redstone_wire[power=10]")),
+            (torch_pos, state!("minecraft:redstone_torch[lit=true]")),
         ]);
         assert_eq!(
             best_neighbor_signal(&w, pos(0, 0, 0), true),
@@ -1123,7 +1179,7 @@ mod tests {
         // Negative control: with the torch removed, the wire-ignoring scan
         // must read zero — proving the suppression actually discriminates
         // rather than the torch case being a coincidence.
-        let w2 = world(&[(wire_pos, "minecraft:redstone_wire[power=10]")]);
+        let w2 = world(&[(wire_pos, state!("minecraft:redstone_wire[power=10]"))]);
         assert_eq!(best_neighbor_signal(&w2, pos(0, 0, 0), true), 0);
         // And WITHOUT ignore_wire, the same setup must see the wire's power.
         assert_eq!(best_neighbor_signal(&w2, pos(0, 0, 0), false), 10);
@@ -1131,7 +1187,7 @@ mod tests {
 
     #[test]
     fn wall_torch_signals_every_direction_except_its_own_mount_face() {
-        let torch = "minecraft:redstone_wall_torch[facing=north,lit=true]";
+        let torch = state!("minecraft:redstone_wall_torch[facing=north,lit=true]");
         assert_eq!(weak_signal(torch, Direction::North, false), 0, "the mount face must be excluded");
         for d in [Direction::South, Direction::East, Direction::West, Direction::Up, Direction::Down] {
             assert_eq!(weak_signal(torch, d, false), 15);
@@ -1140,7 +1196,7 @@ mod tests {
 
     #[test]
     fn diode_signals_only_in_its_own_facing_direction() {
-        let repeater = "minecraft:repeater[facing=east,delay=1,locked=false,powered=true]";
+        let repeater = state!("minecraft:repeater[facing=east,delay=1,locked=false,powered=true]");
         assert_eq!(weak_signal(repeater, Direction::East, false), 15);
         for d in [Direction::West, Direction::North, Direction::South, Direction::Up, Direction::Down] {
             assert_eq!(weak_signal(repeater, d, false), 0, "control failed: direction {d:?} must be silent");
@@ -1149,7 +1205,7 @@ mod tests {
 
     #[test]
     fn unpowered_diode_signals_nothing_even_in_its_own_direction() {
-        let repeater = "minecraft:repeater[facing=east,delay=1,locked=false,powered=false]";
+        let repeater = state!("minecraft:repeater[facing=east,delay=1,locked=false,powered=false]");
         assert_eq!(weak_signal(repeater, Direction::East, false), 0);
     }
 
@@ -1169,7 +1225,7 @@ mod tests {
     fn alternate_signal_reads_the_clockwise_and_counterclockwise_neighbours() {
         let origin = pos(0, 0, 0);
         let south_pos = Direction::South.relative(origin);
-        let w = world(&[(south_pos, &redstone_wire_power_fixture(10))]);
+        let w = world(&[(south_pos, state!("minecraft:redstone_wire[power=10]"))]);
         // side_input_diodes_only = false (comparator-style): a wire counts.
         assert_eq!(alternate_signal(&w, origin, Direction::East, false), 10);
         // side_input_diodes_only = true (repeater-style): a bare wire does
@@ -1177,13 +1233,6 @@ mod tests {
         // a repeater) — must read zero, proving the flag actually
         // discriminates rather than being decorative.
         assert_eq!(alternate_signal(&w, origin, Direction::East, true), 0);
-    }
-
-    /// Builds a `minecraft:redstone_wire[power=N]` fixture without pulling in
-    /// `crate::redstone_wire` (this module has no dependency on it — the
-    /// reverse dependency direction, `redstone_wire` depends on `redstone`).
-    fn redstone_wire_power_fixture(power: u8) -> String {
-        format!("{WIRE}[power={power}]")
     }
 
     #[test]
@@ -1198,7 +1247,7 @@ mod tests {
         // must have `FACING = north` for this to register — not `south`, an
         // earlier version of this fixture's mistake, corrected after this
         // test caught it failing (`0`, not the predicted `15`).
-        let w = world(&[(north_pos, "minecraft:repeater[facing=north,delay=1,locked=false,powered=true]")]);
+        let w = world(&[(north_pos, state!("minecraft:repeater[facing=north,delay=1,locked=false,powered=true]"))]);
         assert_eq!(alternate_signal(&w, origin, Direction::East, true), 15);
     }
 
@@ -1206,7 +1255,7 @@ mod tests {
     fn input_signal_reads_a_lit_torch_facing_into_the_diode() {
         let origin = pos(0, 0, 0);
         let torch_pos = Direction::East.relative(origin);
-        let w = world(&[(torch_pos, "minecraft:redstone_torch[lit=true]")]);
+        let w = world(&[(torch_pos, state!("minecraft:redstone_torch[lit=true]"))]);
         assert_eq!(input_signal(&w, origin, Direction::East), 15);
     }
 
@@ -1218,7 +1267,7 @@ mod tests {
 
     #[test]
     fn observer_signals_only_in_its_own_facing_direction_when_powered() {
-        let observer = "minecraft:observer[facing=north,powered=true]";
+        let observer = state!("minecraft:observer[facing=north,powered=true]");
         assert_eq!(weak_signal(observer, Direction::North, false), 15);
         for d in [Direction::South, Direction::East, Direction::West, Direction::Up, Direction::Down] {
             assert_eq!(weak_signal(observer, d, false), 0);
@@ -1237,7 +1286,7 @@ mod tests {
     #[test]
     fn control_input_signal_with_only_diodes_rejects_a_torch() {
         let origin = pos(0, 0, 0);
-        let torch = "minecraft:redstone_torch[lit=true]";
+        let torch = state!("minecraft:redstone_torch[lit=true]");
         let dir = Direction::Down;
         // control_input_signal's own `pos` parameter IS the neighbour being
         // queried (see `control_input_signal`'s own doc comment / the jar's
@@ -1281,33 +1330,33 @@ mod tests {
     /// under the wrong hypothesis that the family is unmodelled. Picking
     /// `power=15` for any of them would make the row pass under the boolean
     /// hypothesis too, so no row does.
-    fn input_source_own_signal_table() -> Vec<(&'static str, u8)> {
+    fn input_source_own_signal_table() -> Vec<(StateId, u8)> {
         vec![
             // LeverBlock.ownSignal / ButtonBlock.ownSignal: POWERED ? 15 : 0.
-            ("minecraft:lever[face=wall,facing=north,powered=true]", 15),
-            ("minecraft:lever[face=wall,facing=north,powered=false]", 0),
-            ("minecraft:stone_button[face=wall,facing=east,powered=true]", 15),
-            ("minecraft:oak_button[face=floor,facing=east,powered=true]", 15),
-            ("minecraft:stone_button[face=wall,facing=east,powered=false]", 0),
+            (state!("minecraft:lever[face=wall,facing=north,powered=true]"), 15),
+            (state!("minecraft:lever[face=wall,facing=north,powered=false]"), 0),
+            (state!("minecraft:stone_button[face=wall,facing=east,powered=true]"), 15),
+            (state!("minecraft:oak_button[face=floor,facing=east,powered=true]"), 15),
+            (state!("minecraft:stone_button[face=wall,facing=east,powered=false]"), 0),
             // PressurePlateBlock.getSignalForState: POWERED ? 15 : 0.
-            ("minecraft:stone_pressure_plate[powered=true]", 15),
-            ("minecraft:oak_pressure_plate[powered=false]", 0),
+            (state!("minecraft:stone_pressure_plate[powered=true]"), 15),
+            (state!("minecraft:oak_pressure_plate[powered=false]"), 0),
             // WeightedPressurePlateBlock.getSignalForState: the analog POWER.
-            ("minecraft:light_weighted_pressure_plate[power=4]", 4),
-            ("minecraft:heavy_weighted_pressure_plate[power=3]", 3),
-            ("minecraft:heavy_weighted_pressure_plate[power=0]", 0),
+            (state!("minecraft:light_weighted_pressure_plate[power=4]"), 4),
+            (state!("minecraft:heavy_weighted_pressure_plate[power=3]"), 3),
+            (state!("minecraft:heavy_weighted_pressure_plate[power=0]"), 0),
             // TripWireHookBlock.ownSignal / DetectorRailBlock.ownSignal.
-            ("minecraft:tripwire_hook[facing=west,attached=true,powered=true]", 15),
-            ("minecraft:tripwire_hook[facing=west,attached=true,powered=false]", 0),
-            ("minecraft:detector_rail[shape=north_south,powered=true]", 15),
-            ("minecraft:detector_rail[shape=north_south,powered=false]", 0),
+            (state!("minecraft:tripwire_hook[facing=west,attached=true,powered=true]"), 15),
+            (state!("minecraft:tripwire_hook[facing=west,attached=true,powered=false]"), 0),
+            (state!("minecraft:detector_rail[shape=north_south,powered=true]"), 15),
+            (state!("minecraft:detector_rail[shape=north_south,powered=false]"), 0),
             // TargetBlock.ownSignal / DaylightDetectorBlock.ownSignal: analog.
-            ("minecraft:target[power=7]", 7),
-            ("minecraft:target[power=0]", 0),
-            ("minecraft:daylight_detector[inverted=false,power=11]", 11),
-            ("minecraft:daylight_detector[inverted=true,power=0]", 0),
+            (state!("minecraft:target[power=7]"), 7),
+            (state!("minecraft:target[power=0]"), 0),
+            (state!("minecraft:daylight_detector[inverted=false,power=11]"), 11),
+            (state!("minecraft:daylight_detector[inverted=true,power=0]"), 0),
             // PoweredBlock.ownSignal: the unconditional constant.
-            ("minecraft:redstone_block", 15),
+            (state!("minecraft:redstone_block"), 15),
         ]
     }
 
@@ -1324,13 +1373,13 @@ mod tests {
         for (state, expected) in input_source_own_signal_table() {
             let got = own_signal(state);
             if got != expected {
-                wrong.push(format!("{state} -> own_signal {got}, expected {expected}"));
+                wrong.push(format!("{} -> own_signal {got}, expected {expected}", state.canonical_state()));
             }
             // Every one of them is also a signal *source* in the jar,
             // unconditionally — including the silent configurations, whose value
             // is 0 while the predicate stays true.
             if !is_signal_source(state) {
-                wrong.push(format!("{state} -> is_signal_source false, expected true"));
+                wrong.push(format!("{} -> is_signal_source false, expected true", state.canonical_state()));
             }
         }
         assert!(
@@ -1345,7 +1394,7 @@ mod tests {
         // for every active row. Three rows are analog and non-15, so the table
         // above is known to separate the two models rather than merely to agree
         // with one.
-        let analog_rows: Vec<(&str, u8)> = input_source_own_signal_table()
+        let analog_rows: Vec<(StateId, u8)> = input_source_own_signal_table()
             .into_iter()
             .filter(|(_, v)| *v != 0 && *v != 15)
             .collect();
@@ -1375,7 +1424,7 @@ mod tests {
                 checked += 1;
                 let got = weak_signal(state, direction, false);
                 if got != *expected {
-                    wrong.push(format!("{state} toward {direction:?} -> {got}, expected {expected}"));
+                    wrong.push(format!("{} toward {direction:?} -> {got}, expected {expected}", state.canonical_state()));
                 }
             }
         }
@@ -1405,22 +1454,22 @@ mod tests {
     /// implementation cannot satisfy. `attached_connected_direction` is what
     /// makes the three lever rows differ: a floor lever powers the block below
     /// it, a ceiling lever the block above, and a wall lever the wall.
-    fn input_source_direct_signal_table() -> Vec<(&'static str, Direction, u8)> {
+    fn input_source_direct_signal_table() -> Vec<(StateId, Direction, u8)> {
         vec![
             // LeverBlock.getDirectSignal: getConnectedDirection(state) only.
-            ("minecraft:lever[face=wall,facing=north,powered=true]", Direction::North, 15),
-            ("minecraft:lever[face=wall,facing=east,powered=true]", Direction::East, 15),
-            ("minecraft:lever[face=floor,facing=north,powered=true]", Direction::Up, 15),
-            ("minecraft:lever[face=ceiling,facing=north,powered=true]", Direction::Down, 15),
-            ("minecraft:stone_button[face=wall,facing=south,powered=true]", Direction::South, 15),
-            ("minecraft:oak_button[face=floor,facing=west,powered=true]", Direction::Up, 15),
+            (state!("minecraft:lever[face=wall,facing=north,powered=true]"), Direction::North, 15),
+            (state!("minecraft:lever[face=wall,facing=east,powered=true]"), Direction::East, 15),
+            (state!("minecraft:lever[face=floor,facing=north,powered=true]"), Direction::Up, 15),
+            (state!("minecraft:lever[face=ceiling,facing=north,powered=true]"), Direction::Down, 15),
+            (state!("minecraft:stone_button[face=wall,facing=south,powered=true]"), Direction::South, 15),
+            (state!("minecraft:oak_button[face=floor,facing=west,powered=true]"), Direction::Up, 15),
             // BasePressurePlateBlock.getDirectSignal: UP only.
-            ("minecraft:stone_pressure_plate[powered=true]", Direction::Up, 15),
-            ("minecraft:heavy_weighted_pressure_plate[power=3]", Direction::Up, 3),
+            (state!("minecraft:stone_pressure_plate[powered=true]"), Direction::Up, 15),
+            (state!("minecraft:heavy_weighted_pressure_plate[power=3]"), Direction::Up, 3),
             // TripWireHookBlock.getDirectSignal: its own FACING only.
-            ("minecraft:tripwire_hook[facing=west,attached=true,powered=true]", Direction::West, 15),
+            (state!("minecraft:tripwire_hook[facing=west,attached=true,powered=true]"), Direction::West, 15),
             // DetectorRailBlock.getDirectSignal: UP only.
-            ("minecraft:detector_rail[shape=north_south,powered=true]", Direction::Up, 15),
+            (state!("minecraft:detector_rail[shape=north_south,powered=true]"), Direction::Up, 15),
         ]
     }
 
@@ -1434,14 +1483,14 @@ mod tests {
         for (state, carrying, value) in input_source_direct_signal_table() {
             let got = direct_signal(state, carrying, false);
             if got != value {
-                wrong.push(format!("{state} toward {carrying:?} -> {got}, expected {value}"));
+                wrong.push(format!("{} toward {carrying:?} -> {got}, expected {value}", state.canonical_state()));
             }
             for direction in EVERY_DIRECTION.into_iter().filter(|d| *d != carrying) {
                 let silent = direct_signal(state, direction, false);
                 if silent != 0 {
                     wrong.push(format!(
-                        "{state} toward {direction:?} -> {silent}, expected 0 (only {carrying:?} \
-                         carries strong power)"
+                        "{} toward {direction:?} -> {silent}, expected 0 (only {carrying:?} carries strong power)",
+                        state.canonical_state()
                     ));
                 }
             }
@@ -1462,17 +1511,17 @@ mod tests {
     fn an_inactive_input_source_sends_no_strong_power_in_its_own_direction() {
         let mut wrong: Vec<String> = Vec::new();
         for (state, carrying) in [
-            ("minecraft:lever[face=wall,facing=north,powered=false]", Direction::North),
-            ("minecraft:lever[face=floor,facing=north,powered=false]", Direction::Up),
-            ("minecraft:stone_button[face=wall,facing=south,powered=false]", Direction::South),
-            ("minecraft:stone_pressure_plate[powered=false]", Direction::Up),
-            ("minecraft:heavy_weighted_pressure_plate[power=0]", Direction::Up),
-            ("minecraft:tripwire_hook[facing=west,attached=false,powered=false]", Direction::West),
-            ("minecraft:detector_rail[shape=north_south,powered=false]", Direction::Up),
+            (state!("minecraft:lever[face=wall,facing=north,powered=false]"), Direction::North),
+            (state!("minecraft:lever[face=floor,facing=north,powered=false]"), Direction::Up),
+            (state!("minecraft:stone_button[face=wall,facing=south,powered=false]"), Direction::South),
+            (state!("minecraft:stone_pressure_plate[powered=false]"), Direction::Up),
+            (state!("minecraft:heavy_weighted_pressure_plate[power=0]"), Direction::Up),
+            (state!("minecraft:tripwire_hook[facing=west,attached=false,powered=false]"), Direction::West),
+            (state!("minecraft:detector_rail[shape=north_south,powered=false]"), Direction::Up),
         ] {
             let got = direct_signal(state, carrying, false);
             if got != 0 {
-                wrong.push(format!("{state} toward {carrying:?} -> {got}, expected 0"));
+                wrong.push(format!("{} toward {carrying:?} -> {got}, expected 0", state.canonical_state()));
             }
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n  "));
@@ -1490,19 +1539,19 @@ mod tests {
     fn the_three_full_cube_and_flat_sources_send_no_strong_power_in_any_direction() {
         let mut wrong: Vec<String> = Vec::new();
         for (state, weak) in [
-            ("minecraft:target[power=7]", 7u8),
-            ("minecraft:daylight_detector[inverted=false,power=11]", 11),
-            ("minecraft:redstone_block", 15),
+            (state!("minecraft:target[power=7]"), 7u8),
+            (state!("minecraft:daylight_detector[inverted=false,power=11]"), 11),
+            (state!("minecraft:redstone_block"), 15),
         ] {
             // The premise: each one really is emitting, so a zero below is a
             // statement about the strong path and not about a silent block.
             if own_signal(state) != weak {
-                wrong.push(format!("premise failed: {state} own_signal {} != {weak}", own_signal(state)));
+                wrong.push(format!("premise failed: {} own_signal {} != {weak}", state.canonical_state(), own_signal(state)));
             }
             for direction in EVERY_DIRECTION {
                 let got = direct_signal(state, direction, false);
                 if got != 0 {
-                    wrong.push(format!("{state} toward {direction:?} -> {got}, expected 0"));
+                    wrong.push(format!("{} toward {direction:?} -> {got}, expected 0", state.canonical_state()));
                 }
             }
         }
@@ -1526,14 +1575,14 @@ mod tests {
         // `stone.north()` stuck to the stone has `facing=north` — not `south`.
         let lever_pos = Direction::North.relative(stone_pos);
         let w = world(&[
-            (stone_pos, "minecraft:stone"),
-            (wire_pos, "minecraft:redstone_wire[power=0]"),
-            (lever_pos, "minecraft:lever[face=wall,facing=north,powered=true]"),
+            (stone_pos, state!("minecraft:stone")),
+            (wire_pos, state!("minecraft:redstone_wire[power=0]")),
+            (lever_pos, state!("minecraft:lever[face=wall,facing=north,powered=true]")),
         ]);
 
         // The weak half alone gives nothing: the stone is not a source.
         assert_eq!(
-            weak_signal("minecraft:stone", Direction::Down, false),
+            weak_signal(state!("minecraft:stone"), Direction::Down, false),
             0,
             "premise: a stone block has no weak signal of its own, so anything the wire \
              reads must have come through the strong path"
@@ -1556,9 +1605,9 @@ mod tests {
         // with the lever facing EAST strongly powers a different block, so the
         // stone gets nothing and the wire reads exactly 0 — not merely "less".
         let elsewhere = world(&[
-            (stone_pos, "minecraft:stone"),
-            (wire_pos, "minecraft:redstone_wire[power=0]"),
-            (lever_pos, "minecraft:lever[face=wall,facing=east,powered=true]"),
+            (stone_pos, state!("minecraft:stone")),
+            (wire_pos, state!("minecraft:redstone_wire[power=0]")),
+            (lever_pos, state!("minecraft:lever[face=wall,facing=east,powered=true]")),
         ]);
         assert_eq!(
             direct_signal_to(&elsewhere, stone_pos, false),
@@ -1569,9 +1618,9 @@ mod tests {
 
         // Second control: the same north-facing lever, unpowered.
         let off = world(&[
-            (stone_pos, "minecraft:stone"),
-            (wire_pos, "minecraft:redstone_wire[power=0]"),
-            (lever_pos, "minecraft:lever[face=wall,facing=north,powered=false]"),
+            (stone_pos, state!("minecraft:stone")),
+            (wire_pos, state!("minecraft:redstone_wire[power=0]")),
+            (lever_pos, state!("minecraft:lever[face=wall,facing=north,powered=false]")),
         ]);
         assert_eq!(best_neighbor_signal(&off, wire_pos, true), 0);
     }
@@ -1584,8 +1633,8 @@ mod tests {
         let stone_pos = pos(0, 0, 0);
         let plate_pos = Direction::Up.relative(stone_pos);
         let w = world(&[
-            (stone_pos, "minecraft:stone"),
-            (plate_pos, "minecraft:stone_pressure_plate[powered=true]"),
+            (stone_pos, state!("minecraft:stone")),
+            (plate_pos, state!("minecraft:stone_pressure_plate[powered=true]")),
         ]);
         assert_eq!(direct_signal_to(&w, stone_pos, false), 15);
         // A wire east of the stone reads the stone by travelling East.
@@ -1594,15 +1643,15 @@ mod tests {
         // The weighted plate's analog value survives the same path — 3, not 15,
         // which a boolean strong path would give.
         let weighted = world(&[
-            (stone_pos, "minecraft:stone"),
-            (plate_pos, "minecraft:heavy_weighted_pressure_plate[power=3]"),
+            (stone_pos, state!("minecraft:stone")),
+            (plate_pos, state!("minecraft:heavy_weighted_pressure_plate[power=3]")),
         ]);
         assert_eq!(direct_signal_to(&weighted, stone_pos, false), 3);
 
         // Control: unpressed plate, same geometry, exactly zero.
         let off = world(&[
-            (stone_pos, "minecraft:stone"),
-            (plate_pos, "minecraft:stone_pressure_plate[powered=false]"),
+            (stone_pos, state!("minecraft:stone")),
+            (plate_pos, state!("minecraft:stone_pressure_plate[powered=false]")),
         ]);
         assert_eq!(direct_signal_to(&off, stone_pos, false), 0);
     }
@@ -1619,10 +1668,10 @@ mod tests {
         let origin = pos(0, 0, 0);
         let dir = Direction::East;
         let block_pos = dir.relative(origin);
-        let w = world(&[(block_pos, "minecraft:redstone_block")]);
+        let w = world(&[(block_pos, state!("minecraft:redstone_block"))]);
 
         assert_eq!(
-            direct_signal("minecraft:redstone_block", dir, false),
+            direct_signal(state!("minecraft:redstone_block"), dir, false),
             0,
             "premise: a block of redstone has no direct signal, so the 15 below cannot have \
              come from the generic signal-source tail"
@@ -1634,7 +1683,7 @@ mod tests {
 
         // And the comparator side-input path end to end: clockwise(East) = South.
         let south = Direction::South.relative(origin);
-        let side = world(&[(south, "minecraft:redstone_block")]);
+        let side = world(&[(south, state!("minecraft:redstone_block"))]);
         assert_eq!(alternate_signal(&side, origin, Direction::East, false), 15);
         assert_eq!(alternate_signal(&side, origin, Direction::East, true), 0);
     }
@@ -1650,24 +1699,25 @@ mod tests {
     fn the_conductor_split_follows_the_full_cube_shape_not_the_source_predicate() {
         let mut wrong: Vec<String> = Vec::new();
         for (state, want_conductor) in [
-            ("minecraft:lever[face=wall,facing=north,powered=true]", false),
-            ("minecraft:stone_button[face=wall,facing=east,powered=true]", false),
-            ("minecraft:oak_button[face=floor,facing=east,powered=false]", false),
-            ("minecraft:stone_pressure_plate[powered=true]", false),
-            ("minecraft:light_weighted_pressure_plate[power=4]", false),
-            ("minecraft:heavy_weighted_pressure_plate[power=0]", false),
-            ("minecraft:tripwire_hook[facing=west,attached=true,powered=true]", false),
-            ("minecraft:detector_rail[shape=north_south,powered=true]", false),
-            ("minecraft:daylight_detector[inverted=false,power=11]", false),
+            (state!("minecraft:lever[face=wall,facing=north,powered=true]"), false),
+            (state!("minecraft:stone_button[face=wall,facing=east,powered=true]"), false),
+            (state!("minecraft:oak_button[face=floor,facing=east,powered=false]"), false),
+            (state!("minecraft:stone_pressure_plate[powered=true]"), false),
+            (state!("minecraft:light_weighted_pressure_plate[power=4]"), false),
+            (state!("minecraft:heavy_weighted_pressure_plate[power=0]"), false),
+            (state!("minecraft:tripwire_hook[facing=west,attached=true,powered=true]"), false),
+            (state!("minecraft:detector_rail[shape=north_south,powered=true]"), false),
+            (state!("minecraft:daylight_detector[inverted=false,power=11]"), false),
             // Full collision cubes in `Blocks`, so conductors — and both are
             // signal sources, which is the coincidence this row exists to break.
-            ("minecraft:target[power=7]", true),
-            ("minecraft:redstone_block", true),
-            ("minecraft:stone", true),
+            (state!("minecraft:target[power=7]"), true),
+            (state!("minecraft:redstone_block"), true),
+            (state!("minecraft:stone"), true),
         ] {
             if is_redstone_conductor(state) != want_conductor {
                 wrong.push(format!(
-                    "{state} -> is_redstone_conductor {}, expected {want_conductor}",
+                    "{} -> is_redstone_conductor {}, expected {want_conductor}",
+                    state.canonical_state(),
                     is_redstone_conductor(state)
                 ));
             }
@@ -1681,24 +1731,24 @@ mod tests {
     #[test]
     fn the_weighted_plates_are_split_out_from_the_boolean_ones() {
         for weighted in [
-            "minecraft:light_weighted_pressure_plate[power=4]",
-            "minecraft:heavy_weighted_pressure_plate[power=3]",
+            state!("minecraft:light_weighted_pressure_plate[power=4]"),
+            state!("minecraft:heavy_weighted_pressure_plate[power=3]"),
         ] {
             assert!(is_weighted_pressure_plate(weighted), "{weighted}");
             assert!(!is_pressure_plate(weighted), "{weighted} must not take the boolean path");
         }
         for boolean in [
-            "minecraft:stone_pressure_plate[powered=true]",
-            "minecraft:oak_pressure_plate[powered=true]",
-            "minecraft:polished_blackstone_pressure_plate[powered=true]",
+            state!("minecraft:stone_pressure_plate[powered=true]"),
+            state!("minecraft:oak_pressure_plate[powered=true]"),
+            state!("minecraft:polished_blackstone_pressure_plate[powered=true]"),
         ] {
             assert!(is_pressure_plate(boolean), "{boolean}");
             assert!(!is_weighted_pressure_plate(boolean), "{boolean}");
         }
         // A weighted plate read through the boolean path would answer 0 at
         // power=3, which is the failure this split prevents.
-        assert_eq!(pressure_plate_signal("minecraft:heavy_weighted_pressure_plate[power=3]"), 3);
-        assert!(!powered_property("minecraft:heavy_weighted_pressure_plate[power=3]"));
+        assert_eq!(pressure_plate_signal(state!("minecraft:heavy_weighted_pressure_plate[power=3]")), 3);
+        assert!(!powered_property(state!("minecraft:heavy_weighted_pressure_plate[power=3]")));
     }
 
     /// `attached_connected_direction` for each `AttachFace`, plus the wall
@@ -1706,21 +1756,21 @@ mod tests {
     #[test]
     fn the_attached_connected_direction_follows_the_attach_face() {
         assert_eq!(
-            attached_connected_direction("minecraft:lever[face=floor,facing=north,powered=false]"),
+            attached_connected_direction(state!("minecraft:lever[face=floor,facing=north,powered=false]")),
             Direction::Up
         );
         assert_eq!(
-            attached_connected_direction("minecraft:lever[face=ceiling,facing=north,powered=false]"),
+            attached_connected_direction(state!("minecraft:lever[face=ceiling,facing=north,powered=false]")),
             Direction::Down
         );
         assert_eq!(
-            attached_connected_direction("minecraft:lever[face=wall,facing=south,powered=false]"),
+            attached_connected_direction(state!("minecraft:lever[face=wall,facing=south,powered=false]")),
             Direction::South
         );
         // No `face` at all falls back to the wall reading, matching
         // vanilla's own wall attach-face being the registered default.
         assert_eq!(
-            attached_connected_direction("minecraft:lever[facing=west]"),
+            attached_connected_direction(state!("minecraft:lever[facing=west]")),
             Direction::West
         );
     }
@@ -1738,33 +1788,33 @@ mod tests {
     fn nothing_unrelated_is_mistaken_for_an_input_source() {
         let mut wrong: Vec<String> = Vec::new();
         for state in [
-            "minecraft:stone",
-            "minecraft:air",
-            "minecraft:water[level=0]",
-            "minecraft:oak_planks",
-            "minecraft:rail[shape=north_south]",
-            "minecraft:powered_rail[shape=north_south,powered=true]",
-            "minecraft:activator_rail[shape=north_south,powered=true]",
-            "minecraft:tripwire[attached=true,powered=true]",
-            "minecraft:chest[facing=north]",
+            state!("minecraft:stone"),
+            state!("minecraft:air"),
+            state!("minecraft:water[level=0]"),
+            state!("minecraft:oak_planks"),
+            state!("minecraft:rail[shape=north_south]"),
+            state!("minecraft:powered_rail[shape=north_south,powered=true]"),
+            state!("minecraft:activator_rail[shape=north_south,powered=true]"),
+            state!("minecraft:tripwire[attached=true,powered=true]"),
+            state!("minecraft:chest[facing=north]"),
         ] {
             if is_input_source(state) {
-                wrong.push(format!("{state} is_input_source true, expected false"));
+                wrong.push(format!("{} is_input_source true, expected false", state.canonical_state()));
             }
             if own_signal(state) != 0 {
-                wrong.push(format!("{state} own_signal {}, expected 0", own_signal(state)));
+                wrong.push(format!("{} own_signal {}, expected 0", state.canonical_state(), own_signal(state)));
             }
         }
         // Wire and torches are excluded from `is_input_source` but *do* emit,
         // so they belong to the predicate half of this control and not to the
         // "emits nothing" half. Asserting `own_signal == 0` for them would be
         // wrong about the code, which is how this row was first written.
-        for relaying in ["minecraft:redstone_wire[power=15]", "minecraft:redstone_torch[lit=true]"] {
+        for relaying in [state!("minecraft:redstone_wire[power=15]"), state!("minecraft:redstone_torch[lit=true]")] {
             if is_input_source(relaying) {
-                wrong.push(format!("{relaying} is_input_source true, expected false"));
+                wrong.push(format!("{} is_input_source true, expected false", relaying.canonical_state()));
             }
             if own_signal(relaying) != 15 {
-                wrong.push(format!("{relaying} own_signal {}, expected 15", own_signal(relaying)));
+                wrong.push(format!("{} own_signal {}, expected 15", relaying.canonical_state(), own_signal(relaying)));
             }
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n  "));

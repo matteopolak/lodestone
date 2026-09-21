@@ -46,15 +46,15 @@
 //!   columns; radius 2 is twenty-five. Raising them is how this file becomes a
 //!   multi-minute test.
 //! - The seed gate compares **surface heights**, not block-state ids, because
-//!   the client speaks numeric wire ids and `ChunkColumn` speaks block-name
-//!   strings, and there is no id↔name mapping available to both. A height
-//!   profile is derivable identically on both sides.
+//!   the client speaks numeric wire ids while the server uses canonical state
+//!   ids. A height profile is derivable identically on both sides.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use lodestone::net::{NetClient, NetUpdate};
 use lodestone_client::{BlockPos, ChunkPos};
+use lodestone_data::block::Block;
 use lodestone_model::{BlockActionKind, BlockFace, ClientAction};
 use lodestone_server::ChunkSource;
 
@@ -176,7 +176,7 @@ fn generated_surface_profile(seed: i64, cx: i32, cz: i32, samples: &[(i32, i32)]
             let (lx, lz) = (x.rem_euclid(16), z.rem_euclid(16));
             (column.min_y..column.min_y + column.height)
                 .rev()
-                .find(|&y| column.block_state(lx, y, lz) != "minecraft:air")
+                .find(|&y| column.block_state_id(lx, y, lz).block() != Block::Air)
         })
         .collect()
 }

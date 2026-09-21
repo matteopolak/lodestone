@@ -3,6 +3,7 @@
 //! Independent NBT-shape checks for native-to-Anvil chunk export.
 
 use lodestone_core::Nbt;
+use lodestone_data::block_states::StateId;
 use lodestone_server::{
     ChunkColumn, PersistedScheduledTick, ScheduledTickKind, TickPriority,
     anvil_export::{
@@ -36,11 +37,12 @@ fn section(chunk: &Nbt, y: i8) -> &Nbt {
 
 fn record_with_typed_payload() -> NativeChunkRecord {
     let mut column = ChunkColumn::new(-64, 32);
-    column.set_block(
+    column.set_block_id(
         1,
         -63,
         2,
-        "minecraft:oak_stairs[facing=west,half=top,shape=inner_left,waterlogged=false]",
+        StateId::from_state_str("minecraft:oak_stairs[facing=west,half=top,shape=inner_left,waterlogged=false]")
+            .expect("oak stairs fixture state"),
     );
     column.set_biome_cell(2, 0, 1, "minecraft:desert");
     let mut motion = [0u16; 256];

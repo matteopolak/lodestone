@@ -2,6 +2,7 @@
 //! block-pattern match and spawn. Moved out of `mobs/mod.rs` verbatim as part
 //! of the `mobs.rs` file split (see `docs/plans/crate-and-file-splits.md`).
 
+use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockPos, Vec3};
 
 #[cfg(test)]
@@ -24,10 +25,10 @@ impl GolemCell {
     /// iron/snow, the carved-pumpkin-or-jack-o'-lantern `Predicate` literal
     /// (`CarvedPumpkinBlock.PUMPKINS_PREDICATE`), and `BlockStateBase::isAir`
     /// for the required-clear cells.
-    fn matches(self, block: &str) -> bool {
+    fn matches(self, block: StateId) -> bool {
         // Strip any `[prop=value]` state suffix so this compares block
         // identity only, matching `BlockStatePredicate.forBlock`.
-        let path = block.split('[').next().unwrap_or(block);
+        let path = block.block().name();
         match self {
             GolemCell::Iron => path == "minecraft:iron_block",
             GolemCell::Snow => path == "minecraft:snow_block",
@@ -119,14 +120,14 @@ impl GolemPatternMatch {
 }
 
 fn golem_pattern_matches(
-    block_at: &dyn Fn(i32, i32, i32) -> String,
+    block_at: &dyn Fn(i32, i32, i32) -> StateId,
     pattern: &[&[GolemCell]],
     candidate: &GolemPatternMatch,
 ) -> bool {
     for (down, row) in pattern.iter().enumerate() {
         for (right, &cell) in row.iter().enumerate() {
             let (x, y, z) = candidate.translate(right as i32, down as i32, 0);
-            if !cell.matches(&block_at(x, y, z)) {
+            if !cell.matches(block_at(x, y, z)) {
                 return false;
             }
         }
@@ -145,7 +146,7 @@ fn golem_pattern_matches(
 /// matcher that only tried `up = +Y` would silently reject a legally-built
 /// sideways golem.
 pub(super) fn find_golem_pattern(
-    block_at: &dyn Fn(i32, i32, i32) -> String,
+    block_at: &dyn Fn(i32, i32, i32) -> StateId,
     pattern: &[&[GolemCell]],
     placed: (i32, i32, i32),
 ) -> Option<GolemPatternMatch> {
@@ -213,15 +214,15 @@ pub struct GolemConstruction {
 mod golem_tests {
     use super::*;
 
-    fn world_from(blocks: &[((i32, i32, i32), &str)]) -> impl Fn(i32, i32, i32) -> String {
-        let map: std::collections::HashMap<(i32, i32, i32), String> = blocks
+    fn world_from(blocks: &[((i32, i32, i32), &str)]) -> impl Fn(i32, i32, i32) -> StateId {
+        let map: std::collections::HashMap<(i32, i32, i32), StateId> = blocks
             .iter()
-            .map(|(pos, name)| (*pos, (*name).to_owned()))
+            .map(|(pos, name)| (*pos, StateId::from_state_str(name).unwrap()))
             .collect();
         move |x, y, z| {
             map.get(&(x, y, z))
-                .cloned()
-                .unwrap_or_else(|| "minecraft:air".to_owned())
+                .copied()
+                .unwrap_or_else(lodestone_data::block_states::air_state)
         }
     }
 

@@ -16,8 +16,7 @@
 //!
 //! # How it works
 //!
-//! 1. [`block_loot_table_id`] turns a block state (`"minecraft:stone"`, or
-//!    `"minecraft:oak_log[axis=y]"`) into its loot-table key
+//! 1. [`block_loot_table_id`] turns a canonical [`StateId`] into its loot-table key
 //!    (`minecraft:blocks/stone`).
 //! 2. [`drop_block_loot`] looks that table up in the [`crate::LootTableSet`],
 //!    rolls it, and turns each resulting [`ItemStack`] into a [`PoppedItem`]
@@ -96,6 +95,7 @@
 //! `lodestone_model` for the vocabulary. Names no packet and no protocol
 //! version, like the rest of this crate.
 
+use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockPos, ItemStack, ResourceKey, Vec3};
 
 use crate::loot::{LootBlockState, LootContext, LootTableSet, LootTool};
@@ -194,103 +194,22 @@ pub struct PoppedItem {
     pub velocity: Vec3,
 }
 
-/// The loot-table key for a block state. The default is
-/// `minecraft:blocks/` + the block's registry path
-/// (built from the block id as a lazily-supplied default).
-///
-/// Accepts a state string with or without properties: `"minecraft:oak_log
-/// [axis=y]"` and `"minecraft:oak_log"` resolve alike, because a loot table is
-/// keyed by *block*, not block state. A bare path with no namespace is treated
-/// as `minecraft:`, matching how the rest of this crate reads block names.
-///
-/// Returns `None` only for a name this crate cannot parse as a resource key at
-/// all; a syntactically fine name for a block with no bundled table resolves
-/// happily here and then misses in [`LootTableSet::get`], which is the right
-/// place for that to be noticed.
+/// The loot-table key for a canonical block state. A loot table is keyed by
+/// block type, so the state's properties are intentionally ignored.
 #[must_use]
-pub fn block_loot_table_id(block_state: &str) -> Option<ResourceKey> {
-    let name = block_state
-        .split_once('[')
-        .map_or(block_state, |(name, _)| name)
-        .trim();
-    let path = name.split_once(':').map_or(name, |(_, path)| path);
-    if path.is_empty() {
-        return None;
-    }
-    format!("minecraft:blocks/{path}").parse().ok()
+pub fn block_loot_table_id(state: StateId) -> Option<ResourceKey> {
+    let path = state.block().path();
+    (!path.is_empty())
+        .then(|| format!("minecraft:blocks/{path}").parse().ok())
+        .flatten()
 }
 
-/// The loot context's block-state value for a block-state string — the block's
-/// identity plus its **fully resolved** property set.
-///
-/// # Why this resolves through the census instead of reading the brackets
-///
-/// Property matching asks the block's state definition for each property and
-/// then reads the *state's* value, so
-/// every property the block has contributes a value whether or not the caller
-/// spelled it. Splitting `"minecraft:wheat[age=3]"` on commas would agree by luck
-/// for anything `crate::growth_tick` wrote and disagree for a bare
-/// `"minecraft:wheat"`, which is the same state as `age=0` and must fail an
-/// `age=7` matcher *because zero is not seven* rather than because the string
-/// happened to omit the property.
-///
-/// [`lodestone_data::block_states::StateId::from_state_str`] is the resolution
-/// boundary — the committed 32,366-state table, with its
-/// default-plus-overrides fallback — and
-/// [`StateId::properties`](lodestone_data::block_states::StateId::properties)
-/// reads the canonical `(name, value)` list straight back out. No raw numeric
-/// state id enters this in-process path: only a protocol encoder needs
-/// [`StateId::raw`](lodestone_data::block_states::StateId::raw).
-///
-/// Falls back to the properties written in the string for a state the census
-/// cannot resolve at all. That path is the *conservative* direction rather than a
-/// silent guess: a synthetic state this server invents (`minecraft:comparator`'s
-/// `output=N`) keeps whatever it spelled, and a matcher over a property the census
-/// would have supplied simply fails, dropping less rather than more.
+/// The loot context's block-state value for a canonical [`StateId`]. Its full
+/// generated property set is carried into the predicate without reparsing or
+/// formatting state text.
 #[must_use]
-pub fn loot_block_state(block_state: &str) -> Option<LootBlockState> {
-    let name = block_state
-        .split_once('[')
-        .map_or(block_state, |(name, _)| name)
-        .trim();
-    if name.is_empty() {
-        return None;
-    }
-    let block: ResourceKey = if name.contains(':') {
-        name.parse().ok()?
-    } else {
-        format!("minecraft:{name}").parse().ok()?
-    };
-    // The census is keyed by fully-qualified name, so a namespace-less input has
-    // to be re-qualified before the lookup — and the bracket part carried across
-    // verbatim, since `StateId::from_state_str`'s tiers are what turn a partial
-    // property list into a real state.
-    let query = match block_state.split_once('[') {
-        Some((_, rest)) => format!("{block}[{rest}"),
-        None => block.to_string(),
-    };
-    if let Some(state) = lodestone_data::block_states::StateId::from_state_str(&query) {
-        return Some(LootBlockState::with_properties(
-            block,
-            state.properties().iter().copied(),
-        ));
-    }
-    Some(LootBlockState::with_properties(block, parsed_properties(block_state)))
-}
-
-/// The `(name, value)` pairs literally written between the brackets of a
-/// block-state string. Only the fallback path of [`loot_block_state`] uses this;
-/// prefer the census, which supplies the properties a string omitted.
-fn parsed_properties(block_state: &str) -> Vec<(&str, &str)> {
-    let Some((_, raw)) = block_state.split_once('[') else {
-        return Vec::new();
-    };
-    raw.strip_suffix(']')
-        .unwrap_or(raw)
-        .split(',')
-        .filter_map(|pair| pair.split_once('='))
-        .map(|(k, v)| (k.trim(), v.trim()))
-        .collect()
+pub fn loot_block_state(state: StateId) -> Option<LootBlockState> {
+    Some(LootBlockState::new(state))
 }
 
 /// A dropped block's position and initial velocity, in the exact five-draw
@@ -437,18 +356,14 @@ fn next_in_range(rng: &mut SpawnRng, min: f64, max: f64) -> f64 {
 /// `lodestone-shell`'s `sim.rs` carries the same warning for the mining-speed
 /// divider. `held` is the main-hand stack; `None` is a bare hand.
 ///
-/// Returns `true` for a block state this version's census does not know, which is
-/// the same permissive direction used for unknown states elsewhere in the
-/// server, keeping an unknown state from silently swallowing its drops.
+/// The canonical state table makes unsupported block states unrepresentable at
+/// this runtime boundary.
 #[must_use]
-pub fn drops_are_allowed(block_state: &str, held: Option<&ItemStack>) -> bool {
-    let Some(state_id) = crate::mobs::block_state_id(block_state) else {
-        return true;
-    };
-    lodestone_data::tool::mining(held, state_id).correct_tool
+pub fn drops_are_allowed(state: StateId, held: Option<&ItemStack>) -> bool {
+    lodestone_data::tool::mining(held, state).correct_tool
 }
 
-/// Rolls `block_state`'s loot table and returns one [`PoppedItem`] per
+/// Rolls a state's loot table and returns one [`PoppedItem`] per
 /// resulting stack through the block-drop pipeline.
 ///
 /// `held` is the breaking player's main-hand stack, becoming the loot context's
@@ -466,15 +381,15 @@ pub fn drops_are_allowed(block_state: &str, held: Option<&ItemStack>) -> bool {
 #[must_use]
 pub fn drop_block_loot(
     tables: &LootTableSet,
-    block_state: &str,
+    state: StateId,
     pos: BlockPos,
     held: Option<&ItemStack>,
     rng: &mut SpawnRng,
 ) -> Vec<PoppedItem> {
-    drop_block_loot_in(tables, block_state, pos, held, None, rng)
+    drop_block_loot_in(tables, state, pos, held, None, rng)
 }
 
-/// Rolls `block_state`'s loot table for a block destroyed by an **explosion** of
+/// Rolls a state's loot table for a block destroyed by an **explosion** of
 /// `radius` — the decay radius supplied by a destroy-with-decay blast.
 ///
 /// The only difference from [`drop_block_loot`] is
@@ -490,14 +405,14 @@ pub fn drop_block_loot(
 #[must_use]
 pub fn drop_explosion_loot(
     tables: &LootTableSet,
-    block_state: &str,
+    state: StateId,
     pos: BlockPos,
     radius: f32,
     rng: &mut SpawnRng,
 ) -> Vec<PoppedItem> {
     // No tool: a blast breaks the block, not a player, so the loot context has
     // no tool value.
-    drop_block_loot_in(tables, block_state, pos, None, Some(radius), rng)
+    drop_block_loot_in(tables, state, pos, None, Some(radius), rng)
 }
 
 /// Runs a blast's block half **with drops**: computes the exploded set, rolls
@@ -549,26 +464,26 @@ pub fn drop_explosion_loot_in_blast<S: crate::chunk::ChunkSource>(
     tables: &LootTableSet,
     blast_rng: &mut SpawnRng,
     drops_rng: &mut SpawnRng,
-) -> (Vec<(BlockPos, String)>, Vec<PoppedItem>, Vec<BlockPos>) {
+) -> (Vec<(BlockPos, StateId)>, Vec<PoppedItem>, Vec<BlockPos>) {
     let mut changes = Vec::new();
     let mut popped = Vec::new();
     let mut primed_tnt = Vec::new();
     for pos in crate::explosion_blocks::exploded_positions(world, env, centre, radius, blast_rng) {
-        let state = world.block_state(pos.x, pos.y, pos.z);
-        if crate::random_tick::is_air_variant(&state) {
+        let state = world.block_state_id(pos.x, pos.y, pos.z);
+        if crate::random_tick::is_air_variant_id(state) {
             continue;
         }
-        if crate::mobs::tnt::is_tnt_block(&state) {
+        if state.block() == lodestone_data::block::Block::Tnt {
             primed_tnt.push(pos);
-            world.set_block(pos.x, pos.y, pos.z, crate::chunk::AIR);
-            changes.push((pos, crate::chunk::AIR.to_owned()));
+            world.set_block(pos.x, pos.y, pos.z, lodestone_data::block_states::air_state());
+            changes.push((pos, lodestone_data::block_states::air_state()));
             continue;
         }
         // Rolled **before** the write, because the table is keyed off the state
         // that is about to be destroyed.
-        popped.extend(drop_explosion_loot(tables, &state, pos, radius, drops_rng));
-        world.set_block(pos.x, pos.y, pos.z, crate::chunk::AIR);
-        changes.push((pos, crate::chunk::AIR.to_owned()));
+        popped.extend(drop_explosion_loot(tables, state, pos, radius, drops_rng));
+        world.set_block(pos.x, pos.y, pos.z, lodestone_data::block_states::air_state());
+        changes.push((pos, lodestone_data::block_states::air_state()));
     }
     (changes, popped, primed_tnt)
 }
@@ -578,13 +493,13 @@ pub fn drop_explosion_loot_in_blast<S: crate::chunk::ChunkSource>(
 /// zero-count filtering.
 fn drop_block_loot_in(
     tables: &LootTableSet,
-    block_state: &str,
+    state: StateId,
     pos: BlockPos,
     held: Option<&ItemStack>,
     explosion_radius: Option<f32>,
     rng: &mut SpawnRng,
 ) -> Vec<PoppedItem> {
-    let Some(table_id) = block_loot_table_id(block_state) else {
+    let Some(table_id) = block_loot_table_id(state) else {
         return Vec::new();
     };
     let Some(table) = tables.get(&table_id) else {
@@ -597,7 +512,7 @@ fn drop_block_loot_in(
         // Free: the state being broken is already this function's argument. It was
         // simply thrown away here, which is the whole of why every
         // `block_state_property` condition took the wrong branch.
-        block_state: loot_block_state(block_state),
+        block_state: loot_block_state(state),
     };
     table
         .roll(&context, rng)
@@ -654,6 +569,10 @@ pub fn is_within_pickup_range(player_feet: Vec3, item_position: Vec3) -> bool {
 mod tests {
     use super::*;
 
+    fn state(value: &str) -> StateId {
+        StateId::from_state_str(value).expect("test state is in the generated census")
+    }
+
     /// The mechanical half: a block state, with or without properties, resolves
     /// to the `blocks/`-prefixed key the bundled corpus is keyed by. The
     /// expected values come from the bundled JSON's own `random_sequence`
@@ -661,9 +580,8 @@ mod tests {
     /// the id rather than this crate restating a convention.
     #[test]
     fn a_block_state_resolves_to_its_vanilla_loot_table_id() {
-        let id = |s: &str| block_loot_table_id(s).map(|key| key.to_string());
+        let id = |s: &str| block_loot_table_id(state(s)).map(|key| key.to_string());
         assert_eq!(id("minecraft:stone").as_deref(), Some("minecraft:blocks/stone"));
-        assert_eq!(id("stone").as_deref(), Some("minecraft:blocks/stone"));
         assert_eq!(
             id("minecraft:oak_log[axis=y]").as_deref(),
             Some("minecraft:blocks/oak_log"),
@@ -715,7 +633,7 @@ mod tests {
         ] {
             for seed in 0..64u64 {
                 let mut rng = SpawnRng::new(seed);
-                let drops = drop_block_loot(&tables, block, pos, None, &mut rng);
+                let drops = drop_block_loot(&tables, state(block), pos, None, &mut rng);
                 assert_eq!(
                     drops.len(),
                     1,
@@ -755,7 +673,7 @@ mod tests {
         let mut gravel = 0usize;
         for seed in 0..samples {
             let mut rng = SpawnRng::new(seed);
-            let drops = drop_block_loot(&tables, "minecraft:gravel", pos, None, &mut rng);
+            let drops = drop_block_loot(&tables, state("minecraft:gravel"), pos, None, &mut rng);
             assert_eq!(drops.len(), 1, "gravel always drops exactly one stack");
             match drops[0].stack.item.to_string().as_str() {
                 "minecraft:flint" => flint += 1,
@@ -792,14 +710,14 @@ mod tests {
         ] {
             assert!(
                 tables
-                    .get(&block_loot_table_id(block).expect("parses"))
+                    .get(&block_loot_table_id(state(block)).expect("parses"))
                     .is_none(),
                 "precondition: vanilla ships no loot table for {block}, so it must \
                  not be in the bundle either"
             );
             let drops = drop_block_loot(
                 &tables,
-                block,
+                state(block),
                 BlockPos::new(0, 0, 0),
                 None,
                 &mut SpawnRng::new(1),
@@ -808,8 +726,14 @@ mod tests {
         }
         // And a name that is not a resource key at all.
         assert!(
-            drop_block_loot(&tables, "minecraft:", BlockPos::new(0, 0, 0), None, &mut SpawnRng::new(1))
-                .is_empty()
+            drop_block_loot(
+                &tables,
+                lodestone_data::block_states::air_state(),
+                BlockPos::new(0, 0, 0),
+                None,
+                &mut SpawnRng::new(1),
+            )
+            .is_empty()
         );
     }
 
@@ -837,13 +761,14 @@ mod tests {
         tool: LootTool,
         rng: &mut SpawnRng,
     ) -> Vec<PoppedItem> {
-        let table_id = block_loot_table_id(block).expect("test block name parses");
+        let state = state(block);
+        let table_id = block_loot_table_id(state).expect("test block name parses");
         let table = tables.get(&table_id).expect("test block has a bundled table");
         let context = LootContext {
             luck: 0.0,
             tool: Some(tool),
             explosion_radius: None,
-            block_state: loot_block_state(block),
+            block_state: loot_block_state(state),
         };
         table
             .roll(&context, rng)
@@ -929,7 +854,7 @@ mod tests {
         ] {
             for seed in 0..64u64 {
                 let mut rng = SpawnRng::new(seed);
-                let drops = drop_block_loot(&tables, block, pos, Some(&pick), &mut rng);
+                let drops = drop_block_loot(&tables, state(block), pos, Some(&pick), &mut rng);
                 assert_eq!(drops.len(), 1);
                 assert_eq!(
                     drops[0].stack.item.to_string(),
@@ -1088,9 +1013,9 @@ mod tests {
         let plain = tool("minecraft:diamond_pickaxe");
 
         let mut a = SpawnRng::new(0x0DE_D00D);
-        let bare = drop_block_loot(&tables, "minecraft:coal_ore", pos, None, &mut a);
+        let bare = drop_block_loot(&tables, state("minecraft:coal_ore"), pos, None, &mut a);
         let mut b = SpawnRng::new(0x0DE_D00D);
-        let unenchanted = drop_block_loot(&tables, "minecraft:coal_ore", pos, Some(&plain), &mut b);
+        let unenchanted = drop_block_loot(&tables, state("minecraft:coal_ore"), pos, Some(&plain), &mut b);
         assert_eq!(
             bare[0].position, unenchanted[0].position,
             "`ore_drops` guards on `level > 0`, so an unenchanted tool must leave \
@@ -1130,26 +1055,24 @@ mod tests {
         let shovel = tool("minecraft:diamond_shovel");
 
         assert!(
-            !drops_are_allowed("minecraft:stone", None),
+            !drops_are_allowed(state("minecraft:stone"), None),
             "stone requires a correct tool, so a bare hand drops nothing — \
              vanilla `destroyBlock` never calls `dropResources`"
         );
         assert!(
-            !drops_are_allowed("minecraft:stone", Some(&shovel)),
+            !drops_are_allowed(state("minecraft:stone"), Some(&shovel)),
             "a shovel is not `mineable/pickaxe`, so it is the wrong tool for stone"
         );
         assert!(
-            drops_are_allowed("minecraft:stone", Some(&wooden)),
+            drops_are_allowed(state("minecraft:stone"), Some(&wooden)),
             "the weakest pickaxe is still `correct_for_drops` on stone"
         );
         assert!(
-            drops_are_allowed("minecraft:dirt", None),
+            drops_are_allowed(state("minecraft:dirt"), None),
             "dirt does not require a correct tool, so a bare hand drops it — \
              a gate reading `tool.is_some()` refuses this"
         );
-        assert!(drops_are_allowed("minecraft:dirt", Some(&shovel)));
-        // An unknown state must not silently swallow its drops.
-        assert!(drops_are_allowed("minecraft:not_a_real_block", None));
+        assert!(drops_are_allowed(state("minecraft:dirt"), Some(&shovel)));
     }
 
     /// `popResource`'s geometry, predicted from the vanilla constants rather
@@ -1359,22 +1282,20 @@ mod tests {
     #[test]
     fn loot_block_state_fills_in_the_properties_the_string_left_out() {
         let of = |state: &str| {
-            let resolved = loot_block_state(state).expect("state names a block");
+            let resolved = loot_block_state(self::state(state)).expect("state names a block");
             let mut pairs: Vec<String> = resolved
-                .properties
+                .properties()
                 .iter()
-                .map(|(k, v)| format!("{k}={v}"))
+                .map(|property| format!("{}={}", property.key().name(), property.value()))
                 .collect();
             pairs.sort();
-            (resolved.block.to_string(), pairs.join(","))
+            (resolved.block().name().to_string(), pairs.join(","))
         };
 
         // A bare name is the block's default state, and wheat's default `age` is 0
         // — a value, not an absence.
         assert_eq!(of("minecraft:wheat"), ("minecraft:wheat".to_string(), "age=0".to_string()));
         assert_eq!(of("minecraft:wheat[age=7]"), ("minecraft:wheat".to_string(), "age=7".to_string()));
-        // Namespace-less input, which the rest of this crate accepts.
-        assert_eq!(of("wheat[age=5]"), ("minecraft:wheat".to_string(), "age=5".to_string()));
         // A partially-specified multi-property state keeps its named value and
         // takes the vanilla default for the rest — `state_id`'s tier 2.
         let (block, properties) = of("minecraft:oak_door[half=upper]");
@@ -1383,13 +1304,14 @@ mod tests {
             properties.contains("half=upper") && properties.contains("hinge="),
             "the unnamed properties must be present with their defaults, got {properties}"
         );
-        // A block the census does not know keeps whatever the string said, rather
-        // than losing the properties entirely.
-        assert_eq!(
-            of("modded:widget[colour=red]"),
-            ("modded:widget".to_string(), "colour=red".to_string())
-        );
-        assert_eq!(loot_block_state(""), None);
+            assert_eq!(
+                loot_block_state(lodestone_data::block_states::air_state())
+                .expect("air has a canonical state")
+                .block()
+                .name()
+                .to_string(),
+                "minecraft:air"
+            );
     }
 
     /// **End-to-end through the production entry point.**
@@ -1406,7 +1328,7 @@ mod tests {
         let pos = BlockPos::new(4, 65, -7);
         let popped = |state: &str| {
             let mut rng = SpawnRng::new(BLOCK_DROPS_BEHAVIOR_SEED);
-            drop_block_loot(&tables, state, pos, None, &mut rng)
+            drop_block_loot(&tables, StateId::from_state_str(state).unwrap(), pos, None, &mut rng)
                 .into_iter()
                 .map(|item| format!("{}x{}", item.stack.item, item.stack.count))
                 .collect::<Vec<_>>()
@@ -1434,6 +1356,6 @@ mod tests {
         // Wheat requires no tool, so `drops_are_allowed` is not what is being
         // measured here — but assert it, because a `false` would make the whole
         // thing moot at the call site rather than in this function.
-        assert!(drops_are_allowed("minecraft:wheat[age=7]", None));
+        assert!(drops_are_allowed(state("minecraft:wheat[age=7]"), None));
     }
 }

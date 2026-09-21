@@ -45,6 +45,8 @@
 use std::time::Duration;
 
 use lodestone_core::Writer;
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 use lodestone_model::{
     ClientEvent, ConnectionState, Directive, GameMode, VersionAdapter,
 };
@@ -108,16 +110,15 @@ impl ChunkSource for FlatWorld {
         let mut column = ChunkColumn::new(-64, 384);
         for z in 0..16 {
             for x in 0..16 {
-                column.set_block(x, 63, z, "minecraft:grass_block[snowy=false]");
+                column.set_block_id(x, 63, z, Block::GrassBlock.default_state());
             }
         }
         column
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         self.column(x.div_euclid(16), z.div_euclid(16))
-            .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
-            .to_string()
+            .block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -126,7 +127,7 @@ impl ChunkSource for FlatWorld {
             .to_string()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
 }
 
 fn handshake_bytes() -> Vec<u8> {

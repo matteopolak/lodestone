@@ -221,6 +221,27 @@ impl Properties {
         Ok(properties)
     }
 
+    /// Returns this set with one built-in property replaced or inserted.
+    #[must_use]
+    pub fn with_builtin(
+        mut self,
+        key: PropertyKey,
+        value: BuiltinPropertyValue,
+    ) -> Result<Self, PropertiesError> {
+        let property = Property::new(key, PropertyValue::builtin(value))
+            .map_err(PropertiesError::InvalidProperty)?;
+        if let Some(existing) = self.entries[..self.len as usize]
+            .iter_mut()
+            .find(|existing| existing.key == key)
+        {
+            *existing = property;
+            Ok(self)
+        } else {
+            self.push(property)?;
+            Ok(self)
+        }
+    }
+
     /// Resolves the generated properties for one validated block-state id.
     ///
     /// The generated numeric property-set table is copied into the private

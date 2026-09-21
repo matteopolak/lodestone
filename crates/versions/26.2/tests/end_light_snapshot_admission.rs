@@ -5,6 +5,8 @@
 //! the geometry relative: it compares a mutation-then-settle admission with a
 //! fresh source that already contains the same final 3x3 footprint.
 
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 use lodestone_server::{
     ChunkColumn, ChunkSource, ServerDirective, ServerProtocol,
     retained_chunk_source_for_view_radius,
@@ -36,7 +38,7 @@ impl BarrierSource {
         let mut column = ChunkColumn::new(0, 256);
         for z in 0..16 {
             for x in 0..16 {
-                column.set_block(x, 0, z, "minecraft:end_stone");
+                column.set_block_id(x, 0, z, Block::EndStone.default_state());
             }
         }
         column
@@ -51,15 +53,14 @@ impl ChunkSource for BarrierSource {
             ChunkColumn::new(0, 256)
         };
         if (cx, cz) == (1, 0) && self.east_hole {
-            column.set_block(0, 0, 8, "minecraft:air");
+            column.set_block_id(0, 0, 8, StateId::AIR);
         }
         column
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         self.column(x.div_euclid(16), z.div_euclid(16))
-            .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
-            .to_owned()
+            .block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -68,7 +69,7 @@ impl ChunkSource for BarrierSource {
             .to_owned()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
 
     fn dimension(&self) -> Option<Dimension> {
         Some(Dimension::End)
@@ -153,7 +154,7 @@ fn neighbouring_mutation_replaces_saved_end_snapshot_before_raw_encode() {
     // The east neighbour is the relative source of the lower-apron light. The
     // store must invalidate the centre snapshot even though the centre itself
     // is not the edited column.
-    stale_order.set_block(16, 0, 8, "minecraft:air");
+    stale_order.set_block(16, 0, 8, StateId::AIR);
     assert_eq!(
         stale_order
             .resident_column(0, 0)

@@ -157,13 +157,31 @@ pub fn conversion_progress(
     amount
 }
 
-/// Whether a block id (bare, no namespace/state — the same form
-/// [`super::bare_block_id`] produces) is one of `getConversionProgress`'s
+/// Whether a block state is one of `getConversionProgress`'s
 /// two accelerants: `minecraft:iron_bars`, or any bed (`BlockStateBase
 /// instanceof BedBlock`, ported here as "id ends in `_bed`" — every vanilla
 /// bed's registry name has that suffix and nothing else does).
-fn is_special_conversion_block(bare_id: &str) -> bool {
-    bare_id == "iron_bars" || bare_id.ends_with("_bed")
+fn is_special_conversion_block(state: lodestone_data::block_states::StateId) -> bool {
+    matches!(
+        state.block(),
+        lodestone_data::block::Block::IronBars
+            | lodestone_data::block::Block::WhiteBed
+            | lodestone_data::block::Block::OrangeBed
+            | lodestone_data::block::Block::MagentaBed
+            | lodestone_data::block::Block::LightBlueBed
+            | lodestone_data::block::Block::YellowBed
+            | lodestone_data::block::Block::LimeBed
+            | lodestone_data::block::Block::PinkBed
+            | lodestone_data::block::Block::GrayBed
+            | lodestone_data::block::Block::LightGrayBed
+            | lodestone_data::block::Block::CyanBed
+            | lodestone_data::block::Block::PurpleBed
+            | lodestone_data::block::Block::BlueBed
+            | lodestone_data::block::Block::BrownBed
+            | lodestone_data::block::Block::GreenBed
+            | lodestone_data::block::Block::RedBed
+            | lodestone_data::block::Block::BlackBed
+    )
 }
 
 /// `getConversionProgress`'s block scan: counts iron-bars/bed blocks within
@@ -185,9 +203,8 @@ pub fn count_nearby_special_blocks(world: &ChunkWorld, pos: Vec3) -> u32 {
     'scan: for dx in 0..span {
         for dy in 0..span {
             for dz in 0..span {
-                let state = world.block_state(base_x + dx, base_y + dy, base_z + dz);
-                let bare = super::bare_block_id(state);
-                if is_special_conversion_block(bare) {
+                let state = world.block_state_id(base_x + dx, base_y + dy, base_z + dz);
+                if is_special_conversion_block(state) {
                     found += 1;
                     if found >= MAX_SPECIAL_BLOCKS_COUNT {
                         break 'scan;
@@ -202,6 +219,10 @@ pub fn count_nearby_special_blocks(world: &ChunkWorld, pos: Vec3) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn state(name: &str) -> lodestone_data::block_states::StateId {
+        lodestone_data::block_states::StateId::from_state_str(name).unwrap()
+    }
 
     #[test]
     fn roll_conversion_ticks_uses_the_predicted_range() {
@@ -277,9 +298,9 @@ mod tests {
     /// just one hardcoded name — every vanilla bed id ends in `_bed`.
     #[test]
     fn every_bed_colour_counts_as_a_special_block() {
-        assert!(is_special_conversion_block("red_bed"));
-        assert!(is_special_conversion_block("white_bed"));
-        assert!(is_special_conversion_block("iron_bars"));
+        assert!(is_special_conversion_block(state("minecraft:red_bed")));
+        assert!(is_special_conversion_block(state("minecraft:white_bed")));
+        assert!(is_special_conversion_block(state("minecraft:iron_bars")));
     }
 
     /// Control: an ordinary block (not iron bars, not a bed) must not
@@ -288,7 +309,7 @@ mod tests {
     /// reason.
     #[test]
     fn an_unrelated_block_is_not_a_special_conversion_block() {
-        assert!(!is_special_conversion_block("stone"));
-        assert!(!is_special_conversion_block("bedrock"));
+        assert!(!is_special_conversion_block(state("minecraft:stone")));
+        assert!(!is_special_conversion_block(state("minecraft:bedrock")));
     }
 }

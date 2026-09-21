@@ -44,6 +44,8 @@
 //! no acting player at all.
 
 use lodestone_model::{BlockPos, SoundCategory, Vec3, Vec3f};
+use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey};
+use lodestone_data::block_states::StateId;
 
 use crate::block_entities::BlockEntityKind;
 
@@ -196,21 +198,6 @@ pub fn wind_charged_death(pos: Vec3) -> WorldEffect {
     }
 }
 
-/// Strips any `[...]` property suffix, as every canonical-name comparison in
-/// this crate does.
-fn base_name(state: &str) -> &str {
-    state.split('[').next().unwrap_or(state)
-}
-
-/// The value of `state`'s `key=` property, if it carries one.
-fn property_of<'s>(state: &'s str, key: &str) -> Option<&'s str> {
-    let props = state.split_once('[')?.1.strip_suffix(']')?;
-    props.split(',').find_map(|pair| {
-        let (k, v) = pair.split_once('=')?;
-        (k.trim() == key).then_some(v.trim())
-    })
-}
-
 /// `true` iff `name` is a real entry in 26.2's `minecraft:sound_event` registry.
 ///
 /// The guard every derivation in this module ends with — see the module doc.
@@ -332,30 +319,32 @@ pub fn player_burped(pos: Vec3, roll: f32, seed: i64) -> WorldEffect {
     }
 }
 
-/// The level event for a block destroyed at `pos`, or `None` if `state` does not
-/// resolve to a block-state id.
+/// The level event for a block destroyed at `pos`.
 ///
 /// One packet, not two: see [`PARTICLES_DESTROY_BLOCK`]. Publish it with the
 /// breaker as the `except` player — see the module doc's double-trigger note.
 #[must_use]
-pub fn block_destroyed(pos: BlockPos, state: &str) -> Option<WorldEffect> {
-    let id = crate::mobs::block_state_id_or_default(state)?;
+pub fn block_destroyed(pos: BlockPos, state: StateId) -> Option<WorldEffect> {
     Some(WorldEffect::LevelEvent {
         event: PARTICLES_DESTROY_BLOCK,
         pos,
-        data: i32::try_from(id.raw()).ok()?,
+        data: i32::try_from(state.raw()).ok()?,
         global: false,
     })
+}
+
+#[must_use]
+pub fn block_destroyed_id(pos: BlockPos, state: StateId) -> Option<WorldEffect> {
+    block_destroyed(pos, state)
 }
 
 /// The place sound for `state` at `pos` — vanilla's own
 /// item-place/block-placed-by pair, which plays
 /// `soundType.getPlaceSound()` at `(volume + 1) / 2` and `pitch * 0.8`.
 #[must_use]
-pub fn block_placed(pos: BlockPos, state: &str, seed: i64) -> Option<WorldEffect> {
-    let id = crate::mobs::block_state_id_or_default(state)?;
-    let sound = lodestone_data::sound_types::place_sound_name(id)?;
-    let kind = lodestone_data::sound_types::sound_type(id);
+pub fn block_placed(pos: BlockPos, state: StateId, seed: i64) -> Option<WorldEffect> {
+    let sound = lodestone_data::sound_types::place_sound_name(state)?;
+    let kind = lodestone_data::sound_types::sound_type(state);
     Some(WorldEffect::Sound {
         sound: sound.to_owned(),
         category: SoundCategory::Block,
@@ -381,20 +370,32 @@ pub fn block_placed(pos: BlockPos, state: &str, seed: i64) -> Option<WorldEffect
 /// back to the generic `block.wooden_*` family. `pitch` is the caller's, since
 /// vanilla draws it from the level RNG.
 #[must_use]
-pub fn openable_toggled(pos: BlockPos, from: &str, to: &str, pitch: f32) -> Option<WorldEffect> {
-    let block = base_name(to);
-    if base_name(from) != block {
+pub fn openable_toggled(pos: BlockPos, from: StateId, to: StateId, pitch: f32) -> Option<WorldEffect> {
+    openable_toggled_id(pos, from, to, pitch)
+}
+
+#[must_use]
+pub fn openable_toggled_id(
+    pos: BlockPos,
+    from: StateId,
+    to: StateId,
+    pitch: f32,
+) -> Option<WorldEffect> {
+    if from.block() != to.block() {
         return None;
     }
-    let was_open = property_of(from, "open")? == "true";
-    let is_open = property_of(to, "open")? == "true";
+    let was_open = Properties::from_state_id(from)
+        .get(PropertyKey::Open)
+        .is_some_and(|value| value.builtin_value() == Some(BuiltinPropertyValue::True));
+    let is_open = Properties::from_state_id(to)
+        .get(PropertyKey::Open)
+        .is_some_and(|value| value.builtin_value() == Some(BuiltinPropertyValue::True));
     if was_open == is_open {
         return None;
     }
     let action = if is_open { "open" } else { "close" };
-
-    let path = block.strip_prefix("minecraft:")?;
-    let (family, generic) = if path.ends_with("_door") || path == "door" {
+    let path = to.block().path();
+    let family = if path.ends_with("_door") || path == "door" {
         ("door", "block.wooden_door")
     } else if path.ends_with("_trapdoor") || path == "trapdoor" {
         ("trapdoor", "block.wooden_trapdoor")
@@ -403,14 +404,11 @@ pub fn openable_toggled(pos: BlockPos, from: &str, to: &str, pitch: f32) -> Opti
     } else {
         return None;
     };
-    // `block.iron_door.open` and `block.copper_door.open` are per-block;
-    // `block.bamboo_wood_door.open` is per *wood type*, so the material prefix
-    // is the block id minus the family suffix.
-    let material = path.trim_end_matches(family).trim_end_matches('_');
+    let material = path.trim_end_matches(family.0).trim_end_matches('_');
     let sound = first_real_sound(&[
         format!("minecraft:block.{path}.{action}"),
-        format!("minecraft:block.{material}_wood_{family}.{action}"),
-        format!("minecraft:{generic}.{action}"),
+        format!("minecraft:block.{material}_wood_{}.{}", family.0, action),
+        format!("minecraft:{}.{}", family.1, action),
     ])?;
     Some(WorldEffect::Sound {
         sound,
@@ -566,7 +564,12 @@ mod tests {
     /// candidate would fail here.
     #[test]
     fn openable_sounds_resolve_per_material() {
-        let sound = |from: &str, to: &str| match openable_toggled(BlockPos::new(1, 2, 3), from, to, 1.0) {
+        let sound = |from: &str, to: &str| match openable_toggled(
+            BlockPos::new(1, 2, 3),
+            state(from),
+            state(to),
+            1.0,
+        ) {
             Some(WorldEffect::Sound { sound, .. }) => sound,
             other => panic!("expected a sound, got {other:?}"),
         };
@@ -605,22 +608,28 @@ mod tests {
         assert!(
             openable_toggled(
                 BlockPos::new(1, 2, 3),
-                "minecraft:oak_door[open=true,powered=false]",
-                "minecraft:oak_door[open=true,powered=true]",
+                state("minecraft:oak_door[open=true,powered=false]"),
+                state("minecraft:oak_door[open=true,powered=true]"),
                 1.0
             )
             .is_none()
         );
-        assert!(openable_toggled(BlockPos::new(1, 2, 3), "minecraft:stone", "minecraft:dirt", 1.0).is_none());
+        assert!(openable_toggled(
+            BlockPos::new(1, 2, 3),
+            state("minecraft:stone"),
+            state("minecraft:dirt"),
+            1.0,
+        )
+        .is_none());
     }
 
     /// A break carries the broken block's own state id, since that is what the
     /// client resolves the particle texture and break sound from.
     #[test]
     fn a_destroyed_block_carries_its_state_id() {
-        let expected = crate::mobs::block_state_id_or_default("minecraft:stone").expect("stone resolves");
+        let expected = state("minecraft:stone");
         assert_eq!(
-            block_destroyed(BlockPos::new(4, 5, 6), "minecraft:stone"),
+            block_destroyed(BlockPos::new(4, 5, 6), expected),
             Some(WorldEffect::LevelEvent {
                 event: PARTICLES_DESTROY_BLOCK,
                 pos: BlockPos::new(4, 5, 6),
@@ -630,20 +639,16 @@ mod tests {
         );
     }
 
-    /// A known state crosses the string-to-id boundary and keeps its own sound;
-    /// unknown input remains no effect rather than acquiring a fallback sound.
+/// A known state keeps its own sound type and placement sound.
     #[test]
     fn a_placed_block_validates_its_state_before_sound_lookup() {
-        let effect = block_placed(BlockPos::new(4, 5, 6), "minecraft:stone", 17)
+        let effect = block_placed(BlockPos::new(4, 5, 6), state("minecraft:stone"), 17)
             .expect("stone has a placement sound");
         assert!(matches!(
             effect,
             WorldEffect::Sound { sound, seed: 17, .. }
                 if sound == "minecraft:block.stone.place"
         ));
-        assert!(
-            block_placed(BlockPos::new(4, 5, 6), "minecraft:not_a_block", 17).is_none()
-        );
     }
 
     /// Living mobs vocalise, non-living entities do not — and the death and hurt
@@ -691,5 +696,9 @@ mod tests {
             })
         );
         assert_eq!(mob_ambient_sound("minecraft:item", pos, false, 1.0, 0), None);
+    }
+
+    fn state(text: &str) -> StateId {
+        StateId::from_state_str(text).expect("fixture state must resolve")
     }
 }

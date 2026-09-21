@@ -43,6 +43,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lodestone_client::{BlockPos, ClientBuilder, Hand, LoginProfile, ServerAddress};
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockFace, ClientAction, GameMode, ItemStack, Vec3f};
 use lodestone_net::{Connection, memory_pair};
 use lodestone_server::{
@@ -63,7 +65,7 @@ use lodestone_v26_2::{V770ServerProtocol, adapter};
 /// source silently discards every placement and each assertion below would
 /// read air and fail for a reason unrelated to the code under test.
 /// `SharedAirSource`'s edit log: `(x, y, z) -> block name`.
-type EditMap = Arc<Mutex<HashMap<(i32, i32, i32), String>>>;
+type EditMap = Arc<Mutex<HashMap<(i32, i32, i32), StateId>>>;
 
 #[derive(Clone, Default)]
 struct SharedAirSource {
@@ -72,7 +74,7 @@ struct SharedAirSource {
 
 impl SharedAirSource {
     /// Every edit the server actually wrote, as `(pos, block name)`.
-    fn edits(&self) -> HashMap<(i32, i32, i32), String> {
+    fn edits(&self) -> HashMap<(i32, i32, i32), StateId> {
         self.edits.lock().expect("edits lock poisoned").clone()
     }
 }
@@ -82,21 +84,21 @@ impl ChunkSource for SharedAirSource {
         let mut column = ChunkColumn::new(0, 16);
         // Redstone dust needs a solid supporting block; keep that fixture
         // state in the served column rather than adding it to the edit log.
-        column.set_block(6, 4, 2, "minecraft:stone");
+        column.set_block_id(6, 4, 2, Block::Stone.default_state());
         column
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         self.edits
             .lock()
             .expect("edits lock poisoned")
             .get(&(x, y, z))
-            .cloned()
+            .copied()
             .unwrap_or_else(|| {
                 if (x, y, z) == (6, 4, 2) {
-                    "minecraft:stone".to_string()
+                    Block::Stone.default_state()
                 } else {
-                    "minecraft:air".to_string()
+                    StateId::AIR
                 }
             })
     }
@@ -105,11 +107,11 @@ impl ChunkSource for SharedAirSource {
         "minecraft:plains".to_string()
     }
 
-    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+    fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
         self.edits
             .lock()
             .expect("edits lock poisoned")
-            .insert((x, y, z), name.to_string());
+            .insert((x, y, z), state);
     }
 }
 
@@ -140,19 +142,19 @@ fn stack(name: &str) -> ItemStack {
 /// never-loaded chunk and the client would never see a confirmation.
 /// One row: hotbar slot, item name, target position, expected result block
 /// name (`None` = nothing placed).
-type Placement = (u8, &'static str, (i32, i32, i32), Option<&'static str>);
+type Placement = (u8, &'static str, (i32, i32, i32), Option<Block>);
 
 const PLACEMENTS: &[Placement] = &[
-    (0, "minecraft:dirt", (2, 5, 2), Some("minecraft:dirt")),
-    (1, "minecraft:oak_planks", (4, 5, 2), Some("minecraft:oak_planks")),
+    (0, "minecraft:dirt", (2, 5, 2), Some(Block::Dirt)),
+    (1, "minecraft:oak_planks", (4, 5, 2), Some(Block::OakPlanks)),
     // Neither placeable-by-name nor a block entity: the row that fails
     // against a name-equality resolver.
-    (2, "minecraft:redstone", (6, 5, 2), Some("minecraft:redstone_wire")),
+    (2, "minecraft:redstone", (6, 5, 2), Some(Block::RedstoneWire)),
     // The negative direction, placed in the middle of the run rather than
     // last so the wait below still proves the whole sequence was processed.
     (3, "minecraft:diamond_sword", (8, 5, 2), None),
-    (4, "minecraft:white_wool", (10, 5, 2), Some("minecraft:white_wool")),
-    (5, "minecraft:glass", (12, 5, 2), Some("minecraft:glass")),
+    (4, "minecraft:white_wool", (10, 5, 2), Some(Block::WhiteWool)),
+    (5, "minecraft:glass", (12, 5, 2), Some(Block::Glass)),
 ];
 
 #[tokio::test]
@@ -247,7 +249,7 @@ async fn every_held_item_places_its_own_block_in_the_servers_own_world() {
     let confirmed = handle
         .wait_for(Duration::from_secs(30), |h| {
             h.block_at(last_pos).is_some_and(|id| {
-                lodestone_data::block_states::block_name(id) == Some(last_block)
+                lodestone_data::block_states::block_name(id) == Some(last_block.name())
             })
         })
         .await
@@ -265,24 +267,27 @@ async fn every_held_item_places_its_own_block_in_the_servers_own_world() {
     let edits = source.edits();
 
     for (_, item, pos, expected) in PLACEMENTS {
-        let actual = source.block_state(pos.0, pos.1, pos.2);
+        let actual = source.block_state_id(pos.0, pos.1, pos.2);
         match expected {
             Some(block) => {
                 assert_eq!(
-                    actual, *block,
-                    "holding {item} must place {block} at {pos:?}, server wrote {actual:?}"
+                    actual,
+                    block.default_state(),
+                    "holding {item} must place {} at {pos:?}, server wrote {actual:?}",
+                    block.name()
                 );
             }
             None => {
                 assert_eq!(
-                    actual, "minecraft:air",
+                    actual, StateId::AIR,
                     "holding {item} must place nothing at {pos:?}, server wrote {actual:?}"
                 );
                 // Named separately from the air check: "not stone" is the
                 // specific regression this gate is about, and an assertion that
                 // only said `== air` would not say *why* it matters.
                 assert_ne!(
-                    actual, "minecraft:stone",
+                    actual,
+                    Block::Stone.default_state(),
                     "a non-placeable item must never fall back to stone ({item})"
                 );
             }
@@ -300,7 +305,9 @@ async fn every_held_item_places_its_own_block_in_the_servers_own_world() {
         edits.len()
     );
     assert!(
-        !edits.values().any(|block| block == "minecraft:stone"),
+        !edits
+            .values()
+            .any(|&state| state == Block::Stone.default_state()),
         "no placement in this test holds a stone item, so the server must never write stone: {edits:?}"
     );
 
@@ -310,7 +317,8 @@ async fn every_held_item_places_its_own_block_in_the_servers_own_world() {
     // above so a failure names which one broke.
     assert!(
         confirmed,
-        "the server never confirmed the final placement ({last_block}) to the client"
+        "the server never confirmed the final placement ({}) to the client",
+        last_block.name()
     );
 }
 
@@ -395,7 +403,9 @@ async fn use_item_on_with_hand_off_places_the_off_hand_item_not_the_main_hand_on
     let confirmed = handle
         .wait_for(Duration::from_secs(30), |h| {
             h.block_at(target)
-                .is_some_and(|id| lodestone_data::block_states::block_name(id) == Some("minecraft:dirt"))
+                .is_some_and(|id| {
+                    lodestone_data::block_states::block_name(id) == Some(Block::Dirt.name())
+                })
         })
         .await
         .is_ok();
@@ -410,14 +420,16 @@ async fn use_item_on_with_hand_off_places_the_off_hand_item_not_the_main_hand_on
 
     let edits = source.edits();
     assert_eq!(
-        edits.get(&(2, 5, 2)).map(String::as_str),
-        Some("minecraft:dirt"),
+        edits.get(&(2, 5, 2)).copied(),
+        Some(Block::Dirt.default_state()),
         "an off-hand UseItemOn must place the off-hand item (dirt), not fall back to the main \
          hand's sword (which cannot place at all): got {:?}",
         edits.get(&(2, 5, 2))
     );
     assert!(
-        !edits.values().any(|block| block == "minecraft:diamond_sword"),
+        !edits
+            .values()
+            .any(|&state| state.name() == "minecraft:diamond_sword"),
         "the main-hand sword must never be written as a block: {edits:?}"
     );
     assert!(

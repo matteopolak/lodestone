@@ -125,6 +125,8 @@
 
 use std::sync::{Arc, Mutex};
 
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockPos, Difficulty};
 
 use crate::chunk::ChunkSource;
@@ -146,7 +148,7 @@ pub const TRAP_CHANCE_SCALE: f64 = 0.01;
 /// `minecraft:lightning_rod` — the block `#minecraft:lightning_rods` tags,
 /// approximated here as the single block it actually contains rather than a
 /// real tag lookup (see the module doc's "out of reach" list).
-pub const LIGHTNING_ROD: &str = "minecraft:lightning_rod";
+pub const LIGHTNING_ROD: Block = Block::LightningRod;
 /// The wire entity type this module's strikes eventually become —
 /// `lodestone-data`'s generated entity-type table already has this at
 /// network id 77.
@@ -186,21 +188,16 @@ impl LightningEnv {
 /// [`crate::fire::block_at`] enforces, duplicated rather than shared because
 /// the two modules' `Env` types differ.
 #[must_use]
-fn block_at<S: ChunkSource + ?Sized>(world: &S, env: LightningEnv, pos: BlockPos) -> String {
+fn block_at<S: ChunkSource + ?Sized>(world: &S, env: LightningEnv, pos: BlockPos) -> StateId {
     if env.contains_y(pos.y) {
-        world.block_state(pos.x, pos.y, pos.z)
+        world.block_state_id(pos.x, pos.y, pos.z)
     } else {
-        crate::chunk::AIR.to_owned()
+        lodestone_data::block_states::air_state()
     }
 }
 
-fn base_name(state: &str) -> &str {
-    state.split('[').next().unwrap_or(state)
-}
-
-fn blocks_motion(state: &str) -> bool {
-    lodestone_data::block_states::StateId::from_state_str(state)
-        .is_some_and(lodestone_data::block_solidity::blocks_motion)
+fn blocks_motion(state: StateId) -> bool {
+    lodestone_data::block_solidity::blocks_motion(state)
 }
 
 /// `Level.getBlockRandomPos` — the level's own tiny LCG, mutated in place.
@@ -224,7 +221,7 @@ pub fn motion_blocking_heightmap_pos<S: ChunkSource + ?Sized>(
     let top = env.min_y + env.height;
     let mut y = top - 1;
     while y > env.min_y {
-        if blocks_motion(&block_at(world, env, BlockPos::new(x, y, z))) {
+        if blocks_motion(block_at(world, env, BlockPos::new(x, y, z))) {
             return BlockPos::new(x, y + 1, z);
         }
         y -= 1;
@@ -240,7 +237,7 @@ pub fn sky_exposed<S: ChunkSource + ?Sized>(world: &S, env: LightningEnv, pos: B
     let top = env.min_y + env.height;
     let mut y = pos.y + 1;
     while y < top {
-        if blocks_motion(&block_at(world, env, BlockPos::new(pos.x, y, pos.z))) {
+        if blocks_motion(block_at(world, env, BlockPos::new(pos.x, y, pos.z))) {
             return false;
         }
         y += 1;
@@ -419,7 +416,7 @@ pub fn tick_thunder_for_chunk<S: ChunkSource + ?Sized>(
     // a spawned bolt's `getStrikePosition` would compute; `pos.below()` and
     // `strike_ground_pos(target)` are the same offset by coincidence of both
     // being "one row down", so this reuses that helper rather than repeating it.
-    let below_is_rod = base_name(&block_at(world, env, strike_ground_pos(target))) == LIGHTNING_ROD;
+    let below_is_rod = block_at(world, env, strike_ground_pos(target)).block() == LIGHTNING_ROD;
     let visual_only = should_be_skeleton_trap(spawn_mobs_rule, difficulty_instance, below_is_rod, rng);
     Some(Strike { pos: target, visual_only })
 }
@@ -581,7 +578,7 @@ mod tests {
     }
 
     impl Rig {
-        fn with_floor(fill: &str, floor_y: i32) -> Self {
+        fn with_floor(fill: StateId, floor_y: i32) -> Self {
             let rig = Self { columns: StdMutex::new(HashMap::new()) };
             // `-8..16`, not `-8..8`: `block_random_pos(rv, xo, 0, zo, 15)`'s
             // `& 15` mask can offset up to **+15** from `xo`/`zo`, and every
@@ -610,12 +607,12 @@ mod tests {
             columns.entry((cx, cz)).or_insert_with(|| ChunkColumn::new(MIN_Y, HEIGHT)).clone()
         }
 
-        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
             let cx = x.div_euclid(16);
             let cz = z.div_euclid(16);
             let mut columns = self.columns.lock().expect("rig lock");
             let column = columns.entry((cx, cz)).or_insert_with(|| ChunkColumn::new(MIN_Y, HEIGHT));
-            column.block_state(x - cx * 16, y, z - cz * 16).to_string()
+            column.block_state_id(x - cx * 16, y, z - cz * 16)
         }
 
         fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -626,13 +623,17 @@ mod tests {
             column.biome_state_at(x - cx * 16, y, z - cz * 16).to_string()
         }
 
-        fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+        fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
             let cx = x.div_euclid(16);
             let cz = z.div_euclid(16);
             let mut columns = self.columns.lock().expect("rig lock");
             let column = columns.entry((cx, cz)).or_insert_with(|| ChunkColumn::new(MIN_Y, HEIGHT));
-            column.set_block(x - cx * 16, y, z - cz * 16, name);
+            column.set_block(x - cx * 16, y, z - cz * 16, state);
         }
+    }
+
+    fn state(value: &str) -> StateId {
+        StateId::from_state_str(value).expect("test state must be canonical")
     }
 
     fn rng() -> SpawnRng {
@@ -728,21 +729,21 @@ mod tests {
     /// this by finding nothing.
     #[test]
     fn heightmap_pos_sits_just_above_the_floor() {
-        let rig = Rig::with_floor("minecraft:stone", 4);
+        let rig = Rig::with_floor(state("minecraft:stone"), 4);
         let pos = motion_blocking_heightmap_pos(&rig, ENV, 0, 0);
         assert_eq!(pos, BlockPos::new(0, 5, 0), "must land directly above the floor top");
     }
 
     #[test]
-    fn unknown_block_state_is_not_treated_as_motion_blocking() {
-        assert!(!blocks_motion("minecraft:not_a_real_block"));
+    fn air_is_not_treated_as_motion_blocking() {
+        assert!(!blocks_motion(state("minecraft:air")));
     }
 
     /// With no lightning rod and no candidate entities, target selection
     /// falls through to the heightmap position untouched.
     #[test]
     fn target_selection_falls_back_to_heightmap_with_no_rod_or_entities() {
-        let rig = Rig::with_floor("minecraft:stone", 0);
+        let rig = Rig::with_floor(state("minecraft:stone"), 0);
         let mut r = rng();
         let target = find_lightning_target_around(&rig, ENV, BlockPos::new(2, 0, 2), None, &[], &mut r);
         assert_eq!(target, BlockPos::new(2, 1, 2));
@@ -753,7 +754,7 @@ mod tests {
     /// (which a draw-count check confirms: the RNG is untouched).
     #[test]
     fn a_nearby_lightning_rod_wins_outright() {
-        let rig = Rig::with_floor("minecraft:stone", 0);
+        let rig = Rig::with_floor(state("minecraft:stone"), 0);
         let rod_pos = BlockPos::new(9, 40, 9);
         let mut a = rng();
         let target = find_lightning_target_around(
@@ -773,7 +774,7 @@ mod tests {
     /// heightmap; one outside it is not a candidate at all.
     #[test]
     fn a_living_entity_in_range_is_preferred_over_terrain() {
-        let rig = Rig::with_floor("minecraft:stone", 0);
+        let rig = Rig::with_floor(state("minecraft:stone"), 0);
         let mut r = rng();
         let near = BlockPos::new(3, 10, 3);
         let far = BlockPos::new(500, 10, 500);
@@ -802,7 +803,7 @@ mod tests {
     /// gate were bypassed.
     #[test]
     fn no_strike_without_thunder() {
-        let rig = Rig::with_floor("minecraft:stone", 0);
+        let rig = Rig::with_floor(state("minecraft:stone"), 0);
         let mut rv = 1;
         let mut r = rng();
         let result = tick_thunder_for_chunk(
@@ -816,7 +817,7 @@ mod tests {
     /// position is directly above the floor.
     #[test]
     fn a_favourable_seed_produces_a_strike_above_the_floor() {
-        let rig = Rig::with_floor("minecraft:stone", 0);
+        let rig = Rig::with_floor(state("minecraft:stone"), 0);
         // See `strike_gate_fires_on_a_zero_roll_and_consumes_one_draw`'s own
         // comment: `0..5000` was the second of the two known-failing
         // `lightning::tests` on `main` (expected 0.05 hits against the same

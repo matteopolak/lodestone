@@ -6,21 +6,19 @@
 //! geometry, draw order and block-entity hand-off together so a caller cannot
 //! accidentally add the blocks without the corresponding metadata.
 
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey};
+use lodestone_data::block_states::StateId;
 use lodestone_data::entity_type::{EntityType, EntityTypeRef};
 
-use crate::feature::{BlockPos, vegetation::config::is_air};
+use crate::feature::BlockPos;
 use crate::rng::RandomSource;
 
-use super::{base_id, ConfiguredFeature, VegGrid, VegTags};
-use crate::interner::StateId;
+#[cfg(test)]
+use super::base_id;
+use super::{ConfiguredFeature, VegGrid, VegTags};
 
 const DUNGEON_LOOT_TABLE: &str = "minecraft:chests/simple_dungeon";
-const CAVE_AIR: &str = "minecraft:cave_air";
-const COBBLESTONE: &str = "minecraft:cobblestone";
-const MOSSY_COBBLESTONE: &str = "minecraft:mossy_cobblestone";
-const CHEST: &str = "minecraft:chest";
-const SPAWNER: &str = "minecraft:spawner";
-
 /// Places one configured dungeon at `origin`.
 ///
 /// The bounded coordinate draws for chest candidates, the bottom-wall moss
@@ -91,17 +89,17 @@ pub(super) fn place_monster_room<R: RandomSource>(
                         // The source feature deliberately uses an unchecked air
                         // write for this branch; its protected-block predicate
                         // applies to the materialized wall branches below.
-                        set_unchecked(grid, pos, CAVE_AIR);
-                    } else if is_solid(grid, tags, pos) && current != CHEST {
+                        set_unchecked(grid, pos, bind_default(grid, Block::CaveAir));
+                    } else if is_solid(grid, tags, pos) && current != Block::Chest {
                         let material = if dy == min_y && random.next_int_bounded(4) != 0 {
-                            MOSSY_COBBLESTONE
+                            bind_default(grid, Block::MossyCobblestone)
                         } else {
-                            COBBLESTONE
+                            bind_default(grid, Block::Cobblestone)
                         };
                         safe_set(grid, tags, pos, material);
                     }
-                } else if current != CHEST && current != SPAWNER {
-                    safe_set(grid, tags, pos, CAVE_AIR);
+                } else if current != Block::Chest && current != Block::Spawner {
+                    safe_set(grid, tags, pos, bind_default(grid, Block::CaveAir));
                 }
             }
         }
@@ -157,7 +155,7 @@ pub(super) fn place_monster_room<R: RandomSource>(
     }
 
     let spawner_pos = origin;
-    if safe_set(grid, tags, spawner_pos, SPAWNER) {
+    if safe_set(grid, tags, spawner_pos, bind_default(grid, Block::Spawner)) {
         let entity_type = match random.next_int_bounded(4) {
             0 => EntityType::Skeleton,
             1 | 2 => EntityType::Zombie,
@@ -182,49 +180,56 @@ fn translated(pos: BlockPos, x: i32, y: i32, z: i32) -> BlockPos {
     }
 }
 
-fn state_at(grid: &VegGrid, pos: BlockPos) -> &str {
-    grid.interner().name_of(grid.get_id(pos.x, pos.y, pos.z))
+fn state_at(grid: &VegGrid, pos: BlockPos) -> StateId {
+    grid.get_id(pos.x, pos.y, pos.z)
 }
 
-fn base_at(grid: &VegGrid, pos: BlockPos) -> &str {
-    base_id(state_at(grid, pos))
+fn base_at(grid: &VegGrid, pos: BlockPos) -> Block {
+    state_at(grid, pos).block()
 }
 
 fn is_empty(grid: &VegGrid, pos: BlockPos) -> bool {
-    is_air(base_at(grid, pos))
+    matches!(base_at(grid, pos), Block::Air | Block::CaveAir | Block::VoidAir)
 }
 
 fn is_solid(grid: &VegGrid, tags: &VegTags, pos: BlockPos) -> bool {
-    tags.solid.test(state_at(grid, pos))
+    tags.solid.test_id(state_at(grid, pos))
 }
 
-fn safe_set(grid: &mut VegGrid, tags: &VegTags, pos: BlockPos, state: &str) -> bool {
-    safe_set_id(grid, tags, pos, grid.interner().id_of(state))
+fn safe_set(grid: &mut VegGrid, tags: &VegTags, pos: BlockPos, state: StateId) -> bool {
+    safe_set_id(grid, tags, pos, state)
 }
 
-fn set_unchecked(grid: &mut VegGrid, pos: BlockPos, state: &str) {
-    let state = grid.interner().id_of(state);
+fn set_unchecked(grid: &mut VegGrid, pos: BlockPos, state: StateId) {
     grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state);
+}
+
+fn bind_default(_grid: &VegGrid, block: Block) -> StateId {
+    block.default_state()
 }
 
 fn safe_set_id(grid: &mut VegGrid, tags: &VegTags, pos: BlockPos, state: StateId) -> bool {
     let current = base_at(grid, pos);
-    if tags.features_cannot_replace.contains(current) {
+    if tags.features_cannot_replace.contains(&current) {
         return false;
     }
     grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state)
 }
 
-fn chest_state(grid: &VegGrid, facing: &str) -> StateId {
-    // The canonical state order is stable across the bundled block-state table.
-    let state = match facing {
-        "north" => "minecraft:chest[facing=north,type=single,waterlogged=false]",
-        "south" => "minecraft:chest[facing=south,type=single,waterlogged=false]",
-        "east" => "minecraft:chest[facing=east,type=single,waterlogged=false]",
-        "west" => "minecraft:chest[facing=west,type=single,waterlogged=false]",
-        _ => "minecraft:chest[facing=north,type=single,waterlogged=false]",
+fn chest_state(_grid: &VegGrid, facing: &str) -> StateId {
+    let facing = match facing {
+        "north" => BuiltinPropertyValue::North,
+        "south" => BuiltinPropertyValue::South,
+        "east" => BuiltinPropertyValue::East,
+        "west" => BuiltinPropertyValue::West,
+        _ => BuiltinPropertyValue::North,
     };
-    grid.interner().id_of(state)
+    let properties = Properties::empty()
+        .with_builtin(PropertyKey::Facing, facing)
+        .and_then(|properties| properties.with_builtin(PropertyKey::Type, BuiltinPropertyValue::Single))
+        .and_then(|properties| properties.with_builtin(PropertyKey::Waterlogged, BuiltinPropertyValue::False))
+        .expect("chest properties");
+    Properties::state_for_block(Block::Chest, &properties).expect("chest state")
 }
 
 fn reorient_chest(grid: &VegGrid, tags: &VegTags, pos: BlockPos) -> &'static str {
@@ -236,7 +241,7 @@ fn reorient_chest(grid: &VegGrid, tags: &VegTags, pos: BlockPos) -> &'static str
         (0, 1, "south"),
         (-1, 0, "west"),
     ] {
-        if base_at(grid, translated(pos, dx, 0, dz)) == CHEST {
+        if base_at(grid, translated(pos, dx, 0, dz)) == Block::Chest {
             return "north";
         }
     }
@@ -246,11 +251,12 @@ fn reorient_chest(grid: &VegGrid, tags: &VegTags, pos: BlockPos) -> &'static str
     // the block-state helper's deterministic behaviour if the render-solid
     // predicate disagrees with that coarse collision test.
     let render_solid = |dx: i32, dz: i32| {
-        let state = grid.interner().name_of(grid.get_id(pos.x + dx, pos.y, pos.z + dz));
         if tags.simple_block_support.solid_render.is_empty() {
             is_solid(grid, tags, translated(pos, dx, 0, dz))
         } else {
-            tags.simple_block_support.solid_render.test(state)
+            tags.simple_block_support
+                .solid_render
+                .test_id(grid.get_id(pos.x + dx, pos.y, pos.z + dz))
         }
     };
     let mut solid = None;
@@ -297,11 +303,12 @@ fn render_solid_at(grid: &VegGrid, tags: &VegTags, pos: BlockPos, facing: &str) 
         "west" => (-1, 0),
         _ => (0, 0),
     };
-    let state = grid.interner().name_of(grid.get_id(pos.x + dx, pos.y, pos.z + dz));
     if tags.simple_block_support.solid_render.is_empty() {
         is_solid(grid, tags, translated(pos, dx, 0, dz))
     } else {
-        tags.simple_block_support.solid_render.test(state)
+        tags.simple_block_support
+            .solid_render
+            .test_id(grid.get_id(pos.x + dx, pos.y, pos.z + dz))
     }
 }
 
@@ -349,19 +356,25 @@ mod tests {
         }
     }
 
+    fn state(value: &str) -> StateId {
+        StateId::from_state_str(value).expect("fixture state is in the generated table")
+    }
+
     fn room_grid(opening: bool) -> VegGrid {
         let mut grid = VegGrid::new(-64, 384, 0, 0);
+        let stone = state("minecraft:stone");
+        let cave_air = state("minecraft:cave_air");
         for x in 3..14 {
             for y in 62..71 {
                 for z in 3..14 {
-                    grid.seed(x, y, z, "minecraft:stone".to_owned());
+                    grid.seed_id(x, y, z, stone);
                 }
             }
         }
         if opening {
             for x in [4, 5] {
                 for y in [64, 65] {
-                    grid.seed(x, y, 8, "minecraft:cave_air".to_owned());
+                    grid.seed_id(x, y, 8, cave_air);
                 }
             }
         }
@@ -390,16 +403,18 @@ mod tests {
 
     fn fixture_grid(opening: bool) -> VegGrid {
         let mut grid = VegGrid::new(0, 128, -8, -8);
+        let stone = state("minecraft:stone");
         for x in -8..=8 {
             for y in 0..128 {
                 for z in -8..=8 {
-                    grid.seed(x, y, z, "minecraft:stone".to_owned());
+                    grid.seed_id(x, y, z, stone);
                 }
             }
         }
         if opening {
-            grid.seed(-4, 64, 0, "minecraft:cave_air".to_owned());
-            grid.seed(-4, 65, 0, "minecraft:cave_air".to_owned());
+            let cave_air = state("minecraft:cave_air");
+            grid.seed_id(-4, 64, 0, cave_air);
+            grid.seed_id(-4, 65, 0, cave_air);
         }
         grid
     }
@@ -417,7 +432,7 @@ mod tests {
 
     fn final_cells(grid: &VegGrid) -> BTreeMap<String, String> {
         grid.dirty_cells()
-            .map(|(x, y, z, state)| (format!("{x},{y},{z}"), state.to_owned()))
+            .map(|(x, y, z, state)| (format!("{x},{y},{z}"), state.canonical_state()))
             .collect()
     }
 
@@ -567,12 +582,12 @@ mod tests {
         }
         let grid = generated.expect("at least one deterministic room seed must roll a chest");
         assert!(
-            (3..14).any(|x| (3..14).any(|z| base_at(&grid, BlockPos { x, y: 64, z }) == SPAWNER)),
+            (3..14).any(|x| (3..14).any(|z| base_at(&grid, BlockPos { x, y: 64, z }) == Block::Spawner)),
             "accepted room must place its spawner"
         );
         assert_eq!(
             base_at(&grid, BlockPos { x: 8, y: 68, z: 8 }),
-            "minecraft:stone",
+            Block::Stone,
             "the top scan row is a gate only and must not be carved"
         );
         assert!(
@@ -580,13 +595,11 @@ mod tests {
             "placement must not write the scan-only top row"
         );
 
-        // This state has a collision shape that looks substantial but is
-        // canonically non-solid. The old base-name helper would call its
-        // `minecraft:ladder` base solid; the exact state census must reject it
-        // when it occupies the scan-only ceiling row.
-        assert!(super::super::config::blocks_motion(base_id(NON_SOLID_STATE)));
+        // This ladder state has a substantial collision shape but is canonically
+        // non-solid, so it must fail the scan-only ceiling-row gate.
+        assert!(super::super::config::blocks_motion(base_id(state(NON_SOLID_STATE))));
         let mut non_solid = room_grid(true);
-        non_solid.seed(8, 68, 8, NON_SOLID_STATE.to_owned());
+        non_solid.seed_id(8, 68, 8, state(NON_SOLID_STATE));
         let mut non_solid_random = LegacyRandomSource::new(1);
         place_monster_room(
             &mut non_solid_random,

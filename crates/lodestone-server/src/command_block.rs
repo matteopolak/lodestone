@@ -76,15 +76,17 @@
 //! reason.
 
 use lodestone_model::BlockPos;
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey};
+use lodestone_data::block_states::StateId;
 use uuid::Uuid;
 
 use crate::neighbor_update::Direction;
-use crate::redstone::{base_name, direction_from_str, direction_to_str, get_bool_property, get_str_property};
 use crate::scheduled_tick::{ScheduledTick, ScheduledTickKind, ScheduledTickQueue, TickPriority};
 
-pub const COMMAND_BLOCK: &str = "minecraft:command_block";
-pub const CHAIN_COMMAND_BLOCK: &str = "minecraft:chain_command_block";
-pub const REPEATING_COMMAND_BLOCK: &str = "minecraft:repeating_command_block";
+pub const COMMAND_BLOCK: Block = Block::CommandBlock;
+pub const CHAIN_COMMAND_BLOCK: Block = Block::ChainCommandBlock;
+pub const REPEATING_COMMAND_BLOCK: Block = Block::RepeatingCommandBlock;
 
 /// The scheduled-tick kind a `tick.rs` drain would dispatch on, mirroring
 /// [`crate::redstone_dispenser::TICK_DISPENSER_FIRE`]'s own naming — see this
@@ -92,34 +94,49 @@ pub const REPEATING_COMMAND_BLOCK: &str = "minecraft:repeating_command_block";
 pub const TICK_COMMAND_BLOCK: &str = "command:tick";
 
 #[must_use]
-pub fn is_command_block_family(state: &str) -> bool {
-    matches!(base_name(state), COMMAND_BLOCK | CHAIN_COMMAND_BLOCK | REPEATING_COMMAND_BLOCK)
+pub fn is_command_block_family(state: StateId) -> bool {
+    matches!(
+        state.block(),
+        Block::CommandBlock | Block::ChainCommandBlock | Block::RepeatingCommandBlock
+    )
 }
 
-pub use lodestone_model::CommandBlockMode;
-
-/// `CommandBlockEntity.getMode`.
 #[must_use]
-pub fn mode_for_block(state: &str) -> CommandBlockMode {
-    match base_name(state) {
-        CHAIN_COMMAND_BLOCK => CommandBlockMode::Sequence,
-        REPEATING_COMMAND_BLOCK => CommandBlockMode::Auto,
+pub fn mode_for_block(state: StateId) -> CommandBlockMode {
+    match state.block() {
+        Block::ChainCommandBlock => CommandBlockMode::Sequence,
+        Block::RepeatingCommandBlock => CommandBlockMode::Auto,
         _ => CommandBlockMode::Redstone,
     }
 }
 
-/// `CommandBlock.CONDITIONAL` — the `conditional=true/false` block-state
-/// property.
 #[must_use]
-pub fn is_conditional(state: &str) -> bool {
-    get_bool_property(state, "conditional").unwrap_or(false)
+pub fn mode_for_block_id(state: StateId) -> CommandBlockMode {
+    mode_for_block(state)
 }
 
-/// `DirectionalBlock.FACING` on a command block.
 #[must_use]
-pub fn facing(state: &str) -> Direction {
-    get_str_property(state, "facing").map(direction_from_str).unwrap_or(Direction::North)
+pub fn is_conditional(state: StateId) -> bool {
+    crate::redstone::get_bool_property(state, PropertyKey::Conditional)
+        .unwrap_or(false)
 }
+
+#[must_use]
+pub fn is_conditional_id(state: StateId) -> bool {
+    is_conditional(state)
+}
+
+#[must_use]
+pub fn facing(state: StateId) -> Direction {
+    crate::redstone::property_direction(state, PropertyKey::Facing).unwrap_or(Direction::North)
+}
+
+#[must_use]
+pub fn facing_id(state: StateId) -> Direction {
+    facing(state)
+}
+
+pub use lodestone_model::CommandBlockMode;
 
 /// The persistent state of one command block — vanilla's own base
 /// command-block fields plus its block entity's `powered`/`auto`/`conditionMet`, which
@@ -330,8 +347,13 @@ pub fn next_chain_position(from: BlockPos, direction: Direction) -> BlockPos {
 /// non-chain block, or a chain block somehow not reporting `Sequence` mode,
 /// ends the whole chain, not just this link).
 #[must_use]
-pub fn chain_link_present(state: &str) -> bool {
-    base_name(state) == CHAIN_COMMAND_BLOCK && mode_for_block(state) == CommandBlockMode::Sequence
+pub fn chain_link_present(state: StateId) -> bool {
+    state.block() == CHAIN_COMMAND_BLOCK
+}
+
+#[must_use]
+pub fn chain_link_present_id(state: StateId) -> bool {
+    chain_link_present(state)
 }
 
 /// Whether a present chain link should actually run this pass —
@@ -352,7 +374,7 @@ pub fn chain_link_should_run(powered: bool, always_active: bool) -> bool {
 /// [`COMMAND_BLOCK`] for any other ordinal, matching that `switch`'s own
 /// `default` arm.
 #[must_use]
-pub fn base_name_for_mode(mode: CommandBlockMode) -> &'static str {
+pub fn base_name_for_mode(mode: CommandBlockMode) -> Block {
     match mode {
         CommandBlockMode::Sequence => CHAIN_COMMAND_BLOCK,
         CommandBlockMode::Auto => REPEATING_COMMAND_BLOCK,
@@ -360,14 +382,18 @@ pub fn base_name_for_mode(mode: CommandBlockMode) -> &'static str {
     }
 }
 
-/// Builds a command block's block-state string from its two properties —
-/// `CommandBlock.createBlockStateDefinition`'s only two (`FACING`,
-/// `CONDITIONAL`). Property order is not significant to this crate's state
-/// resolver (`crate::redstone::with_property`'s own doc comment); this order
-/// matches this module's own test fixtures.
+/// Builds a command block state from its two mutable properties.
 #[must_use]
-pub fn state_with(base: &str, facing: Direction, conditional: bool) -> String {
-    format!("{base}[conditional={conditional},facing={}]", direction_to_str(facing))
+pub fn state_with(base: Block, facing: Direction, conditional: bool) -> StateId {
+    let properties = Properties::from_state_id(base.default_state())
+        .with_builtin(PropertyKey::Facing, crate::redstone::direction_property(facing))
+        .expect("command block facing is a generated property")
+        .with_builtin(
+            PropertyKey::Conditional,
+            if conditional { BuiltinPropertyValue::True } else { BuiltinPropertyValue::False },
+        )
+        .expect("command block conditional is a generated property");
+    Properties::state_for_block(base, &properties).expect("command block state is generated")
 }
 
 /// One [`TICK_COMMAND_BLOCK`] entry at delay `1` —
@@ -413,23 +439,23 @@ pub const COMMAND_BLOCK_SOURCE_UUID: Uuid = Uuid::nil();
 mod tests {
     use super::*;
 
-    fn state(base: &str, facing: &str, conditional: bool) -> String {
-        format!("{base}[conditional={conditional},facing={facing}]")
+    fn state(base: Block, facing: Direction, conditional: bool) -> StateId {
+        state_with(base, facing, conditional)
     }
 
     #[test]
     fn mode_is_derived_from_the_block_type_not_stored() {
-        assert_eq!(mode_for_block(&state(COMMAND_BLOCK, "north", false)), CommandBlockMode::Redstone);
-        assert_eq!(mode_for_block(&state(REPEATING_COMMAND_BLOCK, "north", false)), CommandBlockMode::Auto);
-        assert_eq!(mode_for_block(&state(CHAIN_COMMAND_BLOCK, "north", false)), CommandBlockMode::Sequence);
+        assert_eq!(mode_for_block(state(COMMAND_BLOCK, Direction::North, false)), CommandBlockMode::Redstone);
+        assert_eq!(mode_for_block(state(REPEATING_COMMAND_BLOCK, Direction::North, false)), CommandBlockMode::Auto);
+        assert_eq!(mode_for_block(state(CHAIN_COMMAND_BLOCK, Direction::North, false)), CommandBlockMode::Sequence);
     }
 
     #[test]
     fn is_command_block_family_recognises_exactly_the_three_blocks() {
-        assert!(is_command_block_family(&state(COMMAND_BLOCK, "north", false)));
-        assert!(is_command_block_family(&state(CHAIN_COMMAND_BLOCK, "north", false)));
-        assert!(is_command_block_family(&state(REPEATING_COMMAND_BLOCK, "north", false)));
-        assert!(!is_command_block_family("minecraft:stone"));
+        assert!(is_command_block_family(state(COMMAND_BLOCK, Direction::North, false)));
+        assert!(is_command_block_family(state(CHAIN_COMMAND_BLOCK, Direction::North, false)));
+        assert!(is_command_block_family(state(REPEATING_COMMAND_BLOCK, Direction::North, false)));
+        assert!(!is_command_block_family(Block::Stone.default_state()));
     }
 
     #[test]
@@ -586,9 +612,9 @@ mod tests {
 
     #[test]
     fn chain_link_present_requires_both_the_block_and_its_own_sequence_mode() {
-        assert!(chain_link_present(&state(CHAIN_COMMAND_BLOCK, "north", false)));
-        assert!(!chain_link_present(&state(COMMAND_BLOCK, "north", false)), "not a chain block at all");
-        assert!(!chain_link_present("minecraft:air"));
+        assert!(chain_link_present(state(CHAIN_COMMAND_BLOCK, Direction::North, false)));
+        assert!(!chain_link_present(state(COMMAND_BLOCK, Direction::North, false)), "not a chain block at all");
+        assert!(!chain_link_present(lodestone_data::block_states::air_state()));
     }
 
     #[test]
@@ -608,9 +634,9 @@ mod tests {
     #[test]
     fn state_with_round_trips_through_this_modules_own_readers() {
         let built = state_with(REPEATING_COMMAND_BLOCK, Direction::West, true);
-        assert_eq!(mode_for_block(&built), CommandBlockMode::Auto);
-        assert_eq!(facing(&built), Direction::West);
-        assert!(is_conditional(&built));
+        assert_eq!(mode_for_block(built), CommandBlockMode::Auto);
+        assert_eq!(facing(built), Direction::West);
+        assert!(is_conditional(built));
     }
 
     #[test]
@@ -646,11 +672,11 @@ mod tests {
         use crate::scheduled_tick::ScheduledTickQueue;
 
         let mut column = ChunkColumn::new(0, 16);
-        column.set_block(5, 5, 5, &state(COMMAND_BLOCK, "north", false));
+        column.set_block(5, 5, 5, state(COMMAND_BLOCK, Direction::North, false));
         // A constant signal source directly beside the command block —
         // `redstone::best_neighbor_signal`'s own six-direction scan reaches it
         // exactly as `Level.hasNeighborSignal` would.
-        column.set_block(5, 5, 6, "minecraft:redstone_block");
+        column.set_block(5, 5, 6, Block::RedstoneBlock.default_state());
 
         let block_entities = BlockEntityHandle::new();
         block_entities.with(|reg| reg.insert(BlockPos::new(5, 5, 5), BlockEntity::CommandBlock(CommandBlockData::new())));
@@ -687,8 +713,8 @@ mod tests {
         // must be a complete no-op for the command block, proving the arm is
         // actually gated on `block_entities` rather than always running.
         let mut column2 = ChunkColumn::new(0, 16);
-        column2.set_block(5, 5, 5, &state(COMMAND_BLOCK, "north", false));
-        column2.set_block(5, 5, 6, "minecraft:redstone_block");
+        column2.set_block(5, 5, 5, state(COMMAND_BLOCK, Direction::North, false));
+        column2.set_block(5, 5, 6, Block::RedstoneBlock.default_state());
         let mut block_ticks2: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         let _ = crate::random_tick::propagate_and_react(&mut column2, 0, 0, 5, 5, 6, &mut block_ticks2, 0);
         assert!(

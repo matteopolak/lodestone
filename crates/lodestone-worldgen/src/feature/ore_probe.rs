@@ -63,7 +63,7 @@ pub struct Snapshot {
     /// plus `is_adjacent_to_air`'s six).
     pub region_reads: u64,
     /// Of those, reads answered by the write overlay rather than a source grid —
-    /// the ones that cost a `StateInterner::name_of` read guard.
+    /// the ones that previously required a reverse state-text lookup.
     pub region_reads_overlay: u64,
     /// `RuleTest` evaluations — one per target of every candidate, until one
     /// matches.
@@ -71,6 +71,10 @@ pub struct Snapshot {
     /// Of those, the `TagMatch` ones: one `ore_tag_map` lookup plus one member-set
     /// lookup, each hashing a string.
     pub target_tests_tag: u64,
+    /// Candidate biome membership lookups and bounded-cache hits/misses.
+    pub biome_cache_queries: u64,
+    pub biome_cache_hits: u64,
+    pub biome_cache_misses: u64,
     /// `is_adjacent_to_air` calls — one per *matching* target of a candidate.
     pub air_checks: u64,
     /// Cells written through the view by ore placement.
@@ -81,7 +85,7 @@ impl Snapshot {
     /// Every counter, in report order. Named here rather than at the call site so
     /// a counter that is collected but never printed cannot exist.
     #[must_use]
-    pub fn rows(&self) -> [(&'static str, u64); 14] {
+    pub fn rows(&self) -> [(&'static str, u64); 17] {
         [
             ("source_passes", self.source_passes),
             ("features", self.features),
@@ -95,6 +99,9 @@ impl Snapshot {
             ("region_reads_overlay", self.region_reads_overlay),
             ("target_tests", self.target_tests),
             ("target_tests_tag", self.target_tests_tag),
+            ("biome_cache_queries", self.biome_cache_queries),
+            ("biome_cache_hits", self.biome_cache_hits),
+            ("biome_cache_misses", self.biome_cache_misses),
             ("air_checks", self.air_checks),
             ("writes", self.writes),
         ]
@@ -121,12 +128,15 @@ mod imp {
             region_reads_overlay: 0,
             target_tests: 0,
             target_tests_tag: 0,
+            biome_cache_queries: 0,
+            biome_cache_hits: 0,
+            biome_cache_misses: 0,
             air_checks: 0,
             writes: 0,
         }) };
     }
 
-    /// One `Cell<Snapshot>` rather than fourteen `Cell<u64>`s: a `Snapshot` is
+    /// One `Cell<Snapshot>` rather than separate `Cell<u64>`s: a `Snapshot` is
     /// `Copy`, so this is a read-modify-write of a 112-byte struct in TLS, which
     /// the optimiser folds to a single field update at each call site. Fourteen
     /// separate `thread_local!`s would each carry their own lazy-init check.
@@ -158,6 +168,9 @@ mod imp {
         bump_region_read_overlay => region_reads_overlay,
         bump_target_test => target_tests,
         bump_target_test_tag => target_tests_tag,
+        bump_biome_cache_query => biome_cache_queries,
+        bump_biome_cache_hit => biome_cache_hits,
+        bump_biome_cache_miss => biome_cache_misses,
         bump_air_check => air_checks,
         bump_write => writes,
     }
@@ -200,6 +213,9 @@ mod imp {
         bump_region_read_overlay,
         bump_target_test,
         bump_target_test_tag,
+        bump_biome_cache_query,
+        bump_biome_cache_hit,
+        bump_biome_cache_miss,
         bump_air_check,
         bump_write,
     }
@@ -217,7 +233,8 @@ mod imp {
 }
 
 pub use imp::{
-    bump_air_check, bump_blob, bump_candidate, bump_candidate_deduped, bump_feature,
+    bump_air_check, bump_biome_cache_hit, bump_biome_cache_miss, bump_biome_cache_query,
+    bump_blob, bump_candidate, bump_candidate_deduped, bump_feature,
     bump_feature_culled, bump_height_probes, bump_region_read, bump_region_read_overlay,
     bump_source_pass, bump_spheres, bump_target_test, bump_target_test_tag, bump_write, reset,
     snapshot,

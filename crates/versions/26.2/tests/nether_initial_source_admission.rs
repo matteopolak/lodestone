@@ -3,6 +3,8 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 use lodestone_server::dimension::Dimension;
 use lodestone_server::{
     retained_chunk_source_for_view_radius, ChunkColumn, ChunkSource, RetainedLightStatus,
@@ -25,7 +27,7 @@ fn initial_nether_admits_cardinal_sources_but_defers_diagonal_sources() {
     let proto = V770ServerProtocol;
 
     let mut west = ChunkColumn::new(shape.min_y, shape.world_height as i32);
-    west.set_block(15, 82, 13, "minecraft:glowstone");
+    west.set_block_id(15, 82, 13, Block::Glowstone.default_state());
     let with_west = proto
         .compute_initial_column_light_with_neighbours_in_dimension(
             &center,
@@ -45,7 +47,7 @@ fn initial_nether_admits_cardinal_sources_but_defers_diagonal_sources() {
     assert_eq!(block_at(&with_west, 82, 0, 13), 14);
 
     let mut north_west = ChunkColumn::new(shape.min_y, shape.world_height as i32);
-    north_west.set_block(15, 82, 15, "minecraft:glowstone");
+    north_west.set_block_id(15, 82, 15, Block::Glowstone.default_state());
     let with_diagonal = proto
         .compute_initial_column_light_with_neighbours_in_dimension(
             &center,
@@ -241,7 +243,7 @@ fn dependency_initialization_uses_its_own_unsettled_neighbour_sources() {
         RetainedLightStatus::DependencyInitialized,
     );
     let mut future_neighbour = blank();
-    future_neighbour.set_block(8, 82, 8, "minecraft:glowstone");
+    future_neighbour.set_block_id(8, 82, 8, Block::Glowstone.default_state());
     let mut neighbours = Vec::new();
     for dz in -1..=1 {
         for dx in -1..=1 {
@@ -326,7 +328,7 @@ fn dependency_centre_admission_preserves_values_and_center_storage_shape() {
     let storage = LightStorage::from_masks(allocated, light_and_data);
 
     let mut centre = source.column(0, 0);
-    centre.set_block(8, 82, 8, "minecraft:netherrack");
+    centre.set_block_id(8, 82, 8, Block::Netherrack.default_state());
     retained.set_storage(storage.clone());
     centre.set_retained_light_with_status(
         retained.clone(),
@@ -335,7 +337,7 @@ fn dependency_centre_admission_preserves_values_and_center_storage_shape() {
     assert!(source.store_resident_column(0, 0, &centre));
 
     let mut new_dependency = source.column(1, 0);
-    new_dependency.set_block(0, 82, 0, "minecraft:glowstone");
+    new_dependency.set_block_id(0, 82, 0, Block::Glowstone.default_state());
     assert!(source.store_resident_column(1, 0, &new_dependency));
     assert!(new_dependency.retained_light().is_none());
 
@@ -466,7 +468,7 @@ impl LifecycleProbeSource {
     fn with_emitter() -> Self {
         let source = Self::default();
         let mut dependency = Self::blank();
-        dependency.set_block(8, PROBE_Y, 0, "minecraft:glowstone");
+        dependency.set_block_id(8, PROBE_Y, 0, Block::Glowstone.default_state());
         source.insert((0, 1), dependency);
         source
     }
@@ -486,10 +488,9 @@ impl ChunkSource for LifecycleProbeSource {
             .unwrap_or_else(Self::blank)
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         self.column(x.div_euclid(16), z.div_euclid(16))
-            .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
-            .to_owned()
+            .block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -498,11 +499,11 @@ impl ChunkSource for LifecycleProbeSource {
             .to_owned()
     }
 
-    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+    fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
         let coordinate = (x.div_euclid(16), z.div_euclid(16));
         let mut columns = self.columns.lock().expect("probe source lock");
         let column = columns.entry(coordinate).or_insert_with(Self::blank);
-        column.set_block(x.rem_euclid(16), y, z.rem_euclid(16), name);
+        column.set_block_id(x.rem_euclid(16), y, z.rem_euclid(16), state);
     }
 
     fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {

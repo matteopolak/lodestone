@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
 use lodestone_core::Nbt;
+use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockPos, ItemStack};
 use lodestone_server::dimension::Dimension;
 use lodestone_server::region_source::RegionChunkSource;
@@ -47,20 +48,20 @@ impl ChunkSource for Flat {
         let mut column = ChunkColumn::new(MIN_Y, HEIGHT);
         for z in 0..16 {
             for x in 0..16 {
-                column.set_block(x, 60, z, "minecraft:stone");
+                column.set_block_id(x, 60, z, state("minecraft:stone"));
             }
         }
         column
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         // The column-regenerating form (correct, just not cheap); this fixture
         // is small and this path is not hot.
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
-        self.column(cx, cz).block_state(lx, y, lz).to_string()
+        self.column(cx, cz).block_state_id(lx, y, lz)
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -77,9 +78,13 @@ impl ChunkSource for Flat {
     // design (an edit a test needs to survive goes through a source with real
     // retention). Keeping that choice explicit prevents this fixture from
     // accidentally becoming a persistence double.
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
         // No storage; edits are discarded by design.
     }
+}
+
+fn state(name: &str) -> StateId {
+    StateId::from_state_str(name).expect("fixture state is in the built-in table")
 }
 
 /// Uniquely named per test: the scratch area is shared with sibling agents and
@@ -144,12 +149,12 @@ fn a_container_full_of_items_survives_a_close_and_reopen() {
 
         // Placement, as `server.rs::apply_use_item_on` does it: the block goes
         // through `ChunkSource::set_block` and the entity into the registry.
-        world.set_block(hopper_pos.x, hopper_pos.y, hopper_pos.z, "minecraft:hopper");
+        world.set_block(hopper_pos.x, hopper_pos.y, hopper_pos.z, state("minecraft:hopper"));
         world.set_block(
             furnace_pos.x,
             furnace_pos.y,
             furnace_pos.z,
-            "minecraft:blast_furnace",
+            state("minecraft:blast_furnace"),
         );
 
         let mut hopper = Hopper::new();
@@ -285,7 +290,7 @@ fn a_container_loaded_from_disk_can_be_changed_and_saved_again() {
 
     {
         let world = open(&dir);
-        world.set_block(pos.x, pos.y, pos.z, "minecraft:hopper");
+        world.set_block(pos.x, pos.y, pos.z, state("minecraft:hopper"));
         let mut hopper = Hopper::new();
         hopper.set_slot(0, Some(stack("minecraft:cobblestone", 1)));
         world
@@ -334,7 +339,7 @@ fn reloading_a_chunk_does_not_overwrite_a_live_container_with_the_disk_copy() {
     let pos = BlockPos::new(1, 64, 1);
 
     let world = open(&dir);
-    world.set_block(pos.x, pos.y, pos.z, "minecraft:hopper");
+    world.set_block(pos.x, pos.y, pos.z, state("minecraft:hopper"));
     let mut hopper = Hopper::new();
     hopper.set_slot(0, Some(stack("minecraft:stick", 1)));
     world
@@ -383,7 +388,7 @@ fn placing_containers_costs_zero_region_writes_until_a_save_runs() {
 
     for i in 0..8 {
         let pos = BlockPos::new(i * 3, 70, 0);
-        world.set_block(pos.x, pos.y, pos.z, "minecraft:hopper");
+        world.set_block(pos.x, pos.y, pos.z, state("minecraft:hopper"));
         registry.with(|reg| reg.insert(pos, BlockEntity::Hopper(Hopper::new())));
     }
 
@@ -443,7 +448,7 @@ fn the_persistent_server_and_its_world_share_one_block_entity_registry() {
     );
 
     // And the save path, which holds only `WorldState`, sees it too.
-    world.set_block(pos.x, pos.y, pos.z, "minecraft:hopper");
+    world.set_block(pos.x, pos.y, pos.z, state("minecraft:hopper"));
     let handle = world.save_handle();
     handle.save().expect("save");
     assert_eq!(
@@ -476,7 +481,7 @@ fn an_extension_block_entity_key_survives_reconciliation_and_reopen() {
 
     {
         let world = open(&dir);
-        world.set_block(pos.x, pos.y, pos.z, "minecraft:chest");
+    world.set_block(pos.x, pos.y, pos.z, state("minecraft:chest"));
         world.block_entities().with(|registry| {
             registry.insert(
                 pos,

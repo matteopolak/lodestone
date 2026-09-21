@@ -15,6 +15,8 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 use lodestone_worldgen::density::{NoiseParams, Resolver};
 use lodestone_worldgen::overworld::OverworldGenerator;
 use lodestone_worldgen::structure::StructureRegistry;
@@ -242,11 +244,18 @@ fn start_at(
     start
 }
 
+fn block_set(names: &[&str]) -> HashSet<Block> {
+    names
+        .iter()
+        .map(|name| Block::from_name(name).unwrap_or_else(|| panic!("unknown block {name}")))
+        .collect()
+}
+
 /// Counts, over every chunk the start's box covers, how many blocks are in `names`.
 fn count_blocks(
     generator: &OverworldGenerator,
     bb: lodestone_worldgen::structure::BoundingBox,
-    names: &HashSet<&str>,
+    blocks: &HashSet<Block>,
 ) -> usize {
     let mut n = 0usize;
     for x in (bb.min[0] >> 4)..=(bb.max[0] >> 4) {
@@ -255,9 +264,8 @@ fn count_blocks(
             for lx in 0..16 {
                 for lz in 0..16 {
                     for y in column.min_y()..(column.min_y() + column.height()) {
-                        let state = column.block_state(lx, y, lz);
-                        let name = state.split_once('[').map_or(state, |(n, _)| n);
-                        if names.contains(name) {
+                        let state = column.block_state_id(lx, y, lz);
+                        if blocks.contains(&state.block()) {
                             n += 1;
                         }
                     }
@@ -426,7 +434,7 @@ fn a_desert_pyramid_chunk_gains_pyramid_blocks_a_structureless_chunk_does_not() 
         blocks.len()
     );
 
-    let pyramid_blocks: HashSet<&str> = [
+    let pyramid_blocks = block_set(&[
         "minecraft:chiseled_sandstone",
         "minecraft:cut_sandstone",
         "minecraft:orange_terracotta",
@@ -435,26 +443,21 @@ fn a_desert_pyramid_chunk_gains_pyramid_blocks_a_structureless_chunk_does_not() 
         "minecraft:tnt",
         "minecraft:stone_pressure_plate",
         "minecraft:suspicious_sand",
-    ]
-    .into_iter()
-    .collect();
+    ]);
     // **The expected count is predicted, not observed.** The piece's own resolved
     // list is collapsed last-write-wins into a final state per position, and the
     // signature blocks in *that* are what the world must contain. So the number
     // comes from the start stage and the measurement from the placement stage —
     // two different stages, which is what makes a partially-written pyramid fail
     // rather than merely score lower.
-    let mut final_state: std::collections::HashMap<[i32; 3], &str> =
+    let mut final_state: std::collections::HashMap<[i32; 3], StateId> =
         std::collections::HashMap::new();
     for block in blocks.iter() {
-        final_state.insert(block.pos, block.state.as_str());
+        final_state.insert(block.pos, block.state);
     }
     let expected = final_state
         .values()
-        .filter(|state| {
-            let name = state.split_once('[').map_or(**state, |(n, _)| n);
-            pyramid_blocks.contains(name)
-        })
+        .filter(|state| pyramid_blocks.contains(&state.block()))
         .count();
     assert!(expected > 300, "the piece itself carries only {expected} signature blocks");
 
@@ -478,15 +481,13 @@ fn a_swamp_hut_chunk_gains_hut_blocks_a_structureless_chunk_does_not() {
     let without = generator(&NoStructures(ServerAssets::new()), &settings);
     let start = start_at(&with, HUT_CHUNK, "minecraft:swamp_hut");
 
-    let hut_blocks: HashSet<&str> = [
+    let hut_blocks = block_set(&[
         "minecraft:spruce_planks",
         "minecraft:spruce_stairs",
         "minecraft:cauldron",
         "minecraft:crafting_table",
         "minecraft:potted_red_mushroom",
-    ]
-    .into_iter()
-    .collect();
+    ]);
     let placed = count_blocks(&with, start.bounding_box, &hut_blocks);
     let control = count_blocks(&without, start.bounding_box, &hut_blocks);
     assert!(
@@ -523,7 +524,7 @@ fn a_jungle_temple_chunk_gains_temple_blocks_a_structureless_chunk_does_not() {
         .as_ref()
         .expect("a coded piece carries a resolved block list");
 
-    let temple_blocks: HashSet<&str> = [
+    let temple_blocks = block_set(&[
         "minecraft:chiseled_stone_bricks",
         "minecraft:cobblestone_stairs",
         "minecraft:lever",
@@ -533,20 +534,15 @@ fn a_jungle_temple_chunk_gains_temple_blocks_a_structureless_chunk_does_not() {
         "minecraft:tripwire_hook",
         "minecraft:tripwire",
         "minecraft:chest",
-    ]
-    .into_iter()
-    .collect();
-    let mut final_state: std::collections::HashMap<[i32; 3], &str> =
+    ]);
+    let mut final_state: std::collections::HashMap<[i32; 3], StateId> =
         std::collections::HashMap::new();
     for block in blocks.iter() {
-        final_state.insert(block.pos, block.state.as_str());
+        final_state.insert(block.pos, block.state);
     }
     let expected = final_state
         .values()
-        .filter(|state| {
-            let name = state.split_once('[').map_or(**state, |(n, _)| n);
-            temple_blocks.contains(name)
-        })
+        .filter(|state| temple_blocks.contains(&state.block()))
         .count();
     // 3 chiseled + 3 lever + 1 repeater + 3 piston + 2 dispenser + 4 hook +
     // 5 tripwire + 2 chest + 14 stairs (`5,9,6`..`7,4,5` and the 8 descending
@@ -605,20 +601,20 @@ fn a_coded_container_carries_its_loot_table_and_its_block() {
         assert_eq!(seeds.len(), piece.loot.len(), "{structure} reused a roll seed");
         // The block is in the piece's *final* state at that position, not merely
         // written at some point.
-        let mut final_state: std::collections::HashMap<[i32; 3], &str> =
+        let mut final_state: std::collections::HashMap<[i32; 3], StateId> =
             std::collections::HashMap::new();
         for block in piece.blocks.as_ref().expect("blocks").iter() {
-            final_state.insert(block.pos, block.state.as_str());
+            final_state.insert(block.pos, block.state);
         }
         for entry in &piece.loot {
             let state = final_state
                 .get(&entry.pos)
                 .unwrap_or_else(|| panic!("{structure} has no block at its loot pos {:?}", entry.pos));
             assert!(
-                state.starts_with("minecraft:chest[")
-                    || state.starts_with("minecraft:dispenser["),
-                "{structure}'s loot at {:?} sits on {state}",
-                entry.pos
+                state.name() == "minecraft:chest" || state.name() == "minecraft:dispenser",
+                "{structure}'s loot at {:?} sits on {}",
+                entry.pos,
+                state.canonical_state()
             );
         }
     }
@@ -659,6 +655,8 @@ fn mineshaft_scope_matches_external_corridor_sentinels() {
     let settings = settings();
     let with = generator_for_seed(SEED_42, &ServerAssets::new(), &settings);
     let without = generator_for_seed(SEED_42, &NoStructures(ServerAssets::new()), &settings);
+    let old_whole_shell = StateId::from_state_str(OLD_WHOLE_SHELL_OUTPUT)
+        .expect("known old whole-shell state");
     let column = with.column(CHUNK.0, CHUNK.1);
     let structureless = without.column(CHUNK.0, CHUNK.1);
 
@@ -667,26 +665,28 @@ fn mineshaft_scope_matches_external_corridor_sentinels() {
         let x = fields.next().expect("x").parse::<i32>().expect("integer x");
         let y = fields.next().expect("y").parse::<i32>().expect("integer y");
         let z = fields.next().expect("z").parse::<i32>().expect("integer z");
-        let expected = fields.next().expect("state");
+        let expected_text = fields.next().expect("state");
+        let expected = StateId::from_state_str(expected_text)
+            .unwrap_or_else(|| panic!("unknown expected state {expected_text}: {line}"));
         assert!(fields.next().is_none(), "one state per sentinel: {line}");
         assert_eq!(x.div_euclid(16), CHUNK.0, "sentinel leaves the target chunk: {line}");
         assert_eq!(z.div_euclid(16), CHUNK.1, "sentinel leaves the target chunk: {line}");
 
         let lx = x.rem_euclid(16) as usize;
         let lz = z.rem_euclid(16) as usize;
-        let actual = column.block_state(lx, y, lz);
+        let actual = column.block_state_id(lx, y, lz);
         assert_eq!(actual, expected, "scope replay at ({x}, {y}, {z})");
 
         // The retained pre-fix output was stone: that is the explicit
         // old-whole-shell control. A resolver with no structures independently
         // reproduces it, proving these sentinels are not terrain look-alikes.
-        let no_structure = structureless.block_state(lx, y, lz);
+        let no_structure = structureless.block_state_id(lx, y, lz);
         assert_eq!(
-            no_structure, OLD_WHOLE_SHELL_OUTPUT,
+            no_structure, old_whole_shell,
             "structureless control at ({x}, {y}, {z})"
         );
         assert_ne!(
-            OLD_WHOLE_SHELL_OUTPUT, expected,
+            old_whole_shell, expected,
             "old whole-shell control must fail at ({x}, {y}, {z})"
         );
     };
@@ -707,8 +707,8 @@ fn mineshaft_target_chunk_rng_matches_external_cobweb() {
     assert_eq!(WORLD.0.div_euclid(16), CHUNK.0);
     assert_eq!(WORLD.2.div_euclid(16), CHUNK.1);
     assert_eq!(
-        column.block_state(WORLD.0.rem_euclid(16) as usize, WORLD.1, WORLD.2.rem_euclid(16) as usize),
-        "minecraft:cobweb",
+        column.block_state_id(WORLD.0.rem_euclid(16) as usize, WORLD.1, WORLD.2.rem_euclid(16) as usize),
+        StateId::from_state_str("minecraft:cobweb").expect("known cobweb state"),
         "captured section-Y0 palette entry at the corridor's probabilistic gate"
     );
 }
@@ -730,23 +730,24 @@ fn coded_chest_reorientation_reaches_production_column_without_changing_loot() {
     assert_eq!(chest_positions.len(), 2, "jungle temple chest sidecar");
 
     let column = with.column(JUNGLE_CHUNK.0, JUNGLE_CHUNK.1);
-    let states: Vec<String> = chest_positions
+    let states: Vec<StateId> = chest_positions
         .iter()
         .map(|pos| {
             column
-                .block_state(
+                .block_state_id(
                     pos[0].rem_euclid(16) as usize,
                     pos[1],
                     pos[2].rem_euclid(16) as usize,
                 )
-                .to_owned()
         })
         .collect();
     assert_eq!(
         states,
         vec![
-            "minecraft:chest[facing=north,type=single,waterlogged=false]".to_string(),
-            "minecraft:chest[facing=south,type=single,waterlogged=false]".to_string(),
+            StateId::from_state_str("minecraft:chest[facing=north,type=single,waterlogged=false]")
+                .expect("known north-facing chest state"),
+            StateId::from_state_str("minecraft:chest[facing=south,type=single,waterlogged=false]")
+                .expect("known south-facing chest state"),
         ],
         "the receiving grid must control each coded chest's facing"
     );

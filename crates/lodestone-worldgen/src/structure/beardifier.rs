@@ -478,6 +478,7 @@ mod tests {
             pieces: vec![piece(box_)],
             terrain_adaptation: adjustment,
             pieces_complete: true,
+            mineshaft_tree: None,
         }
     }
 

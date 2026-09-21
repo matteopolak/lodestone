@@ -96,7 +96,7 @@
 //! # Dependencies
 //!
 //! [`crate::aquifer`], [`crate::compose`], [`crate::surface`],
-//! [`crate::dense_grid`], [`crate::interner`], [`crate::noise::EndIslandNoise`] and
+//! [`crate::dense_grid`], [`crate::noise::EndIslandNoise`] and
 //! `lodestone-worldgen-core`'s density interpreter. Nothing version-specific.
 
 use std::cell::RefCell;
@@ -106,15 +106,16 @@ use std::sync::{Arc, Mutex, OnceLock};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use lodestone_data::biomes::{BiomeRef, BuiltinBiome};
+use lodestone_data::block::Block;
 use lodestone_data::block_entity_types::BlockEntityType;
+use lodestone_data::block_states::StateId;
 
 use crate::aquifer::{AquiferSystem, BlockKind};
 use crate::dense_grid::DenseBlockGrid;
 use crate::density::{Builder, Resolver};
 use crate::engine::Program;
-use crate::interner::StateInterner;
 use crate::noise::EndIslandNoise;
-use crate::surface::{PreState, SurfaceDiff, SurfaceSystem, identity_canon};
+use crate::surface::{PreClass, PreState, SurfaceDiff, SurfaceSystem, identity_canon};
 use crate::structure::{StructureBlocks, StructureMutationContext, StructureMutationRecorder};
 use lodestone_worldgen_core::hash::FastMap;
 
@@ -278,7 +279,7 @@ pub struct EndColumn {
     /// [`WORLD_HEIGHT`] rows so structures above the noise ceiling survive.
     height: i32,
     world_height: i32,
-    palette: Vec<String>,
+    palette: Vec<StateId>,
     blocks: Vec<u16>,
     /// Typed biome identity per horizontal quart, resolved to a resource name
     /// only by the explicit string accessors below.
@@ -329,16 +330,16 @@ impl EndColumn {
         self.height
     }
 
-    /// Canonical block-state string at local `(lx, lz)` in `0..16` and world `y`.
-    /// Out-of-range Y is `"minecraft:air"`.
+    /// Canonical block-state id at local `(lx, lz)` in `0..16` and world `y`.
+    /// Out-of-range Y is the canonical air state.
     #[must_use]
-    pub fn block_state(&self, lx: usize, y: i32, lz: usize) -> &str {
+    pub fn block_state_id(&self, lx: usize, y: i32, lz: usize) -> StateId {
         let ly = y - self.min_y;
         if !(0..self.world_height).contains(&ly) {
-            return "minecraft:air";
+            return lodestone_data::block_states::air_state();
         }
         let idx = ((ly * 16 + lz as i32) * 16 + lx as i32) as usize;
-        &self.palette[self.blocks[idx] as usize]
+        self.palette[self.blocks[idx] as usize]
     }
 
     /// Typed biome identity at horizontal quart `(qx, qz)`, both in `0..4`.
@@ -414,20 +415,16 @@ impl EndColumn {
     /// question, and the one an empty-column bug fails.
     #[must_use]
     pub fn non_air_count(&self) -> usize {
-        let air = self
-            .palette
+        let air = lodestone_data::block_states::air_state();
+        self.blocks
             .iter()
-            .position(|s| s == "minecraft:air")
-            .map(|i| i as u16);
-        match air {
-            Some(air) => self.blocks.iter().filter(|&&b| b != air).count(),
-            None => self.blocks.len(),
-        }
+            .filter(|&&b| self.palette[b as usize] != air)
+            .count()
     }
 
     /// The raw parts, for a caller building a chunk packet or a region file.
     #[must_use]
-    pub fn into_raw(self) -> (i32, i32, Vec<String>, Vec<u16>, [BiomeRef; 16]) {
+    pub fn into_raw(self) -> (i32, i32, Vec<StateId>, Vec<u16>, [BiomeRef; 16]) {
         (
             self.min_y,
             self.world_height,
@@ -451,7 +448,6 @@ impl EndColumn {
 pub struct EndGenerator {
     seed: i64,
     slot_count: usize,
-    interner: Arc<StateInterner>,
     surface: SurfaceSystem,
     /// `noise_router.final_density`, compiled once. Cloning it per chunk is an `Arc`
     /// bump.
@@ -462,7 +458,6 @@ pub struct EndGenerator {
     sea_level: i32,
     cell_width: i32,
     cell_height: i32,
-    default_block: String,
     default_block_pre: PreState,
     /// The dimension's `default_fluid` as a [`BlockKind`]. **`Air` is a real answer
     /// here, not a missing one** — the End has no fluid, and `sea_level 0` against
@@ -669,35 +664,35 @@ impl EndGenerator {
         );
 
         let router = &settings["noise_router"];
-        let interner = Arc::new(StateInterner::new());
         let canon = identity_canon(settings);
         let final_density = Program::compile(
             &builder.build(&router["final_density"]).expect("bundled final_density density-function document"),
         );
-        let surface = SurfaceSystem::new(settings, &builder, &canon, &interner);
+        let surface = SurfaceSystem::new(settings, &builder, &canon);
 
         let min_y = settings["noise"]["min_y"].as_i64().unwrap_or(0) as i32;
         let height = settings["noise"]["height"].as_i64().unwrap_or(128) as i32;
         let sea_level = settings["sea_level"].as_i64().unwrap_or(0) as i32;
         let (cell_width, cell_height) = crate::aquifer::cell_geometry(settings);
 
-        let default_block = settings["default_block"]["Name"]
-            .as_str()
-            .unwrap_or("minecraft:end_stone")
-            .to_string();
+        let default_block = Block::from_name(
+            settings["default_block"]["Name"]
+                .as_str()
+                .unwrap_or("minecraft:end_stone"),
+        )
+        .unwrap_or(Block::EndStone)
+        .default_state();
         let default_fluid = crate::aquifer::fluid_from_settings(settings);
-        let default_block_pre = PreState::from_name(&interner, &default_block);
+        let default_block_pre = pre_state_from_canonical(default_block);
         // Read through the same `BlockKind` the fill will produce, so the two cannot
         // disagree about what "the fluid" is in a dimension whose fluid is air.
-        let default_fluid_pre = PreState::from_name(
-            &interner,
-            match default_fluid {
-                BlockKind::Air => "minecraft:air",
-                BlockKind::Water => "minecraft:water[level=0]",
-                BlockKind::Lava => "minecraft:lava[level=0]",
-                BlockKind::Stone => panic!("default_fluid is not a fluid: Stone"),
-            },
-        );
+        let default_fluid_state = match default_fluid {
+            BlockKind::Air => Block::Air.default_state(),
+            BlockKind::Water => Block::Water.default_state(),
+            BlockKind::Lava => Block::Lava.default_state(),
+            BlockKind::Stone => panic!("default_fluid is not a fluid: Stone"),
+        };
+        let default_fluid_pre = pre_state_from_canonical(default_fluid_state);
 
         let slot_count = builder.slot_count();
 
@@ -711,7 +706,6 @@ impl EndGenerator {
         Self {
             seed,
             slot_count,
-            interner,
             surface,
             final_density,
             biomes: EndBiomeSource::new(seed),
@@ -720,7 +714,6 @@ impl EndGenerator {
             sea_level,
             cell_width,
             cell_height,
-            default_block,
             default_block_pre,
             default_fluid,
             default_fluid_pre,
@@ -821,15 +814,21 @@ impl EndGenerator {
             .biomes
             .chunk_quarts_typed(cx, cz)
             .map(BiomeRef::builtin);
-        let (palette, blocks) = world.into_palette_and_blocks_box(
+        let (local_palette, blocks) = world.into_id_palette_and_blocks_box(
             cx * 16,
             self.min_y,
             cz * 16,
             16,
             WORLD_HEIGHT,
             16,
-            self.interner.id_of("minecraft:air"),
+            StateId::AIR,
         );
+        let palette = local_palette
+            .into_iter()
+            .map(|state| {
+                state
+            })
+            .collect();
         EndColumn {
             min_y: self.min_y,
             height: self.height,
@@ -890,15 +889,14 @@ impl EndGenerator {
         let columns = coords
             .iter()
             .map(|&(cx, cz)| {
-                let mut region = DenseBlockGrid::with_interner(
-                    self.interner.clone(),
+                let mut region = DenseBlockGrid::with_default(
                     (cx - 1) * 16,
                     self.min_y,
                     (cz - 1) * 16,
                     48,
                     WORLD_HEIGHT,
                     48,
-                    self.interner.id_of("minecraft:air"),
+                    StateId::AIR,
                 );
                 for source_x in cx - 1..=cx + 1 {
                     for source_z in cz - 1..=cz + 1 {
@@ -1006,7 +1004,7 @@ impl EndGenerator {
         &self,
         source_x: i32,
         source_z: i32,
-        overrides: &[(i32, i32, i32, String)],
+        overrides: &[(i32, i32, i32, StateId)],
     ) -> EndDecorationResult {
         self.parity_source_decoration_for_target_with_overrides(
             source_x, source_z, source_x, source_z, overrides,
@@ -1025,7 +1023,7 @@ impl EndGenerator {
         target_z: i32,
         source_x: i32,
         source_z: i32,
-        overrides: &[(i32, i32, i32, String)],
+        overrides: &[(i32, i32, i32, StateId)],
     ) -> EndDecorationResult {
         let mut world = self.parity_decoration_grid_for_target(target_x, target_z);
         let (min_x, min_y, min_z, size_x, size_y, size_z) = world.bounds();
@@ -1034,7 +1032,7 @@ impl EndGenerator {
                 && (min_y..min_y + size_y).contains(y)
                 && (min_z..min_z + size_z).contains(z)
             {
-                world.set(*x, *y, *z, state);
+                world.set_id(*x, *y, *z, *state);
             }
         }
         let before = world.clone();
@@ -1063,7 +1061,7 @@ impl EndGenerator {
                         spills.push(EndDecorationSpill {
                             source: (source_x, source_z),
                             position: (x, y, z),
-                            state: world.get(x, y, z).to_owned(),
+                            state: world.get_id(x, y, z),
                         });
                     }
                 }
@@ -1081,15 +1079,14 @@ impl EndGenerator {
         target_x: i32,
         target_z: i32,
     ) -> DenseBlockGrid {
-        let mut world = DenseBlockGrid::with_interner(
-            Arc::clone(&self.interner),
+        let mut world = DenseBlockGrid::with_default(
             (target_x - 1) * 16,
             self.min_y,
             (target_z - 1) * 16,
             48,
             WORLD_HEIGHT,
             48,
-            self.interner.id_of("minecraft:air"),
+            StateId::AIR,
         );
         for cx in target_x - 1..=target_x + 1 {
             for cz in target_z - 1..=target_z + 1 {
@@ -1178,7 +1175,6 @@ impl EndGenerator {
                     self.surface_stage(&field, &heights, &biome_quarts, cx * 16, cz * 16);
                 schedule.enter(crate::stage_schedule::ColumnStage::Materialize);
                 let world = crate::compose::materialize_column(
-                    &self.interner,
                     &field,
                     &surface_diff,
                     cx * 16,
@@ -1308,7 +1304,6 @@ impl EndGenerator {
         let surface_diff = self.surface_stage(&field, &heights, &biome_quarts, base_x, base_z);
         schedule.enter(crate::stage_schedule::ColumnStage::Materialize);
         let world = crate::compose::materialize_column(
-            &self.interner,
             &field,
             &surface_diff,
             base_x,
@@ -1334,15 +1329,14 @@ impl EndGenerator {
         let base_x = terrain.bounds().0;
         let base_y = terrain.bounds().1;
         let base_z = terrain.bounds().2;
-        let mut world = DenseBlockGrid::with_interner(
-            Arc::clone(&self.interner),
+        let mut world = DenseBlockGrid::with_default(
             base_x,
             base_y,
             base_z,
             16,
             WORLD_HEIGHT,
             16,
-            self.interner.id_of("minecraft:air"),
+            StateId::AIR,
         );
         world.copy_box_from(
             &terrain,
@@ -1363,9 +1357,7 @@ impl EndGenerator {
     /// Structure placement records this before a later write can replace the
     /// state, so the packet seam does not have to infer history from the final
     /// palette.
-    fn block_entity_type_for_state(state: &str) -> Option<BlockEntityType> {
-        let state = lodestone_data::block_states::state_id(state)
-            .and_then(lodestone_data::block_states::StateId::new)?;
+    fn block_entity_type_for_state(state: StateId) -> Option<BlockEntityType> {
         lodestone_data::block_entity_types::block_entity_type(state)
     }
 
@@ -1411,7 +1403,7 @@ impl EndGenerator {
                     }
                     if let Some(blocks) = &piece.blocks {
                         for block in blocks.iter() {
-                            if let Some(type_id) = Self::block_entity_type_for_state(&block.state) {
+                            if let Some(type_id) = Self::block_entity_type_for_state(block.state) {
                                 if type_id != BlockEntityType::ENDER_CHEST
                                     && (min_x..min_x + 16).contains(&block.pos[0])
                                     && (min_z..min_z + 16).contains(&block.pos[2])
@@ -1424,7 +1416,7 @@ impl EndGenerator {
                                     });
                                 }
                             }
-                            mutation.write(&mut world, block.pos[0], block.pos[1], block.pos[2], &block.state);
+                            mutation.write(&mut world, block.pos[0], block.pos[1], block.pos[2], block.state);
                         }
                     }
                     if let Some(placement) = &piece.placement {
@@ -1514,7 +1506,7 @@ impl EndGenerator {
         });
         EndStructurePlacementResult {
             block_entity_events,
-            structure_blocks: mutation_recorder.finish(world.interner()),
+            structure_blocks: mutation_recorder.finish(),
         }
     }
 
@@ -1546,15 +1538,14 @@ impl EndGenerator {
         Vec<EndBlockEntityEvent>,
         StructureBlocks,
     ) {
-        let mut region = DenseBlockGrid::with_interner(
-            self.interner.clone(),
+        let mut region = DenseBlockGrid::with_default(
             (cx - 1) * 16,
             self.min_y,
             (cz - 1) * 16,
             48,
             WORLD_HEIGHT,
             48,
-            self.interner.id_of("minecraft:air"),
+            StateId::AIR,
         );
         for source_x in cx - 1..=cx + 1 {
             for source_z in cz - 1..=cz + 1 {
@@ -1623,12 +1614,7 @@ impl EndGenerator {
                     if remaining == 0 {
                         break;
                     }
-                    let Some(state) = region
-                        .interner()
-                        .canonical_id(region.get_id(cx * 16 + x, min_y + local_y, cz * 16 + z))
-                    else {
-                        continue;
-                    };
+                    let state = region.get_id(cx * 16 + x, min_y + local_y, cz * 16 + z);
                     let stored = (local_y + 1) as u16;
                     if maps[0][index] == 0 && state != lodestone_data::block_states::air_state() {
                         maps[0][index] = stored;
@@ -1713,13 +1699,6 @@ impl EndGenerator {
         base_x: i32,
         base_z: i32,
     ) -> SurfaceDiff {
-        // Re-derived rather than reasoned about: a wrong `PreClass` changes which
-        // surface rules fire and still produces a plausible column.
-        debug_assert_eq!(
-            self.default_block_pre,
-            PreState::from_name(&self.interner, &self.default_block),
-        );
-
         let pre = |lx: i32, y: i32, lz: i32| -> PreState {
             let ly = y - self.min_y;
             if !(0..self.height).contains(&ly) {
@@ -1804,6 +1783,18 @@ impl crate::structure::StartContext for EndStartSampler<'_> {
 
     fn block_kind_at(&self, x: i32, y: i32, z: i32) -> BlockKind {
         self.aquifer(x.div_euclid(16), z.div_euclid(16)).block_at(x, y, z)
+    }
+}
+
+fn pre_state_from_canonical(canonical: StateId) -> PreState {
+    let class = match canonical.block() {
+        Block::Air => PreClass::Air,
+        Block::Water | Block::Lava => PreClass::Fluid,
+        _ => PreClass::Stone,
+    };
+    PreState {
+        state: canonical,
+        class,
     }
 }
 

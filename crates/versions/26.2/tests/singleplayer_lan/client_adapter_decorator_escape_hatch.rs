@@ -32,6 +32,7 @@
 use std::time::Duration;
 
 use lodestone_client::{ClientBuilder, ClientHandle, EventStream, LoginProfile, ServerAddress};
+use lodestone_data::block_states::StateId;
 use lodestone_model::{
     AdapterError, ChatKind, ClientAction, ClientEvent, ConnectionState, Directive, Text,
     VersionAdapter, WorldSink,
@@ -48,12 +49,12 @@ impl ChunkSource for AirSource {
         ChunkColumn::new(-64, 384)
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
-        self.column(cx, cz).block_state(lx, y, lz).to_string()
+        self.column(cx, cz).block_state_id(lx, y, lz)
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -64,7 +65,7 @@ impl ChunkSource for AirSource {
         self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
 }
 
 /// Which single behaviour, if any, [`Decorator`] deviates from plain

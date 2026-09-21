@@ -47,25 +47,25 @@ pub(super) const ITEM_DIMENSIONS: EntityDimensions = EntityDimensions::new(0.25,
 ///
 /// # Cost, stated because it is strictly more work per item
 ///
-/// The boolean was one map lookup per cell. This is a `String` from the oracle, a
-/// name→id lookup, and an O(1) rodata index — then `collide` sweeps the cells the
+/// The boolean was one map lookup per cell. This is a typed state lookup and an
+/// O(1) rodata index — then `collide` sweeps the cells the
 /// item's expanded box spans rather than probing one column. `probe_count` is
 /// incremented per cell so the cost is a **counter** a gate can assert on rather
 /// than a duration, and `items_settled_probe_count` exposes it.
 pub(super) struct LiveBlockCollision<'a> {
-    pub(super) block_state: &'a dyn Fn(i32, i32, i32) -> String,
+    pub(super) block_state: &'a dyn Fn(i32, i32, i32) -> lodestone_data::block_states::StateId,
     pub(super) probe_count: std::cell::Cell<u64>,
 }
 
 impl CollisionView for LiveBlockCollision<'_> {
     fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<lodestone_physics::Aabb>) {
         self.probe_count.set(self.probe_count.get() + 1);
-        let name = (self.block_state)(x, y, z);
+        let state = (self.block_state)(x, y, z);
         // The moving-piston state has no static census box because its carried
         // shape is dynamic. During the server's discrete two-cell shove it is
         // nevertheless solid for entity support and collision, matching the
         // pathfinding adapter's deliberately equivalent full-cube fallback.
-        if crate::piston::is_moving_piston(&name) {
+        if state.block().name() == "minecraft:moving_piston" {
             let (bx, by, bz) = (f64::from(x), f64::from(y), f64::from(z));
             out.push(lodestone_physics::Aabb::new(bx, by, bz, bx + 1.0, by + 1.0, bz + 1.0));
             return;
@@ -74,9 +74,6 @@ impl CollisionView for LiveBlockCollision<'_> {
         // block's registered default for properties the input omits. Replacing it
         // with a lowest-id fallback makes a bare oak slab a full cube rather than
         // its default bottom slab, so the item rests at the wrong height.
-        let Some(state) = block_state_id(&name) else {
-            return;
-        };
         let shape = collision_shapes::collision_boxes(state);
         let (bx, by, bz) = (f64::from(x), f64::from(y), f64::from(z));
         for b in shape {
@@ -335,18 +332,23 @@ fn mob_supported(view: &dyn CollisionView, dimensions: EntityDimensions, feet: V
 #[cfg(test)]
 mod live_mob_collision_tests {
     use super::*;
+    use lodestone_data::block_states::StateId;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    fn state_with_floor(x: i32, y: i32, z: i32) -> String {
+    fn state(name: &str) -> StateId {
+        StateId::from_state_str(name).expect("fixture state must be in the built-in registry")
+    }
+
+    fn state_with_floor(x: i32, y: i32, z: i32) -> StateId {
         let _ = (x, z);
         if y == 0 {
-            "minecraft:stone".to_string()
+            state("minecraft:stone")
         } else {
-            AIR.to_string()
+            state("minecraft:air")
         }
     }
 
-    fn settle(sim: &mut MobSim<'_>, state: &(dyn Fn(i32, i32, i32) -> String + Sync)) {
+    fn settle(sim: &mut MobSim<'_>, state: &(dyn Fn(i32, i32, i32) -> StateId + Sync)) {
         for _ in 0..160 {
             sim.tick_with_terrain(state);
         }
@@ -389,7 +391,7 @@ mod live_mob_collision_tests {
     /// 0.5 high, a fence is 1.5 high, and short grass has no collision at all.
     #[test]
     fn live_sweep_uses_slab_fence_and_non_colliding_plant_shapes() {
-        for (state, expected_y) in [
+        for (state_name, expected_y) in [
             ("minecraft:oak_slab[type=bottom]", 0.5),
             ("minecraft:oak_fence[north=false,east=false,south=false,west=false,waterlogged=false]", 1.5),
             ("minecraft:short_grass", 0.0),
@@ -404,11 +406,11 @@ mod live_mob_collision_tests {
                 .id();
             let live = |x: i32, y: i32, z: i32| {
                 if x == 0 && y == 0 && z == 0 {
-                    state.to_string()
+                    state(state_name)
                 } else if y == -1 {
-                    "minecraft:stone".to_string()
+                    state("minecraft:stone")
                 } else {
-                    AIR.to_string()
+                    state("minecraft:air")
                 }
             };
             settle(&mut sim, &live);
@@ -433,9 +435,9 @@ mod live_mob_collision_tests {
         let floor_exists = AtomicBool::new(true);
         let live = |x: i32, y: i32, z: i32| {
             if floor_exists.load(Ordering::SeqCst) && x == 0 && y == 0 && z == 0 {
-                "minecraft:stone".to_string()
+                state("minecraft:stone")
             } else {
-                AIR.to_string()
+                state("minecraft:air")
             }
         };
         sim.tick_with_terrain(&live);
@@ -464,9 +466,9 @@ mod live_mob_collision_tests {
                 .id();
             let floor = |bx: i32, by: i32, bz: i32| {
                 if (bx, by, bz) == (0, 0, 0) {
-                    "minecraft:stone".to_string()
+                    state("minecraft:stone")
                 } else {
-                    AIR.to_string()
+                    state("minecraft:air")
                 }
             };
             sim.tick_with_terrain(&floor);
@@ -511,11 +513,11 @@ mod live_mob_collision_tests {
             .id();
         let live = |x: i32, y: i32, z: i32| {
             if y == 0 {
-                "minecraft:stone".to_string()
+                state("minecraft:stone")
             } else if x == 2 && y == 1 && z == 0 {
-                "minecraft:stone".to_string()
+                state("minecraft:stone")
             } else {
-                AIR.to_string()
+                state("minecraft:air")
             }
         };
         sim.tick_with_terrain(&live);
@@ -564,7 +566,7 @@ mod live_mob_collision_tests {
             held_item: None,
             view_direction: Vec3::new(0.0, 0.0, 1.0),
         }]);
-        let live = |x: i32, y: i32, z: i32| snapshot.block_state(x, y, z).to_owned();
+        let live = |x: i32, y: i32, z: i32| snapshot.block_state_id(x, y, z);
 
         sim.tick_with_terrain(&live);
 

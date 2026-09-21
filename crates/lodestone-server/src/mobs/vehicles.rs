@@ -10,7 +10,7 @@ use lodestone_physics::{CollisionView, EntityDimensions, Vec3d};
 use lodestone_model::{EntityNetworkId, ResourceKey, Vec3};
 use uuid::Uuid;
 
-use super::{MobSim, TrackedVehicle, block_state_id};
+use super::{MobSim, TrackedVehicle};
 
 /// The tick-start chunk owner of one un-ridden vehicle.
 ///
@@ -346,7 +346,7 @@ impl<'w> MobSim<'w> {
         &self,
         id: i32,
         passenger_yaw: f32,
-        block_state: &dyn Fn(i32, i32, i32) -> String,
+        block_state: &dyn Fn(i32, i32, i32) -> block_states::StateId,
     ) -> Option<Vec3> {
         let vehicle = self.vehicles.get(&id)?;
         Some(boat_dismount_position(
@@ -362,7 +362,7 @@ impl<'w> MobSim<'w> {
         &self,
         id: EntityNetworkId,
         passenger_yaw: f32,
-        block_state: &dyn Fn(i32, i32, i32) -> String,
+        block_state: &dyn Fn(i32, i32, i32) -> block_states::StateId,
     ) -> Option<Vec3> {
         self.vehicle_dismount_position(server_entity_raw(id)?, passenger_yaw, block_state)
     }
@@ -465,7 +465,7 @@ impl<'w> MobSim<'w> {
     /// `float_boat` and `move_entity` come from [`lodestone_physics::vehicle`] —
     /// literally the same functions the client's `tick_controlled_vehicle` calls,
     /// so a boat cannot behave one way while watched and another while ridden.
-    pub fn tick_vehicles(&mut self, block_state: &dyn Fn(i32, i32, i32) -> String) {
+    pub fn tick_vehicles(&mut self, block_state: &dyn Fn(i32, i32, i32) -> block_states::StateId) {
         self.clear_disconnected_vehicle_riders();
         let mut ids: Vec<i32> = self.vehicles.keys().copied().collect();
         ids.sort_unstable();
@@ -484,7 +484,7 @@ impl<'w> MobSim<'w> {
     /// owns a cloned tick-start vehicle; no completion writes the live map.
     pub(crate) fn tick_vehicle_owner_batches(
         &mut self,
-        block_state: &(dyn Fn(i32, i32, i32) -> String + Sync),
+        block_state: &(dyn Fn(i32, i32, i32) -> block_states::StateId + Sync),
     ) -> Vec<VehicleTickOwnerBatch> {
         self.clear_disconnected_vehicle_riders();
         self.vehicle_owner_plan = self
@@ -507,7 +507,7 @@ impl<'w> MobSim<'w> {
 
     fn tick_vehicle_owner_batches_with_workers(
         &self,
-        block_state: &(dyn Fn(i32, i32, i32) -> String + Sync),
+        block_state: &(dyn Fn(i32, i32, i32) -> block_states::StateId + Sync),
         worker_count: usize,
     ) -> Vec<VehicleTickOwnerBatch> {
         let mut ids: Vec<i32> = self.vehicles.keys().copied().collect();
@@ -682,7 +682,7 @@ fn merge_vehicle_tick_owner_batches(
 
 fn tick_one_vehicle(
     vehicle: &mut TrackedVehicle,
-    block_state: &dyn Fn(i32, i32, i32) -> String,
+    block_state: &dyn Fn(i32, i32, i32) -> block_states::StateId,
 ) {
     use lodestone_physics::vehicle::{BOAT_STEP_HEIGHT, boat_status, float_boat};
     use lodestone_physics::{MoveContext, PhysicsProfile, move_entity};
@@ -740,7 +740,7 @@ fn tick_one_vehicle(
 
 fn ticked_vehicle(
     mut vehicle: TrackedVehicle,
-    block_state: &dyn Fn(i32, i32, i32) -> String,
+    block_state: &dyn Fn(i32, i32, i32) -> block_states::StateId,
 ) -> TrackedVehicle {
     tick_one_vehicle(&mut vehicle, block_state);
     vehicle
@@ -761,14 +761,13 @@ fn ticked_vehicle(
 /// for most blocks and would also classify **air** as land, which freezes a boat
 /// in mid-fall.
 struct VehicleCollision<'a> {
-    block_state: &'a dyn Fn(i32, i32, i32) -> String,
+    block_state: &'a dyn Fn(i32, i32, i32) -> block_states::StateId,
 }
 
 impl VehicleCollision<'_> {
     /// The validated block-state id at a cell, `None` outside the table.
     fn state_id(&self, x: i32, y: i32, z: i32) -> Option<block_states::StateId> {
-        let name = (self.block_state)(x, y, z);
-        block_state_id(&name)
+        Some((self.block_state)(x, y, z))
     }
 }
 
@@ -798,12 +797,7 @@ impl CollisionView for VehicleCollision<'_> {
         // actually touches the hull — so answering `0.6` for a shapeless cell is
         // unreachable rather than wrong, and the census read here is the honest
         // version either way.
-        let name = (self.block_state)(x, y, z);
-        // The block name without its `[…]` state properties — none of the four
-        // slippery blocks has any, but a `ChunkSource` hands back canonical
-        // states, so an unstripped compare would silently never match.
-        let base = name.split_once('[').map_or(name.as_str(), |(base, _)| base);
-        match base {
+        match (self.block_state)(x, y, z).block().name() {
             "minecraft:ice" | "minecraft:frosted_ice" | "minecraft:packed_ice" => 0.98,
             "minecraft:blue_ice" => 0.989,
             "minecraft:slime_block" => 0.8,
@@ -817,8 +811,7 @@ impl CollisionView for VehicleCollision<'_> {
     }
 
     fn fluid_at(&self, x: i32, y: i32, z: i32) -> Option<lodestone_physics::fluid::FluidCell> {
-        let name = (self.block_state)(x, y, z);
-        let state = crate::fluid::fluid_state_of(&name)?;
+        let state = super::block_ids::fluid_state_id((self.block_state)(x, y, z))?;
         Some(lodestone_physics::fluid::FluidCell {
             kind: match state.kind {
                 crate::fluid::FluidKind::Water => lodestone_physics::fluid::FluidKind::Water,
@@ -848,7 +841,7 @@ fn block_floor_height(view: &dyn CollisionView, x: i32, y: i32, z: i32) -> f64 {
 fn boat_dismount_position(
     boat_position: Vec3d,
     passenger_yaw: f32,
-    block_state: &dyn Fn(i32, i32, i32) -> String,
+    block_state: &dyn Fn(i32, i32, i32) -> block_states::StateId,
 ) -> Vec3 {
     const BOAT_HEIGHT: f64 = 0.5625;
 
@@ -927,14 +920,14 @@ mod vehicle_tests {
 
     /// A stone seabed at `y = 60` and water at `y = 61..=63`, so a boat can float
     /// and a lake has a bottom. Everything above is air.
-    fn lake() -> impl Fn(i32, i32, i32) -> String {
+    fn lake() -> impl Fn(i32, i32, i32) -> block_states::StateId {
         |_x, y, _z| {
             if y <= 60 {
-                "minecraft:stone".to_owned()
+                block_states::StateId::from_state_str("minecraft:stone").unwrap()
             } else if y <= 63 {
-                "minecraft:water[level=0]".to_owned()
+                block_states::StateId::from_state_str("minecraft:water[level=0]").unwrap()
             } else {
-                "minecraft:air".to_owned()
+                block_states::air_state()
             }
         }
     }
@@ -1120,9 +1113,9 @@ mod vehicle_tests {
     fn boat_dismount_prefers_the_passenger_facing_side_and_falls_back_to_the_deck() {
         let floor = |_x: i32, y: i32, _z: i32| {
             if y <= 7 {
-                "minecraft:stone".to_owned()
+                block_states::StateId::from_state_str("minecraft:stone").unwrap()
             } else {
-                "minecraft:air".to_owned()
+                block_states::air_state()
             }
         };
         let preferred = boat_dismount_position(Vec3d::new(8.0, 8.0, 8.0), 0.0, &floor);
@@ -1135,9 +1128,9 @@ mod vehicle_tests {
 
         let blocked = |_x: i32, y: i32, _z: i32| {
             if y <= 8 {
-                "minecraft:stone".to_owned()
+                block_states::StateId::from_state_str("minecraft:stone").unwrap()
             } else {
-                "minecraft:air".to_owned()
+                block_states::air_state()
             }
         };
         assert_eq!(
@@ -1347,7 +1340,7 @@ mod vehicle_tests {
         // One tick of `AbstractBoat.tick`: the clock and the damage each fall by
         // one. A reset to zero, or a decay of only one of the two, both leave a
         // visibly wrong animation and both look like "it decays" from here.
-        sim.tick_vehicles(&|_, _, _| "minecraft:air".to_owned());
+        sim.tick_vehicles(&|_, _, _| block_states::air_state());
         match hurt_of(&sim, boat) {
             Some((9, -1, d)) if (d - 24.0).abs() < f32::EPSILON => {}
             other => wrong.push(format!("after one tick the triple was {other:?}, expected (9, -1, 24.0)")),

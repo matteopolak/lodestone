@@ -4,7 +4,7 @@
 //!
 //! The block-side half of vanilla's `VillagerProfession`/`PoiTypes` pairing:
 //! which workstation block registers which point-of-interest type
-//! ([`poi_type_for_block`]), which profession that POI type hands out
+//! (`poi_type_for_state`), which profession that POI type hands out
 //! ([`profession_for_poi_type`]), and the live claim ledger
 //! ([`WorkstationClaims`]) an unemployed villager's search
 //! ([`find_and_claim_workstation`]) draws a job from. Leveling
@@ -22,7 +22,7 @@
 //!
 //! [`find_and_claim_workstation`] is the search a job-seeking villager runs:
 //! a bounded nearest-first scan of [`ChunkWorld`] for a block
-//! [`poi_type_for_block`] recognises, claiming the nearest one with a free
+//! [`poi_type_for_state`] recognises, claiming the nearest one with a free
 //! ticket. Losing the block is handled by re-verification, not an event
 //! hook — see [`WorkstationClaims::remove`]'s doc for the invalidation rule.
 //!
@@ -101,6 +101,7 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 
+use lodestone_data::block::Block;
 use lodestone_model::{BlockPos, ResourceKey};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -197,50 +198,26 @@ pub fn profession_for_poi_type(poi_type_path: &str) -> Option<Profession> {
 }
 
 /// The registered point-of-interest block table, restricted to the thirteen
-/// workstation types (`home`/`meeting`/`bee_nest`/`nether_portal`/… are not
-/// profession job sites and are out of this module's scope — the first three
-/// have no consumer anywhere in this codebase yet, and the fourth is
-/// `crate::portal`'s existing one).
-///
-/// `block_id` is the *bare* id — no `minecraft:` namespace, no `[...]` state
-/// properties — see [`bare_block_id`], which every caller here runs the raw
-/// `ChunkWorld::block_state` string through first.
 #[must_use]
-pub fn poi_type_for_block(block_id: &str) -> Option<&'static str> {
-    match block_id {
-        "blast_furnace" => Some("armorer"),
-        "smoker" => Some("butcher"),
-        "cartography_table" => Some("cartographer"),
-        "brewing_stand" => Some("cleric"),
-        "composter" => Some("farmer"),
-        "barrel" => Some("fisherman"),
-        "fletching_table" => Some("fletcher"),
-        // All four cauldron fill states share one POI type.
-        "cauldron" | "water_cauldron" | "lava_cauldron" | "powder_snow_cauldron" => {
+pub fn poi_type_for_state(state: lodestone_data::block_states::StateId) -> Option<&'static str> {
+    match state.block() {
+        Block::BlastFurnace => Some("armorer"),
+        Block::Smoker => Some("butcher"),
+        Block::CartographyTable => Some("cartographer"),
+        Block::BrewingStand => Some("cleric"),
+        Block::Composter => Some("farmer"),
+        Block::Barrel => Some("fisherman"),
+        Block::FletchingTable => Some("fletcher"),
+        Block::Cauldron | Block::WaterCauldron | Block::LavaCauldron | Block::PowderSnowCauldron => {
             Some("leatherworker")
         }
-        "lectern" => Some("librarian"),
-        "stonecutter" => Some("mason"),
-        "loom" => Some("shepherd"),
-        "smithing_table" => Some("toolsmith"),
-        "grindstone" => Some("weaponsmith"),
+        Block::Lectern => Some("librarian"),
+        Block::Stonecutter => Some("mason"),
+        Block::Loom => Some("shepherd"),
+        Block::SmithingTable => Some("toolsmith"),
+        Block::Grindstone => Some("weaponsmith"),
         _ => None,
     }
-}
-
-/// Strips a [`ChunkWorld::block_state`] string down to its bare block id:
-/// `"minecraft:composter[level=3]"` -> `"composter"`. Every caller of
-/// [`poi_type_for_block`] in this module runs its input through this first,
-/// since the world snapshot answers full state strings and the POI table is
-/// keyed on the block alone (every state of a registered block maps to the
-/// same point-of-interest type, rather than only selected properties).
-#[must_use]
-pub fn bare_block_id(state: &str) -> &str {
-    let without_namespace = state.strip_prefix("minecraft:").unwrap_or(state);
-    without_namespace
-        .split('[')
-        .next()
-        .unwrap_or(without_namespace)
 }
 
 /// The live, in-memory workstation claim ledger.
@@ -383,8 +360,8 @@ pub fn find_and_claim_workstation(
         for dy in -SEARCH_RADIUS..=SEARCH_RADIUS {
             for dz in -SEARCH_RADIUS..=SEARCH_RADIUS {
                 let pos = BlockPos::new(origin.x + dx, origin.y + dy, origin.z + dz);
-                let state = world.block_state(pos.x, pos.y, pos.z);
-                if poi_type_for_block(bare_block_id(state)).is_some() {
+                let state = world.block_state_id(pos.x, pos.y, pos.z);
+                if poi_type_for_state(state).is_some() {
                     candidates.push(pos);
                 }
             }
@@ -397,8 +374,8 @@ pub fn find_and_claim_workstation(
         dx * dx + dy * dy + dz * dz
     });
     for pos in candidates {
-        let state = world.block_state(pos.x, pos.y, pos.z);
-        let Some(poi_path) = poi_type_for_block(bare_block_id(state)) else {
+        let state = world.block_state_id(pos.x, pos.y, pos.z);
+        let Some(poi_path) = poi_type_for_state(state) else {
             continue;
         };
         let Some(profession) = profession_for_poi_type(poi_path) else {
@@ -413,41 +390,35 @@ pub fn find_and_claim_workstation(
     None
 }
 
-/// The bed block tag contains all sixteen dyed bed blocks, each registered as
-/// the `home` point-of-interest type with one ticket. Takes a *bare* block id, the
-/// same contract [`poi_type_for_block`] has — run a raw
-/// [`ChunkWorld::block_state`] string through [`bare_block_id`] first.
 #[must_use]
-pub fn is_bed_block(block_id: &str) -> bool {
+pub fn is_bed_state(state: lodestone_data::block_states::StateId) -> bool {
     matches!(
-        block_id,
-        "white_bed"
-            | "orange_bed"
-            | "magenta_bed"
-            | "light_blue_bed"
-            | "yellow_bed"
-            | "lime_bed"
-            | "pink_bed"
-            | "gray_bed"
-            | "light_gray_bed"
-            | "cyan_bed"
-            | "purple_bed"
-            | "blue_bed"
-            | "brown_bed"
-            | "green_bed"
-            | "red_bed"
-            | "black_bed"
+        state.block(),
+        Block::WhiteBed
+            | Block::OrangeBed
+            | Block::MagentaBed
+            | Block::LightBlueBed
+            | Block::YellowBed
+            | Block::LimeBed
+            | Block::PinkBed
+            | Block::GrayBed
+            | Block::LightGrayBed
+            | Block::CyanBed
+            | Block::PurpleBed
+            | Block::BlueBed
+            | Block::BrownBed
+            | Block::GreenBed
+            | Block::RedBed
+            | Block::BlackBed
     )
 }
 
-/// `VillagerGoalPackages.validateBedPoi`'s block-state half: `true` when a
-/// *full* (not bare) state string carries `occupied=true` — someone is
-/// physically asleep in this bed right now, distinct from
-/// [`PoiRecord::is_occupied`]'s ticket-based sense of "occupied", which this
-/// module's own claiming logic never sets from this check.
 #[must_use]
-fn bed_state_is_occupied(state: &str) -> bool {
-    state.contains("occupied=true")
+fn bed_state_id_is_occupied(state: lodestone_data::block_states::StateId) -> bool {
+    state
+        .properties()
+        .iter()
+        .any(|&(key, value)| key == "occupied" && value == "true")
 }
 
 /// The `minecraft:home` [`ResourceKey`] every claimed bed is recorded under.
@@ -539,8 +510,8 @@ impl BedClaims {
 /// unoccupied, unclaimed bed within [`SEARCH_RADIUS`], claiming the first
 /// one found.
 ///
-/// The bed-search predicate skips a bed with `occupied=true` — this is
-/// [`bed_state_is_occupied`]; the ticket gate is [`BedClaims::try_claim`].
+/// The bed-search predicate skips a bed with `occupied=true`; the ticket gate
+/// is [`BedClaims::try_claim`].
 /// Nearest-first and [`SEARCH_RADIUS`] are [`find_and_claim_workstation`]'s
 /// own disclosed narrowing, reused rather than restated — see that
 /// function's doc.
@@ -554,8 +525,8 @@ pub fn find_and_claim_bed(origin: BlockPos, world: &ChunkWorld, claims: &mut Bed
         for dy in -SEARCH_RADIUS..=SEARCH_RADIUS {
             for dz in -SEARCH_RADIUS..=SEARCH_RADIUS {
                 let pos = BlockPos::new(origin.x + dx, origin.y + dy, origin.z + dz);
-                let state = world.block_state(pos.x, pos.y, pos.z);
-                if is_bed_block(bare_block_id(state)) {
+                let state = world.block_state_id(pos.x, pos.y, pos.z);
+                if is_bed_state(state) {
                     candidates.push(pos);
                 }
             }
@@ -568,11 +539,11 @@ pub fn find_and_claim_bed(origin: BlockPos, world: &ChunkWorld, claims: &mut Bed
         dx * dx + dy * dy + dz * dz
     });
     for pos in candidates {
-        let state = world.block_state(pos.x, pos.y, pos.z);
-        if !is_bed_block(bare_block_id(state)) {
+        let state = world.block_state_id(pos.x, pos.y, pos.z);
+        if !is_bed_state(state) {
             continue;
         }
-        if bed_state_is_occupied(state) {
+        if bed_state_id_is_occupied(state) {
             continue;
         }
         if claims.try_claim(pos) {
@@ -582,12 +553,9 @@ pub fn find_and_claim_bed(origin: BlockPos, world: &ChunkWorld, claims: &mut Bed
     None
 }
 
-/// The meeting point's one registering block is the bell, with a 32-ticket cap —
-/// a single block id, unlike [`is_bed_block`]'s sixteen-way tag match. Bare id, same
-/// contract as [`poi_type_for_block`]/[`is_bed_block`].
 #[must_use]
-pub fn is_bell_block(block_id: &str) -> bool {
-    block_id == "bell"
+pub fn is_bell_state(state: lodestone_data::block_states::StateId) -> bool {
+    state.block() == Block::Bell
 }
 
 /// The `minecraft:meeting` [`ResourceKey`] every claimed bell is recorded
@@ -680,7 +648,7 @@ impl BellClaims {
 
 /// Runs one bell search from `origin`: a nearest-first scan of `world` for a
 /// bell with a free ticket, claiming the first one found —
-/// [`find_and_claim_bed`]'s own shape, restricted to [`is_bell_block`] and
+/// [`find_and_claim_bed`]'s own shape, restricted to [`is_bell_state`] and
 /// with no `validateBedPoi`-equivalent extra check (a bell has no "someone is
 /// using it right now" state the way a bed does).
 ///
@@ -693,8 +661,8 @@ pub fn find_and_claim_bell(origin: BlockPos, world: &ChunkWorld, claims: &mut Be
         for dy in -SEARCH_RADIUS..=SEARCH_RADIUS {
             for dz in -SEARCH_RADIUS..=SEARCH_RADIUS {
                 let pos = BlockPos::new(origin.x + dx, origin.y + dy, origin.z + dz);
-                let state = world.block_state(pos.x, pos.y, pos.z);
-                if is_bell_block(bare_block_id(state)) {
+                let state = world.block_state_id(pos.x, pos.y, pos.z);
+                if is_bell_state(state) {
                     candidates.push(pos);
                 }
             }
@@ -707,8 +675,8 @@ pub fn find_and_claim_bell(origin: BlockPos, world: &ChunkWorld, claims: &mut Be
         dx * dx + dy * dy + dz * dz
     });
     for pos in candidates {
-        let state = world.block_state(pos.x, pos.y, pos.z);
-        if !is_bell_block(bare_block_id(state)) {
+        let state = world.block_state_id(pos.x, pos.y, pos.z);
+        if !is_bell_state(state) {
             continue;
         }
         if claims.try_claim(pos) {
@@ -759,30 +727,32 @@ pub fn level_up(mut level: i32, xp: i32) -> i32 {
 mod tests {
     use super::*;
 
+    fn state(name: &str) -> lodestone_data::block_states::StateId {
+        lodestone_data::block_states::StateId::from_state_str(name).unwrap()
+    }
+
     #[test]
     fn every_workstation_block_resolves_to_the_profession_that_claims_it() {
-        // Enumerates `poi_type_for_block`'s own table rather than hand-listing
-        // pairs a second time, so this cannot drift from the match arms above.
         let blocks = [
-            "blast_furnace",
-            "smoker",
-            "cartography_table",
-            "brewing_stand",
-            "composter",
-            "barrel",
-            "fletching_table",
-            "cauldron",
-            "water_cauldron",
-            "lava_cauldron",
-            "powder_snow_cauldron",
-            "lectern",
-            "stonecutter",
-            "loom",
-            "smithing_table",
-            "grindstone",
+            "minecraft:blast_furnace",
+            "minecraft:smoker",
+            "minecraft:cartography_table",
+            "minecraft:brewing_stand",
+            "minecraft:composter",
+            "minecraft:barrel",
+            "minecraft:fletching_table",
+            "minecraft:cauldron",
+            "minecraft:water_cauldron",
+            "minecraft:lava_cauldron",
+            "minecraft:powder_snow_cauldron",
+            "minecraft:lectern",
+            "minecraft:stonecutter",
+            "minecraft:loom",
+            "minecraft:smithing_table",
+            "minecraft:grindstone",
         ];
         for block in blocks {
-            let poi_type = poi_type_for_block(block)
+            let poi_type = poi_type_for_state(state(block))
                 .unwrap_or_else(|| panic!("{block} should register a POI type"));
             assert!(
                 profession_for_poi_type(poi_type).is_some(),
@@ -792,10 +762,13 @@ mod tests {
     }
 
     #[test]
-    fn bare_block_id_strips_namespace_and_state() {
-        assert_eq!(bare_block_id("minecraft:composter[level=3]"), "composter");
-        assert_eq!(bare_block_id("minecraft:lectern"), "lectern");
-        assert_eq!(bare_block_id("minecraft:air"), "air");
+    fn workstation_state_properties_do_not_change_the_poi() {
+        assert_eq!(
+            poi_type_for_state(state("minecraft:composter[level=3]")),
+            Some("farmer")
+        );
+        assert_eq!(poi_type_for_state(state("minecraft:lectern")), Some("librarian"));
+        assert_eq!(poi_type_for_state(state("minecraft:air")), None);
     }
 
     /// The discriminating claim gate: **two villagers,
@@ -839,7 +812,7 @@ mod tests {
     fn every_bed_colour_registers_as_a_home_poi() {
         // Enumerates the sixteen dyed bed blocks explicitly, mirroring the
         // workstation table's own enumeration test above rather than
-        // deriving the list from `is_bed_block` itself.
+        // deriving the list from the block-state matcher itself.
         let beds = [
             "white_bed",
             "orange_bed",
@@ -859,10 +832,13 @@ mod tests {
             "black_bed",
         ];
         for bed in beds {
-            assert!(is_bed_block(bed), "{bed} should register as a home POI");
+            assert!(
+                is_bed_state(state(&format!("minecraft:{bed}"))),
+                "{bed} should register as a home POI"
+            );
         }
-        assert!(!is_bed_block("composter"), "a workstation is not a bed");
-        assert!(!is_bed_block("air"), "air is not a bed");
+        assert!(!is_bed_state(state("minecraft:composter")), "a workstation is not a bed");
+        assert!(!is_bed_state(state("minecraft:air")), "air is not a bed");
     }
 
     /// The same discriminating shape as
@@ -967,7 +943,7 @@ mod tests {
         let mut claims = WorkstationClaims::new();
         let center = BlockPos::new(0, 70, 0);
         // "librarian" — the POI *type* a lectern registers as
-        // ([`poi_type_for_block`]), not the block id itself.
+        // (`poi_type_for_state`), not the block id itself.
         let job_type = || -> ResourceKey { "minecraft:librarian".parse().expect("valid key") };
 
         let inside = BlockPos::new(30, 70, 0);
@@ -1010,9 +986,9 @@ mod tests {
 
     #[test]
     fn a_bell_registers_as_a_meeting_poi_and_nothing_else_does() {
-        assert!(is_bell_block("bell"));
-        assert!(!is_bell_block("composter"), "a workstation is not a bell");
-        assert!(!is_bell_block("white_bed"), "a bed is not a bell");
+        assert!(is_bell_state(state("minecraft:bell")));
+        assert!(!is_bell_state(state("minecraft:composter")), "a workstation is not a bell");
+        assert!(!is_bell_state(state("minecraft:white_bed")), "a bed is not a bell");
     }
 
     /// **The magnitude half, against a bed/workstation's own 1-ticket cap**:

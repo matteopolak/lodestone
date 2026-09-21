@@ -4,7 +4,7 @@ use std::io::Read as _;
 
 use lodestone_canonical::inverse;
 use lodestone_core::{Ctx, Reader, State, encode_body};
-use lodestone_data::block_states::{self, block_name, properties};
+use lodestone_data::block_states::{self, StateId};
 use lodestone_model::{
     AnimationAction, BlockActionKind, BlockFace, BlockPos, ClientAction, ClientEvent,
     ConnectionState, Directive, Hand, PredictionSequence, Reported, Text, Vec3f, VersionAdapter,
@@ -104,7 +104,7 @@ fn join_position_chunk_and_block_update_match_protocol_5_layout() {
     assert_eq!(&inflated[10240..], &[1; 256]);
 
     assert!(matches!(
-        protocol.encode_block_update(1, 64, -1, "minecraft:stone"),
+        protocol.encode_block_update(1, 64, -1, StateId::from_state_str("minecraft:stone").unwrap()),
         ServerDirective::Send { packet_id: 35, payload }
             if payload == vec![0, 0, 0, 1, 64, 0xFF, 0xFF, 0xFF, 0xFF, 1, 0]
     ));
@@ -926,31 +926,13 @@ fn update_attributes_literal_fixture_reaches_ecs_ingest_attribute() {
 #[test]
 fn unsupported_states_are_errors_not_air_substitutions() {
     let protocol = V5ServerProtocol;
-    assert!(protocol
-        .try_encode_block_update(0, 64, 0, "minecraft:not_a_real_state")
-        .is_err());
+    assert!(StateId::from_state_str("minecraft:not_a_real_state").is_none());
 
     let unsupported = (0..block_states::STATE_COUNT)
         .find(|&state| inverse::resolve(state).is_err())
         .expect("the canonical registry has states outside the legacy image");
-    let mut state = block_name(unsupported)
-        .expect("state is in the canonical registry")
-        .to_owned();
-    let props = properties(unsupported).expect("state is in the canonical registry");
-    if !props.is_empty() {
-        state.push('[');
-        for (index, (name, value)) in props.iter().enumerate() {
-            if index != 0 {
-                state.push(',');
-            }
-            state.push_str(name);
-            state.push('=');
-            state.push_str(value);
-        }
-        state.push(']');
-    }
-    assert_eq!(block_states::state_id(&state), Some(unsupported));
-    assert!(protocol.try_encode_block_update(0, 64, 0, &state).is_err());
+    let state = StateId::new(unsupported as u32).expect("state is in the canonical registry");
+    assert!(protocol.try_encode_block_update(0, 64, 0, state).is_err());
 
     let later = block_states::state_id("minecraft:slime_block")
         .expect("the canonical registry includes the protocol-47 addition");
@@ -959,11 +941,11 @@ fn unsupported_states_are_errors_not_air_substitutions() {
         "the generic pre-flattening inverse alone cannot rule this state out"
     );
     assert!(protocol
-        .try_encode_block_update(0, 64, 0, "minecraft:slime_block")
+        .try_encode_block_update(0, 64, 0, StateId::from_state_str("minecraft:slime_block").unwrap())
         .is_err());
 
     assert!(matches!(
-        protocol.try_encode_block_update(0, 64, 0, "minecraft:packed_ice"),
+        protocol.try_encode_block_update(0, 64, 0, StateId::from_state_str("minecraft:packed_ice").unwrap()),
         Ok(ServerDirective::Send { packet_id: 35, payload })
             if payload == vec![0, 0, 0, 0, 64, 0, 0, 0, 0, 0xAE, 1, 0]
     ));

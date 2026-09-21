@@ -15,11 +15,15 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+use lodestone_data::biomes::BuiltinBiome;
+use lodestone_data::block::Block;
+use lodestone_data::block_states::{BlockStateValue, StateId};
+
 use crate::density::{Builder, Context as DfContext, Density};
-use crate::interner::{StateId, StateInterner};
 use crate::math::{floor, lerp2, map, random_between_inclusive, round};
 use crate::noise::NormalNoise;
 use crate::rng::{PositionalRandomFactory, RandomSource, AnyPositionalFactory};
+use crate::overworld::fill::PackedStateCarrier;
 
 /// Sentinel meaning that no water surface has been seen above the current block.
 const NO_WATER: i32 = i32::MIN;
@@ -29,6 +33,12 @@ const NO_WATER: i32 = i32::MIN;
 /// This value is deliberately independent of the dimension's configured
 /// minimum Y. The scan keeps it until it finds a lower non-stone block.
 const WAY_BELOW_MIN_Y: i32 = -2032 << 4;
+
+#[inline]
+#[cfg(test)]
+fn packed_index(x: i32, y: i32, z: i32, _height: i32) -> usize {
+    ((y * 16 + z) * 16 + x) as usize
+}
 
 /// Sparse local `(x, y, z)` rewrites in scan-owned column storage.
 ///
@@ -150,7 +160,7 @@ pub enum PreClass {
 /// lookup. [`class_of_name`] is available for callers that start from names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PreState {
-    /// The interned canonical pre-surface state.
+    /// The canonical pre-surface state.
     pub state: StateId,
     /// Its air/fluid/stone class.
     pub class: PreClass,
@@ -163,26 +173,34 @@ impl PreState {
         class: PreClass::Air,
     };
 
+    /// Builds a pre-surface state from a bound numeric state.
+    #[must_use]
+    pub fn from_id(state: StateId) -> Self {
+        let class = match state.block() {
+            Block::Air | Block::CaveAir | Block::VoidAir => PreClass::Air,
+            Block::Water | Block::Lava => PreClass::Fluid,
+            _ => PreClass::Stone,
+        };
+        Self { state, class }
+    }
+
     /// Builds a pre-surface state from a canonical name.
     #[must_use]
-    pub fn from_name(interner: &StateInterner, name: &str) -> Self {
-        Self {
-            state: interner.id_of(name),
-            class: class_of_name(name),
-        }
+    pub fn from_name(name: &str) -> Self {
+        Self::from_id(
+            BlockStateValue::parse(name)
+                .state_id()
+                .expect("unknown built-in block state"),
+        )
     }
 }
 
 /// Classifies a canonical block-state string.
 #[must_use]
 pub fn class_of_name(name: &str) -> PreClass {
-    if is_air(name) {
-        PreClass::Air
-    } else if is_fluid(name) {
-        PreClass::Fluid
-    } else {
-        PreClass::Stone
-    }
+    BlockStateValue::parse(name)
+        .state_id()
+        .map_or(PreClass::Stone, |state| PreState::from_id(state).class)
 }
 
 /// Maps a result-state partial key (`name` plus sorted specified properties) to
@@ -192,12 +210,12 @@ pub type BlockCanon = HashMap<String, String>;
 /// A parsed surface-rule condition.
 enum Cond {
     AbovePreliminarySurface,
-    /// `biome` — a per-position runtime check
-    /// (`ctx.biome` membership) rather than a build-time constant, since a
-    /// generator run no longer has one fixed biome for its whole life. The
-    /// list is the rule's raw `biome_is` set, exactly as written in JSON.
+    /// `biome` — a per-position runtime check (`ctx.biome` membership) rather
+    /// than a build-time constant, since a generator run no longer has one
+    /// fixed biome for its whole life. The set retains source length and
+    /// extension order for exact fallback semantics.
     BiomeIs {
-        list: Vec<String>,
+        set: BiomeSet,
         cache: usize,
     },
     NoiseThreshold {
@@ -242,6 +260,65 @@ enum Cond {
         add_stone_depth: bool,
         cache: usize,
     },
+}
+
+/// A surface-rule biome set split at the built-in/extension boundary.
+///
+/// Built-ins are checked by canonical enum identity; only names outside the
+/// generated registry remain owned strings. The fallback vector retains the
+/// source order because extension registries are allowed to expose duplicate
+/// or otherwise non-canonical names at this boundary.
+const BIOME_BITSET_WORDS: usize = 2;
+const _: () = assert!(BuiltinBiome::COUNT <= (BIOME_BITSET_WORDS * 64) as u8);
+
+#[derive(Debug)]
+struct BiomeSet {
+    builtins: [u64; BIOME_BITSET_WORDS],
+    extensions: Vec<String>,
+    source_len: usize,
+}
+
+impl BiomeSet {
+    fn from_names(names: Vec<String>) -> Self {
+        let source_len = names.len();
+        let mut builtins = [0; BIOME_BITSET_WORDS];
+        let mut extensions = Vec::new();
+        for name in names {
+            if let Some(biome) = BuiltinBiome::from_name(&name) {
+                let index = biome as usize;
+                builtins[index / 64] |= 1u64 << (index % 64);
+            } else {
+                extensions.push(name);
+            }
+        }
+        Self {
+            builtins,
+            extensions,
+            source_len,
+        }
+    }
+
+    #[cfg(test)]
+    #[inline]
+    fn contains(&self, name: &str) -> bool {
+        self.contains_resolved(BuiltinBiome::from_name(name), name)
+    }
+
+    #[inline(always)]
+    fn contains_resolved(&self, biome: Option<BuiltinBiome>, name: &str) -> bool {
+        if let Some(biome) = biome {
+            let index = biome as usize;
+            return self.builtins[index / 64] & (1u64 << (index % 64)) != 0;
+        }
+        self.extensions.iter().any(|candidate| candidate == name)
+    }
+
+    #[inline]
+    fn is_exact_builtin(&self, biome: BuiltinBiome) -> bool {
+        self.source_len == 1
+            && self.extensions.is_empty()
+            && self.builtins[biome as usize / 64] & (1u64 << (biome as usize % 64)) != 0
+    }
 }
 
 impl Cond {
@@ -292,18 +369,151 @@ enum CompiledRuleNode {
         if_true: usize,
         if_false: usize,
     },
+    ColumnCondition {
+        condition: usize,
+        if_true: usize,
+        if_false: usize,
+    },
 }
 
 struct CompiledRule {
     nodes: Vec<CompiledRuleNode>,
     entry: usize,
+    /// Whether the bundled graph has a proven no-output region below the
+    /// preliminary surface when the sulfur-biome candidate is absent.
+    deep_no_output: bool,
 }
 
 impl CompiledRule {
     fn new(rule: &Rule) -> Self {
         let mut nodes = Vec::new();
         let entry = Self::compile(rule, &mut nodes, NO_RULE_EDGE);
-        Self { nodes, entry }
+        Self {
+            nodes,
+            entry,
+            deep_no_output: false,
+        }
+    }
+
+    /// Proves that no block or band output is reachable for
+    /// `y >= 9`, `AbovePreliminarySurface == false`, and no sulfur-biome
+    /// candidate. Unknown predicates are explored both ways, so a custom
+    /// graph is rejected unless this exact proof succeeds.
+    fn prove_deep_no_output(&mut self, conditions: &[Cond]) {
+        let mut visiting = vec![false; self.nodes.len()];
+        let mut visited = vec![false; self.nodes.len()];
+        self.deep_no_output = !Self::reaches_output_deep(
+            self.entry,
+            &self.nodes,
+            conditions,
+            &mut visiting,
+            &mut visited,
+        );
+    }
+
+    fn specialize_column_invariants(&mut self, conditions: &[Cond]) {
+        for node in &mut self.nodes {
+            let Some((condition, if_true, if_false)) = (match node {
+                CompiledRuleNode::Condition {
+                    condition,
+                    if_true,
+                    if_false,
+                } if conditions[*condition].is_column_invariant() => {
+                    Some((*condition, *if_true, *if_false))
+                }
+                _ => None,
+            }) else {
+                continue;
+            };
+            *node = CompiledRuleNode::ColumnCondition {
+                condition,
+                if_true,
+                if_false,
+            };
+        }
+    }
+
+    fn reaches_output_deep(
+        pc: usize,
+        nodes: &[CompiledRuleNode],
+        conditions: &[Cond],
+        visiting: &mut [bool],
+        visited: &mut [bool],
+    ) -> bool {
+        if pc == NO_RULE_EDGE {
+            return false;
+        }
+        if visited[pc] {
+            return false;
+        }
+        if visiting[pc] {
+            return true;
+        }
+        visiting[pc] = true;
+        let result = match &nodes[pc] {
+            CompiledRuleNode::Block(_) | CompiledRuleNode::Bandlands(_) => true,
+            CompiledRuleNode::Condition {
+                condition,
+                if_true,
+                if_false,
+            }
+            | CompiledRuleNode::ColumnCondition {
+                condition,
+                if_true,
+                if_false,
+            } => match Self::deep_condition_value(&conditions[*condition]) {
+                Some(true) => Self::reaches_output_deep(
+                    *if_true,
+                    nodes,
+                    conditions,
+                    visiting,
+                    visited,
+                ),
+                Some(false) => Self::reaches_output_deep(
+                    *if_false,
+                    nodes,
+                    conditions,
+                    visiting,
+                    visited,
+                ),
+                None => {
+                    Self::reaches_output_deep(
+                        *if_true,
+                        nodes,
+                        conditions,
+                        visiting,
+                        visited,
+                    ) || Self::reaches_output_deep(
+                        *if_false,
+                        nodes,
+                        conditions,
+                        visiting,
+                        visited,
+                    )
+                }
+            },
+        };
+        visiting[pc] = false;
+        visited[pc] = true;
+        result
+    }
+
+    fn deep_condition_value(condition: &Cond) -> Option<bool> {
+        match condition {
+            Cond::AbovePreliminarySurface => Some(false),
+            Cond::BiomeIs { set, .. }
+                if set.is_exact_builtin(BuiltinBiome::SulfurCaves) =>
+            {
+                Some(false)
+            }
+            Cond::VerticalGradient {
+                true_at_and_below,
+                false_at_and_above,
+                ..
+            } if *true_at_and_below < 9 && *false_at_and_above <= 9 => Some(false),
+            Cond::Not(inner) => Self::deep_condition_value(inner).map(|value| !value),
+            _ => None,
+        }
     }
 
     fn compile(rule: &Rule, nodes: &mut Vec<CompiledRuleNode>, fallback: usize) -> usize {
@@ -353,6 +563,11 @@ impl CompiledRule {
                     condition: condition_id,
                     if_true,
                     if_false,
+                }
+                | CompiledRuleNode::ColumnCondition {
+                    condition: condition_id,
+                    if_true,
+                    if_false,
                 } => {
                     if condition(*condition_id) {
                         *if_true
@@ -389,17 +604,6 @@ impl Rule {
 /// Size of the generated clay-band table.
 const CLAY_BANDS_LEN: usize = 192;
 
-/// Allowed block names for generated clay-band entries.
-const BAND_BLOCK_NAMES: [&str; 7] = [
-    "minecraft:terracotta",
-    "minecraft:orange_terracotta",
-    "minecraft:yellow_terracotta",
-    "minecraft:brown_terracotta",
-    "minecraft:red_terracotta",
-    "minecraft:white_terracotta",
-    "minecraft:light_gray_terracotta",
-];
-
 impl BandBlocks {
     /// Selects a band entry for a world position.
     fn get_band(&self, world_x: i32, y: i32, world_z: i32) -> StateId {
@@ -415,33 +619,40 @@ impl BandBlocks {
 }
 
 /// Builds the deterministic clay-band table for a generator.
-fn generate_bands<R: RandomSource>(random: &mut R) -> Vec<String> {
-    let mut clay_bands = vec!["minecraft:terracotta".to_string(); CLAY_BANDS_LEN];
+fn generate_bands<R: RandomSource>(random: &mut R) -> Vec<StateId> {
+    let terracotta = Block::Terracotta.default_state();
+    let orange_terracotta = Block::OrangeTerracotta.default_state();
+    let yellow_terracotta = Block::YellowTerracotta.default_state();
+    let brown_terracotta = Block::BrownTerracotta.default_state();
+    let red_terracotta = Block::RedTerracotta.default_state();
+    let white_terracotta = Block::WhiteTerracotta.default_state();
+    let light_gray_terracotta = Block::LightGrayTerracotta.default_state();
+    let mut clay_bands = vec![terracotta; CLAY_BANDS_LEN];
 
     let len = CLAY_BANDS_LEN as i32;
     let mut i: i32 = 0;
     while i < len {
         i += random.next_int_bounded(5) + 1;
         if i < len {
-            clay_bands[i as usize] = "minecraft:orange_terracotta".to_string();
+            clay_bands[i as usize] = orange_terracotta;
         }
         i += 1;
     }
 
-    make_bands(random, &mut clay_bands, 1, "minecraft:yellow_terracotta");
-    make_bands(random, &mut clay_bands, 2, "minecraft:brown_terracotta");
-    make_bands(random, &mut clay_bands, 1, "minecraft:red_terracotta");
+    make_bands(random, &mut clay_bands, 1, yellow_terracotta);
+    make_bands(random, &mut clay_bands, 2, brown_terracotta);
+    make_bands(random, &mut clay_bands, 1, red_terracotta);
 
     let white_band_count = random_between_inclusive(random, 9, 15);
     let mut placed = 0;
     let mut start: i32 = 0;
     while placed < white_band_count && start < len {
-        clay_bands[start as usize] = "minecraft:white_terracotta".to_string();
+        clay_bands[start as usize] = white_terracotta;
         if start - 1 > 0 && random.next_bool() {
-            clay_bands[(start - 1) as usize] = "minecraft:light_gray_terracotta".to_string();
+            clay_bands[(start - 1) as usize] = light_gray_terracotta;
         }
         if start + 1 < len && random.next_bool() {
-            clay_bands[(start + 1) as usize] = "minecraft:light_gray_terracotta".to_string();
+            clay_bands[(start + 1) as usize] = light_gray_terracotta;
         }
         placed += 1;
         start += random.next_int_bounded(16) + 4;
@@ -451,7 +662,12 @@ fn generate_bands<R: RandomSource>(random: &mut R) -> Vec<String> {
 }
 
 /// Scatters random runs of one state through the band table.
-fn make_bands<R: RandomSource>(random: &mut R, clay_bands: &mut [String], base_width: i32, state: &str) {
+fn make_bands<R: RandomSource>(
+    random: &mut R,
+    clay_bands: &mut [StateId],
+    base_width: i32,
+    state: StateId,
+) {
     let band_count = random_between_inclusive(random, 6, 15);
     let len = clay_bands.len() as i32;
     for _ in 0..band_count {
@@ -459,7 +675,7 @@ fn make_bands<R: RandomSource>(random: &mut R, clay_bands: &mut [String], base_w
         let start = random.next_int_bounded(len);
         let mut p = 0;
         while start + p < len && p < width {
-            clay_bands[(start + p) as usize] = state.to_string();
+            clay_bands[(start + p) as usize] = state;
             p += 1;
         }
     }
@@ -494,9 +710,11 @@ impl EvalCache {
     }
 
     #[inline(always)]
-    fn begin_column(&mut self) {
+    fn begin_column(&mut self, cache_y: bool) {
         self.xz_epoch = self.xz_epoch.wrapping_add(1).max(1);
-        self.y_epoch = self.y_epoch.wrapping_add(1).max(1);
+        if cache_y {
+            self.y_epoch = self.y_epoch.wrapping_add(1).max(1);
+        }
     }
 
     #[inline(always)]
@@ -542,6 +760,8 @@ struct Ctx<'a, 'b, 'c> {
     stone_depth_below: i32,
     /// The current position's biome answer, populated only when needed.
     biome: Option<(&'a str, bool)>,
+    /// The built-in identity for `biome`, resolved once per Y position.
+    biome_builtin: Option<Option<BuiltinBiome>>,
     /// The callback used by the normal chunk scan. `top_material` supplies a
     /// fixed answer instead, so its context leaves this as `None`.
     biome_at: Option<&'b dyn Fn(i32, i32, i32) -> (&'a str, bool)>,
@@ -571,6 +791,16 @@ impl<'a, 'b, 'c> Ctx<'a, 'b, 'c> {
     }
 
     #[inline(always)]
+    fn biome_builtin(&mut self) -> Option<BuiltinBiome> {
+        if let Some(value) = self.biome_builtin {
+            return value;
+        }
+        let value = BuiltinBiome::from_name(self.biome().0);
+        self.biome_builtin = Some(value);
+        value
+    }
+
+    #[inline(always)]
     fn get_y_cache(&self, slot: usize) -> Option<bool> {
         self.cache_y.then(|| self.cache.get_y(slot)).flatten()
     }
@@ -579,6 +809,13 @@ impl<'a, 'b, 'c> Ctx<'a, 'b, 'c> {
     fn set_y_cache(&mut self, slot: usize, value: bool) {
         if self.cache_y {
             self.cache.set_y(slot, value);
+        }
+    }
+
+    #[inline(always)]
+    fn begin_y(&mut self) {
+        if self.cache_y {
+            self.cache.begin_y();
         }
     }
 }
@@ -590,8 +827,6 @@ pub struct SurfaceSystem {
     gen_depth: i32,
     /// Canonical state that surface rules may replace.
     default_block: StateId,
-    /// State table used to convert carver results at the public boundary.
-    interner: Arc<StateInterner>,
     surface_noise: NormalNoise,
     surface_secondary_noise: NormalNoise,
     master: AnyPositionalFactory,
@@ -600,7 +835,6 @@ pub struct SurfaceSystem {
     #[cfg(test)]
     rule: Rule,
     conditions: Vec<Cond>,
-    column_invariant: Vec<bool>,
     bandlands: Vec<BandBlocks>,
     compiled_rule: CompiledRule,
     /// Number of condition slots used by the scan's X/Z-local and Y-local
@@ -618,19 +852,16 @@ impl SurfaceSystem {
     /// Biome and climate values are supplied at scan time because they vary by
     /// column.
     ///
-    /// Result states and band entries are interned once during construction.
     #[must_use]
     pub fn new(
         settings: &Value,
         builder: &Builder,
         canon: &BlockCanon,
-        interner: &Arc<StateInterner>,
     ) -> Self {
         Self::new_with_preliminary_cache(
             settings,
             builder,
             canon,
-            interner,
             Arc::new(crate::aquifer::PreliminarySurfaceCache::new()),
         )
     }
@@ -641,13 +872,11 @@ impl SurfaceSystem {
         settings: &Value,
         builder: &Builder,
         canon: &BlockCanon,
-        interner: &Arc<StateInterner>,
         preliminary_shared: Arc<crate::aquifer::PreliminarySurfaceCache>,
     ) -> Self {
         let min_y = settings["noise"]["min_y"].as_i64().unwrap_or(-64) as i32;
         let gen_depth = settings["noise"]["height"].as_i64().unwrap_or(384) as i32;
-        let default_block =
-            interner.id_of(&canonical_from_block_json(&settings["default_block"], canon));
+        let default_block = canonical_state_from_block_json(&settings["default_block"], canon);
 
         let surface_noise = builder.noise("minecraft:surface");
         let surface_secondary_noise = builder.noise("minecraft:surface_secondary");
@@ -661,7 +890,6 @@ impl SurfaceSystem {
         let parser = RuleParser {
             builder,
             canon,
-            interner,
             min_y,
             gen_depth,
             xz_cache_slots: Cell::new(0),
@@ -673,18 +901,15 @@ impl SurfaceSystem {
         let xz_cache_slots = parser.xz_cache_slots.get();
         let y_cache_slots = parser.y_cache_slots.get();
         let conditions = parser.conditions.into_inner();
-        let column_invariant = conditions
-            .iter()
-            .map(Cond::is_column_invariant)
-            .collect();
         let bandlands = parser.bandlands.into_inner();
-        let compiled_rule = CompiledRule::new(&rule);
+        let mut compiled_rule = CompiledRule::new(&rule);
+        compiled_rule.specialize_column_invariants(&conditions);
+        compiled_rule.prove_deep_no_output(&conditions);
 
         Self {
             min_y,
             gen_depth,
             default_block,
-            interner: Arc::clone(interner),
             surface_noise,
             surface_secondary_noise,
             master,
@@ -693,7 +918,6 @@ impl SurfaceSystem {
             #[cfg(test)]
             rule,
             conditions,
-            column_invariant,
             bandlands,
             compiled_rule,
             xz_cache_slots,
@@ -927,6 +1151,343 @@ impl SurfaceSystem {
         )
     }
 
+    /// Evaluates a packed region column while skipping spans that the compiled
+    /// graph proves cannot emit a result. `deep_biome_absent` is a conservative
+    /// per-column mask supplied by the region biome sidecar; `true` means that
+    /// no possible zoom candidate is the sulfur biome. The packed field is
+    /// traversed once, in descending Y order, so no second shape pass or full
+    /// column span allocation is needed.
+    #[cfg(test)]
+    pub(crate) fn build_surface_reusing_packed_with_deep_skip<'b>(
+        &self,
+        mut out: SurfaceDiff,
+        blocks: &[u16],
+        field_height: i32,
+        heights: &[i32; 256],
+        deep_biome_absent: &[bool; 256],
+        biome_at: &dyn Fn(i32, i32, i32) -> (&'b str, bool),
+        column_biome_at: &dyn Fn(i32, i32, i32),
+        min_block_x: i32,
+        min_block_z: i32,
+        preliminary_shared: &crate::aquifer::PreliminarySurfaceCache,
+    ) -> SurfaceDiff
+    {
+        assert_eq!(field_height, self.gen_depth);
+        assert_eq!(
+            blocks.len(),
+            (16 * 16 * field_height) as usize,
+            "packed surface field has the wrong dimensions"
+        );
+
+        out.clear();
+        let y_lo = self.min_y;
+        let y_hi = self.min_y + self.gen_depth;
+        let mut cache = EvalCache::new(self.xz_cache_slots, self.y_cache_slots);
+        let mut column_conditions = vec![0u8; self.conditions.len()];
+        let [corner_c0, corner_c1, corner_c2, corner_c3] =
+            self.preliminary_surface_corners_with_cache(
+                min_block_x >> 4,
+                min_block_z >> 4,
+                preliminary_shared,
+            );
+        let heightmap = |lx: i32, lz: i32| -> i32 { heights[(lz * 16 + lx) as usize] };
+
+        for x in 0..16 {
+            for z in 0..16 {
+                out.begin_column(x, z);
+                let block_x = min_block_x + x;
+                let block_z = min_block_z + z;
+                let surface_depth = self.surface_depth(block_x, block_z);
+                cache.begin_column(false);
+                column_conditions.fill(0);
+                let mut ctx = Ctx {
+                    block_x,
+                    block_z,
+                    surface_depth,
+                    surface_secondary: self.surface_secondary(block_x, block_z),
+                    min_surface_level: Self::interpolate_min_surface_level(
+                        block_x,
+                        block_z,
+                        surface_depth,
+                        corner_c0,
+                        corner_c1,
+                        corner_c2,
+                        corner_c3,
+                    ),
+                    block_y: 0,
+                    water_height: NO_WATER,
+                    stone_depth_above: 0,
+                    stone_depth_below: 0,
+                    biome: None,
+                    biome_builtin: None,
+                    biome_at: Some(biome_at),
+                    cache: &mut cache,
+                    cache_y: false,
+                };
+
+                let height = heights[(z * 16 + x) as usize] + 1;
+                column_biome_at(x, height, z);
+                let mut stone_above_depth = 0;
+                let mut water_height = NO_WATER;
+                let end_y = y_lo;
+                let mut y = if height >= y_hi { y_hi - 1 } else { height };
+                if y < y_lo {
+                    out.finish_column(x, z);
+                    continue;
+                }
+
+                while y >= end_y {
+                    let span_top = y;
+                    let code = blocks[packed_index(x, y - self.min_y, z, field_height)];
+                    let mut span_bottom = y;
+                    while span_bottom > end_y {
+                        let next = span_bottom - 1;
+                        let next_code = blocks[packed_index(
+                            x,
+                            next - self.min_y,
+                            z,
+                            field_height,
+                        )];
+                        if next_code != code {
+                            break;
+                        }
+                        span_bottom = next;
+                    }
+
+                    match code {
+                        0 => {
+                            stone_above_depth = 0;
+                            water_height = NO_WATER;
+                        }
+                        2 | 3 => {
+                            if water_height == NO_WATER {
+                                water_height = span_top + 1;
+                            }
+                        }
+                        1 => {
+                            let next_ceiling_stone_y = if span_bottom == end_y {
+                                end_y
+                            } else {
+                                span_bottom + 1
+                            };
+                            let skip_deep = self.compiled_rule.deep_no_output
+                                && deep_biome_absent[(z * 16 + x) as usize];
+                            let dead_hi = (ctx.min_surface_level - 1).min(span_top);
+                            let dead_lo = 9.max(span_bottom);
+
+                            if skip_deep && dead_lo <= dead_hi {
+                                self.apply_compiled_packed_range(
+                                    (dead_hi + 1)..=span_top,
+                                    &mut stone_above_depth,
+                                    water_height,
+                                    next_ceiling_stone_y,
+                                    &heightmap,
+                                    &mut ctx,
+                                    &mut column_conditions,
+                                    &mut out,
+                                    x,
+                                    z,
+                                );
+                                stone_above_depth += dead_hi - dead_lo + 1;
+                                self.apply_compiled_packed_range(
+                                    span_bottom..=(dead_lo - 1),
+                                    &mut stone_above_depth,
+                                    water_height,
+                                    next_ceiling_stone_y,
+                                    &heightmap,
+                                    &mut ctx,
+                                    &mut column_conditions,
+                                    &mut out,
+                                    x,
+                                    z,
+                                );
+                            } else {
+                                self.apply_compiled_packed_range(
+                                    span_bottom..=span_top,
+                                    &mut stone_above_depth,
+                                    water_height,
+                                    next_ceiling_stone_y,
+                                    &heightmap,
+                                    &mut ctx,
+                                    &mut column_conditions,
+                                    &mut out,
+                                    x,
+                                    z,
+                                );
+                            }
+                        }
+                        other => panic!("invalid packed fill block kind: {other}"),
+                    }
+                    y = span_bottom - 1;
+                }
+                out.finish_column(x, z);
+            }
+        }
+        out
+    }
+
+    pub(crate) fn build_surface_reusing_packed_in_place<'b>(
+        &self,
+        carrier: &mut PackedStateCarrier,
+        heights: &[i32; 256],
+        deep_biome_absent: &[bool; 256],
+        biome_at: &dyn Fn(i32, i32, i32) -> (&'b str, bool),
+        column_biome_at: &dyn Fn(i32, i32, i32),
+        min_block_x: i32,
+        min_block_z: i32,
+        preliminary_shared: &crate::aquifer::PreliminarySurfaceCache,
+    ) {
+        let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Surface);
+        debug_assert_eq!(carrier.base_x(), min_block_x);
+        debug_assert_eq!(carrier.base_z(), min_block_z);
+        let y_lo = self.min_y;
+        let y_hi = self.min_y + self.gen_depth;
+        let mut cache = EvalCache::new(self.xz_cache_slots, self.y_cache_slots);
+        let mut column_conditions = vec![0u8; self.conditions.len()];
+        let use_deep_skip = self.packed_deep_skip_enabled();
+        let [corner_c0, corner_c1, corner_c2, corner_c3] =
+            self.preliminary_surface_corners_with_cache(
+                min_block_x >> 4,
+                min_block_z >> 4,
+                preliminary_shared,
+            );
+        let heightmap = |lx: i32, lz: i32| -> i32 { heights[(lz * 16 + lx) as usize] };
+
+        for x in 0..16 {
+            for z in 0..16 {
+                let block_x = min_block_x + x;
+                let block_z = min_block_z + z;
+                let surface_depth = self.surface_depth(block_x, block_z);
+                cache.begin_column(false);
+                column_conditions.fill(0);
+                let mut ctx = Ctx {
+                    block_x,
+                    block_z,
+                    surface_depth,
+                    surface_secondary: self.surface_secondary(block_x, block_z),
+                    min_surface_level: Self::interpolate_min_surface_level(
+                        block_x,
+                        block_z,
+                        surface_depth,
+                        corner_c0,
+                        corner_c1,
+                        corner_c2,
+                        corner_c3,
+                    ),
+                    block_y: 0,
+                    water_height: NO_WATER,
+                    stone_depth_above: 0,
+                    stone_depth_below: 0,
+                    biome: None,
+                    biome_builtin: None,
+                    biome_at: Some(biome_at),
+                    cache: &mut cache,
+                    cache_y: false,
+                };
+                let height = heights[(z * 16 + x) as usize] + 1;
+                column_biome_at(x, height, z);
+                let mut stone_above_depth = 0;
+                let mut water_height = NO_WATER;
+                let end_y = y_lo;
+                let mut y = if height >= y_hi { y_hi - 1 } else { height };
+                if y < y_lo {
+                    continue;
+                }
+                while y >= end_y {
+                    let span_top = y;
+                    let code = carrier.pre_code(block_x, y, block_z);
+                    let mut span_bottom = y;
+                    while span_bottom > end_y {
+                        let next = span_bottom - 1;
+                        if carrier.pre_code(block_x, next, block_z) != code {
+                            break;
+                        }
+                        span_bottom = next;
+                    }
+                    match code {
+                        0 => {
+                            stone_above_depth = 0;
+                            water_height = NO_WATER;
+                        }
+                        2 | 3 => {
+                            if water_height == NO_WATER {
+                                water_height = span_top + 1;
+                            }
+                        }
+                        1 => {
+                            debug_assert!((span_bottom..=span_top).all(|block_y| {
+                                carrier.pre_state(block_x, block_y, block_z).state
+                                    == self.default_block
+                            }), "stone fill span must contain only the configured default block");
+                            let next_ceiling_stone_y = if span_bottom == end_y {
+                                end_y
+                            } else {
+                                span_bottom + 1
+                            };
+                            let skip_deep = use_deep_skip
+                                && deep_biome_absent[(z * 16 + x) as usize];
+                            let dead_hi = (ctx.min_surface_level - 1).min(span_top);
+                            let dead_lo = 9.max(span_bottom);
+                            if skip_deep && dead_lo <= dead_hi {
+                                self.apply_compiled_packed_range_in_place(
+                                    (dead_hi + 1)..=span_top,
+                                    &mut stone_above_depth,
+                                    water_height,
+                                    next_ceiling_stone_y,
+                                    &heightmap,
+                                    &mut ctx,
+                                    &mut column_conditions,
+                                    carrier,
+                                    x,
+                                    z,
+                                );
+                                stone_above_depth += dead_hi - dead_lo + 1;
+                                self.apply_compiled_packed_range_in_place(
+                                    span_bottom..=(dead_lo - 1),
+                                    &mut stone_above_depth,
+                                    water_height,
+                                    next_ceiling_stone_y,
+                                    &heightmap,
+                                    &mut ctx,
+                                    &mut column_conditions,
+                                    carrier,
+                                    x,
+                                    z,
+                                );
+                            } else {
+                                self.apply_compiled_packed_range_in_place(
+                                    span_bottom..=span_top,
+                                    &mut stone_above_depth,
+                                    water_height,
+                                    next_ceiling_stone_y,
+                                    &heightmap,
+                                    &mut ctx,
+                                    &mut column_conditions,
+                                    carrier,
+                                    x,
+                                    z,
+                                );
+                            }
+                        }
+                        other => panic!("invalid packed surface state code: {other}"),
+                    }
+                    y = span_bottom - 1;
+                }
+            }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[inline]
+    fn packed_deep_skip_enabled(&self) -> bool { self.compiled_rule.deep_no_output }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[inline]
+    fn packed_deep_skip_enabled(&self) -> bool {
+        self.compiled_rule.deep_no_output
+            && std::env::var_os("LODESTONE_DISABLE_SURFACE_DEEP_SKIP").is_none()
+    }
+
     #[inline]
     fn build_surface_reusing_with_column_biome_and_preliminary_cache<'b, P, H, B, C>(
         &self,
@@ -969,7 +1530,7 @@ impl SurfaceSystem {
                 let block_x = min_block_x + x;
                 let block_z = min_block_z + z;
                 let surface_depth = self.surface_depth(block_x, block_z);
-                cache.begin_column();
+                cache.begin_column(false);
                 column_conditions.fill(0);
                 let mut ctx = Ctx {
                     block_x,
@@ -990,6 +1551,7 @@ impl SurfaceSystem {
                     stone_depth_above: 0,
                     stone_depth_below: 0,
                     biome: None,
+                    biome_builtin: None,
                     biome_at: Some(&biome_at),
                     cache: &mut cache,
                     cache_y: false,
@@ -1039,8 +1601,9 @@ impl SurfaceSystem {
                         ctx.water_height = water_height;
                         ctx.stone_depth_above = stone_above_depth;
                         ctx.stone_depth_below = stone_below_depth;
-                        ctx.cache.begin_y();
+                        ctx.begin_y();
                         ctx.biome = None;
+                        ctx.biome_builtin = None;
 
                         if old.state == self.default_block {
                             if let Some(state) = self.try_apply_compiled_column(
@@ -1068,9 +1631,6 @@ impl SurfaceSystem {
     /// grass/mycelium block. Returns the canonical result state, or `None` if no
     /// rule matched. `heightmap(local_x, local_z)` is only consulted by the
     /// `steep` condition.
-    ///
-    /// The public carver boundary returns a canonical state name, so the
-    /// selected interned state is resolved only after rule evaluation.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn top_material(
@@ -1082,10 +1642,10 @@ impl SurfaceSystem {
         heightmap: &dyn Fn(i32, i32) -> i32,
         biome: &str,
         cold_enough_to_snow: bool,
-    ) -> Option<String> {
+    ) -> Option<StateId> {
         let surface_depth = self.surface_depth(block_x, block_z);
         let mut cache = EvalCache::new(self.xz_cache_slots, self.y_cache_slots);
-        cache.begin_column();
+        cache.begin_column(true);
         cache.begin_y();
         let mut ctx = Ctx {
             block_x,
@@ -1098,12 +1658,12 @@ impl SurfaceSystem {
             stone_depth_above: 1,
             stone_depth_below: 1,
             biome: Some((biome, cold_enough_to_snow)),
+            biome_builtin: None,
             biome_at: None,
             cache: &mut cache,
             cache_y: true,
         };
         self.try_apply_compiled(heightmap, &mut ctx)
-            .map(|id| self.interner.name_of(id).to_string())
     }
 
     #[inline]
@@ -1127,6 +1687,11 @@ impl SurfaceSystem {
                     condition,
                     if_true,
                     if_false,
+                }
+                | CompiledRuleNode::ColumnCondition {
+                    condition,
+                    if_true,
+                    if_false,
                 } => {
                     if self.test(&self.conditions[*condition], heightmap, ctx) {
                         *if_true
@@ -1137,6 +1702,90 @@ impl SurfaceSystem {
             };
         }
         None
+    }
+
+    #[inline]
+    #[cfg(test)]
+    fn apply_compiled_surface_cell<H: Fn(i32, i32) -> i32 + ?Sized>(
+        &self,
+        heightmap: &H,
+        ctx: &mut Ctx<'_, '_, '_>,
+        column_conditions: &mut [u8],
+        out: &mut SurfaceDiff,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) {
+        if let Some(state) = self.try_apply_compiled_column(heightmap, ctx, column_conditions) {
+            out.push(x, y, z, state);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
+    fn apply_compiled_packed_range<H: Fn(i32, i32) -> i32 + ?Sized>(
+        &self,
+        range: std::ops::RangeInclusive<i32>,
+        stone_above_depth: &mut i32,
+        water_height: i32,
+        next_ceiling_stone_y: i32,
+        heightmap: &H,
+        ctx: &mut Ctx<'_, '_, '_>,
+        column_conditions: &mut [u8],
+        out: &mut SurfaceDiff,
+        x: i32,
+        z: i32,
+    ) {
+        for block_y in range.rev() {
+            *stone_above_depth += 1;
+            ctx.block_y = block_y;
+            ctx.water_height = water_height;
+            ctx.stone_depth_above = *stone_above_depth;
+            ctx.stone_depth_below = block_y - next_ceiling_stone_y + 1;
+            ctx.begin_y();
+            ctx.biome = None;
+            ctx.biome_builtin = None;
+            self.apply_compiled_surface_cell(
+                heightmap,
+                ctx,
+                column_conditions,
+                out,
+                x,
+                block_y,
+                z,
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_compiled_packed_range_in_place<H: Fn(i32, i32) -> i32 + ?Sized>(
+        &self,
+        range: std::ops::RangeInclusive<i32>,
+        stone_above_depth: &mut i32,
+        water_height: i32,
+        next_ceiling_stone_y: i32,
+        heightmap: &H,
+        ctx: &mut Ctx<'_, '_, '_>,
+        column_conditions: &mut [u8],
+        carrier: &mut PackedStateCarrier,
+        x: i32,
+        z: i32,
+    ) {
+        for block_y in range.rev() {
+            *stone_above_depth += 1;
+            ctx.block_y = block_y;
+            ctx.water_height = water_height;
+            ctx.stone_depth_above = *stone_above_depth;
+            ctx.stone_depth_below = block_y - next_ceiling_stone_y + 1;
+            ctx.begin_y();
+            ctx.biome = None;
+            ctx.biome_builtin = None;
+            let block_x = carrier.base_x() + x;
+            let block_z = carrier.base_z() + z;
+            if let Some(state) = self.try_apply_compiled_column(heightmap, ctx, column_conditions) {
+                carrier.set_id(block_x, block_y, block_z, state);
+            }
+        }
     }
 
     #[inline]
@@ -1163,23 +1812,27 @@ impl SurfaceSystem {
                     if_false,
                 } => {
                     let cond = &self.conditions[*condition];
-                    let value = if self.column_invariant[*condition] {
-                        match column_conditions[*condition] {
-                            1 => false,
-                            2 => true,
-                            _ => {
-                                let value = self.test(cond, heightmap, ctx);
-                                column_conditions[*condition] = if value { 2 } else { 1 };
-                                value
-                            }
+                    // A compiled path visits each condition node at most once.
+                    // The general evaluator's Y epoch cache is useful only
+                    // for callers that may revisit a source; on this linear
+                    // production walk it adds a bounds check and a write for
+                    // every Y-dependent predicate without a possible hit.
+                    let value = self.test_column(cond, heightmap, ctx);
+                    if value { *if_true } else { *if_false }
+                }
+                CompiledRuleNode::ColumnCondition {
+                    condition,
+                    if_true,
+                    if_false,
+                } => {
+                    let value = match column_conditions[*condition] {
+                        1 => false,
+                        2 => true,
+                        _ => {
+                            let value = self.test(&self.conditions[*condition], heightmap, ctx);
+                            column_conditions[*condition] = if value { 2 } else { 1 };
+                            value
                         }
-                    } else {
-                        // A compiled path visits each condition node at most once.
-                        // The general evaluator's Y epoch cache is useful only
-                        // for callers that may revisit a source; on this linear
-                        // production walk it adds a bounds check and a write for
-                        // every Y-dependent predicate without a possible hit.
-                        self.test(cond, heightmap, ctx)
                     };
                     if value { *if_true } else { *if_false }
                 }
@@ -1213,20 +1866,28 @@ impl SurfaceSystem {
                     if_false,
                 } => {
                     let cond = &self.conditions[*condition];
+                    counts[*condition] += 1;
+                    let value = self.test(cond, heightmap, ctx);
+                    if value { *if_true } else { *if_false }
+                }
+                CompiledRuleNode::ColumnCondition {
+                    condition,
+                    if_true,
+                    if_false,
+                } => {
+                    let cond = &self.conditions[*condition];
                     let value = match column_conditions.as_deref_mut() {
-                        Some(values) if self.column_invariant[*condition] => {
-                            match values[*condition] {
-                                1 => false,
-                                2 => true,
-                                _ => {
-                                    counts[*condition] += 1;
-                                    let value = self.test(cond, heightmap, ctx);
-                                    values[*condition] = if value { 2 } else { 1 };
-                                    value
-                                }
+                        Some(values) => match values[*condition] {
+                            1 => false,
+                            2 => true,
+                            _ => {
+                                counts[*condition] += 1;
+                                let value = self.test(cond, heightmap, ctx);
+                                values[*condition] = if value { 2 } else { 1 };
+                                value
                             }
-                        }
-                        _ => {
+                        },
+                        None => {
                             counts[*condition] += 1;
                             self.test(cond, heightmap, ctx)
                         }
@@ -1271,6 +1932,130 @@ impl SurfaceSystem {
         }
     }
 
+    /// Evaluates a Y-dependent condition on the linear chunk walk.
+    ///
+    /// The walk advances Y after every visit and never revisits a compiled
+    /// node at the same position, so Y-cache probes cannot produce a hit.
+    /// Keeping this path separate also leaves the cached evaluator intact for
+    /// `top_material`, whose callers may revisit a condition source.
+    #[inline(always)]
+    fn test_column<H: Fn(i32, i32) -> i32 + ?Sized>(
+        &self,
+        cond: &Cond,
+        heightmap: &H,
+        ctx: &mut Ctx<'_, '_, '_>,
+    ) -> bool {
+        match cond {
+            Cond::BiomeIs { set, .. } => {
+                let name = ctx.biome().0;
+                set.contains_resolved(ctx.biome_builtin(), name)
+            }
+            Cond::AbovePreliminarySurface => ctx.block_y >= ctx.min_surface_level,
+            Cond::NoiseThreshold {
+                noise,
+                min,
+                max,
+                is_3d: true,
+                ..
+            } => {
+                let v = noise.get_value(
+                    f64::from(ctx.block_x),
+                    f64::from(ctx.block_y),
+                    f64::from(ctx.block_z),
+                );
+                v >= *min && v <= *max
+            }
+            Cond::Not(inner) => !self.test_column(inner, heightmap, ctx),
+            Cond::StoneDepth {
+                offset,
+                add_surface_depth,
+                secondary_depth_range,
+                ceiling,
+                ..
+            } => {
+                let stone_depth = if *ceiling {
+                    ctx.stone_depth_below
+                } else {
+                    ctx.stone_depth_above
+                };
+                let surface_depth = if *add_surface_depth {
+                    ctx.surface_depth
+                } else {
+                    0
+                };
+                let secondary = if *secondary_depth_range == 0 {
+                    0
+                } else {
+                    map(
+                        ctx.surface_secondary,
+                        -1.0,
+                        1.0,
+                        0.0,
+                        f64::from(*secondary_depth_range),
+                    ) as i32
+                };
+                stone_depth <= 1 + offset + surface_depth + secondary
+            }
+            Cond::Temperature { .. } => ctx.biome().1,
+            Cond::VerticalGradient {
+                factory,
+                true_at_and_below,
+                false_at_and_above,
+                ..
+            } => {
+                let block_y = ctx.block_y;
+                if block_y <= *true_at_and_below {
+                    true
+                } else if block_y >= *false_at_and_above {
+                    false
+                } else {
+                    let probability = map(
+                        f64::from(block_y),
+                        f64::from(*true_at_and_below),
+                        f64::from(*false_at_and_above),
+                        1.0,
+                        0.0,
+                    );
+                    let mut random = factory.at(ctx.block_x, block_y, ctx.block_z);
+                    f64::from(random.next_float()) < probability
+                }
+            }
+            Cond::Water {
+                offset,
+                surface_depth_multiplier,
+                add_stone_depth,
+                ..
+            } => {
+                ctx.water_height == NO_WATER
+                    || ctx.block_y
+                        + if *add_stone_depth {
+                            ctx.stone_depth_above
+                        } else {
+                            0
+                        }
+                        >= ctx.water_height + offset + ctx.surface_depth * surface_depth_multiplier
+            }
+            Cond::YAbove {
+                anchor_y,
+                surface_depth_multiplier,
+                add_stone_depth,
+                ..
+            } => {
+                ctx.block_y
+                    + if *add_stone_depth {
+                        ctx.stone_depth_above
+                    } else {
+                        0
+                    }
+                    >= anchor_y + ctx.surface_depth * surface_depth_multiplier
+            }
+            // These predicates are X/Z-only and retain their ordinary cache.
+            Cond::NoiseThreshold { .. } | Cond::Steep { .. } | Cond::Hole { .. } => {
+                self.test(cond, heightmap, ctx)
+            }
+        }
+    }
+
     #[inline]
     fn test<H: Fn(i32, i32) -> i32 + ?Sized>(
         &self,
@@ -1279,13 +2064,12 @@ impl SurfaceSystem {
         ctx: &mut Ctx<'_, '_, '_>,
     ) -> bool {
         match cond {
-            Cond::BiomeIs { list, cache } => {
+            Cond::BiomeIs { set, cache } => {
                 if let Some(value) = ctx.get_y_cache(*cache) {
                     return value;
                 }
-                let value = list
-                    .iter()
-                    .any(|b| b.as_str() == ctx.biome().0);
+                let name = ctx.biome().0;
+                let value = set.contains_resolved(ctx.biome_builtin(), name);
                 ctx.set_y_cache(*cache, value);
                 value
             }
@@ -1472,8 +2256,6 @@ impl SurfaceSystem {
 struct RuleParser<'a, 'b> {
     builder: &'a Builder<'b>,
     canon: &'a BlockCanon,
-    /// State interner used while parsing result blocks.
-    interner: &'a StateInterner,
     min_y: i32,
     gen_depth: i32,
     /// Cache-slot counters. Each parsed condition receives its own slot.
@@ -1500,8 +2282,7 @@ impl RuleParser<'_, '_> {
         let ty = strip(node["type"].as_str().expect("rule type"));
         match ty {
             "block" => Rule::Block(
-                self.interner
-                    .id_of(&canonical_from_block_json(&node["result_state"], self.canon)),
+                canonical_state_from_block_json(&node["result_state"], self.canon),
             ),
             "sequence" => Rule::Sequence(
                 node["sequence"]
@@ -1539,24 +2320,13 @@ impl RuleParser<'_, '_> {
             .builder
             .positional_factory()
             .from_hash_of("minecraft:clay_bands");
-        let names = generate_bands(&mut random);
+        let clay_bands = generate_bands(&mut random);
 
         assert_eq!(
-            names.len(),
+            clay_bands.len(),
             CLAY_BANDS_LEN,
             "generate_bands must produce the configured clay-band table length"
         );
-        if let Some(unknown) = names
-            .iter()
-            .find(|n| !BAND_BLOCK_NAMES.contains(&n.as_str()))
-        {
-            panic!(
-                "clay band table contains {unknown:?}, which is not in \
-                 BAND_BLOCK_NAMES {BAND_BLOCK_NAMES:?}"
-            );
-        }
-
-        let clay_bands = names.iter().map(|n| self.interner.id_of(n)).collect();
         BandBlocks {
             clay_bands,
             offset_noise,
@@ -1568,7 +2338,7 @@ impl RuleParser<'_, '_> {
         match ty {
             "above_preliminary_surface" => Cond::AbovePreliminarySurface,
             "biome" => {
-                let list = node["biome_is"]
+                let names = node["biome_is"]
                     .as_array()
                     .map(|a| {
                         a.iter()
@@ -1584,7 +2354,7 @@ impl RuleParser<'_, '_> {
                         ]
                     });
                 Cond::BiomeIs {
-                    list,
+                    set: BiomeSet::from_names(names),
                     cache: self.next_y_cache_slot(),
                 }
             }
@@ -1676,19 +2446,6 @@ fn strip(id: &str) -> &str {
     id.strip_prefix("minecraft:").unwrap_or(id)
 }
 
-fn is_air(s: &str) -> bool {
-    let name = s.split('[').next().unwrap_or(s);
-    matches!(
-        name,
-        "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air"
-    )
-}
-
-fn is_fluid(s: &str) -> bool {
-    let name = s.split('[').next().unwrap_or(s);
-    name == "minecraft:water" || name == "minecraft:lava"
-}
-
 /// Builds the partial key (`name` plus sorted specified properties) for a block
 /// JSON node.
 fn block_json_key(node: &Value) -> String {
@@ -1717,12 +2474,15 @@ fn block_json_key(node: &Value) -> String {
 }
 
 /// Resolves a block JSON node through the caller-supplied canonical table.
-fn canonical_from_block_json(node: &Value, canon: &BlockCanon) -> String {
+fn canonical_state_from_block_json(node: &Value, canon: &BlockCanon) -> StateId {
     let key = block_json_key(node);
-    canon
+    let state = canon
         .get(&key)
         .cloned()
-        .unwrap_or_else(|| panic!("no canonical block for result_state key {key:?}"))
+        .unwrap_or_else(|| panic!("no canonical block for result_state key {key:?}"));
+    BlockStateValue::parse(&state)
+        .state_id()
+        .unwrap_or_else(|| panic!("unknown built-in block state {state:?}"))
 }
 
 /// Builds an identity canonical table from the result states in a settings
@@ -1757,16 +2517,15 @@ pub fn identity_canon(settings: &Value) -> BlockCanon {
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
-    use std::sync::Arc;
 
+    use lodestone_data::biomes::BuiltinBiome;
     use serde_json::Value;
 
     use super::{
-        class_of_name, CompiledRule, Cond, Ctx, EvalCache, PreClass, PreState, Rule, StateId, SurfaceDiff,
-        SurfaceSystem, WAY_BELOW_MIN_Y, NO_WATER,
+        class_of_name, packed_index, CompiledRule, Cond, Ctx, EvalCache, PreClass, PreState, Rule,
+        StateId, SurfaceDiff, SurfaceSystem, WAY_BELOW_MIN_Y, NO_WATER,
     };
     use crate::density::{Builder, NoiseParams, Resolver};
-    use crate::interner::StateInterner;
 
     struct FsResolver {
         root: PathBuf,
@@ -1802,6 +2561,70 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    #[allow(unsafe_code)]
+    fn process_usage() -> (u64, u64) {
+        #[repr(C)]
+        #[derive(Default)]
+        struct Rusage {
+            _uuid: [u8; 16],
+            _user_time: u64,
+            _system_time: u64,
+            _pkg_idle_wkups: u64,
+            _interrupt_wkups: u64,
+            _pageins: u64,
+            _wired_size: u64,
+            _resident_size: u64,
+            _phys_footprint: u64,
+            _proc_start_abstime: u64,
+            _proc_exit_abstime: u64,
+            _child_user_time: u64,
+            _child_system_time: u64,
+            _child_pkg_idle_wkups: u64,
+            _child_interrupt_wkups: u64,
+            _child_pageins: u64,
+            _child_elapsed_abstime: u64,
+            _diskio_bytesread: u64,
+            _diskio_byteswritten: u64,
+            _cpu_time_qos_default: u64,
+            _cpu_time_qos_maintenance: u64,
+            _cpu_time_qos_background: u64,
+            _cpu_time_qos_utility: u64,
+            _cpu_time_qos_legacy: u64,
+            _cpu_time_qos_user_initiated: u64,
+            _cpu_time_qos_user_interactive: u64,
+            _billed_system_time: u64,
+            _serviced_system_time: u64,
+            _logical_writes: u64,
+            _lifetime_max_phys_footprint: u64,
+            instructions: u64,
+            cycles: u64,
+            _billed_energy: u64,
+            _serviced_energy: u64,
+            _interval_max_phys_footprint: u64,
+            _runnable_time: u64,
+            _flags: u64,
+        }
+        unsafe extern "C" {
+            fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut core::ffi::c_void) -> i32;
+        }
+        let mut info = Rusage::default();
+        let rc = unsafe {
+            proc_pid_rusage(
+                i32::try_from(std::process::id()).unwrap(),
+                4,
+                (&raw mut info).cast::<core::ffi::c_void>(),
+            )
+        };
+        assert_eq!(rc, 0, "proc_pid_rusage failed with {rc}");
+        (info.instructions, info.cycles)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn process_usage() -> (u64, u64) {
+        panic!("surface instruction/cycle profile requires macOS proc_pid_rusage");
+    }
+
     #[test]
     fn block_classification_treats_all_air_states_as_air() {
         for name in [
@@ -1820,12 +2643,46 @@ mod tests {
     }
 
     #[test]
+    fn typed_pre_state_classification_uses_bound_state_facts() {
+        let air = PreState::from_id(StateId::AIR);
+        let water = PreState::from_name("minecraft:water");
+        let stone = PreState::from_name("minecraft:stone");
+        assert_eq!(air.class, PreClass::Air);
+        assert_eq!(water.class, PreClass::Fluid);
+        assert_eq!(stone.class, PreClass::Stone);
+    }
+
+    #[test]
+    fn biome_sets_pack_builtins_and_retain_extension_order() {
+        let set = super::BiomeSet::from_names(vec![
+            "minecraft:plains".to_string(),
+            "mod:first".to_string(),
+            "minecraft:plains".to_string(),
+            "mod:second".to_string(),
+        ]);
+        assert!(set.contains("minecraft:plains"));
+        assert!(!set.contains("minecraft:desert"));
+        assert!(set.contains("mod:first"));
+        assert!(set.contains("mod:second"));
+        assert_eq!(set.extensions, ["mod:first", "mod:second"]);
+        assert_eq!(set.source_len, 4);
+
+        let sulfur = super::BiomeSet::from_names(vec!["minecraft:sulfur_caves".to_string()]);
+        assert!(sulfur.is_exact_builtin(BuiltinBiome::SulfurCaves));
+        let duplicate = super::BiomeSet::from_names(vec![
+            "minecraft:sulfur_caves".to_string(),
+            "minecraft:sulfur_caves".to_string(),
+        ]);
+        assert!(!duplicate.is_exact_builtin(BuiltinBiome::SulfurCaves));
+    }
+
+    #[test]
     fn condition_cache_respects_xz_and_y_epochs() {
         let mut cache = EvalCache::new(1, 1);
         assert_eq!(cache.get_xz(0), None, "unstarted X/Z epoch must not hit");
         assert_eq!(cache.get_y(0), None, "unstarted Y epoch must not hit");
 
-        cache.begin_column();
+        cache.begin_column(true);
         cache.set_xz(0, true);
         cache.set_y(0, false);
         assert_eq!(cache.get_xz(0), Some(true));
@@ -1835,7 +2692,10 @@ mod tests {
         assert_eq!(cache.get_xz(0), Some(true), "Y updates preserve X/Z values");
         assert_eq!(cache.get_y(0), None, "Y updates invalidate Y values");
 
-        cache.begin_column();
+        cache.begin_column(true);
+        let y_epoch = cache.y_epoch;
+        cache.begin_column(false);
+        assert_eq!(cache.y_epoch, y_epoch, "non-cached Y domain must not advance");
         assert_eq!(cache.get_xz(0), None, "a new column invalidates X/Z values");
     }
 
@@ -1955,6 +2815,18 @@ mod tests {
     }
 
     #[test]
+    fn deep_no_output_proof_rejects_unknown_reachable_rules() {
+        let conditions = vec![Cond::BiomeIs {
+            set: super::BiomeSet::from_names(vec!["minecraft:plains".to_string()]),
+            cache: 0,
+        }];
+        let rule = Rule::Condition(0, Box::new(Rule::Block(StateId::from_raw(7))));
+        let mut compiled = CompiledRule::new(&rule);
+        compiled.prove_deep_no_output(&conditions);
+        assert!(!compiled.deep_no_output);
+    }
+
+    #[test]
     fn compiled_real_settings_match_recursive_evaluation() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/worldgen_data");
         let resolver = FsResolver { root: root.clone() };
@@ -1963,9 +2835,8 @@ mod tests {
         )
         .unwrap();
         let builder = Builder::new(42, &resolver);
-        let interner = Arc::new(StateInterner::new());
         let canon = super::identity_canon(&settings);
-        let surface = SurfaceSystem::new(&settings, &builder, &canon, &interner);
+        let surface = SurfaceSystem::new(&settings, &builder, &canon);
         let heightmap = |x: i32, z: i32| 62 + (x * 3 + z * 5).rem_euclid(9);
         let biomes = [
             "minecraft:plains",
@@ -1989,9 +2860,9 @@ mod tests {
                     let mut column_cache =
                         EvalCache::new(surface.xz_cache_slots, surface.y_cache_slots);
                     let mut column_conditions = vec![0u8; surface.conditions.len()];
-                    compiled_cache.begin_column();
-                    recursive_cache.begin_column();
-                    column_cache.begin_column();
+                    compiled_cache.begin_column(true);
+                    recursive_cache.begin_column(true);
+                    column_cache.begin_column(false);
                     column_conditions.fill(0);
 
                     for &block_y in &[-64, -32, 0, 32, 64, 96, 128, 160, 256, 319] {
@@ -2019,6 +2890,7 @@ mod tests {
                                         stone_depth_above,
                                         stone_depth_below,
                                         biome: None,
+                                        biome_builtin: None,
                                         biome_at: Some(&biome_at),
                                         cache: &mut compiled_cache,
                                         cache_y: true,
@@ -2042,6 +2914,7 @@ mod tests {
                                         stone_depth_above,
                                         stone_depth_below,
                                         biome: None,
+                                        biome_builtin: None,
                                         biome_at: Some(&biome_at),
                                         cache: &mut recursive_cache,
                                         cache_y: true,
@@ -2065,6 +2938,7 @@ mod tests {
                                         stone_depth_above,
                                         stone_depth_below,
                                         biome: None,
+                                        biome_builtin: None,
                                         biome_at: Some(&biome_at),
                                         cache: &mut column_cache,
                                         cache_y: false,
@@ -2095,6 +2969,255 @@ mod tests {
     }
 
     #[test]
+    fn packed_deep_skip_preserves_land_ocean_sulfur_and_boundary_outputs() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/worldgen_data");
+        let resolver = FsResolver { root: root.clone() };
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join("noise_settings/overworld.json")).unwrap(),
+        )
+        .unwrap();
+        let builder = Builder::new(42, &resolver);
+        let canon = super::identity_canon(&settings);
+        let surface = SurfaceSystem::new(&settings, &builder, &canon);
+        assert!(surface.compiled_rule.deep_no_output);
+
+        let stone = PreState::from_name("minecraft:stone");
+        let water = PreState::from_name("minecraft:water");
+        let cases = [
+            ("land", 100, false, true),
+            ("ocean", 63, true, true),
+            ("sulfur", 100, false, false),
+            ("boundary", 12, false, true),
+        ];
+        for (name, top, ocean, sulfur) in cases {
+            let mut blocks = vec![0u16; 16 * 16 * surface.gen_depth as usize];
+            let mut heights = [top; 256];
+            for x in 0..16 {
+                for z in 0..16 {
+                    let column_top = if ocean { top } else { top + (x * 3 + z * 5) % 5 };
+                    heights[(z * 16 + x) as usize] = column_top;
+                    for y in surface.min_y..=column_top {
+                        let code = if ocean && y >= column_top - 2 { 2 } else { 1 };
+                        blocks[packed_index(x, y - surface.min_y, z, surface.gen_depth) as usize] =
+                            code;
+                    }
+                }
+            }
+            let heightmap = |x: i32, z: i32| heights[(z * 16 + x) as usize];
+            let biome_name = if sulfur {
+                "minecraft:sulfur_caves"
+            } else {
+                "minecraft:plains"
+            };
+            let biome_at = |_x: i32, _y: i32, _z: i32| (biome_name, false);
+            let pre = |x: i32, y: i32, z: i32| {
+                let code = blocks[packed_index(x, y - surface.min_y, z, surface.gen_depth)];
+                match code {
+                    0 => PreState::AIR,
+                    1 => stone,
+                    2 | 3 => water,
+                    other => panic!("invalid test packed block kind: {other}"),
+                }
+            };
+            let baseline = surface.build_surface(&pre, &heightmap, &biome_at, 0, 0);
+            let optimized = surface.build_surface_reusing_packed_with_deep_skip(
+                SurfaceDiff::default(),
+                &blocks,
+                surface.gen_depth,
+                &heights,
+                &[!sulfur; 256],
+                &biome_at,
+                &|_, _, _| {},
+                0,
+                0,
+                surface.preliminary_shared.as_ref(),
+            );
+            assert_eq!(optimized.changes, baseline.changes, "case={name}");
+            assert_eq!(optimized.column_offsets, baseline.column_offsets, "case={name}");
+        }
+    }
+
+    struct PackedAbFixture {
+        blocks: Vec<u16>,
+        heights: [i32; 256],
+        deep_biome_absent: [bool; 256],
+    }
+
+    fn packed_ab_fixture(surface: &SurfaceSystem, ocean: bool) -> PackedAbFixture {
+        let mut blocks = vec![0u16; 16 * 16 * surface.gen_depth as usize];
+        let mut heights = [0; 256];
+        for x in 0..16 {
+            for z in 0..16 {
+                let top = if ocean {
+                    63
+                } else {
+                    100 + (x * 3 + z * 5) % 5
+                };
+                heights[(z * 16 + x) as usize] = top;
+                for y in surface.min_y..=top {
+                    let code = if ocean && y >= top - 2 { 2 } else { 1 };
+                    blocks[packed_index(x, y - surface.min_y, z, surface.gen_depth)] = code;
+                }
+            }
+        }
+        PackedAbFixture {
+            blocks,
+            heights,
+            deep_biome_absent: [true; 256],
+        }
+    }
+
+    fn packed_diff_identity(diff: &SurfaceDiff) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        let mut add = |byte: u8| {
+            hash = (hash ^ u64::from(byte)).wrapping_mul(0x1000_0000_01b3);
+        };
+        for x in 0..16 {
+            for z in 0..16 {
+                for &(y, state) in diff.column_slice(x, z) {
+                    for byte in x.to_le_bytes() {
+                        add(byte);
+                    }
+                    for byte in y.to_le_bytes() {
+                        add(byte);
+                    }
+                    for byte in z.to_le_bytes() {
+                        add(byte);
+                    }
+                    for byte in state.raw().to_le_bytes() {
+                        add(byte);
+                    }
+                }
+            }
+        }
+        hash
+    }
+
+    fn packed_baseline<'a>(
+        surface: &SurfaceSystem,
+        fixture: &'a PackedAbFixture,
+        stone: PreState,
+        fluid: PreState,
+        biome_name: &'static str,
+    ) -> SurfaceDiff {
+        let heightmap = |x: i32, z: i32| fixture.heights[(z * 16 + x) as usize];
+        let pre = |x: i32, y: i32, z: i32| {
+            match fixture.blocks[packed_index(x, y - surface.min_y, z, surface.gen_depth)] {
+                0 => PreState::AIR,
+                1 => stone,
+                2 | 3 => fluid,
+                other => panic!("invalid A/B packed block kind: {other}"),
+            }
+        };
+        let biome_at = |_x: i32, _y: i32, _z: i32| (biome_name, false);
+        surface.build_surface_reusing_with_preliminary_cache(
+            SurfaceDiff::default(),
+            &pre,
+            &heightmap,
+            &biome_at,
+            &|_, _, _| {},
+            0,
+            0,
+            surface.preliminary_shared.as_ref(),
+        )
+    }
+
+    fn packed_optimized<'a>(
+        surface: &SurfaceSystem,
+        fixture: &'a PackedAbFixture,
+        biome_name: &'static str,
+    ) -> SurfaceDiff {
+        let biome_at = |_x: i32, _y: i32, _z: i32| (biome_name, false);
+        surface.build_surface_reusing_packed_with_deep_skip(
+            SurfaceDiff::default(),
+            &fixture.blocks,
+            surface.gen_depth,
+            &fixture.heights,
+            &fixture.deep_biome_absent,
+            &biome_at,
+            &|_, _, _| {},
+            0,
+            0,
+            surface.preliminary_shared.as_ref(),
+        )
+    }
+
+    /// Bounded release A/B for the wired packed deep-span kernel. Run with
+    /// `--release --ignored --nocapture` on macOS after the release queue is clear.
+    #[test]
+    #[ignore]
+    fn packed_deep_skip_release_ab_land_and_ocean() {
+        use lodestone_time::Instant;
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/worldgen_data");
+        let resolver = FsResolver { root: root.clone() };
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join("noise_settings/overworld.json")).unwrap(),
+        )
+        .unwrap();
+        let builder = Builder::new(42, &resolver);
+        let canon = super::identity_canon(&settings);
+        let surface = SurfaceSystem::new(&settings, &builder, &canon);
+        assert!(surface.compiled_rule.deep_no_output);
+        let stone = PreState::from_name("minecraft:stone");
+        let fluid = PreState::from_name("minecraft:water");
+
+        for (name, ocean) in [("land", false), ("ocean", true)] {
+            let fixture = packed_ab_fixture(&surface, ocean);
+            let baseline = packed_baseline(&surface, &fixture, stone, fluid, "minecraft:plains");
+            let optimized = packed_optimized(&surface, &fixture, "minecraft:plains");
+            assert_eq!(optimized.changes, baseline.changes, "case={name}");
+            assert_eq!(optimized.column_offsets, baseline.column_offsets, "case={name}");
+            let identity = packed_diff_identity(&baseline);
+            let mut baseline_ns = Vec::with_capacity(5);
+            let mut optimized_ns = Vec::with_capacity(5);
+            let mut baseline_instructions = Vec::with_capacity(5);
+            let mut optimized_instructions = Vec::with_capacity(5);
+            let mut baseline_cycles = Vec::with_capacity(5);
+            let mut optimized_cycles = Vec::with_capacity(5);
+            for _ in 0..5 {
+                let (before_instructions, before_cycles) = process_usage();
+                let start = Instant::now();
+                let diff = packed_baseline(&surface, &fixture, stone, fluid, "minecraft:plains");
+                baseline_ns.push(start.elapsed().as_nanos());
+                let (after_instructions, after_cycles) = process_usage();
+                baseline_instructions.push(after_instructions - before_instructions);
+                baseline_cycles.push(after_cycles - before_cycles);
+                assert_eq!(packed_diff_identity(&diff), identity, "baseline identity={name}");
+
+                let (before_instructions, before_cycles) = process_usage();
+                let start = Instant::now();
+                let diff = packed_optimized(&surface, &fixture, "minecraft:plains");
+                optimized_ns.push(start.elapsed().as_nanos());
+                let (after_instructions, after_cycles) = process_usage();
+                optimized_instructions.push(after_instructions - before_instructions);
+                optimized_cycles.push(after_cycles - before_cycles);
+                assert_eq!(packed_diff_identity(&diff), identity, "optimized identity={name}");
+            }
+            baseline_ns.sort_unstable();
+            optimized_ns.sort_unstable();
+            baseline_instructions.sort_unstable();
+            optimized_instructions.sort_unstable();
+            baseline_cycles.sort_unstable();
+            optimized_cycles.sort_unstable();
+            let baseline_instruction_median = baseline_instructions[2];
+            let optimized_instruction_median = optimized_instructions[2];
+            let speedup = baseline_instruction_median as f64
+                / optimized_instruction_median.max(1) as f64;
+            println!(
+                "SURFACE_PACKED_DEEP_SKIP_AB case={name} baseline_ns={} optimized_ns={} baseline_instructions={} optimized_instructions={} baseline_cycles={} optimized_cycles={} instruction_speedup={speedup:.3} rewrites={} identity={identity:016x}",
+                baseline_ns[2],
+                optimized_ns[2],
+                baseline_instruction_median,
+                optimized_instruction_median,
+                baseline_cycles[2],
+                optimized_cycles[2],
+                baseline.len(),
+            );
+        }
+    }
+
+    #[test]
     fn column_specialization_reuses_invariant_predicates() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/worldgen_data");
         let resolver = FsResolver { root: root.clone() };
@@ -2103,9 +3226,8 @@ mod tests {
         )
         .unwrap();
         let builder = Builder::new(42, &resolver);
-        let interner = Arc::new(StateInterner::new());
         let canon = super::identity_canon(&settings);
-        let surface = SurfaceSystem::new(&settings, &builder, &canon, &interner);
+        let surface = SurfaceSystem::new(&settings, &builder, &canon);
         let heightmap = |x: i32, z: i32| 62 + (x * 3 + z * 5).rem_euclid(9);
         let biome = "minecraft:badlands";
         let biome_at = |_x: i32, _y: i32, _z: i32| (biome, false);
@@ -2117,8 +3239,8 @@ mod tests {
         let mut ordinary_cache =
             EvalCache::new(surface.xz_cache_slots, surface.y_cache_slots);
         let mut column_cache = EvalCache::new(surface.xz_cache_slots, surface.y_cache_slots);
-        ordinary_cache.begin_column();
-        column_cache.begin_column();
+        ordinary_cache.begin_column(true);
+        column_cache.begin_column(false);
         let mut ordinary_ctx = Ctx {
             block_x,
             block_z,
@@ -2130,6 +3252,7 @@ mod tests {
             stone_depth_above: 0,
             stone_depth_below: 0,
             biome: None,
+            biome_builtin: None,
             biome_at: Some(&biome_at),
             cache: &mut ordinary_cache,
             cache_y: true,
@@ -2145,6 +3268,7 @@ mod tests {
             stone_depth_above: 0,
             stone_depth_below: 0,
             biome: None,
+            biome_builtin: None,
             biome_at: Some(&biome_at),
             cache: &mut column_cache,
             cache_y: false,
@@ -2160,7 +3284,8 @@ mod tests {
             ordinary_ctx.stone_depth_above = stone_above_depth;
             ordinary_ctx.stone_depth_below = stone_below_depth;
             ordinary_ctx.biome = None;
-            ordinary_ctx.cache.begin_y();
+            ordinary_ctx.biome_builtin = None;
+            ordinary_ctx.begin_y();
             let ordinary = surface.try_apply_compiled_counted(
                 &heightmap,
                 &mut ordinary_ctx,
@@ -2174,7 +3299,8 @@ mod tests {
             column_ctx.stone_depth_above = stone_above_depth;
             column_ctx.stone_depth_below = stone_below_depth;
             column_ctx.biome = None;
-            column_ctx.cache.begin_y();
+            column_ctx.biome_builtin = None;
+            column_ctx.begin_y();
             let specialized = surface.try_apply_compiled_counted(
                 &heightmap,
                 &mut column_ctx,
@@ -2194,28 +3320,34 @@ mod tests {
         let ordinary_invariant = ordinary_counts
             .iter()
             .enumerate()
-            .filter(|(id, _)| surface.column_invariant[*id])
+            .filter(|(id, _)| surface.conditions[*id].is_column_invariant())
             .map(|(_, count)| count)
             .sum::<usize>();
         let specialized_invariant = column_counts
             .iter()
             .enumerate()
-            .filter(|(id, _)| surface.column_invariant[*id])
+            .filter(|(id, _)| surface.conditions[*id].is_column_invariant())
             .map(|(_, count)| count)
             .sum::<usize>();
         let visited_invariant = column_counts
             .iter()
             .enumerate()
-            .filter(|(id, count)| surface.column_invariant[*id] && **count != 0)
+            .filter(|(id, count)| {
+                surface.conditions[*id].is_column_invariant() && **count != 0
+            })
             .count();
         assert!(
             ordinary_invariant > specialized_invariant,
             "ordinary={ordinary_invariant} specialized={specialized_invariant} visited={visited_invariant} available={}",
-            surface.column_invariant.iter().filter(|&&value| value).count(),
+            surface
+                .conditions
+                .iter()
+                .filter(|condition| condition.is_column_invariant())
+                .count(),
         );
         assert_eq!(specialized_invariant, visited_invariant);
-        for (id, invariant) in surface.column_invariant.iter().enumerate() {
-            if !invariant {
+        for (id, condition) in surface.conditions.iter().enumerate() {
+            if !condition.is_column_invariant() {
                 assert_eq!(
                     ordinary_counts[id],
                     column_counts[id],
@@ -2335,11 +3467,10 @@ mod tests {
         )
         .unwrap();
         let builder = Builder::new(42, &resolver);
-        let interner = Arc::new(StateInterner::new());
         let canon = super::identity_canon(&settings);
-        let surface = SurfaceSystem::new(&settings, &builder, &canon, &interner);
-        let stone = PreState::from_name(&interner, "minecraft:stone");
-        let water = PreState::from_name(&interner, "minecraft:water");
+        let surface = SurfaceSystem::new(&settings, &builder, &canon);
+        let stone = PreState::from_name("minecraft:stone");
+        let water = PreState::from_name("minecraft:water");
         let heightmap = |x: i32, z: i32| 62 + (x * 7 + z * 11).rem_euclid(17);
         let pre = |x: i32, y: i32, z: i32| {
             let top = 72 + (x * 7 + z * 11).rem_euclid(41);

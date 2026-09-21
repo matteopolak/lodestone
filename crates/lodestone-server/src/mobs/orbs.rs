@@ -300,7 +300,10 @@ impl<'w> MobSim<'w> {
     /// vanilla's.
     // `pub(super)`, not private: `tick_with_terrain` (mod.rs, this file's
     // *parent* module) calls this every tick.
-    pub(super) fn tick_orbs(&mut self, block_state: &(dyn Fn(i32, i32, i32) -> String + Sync)) {
+    pub(super) fn tick_orbs(
+        &mut self,
+        block_state: &(dyn Fn(i32, i32, i32) -> lodestone_data::block_states::StateId + Sync),
+    ) {
         let scanning = self.tick_count % ORB_MERGE_SCAN_PERIOD == 1;
         self.orb_owner_plan = self
             .orb_owner_plan
@@ -384,7 +387,7 @@ impl<'w> MobSim<'w> {
 
     fn tick_orb_owner_batches_with_workers(
         &self,
-        block_state: &(dyn Fn(i32, i32, i32) -> String + Sync),
+        block_state: &(dyn Fn(i32, i32, i32) -> lodestone_data::block_states::StateId + Sync),
         worker_count: usize,
     ) -> Vec<OrbTickOwnerBatch> {
         let mut ids: Vec<i32> = self.orbs.keys().copied().collect();
@@ -897,7 +900,7 @@ mod experience_orb_tests {
     #[test]
     fn orb_owner_batches_restore_serial_state_after_reversed_completion() {
         let world = flat_world();
-        let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
+        let state_at = |x, y, z| world.block_state_id(x, y, z);
         let view = super::super::LiveBlockCollision {
             block_state: &state_at,
             probe_count: std::cell::Cell::new(0),
@@ -949,7 +952,7 @@ mod experience_orb_tests {
     #[test]
     fn crossing_chunk_boundary_commits_destination_before_next_owner_plan() {
         let world = dense_orb_world();
-        let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
+        let state_at = |x, y, z| world.block_state_id(x, y, z);
         let view = super::super::LiveBlockCollision {
             block_state: &state_at,
             probe_count: std::cell::Cell::new(0),
@@ -991,7 +994,7 @@ mod experience_orb_tests {
     #[test]
     fn crossing_orb_requires_and_reports_durable_save_ack_before_destination_start() {
         let world = dense_orb_world();
-        let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
+        let state_at = |x, y, z| world.block_state_id(x, y, z);
         let view = super::super::LiveBlockCollision {
             block_state: &state_at,
             probe_count: std::cell::Cell::new(0),
@@ -1033,7 +1036,7 @@ mod experience_orb_tests {
     #[should_panic(expected = "owner of its completed position")]
     fn orb_owner_batches_reject_a_wrong_destination() {
         let world = dense_orb_world();
-        let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
+        let state_at = |x, y, z| world.block_state_id(x, y, z);
         let view = super::super::LiveBlockCollision {
             block_state: &state_at,
             probe_count: std::cell::Cell::new(0),
@@ -1053,7 +1056,7 @@ mod experience_orb_tests {
     #[should_panic(expected = "every tick-start owner batch exactly once")]
     fn orb_owner_batch_merge_rejects_a_missing_owner() {
         let world = flat_world();
-        let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
+        let state_at = |x, y, z| world.block_state_id(x, y, z);
         let view = super::super::LiveBlockCollision {
             block_state: &state_at,
             probe_count: std::cell::Cell::new(0),
@@ -1068,7 +1071,7 @@ mod experience_orb_tests {
     #[should_panic(expected = "may not contain one owner twice")]
     fn orb_owner_batch_merge_rejects_a_duplicate_owner() {
         let world = flat_world();
-        let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
+        let state_at = |x, y, z| world.block_state_id(x, y, z);
         let view = super::super::LiveBlockCollision {
             block_state: &state_at,
             probe_count: std::cell::Cell::new(0),
@@ -1085,7 +1088,7 @@ mod experience_orb_tests {
         let world = dense_orb_world();
         let mut serial = dense_orb_owner_fixture(&world, 256).0;
         serial.orb_owner_plan = 1;
-        let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
+        let state_at = |x, y, z| world.block_state_id(x, y, z);
         let serial_batches = serial.tick_orb_owner_batches_with_workers(&state_at, 1);
         serial.apply_orb_tick_owner_batches(serial_batches);
 
@@ -1114,7 +1117,7 @@ mod experience_orb_tests {
     #[should_panic(expected = "latest tick-start plan")]
     fn orb_owner_batches_reject_stale_plan_completions() {
         let world = flat_world();
-        let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
+        let state_at = |x, y, z| world.block_state_id(x, y, z);
         let view = super::super::LiveBlockCollision {
             block_state: &state_at,
             probe_count: std::cell::Cell::new(0),
@@ -1129,7 +1132,7 @@ mod experience_orb_tests {
     #[should_panic(expected = "already applied tick-start plan")]
     fn orb_owner_batches_reject_replayed_completions() {
         let world = flat_world();
-        let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
+        let state_at = |x, y, z| world.block_state_id(x, y, z);
         let view = super::super::LiveBlockCollision {
             block_state: &state_at,
             probe_count: std::cell::Cell::new(0),
@@ -1147,7 +1150,7 @@ mod experience_orb_tests {
         let world = dense_orb_world();
         for orb_count in [256, 2_048] {
             let sim = dense_orb_owner_fixture(&world, orb_count).0;
-            let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
+        let state_at = |x, y, z| world.block_state_id(x, y, z);
             let started = lodestone_time::Instant::now();
             let _ = sim.tick_orb_owner_batches_with_workers(&state_at, 1);
             let serial = started.elapsed();

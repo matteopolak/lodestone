@@ -13,13 +13,66 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock};
 
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue as V, Properties, PropertyKey};
+
 use crate::rng::{LegacyRandomSource, RandomSource};
 
 use super::podium::PodiumBlock;
-use lodestone_data::block_states::BlockStateValue;
+use lodestone_data::block_states::StateId;
 
 /// The number of spikes ringing the island.
 pub const SPIKE_COUNT: usize = 10;
+
+fn typed_state(block: Block, properties: &[(PropertyKey, V)]) -> StateId {
+    let mut typed = Properties::empty();
+    for &(key, value) in properties {
+        typed = typed
+            .with_builtin(key, value)
+            .expect("generated block property is valid");
+    }
+    Properties::state_for_block(block, &typed).expect("generated block state is valid")
+}
+
+fn iron_bar_states() -> &'static [StateId; 16] {
+    static STATES: OnceLock<[StateId; 16]> = OnceLock::new();
+    STATES.get_or_init(|| {
+        std::array::from_fn(|bits| {
+            let north = bits & 1 != 0;
+            let south = bits & 2 != 0;
+            let west = bits & 4 != 0;
+            let east = bits & 8 != 0;
+            let bool_value = |value| if value { V::True } else { V::False };
+            typed_state(
+                Block::IronBars,
+                &[
+                    (PropertyKey::East, bool_value(east)),
+                    (PropertyKey::North, bool_value(north)),
+                    (PropertyKey::South, bool_value(south)),
+                    (PropertyKey::West, bool_value(west)),
+                ],
+            )
+        })
+    })
+}
+
+#[derive(Clone, Copy)]
+struct SpikeStates {
+    air: StateId,
+    obsidian: StateId,
+    bedrock: StateId,
+    fire: StateId,
+}
+
+fn spike_states() -> SpikeStates {
+    static STATES: OnceLock<SpikeStates> = OnceLock::new();
+    *STATES.get_or_init(|| SpikeStates {
+        air: Block::Air.default_state(),
+        obsidian: Block::Obsidian.default_state(),
+        bedrock: Block::Bedrock.default_state(),
+        fire: Block::Fire.default_state(),
+    })
+}
 
 /// The ring radius every spike's centre sits on, in blocks.
 const SPIKE_DISTANCE: f64 = 42.0;
@@ -167,6 +220,7 @@ fn compute_end_spikes_for_seed(seed: i64) -> [EndSpike; SPIKE_COUNT] {
 #[must_use]
 pub fn end_spike_blocks(spike: &EndSpike, min_y: i32) -> Vec<PodiumBlock> {
     let mut writes = Vec::new();
+    let states = spike_states();
     let radius = spike.radius;
     let max_y = spike.height + 10;
     let radius_sq_plus_one = radius * radius + 1;
@@ -177,9 +231,9 @@ pub fn end_spike_blocks(spike: &EndSpike, min_y: i32) -> Vec<PodiumBlock> {
                 let x = spike.center_x + dx;
                 let z = spike.center_z + dz;
                 if horizontal_sq <= radius_sq_plus_one && y < spike.height {
-                    writes.push(PodiumBlock { x, y, z, state: BlockStateValue::parse("minecraft:obsidian") });
+                    writes.push(PodiumBlock { x, y, z, state: states.obsidian });
                 } else if y > 65 {
-                    writes.push(PodiumBlock { x, y, z, state: BlockStateValue::parse("minecraft:air") });
+                    writes.push(PodiumBlock { x, y, z, state: states.air });
                 }
             }
         }
@@ -201,13 +255,15 @@ pub fn end_spike_blocks(spike: &EndSpike, min_y: i32) -> Vec<PodiumBlock> {
                     let south = x_edge && dz != 2;
                     let west = z_edge && dx != -2;
                     let east = z_edge && dx != 2;
+                    let bits = u8::from(north)
+                        | (u8::from(south) << 1)
+                        | (u8::from(west) << 2)
+                        | (u8::from(east) << 3);
                     writes.push(PodiumBlock {
                         x: spike.center_x + dx,
                         y: spike.height + dy,
                         z: spike.center_z + dz,
-                        state: BlockStateValue::parse(&format!(
-                            "minecraft:iron_bars[north={north},south={south},west={west},east={east}]"
-                        )),
+                        state: iron_bar_states()[bits as usize],
                     });
                 }
             }
@@ -221,7 +277,7 @@ pub fn end_spike_blocks(spike: &EndSpike, min_y: i32) -> Vec<PodiumBlock> {
         x: crystal_x,
         y: crystal_y - 1,
         z: crystal_z,
-        state: BlockStateValue::parse("minecraft:bedrock"),
+        state: states.bedrock,
     });
     // The block below is always the bedrock just written above (never soul
     // sand/soil), so vanilla's `FireBlock.getState` soul-fire branch never
@@ -230,7 +286,7 @@ pub fn end_spike_blocks(spike: &EndSpike, min_y: i32) -> Vec<PodiumBlock> {
         x: crystal_x,
         y: crystal_y,
         z: crystal_z,
-        state: BlockStateValue::parse("minecraft:fire"),
+        state: states.fire,
     });
 
     writes
@@ -367,9 +423,9 @@ mod tests {
         let spike = EndSpike { center_x: 0, center_z: 0, radius: 3, height: 85, guarded: false };
         let writes = end_spike_blocks(&spike, -64);
         // crystal_y = height + 1 = 86; one below is height itself (85).
-        assert_eq!(find(&writes, 0, 85, 0).unwrap().state, "minecraft:bedrock", "one below the crystal");
-        assert_eq!(find(&writes, 0, 86, 0).unwrap().state, "minecraft:fire", "at the crystal's own cell");
-        assert_eq!(find(&writes, 0, 85 - 20, 0).unwrap().state, "minecraft:obsidian", "well below the crystal, inside the column");
+        assert_eq!(find(&writes, 0, 85, 0).unwrap().state.canonical_state(), "minecraft:bedrock", "one below the crystal");
+        assert_eq!(find(&writes, 0, 86, 0).unwrap().state.canonical_state(), "minecraft:fire", "at the crystal's own cell");
+        assert_eq!(find(&writes, 0, 85 - 20, 0).unwrap().state.canonical_state(), "minecraft:obsidian", "well below the crystal, inside the column");
     }
 
     /// An unguarded spike must write **zero** iron bars — the negative
@@ -380,7 +436,7 @@ mod tests {
     fn an_unguarded_spike_places_no_iron_bars() {
         let spike = EndSpike { center_x: 5, center_z: -5, radius: 2, height: 76, guarded: false };
         let writes = end_spike_blocks(&spike, -64);
-        assert!(writes.iter().all(|w| !w.state.starts_with("minecraft:iron_bars")), "an unguarded spike must place no cage");
+        assert!(writes.iter().all(|w| w.state.block() != Block::IronBars), "an unguarded spike must place no cage");
     }
 
     /// A guarded spike's cage: exactly the expected cell count (the 5x5x4
@@ -392,7 +448,7 @@ mod tests {
     fn a_guarded_spike_places_the_expected_cage() {
         let spike = EndSpike { center_x: 0, center_z: 0, radius: 2, height: 76, guarded: true };
         let writes = end_spike_blocks(&spike, -64);
-        let bars: Vec<&PodiumBlock> = writes.iter().filter(|w| w.state.starts_with("minecraft:iron_bars")).collect();
+        let bars: Vec<&PodiumBlock> = writes.iter().filter(|w| w.state.block() == Block::IronBars).collect();
         assert_eq!(bars.len(), 73, "cage cell count");
 
         // dx=2, dz=-2, dy=0 (a bottom corner, on both the x-side and z-side,
@@ -403,7 +459,7 @@ mod tests {
         // west  = z_edge && dx != -2 = true && true  = true
         // east  = z_edge && dx != 2  = true && false = false
         let corner = find(&writes, 2, 76, -2).expect("corner cage cell must be written");
-        assert_eq!(corner.state, "minecraft:iron_bars[north=false,south=true,west=true,east=false]");
+        assert_eq!(corner.state.canonical_state(), "minecraft:iron_bars[east=false,north=false,south=true,west=true]");
     }
 
     /// **Control**: translating the spike must translate every write —

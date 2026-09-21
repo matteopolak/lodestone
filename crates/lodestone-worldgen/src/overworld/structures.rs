@@ -55,12 +55,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use lodestone_worldgen_core::rng::{
     RandomSource, WorldgenRandom, XoroshiroRandomSource,
 };
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey};
+use lodestone_data::block_states::StateId as CanonicalStateId;
 
 use crate::aquifer::{AquiferSystem, BlockKind};
 use crate::carver::{mark_touched_column, TouchedMask};
 use crate::structure::{
-    CodedBlock, HeightmapKind, PieceRefinement, RingProbeCache, StartContext, StructureKind,
-    StructureMutationContext, StructureMutationSink, StructureStart, VerticalPlacement,
+    CodedBlock, HeightmapKind, PieceRefinement, RingProbeCache, StartContext,
+    StructureKind, StructureMutationContext, StructureMutationSink, StructureStart,
+    VerticalPlacement,
 };
 
 use super::OverworldGenerator;
@@ -124,6 +128,93 @@ impl StructureRefs {
     }
 }
 
+/// A bounded source-window index. Each origin stores the bundled structure-set
+/// memberships in one mask, so reference gathering does not retain a tuple for
+/// every `(source, set)` candidate or rescan an origin's set list.
+#[derive(Debug)]
+pub(super) struct StructureOriginIndex {
+    min_x: i32,
+    min_z: i32,
+    width: usize,
+    masks: Vec<u32>,
+}
+
+impl StructureOriginIndex {
+    fn from_candidates(
+        min_x: i32,
+        max_x: i32,
+        min_z: i32,
+        max_z: i32,
+        candidates: Vec<((i32, i32), usize)>,
+    ) -> Result<Self, Vec<((i32, i32), usize)>> {
+        if candidates
+            .iter()
+            .any(|(_, set_index)| *set_index >= u32::BITS as usize)
+        {
+            return Err(candidates);
+        }
+        let width = usize::try_from(max_x - min_x + 1).map_err(|_| Vec::new())?;
+        let depth = usize::try_from(max_z - min_z + 1).map_err(|_| Vec::new())?;
+        let Some(mut masks) = width.checked_mul(depth).map(|size| vec![0; size]) else {
+            return Err(Vec::new());
+        };
+        for ((x, z), set_index) in candidates {
+            let Ok(local_x) = usize::try_from(x - min_x) else {
+                return Err(Vec::new());
+            };
+            let Ok(local_z) = usize::try_from(z - min_z) else {
+                return Err(Vec::new());
+            };
+            let Some(slot) = local_z
+                .checked_mul(width)
+                .and_then(|slot| slot.checked_add(local_x))
+            else {
+                return Err(Vec::new());
+            };
+            masks[slot] |= 1u32 << set_index;
+        }
+        Ok(Self {
+            min_x,
+            min_z,
+            width,
+            masks,
+        })
+    }
+
+    #[inline]
+    fn mask_at(&self, x: i32, z: i32) -> u32 {
+        let local_x = usize::try_from(x - self.min_x).expect("origin index X escaped window");
+        let local_z = usize::try_from(z - self.min_z).expect("origin index Z escaped window");
+        self.masks[local_z * self.width + local_x]
+    }
+
+    fn for_each_source(
+        &self,
+        min_x: i32,
+        max_x: i32,
+        min_z: i32,
+        max_z: i32,
+        mut visit: impl FnMut(i32, i32, &[usize]),
+    ) {
+        let mut set_indices = [0usize; u32::BITS as usize];
+        for x in min_x..=max_x {
+            for z in min_z..=max_z {
+                let mut mask = self.mask_at(x, z);
+                let mut count = 0;
+                while mask != 0 {
+                    let set_index = mask.trailing_zeros() as usize;
+                    set_indices[count] = set_index;
+                    count += 1;
+                    mask &= mask - 1;
+                }
+                if count != 0 {
+                    visit(x, z, &set_indices[..count]);
+                }
+            }
+        }
+    }
+}
+
 /// Orders target-chunk structure starts the way the decoration lifecycle
 /// consumes them: generation step first, then the complete structure-registry
 /// position within that step. The reference walk itself is source-chunk-first,
@@ -148,13 +239,26 @@ struct TouchedColumnSink<'a> {
     chunk_z: i32,
 }
 
+struct NoopStructureMutationSink;
+
+impl StructureMutationSink for NoopStructureMutationSink {
+    fn record_structure_mutation(
+        &mut self,
+        _source: (i32, i32),
+        _step: i32,
+        _position: [i32; 3],
+        _state: CanonicalStateId,
+    ) {
+    }
+}
+
 impl StructureMutationSink for TouchedColumnSink<'_> {
     fn record_structure_mutation(
         &mut self,
         _source: (i32, i32),
         _step: i32,
         position: [i32; 3],
-        _state: crate::interner::StateId,
+        _state: CanonicalStateId,
     ) {
         mark_touched_column(self.mask, self.chunk_x, self.chunk_z, position[0], position[2]);
     }
@@ -170,7 +274,7 @@ impl StructureMutationSink for TouchedColumnSink<'_> {
 fn place_coded_blocks(
     world: &mut crate::dense_grid::DenseBlockGrid,
     blocks: &[CodedBlock],
-    solid_render: &dyn Fn(&str) -> bool,
+    solid_render: &dyn Fn(CanonicalStateId) -> bool,
 ) {
     place_coded_blocks_with_sink(world, blocks, solid_render, None);
 }
@@ -178,22 +282,22 @@ fn place_coded_blocks(
 fn place_coded_blocks_with_sink(
     world: &mut crate::dense_grid::DenseBlockGrid,
     blocks: &[CodedBlock],
-    solid_render: &dyn Fn(&str) -> bool,
+    solid_render: &dyn Fn(CanonicalStateId) -> bool,
     mut mutation: Option<&mut StructureMutationContext<'_>>,
 ) {
     for block in blocks {
-        if block.state.starts_with("minecraft:chest[") {
+        if block.state.block() == Block::Chest {
             let state = crate::structure::fortress::chest_state(world, block.pos, solid_render);
             if let Some(mutation) = mutation.as_deref_mut() {
-                mutation.write(world, block.pos[0], block.pos[1], block.pos[2], &state);
+                mutation.write(world, block.pos[0], block.pos[1], block.pos[2], state);
             } else {
-                world.set(block.pos[0], block.pos[1], block.pos[2], &state);
+                world.set_id(block.pos[0], block.pos[1], block.pos[2], state);
             }
         } else {
             if let Some(mutation) = mutation.as_deref_mut() {
-                mutation.write(world, block.pos[0], block.pos[1], block.pos[2], &block.state);
+                mutation.write(world, block.pos[0], block.pos[1], block.pos[2], block.state);
             } else {
-                world.set(block.pos[0], block.pos[1], block.pos[2], &block.state);
+                world.set_id(block.pos[0], block.pos[1], block.pos[2], block.state);
             }
         }
     }
@@ -224,7 +328,9 @@ const PORTAL_TERRAIN_REACH: i32 = 14;
 /// a structure predicate asks about several columns of the same chunk.
 pub(super) struct StartSampler<'a> {
     generator: &'a OverworldGenerator,
-    /// A bounded request-local aquifer cache. `RefCell` because
+    /// A bounded request-local aquifer cache. Region-prefix source walks keep
+    /// one sampler across all targets; scalar calls still own one sampler per
+    /// reference computation. `RefCell` because
     /// [`StartContext`] takes `&self` (it is called from a `&dyn` behind the
     /// registry) and this is single-threaded per stage invocation. Structure
     /// starts normally touch one or two chunks; eviction is an exact rebuild,
@@ -253,6 +359,7 @@ const AQUIFER_CACHE_CAPACITY: usize = 512;
 #[cfg(feature = "gen-counters")]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StructureCacheStats {
+    pub sampler_constructions: u64,
     pub height_lookups: u64,
     pub height_hits: u64,
     pub height_misses: u64,
@@ -266,6 +373,7 @@ pub struct StructureCacheStats {
 
 #[cfg(feature = "gen-counters")]
 struct StructureCacheCounters {
+    sampler_constructions: AtomicU64,
     height_lookups: AtomicU64,
     height_hits: AtomicU64,
     height_misses: AtomicU64,
@@ -279,6 +387,7 @@ struct StructureCacheCounters {
 
 #[cfg(feature = "gen-counters")]
 static STRUCTURE_CACHE_COUNTERS: StructureCacheCounters = StructureCacheCounters {
+    sampler_constructions: AtomicU64::new(0),
     height_lookups: AtomicU64::new(0),
     height_hits: AtomicU64::new(0),
     height_misses: AtomicU64::new(0),
@@ -294,6 +403,7 @@ static STRUCTURE_CACHE_COUNTERS: StructureCacheCounters = StructureCacheCounters
 pub fn reset_structure_cache_stats() {
     let counters = &STRUCTURE_CACHE_COUNTERS;
     for counter in [
+        &counters.sampler_constructions,
         &counters.height_lookups,
         &counters.height_hits,
         &counters.height_misses,
@@ -313,6 +423,7 @@ pub fn reset_structure_cache_stats() {
 pub fn structure_cache_stats() -> StructureCacheStats {
     let counters = &STRUCTURE_CACHE_COUNTERS;
     StructureCacheStats {
+        sampler_constructions: counters.sampler_constructions.load(Ordering::Relaxed),
         height_lookups: counters.height_lookups.load(Ordering::Relaxed),
         height_hits: counters.height_hits.load(Ordering::Relaxed),
         height_misses: counters.height_misses.load(Ordering::Relaxed),
@@ -500,6 +611,10 @@ impl HeightProbeCache {
 
 impl StartSampler<'_> {
     pub(super) fn new(generator: &OverworldGenerator) -> StartSampler<'_> {
+        #[cfg(feature = "gen-counters")]
+        STRUCTURE_CACHE_COUNTERS
+            .sampler_constructions
+            .fetch_add(1, Ordering::Relaxed);
         StartSampler {
             generator,
             aquifers: RefCell::new(AquiferCache::default()),
@@ -748,18 +863,20 @@ fn place_buried_treasure_chest_with_sink(
     // is neither air nor a fluid, scanned against the *real* grid — sand,
     // sandstone and every surface-rule product are visible here, unlike at
     // structure-start time.
-    let Some(ground) = (min_y..=top).rev().find(|&y| !is_air_or_liquid(world.get(x, y, z))) else {
+    let Some(ground) = (min_y..=top).rev().find(|&y| {
+        !is_air_or_liquid_id(world.get_id(x, y, z))
+    }) else {
         return;
     };
     let mut y = ground + 1;
     while y > min_y {
-        let below = world.get(x, y - 1, z).to_string();
-        if is_stone_family(base_name(&below)) {
-            let current = world.get(x, y, z);
-            let soft = if !is_air_or_liquid(current) {
-                current.to_string()
+        let below = world.get_id(x, y - 1, z);
+        if is_stone_family_id(below) {
+            let current = world.get_id(x, y, z);
+            let soft = if !is_air_or_liquid_id(current) {
+                current
             } else {
-                "minecraft:sand".to_string()
+                Block::Sand.default_state()
             };
             const NEIGHBOURS: [[i32; 3]; 6] = [
                 [0, -1, 0],
@@ -771,22 +888,22 @@ fn place_buried_treasure_chest_with_sink(
             ];
             for delta in NEIGHBOURS {
                 let rel = [x + delta[0], y + delta[1], z + delta[2]];
-                if !is_air_or_liquid(world.get(rel[0], rel[1], rel[2])) {
+                if !is_air_or_liquid_id(world.get_id(rel[0], rel[1], rel[2])) {
                     continue;
                 }
-                let below_rel = world.get(rel[0], rel[1] - 1, rel[2]);
+                let below_rel = world.get_id(rel[0], rel[1] - 1, rel[2]);
                 let is_up = delta == [0, 1, 0];
-                if is_air_or_liquid(below_rel) && !is_up {
+                if is_air_or_liquid_id(below_rel) && !is_up {
                     if let Some(mutation) = mutation.as_deref_mut() {
-                        mutation.write(world, rel[0], rel[1], rel[2], &below);
+                        mutation.write(world, rel[0], rel[1], rel[2], below);
                     } else {
-                        world.set(rel[0], rel[1], rel[2], &below);
+                        world.set_id(rel[0], rel[1], rel[2], below);
                     }
                 } else {
                     if let Some(mutation) = mutation.as_deref_mut() {
-                        mutation.write(world, rel[0], rel[1], rel[2], &soft);
+                        mutation.write(world, rel[0], rel[1], rel[2], soft);
                     } else {
-                        world.set(rel[0], rel[1], rel[2], &soft);
+                        world.set_id(rel[0], rel[1], rel[2], soft);
                     }
                 }
             }
@@ -799,10 +916,10 @@ fn place_buried_treasure_chest_with_sink(
                     x,
                     y,
                     z,
-                    "minecraft:chest[facing=north,type=single,waterlogged=false]",
+                    chest_north_state(),
                 );
             } else {
-                world.set(x, y, z, "minecraft:chest[facing=north,type=single,waterlogged=false]");
+                world.set_id(x, y, z, chest_north_state());
             }
             return;
         }
@@ -810,17 +927,50 @@ fn place_buried_treasure_chest_with_sink(
     }
 }
 
+#[cfg(test)]
 fn base_name(state: &str) -> &str {
     state.split('[').next().unwrap_or(state)
 }
 
+fn state_with_properties(
+    block: Block,
+    entries: &[(&str, &str)],
+) -> CanonicalStateId {
+    let properties = entries.iter().fold(
+        Properties::from_state_id(block.default_state()),
+        |properties, &(key, value)| {
+            properties
+                .with_builtin(
+                    PropertyKey::from_name(key).expect("generated property key"),
+                    BuiltinPropertyValue::from_name(value).expect("generated property value"),
+                )
+                .expect("generated block-state property is valid")
+        },
+    );
+    Properties::state_for_block(block, &properties).expect("generated block-state properties")
+}
+
+#[inline]
+fn chest_north_state() -> CanonicalStateId {
+    state_with_properties(
+        Block::Chest,
+        &[("facing", "north"), ("type", "single"), ("waterlogged", "false")],
+    )
+}
+
+#[cfg(test)]
 fn is_air_or_liquid(state: &str) -> bool {
     let name = base_name(state);
     name == "minecraft:air" || name == "minecraft:water" || name == "minecraft:lava"
 }
 
+fn is_air_or_liquid_id(state: CanonicalStateId) -> bool {
+    matches!(state.block(), Block::Air | Block::Water | Block::Lava)
+}
+
 /// `belowState.is(SANDSTONE) || .is(STONE) || .is(ANDESITE) || .is(GRANITE) ||
 /// .is(DIORITE)`.
+#[cfg(test)]
 fn is_stone_family(name: &str) -> bool {
     matches!(
         name,
@@ -829,6 +979,13 @@ fn is_stone_family(name: &str) -> bool {
             | "minecraft:andesite"
             | "minecraft:granite"
             | "minecraft:diorite"
+    )
+}
+
+fn is_stone_family_id(state: CanonicalStateId) -> bool {
+    matches!(
+        state.block(),
+        Block::Sandstone | Block::Stone | Block::Andesite | Block::Granite | Block::Diorite
     )
 }
 
@@ -904,7 +1061,11 @@ pub(crate) fn place_ruined_portal_terrain_with_sink<R: RandomSource>(
             };
             let y = if follows_surface { surface } else { box_.min[1].min(surface) };
             if (y - box_.min[1]).abs() > 3
-                || !portal_replaceable(world.get(x, y, z), placement, features_cannot_replace)
+                || !portal_replaceable_id(
+                    world.get_id(x, y, z),
+                    placement,
+                    features_cannot_replace,
+                )
             {
                 continue;
             }
@@ -917,7 +1078,7 @@ pub(crate) fn place_ruined_portal_terrain_with_sink<R: RandomSource>(
     }
     for x in (box_.min[0] + 1)..box_.max[0] {
         for z in (box_.min[2] + 1)..box_.max[2] {
-            if base_name(world.get(x, box_.min[1], z)) == "minecraft:netherrack" {
+            if world.get_base_id(x, box_.min[1], z).block() == Block::Netherrack {
                 add_portal_drip_column(
                     world,
                     random,
@@ -954,23 +1115,23 @@ fn portal_surface_y(
     let ocean_floor = placement == VerticalPlacement::OnOceanFloor;
     (min_y..(min_y + size_y)).rev().find(|&y| {
         if ocean_floor {
-            !is_air_or_liquid(world.get(x, y, z))
+            !is_air_or_liquid_id(world.get_id(x, y, z))
         } else {
-            base_name(world.get(x, y, z)) != "minecraft:air"
+            world.get_base_id(x, y, z).block() != Block::Air
         }
     })
 }
 
-fn portal_replaceable(
-    state: &str,
+fn portal_replaceable_id(
+    state: CanonicalStateId,
     placement: VerticalPlacement,
     features_cannot_replace: &std::collections::HashSet<String>,
 ) -> bool {
-    let name = base_name(state);
-    name != "minecraft:air"
-        && name != "minecraft:obsidian"
-        && !features_cannot_replace.contains(name)
-        && (placement == VerticalPlacement::InNether || name != "minecraft:lava")
+    let block = state.block();
+    block != Block::Air
+        && block != Block::Obsidian
+        && !features_cannot_replace.contains(block.name())
+        && (placement == VerticalPlacement::InNether || block != Block::Lava)
 }
 
 fn place_portal_netherrack_or_magma<R: RandomSource>(
@@ -981,14 +1142,14 @@ fn place_portal_netherrack_or_magma<R: RandomSource>(
     mut mutation: Option<&mut StructureMutationContext<'_>>,
 ) {
     let state = if !cold && random.next_float() < 0.07 {
-        "minecraft:magma_block"
+        Block::MagmaBlock.default_state()
     } else {
-        "minecraft:netherrack"
+        Block::Netherrack.default_state()
     };
     if let Some(mutation) = mutation.as_deref_mut() {
         mutation.write(world, pos[0], pos[1], pos[2], state);
     } else {
-        world.set(pos[0], pos[1], pos[2], state);
+        world.set_id(pos[0], pos[1], pos[2], state);
     }
 }
 
@@ -1016,14 +1177,17 @@ fn maybe_add_portal_leaves<R: RandomSource>(
     mut mutation: Option<&mut StructureMutationContext<'_>>,
 ) {
     if random.next_float() < 0.5
-        && base_name(world.get(pos[0], pos[1], pos[2])) == "minecraft:netherrack"
-        && base_name(world.get(pos[0], pos[1] + 1, pos[2])) == "minecraft:air"
+        && world.get_base_id(pos[0], pos[1], pos[2]).block() == Block::Netherrack
+        && world.get_base_id(pos[0], pos[1] + 1, pos[2]).block() == Block::Air
     {
-        let state = "minecraft:jungle_leaves[distance=7,persistent=true,waterlogged=false]";
+        let state = state_with_properties(
+            Block::JungleLeaves,
+            &[("distance", "7"), ("persistent", "true"), ("waterlogged", "false")],
+        );
         if let Some(mutation) = mutation.as_deref_mut() {
             mutation.write(world, pos[0], pos[1] + 1, pos[2], state);
         } else {
-            world.set(pos[0], pos[1] + 1, pos[2], state);
+            world.set_id(pos[0], pos[1] + 1, pos[2], state);
         }
     }
 }
@@ -1034,26 +1198,58 @@ fn maybe_add_portal_vine<R: RandomSource>(
     pos: [i32; 3],
     mut mutation: Option<&mut StructureMutationContext<'_>>,
 ) {
-    let state = base_name(world.get(pos[0], pos[1], pos[2]));
-    if matches!(state, "minecraft:air" | "minecraft:water" | "minecraft:lava" | "minecraft:vine") {
+    let state = world.get_base_id(pos[0], pos[1], pos[2]).block();
+    if matches!(state, Block::Air | Block::Water | Block::Lava | Block::Vine) {
         return;
     }
     let (dx, dz, vine) = match random.next_int_bounded(4) {
-        0 => (0, -1, "minecraft:vine[east=false,north=false,south=true,up=false,west=false]"),
-        1 => (1, 0, "minecraft:vine[east=false,north=false,south=false,up=false,west=true]"),
-        2 => (0, 1, "minecraft:vine[east=false,north=true,south=false,up=false,west=false]"),
-        _ => (-1, 0, "minecraft:vine[east=true,north=false,south=false,up=false,west=false]"),
+        0 => (
+            0,
+            -1,
+            state_with_properties(
+                Block::Vine,
+                &[("east", "false"), ("north", "false"), ("south", "true"), ("up", "false"), ("west", "false")],
+            ),
+        ),
+        1 => (
+            1,
+            0,
+            state_with_properties(
+                Block::Vine,
+                &[("east", "false"), ("north", "false"), ("south", "false"), ("up", "false"), ("west", "true")],
+            ),
+        ),
+        2 => (
+            0,
+            1,
+            state_with_properties(
+                Block::Vine,
+                &[("east", "false"), ("north", "true"), ("south", "false"), ("up", "false"), ("west", "false")],
+            ),
+        ),
+        _ => (
+            -1,
+            0,
+            state_with_properties(
+                Block::Vine,
+                &[("east", "true"), ("north", "false"), ("south", "false"), ("up", "false"), ("west", "false")],
+            ),
+        ),
     };
-    if base_name(world.get(pos[0] + dx, pos[1], pos[2] + dz)) == "minecraft:air" {
+    if world.get_base_id(pos[0] + dx, pos[1], pos[2] + dz).block() == Block::Air {
         if let Some(mutation) = mutation.as_deref_mut() {
             mutation.write(world, pos[0] + dx, pos[1], pos[2] + dz, vine);
         } else {
-            world.set(pos[0] + dx, pos[1], pos[2] + dz, vine);
+            world.set_id(pos[0] + dx, pos[1], pos[2] + dz, vine);
         }
     }
 }
 
 impl OverworldGenerator {
+    pub(super) fn has_structure_registry(&self) -> bool {
+        self.structures.is_some()
+    }
+
     fn compute_structure_starts(&self, cx: i32, cz: i32) -> Vec<Arc<StructureStart>> {
         crate::counters::bump_structure_start();
         let Some(registry) = &self.structures else {
@@ -1087,9 +1283,39 @@ impl OverworldGenerator {
             })
     }
 
+    fn structure_starts_stage_for_sets_with_sampler(
+        &self,
+        cx: i32,
+        cz: i32,
+        set_indices: &[usize],
+        sampler: &StartSampler<'_>,
+    ) -> Arc<Vec<Arc<StructureStart>>> {
+        // Candidate provenance lets this cold computation skip every set whose
+        // placement cannot own this source. The slot still memoises the complete
+        // answer for the source, so later full-start callers see no subset.
+        self.store
+            .entry((cx, cz))
+            .structure_starts
+            .get_or_compute(drop, || {
+                crate::counters::bump_structure_start();
+                let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Structure);
+                let Some(registry) = &self.structures else {
+                    return Vec::new();
+                };
+                registry
+                    .starts_at_sets(set_indices, cx, cz, sampler)
+                    .into_iter()
+                    .map(Arc::new)
+                    .collect()
+            })
+    }
+
     /// Stage 0b: this chunk's structure references — `createReferences`' 17×17
     /// walk, keeping the starts whose adjusted box comes within
     /// [`BEARD_REACH`] blocks of this chunk.
+    /// Candidate origins retain their structure-set index through the walk, so
+    /// each source runs only its candidate sets while the source stage remains
+    /// the single memoised owner of the resulting starts.
     ///
     /// Vanilla's `createReferences` uses a plain 16×16 chunk-box intersection;
     /// the extra 12 blocks are the beardifier's own reach
@@ -1099,20 +1325,51 @@ impl OverworldGenerator {
     /// chunk-box test for the persistence view, so the NBT is vanilla's and the
     /// beardifier's input is the beardifier's.
     pub(super) fn structure_refs_stage(&self, cx: i32, cz: i32) -> Arc<StructureRefs> {
+        self.structure_refs_stage_with_index(cx, cz, None)
+    }
+
+    /// Computes references using a prebuilt source-window index when one is
+    /// available. The stage slot remains the owner of each target's product;
+    /// the index only replaces repeated candidate-cell enumeration.
+    pub(super) fn structure_refs_stage_with_index(
+        &self,
+        cx: i32,
+        cz: i32,
+        origin_index: Option<&StructureOriginIndex>,
+    ) -> Arc<StructureRefs> {
+        if self.structures.is_none() {
+            return self
+                .store
+                .entry((cx, cz))
+                .structure_refs
+                .get_or_compute(drop, || StructureRefs::default());
+        }
+        let sampler = StartSampler::new(self);
+        self.structure_refs_stage_with_index_and_sampler(cx, cz, origin_index, &sampler)
+    }
+
+    pub(super) fn structure_refs_stage_with_index_and_sampler(
+        &self,
+        cx: i32,
+        cz: i32,
+        origin_index: Option<&StructureOriginIndex>,
+        sampler: &StartSampler<'_>,
+    ) -> Arc<StructureRefs> {
         self.store.entry((cx, cz)).structure_refs.get_or_compute(drop, || {
             let Some(registry) = &self.structures else {
                 return StructureRefs::default();
             };
-            let sampler = StartSampler::new(self);
+            crate::counters::bump_structure_reference_computation();
             let mut entries = Vec::new();
-            for (sx, sz) in registry.origin_candidates_in(
-                cx - REFS_RADIUS,
-                cx + REFS_RADIUS,
-                cz - REFS_RADIUS,
-                cz + REFS_RADIUS,
-                &sampler,
-            ) {
-                for start in self.structure_starts_stage(sx, sz).iter() {
+            let min_x = cx - REFS_RADIUS;
+            let max_x = cx + REFS_RADIUS;
+            let min_z = cz - REFS_RADIUS;
+            let max_z = cz + REFS_RADIUS;
+            let mut append_source = |sx: i32, sz: i32, set_indices: &[usize]| {
+                for start in self
+                    .structure_starts_stage_for_sets_with_sampler(sx, sz, set_indices, sampler)
+                    .iter()
+                {
                     if start.adjusted_bounding_box().is_close_to_chunk(cx, cz, BEARD_REACH)
                         || (start.structure.contains("ruined_portal")
                             && start.pieces.iter().any(|piece| {
@@ -1123,9 +1380,66 @@ impl OverworldGenerator {
                         entries.push((sx, sz, Arc::clone(start)));
                     }
                 }
+            };
+            if let Some(index) = origin_index {
+                index.for_each_source(min_x, max_x, min_z, max_z, append_source);
+            } else {
+                let candidates = registry.origin_candidates_by_set_in(
+                    min_x,
+                    max_x,
+                    min_z,
+                    max_z,
+                    sampler,
+                );
+                match StructureOriginIndex::from_candidates(min_x, max_x, min_z, max_z, candidates) {
+                    Ok(index) => {
+                        index.for_each_source(min_x, max_x, min_z, max_z, append_source);
+                    }
+                    Err(mut candidates) => {
+                        // The bundled registry has fewer than 32 sets. Datapacks
+                        // may exceed the mask width; retain the old sorted walk.
+                        candidates
+                            .sort_unstable_by_key(|((sx, sz), set_index)| (*sx, *sz, *set_index));
+                        let mut offset = 0;
+                        while offset < candidates.len() {
+                            let ((sx, sz), _) = candidates[offset];
+                            let end = candidates[offset..]
+                                .iter()
+                                .position(|((x, z), _)| (*x, *z) != (sx, sz))
+                                .map_or(candidates.len(), |relative| offset + relative);
+                            let mut set_indices = Vec::with_capacity(end - offset);
+                            for &((_, _), set_index) in &candidates[offset..end] {
+                                if set_indices.last().copied() != Some(set_index) {
+                                    set_indices.push(set_index);
+                                }
+                            }
+                            append_source(sx, sz, &set_indices);
+                            offset = end;
+                        }
+                    }
+                }
             }
             StructureRefs { entries }
         })
+    }
+
+    pub(super) fn structure_origin_index_for_bounds_with_sampler(
+        &self,
+        min_x: i32,
+        max_x: i32,
+        min_z: i32,
+        max_z: i32,
+        sampler: &StartSampler<'_>,
+    ) -> Option<StructureOriginIndex> {
+        let registry = self.structures.as_ref()?;
+        let candidates = registry.origin_candidates_by_set_in(
+            min_x,
+            max_x,
+            min_z,
+            max_z,
+            sampler,
+        );
+        StructureOriginIndex::from_candidates(min_x, max_x, min_z, max_z, candidates).ok()
     }
 
     /// The starts whose origin is `(cx, cz)` and whose piece lists are complete —
@@ -1247,8 +1561,19 @@ impl OverworldGenerator {
         &self,
         cx: i32,
         cz: i32,
+        world: crate::dense_grid::DenseBlockGrid,
+        touched: Option<&mut TouchedMask>,
+    ) -> crate::dense_grid::DenseBlockGrid {
+        self.structure_place_stage_with_touched_and_observer(cx, cz, world, touched, None)
+    }
+
+    pub(super) fn structure_place_stage_with_touched_and_observer(
+        &self,
+        cx: i32,
+        cz: i32,
         mut world: crate::dense_grid::DenseBlockGrid,
         mut touched: Option<&mut TouchedMask>,
+        mutation_observer: Option<super::BlockMutationObserverHandle>,
     ) -> crate::dense_grid::DenseBlockGrid {
         let Some(registry) = &self.structures else {
             return world;
@@ -1266,8 +1591,11 @@ impl OverworldGenerator {
             crate::rng::WorldgenRandom<crate::rng::XoroshiroRandomSource>,
         > = HashMap::new();
         let mineshaft_sampler = StartSampler::new(self);
-        let solid_render = |state: &str| {
-            self.veg_tags.simple_block_support.solid_render.test(state)
+        let solid_render = |state: CanonicalStateId| {
+            self.veg_tags
+                .simple_block_support
+                .solid_render
+                .test_id(state)
         };
         let structure_refs = self.structure_refs_stage(cx, cz);
         let mut structure_entries = structure_refs.entries.iter().collect::<Vec<_>>();
@@ -1280,6 +1608,7 @@ impl OverworldGenerator {
             WorldgenRandom<XoroshiroRandomSource>,
         > = HashMap::new();
         let mut portal_randoms: HashMap<&str, WorldgenRandom<XoroshiroRandomSource>> = HashMap::new();
+        let mut no_op_sink = NoopStructureMutationSink;
         for (_, _, start) in structure_entries {
             if !start.pieces_complete {
                 continue;
@@ -1292,9 +1621,23 @@ impl OverworldGenerator {
                 chunk_x: cx,
                 chunk_z: cz,
             });
-            let mut mutation = touched_sink.as_mut().map(|sink| {
-                StructureMutationContext::new(sink, (start.chunk_x, start.chunk_z), step)
-            });
+            let mut mutation = if let Some(sink) = touched_sink.as_mut() {
+                Some(StructureMutationContext::new_with_observer(
+                    sink,
+                    (start.chunk_x, start.chunk_z),
+                    step,
+                    mutation_observer.clone(),
+                ))
+            } else if mutation_observer.is_some() {
+                Some(StructureMutationContext::new_with_observer(
+                    &mut no_op_sink,
+                    (start.chunk_x, start.chunk_z),
+                    step,
+                    mutation_observer.clone(),
+                ))
+            } else {
+                None
+            };
             let is_mineshaft = registry
                 .structure(&start.structure)
                 .is_some_and(|definition| matches!(definition.kind, StructureKind::Mineshaft { .. }));
@@ -1323,10 +1666,10 @@ impl OverworldGenerator {
                                 block.pos[0],
                                 block.pos[1],
                                 block.pos[2],
-                                &block.state,
+                                block.state,
                             );
                         } else {
-                            world.set(block.pos[0], block.pos[1], block.pos[2], &block.state);
+                            world.set_id(block.pos[0], block.pos[1], block.pos[2], block.state);
                         }
                     }
                     continue;
@@ -1518,11 +1861,34 @@ impl OverworldGenerator {
     /// `structure_refs` (which *is* memoised) and it is consumed exactly once per
     /// chunk, by the fill. A slot for it would be a third stage carrying no work.
     pub(super) fn beardifier_for(&self, cx: i32, cz: i32) -> crate::structure::beardifier::Beardifier {
+        self.beardifier_for_with_index(cx, cz, None)
+    }
+
+    pub(super) fn beardifier_for_with_index(
+        &self,
+        cx: i32,
+        cz: i32,
+        origin_index: Option<&StructureOriginIndex>,
+    ) -> crate::structure::beardifier::Beardifier {
+        if self.structures.is_none() {
+            return crate::structure::beardifier::Beardifier::empty();
+        }
+        let sampler = StartSampler::new(self);
+        self.beardifier_for_with_index_and_sampler(cx, cz, origin_index, &sampler)
+    }
+
+    pub(super) fn beardifier_for_with_index_and_sampler(
+        &self,
+        cx: i32,
+        cz: i32,
+        origin_index: Option<&StructureOriginIndex>,
+        sampler: &StartSampler<'_>,
+    ) -> crate::structure::beardifier::Beardifier {
         use crate::structure::beardifier::Beardifier;
         if self.structures.is_none() {
             return Beardifier::empty();
         }
-        let refs = self.structure_refs_stage(cx, cz);
+        let refs = self.structure_refs_stage_with_index_and_sampler(cx, cz, origin_index, sampler);
         let starts = refs
             .entries
             .iter()
@@ -1687,6 +2053,54 @@ mod tests {
     }
 
     #[test]
+    fn origin_mask_preserves_source_and_set_order_with_negative_coordinates() {
+        let candidates = vec![
+            ((-2, -1), 3),
+            ((-2, -1), 1),
+            ((-2, -1), 1),
+            ((-2, 0), 0),
+            ((0, -2), 2),
+        ];
+        let index = StructureOriginIndex::from_candidates(-2, 0, -2, 0, candidates.clone())
+            .expect("bundled set indices fit the compact mask");
+        let mut indexed = Vec::new();
+        for x in -2..=0 {
+            for z in -2..=0 {
+                let mut mask = index.mask_at(x, z);
+                while mask != 0 {
+                    let set_index = mask.trailing_zeros() as usize;
+                    indexed.push(((x, z), set_index));
+                    mask &= mask - 1;
+                }
+            }
+        }
+        let mut sorted = candidates;
+        sorted.sort_unstable();
+        let mut fallback = Vec::new();
+        let mut offset = 0;
+        while offset < sorted.len() {
+            let ((x, z), _) = sorted[offset];
+            let end = sorted[offset..]
+                .iter()
+                .position(|((other_x, other_z), _)| (*other_x, *other_z) != (x, z))
+                .map_or(sorted.len(), |relative| offset + relative);
+            for &((_, _), set_index) in &sorted[offset..end] {
+                if fallback.last().copied() != Some(((x, z), set_index)) {
+                    fallback.push(((x, z), set_index));
+                }
+            }
+            offset = end;
+        }
+        assert_eq!(indexed, fallback);
+    }
+
+    #[test]
+    fn origin_mask_falls_back_when_a_datapack_exceeds_u32_set_width() {
+        let candidates = vec![((-1, -1), u32::BITS as usize)];
+        assert!(StructureOriginIndex::from_candidates(-1, -1, -1, -1, candidates).is_err());
+    }
+
+    #[test]
     fn structure_touch_sink_marks_same_state_writes_but_not_clipped_columns() {
         let mut world = crate::dense_grid::DenseBlockGrid::new(0, 0, 0, 2, 2, 2, "minecraft:air");
         let mut mask = TouchedMask::default();
@@ -1697,11 +2111,139 @@ mod tests {
         };
         let mut mutation = StructureMutationContext::new(&mut sink, (0, 0), 4);
 
-        mutation.write(&mut world, 1, 0, 1, "minecraft:air");
-        mutation.write(&mut world, 2, 0, 0, "minecraft:stone");
+        mutation.write(
+            &mut world,
+            1,
+            0,
+            1,
+            CanonicalStateId::from_state_str("minecraft:air").unwrap(),
+        );
+        mutation.write(
+            &mut world,
+            2,
+            0,
+            0,
+            CanonicalStateId::from_state_str("minecraft:stone").unwrap(),
+        );
 
         assert!(crate::carver::touched_column(&mask, 1, 1));
         assert!(!crate::carver::touched_column(&mask, 0, 0));
+    }
+
+    struct SourceIndexResolver;
+
+    impl crate::density::Resolver for SourceIndexResolver {
+        fn density_function(&self, _id: &str) -> serde_json::Value {
+            serde_json::Value::Null
+        }
+
+        fn noise(&self, _id: &str) -> crate::density::NoiseParams {
+            crate::density::NoiseParams {
+                first_octave: 0,
+                amplitudes: Vec::new(),
+            }
+        }
+
+        fn structure_set_ids(&self) -> Vec<String> {
+            vec!["test:sparse".to_owned(), "test:dense".to_owned()]
+        }
+
+        fn structure_set(&self, id: &str) -> serde_json::Value {
+            let (spacing, salt) = match id {
+                "test:sparse" => (2, 17),
+                "test:dense" => (1, 31),
+                _ => return serde_json::Value::Null,
+            };
+            serde_json::json!({
+                "placement": {
+                    "type": "minecraft:random_spread",
+                    "spacing": spacing,
+                    "separation": 0,
+                    "salt": salt
+                },
+                "structures": [{"structure": "minecraft:buried_treasure", "weight": 1}]
+            })
+        }
+
+        fn structure(&self, id: &str) -> serde_json::Value {
+            if id != "minecraft:buried_treasure" {
+                return serde_json::Value::Null;
+            }
+            serde_json::json!({
+                "type": "minecraft:buried_treasure",
+                "biomes": ["test:biome"],
+                "step": "surface_structures",
+                "terrain_adaptation": "none"
+            })
+        }
+    }
+
+    struct SourceIndexWorld;
+
+    impl crate::structure::StartContext for SourceIndexWorld {
+        fn first_occupied_height(
+            &self,
+            _x: i32,
+            _z: i32,
+            _heightmap: HeightmapKind,
+        ) -> i32 {
+            63
+        }
+
+        fn biome_at_quart(&self, _qx: i32, _qy: i32, _qz: i32) -> String {
+            "test:biome".to_owned()
+        }
+
+        fn sea_level(&self) -> i32 {
+            63
+        }
+    }
+
+    fn start_signatures(starts: &[crate::structure::StructureStart]) -> Vec<String> {
+        starts.iter().map(|start| format!("{start:?}")).collect()
+    }
+
+    #[test]
+    fn source_set_index_matches_scalar_starts_with_a_discriminating_control() {
+        let context = SourceIndexWorld;
+        for seed in [-195_764_831, 0, 42] {
+            let registry = crate::structure::StructureRegistry::new(seed, &SourceIndexResolver);
+            let discriminating_source = (-8..=8)
+                .flat_map(|cx| (-8..=8).map(move |cz| (cx, cz)))
+                .find(|&(cx, cz)| {
+                    registry
+                        .origin_candidates_by_set_in(cx, cx, cz, cz, &context)
+                        .len()
+                        == 2
+                })
+                .expect("the fixture must expose a source with two set candidates");
+            for (cx, cz) in [(0, 0), (-1, 2), (3, -4), (7, 5), discriminating_source] {
+                let mut set_indices = registry
+                    .origin_candidates_by_set_in(cx, cx, cz, cz, &context)
+                    .into_iter()
+                    .map(|(_, set_index)| set_index)
+                    .collect::<Vec<_>>();
+                set_indices.sort_unstable();
+                set_indices.dedup();
+                let scalar = registry.starts_at(cx, cz, &context);
+                let indexed = registry.starts_at_sets(&set_indices, cx, cz, &context);
+                assert_eq!(
+                    start_signatures(&indexed),
+                    start_signatures(&scalar),
+                    "source/set index changed starts at seed {seed}, chunk ({cx}, {cz})"
+                );
+
+                if (cx, cz) == discriminating_source {
+                    let mut missing_set = set_indices.clone();
+                    missing_set.pop();
+                    assert_ne!(
+                        start_signatures(&registry.starts_at_sets(&missing_set, cx, cz, &context)),
+                        start_signatures(&scalar),
+                        "negative control must detect an omitted source set"
+                    );
+                }
+            }
+        }
     }
 
     fn portal_fixture_world() -> crate::dense_grid::DenseBlockGrid {
@@ -1861,12 +2403,15 @@ mod tests {
             }
             world.set(pos[0], pos[1] + 1, pos[2], fields[5]);
             world.set(pos[0], pos[1] - 1, pos[2], fields[6]);
-            let solid_render = |state: &str| state == "minecraft:stone";
+            let solid_render = |state: CanonicalStateId| state.block() == Block::Stone;
             place_coded_blocks(
                 &mut world,
                 &[CodedBlock {
                     pos,
-                    state: "minecraft:chest[facing=north,type=single,waterlogged=false]".to_string(),
+                    state: CanonicalStateId::from_state_str(
+                        "minecraft:chest[facing=north,type=single,waterlogged=false]",
+                    )
+                    .unwrap(),
                 }],
                 &solid_render,
             );
@@ -1989,16 +2534,16 @@ mod tests {
         let skirt_cells = (0..16)
             .flat_map(|x| (0..16).map(move |z| (x, z)))
             .filter(|&(x, z)| x < box_.min[0] || x > box_.max[0] || z < box_.min[2] || z > box_.max[2])
-            .filter(|&(x, z)| base_name(world.get(x, 59, z)) == "minecraft:netherrack")
+            .filter(|&(x, z)| base_name(&world.get(x, 59, z)) == "minecraft:netherrack")
             .count();
         assert!(skirt_cells > 0, "the portal produced no netherrack outside its frame");
         assert_eq!(
-            base_name(world.get(6, 59, 6)),
+            base_name(&world.get(6, 59, 6)),
             "minecraft:netherrack",
             "the frame's netherrack did not grow a drip column"
         );
         assert_eq!(
-            base_name(world.get(5, 59, 5)),
+            base_name(&world.get(5, 59, 5)),
             "minecraft:obsidian",
             "terrain growth replaced a protected block"
         );
@@ -2093,6 +2638,7 @@ mod tests {
                 pieces: Vec::new(),
                 terrain_adaptation: crate::structure::TerrainAdjustment::None,
                 pieces_complete: true,
+                mineshaft_tree: None,
             })
         }
 

@@ -4,6 +4,7 @@
 //! source is the packet/save product and must include the feature writes that
 //! can cross a chunk boundary.
 
+use lodestone_data::block_states::StateId;
 use lodestone_server::{end_chunk_source, ChunkGenerationStage, ChunkSource};
 
 const SEED: i64 = -195_764_831;
@@ -25,16 +26,16 @@ fn end_shaped_stops_before_features_and_full_runs_the_feature_output_suffix() {
         "the End shaped path must retain its partial-column stage"
     );
     assert_eq!(
-        shaped.block_state(x.rem_euclid(16), y, z.rem_euclid(16)),
-        "minecraft:air",
+        shaped.block_state_id(x.rem_euclid(16), y, z.rem_euclid(16)),
+        StateId::AIR,
         "a shaped End column must not run the fixed-platform FEATURES write"
     );
 
     let full = source.column_at(cx, cz, ChunkGenerationStage::Full);
     assert_eq!(full.generation_stage(), ChunkGenerationStage::Full);
     assert_eq!(
-        full.block_state(x.rem_euclid(16), y, z.rem_euclid(16)),
-        "minecraft:obsidian",
+        full.block_state_id(x.rem_euclid(16), y, z.rem_euclid(16)),
+        StateId::from_state_str("minecraft:obsidian").expect("obsidian is a built-in state"),
         "the FULL End column must include the fixed-platform FEATURES write"
     );
     assert_eq!(

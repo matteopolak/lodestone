@@ -4,6 +4,7 @@ mod support { pub mod large_parity_manifest; }
 
 use std::{collections::{BTreeMap, BTreeSet}, fs::File, io::{BufReader, Cursor, Read, Seek, SeekFrom}, path::{Path, PathBuf}, time::{Duration, Instant}};
 use lodestone_core::{Reader, Writer};
+use lodestone_data::block::Block;
 use lodestone_server::{
     ChunkColumn, ChunkSource, RetainedLightStatus, ServerDirective, ServerProtocol,
     end_chunk_source,
@@ -1849,7 +1850,7 @@ fn trace_column_from_env() -> Option<ChunkPos> {
 }
 
 fn non_air_sections(column: &ChunkColumn) -> Vec<usize> {
-    let air_id = lodestone_data::block_states::air_state_id();
+    let air_id = lodestone_data::block_states::air_state();
     (0..column.section_count())
         .filter(|&section| {
             let base_y = column.min_y + (section * 16) as i32;
@@ -2346,14 +2347,14 @@ fn initial_light_admission_excludes_future_neighbours() {
     let mut centre = ChunkColumn::new(0, 256);
     for z in 0..16 {
         for x in 0..16 {
-            centre.set_block(x, 0, z, "minecraft:end_stone");
+            centre.set_block_id(x, 0, z, Block::EndStone.default_state());
         }
     }
     let empty = ChunkColumn::new(0, 256);
     let mut east = ChunkColumn::new(0, 256);
     for z in 0..16 {
         for x in 0..16 {
-            east.set_block(x, 0, z, "minecraft:end_stone");
+            east.set_block_id(x, 0, z, Block::EndStone.default_state());
         }
     }
     let all_neighbours = (-1..=1)
@@ -2792,7 +2793,7 @@ fn north_neighbour_light_requires_neighbour_aware_initial_encoding() {
     let shape = ChunkShape::overworld_1_21();
     let centre = ChunkColumn::new(shape.min_y, shape.world_height as i32);
     let mut north = ChunkColumn::new(shape.min_y, shape.world_height as i32);
-    north.set_block(8, 0, 15, "minecraft:glowstone");
+    north.set_block_id(8, 0, 15, Block::Glowstone.default_state());
     let proto = V770ServerProtocol;
     let decode = |directive: ServerDirective| {
         let ServerDirective::Send { payload, .. } = directive else {
@@ -2967,7 +2968,8 @@ fn java_and_rust_light_free_records_agree() {
     };
     let column = source.column(header.cx0, header.cz0);
     if header.dimension == Dimension::Nether && header.cx0 == 50 && header.cz0 == -50 {
-        eprintln!("P07_TARGET_STATE state={} id={}", column.block_state(14, 7, 1), column.block_state_id(14, 7, 1));
+        let state = column.block_state_id(14, 7, 1);
+        eprintln!("P07_TARGET_STATE state={} id={}", state.canonical_state(), state.raw());
     }
     let rust_record = light_free_record(&column, header.cx0, header.cz0, header.dimension);
     if let Some(path) = std::env::var_os("LODESTONE_LARGE_PARITY_RUST_RECORD_OUT") {

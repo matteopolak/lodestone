@@ -43,19 +43,10 @@
 //! [`V770Adapter`]'s own decode logic for those same packets, which is the
 //! best available specification for their wire layout.
 
-/// The chunk-encode boundary's byte-identity gate (`DESIGN.md` §12.131): the
-/// string path [`build_world_column`] used to be, kept as a control and asserted
-/// to encode byte-identical payloads. A submodule rather than lines in this
-/// file's own `mod tests` because it needs the pre-change body verbatim and this
-/// file is already 5,000 lines that several agents edit concurrently. The
-/// instructions-retired half is `tests/chunk_encode_cycles.rs` — it needs
-/// `proc_pid_rusage`, and this crate is `#![forbid(unsafe_code)]`.
-#[cfg(test)]
-mod chunk_encode_identity;
-
 use lodestone_core::{
-    Ctx, Decode, Encode, Nbt, NbtTag, Reader, Writer, read_network_nbt, write_network_nbt,
+    Ctx, Encode, Nbt, NbtTag, Reader, Writer, read_network_nbt, write_network_nbt,
 };
+use lodestone_data::block_states::StateId;
 // The command tree's *encode* side. `CommandTree` is aliased because this module
 // already deals in `lodestone_world`/`lodestone_server` column types with short
 // names and an unqualified `CommandTree` here would read as a server-side
@@ -509,6 +500,7 @@ fn stone_id() -> u32 {
 /// Delegates to [`lodestone_data::block_states::air_state_id`], which caches it.
 /// This used to be a 32,366-row scan **per call**, and one of those calls is on
 /// the per-column encode path.
+#[cfg(test)]
 fn air_id() -> u32 {
     lodestone_data::block_states::air_state_id()
 }
@@ -628,37 +620,7 @@ pub fn biome_registry_id(name: &str) -> u32 {
 /// vanilla's own clientbound game-event packet's own change-game-mode accessor's own event code.
 const GAME_EVENT_CHANGE_GAME_MODE: u8 = 3;
 
-/// Resolves a canonical block-state string ([`ServerChunkColumn`]'s own
-/// vocabulary, e.g. `"minecraft:water[level=0]"`, `"minecraft:stone"`) to its
-/// protocol-776 registry id, falling back to air for a block name this table
-/// does not carry.
-///
-/// **The resolution itself now lives in
-/// [`lodestone_data::block_states::state_id`]** — the three-tier
-/// exact/default-plus-overrides/default algorithm, its synthetic-property drop
-/// and the reason the default state is not the lowest id are all documented
-/// there, and so is the index that makes it `O(log 1196)` plus one scan of *that
-/// block's* states rather than the 32,366-row scan with a string compare per row
-/// this function used to be. This wrapper is the air fallback and nothing else.
-///
-/// Moving it was a performance change with a correctness dividend: `lodestone-server`'s
-/// [`ServerChunkColumn`] resolves its own block palette through the *same*
-/// function now (`palette_state_ids`), so [`build_world_column`] indexes integers
-/// instead of hashing 98,304 strings per column, and the two paths cannot drift
-/// into two different understandings of what a bare block name means. Both
-/// remaining string callers ([`V770ServerProtocol::encode_block_update`] and
-/// `encode_block_update_body`) are per-*edit*, not per-block.
-///
-/// A block-update confirmation is best-effort feedback (see
-/// `docs/block-edit.md`), not the server's authoritative state — that stays
-/// in [`ServerChunkColumn`]'s own string form, which this function only
-/// reads. The air fallback exists so a state string this version's table cannot
-/// parse back at all degrades to a visibly-wrong confirmation rather than a
-/// panic or a corrupted wire id.
-fn resolve_state_id(state: &str) -> u32 {
-    lodestone_data::block_states::state_id(state).unwrap_or_else(air_id)
-}
-
+/// Test-only text parsing for fixtures that need to name a canonical state.
 /// Unpacks vanilla's vanilla's own block-position type's own as long form (the inverse of
 /// [`pack_block_pos`]): `x` in the high 26 bits, `z` in the middle 26 bits,
 /// `y` in the low 12 bits, each sign-extended back out via a
@@ -4042,10 +4004,10 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
-    fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {
+    fn encode_block_update(&self, x: i32, y: i32, z: i32, state: StateId) -> ServerDirective {
         ServerDirective::Send {
             packet_id: play::clientbound::BLOCK_UPDATE,
-            payload: encode_block_update_body(x, y, z, resolve_state_id(state)),
+            payload: encode_block_update_body(x, y, z, state.raw()),
         }
     }
 

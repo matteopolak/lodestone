@@ -106,9 +106,9 @@ const SAMPLE: i32 = 20;
 /// breaking it.
 const STORE_RETENTION_UNDER_TEST: usize = 4_096;
 
-/// One column's whole wire-facing product, as `u15_column_dump.rs` frames it:
+/// One column's whole generated product, as exposed by `GeneratedColumn::into_raw`:
 /// `(min_y, height, palette, blocks, biomes)` from `GeneratedColumn::into_raw`,
-/// not an internal structure. Palette **order** reaches the wire, so a change
+/// not an internal structure. Palette **order** reaches chunk encoding, so a change
 /// that permuted the palette while placing identical blocks is caught here and
 /// would be missed by a block-set comparison.
 fn column_bytes(generator: &lodestone_worldgen::overworld::OverworldGenerator, cx: i32, cz: i32) -> Vec<u8> {
@@ -122,8 +122,7 @@ fn column_bytes(generator: &lodestone_worldgen::overworld::OverworldGenerator, c
     out.extend_from_slice(&height.to_le_bytes());
     out.extend_from_slice(&(palette.len() as u32).to_le_bytes());
     for state in &palette {
-        out.extend_from_slice(&(state.len() as u32).to_le_bytes());
-        out.extend_from_slice(state.as_bytes());
+        out.extend_from_slice(&state.raw().to_le_bytes());
     }
     out.extend_from_slice(&(blocks.len() as u32).to_le_bytes());
     for b in &blocks {
@@ -168,7 +167,7 @@ fn reclaimed_columns_regenerate_byte_identically() {
     // Phase 2: keep walking, well past the ceiling, so the sample's entries
     // become the oldest unpinned ones and are reclaimed.
     for cx in SAMPLE..STRIP {
-        std::hint::black_box(generator.column(cx, 0).block_state(0, 0, 0));
+        std::hint::black_box(generator.column(cx, 0).block_state_id(0, 0, 0));
     }
     let (len_after_walk, evicted_after_walk) = (generator.store_len(), generator.store_evictions());
     println!(
@@ -390,7 +389,7 @@ fn dump_walked_strip() {
         .expect("set LODESTONE_STORE_WALK_DUMP to the output path for this arm");
     let generator = overworld_generator(SEED);
     for cx in 0..STRIP {
-        std::hint::black_box(generator.column(cx, 0).block_state(0, 0, 0));
+        std::hint::black_box(generator.column(cx, 0).block_state_id(0, 0, 0));
     }
     let (len, evicted) = (generator.store_len(), generator.store_evictions());
     let mut out = Vec::new();

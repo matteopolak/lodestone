@@ -10,7 +10,9 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use lodestone_data::block_states::StateId;
 use lodestone_worldgen::density::{NoiseParams, Resolver};
+use lodestone_worldgen::dense_grid::DenseBlockGrid;
 use lodestone_worldgen::overworld::OverworldGenerator;
 use serde_json::Value;
 
@@ -221,14 +223,14 @@ fn every_wired_kind_writes_blocks() {
                 .unwrap_or_else(|| panic!("{structure_id} piece {} has no placement", piece.id));
             // One grid per piece, positioned on the piece rather than on the
             // chunk, so this measures the template and not the clip.
-            let mut grid = lodestone_worldgen::dense_grid::DenseBlockGrid::new(
+            let mut grid = DenseBlockGrid::with_default(
                 piece.bounding_box.min[0],
                 piece.bounding_box.min[1],
                 piece.bounding_box.min[2],
                 piece.bounding_box.max[0] - piece.bounding_box.min[0] + 1,
                 piece.bounding_box.max[1] - piece.bounding_box.min[1] + 1,
                 piece.bounding_box.max[2] - piece.bounding_box.min[2] + 1,
-                "minecraft:air",
+                lodestone_data::block_states::air_state(),
             );
             let origin = lodestone_worldgen::structure::template::PlaceOrigin {
                 position: placement.position,
@@ -279,13 +281,14 @@ fn a_start_chunk_gains_blocks_a_structureless_chunk_does_not() {
 
     // Cold-ruin materials, none of which terrain, surface rules, carvers, ores or
     // vegetation can produce.
-    let ruin_blocks: HashSet<&str> = [
+    let ruin_blocks: HashSet<StateId> = [
         "minecraft:stone_bricks",
         "minecraft:cracked_stone_bricks",
         "minecraft:mossy_stone_bricks",
         "minecraft:sea_lantern",
     ]
     .into_iter()
+    .map(|state| StateId::from_state_str(state).expect("bundled ruin state"))
     .collect();
     let count = |generator: &OverworldGenerator| {
         let mut n = 0usize;
@@ -294,7 +297,7 @@ fn a_start_chunk_gains_blocks_a_structureless_chunk_does_not() {
             for lx in 0..16 {
                 for lz in 0..16 {
                     for y in column.min_y()..(column.min_y() + column.height()) {
-                        if ruin_blocks.contains(column.block_state(lx, y, lz)) {
+                        if ruin_blocks.contains(&column.block_state_id(lx, y, lz)) {
                             n += 1;
                         }
                     }

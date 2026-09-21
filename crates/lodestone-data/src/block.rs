@@ -53,6 +53,7 @@
 use crate::block_states::StateId;
 use crate::generated_block_enum as table;
 use crate::generated_block_registry::BLOCK_REGISTRY_NAMES;
+use std::borrow::Borrow;
 
 pub use table::Block;
 
@@ -144,6 +145,97 @@ impl Block {
     /// Every block, in registration order.
     pub fn all() -> impl ExactSizeIterator<Item = Self> + Clone {
         table::BLOCKS_BY_REGISTRY_ID.iter().copied()
+    }
+}
+
+/// Exact membership for the built-in block registry.
+///
+/// The registry is a contiguous 1,196-value `u16` domain, so membership needs
+/// 19 words and one indexed bit test. This is intended for immutable gameplay
+/// and world-generation tag closures; it does not represent plugin blocks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct BlockMask([u64; BLOCK_MASK_WORDS]);
+
+/// Number of machine words in [`BlockMask`].
+pub const BLOCK_MASK_WORDS: usize = (crate::generated_block_registry::BLOCK_COUNT as usize).div_ceil(64);
+
+impl BlockMask {
+    /// An empty exact set.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self([0; BLOCK_MASK_WORDS])
+    }
+
+    /// Inserts a built-in block.
+    #[inline]
+    pub fn insert(&mut self, block: Block) {
+        let id = block.registry_id() as usize;
+        self.0[id >> 6] |= 1u64 << (id & 63);
+    }
+
+    /// Tests exact membership.
+    #[inline]
+    #[must_use]
+    pub fn contains<T: Borrow<Block>>(&self, block: T) -> bool {
+        let id = block.borrow().registry_id() as usize;
+        self.0[id >> 6] & (1u64 << (id & 63)) != 0
+    }
+
+    /// Returns whether this set contains no blocks.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.iter().all(|word| *word == 0)
+    }
+
+    /// Returns the number of blocks in this set.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.iter().map(|word| word.count_ones() as usize).sum()
+    }
+}
+
+impl Default for BlockMask {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+impl FromIterator<Block> for BlockMask {
+    fn from_iter<T: IntoIterator<Item = Block>>(iter: T) -> Self {
+        let mut mask = Self::empty();
+        for block in iter {
+            mask.insert(block);
+        }
+        mask
+    }
+}
+
+#[cfg(test)]
+mod block_mask_tests {
+    use super::{Block, BlockMask};
+
+    #[test]
+    fn block_mask_is_exact_across_the_registry() {
+        let mut mask = BlockMask::default();
+        assert!(mask.is_empty());
+        assert!(!mask.contains(Block::Air));
+
+        for id in 0..Block::COUNT {
+            mask.insert(Block::from_registry_id(id).expect("generated registry is contiguous"));
+        }
+
+        assert_eq!(mask.len(), Block::COUNT as usize);
+        for id in 0..Block::COUNT {
+            assert!(mask.contains(Block::from_registry_id(id).expect("generated registry is contiguous")));
+        }
+    }
+
+    #[test]
+    fn block_mask_deduplicates_from_iter() {
+        let mask: BlockMask = [Block::Air, Block::Stone, Block::Air].into_iter().collect();
+        assert_eq!(mask.len(), 2);
+        assert!(mask.contains(Block::Air));
+        assert!(mask.contains(Block::Stone));
     }
 }
 

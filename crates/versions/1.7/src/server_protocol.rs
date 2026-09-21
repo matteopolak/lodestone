@@ -8,6 +8,7 @@ use std::io::Write as _;
 
 use flate2::{Compression, write::ZlibEncoder};
 use lodestone_canonical::inverse;
+use lodestone_data::block_states::StateId;
 use lodestone_core::{Ctx, Decode, Encode, Reader, State, Writer, encode_body};
 use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ResourceKey, Rotation, Vec3f};
 use lodestone_server::{
@@ -282,12 +283,9 @@ impl V5ServerProtocol {
         x: i32,
         y: i32,
         z: i32,
-        state: &str,
+        state: StateId,
     ) -> Result<ServerDirective, ChunkEncodeError> {
-        let canonical = lodestone_data::block_states::state_id(state).ok_or_else(|| {
-            ChunkEncodeError::new(format!("unknown canonical block state {state}"))
-        })?;
-        let composite = legacy_composite(canonical)?;
+        let composite = legacy_composite(state.raw())?;
         let block_type = i32::try_from(composite >> 4)
             .map_err(|_| ChunkEncodeError::new("protocol-5 block id exceeds i32"))?;
         let y = u8::try_from(y)
@@ -762,7 +760,7 @@ impl ServerProtocol for V5ServerProtocol {
         )
     }
 
-    fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {
+    fn encode_block_update(&self, x: i32, y: i32, z: i32, state: StateId) -> ServerDirective {
         self.try_encode_block_update(x, y, z, state)
             .expect("call try_encode_block_update to handle an unrepresentable protocol-5 state")
     }

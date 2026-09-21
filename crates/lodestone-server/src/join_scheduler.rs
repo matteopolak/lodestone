@@ -1592,6 +1592,8 @@ impl<S: ChunkSource + 'static> JoinChunkStream<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lodestone_data::block::Block;
+    use lodestone_data::block_states::StateId;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
     use std::time::Duration;
@@ -1646,15 +1648,15 @@ mod tests {
             Ok(Some(GenerationRequestResult::Existing(ChunkColumn::new(0, 16))))
         }
 
-        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-            crate::chunk::AIR.to_string()
+        fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
+            StateId::AIR
         }
 
         fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
             crate::chunk::DEFAULT_BIOME.to_string()
         }
 
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
     }
 
     impl ChunkSource for BatchPathSource {
@@ -1691,15 +1693,15 @@ mod tests {
                 .collect()
         }
 
-        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-            crate::chunk::AIR.to_string()
+        fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
+            StateId::AIR
         }
 
         fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
             crate::chunk::DEFAULT_BIOME.to_string()
         }
 
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
     }
 
     impl ChunkSource for CancellableRequestSource {
@@ -1723,15 +1725,15 @@ mod tests {
             ))
         }
 
-        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-            crate::chunk::AIR.to_string()
+        fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
+            StateId::AIR
         }
 
         fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
             crate::chunk::DEFAULT_BIOME.to_string()
         }
 
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
     }
 
     impl ChunkSource for StageRecordingSource {
@@ -1747,15 +1749,15 @@ mod tests {
             ChunkColumn::new(0, 16)
         }
 
-        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-            crate::chunk::AIR.to_string()
+        fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
+            StateId::AIR
         }
 
         fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
             crate::chunk::DEFAULT_BIOME.to_string()
         }
 
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
     }
 
     impl ChunkSource for SkewedSource {
@@ -1773,15 +1775,15 @@ mod tests {
             ChunkColumn::new(0, 16)
         }
 
-        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-            "minecraft:air".to_string()
+        fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
+            StateId::AIR
         }
 
         fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
             crate::chunk::DEFAULT_BIOME.to_string()
         }
 
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
     }
 
     /// Twelve columns whose costs *decrease* with index, so the pool finishes them
@@ -2172,11 +2174,11 @@ mod tests {
                 for &(cx, cz) in coords {
                     cx.hash(&mut digest);
                     cz.hash(&mut digest);
-                    let state = if (cx as i64 * 31 + cz as i64 * 17) & 1 == 0 {
-                        "minecraft:stone"
-                    } else {
-                        "minecraft:dirt"
-                    };
+                let state = if (cx as i64 * 31 + cz as i64 * 17) & 1 == 0 {
+                    Block::Stone.default_state()
+                } else {
+                    Block::Dirt.default_state()
+                };
                     state.hash(&mut digest);
                 }
                 digest.finish()
@@ -2188,26 +2190,26 @@ mod tests {
                 let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
                 self.max_active.fetch_max(active, Ordering::SeqCst);
                 std::thread::sleep(Duration::from_millis(2));
-                let state = if (cx as i64 * 31 + cz as i64 * 17) & 1 == 0 {
-                    "minecraft:stone"
-                } else {
-                    "minecraft:dirt"
-                };
+                    let state = if (cx as i64 * 31 + cz as i64 * 17) & 1 == 0 {
+                        Block::Stone.default_state()
+                    } else {
+                        Block::Dirt.default_state()
+                    };
                 let mut column = ChunkColumn::new(0, 16);
                 column.set_block(0, 0, 0, state);
                 self.active.fetch_sub(1, Ordering::SeqCst);
                 column
             }
 
-            fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-                "minecraft:air".to_string()
+            fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
+                StateId::AIR
             }
 
             fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
                 crate::chunk::DEFAULT_BIOME.to_string()
             }
 
-            fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+            fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
         }
 
         let parallelism = crate::worldgen_dispatch::parallelism();
@@ -2239,7 +2241,7 @@ mod tests {
                     let column = payload
                         .column()
                         .expect("the probe pipeline has no off-task encoder");
-                    observed.push((position, column.block_state(0, 0, 0).to_string()));
+                    observed.push((position, column.block_state_id(0, 0, 0)));
                 }
                 observed
             }));

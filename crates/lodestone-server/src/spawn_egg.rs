@@ -106,6 +106,7 @@
 //! no world handle — the caller supplies a block-state reader.
 
 use lodestone_data::{collision_shapes, entity_types};
+use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockFace, BlockPos, Difficulty, ResourceKey, Vec3};
 
 /// What a right-click with the held item means for this module.
@@ -158,7 +159,7 @@ pub fn entity_type_for_egg(item: &str) -> Option<ResourceKey> {
 /// * `clicked` is the block position from the `use_item_on` packet and `face` the
 ///   clicked face.
 /// * `difficulty` is the **world** difficulty, for the real can-spawn-here rule.
-/// * `block_state` reads a full block-state string at world coordinates — the
+/// * `block_state` reads a canonical [`StateId`] at world coordinates — the
 ///   same closure shape the item-settling pass takes, so the caller passes its
 ///   live `ChunkSource` rather than a snapshot.
 #[must_use]
@@ -167,7 +168,7 @@ pub fn use_spawn_egg(
     difficulty: Difficulty,
     clicked: BlockPos,
     face: BlockFace,
-    block_state: &dyn Fn(i32, i32, i32) -> String,
+    block_state: &dyn Fn(i32, i32, i32) -> StateId,
 ) -> SpawnEggUse {
     if !item
         .split_once(':')
@@ -187,7 +188,7 @@ pub fn use_spawn_egg(
     }
 
     let clicked_state = block_state(clicked.x, clicked.y, clicked.z);
-    let clicked_empty = collision_boxes_for(&clicked_state).is_empty();
+    let clicked_empty = collision_boxes_for(clicked_state).is_empty();
     let spawn_pos = if clicked_empty {
         clicked
     } else {
@@ -200,7 +201,7 @@ pub fn use_spawn_egg(
     // `spawn_pos.y`.
     let mut top = None;
     let mut consider = |cell: BlockPos, base: f64| {
-        for b in collision_boxes_for(&block_state(cell.x, cell.y, cell.z)) {
+        for b in collision_boxes_for(block_state(cell.x, cell.y, cell.z)) {
             let candidate = base + f64::from(b.max[1]);
             if top.is_none_or(|t| candidate > t) {
                 top = Some(candidate);
@@ -273,7 +274,7 @@ pub fn apply_spawn_egg(
     difficulty: Difficulty,
     clicked: BlockPos,
     face: BlockFace,
-    block_state: &dyn Fn(i32, i32, i32) -> String,
+    block_state: &dyn Fn(i32, i32, i32) -> StateId,
     mobs: &crate::MobHandle,
 ) -> SpawnEggApplied {
     match use_spawn_egg(item, difficulty, clicked, face, block_state) {
@@ -333,10 +334,12 @@ pub fn y_offset(top: Option<f64>, moved_up: bool) -> f64 {
 /// `pub(crate)`: `crate::mob_spawner`'s spawner-tick collision check
 /// (`crate::tick::run_tick_loop`'s call site) reuses this rather than a second
 /// copy of the same resolution order.
-pub(crate) fn collision_boxes_for(state: &str) -> &'static [collision_shapes::Aabb] {
-    crate::mobs::block_state_id(state)
-        .map(collision_shapes::collision_boxes)
-        .unwrap_or(&[])
+pub(crate) fn collision_boxes_for(state: StateId) -> &'static [collision_shapes::Aabb] {
+    collision_shapes::collision_boxes(state)
+}
+
+pub(crate) fn collision_boxes_for_id(state: StateId) -> &'static [collision_shapes::Aabb] {
+    collision_boxes_for(state)
 }
 
 /// `BlockPos.relative(direction)`.
@@ -357,16 +360,16 @@ mod tests {
 
     /// A world of `minecraft:stone` at `y <= 64`, air above, unless a cell is
     /// overridden.
-    fn world(overrides: Vec<(BlockPos, &'static str)>) -> impl Fn(i32, i32, i32) -> String {
+    fn world(overrides: Vec<(BlockPos, &'static str)>) -> impl Fn(i32, i32, i32) -> StateId {
         move |x, y, z| {
             let at = BlockPos::new(x, y, z);
             if let Some((_, name)) = overrides.iter().find(|(p, _)| *p == at) {
-                return (*name).to_owned();
+                return StateId::from_state_str(name).expect("fixture state must be registered");
             }
             if y <= 64 {
-                "minecraft:stone".to_owned()
+                StateId::from_state_str("minecraft:stone").expect("fixture state must be registered")
             } else {
-                "minecraft:air".to_owned()
+                StateId::from_state_str("minecraft:air").expect("fixture state must be registered")
             }
         }
     }

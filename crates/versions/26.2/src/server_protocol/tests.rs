@@ -5,6 +5,14 @@
 
 use super::*;
 
+fn resolve_state_id(state: &str) -> u32 {
+    lodestone_data::block_states::state_id(state).unwrap_or_else(air_id)
+}
+
+fn fixture_state_id(state: &str) -> StateId {
+    StateId::from_state_str(state).expect("known block-state fixture")
+}
+
 #[cfg(test)]
 mod block_edit_tests {
     use super::*;
@@ -493,16 +501,16 @@ mod block_edit_tests {
         let seed: i64 = 1234;
         let independent_generator = lodestone_server::overworld_generator(seed);
         let real_column = independent_generator.column(0, 0);
-        let deepslate_state = real_column.block_state(0, -50, 0);
-        let gravel_state = real_column.block_state(0, 37, 0);
-        let water_state = real_column.block_state(0, 38, 0);
-        assert_eq!(deepslate_state.split('[').next(), Some("minecraft:deepslate"));
-        assert_eq!(gravel_state, "minecraft:gravel");
-        assert_eq!(water_state.split('[').next(), Some("minecraft:water"));
+        let deepslate_state = real_column.block_state_id(0, -50, 0);
+        let gravel_state = real_column.block_state_id(0, 37, 0);
+        let water_state = real_column.block_state_id(0, 38, 0);
+        assert_eq!(deepslate_state.block(), Block::Deepslate);
+        assert_eq!(gravel_state, Block::Gravel.default_state());
+        assert_eq!(water_state.block(), Block::Water);
 
-        let deepslate_id = resolve_state_id(deepslate_state);
-        let gravel_id = resolve_state_id(gravel_state);
-        let water_id = resolve_state_id(water_state);
+        let deepslate_id = deepslate_state.raw();
+        let gravel_id = gravel_state.raw();
+        let water_id = water_state.raw();
         assert_ne!(
             water_id,
             air_id(),
@@ -628,8 +636,8 @@ mod block_edit_tests {
 
         let shape = ChunkShape::overworld_1_21();
         let mut source = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
-        source.set_block(1, shape.min_y, 2, "minecraft:water[level=7]");
-        source.set_block(3, shape.min_y, 4, "minecraft:lava[level=3]");
+        source.set_block_id(1, shape.min_y, 2, fixture_state_id("minecraft:water[level=7]"));
+        source.set_block_id(3, shape.min_y, 4, fixture_state_id("minecraft:lava[level=3]"));
 
         let directive = ServerProtocol::encode_chunk(&V770ServerProtocol, 0, 0, &source);
         let payload = match directive {
@@ -671,14 +679,14 @@ mod block_edit_tests {
         let shape = ChunkShape::overworld_1_21();
         let mut source = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
         let entries = [
-            (0, "minecraft:air"),
-            (1, "minecraft:cave_air"),
-            (2, "minecraft:void_air"),
-            (3, "minecraft:stone"),
-            (4, "minecraft:water[level=7]"),
+            (0, StateId::AIR),
+            (1, fixture_state_id("minecraft:cave_air")),
+            (2, fixture_state_id("minecraft:void_air")),
+            (3, fixture_state_id("minecraft:stone")),
+            (4, fixture_state_id("minecraft:water[level=7]")),
         ];
         for (x, state) in entries {
-            source.set_block(x as i32, shape.min_y, 0, state);
+            source.set_block_id(x as i32, shape.min_y, 0, state);
         }
 
         let ServerDirective::Send { payload, .. } =
@@ -701,7 +709,7 @@ mod block_edit_tests {
         for (x, state) in entries {
             assert_eq!(
                 decoded.column.get_block(x, shape.min_y, 0),
-                resolve_state_id(state),
+                state.raw(),
                 "decoded state at x={x}"
             );
         }
@@ -713,7 +721,7 @@ mod block_edit_tests {
 
         let shape = ChunkShape::overworld_1_21();
         let mut source = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
-        source.set_block(0, shape.min_y, 0, "minecraft:cave_air");
+        source.set_block_id(0, shape.min_y, 0, fixture_state_id("minecraft:cave_air"));
 
         let ServerDirective::Send { payload, .. } =
             ServerProtocol::encode_chunk(&V770ServerProtocol, 0, 0, &source)
@@ -750,9 +758,14 @@ mod block_edit_tests {
 
         let shape = ChunkShape::overworld_1_21();
         let mut source = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
-        source.set_block(0, -60, 0, "minecraft:stone");
-        source.set_block(0, -56, 0, "minecraft:water[level=0]");
-        source.set_block(0, -52, 0, "minecraft:oak_leaves[persistent=true,distance=7,waterlogged=false]");
+        source.set_block_id(0, -60, 0, Block::Stone.default_state());
+        source.set_block_id(0, -56, 0, fixture_state_id("minecraft:water[level=0]"));
+        source.set_block_id(
+            0,
+            -52,
+            0,
+            fixture_state_id("minecraft:oak_leaves[persistent=true,distance=7,waterlogged=false]"),
+        );
 
         let directive = ServerProtocol::encode_chunk(&V770ServerProtocol, 0, 0, &source);
         let payload = match directive {
@@ -801,7 +814,7 @@ mod block_edit_tests {
         let shape = ChunkShape::overworld_1_21();
         let center = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
         let mut east = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
-        east.set_block(0, 0, 0, "minecraft:glowstone");
+        east.set_block_id(0, 0, 0, Block::Glowstone.default_state());
 
         let proto = V770ServerProtocol;
         let decode_light = |directive: ServerDirective| {
@@ -837,7 +850,7 @@ mod block_edit_tests {
             .map(|(dx, dz)| {
                 let mut column = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
                 if (dx, dz) == (1, 0) {
-                    column.set_block(0, 64, 8, "minecraft:glowstone");
+                    column.set_block_id(0, 64, 8, Block::Glowstone.default_state());
                 }
                 (dx, dz, column)
             })
@@ -915,12 +928,12 @@ mod block_edit_tests {
         };
 
         let mut center = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
-        center.set_block(8, 127, 8, "minecraft:netherrack");
+        center.set_block_id(8, 127, 8, Block::Netherrack.default_state());
 
         // This is intentionally non-emissive: the extra Empty mask comes from
         // the allocated section, not from a computed non-zero block-light cell.
         let mut high_diagonal = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
-        high_diagonal.set_block(8, 128, 8, "minecraft:netherrack");
+        high_diagonal.set_block_id(8, 128, 8, Block::Netherrack.default_state());
         let with_high_diagonal = decode(&center, &[(1, 1, high_diagonal)]);
         assert_eq!(with_high_diagonal.block(9), &LightData::Uniform(0));
         assert_eq!(
@@ -931,7 +944,7 @@ mod block_edit_tests {
         assert_eq!(with_high_diagonal.block(11), &LightData::Missing);
 
         let mut same_height = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
-        same_height.set_block(8, 127, 8, "minecraft:netherrack");
+        same_height.set_block_id(8, 127, 8, Block::Netherrack.default_state());
         let without_high_section = decode(&center, &[(1, 1, same_height)]);
         for section in 0..7 {
             assert_eq!(
@@ -1228,8 +1241,8 @@ mod block_edit_tests {
             RetainedLightStatus::DependencyInitialized,
         );
         let mut neighbour = ServerChunkColumn::new(0, 256);
-        neighbour.set_block(8, 16, 8, "minecraft:stone");
-        neighbour.set_block(8, 32, 8, "minecraft:stone");
+        neighbour.set_block_id(8, 16, 8, Block::Stone.default_state());
+        neighbour.set_block_id(8, 32, 8, Block::Stone.default_state());
 
         let settlement = V770ServerProtocol
             .compute_initial_column_lights_with_neighbours_in_dimension(
@@ -1263,8 +1276,8 @@ mod block_edit_tests {
     fn end_storage_keeps_fresh_terrain_with_another_retained_sky_snapshot() {
         let center = ServerChunkColumn::new(0, 256);
         let mut east = ServerChunkColumn::new(0, 256);
-        east.set_block(8, 16, 8, "minecraft:stone");
-        east.set_block(8, 32, 8, "minecraft:stone");
+        east.set_block_id(8, 16, 8, Block::Stone.default_state());
+        east.set_block_id(8, 32, 8, Block::Stone.default_state());
 
         let mut west = ServerChunkColumn::new(0, 256);
         let mut west_light = ColumnLight::new(16);
@@ -1309,8 +1322,8 @@ mod block_edit_tests {
         let mut west = ServerChunkColumn::new(0, 256);
         for z in 0..16 {
             for x in 0..16 {
-                center.set_block(x, 0, z, "minecraft:end_stone");
-                west.set_block(x, 0, z, "minecraft:end_stone");
+                center.set_block_id(x, 0, z, Block::EndStone.default_state());
+                west.set_block_id(x, 0, z, Block::EndStone.default_state());
             }
         }
 
@@ -1388,8 +1401,8 @@ mod block_edit_tests {
     fn end_initial_dependency_layers_use_admitted_storage_shape() {
         let center = ServerChunkColumn::new(0, 256);
         let mut neighbour = ServerChunkColumn::new(0, 256);
-        neighbour.set_block(8, 16, 8, "minecraft:stone");
-        neighbour.set_block(8, 32, 8, "minecraft:stone");
+        neighbour.set_block_id(8, 16, 8, Block::Stone.default_state());
+        neighbour.set_block_id(8, 32, 8, Block::Stone.default_state());
         let proto = V770ServerProtocol;
 
         let all_air = proto
@@ -1504,7 +1517,7 @@ mod block_edit_tests {
         };
 
         let mut dependency = ServerChunkColumn::new(0, 256);
-        dependency.set_block(8, 0, 8, "minecraft:end_stone");
+        dependency.set_block_id(8, 0, 8, Block::EndStone.default_state());
         let empty_light = ColumnLight::new(shape.section_count);
         dependency.set_retained_light_with_status(
             empty_light.clone(),
@@ -1576,7 +1589,7 @@ mod block_edit_tests {
         column.set_retained_light_with_status(retained, RetainedLightStatus::CentreSettled);
 
         let mut neighbour = ServerChunkColumn::new(0, 256);
-        neighbour.set_block(8, 0, 8, "minecraft:end_stone");
+        neighbour.set_block_id(8, 0, 8, Block::EndStone.default_state());
         let ServerDirective::Send { payload, .. } = V770ServerProtocol
             .try_encode_chunk_with_neighbours_in_dimension(
                 1,
@@ -1618,7 +1631,7 @@ mod block_edit_tests {
         let mut center = ServerChunkColumn::new(0, 256);
         for z in 0..16 {
             for x in 0..16 {
-                center.set_block(x, 0, z, "minecraft:end_stone");
+                center.set_block_id(x, 0, z, Block::EndStone.default_state());
             }
         }
         let east = ServerChunkColumn::new(0, 256);
@@ -1695,7 +1708,7 @@ mod block_edit_tests {
         };
 
         let mut nether = ServerChunkColumn::new(0, 256);
-        nether.set_block(8, 127, 8, "minecraft:netherrack");
+        nether.set_block_id(8, 127, 8, Block::Netherrack.default_state());
         let nether = decode(&nether, Dimension::Nether);
         for section in 0..18 {
             assert_eq!(
@@ -1811,7 +1824,7 @@ mod block_edit_tests {
         );
 
         let mut emitted = empty.clone();
-        emitted.set_block(8, 0, 8, "minecraft:glowstone");
+        emitted.set_block_id(8, 0, 8, Block::Glowstone.default_state());
         let emitted_packet = decode(&emitted);
         assert!(
             (0..emitted_packet.light.light_section_count())
@@ -1923,7 +1936,12 @@ mod block_edit_tests {
     #[test]
     fn encode_block_update_wire_layout() {
         let proto = V770ServerProtocol;
-        let directive = proto.encode_block_update(1, 2, 3, "minecraft:stone");
+        let directive = proto.encode_block_update(
+            1,
+            2,
+            3,
+            StateId::from_state_str("minecraft:stone").expect("stone fixture state"),
+        );
         match directive {
             ServerDirective::Send { packet_id, payload } => {
                 assert_eq!(packet_id, play::clientbound::BLOCK_UPDATE);
@@ -1956,11 +1974,12 @@ mod block_edit_tests {
     /// `sync_block_entity` may discard it as a type mismatch.
     #[test]
     fn a_moving_piston_reaches_the_wire_as_a_state_then_a_record() {
-        use lodestone_server::piston::{Direction, MovingBlockEntity, moving_piston_state};
+        use lodestone_server::piston::{Direction, MovingBlockEntity, moving_piston_state_id};
 
         let proto = V770ServerProtocol;
         let entity = MovingBlockEntity::new(
-            "minecraft:piston_head[facing=east,short=false,type=sticky]".to_string(),
+            StateId::from_state_str("minecraft:piston_head[facing=east,short=false,type=sticky]")
+                .expect("piston fixture state"),
             Direction::East,
             true,
             true,
@@ -1969,8 +1988,13 @@ mod block_edit_tests {
 
         // 1. The state. A `moving_piston` must resolve to a real 26.2 state id —
         // a fallback to the default would silently animate the wrong facing.
-        let moving = moving_piston_state(Direction::East, true);
-        let state_directive = proto.encode_block_update(pos.x, pos.y, pos.z, &moving);
+        let moving = moving_piston_state_id(Direction::East, true);
+        let state_directive = proto.encode_block_update(
+            pos.x,
+            pos.y,
+            pos.z,
+            moving,
+        );
         let ServerDirective::Send {
             packet_id: state_id_packet,
             payload: state_payload,
@@ -1984,8 +2008,8 @@ mod block_edit_tests {
         let wire_state = r.var_i32().expect("state id") as u32;
         r.ensure_empty().expect("no trailing bytes");
         assert_eq!(
-            lodestone_data::block_states::state_id(&moving),
-            Some(wire_state),
+            moving.raw(),
+            wire_state,
             "the moving_piston state must resolve exactly, not fall back to a default"
         );
 

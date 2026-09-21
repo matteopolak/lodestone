@@ -12,9 +12,11 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::density::Resolver;
-use crate::feature::{BlockPos, IntProvider};
+use crate::feature::{BlockPos, FeatureMembershipId, IntProvider};
 use crate::rng::RandomSource;
+use lodestone_data::block::{Block, BlockMask};
 use lodestone_data::block_states::StateId as CanonicalStateId;
+use lodestone_worldgen_core::hash::FastSet;
 
 use super::grid::VegGrid;
 use super::grid::census::bump as census_bump;
@@ -106,7 +108,7 @@ pub enum BlockPredicate {
     /// `target` would have matched every cell in its radius and paved a
     /// column of sand through whatever was there.
     MatchingBlocks {
-        blocks: Vec<String>,
+        blocks: BlockMask,
         offset: (i32, i32, i32),
     },
     /// The matching-fluid predicate — `fluids` is the JSON's raw
@@ -118,7 +120,7 @@ pub enum BlockPredicate {
     /// `docs/worldgen-parity.md` already names) — both JSON ids for one
     /// fluid collapse onto the one base id our grid can ever hold.
     MatchingFluid {
-        fluids: Vec<String>,
+        fluids: BlockMask,
         offset: (i32, i32, i32),
     },
     /// Approximates every `would_survive` check this module reaches as
@@ -166,22 +168,43 @@ pub(super) fn parse_id_list(v: &Value) -> Vec<String> {
     }
 }
 
+pub(super) fn parse_canonical_id_list(v: &Value) -> Option<FastSet<CanonicalStateId>> {
+    parse_id_list(v)
+        .into_iter()
+        .map(|state| CanonicalStateId::from_state_str(&state))
+        .collect()
+}
+
 /// Resolves a configured feature's block holder set. Unlike the older
 /// literal-only helper above, speleothem anchors use a tag in every bundled
 /// record, so leaving `#…` unresolved would make every valid support look
 /// absent and silently suppress the feature.
-pub(super) fn resolve_block_set(resolver: &dyn Resolver, v: &Value) -> Option<HashSet<String>> {
-    match v {
+pub(super) fn resolve_block_set(
+    resolver: &dyn Resolver,
+    v: &Value,
+) -> Option<FastSet<CanonicalStateId>> {
+    let names = match v {
         Value::String(tag) if tag.starts_with('#') => {
             let mut out = HashSet::new();
             let mut seen = HashSet::new();
             crate::compose::resolve_block_tag(resolver, &tag[1..], &mut out, &mut seen);
-            Some(out)
+            out
         }
-        Value::String(id) => Some(HashSet::from([id.clone()])),
-        Value::Array(_) => Some(parse_id_list(v).into_iter().collect()),
-        _ => None,
-    }
+        Value::String(id) => HashSet::from([id.clone()]),
+        Value::Array(_) => parse_id_list(v).into_iter().collect(),
+        _ => return None,
+    };
+    names
+        .into_iter()
+        .map(|name| Block::from_name(&name).map(Block::default_state))
+        .collect()
+}
+
+pub(super) fn resolve_canonical_block_set(
+    resolver: &dyn Resolver,
+    v: &Value,
+) -> Option<FastSet<CanonicalStateId>> {
+    resolve_block_set(resolver, v)
 }
 
 pub(super) fn parse_offset(v: &Value) -> (i32, i32, i32) {
@@ -201,11 +224,23 @@ pub(super) fn parse_offset(v: &Value) -> (i32, i32, i32) {
 /// [`super::ids`]'s bitset, so only the JSON side is still a string — and that
 /// side is a fixed list of at most two entries from the placed-feature document,
 /// not a per-block value.
-pub(super) fn fluid_tag_of(fluid_id: &str) -> Option<Tag> {
-    match fluid_id {
-        "minecraft:water" | "minecraft:flowing_water" => Some(Tag::Water),
-        "minecraft:lava" | "minecraft:flowing_lava" => Some(Tag::Lava),
-        _ => None,
+fn parse_block_set(v: &Value) -> BlockMask {
+    parse_id_list(v)
+        .into_iter()
+        .filter_map(|name| Block::from_name(&name))
+        .collect()
+}
+
+fn parse_fluid_set(v: &Value) -> BlockMask {
+    let fluid_block = |id: &str| match id {
+            "minecraft:water" | "minecraft:flowing_water" => Some(Block::Water),
+            "minecraft:lava" | "minecraft:flowing_lava" => Some(Block::Lava),
+            _ => None,
+        };
+    match v {
+        Value::String(id) => fluid_block(id).into_iter().collect(),
+        Value::Array(ids) => ids.iter().filter_map(Value::as_str).filter_map(fluid_block).collect(),
+        _ => BlockMask::default(),
     }
 }
 
@@ -228,18 +263,11 @@ impl BlockPredicate {
                 offset: parse_offset(&v["offset"]),
             },
             Ok(PredicateDocument::MatchingBlocks) => BlockPredicate::MatchingBlocks {
-                blocks: parse_id_list(&v["blocks"]),
+                blocks: parse_block_set(&v["blocks"]),
                 offset: parse_offset(&v["offset"]),
             },
             Ok(PredicateDocument::MatchingFluids) => BlockPredicate::MatchingFluid {
-                fluids: match &v["fluids"] {
-                    Value::String(fluid) => vec![fluid.clone()],
-                    Value::Array(arr) => arr
-                        .iter()
-                        .filter_map(|f| f.as_str().map(str::to_string))
-                        .collect(),
-                    _ => Vec::new(),
-                },
+                fluids: parse_fluid_set(&v["fluids"]),
                 offset: parse_offset(&v["offset"]),
             },
             Ok(PredicateDocument::WouldSurvive) => match v["state"]["Name"].as_str().unwrap_or("") {
@@ -257,25 +285,20 @@ pub(super)     fn test(&self, grid: &VegGrid, tags: &VegTags, pos: BlockPos) -> 
         match self {
             BlockPredicate::True => true,
             BlockPredicate::Solid => {
-                let state = grid.get(pos.x, pos.y, pos.z);
+                let state = grid.get_id(pos.x, pos.y, pos.z);
                 if !tags.solid.is_empty() {
-                    tags.solid.test(state)
+                    tags.solid.test_id(state)
                 } else {
-                    let base = super::base_id(state);
-                    !is_air(base) && !is_fluid(base) && blocks_motion(base)
+                    let block = state.block();
+                    let is_air = matches!(block, Block::Air | Block::CaveAir | Block::VoidAir);
+                    let is_fluid = matches!(block, Block::Water | Block::Lava);
+                    !is_air && !is_fluid && lodestone_data::block_solidity::blocks_motion(state)
                 }
             }
             BlockPredicate::HasSturdyFaceDown { offset } => {
                 let (dx, dy, dz) = *offset;
                 let state = grid.get_id(pos.x + dx, pos.y + dy, pos.z + dz);
-                grid.interner().canonical_id(state).map_or_else(
-                    || {
-                        tags.simple_block_support
-                            .center_support_down
-                            .test(grid.interner().name_of(state))
-                    },
-                    lodestone_data::block_survival::center_support_down,
-                )
+                lodestone_data::block_survival::center_support_down(state)
             }
             BlockPredicate::Not(inner) => !inner.test(grid, tags, pos),
             BlockPredicate::AllOf(list) => list.iter().all(|p| p.test(grid, tags, pos)),
@@ -291,23 +314,21 @@ pub(super)     fn test(&self, grid: &VegGrid, tags: &VegTags, pos: BlockPos) -> 
             }
             BlockPredicate::MatchingBlocks { blocks, offset } => {
                 let (dx, dy, dz) = *offset;
-                let base = super::base_id(grid.get(pos.x + dx, pos.y + dy, pos.z + dz));
-                blocks.iter().any(|b| b == base)
+                let state = grid.get_id(pos.x + dx, pos.y + dy, pos.z + dz);
+                blocks.contains(state.block())
             }
             BlockPredicate::MatchingFluid { fluids, offset } => {
                 let (dx, dy, dz) = *offset;
                 let id = grid.get_id(pos.x + dx, pos.y + dy, pos.z + dz);
-                fluids.iter().any(|f| {
-                    fluid_tag_of(f).is_some_and(|tag| tags.has(grid.interner(), tag, id))
-                })
+                fluids.contains(id.block())
             }
             BlockPredicate::WouldSurviveOnSupportsVegetation => {
                 tag_at(grid, tags, Tag::SupportsVegetation, pos.x, pos.y - 1, pos.z)
             }
             BlockPredicate::WouldSurviveCactus => {
                 let below = grid.get_id(pos.x, pos.y - 1, pos.z);
-                if !tags.has(grid.interner(), Tag::Cactus, below)
-                    && !tags.has(grid.interner(), Tag::SupportsCactus, below)
+                if !tags.has(Tag::Cactus, below)
+                    && !tags.has(Tag::SupportsCactus, below)
                 {
                     return false;
                 }
@@ -321,8 +342,8 @@ pub(super)     fn test(&self, grid: &VegGrid, tags: &VegTags, pos: BlockPos) -> 
             }
             BlockPredicate::WouldSurviveSugarCane => {
                 let below = grid.get_id(pos.x, pos.y - 1, pos.z);
-                tags.has(grid.interner(), Tag::SugarCane, below)
-                    || tags.has(grid.interner(), Tag::SupportsSugarCane, below)
+                tags.has(Tag::SugarCane, below)
+                    || tags.has(Tag::SupportsSugarCane, below)
             }
         }
     }
@@ -410,7 +431,7 @@ impl From<BlockTagDocument> for Tag {
 
 /// The three air states, by **base** name.
 ///
-/// Since Unit 8 almost every caller asks this of a [`crate::interner::StateId`]
+/// Since Unit 8 almost every caller asks this of a canonical [`StateId`]
 /// via [`Tag::Air`] instead. This function survives as the *definition* those
 /// bits are filled from ([`super::ids`]'s `member`), so there is exactly one
 /// place that decides what counts as air — a second `matches!` inlined next to
@@ -558,10 +579,10 @@ pub fn blocks_motion(base: &str) -> bool {
 /// parse — see module doc.
 #[derive(Clone, Debug)]
 pub enum BlockStateProvider {
-    Simple(String),
+    Simple(CanonicalStateId),
     /// `(weight, state)` pairs, declaration order (matches
     /// [`IntProvider::WeightedList`]'s own walk).
-    Weighted(Vec<(i32, String)>),
+    Weighted(Vec<(i32, CanonicalStateId)>),
     NoiseThreshold {
         seed: i64,
         first_octave: i32,
@@ -569,9 +590,9 @@ pub enum BlockStateProvider {
         scale: f64,
         threshold: f64,
         high_chance: f32,
-        default_state: String,
-        low_states: Vec<String>,
-        high_states: Vec<String>,
+        default_state: CanonicalStateId,
+        low_states: Vec<CanonicalStateId>,
+        high_states: Vec<CanonicalStateId>,
     },
     /// Selects one of its configured states from deterministic normal noise.
     Noise {
@@ -579,7 +600,7 @@ pub enum BlockStateProvider {
         first_octave: i32,
         amplitudes: Vec<f64>,
         scale: f64,
-        states: Vec<String>,
+        states: Vec<CanonicalStateId>,
     },
     /// Uses a slow normal-noise field to choose the fast-field frequency,
     /// then selects a configured state from that fast field.
@@ -593,10 +614,10 @@ pub enum BlockStateProvider {
         slow_scale: f64,
         variety_min: i32,
         variety_max: i32,
-        states: Vec<String>,
+        states: Vec<CanonicalStateId>,
     },
     RandomizedInt {
-        source: Vec<(i32, Vec<String>)>,
+        source: Vec<(i32, Vec<CanonicalStateId>)>,
         values: IntProvider,
     },
     RuleBased {
@@ -606,7 +627,11 @@ pub enum BlockStateProvider {
 }
 
 pub(super) fn canon_state(v: &Value) -> String {
-    crate::feature::canon_state(v)
+    crate::feature::canonical_text(v)
+}
+
+fn parse_provider_state(v: &Value) -> Option<CanonicalStateId> {
+    CanonicalStateId::from_state_str(&canon_state(v))
 }
 
 /// Parse a configured feature's state object into the validated built-in state
@@ -662,19 +687,29 @@ fn parse_validated_state(v: &Value) -> Option<CanonicalStateId> {
 }
 
 impl BlockStateProvider {
+    /// Constructs a provider for a fixed built-in state at a configuration
+    /// boundary. Runtime placement only sees the canonical id.
+    #[cfg(test)]
+    pub(super) fn simple(state: &str) -> Self {
+        Self::Simple(
+            CanonicalStateId::from_state_str(state)
+                .unwrap_or_else(|| panic!("unknown built-in test state: {state}")),
+        )
+    }
+
 pub(super)     fn try_parse(v: &Value) -> Option<Self> {
         let ty = v["type"].as_str()?;
         match ty.strip_prefix("minecraft:").unwrap_or(ty) {
-            "simple_state_provider" => Some(BlockStateProvider::Simple(canon_state(&v["state"]))),
+            "simple_state_provider" => Some(BlockStateProvider::Simple(parse_provider_state(&v["state"])?)),
             "weighted_state_provider" => {
                 let entries = v["entries"].as_array()?;
                 let parsed = entries
                     .iter()
                     .map(|e| {
                         let weight = e["weight"].as_i64().unwrap_or(1) as i32;
-                        (weight, canon_state(&e["data"]))
+                        Some((weight, parse_provider_state(&e["data"]) ?))
                     })
-                    .collect();
+                    .collect::<Option<Vec<_>>>()?;
                 Some(BlockStateProvider::Weighted(parsed))
             }
             "noise_threshold_provider" => Some(BlockStateProvider::NoiseThreshold {
@@ -688,17 +723,17 @@ pub(super)     fn try_parse(v: &Value) -> Option<Self> {
                 scale: v["scale"].as_f64()?,
                 threshold: v["threshold"].as_f64()?,
                 high_chance: v["high_chance"].as_f64().unwrap_or(0.0) as f32,
-                default_state: canon_state(&v["default_state"]),
+                default_state: parse_provider_state(&v["default_state"])? ,
                 low_states: v["low_states"]
                     .as_array()?
                     .iter()
-                    .map(canon_state)
-                    .collect(),
+                    .map(parse_provider_state)
+                    .collect::<Option<Vec<_>>>()?,
                 high_states: v["high_states"]
                     .as_array()?
                     .iter()
-                    .map(canon_state)
-                    .collect(),
+                    .map(parse_provider_state)
+                    .collect::<Option<Vec<_>>>()?,
             }),
             "noise_provider" => Some(BlockStateProvider::Noise {
                 seed: v["seed"].as_i64()?,
@@ -712,8 +747,8 @@ pub(super)     fn try_parse(v: &Value) -> Option<Self> {
                 states: v["states"]
                     .as_array()?
                     .iter()
-                    .map(canon_state)
-                    .collect(),
+                    .map(parse_provider_state)
+                    .collect::<Option<Vec<_>>>()?,
             }),
             "dual_noise_provider" => Some(BlockStateProvider::DualNoise {
                 seed: v["seed"].as_i64()?,
@@ -736,8 +771,8 @@ pub(super)     fn try_parse(v: &Value) -> Option<Self> {
                 states: v["states"]
                     .as_array()?
                     .iter()
-                    .map(canon_state)
-                .collect(),
+                    .map(parse_provider_state)
+                    .collect::<Option<Vec<_>>>()?,
             }),
             "randomized_int_state_provider" => {
                 let property = v["property"].as_str()?;
@@ -761,8 +796,10 @@ pub(super)     fn try_parse(v: &Value) -> Option<Self> {
                         .map(|(weight, states)| (
                             weight,
                             states.into_iter().flat_map(|state| {
-                                (value_min..=value_max)
-                                    .map(move |value| replace_state_property(&state, property, value))
+                                (value_min..=value_max).filter_map(move |value| {
+                                    let text = replace_state_property(&state.canonical_state(), property, value);
+                                    CanonicalStateId::from_state_str(&text)
+                                })
                             }).collect(),
                         ))
                         .collect(),
@@ -786,6 +823,23 @@ pub(super)     fn try_parse(v: &Value) -> Option<Self> {
         }
     }
 
+    /// Keeps the provider's already-canonical states ready for placement.
+    pub(super) fn bind(&self) {
+        match self {
+            Self::Simple(_) | Self::Weighted(_) | Self::Noise { .. } | Self::DualNoise { .. }
+            | Self::RandomizedInt { .. } => {}
+            Self::NoiseThreshold {
+                ..
+            } => {}
+            Self::RuleBased { rules, fallback } => {
+                rules.iter().for_each(|(_, provider)| provider.bind());
+                if let Some(provider) = fallback {
+                    provider.bind();
+                }
+            }
+        }
+    }
+
     /// The state this provider yields at `pos`, **borrowed from the provider**.
     ///
     /// Unit 8: this used to return `Option<String>`, cloning out of the very
@@ -798,25 +852,25 @@ pub(super)     fn try_parse(v: &Value) -> Option<Self> {
     ///
     /// Prefer [`Self::get_state_id`] at a placement site — the grid stores ids, so
     /// the name is only ever an intermediate.
-    fn get_state<'a, R: RandomSource>(
-        &'a self,
+    fn get_state<R: RandomSource>(
+        &self,
         grid: &VegGrid,
         tags: &VegTags,
         random: &mut R,
         pos: BlockPos,
-    ) -> Option<&'a str> {
+    ) -> Option<CanonicalStateId> {
         match self {
-            BlockStateProvider::Simple(state) => Some(state.as_str()),
+            BlockStateProvider::Simple(state) => Some(*state),
             BlockStateProvider::Weighted(entries) => {
                 let total: i32 = entries.iter().map(|(w, _)| *w).sum();
                 let mut roll = random.next_int_bounded(total.max(1));
                 for (weight, state) in entries {
                     roll -= *weight;
                     if roll < 0 {
-                        return Some(state.as_str());
+                        return Some(*state);
                     }
                 }
-                entries.last().map(|(_, s)| s.as_str())
+                entries.last().map(|(_, s)| *s)
             }
             BlockStateProvider::NoiseThreshold {
                 seed,
@@ -839,12 +893,12 @@ pub(super)     fn try_parse(v: &Value) -> Option<Self> {
                 );
                 if value < *threshold {
                     let idx = random.next_int_bounded(low_states.len().max(1) as i32) as usize;
-                    Some(low_states.get(idx).unwrap_or(default_state).as_str())
+                    Some(*low_states.get(idx).unwrap_or(default_state))
                 } else if random.next_float() < *high_chance {
                     let idx = random.next_int_bounded(high_states.len().max(1) as i32) as usize;
-                    Some(high_states.get(idx).unwrap_or(default_state).as_str())
+                    Some(*high_states.get(idx).unwrap_or(default_state))
                 } else {
-                    Some(default_state.as_str())
+                    Some(*default_state)
                 }
             }
             BlockStateProvider::Noise { seed, first_octave, amplitudes, scale, states } => {
@@ -855,7 +909,7 @@ pub(super)     fn try_parse(v: &Value) -> Option<Self> {
                     f64::from(pos.y) * scale,
                     f64::from(pos.z) * scale,
                 );
-                states.get(noise_state_index(value, states.len())).map(String::as_str)
+                states.get(noise_state_index(value, states.len())).copied()
             }
             BlockStateProvider::DualNoise {
                 seed,
@@ -896,7 +950,7 @@ pub(super)     fn try_parse(v: &Value) -> Option<Self> {
                     f64::from(pos.y) * scale / f64::from(variety),
                     f64::from(pos.z) * scale / f64::from(variety),
                 );
-                states.get(noise_state_index(value, states.len())).map(String::as_str)
+                states.get(noise_state_index(value, states.len())).copied()
             }
             BlockStateProvider::RandomizedInt { source, values } => {
                 let total: i32 = source.iter().map(|(weight, _)| *weight).sum();
@@ -907,8 +961,8 @@ pub(super)     fn try_parse(v: &Value) -> Option<Self> {
                 }).or_else(|| source.last().map(|(_, states)| states))?;
                 let value = values.sample(random);
                 match values {
-                    IntProvider::Constant(_) => states.first().map(String::as_str),
-                    IntProvider::Uniform { min, .. } => states.get((value - min) as usize).map(String::as_str),
+                    IntProvider::Constant(_) => states.first().copied(),
+                    IntProvider::Uniform { min, .. } => states.get((value - min) as usize).copied(),
                     _ => None,
                 }
             }
@@ -925,39 +979,26 @@ pub(super)     fn try_parse(v: &Value) -> Option<Self> {
         }
     }
 
-    /// Compatibility-only name selection for the mushroom cap property
-    /// rewrite. Built-in placement uses [`Self::get_state_id`]; this explicit
-    /// escape hatch keeps partial and extension cap states byte-compatible
-    /// until a typed property override can return local ids directly.
-    #[cold]
-    pub(super) fn get_state_for_mushroom_cap<'a, R: RandomSource>(
-        &'a self,
+    pub(super) fn get_state_for_mushroom_cap<R: RandomSource>(
+        &self,
         grid: &VegGrid,
         tags: &VegTags,
         random: &mut R,
         pos: BlockPos,
-    ) -> Option<&'a str> {
+    ) -> Option<CanonicalStateId> {
         self.get_state(grid, tags, random, pos)
     }
 
-    /// [`Self::get_state`] resolved to the id the grid actually stores.
-    ///
-    /// The interner lookup here is not new cost: `VegGrid::set_if_in_bounds`
-    /// already performed exactly this `id_of` on the `String` it was handed, so
-    /// Unit 8 removed the allocation and left the lookup where it was. It is the
-    /// next lever if the shared read guard ever shows up in a profile — the fix
-    /// would be caching the resolved id in the provider, which needs a
-    /// `Sync` interior-mutability cell and a per-interner guard, and is not worth
-    /// it until measured.
+    /// [`Self::get_state`] already returns the canonical id the grid stores.
 pub(super)     fn get_state_id<R: RandomSource>(
         &self,
         grid: &VegGrid,
         tags: &VegTags,
         random: &mut R,
         pos: BlockPos,
-    ) -> Option<crate::interner::StateId> {
-        let name = self.get_state(grid, tags, random, pos)?;
-        Some(grid.interner().id_of(name))
+    ) -> Option<CanonicalStateId> {
+        let state = self.get_state(grid, tags, random, pos)?;
+        Some(state)
     }
 }
 
@@ -990,58 +1031,58 @@ pub struct VegTags {
     /// `#minecraft:features_cannot_replace` — blocks protected from feature
     /// writes. The dungeon feature uses this same closure for its shell,
     /// floor, air and block-entity placements.
-    pub features_cannot_replace: HashSet<String>,
-    pub cannot_replace_below_tree_trunk: HashSet<String>,
-    pub supports_vegetation: HashSet<String>,
-    pub replaceable_by_trees: HashSet<String>,
-    pub logs: HashSet<String>,
+    pub features_cannot_replace: BlockMask,
+    pub cannot_replace_below_tree_trunk: BlockMask,
+    pub supports_vegetation: BlockMask,
+    pub replaceable_by_trees: BlockMask,
+    pub logs: BlockMask,
     /// `#minecraft:supports_cactus` — the cactus block's own survival check's
     /// below-block check (cactus/block-column feature, added alongside sugar cane).
-    pub supports_cactus: HashSet<String>,
+    pub supports_cactus: BlockMask,
     /// `#minecraft:supports_sugar_cane` — the sugar cane block's own survival
     /// check's below-block check. The adjacency-to-water half of that same check
     /// is *not* modelled here; it doesn't need to be, because every biome's
     /// own `patch_sugar_cane*` placed-feature JSON already encodes it as an
     /// explicit sibling `any_of`/`matching_fluids` predicate — see
     /// [`BlockPredicate::MatchingFluid`].
-    pub supports_sugar_cane: HashSet<String>,
+    pub supports_sugar_cane: BlockMask,
     /// `#minecraft:leaves` — the air-or-leaves check, the anchor gate
     /// [`place_dark_oak_trunk`] checks before attempting each 2×2 log layer
     /// (a dark oak trunk can grow up through a neighbour's already-placed
     /// canopy; dense dark forests depend on that).
-    pub leaves: HashSet<String>,
+    pub leaves: BlockMask,
     /// `#minecraft:mangrove_logs_can_grow_through` —
     /// [`TrunkPlacerCfg::UpwardsBranching`]'s extra valid-tree-position OR-arm.
-    pub mangrove_logs_can_grow_through: HashSet<String>,
+    pub mangrove_logs_can_grow_through: BlockMask,
     /// `#minecraft:mangrove_roots_can_grow_through` — [`RootPlacerCfg::Mangrove`]'s
     /// can-place-root extra OR-arm.
-    pub mangrove_roots_can_grow_through: HashSet<String>,
+    pub mangrove_roots_can_grow_through: BlockMask,
     /// `#minecraft:huge_brown_mushroom_can_place_on` — the exact floor gate
     /// in the bundled brown mushroom record.
-    pub huge_brown_mushroom_can_place_on: HashSet<String>,
+    pub huge_brown_mushroom_can_place_on: BlockMask,
     /// `#minecraft:huge_red_mushroom_can_place_on` — the exact floor gate
     /// in the bundled red mushroom record.
-    pub huge_red_mushroom_can_place_on: HashSet<String>,
+    pub huge_red_mushroom_can_place_on: BlockMask,
     /// `#minecraft:replaceable_by_mushrooms` — the write target set for huge
     /// mushroom caps and stems. The feature's clearance check is narrower and
     /// accepts only air or leaves; this set is used after that check succeeds.
-    pub replaceable_by_mushrooms: HashSet<String>,
+    pub replaceable_by_mushrooms: BlockMask,
     /// `#minecraft:supports_bamboo` — bamboo's floor survival rule.
-    pub supports_bamboo: HashSet<String>,
+    pub supports_bamboo: BlockMask,
     /// The dedicated floor tag for dry grass and dead bushes.
-    pub supports_dry_vegetation: HashSet<String>,
+    pub supports_dry_vegetation: BlockMask,
     /// The dedicated floor tag for azalea bushes.
-    pub supports_azalea: HashSet<String>,
+    pub supports_azalea: BlockMask,
     /// The dedicated floor tag for crimson roots.
-    pub supports_crimson_roots: HashSet<String>,
+    pub supports_crimson_roots: BlockMask,
     /// The dedicated floor tag for the lower half of small dripleaves.
-    pub supports_small_dripleaf: HashSet<String>,
+    pub supports_small_dripleaf: BlockMask,
     /// The only two valid floor blocks for soul fire.
-    pub soul_fire_base_blocks: HashSet<String>,
+    pub soul_fire_base_blocks: BlockMask,
     /// Mushroom floors which bypass the raw-brightness check during decoration.
-    pub overrides_mushroom_light_requirement: HashSet<String>,
+    pub overrides_mushroom_light_requirement: BlockMask,
     /// Non-fluid floors that can support lily pads.
-    pub supports_lily_pad: HashSet<String>,
+    pub supports_lily_pad: BlockMask,
     /// Exact per-state solidity used by dungeon geometry and chest support
     /// checks. Unlike the older base-name vegetation helper, this preserves
     /// state properties whose shapes do not block the room.
@@ -1049,24 +1090,24 @@ pub struct VegTags {
     /// Exact canonical-state capability facts supplied by the version boundary.
     pub simple_block_support: SimpleBlockSupport,
     /// Ground accepted by the cave-root system's nested tree candidate.
-    pub azalea_grows_on: HashSet<String>,
+    pub azalea_grows_on: BlockMask,
     /// Ground blocks replaced by bamboo's optional podzol disk.
-    pub beneath_bamboo_podzol_replaceable: HashSet<String>,
+    pub beneath_bamboo_podzol_replaceable: BlockMask,
     /// Ground blocks accepted by giant-conifer ground alteration.
-    pub beneath_tree_podzol_replaceable: HashSet<String>,
+    pub beneath_tree_podzol_replaceable: BlockMask,
     /// Blocks that a live sculk spread may replace after the first charge
     /// reaches a substrate. This is the ordinary spread tag; world generation
     /// has a separate, slightly wider closure below.
-    pub sculk_replaceable: HashSet<String>,
+    pub sculk_replaceable: BlockMask,
     /// Blocks the world-generation sculk spread may replace. Keeping this
     /// separate from [`Self::sculk_replaceable`] is load-bearing: the two
     /// tag closures intentionally differ for world-gen-only substrate.
-    pub sculk_replaceable_world_gen: HashSet<String>,
+    pub sculk_replaceable_world_gen: BlockMask,
     /// `#minecraft:base_stone_overworld` — the substrate required by a
     /// speleothem cluster's optional water pool.
-    pub base_stone_overworld: HashSet<String>,
+    pub base_stone_overworld: BlockMask,
     /// Unit 8: the same membership questions as the sets above, as bitsets
-    /// indexed by [`crate::interner::StateId`] — see [`super::ids`] for the whole
+    /// indexed by canonical [`StateId`] — see [`super::ids`] for the whole
     /// design, including why the sets above must not be mutated after
     /// [`Self::bind`] has run.
     ///
@@ -1109,7 +1150,9 @@ pub fn build_veg_tags(resolver: &dyn Resolver) -> VegTags {
         let mut out = HashSet::new();
         let mut seen = HashSet::new();
         crate::compose::resolve_block_tag(resolver, id, &mut out, &mut seen);
-        out
+        out.into_iter()
+            .filter_map(|name| Block::from_name(&name))
+            .collect::<BlockMask>()
     };
     VegTags {
         features_cannot_replace: resolve("minecraft:features_cannot_replace"),
@@ -1141,9 +1184,8 @@ pub fn build_veg_tags(resolver: &dyn Resolver) -> VegTags {
         sculk_replaceable: resolve("minecraft:sculk_replaceable"),
         sculk_replaceable_world_gen: resolve("minecraft:sculk_replaceable_world_gen"),
         base_stone_overworld: resolve("minecraft:base_stone_overworld"),
-        // Unbound: the bitsets are per-interner and the interner does not exist
-        // yet at generator-construction time. The decoration driver binds them
-        // once per pass. See [`super::ids`].
+        // The bitsets are populated lazily from the process-wide canonical state
+        // table on the first decoration pass. See [`super::ids`].
         id_tags: IdTags::default(),
     }
 }
@@ -1161,6 +1203,8 @@ pub enum VegPlacement {
     InSquare,
     Heightmap(HeightmapKind),
     Biome,
+    /// A biome filter bound to the compiled numeric membership plan.
+    BiomeWithMembership(FeatureMembershipId),
     RarityFilter(i32),
     SurfaceWaterDepthFilter(i32),
     /// The noise-threshold count placement — a biome-info-noise gated count.
@@ -1384,6 +1428,11 @@ impl VegPlacement {
                     .then_some(Positions::One(pos))
                     .unwrap_or(Positions::None)
             }
+            VegPlacement::BiomeWithMembership(id) => {
+                grid.biome_allows_membership(*id, pos.x, pos.y, pos.z)
+                    .then_some(Positions::One(pos))
+                    .unwrap_or(Positions::None)
+            }
             VegPlacement::RarityFilter(chance) => {
                 if random.next_float() < 1.0 / *chance as f32 {
                     Positions::One(pos)
@@ -1556,8 +1605,7 @@ fn find_on_ground_y(
     let mut y = y_start;
     while y >= grid.min_y + 1 {
         let below_empty = empty(y - 1);
-        let below_bedrock =
-            super::base_id(grid.get(x, y - 1, z)) == "minecraft:bedrock";
+        let below_bedrock = grid.get_id(x, y - 1, z).block() == Block::Bedrock;
         if !below_empty && current_empty && !below_bedrock {
             if current_layer == layer_to_place_on {
                 return Some(y);
@@ -1726,6 +1774,15 @@ impl Decorator {
             _ => Decorator::Unsupported,
         }
     }
+
+    pub(super) fn bind_states(&self) {
+        match self {
+            Self::PlaceOnGround { block_provider, .. }
+            | Self::AlterGround { provider: block_provider }
+            | Self::AttachedToLogs { block_provider, .. } => block_provider.bind(),
+            Self::Beehive { .. } | Self::TrunkVine | Self::Unsupported => {}
+        }
+    }
 }
 
 /// The reference feature-size base kind — both
@@ -1847,6 +1904,20 @@ pub(super)     root_placer: Option<RootPlacerCfg>,
 }
 
 impl TreeConfig {
+    pub(super) fn bind_states(&self) {
+        if let Some(provider) = &self.below_trunk_provider {
+            provider.bind();
+        }
+        self.trunk_provider.bind();
+        self.foliage_provider.bind();
+        for decorator in &self.decorators {
+            decorator.bind_states();
+        }
+        if let Some(root) = &self.root_placer {
+            root.bind_states();
+        }
+    }
+
     /// `None` if any required sub-part (trunk placer, foliage placer,
     /// feature size, trunk/foliage provider) is a kind this module doesn't
     /// implement — see module doc on why that must degrade rather than
@@ -1902,6 +1973,12 @@ pub(super)     prioritize_tip: bool,
 }
 
 impl BlockColumnConfig {
+    pub(super) fn bind_states(&self) {
+        for (_, provider) in &self.layers {
+            provider.bind();
+        }
+    }
+
     /// `direction` is a JSON string (`"up"`/`"down"`/four horizontal names);
     /// only the two vertical directions parse — the only two any
     /// `block_column` configured feature in `crates/lodestone-server/assets/worldgen`
@@ -2017,6 +2094,92 @@ pub enum ConfiguredFeature {
     Unsupported(String),
 }
 
+impl ConfiguredFeature {
+    /// Binds all built-in provider states at the feature boundary. Placement
+    /// then performs only canonical-id to local-id lookups.
+    pub(super) fn bind_states(&self) {
+        match self {
+            Self::SimpleBlock(provider) | Self::BlockPile(provider) => provider.bind(),
+            Self::Tree(cfg) => cfg.bind_states(),
+            Self::BlockColumn(cfg) => cfg.bind_states(),
+            Self::Coral(_) => {}
+            Self::FallenTree(cfg) => {
+                cfg.trunk_provider.bind();
+                cfg.stump_decorators.iter().for_each(|d| d.bind_states());
+                cfg.log_decorators.iter().for_each(|d| d.bind_states());
+            }
+            Self::RootSystem(cfg) => {
+                cfg.root_state_provider.bind();
+                cfg.hanging_root_state_provider.bind();
+                cfg.feature.feature.bind_states();
+            }
+            Self::RandomSelector { default, options } => {
+                default.feature.bind_states();
+                options.iter().for_each(|(_, p)| p.feature.bind_states());
+            }
+            Self::SimpleRandomSelector(list) | Self::Sequence(list) => {
+                list.iter().for_each(|p| p.feature.bind_states());
+            }
+            Self::WeightedRandomSelector(list) => {
+                list.iter().for_each(|(_, p)| p.feature.bind_states());
+            }
+            Self::RandomBooleanSelector { yes, no } => {
+                yes.feature.bind_states();
+                no.feature.bind_states();
+            }
+            Self::Spring(_) => {}
+            Self::Disk(cfg) => cfg.provider.bind(),
+            Self::NetherForestVegetation(cfg) => cfg.provider.bind(),
+            Self::Lake(cfg) => {
+                cfg.fluid.bind();
+                cfg.barrier.bind();
+            }
+            Self::HugeMushroom(cfg) => {
+                cfg.cap_provider.bind();
+                cfg.stem_provider.bind();
+            }
+            Self::BlockBlob(_) | Self::ReplaceBlobs(_) => {}
+            Self::VegetationPatch(cfg) => {
+                cfg.ground_state.bind();
+                cfg.vegetation_feature.feature.bind_states();
+            }
+            Self::Geode(cfg) => {
+                cfg.filling_provider.bind();
+                cfg.inner_layer_provider.bind();
+                cfg.alternate_inner_layer_provider.bind();
+                cfg.middle_layer_provider.bind();
+                cfg.outer_layer_provider.bind();
+            }
+            Self::GlowstoneBlob
+            | Self::BasaltPillar
+            | Self::DesertWell
+            | Self::BlueIce
+            | Self::Kelp
+            | Self::SeaPickle(_)
+            | Self::Seagrass(_)
+            | Self::Vines
+            | Self::TwistingVines(_)
+            | Self::WeepingVines
+            | Self::MultifaceGrowth(_)
+            | Self::Speleothem(_)
+            | Self::SpeleothemCluster(_)
+            | Self::UnderwaterMagma(_)
+            | Self::Delta(_)
+            | Self::BasaltColumns(_)
+            | Self::MonsterRoom
+            | Self::HugeFungus(_)
+            | Self::Bamboo(_)
+            | Self::SculkPatch(_)
+            | Self::Fossil(_)
+            | Self::IceSpike(_)
+            | Self::LargeDripstone(_)
+            | Self::Iceberg(_)
+            | Self::NoOp
+            | Self::Unsupported(_) => {}
+        }
+    }
+}
+
 /// The reference placed-feature record — an ordered
 /// [`VegPlacement`] pipeline plus the [`ConfiguredFeature`] it terminates in.
 /// Every reference to a placed feature (top-level biome step entry, or a
@@ -2034,55 +2197,55 @@ pub struct PlacedRef {
     pub feature: Box<ConfiguredFeature>,
 }
 
-impl PlacedRef {
-    pub(crate) fn requires_wide_context(&self) -> bool {
-        fn feature_requires_wide(feature: &ConfiguredFeature) -> bool {
-            match feature {
-                ConfiguredFeature::Unsupported(_)
-                | ConfiguredFeature::Fossil(_)
-                | ConfiguredFeature::Geode(_)
-                | ConfiguredFeature::Iceberg(_)
-                | ConfiguredFeature::LargeDripstone(_)
-                | ConfiguredFeature::HugeMushroom(_)
-                | ConfiguredFeature::HugeFungus(_)
-                | ConfiguredFeature::RootSystem(_)
-                | ConfiguredFeature::VegetationPatch(_)
-                | ConfiguredFeature::SculkPatch(_)
-                | ConfiguredFeature::MultifaceGrowth(_)
-                | ConfiguredFeature::Speleothem(_)
-                | ConfiguredFeature::SpeleothemCluster(_)
-                | ConfiguredFeature::BlockBlob(_)
-                | ConfiguredFeature::BasaltColumns(_)
-                | ConfiguredFeature::ReplaceBlobs(_)
-                | ConfiguredFeature::Delta(_)
-                | ConfiguredFeature::GlowstoneBlob
-                | ConfiguredFeature::BasaltPillar
-                | ConfiguredFeature::DesertWell
-                | ConfiguredFeature::BlueIce
-                | ConfiguredFeature::Kelp
-                | ConfiguredFeature::Vines
-                | ConfiguredFeature::WeepingVines => true,
-                ConfiguredFeature::RandomSelector { default, options } => {
-                    default.requires_wide_context()
-                        || options
-                            .iter()
-                            .any(|(_, option)| option.requires_wide_context())
-                }
-                ConfiguredFeature::SimpleRandomSelector(options)
-                | ConfiguredFeature::Sequence(options) => {
-                    options.iter().any(PlacedRef::requires_wide_context)
-                }
-                ConfiguredFeature::WeightedRandomSelector(options) => options
-                    .iter()
-                    .any(|(_, placed)| placed.requires_wide_context()),
-                ConfiguredFeature::RandomBooleanSelector { yes, no } => {
-                    yes.requires_wide_context() || no.requires_wide_context()
-                }
-                _ => false,
+/// Binds the immutable biome-membership token to every biome placement in a
+/// resolved placed-feature tree. Registry references are parsed before the
+/// generator knows the biome union; this one setup-only walk closes that gap
+/// so the candidate path carries an integer token rather than a registry name.
+pub(crate) fn bind_placed_feature_membership(
+    placed: &mut PlacedRef,
+    membership: FeatureMembershipId,
+) {
+    for placement in &mut placed.placements {
+        if matches!(placement, VegPlacement::Biome) {
+            *placement = VegPlacement::BiomeWithMembership(membership);
+        }
+    }
+    bind_configured_feature_membership(&mut placed.feature, membership);
+}
+
+fn bind_configured_feature_membership(
+    feature: &mut ConfiguredFeature,
+    membership: FeatureMembershipId,
+) {
+    match feature {
+        ConfiguredFeature::RandomSelector { default, options } => {
+            bind_placed_feature_membership(default, membership);
+            for (_, option) in options {
+                bind_placed_feature_membership(option, membership);
             }
         }
-
-        feature_requires_wide(&self.feature)
+        ConfiguredFeature::SimpleRandomSelector(options)
+        | ConfiguredFeature::Sequence(options) => {
+            for option in options {
+                bind_placed_feature_membership(option, membership);
+            }
+        }
+        ConfiguredFeature::RandomBooleanSelector { yes, no } => {
+            bind_placed_feature_membership(yes, membership);
+            bind_placed_feature_membership(no, membership);
+        }
+        ConfiguredFeature::WeightedRandomSelector(options) => {
+            for (_, option) in options {
+                bind_placed_feature_membership(option, membership);
+            }
+        }
+        ConfiguredFeature::VegetationPatch(config) => {
+            bind_placed_feature_membership(&mut config.vegetation_feature, membership);
+        }
+        ConfiguredFeature::RootSystem(config) => {
+            bind_placed_feature_membership(&mut config.feature, membership);
+        }
+        _ => {}
     }
 }
 
@@ -2159,7 +2322,10 @@ fn parse_root_system_int(config: &Value, name: &str, min: i32, max: i32) -> Opti
         .then_some(value as i32)
 }
 
-fn parse_root_replaceable(resolver: &dyn Resolver, value: &Value) -> Option<HashSet<String>> {
+fn parse_root_replaceable(
+    resolver: &dyn Resolver,
+    value: &Value,
+) -> Option<FastSet<CanonicalStateId>> {
     let mut replaceable = HashSet::new();
     let mut seen = HashSet::new();
     let mut add = |entry: &str| {
@@ -2179,7 +2345,10 @@ fn parse_root_replaceable(resolver: &dyn Resolver, value: &Value) -> Option<Hash
         }
         _ => return None,
     }
-    Some(replaceable)
+    replaceable
+        .into_iter()
+        .map(|name| Block::from_name(&name).map(Block::default_state))
+        .collect()
 }
 
 fn parse_root_system_config(resolver: &dyn Resolver, config: &Value) -> Option<super::root_system::RootSystemCfg> {
@@ -2377,7 +2546,7 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
                     requires_block_below: c["requires_block_below"].as_bool().unwrap_or(true),
                     rock_count: c["rock_count"].as_i64().unwrap_or(4) as i32,
                     hole_count: c["hole_count"].as_i64().unwrap_or(1) as i32,
-                    valid_blocks: parse_id_list(&c["valid_blocks"]).into_iter().collect(),
+                    valid_blocks: parse_canonical_id_list(&c["valid_blocks"]).unwrap_or_default(),
                 })),
                 None => ConfiguredFeature::Unsupported("spring_feature: malformed state".into()),
             }
@@ -2436,11 +2605,13 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
         }
         "delta_feature" => {
             let c = &doc["config"];
-            match (try_parse_int_provider(&c["rim_size"]), try_parse_int_provider(&c["size"])) {
-                (Some(rim_size), Some(size)) => ConfiguredFeature::Delta(Box::new(
+            let contents = CanonicalStateId::from_state_str(&canon_state(&c["contents"]));
+            let rim = CanonicalStateId::from_state_str(&canon_state(&c["rim"]));
+            match (try_parse_int_provider(&c["rim_size"]), try_parse_int_provider(&c["size"]), contents, rim) {
+                (Some(rim_size), Some(size), Some(contents), Some(rim)) => ConfiguredFeature::Delta(Box::new(
                     super::features::DeltaCfg {
-                        contents: canon_state(&c["contents"]),
-                        rim: canon_state(&c["rim"]),
+                        contents,
+                        rim,
                         rim_size,
                         size,
                     },
@@ -2462,7 +2633,8 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
             match (try_parse_int_provider(&c["radius"]), parse_validated_state(&c["state"])) {
                 (Some(radius), Some(state)) => {
                     ConfiguredFeature::ReplaceBlobs(Box::new(super::features::ReplaceBlobsCfg {
-                        target: canon_state(&c["target"]),
+                        target: parse_validated_state(&c["target"])
+                            .unwrap_or_else(lodestone_data::block_states::air_state),
                         state,
                         radius,
                     }))
@@ -2481,7 +2653,7 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
         "blue_ice" => ConfiguredFeature::BlueIce,
         "iceberg" => match parse_validated_state(&doc["config"]["state"]) {
             Some(state) => ConfiguredFeature::Iceberg(Box::new(super::iceberg::IcebergCfg {
-                state: state.canonical_state(),
+                state,
             })),
             None => ConfiguredFeature::Unsupported("iceberg: malformed state".into()),
         },
@@ -2507,28 +2679,36 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
         "multiface_growth" => {
             let c = &doc["config"];
             ConfiguredFeature::MultifaceGrowth(Box::new(super::features::MultifaceGrowthCfg {
-                block: c["block"].as_str().unwrap_or("minecraft:glow_lichen").to_string(),
+                block: CanonicalStateId::from_state_str(
+                    c["block"].as_str().unwrap_or("minecraft:glow_lichen"),
+                )
+                .unwrap_or_else(|| Block::GlowLichen.default_state()),
                 search_range: c["search_range"].as_i64().unwrap_or(10) as i32,
                 // Vanilla's codec defaults: all three false.
                 can_place_on_floor: c["can_place_on_floor"].as_bool().unwrap_or(false),
                 can_place_on_ceiling: c["can_place_on_ceiling"].as_bool().unwrap_or(false),
                 can_place_on_wall: c["can_place_on_wall"].as_bool().unwrap_or(false),
                 chance_of_spreading: c["chance_of_spreading"].as_f64().unwrap_or(0.5) as f32,
-                can_be_placed_on: parse_id_list(&c["can_be_placed_on"]).into_iter().collect(),
+                can_be_placed_on: parse_canonical_id_list(&c["can_be_placed_on"])
+                    .unwrap_or_default(),
             }))
         }
         "speleothem" => {
             let c = &doc["config"];
             let parsed = (
-                c["base_block"]["Name"].as_str(),
-                c["pointed_block"]["Name"].as_str(),
-                resolve_block_set(resolver, &c["replaceable_blocks"]),
+                c["base_block"]["Name"]
+                    .as_str()
+                    .and_then(|_| CanonicalStateId::from_state_str(&canon_state(&c["base_block"]))),
+                c["pointed_block"]["Name"]
+                    .as_str()
+                    .and_then(|_| CanonicalStateId::from_state_str(&canon_state(&c["pointed_block"]))),
+                resolve_canonical_block_set(resolver, &c["replaceable_blocks"]),
             );
             match parsed {
                 (Some(base_block), Some(pointed_block), Some(replaceable_blocks)) => {
                     ConfiguredFeature::Speleothem(Box::new(super::features::SpeleothemCfg {
-                        base_block: base_block.to_string(),
-                        pointed_block: pointed_block.to_string(),
+                        base_block,
+                        pointed_block,
                         replaceable_blocks,
                         chance_of_taller_generation: c["chance_of_taller_generation"]
                             .as_f64()
@@ -2552,9 +2732,13 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
         "speleothem_cluster" => {
             let c = &doc["config"];
             let parsed = (
-                c["base_block"]["Name"].as_str(),
-                c["pointed_block"]["Name"].as_str(),
-                resolve_block_set(resolver, &c["replaceable_blocks"]),
+                c["base_block"]["Name"]
+                    .as_str()
+                    .and_then(|_| CanonicalStateId::from_state_str(&canon_state(&c["base_block"]))),
+                c["pointed_block"]["Name"]
+                    .as_str()
+                    .and_then(|_| CanonicalStateId::from_state_str(&canon_state(&c["pointed_block"]))),
+                resolve_canonical_block_set(resolver, &c["replaceable_blocks"]),
                 try_parse_int_provider(&c["height"]),
                 try_parse_int_provider(&c["radius"]),
                 try_parse_int_provider(&c["speleothem_block_layer_thickness"]),
@@ -2573,8 +2757,8 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
                     Some(wetness),
                 ) => ConfiguredFeature::SpeleothemCluster(Box::new(
                     super::features::SpeleothemClusterCfg {
-                        base_block: base_block.to_string(),
-                        pointed_block: pointed_block.to_string(),
+                        base_block,
+                        pointed_block,
                         replaceable_blocks,
                         floor_to_ceiling_search_range: c["floor_to_ceiling_search_range"]
                             .as_i64()
@@ -2659,17 +2843,26 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
         "huge_fungus" => {
             let c = &doc["config"];
             match (
-                c["valid_base_block"]["Name"].as_str(),
+                parse_validated_state(&c["valid_base_block"]),
                 c["stem_state"]["Name"].as_str(),
                 c["hat_state"]["Name"].as_str(),
                 c["decor_state"]["Name"].as_str(),
             ) {
                 (Some(valid_base_block), Some(_stem_state), Some(_hat_state), Some(_decor_state)) => {
+                    let Some(stem_state) = CanonicalStateId::from_state_str(&canon_state(&c["stem_state"])) else {
+                        return ConfiguredFeature::Unsupported("huge_fungus: unsupported states".into());
+                    };
+                    let Some(hat_state) = CanonicalStateId::from_state_str(&canon_state(&c["hat_state"])) else {
+                        return ConfiguredFeature::Unsupported("huge_fungus: unsupported states".into());
+                    };
+                    let Some(decor_state) = CanonicalStateId::from_state_str(&canon_state(&c["decor_state"])) else {
+                        return ConfiguredFeature::Unsupported("huge_fungus: unsupported states".into());
+                    };
                     ConfiguredFeature::HugeFungus(Box::new(super::features::HugeFungusCfg {
-                        valid_base_block: valid_base_block.to_string(),
-                        stem_state: canon_state(&c["stem_state"]),
-                        hat_state: canon_state(&c["hat_state"]),
-                        decor_state: canon_state(&c["decor_state"]),
+                        valid_base_block,
+                        stem_state,
+                        hat_state,
+                        decor_state,
                         replaceable_blocks: BlockPredicate::parse(&c["replaceable_blocks"]),
                         planted: c["planted"].as_bool().unwrap_or(false),
                     }))
@@ -2691,7 +2884,7 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
                 (Some(ground_state), Some(depth), Some(xz_radius)) => {
                     ConfiguredFeature::VegetationPatch(Box::new(
                         super::features::VegetationPatchCfg {
-                            replaceable: resolve_block_set(resolver, &c["replaceable"])
+                            replaceable: resolve_canonical_block_set(resolver, &c["replaceable"])
                                 .unwrap_or_default(),
                             ground_state,
                             vegetation_feature: resolve_placed_feature_ref(
@@ -2882,7 +3075,13 @@ mod tests {
     use crate::feature::top_layer::StatePredicate;
     use crate::feature::vegetation::grid::VegGrid;
     use crate::feature::vegetation::ids::Tag;
+    use lodestone_data::block::Block;
+    use lodestone_data::block_states::StateId;
     use serde_json::Value;
+
+    fn state(spec: &str) -> StateId {
+        StateId::from_state_str(spec).expect("test state is in the generated table")
+    }
 
     #[test]
     fn matching_fluids_accepts_the_registry_string_shape() {
@@ -2893,7 +3092,7 @@ mod tests {
         assert!(matches!(
             predicate,
             BlockPredicate::MatchingFluid { fluids, offset: (0, 0, 0) }
-                if fluids == vec!["minecraft:water"]
+                if fluids == [Block::Water].into_iter().collect()
         ));
     }
 
@@ -2945,7 +3144,7 @@ mod tests {
     fn has_sturdy_face_down_tests_the_state_at_the_scan_target() {
         let predicate = BlockPredicate::HasSturdyFaceDown { offset: (0, 0, 0) };
         let mut grid = VegGrid::new(0, 4, 0, 0);
-        grid.seed(8, 3, 8, "minecraft:stone".to_string());
+        grid.seed_id(8, 3, 8, state("minecraft:stone"));
         let mut tags = super::VegTags::default();
         tags.simple_block_support.center_support_down = StatePredicate::new(
             HashSet::from(["minecraft:test_support".to_string()]),
@@ -2955,7 +3154,7 @@ mod tests {
         assert!(predicate.test(&grid, &tags, BlockPos { x: 8, y: 3, z: 8 }));
         assert!(!predicate.test(&grid, &tags, BlockPos { x: 8, y: 2, z: 8 }));
 
-        grid.seed(9, 3, 9, "minecraft:test_support".to_string());
+        grid.seed_id(9, 3, 9, state("minecraft:test_support"));
         assert!(predicate.test(&grid, &tags, BlockPos { x: 9, y: 3, z: 9 }));
     }
 
@@ -3005,7 +3204,7 @@ mod tests {
             panic!("vegetation patch document must parse");
         };
         assert_eq!(cfg.replaceable.len(), 1);
-        assert!(cfg.replaceable.contains("minecraft:deepslate"));
+        assert!(cfg.replaceable.contains(&state("minecraft:deepslate")));
     }
 
     #[test]
@@ -3057,8 +3256,8 @@ mod tests {
         let ConfiguredFeature::Geode(cfg) = feature else {
             panic!("geode document must parse");
         };
-        assert!(cfg.cannot_replace.contains("minecraft:bedrock"));
-        assert!(cfg.invalid_blocks.contains("minecraft:water"));
+        assert!(cfg.cannot_replace.contains(&state("minecraft:bedrock")));
+        assert!(cfg.invalid_blocks.contains(&state("minecraft:water")));
         assert_eq!(cfg.outer_wall_distance_max, 5);
     }
 
@@ -3274,7 +3473,7 @@ mod tests {
         };
         assert_eq!(cfg.root_column_max_height, 100);
         assert_eq!(cfg.root_placement_attempts, 20);
-        assert!(cfg.root_replaceable.contains("minecraft:stone"));
+        assert!(cfg.root_replaceable.contains(&state("minecraft:stone")));
 
         let mut malformed = root_system_doc();
         malformed["config"]
@@ -3296,7 +3495,7 @@ mod tests {
         });
         assert!(matches!(
             super::parse_configured_feature_doc(&RootResolver, &complete),
-            ConfiguredFeature::Iceberg(cfg) if cfg.state == "minecraft:blue_ice"
+            ConfiguredFeature::Iceberg(cfg) if cfg.state == state("minecraft:blue_ice")
         ));
 
         let malformed = serde_json::json!({
@@ -3314,14 +3513,19 @@ mod tests {
 #[cfg(test)]
 mod heightmap_tests {
     use super::{HeightmapKind, VegGrid};
+    use lodestone_data::block_states::StateId;
+
+    fn state(spec: &str) -> StateId {
+        StateId::from_state_str(spec).expect("test state is in the generated table")
+    }
 
     #[test]
     fn final_world_surface_sees_overlay_while_worldgen_surface_stays_frozen() {
         let mut grid = VegGrid::new(0, 16, 0, 0);
-        grid.seed(8, 4, 8, "minecraft:stone".to_string());
+        grid.seed_id(8, 4, 8, state("minecraft:stone"));
         assert_eq!(HeightmapKind::WorldSurfaceWg.scan(&grid, 8, 8), 5);
 
-        assert!(grid.set_if_in_bounds(8, 8, 8, "minecraft:short_grass".to_string()));
+        assert!(grid.set_id_if_in_bounds(8, 8, 8, state("minecraft:short_grass")));
 
         assert_eq!(HeightmapKind::WorldSurface.scan(&grid, 8, 8), 9);
         assert_eq!(HeightmapKind::WorldSurfaceWg.scan(&grid, 8, 8), 5);

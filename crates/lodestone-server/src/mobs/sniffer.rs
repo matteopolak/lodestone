@@ -65,7 +65,6 @@
 
 use lodestone_model::{BlockPos, ResourceKey, Vec3};
 
-use super::villager::bare_block_id;
 use super::{ChunkWorld, MobSim, SimMob};
 use crate::mob_spawn::SpawnRng;
 
@@ -237,7 +236,7 @@ fn find_dig_position(world: &ChunkWorld, sniffer: &SimMob<'_>) -> Option<Vec3> {
                 let x = origin.x + dx;
                 let y = origin.y + dy;
                 let z = origin.z + dz;
-                let bare = bare_block_id(world.block_state(x, y, z));
+                let bare = world.block_state_id(x, y, z).block().path();
                 if !DIGGABLE_BLOCKS.contains(&bare) {
                     continue;
                 }
@@ -245,7 +244,7 @@ fn find_dig_position(world: &ChunkWorld, sniffer: &SimMob<'_>) -> Option<Vec3> {
                 // diggable block — the same `#air`-tag approximation
                 // `find_nearest_cat_block`'s own doc already discloses for
                 // a different species' block search.
-                let above = bare_block_id(world.block_state(x, y + 1, z));
+                let above = world.block_state_id(x, y + 1, z).block().path();
                 if !matches!(above, "air" | "cave_air" | "void_air") {
                     continue;
                 }
@@ -274,7 +273,7 @@ fn diggable_block_below(world: &ChunkWorld, walk_target: Vec3) -> bool {
     let x = walk_target.x.floor() as i32;
     let y = walk_target.y.floor() as i32 - 1;
     let z = walk_target.z.floor() as i32;
-    DIGGABLE_BLOCKS.contains(&bare_block_id(world.block_state(x, y, z)))
+    DIGGABLE_BLOCKS.contains(&world.block_state_id(x, y, z).block().path())
 }
 
 impl<'w> MobSim<'w> {

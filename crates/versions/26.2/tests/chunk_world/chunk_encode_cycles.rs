@@ -178,6 +178,12 @@ fn cell_loop_string_path(shape: &ChunkShape, source: &ChunkColumn) -> WorldChunk
         shape.air_id,
         shape.biome_id,
     );
+    let canonical_states = source
+        .palette()
+        .iter()
+        .copied()
+        .map(|state| (state, state.canonical_state()))
+        .collect::<HashMap<_, _>>();
     let mut seen: HashMap<&str, u32> = HashMap::new();
     for section_index in 0..shape.section_count {
         let base_y = shape.min_y + (section_index * ChunkSection::EDGE) as i32;
@@ -191,7 +197,11 @@ fn cell_loop_string_path(shape: &ChunkShape, source: &ChunkColumn) -> WorldChunk
             let wy = base_y + ly as i32;
             for lz in 0..ChunkSection::EDGE {
                 for lx in 0..ChunkSection::EDGE {
-                    let state = source.block_state(lx as i32, wy, lz as i32);
+                    let state_id = source.block_state_id(lx as i32, wy, lz as i32);
+                    let state = canonical_states
+                        .get(&state_id)
+                        .expect("column palette contains every cell state")
+                        .as_str();
                     let id = *seen
                         .entry(state)
                         .or_insert_with(|| resolve_state_id_legacy(state));
@@ -232,7 +242,7 @@ fn cell_loop_integer_path(shape: &ChunkShape, source: &ChunkColumn) -> WorldChun
             let wy = base_y + ly as i32;
             for lz in 0..ChunkSection::EDGE {
                 for lx in 0..ChunkSection::EDGE {
-                    let id = source.block_state_id(lx as i32, wy, lz as i32);
+                    let id = source.block_state_id(lx as i32, wy, lz as i32).raw();
                     if id != shape.air_id {
                         section.set_block(lx, ly, lz, id);
                     }
@@ -396,9 +406,9 @@ fn encode_cost_per_column_instructions_retired() {
         .map(|i| source.column((i % 4) as i32, (i / 4) as i32))
         .collect();
     let cells_per_column = 16 * 16 * shape.world_height as u64;
-    let distinct: usize = columns.iter().map(|c| c.raw_palette().len()).sum();
+    let distinct: usize = columns.iter().map(|c| c.palette().len()).sum();
     assert!(
-        columns.iter().any(|c| c.raw_palette().len() >= 3),
+        columns.iter().any(|c| c.palette().len() >= 3),
         "fixture is degenerate: no column has three distinct palette entries, so the resolver \
          arm is not being exercised"
     );

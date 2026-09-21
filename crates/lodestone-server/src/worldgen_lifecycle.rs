@@ -5,10 +5,9 @@
 //! source adapters and resident materializer are reusable lifecycle tooling.  A
 //! source completion runs the same worldgen dispatcher that the integrated
 //! server uses, then applies its absolute transitions to every resident column
-//! reached by the write.  State strings cross the generator boundary because
-//! palette ids belong to one generator instance.
+//! reached by the write. All lifecycle state transitions use canonical ids.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{btree_map::Entry, BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::{
@@ -16,6 +15,7 @@ use crate::{
     OverworldChunkSource,
 };
 use crate::worldgen_session::ProvenanceMutation;
+use lodestone_data::block_states::StateId;
 use lodestone_worldgen::overworld::{GeneratedBlockEntity, OverworldGenerator};
 use lodestone_worldgen::structure::StructureBlocks;
 use lodestone_worldgen::stage_schedule::ColumnStage;
@@ -23,6 +23,26 @@ use sha2::{Digest, Sha256};
 
 #[cfg(test)]
 use std::cell::Cell;
+
+#[cfg(test)]
+thread_local! {
+    static GENERATED_RESIDENT_UNWRAPS: Cell<u64> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_generated_resident_unwrap() {
+    GENERATED_RESIDENT_UNWRAPS.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+fn reset_generated_resident_unwraps() {
+    GENERATED_RESIDENT_UNWRAPS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn generated_resident_unwraps() -> u64 {
+    GENERATED_RESIDENT_UNWRAPS.with(Cell::get)
+}
 
 /// A chunk coordinate used by lifecycle replay.
 pub type ChunkPos = (i32, i32);
@@ -81,18 +101,20 @@ impl ImmutableComputeExecutor for PersistentWorldgenExecutor {
 /// Horizontal chunk radius sampled by an initial packet's light encoder.
 pub const PACKET_LIGHT_RADIUS: i32 = 1;
 
-/// Maximum horizontal chunk radius touched by one FEATURES source write.
-pub const FEATURES_WRITE_RADIUS: i32 = 2;
+/// Horizontal radius used by the target-owned FEATURES lifecycle. The
+/// dispatcher is the authority for this footprint; settlement and replay
+/// contexts must use the same value.
+pub const TARGET_FEATURE_RADIUS: i32 = lodestone_worldgen::overworld::TARGET_DECORATION_RADIUS;
 
-/// Horizontal chunk radius whose source bodies are dispatched for one target.
-pub const FEATURES_SOURCE_RADIUS: i32 = 1;
-
-/// Maximum source-to-source distance of a mutable dependency.
-pub const MUTABLE_READ_RADIUS: i32 = 4;
+// Source-ordered replay remains available for Nether/End captures. These
+// constants describe that legacy capture closure, not target-owned Overworld
+// settlement geometry.
+const SOURCE_FEATURE_WRITE_RADIUS: i32 = 2;
+const SOURCE_MUTABLE_READ_RADIUS: i32 = 4;
 
 // The reverse frontier already accounts for the selected source's write halo;
 // the remaining two chunks are the audited mutable-read contribution.
-const BACKWARD_FRONTIER_RADIUS: i32 = MUTABLE_READ_RADIUS - FEATURES_WRITE_RADIUS;
+const BACKWARD_FRONTIER_RADIUS: i32 = SOURCE_MUTABLE_READ_RADIUS - SOURCE_FEATURE_WRITE_RADIUS;
 const ADMITTED_DESTINATION_RADIUS: i32 = 2;
 
 /// A completion stage captured from the external scheduler.
@@ -125,6 +147,9 @@ pub enum LifecycleCompletionMode {
 #[cfg(test)]
 thread_local! {
     static COMPLETION_MODE_COUNTS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
+    static REGION_FEATURE_EPOCH_COUNTS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
+    static REGION_FEATURE_OVERRIDE_COUNTS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
+    static REGION_FEATURE_SCALAR_FALLBACKS: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -146,6 +171,49 @@ pub(crate) fn reset_completion_mode_counts() {
 #[cfg(test)]
 pub(crate) fn completion_mode_counts() -> (usize, usize) {
     COMPLETION_MODE_COUNTS.with(Cell::get)
+}
+
+#[cfg(test)]
+fn record_region_feature_epoch(mode: LifecycleCompletionMode) {
+    REGION_FEATURE_EPOCH_COUNTS.with(|counts| {
+        let (full, sparse) = counts.get();
+        counts.set(match mode {
+            LifecycleCompletionMode::Full => (full + 1, sparse),
+            LifecycleCompletionMode::SparsePadding => (full, sparse + 1),
+        });
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn reset_region_feature_epoch_counts() {
+    REGION_FEATURE_EPOCH_COUNTS.with(|counts| counts.set((0, 0)));
+    REGION_FEATURE_OVERRIDE_COUNTS.with(|counts| counts.set((0, 0)));
+    REGION_FEATURE_SCALAR_FALLBACKS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn region_feature_epoch_counts() -> (usize, usize) {
+    REGION_FEATURE_EPOCH_COUNTS.with(Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn region_feature_override_counts() -> (usize, usize) {
+    REGION_FEATURE_OVERRIDE_COUNTS.with(Cell::get)
+}
+
+#[cfg(test)]
+fn record_region_feature_override_counts(counts: (usize, usize)) {
+    REGION_FEATURE_OVERRIDE_COUNTS.with(|recorded| recorded.set(counts));
+}
+
+#[cfg(test)]
+pub(crate) fn region_feature_scalar_fallbacks() -> usize {
+    REGION_FEATURE_SCALAR_FALLBACKS.with(Cell::get)
+}
+
+#[cfg(test)]
+fn record_region_feature_scalar_fallback() {
+    REGION_FEATURE_SCALAR_FALLBACKS.with(|count| count.set(count.get() + 1));
 }
 
 /// Generation status tracked for one resident lifecycle column.
@@ -191,18 +259,16 @@ pub struct LifecycleResidentTransition {
     pub client_heightmaps: Option<LifecycleClientHeightmaps>,
 }
 
-/// One final write emitted by a production source completion.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A canonical cross-column write retained through lifecycle settlement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LifecycleSpill {
     /// The source chunk whose body produced this write.
     pub source: ChunkPos,
     /// The absolute block coordinate of the write.
     pub position: AbsoluteCell,
-    /// The canonical block-state string after the write.
-    pub state: String,
-    /// Whether this source-crossing fungus write was transient during feature
-    /// execution. Ordered lifecycle replay retains it for later reads and
-    /// packet materialization.
+    /// The validated canonical block-state id after the write.
+    pub state: StateId,
+    /// Whether this source-crossing write is transient during a transaction.
     pub transient: bool,
 }
 
@@ -217,6 +283,14 @@ pub struct LifecycleFeatureResult {
     pub structure_blocks: StructureBlocks,
     /// End return-gateway sidecars emitted with the source's block writes.
     pub end_gateways: Vec<lodestone_worldgen::end::EndGateway>,
+}
+
+fn authenticated_features_identity(generated: [u8; 32], prefix: [u8; 32]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"lodestone-worldgen-authenticated-features-v2");
+    hasher.update(generated);
+    hasher.update(prefix);
+    hasher.finalize().into()
 }
 
 /// A target-owned source may return its finished target column directly when
@@ -347,7 +421,7 @@ impl LifecycleReplayPlan {
         for event in feature_events.iter().rev() {
             let reaches = event_frontier.iter().any(|destination| {
                 (event.source.0 - destination.0).abs().max((event.source.1 - destination.1).abs())
-                    <= FEATURES_WRITE_RADIUS
+                    <= SOURCE_FEATURE_WRITE_RADIUS
             });
             if !reaches {
                 continue;
@@ -408,11 +482,6 @@ pub trait LifecycleWorldgenSource {
     /// default keeps sources with no replay-specific cache unchanged.
     fn prepare_lifecycle_replay(&mut self, _admissions: &[ChunkPos]) {}
 
-    /// Prepare request-local immutable terrain products before shaped admission.
-    /// Sources with shared terrain windows may fill their stage slots here;
-    /// sources without one retain the no-op default.
-    fn prepare_generation_batch(&self, _targets: &[ChunkPos]) {}
-
     /// Build the request/target-owned immutable read context once before its
     /// ordered source wavefront starts.
     fn lifecycle_replay_context(&self, target: ChunkPos) -> Arc<Self::ReplayContext>;
@@ -431,6 +500,17 @@ pub trait LifecycleWorldgenSource {
             .into_iter()
             .map(|target| (target, self.lifecycle_replay_context(target)))
             .collect()
+    }
+
+    /// Start an optional request-owned mutable decoration epoch after all
+    /// target contexts have been prepared. Sources without a shared region
+    /// keep the scalar completion path.
+    fn begin_region_feature_epoch(
+        &self,
+        _targets: &[ChunkPos],
+        _contexts: &BTreeMap<ChunkPos, Arc<Self::ReplayContext>>,
+    ) -> Option<lodestone_worldgen::overworld::RegionFeatureEpoch> {
+        None
     }
 
     /// Optional source-specific computation count for replay controls.
@@ -463,6 +543,34 @@ pub trait LifecycleWorldgenSource {
         None
     }
 
+    /// Build shaped products after warming the exact prefix consumed by the
+    /// replay wavefront. Sources without a shared prefix retain their batch
+    /// implementation.
+    fn generated_shaped_columns_with_prefix(
+        &self,
+        chunks: &[ChunkPos],
+        _prefix_targets: &[ChunkPos],
+        _prefix_radius: i32,
+    ) -> Option<Vec<lodestone_worldgen::overworld::GeneratedColumn>> {
+        self.generated_shaped_columns(chunks)
+    }
+
+    /// Build carriers for `chunks` while keeping the source lease over the
+    /// complete read context. Read-only context coordinates are warmed but
+    /// never converted into packet carriers. Sources without this split
+    /// retain their ordinary batch path when both coordinate lists match.
+    fn generated_shaped_columns_with_context(
+        &self,
+        chunks: &[ChunkPos],
+        lease_chunks: &[ChunkPos],
+        prefix_targets: &[ChunkPos],
+        prefix_radius: i32,
+    ) -> Option<Vec<lodestone_worldgen::overworld::GeneratedColumn>> {
+        (chunks == lease_chunks)
+            .then(|| self.generated_shaped_columns_with_prefix(chunks, prefix_targets, prefix_radius))
+            .flatten()
+    }
+
     /// Return the source's exact lifecycle map seed for one resident column.
     ///
     /// This is a source boundary, not a reconstruction from the resident
@@ -481,7 +589,7 @@ pub trait LifecycleWorldgenSource {
     fn feature_result(
         &self,
         source: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
         _resident: &BTreeMap<ChunkPos, ChunkColumn>,
     ) -> LifecycleFeatureResult;
 
@@ -494,7 +602,7 @@ pub trait LifecycleWorldgenSource {
         &self,
         _target: ChunkPos,
         source: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
         resident: &BTreeMap<ChunkPos, ChunkColumn>,
     ) -> LifecycleFeatureResult {
         self.feature_result(source, overrides, resident)
@@ -504,7 +612,7 @@ pub trait LifecycleWorldgenSource {
     fn target_feature_result(
         &self,
         target: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
         resident: &BTreeMap<ChunkPos, ChunkColumn>,
     ) -> LifecycleFeatureResult {
         self.feature_result_for_target(target, target, overrides, resident)
@@ -515,7 +623,7 @@ pub trait LifecycleWorldgenSource {
     fn target_feature_result_direct(
         &self,
         _target: ChunkPos,
-        _overrides: &BTreeMap<AbsoluteCell, String>,
+        _overrides: &BTreeMap<AbsoluteCell, StateId>,
         _resident: &BTreeMap<ChunkPos, ChunkColumn>,
     ) -> Option<LifecycleTargetFeatureResult> {
         None
@@ -526,18 +634,49 @@ pub trait LifecycleWorldgenSource {
     fn target_feature_result_direct_with_replay_context(
         &self,
         target: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
         resident: &BTreeMap<ChunkPos, ChunkColumn>,
         _context: &Self::ReplayContext,
     ) -> Option<LifecycleTargetFeatureResult> {
         self.target_feature_result_direct(target, overrides, resident)
     }
 
+    /// Run direct target output through the request-owned Overworld epoch when
+    /// one is installed. The default preserves the existing source boundary.
+    fn target_feature_result_direct_with_replay_context_and_epoch(
+        &self,
+        target: ChunkPos,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
+        resident: &BTreeMap<ChunkPos, ChunkColumn>,
+        context: &Self::ReplayContext,
+        _epoch: &mut lodestone_worldgen::overworld::RegionFeatureEpoch,
+    ) -> Option<LifecycleTargetFeatureResult> {
+        self.target_feature_result_direct_with_replay_context(
+            target, overrides, resident, context,
+        )
+    }
+
+    /// Direct target output using the materializer's append-only override
+    /// revisions. The default preserves non-Overworld source adapters.
+    fn target_feature_result_direct_with_replay_context_and_epoch_revisions(
+        &self,
+        target: ChunkPos,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
+        resident: &BTreeMap<ChunkPos, ChunkColumn>,
+        context: &Self::ReplayContext,
+        epoch: &mut lodestone_worldgen::overworld::RegionFeatureEpoch,
+        _revisions: &[((i32, i32, i32), StateId)],
+    ) -> Option<LifecycleTargetFeatureResult> {
+        self.target_feature_result_direct_with_replay_context_and_epoch(
+            target, overrides, resident, context, epoch,
+        )
+    }
+
     /// Run a target-owned padding writer without constructing a target product.
     fn target_feature_result_sparse_with_replay_context(
         &self,
         target: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
         resident: &BTreeMap<ChunkPos, ChunkColumn>,
         _context: &Self::ReplayContext,
     ) -> Option<LifecycleSparseTargetFeatureResult> {
@@ -562,6 +701,37 @@ pub trait LifecycleWorldgenSource {
         })
     }
 
+    /// Run sparse target output through the request-owned Overworld epoch when
+    /// one is installed. The default preserves the existing source boundary.
+    fn target_feature_result_sparse_with_replay_context_and_epoch(
+        &self,
+        target: ChunkPos,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
+        resident: &BTreeMap<ChunkPos, ChunkColumn>,
+        context: &Self::ReplayContext,
+        _epoch: &mut lodestone_worldgen::overworld::RegionFeatureEpoch,
+    ) -> Option<LifecycleSparseTargetFeatureResult> {
+        self.target_feature_result_sparse_with_replay_context(
+            target, overrides, resident, context,
+        )
+    }
+
+    /// Sparse target output using append-only override revisions. The default
+    /// keeps dimensions without a region epoch on their existing boundary.
+    fn target_feature_result_sparse_with_replay_context_and_epoch_revisions(
+        &self,
+        target: ChunkPos,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
+        resident: &BTreeMap<ChunkPos, ChunkColumn>,
+        context: &Self::ReplayContext,
+        epoch: &mut lodestone_worldgen::overworld::RegionFeatureEpoch,
+        _revisions: &[((i32, i32, i32), StateId)],
+    ) -> Option<LifecycleSparseTargetFeatureResult> {
+        self.target_feature_result_sparse_with_replay_context_and_epoch(
+            target, overrides, resident, context, epoch,
+        )
+    }
+
     /// Whether direct target output is safe only for a marked authenticated
     /// generated prefix. Production Overworld sources enable this because an
     /// edited or hydrated `ChunkColumn` must outrank deterministic output;
@@ -584,7 +754,7 @@ pub trait LifecycleWorldgenSource {
         &self,
         target: ChunkPos,
         source: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
         resident: &BTreeMap<ChunkPos, ChunkColumn>,
         _context: &Self::ReplayContext,
     ) -> LifecycleFeatureResult {
@@ -595,7 +765,7 @@ pub trait LifecycleWorldgenSource {
         &self,
         target: ChunkPos,
         source: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
         resident: &BTreeMap<ChunkPos, ChunkColumn>,
         context: &Self::ReplayContext,
         _completed_sources: &BTreeSet<ChunkPos>,
@@ -608,16 +778,15 @@ pub trait LifecycleWorldgenSource {
         )
     }
 
-    /// Run one target FEATURES body while preserving the source ownership
+    /// Run one target FEATURES body while preserving any source identities
     /// discovered by that body. Most dimensions have one source identity and
-    /// use the ordinary target result; a target-centred aggregate may execute
-    /// several internal source bodies and report them for target-local
-    /// deduplication.
+    /// use the ordinary target result; source-ordered adapters may report
+    /// additional identities for target-local deduplication.
     fn feature_result_for_target_with_completed(
         &self,
         target: ChunkPos,
         source: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
         resident: &BTreeMap<ChunkPos, ChunkColumn>,
         _completed_sources: &BTreeSet<ChunkPos>,
     ) -> (LifecycleFeatureResult, Vec<ChunkPos>) {
@@ -647,7 +816,7 @@ pub trait LifecycleWorldgenSource {
     fn post_features_spills(
         &self,
         _source: ChunkPos,
-        _overrides: &BTreeMap<AbsoluteCell, String>,
+        _overrides: &BTreeMap<AbsoluteCell, StateId>,
     ) -> Vec<LifecycleSpill> {
         Vec::new()
     }
@@ -712,6 +881,36 @@ impl<T: LifecycleWorldgenSource + ?Sized> LifecycleWorldgenSource for &T {
         LifecycleWorldgenSource::generated_shaped_columns(*self, chunks)
     }
 
+    fn generated_shaped_columns_with_prefix(
+        &self,
+        chunks: &[ChunkPos],
+        prefix_targets: &[ChunkPos],
+        prefix_radius: i32,
+    ) -> Option<Vec<lodestone_worldgen::overworld::GeneratedColumn>> {
+        LifecycleWorldgenSource::generated_shaped_columns_with_prefix(
+            *self,
+            chunks,
+            prefix_targets,
+            prefix_radius,
+        )
+    }
+
+    fn generated_shaped_columns_with_context(
+        &self,
+        chunks: &[ChunkPos],
+        lease_chunks: &[ChunkPos],
+        prefix_targets: &[ChunkPos],
+        prefix_radius: i32,
+    ) -> Option<Vec<lodestone_worldgen::overworld::GeneratedColumn>> {
+        LifecycleWorldgenSource::generated_shaped_columns_with_context(
+            *self,
+            chunks,
+            lease_chunks,
+            prefix_targets,
+            prefix_radius,
+        )
+    }
+
     fn lifecycle_replay_context(&self, target: ChunkPos) -> Arc<Self::ReplayContext> {
         LifecycleWorldgenSource::lifecycle_replay_context(*self, target)
     }
@@ -721,6 +920,14 @@ impl<T: LifecycleWorldgenSource + ?Sized> LifecycleWorldgenSource for &T {
         targets: &[ChunkPos],
     ) -> BTreeMap<ChunkPos, Arc<Self::ReplayContext>> {
         LifecycleWorldgenSource::lifecycle_replay_contexts(*self, targets)
+    }
+
+    fn begin_region_feature_epoch(
+        &self,
+        targets: &[ChunkPos],
+        contexts: &BTreeMap<ChunkPos, Arc<Self::ReplayContext>>,
+    ) -> Option<lodestone_worldgen::overworld::RegionFeatureEpoch> {
+        LifecycleWorldgenSource::begin_region_feature_epoch(*self, targets, contexts)
     }
 
     fn lifecycle_client_heightmaps(
@@ -734,7 +941,7 @@ impl<T: LifecycleWorldgenSource + ?Sized> LifecycleWorldgenSource for &T {
     fn feature_result(
         &self,
         source: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
         resident: &BTreeMap<ChunkPos, ChunkColumn>,
     ) -> LifecycleFeatureResult {
         LifecycleWorldgenSource::feature_result(*self, source, overrides, resident)
@@ -744,7 +951,7 @@ impl<T: LifecycleWorldgenSource + ?Sized> LifecycleWorldgenSource for &T {
         &self,
         target: ChunkPos,
         source: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
         resident: &BTreeMap<ChunkPos, ChunkColumn>,
     ) -> LifecycleFeatureResult {
         LifecycleWorldgenSource::feature_result_for_target(
@@ -759,7 +966,7 @@ impl<T: LifecycleWorldgenSource + ?Sized> LifecycleWorldgenSource for &T {
     fn target_feature_result(
         &self,
         target: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
         resident: &BTreeMap<ChunkPos, ChunkColumn>,
     ) -> LifecycleFeatureResult {
         LifecycleWorldgenSource::target_feature_result(*self, target, overrides, resident)
@@ -768,7 +975,7 @@ impl<T: LifecycleWorldgenSource + ?Sized> LifecycleWorldgenSource for &T {
     fn target_feature_result_direct(
         &self,
         target: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
         resident: &BTreeMap<ChunkPos, ChunkColumn>,
     ) -> Option<LifecycleTargetFeatureResult> {
         LifecycleWorldgenSource::target_feature_result_direct(
@@ -782,7 +989,7 @@ impl<T: LifecycleWorldgenSource + ?Sized> LifecycleWorldgenSource for &T {
     fn target_feature_result_direct_with_replay_context(
         &self,
         target: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
         resident: &BTreeMap<ChunkPos, ChunkColumn>,
         context: &Self::ReplayContext,
     ) -> Option<LifecycleTargetFeatureResult> {
@@ -795,10 +1002,28 @@ impl<T: LifecycleWorldgenSource + ?Sized> LifecycleWorldgenSource for &T {
         )
     }
 
+    fn target_feature_result_direct_with_replay_context_and_epoch(
+        &self,
+        target: ChunkPos,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
+        resident: &BTreeMap<ChunkPos, ChunkColumn>,
+        context: &Self::ReplayContext,
+        epoch: &mut lodestone_worldgen::overworld::RegionFeatureEpoch,
+    ) -> Option<LifecycleTargetFeatureResult> {
+        LifecycleWorldgenSource::target_feature_result_direct_with_replay_context_and_epoch(
+            *self,
+            target,
+            overrides,
+            resident,
+            context,
+            epoch,
+        )
+    }
+
     fn target_feature_result_sparse_with_replay_context(
         &self,
         target: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
         resident: &BTreeMap<ChunkPos, ChunkColumn>,
         context: &Self::ReplayContext,
     ) -> Option<LifecycleSparseTargetFeatureResult> {
@@ -808,6 +1033,24 @@ impl<T: LifecycleWorldgenSource + ?Sized> LifecycleWorldgenSource for &T {
             overrides,
             resident,
             context,
+        )
+    }
+
+    fn target_feature_result_sparse_with_replay_context_and_epoch(
+        &self,
+        target: ChunkPos,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
+        resident: &BTreeMap<ChunkPos, ChunkColumn>,
+        context: &Self::ReplayContext,
+        epoch: &mut lodestone_worldgen::overworld::RegionFeatureEpoch,
+    ) -> Option<LifecycleSparseTargetFeatureResult> {
+        LifecycleWorldgenSource::target_feature_result_sparse_with_replay_context_and_epoch(
+            *self,
+            target,
+            overrides,
+            resident,
+            context,
+            epoch,
         )
     }
 
@@ -823,7 +1066,7 @@ impl<T: LifecycleWorldgenSource + ?Sized> LifecycleWorldgenSource for &T {
         &self,
         target: ChunkPos,
         source: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
         resident: &BTreeMap<ChunkPos, ChunkColumn>,
         context: &Self::ReplayContext,
     ) -> LifecycleFeatureResult {
@@ -841,7 +1084,7 @@ impl<T: LifecycleWorldgenSource + ?Sized> LifecycleWorldgenSource for &T {
         &self,
         target: ChunkPos,
         source: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
         resident: &BTreeMap<ChunkPos, ChunkColumn>,
         context: &Self::ReplayContext,
         completed_sources: &BTreeSet<ChunkPos>,
@@ -861,7 +1104,7 @@ impl<T: LifecycleWorldgenSource + ?Sized> LifecycleWorldgenSource for &T {
         &self,
         target: ChunkPos,
         source: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
         resident: &BTreeMap<ChunkPos, ChunkColumn>,
         completed_sources: &BTreeSet<ChunkPos>,
     ) -> (LifecycleFeatureResult, Vec<ChunkPos>) {
@@ -886,7 +1129,7 @@ impl<T: LifecycleWorldgenSource + ?Sized> LifecycleWorldgenSource for &T {
     fn post_features_spills(
         &self,
         source: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
     ) -> Vec<LifecycleSpill> {
         LifecycleWorldgenSource::post_features_spills(*self, source, overrides)
     }
@@ -908,9 +1151,43 @@ impl<T: LifecycleWorldgenSource + ?Sized> LifecycleWorldgenSource for &T {
     }
 }
 
-fn override_vec(overrides: &BTreeMap<AbsoluteCell, String>) -> Vec<(i32, i32, i32, String)> {
+fn override_vec(overrides: &BTreeMap<AbsoluteCell, StateId>) -> Vec<(i32, i32, i32, StateId)> {
     overrides
         .iter()
+        .map(|(&(x, y, z), state)| (x, y, z, state.clone()))
+        .collect()
+}
+
+fn overworld_override_vec(
+    overrides: &BTreeMap<AbsoluteCell, StateId>,
+    target: ChunkPos,
+    generator: &lodestone_worldgen::overworld::OverworldGenerator,
+) -> Vec<(i32, i32, i32, StateId)> {
+    // Keep the server-side overlay window derived from the same radius as
+    // target settlement and the worldgen dispatcher: overrides are live for
+    // every cell in C, including writes made by an earlier neighbouring W.
+    overworld_override_vec_with_radius(overrides, target, generator, TARGET_FEATURE_RADIUS)
+}
+
+fn overworld_override_vec_with_radius(
+    overrides: &BTreeMap<AbsoluteCell, StateId>,
+    target: ChunkPos,
+    generator: &lodestone_worldgen::overworld::OverworldGenerator,
+    radius: i32,
+) -> Vec<(i32, i32, i32, StateId)> {
+    let min_x = (target.0 - radius) * 16
+        - lodestone_worldgen::feature::vegetation::GEODE_PADDING;
+    let max_x = (target.0 + radius + 1) * 16
+        + lodestone_worldgen::feature::vegetation::GEODE_PADDING;
+    let min_z = (target.1 - radius) * 16
+        - lodestone_worldgen::feature::vegetation::GEODE_PADDING;
+    let max_z = (target.1 + radius + 1) * 16
+        + lodestone_worldgen::feature::vegetation::GEODE_PADDING;
+    let min_y = generator.min_y();
+    let max_y = min_y + generator.height();
+    overrides
+        .range((min_x, i32::MIN, i32::MIN)..(max_x, i32::MIN, i32::MIN))
+        .filter(|((_, y, z), _)| (min_y..max_y).contains(y) && (min_z..max_z).contains(z))
         .map(|(&(x, y, z), state)| (x, y, z, state.clone()))
         .collect()
 }
@@ -941,6 +1218,36 @@ impl LifecycleWorldgenSource for OverworldChunkSource {
         crate::chunk::OverworldChunkSource::generated_shaped_columns(self, chunks)
     }
 
+    fn generated_shaped_columns_with_prefix(
+        &self,
+        chunks: &[ChunkPos],
+        prefix_targets: &[ChunkPos],
+        prefix_radius: i32,
+    ) -> Option<Vec<lodestone_worldgen::overworld::GeneratedColumn>> {
+        crate::chunk::OverworldChunkSource::generated_shaped_columns_with_prefix(
+            self,
+            chunks,
+            prefix_targets,
+            prefix_radius,
+        )
+    }
+
+    fn generated_shaped_columns_with_context(
+        &self,
+        chunks: &[ChunkPos],
+        lease_chunks: &[ChunkPos],
+        prefix_targets: &[ChunkPos],
+        prefix_radius: i32,
+    ) -> Option<Vec<lodestone_worldgen::overworld::GeneratedColumn>> {
+        crate::chunk::OverworldChunkSource::generated_shaped_columns_with_context(
+            self,
+            chunks,
+            lease_chunks,
+            prefix_targets,
+            prefix_radius,
+        )
+    }
+
     fn lifecycle_replay_context(&self, target: ChunkPos) -> Arc<Self::ReplayContext> {
         self.generator().lifecycle_replay_context(target.0, target.1)
     }
@@ -949,7 +1256,12 @@ impl LifecycleWorldgenSource for OverworldChunkSource {
         &self,
         targets: &[ChunkPos],
     ) -> BTreeMap<ChunkPos, Arc<Self::ReplayContext>> {
-        let batch = self.generator().mixed_replay_batch(targets);
+        let batch = self
+            .generator()
+            .mixed_replay_batch_with_radius(
+                targets,
+                TARGET_FEATURE_RADIUS,
+            );
         targets
             .iter()
             .copied()
@@ -957,6 +1269,18 @@ impl LifecycleWorldgenSource for OverworldChunkSource {
             .into_iter()
             .filter_map(|target| batch.context_arc(target).map(|context| (target, context)))
             .collect()
+    }
+
+    fn begin_region_feature_epoch(
+        &self,
+        targets: &[ChunkPos],
+        contexts: &BTreeMap<ChunkPos, Arc<Self::ReplayContext>>,
+    ) -> Option<lodestone_worldgen::overworld::RegionFeatureEpoch> {
+        let context = contexts.values().next()?;
+        Some(
+            self.generator()
+                .begin_region_feature_epoch_from_context(context, targets),
+        )
     }
 
     fn lifecycle_client_heightmaps(
@@ -971,10 +1295,10 @@ impl LifecycleWorldgenSource for OverworldChunkSource {
     fn feature_result(
         &self,
         source: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
         _resident: &BTreeMap<ChunkPos, ChunkColumn>,
     ) -> LifecycleFeatureResult {
-        let overrides = override_vec(overrides);
+        let overrides = overworld_override_vec(overrides, source, self.generator());
         let result = self.generator().parity_source_decoration_with_overrides(
             source.0,
             source.1,
@@ -1002,10 +1326,10 @@ impl LifecycleWorldgenSource for OverworldChunkSource {
     fn target_feature_result(
         &self,
         target: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
         _resident: &BTreeMap<ChunkPos, ChunkColumn>,
     ) -> LifecycleFeatureResult {
-        let overrides = override_vec(overrides);
+        let overrides = overworld_override_vec(overrides, target, self.generator());
         let result = self
             .generator()
             .parity_features_with_overrides(target.0, target.1, &overrides);
@@ -1029,10 +1353,10 @@ impl LifecycleWorldgenSource for OverworldChunkSource {
     fn target_feature_result_direct(
         &self,
         target: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
         _resident: &BTreeMap<ChunkPos, ChunkColumn>,
     ) -> Option<LifecycleTargetFeatureResult> {
-        let overrides = override_vec(overrides);
+        let overrides = overworld_override_vec(overrides, target, self.generator());
         let result = self
             .generator()
             .direct_decoration_with_overrides(target.0, target.1, &overrides);
@@ -1064,15 +1388,104 @@ impl LifecycleWorldgenSource for OverworldChunkSource {
         })
     }
 
+    fn target_feature_result_direct_with_replay_context_and_epoch_revisions(
+        &self,
+        target: ChunkPos,
+        _overrides: &BTreeMap<AbsoluteCell, StateId>,
+        _resident: &BTreeMap<ChunkPos, ChunkColumn>,
+        context: &Self::ReplayContext,
+        epoch: &mut lodestone_worldgen::overworld::RegionFeatureEpoch,
+        revisions: &[((i32, i32, i32), StateId)],
+    ) -> Option<LifecycleTargetFeatureResult> {
+        let result = self
+            .generator()
+            .complete_region_feature_epoch_target_from_context_with_override_events(
+                epoch,
+                target,
+                context,
+                revisions,
+            );
+        let mut column = ChunkColumn::from_generated(result.column);
+        self.attach_structures(&mut column, target.0, target.1);
+        column.populate_missing_block_entity_states(target.0, target.1);
+        Some(LifecycleTargetFeatureResult {
+            column,
+            spills: result
+                .spills
+                .into_iter()
+                .map(|spill| LifecycleSpill {
+                    source: spill.source,
+                    position: spill.position,
+                    state: spill.state,
+                    transient: false,
+                })
+                .collect(),
+            local_features: result
+                .local_features
+                .into_iter()
+                .map(|spill| LifecycleSpill {
+                    source: spill.source,
+                    position: spill.position,
+                    state: spill.state,
+                    transient: false,
+                })
+                .collect(),
+        })
+    }
+
+    fn target_feature_result_direct_with_replay_context_and_epoch(
+        &self,
+        target: ChunkPos,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
+        _resident: &BTreeMap<ChunkPos, ChunkColumn>,
+        context: &Self::ReplayContext,
+        epoch: &mut lodestone_worldgen::overworld::RegionFeatureEpoch,
+    ) -> Option<LifecycleTargetFeatureResult> {
+        let result = self
+            .generator()
+            .complete_region_feature_epoch_target_from_context_with_overrides(
+                epoch,
+                target,
+                context,
+                overrides,
+            );
+        let mut column = ChunkColumn::from_generated(result.column);
+        self.attach_structures(&mut column, target.0, target.1);
+        column.populate_missing_block_entity_states(target.0, target.1);
+        Some(LifecycleTargetFeatureResult {
+            column,
+            spills: result
+                .spills
+                .into_iter()
+                .map(|spill| LifecycleSpill {
+                    source: spill.source,
+                    position: spill.position,
+                    state: spill.state,
+                    transient: false,
+                })
+                .collect(),
+            local_features: result
+                .local_features
+                .into_iter()
+                .map(|spill| LifecycleSpill {
+                    source: spill.source,
+                    position: spill.position,
+                    state: spill.state,
+                    transient: false,
+                })
+                .collect(),
+        })
+    }
+
     fn target_feature_result_direct_with_replay_context(
         &self,
         target: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
         _resident: &BTreeMap<ChunkPos, ChunkColumn>,
         context: &Self::ReplayContext,
     ) -> Option<LifecycleTargetFeatureResult> {
-        let overrides = override_vec(overrides);
-        let result = self.generator().direct_decoration_with_context(
+        let overrides = overworld_override_vec(overrides, target, self.generator());
+        let result = self.generator().direct_source_decoration_with_context(
             target.0,
             target.1,
             &overrides,
@@ -1109,17 +1522,100 @@ impl LifecycleWorldgenSource for OverworldChunkSource {
     fn target_feature_result_sparse_with_replay_context(
         &self,
         target: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
         _resident: &BTreeMap<ChunkPos, ChunkColumn>,
         context: &Self::ReplayContext,
     ) -> Option<LifecycleSparseTargetFeatureResult> {
-        let overrides = override_vec(overrides);
-        let result = self.generator().sparse_direct_decoration_with_context(
+        let overrides = overworld_override_vec(overrides, target, self.generator());
+        let result = self.generator().sparse_source_decoration_with_context(
             target.0,
             target.1,
             &overrides,
             context,
         );
+        Some(LifecycleSparseTargetFeatureResult {
+            spills: result
+                .spills
+                .into_iter()
+                .map(|spill| LifecycleSpill {
+                    source: spill.source,
+                    position: spill.position,
+                    state: spill.state,
+                    transient: false,
+                })
+                .collect(),
+            local_features: result
+                .local_features
+                .into_iter()
+                .map(|spill| LifecycleSpill {
+                    source: spill.source,
+                    position: spill.position,
+                    state: spill.state,
+                    transient: false,
+                })
+                .collect(),
+            block_entities: result.block_entities,
+        })
+    }
+
+    fn target_feature_result_sparse_with_replay_context_and_epoch(
+        &self,
+        target: ChunkPos,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
+        _resident: &BTreeMap<ChunkPos, ChunkColumn>,
+        context: &Self::ReplayContext,
+        epoch: &mut lodestone_worldgen::overworld::RegionFeatureEpoch,
+    ) -> Option<LifecycleSparseTargetFeatureResult> {
+        let result = self
+            .generator()
+            .complete_region_feature_epoch_target_sparse_from_context_with_overrides(
+                epoch,
+                target,
+                context,
+                overrides,
+            );
+        Some(LifecycleSparseTargetFeatureResult {
+            spills: result
+                .spills
+                .into_iter()
+                .map(|spill| LifecycleSpill {
+                    source: spill.source,
+                    position: spill.position,
+                    state: spill.state,
+                    transient: false,
+                })
+                .collect(),
+            local_features: result
+                .local_features
+                .into_iter()
+                .map(|spill| LifecycleSpill {
+                    source: spill.source,
+                    position: spill.position,
+                    state: spill.state,
+                    transient: false,
+                })
+                .collect(),
+            block_entities: result.block_entities,
+        })
+    }
+
+    fn target_feature_result_sparse_with_replay_context_and_epoch_revisions(
+        &self,
+        target: ChunkPos,
+        _overrides: &BTreeMap<AbsoluteCell, StateId>,
+        _resident: &BTreeMap<ChunkPos, ChunkColumn>,
+        context: &Self::ReplayContext,
+        epoch: &mut lodestone_worldgen::overworld::RegionFeatureEpoch,
+        revisions: &[((i32, i32, i32), StateId)],
+    ) -> Option<LifecycleSparseTargetFeatureResult> {
+        let result = self
+            .generator()
+            .complete_region_feature_epoch_target_sparse_from_context_with_override_events(
+                epoch,
+                target,
+                context,
+                revisions,
+            );
         Some(LifecycleSparseTargetFeatureResult {
             spills: result
                 .spills
@@ -1157,11 +1653,16 @@ impl LifecycleWorldgenSource for OverworldChunkSource {
         &self,
         target: ChunkPos,
         source: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
         _resident: &BTreeMap<ChunkPos, ChunkColumn>,
         context: &Self::ReplayContext,
     ) -> LifecycleFeatureResult {
-        let overrides = override_vec(overrides);
+        let overrides = overworld_override_vec_with_radius(
+            overrides,
+            target,
+            self.generator(),
+            lodestone_worldgen::feature::region_view::WIDE_RADIUS,
+        );
         let result = self
             .generator()
             .parity_source_decoration_with_context(
@@ -1193,10 +1694,15 @@ impl LifecycleWorldgenSource for OverworldChunkSource {
         &self,
         target: ChunkPos,
         source: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
         _resident: &BTreeMap<ChunkPos, ChunkColumn>,
     ) -> LifecycleFeatureResult {
-        let overrides = override_vec(overrides);
+        let overrides = overworld_override_vec_with_radius(
+            overrides,
+            target,
+            self.generator(),
+            lodestone_worldgen::feature::region_view::WIDE_RADIUS,
+        );
         let result = self
             .generator()
             .parity_source_decoration_with_overrides(
@@ -1234,7 +1740,7 @@ impl LifecycleWorldgenSource for OverworldChunkSource {
     fn post_features_spills(
         &self,
         source: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
     ) -> Vec<LifecycleSpill> {
         top_layer_spills(self.generator(), source, overrides)
     }
@@ -1271,7 +1777,7 @@ impl LifecycleWorldgenSource for NetherChunkSource {
     fn feature_result(
         &self,
         source: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
         resident: &BTreeMap<ChunkPos, ChunkColumn>,
     ) -> LifecycleFeatureResult {
         self.feature_result_for_target(source, source, overrides, resident)
@@ -1281,10 +1787,9 @@ impl LifecycleWorldgenSource for NetherChunkSource {
         &self,
         target: ChunkPos,
         source: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
         resident: &BTreeMap<ChunkPos, ChunkColumn>,
     ) -> LifecycleFeatureResult {
-        let interner = std::sync::Arc::clone(self.generator().interner());
         let overrides = override_vec(overrides);
         let result = if target == source {
             self.generator().parity_target_pass_with_resident(
@@ -1295,7 +1800,6 @@ impl LifecycleWorldgenSource for NetherChunkSource {
                 |cx, cz| {
                     let column = resident.get(&(cx, cz))?;
                     Some(lodestone_worldgen::dense_grid::DenseBlockGrid::from_canonical_states(
-                        std::sync::Arc::clone(&interner),
                         cx * 16,
                         0,
                         cz * 16,
@@ -1303,7 +1807,7 @@ impl LifecycleWorldgenSource for NetherChunkSource {
                         NetherChunkSource::WINDOW_HEIGHT,
                         16,
                         |x, y, z| {
-                            column.resolved_block_state_id(
+                            column.block_state_id(
                                 x.rem_euclid(16),
                                 y,
                                 z.rem_euclid(16),
@@ -1322,7 +1826,6 @@ impl LifecycleWorldgenSource for NetherChunkSource {
                 |cx, cz| {
                     let column = resident.get(&(cx, cz))?;
                     Some(lodestone_worldgen::dense_grid::DenseBlockGrid::from_canonical_states(
-                        std::sync::Arc::clone(&interner),
                         cx * 16,
                         0,
                         cz * 16,
@@ -1330,7 +1833,7 @@ impl LifecycleWorldgenSource for NetherChunkSource {
                         NetherChunkSource::WINDOW_HEIGHT,
                         16,
                         |x, y, z| {
-                            column.resolved_block_state_id(
+                            column.block_state_id(
                                 x.rem_euclid(16),
                                 y,
                                 z.rem_euclid(16),
@@ -1362,7 +1865,7 @@ impl LifecycleWorldgenSource for NetherChunkSource {
         &self,
         target: ChunkPos,
         source: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
         resident: &BTreeMap<ChunkPos, ChunkColumn>,
         completed_sources: &BTreeSet<ChunkPos>,
     ) -> (LifecycleFeatureResult, Vec<ChunkPos>) {
@@ -1379,7 +1882,7 @@ impl LifecycleWorldgenSource for NetherChunkSource {
         &self,
         target: ChunkPos,
         source: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
         resident: &BTreeMap<ChunkPos, ChunkColumn>,
         _context: &Self::ReplayContext,
         completed_sources: &BTreeSet<ChunkPos>,
@@ -1422,7 +1925,7 @@ impl LifecycleWorldgenSource for EndChunkSource {
     fn feature_result(
         &self,
         source: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
         _resident: &BTreeMap<ChunkPos, ChunkColumn>,
     ) -> LifecycleFeatureResult {
         let overrides = override_vec(overrides);
@@ -1450,7 +1953,7 @@ impl LifecycleWorldgenSource for EndChunkSource {
         &self,
         target: ChunkPos,
         source: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
         _resident: &BTreeMap<ChunkPos, ChunkColumn>,
     ) -> LifecycleFeatureResult {
         let overrides = override_vec(overrides);
@@ -1501,7 +2004,7 @@ impl LifecycleWorldgenSource for EndChunkSource {
 pub fn top_layer_spills(
     generator: &OverworldGenerator,
     source: ChunkPos,
-    overrides: &BTreeMap<AbsoluteCell, String>,
+    overrides: &BTreeMap<AbsoluteCell, StateId>,
 ) -> Vec<LifecycleSpill> {
     let overrides = override_vec(overrides);
     generator
@@ -1520,15 +2023,17 @@ pub fn top_layer_spills(
 /// capture.
 ///
 /// `complete` runs one FEATURES event. Targeted replay records the requested
-/// target separately from source ownership: the source body keeps its own
-/// decoration seed, while the target supplies the resident read window. Each
-/// emitted transition is applied to the resident destination column. The
-/// caller admits the complete halo before replay so a source may write to a
-/// neighbour whose explicit ticket appears later in the capture.
+/// target separately from the emitted source coordinate: target-owned replay
+/// invokes one target body, while source-ordered replay keeps each source's
+/// decoration seed. Each emitted transition is applied to its resident
+/// destination column. The caller admits the complete halo before replay so a
+/// body may write to a neighbour whose explicit ticket appears later in the
+/// capture.
 pub struct LifecycleMaterializer<S: LifecycleWorldgenSource> {
     source: S,
     replay_context: Option<Arc<S::ReplayContext>>,
     replay_contexts: BTreeMap<ChunkPos, Arc<S::ReplayContext>>,
+    region_feature_epoch: Option<lodestone_worldgen::overworld::RegionFeatureEpoch>,
     resident: BTreeMap<ChunkPos, ChunkColumn>,
     /// Typed shaped products remain here until a lifecycle operation needs the
     /// mutable server carrier. The map is request/region scoped, so it cannot
@@ -1556,8 +2061,8 @@ pub struct LifecycleMaterializer<S: LifecycleWorldgenSource> {
     /// event, while the source set below deduplicates nested work for that
     /// target only.
     target_completions: BTreeSet<(ChunkPos, ChunkPos, LifecycleCompletion)>,
-    /// Internal source bodies already executed by the active target-centred
-    /// aggregate. This is scoped to one target: a source can be replayed for
+    /// Internal source bodies already executed by the active source-ordered
+    /// completion. This is scoped to one target: a source can be replayed for
     /// another target because its resident read view and write ownership may
     /// differ.
     completed_feature_sources: BTreeSet<ChunkPos>,
@@ -1576,22 +2081,49 @@ pub struct LifecycleMaterializer<S: LifecycleWorldgenSource> {
     /// Temporary writes to resident dependencies during the active target
     /// transaction. They are visible to later source bodies in that
     /// transaction and rolled back before the next target is finalized.
-    temporary_spills: BTreeMap<AbsoluteCell, (ChunkPos, Option<String>, Option<String>)>,
+    temporary_spills: BTreeMap<AbsoluteCell, (ChunkPos, Option<StateId>, Option<StateId>)>,
     /// Temporary CARVERS-view entries for the same transaction. Sparse local
     /// padding writes are not entered here and therefore remain visible.
-    temporary_carvers_overrides: BTreeMap<AbsoluteCell, Option<String>>,
-    /// Final writes owned by sparse padding completions, grouped by destination.
-    sparse_padding_overrides: BTreeMap<ChunkPos, BTreeMap<AbsoluteCell, String>>,
+    temporary_carvers_overrides: BTreeMap<AbsoluteCell, Option<StateId>>,
+    /// Writes retained for sparse padding destinations, grouped by destination.
+    sparse_padding_overrides: BTreeMap<ChunkPos, BTreeMap<AbsoluteCell, StateId>>,
+    sparse_completed_targets: BTreeSet<ChunkPos>,
+    /// The canonical FEATURES write for each cell emitted by target-owned
+    /// requests in this region. Region traversal order can differ from the
+    /// ledger's provenance order, so outputs apply these winners only after
+    /// every requested and sparse writer has completed.
+    target_feature_winners: BTreeMap<AbsoluteCell, TargetFeatureWinner>,
     /// Writes visible through the CARVERS read view. A target-scoped source
     /// body sees every preceding authenticated FEATURES write, including
     /// writes into a source's own column; source-local top-layer writes are
     /// kept out because they occur after the FEATURES wavefront.
-    carvers_overrides: BTreeMap<AbsoluteCell, String>,
-    overrides: BTreeMap<AbsoluteCell, String>,
+    carvers_overrides: BTreeMap<AbsoluteCell, StateId>,
+    overrides: BTreeMap<AbsoluteCell, StateId>,
+    /// Append-only revision streams consumed by the production region epoch.
+    /// The maps above remain the source boundary for adapters and controls;
+    /// these vectors prevent each target from rescanning those maps.
+    override_revisions: Vec<(AbsoluteCell, StateId)>,
+    carvers_override_revisions: Vec<(AbsoluteCell, StateId)>,
     direct_target_output: bool,
     /// Structure placement output accumulated from each source body without
     /// replaying the mixed stream.
     feature_structure_blocks: StructureBlocks,
+}
+
+#[derive(Clone, Copy)]
+struct TargetFeatureWinner {
+    target: ChunkPos,
+    source: ChunkPos,
+    ordinal: u32,
+    state: StateId,
+}
+
+fn target_feature_winner_precedes(candidate: TargetFeatureWinner, current: TargetFeatureWinner) -> bool {
+    // Target-owned FEATURES use the same minimum ordering as
+    // MutationProvenance: target, source, stage, then per-source ordinal. The
+    // stage and destination are identical for candidates stored at one cell.
+    (candidate.target, candidate.source, candidate.ordinal)
+        < (current.target, current.source, current.ordinal)
 }
 
 struct SharedPrefix {
@@ -1626,6 +2158,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             source,
             replay_context: None,
             replay_contexts: BTreeMap::new(),
+            region_feature_epoch: None,
             resident: BTreeMap::new(),
             generated_resident: BTreeMap::new(),
             authenticated_prefixes: BTreeMap::new(),
@@ -1641,8 +2174,12 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             temporary_spills: BTreeMap::new(),
             temporary_carvers_overrides: BTreeMap::new(),
             sparse_padding_overrides: BTreeMap::new(),
+            sparse_completed_targets: BTreeSet::new(),
+            target_feature_winners: BTreeMap::new(),
             carvers_overrides: BTreeMap::new(),
             overrides: BTreeMap::new(),
+            override_revisions: Vec::new(),
+            carvers_override_revisions: Vec::new(),
             direct_target_output: false,
             feature_structure_blocks: StructureBlocks::default(),
         }
@@ -1659,6 +2196,9 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
     /// sources use a shared mixed batch; other sources use scalar defaults.
     pub fn prepare_lifecycle_replay_contexts(&mut self, targets: &[ChunkPos]) {
         self.replay_contexts = self.source.lifecycle_replay_contexts(targets);
+        self.region_feature_epoch = self
+            .source
+            .begin_region_feature_epoch(targets, &self.replay_contexts);
     }
 
     /// Install an already prepared target context before its completion.
@@ -1684,6 +2224,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         self.shared_prefixes.clear();
         self.replay_context = None;
         self.replay_contexts.clear();
+        self.region_feature_epoch = None;
         self.resident_stages.clear();
         self.completions.clear();
         self.target_completions.clear();
@@ -1694,10 +2235,71 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         self.temporary_spills.clear();
         self.temporary_carvers_overrides.clear();
         self.sparse_padding_overrides.clear();
+        self.sparse_completed_targets.clear();
+        self.target_feature_winners.clear();
         self.carvers_overrides.clear();
         self.overrides.clear();
+        self.override_revisions.clear();
+        self.carvers_override_revisions.clear();
         self.direct_target_output = false;
         self.feature_structure_blocks = StructureBlocks::default();
+    }
+
+    fn record_target_feature_winner(
+        &mut self,
+        target: ChunkPos,
+        source: ChunkPos,
+        ordinal: u32,
+        position: AbsoluteCell,
+        state: StateId,
+    ) {
+        let candidate = TargetFeatureWinner {
+            target,
+            source,
+            ordinal,
+            state,
+        };
+        match self.target_feature_winners.entry(position) {
+            Entry::Vacant(entry) => {
+                entry.insert(candidate);
+            }
+            Entry::Occupied(mut entry)
+                if target_feature_winner_precedes(candidate, *entry.get()) =>
+            {
+                entry.insert(candidate);
+            }
+            Entry::Occupied(_) => {}
+        }
+    }
+
+    #[inline]
+    fn set_override(&mut self, position: AbsoluteCell, state: StateId) {
+        match self.overrides.entry(position) {
+            Entry::Vacant(entry) => {
+                entry.insert(state);
+                self.override_revisions.push((position, state));
+            }
+            Entry::Occupied(mut entry) if *entry.get() != state => {
+                entry.insert(state);
+                self.override_revisions.push((position, state));
+            }
+            Entry::Occupied(_) => {}
+        }
+    }
+
+    #[inline]
+    fn set_carvers_override(&mut self, position: AbsoluteCell, state: StateId) {
+        match self.carvers_overrides.entry(position) {
+            Entry::Vacant(entry) => {
+                entry.insert(state);
+                self.carvers_override_revisions.push((position, state));
+            }
+            Entry::Occupied(mut entry) if *entry.get() != state => {
+                entry.insert(state);
+                self.carvers_override_revisions.push((position, state));
+            }
+            Entry::Occupied(_) => {}
+        }
     }
 
     /// Read the optional source computation counter used by lifecycle parity
@@ -1710,6 +2312,16 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
     #[must_use]
     pub fn feature_dispatch(&self) -> LifecycleFeatureDispatch {
         self.source.feature_dispatch()
+    }
+
+    /// Return `(override_entries_consumed, target_completions)` for the
+    /// request-owned region epoch. A healthy production epoch consumes each
+    /// revision once while the target count continues to grow.
+    #[must_use]
+    pub fn region_feature_override_counts(&self) -> Option<(usize, usize)> {
+        self.region_feature_epoch
+            .as_ref()
+            .map(lodestone_worldgen::overworld::RegionFeatureEpoch::override_application_counts)
     }
 
     /// Take the typed structure trace emitted by completed FEATURES bodies.
@@ -1796,6 +2408,12 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         self.sparse_padding_targets.extend(targets);
     }
 
+    #[must_use]
+    pub fn target_features_completed(&self, target: ChunkPos) -> bool {
+        self.target_completions
+            .contains(&(target, target, LifecycleCompletion::Features))
+    }
+
     /// Generate independent shaped admissions on the server's process-wide
     /// worker dispatcher, then commit them in the supplied canonical order.
     /// No mutable lifecycle state is visible to workers: FEATURES completions
@@ -1819,10 +2437,34 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         self.admit_region_with(chunks, executor);
     }
 
-    /// Admit the missing portion of a shared generation region.
-    pub fn admit_region_with(
+    /// Admit shaped residents after warming a source-owned replay prefix.
+    pub fn admit_region_with_prefix(
         &mut self,
         chunks: &[ChunkPos],
+        prefix_targets: &[ChunkPos],
+        prefix_radius: i32,
+        executor: &dyn ImmutableComputeExecutor,
+    ) -> usize
+    where
+        S: Sync,
+    {
+        self.admit_region_with_context(
+            chunks,
+            chunks,
+            prefix_targets,
+            prefix_radius,
+            executor,
+        )
+    }
+
+    /// Admit carriers for `chunks` while allowing the source to lease a
+    /// larger immutable read context without retaining carriers for it.
+    pub fn admit_region_with_context(
+        &mut self,
+        chunks: &[ChunkPos],
+        lease_chunks: &[ChunkPos],
+        prefix_targets: &[ChunkPos],
+        prefix_radius: i32,
         executor: &dyn ImmutableComputeExecutor,
     ) -> usize
     where
@@ -1839,15 +2481,31 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         }
         let admitted = jobs.len();
         let source = &self.source;
-        let generated = source
-            .generated_shaped_columns(&jobs)
-            .map(|columns| columns.into_iter().map(Some).collect::<Vec<_>>())
-            .unwrap_or_else(|| {
-                executor.execute_generated_shaped(
-                    jobs.clone(),
+        let generated = source.generated_shaped_columns_with_context(
+            &jobs,
+            lease_chunks,
+            prefix_targets,
+            prefix_radius,
+        );
+        let (jobs, generated) = match generated {
+            Some(columns) => (
+                jobs,
+                columns.into_iter().map(Some).collect::<Vec<_>>(),
+            ),
+            None => {
+                let mut seen = BTreeSet::new();
+                let fallback_jobs = lease_chunks
+                    .iter()
+                    .copied()
+                    .filter(|chunk| seen.insert(*chunk) && !self.is_admitted(*chunk))
+                    .collect::<Vec<_>>();
+                let generated = executor.execute_generated_shaped(
+                    fallback_jobs.clone(),
                     &|(cx, cz)| source.generated_shaped_column(cx, cz),
-                )
-            });
+                );
+                (fallback_jobs, generated)
+            }
+        };
         assert_eq!(generated.len(), jobs.len(), "worldgen dispatcher changed admission count");
         let fallback_jobs = jobs
             .iter()
@@ -1876,6 +2534,18 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         admitted
     }
 
+    /// Admit the missing portion of a shared generation region.
+    pub fn admit_region_with(
+        &mut self,
+        chunks: &[ChunkPos],
+        executor: &dyn ImmutableComputeExecutor,
+    ) -> usize
+    where
+        S: Sync,
+    {
+        self.admit_region_with_prefix(chunks, chunks, 0, executor)
+    }
+
     /// Whether this materializer holds a shaped resident.
     #[must_use]
     pub fn is_admitted(&self, chunk: ChunkPos) -> bool {
@@ -1886,6 +2556,19 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
     #[must_use]
     pub fn resident_count(&self) -> usize {
         self.resident.len() + self.generated_resident.len()
+    }
+
+    /// Number of admitted shaped products that still use the generator's
+    /// compact representation.
+    #[must_use]
+    pub fn generated_resident_count(&self) -> usize {
+        self.generated_resident.len()
+    }
+
+    /// Number of admitted products converted to the mutable server carrier.
+    #[must_use]
+    pub fn materialized_resident_count(&self) -> usize {
+        self.resident.len()
     }
 
     fn admit_shaped(&mut self, chunk: ChunkPos, column: ChunkColumn) {
@@ -1927,6 +2610,13 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         self.admit_generated(chunk, column);
     }
 
+    /// Whether a coordinate is still represented by its authenticated typed
+    /// shaped product rather than a persisted or edited carrier.
+    #[must_use]
+    pub fn has_generated_resident(&self, chunk: ChunkPos) -> bool {
+        self.generated_resident.contains_key(&chunk) && !self.resident.contains_key(&chunk)
+    }
+
     /// Materialize one typed shaped product exactly once, preserving the
     /// existing `ChunkColumn` APIs for mutation, lighting and packet code.
     fn materialize_resident(&mut self, chunk: ChunkPos) {
@@ -1939,8 +2629,16 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             .expect("generated resident was admitted before materialization");
         #[cfg(test)]
         crate::chunk::record_generated_materialization();
+        let generated = match Arc::try_unwrap(generated) {
+            Ok(generated) => {
+                #[cfg(test)]
+                record_generated_resident_unwrap();
+                generated
+            }
+            Err(generated) => (*generated).clone(),
+        };
         self.resident
-            .insert(chunk, ChunkColumn::from_generated((*generated).clone()));
+            .insert(chunk, ChunkColumn::from_generated(generated));
         self.apply_sparse_padding_overrides(chunk);
     }
 
@@ -2056,12 +2754,15 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             self.has_direct_target_output(),
             "authenticated FEATURES require direct target output"
         );
-        assert!(
-            self.authenticated_prefixes.contains_key(&chunk),
-            "authenticated FEATURES require an authenticated shaped prefix"
+        let prefix = self
+            .authenticated_prefixes
+            .get(&chunk)
+            .copied()
+            .expect("authenticated FEATURES require an authenticated shaped prefix");
+        self.authenticated_stages.insert(
+            (chunk, LifecycleCompletion::Features),
+            authenticated_features_identity(digest, prefix),
         );
-        self.authenticated_stages
-            .insert((chunk, LifecycleCompletion::Features), digest);
     }
 
     /// Return the authenticated FEATURES identity, when the target has one.
@@ -2078,7 +2779,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         source: ChunkPos,
         destination: ChunkPos,
         position: (i32, i32, i32),
-        state: &str,
+        state: StateId,
         transient: bool,
     ) {
         // A direct target result already contains its own target writes. The
@@ -2096,8 +2797,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             hasher.update(position.0.to_le_bytes());
             hasher.update(position.1.to_le_bytes());
             hasher.update(position.2.to_le_bytes());
-            hasher.update((state.len() as u64).to_le_bytes());
-            hasher.update(state.as_bytes());
+            hasher.update(state.raw().to_le_bytes());
             *digest = hasher.finalize().into();
         };
         if let Some(digest) = self.authenticated_prefixes.get_mut(&destination) {
@@ -2113,18 +2813,16 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
 
     fn retain_sparse_padding_write(
         &mut self,
-        mode: LifecycleCompletionMode,
+        _mode: LifecycleCompletionMode,
         destination: ChunkPos,
         position: AbsoluteCell,
-        state: &str,
+        state: StateId,
     ) -> bool {
-        if matches!(mode, LifecycleCompletionMode::SparsePadding)
-            && self.sparse_padding_targets.contains(&destination)
-        {
+        if self.sparse_padding_targets.contains(&destination) {
             self.sparse_padding_overrides
                 .entry(destination)
                 .or_default()
-                .insert(position, state.to_owned());
+                .insert(position, state);
             return self.resident.contains_key(&destination);
         }
         false
@@ -2383,13 +3081,19 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             self.is_admitted(target),
             "lifecycle target {target:?} was not admitted before completion"
         );
+        let promote_sparse = target_owned
+            && matches!(mode, LifecycleCompletionMode::Full)
+            && self.sparse_completed_targets.contains(&target);
         let direct_generated = target_owned
             && matches!(mode, LifecycleCompletionMode::Full)
+            && !promote_sparse
             && self.generated_resident.contains_key(&target)
             && self.has_authenticated_target_output(target)
             && self.source.direct_target_output_from_generated_prefix()
             && self.replay_contexts.contains_key(&target);
-        if !matches!(mode, LifecycleCompletionMode::SparsePadding) && !direct_generated {
+        if promote_sparse {
+            self.promote_sparse_target(target);
+        } else if !matches!(mode, LifecycleCompletionMode::SparsePadding) && !direct_generated {
             self.materialize_resident(target);
         }
         assert!(
@@ -2409,6 +3113,9 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         }
         self.active_target = Some(target);
         self.mutable_targets.insert(target);
+        if promote_sparse {
+            self.direct_target_output = true;
+        }
     }
 
     /// Ends a packet-local transaction, restoring incidental writes to future
@@ -2417,7 +3124,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         assert_eq!(self.active_target, Some(target), "finished lifecycle target out of order");
         let temporary_spills = std::mem::take(&mut self.temporary_spills);
         let temporary_carvers_overrides = std::mem::take(&mut self.temporary_carvers_overrides);
-        let mut restores = BTreeMap::<ChunkPos, Vec<(i32, i32, i32, String)>>::new();
+        let mut restores = BTreeMap::<ChunkPos, Vec<(i32, i32, i32, StateId)>>::new();
         for (position, (destination, previous, previous_override)) in temporary_spills {
             if let Some(previous) = previous {
                 restores.entry(destination).or_default().push((
@@ -2429,7 +3136,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             }
             match previous_override {
                 Some(value) => {
-                    self.overrides.insert(position, value);
+                    self.set_override(position, value);
                 }
                 None => {
                     self.overrides.remove(&position);
@@ -2439,17 +3146,13 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         for (destination, writes) in restores {
             self.materialize_resident(destination);
             if let Some(column) = self.resident.get_mut(&destination) {
-                let writes = writes
-                    .iter()
-                    .map(|(x, y, z, state)| (*x, *y, *z, state.as_str()))
-                    .collect::<Vec<_>>();
-                column.apply_ordered_block_batch(&writes);
+                column.apply_ordered_block_id_batch(&writes);
             }
         }
         for (position, previous) in temporary_carvers_overrides {
             match previous {
                 Some(value) => {
-                    self.carvers_overrides.insert(position, value);
+                    self.set_carvers_override(position, value);
                 }
                 None => {
                     self.carvers_overrides.remove(&position);
@@ -2496,12 +3199,12 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         let mut writes = Vec::new();
         for spill in &spills {
             observe(spill);
-            self.overrides.insert(spill.position, spill.state.clone());
+            self.set_override(spill.position, spill.state);
             writes.push((
                 spill.position.0.rem_euclid(16),
                 spill.position.1,
                 spill.position.2.rem_euclid(16),
-                spill.state.as_str(),
+                spill.state,
             ));
         }
         if !writes.is_empty() {
@@ -2509,7 +3212,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             self.resident
                 .get_mut(&target)
                 .expect("post-FEATURES target was admitted")
-                .apply_ordered_block_batch(&writes);
+                .apply_ordered_block_id_batch(&writes);
         }
         self.finish_target(target);
     }
@@ -2555,8 +3258,13 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             self.materialize_resident(source);
         }
         assert!(!target_owned || target_scoped, "target-owned FEATURES must be target-scoped");
+        let promoting_sparse = target_owned
+            && target_scoped
+            && source == target
+            && matches!(mode, LifecycleCompletionMode::Full)
+            && self.sparse_completed_targets.remove(&target);
         let inserted = if target_scoped {
-            self.target_completions.insert((target, source, stage))
+            promoting_sparse || self.target_completions.insert((target, source, stage))
         } else {
             self.completions.insert((source, stage))
         };
@@ -2599,7 +3307,9 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         let mut dirty_sparse_residents = BTreeSet::new();
         let (result, completed_feature_sources) = if target_owned {
             assert_eq!(source, target, "target-owned FEATURES source must be its target");
-            if matches!(mode, LifecycleCompletionMode::SparsePadding) {
+            if promoting_sparse {
+                (LifecycleFeatureResult::default(), Vec::new())
+            } else if matches!(mode, LifecycleCompletionMode::SparsePadding) {
                 let context = self
                     .replay_context
                     .as_deref()
@@ -2609,15 +3319,39 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 } else {
                     &self.overrides
                 };
-                let sparse = self
-                    .source
-                    .target_feature_result_sparse_with_replay_context(
-                        target,
-                        feature_overrides,
-                        &self.resident,
-                        context,
-                    )
-                    .expect("target-owned source must provide sparse padding completion");
+                let override_revisions =
+                    if target_scoped && self.source.target_feature_reads_carvers() {
+                        &self.carvers_override_revisions
+                    } else {
+                        &self.override_revisions
+                    };
+                let sparse = if let Some(epoch) = self.region_feature_epoch.as_mut() {
+                    let result = self.source
+                        .target_feature_result_sparse_with_replay_context_and_epoch_revisions(
+                            target,
+                            feature_overrides,
+                            &self.resident,
+                            context,
+                            epoch,
+                            override_revisions,
+                        );
+                    #[cfg(test)]
+                    if result.is_some() {
+                        record_region_feature_epoch(LifecycleCompletionMode::SparsePadding);
+                    }
+                    result
+                } else {
+                    #[cfg(test)]
+                    record_region_feature_scalar_fallback();
+                    self.source
+                        .target_feature_result_sparse_with_replay_context(
+                            target,
+                            feature_overrides,
+                            &self.resident,
+                            context,
+                        )
+                }
+                .expect("target-owned source must provide sparse padding completion");
                 target_local_features = sparse.local_features;
                 (
                     LifecycleFeatureResult {
@@ -2635,17 +3369,44 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                         } else {
                             &self.overrides
                         };
+                    let override_revisions =
+                        if target_scoped && self.source.target_feature_reads_carvers() {
+                            &self.carvers_override_revisions
+                        } else {
+                            &self.override_revisions
+                        };
                     self.replay_context
                         .as_deref()
                         .and_then(|context| {
-                            self.source.target_feature_result_direct_with_replay_context(
-                                target,
-                                feature_overrides,
-                                &self.resident,
-                                context,
-                            )
+                            if let Some(epoch) = self.region_feature_epoch.as_mut() {
+                                let result = self.source
+                                    .target_feature_result_direct_with_replay_context_and_epoch_revisions(
+                                        target,
+                                        feature_overrides,
+                                        &self.resident,
+                                        context,
+                                        epoch,
+                                        override_revisions,
+                                    );
+                                #[cfg(test)]
+                                if result.is_some() {
+                                    record_region_feature_epoch(LifecycleCompletionMode::Full);
+                                }
+                                result
+                            } else {
+                                #[cfg(test)]
+                                record_region_feature_scalar_fallback();
+                                self.source.target_feature_result_direct_with_replay_context(
+                                    target,
+                                    feature_overrides,
+                                    &self.resident,
+                                    context,
+                                )
+                            }
                         })
                         .or_else(|| {
+                            #[cfg(test)]
+                            record_region_feature_scalar_fallback();
                             self.source.target_feature_result_direct(
                                 target,
                                 feature_overrides,
@@ -2726,7 +3487,19 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 Vec::new(),
             )
         };
-        for local in &target_local_features {
+        if matches!(mode, LifecycleCompletionMode::SparsePadding) {
+            self.sparse_completed_targets.insert(target);
+        }
+        for (ordinal, local) in target_local_features.iter().enumerate() {
+            if target_owned && stage == LifecycleCompletion::Features {
+                self.record_target_feature_winner(
+                    target,
+                    local.source,
+                    ordinal as u32,
+                    local.position,
+                    local.state,
+                );
+            }
             assert_eq!(
                 local.source, source,
                 "direct target local FEATURES write disagrees with completion source"
@@ -2744,14 +3517,14 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 "direct target local FEATURES write is outside target column"
             );
             if self.source.target_feature_reads_carvers() {
-                self.carvers_overrides.insert(local.position, local.state.clone());
+                self.set_carvers_override(local.position, local.state);
             }
-            self.overrides.insert(local.position, local.state.clone());
+            self.set_override(local.position, local.state);
             if self.retain_sparse_padding_write(
                 mode,
                 destination,
                 local.position,
-                &local.state,
+                local.state,
             ) {
                 dirty_sparse_residents.insert(destination);
             }
@@ -2832,23 +3605,38 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 .expect("entity destination was materialized above");
             column.add_generated_block_entities(std::slice::from_ref(entity));
         }
-        let mut writes = BTreeMap::<ChunkPos, Vec<(i32, i32, i32, &str)>>::new();
+        let mut writes = BTreeMap::<ChunkPos, Vec<(i32, i32, i32, StateId)>>::new();
+        let mut source_ordinals = BTreeMap::<ChunkPos, u32>::new();
         for spill in &result.spills {
+            let ordinal = source_ordinals.entry(spill.source).or_default();
+            let spill_ordinal = *ordinal;
+            *ordinal = spill_ordinal.saturating_add(1);
             let destination = (
                 spill.position.0.div_euclid(16),
                 spill.position.2.div_euclid(16),
             );
-            // A target completion is a packet-local transaction.  The source
-            // dispatcher may inspect the full resident window and report
-            // writes outside the target, but those writes belong to the
-            // corresponding target's own completion.  Retaining them here
-            // would let a dependency source mutate a future packet before its
-            // status transition, and the later source completion could no
-            // longer reproduce the target-local read context.
+            if target_owned
+                && stage == LifecycleCompletion::Features
+                && self.mutable_targets.contains(&destination)
+            {
+                self.record_target_feature_winner(
+                    target,
+                    spill.source,
+                    spill_ordinal,
+                    spill.position,
+                    spill.state,
+                );
+            }
+            // Sparse padding writes stay deferred, except when they cross
+            // into another requested target in this same settlement wave.
             let sparse_padding_destination = self.sparse_padding_targets.contains(&destination);
+            let sparse_requested_destination = matches!(mode, LifecycleCompletionMode::SparsePadding)
+                && destination != target
+                && self.mutable_targets.contains(&destination)
+                && !sparse_padding_destination;
             if matches!(mode, LifecycleCompletionMode::SparsePadding)
                 && destination != target
-                && !sparse_padding_destination
+                && !sparse_requested_destination
             {
                 observe(spill);
                 continue;
@@ -2858,7 +3646,8 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 && (!self.mutable_targets.contains(&destination)
                     || sparse_padding_destination
                     || (matches!(mode, LifecycleCompletionMode::SparsePadding)
-                        && destination != target));
+                        && destination != target
+                        && !sparse_requested_destination));
             let mut deferred = false;
             if transient {
                 deferred = sparse_padding_destination
@@ -2870,7 +3659,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                     self.materialize_resident(destination);
                     let previous = self.resident.get(&destination).map(|column| {
                         column
-                            .block_state(
+                            .block_state_id(
                                 spill.position.0.rem_euclid(16),
                                 spill.position.1,
                                 spill.position.2.rem_euclid(16),
@@ -2884,7 +3673,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 } else if !matches!(mode, LifecycleCompletionMode::SparsePadding) {
                     let previous = self.resident.get(&destination).map(|column| {
                         column
-                            .block_state(
+                            .block_state_id(
                                 spill.position.0.rem_euclid(16),
                                 spill.position.1,
                                 spill.position.2.rem_euclid(16),
@@ -2902,25 +3691,26 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 mode,
                 destination,
                 spill.position,
-                &spill.state,
+                spill.state,
             ) {
                 dirty_sparse_residents.insert(destination);
             }
             if target_scoped && self.source.target_feature_reads_carvers() {
-                self.carvers_overrides.insert(spill.position, spill.state.clone());
+                self.set_carvers_override(spill.position, spill.state);
             }
-            self.overrides.insert(spill.position, spill.state.clone());
+            self.set_override(spill.position, spill.state);
             self.record_authenticated_write(
                 target,
                 source,
                 destination,
                 spill.position,
-                &spill.state,
+                spill.state,
                 transient,
             );
             if self.is_admitted(destination)
                 && !deferred
-                && !matches!(mode, LifecycleCompletionMode::SparsePadding)
+                && (!matches!(mode, LifecycleCompletionMode::SparsePadding)
+                    || sparse_requested_destination)
             {
                 self.materialize_resident(destination);
                 self.ensure_client_heightmaps(destination);
@@ -2928,7 +3718,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                     spill.position.0.rem_euclid(16),
                     spill.position.1,
                     spill.position.2.rem_euclid(16),
-                    spill.state.as_str(),
+                    spill.state,
                 ));
             }
         }
@@ -2937,7 +3727,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             self.resident
                 .get_mut(&destination)
                 .expect("resident destination was checked above")
-                .apply_ordered_block_batch(&writes);
+                .apply_ordered_block_id_batch(&writes);
         }
         for destination in dirty_sparse_residents {
             self.apply_sparse_padding_overrides(destination);
@@ -2963,7 +3753,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 );
             }
         }
-        let mut writes = BTreeMap::<ChunkPos, Vec<(i32, i32, i32, &str)>>::new();
+        let mut writes = BTreeMap::<ChunkPos, Vec<(i32, i32, i32, StateId)>>::new();
         for spill in &post_features_spills {
             let destination = (
                 spill.position.0.div_euclid(16),
@@ -2978,9 +3768,9 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             }
             if transient && !deferred {
                 self.materialize_resident(destination);
-                let previous = self.resident.get(&destination).map(|column| {
-                    column
-                        .block_state(
+                    let previous = self.resident.get(&destination).map(|column| {
+                        column
+                            .block_state_id(
                             spill.position.0.rem_euclid(16),
                             spill.position.1,
                             spill.position.2.rem_euclid(16),
@@ -2993,13 +3783,13 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                     .or_insert((destination, previous, previous_override));
             }
             observe(spill);
-            self.overrides.insert(spill.position, spill.state.clone());
+            self.set_override(spill.position, spill.state);
             self.record_authenticated_write(
                 target,
                 source,
                 destination,
                 spill.position,
-                &spill.state,
+                spill.state,
                 transient,
             );
             if self.is_admitted(destination) && !deferred {
@@ -3009,7 +3799,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                     spill.position.0.rem_euclid(16),
                     spill.position.1,
                     spill.position.2.rem_euclid(16),
-                    spill.state.as_str(),
+                    spill.state,
                 ));
             }
         }
@@ -3018,7 +3808,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             self.resident
                 .get_mut(&destination)
                 .expect("resident destination was checked above")
-                .apply_ordered_block_batch(&writes);
+                .apply_ordered_block_id_batch(&writes);
         }
         if !matches!(mode, LifecycleCompletionMode::SparsePadding) {
             self.materialize_resident(source);
@@ -3034,25 +3824,24 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         &mut self,
         mutations: impl IntoIterator<Item = &'a ProvenanceMutation>,
     ) {
-        let mut writes = BTreeMap::<ChunkPos, Vec<(i32, i32, i32, Arc<String>)>>::new();
+        let mut writes = BTreeMap::<ChunkPos, Vec<(i32, i32, i32, StateId)>>::new();
         for mutation in mutations {
             let state = mutation
-                .get::<String>()
-                .expect("committed worldgen mutations carry state strings");
+                .get::<StateId>()
+                .expect("committed worldgen mutations carry StateId");
             let position = mutation.provenance().destination();
             let cell = (position.x(), position.y(), position.z());
-            let restored = (*state).clone();
             if self.source.target_feature_reads_carvers() {
-                self.carvers_overrides.insert(cell, restored.clone());
+                self.set_carvers_override(cell, *state);
             }
-            self.overrides.insert(cell, restored);
+            self.set_override(cell, *state);
             let destination = (cell.0.div_euclid(16), cell.2.div_euclid(16));
             self.record_authenticated_write(
                 mutation.provenance().target(),
                 mutation.provenance().source(),
                 destination,
                 cell,
-                state.as_str(),
+                *state,
                 false,
             );
             if self.is_admitted(destination) {
@@ -3060,7 +3849,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                     cell.0.rem_euclid(16),
                     cell.1,
                     cell.2.rem_euclid(16),
-                    state,
+                    *state,
                 ));
             }
         }
@@ -3077,25 +3866,58 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             // value is important: filtering individual writes would drop an
             // intermediate feature write followed by a later top-layer write
             // and could change the observable order.
-            let final_states = writes
-                .iter()
-                .map(|(x, y, z, state)| ((*x, *y, *z), state.as_str()))
-                .collect::<BTreeMap<_, _>>();
             let writes = writes
                 .iter()
                 .filter(|(x, y, z, _)| {
-                    final_states
-                        .get(&(*x, *y, *z))
-                        .is_some_and(|state| *state != column.block_state(*x, *y, *z))
+                    writes
+                        .iter()
+                        .rev()
+                        .find(|(fx, fy, fz, _)| (*fx, *fy, *fz) == (*x, *y, *z))
+                        .is_some_and(|(_, _, _, state)| {
+                            *state != column.block_state_id(*x, *y, *z)
+                        })
                 })
-                .map(|(x, y, z, state)| (*x, *y, *z, state.as_str()))
+                .map(|(x, y, z, state)| (*x, *y, *z, *state))
                 .collect::<Vec<_>>();
             if !writes.is_empty() {
                 self.resident
                     .get_mut(&destination)
                     .expect("restored mutation destination was checked above")
-                    .apply_ordered_block_batch(&writes);
+                    .apply_ordered_block_id_batch(&writes);
             }
+        }
+    }
+
+    /// Settle each target cell from the minimum-provenance target-owned
+    /// FEATURES writer before its immutable output snapshot is captured.
+    pub fn apply_canonical_target_feature_winners(&mut self, target: ChunkPos) {
+        let winners = self
+            .target_feature_winners
+            .iter()
+            .filter(|((x, _, z), _)| (x.div_euclid(16), z.div_euclid(16)) == target)
+            .map(|(&cell, winner)| (cell, winner.state))
+            .collect::<Vec<_>>();
+        if winners.is_empty() {
+            return;
+        }
+        self.materialize_resident(target);
+        let column = self
+            .resident
+            .get(&target)
+            .expect("canonical FEATURES target was admitted");
+        let writes = winners
+            .into_iter()
+            .filter_map(|(cell, state)| {
+                let local = (cell.0.rem_euclid(16), cell.1, cell.2.rem_euclid(16));
+                (column.block_state_id(local.0, local.1, local.2) != state)
+                    .then_some((local.0, local.1, local.2, state))
+            })
+            .collect::<Vec<_>>();
+        if !writes.is_empty() {
+            self.resident
+                .get_mut(&target)
+                .expect("canonical FEATURES target was admitted")
+                .apply_ordered_block_id_batch(&writes);
         }
     }
 
@@ -3136,23 +3958,37 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         lx: usize,
         y: i32,
         lz: usize,
-    ) -> Option<&str> {
+    ) -> Option<StateId> {
         self.resident
             .get(&chunk)
-            .map(|column| column.block_state(lx as i32, y, lz as i32))
+            .map(|column| column.block_state_id(lx as i32, y, lz as i32))
+    }
+
+    /// Read one canonical state id without materializing a generated resident.
+    #[must_use]
+    pub fn resident_block_state_id(
+        &self,
+        chunk: ChunkPos,
+        lx: usize,
+        y: i32,
+        lz: usize,
+    ) -> Option<StateId> {
+        self.resident
+            .get(&chunk)
+            .map(|column| column.block_state_id(lx as i32, y, lz as i32))
             .or_else(|| {
                 self.generated_resident
                     .get(&chunk)
-                    .map(|column| column.block_state(lx, y, lz))
+                    .map(|column| column.block_state_id(lx, y, lz))
             })
     }
 
-    /// Return only the final local writes retained for a sparse packet
+    /// Return final canonical local writes retained for a sparse packet
     /// neighbour. Transaction-local future-target spills are not included.
     pub fn sparse_padding_overlay_for_packet(
         &self,
         chunk: ChunkPos,
-    ) -> Option<Vec<(i32, i32, i32, String)>> {
+    ) -> Option<Vec<(i32, i32, i32, StateId)>> {
         if !self.sparse_padding_targets.contains(&chunk) {
             return None;
         }
@@ -3161,30 +3997,37 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 .get(&chunk)
                 .into_iter()
                 .flat_map(|writes| writes.iter())
-                .map(|(&(x, y, z), state)| {
-                    (x.rem_euclid(16), y, z.rem_euclid(16), state.clone())
+                .map(|(&(x, y, z), &state)| {
+                    (x.rem_euclid(16), y, z.rem_euclid(16), state)
                 })
                 .collect(),
         )
     }
 
     fn apply_sparse_padding_overrides(&mut self, chunk: ChunkPos) {
-        let writes = self
-            .sparse_padding_overrides
-            .get(&chunk)
-            .into_iter()
-            .flat_map(|writes| writes.iter())
-            .map(|(&(x, y, z), state)| (x.rem_euclid(16), y, z.rem_euclid(16), state.clone()))
-            .collect::<Vec<_>>();
+        let writes = self.sparse_padding_overlay_for_packet(chunk).unwrap_or_default();
         if !writes.is_empty() {
-            let writes = writes
-                .iter()
-                .map(|(x, y, z, state)| (*x, *y, *z, state.as_str()))
-                .collect::<Vec<_>>();
             self.resident
                 .get_mut(&chunk)
                 .expect("sparse padding overrides require a resident")
-                .apply_ordered_block_batch(&writes);
+                .apply_ordered_block_id_batch(&writes);
+        }
+    }
+
+    fn promote_sparse_target(&mut self, chunk: ChunkPos) {
+        self.materialize_resident(chunk);
+        let writes = self
+            .sparse_padding_overrides
+            .remove(&chunk)
+            .into_iter()
+            .flat_map(|writes| writes.into_iter())
+            .map(|((x, y, z), state)| (x.rem_euclid(16), y, z.rem_euclid(16), state))
+            .collect::<Vec<_>>();
+        if !writes.is_empty() {
+            self.resident
+                .get_mut(&chunk)
+                .expect("promoted sparse target was materialized")
+                .apply_ordered_block_id_batch(&writes);
         }
     }
 
@@ -3206,7 +4049,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             .expect("lifecycle source status was checked resident above");
         // A target-scoped event may arrive after the resident has crossed a
         // later authenticated boundary. Explicit resident transitions remain
-        // authoritative for the retained lifecycle status; source ownership
+        // authoritative for the retained lifecycle status; the dispatch mode
         // decides separately whether the body has any work left to execute.
         if next > current {
             self.resident_stages.insert(source, next);
@@ -3322,6 +4165,10 @@ mod tests {
 
     use super::*;
 
+    fn sid(name: &str) -> StateId {
+        StateId::from_state_str(name).expect("test state must be canonical")
+    }
+
     struct CountingSource {
         feature_calls: Rc<Cell<usize>>,
     }
@@ -3416,7 +4263,7 @@ mod tests {
         fn feature_result(
             &self,
             _source: ChunkPos,
-            _overrides: &BTreeMap<AbsoluteCell, String>,
+            _overrides: &BTreeMap<AbsoluteCell, StateId>,
             _resident: &BTreeMap<ChunkPos, ChunkColumn>,
         ) -> LifecycleFeatureResult {
             LifecycleFeatureResult::default()
@@ -3425,13 +4272,13 @@ mod tests {
         fn target_feature_result_direct(
             &self,
             target: ChunkPos,
-            overrides: &BTreeMap<AbsoluteCell, String>,
+            overrides: &BTreeMap<AbsoluteCell, StateId>,
             _resident: &BTreeMap<ChunkPos, ChunkColumn>,
         ) -> Option<LifecycleTargetFeatureResult> {
             let mut column = ChunkColumn::new(0, 1);
             for (&(x, y, z), state) in overrides {
                 if (x.div_euclid(16), z.div_euclid(16)) == target {
-                    column.set_block(x.rem_euclid(16), y, z.rem_euclid(16), state);
+                    column.set_block_id(x.rem_euclid(16), y, z.rem_euclid(16), *state);
                 }
             }
             column.install_client_heightmaps_raw([[0u16; 256]; 3]);
@@ -3473,7 +4320,7 @@ mod tests {
         fn feature_result(
             &self,
             _source: ChunkPos,
-            _overrides: &BTreeMap<AbsoluteCell, String>,
+            _overrides: &BTreeMap<AbsoluteCell, StateId>,
             _resident: &BTreeMap<ChunkPos, ChunkColumn>,
         ) -> LifecycleFeatureResult {
             LifecycleFeatureResult::default()
@@ -3482,7 +4329,7 @@ mod tests {
         fn target_feature_result_direct(
             &self,
             target: ChunkPos,
-            overrides: &BTreeMap<AbsoluteCell, String>,
+            overrides: &BTreeMap<AbsoluteCell, StateId>,
             _resident: &BTreeMap<ChunkPos, ChunkColumn>,
         ) -> Option<LifecycleTargetFeatureResult> {
             let mut column = ChunkColumn::new(0, 1);
@@ -3493,25 +4340,25 @@ mod tests {
                 } else {
                     "minecraft:stone"
                 };
-                column.set_block(15, 0, 0, state);
+                column.set_block_id(15, 0, 0, sid(state));
                 local_features.push(LifecycleSpill {
                     source: target,
                     position: (15, 0, 0),
-                    state: state.to_owned(),
+                    state: sid(state),
                     transient: false,
                 });
             }
             if target == (1, 0) && overrides.contains_key(&(15, 0, 0)) {
-                column.set_block(0, 0, 0, "minecraft:diamond_block");
+                column.set_block_id(0, 0, 0, sid("minecraft:diamond_block"));
             }
             if target == (1, 0) && overrides.contains_key(&(16, 0, 0)) {
-                column.set_block(1, 0, 0, "minecraft:gold_block");
+                column.set_block_id(1, 0, 0, sid("minecraft:gold_block"));
             }
             let spills = if target == (0, 0) && self.outward_marker {
                 vec![LifecycleSpill {
                     source: target,
                     position: (16, 0, 0),
-                    state: "minecraft:emerald_block".to_owned(),
+                    state: sid("minecraft:emerald_block"),
                     transient: false,
                 }]
             } else {
@@ -3556,7 +4403,7 @@ mod tests {
         fn feature_result(
             &self,
             source: ChunkPos,
-            _overrides: &BTreeMap<AbsoluteCell, String>,
+            _overrides: &BTreeMap<AbsoluteCell, StateId>,
             _resident: &BTreeMap<ChunkPos, ChunkColumn>,
         ) -> LifecycleFeatureResult {
             self.source_calls.fetch_add(1, Ordering::Relaxed);
@@ -3566,7 +4413,7 @@ mod tests {
         fn target_feature_result(
             &self,
             target: ChunkPos,
-            _overrides: &BTreeMap<AbsoluteCell, String>,
+            _overrides: &BTreeMap<AbsoluteCell, StateId>,
             _resident: &BTreeMap<ChunkPos, ChunkColumn>,
         ) -> LifecycleFeatureResult {
             self.target_calls.fetch_add(1, Ordering::Relaxed);
@@ -3600,7 +4447,7 @@ mod tests {
         fn feature_result(
             &self,
             _source: ChunkPos,
-            _overrides: &BTreeMap<AbsoluteCell, String>,
+            _overrides: &BTreeMap<AbsoluteCell, StateId>,
             _resident: &BTreeMap<ChunkPos, ChunkColumn>,
         ) -> LifecycleFeatureResult {
             LifecycleFeatureResult::default()
@@ -3609,7 +4456,7 @@ mod tests {
         fn target_feature_result_direct_with_replay_context(
             &self,
             _target: ChunkPos,
-            _overrides: &BTreeMap<AbsoluteCell, String>,
+            _overrides: &BTreeMap<AbsoluteCell, StateId>,
             _resident: &BTreeMap<ChunkPos, ChunkColumn>,
             context: &Self::ReplayContext,
         ) -> Option<LifecycleTargetFeatureResult> {
@@ -3645,7 +4492,7 @@ mod tests {
         fn feature_result(
             &self,
             source: ChunkPos,
-            _overrides: &BTreeMap<AbsoluteCell, String>,
+            _overrides: &BTreeMap<AbsoluteCell, StateId>,
             _resident: &BTreeMap<ChunkPos, ChunkColumn>,
         ) -> LifecycleFeatureResult {
             let (position, state) = match source {
@@ -3657,7 +4504,7 @@ mod tests {
                 spills: vec![LifecycleSpill {
                     source,
                     position,
-                    state: state.to_owned(),
+                    state: sid(state),
                     transient: false,
                 }],
                 block_entities: Vec::new(),
@@ -3670,7 +4517,7 @@ mod tests {
             &self,
             target: ChunkPos,
             source: ChunkPos,
-            overrides: &BTreeMap<AbsoluteCell, String>,
+            overrides: &BTreeMap<AbsoluteCell, StateId>,
             resident: &BTreeMap<ChunkPos, ChunkColumn>,
             completed_sources: &BTreeSet<ChunkPos>,
         ) -> (LifecycleFeatureResult, Vec<ChunkPos>) {
@@ -3706,7 +4553,7 @@ mod tests {
         fn feature_result(
             &self,
             _source: ChunkPos,
-            _overrides: &BTreeMap<AbsoluteCell, String>,
+            _overrides: &BTreeMap<AbsoluteCell, StateId>,
             _resident: &BTreeMap<ChunkPos, ChunkColumn>,
         ) -> LifecycleFeatureResult {
             LifecycleFeatureResult::default()
@@ -3716,14 +4563,14 @@ mod tests {
             &self,
             target: ChunkPos,
             source: ChunkPos,
-            _overrides: &BTreeMap<AbsoluteCell, String>,
+            _overrides: &BTreeMap<AbsoluteCell, StateId>,
             _resident: &BTreeMap<ChunkPos, ChunkColumn>,
         ) -> LifecycleFeatureResult {
             let spills = (target == (2, 0) && source == (2, 0))
                 .then(|| LifecycleSpill {
                     source,
                     position: (16, 0, 0),
-                    state: "minecraft:diamond_block".to_owned(),
+                    state: sid("minecraft:diamond_block"),
                     transient: false,
                 })
                 .into_iter()
@@ -3752,7 +4599,7 @@ mod tests {
             } else {
                 "minecraft:dirt"
             };
-            column.set_block(0, 0, 0, state);
+            column.set_block_id(0, 0, 0, sid(state));
             column
         }
 
@@ -3767,7 +4614,7 @@ mod tests {
         fn feature_result(
             &self,
             _source: ChunkPos,
-            _overrides: &BTreeMap<AbsoluteCell, String>,
+            _overrides: &BTreeMap<AbsoluteCell, StateId>,
             _resident: &BTreeMap<ChunkPos, ChunkColumn>,
         ) -> LifecycleFeatureResult {
             LifecycleFeatureResult::default()
@@ -3778,7 +4625,7 @@ mod tests {
         let mut digest = Sha256::new();
         digest.update(column.min_y.to_le_bytes());
         digest.update(column.height.to_le_bytes());
-        for id in column.palette_state_ids() {
+        for id in column.palette() {
             digest.update(id.raw().to_le_bytes());
         }
         for section in 0..column.section_count() {
@@ -3812,14 +4659,14 @@ mod tests {
         fn feature_result(
             &self,
             source: ChunkPos,
-            _overrides: &BTreeMap<AbsoluteCell, String>,
+            _overrides: &BTreeMap<AbsoluteCell, StateId>,
             _resident: &BTreeMap<ChunkPos, ChunkColumn>,
         ) -> LifecycleFeatureResult {
             LifecycleFeatureResult {
                 spills: (source == (0, 0)).then(|| LifecycleSpill {
                     source,
                     position: (4, 14, 1),
-                    state: "minecraft:spawner".to_owned(),
+                    state: sid("minecraft:spawner"),
                     transient: false,
                 }).into_iter().collect(),
                 block_entities: Vec::new(),
@@ -3851,7 +4698,7 @@ mod tests {
         fn feature_result(
             &self,
             source: ChunkPos,
-            _overrides: &BTreeMap<AbsoluteCell, String>,
+            _overrides: &BTreeMap<AbsoluteCell, StateId>,
             _resident: &BTreeMap<ChunkPos, ChunkColumn>,
         ) -> LifecycleFeatureResult {
             if source != (0, 0) {
@@ -3861,7 +4708,7 @@ mod tests {
                 spills: vec![LifecycleSpill {
                     source,
                     position: (16, 4, 0),
-                    state: "minecraft:spawner".to_owned(),
+                    state: sid("minecraft:spawner"),
                     transient: false,
                 }],
                 block_entities: vec![GeneratedBlockEntity::DungeonSpawner {
@@ -3885,7 +4732,7 @@ mod tests {
 
         fn shaped_column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
             let mut column = ChunkColumn::new(0, 8);
-            column.set_block(0, 0, 0, "minecraft:stone");
+            column.set_block_id(0, 0, 0, sid("minecraft:stone"));
             column
         }
 
@@ -3904,7 +4751,7 @@ mod tests {
         fn feature_result(
             &self,
             source: ChunkPos,
-            _overrides: &BTreeMap<AbsoluteCell, String>,
+            _overrides: &BTreeMap<AbsoluteCell, StateId>,
             _resident: &BTreeMap<ChunkPos, ChunkColumn>,
         ) -> LifecycleFeatureResult {
             let position = match source {
@@ -3919,7 +4766,7 @@ mod tests {
                 spills: vec![LifecycleSpill {
                     source,
                     position,
-                    state: "minecraft:stone".to_owned(),
+                    state: sid("minecraft:stone"),
                     transient: false,
                 }],
                 block_entities: Vec::new(),
@@ -3953,7 +4800,7 @@ mod tests {
         assert_eq!(world_surface(materializer.resident_column((0, 0)).unwrap()), 1);
     }
 
-    fn later_target_state(source: TargetLocalReadSource, local_x: i32) -> String {
+    fn later_target_state(source: TargetLocalReadSource, local_x: i32) -> StateId {
         let local_marker = source.local_marker;
         let top_layer_marker = source.top_layer_marker;
         let mut materializer = LifecycleMaterializer::new(source);
@@ -3965,14 +4812,14 @@ mod tests {
         materializer.finish_target((0, 0));
         if top_layer_marker {
             assert_eq!(
-                materializer.resident_column((0, 0)).unwrap().block_state(15, 0, 0),
-                "minecraft:snow[layers=1]",
+                materializer.resident_column((0, 0)).unwrap().block_state_id(15, 0, 0),
+                sid("minecraft:snow[layers=1]"),
                 "the direct target column owns its local top-layer write",
             );
         } else if local_marker {
             assert_eq!(
-                materializer.resident_column((0, 0)).unwrap().block_state(15, 0, 0),
-                "minecraft:stone",
+                materializer.resident_column((0, 0)).unwrap().block_state_id(15, 0, 0),
+                sid("minecraft:stone"),
                 "the direct target column owns its local final FEATURES write",
             );
         }
@@ -3989,8 +4836,7 @@ mod tests {
         materializer
             .resident_column((1, 0))
             .expect("later target was admitted")
-            .block_state(local_x, 0, 0)
-            .to_owned()
+            .block_state_id(local_x, 0, 0)
     }
 
     #[test]
@@ -4004,7 +4850,7 @@ mod tests {
                 },
                 0,
             ),
-            "minecraft:diamond_block",
+            sid("minecraft:diamond_block"),
             "a local east-edge FEATURES write must seed the later target read view",
         );
         assert_eq!(
@@ -4309,13 +5155,13 @@ mod tests {
         );
         materializer.finish_target((0, 0));
         assert_eq!(
-            materializer.resident_column((1, 0)).unwrap().block_state(0, 0, 0),
-            "minecraft:stone",
+            materializer.resident_column((1, 0)).unwrap().block_state_id(0, 0, 0),
+            sid("minecraft:stone"),
             "a write into a source that entered FEATURES must be retained",
         );
         assert_eq!(
-            materializer.resident_column((2, 0)).unwrap().block_state(0, 0, 0),
-            "minecraft:air",
+            materializer.resident_column((2, 0)).unwrap().block_state_id(0, 0, 0),
+            sid("minecraft:air"),
             "a write into a later source must not leak into the next packet target",
         );
 
@@ -4328,8 +5174,8 @@ mod tests {
         );
         materializer.finish_target((1, 0));
         assert_eq!(
-            materializer.resident_column((1, 0)).unwrap().block_state(0, 0, 0),
-            "minecraft:stone",
+            materializer.resident_column((1, 0)).unwrap().block_state_id(0, 0, 0),
+            sid("minecraft:stone"),
             "the later target must replay the source whose write it owns",
         );
     }
@@ -4345,13 +5191,13 @@ mod tests {
         materializer.complete_for_target((1, 0), (1, 0), LifecycleCompletion::Features, 0);
         materializer.finish_target((1, 0));
         let early = materializer.snapshot_for_packet((1, 0));
-        assert_eq!(early.block_state(0, 0, 0), "minecraft:air");
+        assert_eq!(early.block_state_id(0, 0, 0), sid("minecraft:air"));
 
         materializer.begin_target((2, 0));
         materializer.complete_for_target((2, 0), (2, 0), LifecycleCompletion::Features, 1);
         materializer.finish_target((2, 0));
         let late = materializer.snapshot_for_packet((1, 0));
-        assert_eq!(late.block_state(0, 0, 0), "minecraft:diamond_block");
+        assert_eq!(late.block_state_id(0, 0, 0), sid("minecraft:diamond_block"));
         assert_ne!(column_digest(&early), column_digest(&late));
     }
 
@@ -4362,7 +5208,7 @@ mod tests {
         materializer.complete((0, 0), LifecycleCompletion::Features, 0);
 
         let column = materializer.resident_column((0, 0)).expect("admitted source column");
-        assert_eq!(column.block_state(4, 14, 1), "minecraft:spawner");
+        assert_eq!(column.block_state_id(4, 14, 1), sid("minecraft:spawner"));
         assert!(column.block_entities().is_empty());
     }
 
@@ -4373,7 +5219,7 @@ mod tests {
         future.admit((1, 0));
         future.complete_for_target((0, 0), (0, 0), LifecycleCompletion::Features, 0);
         future.finish_target((0, 0));
-        assert_eq!(future.resident_column((1, 0)).unwrap().block_state(0, 4, 0), "minecraft:air");
+        assert_eq!(future.resident_column((1, 0)).unwrap().block_state_id(0, 4, 0), sid("minecraft:air"));
         assert!(
             future.resident_column((1, 0)).unwrap().block_entities().is_empty(),
             "a future dependency must not expose a deferred generated entity in its packet state",
@@ -4385,7 +5231,7 @@ mod tests {
         current.complete_for_target((1, 0), (0, 0), LifecycleCompletion::Features, 0);
         current.finish_target((1, 0));
         let column = current.resident_column((1, 0)).unwrap();
-        assert_eq!(column.block_state(0, 4, 0), "minecraft:spawner");
+        assert_eq!(column.block_state_id(0, 4, 0), sid("minecraft:spawner"));
         assert_eq!(column.block_entities().len(), 1);
     }
 
@@ -4411,19 +5257,21 @@ mod tests {
         fn feature_result(
             &self,
             source: ChunkPos,
-            overrides: &BTreeMap<AbsoluteCell, String>,
+            overrides: &BTreeMap<AbsoluteCell, StateId>,
             _resident: &BTreeMap<ChunkPos, ChunkColumn>,
         ) -> LifecycleFeatureResult {
             if source == (0, 1) {
                 self.expected_override.set(
-                    overrides.get(&(16, 0, 0)).map(String::as_str) == Some("minecraft:stone"),
+                    overrides
+                        .get(&(16, 0, 0))
+                        .is_some_and(|&state| state == sid("minecraft:stone")),
                 );
             }
             let spills = if source == (0, 0) && !self.post_features {
                 vec![LifecycleSpill {
                     source,
                     position: (16, 0, 0),
-                    state: "minecraft:stone".to_owned(),
+                    state: sid("minecraft:stone"),
                     transient: false,
                 }]
             } else {
@@ -4440,13 +5288,13 @@ mod tests {
         fn post_features_spills(
             &self,
             source: ChunkPos,
-            _overrides: &BTreeMap<AbsoluteCell, String>,
+            _overrides: &BTreeMap<AbsoluteCell, StateId>,
         ) -> Vec<LifecycleSpill> {
             if source == (0, 0) && self.post_features {
                 vec![LifecycleSpill {
                     source,
                     position: (16, 0, 0),
-                    state: "minecraft:stone".to_owned(),
+                    state: sid("minecraft:stone"),
                     transient: false,
                 }]
             } else {
@@ -4477,7 +5325,7 @@ mod tests {
         fn feature_result(
             &self,
             _source: ChunkPos,
-            _overrides: &BTreeMap<AbsoluteCell, String>,
+            _overrides: &BTreeMap<AbsoluteCell, StateId>,
             _resident: &BTreeMap<ChunkPos, ChunkColumn>,
         ) -> LifecycleFeatureResult {
             let calls = self.feature_calls.get() + 1;
@@ -4503,7 +5351,7 @@ mod tests {
             } else {
                 "minecraft:dirt"
             };
-            column.set_block(0, 0, 0, state);
+            column.set_block_id(0, 0, 0, sid(state));
             column
         }
 
@@ -4518,7 +5366,7 @@ mod tests {
         fn feature_result(
             &self,
             _source: ChunkPos,
-            _overrides: &BTreeMap<AbsoluteCell, String>,
+            _overrides: &BTreeMap<AbsoluteCell, StateId>,
             _resident: &BTreeMap<ChunkPos, ChunkColumn>,
         ) -> LifecycleFeatureResult {
             LifecycleFeatureResult::default()
@@ -4549,7 +5397,7 @@ mod tests {
         fn feature_result(
             &self,
             source: ChunkPos,
-            overrides: &BTreeMap<AbsoluteCell, String>,
+            overrides: &BTreeMap<AbsoluteCell, StateId>,
             _resident: &BTreeMap<ChunkPos, ChunkColumn>,
         ) -> LifecycleFeatureResult {
             let state = match source {
@@ -4562,7 +5410,7 @@ mod tests {
                 spills: vec![LifecycleSpill {
                     source,
                     position: (16, 0, 0),
-                    state: state.to_owned(),
+                    state: sid(state),
                     transient: false,
                 }],
                 block_entities: Vec::new(),
@@ -4583,8 +5431,8 @@ mod tests {
         parallel.admit_many_parallel(&chunks);
         for &chunk in &chunks {
             assert_eq!(
-                serial.resident_column(chunk).unwrap().block_state(0, 0, 0),
-                parallel.resident_column(chunk).unwrap().block_state(0, 0, 0),
+                serial.resident_column(chunk).unwrap().block_state_id(0, 0, 0),
+                parallel.resident_column(chunk).unwrap().block_state_id(0, 0, 0),
                 "parallel admission changed shaped output at {chunk:?}",
             );
         }
@@ -4661,8 +5509,78 @@ mod tests {
     }
 
     #[test]
+    fn overworld_overrides_are_bounded_to_the_dispatch_window() {
+        let generator = crate::overworld_generator(42);
+        let target = (-2, 3);
+        let origin_x = target.0 * 16;
+        let origin_z = target.1 * 16;
+        let min_x = origin_x + lodestone_worldgen::feature::REGION_MIN
+            - lodestone_worldgen::feature::vegetation::GEODE_PADDING;
+        let max_x = origin_x + lodestone_worldgen::feature::REGION_MAX
+            + lodestone_worldgen::feature::vegetation::GEODE_PADDING;
+        let min_z = origin_z + lodestone_worldgen::feature::REGION_MIN
+            - lodestone_worldgen::feature::vegetation::GEODE_PADDING;
+        let max_z = origin_z + lodestone_worldgen::feature::REGION_MAX
+            + lodestone_worldgen::feature::vegetation::GEODE_PADDING;
+        let mut overrides = BTreeMap::new();
+        overrides.insert(
+            (min_x, generator.min_y(), min_z),
+            "minecraft:stone".to_owned(),
+        );
+        overrides.insert(
+            (
+                max_x - 1,
+                generator.min_y() + generator.height() - 1,
+                max_z - 1,
+            ),
+            "minecraft:dirt".to_owned(),
+        );
+        overrides.insert((min_x - 1, 0, min_z), "outside-x".to_owned());
+        overrides.insert((min_x, 0, max_z), "outside-z".to_owned());
+        overrides.insert((min_x, generator.min_y() - 1, min_z), "outside-y".to_owned());
+
+        let bounded = overworld_override_vec(&overrides, target, &generator);
+        assert_eq!(bounded.len(), 2);
+        assert_eq!(bounded[0].3, "minecraft:stone");
+        assert_eq!(bounded[1].3, "minecraft:dirt");
+        assert_eq!(override_vec(&overrides).len(), 5);
+    }
+
+    #[test]
+    fn bounded_overworld_overrides_preserve_direct_output() {
+        let generator = crate::overworld_generator(42);
+        let target = (0, 0);
+        let context = generator.lifecycle_replay_context(target.0, target.1);
+        let mut overrides = BTreeMap::new();
+        overrides.insert((0, 63, 0), "minecraft:cobblestone".to_owned());
+        overrides.insert((10_000, 63, 10_000), "minecraft:diamond_block".to_owned());
+        let full = override_vec(&overrides);
+        let bounded = overworld_override_vec(&overrides, target, &generator);
+
+        let expected = generator.direct_source_decoration_with_context(
+            target.0,
+            target.1,
+            &full,
+            &context,
+        );
+        let actual = generator.direct_source_decoration_with_context(
+            target.0,
+            target.1,
+            &bounded,
+            &context,
+        );
+        assert_eq!(
+            column_digest(&ChunkColumn::from_generated(expected.column)),
+            column_digest(&ChunkColumn::from_generated(actual.column)),
+        );
+        assert_eq!(actual.spills, expected.spills);
+        assert_eq!(actual.local_features, expected.local_features);
+    }
+
+    #[test]
     fn generated_shaped_admission_materializes_once_at_the_server_boundary() {
         crate::chunk::reset_generated_materializations();
+        reset_generated_resident_unwraps();
         let source = OverworldChunkSource::new(crate::overworld_generator(42));
         let mut materializer = LifecycleMaterializer::new(source);
 
@@ -4680,11 +5598,10 @@ mod tests {
         let generated_state = materializer
             .generated_resident_column((0, 0))
             .expect("typed shaped product remains readable")
-            .block_state(0, 0, 0)
-            .to_owned();
+            .block_state_id(0, 0, 0);
         assert_eq!(
             materializer.resident_block_state((0, 0), 0, 0, 0),
-            Some(generated_state.as_str()),
+            Some(generated_state),
             "read-only block access must not force server materialization",
         );
 
@@ -4695,7 +5612,41 @@ mod tests {
             1,
             "repeated consumers must share one materialization per coordinate"
         );
+        assert_eq!(
+            generated_resident_unwraps(),
+            1,
+            "the sole generated handle should be consumed without cloning"
+        );
         assert!(materializer.resident_column((0, 0)).is_some());
+    }
+
+    #[test]
+    fn shared_generated_materialization_matches_unique_consumption() {
+        let target = (0, 0);
+
+        reset_generated_resident_unwraps();
+        let mut unique = LifecycleMaterializer::new(OverworldChunkSource::new(
+            crate::overworld_generator(42),
+        ));
+        unique.admit(target);
+        unique.materialize_resident_for_test(target);
+        let unique_digest = column_digest(unique.resident_column(target).unwrap());
+        assert_eq!(generated_resident_unwraps(), 1);
+
+        reset_generated_resident_unwraps();
+        let mut shared = LifecycleMaterializer::new(OverworldChunkSource::new(
+            crate::overworld_generator(42),
+        ));
+        shared.admit(target);
+        let retained_handle = shared
+            .generated_resident_handle(target)
+            .expect("admission must retain a generated handle");
+        shared.materialize_resident_for_test(target);
+        let shared_digest = column_digest(shared.resident_column(target).unwrap());
+
+        assert_eq!(generated_resident_unwraps(), 0);
+        assert_eq!(unique_digest, shared_digest);
+        drop(retained_handle);
     }
 
     #[test]
@@ -4761,8 +5712,8 @@ mod tests {
             materializer
                 .resident_column((1, 0))
                 .expect("hydrated coordinate must use its server carrier")
-                .block_state(0, -64, 0),
-            "minecraft:air"
+                .block_state_id(0, -64, 0),
+            sid("minecraft:air")
         );
         assert_eq!(
             crate::chunk::generated_materializations(),
@@ -4792,6 +5743,35 @@ mod tests {
         }
         assert_eq!(target_calls.load(Ordering::Relaxed), targets.len());
         assert_eq!(source_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "target-owned FEATURES replay requires exactly one target event")]
+    fn target_owned_trace_rejects_neighbor_origin_bodies() {
+        let target = (0, 0);
+        let admissions = (-1..=1)
+            .flat_map(|z| (-1..=1).map(move |x| (x, z)))
+            .collect::<Vec<_>>();
+        let events = admissions
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(sequence, source)| LifecycleReplayEvent {
+                source,
+                stage: LifecycleCompletion::Features,
+                sequence: sequence as u64,
+                resident_transitions: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let plan = LifecycleReplayPlan::for_target(target, &admissions, &events)
+            .expect("the nine-origin trace is structurally valid");
+        let source = DispatchCountingSource {
+            dispatch: LifecycleFeatureDispatch::TargetOwned,
+            target_calls: Arc::new(AtomicUsize::new(0)),
+            source_calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let mut materializer = LifecycleMaterializer::new(source);
+        materializer.replay_plan(&plan);
     }
 
     #[test]
@@ -4893,7 +5873,7 @@ mod tests {
         let mut control = LifecycleMaterializer::new(DirectHeightmapSource);
         control.admit(target);
         control.complete_target_features_observing(target, 0, |_| {});
-        assert_eq!(control.snapshot_for_packet(target).block_state(0, 0, 0), "minecraft:air");
+        assert_eq!(control.snapshot_for_packet(target).block_state_id(0, 0, 0), sid("minecraft:air"));
 
         let mutation = ProvenanceMutation::test_block_state(
             (-1, 0),
@@ -4902,15 +5882,15 @@ mod tests {
             0,
             crate::worldgen_session::BlockCoordinate::new(0, 0, 0),
             1,
-            "minecraft:stone".to_owned(),
+            sid("minecraft:stone"),
         );
         let mut materializer = LifecycleMaterializer::new(DirectHeightmapSource);
         materializer.admit(target);
         materializer.restore_committed_mutations([&mutation]);
         materializer.complete_target_features_observing(target, 0, |_| {});
         assert_eq!(
-            materializer.snapshot_for_packet(target).block_state(0, 0, 0),
-            "minecraft:stone",
+            materializer.snapshot_for_packet(target).block_state_id(0, 0, 0),
+            sid("minecraft:stone"),
         );
     }
 
@@ -4927,10 +5907,10 @@ mod tests {
         reordered.complete((1, 0), LifecycleCompletion::Features, 0);
         reordered.complete((0, 0), LifecycleCompletion::Features, 1);
 
-        let canonical_state = canonical.resident_column((1, 0)).unwrap().block_state(0, 0, 0);
-        let reordered_state = reordered.resident_column((1, 0)).unwrap().block_state(0, 0, 0);
-        assert_eq!(canonical_state, "minecraft:diamond_block");
-        assert_eq!(reordered_state, "minecraft:stone");
+        let canonical_state = canonical.resident_column((1, 0)).unwrap().block_state_id(0, 0, 0);
+        let reordered_state = reordered.resident_column((1, 0)).unwrap().block_state_id(0, 0, 0);
+        assert_eq!(canonical_state, sid("minecraft:diamond_block"));
+        assert_eq!(reordered_state, sid("minecraft:stone"));
         assert_ne!(canonical_state, reordered_state, "reordered mutable commits must change the control output");
     }
 
@@ -5058,7 +6038,7 @@ mod tests {
             (1, 0),
             destination,
             (3, 4, 5),
-            "minecraft:stone",
+            sid("minecraft:stone"),
             false,
         );
         let after = materializer
@@ -5067,6 +6047,59 @@ mod tests {
             .copied()
             .expect("destination identity remains resident");
         assert_ne!(before, after, "one persistent block write must change its identity");
+    }
+
+    #[test]
+    fn authenticated_features_seed_retains_prior_write_identity() {
+        let mut materializer = LifecycleMaterializer::new(CountingSource {
+            feature_calls: Rc::new(Cell::new(0)),
+        });
+        let destination = (0, 0);
+        let generated = [5; 32];
+        let initial_prefix = [7; 32];
+        materializer
+            .authenticated_prefixes
+            .insert(destination, initial_prefix);
+        materializer.record_authenticated_write(
+            (1, 0),
+            (1, 0),
+            destination,
+            (3, 4, 5),
+            sid("minecraft:stone"),
+            false,
+        );
+        let updated_prefix = materializer.authenticated_prefixes[&destination];
+        assert_ne!(initial_prefix, updated_prefix);
+        assert_ne!(
+            authenticated_features_identity(generated, initial_prefix),
+            authenticated_features_identity(generated, updated_prefix),
+        );
+    }
+
+    #[test]
+    fn authenticated_features_identity_tracks_later_write() {
+        let mut materializer = LifecycleMaterializer::new(CountingSource {
+            feature_calls: Rc::new(Cell::new(0)),
+        });
+        let destination = (0, 0);
+        materializer
+            .authenticated_stages
+            .insert((destination, LifecycleCompletion::Features), [8; 32]);
+        let before = materializer.authenticated_stages
+            [&(destination, LifecycleCompletion::Features)];
+        materializer.record_authenticated_write(
+            (1, 0),
+            (1, 0),
+            destination,
+            (3, 4, 5),
+            sid("minecraft:stone"),
+            false,
+        );
+        assert_ne!(
+            before,
+            materializer.authenticated_stages
+                [&(destination, LifecycleCompletion::Features)],
+        );
     }
 
     #[test]
@@ -5088,7 +6121,7 @@ mod tests {
             (1, 0),
             destination,
             (3, 4, 5),
-            "minecraft:stone",
+            sid("minecraft:stone"),
             true,
         );
         assert_eq!(

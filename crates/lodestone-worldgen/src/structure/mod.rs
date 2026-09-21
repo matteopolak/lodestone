@@ -174,12 +174,13 @@ use serde_json::Value;
 
 use crate::aquifer::BlockKind;
 use crate::density::Resolver;
-use crate::interner::{StateId, StateInterner};
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId as CanonicalStateId;
 use jigsaw::{JigsawConfig, JigsawStub};
 use placement::{Placement, PlacementKind};
 use pool::PoolStore;
 use processor::{PosTest, Processor, ProcessorRule, RuleTest};
-use template::{BlockState, Mirror, PlaceSettings, Rotation, StructureTemplate};
+use template::{Mirror, PlaceSettings, Rotation, StructureTemplate};
 
 /// One structure block write captured at the point where a source's Features
 /// stream places it. The source, configured step and write ordinal are kept
@@ -191,7 +192,7 @@ pub struct StructureBlockMutation {
     pub step: i32,
     pub ordinal: u32,
     pub position: [i32; 3],
-    pub state: String,
+    pub state: CanonicalStateId,
 }
 
 pub trait StructureMutationSink {
@@ -200,7 +201,7 @@ pub trait StructureMutationSink {
         source: (i32, i32),
         step: i32,
         position: [i32; 3],
-        state: StateId,
+        state: CanonicalStateId,
     );
 }
 
@@ -210,7 +211,7 @@ struct RecordedStructureMutation {
     step: i32,
     ordinal: u32,
     position: [i32; 3],
-    state: StateId,
+    state: CanonicalStateId,
 }
 
 #[derive(Debug, Default)]
@@ -220,7 +221,7 @@ pub struct StructureMutationRecorder {
 }
 
 impl StructureMutationRecorder {
-    pub fn finish(self, interner: &StateInterner) -> StructureBlocks {
+    pub fn finish(self) -> StructureBlocks {
         let mut blocks = StructureBlocks::default();
         for mutation in self.mutations {
             blocks.push_mutation(StructureBlockMutation {
@@ -228,7 +229,7 @@ impl StructureMutationRecorder {
                 step: mutation.step,
                 ordinal: mutation.ordinal,
                 position: mutation.position,
-                state: interner.name_of(mutation.state).to_owned(),
+                state: mutation.state,
             });
         }
         blocks
@@ -241,7 +242,7 @@ impl StructureMutationSink for StructureMutationRecorder {
         source: (i32, i32),
         step: i32,
         position: [i32; 3],
-        state: StateId,
+        state: CanonicalStateId,
     ) {
         let ordinal = self.ordinals.entry((source, step)).or_default();
         let current = *ordinal;
@@ -260,6 +261,7 @@ pub struct StructureMutationContext<'a> {
     sink: &'a mut dyn StructureMutationSink,
     source: (i32, i32),
     step: i32,
+    mutation_observer: Option<crate::overworld::BlockMutationObserverHandle>,
 }
 
 impl std::fmt::Debug for StructureMutationContext<'_> {
@@ -277,8 +279,27 @@ impl<'a> StructureMutationContext<'a> {
         sink: &'a mut dyn StructureMutationSink,
         source: (i32, i32),
         step: i32,
-    ) -> Self {
-        Self { sink, source, step }
+    ) -> StructureMutationContext<'a> {
+        StructureMutationContext {
+            sink,
+            source,
+            step,
+            mutation_observer: None,
+        }
+    }
+
+    pub fn new_with_observer(
+        sink: &'a mut dyn StructureMutationSink,
+        source: (i32, i32),
+        step: i32,
+        mutation_observer: Option<crate::overworld::BlockMutationObserverHandle>,
+    ) -> StructureMutationContext<'a> {
+        StructureMutationContext {
+            sink,
+            source,
+            step,
+            mutation_observer,
+        }
     }
 
     pub fn write(
@@ -287,9 +308,12 @@ impl<'a> StructureMutationContext<'a> {
         x: i32,
         y: i32,
         z: i32,
-        state: &str,
+        state: CanonicalStateId,
     ) {
-        let state = world.interner().id_of(state);
+        let old = world.base_facts_untracked(x, y, z);
+        if let Some(observer) = &self.mutation_observer {
+            observer(x, y, z, old, state);
+        }
         world.set_id_observed(x, y, z, state, self.source, self.step, self.sink);
     }
 
@@ -299,8 +323,12 @@ impl<'a> StructureMutationContext<'a> {
         x: i32,
         y: i32,
         z: i32,
-        state: StateId,
+        state: CanonicalStateId,
     ) {
+        let old = world.base_facts_untracked(x, y, z);
+        if let Some(observer) = &self.mutation_observer {
+            observer(x, y, z, old, state);
+        }
         world.set_id_observed(x, y, z, state, self.source, self.step, self.sink);
     }
 }
@@ -853,9 +881,8 @@ pub struct PiecePlacement {
 pub struct CodedBlock {
     /// Absolute world position.
     pub pos: [i32; 3],
-    /// The canonical block state string, ready for
-    /// [`DenseBlockGrid::set`](crate::dense_grid::DenseBlockGrid::set).
-    pub state: String,
+    /// The canonical block state, resolved when the structure product is built.
+    pub state: CanonicalStateId,
 }
 
 /// A loot table a **coded** piece attached to a container it placed — the
@@ -1106,6 +1133,8 @@ pub struct StructureStart {
     /// `overworld` stage keeps both so the placement gate can compare ids
     /// while the NBT writer filters.
     pub pieces_complete: bool,
+    /// Immutable placement data retained by generated mineshaft starts.
+    pub mineshaft_tree: Option<Arc<mineshaft::Shaft>>,
 }
 
 impl StructureStart {
@@ -1519,7 +1548,7 @@ enum Stub {
     /// inversion is real — a mineshaft candidate that then fails its biome
     /// check has already spent its whole stream, and any other order would be
     /// a different world.
-    Eager([i32; 3], Vec<StructurePiece>),
+    Eager([i32; 3], Vec<StructurePiece>, Option<Arc<mineshaft::Shaft>>),
     /// A ruined portal's fully-decided construction data. Its own variant rather
     /// than reusing [`Self::Continued`]: nothing draws after the biome check for
     /// this kind (the generation-point search decides template, rotation, mirror,
@@ -1537,7 +1566,7 @@ impl Stub {
     fn position(&self) -> [i32; 3] {
         match self {
             Self::Plain(position)
-            | Self::Eager(position, _)
+            | Self::Eager(position, _, _)
             | Self::Continued(position, _) => *position,
             Self::Jigsaw(stub) => stub.position,
             Self::RuinedPortal(stub) => stub.position,
@@ -1813,13 +1842,13 @@ impl StructureKind {
             }
             return Some(Stub::Continued([x, y, z], Box::new(random)));
         }
-        if let Self::Mineshaft { wood, blocking } = self {
+        if let Self::Mineshaft { wood, .. } = self {
             // The other kind whose generation point costs RNG, and the only one
             // whose generation point costs *pieces*.
             let mut random = structure_random(seed, cx, cz);
-            let (pieces, position) =
-                mineshaft::generate(cx, cz, ctx, *wood, blocking, &mut random);
-            return Some(Stub::Eager(position, pieces));
+            let (pieces, position, tree) =
+                mineshaft::generate_start(cx, cz, ctx, *wood, &mut random);
+            return Some(Stub::Eager(position, pieces, Some(tree)));
         }
         if matches!(self, Self::EndCity | Self::Mansion) {
             let mut random = structure_random(seed, cx, cz);
@@ -1993,7 +2022,7 @@ impl StructureKind {
         // The eager arm is checked on the *stub*, not on the kind, because the stub
         // is what carries the answer — and matching on the kind first would leave a
         // future eager kind silently returning `None`.
-        if let Stub::Eager(_, pieces) = stub {
+        if let Stub::Eager(_, pieces, _) = stub {
             return Some(pieces);
         }
         if let Self::NetherFossil { .. } = self {
@@ -2473,17 +2502,29 @@ fn ruined_portal_piece(stub: RuinedPortalStub, templates: &TemplateStore) -> Vec
         Processor::structure_and_air()
     };
     let mut rules = vec![
-        rule_random_replace("minecraft:gold_block", 0.3, "minecraft:air"),
+        rule_random_replace(Block::GoldBlock, 0.3, Block::Air.default_state()),
         ruined_portal_lava_rule(stub.placement, stub.properties.cold),
     ];
     if !stub.properties.cold {
-        rules.push(rule_random_replace("minecraft:netherrack", 0.07, "minecraft:magma_block"));
+        rules.push(rule_random_replace(
+            Block::Netherrack,
+            0.07,
+            Block::MagmaBlock.default_state(),
+        ));
     }
     let mut processors = vec![
         ignore,
         Processor::Rule(rules),
         Processor::BlockAge { mossiness: stub.properties.mossiness },
-        Processor::ProtectedBlocks(Arc::clone(&stub.features_cannot_replace)),
+        Processor::ProtectedBlocks(Arc::new(
+            stub.features_cannot_replace
+                .iter()
+                .map(|name| {
+                    lodestone_data::block::Block::from_name(name)
+                        .unwrap_or_else(|| panic!("unsupported protected structure block: {name}"))
+                })
+                .collect(),
+        )),
         Processor::LavaSubmerged,
     ];
     if stub.properties.replace_with_blackstone {
@@ -2515,23 +2556,23 @@ fn ruined_portal_piece(stub: RuinedPortalStub, templates: &TemplateStore) -> Vec
 
 /// A block-replace rule that only fires with probability `probability`,
 /// unconditional on location and position.
-fn rule_random_replace(source: &str, probability: f32, target: &str) -> ProcessorRule {
+fn rule_random_replace(source: Block, probability: f32, target: CanonicalStateId) -> ProcessorRule {
     ProcessorRule {
-        input: RuleTest::RandomBlockMatch(source.to_string(), probability),
+        input: RuleTest::RandomBlockMatch(source, probability),
         location: RuleTest::AlwaysTrue,
         position: PosTest::AlwaysTrue,
-        output: BlockState::of(target),
+        output: target,
     }
 }
 
 /// An unconditional block-replace rule — always fires when `source` matches,
 /// with no location or position gating.
-fn rule_replace(source: &str, target: &str) -> ProcessorRule {
+fn rule_replace(source: Block, target: CanonicalStateId) -> ProcessorRule {
     ProcessorRule {
-        input: RuleTest::BlockMatch(source.to_string()),
+        input: RuleTest::BlockMatch(source),
         location: RuleTest::AlwaysTrue,
         position: PosTest::AlwaysTrue,
-        output: BlockState::of(target),
+        output: target,
     }
 }
 
@@ -2540,11 +2581,11 @@ fn rule_replace(source: &str, target: &str) -> ProcessorRule {
 /// setup came out cold, or rolls a 20% magma chance when it did not.
 fn ruined_portal_lava_rule(placement: VerticalPlacement, cold: bool) -> ProcessorRule {
     if placement == VerticalPlacement::OnOceanFloor {
-        rule_replace("minecraft:lava", "minecraft:magma_block")
+        rule_replace(Block::Lava, Block::MagmaBlock.default_state())
     } else if cold {
-        rule_replace("minecraft:lava", "minecraft:netherrack")
+        rule_replace(Block::Lava, Block::Netherrack.default_state())
     } else {
-        rule_random_replace("minecraft:lava", 0.2, "minecraft:magma_block")
+        rule_random_replace(Block::Lava, 0.2, Block::MagmaBlock.default_state())
     }
 }
 
@@ -2712,18 +2753,17 @@ fn ocean_ruin_add_piece<R: RandomSource>(
 /// piece's already-rotted block list.
 fn ocean_ruin_archaeology(temperature: OceanRuinTemperature) -> Processor {
     let (candidate, replacement) = match temperature {
-        OceanRuinTemperature::Warm => ("minecraft:sand", "minecraft:suspicious_sand[dusted=0]"),
-        OceanRuinTemperature::Cold => ("minecraft:gravel", "minecraft:suspicious_gravel[dusted=0]"),
+        OceanRuinTemperature::Warm => (Block::Sand, Block::SuspiciousSand.default_state()),
+        OceanRuinTemperature::Cold => (Block::Gravel, Block::SuspiciousGravel.default_state()),
     };
     Processor::Capped {
         delegate: Box::new(Processor::Rule(vec![processor::ProcessorRule {
-            input: processor::RuleTest::BlockMatch(candidate.to_string()),
+            input: processor::RuleTest::BlockMatch(
+                candidate,
+            ),
             location: processor::RuleTest::AlwaysTrue,
             position: processor::PosTest::AlwaysTrue,
-            // The replacement block's default state — its `dusted`
-            // property defaults to 0, and it has to be spelled out because the
-            // state field's canonical form carries every property.
-            output: template::BlockState::parse(replacement),
+            output: replacement,
         }])),
         limit: 5,
     }
@@ -3027,6 +3067,9 @@ pub struct StructureRegistry {
     /// equivalent generator can reuse the immutable process cache without
     /// copying the candidate list.
     ring_positions: OnceLock<Arc<HashMap<String, Vec<(i32, i32)>>>>,
+    /// Seed-only ring candidates used to decide whether relocation can reach a
+    /// requested box. Relocation itself remains context- and RNG-bearing.
+    raw_ring_reach: OnceLock<Vec<(i32, i32)>>,
 }
 
 impl StructureRegistry {
@@ -3410,6 +3453,7 @@ impl StructureRegistry {
             blueprint,
             blueprint_cache_key,
             ring_positions: OnceLock::new(),
+            raw_ring_reach: OnceLock::new(),
         }
     }
 
@@ -3437,19 +3481,16 @@ impl StructureRegistry {
         world: &crate::dense_grid::DenseBlockGrid,
         placement_random: &mut WorldgenRandom<XoroshiroRandomSource>,
     ) -> Option<Vec<CodedBlock>> {
-        let StructureKind::Mineshaft { wood, blocking } = &self.blueprint.structures.get(&start.structure)?.kind else {
+        let StructureKind::Mineshaft { blocking, .. } = &self.blueprint.structures.get(&start.structure)?.kind else {
             return None;
         };
-        let mut tree_random = structure_random(self.seed, start.chunk_x, start.chunk_z);
+        let tree = start.mineshaft_tree.as_deref()?;
         let pieces = mineshaft::generate_for_chunk_with_world(
-            start.chunk_x,
-            start.chunk_z,
+            tree,
             (chunk_x, chunk_z),
             ctx,
             world,
-            *wood,
             blocking,
-            &mut tree_random,
             placement_random,
         );
         let mut blocks = Vec::new();
@@ -3472,7 +3513,7 @@ impl StructureRegistry {
         chunk_z: i32,
         world: &mut crate::dense_grid::DenseBlockGrid,
         placement_random: &mut WorldgenRandom<XoroshiroRandomSource>,
-        solid_render: &dyn Fn(&str) -> bool,
+        solid_render: &dyn Fn(CanonicalStateId) -> bool,
     ) -> Option<Vec<CodedLoot>> {
         self.place_fortress_for_chunk_with_sink(
             start,
@@ -3492,7 +3533,7 @@ impl StructureRegistry {
         chunk_z: i32,
         world: &mut crate::dense_grid::DenseBlockGrid,
         placement_random: &mut WorldgenRandom<XoroshiroRandomSource>,
-        solid_render: &dyn Fn(&str) -> bool,
+        solid_render: &dyn Fn(CanonicalStateId) -> bool,
         mutation: Option<&mut StructureMutationContext<'_>>,
     ) -> Option<Vec<CodedLoot>> {
         let Some(definition) = self.blueprint.structures.get(&start.structure) else {
@@ -3538,8 +3579,12 @@ impl StructureRegistry {
             &mut placement,
             &|state| {
                 !matches!(
-                    state.split_once('[').map_or(state, |(base, _)| base),
-                    "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air" | "minecraft:water" | "minecraft:lava"
+                    state.block(),
+                    lodestone_data::block::Block::Air
+                        | lodestone_data::block::Block::CaveAir
+                        | lodestone_data::block::Block::VoidAir
+                        | lodestone_data::block::Block::Water
+                        | lodestone_data::block::Block::Lava
                 )
             },
         )
@@ -3696,28 +3741,49 @@ impl StructureRegistry {
         let max_x = max_x.saturating_add(padding);
         let min_z = min_z.saturating_sub(padding);
         let max_z = max_z.saturating_add(padding);
-        let ring_can_reach = self.blueprint.sets.iter().any(|set| {
-            let PlacementKind::ConcentricRings {
-                distance,
-                spread,
-                count,
-                ..
-            } = &set.placement.kind
-            else {
-                return false;
-            };
-            (*count > 0 && *spread > 0)
-                && placement::ring_candidates(self.seed, *distance, *spread, *count)
-                    .into_iter()
-                    .any(|(_, x, z)| {
-                        (min_x..=max_x).contains(&x) && (min_z..=max_z).contains(&z)
-                    })
-        });
+        let ring_can_reach = self
+            .blueprint
+            .sets
+            .iter()
+            .any(|set| matches!(&set.placement.kind, PlacementKind::ConcentricRings { .. }))
+            && self.raw_ring_reach().iter().any(|&(x, z)| {
+                (min_x..=max_x).contains(&x) && (min_z..=max_z).contains(&z)
+            });
         if ring_can_reach {
             self.ring_positions_for_context(ctx)
         } else {
             EMPTY_RING_POSITIONS.get_or_init(HashMap::new)
         }
+    }
+
+    fn raw_ring_reach(&self) -> &[(i32, i32)] {
+        self.raw_ring_reach
+            .get_or_init(|| {
+                crate::counters::bump_structure_ring_reach_build();
+                self.blueprint
+                    .sets
+                    .iter()
+                    .filter_map(|set| {
+                        let PlacementKind::ConcentricRings {
+                            distance,
+                            spread,
+                            count,
+                            ..
+                        } = &set.placement.kind
+                        else {
+                            return None;
+                        };
+                        (*count > 0 && *spread > 0).then(|| {
+                            placement::ring_candidates(self.seed, *distance, *spread, *count)
+                                .into_iter()
+                                .map(|(_, x, z)| (x, z))
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                    .flatten()
+                    .collect()
+            })
+            .as_slice()
     }
 
     /// Returns the possible structure origins in an inclusive chunk box, with
@@ -3738,12 +3804,29 @@ impl StructureRegistry {
         max_z: i32,
         ctx: &dyn StartContext,
     ) -> Vec<(i32, i32)> {
+        let mut origins = self
+            .origin_candidates_by_set_in(min_x, max_x, min_z, max_z, ctx)
+            .into_iter()
+            .map(|(origin, _)| origin)
+            .collect::<Vec<_>>();
+        origins.dedup();
+        origins
+    }
+
+    pub(crate) fn origin_candidates_by_set_in(
+        &self,
+        min_x: i32,
+        max_x: i32,
+        min_z: i32,
+        max_z: i32,
+        ctx: &dyn StartContext,
+    ) -> Vec<((i32, i32), usize)> {
         if min_x > max_x || min_z > max_z {
             return Vec::new();
         }
         let ring_positions = self.ring_positions_for_context_in_box(ctx, min_x, max_x, min_z, max_z);
         let mut origins = Vec::new();
-        for set in &self.blueprint.sets {
+        for (set_index, set) in self.blueprint.sets.iter().enumerate() {
             match &set.placement.kind {
                 PlacementKind::RandomSpread { spacing, .. } if *spacing > 0 => {
                     let spacing = *spacing;
@@ -3753,6 +3836,7 @@ impl StructureRegistry {
                     let max_cell_z = max_z.div_euclid(spacing) + 1;
                     for cell_x in min_cell_x..=max_cell_x {
                         for cell_z in min_cell_z..=max_cell_z {
+                            crate::counters::bump_structure_candidate_cell_probe();
                             let Some(origin) = set.placement.potential_structure_chunk(
                                 self.seed,
                                 cell_x * spacing,
@@ -3763,24 +3847,29 @@ impl StructureRegistry {
                             if (min_x..=max_x).contains(&origin.0)
                                 && (min_z..=max_z).contains(&origin.1)
                             {
-                                origins.push(origin);
+                                origins.push((origin, set_index));
                             }
                         }
                     }
                 }
                 PlacementKind::ConcentricRings { .. } => {
                     if let Some(positions) = ring_positions.get(&set.id) {
-                        origins.extend(positions.iter().copied().filter(|(x, z)| {
-                            (min_x..=max_x).contains(x)
-                                && (min_z..=max_z).contains(z)
-                        }));
+                        origins.extend(
+                            positions
+                                .iter()
+                                .copied()
+                                .filter(|(x, z)| {
+                                    (min_x..=max_x).contains(x)
+                                        && (min_z..=max_z).contains(z)
+                                })
+                                .map(|origin| (origin, set_index)),
+                        );
                     }
                 }
                 PlacementKind::RandomSpread { .. } | PlacementKind::Unsupported(_) => {}
             }
         }
         origins.sort_unstable();
-        origins.dedup();
         origins
     }
 
@@ -3919,29 +4008,50 @@ impl StructureRegistry {
         let ring_positions = self.ring_positions_for_context_in_box(ctx, cx, cx, cz, cz);
         let mut out = Vec::new();
         for set in &self.blueprint.sets {
-            if !self.is_structure_chunk_with_context(set, cx, cz, ring_positions) {
-                continue;
-            }
-            if set.entries.len() == 1 {
-                if let Some(start) = self.try_start(&set.entries[0].0, cx, cz, ctx) {
-                    out.push(start);
-                }
-                continue;
-            }
-            // The weighted walk. One legacy stream seeded per chunk (not per
-            // set), re-drawn after each rejected option with the rejected
-            // option's weight removed — so an early rejection shifts every
-            // later draw. `nextInt(total)` is drawn *before* the linear scan,
-            // once per attempt.
-            let mut random = WorldgenRandom::new(LegacyRandomSource::new(0));
-            random.set_large_feature_seed(self.seed, cx, cz);
-            if let Some(start) = choose_weighted_entry(&set.entries, &mut random, |structure_id| {
-                self.try_start(structure_id, cx, cz, ctx)
-            }) {
+            if let Some(start) = self.start_at_set(set, cx, cz, ctx, ring_positions) {
                 out.push(start);
             }
         }
         out
+    }
+
+    pub(crate) fn starts_at_sets(
+        &self,
+        set_indices: &[usize],
+        cx: i32,
+        cz: i32,
+        ctx: &dyn StartContext,
+    ) -> Vec<StructureStart> {
+        let ring_positions = self.ring_positions_for_context_in_box(ctx, cx, cx, cz, cz);
+        let mut out = Vec::with_capacity(set_indices.len());
+        for &set_index in set_indices {
+            let set = &self.blueprint.sets[set_index];
+            if let Some(start) = self.start_at_set(set, cx, cz, ctx, ring_positions) {
+                out.push(start);
+            }
+        }
+        out
+    }
+
+    fn start_at_set(
+        &self,
+        set: &StructureSetDef,
+        cx: i32,
+        cz: i32,
+        ctx: &dyn StartContext,
+        ring_positions: &HashMap<String, Vec<(i32, i32)>>,
+    ) -> Option<StructureStart> {
+        if !self.is_structure_chunk_with_context(set, cx, cz, ring_positions) {
+            return None;
+        }
+        if set.entries.len() == 1 {
+            return self.try_start(&set.entries[0].0, cx, cz, ctx);
+        }
+        let mut random = WorldgenRandom::new(LegacyRandomSource::new(0));
+        random.set_large_feature_seed(self.seed, cx, cz);
+        choose_weighted_entry(&set.entries, &mut random, |structure_id| {
+            self.try_start(structure_id, cx, cz, ctx)
+        })
     }
 
     /// Returns the possible random-spread origins in an inclusive chunk box.
@@ -3981,6 +4091,7 @@ impl StructureRegistry {
             let max_cell_z = max_z.div_euclid(spacing) + 1;
             for cell_x in min_cell_x..=max_cell_x {
                 for cell_z in min_cell_z..=max_cell_z {
+                    crate::counters::bump_structure_candidate_cell_probe();
                     let Some(origin) = set
                         .placement
                         .potential_structure_chunk(self.seed, cell_x * spacing, cell_z * spacing)
@@ -4026,6 +4137,10 @@ impl StructureRegistry {
         // Only now — a generation stub's piece consumer runs
         // only after the biome filter above passes, so
         // a biome-rejected candidate must consume no RNG and sample no columns.
+        let mineshaft_tree = match &stub {
+            Stub::Eager(_, _, tree) => tree.clone(),
+            _ => None,
+        };
         let generated = def.kind.generate_pieces(
             stub,
             cx,
@@ -4062,6 +4177,7 @@ impl StructureRegistry {
                     pieces,
                     terrain_adaptation: def.terrain_adaptation,
                     pieces_complete: complete,
+                    mineshaft_tree,
                 })
             }
         }
@@ -4244,6 +4360,10 @@ fn preferred_ring_chunk(
 
 #[cfg(test)]
 mod tests {
+    fn test_state(spec: &str) -> CanonicalStateId {
+        CanonicalStateId::from_state_str(spec).expect("test state is in the generated table")
+    }
+
     use super::*;
 
     /// Reference implementation for the weighted walk. This deliberately
@@ -4459,6 +4579,7 @@ mod tests {
             }),
             blueprint_cache_key,
             ring_positions: OnceLock::new(),
+            raw_ring_reach: OnceLock::new(),
         }
     }
 
@@ -4472,6 +4593,8 @@ mod tests {
         let first = ring_test_registry(0x1234, Some(0x81), 1);
         let first_positions = first.origin_candidates_in(-64, 64, -64, 64, &first_context);
         assert!(first_calls.load(std::sync::atomic::Ordering::Relaxed) > 0);
+        let first_raw = first.raw_ring_reach().as_ptr();
+        assert_eq!(first_raw, first.raw_ring_reach().as_ptr());
 
         let second_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let second_context = CountingRingContext {
@@ -4666,6 +4789,7 @@ mod tests {
             }),
             blueprint_cache_key: None,
             ring_positions: OnceLock::new(),
+            raw_ring_reach: OnceLock::new(),
         };
         let expected = (-25..=25)
             .flat_map(|x| (-25..=25).map(move |z| (x, z)))
@@ -4720,6 +4844,7 @@ mod tests {
             }),
             blueprint_cache_key: None,
             ring_positions: OnceLock::new(),
+            raw_ring_reach: OnceLock::new(),
         };
         let expected = (-80..=80)
             .flat_map(|x| (-80..=80).map(move |z| (x, z)))
@@ -4759,6 +4884,7 @@ mod tests {
             }),
             blueprint_cache_key: None,
             ring_positions: OnceLock::new(),
+            raw_ring_reach: OnceLock::new(),
         };
         assert!(registry.random_spread_origins_in(-64, 64, -64, 64).is_none());
     }
@@ -5103,16 +5229,16 @@ mod tests {
     #[test]
     fn ruined_portal_lava_rule_picks_the_right_branch() {
         let ocean = ruined_portal_lava_rule(VerticalPlacement::OnOceanFloor, false);
-        assert!(matches!(ocean.input, RuleTest::BlockMatch(ref s) if s == "minecraft:lava"));
-        assert_eq!(ocean.output.name, "minecraft:magma_block");
+        assert!(matches!(ocean.input, RuleTest::BlockMatch(s) if s == lodestone_data::block::Block::Lava));
+        assert_eq!(ocean.output.name(), "minecraft:magma_block");
 
         let cold = ruined_portal_lava_rule(VerticalPlacement::Underground, true);
-        assert!(matches!(cold.input, RuleTest::BlockMatch(ref s) if s == "minecraft:lava"));
-        assert_eq!(cold.output.name, "minecraft:netherrack");
+        assert!(matches!(cold.input, RuleTest::BlockMatch(s) if s == lodestone_data::block::Block::Lava));
+        assert_eq!(cold.output.name(), "minecraft:netherrack");
 
         let warm = ruined_portal_lava_rule(VerticalPlacement::Underground, false);
-        assert!(matches!(warm.input, RuleTest::RandomBlockMatch(ref s, p) if s == "minecraft:lava" && p == 0.2));
-        assert_eq!(warm.output.name, "minecraft:magma_block");
+        assert!(matches!(warm.input, RuleTest::RandomBlockMatch(s, p) if s == lodestone_data::block::Block::Lava && p == 0.2));
+        assert_eq!(warm.output.name(), "minecraft:magma_block");
     }
 
     /// A ruined portal's processor chain, assembled from a hand-built stub: the
@@ -5165,7 +5291,7 @@ mod tests {
         let settings = &warm[0].placement.as_ref().expect("template piece").settings;
         assert_eq!(settings.processors.len(), 5, "no blackstone processor expected");
         assert!(
-            matches!(&settings.processors[0], Processor::BlockIgnore(v) if v.len() == 1 && v[0] == "minecraft:structure_block")
+            matches!(&settings.processors[0], Processor::BlockIgnore(v) if v.len() == 1 && v[0] == lodestone_data::block::Block::StructureBlock)
         );
         let Processor::Rule(rules) = &settings.processors[1] else {
             panic!("second processor must be the rule chain");
@@ -5191,21 +5317,21 @@ mod tests {
         );
         let mut recorder = StructureMutationRecorder::default();
         let mut context = StructureMutationContext::new(&mut recorder, (7, -3), 4);
-        context.write(&mut grid, 0, 0, 0, "minecraft:stone");
-        context.write(&mut grid, 0, 0, 0, "minecraft:dirt");
-        context.write(&mut grid, 0, 0, 0, "minecraft:dirt");
-        let blocks = recorder.finish(grid.interner());
+        context.write(&mut grid, 0, 0, 0, test_state("minecraft:stone"));
+        context.write(&mut grid, 0, 0, 0, test_state("minecraft:dirt"));
+        context.write(&mut grid, 0, 0, 0, test_state("minecraft:dirt"));
+        let blocks = recorder.finish();
         let mutations = blocks.mutations();
         assert_eq!(mutations.len(), 3);
         assert_eq!(
             mutations
                 .iter()
-                .map(|mutation| (mutation.source, mutation.step, mutation.ordinal, mutation.state.as_str()))
+                .map(|mutation| (mutation.source, mutation.step, mutation.ordinal, mutation.state))
                 .collect::<Vec<_>>(),
             vec![
-                ((7, -3), 4, 0, "minecraft:stone"),
-                ((7, -3), 4, 1, "minecraft:dirt"),
-                ((7, -3), 4, 2, "minecraft:dirt"),
+                ((7, -3), 4, 0, test_state("minecraft:stone")),
+                ((7, -3), 4, 1, test_state("minecraft:dirt")),
+                ((7, -3), 4, 2, test_state("minecraft:dirt")),
             ]
         );
         assert_eq!(grid.get(0, 0, 0), "minecraft:dirt");
@@ -5223,23 +5349,23 @@ mod tests {
         );
         let mut recorder = StructureMutationRecorder::default();
         let mut context = StructureMutationContext::new(&mut recorder, (2, 3), 4);
-        context.write(&mut grid, 1, 0, 0, "minecraft:stone");
-        context.write(&mut grid, 0, 0, 0, "minecraft:stone");
-        context.write(&mut grid, 0, 0, 0, "minecraft:dirt");
-        context.write(&mut grid, 0, 0, 0, "minecraft:dirt");
-        let blocks = recorder.finish(grid.interner());
+        context.write(&mut grid, 1, 0, 0, test_state("minecraft:stone"));
+        context.write(&mut grid, 0, 0, 0, test_state("minecraft:stone"));
+        context.write(&mut grid, 0, 0, 0, test_state("minecraft:dirt"));
+        context.write(&mut grid, 0, 0, 0, test_state("minecraft:dirt"));
+        let blocks = recorder.finish();
         let writes = blocks.mutations();
         assert_eq!(writes.len(), 4);
         assert_eq!(
             writes
                 .iter()
-                .map(|write| (write.ordinal, write.position, write.state.as_str()))
+                .map(|write| (write.ordinal, write.position, write.state))
                 .collect::<Vec<_>>(),
             vec![
-                (0, [1, 0, 0], "minecraft:stone"),
-                (1, [0, 0, 0], "minecraft:stone"),
-                (2, [0, 0, 0], "minecraft:dirt"),
-                (3, [0, 0, 0], "minecraft:dirt"),
+                (0, [1, 0, 0], test_state("minecraft:stone")),
+                (1, [0, 0, 0], test_state("minecraft:stone")),
+                (2, [0, 0, 0], test_state("minecraft:dirt")),
+                (3, [0, 0, 0], test_state("minecraft:dirt")),
             ]
         );
         assert_eq!(grid.get(0, 0, 0), "minecraft:dirt");

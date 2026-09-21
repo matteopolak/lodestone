@@ -67,17 +67,19 @@
 //! [`crate::crafting::EMBEDDED_ITEM_TAGS`] for the payment-item check.
 
 use crate::chunk::ChunkSource;
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 use lodestone_data::mob_effects::{MobEffectId, mob_effect_id, mob_effect_name_for};
 
 /// `minecraft:beacon_base_blocks` — the five blocks one pyramid layer may be
 /// built from. See this module's own doc for why this is transcribed rather
 /// than read from a bundled tag asset.
-pub const BASE_BLOCKS: [&str; 5] = [
-    "minecraft:iron_block",
-    "minecraft:gold_block",
-    "minecraft:emerald_block",
-    "minecraft:diamond_block",
-    "minecraft:netherite_block",
+pub const BASE_BLOCKS: [Block; 5] = [
+    Block::IronBlock,
+    Block::GoldBlock,
+    Block::EmeraldBlock,
+    Block::DiamondBlock,
+    Block::NetheriteBlock,
 ];
 
 /// The four beacon power tiers, index 0 = the tier a level-1 pyramid unlocks
@@ -144,35 +146,19 @@ impl BeaconPower {
 /// crate's other per-module private copies use (`fire.rs`, `growth_tick.rs`),
 /// duplicated rather than shared so this module has no dependency on their
 /// private items.
-fn base_name(state: &str) -> &str {
-    state.split('[').next().unwrap_or(state)
-}
-
-fn is_base_block(state: &str) -> bool {
-    BASE_BLOCKS.contains(&base_name(state))
+fn is_base_block(state: StateId) -> bool {
+    BASE_BLOCKS.contains(&state.block())
 }
 
 /// Blocks a beacon's beam continues through, for [`beam_unobstructed`] —
 /// the real tick-beam rule's own gate: passes unless light dampening is `>= 15`
-/// and the block is not bedrock. `state` carries the full block-state
-/// string [`ChunkSource::block_state`] returns (bare name or
-/// `name[prop=value,...]`), resolved to a global id via
-/// [`lodestone_data::block_states::state_id`] — the same resolution
-/// `crate::chunk::resolve_palette_state_id` already uses for this exact
-/// string shape. An unresolvable state returns before accessing the complete
-/// census, which is the same fail-open direction [`is_base_block`] already
-/// takes for an unrecognised state, not a new failure mode this function
-/// invents.
-fn is_beam_transparent(state: &str) -> bool {
-    if base_name(state) == "minecraft:bedrock" {
+/// and the block is not bedrock. The caller supplies a validated state id, so
+/// this hot path performs no text conversion.
+fn is_beam_transparent(state: StateId) -> bool {
+    if state.block() == Block::Bedrock {
         return true;
     }
-    let Some(id) = lodestone_data::block_states::state_id(state) else {
-        return true;
-    };
-    let id = lodestone_data::block_states::StateId::new(id)
-        .expect("state-id resolution returns a generated state");
-    lodestone_data::light_props::dampening(id) < 15
+    lodestone_data::light_props::dampening(state) < 15
 }
 
 /// The beacon pyramid tier beneath `(x, y, z)` — vanilla's
@@ -190,7 +176,7 @@ pub fn beacon_levels<S: ChunkSource + ?Sized>(source: &S, x: i32, y: i32, z: i32
         let mut layer_ok = true;
         'layer: for lx in (x - step)..=(x + step) {
             for lz in (z - step)..=(z + step) {
-                if !is_base_block(&source.block_state(lx, ly, lz)) {
+                if !is_base_block(source.block_state_id(lx, ly, lz)) {
                     layer_ok = false;
                     break 'layer;
                 }
@@ -212,8 +198,8 @@ pub fn beacon_levels<S: ChunkSource + ?Sized>(source: &S, x: i32, y: i32, z: i32
 #[must_use]
 pub fn beam_unobstructed<S: ChunkSource + ?Sized>(source: &S, x: i32, y: i32, z: i32, scan_height: i32) -> bool {
     for dy in 1..=scan_height {
-        let state = source.block_state(x, y + dy, z);
-        if !is_beam_transparent(&state) {
+        let state = source.block_state_id(x, y + dy, z);
+        if !is_beam_transparent(state) {
             return false;
         }
     }
@@ -401,14 +387,14 @@ mod tests {
                 .clone()
         }
 
-        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
             let cx = x.div_euclid(16);
             let cz = z.div_euclid(16);
             let mut columns = self.columns.lock().expect("rig lock");
             let column = columns
                 .entry((cx, cz))
                 .or_insert_with(|| ChunkColumn::new(MIN_Y, HEIGHT));
-            column.block_state(x - cx * 16, y, z - cz * 16).to_string()
+            column.block_state_id(x - cx * 16, y, z - cz * 16)
         }
 
         fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -421,21 +407,25 @@ mod tests {
             column.biome_state_at(x - cx * 16, y, z - cz * 16).to_string()
         }
 
-        fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+        fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
             let cx = x.div_euclid(16);
             let cz = z.div_euclid(16);
             let mut columns = self.columns.lock().expect("rig lock");
             let column = columns
                 .entry((cx, cz))
                 .or_insert_with(|| ChunkColumn::new(MIN_Y, HEIGHT));
-            column.set_block(x - cx * 16, y, z - cz * 16, name);
+            column.set_block(x - cx * 16, y, z - cz * 16, state);
         }
     }
 
     /// Fills the `layers`-tall pyramid base beneath `(x, y, z)` with
     /// `block`, each layer `step` blocks below `y` and `(2*step+1)` wide —
     /// exactly the shape [`beacon_levels`] checks.
-    fn build_pyramid(rig: &Rig, x: i32, y: i32, z: i32, block: &str, layers: i32) {
+    fn state(value: &str) -> StateId {
+        StateId::from_state_str(value).expect("test state must be canonical")
+    }
+
+    fn build_pyramid(rig: &Rig, x: i32, y: i32, z: i32, block: StateId, layers: i32) {
         for step in 1..=layers {
             let ly = y - step;
             for lx in (x - step)..=(x + step) {
@@ -449,7 +439,7 @@ mod tests {
     #[test]
     fn a_full_four_layer_pyramid_reports_level_four() {
         let rig = Rig::new();
-        build_pyramid(&rig, 0, 64, 0, "minecraft:iron_block", 4);
+        build_pyramid(&rig, 0, 64, 0, state("minecraft:iron_block"), 4);
         assert_eq!(beacon_levels(&rig, 0, 64, 0), 4);
     }
 
@@ -460,14 +450,14 @@ mod tests {
     #[test]
     fn a_broken_third_layer_caps_the_level_at_two() {
         let rig = Rig::new();
-        build_pyramid(&rig, 0, 64, 0, "minecraft:iron_block", 2);
+        build_pyramid(&rig, 0, 64, 0, state("minecraft:iron_block"), 2);
         // Layer 3 (y=61): fill it, then break exactly one corner.
         for lx in -3..=3 {
             for lz in -3..=3 {
-                rig.set_block(lx, 61, lz, "minecraft:iron_block");
+                rig.set_block(lx, 61, lz, state("minecraft:iron_block"));
             }
         }
-        rig.set_block(3, 61, 3, "minecraft:dirt");
+        rig.set_block(3, 61, 3, state("minecraft:dirt"));
         assert_eq!(beacon_levels(&rig, 0, 64, 0), 2);
     }
 
@@ -478,12 +468,12 @@ mod tests {
         let rig = Rig::new();
         for lx in -1..=1 {
             for lz in -1..=1 {
-                rig.set_block(lx, 63, lz, "minecraft:diamond_block");
+                rig.set_block(lx, 63, lz, state("minecraft:diamond_block"));
             }
         }
         for lx in -2..=2 {
             for lz in -2..=2 {
-                rig.set_block(lx, 62, lz, "minecraft:netherite_block");
+                rig.set_block(lx, 62, lz, state("minecraft:netherite_block"));
             }
         }
         assert_eq!(beacon_levels(&rig, 0, 64, 0), 2);
@@ -505,7 +495,7 @@ mod tests {
     fn a_glass_shaft_is_unobstructed() {
         let rig = Rig::new();
         for dy in 1..=20 {
-            rig.set_block(0, 64 + dy, 0, "minecraft:cyan_stained_glass");
+            rig.set_block(0, 64 + dy, 0, state("minecraft:cyan_stained_glass"));
         }
         assert!(beam_unobstructed(&rig, 0, 64, 0, 20));
     }
@@ -516,7 +506,7 @@ mod tests {
     #[test]
     fn one_solid_block_blocks_the_beam() {
         let rig = Rig::new();
-        rig.set_block(0, 70, 0, "minecraft:stone");
+        rig.set_block(0, 70, 0, state("minecraft:stone"));
         assert!(!beam_unobstructed(&rig, 0, 64, 0, 20));
     }
 
@@ -531,7 +521,7 @@ mod tests {
     fn a_carpet_shaft_is_unobstructed_even_though_it_was_never_in_the_old_family_list() {
         let rig = Rig::new();
         for dy in 1..=20 {
-            rig.set_block(0, 64 + dy, 0, "minecraft:white_carpet");
+            rig.set_block(0, 64 + dy, 0, state("minecraft:white_carpet"));
         }
         assert!(beam_unobstructed(&rig, 0, 64, 0, 20));
     }
@@ -543,7 +533,7 @@ mod tests {
     #[test]
     fn bedrock_is_exempt_from_its_own_full_dampening() {
         let rig = Rig::new();
-        rig.set_block(0, 70, 0, "minecraft:bedrock");
+        rig.set_block(0, 70, 0, state("minecraft:bedrock"));
         assert!(beam_unobstructed(&rig, 0, 64, 0, 20));
     }
 

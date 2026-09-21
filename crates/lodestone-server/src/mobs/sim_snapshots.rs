@@ -182,7 +182,7 @@ impl<'w> MobSim<'w> {
                 // dropping it reproduces the original teleport with no trace. The
                 // three states `crate::gravity_tick::is_gravity_block` accepts all
                 // resolve.
-                object_data: block_states::state_id(&tracked.state).unwrap_or(0) as i32,
+                object_data: tracked.state.raw() as i32,
                 // A falling block is never leashable, vanilla's own interface for that.
                 leash_link: None,
             });

@@ -20,6 +20,9 @@ does not parse state or property text. Properties::parse is strict and is
 intended for configuration or other text boundaries only. state_for_block
 matches a typed property set only inside the generated span for the supplied
 block, so a key/value pair valid for one block cannot resolve to another.
+with_builtin replaces or inserts one generated key/value pair without leaving
+the typed representation; this is the operation used by moving block render
+state synthesis.
 
 Values supplied by extensions use ExtensionId, an opaque u32 handle owned by
 the extension registry. The resident built-in Properties representation stores

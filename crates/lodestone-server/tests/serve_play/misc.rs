@@ -156,22 +156,23 @@ struct LavaSource;
 impl ChunkSource for LavaSource {
     fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
         let mut col = ChunkColumn::new(0, 16);
+        let lava = fixture_state("minecraft:lava");
         for x in 0..16 {
             for z in 0..16 {
                 for y in 0..16 {
-                    col.set_block(x, y, z, "minecraft:lava");
+                    col.set_block_id(x, y, z, lava);
                 }
             }
         }
         col
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
-        self.column(cx, cz).block_state(lx, y, lz).to_string()
+        self.column(cx, cz).block_state_id(lx, y, lz)
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -182,7 +183,7 @@ impl ChunkSource for LavaSource {
         self.column(cx, cz).biome_state_at(lx, y, lz).to_string()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
 }
 
 /// **The burning integration gate**: a player standing in lava takes

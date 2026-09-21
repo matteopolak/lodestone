@@ -766,7 +766,7 @@ impl<'w> MobSim<'w> {
     /// placement, does a valid pattern exist, and if so spawn the golem".
     pub fn try_construct_golem(
         &mut self,
-        block_at: &dyn Fn(i32, i32, i32) -> String,
+        block_at: &dyn Fn(i32, i32, i32) -> lodestone_data::block_states::StateId,
         pumpkin_pos: (i32, i32, i32),
     ) -> Option<GolemConstruction> {
         if let Some(found) = golem::find_golem_pattern(block_at, golem::SNOW_GOLEM_PATTERN, pumpkin_pos) {

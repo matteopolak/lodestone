@@ -113,8 +113,8 @@
 //!
 //! # Dependencies
 //!
-//! [`crate::dense_grid::DenseBlockGrid`] for the sources, and
-//! [`crate::interner`] for the `StateId`↔`&str` shim `get`/`set` still need.
+//! [`crate::dense_grid::DenseBlockGrid`] for the sources and canonical
+//! [`lodestone_data::block_states::StateId`] values for every read/write path.
 //! There is still **no shared buffer pool** — see [`scratch`], which is the
 //! `thread_local` free-list this module's own doc named as the only acceptable
 //! form of reuse here, installed by Unit 19. The direct page storage is owned by
@@ -122,10 +122,8 @@
 //! re-create exactly the contention [`crate::overworld::store`] exists to
 //! delete, and `4307b59` is the scar for getting that wrong.
 
-use std::sync::Arc;
-
 use crate::dense_grid::DenseBlockGrid;
-use crate::interner::{StateId, StateInterner};
+use lodestone_data::block_states::StateId;
 
 use super::{REGION_MAX, REGION_MIN};
 
@@ -172,7 +170,7 @@ pub(crate) use scratch::{Overlay, WriteLog};
 mod scratch {
     use std::cell::{Cell, RefCell};
 
-    use crate::interner::StateId;
+    use lodestone_data::block_states::StateId;
 
     /// The overlay's key: centre-relative local `(lx, y, lz)` for
     /// [`super::RegionView`], `VegGrid`-local for the vegetation grid. Both are
@@ -405,6 +403,18 @@ mod scratch {
                 self.keys.push(packed);
             }
         }
+
+        fn retained_bytes(&self) -> usize {
+            std::mem::size_of::<Self>()
+                + self.pages.capacity() * std::mem::size_of::<Option<Box<Page>>>()
+                + self.keys.capacity() * std::mem::size_of::<u32>()
+                + self
+                    .pages
+                    .iter()
+                    .filter_map(Option::as_ref)
+                    .count()
+                    * std::mem::size_of::<Page>()
+        }
     }
 
     /// The overlay owns one storage instance. It is deliberately not `Sync` or
@@ -427,6 +437,17 @@ mod scratch {
 
     impl Overlay {
         pub(crate) fn with_bounds(min_x: i32, max_x: i32, min_y: i32, height: i32) -> Self {
+            Self::with_bounds_xyz(min_x, max_x, min_y, height, min_x, max_x)
+        }
+
+        pub(crate) fn with_bounds_xyz(
+            min_x: i32,
+            max_x: i32,
+            min_y: i32,
+            height: i32,
+            min_z: i32,
+            max_z: i32,
+        ) -> Self {
             let recycled = OVERLAYS
                 .try_with(|free| free.try_borrow_mut().ok().and_then(|mut f| f.pop()))
                 .ok()
@@ -435,9 +456,9 @@ mod scratch {
                 bump_miss();
             }
             let mut storage = recycled.unwrap_or_else(|| {
-                Storage::new(min_x, max_x, min_y, height, min_x, max_x)
+                Storage::new(min_x, max_x, min_y, height, min_z, max_z)
             });
-            storage.reconfigure(min_x, max_x, min_y, height, min_x, max_x);
+            storage.reconfigure(min_x, max_x, min_y, height, min_z, max_z);
             Self { storage: Some(storage) }
         }
 
@@ -465,14 +486,47 @@ mod scratch {
         }
 
         #[inline]
+        pub(crate) fn get_if_in_bounds(&self, key: &Key) -> Option<StateId> {
+            let storage = self.storage();
+            storage.pack(key).and_then(|packed| storage.get_packed(packed))
+        }
+
+        #[inline]
         pub(crate) fn insert_in_bounds(&mut self, key: Key, state: StateId) {
             self.storage_mut().insert_in_bounds(key, state);
+        }
+
+        #[inline]
+        pub(crate) fn insert_if_in_bounds(&mut self, key: Key, state: StateId) -> bool {
+            let storage = self.storage_mut();
+            let Some(packed) = storage.pack(&key) else {
+                return false;
+            };
+            storage.insert_packed(packed, state);
+            true
+        }
+
+        #[inline]
+        pub(crate) fn insert_if_in_bounds_with_new(
+            &mut self,
+            key: Key,
+            state: StateId,
+        ) -> Option<bool> {
+            let storage = self.storage_mut();
+            let packed = storage.pack(&key)?;
+            let is_new = storage.get_packed(packed).is_none();
+            storage.insert_packed(packed, state);
+            Some(is_new)
         }
 
         /// Number of **distinct** cells written. An overwrite updates its stamped
         /// cell in place and does not append another packed key.
         pub(crate) fn len(&self) -> usize {
             self.storage().keys.len()
+        }
+
+        pub(crate) fn retained_bytes(&self) -> usize {
+            self.storage().retained_bytes()
         }
 
         /// Every current entry. Consumers impose a total order before exporting
@@ -553,8 +607,20 @@ mod scratch {
             self.entries().iter()
         }
 
+        pub(crate) fn iter_rev(&self) -> impl Iterator<Item = &Key> {
+            self.entries().iter().rev()
+        }
+
         pub(crate) fn iter_from(&self, cursor: usize) -> impl Iterator<Item = &Key> {
             self.entries().iter().skip(cursor)
+        }
+
+        pub(crate) fn clear(&mut self) {
+            self.entries_mut().clear();
+        }
+
+        fn entries_mut(&mut self) -> &mut Vec<Key> {
+            self.entries.as_mut().expect("write log is only taken in Drop")
         }
     }
 
@@ -780,7 +846,6 @@ pub struct RegionView<'a> {
     /// Ordered `set_id` events. Mixed replay consumes this as a delta after
     /// each entry; seeded read context is intentionally not recorded.
     write_log: WriteLog,
-    interner: Arc<StateInterner>,
 }
 
 impl<'a> RegionView<'a> {
@@ -795,7 +860,6 @@ impl<'a> RegionView<'a> {
     /// no second copy of the routing convention to keep in step.
     #[must_use]
     pub fn over_sources(
-        interner: Arc<StateInterner>,
         centre_cx: i32,
         centre_cz: i32,
         min_y: i32,
@@ -821,7 +885,6 @@ impl<'a> RegionView<'a> {
             overlay: Overlay::with_bounds(REGION_MIN, REGION_MAX, min_y, height),
             scan_order: Vec::new(),
             write_log: WriteLog::default(),
-            interner,
         }
     }
 
@@ -830,7 +893,6 @@ impl<'a> RegionView<'a> {
     /// edge of its writer neighbourhood.
     #[must_use]
     pub fn over_wide_sources(
-        interner: Arc<StateInterner>,
         centre_cx: i32,
         centre_cz: i32,
         min_y: i32,
@@ -861,7 +923,6 @@ impl<'a> RegionView<'a> {
             ),
             scan_order: Vec::new(),
             write_log: WriteLog::default(),
-            interner,
         }
     }
 
@@ -888,15 +949,7 @@ impl<'a> RegionView<'a> {
             overlay: Overlay::with_bounds(REGION_MIN, REGION_MAX, min_y, height),
             scan_order: Vec::new(),
             write_log: WriteLog::default(),
-            interner: Arc::clone(grid.interner()),
         }
-    }
-
-    /// This view's interner, for a caller that needs to mint or resolve ids
-    /// against it.
-    #[must_use]
-    pub fn interner(&self) -> &Arc<StateInterner> {
-        &self.interner
     }
 
     /// Whether a local coordinate can be read from this view. A wide source
@@ -952,26 +1005,11 @@ impl<'a> RegionView<'a> {
         }
     }
 
-    /// [`Self::get_id`] resolved to a canonical state string.
-    ///
-    /// A source hit is a plain array read out of that grid's own resolved
-    /// palette (no lock, no allocation). An **overlay** hit costs one
-    /// `StateInterner::name_of` read guard, which is why the overlay is the
-    /// smaller of the two cases by orders of magnitude: it holds only cells this
-    /// decoration pass has already written.
+    /// Interned state at local coordinates. This alias keeps the general read
+    /// name used by older callers while retaining the numeric representation.
     #[must_use]
-    pub fn get(&self, lx: i32, y: i32, lz: i32) -> &str {
-        if !self.in_read_region(lx, y, lz) {
-            return "minecraft:air";
-        }
-        if let Some(id) = self.overlay.get_in_bounds(&(lx, y, lz)) {
-            super::ore_probe::bump_region_read_overlay(1);
-            return self.interner.name_of(id);
-        }
-        match self.source_at(lx, lz) {
-            Some(grid) => grid.get(self.origin_x + lx, y, self.origin_z + lz),
-            None => "minecraft:air",
-        }
+    pub fn get(&self, lx: i32, y: i32, lz: i32) -> StateId {
+        self.get_id(lx, y, lz)
     }
 
     /// Records a write at local `(lx, y, lz)`. Dropped outside the driven
@@ -1005,10 +1043,9 @@ impl<'a> RegionView<'a> {
         true
     }
 
-    /// [`Self::set_id`] taking a state string, interning it first.
-    pub fn set(&mut self, lx: i32, y: i32, lz: i32, state: &str) -> bool {
-        let id = self.interner.id_of(state);
-        self.set_id(lx, y, lz, id)
+    /// [`Self::set_id`] under the general write name used by older callers.
+    pub fn set(&mut self, lx: i32, y: i32, lz: i32, state: StateId) -> bool {
+        self.set_id(lx, y, lz, state)
     }
 
     /// Number of distinct cells written through this view.
@@ -1114,6 +1151,19 @@ impl<'a> RegionView<'a> {
         out.sort_unstable_by_key(|&(lx, y, lz, _)| (y, lz, lx));
         out
     }
+}
+
+impl<'a> super::OreWorldAccess for RegionView<'a> {
+    #[inline]
+    fn ore_get_id(&self, lx: i32, y: i32, lz: i32) -> StateId {
+        self.get_id(lx, y, lz)
+    }
+
+    #[inline]
+    fn ore_set_id(&mut self, lx: i32, y: i32, lz: i32, state: StateId) -> bool {
+        self.set_id(lx, y, lz, state)
+    }
+
 }
 
 #[cfg(test)]
@@ -1564,6 +1614,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn write_log_reverse_view_preserves_last_write_order_without_copying() {
+        let mut log = WriteLog::default();
+        log.push((1, 2, 3));
+        log.push((4, 5, 6));
+        log.push((7, 8, 9));
+        assert_eq!(
+            log.iter_rev().copied().collect::<Vec<_>>(),
+            vec![(7, 8, 9), (4, 5, 6), (1, 2, 3)],
+        );
+    }
+
     /// The free-list is bounded, so it cannot become a leak that only shows up on a
     /// long-lived worker thread.
     #[test]
@@ -1580,13 +1642,48 @@ mod tests {
         assert!(overlays > 0, "control: it must keep at least one, or reuse never happens");
     }
 
-    fn chunk_grid(interner: &Arc<StateInterner>, cx: i32, cz: i32, state: &str) -> DenseBlockGrid {
-        let air = interner.id_of("minecraft:air");
+    fn state(spec: &str) -> StateId {
+        StateId::from_state_str(spec).expect("test state is in the generated table")
+    }
+
+    fn marker_spec(dx: i32, dz: i32) -> &'static str {
+        [
+            "minecraft:stone",
+            "minecraft:dirt",
+            "minecraft:granite",
+            "minecraft:andesite",
+            "minecraft:calcite",
+            "minecraft:tuff",
+            "minecraft:deepslate",
+            "minecraft:gravel",
+            "minecraft:sand",
+        ][((dx + 1) * 3 + (dz + 1)) as usize]
+    }
+
+    fn fixture_state(index: i32) -> StateId {
+        state(
+            [
+                "minecraft:stone",
+                "minecraft:dirt",
+                "minecraft:granite",
+                "minecraft:andesite",
+                "minecraft:calcite",
+                "minecraft:tuff",
+                "minecraft:deepslate",
+                "minecraft:gravel",
+                "minecraft:sand",
+            ][index.rem_euclid(9) as usize],
+        )
+    }
+
+    fn chunk_grid(cx: i32, cz: i32, state_spec: &str) -> DenseBlockGrid {
+        let air = state("minecraft:air");
         let mut grid =
-            DenseBlockGrid::with_interner(Arc::clone(interner), cx * 16, 0, cz * 16, 16, 8, 16, air);
+            DenseBlockGrid::with_default(cx * 16, 0, cz * 16, 16, 8, 16, air);
+        let state = state(state_spec);
         for lx in 0..16 {
             for lz in 0..16 {
-                grid.set(cx * 16 + lx, 4, cz * 16 + lz, state);
+                grid.set_id(cx * 16 + lx, 4, cz * 16 + lz, state);
             }
         }
         grid
@@ -1594,7 +1691,6 @@ mod tests {
 
     #[test]
     fn wide_read_context_reaches_outer_sources_without_accepting_outer_writes() {
-        let interner = Arc::new(StateInterner::new());
         let grids = (-WIDE_RADIUS..=WIDE_RADIUS)
             .flat_map(|dx| {
                 (-WIDE_RADIUS..=WIDE_RADIUS).map(move |dz| {
@@ -1606,21 +1702,20 @@ mod tests {
                     (dx, dz, state)
                 })
             })
-            .map(|(dx, dz, state)| chunk_grid(&interner, 10 + dx, -20 + dz, state))
+            .map(|(dx, dz, state)| chunk_grid(10 + dx, -20 + dz, state))
             .collect::<Vec<_>>();
         let mut view = RegionView::over_wide_sources(
-            Arc::clone(&interner),
             10,
             -20,
             0,
             8,
             |dx, dz| grids.get(wide_slot_of_offset(dx, dz)),
         );
-        assert_eq!(view.get(-17, 4, 0), "minecraft:granite");
-        assert!(!view.set(-17, 4, 0, "minecraft:diorite"));
-        assert_eq!(view.get(-17, 4, 0), "minecraft:granite");
-        assert!(view.set(0, 4, 0, "minecraft:diorite"));
-        assert_eq!(view.get(0, 4, 0), "minecraft:diorite");
+        assert_eq!(view.get(-17, 4, 0), state("minecraft:granite"));
+        assert!(!view.set_id(-17, 4, 0, state("minecraft:diorite")));
+        assert_eq!(view.get(-17, 4, 0), state("minecraft:granite"));
+        assert!(view.set_id(0, 4, 0, state("minecraft:diorite")));
+        assert_eq!(view.get(0, 4, 0), state("minecraft:diorite"));
     }
 
     /// Each of the nine chunks must be read back through its own grid. The
@@ -1628,19 +1723,13 @@ mod tests {
     /// shared state every routing bug would look correct.
     #[test]
     fn a_read_resolves_to_the_source_chunk_that_owns_the_column() {
-        let interner = Arc::new(StateInterner::new());
         let grids: Vec<DenseBlockGrid> = (-1..=1)
             .flat_map(|dx| (-1..=1).map(move |dz| (dx, dz)))
             .map(|(dx, dz)| {
-                chunk_grid(
-                    &interner,
-                    10 + dx,
-                    -20 + dz,
-                    &format!("minecraft:marker_{dx}_{dz}"),
-                )
+                chunk_grid(10 + dx, -20 + dz, marker_spec(dx, dz))
             })
             .collect();
-        let view = RegionView::over_sources(Arc::clone(&interner), 10, -20, 0, 8, |dx, dz| {
+        let view = RegionView::over_sources(10, -20, 0, 8, |dx, dz| {
             grids.get(((dx + 1) * 3 + (dz + 1)) as usize)
         });
         for dx in -1..=1i32 {
@@ -1649,7 +1738,7 @@ mod tests {
                     let (qx, qz) = (dx * 16 + lx, dz * 16 + lz);
                     assert_eq!(
                         view.get(qx, 4, qz),
-                        format!("minecraft:marker_{dx}_{dz}"),
+                        state(marker_spec(dx, dz)),
                         "local ({qx}, {qz}) must read out of chunk offset ({dx}, {dz})",
                     );
                 }
@@ -1668,15 +1757,13 @@ mod tests {
     /// of the new routing.
     #[test]
     fn a_view_answers_cell_for_cell_what_the_stitched_copy_answered() {
-        let interner = Arc::new(StateInterner::new());
         // Terrain with per-column variety, so a transposition or an off-by-a-chunk
         // shows up rather than being masked by a uniform field.
         let grids: Vec<DenseBlockGrid> = (-1..=1)
             .flat_map(|dx| (-1..=1).map(move |dz| (dx, dz)))
             .map(|(dx, dz)| {
-                let air = interner.id_of("minecraft:air");
-                let mut g = DenseBlockGrid::with_interner(
-                    Arc::clone(&interner),
+                let air = state("minecraft:air");
+                let mut g = DenseBlockGrid::with_default(
                     (3 + dx) * 16,
                     -64,
                     (7 + dz) * 16,
@@ -1690,7 +1777,7 @@ mod tests {
                         for ly in 0..12 {
                             let x = (3 + dx) * 16 + lx;
                             let z = (7 + dz) * 16 + lz;
-                            g.set(x, -64 + ly, z, &format!("minecraft:s{}", (x * 31 + z * 7 + ly) % 5));
+                            g.set_id(x, -64 + ly, z, fixture_state(x * 31 + z * 7 + ly));
                         }
                     }
                 }
@@ -1700,10 +1787,9 @@ mod tests {
 
         // The deleted algorithm, verbatim in shape: one dense region grid, all
         // nine sources copied in.
-        let air = interner.id_of("minecraft:air");
+        let air = state("minecraft:air");
         let size = REGION_MAX - REGION_MIN;
-        let mut stitched = DenseBlockGrid::with_interner(
-            Arc::clone(&interner),
+        let mut stitched = DenseBlockGrid::with_default(
             REGION_MIN,
             -64,
             REGION_MIN,
@@ -1727,7 +1813,7 @@ mod tests {
             }
         }
 
-        let view = RegionView::over_sources(Arc::clone(&interner), 3, 7, -64, 12, |dx, dz| {
+        let view = RegionView::over_sources(3, 7, -64, 12, |dx, dz| {
             grids.get(((dx + 1) * 3 + (dz + 1)) as usize)
         });
 
@@ -1767,12 +1853,11 @@ mod tests {
     /// one a coordinate-space bug destroys silently.
     #[test]
     fn region_view_carries_a_write_across_the_chunk_seam() {
-        let interner = Arc::new(StateInterner::new());
         let grids: Vec<DenseBlockGrid> = (-1..=1)
             .flat_map(|dx| (-1..=1).map(move |dz| (dx, dz)))
-            .map(|(dx, dz)| chunk_grid(&interner, dx, dz, "minecraft:stone"))
+            .map(|(dx, dz)| chunk_grid(dx, dz, "minecraft:stone"))
             .collect();
-        let mut view = RegionView::over_sources(Arc::clone(&interner), 0, 0, 0, 8, |dx, dz| {
+        let mut view = RegionView::over_sources(0, 0, 0, 8, |dx, dz| {
             grids.get(((dx + 1) * 3 + (dz + 1)) as usize)
         });
 
@@ -1780,14 +1865,14 @@ mod tests {
         // the centre's own columns and 16/17 are the eastern neighbour's.
         for lx in 14..18 {
             assert!(
-                view.set(lx, 5, 8, "minecraft:oak_leaves"),
+                view.set_id(lx, 5, 8, state("minecraft:oak_leaves")),
                 "write at local x={lx} must land inside the driven region",
             );
         }
         for lx in 14..18 {
             assert_eq!(
                 view.get(lx, 5, 8),
-                "minecraft:oak_leaves",
+                state("minecraft:oak_leaves"),
                 "the spilled canopy must be readable at local x={lx}",
             );
         }
@@ -1828,17 +1913,16 @@ mod tests {
     /// visited cells in, and therefore the order that reproduces its palette.
     #[test]
     fn centre_writes_come_back_in_y_then_z_then_x_order() {
-        let interner = Arc::new(StateInterner::new());
         let grids: Vec<DenseBlockGrid> = (0..9)
-            .map(|_| chunk_grid(&interner, 0, 0, "minecraft:stone"))
+            .map(|_| chunk_grid(0, 0, "minecraft:stone"))
             .collect();
-        let mut view = RegionView::over_sources(Arc::clone(&interner), 0, 0, 0, 8, |dx, dz| {
+        let mut view = RegionView::over_sources(0, 0, 0, 8, |dx, dz| {
             grids.get(((dx + 1) * 3 + (dz + 1)) as usize)
         });
         // Deliberately written in an order that is neither the expected one nor
         // its reverse.
         for &(lx, y, lz) in &[(3, 6, 1), (1, 2, 3), (9, 2, 3), (1, 2, 0), (0, 6, 1)] {
-            view.set(lx, y, lz, "minecraft:diamond_ore");
+            view.set_id(lx, y, lz, state("minecraft:diamond_ore"));
         }
         let keys: Vec<(i32, i32, i32)> = view
             .centre_writes_in_scan_order()
@@ -1853,15 +1937,14 @@ mod tests {
 
     #[test]
     fn all_writes_have_a_stable_x_then_z_then_y_order() {
-        let interner = Arc::new(StateInterner::new());
         let grids: Vec<DenseBlockGrid> = (0..9)
-            .map(|_| chunk_grid(&interner, 0, 0, "minecraft:stone"))
+            .map(|_| chunk_grid(0, 0, "minecraft:stone"))
             .collect();
-        let mut view = RegionView::over_sources(Arc::clone(&interner), 0, 0, 0, 8, |dx, dz| {
+        let mut view = RegionView::over_sources(0, 0, 0, 8, |dx, dz| {
             grids.get(((dx + 1) * 3 + (dz + 1)) as usize)
         });
         for &(lx, y, lz) in &[(3, 6, 1), (-1, 2, 3), (3, 2, 1), (1, 2, -3), (-1, 6, 3)] {
-            view.set(lx, y, lz, "minecraft:diamond_ore");
+            view.set_id(lx, y, lz, state("minecraft:diamond_ore"));
         }
         let keys: Vec<(i32, i32, i32)> = view
             .writes_in_scan_order()
@@ -1879,23 +1962,22 @@ mod tests {
     /// grid's unseeded padding ring keeps behaving the way it did.
     #[test]
     fn reads_and_writes_outside_the_region_are_air_and_dropped() {
-        let interner = Arc::new(StateInterner::new());
         let grids: Vec<DenseBlockGrid> = (-1..=1)
             .flat_map(|dx| (-1..=1).map(move |dz| (dx, dz)))
-            .map(|(dx, dz)| chunk_grid(&interner, dx, dz, "minecraft:stone"))
+            .map(|(dx, dz)| chunk_grid(dx, dz, "minecraft:stone"))
             .collect();
-        let mut view = RegionView::over_sources(Arc::clone(&interner), 0, 0, 0, 8, |dx, dz| {
+        let mut view = RegionView::over_sources(0, 0, 0, 8, |dx, dz| {
             grids.get(((dx + 1) * 3 + (dz + 1)) as usize)
         });
         for (lx, lz) in [(REGION_MIN - 1, 0), (REGION_MAX, 0), (0, REGION_MIN - 1), (0, REGION_MAX)] {
-            assert_eq!(view.get(lx, 4, lz), "minecraft:air");
-            assert!(!view.set(lx, 4, lz, "minecraft:stone"));
-            assert_eq!(view.get(lx, 4, lz), "minecraft:air");
+            assert_eq!(view.get(lx, 4, lz), state("minecraft:air"));
+            assert!(!view.set_id(lx, 4, lz, state("minecraft:stone")));
+            assert_eq!(view.get(lx, 4, lz), state("minecraft:air"));
         }
         // Vertically too.
-        assert_eq!(view.get(0, -1, 0), "minecraft:air");
-        assert_eq!(view.get(0, 8, 0), "minecraft:air");
-        assert!(!view.set(0, 8, 0, "minecraft:stone"));
+        assert_eq!(view.get(0, -1, 0), state("minecraft:air"));
+        assert_eq!(view.get(0, 8, 0), state("minecraft:air"));
+        assert!(!view.set_id(0, 8, 0, state("minecraft:stone")));
         assert_eq!(view.writes(), 0, "no out-of-region write may have landed");
     }
 
@@ -1903,21 +1985,20 @@ mod tests {
     /// wider ore read context without turning that state into a new 3x3 write.
     #[test]
     fn a_seeded_read_state_shadows_the_wide_source_rim() {
-        let interner = Arc::new(StateInterner::new());
         let grids: Vec<DenseBlockGrid> = (-2..=2)
             .flat_map(|dx| (-2..=2).map(move |dz| (dx, dz)))
-            .map(|(dx, dz)| chunk_grid(&interner, dx, dz, "minecraft:stone"))
+            .map(|(dx, dz)| chunk_grid(dx, dz, "minecraft:stone"))
             .collect();
-        let mut view = RegionView::over_wide_sources(Arc::clone(&interner), 0, 0, 0, 8, |dx, dz| {
+        let mut view = RegionView::over_wide_sources(0, 0, 0, 8, |dx, dz| {
             grids.get(((dx + 2) * 5 + (dz + 2)) as usize)
         });
         // x=-17 is in the source chunk at -2, but outside the current 3x3
         // writer box [-16, 32). It is still in the ore read box [-32, 48).
-        assert_eq!(view.get(-17, 4, 0), "minecraft:stone");
-        let gold = interner.id_of("minecraft:gold_ore");
+        assert_eq!(view.get(-17, 4, 0), state("minecraft:stone"));
+        let gold = state("minecraft:gold_ore");
         assert!(view.seed_read_id(-17, 4, 0, gold));
         assert_eq!(view.write_log_len(), 0, "seeded read context must not enter the write log");
-        assert_eq!(view.get(-17, 4, 0), "minecraft:gold_ore");
+        assert_eq!(view.get(-17, 4, 0), state("minecraft:gold_ore"));
         assert!(!view.seed_read_id(crate::feature::ORE_READ_MIN - 1, 4, 0, gold));
         assert!(view.set_id(0, 4, 0, gold));
         assert_eq!(view.write_log_len(), 1, "set_id must append after a seeded read");
@@ -1931,20 +2012,19 @@ mod tests {
     /// on, and the reason writes cannot be merged after the pass instead.
     #[test]
     fn a_write_shadows_the_source_for_later_reads_in_the_same_pass() {
-        let interner = Arc::new(StateInterner::new());
         let grids: Vec<DenseBlockGrid> = (-1..=1)
             .flat_map(|dx| (-1..=1).map(move |dz| (dx, dz)))
-            .map(|(dx, dz)| chunk_grid(&interner, dx, dz, "minecraft:stone"))
+            .map(|(dx, dz)| chunk_grid(dx, dz, "minecraft:stone"))
             .collect();
-        let mut view = RegionView::over_sources(Arc::clone(&interner), 0, 0, 0, 8, |dx, dz| {
+        let mut view = RegionView::over_sources(0, 0, 0, 8, |dx, dz| {
             grids.get(((dx + 1) * 3 + (dz + 1)) as usize)
         });
-        assert_eq!(view.get(5, 4, 5), "minecraft:stone");
-        view.set(5, 4, 5, "minecraft:gold_ore");
-        assert_eq!(view.get(5, 4, 5), "minecraft:gold_ore");
+        assert_eq!(view.get(5, 4, 5), state("minecraft:stone"));
+        view.set_id(5, 4, 5, state("minecraft:gold_ore"));
+        assert_eq!(view.get(5, 4, 5), state("minecraft:gold_ore"));
         // Overwriting keeps the final value and does not grow the write set.
-        view.set(5, 4, 5, "minecraft:iron_ore");
-        assert_eq!(view.get(5, 4, 5), "minecraft:iron_ore");
+        view.set_id(5, 4, 5, state("minecraft:iron_ore"));
+        assert_eq!(view.get(5, 4, 5), state("minecraft:iron_ore"));
         assert_eq!(view.writes(), 1);
     }
 
@@ -1953,11 +2033,9 @@ mod tests {
     /// path rather than to two implementations that merely agree today.
     #[test]
     fn the_region_grid_constructor_answers_like_a_nine_source_view() {
-        let interner = Arc::new(StateInterner::new());
-        let air = interner.id_of("minecraft:air");
+        let air = state("minecraft:air");
         let size = REGION_MAX - REGION_MIN;
-        let mut region = DenseBlockGrid::with_interner(
-            Arc::clone(&interner),
+        let mut region = DenseBlockGrid::with_default(
             REGION_MIN,
             0,
             REGION_MIN,
@@ -1968,20 +2046,20 @@ mod tests {
         );
         let grids: Vec<DenseBlockGrid> = (-1..=1)
             .flat_map(|dx| (-1..=1).map(move |dz| (dx, dz)))
-            .map(|(dx, dz)| chunk_grid(&interner, dx, dz, &format!("minecraft:m{dx}_{dz}")))
+            .map(|(dx, dz)| chunk_grid(dx, dz, marker_spec(dx, dz)))
             .collect();
         for dx in -1..=1i32 {
             for dz in -1..=1i32 {
                 for lx in 0..16 {
                     for lz in 0..16 {
-                        region.set(dx * 16 + lx, 4, dz * 16 + lz, &format!("minecraft:m{dx}_{dz}"));
+                        region.set_id(dx * 16 + lx, 4, dz * 16 + lz, state(marker_spec(dx, dz)));
                     }
                 }
             }
         }
         let fixture_view = RegionView::over_region_grid(&region, 0, 8);
         let production_view =
-            RegionView::over_sources(Arc::clone(&interner), 0, 0, 0, 8, |dx, dz| {
+            RegionView::over_sources(0, 0, 0, 8, |dx, dz| {
                 grids.get(((dx + 1) * 3 + (dz + 1)) as usize)
             });
         for lz in REGION_MIN..REGION_MAX {

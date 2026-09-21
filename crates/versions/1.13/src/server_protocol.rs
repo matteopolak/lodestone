@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 
+use lodestone_data::block_states::StateId;
 use lodestone_core::{Ctx, Decode, Encode, Reader, State, Writer, encode_body};
 use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ItemStack, Rotation, Vec3f};
 use lodestone_server::{
@@ -317,11 +318,9 @@ impl V404ServerProtocol {
         x: i32,
         y: i32,
         z: i32,
-        state: &str,
+        state: StateId,
     ) -> Result<ServerDirective, ChunkEncodeError> {
-        let canonical = lodestone_data::block_states::state_id(state)
-            .ok_or_else(|| ChunkEncodeError::new(format!("unknown canonical block state {state}")))?;
-        let wire = wire_state(canonical)?;
+        let wire = wire_state(state.raw())?;
         let mut payload = Writer::default();
         payload.i64(pack_position(BlockPos::new(x, y, z)));
         payload.var_i32(i32::try_from(wire).expect("protocol-404 state fits in i32"));
@@ -706,7 +705,7 @@ impl ServerProtocol for V404ServerProtocol {
         send(play::clientbound::KEEP_ALIVE, &KeepAliveRequest { id })
     }
 
-    fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {
+    fn encode_block_update(&self, x: i32, y: i32, z: i32, state: StateId) -> ServerDirective {
         self.try_encode_block_update(x, y, z, state)
             .expect("call try_encode_block_update to handle an unrepresentable protocol-404 state")
     }

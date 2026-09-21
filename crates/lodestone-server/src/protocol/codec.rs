@@ -4,6 +4,7 @@
 //! chunk encoding contract, and boxed forwarding required by dynamic protocol selection.
 
 use lodestone_core::State;
+use lodestone_data::block_states::StateId;
 use lodestone_model::command_tree::{CommandSuggestionsResponse, CommandTree};
 use lodestone_model::{
     BlockPos, Difficulty, EntityAttributeSnapshot, GameMode, ItemStack, ResourceKey, SoundCategory,
@@ -1170,11 +1171,10 @@ pub trait ServerProtocol: Send + Sync {
     /// actually took effect (see `crate::server`'s `UseItemOn` handling for
     /// why it sends two of these per placement).
     ///
-    /// `state` is the canonical block-state string [`ChunkColumn`] itself
-    /// stores (e.g. `"minecraft:air"`, `"minecraft:stone"`); resolving it to
-    /// a wire registry id is the implementor's job, the same seam
+    /// `state` is the canonical built-in block-state id. Resolving it to a
+    /// protocol-local registry id is the implementor's job, the same seam
     /// `encode_chunk` already crosses. The default emits nothing.
-    fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {
+    fn encode_block_update(&self, x: i32, y: i32, z: i32, state: StateId) -> ServerDirective {
         let _ = (x, y, z, state);
         ServerDirective::None
     }
@@ -2130,7 +2130,7 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         (**self).encode_forget_chunk(cx, cz)
     }
 
-    fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {
+    fn encode_block_update(&self, x: i32, y: i32, z: i32, state: StateId) -> ServerDirective {
         (**self).encode_block_update(x, y, z, state)
     }
 

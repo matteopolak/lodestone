@@ -730,7 +730,7 @@ fn bench_stage_split(c: &mut Criterion) {
         for lz in 0..16 {
             for lx in 0..16 {
                 for y in plain.min_y()..plain.min_y() + plain.height() {
-                    if plain.block_state(lx, y, lz) != timed.block_state(lx, y, lz) {
+                    if plain.block_state_id(lx, y, lz) != timed.block_state_id(lx, y, lz) {
                         mismatches += 1;
                         first_mismatch.get_or_insert((lx, y, lz));
                     }
@@ -749,7 +749,7 @@ fn bench_stage_split(c: &mut Criterion) {
         // block_state comparison is reading something constant.
         let other = g_plain.column(cx + 1, cz);
         let differs = (plain.min_y()..plain.min_y() + plain.height())
-            .any(|y| plain.block_state(3, y, 5) != other.block_state(3, y, 5));
+            .any(|y| plain.block_state_id(3, y, 5) != other.block_state_id(3, y, 5));
         assert!(
             differs,
             "the block-for-block comparison found no difference between two DIFFERENT chunks, so \
@@ -1376,6 +1376,9 @@ fn bench_counter_calibration(_c: &mut Criterion) {
     // Call-site liveness controls, after the production snapshot.
     counters::bump_structure_context_replaceable_block_at();
     counters::bump_structure_context_kind_block_at();
+    counters::bump_structure_reference_computation();
+    counters::bump_structure_candidate_cell_probe();
+    counters::bump_structure_ring_reach_build();
     let control = counters::snapshot();
     assert_eq!(
         control.structure_context_replaceable_block_at,
@@ -1391,6 +1394,21 @@ fn bench_counter_calibration(_c: &mut Criterion) {
         control.structure_context_block_at,
         s.structure_context_block_at + 2,
         "aggregate context counter control did not move with both call-site hooks"
+    );
+    assert_eq!(
+        control.structure_reference_computations,
+        s.structure_reference_computations + 1,
+        "reference computation counter control did not move"
+    );
+    assert_eq!(
+        control.structure_candidate_cell_probes,
+        s.structure_candidate_cell_probes + 1,
+        "candidate-cell counter control did not move"
+    );
+    assert_eq!(
+        control.structure_ring_reach_builds,
+        s.structure_ring_reach_builds + 1,
+        "ring-reach counter control did not move"
     );
     // The probe term is not predicted, but it *is* bounded: every probe issues at
     // least one query and at most one per Y level. A ratio outside that range
@@ -1678,6 +1696,9 @@ fn print_counters(s: &Snapshot, chunks: u64) {
         s.structure_context_replaceable_block_at,
     );
     row("structure_context_kind", s.structure_context_kind_block_at);
+    row("structure_reference_computations", s.structure_reference_computations);
+    row("structure_candidate_cell_probes", s.structure_candidate_cell_probes);
+    row("structure_ring_reach_builds", s.structure_ring_reach_builds);
     row("rng_draws (all stages)", s.rng_draws_total());
     println!("  software cache traffic:");
     for (i, name) in lodestone_worldgen::counters::CACHE_NAMES.iter().enumerate() {

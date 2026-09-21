@@ -149,8 +149,7 @@ fn fingerprint(column: &GeneratedColumn) -> [u8; 32] {
     for y in column.min_y()..column.min_y() + column.height() {
         for lz in 0..16 {
             for lx in 0..16 {
-                hash.update(column.block_state(lx, y, lz).as_bytes());
-                hash.update([0]);
+                hash.update(column.block_state_id(lx, y, lz).raw().to_le_bytes());
             }
         }
     }
@@ -164,8 +163,8 @@ fn assert_columns_equal(a: &GeneratedColumn, b: &GeneratedColumn, chunk: (i32, i
         for lz in 0..16 {
             for lx in 0..16 {
                 assert_eq!(
-                    a.block_state(lx, y, lz),
-                    b.block_state(lx, y, lz),
+                    a.block_state_id(lx, y, lz),
+                    b.block_state_id(lx, y, lz),
                     "block changed at chunk {chunk:?}, local ({lx},{y},{lz})"
                 );
             }

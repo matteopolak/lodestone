@@ -5,6 +5,7 @@
 //! used by the later hosted legacy family.
 
 use lodestone_canonical::inverse;
+use lodestone_data::block_states::StateId;
 use lodestone_core::{Ctx, Decode, Encode, Reader, State, Writer, encode_body};
 use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ItemStack, Rotation, Vec3f};
 use lodestone_server::{
@@ -183,15 +184,16 @@ fn cursor_coordinate(value: i8) -> Option<f32> {
     (0..=15).contains(&value).then_some(f32::from(value) / 16.0)
 }
 
-fn legacy_composite(canonical: u32) -> Result<u32, ChunkEncodeError> {
-    let composite = inverse::resolve(canonical).map_err(|_| {
+fn legacy_composite(canonical: StateId) -> Result<u32, ChunkEncodeError> {
+    let raw = canonical.raw();
+    let composite = inverse::resolve(raw).map_err(|_| {
         ChunkEncodeError::new(format!(
-            "canonical state {canonical} has no exact protocol-47 representation"
+            "canonical state {raw} has no exact protocol-47 representation"
         ))
     })?;
     if composite >> 4 > LAST_PROTOCOL_47_BLOCK_ID {
         return Err(ChunkEncodeError::new(format!(
-            "canonical state {canonical} resolves to block id {}, which protocol 47 does not define",
+            "canonical state {raw} resolves to block id {}, which protocol 47 does not define",
             composite >> 4
         )));
     }
@@ -209,7 +211,7 @@ fn encode_chunk_body(cx: i32, cz: i32, column: &ChunkColumn) -> Result<Vec<u8>, 
         )));
     }
 
-    let air = lodestone_data::block_states::air_state_id();
+    let air = StateId::AIR;
     let mut bitmask = 0_u16;
     let mut block_data = Vec::new();
     let mut present = Vec::new();
@@ -266,12 +268,9 @@ impl V47ServerProtocol {
         x: i32,
         y: i32,
         z: i32,
-        state: &str,
+        state: StateId,
     ) -> Result<ServerDirective, ChunkEncodeError> {
-        let canonical = lodestone_data::block_states::state_id(state).ok_or_else(|| {
-            ChunkEncodeError::new(format!("unknown canonical block state {state}"))
-        })?;
-        let legacy = legacy_composite(canonical)?;
+        let legacy = legacy_composite(state)?;
         let mut payload = Writer::default();
         payload.i64(pack_position(BlockPos::new(x, y, z)));
         payload.var_i32(i32::try_from(legacy).expect("legacy state fits in i32"));
@@ -686,7 +685,7 @@ impl ServerProtocol for V47ServerProtocol {
         encode_set_slot(window_id, slot, item)
     }
 
-    fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {
+    fn encode_block_update(&self, x: i32, y: i32, z: i32, state: StateId) -> ServerDirective {
         self.try_encode_block_update(x, y, z, state)
             .expect("call try_encode_block_update to handle an unrepresentable protocol-47 state")
     }

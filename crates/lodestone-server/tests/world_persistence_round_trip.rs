@@ -39,6 +39,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use lodestone_core::State;
+use lodestone_data::block_states::StateId;
 use lodestone_server::dimension::Dimension;
 use lodestone_server::region_source::{PersistenceStats, RegionChunkSource};
 use lodestone_server::{ChunkColumn, ChunkSource, ServerBound, ServerDirective, ServerProtocol};
@@ -100,23 +101,23 @@ impl ChunkSource for LayeredWorld {
         for z in 0..16 {
             for x in 0..16 {
                 for y in MIN_Y..(60 + bump) {
-                    column.set_block(x, y, z, "minecraft:stone");
+                    column.set_block_id(x, y, z, state("minecraft:stone"));
                 }
-                column.set_block(x, 60 + bump, z, "minecraft:dirt");
-                column.set_block(x, 61 + bump, z, "minecraft:grass_block[snowy=false]");
+                column.set_block_id(x, 60 + bump, z, state("minecraft:dirt"));
+                column.set_block_id(x, 61 + bump, z, state("minecraft:grass_block[snowy=false]"));
             }
         }
         column
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         // The column-regenerating form (correct, just not cheap); the round
         // trip writes whole regions, not single probes.
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
-        self.column(cx, cz).block_state(lx, y, lz).to_string()
+        self.column(cx, cz).block_state_id(lx, y, lz)
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -133,7 +134,7 @@ impl ChunkSource for LayeredWorld {
     // discarded by design (an edit a test needs to survive goes through a
     // source with real retention). The no-op is explicit so the fixture's
     // retention behavior is clear at the implementation boundary.
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
         // No storage; edits are discarded by design.
     }
 }
@@ -168,6 +169,10 @@ const SPOTS: [(i32, i32, i32, &str); 4] = [
     (-3, 72, -7, MARKER),
 ];
 
+fn state(text: &str) -> StateId {
+    StateId::from_state_str(text).unwrap_or_else(|| panic!("unknown fixture state: {text}"))
+}
+
 /// Opens a persistent world, hands back the live world handle plus the server.
 async fn open(dir: &Path) -> (lodestone_server::IntegratedServer, RegionChunkSource<impl ChunkSource>)
 {
@@ -196,13 +201,13 @@ async fn a_mutation_survives_close_and_reopen() {
     // Exactly what `crate::server`'s `apply_use_item_on` calls in production,
     // on the identical object the server's own `ChunkStore` wraps.
     for &(x, y, z, block) in &SPOTS {
-        world.set_block(x, y, z, block);
+        world.set_block(x, y, z, state(block));
     }
     // Read back *before* saving, so a failure here is a live-world defect and
     // not a persistence one — the two would otherwise be indistinguishable.
     for &(x, y, z, block) in &SPOTS {
         assert_eq!(
-            world.block_state(x, y, z),
+            world.block_state_id(x, y, z).canonical_state(),
             block,
             "the live world lost the mutation before anything was even saved"
         );
@@ -214,7 +219,7 @@ async fn a_mutation_survives_close_and_reopen() {
     let (server, reopened) = open(&dir).await;
     for &(x, y, z, block) in &SPOTS {
         assert_eq!(
-            reopened.block_state(x, y, z),
+            reopened.block_state_id(x, y, z).canonical_state(),
             block,
             "({x},{y},{z}) did not survive close and reopen"
         );
@@ -225,8 +230,8 @@ async fn a_mutation_survives_close_and_reopen() {
     // above and produce an unplayable world.
     let solid = (MIN_Y..MIN_Y + HEIGHT)
         .filter(|&y| {
-            let state = reopened.block_state(5, y, 5);
-            state != "minecraft:air" && state != "minecraft:cave_air"
+            let cell = reopened.block_state_id(5, y, 5);
+            cell != StateId::AIR && cell != state("minecraft:cave_air")
         })
         .count();
     assert!(
@@ -279,7 +284,7 @@ async fn a_save_writes_one_column_per_mutated_chunk_and_nothing_else() {
     // (5,5) and (6,5) share chunk (0,0); (21,9) is chunk (1,0); (-3,-7) is
     // chunk (-1,-1).
     for &(x, y, z, block) in &SPOTS {
-        world.set_block(x, y, z, block);
+        world.set_block(x, y, z, state(block));
     }
     let expected_chunks = 3;
     assert_eq!(
@@ -343,7 +348,7 @@ async fn a_reopened_world_reads_from_disk_instead_of_regenerating() {
 
     // --- session one: written through the production path -------------------
     let (server, world) = open(&dir).await;
-    world.set_block(5, 70, 5, MARKER);
+    world.set_block(5, 70, 5, state(MARKER));
     server.save_now().expect("save");
     server.shutdown().await;
 
@@ -368,7 +373,7 @@ async fn a_reopened_world_reads_from_disk_instead_of_regenerating() {
     // some other one, so the marker is checked on the very column that was
     // counted rather than on a second read.
     assert_eq!(
-        saved.block_state(5, 70, 5),
+        saved.block_state_id(5, 70, 5).canonical_state(),
         MARKER,
         "the column the disk-load counter counted is not the one that was saved"
     );
@@ -389,7 +394,7 @@ async fn a_reopened_world_reads_from_disk_instead_of_regenerating() {
     // block value, which is the one thing immune to who else is reading.
     let (server, reopened) = open(&dir).await;
     assert_eq!(
-        reopened.block_state(5, 70, 5),
+        reopened.block_state_id(5, 70, 5).canonical_state(),
         MARKER,
         "the production reopen path did not see the saved mutation"
     );

@@ -103,7 +103,10 @@
 //! `ChunkColumn::block_state` indexes unguarded — an unchecked read panics the
 //! world tick thread. `Level::getBlockState`'s own first line is the same guard.
 
+use lodestone_data::block::Block;
 use lodestone_data::block_blast;
+use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey, PropertyValue};
+use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockPos, Difficulty};
 
 use crate::chunk::ChunkSource;
@@ -136,9 +139,11 @@ pub const ODDS_PER_DIFFICULTY: i32 = 7;
 pub const ODDS_AGE_OFFSET: i32 = 30;
 
 /// `minecraft:fire`.
+#[cfg(test)]
 pub const FIRE: &str = "minecraft:fire";
 
 /// `minecraft:soul_fire`.
+#[cfg(test)]
 pub const SOUL_FIRE: &str = "minecraft:soul_fire";
 
 /// `#minecraft:infiniburn_overworld`, read straight out of the server jar's own
@@ -148,9 +153,11 @@ pub const SOUL_FIRE: &str = "minecraft:soul_fire";
 /// here: guessing it as "bedrock" (the intuitive answer, and the nether's tag is a
 /// different set again) would make an eternal fire over netherrack burn out and a
 /// fire on bedrock eternal — both backwards.
+#[cfg(test)]
 pub const INFINIBURN_OVERWORLD: [&str; 2] = ["minecraft:netherrack", "minecraft:magma_block"];
 
 /// The blocks `SoulFireBlock::canSurviveOnBlock` accepts (`#minecraft:soul_fire_base_blocks`).
+#[cfg(test)]
 pub const SOUL_FIRE_BASE: [&str; 2] = ["minecraft:soul_sand", "minecraft:soul_soil"];
 
 /// Everything about the world a fire tick needs that is not a block state.
@@ -253,20 +260,33 @@ impl FireEnv {
 /// **Every world read in this module goes through here.** See the module doc for
 /// why that is load-bearing rather than tidy.
 #[must_use]
+#[cfg(test)]
 pub fn block_at<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockPos) -> String {
     if env.contains_y(pos.y) {
-        world.block_state(pos.x, pos.y, pos.z)
+        world
+            .block_state_id(pos.x, pos.y, pos.z)
+            .canonical_state()
     } else {
-        crate::chunk::AIR.to_owned()
+        "minecraft:air".to_owned()
     }
 }
 
+#[must_use]
+pub fn block_at_id<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockPos) -> StateId {
+    if !env.contains_y(pos.y) {
+        return lodestone_data::block_states::air_state();
+    }
+    world.block_state_id(pos.x, pos.y, pos.z)
+}
+
 /// Strips a `[...]` property suffix.
+#[cfg(test)]
 fn base_name(state: &str) -> &str {
     state.split('[').next().unwrap_or(state)
 }
 
 /// The value of `state`'s `key=` property. A whole-key match.
+#[cfg(test)]
 fn property_of<'s>(state: &'s str, key: &str) -> Option<&'s str> {
     let props = state.split_once('[')?.1.strip_suffix(']')?;
     props.split(',').find_map(|pair| {
@@ -277,47 +297,104 @@ fn property_of<'s>(state: &'s str, key: &str) -> Option<&'s str> {
 
 /// `true` for `minecraft:fire` or `minecraft:soul_fire`.
 #[must_use]
+#[cfg(test)]
 pub fn is_fire(state: &str) -> bool {
     matches!(base_name(state), FIRE | SOUL_FIRE)
 }
 
+#[must_use]
+pub fn is_fire_id(state: StateId) -> bool {
+    matches!(state.block(), Block::Fire | Block::SoulFire)
+}
+
 /// `true` for `minecraft:fire` alone — soul fire has no `age` and no tick.
 #[must_use]
+#[cfg(test)]
 pub fn is_ordinary_fire(state: &str) -> bool {
     base_name(state) == FIRE
+}
+
+#[must_use]
+pub fn is_ordinary_fire_id(state: StateId) -> bool {
+    state.block() == Block::Fire
 }
 
 /// `FireBlock.AGE` for a fire state, defaulting to `0` (the default state's
 /// value) when the property is absent.
 #[must_use]
+#[cfg(test)]
 pub fn age_of(state: &str) -> u32 {
     property_of(state, "age")
         .and_then(|value| value.parse::<u32>().ok())
         .map_or(0, |age| age.min(MAX_AGE))
 }
 
+#[must_use]
+pub fn age_of_id(state: StateId) -> u32 {
+    match Properties::from_state_id(state)
+        .get(PropertyKey::Age)
+        .and_then(|property| property.builtin_value())
+    {
+        Some(BuiltinPropertyValue::Value0) => 0,
+        Some(BuiltinPropertyValue::Value1) => 1,
+        Some(BuiltinPropertyValue::Value2) => 2,
+        Some(BuiltinPropertyValue::Value3) => 3,
+        Some(BuiltinPropertyValue::Value4) => 4,
+        Some(BuiltinPropertyValue::Value5) => 5,
+        Some(BuiltinPropertyValue::Value6) => 6,
+        Some(BuiltinPropertyValue::Value7) => 7,
+        Some(BuiltinPropertyValue::Value8) => 8,
+        Some(BuiltinPropertyValue::Value9) => 9,
+        Some(BuiltinPropertyValue::Value10) => 10,
+        Some(BuiltinPropertyValue::Value11) => 11,
+        Some(BuiltinPropertyValue::Value12) => 12,
+        Some(BuiltinPropertyValue::Value13) => 13,
+        Some(BuiltinPropertyValue::Value14) => 14,
+        Some(BuiltinPropertyValue::Value15) => 15,
+        _ => 0,
+    }
+}
+
 /// `FireBlock::canBurn` — `getIgniteOdds(state) > 0`, with the
 /// `waterlogged=true` override already applied.
 #[must_use]
+#[cfg(test)]
 pub fn can_burn(state: &str) -> bool {
     block_blast::ignite_odds_for_state(state) > 0
+}
+
+#[must_use]
+pub fn can_burn_id(state: StateId) -> bool {
+    block_blast::ignite_odds_for_state_id(state) > 0
 }
 
 /// `BlockStateBase::isFaceSturdy(level, pos, UP)`, from the committed
 /// `face_full_up` census — the same fact vanilla's `isFaceSturdy(…, UP,
 /// SupportType.FULL)` reads off the collision shape.
 #[must_use]
+#[cfg(test)]
 pub fn face_sturdy_up(state: &str) -> bool {
     lodestone_data::block_states::state_id(state)
         .and_then(lodestone_data::block_states::StateId::new)
         .is_some_and(lodestone_data::snow_support::face_full_up)
 }
 
+#[must_use]
+pub fn face_sturdy_up_id(state: StateId) -> bool {
+    lodestone_data::snow_support::face_full_up(state)
+}
+
 /// `BlockStateBase::blocksMotion`, for the sky scan.
+#[cfg(test)]
 fn blocks_motion(state: &str) -> bool {
     lodestone_data::block_states::state_id(state)
         .and_then(lodestone_data::block_states::StateId::new)
         .is_some_and(lodestone_data::block_solidity::blocks_motion)
+}
+
+#[must_use]
+pub fn blocks_motion_id(state: StateId) -> bool {
+    lodestone_data::block_solidity::blocks_motion(state)
 }
 
 /// The six face offsets in `Direction.values()` order — **down, up, north,
@@ -355,6 +432,7 @@ pub const BURN_OUT_ORDER: [((i32, i32, i32), i32); 6] = [
 
 /// `FireBlock::isValidFireLocation` — any of the six face neighbours can burn.
 #[must_use]
+#[cfg(test)]
 pub fn is_valid_fire_location<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockPos) -> bool {
     FACE_OFFSETS.iter().any(|&(dx, dy, dz)| {
         can_burn(&block_at(
@@ -368,14 +446,29 @@ pub fn is_valid_fire_location<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, 
 /// `FireBlock::canSurvive` — the block below has a sturdy up face, or some
 /// neighbour can burn.
 #[must_use]
+#[cfg(test)]
 pub fn can_survive<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockPos) -> bool {
     let below = BlockPos::new(pos.x, pos.y - 1, pos.z);
     face_sturdy_up(&block_at(world, env, below)) || is_valid_fire_location(world, env, pos)
 }
 
+#[must_use]
+pub fn is_valid_fire_location_id<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockPos) -> bool {
+    FACE_OFFSETS.iter().any(|&(dx, dy, dz)| {
+        can_burn_id(block_at_id(world, env, BlockPos::new(pos.x + dx, pos.y + dy, pos.z + dz)))
+    })
+}
+
+#[must_use]
+pub fn can_survive_id<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockPos) -> bool {
+    let below = BlockPos::new(pos.x, pos.y - 1, pos.z);
+    face_sturdy_up_id(block_at_id(world, env, below)) || is_valid_fire_location_id(world, env, pos)
+}
+
 /// `FireBlock::getIgniteOdds(LevelReader, BlockPos)` — `0` unless the cell itself
 /// is empty, otherwise the **maximum** ignite odds over its six face neighbours.
 #[must_use]
+#[cfg(test)]
 pub fn ignite_odds_at<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockPos) -> u8 {
     if !crate::random_tick::is_air_variant(&block_at(world, env, pos)) {
         return 0;
@@ -384,6 +477,24 @@ pub fn ignite_odds_at<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: Blo
         .iter()
         .map(|&(dx, dy, dz)| {
             block_blast::ignite_odds_for_state(&block_at(
+                world,
+                env,
+                BlockPos::new(pos.x + dx, pos.y + dy, pos.z + dz),
+            ))
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+#[must_use]
+pub fn ignite_odds_at_id<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockPos) -> u8 {
+    if !crate::random_tick::is_air_variant_id(block_at_id(world, env, pos)) {
+        return 0;
+    }
+    FACE_OFFSETS
+        .iter()
+        .map(|&(dx, dy, dz)| {
+            block_blast::ignite_odds_for_state_id(block_at_id(
                 world,
                 env,
                 BlockPos::new(pos.x + dx, pos.y + dy, pos.z + dz),
@@ -434,13 +545,20 @@ pub fn fire_tick_delay(rng: &mut SpawnRng) -> u64 {
 /// once; the biome-precipitation term is absent. Scans upward to build height, so
 /// it is only ever called behind [`FireEnv::raining`].
 #[must_use]
+#[cfg(test)]
 pub fn is_raining_at<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockPos) -> bool {
     env.raining && sky_exposed(world, env, pos)
+}
+
+#[must_use]
+pub fn is_raining_at_id<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockPos) -> bool {
+    env.raining && sky_exposed_id(world, env, pos)
 }
 
 /// `Level::canSeeSky` plus the heightmap term — nothing motion-blocking between
 /// `pos` and build height.
 #[must_use]
+#[cfg(test)]
 pub fn sky_exposed<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockPos) -> bool {
     let top = env.min_y + env.height;
     let mut y = pos.y + 1;
@@ -453,9 +571,23 @@ pub fn sky_exposed<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockP
     true
 }
 
+#[must_use]
+pub fn sky_exposed_id<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockPos) -> bool {
+    let top = env.min_y + env.height;
+    let mut y = pos.y + 1;
+    while y < top {
+        if blocks_motion_id(block_at_id(world, env, BlockPos::new(pos.x, y, pos.z))) {
+            return false;
+        }
+        y += 1;
+    }
+    true
+}
+
 /// `FireBlock::isNearRain` — raining at this cell or any of its four horizontal
 /// neighbours.
 #[must_use]
+#[cfg(test)]
 pub fn is_near_rain<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockPos) -> bool {
     if !env.raining {
         return false;
@@ -467,13 +599,26 @@ pub fn is_near_rain<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: Block
         || is_raining_at(world, env, BlockPos::new(pos.x, pos.y, pos.z + 1))
 }
 
+#[must_use]
+pub fn is_near_rain_id<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockPos) -> bool {
+    if !env.raining {
+        return false;
+    }
+    is_raining_at_id(world, env, pos)
+        || is_raining_at_id(world, env, BlockPos::new(pos.x - 1, pos.y, pos.z))
+        || is_raining_at_id(world, env, BlockPos::new(pos.x + 1, pos.y, pos.z))
+        || is_raining_at_id(world, env, BlockPos::new(pos.x, pos.y, pos.z - 1))
+        || is_raining_at_id(world, env, BlockPos::new(pos.x, pos.y, pos.z + 1))
+}
+
 /// `FireBlock::getStateForPlacement` — the connected-face form when the cell has
 /// no sturdy or burnable support below it, otherwise the plain default state.
 ///
 /// The five booleans are the client's rendering input: a fire with no floor draws
 /// itself against whichever walls can burn.
 #[must_use]
-pub fn state_for_placement<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockPos) -> String {
+#[cfg(test)]
+pub fn placement_text<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockPos) -> String {
     let below = BlockPos::new(pos.x, pos.y - 1, pos.z);
     let below_state = block_at(world, env, below);
     if !can_burn(&below_state) && !face_sturdy_up(&below_state) {
@@ -492,34 +637,121 @@ pub fn state_for_placement<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos
     }
 }
 
+#[must_use]
+pub fn state_for_placement_id<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockPos) -> StateId {
+    let below = block_at_id(world, env, BlockPos::new(pos.x, pos.y - 1, pos.z));
+    let (up, north, south, west, east) = if !can_burn_id(below) && !face_sturdy_up_id(below) {
+        (
+            can_burn_id(block_at_id(world, env, BlockPos::new(pos.x, pos.y + 1, pos.z))),
+            can_burn_id(block_at_id(world, env, BlockPos::new(pos.x, pos.y, pos.z - 1))),
+            can_burn_id(block_at_id(world, env, BlockPos::new(pos.x, pos.y, pos.z + 1))),
+            can_burn_id(block_at_id(world, env, BlockPos::new(pos.x - 1, pos.y, pos.z))),
+            can_burn_id(block_at_id(world, env, BlockPos::new(pos.x + 1, pos.y, pos.z))),
+        )
+    } else {
+        (false, false, false, false, false)
+    };
+    let bool_value = |value| {
+        PropertyValue::builtin(if value {
+            BuiltinPropertyValue::True
+        } else {
+            BuiltinPropertyValue::False
+        })
+    };
+    let properties = Properties::try_from_pairs(&[
+        (PropertyKey::Age, PropertyValue::builtin(BuiltinPropertyValue::Value0)),
+        (PropertyKey::East, bool_value(east)),
+        (PropertyKey::North, bool_value(north)),
+        (PropertyKey::South, bool_value(south)),
+        (PropertyKey::Up, bool_value(up)),
+        (PropertyKey::West, bool_value(west)),
+    ])
+    .expect("generated fire properties");
+    Properties::state_for_block(Block::Fire, &properties).expect("generated fire state")
+}
+
 /// `BaseFireBlock::getState` — soul fire over a soul-fire base block, otherwise
 /// `FireBlock::getStateForPlacement`.
 #[must_use]
-pub fn state_at<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockPos) -> String {
+#[cfg(test)]
+pub fn at_text<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockPos) -> String {
     let below = block_at(world, env, BlockPos::new(pos.x, pos.y - 1, pos.z));
     if SOUL_FIRE_BASE.contains(&base_name(&below)) {
         return SOUL_FIRE.to_owned();
     }
-    state_for_placement(world, env, pos)
+    placement_text(world, env, pos)
+}
+
+#[must_use]
+pub fn state_at_id<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockPos) -> StateId {
+    let below = block_at_id(world, env, BlockPos::new(pos.x, pos.y - 1, pos.z));
+    if matches!(below.block(), Block::SoulSand | Block::SoulSoil) {
+        Block::SoulFire.default_state()
+    } else {
+        state_for_placement_id(world, env, pos)
+    }
 }
 
 /// `FireBlock::getStateWithAge` — [`state_at`] with `age` written over it, but
 /// only when the answer really is ordinary fire (soul fire has no `age`).
 #[must_use]
-pub fn state_with_age<S: ChunkSource + ?Sized>(
+#[cfg(test)]
+pub fn with_age_text<S: ChunkSource + ?Sized>(
     world: &S,
     env: FireEnv,
     pos: BlockPos,
     age: u32,
 ) -> String {
-    let state = state_at(world, env, pos);
+    let state = at_text(world, env, pos);
     if !is_ordinary_fire(&state) {
         return state;
     }
     with_age(&state, age)
 }
 
+#[must_use]
+pub fn state_with_age_id<S: ChunkSource + ?Sized>(
+    world: &S,
+    env: FireEnv,
+    pos: BlockPos,
+    age: u32,
+) -> StateId {
+    let state = state_at_id(world, env, pos);
+    if !is_ordinary_fire_id(state) {
+        return state;
+    }
+    let properties = Properties::from_state_id(state);
+    let mut pairs = Vec::with_capacity(properties.len());
+    for property in properties.iter() {
+        if property.key() != PropertyKey::Age {
+            pairs.push((property.key(), property.value()));
+        }
+    }
+    let value = match age.min(MAX_AGE) {
+        0 => BuiltinPropertyValue::Value0,
+        1 => BuiltinPropertyValue::Value1,
+        2 => BuiltinPropertyValue::Value2,
+        3 => BuiltinPropertyValue::Value3,
+        4 => BuiltinPropertyValue::Value4,
+        5 => BuiltinPropertyValue::Value5,
+        6 => BuiltinPropertyValue::Value6,
+        7 => BuiltinPropertyValue::Value7,
+        8 => BuiltinPropertyValue::Value8,
+        9 => BuiltinPropertyValue::Value9,
+        10 => BuiltinPropertyValue::Value10,
+        11 => BuiltinPropertyValue::Value11,
+        12 => BuiltinPropertyValue::Value12,
+        13 => BuiltinPropertyValue::Value13,
+        14 => BuiltinPropertyValue::Value14,
+        _ => BuiltinPropertyValue::Value15,
+    };
+    pairs.push((PropertyKey::Age, PropertyValue::builtin(value)));
+    let properties = Properties::try_from_pairs(&pairs).expect("generated fire properties");
+    Properties::state_for_block(Block::Fire, &properties).expect("generated fire state")
+}
+
 /// Rewrites a fire state's `age=` property.
+#[cfg(test)]
 fn with_age(state: &str, age: u32) -> String {
     match state.split_once('[') {
         None => format!("{state}[age={age}]"),
@@ -585,18 +817,18 @@ pub fn ticks_after_edit(pos: BlockPos) -> Vec<ScheduledTick<ScheduledTickKind>> 
 /// fire-primed TNT starts at the ordinary
 /// [`crate::mobs::tnt::DEFAULT_FUSE_TIME`].
 #[allow(clippy::too_many_arguments)]
-pub fn run_scheduled_tick<S: ChunkSource + ?Sized, Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized>(
+pub fn run_scheduled_tick_id<S: ChunkSource + ?Sized, Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized>(
     world: &S,
     env: FireEnv,
     pos: BlockPos,
     block_ticks: &mut Q,
     current_tick: u64,
     rng: &mut SpawnRng,
-    changes: &mut Vec<(BlockPos, String)>,
+    changes: &mut Vec<(BlockPos, StateId)>,
     primed_tnt: &mut Vec<BlockPos>,
 ) {
-    let state = block_at(world, env, pos);
-    if !is_ordinary_fire(&state) {
+    let state = block_at_id(world, env, pos);
+    if !is_ordinary_fire_id(state) {
         // Not our block any more (burnt out, replaced, or soul fire, which does
         // not tick). No reschedule and no draws — vanilla would not have
         // dispatched `FireBlock::tick` here at all.
@@ -616,30 +848,30 @@ pub fn run_scheduled_tick<S: ChunkSource + ?Sized, Q: ScheduledTickQueueAccess<S
         return;
     }
 
-    let set = |world: &S, at: BlockPos, new_state: String, changes: &mut Vec<(BlockPos, String)>| {
+    let set = |world: &S, at: BlockPos, new_state: StateId, changes: &mut Vec<(BlockPos, StateId)>| {
         if !env.contains_y(at.y) {
             return;
         }
-        world.set_block(at.x, at.y, at.z, &new_state);
+        world.set_block(at.x, at.y, at.z, new_state);
         changes.push((at, new_state));
     };
 
     // `if (!state.canSurvive(level, pos)) level.removeBlock(pos, false);` — and
     // vanilla does **not** return here, so the rest of the tick still runs
     // against the `state` local and can write fire back.
-    if !can_survive(world, env, pos) {
-        set(world, pos, crate::chunk::AIR.to_owned(), changes);
+    if !can_survive_id(world, env, pos) {
+        set(world, pos, crate::chunk::air_state(), changes);
     }
 
     let below = BlockPos::new(pos.x, pos.y - 1, pos.z);
-    let below_state = block_at(world, env, below);
-    let infini_burn = INFINIBURN_OVERWORLD.contains(&base_name(&below_state));
-    let age = age_of(&state);
+    let below_state = block_at_id(world, env, below);
+    let infini_burn = matches!(below_state.block(), Block::Netherrack | Block::MagmaBlock);
+    let age = age_of_id(state);
 
     // Draw 2, behind three short-circuiting conditions.
-    if !infini_burn && env.raining && is_near_rain(world, env, pos) {
+    if !infini_burn && env.raining && is_near_rain_id(world, env, pos) {
         if rng.next_f32() < 0.2 + age as f32 * 0.03 {
-            set(world, pos, crate::chunk::AIR.to_owned(), changes);
+            set(world, pos, crate::chunk::air_state(), changes);
             return;
         }
     }
@@ -647,19 +879,19 @@ pub fn run_scheduled_tick<S: ChunkSource + ?Sized, Q: ScheduledTickQueueAccess<S
     // Draw 3.
     let new_age = MAX_AGE.min(age + (rng.next_int(3) / 2) as u32);
     if age != new_age {
-        set(world, pos, with_age(&state, new_age), changes);
+        set(world, pos, state_with_age_id(world, env, pos, new_age), changes);
     }
 
     if !infini_burn {
-        if !is_valid_fire_location(world, env, pos) {
-            if !face_sturdy_up(&below_state) || age > 3 {
-                set(world, pos, crate::chunk::AIR.to_owned(), changes);
+        if !is_valid_fire_location_id(world, env, pos) {
+            if !face_sturdy_up_id(below_state) || age > 3 {
+                set(world, pos, crate::chunk::air_state(), changes);
             }
             return;
         }
         // Draw 4.
-        if age == MAX_AGE && rng.next_int(4) == 0 && !can_burn(&below_state) {
-            set(world, pos, crate::chunk::AIR.to_owned(), changes);
+        if age == MAX_AGE && rng.next_int(4) == 0 && !can_burn_id(below_state) {
+            set(world, pos, crate::chunk::air_state(), changes);
             return;
         }
     }
@@ -688,7 +920,7 @@ pub fn run_scheduled_tick<S: ChunkSource + ?Sized, Q: ScheduledTickQueueAccess<S
                 }
                 let rate = spread_rate(dy);
                 let test = BlockPos::new(pos.x + dx, pos.y + dy, pos.z + dz);
-                let ignite_odds = ignite_odds_at(world, env, test);
+                let ignite_odds = ignite_odds_at_id(world, env, test);
                 if ignite_odds == 0 {
                     continue;
                 }
@@ -698,10 +930,10 @@ pub fn run_scheduled_tick<S: ChunkSource + ?Sized, Q: ScheduledTickQueueAccess<S
                 }
                 // One draw per positive-odds candidate.
                 if rng.next_int(rate) <= odds
-                    && (!env.raining || !is_near_rain(world, env, test))
+                    && (!env.raining || !is_near_rain_id(world, env, test))
                 {
                     let spread_age = MAX_AGE.min(age + (rng.next_int(5) / 4) as u32);
-                    let new_state = state_with_age(world, env, test, spread_age);
+                    let new_state = state_with_age_id(world, env, test, spread_age);
                     set(world, test, new_state, changes);
                     // The new fire owes itself a tick, or it is inert forever.
                     block_ticks.schedule(
@@ -714,6 +946,32 @@ pub fn run_scheduled_tick<S: ChunkSource + ?Sized, Q: ScheduledTickQueueAccess<S
             }
         }
     }
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub fn run_scheduled_tick<S: ChunkSource + ?Sized, Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized>(
+    world: &S,
+    env: FireEnv,
+    pos: BlockPos,
+    block_ticks: &mut Q,
+    current_tick: u64,
+    rng: &mut SpawnRng,
+    changes: &mut Vec<(BlockPos, String)>,
+    primed_tnt: &mut Vec<BlockPos>,
+) {
+    let mut typed = Vec::new();
+    run_scheduled_tick_id(
+        world,
+        env,
+        pos,
+        block_ticks,
+        current_tick,
+        rng,
+        &mut typed,
+        primed_tnt,
+    );
+    changes.extend(typed.into_iter().map(|(pos, state)| (pos, state.canonical_state())));
 }
 
 /// `FireBlock::checkBurnOut` — the one neighbour-consuming half.
@@ -739,11 +997,11 @@ fn check_burn_out<S: ChunkSource + ?Sized>(
     chance: i32,
     rng: &mut SpawnRng,
     age: u32,
-    changes: &mut Vec<(BlockPos, String)>,
+    changes: &mut Vec<(BlockPos, StateId)>,
     primed_tnt: &mut Vec<BlockPos>,
 ) {
-    let state = block_at(world, env, pos);
-    let odds = i32::from(block_blast::burn_odds_for_state(&state));
+    let state = block_at_id(world, env, pos);
+    let odds = i32::from(block_blast::burn_odds_for_state_id(state));
     if rng.next_int(chance.max(1)) >= odds {
         return;
     }
@@ -752,16 +1010,17 @@ fn check_burn_out<S: ChunkSource + ?Sized>(
     }
     // `random.nextInt(age + 10) < 5 && !level.isRainingAt(pos)` — the draw
     // happens first, the rain test only if it hits.
-    if rng.next_int(age as i32 + 10) < 5 && !is_raining_at(world, env, pos) {
+    if rng.next_int(age as i32 + 10) < 5 && !is_raining_at_id(world, env, pos) {
         let new_age = MAX_AGE.min(age + (rng.next_int(5) / 4) as u32);
-        let new_state = state_with_age(world, env, pos, new_age);
-        world.set_block(pos.x, pos.y, pos.z, &new_state);
+        let new_state = state_with_age_id(world, env, pos, new_age);
+        world.set_block(pos.x, pos.y, pos.z, new_state);
         changes.push((pos, new_state));
     } else {
-        world.set_block(pos.x, pos.y, pos.z, crate::chunk::AIR);
-        changes.push((pos, crate::chunk::AIR.to_owned()));
+        let air = crate::chunk::air_state();
+        world.set_block(pos.x, pos.y, pos.z, air);
+        changes.push((pos, air));
     }
-    if crate::mobs::tnt::is_tnt_block(&state) {
+    if state.block() == Block::Tnt {
         primed_tnt.push(pos);
     }
 }
@@ -804,6 +1063,36 @@ mod tests {
         }
     }
 
+    impl Rig {
+        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+            self.block_state_id(x, y, z).canonical_state()
+        }
+
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
+            let cx = x.div_euclid(16);
+            let cz = z.div_euclid(16);
+            let mut columns = self.columns.lock().expect("rig lock");
+            let column = columns
+                .entry((cx, cz))
+                .or_insert_with(|| ChunkColumn::new(MIN_Y, HEIGHT));
+            column.block_state_id(x - cx * 16, y, z - cz * 16)
+        }
+
+        fn set_block(&self, x: i32, y: i32, z: i32, state: impl Into<TestState>) {
+            self.set_block_id(x, y, z, state.into().0);
+        }
+
+        fn set_block_id(&self, x: i32, y: i32, z: i32, state: StateId) {
+            let cx = x.div_euclid(16);
+            let cz = z.div_euclid(16);
+            let mut columns = self.columns.lock().expect("rig lock");
+            let column = columns
+                .entry((cx, cz))
+                .or_insert_with(|| ChunkColumn::new(MIN_Y, HEIGHT));
+            column.set_block_id(x - cx * 16, y, z - cz * 16, state);
+        }
+    }
+
     impl ChunkSource for Rig {
         fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
             let mut columns = self.columns.lock().expect("rig lock");
@@ -813,14 +1102,8 @@ mod tests {
                 .clone()
         }
 
-        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
-            let cx = x.div_euclid(16);
-            let cz = z.div_euclid(16);
-            let mut columns = self.columns.lock().expect("rig lock");
-            let column = columns
-                .entry((cx, cz))
-                .or_insert_with(|| ChunkColumn::new(MIN_Y, HEIGHT));
-            column.block_state(x - cx * 16, y, z - cz * 16).to_string()
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
+            Rig::block_state_id(self, x, y, z)
         }
 
         fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -833,14 +1116,34 @@ mod tests {
             column.biome_state_at(x - cx * 16, y, z - cz * 16).to_string()
         }
 
-        fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
-            let cx = x.div_euclid(16);
-            let cz = z.div_euclid(16);
-            let mut columns = self.columns.lock().expect("rig lock");
-            let column = columns
-                .entry((cx, cz))
-                .or_insert_with(|| ChunkColumn::new(MIN_Y, HEIGHT));
-            column.set_block(x - cx * 16, y, z - cz * 16, name);
+        fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
+            Rig::set_block_id(self, x, y, z, state);
+        }
+    }
+
+    struct TestState(StateId);
+
+    impl From<&str> for TestState {
+        fn from(state: &str) -> Self {
+            Self(StateId::from_state_str(state).expect("fixture state"))
+        }
+    }
+
+    impl From<String> for TestState {
+        fn from(state: String) -> Self {
+            state.as_str().into()
+        }
+    }
+
+    impl From<&String> for TestState {
+        fn from(state: &String) -> Self {
+            state.as_str().into()
+        }
+    }
+
+    impl From<StateId> for TestState {
+        fn from(state: StateId) -> Self {
+            Self(state)
         }
     }
 
@@ -1050,7 +1353,7 @@ mod tests {
         run_scheduled_tick(&rig, FireEnv::OVERWORLD, pos, &mut queue, 0, &mut r, &mut changes, &mut Vec::new());
         assert_eq!(
             rig.block_state(pos.x, pos.y, pos.z),
-            crate::chunk::AIR,
+            "minecraft:air",
             "unsupported fire must go out"
         );
     }
@@ -1120,7 +1423,7 @@ mod tests {
             let mut changes = Vec::new();
             run_scheduled_tick(&rig, FireEnv::OVERWORLD, pos, &mut queue, 0, &mut r, &mut changes, &mut Vec::new());
             match rig.block_state(0, 99, 0).as_str() {
-                crate::chunk::AIR => to_air += 1,
+                "minecraft:air" => to_air += 1,
                 s if is_fire(s) => to_fire += 1,
                 _ => {}
             }
@@ -1216,7 +1519,7 @@ mod tests {
                 for (at, state) in changes {
                     if is_fire(&state) {
                         ever_lit.insert((at.x, at.y, at.z));
-                    } else if state == crate::chunk::AIR {
+                    } else if state == "minecraft:air" {
                         ever_burnt.insert((at.x, at.y, at.z));
                     }
                 }
@@ -1275,7 +1578,7 @@ mod tests {
     #[test]
     fn placement_state_connects_only_to_burnable_faces() {
         let rig = Rig::with_floor("minecraft:stone", 0);
-        let over_stone = state_for_placement(&rig, FireEnv::OVERWORLD, BlockPos::new(2, 1, 2));
+        let over_stone = placement_text(&rig, FireEnv::OVERWORLD, BlockPos::new(2, 1, 2));
         assert_eq!(
             over_stone,
             format!("{FIRE}[age=0,east=false,north=false,south=false,up=false,west=false]")
@@ -1283,7 +1586,7 @@ mod tests {
 
         let rig = Rig::new();
         rig.set_block(3, 100, 2, "minecraft:oak_planks");
-        let mid_air = state_for_placement(&rig, FireEnv::OVERWORLD, BlockPos::new(2, 100, 2));
+        let mid_air = placement_text(&rig, FireEnv::OVERWORLD, BlockPos::new(2, 100, 2));
         assert_eq!(
             mid_air,
             format!("{FIRE}[age=0,east=true,north=false,south=false,up=false,west=false]")
@@ -1296,10 +1599,10 @@ mod tests {
         for base in ["minecraft:soul_sand", "minecraft:soul_soil"] {
             let rig = Rig::new();
             rig.set_block(2, 99, 2, base);
-            assert_eq!(state_at(&rig, FireEnv::OVERWORLD, BlockPos::new(2, 100, 2)), SOUL_FIRE);
+            assert_eq!(at_text(&rig, FireEnv::OVERWORLD, BlockPos::new(2, 100, 2)), SOUL_FIRE);
         }
         let rig = Rig::with_floor("minecraft:stone", 0);
-        assert!(is_ordinary_fire(&state_at(
+        assert!(is_ordinary_fire(&at_text(
             &rig,
             FireEnv::OVERWORLD,
             BlockPos::new(2, 1, 2)

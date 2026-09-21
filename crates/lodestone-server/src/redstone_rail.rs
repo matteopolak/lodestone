@@ -63,10 +63,13 @@
 
 use crate::neighbor_update::Direction;
 use crate::redstone::{base_name, get_bool_property, get_str_property, with_property, WorldState};
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, PropertyKey, PropertyValue};
+use lodestone_data::block_states::StateId;
 use lodestone_model::BlockPos;
 
-pub const POWERED_RAIL: &str = "minecraft:powered_rail";
-pub const ACTIVATOR_RAIL: &str = "minecraft:activator_rail";
+pub const POWERED_RAIL: Block = Block::PoweredRail;
+pub const ACTIVATOR_RAIL: Block = Block::ActivatorRail;
 
 /// Recursion cap for the same-orientation rail search (`search_depth >= 8`).
 pub const MAX_SEARCH_DEPTH: i32 = 8;
@@ -85,14 +88,14 @@ pub enum RailShape {
 
 impl RailShape {
     #[must_use]
-    pub fn from_str(s: &str) -> Option<Self> {
-        Some(match s {
-            "north_south" => RailShape::NorthSouth,
-            "east_west" => RailShape::EastWest,
-            "ascending_north" => RailShape::AscendingNorth,
-            "ascending_south" => RailShape::AscendingSouth,
-            "ascending_east" => RailShape::AscendingEast,
-            "ascending_west" => RailShape::AscendingWest,
+    pub fn from_value(value: BuiltinPropertyValue) -> Option<Self> {
+        Some(match value {
+            BuiltinPropertyValue::NorthSouth => RailShape::NorthSouth,
+            BuiltinPropertyValue::EastWest => RailShape::EastWest,
+            BuiltinPropertyValue::AscendingNorth => RailShape::AscendingNorth,
+            BuiltinPropertyValue::AscendingSouth => RailShape::AscendingSouth,
+            BuiltinPropertyValue::AscendingEast => RailShape::AscendingEast,
+            BuiltinPropertyValue::AscendingWest => RailShape::AscendingWest,
             _ => return None,
         })
     }
@@ -107,32 +110,32 @@ impl RailShape {
     }
 }
 
-fn rail_shape(state: &str) -> Option<RailShape> {
-    get_str_property(state, "shape").and_then(RailShape::from_str)
+fn rail_shape(state: StateId) -> Option<RailShape> {
+    get_str_property(state, PropertyKey::Shape).and_then(RailShape::from_value)
 }
 
 /// Public wrapper over [`rail_shape`] — the `SHAPE` a caller needs after
 /// [`update_state`] to compute [`extra_notifications`], since a `POWERED`
 /// flip never changes `SHAPE`.
 #[must_use]
-pub fn shape_of(state: &str) -> Option<RailShape> {
+pub fn shape_of(state: StateId) -> Option<RailShape> {
     rail_shape(state)
 }
 
-fn rail_powered(state: &str) -> bool {
-    get_bool_property(state, "powered").unwrap_or(false)
+fn rail_powered(state: StateId) -> bool {
+    get_bool_property(state, PropertyKey::Powered).unwrap_or(false)
 }
 
 /// `true` for either powered-rail family covered by this module.
 #[must_use]
-pub fn is_powered_rail_family(state: &str) -> bool {
+pub fn is_powered_rail_family(state: StateId) -> bool {
     matches!(base_name(state), POWERED_RAIL | ACTIVATOR_RAIL)
 }
 
 /// Checks whether a candidate at `pos` belongs to the same rail family, has a
 /// compatible orientation, and is currently powered. Recursion and neighbour
 /// signal checks stay in [`is_same_rail_at`].
-fn is_candidate_rail(state: &str, family: &str, dir: RailShape) -> bool {
+fn is_candidate_rail(state: StateId, family: Block, dir: RailShape) -> bool {
     if base_name(state) != family {
         return false;
     }
@@ -158,7 +161,7 @@ fn is_candidate_rail(state: &str, family: &str, dir: RailShape) -> bool {
 /// than recomputed here, keeping this module's only dependency on the query
 /// layer at the call site.
 #[must_use]
-pub fn find_powered_rail_signal<F, S>(lookup: &F, has_neighbor_signal: &S, family: &str, pos: BlockPos, shape: RailShape, forward: bool, search_depth: i32) -> bool
+pub fn find_powered_rail_signal<F, S>(lookup: &F, has_neighbor_signal: &S, family: Block, pos: BlockPos, shape: RailShape, forward: bool, search_depth: i32) -> bool
 where
     F: Fn(BlockPos) -> WorldState,
     S: Fn(BlockPos) -> bool,
@@ -246,19 +249,19 @@ where
 
 /// Checks a candidate rail and then looks for either a direct neighbour signal
 /// or a powered relay farther along the same orientation.
-fn is_same_rail_at<F, S>(lookup: &F, has_neighbor_signal: &S, family: &str, pos: BlockPos, forward: bool, search_depth: i32, dir: RailShape) -> bool
+fn is_same_rail_at<F, S>(lookup: &F, has_neighbor_signal: &S, family: Block, pos: BlockPos, forward: bool, search_depth: i32, dir: RailShape) -> bool
 where
     F: Fn(BlockPos) -> WorldState,
     S: Fn(BlockPos) -> bool,
 {
     let state = lookup(pos);
-    if !is_candidate_rail(&state, family, dir) {
+    if !is_candidate_rail(state, family, dir) {
         return false;
     }
     if has_neighbor_signal(pos) {
         return true;
     }
-    let Some(shape) = rail_shape(&state) else { return false };
+    let Some(shape) = rail_shape(state) else { return false };
     find_powered_rail_signal(lookup, has_neighbor_signal, family, pos, shape, forward, search_depth + 1)
 }
 
@@ -283,7 +286,7 @@ pub fn extra_notifications(pos: BlockPos, shape: RailShape) -> Vec<crate::neighb
 
 /// Returns `None` when the computed `POWERED` value already matches the state.
 #[must_use]
-pub fn update_state<F, S>(lookup: &F, has_neighbor_signal: &S, pos: BlockPos, state: &str) -> Option<String>
+pub fn update_state<F, S>(lookup: &F, has_neighbor_signal: &S, pos: BlockPos, state: StateId) -> Option<StateId>
 where
     F: Fn(BlockPos) -> WorldState,
     S: Fn(BlockPos) -> bool,
@@ -300,26 +303,52 @@ where
     if should_power == is_powered {
         return None;
     }
-    Some(with_property(state, "powered", if should_power { "true" } else { "false" }))
+    (should_power != rail_powered(state)).then(|| {
+        with_property(
+            state,
+            PropertyKey::Powered,
+            PropertyValue::builtin(if should_power { BuiltinPropertyValue::True } else { BuiltinPropertyValue::False }),
+        )
+        .expect("rail powered property is a generated state")
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn world(entries: &[(BlockPos, &str)]) -> impl Fn(BlockPos) -> WorldState + use<> {
-        let entries: Vec<(BlockPos, WorldState)> = entries.iter().map(|(p, s)| (*p, WorldState::from(*s))).collect();
+    fn world(entries: &[(BlockPos, StateId)]) -> impl Fn(BlockPos) -> WorldState + use<> {
+        let entries = entries.to_vec();
         move |p: BlockPos| {
             entries
                 .iter()
                 .find(|(pos, _)| *pos == p)
-                .map(|(_, s)| s.clone())
-                .unwrap_or_else(crate::chunk::air_state_arc)
+                .map(|(_, s)| *s)
+                .unwrap_or_else(lodestone_data::block_states::air_state)
         }
     }
 
-    fn rail(shape: &str, powered: bool) -> String {
-        format!("minecraft:powered_rail[shape={shape},powered={powered}]")
+    fn rail(shape: RailShape, powered: bool) -> StateId {
+        let shape = match shape {
+            RailShape::NorthSouth => BuiltinPropertyValue::NorthSouth,
+            RailShape::EastWest => BuiltinPropertyValue::EastWest,
+            RailShape::AscendingNorth => BuiltinPropertyValue::AscendingNorth,
+            RailShape::AscendingSouth => BuiltinPropertyValue::AscendingSouth,
+            RailShape::AscendingEast => BuiltinPropertyValue::AscendingEast,
+            RailShape::AscendingWest => BuiltinPropertyValue::AscendingWest,
+        };
+        let state = with_property(
+            Block::PoweredRail.default_state(),
+            PropertyKey::Shape,
+            PropertyValue::builtin(shape),
+        )
+        .expect("powered rail shape is a generated state");
+        with_property(
+            state,
+            PropertyKey::Powered,
+            PropertyValue::builtin(if powered { BuiltinPropertyValue::True } else { BuiltinPropertyValue::False }),
+        )
+        .expect("powered rail powered property is a generated state")
     }
 
     /// Direct signal alone (no chain at all) powers the rail — the base case
@@ -327,10 +356,10 @@ mod tests {
     #[test]
     fn direct_signal_powers_a_rail_with_no_neighbours() {
         let pos = BlockPos::new(0, 64, 0);
-        let w = world(&[(pos, &rail("north_south", false))]);
+        let w = world(&[(pos, rail(RailShape::NorthSouth, false))]);
         let has_signal = |p: BlockPos| p == pos;
-        let out = update_state(&w, &has_signal, pos, &rail("north_south", false));
-        assert_eq!(out, Some(rail("north_south", true)));
+        let out = update_state(&w, &has_signal, pos, rail(RailShape::NorthSouth, false));
+        assert_eq!(out, Some(rail(RailShape::NorthSouth, true)));
     }
 
     /// **The chain case, two hops out.** The search only ever
@@ -348,13 +377,13 @@ mod tests {
         let b = BlockPos::new(0, 64, 1);
         let c = BlockPos::new(0, 64, 2);
         let w = world(&[
-            (a, &rail("north_south", false)),
-            (b, &rail("north_south", true)),
-            (c, &rail("north_south", true)),
+            (a, rail(RailShape::NorthSouth, false)),
+            (b, rail(RailShape::NorthSouth, true)),
+            (c, rail(RailShape::NorthSouth, true)),
         ]);
         let has_signal = |p: BlockPos| p == c;
-        let out = update_state(&w, &has_signal, a, &rail("north_south", false));
-        assert_eq!(out, Some(rail("north_south", true)), "A must inherit power by walking through B to C's signal");
+        let out = update_state(&w, &has_signal, a, rail(RailShape::NorthSouth, false));
+        assert_eq!(out, Some(rail(RailShape::NorthSouth, true)), "A must inherit power by walking through B to C's signal");
     }
 
     /// **The gating half of the case above, isolated.** If B is *not* already
@@ -369,12 +398,12 @@ mod tests {
         let b = BlockPos::new(0, 64, 1);
         let c = BlockPos::new(0, 64, 2);
         let w = world(&[
-            (a, &rail("north_south", false)),
-            (b, &rail("north_south", false)),
-            (c, &rail("north_south", true)),
+            (a, rail(RailShape::NorthSouth, false)),
+            (b, rail(RailShape::NorthSouth, false)),
+            (c, rail(RailShape::NorthSouth, true)),
         ]);
         let has_signal = |p: BlockPos| p == c;
-        let out = update_state(&w, &has_signal, a, &rail("north_south", false));
+        let out = update_state(&w, &has_signal, a, rail(RailShape::NorthSouth, false));
         assert_eq!(out, None, "B is not itself powered, so the search must not reach past it to C");
     }
 
@@ -387,13 +416,12 @@ mod tests {
         let origin = BlockPos::new(0, 64, 0);
         let mut entries = Vec::new();
         for i in 0..=9 {
-            entries.push((BlockPos::new(0, 64, i), rail("north_south", true)));
+            entries.push((BlockPos::new(0, 64, i), rail(RailShape::NorthSouth, true)));
         }
-        let entries_ref: Vec<(BlockPos, &str)> = entries.iter().map(|(p, s)| (*p, s.as_str())).collect();
-        let w = world(&entries_ref);
+        let w = world(&entries);
         let far_end = BlockPos::new(0, 64, 9);
         let has_signal = move |p: BlockPos| p == far_end;
-        let out = update_state(&w, &has_signal, origin, &rail("north_south", false));
+        let out = update_state(&w, &has_signal, origin, rail(RailShape::NorthSouth, false));
         assert_eq!(out, None, "a signal 9 cells away must not power the origin through the cap");
     }
 
@@ -404,9 +432,9 @@ mod tests {
     fn a_perpendicular_rail_does_not_relay_power() {
         let a = BlockPos::new(0, 64, 0);
         let b = BlockPos::new(0, 64, 1);
-        let w = world(&[(a, &rail("north_south", false)), (b, &rail("east_west", true))]);
+        let w = world(&[(a, rail(RailShape::NorthSouth, false)), (b, rail(RailShape::EastWest, true))]);
         let has_signal = |p: BlockPos| p == b;
-        let out = update_state(&w, &has_signal, a, &rail("north_south", false));
+        let out = update_state(&w, &has_signal, a, rail(RailShape::NorthSouth, false));
         assert_eq!(out, None, "an east/west rail must not carry a north/south search's power");
     }
 
@@ -415,9 +443,9 @@ mod tests {
     #[test]
     fn no_change_when_already_at_the_computed_value() {
         let pos = BlockPos::new(0, 64, 0);
-        let w = world(&[(pos, &rail("north_south", true))]);
+        let w = world(&[(pos, rail(RailShape::NorthSouth, true))]);
         let has_signal = |p: BlockPos| p == pos;
-        assert_eq!(update_state(&w, &has_signal, pos, &rail("north_south", true)), None);
+        assert_eq!(update_state(&w, &has_signal, pos, rail(RailShape::NorthSouth, true)), None);
     }
 
     /// [`extra_notifications`]: flat rail notifies only below; a slope also
@@ -438,9 +466,15 @@ mod tests {
     /// `is_powered_rail_family` covers both registered rail families.
     #[test]
     fn both_powered_and_activator_rail_are_the_same_family() {
-        assert!(is_powered_rail_family("minecraft:powered_rail[shape=north_south,powered=false]"));
-        assert!(is_powered_rail_family("minecraft:activator_rail[shape=north_south,powered=false]"));
-        assert!(!is_powered_rail_family("minecraft:rail[shape=north_south]"));
-        assert!(!is_powered_rail_family("minecraft:detector_rail[shape=north_south,powered=false]"));
+        assert!(is_powered_rail_family(rail(RailShape::NorthSouth, false)));
+        let activator = with_property(
+            Block::ActivatorRail.default_state(),
+            PropertyKey::Shape,
+            PropertyValue::builtin(BuiltinPropertyValue::NorthSouth),
+        )
+        .expect("activator rail shape is a generated state");
+        assert!(is_powered_rail_family(activator));
+        assert!(!is_powered_rail_family(Block::Rail.default_state()));
+        assert!(!is_powered_rail_family(Block::DetectorRail.default_state()));
     }
 }

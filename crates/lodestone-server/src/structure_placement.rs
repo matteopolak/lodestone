@@ -21,7 +21,7 @@
 //! the exact same [`StructureTemplate::place`] generation uses, and writes
 //! every touched cell back through [`ChunkSource::set_block`] — the same
 //! edit path a player's own block placement goes through, so the paste
-//! persists and reports through `column()`/`block_state()` exactly like any
+//! persists and reports through `column()`/`block_state_id()` exactly like any
 //! other edit.
 
 use lodestone_worldgen::dense_grid::DenseBlockGrid;
@@ -62,12 +62,19 @@ pub fn place_structure_live(
         return 0;
     }
 
-    let mut grid = DenseBlockGrid::new(min_x, min_y, min_z, size_x, size_y, size_z, "minecraft:air");
+    let mut grid = DenseBlockGrid::with_default(
+        min_x,
+        min_y,
+        min_z,
+        size_x,
+        size_y,
+        size_z,
+        lodestone_data::block_states::air_state(),
+    );
     for y in min_y..min_y + size_y {
         for z in min_z..min_z + size_z {
             for x in min_x..min_x + size_x {
-                let state = source.block_state(x, y, z);
-                grid.set(x, y, z, &state);
+                grid.set_id(x, y, z, source.block_state_id(x, y, z));
             }
         }
     }
@@ -77,7 +84,7 @@ pub fn place_structure_live(
     for y in min_y..min_y + size_y {
         for z in min_z..min_z + size_z {
             for x in min_x..min_x + size_x {
-                source.set_block(x, y, z, grid.get(x, y, z));
+                source.set_block(x, y, z, grid.get_id(x, y, z));
             }
         }
     }
@@ -96,7 +103,7 @@ mod tests {
     /// prove [`place_structure_live`] reads/writes through the real
     /// [`ChunkSource`] interface, without pulling in a whole generator.
     struct FlatStoneWorld {
-        edits: Mutex<HashMap<(i32, i32, i32), String>>,
+        edits: Mutex<HashMap<(i32, i32, i32), lodestone_data::block_states::StateId>>,
     }
 
     impl FlatStoneWorld {
@@ -112,18 +119,19 @@ mod tests {
             ChunkColumn::new(0, 8)
         }
 
-        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> lodestone_data::block_states::StateId {
             self.edits
                 .lock()
                 .unwrap()
                 .get(&(x, y, z))
-                .cloned()
+                .copied()
                 .unwrap_or_else(|| {
-                    if y == 0 {
-                        "minecraft:stone".to_string()
+                    lodestone_data::block_states::StateId::from_state_str(if y == 0 {
+                        "minecraft:stone"
                     } else {
-                        "minecraft:air".to_string()
-                    }
+                        "minecraft:air"
+                    })
+                    .expect("fixture state is canonical")
                 })
         }
 
@@ -131,8 +139,15 @@ mod tests {
             "minecraft:plains".to_string()
         }
 
-        fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
-            self.edits.lock().unwrap().insert((x, y, z), name.to_string());
+        fn set_block(&self, x: i32, y: i32, z: i32, state: lodestone_data::block_states::StateId) {
+            self.edits
+                .lock()
+                .unwrap()
+                .insert((x, y, z), state);
+        }
+
+        fn block_state(&self, x: i32, y: i32, z: i32) -> lodestone_data::block_states::StateId {
+            self.block_state_id(x, y, z)
         }
     }
 
@@ -155,7 +170,11 @@ mod tests {
     #[test]
     fn pastes_into_an_already_generated_live_world() {
         let world = FlatStoneWorld::new();
-        assert_eq!(world.block_state(5, 1, 5), "minecraft:air", "control: nothing there yet");
+        assert_eq!(
+            world.block_state(5, 1, 5).name(),
+            "minecraft:air",
+            "control: nothing there yet"
+        );
 
         let template = two_block_template();
         let origin = PlaceOrigin {
@@ -166,13 +185,13 @@ mod tests {
         let written = place_structure_live(&world, &template, origin, &PlaceSettings::default());
 
         assert_eq!(written, 2);
-        assert_eq!(world.block_state(5, 1, 5), "minecraft:gold_block");
-        assert_eq!(world.block_state(5, 2, 5), "minecraft:diamond_block");
+        assert_eq!(world.block_state(5, 1, 5).name(), "minecraft:gold_block");
+        assert_eq!(world.block_state(5, 2, 5).name(), "minecraft:diamond_block");
         // Outside the template's own footprint is untouched.
-        assert_eq!(world.block_state(6, 1, 5), "minecraft:air");
+        assert_eq!(world.block_state(6, 1, 5).name(), "minecraft:air");
         // And the pre-existing stone floor the template did not cover is
         // still there, proving the whole-bbox writeback did not clobber
         // live blocks it merely read.
-        assert_eq!(world.block_state(5, 0, 5), "minecraft:stone");
+        assert_eq!(world.block_state(5, 0, 5).name(), "minecraft:stone");
     }
 }

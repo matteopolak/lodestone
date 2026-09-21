@@ -30,6 +30,8 @@
 use std::time::Duration;
 
 use lodestone_core::{Decode, Reader, Writer};
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 use lodestone_net::{Connection, Transport};
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
 use lodestone_v26_2::V770ServerProtocol;
@@ -54,19 +56,18 @@ impl ChunkSource for FlatSource {
         for x in 0..16 {
             for z in 0..16 {
                 for y in MIN_Y..=64 {
-                    column.set_block(x, y, z, "minecraft:stone");
+                    column.set_block_id(x, y, z, Block::Stone.default_state());
                 }
             }
         }
         column
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         self.column(cx, cz)
-            .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
-            .to_string()
+            .block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -77,7 +78,7 @@ impl ChunkSource for FlatSource {
             .to_string()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
         // Read-only fixture.
     }
 }
