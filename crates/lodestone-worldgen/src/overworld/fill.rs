@@ -1579,16 +1579,13 @@ impl OverworldGenerator {
         };
         let mut carvers_for_source = |source_x: i32, source_z: i32| -> &[CarverConfig] {
             let biome = if let Some(cursor) = cursor.as_deref_mut() {
-                self.biome_for_carver_source(source_x, source_z, cursor)
+                self.carver_biome_for_source(source_x, source_z, cursor)
             } else if let Some(cursor) = owned_cursor.as_mut() {
-                self.biome_for_carver_source(source_x, source_z, cursor)
+                self.carver_biome_for_source(source_x, source_z, cursor)
             } else {
-                self.fallback_biome.as_str()
+                return self.carvers_by_biome.get_name(&self.fallback_biome);
             };
-            self.carvers_by_biome
-                .get(biome)
-                .map(Vec::as_slice)
-                .unwrap_or(&[])
+            self.carvers_by_biome.get(biome)
         };
 
         let mut grid = CarveGrid::from_dense(world);

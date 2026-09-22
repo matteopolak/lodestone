@@ -127,7 +127,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::aquifer::{AquiferSystem, BlockKind};
 use crate::biome::{BiomeTable, ClimateSampler};
-use crate::carver::{CarveGrid, CarverConfig, NoObserver};
+use crate::carver::{CarveGrid, CarverCatalog, CarverConfig, NoObserver};
 use crate::density::{Builder, Resolver};
 use crate::engine::Program;
 use crate::feature::{PlacedOre, PlacedScatteredOre, RuleTest};
@@ -652,7 +652,7 @@ pub struct NetherGenerator {
     /// no tag data, in which case carving is a harmless no-op — the same
     /// no-data-supplied convention every other stage here follows.
     carver_replaceable: FastSet<StateId>,
-    carvers_by_biome: HashMap<String, Vec<CarverConfig>>,
+    carvers_by_biome: CarverCatalog,
     /// The globally ordered decoration catalog. Feature seeds use the index in
     /// this per-step order, not a biome document's local position; the source
     /// pass selects the union of its 3x3 section biomes from this catalog.
@@ -1303,7 +1303,7 @@ impl NetherGenerator {
             .filter_map(|name| Block::from_name(name).map(Block::default_state))
             .collect();
 
-        let mut carvers_by_biome = HashMap::new();
+        let mut carvers_by_biome = CarverCatalog::new();
         let mut ores_by_biome = HashMap::new();
         // Vanilla's own multi-noise biome source's "possible biomes" for this dimension, derived from
         // the parameter table rather than written down: a hardcoded list of the
@@ -1311,10 +1311,12 @@ impl NetherGenerator {
         // added a sixth would silently lose its structures.
         let mut possible_biomes: HashSet<String> = HashSet::new();
         for point in table.iter() {
-            possible_biomes.insert(point.biome.clone());
-            carvers_by_biome
-                .entry(point.biome.clone())
-                .or_insert_with(|| crate::compose::build_biome_carvers(resolver, &point.biome));
+            if possible_biomes.insert(point.biome.clone()) {
+                carvers_by_biome.insert(
+                    point.biome.clone(),
+                    crate::compose::build_biome_carvers(resolver, &point.biome),
+                );
+            }
             let (ores, _) = build_nether_feature_lists(resolver, &point.biome);
             ores_by_biome.entry(point.biome.clone()).or_insert(ores);
         }
@@ -2538,9 +2540,20 @@ impl NetherGenerator {
     /// The biome one *source chunk* of the carve neighbourhood resolves to —
     /// vanilla's `carverBiome`, sampled at that chunk's own quart corner and
     /// `y = 0`.
-    fn biome_for_carver_source(&self, source_x: i32, source_z: i32) -> &str {
+    fn carver_biome_for_source(
+        &self,
+        source_x: i32,
+        source_z: i32,
+    ) -> crate::carver::CarverBiome<'_> {
         let target = self.climate.target(source_x * 16, 0, source_z * 16);
-        self.table.nearest(&target)
+        let row = self.table.nearest_row(&target);
+        crate::carver::CarverBiome::Builtin(
+            self.table
+                .biome_ref_at(row)
+                .expect("strict Nether biome table contains only generated built-ins")
+                .builtin_or_none()
+                .expect("strict Nether biome table contains only generated built-ins"),
+        )
     }
 
     fn surface_stage(
@@ -2684,11 +2697,8 @@ impl NetherGenerator {
         let mut grid = CarveGrid::from_dense(world);
         let mut carvers_for_source =
             |sx: i32, sz: i32| -> &[CarverConfig] {
-                let biome = self.biome_for_carver_source(sx, sz);
-                self.carvers_by_biome
-                    .get(biome)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[])
+                let biome = self.carver_biome_for_source(sx, sz);
+                self.carvers_by_biome.get(biome)
             };
         let top_material = |_: i32, _: i32, _: i32, _: bool| -> Option<StateId> { None };
         crate::carver::apply_carvers(
@@ -3587,7 +3597,10 @@ mod tests {
                 let mut random = decoration_random();
                 random.begin_decoration_source();
                 let decoration_seed = random.set_decoration_seed(generator.seed, origin.x, origin.z);
-                let biome = generator.biome_for_carver_source(source_x, source_z);
+                let biome = match generator.carver_biome_for_source(source_x, source_z) {
+                    crate::carver::CarverBiome::Builtin(biome) => biome.name(),
+                    crate::carver::CarverBiome::Extension(name) => name,
+                };
                 let (_, decorations) = build_nether_feature_lists(&assets, biome);
                 for (_, index, placed) in decorations.iter().filter(|(step, _, _)| *step == 4) {
                     if (source_x, source_z, *index) == (-251, -249, 0) {
