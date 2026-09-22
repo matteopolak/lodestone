@@ -41,11 +41,13 @@ read from each interval, and do not enable the ordinary generation counters.
 The session remainder includes production admission, materialization, ledger,
 publication, and diagnostic observer overhead; compare it with the uninstrumented
 `production_request` total rather than treating it as a generator stage.
-The same feature reports four non-overlapping lifecycle regions: replay-context
+The same feature reports five lifecycle regions: admission, replay-context
 preparation, requested-target mutable advancement, sparse-padding completion, and
-packet-snapshot finalization. These regions explain the session remainder without
-changing the default build; packet light and encoding remain the separate
-`light_encode` metric.
+packet-snapshot finalization. Admission is measured around the immutable region
+admission call and therefore overlaps the terrain-prefix stage counters; the
+other regions are disjoint lifecycle scopes. These regions explain the session
+remainder without changing the default build; packet light and encoding remain
+the separate `light_encode` metric.
 
 The production prefix carries its sixteen surface biomes as `BiomeRef` values with
 their snow-temperature results. Surface and top-layer consumers keep that typed
