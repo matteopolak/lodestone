@@ -883,12 +883,8 @@ impl OverworldGenerator {
                     let y0 = self.min_y + cell_y * 8;
                     let z0 = base_z + cell_z * 4;
                     let solid_cell = if empty_beard && sampler.supports_final_density_cells() {
-                        if sampler.final_density_cell_is_positive(x0, y0, z0) {
-                            true
-                        } else {
-                            sampler.final_density_cell(x0, y0, z0, &mut densities);
-                            Self::cell_densities_are_positive(&densities)
-                        }
+                        sampler.final_density_cell_or_positive(x0, y0, z0, &mut densities)
+                            || Self::cell_densities_are_positive(&densities)
                     } else {
                         sampler.final_density_cell(x0, y0, z0, &mut densities);
                         empty_beard && Self::cell_densities_are_positive(&densities)

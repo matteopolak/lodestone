@@ -71,6 +71,11 @@ while sparse positions and mismatched identities use the exact snapped lookup.
 This keeps the interpolation cell cache and shared slot lattice authoritative
 rather than replacing them with an independent cross-cell cache.
 
+Overworld cell filling uses `final_density_cell_or_positive` for the fast solid-cell proof. A
+single field context handles the proof and the exact 128-value fallback, so inconclusive cells do
+not rebuild the evaluator entry state. The fallback remains bitwise-identical to
+`final_density_cell`; positive cells leave the caller's output buffer untouched.
+
 The focused bundled control compares every output bit with fresh scalar point
 queries. With `gen-counters`, the same 4×2-cell sample reports 9,276 scalar
 field visits versus 3,132 compiled-plan visits. The product-admitted route

@@ -2332,12 +2332,35 @@ impl OverworldGenerator {
         targets: &[(i32, i32)],
         read_radius: i32,
     ) -> MixedReplayBatch {
+        self.mixed_replay_batch_with_radius_inner(targets, read_radius, true)
+    }
+
+    /// Builds a replay batch from prefixes prepared by the caller's admitted
+    /// generation region. Production uses this after the shaped admission
+    /// already covered the complete replay dependency union.
+    #[must_use]
+    pub fn mixed_replay_batch_with_radius_prepared(
+        &self,
+        targets: &[(i32, i32)],
+        read_radius: i32,
+    ) -> MixedReplayBatch {
+        self.mixed_replay_batch_with_radius_inner(targets, read_radius, false)
+    }
+
+    fn mixed_replay_batch_with_radius_inner(
+        &self,
+        targets: &[(i32, i32)],
+        read_radius: i32,
+        prepare_prefixes: bool,
+    ) -> MixedReplayBatch {
         assert!((0..=3).contains(&read_radius));
         let order = unique_target_order(targets);
         let positions = replay_dependency_union_with_radius(&order, read_radius)
             .into_iter()
             .collect::<Vec<_>>();
-        self.prepare_pre_ore_position_union(&positions);
+        if prepare_prefixes {
+            self.prepare_pre_ore_position_union(&positions);
+        }
         let products = positions
             .into_iter()
             .map(|position| {

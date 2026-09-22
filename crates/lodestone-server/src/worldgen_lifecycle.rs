@@ -490,6 +490,13 @@ pub trait LifecycleWorldgenSource {
             .collect()
     }
 
+    fn lifecycle_replay_contexts_prepared(
+        &self,
+        _targets: &[ChunkPos],
+    ) -> Option<BTreeMap<ChunkPos, Arc<Self::ReplayContext>>> {
+        None
+    }
+
     /// Start an optional request-owned mutable decoration epoch after all
     /// target contexts have been prepared. Sources without a shared region
     /// keep the scalar completion path.
@@ -910,6 +917,13 @@ impl<T: LifecycleWorldgenSource + ?Sized> LifecycleWorldgenSource for &T {
         LifecycleWorldgenSource::lifecycle_replay_contexts(*self, targets)
     }
 
+    fn lifecycle_replay_contexts_prepared(
+        &self,
+        targets: &[ChunkPos],
+    ) -> Option<BTreeMap<ChunkPos, Arc<Self::ReplayContext>>> {
+        LifecycleWorldgenSource::lifecycle_replay_contexts_prepared(*self, targets)
+    }
+
     fn begin_region_feature_epoch(
         &self,
         targets: &[ChunkPos],
@@ -1257,6 +1271,24 @@ impl LifecycleWorldgenSource for OverworldChunkSource {
             .into_iter()
             .filter_map(|target| batch.context_arc(target).map(|context| (target, context)))
             .collect()
+    }
+
+    fn lifecycle_replay_contexts_prepared(
+        &self,
+        targets: &[ChunkPos],
+    ) -> Option<BTreeMap<ChunkPos, Arc<Self::ReplayContext>>> {
+        let batch = self
+            .generator()
+            .mixed_replay_batch_with_radius_prepared(targets, TARGET_FEATURE_RADIUS);
+        Some(
+            targets
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .filter_map(|target| batch.context_arc(target).map(|context| (target, context)))
+                .collect(),
+        )
     }
 
     fn begin_region_feature_epoch(
@@ -2184,6 +2216,16 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
     /// sources use a shared mixed batch; other sources use scalar defaults.
     pub fn prepare_lifecycle_replay_contexts(&mut self, targets: &[ChunkPos]) {
         self.replay_contexts = self.source.lifecycle_replay_contexts(targets);
+        self.region_feature_epoch = self
+            .source
+            .begin_region_feature_epoch(targets, &self.replay_contexts);
+    }
+
+    pub fn prepare_lifecycle_replay_contexts_prepared(&mut self, targets: &[ChunkPos]) {
+        self.replay_contexts = self
+            .source
+            .lifecycle_replay_contexts_prepared(targets)
+            .unwrap_or_else(|| self.source.lifecycle_replay_contexts(targets));
         self.region_feature_epoch = self
             .source
             .begin_region_feature_epoch(targets, &self.replay_contexts);
