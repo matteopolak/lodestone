@@ -60,6 +60,12 @@ unbounded map.
 The region-prefix control expects one sampler for a multi-target request; the scalar control keeps
 one sampler per independent reference call.
 
+Production dimension constructors build each registry against the set of biomes that their sampler
+can reach. This removes structure sets that cannot pass the dimension's biome gate before any
+placement-cell walk or structure-start evaluation, while preserving the resource-location order of
+the retained registry for all random draws and placement ordering. Generic and fixture callers may
+still use the unfiltered constructor.
+
 The start biome gate uses the context's borrowed membership query, so the production sampler does
 not allocate a biome id for every candidate. Its pre-surface block-kind reads retain only the
 immediately previous coordinate result; this is enough for eager mineshaft predicates' repeated

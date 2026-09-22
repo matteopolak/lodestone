@@ -1160,6 +1160,7 @@ impl OverworldGenerator {
         }
         let biome_names: std::collections::BTreeSet<String> =
             biome_source_order.iter().cloned().collect();
+        let possible_structure_biomes: HashSet<String> = biome_names.iter().cloned().collect();
 
         let mut carvers_by_biome = HashMap::new();
         // The same per-biome document walk also yields each
@@ -1206,7 +1207,11 @@ impl OverworldGenerator {
         // `None`, so nothing downstream distinguishes "no structure data" from
         // "this engine before structures existed".
         let structures = {
-            let registry = crate::structure::StructureRegistry::new(seed, resolver);
+            let registry = crate::structure::StructureRegistry::new_for_biomes(
+                seed,
+                resolver,
+                Some(&possible_structure_biomes),
+            );
             if registry.is_empty() { None } else { Some(registry) }
         };
         let generation_identity = resolver_fingerprint.map(|resolver_fingerprint| {
