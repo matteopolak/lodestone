@@ -163,6 +163,15 @@ impl<'a> Field<'a> {
                 z0.div_euclid(self.geom.cell_width),
             );
 
+        if let Some(tile_plan) = self.graph.overworld_final_density_tile_plan() {
+            self.eval_overworld_final_density_tile_cell(
+                plan, tile_plan, x0, y0, z0, output,
+            );
+            self.tile_active = false;
+            self.cell_xz = None;
+            return;
+        }
+
         let all = [u64::MAX; 2];
         self.interpolate_cell(
             plan.terrain_inner,
@@ -258,6 +267,92 @@ impl<'a> Field<'a> {
         }
         self.tile_active = false;
         self.cell_xz = None;
+    }
+
+    fn eval_overworld_final_density_tile_cell(
+        &mut self,
+        final_plan: OverworldFinalDensityPlan,
+        tile_plan: &TilePlan,
+        x0: i32,
+        y0: i32,
+        z0: i32,
+        output: &mut [f64; 128],
+    ) {
+        debug_assert_eq!(tile_plan.roots.len(), 5);
+        let roots = [
+            tile_plan.roots[0],
+            tile_plan.roots[1],
+            tile_plan.roots[2],
+            tile_plan.roots[3],
+            tile_plan.roots[4],
+        ];
+        let slots = [
+            final_plan.terrain_slot,
+            final_plan.noodle_control_slot,
+            final_plan.noodle_ridge_a_slot,
+            final_plan.noodle_ridge_b_slot,
+            final_plan.noodle_thickness_slot,
+        ];
+        let cw = self.geom.cell_width;
+        let ch = self.geom.cell_height;
+        let cx = x0.div_euclid(cw);
+        let cy = y0.div_euclid(ch);
+        let cz = z0.div_euclid(cw);
+        let keys = cell_corner_keys(cx, cy, cz, cw, ch);
+        let mut corners = [[0.0; 8]; 5];
+        let mut active = [0_u8; 5];
+
+        for root in 0..5 {
+            if let Some(values) = self
+                .scratch
+                .cell_get_ref_with_column(slots[root], cx, cy, cz, self.cell_xz)
+            {
+                corners[root] = *values;
+                continue;
+            }
+            crate::counters::bump_cell_fill();
+            crate::counters::bump_cache_compute(crate::counters::CacheKind::Cell);
+            for (lane, key) in keys.into_iter().enumerate() {
+                crate::counters::bump_corner_lookup();
+                if let Some(value) = self.scratch.slot_get(slots[root], key) {
+                    crate::counters::bump_slot_hit();
+                    corners[root][lane] = value;
+                } else {
+                    crate::counters::bump_slot_miss(slots[root]);
+                    crate::counters::bump_corner_eval();
+                    crate::counters::bump_cache_compute(crate::counters::CacheKind::Slot);
+                    active[root] |= 1 << lane;
+                }
+            }
+        }
+
+        if active.iter().any(|&mask| mask != 0) {
+            let computed = self.eval_tile_plan_roots(tile_plan, roots, keys, active);
+            for root in 0..5 {
+                for (lane, key) in keys.into_iter().enumerate() {
+                    if active[root] & (1 << lane) != 0 {
+                        let value = computed[root][lane];
+                        corners[root][lane] = value;
+                        self.scratch.slot_put(slots[root], key, value);
+                    }
+                }
+                if active[root] != 0 {
+                    self.scratch
+                        .cell_put(slots[root], cx, cy, cz, corners[root]);
+                }
+            }
+        }
+
+        write_interpolated_corners(cw, ch, x0, y0, z0, [u64::MAX; 2], corners[0], output);
+        let mut out_mask = [0_u64; 2];
+        for index in 0..128 {
+            let value = interpolate_lane(cw, ch, index, &corners[1]);
+            if !(value >= -1_000_000.0 && value < 0.0) {
+                out_mask[index >> 6] |= 1_u64 << (index & 63);
+            }
+        }
+        let channels = [corners[1], corners[2], corners[3], corners[4]];
+        write_shared_noodle_output(cw, ch, out_mask, &channels, output);
     }
 
     /// Proves that every emitted block in one production cell has positive
@@ -1156,6 +1251,36 @@ impl<'a> Field<'a> {
             self.products,
             std::ptr::from_ref(self.graph),
         )
+    }
+
+    fn eval_tile_plan_roots(
+        &mut self,
+        plan: &TilePlan,
+        roots: [u16; 5],
+        contexts: [(i32, i32, i32); 8],
+        active: [u8; 5],
+    ) -> [[f64; 8]; 5] {
+        self.scratch.begin_tile_plan(plan.ops.len());
+        for root in 0..5 {
+            if active[root] != 0 {
+                eval_tile_plan_node(
+                    plan,
+                    roots[root],
+                    &contexts,
+                    active[root],
+                    self.scratch,
+                    self.noises,
+                    self.leaves,
+                    self.products,
+                    std::ptr::from_ref(self.graph),
+                );
+            }
+        }
+        let mut values = [[0.0; 8]; 5];
+        for root in 0..5 {
+            values[root] = self.scratch.plan_values(roots[root]);
+        }
+        values
     }
 
     #[inline(always)]
