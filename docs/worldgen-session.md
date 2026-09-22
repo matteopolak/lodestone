@@ -46,10 +46,17 @@ already-prepared replay window. It owns the mutable feature overlay for the
 complete canonical target sequence, including sparse padding targets. Each
 target applies the epoch's prior writes before running its feature and top-layer
 passes, records new local and cross-column writes, and advances the same ordered
-overlay. Padding uses the same epoch but discards its dense working column
-without compacting it into a `ChunkColumn`; only sparse writes and entities
-needed by requested targets are retained. Nether, End, and fixture sources use
+overlay. Padding runs FEATURES and TOP_LAYER directly against that overlay and
+its immutable sources, without constructing a disposable dense working column.
+Only sparse writes and entities needed by requested targets are retained.
+TOP_LAYER keeps its motion-blocking scan and observes each ice write before
+testing snow placement. Nether, End, and fixture sources use
 the typed no-op hook and keep their existing scalar path.
+
+The epoch's vegetation grid retains immutable terrain heights for both the
+non-air surface and the motion-blocking ocean floor. Those probes read the
+admitted pre-FEATURES source window; prior-target, feature, ore, and top-layer
+writes affect only the live height probes.
 
 Settlement padding uses the explicit `LifecycleCompletionMode::SparsePadding`
 boundary. A padding writer still runs the mixed FEATURES stream followed by
@@ -86,7 +93,26 @@ finalization and every supplied neighbour must match it. Full packet snapshots
 also require the output product and all output sidecars, including client
 heightmaps.
 
-The initial-light broker passes the owned radius-one columns to the version
+Immutable output products and packet snapshots share one `Arc<ChunkColumn>`.
+When a direct FEATURES result already includes TOP_LAYER, the two stage records
+also share that result; scalar paths that perform another mutation keep distinct
+products. Stage completion alone does not make an old product a valid live
+neighbor: later sources may have written into its resident column.
+
+Batch packet finalization shares unchanged materialized neighbors through a
+local coordinate map. Canonicalizing a target invalidates its entry before the
+next snapshot is taken. Earlier snapshots retain their previous version, and
+the map is discarded at the end of finalization. Canonical feature winners are
+indexed by destination column so finalizing a target does not scan unrelated
+columns' writes. Consuming a shared neighbor for mutation detaches it first.
+
+Sparse padding writes into an untouched future direct-output target stay in the
+ordered mutation journal until that target consumes them. They do not materialize
+a temporary mutable column that direct completion would immediately replace.
+Already materialized targets and sources without that direct-output contract
+retain ordinary immediate writes.
+
+The initial-light broker passes borrowed views of the snapshot's radius-one columns to the version
 encoder; it does not reread a mutable source after detachment. Sources without
 this request boundary use the scalar generation fallback.
 
@@ -157,6 +183,8 @@ retained-byte usage. `new` accounts inline value size; heap-backed values use
 `new_with_retained_bytes` (and mutable writes use
 `push_with_retained_bytes`) so callers do not silently under-report retained
 memory. Pending values are charged when accepted and released on cancellation.
+Charges are per logical product, not deduplicated physical allocations: two
+stage records sharing an `Arc` still each consume their declared byte budget.
 
 Mutable stages require `declare_mutable_sources` with a complete zero-based
 canonical source set. A stage cannot commit after only a contiguous prefix;

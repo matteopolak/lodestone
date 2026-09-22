@@ -13,6 +13,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+lodestone-data = { workspace = true }
 # `ResourceKey` is the validated internal type used by the plugin dimension
 # registration seam; the textual constant below is parsed once at ingress.
 lodestone-model = { workspace = true }

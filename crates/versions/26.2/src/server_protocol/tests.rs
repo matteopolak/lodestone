@@ -13,6 +13,15 @@ fn fixture_state_id(state: &str) -> StateId {
     StateId::from_state_str(state).expect("known block-state fixture")
 }
 
+fn borrowed_neighbours(
+    neighbours: &[(i32, i32, ServerChunkColumn)],
+) -> Vec<(i32, i32, &ServerChunkColumn)> {
+    neighbours
+        .iter()
+        .map(|(dx, dz, column)| (*dx, *dz, column))
+        .collect()
+}
+
 #[cfg(test)]
 mod block_edit_tests {
     use super::*;
@@ -829,7 +838,7 @@ mod block_edit_tests {
         let isolated = decode_light(ServerProtocol::encode_chunk(&proto, 0, 0, &center));
         let with_east = decode_light(
             proto
-                .try_encode_chunk_with_neighbours(0, 0, &center, &[(1, 0, east)])
+                .try_encode_chunk_with_neighbours(0, 0, &center, &[(1, 0, &east)])
                 .expect("neighbour-aware encoding"),
         );
 
@@ -855,6 +864,7 @@ mod block_edit_tests {
                 (dx, dz, column)
             })
             .collect::<Vec<_>>();
+        let neighbour_refs = borrowed_neighbours(&neighbours);
 
         let decode = |column: &ServerChunkColumn| {
             let ServerDirective::Send { payload, .. } = proto
@@ -862,7 +872,7 @@ mod block_edit_tests {
                     0,
                     0,
                     column,
-                    &neighbours,
+                    &neighbour_refs,
                     Dimension::Nether,
                 )
                 .expect("initial Nether chunk")
@@ -880,7 +890,7 @@ mod block_edit_tests {
         let settlement = proto
             .compute_initial_column_lights_with_neighbours_in_dimension(
                 &center,
-                &neighbours,
+                &neighbour_refs,
                 Dimension::Nether,
             )
             .expect("detached initial Nether settlement");
@@ -907,7 +917,7 @@ mod block_edit_tests {
         let shape = ChunkShape::nether_or_end_1_21();
         let proto = V770ServerProtocol;
         let decode = |center: &ServerChunkColumn,
-                      neighbours: &[(i32, i32, ServerChunkColumn)]| {
+                      neighbours: &[(i32, i32, &ServerChunkColumn)]| {
             let ServerDirective::Send { payload, .. } = proto
                 .try_encode_chunk_with_neighbours_in_dimension(
                     0,
@@ -934,7 +944,7 @@ mod block_edit_tests {
         // the allocated section, not from a computed non-zero block-light cell.
         let mut high_diagonal = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
         high_diagonal.set_block_id(8, 128, 8, Block::Netherrack.default_state());
-        let with_high_diagonal = decode(&center, &[(1, 1, high_diagonal)]);
+        let with_high_diagonal = decode(&center, &[(1, 1, &high_diagonal)]);
         assert_eq!(with_high_diagonal.block(9), &LightData::Uniform(0));
         assert_eq!(
             with_high_diagonal.block(10),
@@ -945,7 +955,7 @@ mod block_edit_tests {
 
         let mut same_height = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
         same_height.set_block_id(8, 127, 8, Block::Netherrack.default_state());
-        let without_high_section = decode(&center, &[(1, 1, same_height)]);
+        let without_high_section = decode(&center, &[(1, 1, &same_height)]);
         for section in 0..7 {
             assert_eq!(
                 without_high_section.block(section),
@@ -1122,13 +1132,14 @@ mod block_edit_tests {
                 }
             }
         }
+        let neighbour_refs = borrowed_neighbours(&neighbours);
 
         let ServerDirective::Send { payload, .. } = V770ServerProtocol
             .try_encode_chunk_with_neighbours_in_dimension(
                 -250,
                 -250,
                 &center,
-                &neighbours,
+                &neighbour_refs,
                 Dimension::End,
             )
             .expect("generated End initial chunk")
@@ -1247,7 +1258,7 @@ mod block_edit_tests {
         let settlement = V770ServerProtocol
             .compute_initial_column_lights_with_neighbours_in_dimension(
                 &center,
-                &[(1, 0, neighbour)],
+                &[(1, 0, &neighbour)],
                 Dimension::End,
             )
             .expect("fresh End centre admission");
@@ -1288,7 +1299,7 @@ mod block_edit_tests {
         let settlement = V770ServerProtocol
             .compute_initial_column_lights_with_neighbours_in_dimension(
                 &center,
-                &[(1, 0, east), (-1, 0, west)],
+                &[(1, 0, &east), (-1, 0, &west)],
                 Dimension::End,
             )
             .expect("fresh End centre admission");
@@ -1330,7 +1341,7 @@ mod block_edit_tests {
         let baseline = V770ServerProtocol
             .compute_initial_column_lights_with_neighbours_in_dimension(
                 &center,
-                &[(-1, 0, west.clone())],
+                &[(-1, 0, &west)],
                 Dimension::End,
             )
             .expect("fresh End centre admission without retained dependency");
@@ -1348,7 +1359,7 @@ mod block_edit_tests {
         let with_retained_dependency = V770ServerProtocol
             .compute_initial_column_lights_with_neighbours_in_dimension(
                 &center,
-                &[(-1, 0, retained_west)],
+                &[(-1, 0, &retained_west)],
                 Dimension::End,
             )
             .expect("fresh End centre admission with retained dependency");
@@ -1408,7 +1419,7 @@ mod block_edit_tests {
         let all_air = proto
             .compute_initial_column_lights_with_neighbours_in_dimension(
                 &center,
-                &[(1, 0, neighbour.clone())],
+                &[(1, 0, &neighbour)],
                 Dimension::End,
             )
             .expect("fresh End settlement");
@@ -1420,7 +1431,7 @@ mod block_edit_tests {
         let mut expected_lights = proto
             .compute_initial_column_lights_with_neighbours_and_storage_in_dimension(
                 &center,
-                &[(1, 0, neighbour.clone())],
+                &[(1, 0, &neighbour)],
                 &[None; 9],
                 Dimension::End,
             )
@@ -1460,10 +1471,11 @@ mod block_edit_tests {
             .filter(|&(dx, dz)| (dx, dz) != (0, 0))
             .map(|(dx, dz)| (dx, dz, ServerChunkColumn::new(0, 256)))
             .collect::<Vec<_>>();
+        let empty_neighbour_refs = borrowed_neighbours(&empty_neighbours);
         let empty_footprint = proto
             .compute_initial_column_lights_with_neighbours_in_dimension(
                 &center,
-                &empty_neighbours,
+                &empty_neighbour_refs,
                 Dimension::End,
             )
             .expect("fresh all-air settlement");
@@ -1595,7 +1607,7 @@ mod block_edit_tests {
                 1,
                 -5,
                 &column,
-                &[(1, 0, neighbour)],
+                &[(1, 0, &neighbour)],
                 Dimension::End,
             )
             .expect("End initial chunk")
@@ -1641,7 +1653,7 @@ mod block_edit_tests {
             .map(|(dx, dz)| (dx, dz, ServerChunkColumn::new(0, 256)))
             .collect::<Vec<_>>();
         let proto = V770ServerProtocol;
-        let decode = |neighbours: &[(i32, i32, ServerChunkColumn)]| {
+        let decode = |neighbours: &[(i32, i32, &ServerChunkColumn)]| {
             let ServerDirective::Send { payload, .. } = proto
                 .try_encode_chunk_with_neighbours_in_dimension(
                     0,
@@ -1662,15 +1674,16 @@ mod block_edit_tests {
         };
 
         let isolated = decode(&[]);
-        let with_east = decode(&[(1, 0, east)]);
+        let with_east = decode(&[(1, 0, &east)]);
         let without_east = decode(
             &all_neighbours
                 .iter()
                 .filter(|&&(dx, dz, _)| (dx, dz) != (1, 0))
-                .map(|(dx, dz, column)| (*dx, *dz, column.clone()))
+                .map(|(dx, dz, column)| (*dx, *dz, column))
                 .collect::<Vec<_>>(),
         );
-        let with_all = decode(&all_neighbours);
+        let all_neighbour_refs = borrowed_neighbours(&all_neighbours);
+        let with_all = decode(&all_neighbour_refs);
         assert!(matches!(with_east.sky(0), LightData::Values(_)));
         assert_eq!(isolated.section_light(0).sky_at(15, 15, 8), 0);
         assert_eq!(with_east.section_light(0).sky_at(15, 15, 8), 14);

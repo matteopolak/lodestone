@@ -109,6 +109,7 @@ use lodestone_worldgen_core::hash::{FastMap, FastSet};
 use serde_json::Value;
 
 use crate::dense_grid::DenseBlockGrid;
+use crate::feature::vegetation::VegGrid;
 use crate::noise::ClimateNoise;
 use crate::stage_schedule::DecorationStep;
 
@@ -189,25 +190,8 @@ pub struct BiomeClimate {
     pub temperature_modifier: TemperatureModifier,
 }
 
-/// The per-block-state facts `freeze_top_layer` needs, resolved once per
-/// generator into string-keyed lookups.
-///
-/// Every field originates in a jar dump, never in this crate: the four
-/// per-state predicates come from `lodestone_data::snow_support` (whose own
-/// module doc records the four hand guesses the dump contradicted) and the two
-/// tags from vanilla's `tags/block/*.json` through
-/// [`crate::density::Resolver::block_tag`].
-///
-/// # Why lookups are two-level
-///
-/// The generator's block field holds canonical state strings, but it emits
-/// fluids **without** the `level` property (`docs/worldgen-parity.md`'s "Known
-/// representation gap") — so a column's water reads as `minecraft:water`, not
-/// `minecraft:water[level=0]`. Since `is_water_source_liquid_block` is true for
-/// exactly one water state, an exact-string lookup would silently stop every
-/// ocean from freezing. [`StatePredicate::test_id`] therefore falls back from the
-/// exact state to the block's **default state**'s answer, which is what a
-/// property-less name means.
+/// Freeze and snow predicates resolved from registry facts and block tags.
+/// Text is consumed at construction; generation reads typed state tables.
 #[derive(Clone, Debug, Default)]
 pub struct SnowSupport {
     /// Vanilla's own motion-blocking predicate, from `lodestone_data::block_solidity`.
@@ -685,9 +669,75 @@ pub fn motion_blocking_first_free(
     min_y: i32,
     height: i32,
 ) -> i32 {
+    motion_blocking_first_free_scalar(grid, support, x, z, min_y, height)
+}
+
+pub(crate) trait TopLayerGrid {
+    fn top_layer_get_id(&self, x: i32, y: i32, z: i32) -> StateId;
+
+    fn top_layer_set_id(&mut self, x: i32, y: i32, z: i32, state: StateId);
+
+    fn top_layer_motion_blocking_first_free(
+        &self,
+        support: &SnowSupport,
+        x: i32,
+        z: i32,
+        min_y: i32,
+        height: i32,
+    ) -> i32 {
+        motion_blocking_first_free_scalar(self, support, x, z, min_y, height)
+    }
+}
+
+impl TopLayerGrid for DenseBlockGrid {
+    fn top_layer_get_id(&self, x: i32, y: i32, z: i32) -> StateId {
+        self.get_id(x, y, z)
+    }
+
+    fn top_layer_set_id(&mut self, x: i32, y: i32, z: i32, state: StateId) {
+        self.set_id(x, y, z, state);
+    }
+}
+
+impl TopLayerGrid for VegGrid {
+    fn top_layer_get_id(&self, x: i32, y: i32, z: i32) -> StateId {
+        self.get_id(x, y, z)
+    }
+
+    fn top_layer_set_id(&mut self, x: i32, y: i32, z: i32, state: StateId) {
+        let _ = self.set_id_if_in_bounds(x, y, z, state);
+    }
+
+    fn top_layer_motion_blocking_first_free(
+        &self,
+        support: &SnowSupport,
+        x: i32,
+        z: i32,
+        min_y: i32,
+        height: i32,
+    ) -> i32 {
+        self.top_layer_motion_blocking_first_free_if_extent(
+            x,
+            z,
+            min_y,
+            height,
+            |state| support.motion_blocking_id(state),
+        )
+        .unwrap_or_else(|| motion_blocking_first_free_scalar(self, support, x, z, min_y, height))
+    }
+}
+
+fn motion_blocking_first_free_scalar<G: TopLayerGrid + ?Sized>(
+    grid: &G,
+    support: &SnowSupport,
+    x: i32,
+    z: i32,
+    min_y: i32,
+    height: i32,
+) -> i32 {
     let mut y = min_y + height - 1;
     while y >= min_y {
-        if support.motion_blocking_id(grid.get_id(x, y, z)) {
+        if support.motion_blocking_id(grid.top_layer_get_id(x, y, z)) {
             return y + 1;
         }
         y -= 1;
@@ -810,6 +860,35 @@ pub fn apply_freeze_top_layer_typed_with_observer(
     noise: &ClimateNoise,
     observer: &mut dyn FnMut(i32, i32, i32, StateId),
 ) -> FreezeCounts {
+    apply_freeze_top_layer_typed_with_observer_on(
+        grid,
+        chunk_x,
+        chunk_z,
+        min_y,
+        height,
+        sea_level,
+        biome_at,
+        climates,
+        support,
+        noise,
+        observer,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_freeze_top_layer_typed_with_observer_on<G: TopLayerGrid>(
+    grid: &mut G,
+    chunk_x: i32,
+    chunk_z: i32,
+    min_y: i32,
+    height: i32,
+    sea_level: i32,
+    biome_at: &dyn Fn(i32, i32) -> lodestone_data::biomes::BuiltinBiome,
+    climates: &[Option<BiomeClimate>; lodestone_data::biomes::BuiltinBiome::COUNT as usize],
+    support: &SnowSupport,
+    noise: &ClimateNoise,
+    observer: &mut dyn FnMut(i32, i32, i32, StateId),
+) -> FreezeCounts {
     let climate_at = |x: i32, z: i32| climates[biome_at(x, z) as usize].as_ref();
     apply_freeze_top_layer_impl(
         grid,
@@ -826,8 +905,8 @@ pub fn apply_freeze_top_layer_typed_with_observer(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn apply_freeze_top_layer_impl<'a>(
-    grid: &mut DenseBlockGrid,
+fn apply_freeze_top_layer_impl<'a, G: TopLayerGrid>(
+    grid: &mut G,
     chunk_x: i32,
     chunk_z: i32,
     min_y: i32,
@@ -858,9 +937,6 @@ fn apply_freeze_top_layer_impl<'a>(
     let base_x = chunk_x * 16;
     let base_z = chunk_z * 16;
     let max_y = min_y + height - 1;
-    // `dx` outer, `dz` inner — vanilla's own iteration order. Iteration
-    // order cannot matter here (no column reads another), but it is kept
-    // vanilla's so a future reader does not have to prove that again.
     for dx in 0..16 {
         for dz in 0..16 {
             let x = base_x + dx;
@@ -868,7 +944,7 @@ fn apply_freeze_top_layer_impl<'a>(
             let Some(climate) = climate_at(dx, dz) else {
                 continue;
             };
-            let top_y = motion_blocking_first_free(grid, support, x, z, min_y, height);
+            let top_y = grid.top_layer_motion_blocking_first_free(support, x, z, min_y, height);
             let below_y = top_y - 1;
 
             // --- ice: vanilla's own freeze predicate at belowPos, neighbour checking off
@@ -878,9 +954,9 @@ fn apply_freeze_top_layer_impl<'a>(
                 // worldgen — see this module's "Approximations, named".
                 if support
                     .water_source
-                    .test_id(grid.get_id(x, below_y, z))
+                    .test_id(grid.top_layer_get_id(x, below_y, z))
                 {
-                    grid.set_id(x, below_y, z, ice_id);
+                    grid.top_layer_set_id(x, below_y, z, ice_id);
                     observer(
                         x,
                         below_y,
@@ -899,7 +975,7 @@ fn apply_freeze_top_layer_impl<'a>(
             if !inside_top || warm_enough_to_rain(climate, noise, x, top_y, z, sea_level) {
                 continue;
             }
-            let top_base = grid.get_id(x, top_y, z);
+            let top_base = grid.top_layer_get_id(x, top_y, z);
             // Vanilla's own check: air, or already a snow layer.
             if !(air_ids.contains(&top_base) || top_base == snow_base_id) {
                 continue;
@@ -908,14 +984,14 @@ fn apply_freeze_top_layer_impl<'a>(
             // above may just have changed. Reading it here rather than earlier is
             // what makes frozen oceans bare ice instead of snow-covered ice.
             let below_state = if inside_below {
-                grid.get_id(x, below_y, z)
+                grid.top_layer_get_id(x, below_y, z)
             } else {
                 StateId::AIR
             };
             if !support.snow_can_survive_id(below_state) {
                 continue;
             }
-            grid.set_id(x, top_y, z, snow_layer_id);
+            grid.top_layer_set_id(x, top_y, z, snow_layer_id);
             observer(
                 x,
                 top_y,
@@ -934,7 +1010,7 @@ fn apply_freeze_top_layer_impl<'a>(
                 else {
                     continue;
                 };
-                grid.set_id(x, below_y, z, *snowy);
+                grid.top_layer_set_id(x, below_y, z, *snowy);
                 observer(
                     x,
                     below_y,
@@ -1082,6 +1158,75 @@ mod tests {
             "the observer must expose the exact top-layer write order",
         );
         assert_eq!(grid.get_id(0, 1, 0), SNOW_LAYER);
+
+        let ice_support = SnowSupport {
+            blocks_motion: StatePredicate::new(
+                ["minecraft:stone".to_owned()].into_iter().collect(),
+                HashMap::new(),
+            ),
+            has_fluid_state: StatePredicate::new(
+                ["minecraft:water".to_owned()].into_iter().collect(),
+                HashMap::new(),
+            ),
+            water_source: StatePredicate::new(
+                ["minecraft:water".to_owned()].into_iter().collect(),
+                HashMap::new(),
+            ),
+            face_full_up: StatePredicate::new(
+                ["minecraft:ice".to_owned()].into_iter().collect(),
+                HashMap::new(),
+            ),
+            cannot_support_blocks: [Block::Ice].into_iter().collect(),
+            ..SnowSupport::default()
+        };
+        let mut dense_ice = DenseBlockGrid::new(0, 0, 0, 16, 2, 16, "minecraft:air");
+        dense_ice.set_id(0, 0, 0, Block::Water.default_state());
+        let mut veg_ice = VegGrid::new(0, 2, 0, 0);
+        assert!(veg_ice.set_id_if_in_bounds(0, 0, 0, Block::Water.default_state()));
+        let ice_climate = climate(0.0);
+        let ice_climate_at = |_x: i32, _z: i32| Some(&ice_climate);
+        let mut dense_ice_writes = Vec::new();
+        let dense_ice_counts = apply_freeze_top_layer_impl(
+            &mut dense_ice,
+            0,
+            0,
+            0,
+            2,
+            63,
+            &ice_climate_at,
+            &ice_support,
+            &ClimateNoise::new(),
+            &mut |x, y, z, state| dense_ice_writes.push((x, y, z, state)),
+        );
+        let mut veg_ice_writes = Vec::new();
+        let veg_ice_counts = apply_freeze_top_layer_impl(
+            &mut veg_ice,
+            0,
+            0,
+            0,
+            2,
+            63,
+            &ice_climate_at,
+            &ice_support,
+            &ClimateNoise::new(),
+            &mut |x, y, z, state| veg_ice_writes.push((x, y, z, state)),
+        );
+        let expected_ice_writes = vec![(0, 0, 0, ICE)];
+        assert_eq!(
+            dense_ice_counts,
+            FreezeCounts {
+                ice: 1,
+                snow: 0,
+                snowy_flips: 0,
+            }
+        );
+        assert_eq!(veg_ice_counts, dense_ice_counts);
+        assert_eq!(dense_ice_writes, expected_ice_writes);
+        assert_eq!(veg_ice_writes, expected_ice_writes);
+        assert_eq!(dense_ice.get_id(0, 0, 0), ICE);
+        assert_eq!(veg_ice.get_id(0, 0, 0), ICE);
+        assert_eq!(dense_ice.get_id(0, 1, 0), StateId::AIR);
+        assert_eq!(veg_ice.get_id(0, 1, 0), StateId::AIR);
     }
 
     /// The two-level lookup: an exact state wins, and a property-less name falls
@@ -1102,15 +1247,6 @@ mod tests {
         );
         assert!(!p.test("minecraft:water[level=1]"), "an override wins");
         assert!(!p.test("minecraft:stone"), "an unknown block is false");
-    }
-
-    #[test]
-    #[should_panic(expected = "unknown or malformed built-in block state")]
-    fn state_predicate_rejects_extension_state_at_ingress() {
-        let mut defaults = HashSet::new();
-        defaults.insert("minecraft:water".to_owned());
-        let predicate = StatePredicate::new(defaults, HashMap::new());
-        let _ = predicate;
     }
 
     #[test]

@@ -5231,16 +5231,16 @@ impl<S: ChunkSource> ChunkStore<S> {
             .map_err(|()| ColumnLightSettlementError::MissingFootprint)
     }
 
-    fn light_columns(
-        snapshot: &ChunkWriteSnapshot<'_>,
+    fn light_columns<'a>(
+        snapshot: &'a ChunkWriteSnapshot<'_>,
         centre: (i32, i32),
         neighbour_offsets: &[(i32, i32)],
-    ) -> Result<(ChunkColumn, Vec<(i32, i32, ChunkColumn)>), ColumnLightSettlementError> {
+    ) -> Result<(&'a ChunkColumn, Vec<(i32, i32, &'a ChunkColumn)>), ColumnLightSettlementError> {
         let centre_column = snapshot
             .observations
             .iter()
             .find(|observation| observation.chunk == centre)
-            .map(|observation| observation.column.clone())
+            .map(|observation| &observation.column)
             .ok_or(ColumnLightSettlementError::MissingFootprint)?;
         let neighbours = neighbour_offsets
             .iter()
@@ -5249,7 +5249,7 @@ impl<S: ChunkSource> ChunkStore<S> {
                     .observations
                     .iter()
                     .find(|observation| observation.chunk == (centre.0 + dx, centre.1 + dz))
-                    .map(|observation| (dx, dz, observation.column.clone()))
+                    .map(|observation| (dx, dz, &observation.column))
                     .ok_or(ColumnLightSettlementError::MissingFootprint)
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -5860,11 +5860,11 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
         exclusive: bool,
         compute: &mut dyn FnMut(
             &ChunkColumn,
-            &[(i32, i32, ChunkColumn)],
+            &[(i32, i32, &ChunkColumn)],
         ) -> Option<lodestone_world::ColumnLight>,
     ) -> Result<ChunkColumn, ColumnLightSettlementError> {
         let mut compute_batch = |centre: &ChunkColumn,
-                                 neighbours: &[(i32, i32, ChunkColumn)]| {
+                                 neighbours: &[(i32, i32, &ChunkColumn)]| {
             compute(centre, neighbours).map(ColumnLightSettlement::centre)
         };
         self.settle_resident_column_lights_with_neighbours(
@@ -5895,7 +5895,7 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
         exclusive: bool,
         compute: &mut dyn FnMut(
             &ChunkColumn,
-            &[(i32, i32, ChunkColumn)],
+            &[(i32, i32, &ChunkColumn)],
         ) -> Option<ColumnLightSettlement>,
     ) -> Result<ChunkColumn, ColumnLightSettlementError> {
         let centre = (cx, cz);
@@ -5954,7 +5954,7 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
             };
             if !replace_existing && Self::snapshot_is_centre_settled(&snapshot, centre) {
                 lease.release_and_prune();
-                return Ok(centre_column);
+                return Ok(centre_column.clone());
             }
             let Some(settlement) = compute(&centre_column, &neighbours) else {
                 lease.release_and_prune();
@@ -5992,7 +5992,7 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
             neighbour_offsets,
         )?;
         if !replace_existing && Self::snapshot_is_centre_settled(&snapshot, centre) {
-            return Ok(centre_column);
+            return Ok(centre_column.clone());
         }
         let Some(settlement) = compute(&centre_column, &neighbours) else {
             return Err(ColumnLightSettlementError::NoLight);
@@ -8272,7 +8272,7 @@ mod tests {
             *zero_dependency.block_mut(section) = lodestone_world::LightData::Uniform(0);
         }
         let zero_for_first = zero_dependency.clone();
-        let mut first_compute = |_: &ChunkColumn, _: &[(i32, i32, ChunkColumn)]| {
+        let mut first_compute = |_: &ChunkColumn, _: &[(i32, i32, &ChunkColumn)]| {
             ColumnLightSettlement::with_neighbours(
                 centre_light.clone(),
                 [(1, 0, zero_for_first.clone())],
@@ -8302,7 +8302,7 @@ mod tests {
             .resident_column(1, 0)
             .expect("the allocated dependency is resident");
         let mut populated_compute_calls = 0;
-        let mut populated_compute = |column: &ChunkColumn, _: &[(i32, i32, ChunkColumn)]| {
+        let mut populated_compute = |column: &ChunkColumn, _: &[(i32, i32, &ChunkColumn)]| {
             populated_compute_calls += 1;
             let mut populated = lodestone_world::ColumnLight::new(column.section_count());
             *populated.sky_mut(0) = lodestone_world::LightData::Uniform(9);
@@ -8339,7 +8339,7 @@ mod tests {
             *expected.sky_mut(section) = lodestone_world::LightData::Uniform(15);
             *expected.block_mut(section) = lodestone_world::LightData::Uniform(0);
         }
-        let mut first_compute = |_: &ChunkColumn, _: &[(i32, i32, ChunkColumn)]| {
+        let mut first_compute = |_: &ChunkColumn, _: &[(i32, i32, &ChunkColumn)]| {
             Some(ColumnLightSettlement::centre(expected.clone()))
         };
         store
@@ -8357,7 +8357,7 @@ mod tests {
 
         let east = store.column(1, 0);
         let empty = lodestone_world::ColumnLight::new(east.section_count());
-        let mut second_compute = |_: &ChunkColumn, _: &[(i32, i32, ChunkColumn)]| {
+        let mut second_compute = |_: &ChunkColumn, _: &[(i32, i32, &ChunkColumn)]| {
             ColumnLightSettlement::with_neighbours(empty.clone(), [(-1, 0, empty.clone())])
         };
         store
@@ -8395,7 +8395,7 @@ mod tests {
         let mut dependency_light = lodestone_world::ColumnLight::new(centre.section_count());
         *dependency_light.sky_mut(0) = lodestone_world::LightData::Uniform(11);
         let mut first_compute =
-            |_column: &ChunkColumn, _neighbours: &[(i32, i32, ChunkColumn)]| {
+            |_column: &ChunkColumn, _neighbours: &[(i32, i32, &ChunkColumn)]| {
                 ColumnLightSettlement::with_neighbours(
                     lodestone_world::ColumnLight::new(centre.section_count()),
                     [(1, 0, dependency_light.clone())],
@@ -8422,7 +8422,7 @@ mod tests {
         );
         let mut centre_calls = 0;
         let mut centre_compute =
-            |column: &ChunkColumn, _neighbours: &[(i32, i32, ChunkColumn)]| {
+            |column: &ChunkColumn, _neighbours: &[(i32, i32, &ChunkColumn)]| {
                 centre_calls += 1;
                 Some(ColumnLightSettlement::centre(
                     lodestone_world::ColumnLight::new(column.section_count()),
@@ -8447,7 +8447,7 @@ mod tests {
         );
         let mut skipped_calls = 0;
         let mut skipped_compute =
-            |_column: &ChunkColumn, _neighbours: &[(i32, i32, ChunkColumn)]| {
+            |_column: &ChunkColumn, _neighbours: &[(i32, i32, &ChunkColumn)]| {
                 skipped_calls += 1;
                 Some(ColumnLightSettlement::centre(
                     lodestone_world::ColumnLight::new(centre.section_count()),
@@ -8477,7 +8477,7 @@ mod tests {
         let store = ChunkStore::with_capacity(CountingSource::new(), 16);
         let centre = store.column(0, 0);
         let mut first_compute = |column: &ChunkColumn,
-                                 _neighbours: &[(i32, i32, ChunkColumn)]| {
+                                 _neighbours: &[(i32, i32, &ChunkColumn)]| {
             let mut centre_light = lodestone_world::ColumnLight::new(column.section_count());
             *centre_light.sky_mut(0) = lodestone_world::LightData::Uniform(4);
             let mut dependency_light = lodestone_world::ColumnLight::new(column.section_count());
@@ -8504,7 +8504,7 @@ mod tests {
             .resident_column(1, 0)
             .expect("the dependency remains resident");
         let mut dependency_compute = |column: &ChunkColumn,
-                                      _neighbours: &[(i32, i32, ChunkColumn)]| {
+                                      _neighbours: &[(i32, i32, &ChunkColumn)]| {
             Some(ColumnLightSettlement::centre(
                 lodestone_world::ColumnLight::new(column.section_count()),
             ))
@@ -8537,7 +8537,7 @@ mod tests {
             .cloned()
             .expect("settled dependency retains its light");
         let mut neighbouring_compute = |column: &ChunkColumn,
-                                        _neighbours: &[(i32, i32, ChunkColumn)]| {
+                                        _neighbours: &[(i32, i32, &ChunkColumn)]| {
             ColumnLightSettlement::with_neighbours(
                 lodestone_world::ColumnLight::new(column.section_count()),
                 [(1, 0, dependency_light.clone())],
@@ -8933,7 +8933,7 @@ mod tests {
             let refresh_fallback = fallback.clone();
             let delayed = scope.spawn(move || {
                 let mut compute = |centre: &ChunkColumn,
-                                   neighbours: &[(i32, i32, ChunkColumn)]| {
+                                   neighbours: &[(i32, i32, &ChunkColumn)]| {
                     assert_eq!(neighbours.len(), 8);
                     assert_eq!(
                         neighbours
@@ -9005,7 +9005,7 @@ mod tests {
             .resident_column(0, 0)
             .expect("the current centre remains resident");
         let mut compute = |centre: &ChunkColumn,
-                           neighbours: &[(i32, i32, ChunkColumn)]| {
+                           neighbours: &[(i32, i32, &ChunkColumn)]| {
             assert_eq!(neighbours.len(), 8);
             let mut light = lodestone_world::ColumnLight::new(centre.section_count());
             *light.sky_mut(0) = lodestone_world::LightData::Uniform(9);
@@ -9070,7 +9070,7 @@ mod tests {
             let refresh_fallback = fallback.clone();
             let delayed = scope.spawn(move || {
                 let mut compute = |centre: &ChunkColumn,
-                                   neighbours: &[(i32, i32, ChunkColumn)]| {
+                                   neighbours: &[(i32, i32, &ChunkColumn)]| {
                     assert_eq!(neighbours.len(), 8);
                     refresh_captured.store(true, Ordering::Release);
                     let (released, wake) = &*refresh_release;
@@ -9141,7 +9141,7 @@ mod tests {
             .resident_column(0, 0)
             .expect("the current centre remains resident");
         let mut compute = |centre: &ChunkColumn,
-                           neighbours: &[(i32, i32, ChunkColumn)]| {
+                           neighbours: &[(i32, i32, &ChunkColumn)]| {
             assert_eq!(neighbours.len(), 8);
             let mut light = lodestone_world::ColumnLight::new(centre.section_count());
             *light.sky_mut(0) = lodestone_world::LightData::Uniform(9);

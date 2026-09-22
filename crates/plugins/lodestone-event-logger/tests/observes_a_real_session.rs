@@ -63,6 +63,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lodestone_client::{ClientBuilder, ClientEvent, LoginProfile, ServerAddress};
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 use lodestone_ecs::GameTick;
 use lodestone_ecs::ecs::entity::Entity;
 use lodestone_ecs::parking_lot::RwLock;
@@ -109,20 +111,20 @@ impl ChunkSource for FlatAir {
         let mut column = ChunkColumn::new(-64, 384);
         for lx in 0..16 {
             for lz in 0..16 {
-                column.set_block(lx, 63, lz, "minecraft:stone");
+                column.set_block_id(lx, 63, lz, Block::Stone.default_state());
             }
         }
         column
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         // The column-regenerating form (correct, just not cheap); this
         // fixture is tiny and this path is not hot.
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
-        self.column(cx, cz).block_state(lx, y, lz).to_string()
+        self.column(cx, cz).block_state_id(lx, y, lz)
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -139,7 +141,7 @@ impl ChunkSource for FlatAir {
     // design. Written out explicitly rather than left to the trait default,
     // since a default `set_block` that silently discards a write is
     // indistinguishable at the call site from one that persisted it.
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
         // No storage; edits are discarded by design.
     }
 }

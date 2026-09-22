@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lodestone_client::{ChatKind, ClientBuilder, ClientEvent, LoginProfile, PlayerLoadedPolicy, ServerAddress};
+use lodestone_data::block_states::StateId;
 use lodestone_model::{
     BlockActionKind, BlockFace, BlockPos, ClientAction, ConnectionState, Rotation, Vec3, Vec3f,
     VersionAdapter,
@@ -11,6 +12,10 @@ use lodestone_v1_20_6::adapter_for;
 
 const TARGET: BlockPos = BlockPos::new(8, 100, 8);
 
+fn fixture_state(name: &str) -> StateId {
+    StateId::from_state_str(name).expect("fixture state exists")
+}
+
 struct FixtureSource {
     column: Mutex<ChunkColumn>,
 }
@@ -18,7 +23,12 @@ struct FixtureSource {
 impl FixtureSource {
     fn new() -> Self {
         let mut column = ChunkColumn::new(-64, 384);
-        column.set_block(TARGET.x, TARGET.y, TARGET.z, "minecraft:dandelion");
+        column.set_block_id(
+            TARGET.x,
+            TARGET.y,
+            TARGET.z,
+            fixture_state("minecraft:dandelion"),
+        );
         Self {
             column: Mutex::new(column),
         }
@@ -30,23 +40,22 @@ impl ChunkSource for FixtureSource {
         self.column.lock().expect("fixture column lock poisoned").clone()
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         self.column
             .lock()
             .expect("fixture column lock poisoned")
-            .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
-            .to_owned()
+            .block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
     }
 
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
         "minecraft:plains".to_owned()
     }
 
-    fn set_block(&self, x: i32, y: i32, z: i32, state: &str) {
+    fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
         self.column
             .lock()
             .expect("fixture column lock poisoned")
-            .set_block(x.rem_euclid(16), y, z.rem_euclid(16), state);
+            .set_block_id(x.rem_euclid(16), y, z.rem_euclid(16), state);
     }
 }
 
@@ -68,15 +77,14 @@ impl ChunkSource for BoundaryFixtureSource {
         }
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         if (x.div_euclid(16), z.div_euclid(16)) == (0, 0) {
             self.center
                 .lock()
                 .expect("boundary column lock poisoned")
-                .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
-                .to_owned()
+                .block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
         } else {
-            "minecraft:air".to_owned()
+            StateId::AIR
         }
     }
 
@@ -84,12 +92,12 @@ impl ChunkSource for BoundaryFixtureSource {
         "minecraft:plains".to_owned()
     }
 
-    fn set_block(&self, x: i32, y: i32, z: i32, state: &str) {
+    fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
         assert_eq!((x.div_euclid(16), z.div_euclid(16)), (0, 0));
         self.center
             .lock()
             .expect("boundary column lock poisoned")
-            .set_block(x.rem_euclid(16), y, z.rem_euclid(16), state);
+            .set_block_id(x.rem_euclid(16), y, z.rem_euclid(16), state);
     }
 }
 
@@ -337,10 +345,10 @@ async fn initial_and_live_border_light_use_the_open_east_column() {
     let mut center = ChunkColumn::new(-64, 384);
     for z in 0..16 {
         for x in 0..16 {
-            center.set_block(x, 101, z, "minecraft:stone");
+            center.set_block_id(x, 101, z, fixture_state("minecraft:stone"));
         }
     }
-    center.set_block(target.x, target.y, target.z, "minecraft:dirt");
+    center.set_block_id(target.x, target.y, target.z, fixture_state("minecraft:dirt"));
     let source = Arc::new(BoundaryFixtureSource { center: Mutex::new(center) });
     let protocol = lodestone_registry::server_protocol_for_protocol(766).unwrap();
     let (server, client_io) = IntegratedServer::open_in_memory(protocol, source, 0);
@@ -402,12 +410,12 @@ async fn hosted_lighting_reaches_client_and_extinguishes_after_a_block_break() {
         for z in 5..=11 {
             for x in 5..=11 {
                 if y == 98 || y == 104 || x == 5 || x == 11 || z == 5 || z == 11 {
-                    room.set_block(x, y, z, "minecraft:stone");
+                    room.set_block_id(x, y, z, fixture_state("minecraft:stone"));
                 }
             }
         }
     }
-    room.set_block(8, 100, 8, "minecraft:torch");
+    room.set_block_id(8, 100, 8, fixture_state("minecraft:torch"));
     let source = Arc::new(FixtureSource { column: Mutex::new(room) });
     let (server, client_io) = IntegratedServer::open_in_memory(protocol, source, 0);
     let (mut handle, _) = ClientBuilder::new(

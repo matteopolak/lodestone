@@ -29,7 +29,7 @@ fn main() {
         let report_surface = diff_field(
             f.min_y,
             f.height,
-            |lx, y, lz| generated.block_state(lx as usize, y, lz as usize).to_string(),
+            |lx, y, lz| generated.block_state_id(lx as usize, y, lz as usize).canonical_state(),
             |lx, y, lz| f.postsurface.get(lx, y, lz).to_string(),
         );
         print!("{}", report_surface.summary(8));
@@ -38,7 +38,7 @@ fn main() {
         let report_full = diff_field(
             f.min_y,
             f.height,
-            |lx, y, lz| generated.block_state(lx as usize, y, lz as usize).to_string(),
+            |lx, y, lz| generated.block_state_id(lx as usize, y, lz as usize).canonical_state(),
             |lx, y, lz| f.postcarve.get(lx, y, lz).to_string(),
         );
         print!("{}", report_full.summary(8));
@@ -51,7 +51,7 @@ fn main() {
         let report_features = diff_field(
             f.min_y,
             f.height,
-            |lx, y, lz| generated.block_state(lx as usize, y, lz as usize).to_string(),
+            |lx, y, lz| generated.block_state_id(lx as usize, y, lz as usize).canonical_state(),
             |lx, y, lz| f.postfeatures.get(lx, y, lz).to_string(),
         );
         print!("{}", report_features.summary(8));

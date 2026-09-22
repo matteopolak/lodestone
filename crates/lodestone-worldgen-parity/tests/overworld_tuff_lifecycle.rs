@@ -1,5 +1,6 @@
 //! Seeded Overworld lifecycle witness for the requested-target dispatch seam.
 
+use lodestone_data::block::Block;
 use lodestone_server::overworld_chunk_source;
 use lodestone_worldgen_parity::lifecycle::{
     LifecycleCompletion, LifecycleMaterializer, LifecycleReplayEvent, LifecycleReplayPlan,
@@ -29,8 +30,8 @@ fn requested_target_replay_preserves_target_owned_witness() {
     assert_eq!(
         materializer
             .snapshot_for_packet(TARGET)
-            .block_state(LOCAL.0, LOCAL.1, LOCAL.2),
-        "minecraft:deepslate[axis=y]",
+            .block_state_id(LOCAL.0, LOCAL.1, LOCAL.2),
+        Block::Deepslate.default_state(),
     );
 }
 
@@ -73,8 +74,8 @@ fn streamed_adjacent_targets_retain_the_prior_target_owned_spill() {
     materializer.finish_target(target);
 
     assert_eq!(
-        materializer.snapshot_for_packet(target).block_state(1, 27, 14),
-        "minecraft:stone",
+        materializer.snapshot_for_packet(target).block_state_id(1, 27, 14),
+        Block::Stone.default_state(),
         "the preceding target-owned completion retains its border write for streamed (1,0)",
     );
 }
@@ -97,7 +98,7 @@ fn target_owned_dispatch_rejects_a_nine_source_replay() {
         .into_iter()
         .find(|spill| spill.position == cell)
         .map(|spill| spill.state);
-    assert_eq!(source_spill, Some("minecraft:granite".to_owned()));
+    assert_eq!(source_spill, Some(Block::Granite.default_state()));
     assert_eq!(target_owned, None);
     assert_ne!(source_spill, target_owned);
 }

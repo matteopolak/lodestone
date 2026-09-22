@@ -287,6 +287,7 @@ fn feature_type(feature: &ConfiguredFeature) -> Option<&str> {
         ConfiguredFeature::SculkPatch(_) => "minecraft:sculk_patch",
         ConfiguredFeature::RandomBooleanSelector { .. } => "minecraft:random_boolean_selector",
         ConfiguredFeature::WeightedRandomSelector(_) => "minecraft:weighted_random_selector",
+        ConfiguredFeature::Template(_) => "minecraft:template",
         ConfiguredFeature::Sequence(_) => "minecraft:sequence",
         ConfiguredFeature::Geode(_) => "minecraft:geode",
         ConfiguredFeature::Fossil(_) => "minecraft:fossil",

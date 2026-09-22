@@ -8,7 +8,7 @@ use lodestone_client::{
     LoginProfile, ServerAddress, VersionAdapter,
 };
 use lodestone_core::Reader;
-use lodestone_data::block_states::state_id;
+use lodestone_data::block_states::{StateId, state_id};
 use lodestone_model::{AdapterError, ClientAction, WorldSink};
 use lodestone_net::{Connection, memory_pair};
 use lodestone_server::{ChunkColumn as ServerChunkColumn, ServerDirective, ServerProtocol};
@@ -589,7 +589,12 @@ fn production_encoder_matches_external_fluid_counter_annotations() {
     let shape = ChunkShape::overworld_1_21();
     let mut source = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
     for block in &capture.blocks {
-        source.set_block(block.pos[0], block.pos[1], block.pos[2], &block.state);
+        source.set_block_id(
+            block.pos[0],
+            block.pos[1],
+            block.pos[2],
+            StateId::from_state_str(&block.state).expect("captured block state is built in"),
+        );
     }
     let directive = ServerProtocol::encode_chunk(
         &V770ServerProtocol,

@@ -94,6 +94,12 @@
 
 use std::time::Duration;
 
+use lodestone_data::block_states::StateId;
+
+fn builtin_state(state: &str) -> StateId {
+    StateId::from_state_str(state).expect("differential rig state is in the built-in registry")
+}
+
 /// One action applied to a world. Deliberately small: the families where
 /// divergence has actually been found here — waterloggable blocks, fluids,
 /// redstone, containers, falling blocks, pistons — all reduce to a
@@ -103,9 +109,8 @@ use std::time::Duration;
 pub enum Action {
     /// `/setblock x y z <state>` (or the equivalent direct world-sink call
     /// for a non-RCON oracle). `state` is a full blockstate string
-    /// (`"minecraft:water[level=0]"`), matching the format
-    /// `ChunkSource::block_state` already returns elsewhere in this
-    /// workspace.
+    /// (`"minecraft:water[level=0]"`), matching the external oracle's
+    /// command syntax.
     SetBlock { pos: (i32, i32, i32), state: String },
     /// An escape hatch for anything not worth its own `Action` variant yet —
     /// a raw command string, sent verbatim to an oracle that supports one
@@ -1099,52 +1104,53 @@ pub mod fluid {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
+    use lodestone_data::block_states::StateId;
     use lodestone_model::BlockPos;
     use lodestone_server::fluid::{FluidEnv, run_scheduled_tick, ticks_after_edit};
     use lodestone_server::{
         ChunkColumn, ChunkSource, ScheduledTickQueue, ScheduledTickSink,
     };
 
-    use super::{Action, WorldOracle, state_matches};
+    use super::{Action, WorldOracle, builtin_state, state_matches};
 
     /// A sparse block store with a solid floor, sufficient for the fluid
     /// model's reads (`block_state`) and writes (`set_block`).
     #[derive(Debug)]
     struct FlatRig {
-        blocks: Mutex<HashMap<(i32, i32, i32), String>>,
+        blocks: Mutex<HashMap<(i32, i32, i32), StateId>>,
         floor_y: i32,
-        floor_state: String,
+        floor_state: StateId,
     }
 
     impl ChunkSource for FlatRig {
         fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
             // Never read by the fluid model, which goes through
-            // `block_state`/`set_block`. A column is still required by the
+            // `block_state_id`/`set_block`. A column is still required by the
             // trait, so answer with an empty one of the right vertical
             // extent rather than a panic that would be reached only if that
             // ever changed.
             ChunkColumn::new(FLUID_MIN_Y, FLUID_HEIGHT / 16)
         }
 
-        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
             if let Some(state) = self.blocks.lock().expect("rig lock").get(&(x, y, z)) {
-                return state.clone();
+                return *state;
             }
             if y == self.floor_y {
-                return self.floor_state.clone();
+                return self.floor_state;
             }
-            "minecraft:air".to_owned()
+            StateId::AIR
         }
 
         fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
             "minecraft:plains".to_owned()
         }
 
-        fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+        fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
             self.blocks
                 .lock()
                 .expect("rig lock")
-                .insert((x, y, z), name.to_owned());
+                .insert((x, y, z), state);
         }
     }
 
@@ -1179,7 +1185,7 @@ pub mod fluid {
                 rig: FlatRig {
                     blocks: Mutex::new(HashMap::new()),
                     floor_y: origin.1 + floor_y,
-                    floor_state: floor_state.to_owned(),
+                    floor_state: builtin_state(floor_state),
                 },
                 queue: ScheduledTickQueue::new(),
                 tick: 0,
@@ -1193,7 +1199,7 @@ pub mod fluid {
         /// not be a fluid trigger of its own.
         pub fn place_static(&mut self, pos: (i32, i32, i32), state: &str) {
             let (x, y, z) = self.world_pos(pos);
-            self.rig.set_block(x, y, z, state);
+            self.rig.set_block(x, y, z, builtin_state(state));
         }
 
         fn world_pos(&self, pos: (i32, i32, i32)) -> (i32, i32, i32) {
@@ -1215,7 +1221,7 @@ pub mod fluid {
             match action {
                 Action::SetBlock { pos, state } => {
                     let (x, y, z) = self.world_pos(*pos);
-                    self.rig.set_block(x, y, z, state);
+                    self.rig.set_block(x, y, z, builtin_state(state));
                     // The same follow-up ticks a production block edit
                     // schedules, so a script's `SetBlock` behaves like the
                     // set-block path it stands for rather than like a silent
@@ -1254,7 +1260,7 @@ pub mod fluid {
 
         fn block_state(&mut self, pos: (i32, i32, i32), candidates: &[String]) -> Result<Option<String>, Self::Error> {
             let (x, y, z) = self.world_pos(pos);
-            let state = self.rig.block_state(x, y, z);
+            let state = self.rig.block_state_id(x, y, z).canonical_state();
             Ok(candidates
                 .iter()
                 .find(|candidate| state_matches(&state, candidate))
@@ -1300,6 +1306,7 @@ pub mod redstone {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
+    use lodestone_data::block_states::StateId;
     use lodestone_model::BlockPos;
     use lodestone_server::block_tick_reaction::run_due_block_tick;
     use lodestone_server::{
@@ -1307,7 +1314,7 @@ pub mod redstone {
         react_at_placement_with_entities,
     };
 
-    use super::{Action, WorldOracle, state_matches};
+    use super::{Action, WorldOracle, builtin_state, state_matches};
 
     /// Vertical extent of the rig, matching an overworld dimension's own
     /// build limits so any below-the-world guard in the model behaves as it
@@ -1320,7 +1327,7 @@ pub mod redstone {
     struct ColumnRig {
         columns: Mutex<HashMap<(i32, i32), ChunkColumn>>,
         floor_y: i32,
-        floor_state: String,
+        floor_state: StateId,
         /// When set, this source claims **no** column is resident, which is
         /// what a cascade-scoped multi-column view needs to hear in order to
         /// behave like the single-column reach it replaced: it never fetches
@@ -1338,7 +1345,7 @@ pub mod redstone {
                 let mut fresh = ChunkColumn::new(MIN_Y, HEIGHT);
                 for lx in 0..16 {
                     for lz in 0..16 {
-                        fresh.set_block(lx, self.floor_y, lz, &self.floor_state);
+                        fresh.set_block_id(lx, self.floor_y, lz, self.floor_state);
                     }
                 }
                 fresh
@@ -1352,13 +1359,13 @@ pub mod redstone {
             self.with_column(cx, cz, |column| column.clone())
         }
 
-        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
             let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
             self.with_column(cx, cz, |column| {
                 if y < column.min_y || y >= column.min_y + column.height {
-                    return "minecraft:air".to_owned();
+                    return StateId::AIR;
                 }
-                column.block_state(x - cx * 16, y, z - cz * 16).to_owned()
+                column.block_state_id(x - cx * 16, y, z - cz * 16)
             })
         }
 
@@ -1366,11 +1373,11 @@ pub mod redstone {
             "minecraft:plains".to_owned()
         }
 
-        fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+        fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
             let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
             self.with_column(cx, cz, |column| {
                 if y >= column.min_y && y < column.min_y + column.height {
-                    column.set_block(x - cx * 16, y, z - cz * 16, name);
+                    column.set_block_id(x - cx * 16, y, z - cz * 16, state);
                 }
             });
         }
@@ -1420,7 +1427,7 @@ pub mod redstone {
                 rig: ColumnRig {
                     columns: Mutex::new(HashMap::new()),
                     floor_y: origin.1 + floor_y,
-                    floor_state: floor_state.to_owned(),
+                    floor_state: builtin_state(floor_state),
                     deny_neighbours,
                 },
                 queue: ScheduledTickQueue::new(),
@@ -1434,7 +1441,7 @@ pub mod redstone {
         /// not fire the circuit as it appears.
         pub fn place_static(&mut self, pos: (i32, i32, i32), state: &str) {
             let (x, y, z) = self.world_pos(pos);
-            self.rig.set_block(x, y, z, state);
+            self.rig.set_block(x, y, z, builtin_state(state));
         }
 
         fn world_pos(&self, pos: (i32, i32, i32)) -> (i32, i32, i32) {
@@ -1456,7 +1463,7 @@ pub mod redstone {
             match action {
                 Action::SetBlock { pos, state } => {
                     let (x, y, z) = self.world_pos(*pos);
-                    self.rig.set_block(x, y, z, state);
+                    self.rig.set_block(x, y, z, builtin_state(state));
                     let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
                     let mut column = self.rig.column(cx, cz);
                     // The same reaction a world edit runs in production: the
@@ -1477,7 +1484,7 @@ pub mod redstone {
                     );
                     for event in events {
                         let (ex, ey, ez) = event.pos;
-                        self.rig.set_block(ex, ey, ez, &event.to);
+                        self.rig.set_block(ex, ey, ez, event.to);
                     }
                 }
                 Action::RunCommand(_) => {
@@ -1498,7 +1505,7 @@ pub mod redstone {
                 if y < column.min_y || y >= column.min_y + column.height {
                     continue;
                 }
-                let state = column.block_state(x - cx * 16, y, z - cz * 16).to_owned();
+                let state = column.block_state_id(x - cx * 16, y, z - cz * 16);
                 let reaction = run_due_block_tick(
                     &mut column,
                     cx * 16,
@@ -1506,14 +1513,14 @@ pub mod redstone {
                     &self.rig,
                     &ScheduledTickKind::from_name(due.kind.clone()),
                     BlockPos::new(x, y, z),
-                    &state,
+                    state,
                     &mut self.queue,
                     self.tick,
                     None,
                 );
                 for event in reaction.events {
                     let (ex, ey, ez) = event.pos;
-                    self.rig.set_block(ex, ey, ez, &event.to);
+                    self.rig.set_block(ex, ey, ez, event.to);
                 }
             }
             Ok(())
@@ -1521,7 +1528,7 @@ pub mod redstone {
 
         fn block_state(&mut self, pos: (i32, i32, i32), candidates: &[String]) -> Result<Option<String>, Self::Error> {
             let (x, y, z) = self.world_pos(pos);
-            let state = self.rig.block_state(x, y, z);
+            let state = self.rig.block_state_id(x, y, z).canonical_state();
             Ok(candidates
                 .iter()
                 .find(|candidate| state_matches(&state, candidate))

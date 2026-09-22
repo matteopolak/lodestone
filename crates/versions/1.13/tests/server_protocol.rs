@@ -66,8 +66,11 @@ fn join_position_chunk_and_block_update_match_protocol_404_fixtures() {
     ));
 
     let mut column = ChunkColumn::new(0, 256);
-    column.set_block(0, 0, 0, "minecraft:dandelion");
-    assert_eq!(column.block_state(0, 0, 0), "minecraft:dandelion");
+    column.set_block_id(0, 0, 0, StateId::from_state_str("minecraft:dandelion").unwrap());
+    assert_eq!(
+        column.block_state_id(0, 0, 0),
+        StateId::from_state_str("minecraft:dandelion").expect("fixture state exists")
+    );
     let ServerDirective::Send { packet_id, payload } = protocol
         .try_encode_chunk(0, 0, &column)
         .expect("dandelion has protocol-404 state id 1111 in the committed jar report")

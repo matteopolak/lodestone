@@ -1,5 +1,5 @@
 use lodestone_core::{Ctx, Decode, Reader, State, encode_body, read_named_nbt};
-use lodestone_data::block_states;
+use lodestone_data::block_states::{self, StateId};
 use lodestone_model::{
     AnimationAction, BlockFace, BlockPos, ClientAction, ClientEvent, ConnectionState, Directive,
     Hand, Rotation, Vec3f, VersionAdapter,
@@ -581,7 +581,12 @@ fn protocol_498_emits_a_decodable_straddling_chunk_with_embedded_biomes() {
         "minecraft:oak_sapling",
     ];
     for (index, state) in states.iter().enumerate() {
-        column.set_block((index % 16) as i32, 0, (index / 16) as i32, state);
+        column.set_block_id(
+            (index % 16) as i32,
+            0,
+            (index / 16) as i32,
+            StateId::from_state_str(state).expect("fixture state exists"),
+        );
     }
 
     let ServerDirective::Send { packet_id, payload } = protocol
@@ -635,7 +640,7 @@ fn protocol_498_rejects_a_canonical_state_outside_its_table() {
     let modern = "minecraft:sculk";
     assert!(block_states::state_id(modern).is_some());
     let mut column = ChunkColumn::new(0, 256);
-    column.set_block(0, 0, 0, modern);
+    column.set_block_id(0, 0, 0, StateId::from_state_str(modern).expect("fixture state exists"));
 
     let error = protocol
         .try_encode_chunk(0, 0, &column)
@@ -708,7 +713,7 @@ fn protocol_578_emits_the_reference_legacy_join_body() {
 fn protocol_578_encodes_a_decodable_straddling_chunk() {
     let protocol = V578ServerProtocol;
     let mut column = ChunkColumn::new(0, 256);
-    column.set_block(3, 0, 5, "minecraft:stone");
+    column.set_block_id(3, 0, 5, StateId::from_state_str("minecraft:stone").unwrap());
 
     let ServerDirective::Send { packet_id, payload } = protocol
         .try_encode_chunk(7, -4, &column)
@@ -735,7 +740,7 @@ fn protocol_578_rejects_a_canonical_state_outside_its_table() {
     let modern = "minecraft:sculk";
     assert!(block_states::state_id(modern).is_some());
     let mut column = ChunkColumn::new(0, 256);
-    column.set_block(0, 0, 0, modern);
+    column.set_block_id(0, 0, 0, StateId::from_state_str(modern).expect("fixture state exists"));
 
     let error = protocol
         .try_encode_chunk(0, 0, &column)
@@ -882,7 +887,12 @@ fn protocol_754_emits_a_decodable_padded_chunk_and_varint_biomes() {
         "minecraft:oak_sapling",
     ];
     for (index, state) in states.iter().enumerate() {
-        column.set_block((index % 16) as i32, 0, (index / 16) as i32, state);
+        column.set_block_id(
+            (index % 16) as i32,
+            0,
+            (index / 16) as i32,
+            StateId::from_state_str(state).expect("fixture state exists"),
+        );
     }
 
     let ServerDirective::Send { packet_id, payload } = protocol
@@ -910,7 +920,7 @@ fn protocol_754_rejects_a_canonical_state_outside_its_table() {
     let modern = "minecraft:sculk";
     assert!(block_states::state_id(modern).is_some());
     let mut column = ChunkColumn::new(0, 256);
-    column.set_block(0, 0, 0, modern);
+    column.set_block_id(0, 0, 0, StateId::from_state_str(modern).expect("fixture state exists"));
 
     let error = protocol
         .try_encode_chunk(0, 0, &column)

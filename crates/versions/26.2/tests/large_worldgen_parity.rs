@@ -36,6 +36,15 @@ use support::large_parity_manifest::{
 
 type ChunkPos = (i32, i32);
 
+fn borrowed_neighbours(
+    neighbours: &[(i32, i32, ChunkColumn)],
+) -> Vec<(i32, i32, &ChunkColumn)> {
+    neighbours
+        .iter()
+        .map(|(dx, dz, column)| (*dx, *dz, column))
+        .collect()
+}
+
 const MAX_RAW_DIAGNOSTIC_EXAMPLES: usize = 32;
 const MAX_RAW_DIAGNOSTIC_GROUPS: usize = 64;
 /// Keep the Nether immutable replay closure bounded while preserving the
@@ -1150,7 +1159,7 @@ fn nether_packet_replay_generator_capacity_is_row_bounded() {
 fn initial_light_snapshot_for_admission<P: ServerProtocol>(
     proto: &P,
     centre: &ChunkColumn,
-    admitted_neighbours: &[(i32, i32, ChunkColumn)],
+    admitted_neighbours: &[(i32, i32, &ChunkColumn)],
     dimension: ServerDimension,
 ) -> ChunkColumn {
     let mut settled = centre.clone();
@@ -1489,7 +1498,7 @@ impl<'a> NetherSerialLightStore<'a> {
             .unwrap_or_else(|| source.column(center.0, center.1));
         let trace = &mut self.trace;
         let mut compute = |column: &ChunkColumn,
-                           neighbours: &[(i32, i32, ChunkColumn)]| {
+                           neighbours: &[(i32, i32, &ChunkColumn)]| {
             let settlement = V770ServerProtocol
                 .compute_initial_column_lights_with_neighbours_in_dimension(
                     column,
@@ -1723,12 +1732,13 @@ fn compare_end_raw_from_persisted_world(
             resident.push(((cx, cz), expected_prefix, expected_full, index, settled, neighbours));
         }
         for ((cx, cz), expected_prefix, expected_full, index, settled, neighbours) in resident {
+            let neighbour_refs = borrowed_neighbours(&neighbours);
             let directive = V770ServerProtocol
                 .try_encode_chunk_with_neighbours_in_dimension(
                     cx,
                     cz,
                     &settled,
-                    &neighbours,
+                    &neighbour_refs,
                     ServerDimension::End,
                 )
                 .expect("production neighbour-aware chunk encoder for persisted End");
@@ -2375,11 +2385,13 @@ fn initial_light_admission_excludes_future_neighbours() {
         .filter(|(dx, dz, _)| admitted_offsets.contains(&(*dx, *dz)))
         .map(|&(dx, dz, ref column)| (dx, dz, column.clone()))
         .collect::<Vec<_>>();
+    let admitted_neighbour_refs = borrowed_neighbours(&admitted_neighbours);
+    let all_neighbour_refs = borrowed_neighbours(&all_neighbours);
     let proto = V770ServerProtocol;
     let settled = initial_light_snapshot_for_admission(
         &proto,
         &centre,
-        &admitted_neighbours,
+        &admitted_neighbour_refs,
         ServerDimension::End,
     );
     let replayed = proto
@@ -2387,7 +2399,7 @@ fn initial_light_admission_excludes_future_neighbours() {
             0,
             0,
             &settled,
-            &all_neighbours,
+            &all_neighbour_refs,
             ServerDimension::End,
         )
         .expect("the synthetic End packet must encode");
@@ -2396,7 +2408,7 @@ fn initial_light_admission_excludes_future_neighbours() {
             0,
             0,
             &centre,
-            &admitted_neighbours,
+            &admitted_neighbour_refs,
             ServerDimension::End,
         )
         .expect("the admitted-footprint End packet must encode");
@@ -2405,7 +2417,7 @@ fn initial_light_admission_excludes_future_neighbours() {
             0,
             0,
             &centre,
-            &all_neighbours,
+            &all_neighbour_refs,
             ServerDimension::End,
         )
         .expect("the full-footprint End packet must encode");
@@ -2808,7 +2820,7 @@ fn north_neighbour_light_requires_neighbour_aware_initial_encoding() {
             0,
             0,
             &centre,
-            &[(0, -1, north)],
+            &[(0, -1, &north)],
             ServerDimension::Overworld,
         )
         .expect("neighbour-aware initial encoding"),
@@ -3677,12 +3689,13 @@ fn parity_manifest_streams_before_rust_comparison() {
                 }
                 (column, neighbours)
             };
+            let neighbour_refs = borrowed_neighbours(&neighbours);
             let directive = V770ServerProtocol
                 .try_encode_chunk_with_neighbours_in_dimension(
                     cx,
                     cz,
                     &settled_column,
-                    &neighbours,
+                    &neighbour_refs,
                     server_dimension,
                 )
                 .expect("production neighbour-aware chunk encoder");
@@ -3902,8 +3915,9 @@ fn lifecycle_packet_payload<S: LifecycleWorldgenSource>(
             neighbours.push((dx, dz, column.clone()));
         }
     }
+    let neighbour_refs = borrowed_neighbours(&neighbours);
     let directive = V770ServerProtocol
-        .try_encode_chunk_with_neighbours_in_dimension(target.0, target.1, &column, &neighbours, dimension)
+        .try_encode_chunk_with_neighbours_in_dimension(target.0, target.1, &column, &neighbour_refs, dimension)
         .expect("production neighbour-aware chunk encoder");
     match directive {
         ServerDirective::Send { packet_id, payload } => {
@@ -3924,12 +3938,13 @@ fn nether_packet_payload<S: ChunkSource>(source: &S, target: ChunkPos) -> Vec<u8
             }
         }
     }
+    let neighbour_refs = borrowed_neighbours(&neighbours);
     let directive = V770ServerProtocol
         .try_encode_chunk_with_neighbours_in_dimension(
             target.0,
             target.1,
             &column,
-            &neighbours,
+            &neighbour_refs,
             ServerDimension::Nether,
         )
         .expect("production neighbour-aware chunk encoder");
@@ -4229,12 +4244,13 @@ fn compare_lifecycle_manifest<S: LifecycleWorldgenSource + Sync>(
                 }
             }
         }
+        let neighbour_refs = borrowed_neighbours(&neighbours);
         let directive = V770ServerProtocol
             .try_encode_chunk_with_neighbours_in_dimension(
                 target.0,
                 target.1,
                 &column,
-                &neighbours,
+                &neighbour_refs,
                 server_dimension,
             )
             .expect("production neighbour-aware chunk encoder");

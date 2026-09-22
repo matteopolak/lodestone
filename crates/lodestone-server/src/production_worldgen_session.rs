@@ -660,7 +660,8 @@ fn commit_features<S>(
     spills: &[LifecycleSpill],
     structure_blocks: StructureBlocks,
     authenticated_content_fingerprint: Option<[u8; 32]>,
-) -> Result<[u8; 32], SessionError>
+    retain_direct_output: bool,
+) -> Result<([u8; 32], Option<Arc<ChunkColumn>>), SessionError>
 where
     S: LifecycleWorldgenSource + Sync,
 {
@@ -673,8 +674,11 @@ where
         let column = materializer
             .resident_column(target)
             .expect("committed FEATURES target remains resident");
-        return Ok(authenticated_content_fingerprint
-            .unwrap_or_else(|| column_content_fingerprint(column)));
+        return Ok((
+            authenticated_content_fingerprint
+                .unwrap_or_else(|| column_content_fingerprint(column)),
+            None,
+        ));
     }
     session.declare_mutable_sources(
         key,
@@ -751,17 +755,20 @@ where
         }
         session.complete_mutable_source(transaction)?;
     }
-    let column = materializer
-        .resident_column(target)
-        .cloned()
-        .expect("target was admitted before FEATURES");
+    let column = Arc::new(
+        materializer
+            .resident_column(target)
+            .cloned()
+            .expect("target was admitted before FEATURES"),
+    );
     let content_fingerprint = authenticated_content_fingerprint
         .unwrap_or_else(|| column_content_fingerprint(&column));
     let fingerprint = stage_fingerprint(target, ColumnStage::Features, content_fingerprint);
     let retained_bytes = column.memory_census().logical_total();
-    let mut products = vec![ImmutableProduct::new_with_retained_bytes(
+    let sidecars = feature_sidecars(session.pipeline().dimension(), spills, &column);
+    let mut products = vec![ImmutableProduct::from_arc(
         ResourceKey::ResidentOverlay,
-        column.clone(),
+        Arc::clone(&column),
         retained_bytes,
     )];
     if session
@@ -782,9 +789,12 @@ where
         fingerprint,
         EXECUTOR_VERSION,
         products,
-        feature_sidecars(session.pipeline().dimension(), spills, &column),
+        sidecars,
     )?;
-    Ok(content_fingerprint)
+    Ok((
+        content_fingerprint,
+        retain_direct_output.then_some(column),
+    ))
 }
 
 fn commit_top_layer<S>(
@@ -793,6 +803,7 @@ fn commit_top_layer<S>(
     spills: &[LifecycleSpill],
     cached_content_fingerprint: Option<[u8; 32]>,
     authenticated_content_fingerprint: Option<[u8; 32]>,
+    direct_feature_output: Option<Arc<ChunkColumn>>,
 ) -> Result<[u8; 32], SessionError>
 where
     S: LifecycleWorldgenSource + Sync,
@@ -818,10 +829,14 @@ where
         let transaction = session.begin_mutable_source(target, key, 0)?;
         session.complete_mutable_source(transaction)?;
     }
-    let column = materializer
-        .resident_column(target)
-        .cloned()
-        .expect("target was admitted before top layer");
+    let column = direct_feature_output.unwrap_or_else(|| {
+        Arc::new(
+            materializer
+                .resident_column(target)
+                .cloned()
+                .expect("target was admitted before top layer"),
+        )
+    });
     let content_fingerprint = if spills.is_empty() {
         authenticated_content_fingerprint
             .or(cached_content_fingerprint)
@@ -836,7 +851,7 @@ where
         fingerprint,
         fingerprint,
         EXECUTOR_VERSION,
-        vec![ImmutableProduct::new_with_retained_bytes(
+        vec![ImmutableProduct::from_arc(
             ResourceKey::ResidentRegion,
             column,
             retained_bytes,
@@ -959,8 +974,10 @@ where
     feature_spills: Vec<LifecycleSpill>,
     top_spills: Vec<LifecycleSpill>,
     target_content_fingerprint: Option<[u8; 32]>,
-    output: Option<ChunkColumn>,
+    direct_feature_output: Option<Arc<ChunkColumn>>,
+    output: Option<Arc<ChunkColumn>>,
     packet_neighbours: Vec<PacketNeighbour>,
+    packet_columns: Option<&'m mut BTreeMap<ChunkCoordinate, Arc<ChunkColumn>>>,
     phase: GenerationPhase,
     defer_packet_finalization: bool,
     padding_targets: Option<&'m BTreeSet<ChunkCoordinate>>,
@@ -1018,8 +1035,10 @@ where
             feature_spills: Vec::new(),
             top_spills: Vec::new(),
             target_content_fingerprint: None,
+            direct_feature_output: None,
             output: None,
             packet_neighbours: Vec::new(),
+            packet_columns: None,
             phase: GenerationPhase::Admission,
             defer_packet_finalization,
             padding_targets: None,
@@ -1168,7 +1187,7 @@ where
                     .resident_read(self.session.request().target())?
                     .product::<ChunkColumn>(ResourceKey::OutputColumn);
                 if let Some(output) = output {
-                    self.output = Some((*output).clone());
+                    self.output = Some(output);
                     self.phase = if self.defer_packet_finalization {
                         GenerationPhase::PacketDeferred
                     } else {
@@ -1250,18 +1269,23 @@ where
                 self.phase = GenerationPhase::CommitFeatures;
             }
             GenerationPhase::CommitFeatures => {
+                let direct_output_to_top_layer =
+                    P::has_top_layer() && self.materializer.has_direct_target_output();
                 let structure_blocks = self.materializer.take_feature_structure_blocks();
                 let authenticated_content_fingerprint = self
                     .materializer
                     .authenticated_features_digest(self.session.request().target());
-                self.target_content_fingerprint = Some(commit_features(
+                let (content_fingerprint, direct_feature_output) = commit_features(
                     self.session,
                     &mut self.materializer,
                     &self.commit_sources,
                     &self.feature_spills,
                     structure_blocks,
                     authenticated_content_fingerprint,
-                )?);
+                    direct_output_to_top_layer,
+                )?;
+                self.target_content_fingerprint = Some(content_fingerprint);
+                self.direct_feature_output = direct_feature_output;
                 crate::worldgen_progress::emit(crate::worldgen_progress::WorldgenProgress {
                     session: self.session.id().value(),
                     admitted: self.admissions.len() as u32,
@@ -1297,12 +1321,18 @@ where
                 let authenticated_content_fingerprint = self
                     .materializer
                     .authenticated_features_digest(self.session.request().target());
+                let direct_feature_output = if self.materializer.has_direct_target_output() {
+                    self.direct_feature_output.take()
+                } else {
+                    None
+                };
                 self.target_content_fingerprint = Some(commit_top_layer(
                     self.session,
                     &mut self.materializer,
                     &self.top_spills,
                     self.target_content_fingerprint,
                     authenticated_content_fingerprint,
+                    direct_feature_output,
                 )?);
                 self.phase = if self.defer_packet_finalization {
                     GenerationPhase::PacketDeferred
@@ -1315,6 +1345,9 @@ where
                     return Err(SessionError::Cancelled);
                 }
                 let target = self.session.request().target();
+                if let Some(columns) = self.packet_columns.as_deref_mut() {
+                    columns.remove(&target);
+                }
                 self.materializer
                     .apply_canonical_target_feature_winners(target);
                 let mut output = self.materializer.snapshot_for_packet(target);
@@ -1341,15 +1374,16 @@ where
                     sidecars.push(ImmutableSidecar::new(SidecarKey::BlockEntityEvents, entities));
                     sidecars.push(ImmutableSidecar::new(SidecarKey::Gateways, gateways));
                 }
+                let output = Arc::new(output);
                 self.session.complete_immutable(crate::worldgen_session::ImmutableStageCompletion::new(
                     target,
                     output_key,
                     fingerprint,
                     fingerprint,
                     EXECUTOR_VERSION,
-                    vec![ImmutableProduct::new_with_retained_bytes(
+                    vec![ImmutableProduct::from_arc(
                         ResourceKey::OutputColumn,
-                        output.clone(),
+                        Arc::clone(&output),
                         retained_bytes,
                     )],
                     sidecars,
@@ -1403,11 +1437,18 @@ where
                         if let Some(prefix) = shaped_prefix {
                             return Ok(match &prefix.column {
                                 SharedPrefixColumn::Materialized(column) => {
-                                    PacketNeighbour::materialized_with_id_overlay(
-                                        coordinate,
-                                        column.as_ref().clone(),
-                                        &sparse_overlay,
-                                    )
+                                    if sparse_overlay.is_empty() {
+                                        PacketNeighbour::shared_materialized(
+                                            coordinate,
+                                            Arc::clone(column),
+                                        )
+                                    } else {
+                                        PacketNeighbour::materialized_with_id_overlay(
+                                            coordinate,
+                                            column.as_ref().clone(),
+                                            &sparse_overlay,
+                                        )
+                                    }
                                 }
                                 SharedPrefixColumn::Generated(column) => {
                                     PacketNeighbour::generated_with_id_overlay(
@@ -1419,6 +1460,17 @@ where
                             });
                         }
                         if let Some(column) = self.materializer.resident_column(coordinate) {
+                            if sparse_overlay.is_empty() {
+                                if let Some(columns) = self.packet_columns.as_deref_mut() {
+                                    let shared = columns
+                                        .entry(coordinate)
+                                        .or_insert_with(|| Arc::new(column.clone()));
+                                    return Ok(PacketNeighbour::shared_materialized(
+                                        coordinate,
+                                        Arc::clone(shared),
+                                    ));
+                                }
+                            }
                             Ok(PacketNeighbour::materialized_with_id_overlay(
                                 coordinate,
                                 column.clone(),
@@ -1593,6 +1645,7 @@ where
 {
     source: &'a S,
     declared_halo: BTreeSet<ChunkCoordinate>,
+    admission_context_len: usize,
     materializer: LifecycleMaterializer<&'a S>,
     shared_prefixes: SharedPrefixCache,
     settlement_padding: BTreeSet<ChunkCoordinate>,
@@ -1616,6 +1669,7 @@ where
         Self {
             source,
             declared_halo: halo.iter().copied().collect(),
+            admission_context_len: 0,
             materializer: LifecycleMaterializer::new(source),
             shared_prefixes: SharedPrefixCache::new(),
             settlement_padding: BTreeSet::new(),
@@ -1630,8 +1684,8 @@ where
             self.materializer.materialized_resident_count();
         debug_assert_eq!(
             self.admission_counts.mutable + self.admission_counts.read_only,
-            self.declared_halo.len(),
-            "admission partition must cover the declared halo"
+            self.admission_context_len,
+            "admission partition must cover the admitted read context"
         );
         debug_assert_eq!(
             self.admission_counts.generated_residents
@@ -1682,6 +1736,7 @@ where
         {
             return Err(SessionError::OutsideHalo(coordinate));
         }
+        self.admission_context_len = lease_coordinates.len();
         Ok(self.materializer.admit_region_with_context(
             coordinates,
             lease_coordinates,
@@ -2012,6 +2067,7 @@ where
             self.admission_counts = RegionAdmissionCounts {
                 requested: targets.len(),
                 mutable: targets.len(),
+                read_only: halo.len().saturating_sub(targets.len()),
                 ..RegionAdmissionCounts::default()
             };
             self.refresh_admission_counts();
@@ -2075,6 +2131,7 @@ where
         }
 
         let mut results = Vec::with_capacity(sessions.len());
+        let mut packet_columns = BTreeMap::new();
         #[cfg(feature = "worldgen-stage-pmu")]
         let _snapshot_finalization = RegionGuard::enter(RegionPhase::SnapshotFinalization);
         for index in 0..sessions.len() {
@@ -2101,6 +2158,7 @@ where
             if settlement.is_some() {
                     machine.padding_targets = Some(&self.settlement_padding);
                 }
+                machine.packet_columns = Some(&mut packet_columns);
                 machine.finalize_batch_target(executor)
             };
             if result.is_ok() && settlement.is_some() {
@@ -2203,6 +2261,7 @@ where
             self.admission_counts = RegionAdmissionCounts {
                 requested: targets.len(),
                 mutable: targets.len(),
+                read_only: halo.len().saturating_sub(targets.len()),
                 ..RegionAdmissionCounts::default()
             };
             self.refresh_admission_counts();
@@ -2275,6 +2334,7 @@ where
         }
 
         let mut results = Vec::with_capacity(sessions.len());
+        let mut packet_columns = BTreeMap::new();
         for index in 0..sessions.len() {
             if cancelled[index] {
                 results.push(Err(
@@ -2299,6 +2359,7 @@ where
             if settlement.is_some() {
                     machine.padding_targets = Some(&self.settlement_padding);
                 }
+                machine.packet_columns = Some(&mut packet_columns);
                 machine
                     .finalize_batch_target_yielding(&PersistentWorldgenExecutor)
                     .await
@@ -3337,7 +3398,7 @@ mod tests {
     }
 
     #[test]
-    fn target_owned_scalar_settlement_keeps_right_edge_padding_out_of_output() {
+    fn target_owned_scalar_settlement_applies_right_edge_writer_to_output() {
         let invocations = Arc::new(AtomicUsize::new(0));
         let source = SettlementSource {
             invocations: Arc::clone(&invocations),
@@ -3362,7 +3423,11 @@ mod tests {
         )
         .expect("scalar settlement request succeeds");
         assert_eq!(invocations.load(Ordering::Relaxed), 9);
-        assert_eq!(snapshot.column().block_state_id(15, 0, 0), sid("minecraft:air"));
+        assert_eq!(
+            snapshot.column().block_state_id(15, 0, 0),
+            sid("minecraft:diorite"),
+            "the right-edge writer targets the requested column",
+        );
         let output_record = session
             .frontier((0, 0))
             .expect("scalar target frontier exists")
@@ -3392,7 +3457,11 @@ mod tests {
         )
         .expect("terminal scalar request can be replayed");
         assert_eq!(invocations.load(Ordering::Relaxed), 9);
-        assert_eq!(replay.column().block_state_id(15, 0, 0), sid("minecraft:air"));
+        assert_eq!(
+            replay.column().block_state_id(15, 0, 0),
+            sid("minecraft:diorite"),
+            "replay preserves the settled right-edge writer",
+        );
     }
 
     #[test]
@@ -3476,6 +3545,20 @@ mod tests {
         );
         assert_eq!(snapshot.coordinate(), (0, 0));
         assert_eq!(snapshot.neighbours().len(), 8);
+        let resident = session
+            .resident_read((0, 0))
+            .expect("target resident output remains readable");
+        let features = resident
+            .product::<ChunkColumn>(ResourceKey::ResidentOverlay)
+            .expect("direct FEATURES product is retained");
+        let top_layer = resident
+            .product::<ChunkColumn>(ResourceKey::ResidentRegion)
+            .expect("direct TOP_LAYER product is retained");
+        let output = resident
+            .product::<ChunkColumn>(ResourceKey::OutputColumn)
+            .expect("packet output product is retained");
+        assert!(Arc::ptr_eq(&features, &top_layer));
+        assert!(Arc::ptr_eq(&output, &snapshot.column_handle()));
         assert_eq!(
             crate::chunk::generated_materializations(),
             0,

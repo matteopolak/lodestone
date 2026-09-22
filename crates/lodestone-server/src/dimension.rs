@@ -576,7 +576,7 @@ impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
         exclusive: bool,
         compute: &mut dyn FnMut(
             &ChunkColumn,
-            &[(i32, i32, ChunkColumn)],
+            &[(i32, i32, &ChunkColumn)],
         ) -> Option<lodestone_world::ColumnLight>,
     ) -> Result<ChunkColumn, ColumnLightSettlementError> {
         self.primary.settle_resident_column_light_with_neighbours(
@@ -602,7 +602,7 @@ impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
         exclusive: bool,
         compute: &mut dyn FnMut(
             &ChunkColumn,
-            &[(i32, i32, ChunkColumn)],
+            &[(i32, i32, &ChunkColumn)],
         ) -> Option<ColumnLightSettlement>,
     ) -> Result<ChunkColumn, ColumnLightSettlementError> {
         self.primary.settle_resident_column_lights_with_neighbours(

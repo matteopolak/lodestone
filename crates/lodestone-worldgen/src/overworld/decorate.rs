@@ -1146,7 +1146,7 @@ impl OverworldGenerator {
         self.mixed_features_stage_selected(
             target_x,
             target_z,
-            (*pre.0).clone(),
+            Some((*pre.0).clone()),
             context,
             Some((source_x, source_z)),
             overrides,
@@ -1181,7 +1181,7 @@ impl OverworldGenerator {
         self.mixed_features_stage_selected(
             target_x,
             target_z,
-            (*pre.0).clone(),
+            Some((*pre.0).clone()),
             &context,
             Some((target_x, target_z)),
             overrides,
@@ -1388,7 +1388,7 @@ impl OverworldGenerator {
         let (world, result) = self.mixed_features_stage_selected(
             target_x,
             target_z,
-            (*pre.0).clone(),
+            Some((*pre.0).clone()),
             context,
             selected_source,
             overrides,
@@ -1403,7 +1403,7 @@ impl OverworldGenerator {
         let (_, _) = self.top_layer_stage_with_observer(
             target_x,
             target_z,
-            world,
+            world.expect("sparse scalar decoration retains its dense world"),
             &pre.2,
             &mut |x, y, z, state| {
                 local_states.insert((x, y, z), state);
@@ -1473,7 +1473,7 @@ impl OverworldGenerator {
         let (world, result) = self.mixed_features_stage_selected(
             target_x,
             target_z,
-            (*pre.0).clone(),
+            Some((*pre.0).clone()),
             &context,
             selected_source,
             overrides,
@@ -1488,7 +1488,7 @@ impl OverworldGenerator {
         let (world, _) = self.top_layer_stage_with_observer(
             target_x,
             target_z,
-            world,
+            world.expect("direct decoration retains its dense world"),
             &pre.2,
             &mut |x, y, z, state| {
                 local_states.insert((x, y, z), state);
@@ -2108,14 +2108,14 @@ impl OverworldGenerator {
         let (world, result) = self.mixed_features_stage_selected(
             target.0,
             target.1,
-            world,
+            Some(world),
             context,
             Some(target),
             &[],
             SpillCapture::Epoch,
             Some(&mut epoch.grid),
         );
-        let mut world = world;
+        let mut world = world.expect("full epoch target retains its dense output");
         let (world_after_top, _) = self.top_layer_stage_with_observer(
             target.0,
             target.1,
@@ -2235,33 +2235,27 @@ impl OverworldGenerator {
             .centre_pre_ore()
             .cloned()
             .unwrap_or_else(|| self.pre_ore_stage(target.0, target.1));
-        let mut world = (*pre.0).clone();
         epoch.override_target_count += 1;
         epoch.grid.begin_epoch_target(target.0, target.1);
-        epoch.apply_prior_writes(target, &mut world);
         epoch.seed_map_overrides(target, overrides);
-        epoch.apply_override_writes(target, &mut world);
-        let (world, result) = self.mixed_features_stage_selected(
+        let (_, result) = self.mixed_features_stage_selected(
             target.0,
             target.1,
-            world,
+            None,
             context,
             Some(target),
             &[],
             SpillCapture::Epoch,
             Some(&mut epoch.grid),
         );
-        let world = world;
-        let (world_after_top, _) = self.top_layer_stage_with_observer(
+        let mut discard_write = |_x: i32, _y: i32, _z: i32, _state: CanonicalStateId| {};
+        let _ = self.apply_top_layer_to_grid(
             target.0,
             target.1,
-            world,
             &pre.2,
-            &mut |x, y, z, state| {
-                epoch.grid.set_id_if_in_bounds(x, y, z, state);
-            },
+            &mut epoch.grid,
+            &mut discard_write,
         );
-        drop(world_after_top);
         let (local_features, spills) = epoch.record_target_writes(target);
         SparseDirectDecorationResult {
             spills,
@@ -2283,32 +2277,27 @@ impl OverworldGenerator {
             .centre_pre_ore()
             .cloned()
             .unwrap_or_else(|| self.pre_ore_stage(target.0, target.1));
-        let mut world = (*pre.0).clone();
         epoch.override_target_count += 1;
         epoch.grid.begin_epoch_target(target.0, target.1);
-        epoch.apply_prior_writes(target, &mut world);
         epoch.consume_override_events(overrides);
-        epoch.apply_override_writes(target, &mut world);
-        let (world, result) = self.mixed_features_stage_selected(
+        let (_, result) = self.mixed_features_stage_selected(
             target.0,
             target.1,
-            world,
+            None,
             context,
             Some(target),
             &[],
             SpillCapture::Epoch,
             Some(&mut epoch.grid),
         );
-        let (world_after_top, _) = self.top_layer_stage_with_observer(
+        let mut discard_write = |_x: i32, _y: i32, _z: i32, _state: CanonicalStateId| {};
+        let _ = self.apply_top_layer_to_grid(
             target.0,
             target.1,
-            world,
             &pre.2,
-            &mut |x, y, z, state| {
-                epoch.grid.set_id_if_in_bounds(x, y, z, state);
-            },
+            &mut epoch.grid,
+            &mut discard_write,
         );
-        drop(world_after_top);
         let (local_features, spills) = epoch.record_target_writes(target);
         SparseDirectDecorationResult {
             spills,
@@ -3037,7 +3026,7 @@ impl OverworldGenerator {
         let (world, result) = self.mixed_features_stage_selected(
             cx,
             cz,
-            center_world,
+            Some(center_world),
             context,
             selected_source,
             overrides,
@@ -3056,7 +3045,10 @@ impl OverworldGenerator {
                 (x >> 4) == cx && (z >> 4) == cz
             })
             .collect();
-        (world, block_entities)
+        (
+            world.expect("source feature stage retains its dense output"),
+            block_entities,
+        )
     }
 
     /// Runs the complete Overworld FEATURES dispatch over its shared
@@ -3069,14 +3061,14 @@ impl OverworldGenerator {
         &self,
         cx: i32,
         cz: i32,
-        mut center_world: crate::dense_grid::DenseBlockGrid,
+        mut center_world: Option<crate::dense_grid::DenseBlockGrid>,
         context: &MixedReplayContext,
         selected_source: Option<(i32, i32)>,
         overrides: &[(i32, i32, i32, CanonicalStateId)],
         spill_capture: SpillCapture,
         epoch_grid: Option<&mut crate::feature::vegetation::VegGrid>,
     ) -> (
-        crate::dense_grid::DenseBlockGrid,
+        Option<crate::dense_grid::DenseBlockGrid>,
         ParityDecorationResult,
     ) {
         if self.decoration_catalog.is_empty() {
@@ -3094,13 +3086,16 @@ impl OverworldGenerator {
         let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Vegetation);
 
         if matches!(spill_capture, SpillCapture::CrossColumn) {
-            let (min_x, min_y, min_z, size_x, size_y, size_z) = center_world.bounds();
+            let world = center_world
+                .as_mut()
+                .expect("cross-column capture needs a dense output fold");
+            let (min_x, min_y, min_z, size_x, size_y, size_z) = world.bounds();
             for &(x, y, z, state) in overrides {
                 if (min_x..min_x + size_x).contains(&x)
                     && (min_y..min_y + size_y).contains(&y)
                     && (min_z..min_z + size_z).contains(&z)
                 {
-                    center_world.set_id(x, y, z, state);
+                    world.set_id(x, y, z, state);
                 }
             }
         }
@@ -3149,9 +3144,14 @@ impl OverworldGenerator {
         let grid_sources = &wide_pre;
         let grid_biomes = &wide_pre;
         let mut owned_grid = if epoch_grid.is_none() {
-            // The centre clone is the immutable source snapshot while
-            // `center_world` remains the one dense grid this function may return.
-            let centre_grid = Arc::new(center_world.clone());
+            // The centre clone is the immutable source snapshot while the
+            // supplied `center_world` remains the dense grid this function may return.
+            let centre_grid = Arc::new(
+                center_world
+                    .as_ref()
+                    .expect("owned feature grid needs a dense source snapshot")
+                    .clone(),
+            );
             Some(
                 crate::feature::vegetation::VegGrid::with_sources_and_biomes_shared_zoomed(
                     self.min_y,
@@ -3314,10 +3314,12 @@ impl OverworldGenerator {
             }
         }
         let block_entities = grid.take_block_entities();
-        let mut world = center_world;
-        for (x, y, z, state) in grid.dirty_cells() {
-            world.set_id(x, y, z, state);
-        }
+        let world = center_world.map(|mut world| {
+            for (x, y, z, state) in grid.dirty_cells() {
+                world.set_id(x, y, z, state);
+            }
+            world
+        });
         return_mixed_dispatch_scratch(dispatch_scratch);
         (
             world,
@@ -3378,11 +3380,29 @@ impl OverworldGenerator {
         crate::feature::top_layer::FreezeCounts,
     ) {
         let mut world = world;
+        let counts = self.apply_top_layer_to_grid(
+            cx,
+            cz,
+            biome_quarts,
+            &mut world,
+            observer,
+        );
+        (world, counts)
+    }
+
+    fn apply_top_layer_to_grid<G: crate::feature::top_layer::TopLayerGrid>(
+        &self,
+        cx: i32,
+        cz: i32,
+        biome_quarts: &[(BiomeRef, bool); 16],
+        grid: &mut G,
+        observer: &mut dyn FnMut(i32, i32, i32, CanonicalStateId),
+    ) -> crate::feature::top_layer::FreezeCounts {
         if self.snow_support.is_empty()
             || self.freeze_biomes.is_empty()
             || self.biome_climates.is_empty()
         {
-            return (world, crate::feature::top_layer::FreezeCounts::default());
+            return crate::feature::top_layer::FreezeCounts::default();
         }
         // After the early return — see `ore_stage`'s note on why. This is the
         // stage the fixture tree cannot exercise at all (no `block_freeze_facts`
@@ -3398,7 +3418,7 @@ impl OverworldGenerator {
         // nothing (the trap `049c603` already had to fix in two determinism
         // gates).
         if std::env::var("LODESTONE_FREEZE_DISABLE_DEBUG").is_ok() {
-            return (world, crate::feature::top_layer::FreezeCounts::default());
+            return crate::feature::top_layer::FreezeCounts::default();
         }
         // `level.getBiome(topPos)` resolves through the quart grid. `biome_stage`
         // samples each quart at its own corner, so a column's quart index is
@@ -3417,8 +3437,8 @@ impl OverworldGenerator {
                 .expect("extension biome requires its owning registry at the name boundary");
             biome
         };
-        let counts = crate::feature::top_layer::apply_freeze_top_layer_typed_with_observer(
-            &mut world,
+        crate::feature::top_layer::apply_freeze_top_layer_typed_with_observer_on(
+            grid,
             cx,
             cz,
             self.min_y,
@@ -3429,8 +3449,7 @@ impl OverworldGenerator {
             &self.snow_support,
             &self.climate_noise,
             observer,
-        );
-        (world, counts)
+        )
     }
 
 }

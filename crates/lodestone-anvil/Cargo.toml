@@ -34,6 +34,7 @@ xxhash-rust = { version = "0.8", default-features = false, features = [
 ] }
 
 [dev-dependencies]
+lodestone-data = { workspace = true }
 # **A dev-dependency cycle, deliberately.** `lodestone-server` depends on this
 # crate normally; this direction exists only for `tests/vanilla_save_parity.rs`,
 # whose whole subject is the *chunk schema* (`lodestone_server::chunk_nbt`) and

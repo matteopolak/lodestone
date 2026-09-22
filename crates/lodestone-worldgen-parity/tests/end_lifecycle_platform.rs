@@ -1,5 +1,6 @@
 //! Regression coverage for the fixed End platform at the lifecycle source seam.
 
+use lodestone_data::block::Block;
 use lodestone_server::end_chunk_source;
 use lodestone_worldgen_parity::lifecycle::{LifecycleCompletion, LifecycleMaterializer};
 
@@ -21,7 +22,7 @@ fn fixed_platform_is_emitted_by_its_source_and_reaches_lifecycle_heightmaps() {
         direct
             .spills
             .iter()
-            .any(|spill| spill.position == PLATFORM_CELL && spill.state == "minecraft:obsidian"),
+            .any(|spill| spill.position == PLATFORM_CELL && spill.state == Block::Obsidian.default_state()),
         "the source containing the fixed placement origin must emit its platform spill",
     );
 
@@ -41,7 +42,7 @@ fn fixed_platform_is_emitted_by_its_source_and_reaches_lifecycle_heightmaps() {
     let column = materializer
         .resident_column(TARGET)
         .expect("the target was admitted before its feature completion");
-    assert_eq!(column.block_state(2, 48, 0), "minecraft:obsidian");
+    assert_eq!(column.block_state_id(2, 48, 0), Block::Obsidian.default_state());
     assert_eq!(
         column
             .client_heightmaps()
@@ -53,4 +54,3 @@ fn fixed_platform_is_emitted_by_its_source_and_reaches_lifecycle_heightmaps() {
         "the platform spill must update the retained world-surface heightmap",
     );
 }
-

@@ -1,5 +1,6 @@
 //! Regression for source-owned Nether fungus placement across chunk admission.
 
+use lodestone_data::block::Block;
 use lodestone_server::nether_chunk_source;
 use lodestone_worldgen_parity::lifecycle::{LifecycleCompletion, LifecycleMaterializer};
 
@@ -23,12 +24,12 @@ fn crimson_fungus_keeps_caps_and_stems_in_source_chunk() {
         .resident_column(SOURCE)
         .expect("source was admitted before completion");
     assert_eq!(
-        source.block_state(
+        source.block_state_id(
             SOURCE_LOCAL_CONTROL.0,
             SOURCE_LOCAL_CONTROL.1,
             SOURCE_LOCAL_CONTROL.2,
         ),
-        "minecraft:crimson_stem[axis=y]",
+        Block::CrimsonStem.default_state(),
         "the source control proves crimson-fungus placement still ran",
     );
 
@@ -36,8 +37,8 @@ fn crimson_fungus_keeps_caps_and_stems_in_source_chunk() {
         .resident_column(TARGET)
         .expect("target was admitted before source completion");
     assert_eq!(
-        target.block_state(TARGET_LOCAL.0, TARGET_LOCAL.1, TARGET_LOCAL.2),
-        "minecraft:air",
+        target.block_state_id(TARGET_LOCAL.0, TARGET_LOCAL.1, TARGET_LOCAL.2),
+        Block::Air.default_state(),
         "a source fungus must not write its cap into an admitted neighbour",
     );
 }

@@ -91,8 +91,8 @@ fn protocol_774_retains_initial_light_for_cross_column_packets() {
 #[test]
 fn surface_heightmap_uses_first_free_y_and_non_straddling_nine_bit_longs() {
     let mut column = ChunkColumn::new(-64, 384);
-    column.set_block(3, 101, 5, "minecraft:stone");
-    column.set_block(3, 201, 5, "minecraft:cave_air");
+    column.set_block_id(3, 101, 5, StateId::from_state_str("minecraft:stone").unwrap());
+    column.set_block_id(3, 201, 5, StateId::from_state_str("minecraft:cave_air").unwrap());
     let ServerDirective::Send { payload, .. } =
         V774ServerProtocol.try_encode_chunk(0, 0, &column).unwrap() else { panic!("chunk"); };
     let mut reader = Reader::new(&payload);
@@ -170,7 +170,7 @@ fn hosted_configuration_matches_the_full_oracle_registry_manifest() {
 fn chunk_framing_and_exact_state_rejection() {
     let protocol = V774ServerProtocol;
     let mut column = ChunkColumn::new(-64, 384);
-    column.set_block(3, 101, 5, "minecraft:stone");
+    column.set_block_id(3, 101, 5, StateId::from_state_str("minecraft:stone").unwrap());
     let ServerDirective::Send { packet_id, payload } =
         protocol.try_encode_chunk(7, -4, &column).unwrap() else { panic!("chunk"); };
     assert_eq!(packet_id, packet_ids::play::clientbound::LEVEL_CHUNK_WITH_LIGHT);
@@ -193,7 +193,12 @@ fn chunk_framing_and_exact_state_rejection() {
     let name = lodestone_data::block_states::block_name(unsupported).unwrap();
     let properties = lodestone_data::block_states::properties(unsupported).unwrap().iter()
         .map(|(key, value)| format!("{key}={value}")).collect::<Vec<_>>().join(",");
-    column.set_block(0, 0, 0, &format!("{name}[{properties}]"));
+    column.set_block_id(
+        0,
+        0,
+        0,
+        StateId::from_state_str(&format!("{name}[{properties}]")).unwrap(),
+    );
     assert!(protocol.try_encode_chunk(0, 0, &column).is_err());
 }
 
@@ -391,14 +396,15 @@ fn a_loaded_neighbour_contributes_sky_light_across_the_east_border() {
     let mut center = ChunkColumn::new(-64, 384);
     for z in 0..16 {
         for x in 0..16 {
-            center.set_block(x, 101, z, "minecraft:stone");
+            center.set_block_id(x, 101, z, StateId::from_state_str("minecraft:stone").unwrap());
         }
     }
     let isolated = protocol.compute_column_light(&center).unwrap();
+    let east = ChunkColumn::new(-64, 384);
     let with_east = protocol
         .compute_column_light_with_neighbours(
             &center,
-            &[(1, 0, ChunkColumn::new(-64, 384))],
+            &[(1, 0, &east)],
         )
         .unwrap();
     let all_neighbours = (-1..=1)
@@ -407,8 +413,12 @@ fn a_loaded_neighbour_contributes_sky_light_across_the_east_border() {
         .map(|(dx, dz)| (dx, dz, ChunkColumn::new(-64, 384)))
         .collect::<Vec<_>>();
     assert_eq!(all_neighbours.len(), 8, "the full fixture must supply every neighbour");
+    let all_neighbour_refs = all_neighbours
+        .iter()
+        .map(|(dx, dz, column)| (*dx, *dz, column))
+        .collect::<Vec<_>>();
     let with_all = protocol
-        .compute_column_light_with_neighbours(&center, &all_neighbours)
+        .compute_column_light_with_neighbours(&center, &all_neighbour_refs)
         .unwrap();
     let without_east = all_neighbours
         .iter()
@@ -416,8 +426,12 @@ fn a_loaded_neighbour_contributes_sky_light_across_the_east_border() {
         .cloned()
         .collect::<Vec<_>>();
     assert_eq!(without_east.len(), 7, "control must remove only the open east column");
+    let without_east_refs = without_east
+        .iter()
+        .map(|(dx, dz, column)| (*dx, *dz, column))
+        .collect::<Vec<_>>();
     let without_east = protocol
-        .compute_column_light_with_neighbours(&center, &without_east)
+        .compute_column_light_with_neighbours(&center, &without_east_refs)
         .unwrap();
     assert_eq!(
         isolated.section_sky_light(10, 15, 4, 8),
@@ -440,7 +454,7 @@ fn a_loaded_neighbour_contributes_sky_light_across_the_east_border() {
         "control: the north/south sky paths reach the east border only after eight steps"
     );
     let ServerDirective::Send { payload, .. } = protocol
-        .try_encode_chunk_with_neighbours(0, 0, &center, &all_neighbours)
+        .try_encode_chunk_with_neighbours(0, 0, &center, &all_neighbour_refs)
         .unwrap() else { panic!("chunk"); };
     let mut reader = Reader::new(&payload);
     let chunk = LevelChunk::decode(&mut reader, &ChunkShape::overworld(774)).unwrap();

@@ -927,6 +927,7 @@ fn parse_builtin_dimension(
 mod tests {
     use std::path::Path;
 
+    use lodestone_data::block::Block;
     use lodestone_storage_schema::{BuiltinDimension, GameMode, WorldProperties};
 
     use lodestone_server::{
@@ -1066,7 +1067,7 @@ mod tests {
         })
         .expect("open fixture native backend");
         let mut column = ChunkColumn::new(0, 16);
-        column.set_block(1, 1, 2, "minecraft:diamond_block");
+        column.set_block_id(1, 1, 2, Block::DiamondBlock.default_state());
         let light = lodestone_world::ColumnLight::new(column.section_count());
         let scheduled = ScheduledTickHandle::new();
         scheduled.with(|queues| {

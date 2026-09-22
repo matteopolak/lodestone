@@ -90,7 +90,7 @@ fn settle_centre<S: ChunkSource>(source: &S, proto: &V770ServerProtocol) {
         .resident_column(0, 0)
         .expect("the centre must be resident before the light fence");
     let mut compute = |centre: &ChunkColumn,
-                       neighbours: &[(i32, i32, ChunkColumn)]| {
+                       neighbours: &[(i32, i32, &ChunkColumn)]| {
         proto.compute_initial_column_light_with_neighbours_in_dimension(
             centre,
             neighbours,
@@ -127,12 +127,16 @@ fn raw_packet<S: ChunkSource>(source: &S, proto: &V770ServerProtocol) -> Vec<u8>
             )
         })
         .collect::<Vec<_>>();
+    let neighbour_refs = neighbours
+        .iter()
+        .map(|(dx, dz, column)| (*dx, *dz, column))
+        .collect::<Vec<_>>();
     let ServerDirective::Send { payload, .. } = proto
         .try_encode_chunk_with_neighbours_in_dimension(
             0,
             0,
             &centre,
-            &neighbours,
+            &neighbour_refs,
             Dimension::End,
         )
         .expect("the End packet must encode")

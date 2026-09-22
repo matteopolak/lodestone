@@ -14,7 +14,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use lodestone_core::Reader;
-use lodestone_server::{ChunkColumn, EndChunkSource, NetherChunkSource, OverworldChunkSource, end_chunk_source, nether_chunk_source, overworld_chunk_source};
+use lodestone_server::{ChunkColumn, ChunkSource, EndChunkSource, NetherChunkSource, OverworldChunkSource, end_chunk_source, nether_chunk_source, overworld_chunk_source};
 use lodestone_world::{ChunkColumn as WorldChunkColumn, Heightmaps};
 use lodestone_worldgen::stage_schedule::{
     NETHER_FEATURE_SOURCE_RADIUS, NETHER_FEATURE_WRITE_RADIUS,
@@ -882,11 +882,15 @@ fn end_p06_packet_payload(
     target: (i32, i32),
 ) -> Vec<u8> {
     let column = materializer.snapshot_for_packet(target);
+    encode_end_p06_packet(&column, target)
+}
+
+fn encode_end_p06_packet(column: &ChunkColumn, target: (i32, i32)) -> Vec<u8> {
     // The external P06 capture requests each target with a radius-zero ticket.
     // Its initial packet therefore contains the target's own light field; the
     // neighbouring CARVERS columns admitted for lifecycle replay are not light
     // inputs until their own packets or a later seam update.
-    let neighbours: [(i32, i32, ChunkColumn); 0] = [];
+    let neighbours: [(i32, i32, &ChunkColumn); 0] = [];
     let directive = V770ServerProtocol
         .try_encode_chunk_with_neighbours_in_dimension(
             target.0,
@@ -1138,19 +1142,22 @@ fn records_match_without_heightmaps(expected: &[u8], actual: &[u8], dimension: S
 
 fn hex(bytes: &[u8]) -> String { bytes.iter().map(|byte| format!("{byte:02x}")).collect() }
 
+fn decode_end_p06_packet(payload: &[u8]) -> LevelChunkWithLight {
+    let mut reader = Reader::new(payload);
+    let packet = LevelChunkWithLight::decode(
+        &mut reader,
+        &ChunkShape::nether_or_end_1_21(),
+    )
+    .expect("raw End packet must decode");
+    reader
+        .ensure_empty()
+        .expect("raw End packet has no trailing bytes");
+    packet
+}
+
 fn diagnose_end_raw_packet(expected: &[u8], actual: &[u8]) {
-    let decode = |payload: &[u8]| {
-        let mut reader = Reader::new(payload);
-        let packet = LevelChunkWithLight::decode(
-            &mut reader,
-            &ChunkShape::nether_or_end_1_21(),
-        )
-        .expect("raw End packet must decode for diagnostics");
-        reader.ensure_empty().expect("raw End packet has no trailing bytes");
-        packet
-    };
-    let expected = decode(expected);
-    let actual = decode(actual);
+    let expected = decode_end_p06_packet(expected);
+    let actual = decode_end_p06_packet(actual);
     eprintln!(
         "P06 decoded packet coords: expected=({}, {}) actual=({}, {})",
         expected.x, expected.z, actual.x, actual.z,
@@ -1170,6 +1177,21 @@ fn diagnose_end_raw_packet(expected: &[u8], actual: &[u8]) {
             (left != right).then_some((x, z, left, right))
         });
         eprintln!("P06 heightmap type={type_id} first_diff={first:?}");
+        if let Some((x, z, expected_height, actual_height)) = first {
+            let floor = expected_height.min(actual_height).saturating_sub(3) as i32;
+            let ceiling = expected_height.max(actual_height) as i32;
+            for y in (floor..=ceiling).rev() {
+                let state = expected.column.get_block(x, y, z);
+                let state = lodestone_data::block_states::StateId::new(state)
+                    .expect("decoded End state id is canonical");
+                eprintln!(
+                    "P06 heightmap state type={type_id} local=({x},{z},{y}) state={} motion={} fluid={}",
+                    state.canonical_state(),
+                    lodestone_data::block_solidity::blocks_motion(state),
+                    lodestone_data::snow_support::has_fluid_state(state),
+                );
+            }
+        }
     }
     let mut block_differences = 0usize;
     let mut first_block_difference = None;
@@ -2222,6 +2244,93 @@ fn end_p06_parser_rejects_reverse_resident_admission_order() {
     let target = (280, 78);
     let reversed = literal_end_p06_lifecycle_payload(target, [68, 58, 58], true);
     parse_end_p06_lifecycle_events(&reversed, target.0, target.1);
+}
+
+#[test]
+#[ignore = "set LODESTONE_END_P06_CAPTURE to the retained one-target End P06 stream"]
+fn retained_end_p06_capture_matches_production_request_without_transition_injection() {
+    let target = (280, 78);
+    let capture = PathBuf::from(
+        std::env::var_os("LODESTONE_END_P06_CAPTURE")
+            .expect("set LODESTONE_END_P06_CAPTURE to the retained stream file"),
+    );
+    let complete = capture.with_extension("complete");
+    assert!(complete.is_file(), "retained capture is missing {}", complete.display());
+
+    let stream = File::open(&capture)
+        .unwrap_or_else(|error| panic!("open retained End P06 capture {}: {error}", capture.display()));
+    let mut reader = BufReader::new(stream);
+    let mut raw_header = [0u8; HEADER_BYTES];
+    reader
+        .read_exact(&mut raw_header)
+        .expect("read retained End P06 provenance header");
+    let header = parse_stream_header(&raw_header);
+    assert_eq!(header.dimension, StreamDimension::End);
+    assert_eq!(header.format, STREAM_FORMAT_END_P06_LIFECYCLE);
+    assert_eq!((header.cx0, header.cx1, header.cz0, header.cz1), (target.0, target.0, target.1, target.1));
+    assert_eq!(header.count, 1);
+    assert_eq!(header.start, 0);
+
+    let frame = read_frame(&mut reader, &complete, header.format)
+        .expect("retained End P06 capture contains its target frame");
+    assert_eq!((frame.index, frame.cx, frame.cz), (0, target.0, target.1));
+    assert!(read_frame(&mut reader, &complete, header.format).is_none(), "retained End P06 capture has more than one frame");
+
+    let final_target_transition = frame
+        .lifecycle_events
+        .last()
+        .expect("authenticated End P06 source wavefront")
+        .resident_transitions
+        .iter()
+        .find(|transition| transition.resident == target)
+        .expect("last End source event observes its target");
+    assert_eq!(final_target_transition.stage, LifecycleResidentStage::Features);
+    let final_maps = final_target_transition
+        .client_heightmaps
+        .as_ref()
+        .expect("last End target transition carries client heightmaps");
+    let captured_packet = decode_end_p06_packet(&frame.record);
+    assert_eq!((captured_packet.x, captured_packet.z), target);
+    for (map_index, type_id) in [1, 4, 5].into_iter().enumerate() {
+        let map = captured_packet
+            .heightmaps
+            .get(type_id)
+            .expect("captured End packet heightmap");
+        for z in 0..16 {
+            for x in 0..16 {
+                assert_eq!(
+                    map.get(x, z),
+                    u32::from(final_maps[map_index][x + z * 16]),
+                    "captured final packet map {type_id} differs from its final authenticated target transition at ({x},{z})",
+                );
+            }
+        }
+    }
+
+    let source = end_chunk_source(SEED);
+    let production = source
+        .request_generation(
+            lodestone_server::worldgen_session::GenerationRequest::new(
+                lodestone_worldgen::stage_schedule::Dimension::End,
+                target,
+                lodestone_worldgen::stage_schedule::GenerationTarget::Full,
+                1,
+            ),
+            None,
+        )
+        .expect("production End request succeeds")
+        .expect("production End request uses the lifecycle driver");
+    let snapshot = match production {
+        lodestone_server::worldgen_session::GenerationRequestResult::Generated(snapshot) => snapshot,
+        lodestone_server::worldgen_session::GenerationRequestResult::Existing(_) => {
+            panic!("fresh retained End P06 target unexpectedly used persisted output")
+        }
+    };
+    let actual = encode_end_p06_packet(snapshot.column(), target);
+    if support::large_parity_manifest::sha256(&actual) != frame.digest {
+        diagnose_end_raw_packet(&frame.record, &actual);
+        panic!("production End request differs from retained authenticated P06 packet at {target:?}");
+    }
 }
 
 #[test]

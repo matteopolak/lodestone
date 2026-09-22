@@ -159,7 +159,7 @@ impl ServerProtocol for TracingProtocol {
     fn compute_initial_column_light_with_neighbours_in_dimension(
         &self,
         column: &ChunkColumn,
-        neighbours: &[(i32, i32, ChunkColumn)],
+        neighbours: &[(i32, i32, &ChunkColumn)],
         dimension: lodestone_server::dimension::Dimension,
     ) -> Option<lodestone_world::ColumnLight> {
         V770ServerProtocol.compute_initial_column_light_with_neighbours_in_dimension(
@@ -172,7 +172,7 @@ impl ServerProtocol for TracingProtocol {
         cx: i32,
         cz: i32,
         column: &ChunkColumn,
-        neighbours: &[(i32, i32, ChunkColumn)],
+        neighbours: &[(i32, i32, &ChunkColumn)],
         dimension: lodestone_server::dimension::Dimension,
     ) -> Result<ServerDirective, lodestone_server::ChunkEncodeError> {
         assert_eq!(

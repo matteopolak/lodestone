@@ -2907,8 +2907,11 @@ pub fn encode_chunk_with_source<P: ServerProtocol>(
     for attempt in 0..=LIGHT_SETTLEMENT_OPTIMISTIC_RETRIES {
         let mut captured_neighbours = Vec::new();
         let exclusive = attempt == LIGHT_SETTLEMENT_OPTIMISTIC_RETRIES;
-        let mut compute = |centre: &ChunkColumn, neighbours: &[(i32, i32, ChunkColumn)]| {
-            captured_neighbours = neighbours.to_vec();
+        let mut compute = |centre: &ChunkColumn, neighbours: &[(i32, i32, &ChunkColumn)]| {
+            captured_neighbours = neighbours
+                .iter()
+                .map(|(dx, dz, neighbour)| (*dx, *dz, (*neighbour).clone()))
+                .collect();
             proto.compute_initial_column_lights_with_neighbours_in_dimension(
                 centre,
                 neighbours,
@@ -2938,11 +2941,12 @@ pub fn encode_chunk_with_source<P: ServerProtocol>(
                         .collect();
                 }
                 let packet_column = column_for_initial_encode(&centre);
+                let neighbour_refs = borrowed_neighbours(&captured_neighbours);
                 return proto.try_encode_chunk_with_neighbours_in_dimension(
                     cx,
                     cz,
                     &packet_column,
-                    &captured_neighbours,
+                    &neighbour_refs,
                     dimension,
                 );
             }
@@ -2954,11 +2958,12 @@ pub fn encode_chunk_with_source<P: ServerProtocol>(
                         .collect();
                 }
                 let packet_column = column_for_initial_encode(&fallback);
+                let neighbour_refs = borrowed_neighbours(&captured_neighbours);
                 return proto.try_encode_chunk_with_neighbours_in_dimension(
                     cx,
                     cz,
                     &packet_column,
-                    &captured_neighbours,
+                    &neighbour_refs,
                     dimension,
                 );
             }
@@ -2999,9 +3004,9 @@ fn column_for_initial_encode(column: &ChunkColumn) -> ChunkColumn {
 fn detached_initial_packet_columns<P: ServerProtocol>(
     proto: &P,
     column: &ChunkColumn,
-    neighbours: &[(i32, i32, ChunkColumn)],
+    neighbours: &[(i32, i32, &ChunkColumn)],
     dimension: crate::dimension::Dimension,
-) -> (ChunkColumn, Vec<(i32, i32, ChunkColumn)>) {
+) -> ChunkColumn {
     let mut column = column_for_initial_encode(column);
     if let Some(settlement) = proto.compute_initial_column_lights_with_neighbours_in_dimension(
         &column,
@@ -3013,15 +3018,15 @@ fn detached_initial_packet_columns<P: ServerProtocol>(
             crate::chunk::RetainedLightStatus::CentreSettled,
         );
     }
-    (column, neighbours.to_vec())
+    column
 }
 
 fn detached_initial_packet_snapshot_columns<P: ServerProtocol>(
     proto: &P,
     snapshot: &crate::worldgen_session::PacketSnapshot,
-    neighbours: &[(i32, i32, ChunkColumn)],
+    neighbours: &[(i32, i32, &ChunkColumn)],
     dimension: crate::dimension::Dimension,
-) -> (ChunkColumn, Vec<(i32, i32, ChunkColumn)>) {
+) -> ChunkColumn {
     let settlement = if let Some(settlement) = snapshot.light_settlement() {
         settlement.clone()
     } else {
@@ -3031,7 +3036,7 @@ fn detached_initial_packet_snapshot_columns<P: ServerProtocol>(
             neighbours,
             dimension,
         ) else {
-            return (column_for_initial_encode(snapshot.column()), neighbours.to_vec());
+            return column_for_initial_encode(snapshot.column());
         };
         match snapshot.install_light_settlement(settlement) {
             Ok(()) => snapshot
@@ -3046,7 +3051,16 @@ fn detached_initial_packet_snapshot_columns<P: ServerProtocol>(
         settlement.centre_light().clone(),
         crate::chunk::RetainedLightStatus::CentreSettled,
     );
-    (column, neighbours.to_vec())
+    column
+}
+
+fn borrowed_neighbours(
+    neighbours: &[(i32, i32, ChunkColumn)],
+) -> Vec<(i32, i32, &ChunkColumn)> {
+    neighbours
+        .iter()
+        .map(|(dx, dz, column)| (*dx, *dz, column))
+        .collect()
 }
 
 const LIGHT_SETTLEMENT_OPTIMISTIC_RETRIES: usize = 3;
@@ -3184,11 +3198,11 @@ async fn encode_column<P: ServerProtocol, S: ChunkSource + 'static>(
                         (
                             coordinate.0 - cx,
                             coordinate.1 - cz,
-                            neighbour.column().clone(),
+                            neighbour.column(),
                         )
                     })
                     .collect::<Vec<_>>();
-                let (column, neighbours) = detached_initial_packet_snapshot_columns(
+                let column = detached_initial_packet_snapshot_columns(
                     proto,
                     &snapshot,
                     &neighbours,
@@ -3293,11 +3307,11 @@ async fn encode_column_owned<P: ServerProtocol>(
                         (
                             coordinate.0 - cx,
                             coordinate.1 - cz,
-                            neighbour.column().clone(),
+                            neighbour.column(),
                         )
                     })
                     .collect::<Vec<_>>();
-                let (column, neighbours) = detached_initial_packet_snapshot_columns(
+                let column = detached_initial_packet_snapshot_columns(
                     proto,
                     &snapshot,
                     &neighbours,
@@ -6707,7 +6721,7 @@ where
             for attempt in 0..=LIGHT_SETTLEMENT_OPTIMISTIC_RETRIES {
             let exclusive = attempt == LIGHT_SETTLEMENT_OPTIMISTIC_RETRIES;
             let mut compute = |candidate: &ChunkColumn,
-                               neighbours: &[(i32, i32, ChunkColumn)]| {
+                               neighbours: &[(i32, i32, &ChunkColumn)]| {
                 if proto.uses_cross_column_light() {
                     proto.compute_column_light_with_neighbours_in_dimension(
                         candidate,
@@ -6753,7 +6767,12 @@ where
                 .filter(|&(dx, dz)| (dx, dz) != (0, 0))
                 .map(|(dx, dz)| (dx, dz, source.column(cx + dx, cz + dz)))
                 .collect::<Vec<_>>();
-            proto.compute_column_light_with_neighbours_in_dimension(&column, &neighbours, dimension)
+            let neighbour_refs = borrowed_neighbours(&neighbours);
+            proto.compute_column_light_with_neighbours_in_dimension(
+                &column,
+                &neighbour_refs,
+                dimension,
+            )
         } else {
             proto.compute_column_light_in_dimension(&column, dimension)
         };
@@ -6837,7 +6856,7 @@ where
             for attempt in 0..=LIGHT_SETTLEMENT_OPTIMISTIC_RETRIES {
             let exclusive = attempt == LIGHT_SETTLEMENT_OPTIMISTIC_RETRIES;
             let mut compute = |candidate: &ChunkColumn,
-                               neighbours: &[(i32, i32, ChunkColumn)]| {
+                               neighbours: &[(i32, i32, &ChunkColumn)]| {
                 if radius != 0 {
                     proto.compute_column_light_with_neighbours_in_dimension(
                         candidate,
@@ -6877,7 +6896,12 @@ where
             return Ok(());
         };
         let light = if radius != 0 {
-            proto.compute_column_light_with_neighbours_in_dimension(&column, &neighbours, dimension)
+            let neighbour_refs = borrowed_neighbours(&neighbours);
+            proto.compute_column_light_with_neighbours_in_dimension(
+                &column,
+                &neighbour_refs,
+                dimension,
+            )
         } else {
             proto.compute_column_light_in_dimension(&column, dimension)
         };
@@ -18982,7 +19006,7 @@ mod tests {
             _cx: i32,
             _cz: i32,
             column: &ChunkColumn,
-            _neighbours: &[(i32, i32, ChunkColumn)],
+            _neighbours: &[(i32, i32, &ChunkColumn)],
             _dimension: crate::dimension::Dimension,
         ) -> Result<ServerDirective, ChunkEncodeError> {
             let light = column
@@ -18999,7 +19023,7 @@ mod tests {
         fn compute_initial_column_light_with_neighbours_in_dimension(
             &self,
             column: &ChunkColumn,
-            neighbours: &[(i32, i32, ChunkColumn)],
+            neighbours: &[(i32, i32, &ChunkColumn)],
             _dimension: crate::dimension::Dimension,
         ) -> Option<lodestone_world::ColumnLight> {
             assert_eq!(neighbours.len(), 8, "initial settlement must admit the full footprint");
@@ -19019,7 +19043,7 @@ mod tests {
         fn compute_initial_column_lights_with_neighbours_in_dimension(
             &self,
             column: &ChunkColumn,
-            neighbours: &[(i32, i32, ChunkColumn)],
+            neighbours: &[(i32, i32, &ChunkColumn)],
             dimension: crate::dimension::Dimension,
         ) -> Option<crate::chunk::ColumnLightSettlement> {
             let centre = self.compute_initial_column_light_with_neighbours_in_dimension(
@@ -19065,21 +19089,15 @@ mod tests {
             .map(|(dx, dz)| (dx, dz, ChunkColumn::new(0, 256)))
             .collect::<Vec<_>>();
 
-        let (packet_column, packet_neighbours) = detached_initial_packet_columns(
+        let neighbour_refs = borrowed_neighbours(&neighbours);
+        let packet_column = detached_initial_packet_columns(
             &protocol,
             &column,
-            &neighbours,
+            &neighbour_refs,
             crate::dimension::Dimension::End,
         );
 
-        assert_eq!(packet_neighbours.len(), neighbours.len());
-        assert!(packet_neighbours
-            .iter()
-            .zip(&neighbours)
-            .all(|((px, pz, packet), (nx, nz, source))| {
-                (px, pz, packet.min_y, packet.height)
-                    == (nx, nz, source.min_y, source.height)
-            }));
+        assert_eq!(neighbour_refs.len(), neighbours.len());
         assert_eq!(
             packet_column.retained_light_status(),
             Some(crate::chunk::RetainedLightStatus::CentreSettled)
@@ -19110,10 +19128,11 @@ mod tests {
         let snapshot = crate::worldgen_session::PacketSnapshot::for_test(ChunkColumn::new(0, 256));
 
         for _ in 0..2 {
-            let (column, neighbours) = detached_initial_packet_snapshot_columns(
+            let neighbour_refs = borrowed_neighbours(&relative_neighbours);
+            let column = detached_initial_packet_snapshot_columns(
                 &protocol,
                 &snapshot,
-                &relative_neighbours,
+                &neighbour_refs,
                 crate::dimension::Dimension::End,
             );
             protocol
@@ -19121,7 +19140,7 @@ mod tests {
                     0,
                     0,
                     &column,
-                    &neighbours,
+                    &neighbour_refs,
                     crate::dimension::Dimension::End,
                 )
                 .expect("prepared packet snapshot encodes");

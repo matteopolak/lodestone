@@ -146,17 +146,18 @@ fn block_face(face: i8) -> Option<BlockFace> {
     }
 }
 
-fn wire_state(canonical: u32) -> Result<u32, ChunkEncodeError> {
-    wire_state_for_762(canonical).ok_or_else(|| {
+fn wire_state(canonical: StateId) -> Result<u32, ChunkEncodeError> {
+    wire_state_for_762(canonical.raw()).ok_or_else(|| {
         ChunkEncodeError::new(format!(
-            "canonical state {canonical} has no unique exact protocol-762 representation"
+            "canonical state {} has no unique exact protocol-762 representation",
+            canonical.raw()
         ))
     })
 }
 
 fn encode_heightmaps(column: &ChunkColumn) -> Result<Vec<u8>, ChunkEncodeError> {
     let mut heightmap = Heightmap::new(HEIGHT as u32);
-    let air = lodestone_data::block_states::air_state_id();
+    let air = StateId::AIR;
     for z in 0..16usize {
         for x in 0..16usize {
             let height = (MIN_Y..MIN_Y + HEIGHT)
@@ -250,7 +251,7 @@ fn encode_chunk_body(
         }
     }
 
-    let air = lodestone_data::block_states::air_state_id();
+    let air = StateId::AIR;
     let block_kind = PaletteKind::block_states().with_framing(LongArrayFraming::Prefixed);
     let biome_kind = PaletteKind::biomes().with_framing(LongArrayFraming::Prefixed);
     let biome_values = [u32::try_from(PLAINS_BIOME_ID).expect("plains id fits u32"); 64];
@@ -305,7 +306,7 @@ impl V762ServerProtocol {
         z: i32,
         state: StateId,
     ) -> Result<ServerDirective, ChunkEncodeError> {
-        let wire = wire_state(state.raw())?;
+        let wire = wire_state(state)?;
         let mut payload = Writer::default();
         payload.i64(pack_position(BlockPos::new(x, y, z)));
         payload.var_i32(i32::try_from(wire).expect("protocol-762 state fits in i32"));

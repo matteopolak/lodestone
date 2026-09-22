@@ -1013,9 +1013,13 @@ fn save_native_dirty_chunks(context: &NativeSaveContext) -> Result<usize, crate:
                             ));
                         }
                     }
+                    let neighbour_refs = neighbours
+                        .iter()
+                        .map(|(dx, dz, column)| (*dx, *dz, column))
+                        .collect::<Vec<_>>();
                     protocol.compute_column_light_with_neighbours_in_dimension(
                         &snapshot.column,
-                        &neighbours,
+                        &neighbour_refs,
                         dimension,
                     )
                 } else {

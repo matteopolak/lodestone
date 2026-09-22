@@ -93,7 +93,7 @@
 //! cargo test -p lodestone-world --release --test pool_footprint -- --ignored --nocapture
 //! ```
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Instant;
 
@@ -162,52 +162,21 @@ fn make_generator() -> OverworldGenerator {
     OverworldGenerator::new(SEED, &settings, &resolver, "minecraft:plains", false)
 }
 
-/// Interns generated block-state strings into a stable, process-wide `u32` id
-/// space (`"minecraft:air"` fixed at `0` to match `ChunkColumn`'s `air_id`).
-/// The mapping is an arbitrary bijection, not a real protocol registry id —
-/// which is fine for this measurement, because container storage width and
-/// palette length depend only on the *count* of distinct values a section
-/// holds, never on the numeric value of the ids themselves.
-struct Interner {
-    ids: HashMap<String, u32>,
-    names: Vec<String>,
-}
+/// Typed light properties for the real-terrain footprint fixture.
+///
+/// Air is transparent; water and water-filled cauldrons retain the fixture's
+/// partial opacity; all states are treated as non-emissive.
+struct GeneratorLightProps;
 
-impl Interner {
-    fn new() -> Self {
-        let mut ids = HashMap::new();
-        ids.insert("minecraft:air".to_string(), 0u32);
-        Self {
-            ids,
-            names: vec!["minecraft:air".to_string()],
-        }
-    }
-
-    fn intern(&mut self, name: &str) -> u32 {
-        if let Some(&id) = self.ids.get(name) {
-            return id;
-        }
-        let id = self.names.len() as u32;
-        self.ids.insert(name.to_string(), id);
-        self.names.push(name.to_string());
-        id
-    }
-}
-
-/// Opacity/emission keyed by the real generated block-state name, mirroring
-/// `tests/memory.rs`'s `TimingProps` but driven by genuine generator output
-/// instead of synthetic ids. The generator has no features/ores yet (see this
-/// file's module doc), so emission is honestly always zero — there is nothing
-/// in this fixture that should glow.
-struct GeneratorLightProps<'a> {
-    names: &'a [String],
-}
-
-impl LightProperties for GeneratorLightProps<'_> {
+impl LightProperties for GeneratorLightProps {
     fn opacity(&self, state: u32) -> u8 {
-        match self.names[state as usize].as_str() {
-            "minecraft:air" => 0,
-            name if name.contains("water") => 2,
+        match lodestone_data::block_states::StateId::new(state)
+            .expect("generator emitted a valid canonical block-state id")
+            .block()
+        {
+            lodestone_data::block::Block::Air => 0,
+            lodestone_data::block::Block::Water
+            | lodestone_data::block::Block::WaterCauldron => 2,
             _ => 15,
         }
     }
@@ -353,7 +322,6 @@ fn measure_real_terrain_pool_footprint() {
 
     // --- Step 1: generate the real 32-radius view. ---
     let generator = make_generator();
-    let mut interner = Interner::new();
     let mut stats = Stats::default();
 
     let side = 2 * RADIUS + 1;
@@ -377,9 +345,8 @@ fn measure_real_terrain_pool_footprint() {
                     for y in 0..16usize {
                         for x in 0..16usize {
                             let world_y = base_y + y as i32;
-                            let name = gen_col.block_state(x, world_y, z);
-                            let id = interner.intern(name);
-                            values[block_kind.index(x, y, z)] = id;
+                            let state = gen_col.block_state_id(x, world_y, z);
+                            values[block_kind.index(x, y, z)] = state.raw();
                         }
                     }
                 }
@@ -415,7 +382,7 @@ fn measure_real_terrain_pool_footprint() {
                 }
             }
 
-            let light = compute_column_light(&column, &GeneratorLightProps { names: &interner.names });
+            let light = compute_column_light(&column, &GeneratorLightProps);
 
             let mut heightmaps = Heightmaps::new();
             let mut motion = Heightmap::new(WORLD_HEIGHT);

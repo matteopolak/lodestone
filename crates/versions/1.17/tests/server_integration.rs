@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use lodestone_data::block_states::StateId;
 use lodestone_client::{ClientBuilder, EventStream, LoginProfile, PlayerLoadedPolicy, ServerAddress};
 use lodestone_model::{
     AnimationAction, BlockActionKind, BlockFace, BlockPos, ChatKind, ClientAction, ClientEvent,
@@ -116,8 +117,8 @@ struct FixtureSource {
 impl FixtureSource {
     fn new() -> Self {
         let mut column = ChunkColumn::new(-64, 384);
-        column.set_block(TARGET.x, TARGET.y, TARGET.z, "minecraft:dandelion");
-        column.set_block(CHEST.x, CHEST.y, CHEST.z, "minecraft:chest");
+        column.set_block_id(TARGET.x, TARGET.y, TARGET.z, fixture_state("minecraft:dandelion"));
+        column.set_block_id(CHEST.x, CHEST.y, CHEST.z, fixture_state("minecraft:chest"));
         Self {
             column: Mutex::new(column),
         }
@@ -410,24 +411,27 @@ impl ChunkSource for FixtureSource {
         self.column.lock().expect("fixture column lock poisoned").clone()
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         self.column
             .lock()
             .expect("fixture column lock poisoned")
-            .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
-            .to_owned()
+            .block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
     }
 
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
         "minecraft:plains".to_owned()
     }
 
-    fn set_block(&self, x: i32, y: i32, z: i32, state: &str) {
+    fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
         self.column
             .lock()
             .expect("fixture column lock poisoned")
-            .set_block(x.rem_euclid(16), y, z.rem_euclid(16), state);
+            .set_block_id(x.rem_euclid(16), y, z.rem_euclid(16), state);
     }
+}
+
+fn fixture_state(name: &str) -> StateId {
+    StateId::from_state_str(name).expect("fixture state exists")
 }
 
 #[tokio::test]
@@ -456,9 +460,9 @@ async fn registry_selected_protocol_756_reaches_play_and_confirms_a_block_break(
         .wait_for_chunk(lodestone_client::ChunkPos::new(0, 0), Duration::from_secs(10))
         .await
         .expect("protocol-756 chunk arrives");
-    let flower = lodestone_data::block_states::state_id("minecraft:dandelion")
+    let flower = StateId::from_state_str("minecraft:dandelion")
         .expect("fixture state exists");
-    assert_eq!(handle.block_at(TARGET), Some(flower));
+    assert_eq!(handle.block_at(TARGET), Some(flower.raw()));
 
     handle
         .send_action(ClientAction::BlockAction {
@@ -468,9 +472,9 @@ async fn registry_selected_protocol_756_reaches_play_and_confirms_a_block_break(
             sequence: 0,
         })
         .expect("joined client accepts a block action");
-    let air = lodestone_data::block_states::air_state_id();
+    let air = StateId::AIR;
     handle
-        .wait_for(Duration::from_secs(10), move |client| client.block_at(TARGET) == Some(air))
+        .wait_for(Duration::from_secs(10), move |client| client.block_at(TARGET) == Some(air.raw()))
         .await
         .expect("block update reaches the protocol-756 client");
 
@@ -512,9 +516,9 @@ async fn registry_selected_protocol_758_reaches_play_and_confirms_a_block_break(
         .wait_for_chunk(lodestone_client::ChunkPos::new(0, 0), Duration::from_secs(10))
         .await
         .expect("protocol-758 chunk arrives");
-    let flower = lodestone_data::block_states::state_id("minecraft:dandelion")
+    let flower = StateId::from_state_str("minecraft:dandelion")
         .expect("fixture state exists");
-    assert_eq!(handle.block_at(TARGET), Some(flower));
+    assert_eq!(handle.block_at(TARGET), Some(flower.raw()));
 
     handle
         .send_action(ClientAction::BlockAction {
@@ -524,9 +528,9 @@ async fn registry_selected_protocol_758_reaches_play_and_confirms_a_block_break(
             sequence: 0,
         })
         .expect("joined client accepts a block action");
-    let air = lodestone_data::block_states::air_state_id();
+    let air = StateId::AIR;
     handle
-        .wait_for(Duration::from_secs(10), move |client| client.block_at(TARGET) == Some(air))
+        .wait_for(Duration::from_secs(10), move |client| client.block_at(TARGET) == Some(air.raw()))
         .await
         .expect("block update reaches the protocol-758 client");
 

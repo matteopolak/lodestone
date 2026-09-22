@@ -1,5 +1,6 @@
 //! External controls for the Nether target-completion boundary.
 
+use lodestone_data::block::Block;
 use lodestone_server::nether_chunk_source;
 
 const TARGET: (i32, i32) = (0, 1);
@@ -9,13 +10,15 @@ const WORLD: (i32, i32, i32) = (2, 53, 28);
 fn air_control_still_places_the_foundation_at_the_target() {
     let source = nether_chunk_source(42);
 
-    let air = vec![(WORLD.0, WORLD.1, WORLD.2, "minecraft:cave_air".to_owned())];
+    let air = vec![(WORLD.0, WORLD.1, WORLD.2, Block::CaveAir.default_state())];
     let spills = source
         .generator()
         .parity_source_spills_with_overrides(TARGET.0, TARGET.1, TARGET.0, TARGET.1, &air);
 
     assert!(
-        spills.iter().any(|spill| spill.position == WORLD && spill.state == "minecraft:nether_bricks"),
+        spills
+            .iter()
+            .any(|spill| spill.position == WORLD && spill.state == Block::NetherBricks.default_state()),
         "air control must allow the cached fortress support to occupy y=53",
     );
 }
@@ -28,10 +31,10 @@ fn full_nether_dispatch_preserves_external_blackstone_witnesses() {
         (96, 95, 13, 3, 2),
     ] {
         let column = source.generator().column(chunk_x, chunk_z);
-        let state = column.block_state(local_x, y, local_z);
+        let state = column.block_state_id(local_x, y, local_z);
         assert_eq!(
             state,
-            "minecraft:blackstone",
+            Block::Blackstone.default_state(),
             "full x-major Nether dispatch changed witness at chunk ({chunk_x},{chunk_z}) local ({local_x},{y},{local_z})",
         );
     }
@@ -73,7 +76,7 @@ fn target_features_match_external_task_body() {
     let roots = spills
         .iter()
         .filter(|spill| {
-            spill.state == "minecraft:crimson_roots"
+            spill.state == Block::CrimsonRoots.default_state()
                 && (TARGET.0 * 16..TARGET.0 * 16 + 16).contains(&spill.position.0)
                 && (TARGET.1 * 16..TARGET.1 * 16 + 16).contains(&spill.position.2)
         })
@@ -96,7 +99,7 @@ fn target_features_match_external_task_body() {
     let replay_roots = target_replay
         .iter()
         .filter(|spill| {
-            spill.state == "minecraft:crimson_roots"
+            spill.state == Block::CrimsonRoots.default_state()
                 && (TARGET.0 * 16..TARGET.0 * 16 + 16).contains(&spill.position.0)
                 && (TARGET.1 * 16..TARGET.1 * 16 + 16).contains(&spill.position.2)
         })
@@ -121,7 +124,7 @@ fn target_features_match_external_task_body() {
         let roots = filtered
             .iter()
             .filter(|spill| {
-                spill.state == "minecraft:crimson_roots"
+                spill.state == Block::CrimsonRoots.default_state()
                     && (TARGET.0 * 16..TARGET.0 * 16 + 16).contains(&spill.position.0)
                     && (TARGET.1 * 16..TARGET.1 * 16 + 16).contains(&spill.position.2)
             })

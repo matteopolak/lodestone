@@ -140,9 +140,8 @@ async fn registry_selected_legacy_server_reaches_play_and_confirms_a_block_break
         .wait_for_chunk(lodestone_client::ChunkPos::new(0, 0), Duration::from_secs(10))
         .await
         .expect("the projected legacy chunk must arrive");
-    let flower = lodestone_data::block_states::state_id("minecraft:dandelion")
-        .expect("fixture state exists");
-    assert_eq!(handle.block_at(TARGET), Some(flower));
+    let flower = Block::Dandelion.default_state();
+    assert_eq!(handle.block_at(TARGET), Some(flower.raw()));
 
     handle
         .send_action(ClientAction::BlockAction {
@@ -152,9 +151,9 @@ async fn registry_selected_legacy_server_reaches_play_and_confirms_a_block_break
             sequence: 0,
         })
         .expect("joined client accepts a block action");
-    let air = lodestone_data::block_states::air_state_id();
+    let air = StateId::AIR;
     handle
-        .wait_for(Duration::from_secs(10), move |client| client.block_at(TARGET) == Some(air))
+        .wait_for(Duration::from_secs(10), move |client| client.block_at(TARGET) == Some(air.raw()))
         .await
         .expect("the server block-update must replace the known block with air");
 

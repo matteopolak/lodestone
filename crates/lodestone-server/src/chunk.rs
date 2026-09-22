@@ -2481,7 +2481,7 @@ pub trait ChunkSource: Send + Sync {
         replace_existing: bool,
         compute: &mut dyn FnMut(&ChunkColumn) -> Option<lodestone_world::ColumnLight>,
     ) -> Result<ChunkColumn, ColumnLightSettlementError> {
-        let mut compute_centre = |current: &ChunkColumn, _neighbours: &[(i32, i32, ChunkColumn)]| {
+        let mut compute_centre = |current: &ChunkColumn, _neighbours: &[(i32, i32, &ChunkColumn)]| {
             compute(current)
         };
         self.settle_resident_column_light_with_neighbours(
@@ -2511,11 +2511,11 @@ pub trait ChunkSource: Send + Sync {
         exclusive: bool,
         compute: &mut dyn FnMut(
             &ChunkColumn,
-            &[(i32, i32, ChunkColumn)],
+            &[(i32, i32, &ChunkColumn)],
         ) -> Option<ColumnLightSettlement>,
     ) -> Result<ChunkColumn, ColumnLightSettlementError> {
         let mut compute_centre = |current: &ChunkColumn,
-                                  neighbours: &[(i32, i32, ChunkColumn)]| {
+                                  neighbours: &[(i32, i32, &ChunkColumn)]| {
             compute(current, neighbours).map(|settlement| settlement.centre_light().clone())
         };
         self.settle_resident_column_light_with_neighbours(
@@ -2551,7 +2551,7 @@ pub trait ChunkSource: Send + Sync {
         resident_only: bool,
         replace_existing: bool,
         _exclusive: bool,
-        compute: &mut dyn FnMut(&ChunkColumn, &[(i32, i32, ChunkColumn)]) -> Option<lodestone_world::ColumnLight>,
+        compute: &mut dyn FnMut(&ChunkColumn, &[(i32, i32, &ChunkColumn)]) -> Option<lodestone_world::ColumnLight>,
     ) -> Result<ChunkColumn, ColumnLightSettlementError> {
         let current = self
             .resident_column(cx, cz)
@@ -2572,7 +2572,11 @@ pub trait ChunkSource: Send + Sync {
             .ok_or(ColumnLightSettlementError::MissingFootprint)?;
             neighbours.push((dx, dz, column));
         }
-        let Some(light) = compute(&current, &neighbours) else {
+        let neighbour_refs = neighbours
+            .iter()
+            .map(|(dx, dz, column)| (*dx, *dz, column))
+            .collect::<Vec<_>>();
+        let Some(light) = compute(&current, &neighbour_refs) else {
             return Err(ColumnLightSettlementError::NoLight);
         };
         let mut settled = current;
@@ -2939,7 +2943,7 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
         exclusive: bool,
         compute: &mut dyn FnMut(
             &ChunkColumn,
-            &[(i32, i32, ChunkColumn)],
+            &[(i32, i32, &ChunkColumn)],
         ) -> Option<ColumnLightSettlement>,
     ) -> Result<ChunkColumn, ColumnLightSettlementError> {
         (**self).settle_resident_column_lights_with_neighbours(
@@ -2965,7 +2969,7 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
         exclusive: bool,
         compute: &mut dyn FnMut(
             &ChunkColumn,
-            &[(i32, i32, ChunkColumn)],
+            &[(i32, i32, &ChunkColumn)],
         ) -> Option<lodestone_world::ColumnLight>,
     ) -> Result<ChunkColumn, ColumnLightSettlementError> {
         (**self).settle_resident_column_light_with_neighbours(
@@ -3244,7 +3248,7 @@ impl<S: ChunkSource + ?Sized> ChunkSource for &S {
         exclusive: bool,
         compute: &mut dyn FnMut(
             &ChunkColumn,
-            &[(i32, i32, ChunkColumn)],
+            &[(i32, i32, &ChunkColumn)],
         ) -> Option<ColumnLightSettlement>,
     ) -> Result<ChunkColumn, ColumnLightSettlementError> {
         (**self).settle_resident_column_lights_with_neighbours(
@@ -3270,7 +3274,7 @@ impl<S: ChunkSource + ?Sized> ChunkSource for &S {
         exclusive: bool,
         compute: &mut dyn FnMut(
             &ChunkColumn,
-            &[(i32, i32, ChunkColumn)],
+            &[(i32, i32, &ChunkColumn)],
         ) -> Option<lodestone_world::ColumnLight>,
     ) -> Result<ChunkColumn, ColumnLightSettlementError> {
         (**self).settle_resident_column_light_with_neighbours(

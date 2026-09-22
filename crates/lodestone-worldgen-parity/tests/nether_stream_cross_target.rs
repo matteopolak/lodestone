@@ -1,3 +1,4 @@
+use lodestone_data::block::Block;
 use lodestone_server::nether_chunk_source;
 use lodestone_worldgen_parity::lifecycle::{LifecycleCompletion, LifecycleMaterializer};
 
@@ -33,15 +34,15 @@ fn target_scoped_replay_retains_basalt_then_replaces_quartz() {
     assert_eq!(
         materializer
             .snapshot_for_packet((91, 90))
-            .block_state(15, 6, 5),
-        "minecraft:basalt[axis=y]",
+            .block_state_id(15, 6, 5),
+        Block::Basalt.default_state(),
         "the 91,90 packet must retain its basalt witness",
     );
     assert_eq!(
         materializer
             .snapshot_for_packet((92, 90))
-            .block_state(0, 18, 11),
-        "minecraft:nether_quartz_ore",
+            .block_state_id(0, 18, 11),
+        Block::NetherQuartzOre.default_state(),
         "replaying the 92,90 source must not leave the prior target's basalt",
     );
 }
@@ -72,29 +73,29 @@ fn adjacent_target_packets_retain_the_external_neighbour_boundary() {
 
     let first = materializer.snapshot_for_packet((380, 380));
     assert_eq!(
-        first.block_state(8, 50, 1),
-        "minecraft:crimson_roots",
+        first.block_state_id(8, 50, 1),
+        Block::CrimsonRoots.default_state(),
         "the first captured packet keeps its target FEATURES witness",
     );
     assert_eq!(
         materializer
             .resident_column((381, 380))
             .expect("adjacent target was admitted")
-            .block_state(15, 77, 5),
-        "minecraft:air",
+            .block_state_id(15, 77, 5),
+        Block::Air.default_state(),
         "the east-source witness is absent before its completion",
     );
 
     materializer.complete((382, 380), LifecycleCompletion::Features, 2);
     let second = materializer.snapshot_for_packet((381, 380));
     assert_eq!(
-        second.block_state(3, 56, 6),
-        "minecraft:crimson_roots",
+        second.block_state_id(3, 56, 6),
+        Block::CrimsonRoots.default_state(),
         "the second captured packet keeps its target FEATURES witness",
     );
     assert_eq!(
-        second.block_state(15, 77, 5),
-        "minecraft:crimson_roots",
+        second.block_state_id(15, 77, 5),
+        Block::CrimsonRoots.default_state(),
         "the second packet includes the completed east-neighbour spill",
     );
 }

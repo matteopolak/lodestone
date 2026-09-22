@@ -144,15 +144,17 @@ fn legacy_plugin_channel(channel: &str) -> Option<ResourceKey> {
     channel.parse().ok()
 }
 
-fn legacy_composite(canonical: u32) -> Result<u32, ChunkEncodeError> {
-    let composite = inverse::resolve(canonical).map_err(|_| {
+fn legacy_composite(canonical: StateId) -> Result<u32, ChunkEncodeError> {
+    let composite = inverse::resolve(canonical.raw()).map_err(|_| {
         ChunkEncodeError::new(format!(
-            "canonical state {canonical} has no exact protocol-5 representation"
+            "canonical state {} has no exact protocol-5 representation",
+            canonical.raw()
         ))
     })?;
     if !protocol_5_defines_block_id(composite >> 4) {
         return Err(ChunkEncodeError::new(format!(
-            "canonical state {canonical} resolves to block id {}, which protocol 5 does not define",
+            "canonical state {} resolves to block id {}, which protocol 5 does not define",
+            canonical.raw(),
             composite >> 4
         )));
     }
@@ -179,7 +181,7 @@ fn encode_chunk_body(cx: i32, cz: i32, column: &ChunkColumn) -> Result<Vec<u8>, 
         )));
     }
 
-    let air = lodestone_data::block_states::air_state_id();
+    let air = StateId::AIR;
     let mut bitmask = 0_u16;
     let mut sections = Vec::new();
     for section in 0..usize::try_from(LEGACY_HEIGHT / SECTION_EDGE).expect("fixed section count") {
@@ -285,7 +287,7 @@ impl V5ServerProtocol {
         z: i32,
         state: StateId,
     ) -> Result<ServerDirective, ChunkEncodeError> {
-        let composite = legacy_composite(state.raw())?;
+        let composite = legacy_composite(state)?;
         let block_type = i32::try_from(composite >> 4)
             .map_err(|_| ChunkEncodeError::new("protocol-5 block id exceeds i32"))?;
         let y = u8::try_from(y)

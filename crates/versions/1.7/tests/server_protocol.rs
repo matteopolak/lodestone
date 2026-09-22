@@ -71,7 +71,7 @@ fn join_position_chunk_and_block_update_match_protocol_5_layout() {
     ));
 
     let mut column = ChunkColumn::new(-64, 384);
-    column.set_block(0, 0, 0, "minecraft:stone");
+    column.set_block_id(0, 0, 0, StateId::from_state_str("minecraft:stone").unwrap());
     let ServerDirective::Send { packet_id, payload } = protocol
         .try_encode_chunk(0, 0, &column)
         .expect("stone has an exact protocol-5 representation")
@@ -208,7 +208,7 @@ fn block_break_animation_preserves_the_signed_clear_stage_as_raw_byte() {
 fn projects_the_legacy_window_and_decodes_break_actions() {
     let protocol = V5ServerProtocol;
     let mut covering = ChunkColumn::new(-64, 384);
-    covering.set_block(3, 64, 4, "minecraft:stone");
+    covering.set_block_id(3, 64, 4, StateId::from_state_str("minecraft:stone").unwrap());
     assert!(protocol.try_encode_chunk(0, 0, &covering).is_ok());
     assert!(protocol
         .try_encode_chunk(0, 0, &ChunkColumn::new(-64, 319))

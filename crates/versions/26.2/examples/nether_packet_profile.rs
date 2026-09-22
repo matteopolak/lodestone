@@ -25,8 +25,18 @@ fn packet_for(source: &impl ChunkSource) -> Vec<u8> {
             neighbours.push((dx, dz, source.column(dx, dz)));
         }
     }
+    let neighbour_refs = neighbours
+        .iter()
+        .map(|(dx, dz, column)| (*dx, *dz, column))
+        .collect::<Vec<_>>();
     match V770ServerProtocol
-        .try_encode_chunk_with_neighbours_in_dimension(0, 0, &center, &neighbours, Dimension::Nether)
+        .try_encode_chunk_with_neighbours_in_dimension(
+            0,
+            0,
+            &center,
+            &neighbour_refs,
+            Dimension::Nether,
+        )
         .expect("neighbour-aware chunk encoding")
     {
         ServerDirective::Send { payload, .. } => payload,

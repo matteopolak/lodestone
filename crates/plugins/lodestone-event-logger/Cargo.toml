@@ -37,6 +37,7 @@ bevy_ecs = { workspace = true }
 bevy_app = { workspace = true }
 
 [dev-dependencies]
+lodestone-data = { workspace = true }
 # --- the real end-to-end transport (issue #436, item 2) -------------------
 #
 # `tests/observes_a_real_session.rs` proves this plugin observes events that a

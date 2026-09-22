@@ -233,7 +233,7 @@ propagation until a light update; persisted snapshots remain authoritative.
 If that fallback is handed only a partial neighbour list, it treats fresh neighbour emission as
 deferred while still using the supplied terrain to derive allocation-only masks; only a complete
 3x3 input crosses the cardinal-source boundary.
-When a generated request carries an owning packet snapshot, its complete detached 3x3 is passed to
+When a generated request carries an owning packet snapshot, its complete detached 3x3 is borrowed by
 the same status-aware computation before encoding. The computed centre light is installed only on the
 packet copy as `CentreSettled`; it is not a resident lifecycle transition or a persistence write.
 Protocols that do not opt into retained initial light

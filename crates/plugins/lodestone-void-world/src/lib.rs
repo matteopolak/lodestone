@@ -24,6 +24,8 @@
 
 use std::sync::Arc;
 
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 use lodestone_model::ResourceKey;
 use lodestone_server::ChunkSource;
 use lodestone_server::plugin_dimension::{DimensionProperties, DimensionRegistry, PluginDimension};
@@ -67,8 +69,8 @@ impl CheckerboardVoidGenerator {
 /// end-to-end gate (or a person looking at the world) can tell it apart
 /// from the floor pattern at a glance.
 fn landmark_template() -> StructureTemplate {
-    let gold = BlockState::of("minecraft:gold_block");
-    let beacon = BlockState::of("minecraft:beacon");
+    let gold = BlockState::of(Block::GoldBlock);
+    let beacon = BlockState::of(Block::Beacon);
     let mut blocks = Vec::new();
     for dx in 0..3i32 {
         for dz in 0..3i32 {
@@ -89,17 +91,25 @@ impl ChunkGenerator for CheckerboardVoidGenerator {
     }
 
     fn generate(&self, cx: i32, cz: i32) -> DenseBlockGrid {
-        let mut grid = DenseBlockGrid::new(cx * 16, self.min_y(), cz * 16, 16, self.height(), 16, "minecraft:air");
+        let mut grid = DenseBlockGrid::with_default(
+            cx * 16,
+            self.min_y(),
+            cz * 16,
+            16,
+            self.height(),
+            16,
+            StateId::AIR,
+        );
         for lx in 0..16i32 {
             for lz in 0..16i32 {
                 let x = cx * 16 + lx;
                 let z = cz * 16 + lz;
                 let state = if (x + z).rem_euclid(2) == 0 {
-                    "minecraft:stone"
+                    Block::Stone.default_state()
                 } else {
-                    "minecraft:glass"
+                    Block::Glass.default_state()
                 };
-                grid.set(x, FLOOR_Y, z, state);
+                grid.set_id(x, FLOOR_Y, z, state);
             }
         }
 
@@ -161,7 +171,7 @@ pub fn register(registry: &DimensionRegistry) {
 pub fn place_marker_live(source: &dyn ChunkSource, at: [i32; 3]) -> usize {
     let template = StructureTemplate::from_blocks(
         [1, 1, 1],
-        vec![BlockState::of("minecraft:emerald_block")],
+        vec![BlockState::of(Block::EmeraldBlock)],
         vec![([0, 0, 0], 0)],
     );
     let origin = PlaceOrigin {
@@ -191,17 +201,17 @@ mod tests {
     fn generator_produces_the_checkerboard_floor_and_the_landmark() {
         let generator = CheckerboardVoidGenerator::new();
         let grid = generator.generate(0, 0);
-        assert_eq!(grid.get(0, FLOOR_Y, 0), "minecraft:stone");
-        assert_eq!(grid.get(1, FLOOR_Y, 0), "minecraft:glass");
-        assert_eq!(grid.get(0, FLOOR_Y, 1), "minecraft:glass");
+        assert_eq!(grid.get_id(0, FLOOR_Y, 0), Block::Stone.default_state());
+        assert_eq!(grid.get_id(1, FLOOR_Y, 0), Block::Glass.default_state());
+        assert_eq!(grid.get_id(0, FLOOR_Y, 1), Block::Glass.default_state());
         // The landmark: a gold platform at `FLOOR_Y + 1`, and its beacon one
         // row above that, at `FLOOR_Y + 2` — the platform's own local y=0
         // sits at world `FLOOR_Y + 1` (the template's origin), and the
         // beacon's local y=1 is one above it.
-        assert_eq!(grid.get(0, FLOOR_Y + 1, 0), "minecraft:gold_block");
-        assert_eq!(grid.get(1, FLOOR_Y + 2, 1), "minecraft:beacon");
+        assert_eq!(grid.get_id(0, FLOOR_Y + 1, 0), Block::GoldBlock.default_state());
+        assert_eq!(grid.get_id(1, FLOOR_Y + 2, 1), Block::Beacon.default_state());
         // A neighbouring chunk gets the floor but not the landmark.
         let neighbour = generator.generate(1, 0);
-        assert_eq!(neighbour.get(16, FLOOR_Y + 1, 0), "minecraft:air");
+        assert_eq!(neighbour.get_id(16, FLOOR_Y + 1, 0), StateId::AIR);
     }
 }
