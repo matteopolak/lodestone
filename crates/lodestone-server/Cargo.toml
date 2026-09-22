@@ -43,6 +43,8 @@ wasm-threads = ["dep:rayon", "rayon/web_spin_lock"]
 # Kept off normal builds because the test-time clock API is not part of the
 # server's ordinary runtime surface.
 profile-harness = ["tokio/test-util"]
+# Diagnostic-only outermost worldgen stage PMU scopes for the strict harness.
+worldgen-stage-pmu = ["lodestone-worldgen/stage-pmu"]
 
 [dependencies]
 # The portable clock. Not a direct `web-time` dependency any more:

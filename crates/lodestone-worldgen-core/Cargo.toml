@@ -32,6 +32,9 @@ default = []
 # no RNG draw, so it cannot change generated terrain. `just test` covers both
 # settings via `--all-features`.
 gen-counters = []
+# Adds an optional outermost-stage observer for diagnostic hardware-counter runs.
+# It has no effect unless a caller installs an observer at runtime.
+stage-pmu = []
 
 [dependencies]
 # `density`'s data layer parses noise settings, spline tables and biome/climate
