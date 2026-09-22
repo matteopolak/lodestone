@@ -94,6 +94,15 @@ per column) and 24.65 columns/s at width 32 (831 million instructions and
 halo overhead but do not approach the 200-column target; the remaining work is
 inside the terrain and mutable stages rather than the scheduler window alone.
 
+Topology must also match when comparing results. A production-only fresh
+64-column square with batch width 64 measured 401 million instructions and
+105.5 million cycles per output, versus 866 million and 179.3 million for a
+16-column line with batch width 16 using the same seed and one worker. The
+square amortizes its dependency perimeter over more outputs; this is a
+different workload, not an optimization result. Its snapshot-finalization
+region alone consumed 17.7 million cycles per output, making column-copy and
+region-wide bookkeeping costs important alongside density evaluation.
+
 ## Configuration
 
 Run the ignored test with `LODESTONE_WORLDGEN_WORKERS=1`. Optional variables are

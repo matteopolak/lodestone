@@ -26,9 +26,12 @@ saturated dispatcher still falls back to ordered serial execution.
 Production sessions prepare immutable source products once per admitted batch,
 before shaped residents are dispatched. Reconstructing a target state machine
 for ordered mutation and packet finalization does not repeat preparation.
-Overworld preparation still uses one bounded five-by-five density sampler per
-target: experiments with wider shared samplers reduced evaluations but enlarged
-the dense scratch enough to regress cache locality.
+Overworld preparation separates each bounded region's dependency geometry from
+its missing output products. Density, climate, and structure inputs retain the
+full region bounds, but already-ready terrain prefixes do not execute again
+when another coordinate in the same region is missing. Readiness is sampled
+under the same store lease used for publication, so eviction cannot invalidate
+that selection.
 
 The Overworld generator also exposes `OverworldBatchLease`. A production
 dispatcher passes its complete admitted coordinate set to `lease_batch`, then

@@ -216,6 +216,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use serde_json::Value;
+use sha2::{Digest as _, Sha256};
 
 use crate::biome::ClimateSampler;
 use crate::carver::CarverCatalog;
@@ -321,7 +322,7 @@ struct ChunkStages {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OverworldGenerationIdentity {
     seed: i64,
-    settings: String,
+    settings_fingerprint: [u8; 32],
     resolver_fingerprint: u64,
     fallback_biome: String,
     fallback_cold_enough_to_snow: bool,
@@ -334,10 +335,10 @@ impl OverworldGenerationIdentity {
         self.seed
     }
 
-    /// Serialized noise/settings document included in the identity.
+    /// Noise/settings identity computed once during generator construction.
     #[must_use]
-    pub fn settings(&self) -> &str {
-        &self.settings
+    pub const fn settings_fingerprint(&self) -> &[u8; 32] {
+        &self.settings_fingerprint
     }
 
     /// Resolver-provided fingerprint over the immutable datapack inputs.
@@ -1241,7 +1242,7 @@ impl OverworldGenerator {
         let generation_identity = resolver_fingerprint.map(|resolver_fingerprint| {
             OverworldGenerationIdentity {
                 seed,
-                settings: settings_identity,
+                settings_fingerprint: Sha256::digest(settings_identity.as_bytes()).into(),
                 resolver_fingerprint,
                 fallback_biome: biome.to_string(),
                 fallback_cold_enough_to_snow: cold_enough_to_snow,

@@ -193,12 +193,12 @@ pub(super) struct RegionPrefixBatch {
 }
 
 impl RegionPrefixBatch {
-    /// Executes all admitted positions using one bounded density sampler and
-    /// one climate/biome sidecar. Positions must be unique and lie in a
-    /// rectangle no larger than the caller's configured region bound.
+    /// Executes `missing_positions` using the bounded density sampler and
+    /// climate/biome sidecar for the complete admitted `positions` geometry.
     pub(super) fn execute(
         generator: &OverworldGenerator,
         positions: &[(i32, i32)],
+        missing_positions: &[(i32, i32)],
         preliminary: &Arc<PreliminarySurfaceCache>,
     ) -> Self {
         assert!(!positions.is_empty(), "region prefix requires at least one position");
@@ -252,8 +252,8 @@ impl RegionPrefixBatch {
             climate.as_deref(),
         );
         let mut aquifer_cache = AquiferRegionCache::new();
-        let mut products = Vec::with_capacity(positions.len());
-        for &(cx, cz) in positions {
+        let mut products = Vec::with_capacity(missing_positions.len());
+        for &(cx, cz) in missing_positions {
             let aquifer = build_region_aquifer(
                 generator,
                 cx,
@@ -622,7 +622,7 @@ mod prefix_comparison_tests {
 
         let region = generator();
         let preliminary = region.preliminary_cache(crate::aquifer::PRELIMINARY_CACHE_BATCH_CAPACITY);
-        let batch = RegionPrefixBatch::execute(&region, &positions, &preliminary);
+        let batch = RegionPrefixBatch::execute(&region, &positions, &positions, &preliminary);
         let actual = positions
             .iter()
             .map(|&position| digest(&batch.result(position)))
@@ -685,7 +685,7 @@ mod prefix_comparison_tests {
         let batched = generator();
         let preliminary = batched.preliminary_cache(crate::aquifer::PRELIMINARY_CACHE_BATCH_CAPACITY);
         crate::overworld::structures::reset_structure_cache_stats();
-        let _ = RegionPrefixBatch::execute(&batched, &positions, &preliminary);
+        let _ = RegionPrefixBatch::execute(&batched, &positions, &positions, &preliminary);
         let batched_samplers =
             crate::overworld::structures::structure_cache_stats().sampler_constructions;
 

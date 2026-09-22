@@ -272,7 +272,10 @@ digest. This keeps content hashing separate from lifecycle identity.
 For pristine Overworld generated prefixes, an authenticated resolver identity
 also covers the seed, settings, fallback biome, and asset bundle, so the
 request records use a coordinate/stage provenance digest without scanning the
-compact block field. Dynamic resolvers and edited or persisted columns retain
+compact block field. Settings are fingerprinted once at generator construction;
+per-stage provenance consumes that fixed-size identity, not the serialized
+settings document. Executor version 5 separates these identities from older
+checkpoints. Dynamic resolvers and edited or persisted columns retain
 the exact content-digest path. The lifecycle marks that provenance only after
 the typed prefix has been admitted; direct target output and the
 FEATURES-to-TOP_LAYER-to-OUTPUT digest chain require the marker. A dynamic

@@ -473,7 +473,20 @@ impl OverworldGenerator {
         let radius = positions.iter().fold(0, |radius, &(x, z)| {
             radius.max((x - centre.0).abs()).max((z - centre.1).abs())
         });
+        let local_lease;
+        let lease = match existing_lease {
+            Some(lease) => lease,
+            None => {
+                local_lease = self.store.open_view(centre, radius);
+                &local_lease
+            }
+        };
         let region_positions = positions.clone();
+        let missing_positions = positions
+            .iter()
+            .copied()
+            .filter(|position| self.store.entry(*position).pre_ore.peek().is_none())
+            .collect::<Vec<_>>();
         let mut region = None;
         let compute = |position| {
             region
@@ -481,6 +494,7 @@ impl OverworldGenerator {
                     super::region_prefix::RegionPrefixBatch::execute(
                         self,
                         &region_positions,
+                        &missing_positions,
                         preliminary,
                     )
                 })
@@ -488,23 +502,13 @@ impl OverworldGenerator {
                 .as_ref()
                 .clone()
         };
-        let prepared = match existing_lease {
-            Some(lease) => self.store.compute_stage_batch_in_view(
-                lease,
-                positions,
-                |entry| &entry.pre_ore,
-                crate::counters::bump_pre_ore,
-                compute,
-            ),
-            None => self.store.compute_stage_batch(
-                centre,
-                radius,
-                positions,
-                |entry| &entry.pre_ore,
-                crate::counters::bump_pre_ore,
-                compute,
-            ),
-        };
+        let prepared = self.store.compute_stage_batch_in_view(
+            lease,
+            positions,
+            |entry| &entry.pre_ore,
+            crate::counters::bump_pre_ore,
+            compute,
+        );
         prepared.len()
     }
 
@@ -1740,6 +1744,7 @@ mod tests {
 
         use serde_json::Value;
 
+        use crate::counters::Stage;
         use crate::overworld::output::GeneratedColumn;
         use super::OverworldGenerator;
         use crate::density::{NoiseParams, Resolver};
@@ -1820,6 +1825,26 @@ mod tests {
                         }
                     }
                 }
+                for &height in &pre.1 {
+                    for byte in height.to_le_bytes() {
+                        digest = (digest ^ u64::from(byte)).wrapping_mul(0x1000_0000_01b3);
+                    }
+                }
+                for &(biome, cold) in &pre.2 {
+                    let biome = biome.builtin_or_none().expect("fixture biome is built-in") as u8;
+                    digest = (digest ^ u64::from(biome)).wrapping_mul(0x1000_0000_01b3);
+                    digest = (digest ^ u64::from(u8::from(cold))).wrapping_mul(0x1000_0000_01b3);
+                }
+                for qy in 0..pre.3.y_quarts() {
+                    for qz in 0..4 {
+                        for qx in 0..4 {
+                            for byte in pre.3.at_quart(qx, qy, qz).as_bytes() {
+                                digest = (digest ^ u64::from(*byte))
+                                    .wrapping_mul(0x1000_0000_01b3);
+                            }
+                        }
+                    }
+                }
             }
             digest
         }
@@ -1840,6 +1865,55 @@ mod tests {
                 }
             }
             digest
+        }
+
+        #[test]
+        fn mixed_pre_ore_region_executes_only_missing_products() {
+            let positions = [(-2, -3), (-1, -3), (0, -3), (1, -3)];
+
+            let cold = generator();
+            let preliminary = cold
+                .preliminary_cache(crate::aquifer::PRELIMINARY_CACHE_BATCH_CAPACITY);
+            crate::counters::reset();
+            assert_eq!(
+                cold.prepare_pre_ore_region(positions.to_vec(), None, &preliminary),
+                positions.len()
+            );
+            assert_eq!(
+                crate::counters::snapshot().stage_entered[Stage::Shape as usize],
+                positions.len() as u64,
+                "cold control must execute every prefix body"
+            );
+            let expected = prefix_digest(&cold, &positions);
+
+            let mixed = generator();
+            let preliminary = mixed
+                .preliminary_cache(crate::aquifer::PRELIMINARY_CACHE_BATCH_CAPACITY);
+            for &(cx, cz) in &positions[..2] {
+                let _ = mixed.pre_ore_stage(cx, cz);
+            }
+            crate::counters::reset();
+            assert_eq!(
+                mixed.prepare_pre_ore_region(positions.to_vec(), None, &preliminary),
+                positions.len()
+            );
+            assert_eq!(
+                crate::counters::snapshot().stage_entered[Stage::Shape as usize],
+                2,
+                "mixed region must execute only its two missing prefix bodies"
+            );
+            assert_eq!(prefix_digest(&mixed, &positions), expected);
+
+            crate::counters::reset();
+            assert_eq!(
+                mixed.prepare_pre_ore_region(positions.to_vec(), None, &preliminary),
+                positions.len()
+            );
+            assert_eq!(
+                crate::counters::snapshot().stage_entered[Stage::Shape as usize],
+                0,
+                "warm control must execute no prefix bodies"
+            );
         }
 
         #[test]
