@@ -24,10 +24,14 @@ that best cover world-generation or server edits without repeating the full
 CI matrix. It restores Cargo dependency caches without caching or uploading
 `target/` or downloadable artifacts; logs remain in the run. It separately
 uses the existing `sccache` compiler-object cache, so later branch commits can
-reuse compilation work without downloading a full Cargo target directory.
-Edit the checked-in commands on the branch when that branch needs a different
-focused test. There are no dispatch inputs, so a manual run cannot evaluate
-caller-supplied shell text.
+reuse compilation work without downloading a full Cargo target directory. The
+two native test commands set `CARGO_PROFILE_DEV_CODEGEN_BACKEND=llvm`: the
+repository's normal debug compiler is faster, but cannot execute every x86_64
+test path on an Ubuntu runner. The wasm job installs the `wasm-bindgen` CLI
+version used by `web/Cargo.lock` because the Trunk post-build worker hook
+invokes that executable directly. Edit the checked-in commands on the branch
+when that branch needs a different focused test. There are no dispatch inputs,
+so a manual run cannot evaluate caller-supplied shell text.
 
 ## How it works
 

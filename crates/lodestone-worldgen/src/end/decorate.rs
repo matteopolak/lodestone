@@ -1621,7 +1621,7 @@ mod tests {
         assert_eq!(world.get(2, 69, 0), "minecraft:air", "the configured radius must clip the pillar");
         assert_eq!(
             world.get(2, 70, 0),
-            "minecraft:iron_bars[north=true,south=true,west=false,east=false]",
+            "minecraft:iron_bars[east=false,north=true,south=true,waterlogged=false,west=false]",
             "the configured guarded flag must reach cage placement",
         );
     }
