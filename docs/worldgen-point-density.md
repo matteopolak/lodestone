@@ -25,6 +25,29 @@ XZ memo is reused across groups. The production preliminary cache uses this
 batch path for its construction-time grid and surface-corner admissions; scalar
 misses retain the scalar path for small or irregular requests.
 
+When `gen-counters` is enabled, the redundancy probe separately reports compiled
+point scalar and batch visits. Its readiness-candidate count requires the same
+graph identity, operation id, and full `(x, y, z)` within one scalar evaluation
+or one eight-lane batch; it does not turn cross-request repetition into a
+speculative cache hit rate.
+
+`LODESTONE_DENSITY_PROBE_COLUMNS` narrows the ignored density-redundancy probe
+from its default 100 contiguous interior targets to `1..=100` targets. Before
+measuring, it prepares the two-chunk pre-ore halo while excluding the target
+prefixes themselves. The selected `column` calls then form one production
+stream: the first is cold, while an earlier closure can prepare a later target.
+The probe reports stream totals normalized by submitted targets, not cold-call
+averages. Field "own-sampler" counters are scoped to one `Scratch` lifetime,
+not to an individual `Field::eval` call; treat them as a per-sampler demand
+measure until a separate per-evaluation instrument exists.
+
+When compilation sees `Clamp(Max(A, B), lo, hi)`, it may mark the clamp for a
+right-first scalar path only when `A` is cache-free and both finite bounds are
+valid. The evaluator then runs `B` first and returns `hi` when `B > hi`; if not,
+it evaluates `A` and performs the normal max followed by clamp arithmetic. This
+preserves `B`'s cache publication while avoiding `A` only when the clamp result
+is already fixed. Tile and point evaluators retain their ordinary order.
+
 Pure X/Z factor-and-offset products can also be admitted to a request-scoped
 `XzProductLattice`. `XzProductManifest::from_routes` records the exact source
 signatures and a seed-bound fingerprint; `Program::compile_with_xz_products`
@@ -162,7 +185,8 @@ and that a raw recursive control remains bit-identical.
 
 ## Configuration
 
-There is no runtime switch. `PointScratch::with_capacity` selects the bounded
+There is no production runtime switch. `LODESTONE_DENSITY_PROBE_COLUMNS` affects
+only the ignored, counter-enabled redundancy measurement. `PointScratch::with_capacity` selects the bounded
 request-local table size; `PointScratch::new` uses the default 4096 entries.
 Batch evaluation uses a fixed width of eight and lazily reserves one `f64` per
 compiled plan register and lane. Memo participation comes from each source

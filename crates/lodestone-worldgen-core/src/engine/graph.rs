@@ -126,6 +126,13 @@ pub(crate) struct Op {
     pub(crate) c: u32,
 }
 
+/// Marks a clamp whose max child may evaluate its right side first.
+///
+/// This is set only after interning, once [`Graph::compute_tile_eligibility`]
+/// has proved the max left side has no cache effects. `Clamp` otherwise leaves
+/// `Op::c` at zero.
+const CLAMP_MAX_RHS_FIRST: u32 = u32::MAX;
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TileOp {
     pub(crate) kind: OpKind,
@@ -401,6 +408,7 @@ impl Program {
         g.product_identity = has_product_nodes.then_some(manifest_identity).flatten();
         g.product_fingerprint = has_product_nodes.then_some(manifest_fingerprint).flatten();
         let pure = g.compute_tile_eligibility(false);
+        g.mark_clamp_max_rhs_first(&pure);
         if enable_tiles || g.product_manifest.is_some() {
             g.tile_eligible = pure.clone();
         } else {
@@ -953,6 +961,11 @@ impl Graph {
     }
 
     #[inline]
+    pub(crate) fn clamp_max_rhs_first(&self, op: Op) -> Option<Op> {
+        (op.kind == OpKind::Clamp && op.c == CLAMP_MAX_RHS_FIRST).then(|| self.op(op.a))
+    }
+
+    #[inline]
     pub(crate) fn tile_plan(&self, id: NodeId) -> Option<&TilePlan> {
         self.tile_plan_ids
             .get(id as usize)
@@ -1239,6 +1252,26 @@ impl Graph {
                 == Some(second.to_bits())
     }
 
+    fn mark_clamp_max_rhs_first(&mut self, pure: &[bool]) {
+        for index in 0..self.ops.len() {
+            let clamp = self.ops[index];
+            if clamp.kind != OpKind::Clamp {
+                continue;
+            }
+            let maximum = self.op(clamp.a);
+            let low = self.params[clamp.b as usize];
+            let high = self.params[clamp.b as usize + 1];
+            if maximum.kind == OpKind::Max
+                && pure[maximum.a as usize]
+                && low.is_finite()
+                && high.is_finite()
+                && low <= high
+            {
+                self.ops[index].c = CLAMP_MAX_RHS_FIRST;
+            }
+        }
+    }
+
     /// Emits a node, or returns the existing node with the same shape.
     ///
     /// `a`/`b`/`c` are already canonical when this is reached (children are
@@ -1351,7 +1384,7 @@ impl Graph {
     /// | `Add`/`Mul`/`Min`/`Max` | lhs id | rhs id | — |
     /// | unary arithmetic | child id | — | — |
     /// | `Marker`/`Cache2D` | transparent; omitted from the field graph |
-    /// | `Clamp` | child id | params\[2\] | — |
+    /// | `Clamp` | child id | params\[2\] | rhs-first marker |
     /// | `Interpolated`/`FlatCache` | child id | slot | — |
     /// | `Noise` | noise idx | params\[2\] | — |
     /// | `ShiftedNoise` | children\[3\] | noise idx | params\[2\] |
