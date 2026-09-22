@@ -214,6 +214,10 @@ direction.
    entry per sampled stack. An absent CPU array may use the documented
    sample-count fallback; an empty or short array is malformed and is rejected
    rather than being mistaken for a capture without CPU instrumentation.
+   Inclusive attribution credits a recursive symbol once per sample by its
+   resolved `(library, symbol)` identity, so separate profile entries for one
+   symbol do not multiply its cost while like-named symbols in different
+   libraries receive separate credit.
 5. **Read the sidecar-join warning line.** `symbolicated N raw address(es) via sidecar,
    M unresolved` -- a high `M` usually means the binary changed between recording and
    the sidecar being written (rebuild, then re-record) or the profiled process wasn't

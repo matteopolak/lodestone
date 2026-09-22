@@ -126,10 +126,10 @@ Two tables, both restricted to one thread (`--thread`, default: the
 samples):
 
 - **Self time**: weight credited only to a sample's leaf (innermost) frame.
-- **Inclusive time**: weight credited to every *distinct* function in a
-  sample's stack (a function recursing does not get credited twice for the
-  same sample), i.e. "how much of the thread's time was spent inside this
-  function or something it called."
+- **Inclusive time**: weight credited to every distinct resolved
+  `(library, symbol)` identity in a sample's stack. A recursive function can
+  have several `funcTable` entries, but receives that sample's weight once;
+  identically named symbols from different libraries are credited separately.
 
 Neither is asserted against anything -- this is analysis tooling for a human
 reading a profile, not a test.
@@ -314,6 +314,7 @@ class Tables:
         self.resolved_unsymbolicated = 0
         self.unresolved_unsymbolicated = 0
         self.func_name_cache: dict[int, str] = {}
+        self.func_identity_cache: dict[int, tuple[str | None, str]] = {}
         self._resolve_func_names(syms)
 
     def _lib_debug_name_for_resource(self, resource_index: int | None) -> str | None:
@@ -329,19 +330,29 @@ class Tables:
         resources = self.func_table["resource"]
         for func_index, name_str_index in enumerate(names):
             raw_name = self.string_array[name_str_index]
+            debug_name = self._lib_debug_name_for_resource(resources[func_index])
+            resolved_name = raw_name
             if HEX_ADDR_RE.match(raw_name) and syms is not None:
-                debug_name = self._lib_debug_name_for_resource(resources[func_index])
                 rva = int(raw_name, 16)
                 resolved = syms.resolve(debug_name, rva)
                 if resolved is not None:
-                    self.func_name_cache[func_index] = resolved
+                    resolved_name = resolved
                     self.resolved_unsymbolicated += 1
-                    continue
-                self.unresolved_unsymbolicated += 1
-            self.func_name_cache[func_index] = raw_name
+                else:
+                    self.unresolved_unsymbolicated += 1
+            self.func_name_cache[func_index] = resolved_name
+            self.func_identity_cache[func_index] = (debug_name, resolved_name)
 
     def func_name(self, func_index: int) -> str:
         return self.func_name_cache.get(func_index, f"<func {func_index}>")
+
+    def func_identity(self, func_index: int) -> tuple[str | None, str]:
+        """The resolved library-and-symbol identity used for inclusive cost.
+
+        Different `funcTable` entries can describe one recursive symbol, while
+        identical symbol text from two libraries must receive separate credit.
+        """
+        return self.func_identity_cache.get(func_index, (None, f"<func {func_index}>"))
 
     def stack_chain(self, stack_index: int) -> list[int]:
         """Frame indices from leaf to root for one sample's stack.
@@ -563,12 +574,13 @@ def compute_cost_tables(tables: Tables, thread: dict) -> tuple[dict, dict, float
         leaf_name = tables.func_name(leaf_func)
         self_time[leaf_name] = self_time.get(leaf_name, 0.0) + w
 
-        seen = set()
+        seen: set[tuple[str | None, str]] = set()
         for frame_index in chain:
             func_index = frame_func[frame_index]
-            if func_index in seen:
+            identity = tables.func_identity(func_index)
+            if identity in seen:
                 continue  # recursion: credit a function once per sample
-            seen.add(func_index)
+            seen.add(identity)
             name = tables.func_name(func_index)
             inclusive_time[name] = inclusive_time.get(name, 0.0) + w
 
