@@ -77,7 +77,9 @@ The catalog also materializes each placed feature's eligible-biome map once and
 shares it by `Arc` with replay contexts and vegetation grids. This map is immutable
 after generator construction; rebuilding its `String` keys and sets for every
 served chunk changes no admission or RNG decision and only adds avoidable heap
-traffic.
+traffic. Production replay accumulates the 3x3 source union directly into a two-word
+built-in biome mask and selects pre-parsed ore products from the catalog; string
+membership and compatibility maps remain at the setup boundary.
 
 Built-in disk, block-pile, vegetation-patch ground, and huge-mushroom stem placements keep
 their selected provider state as the grid's `StateId`: `BlockStateProvider::get_state_id`
