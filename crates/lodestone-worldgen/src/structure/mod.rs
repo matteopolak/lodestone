@@ -3074,14 +3074,15 @@ pub struct StructureRegistry {
 
 impl StructureRegistry {
     /// Builds the registry for `seed` from `resolver`'s structure documents, with
-    /// **no dimension filter** — every structure set the resolver serves is kept.
+    /// no dimension filter. Dimension generators should prefer
+    /// [`Self::new_for_biomes`] so unreachable structure sets are discarded before
+    /// the per-column walk.
     ///
     /// An empty [`Resolver::structure_set_ids`] yields an empty registry that
     /// places nothing, which is what every fixture resolver in this workspace
     /// gets and why none of them had to change.
     ///
-    /// See [`Self::new_for_biomes`] for the filtered form and for why the
-    /// Overworld deliberately stays on this one.
+    /// See [`Self::new_for_biomes`] for the filtered form.
     #[must_use]
     pub fn new(seed: i64, resolver: &dyn Resolver) -> Self {
         Self::new_for_biomes(seed, resolver, None)
@@ -3113,13 +3114,9 @@ impl StructureRegistry {
     /// a filtered Nether registry loads `bastion`'s pools and nothing else,
     /// instead of every village, `ancient_city` and `trial_chambers` pool graph.
     ///
-    /// **`None` means "no filter", and that is what the Overworld passes.** Its
-    /// own possible-biomes set is the whole 7,594-row parameter table's biome set, so
-    /// filtering there would drop exactly the Nether and End sets and change
-    /// nothing else — but it would also change [`Self::unsupported`]'s keys for a
-    /// generator whose gates pin them, for no behavioural gain. The asymmetry is
-    /// deliberate and is the reason this is a second constructor rather than a
-    /// changed signature.
+    /// **`None` means "no filter"** and is retained for generic callers and
+    /// compatibility fixtures. Production dimension constructors pass their
+    /// reachable biome set explicitly.
     #[must_use]
     pub fn new_for_biomes(
         seed: i64,
