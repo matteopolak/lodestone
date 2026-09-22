@@ -75,6 +75,18 @@ an admission whose shaped products are already retained does not open another le
 `opens` also includes narrow nested structure reads, so it is intentionally
 larger and must not be interpreted as a count of production batches.
 
+Batch width is a first-order control for dependency-halo reuse. On `437a559ad`,
+the same seven-column line with one native worker measured 11.43 columns/s,
+1.892 billion instructions/column, and 372.6 million cycles/column at width 2;
+16.39 columns/s, 1.316 billion instructions/column, and 264.3 million
+cycles/column at width 4; and 20.30 columns/s, 1.055 billion instructions/column,
+and 214.2 million cycles/column at width 7. The reduction is repeated
+terrain-prefix and admission work, not a change in generated output. These are
+diagnostic controls: increasing a browser window also delays the next emitted
+column until the batch future completes, so the browser scheduler keeps its
+separate first-emit and memory contract until browser measurements justify a
+change.
+
 ## Configuration
 
 Run the ignored test with `LODESTONE_WORLDGEN_WORKERS=1`. Optional variables are
