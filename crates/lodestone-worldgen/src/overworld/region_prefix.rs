@@ -27,6 +27,7 @@ struct RegionBiomeSidecar {
     depth: usize,
     cells: Vec<Option<Arc<BiomeCells>>>,
     no_sulfur: Vec<bool>,
+    cold_biomes: [bool; BuiltinBiome::COUNT as usize],
     fiddle_lattice: RefCell<super::biome::ZoomFiddleLattice>,
     surface_search: RefCell<Option<crate::biome::BiomeSearchCursor>>,
 }
@@ -48,6 +49,17 @@ impl RegionBiomeSidecar {
         let depth = (max_z - side_min_z + 2) as usize;
         let mut cells = Vec::with_capacity(width * depth);
         let mut no_sulfur = Vec::with_capacity(width * depth);
+        let mut cold_biomes = [false; BuiltinBiome::COUNT as usize];
+        if let Some(dynamic) = &generator.dynamic_biome {
+            for biome in BuiltinBiome::all() {
+                cold_biomes[biome as usize] = crate::biome::cold_enough_to_snow(
+                    &dynamic.temperatures,
+                    biome.name(),
+                );
+            }
+        } else {
+            cold_biomes.fill(generator.fallback_cold_enough_to_snow);
+        }
         for cz in side_min_z..=max_z + 1 {
             for cx in side_min_x..=max_x + 1 {
                 let biome_cells = (generator.dynamic_biome.is_none()
@@ -72,6 +84,7 @@ impl RegionBiomeSidecar {
             depth,
             cells,
             no_sulfur,
+            cold_biomes,
             fiddle_lattice: RefCell::new(super::biome::ZoomFiddleLattice::for_request_region(
                 super::biome::biome_zoom_seed(generator.seed),
                 side_min_x + 1,
@@ -127,14 +140,14 @@ impl RegionBiomeSidecar {
     }
 
     #[inline]
-    fn biome_at(
+    fn biome_at_typed(
         &self,
         generator: &OverworldGenerator,
         prepared: Option<&PreparedClimateGrid>,
         x: i32,
         y: i32,
         z: i32,
-    ) -> &'static str {
+    ) -> (BuiltinBiome, bool) {
         let (qx, qy, qz) = self
             .fiddle_lattice
             .borrow_mut()
@@ -145,7 +158,11 @@ impl RegionBiomeSidecar {
             let local_qx = block_x.rem_euclid(16).div_euclid(4) as usize;
             let local_qz = block_z.rem_euclid(16).div_euclid(4) as usize;
             let local_qy = (qy * 4 - cells.min_y()).div_euclid(4).max(0) as usize;
-            return cells.at_quart(local_qx, local_qy, local_qz);
+            let biome = cells
+                .at_quart_ref(local_qx, local_qy, local_qz)
+                .builtin_or_none()
+                .expect("strict worldgen biome cells contain only built-in biomes");
+            return (biome, self.cold_biomes[biome as usize]);
         }
         let dynamic = generator
             .dynamic_biome
@@ -158,13 +175,13 @@ impl RegionBiomeSidecar {
         let row = dynamic
             .table
             .nearest_row_with_cursor(&target, self.surface_search.borrow_mut().as_mut().expect("dynamic biome search cursor"));
-        dynamic
+        let biome = dynamic
             .table
             .biome_ref_at(row)
             .expect("strict worldgen table contains only generated built-in biomes")
             .builtin_or_none()
-            .expect("strict worldgen table contains only built-in biomes")
-            .name()
+            .expect("strict worldgen table contains only built-in biomes");
+        (biome, self.cold_biomes[biome as usize])
     }
 }
 
@@ -277,21 +294,13 @@ impl RegionPrefixBatch {
                 &field.1,
                 &deep_biome_absent,
                 &|lx, y, lz| {
-                    let name = sidecar.biome_at(
+                    sidecar.biome_at_typed(
                         generator,
                         climate.as_deref(),
                         base_x + lx,
                         y,
                         base_z + lz,
-                    );
-                    let cold = match &generator.dynamic_biome {
-                        Some(dynamic) => crate::biome::cold_enough_to_snow(
-                            &dynamic.temperatures,
-                            name,
-                        ),
-                        None => generator.fallback_cold_enough_to_snow,
-                    };
-                    (name, cold)
+                    )
                 },
                 &|_, _, _| {},
                 base_x,

@@ -307,10 +307,15 @@ impl BiomeSet {
     #[inline(always)]
     fn contains_resolved(&self, biome: Option<BuiltinBiome>, name: &str) -> bool {
         if let Some(biome) = biome {
-            let index = biome as usize;
-            return self.builtins[index / 64] & (1u64 << (index % 64)) != 0;
+            return self.contains_builtin(biome);
         }
         self.extensions.iter().any(|candidate| candidate == name)
+    }
+
+    #[inline(always)]
+    fn contains_builtin(&self, biome: BuiltinBiome) -> bool {
+        let index = biome as usize;
+        self.builtins[index / 64] & (1u64 << (index % 64)) != 0
     }
 
     #[inline]
@@ -760,11 +765,13 @@ struct Ctx<'a, 'b, 'c> {
     stone_depth_below: i32,
     /// The current position's biome answer, populated only when needed.
     biome: Option<(&'a str, bool)>,
+    typed_biome: Option<(BuiltinBiome, bool)>,
     /// The built-in identity for `biome`, resolved once per Y position.
     biome_builtin: Option<Option<BuiltinBiome>>,
     /// The callback used by the normal chunk scan. `top_material` supplies a
     /// fixed answer instead, so its context leaves this as `None`.
     biome_at: Option<&'b dyn Fn(i32, i32, i32) -> (&'a str, bool)>,
+    typed_biome_at: Option<&'b dyn Fn(i32, i32, i32) -> (BuiltinBiome, bool)>,
     /// Per-call condition storage. X/Z values survive Y updates.
     cache: &'c mut EvalCache,
     /// Whether Y-condition memoization is useful for this caller. The linear
@@ -791,11 +798,30 @@ impl<'a, 'b, 'c> Ctx<'a, 'b, 'c> {
     }
 
     #[inline(always)]
+    fn typed_biome(&mut self) -> (BuiltinBiome, bool) {
+        if let Some(value) = self.typed_biome {
+            return value;
+        }
+        let value = (self
+            .typed_biome_at
+            .expect("surface rule requested a typed biome without a source"))(
+            self.block_x & 15,
+            self.block_y,
+            self.block_z & 15,
+        );
+        self.typed_biome = Some(value);
+        value
+    }
+
+    #[inline(always)]
     fn biome_builtin(&mut self) -> Option<BuiltinBiome> {
         if let Some(value) = self.biome_builtin {
             return value;
         }
-        let value = BuiltinBiome::from_name(self.biome().0);
+        let value = self
+            .typed_biome_at
+            .map(|_| Some(self.typed_biome().0))
+            .unwrap_or_else(|| BuiltinBiome::from_name(self.biome().0));
         self.biome_builtin = Some(value);
         value
     }
@@ -1219,8 +1245,10 @@ impl SurfaceSystem {
                     stone_depth_above: 0,
                     stone_depth_below: 0,
                     biome: None,
+                    typed_biome: None,
                     biome_builtin: None,
                     biome_at: Some(biome_at),
+                    typed_biome_at: None,
                     cache: &mut cache,
                     cache_y: false,
                 };
@@ -1326,12 +1354,12 @@ impl SurfaceSystem {
         out
     }
 
-    pub(crate) fn build_surface_reusing_packed_in_place<'b>(
+    pub(crate) fn build_surface_reusing_packed_in_place(
         &self,
         carrier: &mut PackedStateCarrier,
         heights: &[i32; 256],
         deep_biome_absent: &[bool; 256],
-        biome_at: &dyn Fn(i32, i32, i32) -> (&'b str, bool),
+        biome_at: &dyn Fn(i32, i32, i32) -> (BuiltinBiome, bool),
         column_biome_at: &dyn Fn(i32, i32, i32),
         min_block_x: i32,
         min_block_z: i32,
@@ -1379,8 +1407,10 @@ impl SurfaceSystem {
                     stone_depth_above: 0,
                     stone_depth_below: 0,
                     biome: None,
+                    typed_biome: None,
                     biome_builtin: None,
-                    biome_at: Some(biome_at),
+                    biome_at: None,
+                    typed_biome_at: Some(biome_at),
                     cache: &mut cache,
                     cache_y: false,
                 };
@@ -1551,8 +1581,10 @@ impl SurfaceSystem {
                     stone_depth_above: 0,
                     stone_depth_below: 0,
                     biome: None,
+                    typed_biome: None,
                     biome_builtin: None,
                     biome_at: Some(&biome_at),
+                    typed_biome_at: None,
                     cache: &mut cache,
                     cache_y: false,
                 };
@@ -1658,8 +1690,10 @@ impl SurfaceSystem {
             stone_depth_above: 1,
             stone_depth_below: 1,
             biome: Some((biome, cold_enough_to_snow)),
+            typed_biome: None,
             biome_builtin: None,
             biome_at: None,
+            typed_biome_at: None,
             cache: &mut cache,
             cache_y: true,
         };
@@ -1947,8 +1981,12 @@ impl SurfaceSystem {
     ) -> bool {
         match cond {
             Cond::BiomeIs { set, .. } => {
-                let name = ctx.biome().0;
-                set.contains_resolved(ctx.biome_builtin(), name)
+                if ctx.typed_biome_at.is_some() {
+                    set.contains_builtin(ctx.typed_biome().0)
+                } else {
+                    let name = ctx.biome().0;
+                    set.contains_resolved(ctx.biome_builtin(), name)
+                }
             }
             Cond::AbovePreliminarySurface => ctx.block_y >= ctx.min_surface_level,
             Cond::NoiseThreshold {
@@ -1996,7 +2034,13 @@ impl SurfaceSystem {
                 };
                 stone_depth <= 1 + offset + surface_depth + secondary
             }
-            Cond::Temperature { .. } => ctx.biome().1,
+            Cond::Temperature { .. } => {
+                if ctx.typed_biome_at.is_some() {
+                    ctx.typed_biome().1
+                } else {
+                    ctx.biome().1
+                }
+            }
             Cond::VerticalGradient {
                 factory,
                 true_at_and_below,
@@ -2890,8 +2934,10 @@ mod tests {
                                         stone_depth_above,
                                         stone_depth_below,
                                         biome: None,
+                                        typed_biome: None,
                                         biome_builtin: None,
                                         biome_at: Some(&biome_at),
+                                        typed_biome_at: None,
                                         cache: &mut compiled_cache,
                                         cache_y: true,
                                     };
@@ -2914,8 +2960,10 @@ mod tests {
                                         stone_depth_above,
                                         stone_depth_below,
                                         biome: None,
+                                        typed_biome: None,
                                         biome_builtin: None,
                                         biome_at: Some(&biome_at),
+                                        typed_biome_at: None,
                                         cache: &mut recursive_cache,
                                         cache_y: true,
                                     };
@@ -2938,8 +2986,10 @@ mod tests {
                                         stone_depth_above,
                                         stone_depth_below,
                                         biome: None,
+                                        typed_biome: None,
                                         biome_builtin: None,
                                         biome_at: Some(&biome_at),
+                                        typed_biome_at: None,
                                         cache: &mut column_cache,
                                         cache_y: false,
                                     };
@@ -3252,8 +3302,10 @@ mod tests {
             stone_depth_above: 0,
             stone_depth_below: 0,
             biome: None,
+            typed_biome: None,
             biome_builtin: None,
             biome_at: Some(&biome_at),
+            typed_biome_at: None,
             cache: &mut ordinary_cache,
             cache_y: true,
         };
@@ -3268,8 +3320,10 @@ mod tests {
             stone_depth_above: 0,
             stone_depth_below: 0,
             biome: None,
+            typed_biome: None,
             biome_builtin: None,
             biome_at: Some(&biome_at),
+            typed_biome_at: None,
             cache: &mut column_cache,
             cache_y: false,
         };
