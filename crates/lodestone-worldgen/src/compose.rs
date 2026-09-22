@@ -118,12 +118,19 @@ const BIOME_MASK_WORDS: usize = 2;
 const _: () = assert!(BuiltinBiome::COUNT <= (BIOME_MASK_WORDS * 64) as u8);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct BiomeMask([u64; BIOME_MASK_WORDS]);
+pub(crate) struct BiomeMask([u64; BIOME_MASK_WORDS]);
 
 impl BiomeMask {
-    fn insert(&mut self, biome: BuiltinBiome) {
+    pub(crate) fn insert(&mut self, biome: BuiltinBiome) {
         let index = biome as usize;
         self.0[index / 64] |= 1_u64 << (index % 64);
+    }
+
+    pub(crate) fn insert_ref(&mut self, biome: BiomeRef) {
+        let biome = biome
+            .builtin_or_none()
+            .expect("typed decoration selection requires generated biomes");
+        self.insert(biome);
     }
 
     fn contains(self, biome: BuiltinBiome) -> bool {
@@ -212,7 +219,8 @@ impl FeatureBiomePlan {
 #[derive(Clone, Debug, Default)]
 pub struct DecorationCatalog {
     ordered: Arc<[DecorationEntry]>,
-    members: HashMap<String, Arc<[u64]>>,
+    builtin_members: Arc<[Option<Arc<[u64]>>]>,
+    extension_members: HashMap<String, Arc<[u64]>>,
     /// Immutable numeric feature-to-biome eligibility shared by every replay
     /// context. The catalog is generator-scoped and never changes.
     feature_biomes: Arc<FeatureBiomePlan>,
@@ -224,6 +232,7 @@ struct DecorationEntry {
     index: usize,
     id: String,
     placed: Arc<crate::feature::vegetation::PlacedRef>,
+    ore: Option<Arc<PlacedOre>>,
 }
 
 /// All decoration streams selected for one source biome union.
@@ -258,12 +267,58 @@ impl DecorationCatalog {
     ) -> DecorationSelection {
         let mut selected = vec![0_u64; self.ordered.len().div_ceil(64)];
         for biome in biomes {
-            if let Some(words) = self.members.get(biome) {
-                for (dst, src) in selected.iter_mut().zip(words.iter()) {
-                    *dst |= *src;
-                }
+            if let Some(biome) = BuiltinBiome::from_name(biome) {
+                self.add_builtin_member(&mut selected, biome);
+            } else if let Some(words) = self.extension_members.get(biome) {
+                Self::add_member_words(&mut selected, words);
             }
         }
+
+        self.finish_selection(selected, Some(ore_definitions))
+    }
+
+    pub(crate) fn select_all_mask(&self, biomes: BiomeMask) -> DecorationSelection {
+        let mut selected = vec![0_u64; self.ordered.len().div_ceil(64)];
+        for (word_index, word) in biomes.0.into_iter().enumerate() {
+            let mut bits = word;
+            while bits != 0 {
+                let bit = bits.trailing_zeros() as usize;
+                self.add_builtin_member_index(&mut selected, word_index * 64 + bit);
+                bits &= bits - 1;
+            }
+        }
+
+        self.finish_selection(selected, None)
+    }
+
+    pub(crate) fn select_ores_mask(&self, biomes: BiomeMask) -> Vec<PlacedOre> {
+        self.select_all_mask(biomes).ores
+    }
+
+    #[inline]
+    fn add_builtin_member(&self, selected: &mut [u64], biome: BuiltinBiome) {
+        self.add_builtin_member_index(selected, biome as usize);
+    }
+
+    #[inline]
+    fn add_builtin_member_index(&self, selected: &mut [u64], index: usize) {
+        if let Some(words) = self.builtin_members.get(index).and_then(Option::as_deref) {
+            Self::add_member_words(selected, words);
+        }
+    }
+
+    #[inline]
+    fn add_member_words(selected: &mut [u64], words: &[u64]) {
+        for (dst, src) in selected.iter_mut().zip(words.iter()) {
+            *dst |= *src;
+        }
+    }
+
+    fn finish_selection(
+        &self,
+        selected: Vec<u64>,
+        legacy_ore_definitions: Option<&HashMap<String, PlacedOre>>,
+    ) -> DecorationSelection {
 
         let mut out = DecorationSelection::default();
         for (word_index, word) in selected.into_iter().enumerate() {
@@ -281,7 +336,10 @@ impl DecorationCatalog {
                         }
                         _ => {}
                     }
-                    if let Some(mut ore) = ore_definitions.get(&entry.id).cloned() {
+                    let mut ore = entry.ore.as_deref().cloned().or_else(|| {
+                        legacy_ore_definitions.and_then(|definitions| definitions.get(&entry.id).cloned())
+                    });
+                    if let Some(mut ore) = ore.take() {
                         ore.index = entry.index;
                         out.ores.push(ore);
                     }
@@ -371,22 +429,19 @@ impl DecorationCatalog {
     }
 }
 
-/// Parses the ore-capable entries in a global decoration catalog once at
-/// generator construction. The catalog retains every feature (including the
-/// unsupported ones) for global index accounting; this map only avoids parsing
-/// the same ore document each time a source chunk is decorated.
+/// Returns a compatibility map for the ore products already parsed into the
+/// global decoration catalog. The catalog retains every feature (including
+/// unsupported ones) for global index accounting; production selection reads
+/// those products directly instead of probing this map.
 #[must_use]
 pub fn build_ore_definitions(
-    resolver: &dyn Resolver,
+    _resolver: &dyn Resolver,
     catalog: &DecorationCatalog,
 ) -> HashMap<String, PlacedOre> {
     let mut out = HashMap::new();
     for entry in catalog.ordered.iter() {
-        if let Some(mut ore) = parse_placed_ore(resolver, &entry.id) {
-            if let Some(token) = catalog.feature_biomes.token_for(&entry.id) {
-                crate::feature::Placement::bind_membership(&mut ore.placements, token);
-            }
-            out.entry(entry.id.clone()).or_insert(ore);
+        if let Some(ore) = entry.ore.as_deref() {
+            out.entry(entry.id.clone()).or_insert_with(|| ore.clone());
         }
     }
     out
@@ -490,6 +545,7 @@ pub fn build_decoration_catalog(
                 index: *index,
                 id: id.clone(),
                 placed: Arc::new(placed.get(id).expect("every catalog entry is placed").clone()),
+                ore: None,
             };
             *index += 1;
             entry
@@ -525,6 +581,12 @@ pub fn build_decoration_catalog(
     }
     for entry in &mut ordered {
         entry.placed = Arc::new(placed.get(&entry.id).expect("every catalog entry is placed").clone());
+        entry.ore = parse_placed_ore(resolver, &entry.id).map(|mut ore| {
+            if let Some(token) = feature_biomes.token_for(&entry.id) {
+                crate::feature::Placement::bind_membership(&mut ore.placements, token);
+            }
+            Arc::new(ore)
+        });
     }
     let mut member_words = HashMap::<String, Vec<u64>>::new();
     for (biome, entries) in members {
@@ -537,12 +599,20 @@ pub fn build_decoration_catalog(
             }
         }
     }
+    let mut builtin_members = vec![None; BuiltinBiome::COUNT as usize];
+    let mut extension_members = HashMap::new();
+    for (biome, words) in member_words {
+        let words: Arc<[u64]> = words.into();
+        if let Some(builtin) = BuiltinBiome::from_name(&biome) {
+            builtin_members[builtin as usize] = Some(words);
+        } else {
+            extension_members.insert(biome, words);
+        }
+    }
     DecorationCatalog {
         ordered: ordered.into(),
-        members: member_words
-            .into_iter()
-            .map(|(biome, words)| (biome, words.into()))
-            .collect(),
+        builtin_members: builtin_members.into(),
+        extension_members,
         feature_biomes,
     }
 }
@@ -1029,7 +1099,7 @@ mod tests {
             .collect::<Vec<_>>();
         let mut biomes = HashMap::new();
         biomes.insert(
-            "minecraft:many",
+            "minecraft:plains",
             serde_json::json!({"features": [entries]}),
         );
         let mut placed = HashMap::new();
@@ -1051,12 +1121,23 @@ mod tests {
         };
         let catalog = build_decoration_catalog(
             &resolver,
-            &["minecraft:many".to_string()],
+            &["minecraft:plains".to_string()],
         );
-        let selected = catalog.select(["minecraft:many"]);
+        let selected = catalog.select(["minecraft:plains"]);
+        let mut mask = BiomeMask::default();
+        mask.insert(BuiltinBiome::from_name("minecraft:plains").expect("generated biome"));
+        let typed = catalog.select_all_mask(mask);
         assert_eq!(selected.len(), ids.len());
         assert_eq!(selected.first().map(|entry| entry.1), Some(0));
         assert_eq!(selected.last().map(|entry| entry.1), Some(64));
+        assert_eq!(
+            typed
+                .features
+                .iter()
+                .map(|(_, index, _)| *index)
+                .collect::<Vec<_>>(),
+            selected.iter().map(|(_, index, _)| *index).collect::<Vec<_>>(),
+        );
     }
 
     #[test]

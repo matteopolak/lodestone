@@ -45,7 +45,7 @@ use crate::feature::{
     apply_ore_entry_at_seed_with_membership,
     apply_ore_step_3x3_per_source_overworld_with_membership,
 };
-use crate::compose::FeatureBiomePlan;
+use crate::compose::{BiomeMask, FeatureBiomePlan};
 use crate::feature::region_view::Overlay;
 use crate::rng::{WorldgenRandom, XoroshiroRandomSource};
 use crate::stage_schedule::{
@@ -1661,10 +1661,10 @@ impl OverworldGenerator {
                 &centre_biomes,
                 &wide_pre,
             );
-            source_ores.insert((source_x, source_z), self.decoration_catalog.select_ores(
-                    biomes.iter().copied(),
-                    &self.ore_definitions,
-                ));
+            source_ores.insert(
+                (source_x, source_z),
+                self.decoration_catalog.select_ores_mask(biomes),
+            );
         }
         let ores_for_source = |source_x: i32, source_z: i32| -> &[PlacedOre] {
             source_ores
@@ -1863,22 +1863,20 @@ impl OverworldGenerator {
     /// now that dense array, and the clamp did move with it — it stays in
     /// [`crate::feature::OreInput::region_local`], and `RegionHeights`'s accessors
     /// document that they assume a pre-clamped key.
-    /// Returns the biomes visible to one source's own 3x3 feature neighbourhood
-    /// without consulting the staged store.  The returned set borrows the
-    /// already-built biome palettes; callers that need several catalog streams
-    /// should retain it and pass it to all of them rather than rebuilding it.
+    /// Returns the built-in biomes visible to one source's own 3x3 feature
+    /// neighbourhood without consulting the staged store.
     /// The centre is supplied by the caller because `column_timed` computes it
     /// locally; every other member of this neighbourhood is already present in
     /// the 5x5 `wide_pre` read rim.
-    fn source_biomes<'a>(
+    fn source_biomes(
         source_x: i32,
         source_z: i32,
         centre_x: i32,
         centre_z: i32,
-        centre_biomes: &'a super::biome_cells::BiomeCells,
-        wide_pre: &'a [Option<Arc<super::PreOreResult>>],
-    ) -> BTreeSet<&'a str> {
-        let mut biomes = BTreeSet::new();
+        centre_biomes: &super::biome_cells::BiomeCells,
+        wide_pre: &[Option<Arc<super::PreOreResult>>],
+    ) -> BiomeMask {
+        let mut biomes = BiomeMask::default();
         let radius = super::TARGET_DECORATION_RADIUS;
         for dx in -radius..=radius {
             for dz in -radius..=radius {
@@ -1887,7 +1885,9 @@ impl OverworldGenerator {
                 let offset_x = x - centre_x;
                 let offset_z = z - centre_z;
                 if offset_x == 0 && offset_z == 0 {
-                    biomes.extend(centre_biomes.palette().builtin_names());
+                    for &biome in centre_biomes.palette().entries() {
+                        biomes.insert_ref(biome);
+                    }
                 } else {
                     let pre = wide_pre[crate::feature::region_view::wide_slot_of_offset(
                         offset_x,
@@ -1895,18 +1895,20 @@ impl OverworldGenerator {
                     )]
                     .as_ref()
                     .expect("every source biome lies inside the 5x5 read rim");
-                    biomes.extend(pre.3.palette().builtin_names());
+                    for &biome in pre.3.palette().entries() {
+                        biomes.insert_ref(biome);
+                    }
                 }
             }
         }
         biomes
     }
 
-    fn source_biomes_from_products<'a>(
+    fn source_biomes_from_products(
         source: (i32, i32),
-        products: &'a [MixedReplayProduct],
-    ) -> Option<BTreeSet<&'a str>> {
-        let mut biomes = BTreeSet::new();
+        products: &[MixedReplayProduct],
+    ) -> Option<BiomeMask> {
+        let mut biomes = BiomeMask::default();
         let radius = super::TARGET_DECORATION_RADIUS;
         for dx in -radius..=radius {
             for dz in -radius..=radius {
@@ -1917,7 +1919,9 @@ impl OverworldGenerator {
                     .and_then(|index| products[index].pre.as_ref()) else {
                     return None;
                 };
-                biomes.extend(pre.3.palette().builtin_names());
+                for &biome in pre.3.palette().entries() {
+                    biomes.insert_ref(biome);
+                }
             }
         }
         Some(biomes)
@@ -2390,9 +2394,7 @@ impl OverworldGenerator {
                 // the authoritative radius.
                 let biomes = Self::source_biomes_from_products(source, &products)
                     .unwrap_or_default();
-                let selected = self
-                    .decoration_catalog
-                    .select_all(biomes.iter().copied(), &self.ore_definitions);
+                let selected = self.decoration_catalog.select_all_mask(biomes);
                 let mut features = selected.features;
                 features.extend(selected.step6_disks);
                 features.extend(selected.step6_non_ore);
@@ -2895,12 +2897,9 @@ impl OverworldGenerator {
                     &wide_pre,
                 )
             } else {
-                BTreeSet::new()
+                BiomeMask::default()
             };
-            let selected = self.decoration_catalog.select_all(
-                source_biomes.iter().copied(),
-                &self.ore_definitions,
-            );
+            let selected = self.decoration_catalog.select_all_mask(source_biomes);
             let mut features = selected.features;
             features.extend(selected.step6_disks);
             features.extend(selected.step6_non_ore);
