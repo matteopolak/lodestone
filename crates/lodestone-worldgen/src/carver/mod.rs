@@ -21,6 +21,7 @@
 
 use std::collections::HashMap;
 
+use lodestone_data::biomes::BuiltinBiome;
 use lodestone_data::block::Block;
 use lodestone_data::block_states::StateId;
 use lodestone_worldgen_core::hash::FastSet;
@@ -388,6 +389,57 @@ pub struct CanyonConfig {
 pub enum CarverConfig {
     Cave(CaveConfig),
     Canyon(CanyonConfig),
+}
+
+/// The compact selection key used by the source-chunk carve loop.
+#[derive(Clone, Copy, Debug)]
+pub enum CarverBiome<'a> {
+    Builtin(BuiltinBiome),
+    Extension(&'a str),
+}
+
+/// Parsed carver lists indexed by the generated biome id, with a compatibility
+/// map for extension names.
+#[derive(Debug)]
+pub struct CarverCatalog {
+    builtins: [Option<Vec<CarverConfig>>; BuiltinBiome::COUNT as usize],
+    extensions: HashMap<String, Vec<CarverConfig>>,
+}
+
+impl CarverCatalog {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            builtins: std::array::from_fn(|_| None),
+            extensions: HashMap::new(),
+        }
+    }
+
+    pub fn insert(&mut self, name: String, carvers: Vec<CarverConfig>) {
+        if let Some(biome) = BuiltinBiome::from_name(&name) {
+            self.builtins[biome as usize] = Some(carvers);
+        } else {
+            self.extensions.insert(name, carvers);
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn get(&self, biome: CarverBiome<'_>) -> &[CarverConfig] {
+        match biome {
+            CarverBiome::Builtin(biome) => self.builtins[biome as usize].as_deref().unwrap_or(&[]),
+            CarverBiome::Extension(name) => self.extensions.get(name).map(Vec::as_slice).unwrap_or(&[]),
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn get_name(&self, name: &str) -> &[CarverConfig] {
+        match BuiltinBiome::from_name(name) {
+            Some(biome) => self.get(CarverBiome::Builtin(biome)),
+            None => self.get(CarverBiome::Extension(name)),
+        }
+    }
 }
 
 impl CarverConfig {

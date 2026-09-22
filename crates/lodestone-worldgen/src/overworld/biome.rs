@@ -612,7 +612,7 @@ impl OverworldGenerator {
 
     /// **Diagnostic for the R-tree ruling, not used by generation.** At one source chunk's own
     /// `y = 0` climate target, does vanilla's indexed search (what
-    /// [`Self::biome_for_carver_source`] now uses) resolve to a different biome id
+    /// [`Self::carver_biome_for_source`] now uses) resolve to a different biome id
     /// than the brute-force scan it used before?
     ///
     /// This exists because "no gate failed" and "nothing changed" are different
@@ -737,23 +737,31 @@ impl OverworldGenerator {
     /// Both halves of the fix are visible in the four lines below:
     /// [`crate::biome::memo`] answers a repeated `(cx, cz)` without searching at
     /// all, and a real search goes through the tree rather than the full-table
-    /// scan. The signature is unchanged — still `-> &str` borrowed from `self` —
-    /// which is why `carve_stage` and `ore_stage` needed no edit: the memo stores
-    /// a **table row**, and the row indexes back into this generator's own table.
-    pub(super) fn biome_for_carver_source(
+    /// scan. The memo still stores a **table row**, and the row indexes back into
+    /// this generator's own table; the result is converted to the compact built-in
+    /// key before the carve loop performs its catalog lookup.
+    pub(super) fn carver_biome_for_source(
         &self,
         source_cx: i32,
         source_cz: i32,
         _cursor: &mut BiomeSearchCursor,
-    ) -> &str {
+    ) -> crate::carver::CarverBiome<'_> {
         match &self.dynamic_biome {
-            None => self.fallback_biome.as_str(),
+            None => BuiltinBiome::from_name(&self.fallback_biome)
+                .map(crate::carver::CarverBiome::Builtin)
+                .unwrap_or(crate::carver::CarverBiome::Extension(
+                    self.fallback_biome.as_str(),
+                )),
             Some(d) => {
                 let row = crate::biome::memo::source_row(d.table.id(), source_cx, source_cz, || {
                     let target = d.climate.target(source_cx * 16, 0, source_cz * 16);
                     d.table.nearest_row_stateless(&target)
                 });
-                d.table.biome_at(row)
+                d.table
+                    .biome_ref_at(row)
+                    .and_then(|biome| biome.builtin_or_none())
+                    .map(crate::carver::CarverBiome::Builtin)
+                    .unwrap_or(crate::carver::CarverBiome::Extension(d.table.biome_at(row)))
             }
         }
     }

@@ -59,8 +59,7 @@
 //! [`crate::spawners`]'s own "no block grid, no light, no RNG" boundary, this
 //! module adds the RNG but still takes no world handle.
 
-use std::collections::HashMap;
-
+use lodestone_data::biomes::{BiomeRef, BuiltinBiome};
 use lodestone_data::entity_type::EntityTypeRef;
 
 use crate::rng::{LegacyRandomSource, RandomSource, WorldgenRandom};
@@ -87,11 +86,9 @@ pub struct GenerationSpawn {
 /// [`crate::spawners`] already commits to, rather than taking a
 /// `GeneratedColumn` dependency on the type this stage exists to populate.
 ///
-/// `spawners_by_biome` is [`crate::overworld::OverworldGenerator`]'s own
-/// per-biome table (`all_biome_spawners`) — a biome absent from it, or one
-/// whose `creature` list is empty, yields an empty `Vec`. That is the negative
-/// control the issue's evidence standard asks for: a biome that cannot spawn a
-/// creature must not.
+/// `spawners_by_biome` is the generator's fixed built-in biome table. A biome
+/// absent from it, or one whose `creature` list is empty, yields an empty
+/// `Vec`.
 ///
 /// `seed`/`cx`/`cz` seed a [`WorldgenRandom`] with the same per-chunk decoration
 /// seed used for `UNDERGROUND_ORES` — see the module doc's "Deliberately not
@@ -99,9 +96,9 @@ pub struct GenerationSpawn {
 /// own draw order.
 #[must_use]
 pub fn spawn_candidates_for_chunk(
-    biome_at: impl Fn(usize, usize) -> String,
+    biome_at: impl Fn(usize, usize) -> BiomeRef,
     surface_y: impl Fn(usize, usize) -> i32,
-    spawners_by_biome: &HashMap<String, BiomeSpawners>,
+    spawners_by_biome: &[Option<BiomeSpawners>; BuiltinBiome::COUNT as usize],
     seed: i64,
     cx: i32,
     cz: i32,
@@ -111,8 +108,10 @@ pub fn spawn_candidates_for_chunk(
 
     let lx = random.next_int_bounded(16) as usize;
     let lz = random.next_int_bounded(16) as usize;
-    let biome = biome_at(lx, lz);
-    let Some(spawners) = spawners_by_biome.get(&biome) else {
+    let Some(biome) = biome_at(lx, lz).builtin_or_none() else {
+        return Vec::new();
+    };
+    let Some(spawners) = spawners_by_biome[biome as usize].as_ref() else {
         return Vec::new();
     };
     let entries = spawners.for_category(MobCategory::Creature);
@@ -173,12 +172,17 @@ pub fn spawn_candidates_for_chunk(
 mod tests {
     use super::*;
     use crate::spawners::parse_biome_spawners;
+    use std::array;
 
-    fn table(entries: &[(&str, serde_json::Value)]) -> HashMap<String, BiomeSpawners> {
-        entries
-            .iter()
-            .map(|(name, doc)| ((*name).to_owned(), parse_biome_spawners(doc)))
-            .collect()
+    fn table(
+        entries: &[(&str, serde_json::Value)],
+    ) -> [Option<BiomeSpawners>; BuiltinBiome::COUNT as usize] {
+        let mut table = array::from_fn(|_| None);
+        for (name, doc) in entries {
+            let biome = BuiltinBiome::from_name(name).expect("test biome is built in");
+            table[biome as usize] = Some(parse_biome_spawners(doc));
+        }
+        table
     }
 
     /// A verbatim slice of `assets/worldgen/biome/beach.json`: exactly one
@@ -229,7 +233,7 @@ mod tests {
     fn beach_chunk_proposes_a_turtle_pack_in_range() {
         let spawners = table(&[("minecraft:beach", beach_doc())]);
         let out = spawn_candidates_for_chunk(
-            |_lx, _lz| "minecraft:beach".to_owned(),
+            |_lx, _lz| BiomeRef::builtin(BuiltinBiome::Beach),
             |_lx, _lz| 64, // flat surface at y=64 for every column
             &spawners,
             12345,
@@ -267,7 +271,7 @@ mod tests {
     fn ocean_chunk_with_empty_creature_list_proposes_nothing() {
         let spawners = table(&[("minecraft:ocean", ocean_doc())]);
         let out = spawn_candidates_for_chunk(
-            |_lx, _lz| "minecraft:ocean".to_owned(),
+            |_lx, _lz| BiomeRef::builtin(BuiltinBiome::Ocean),
             |_lx, _lz| 60,
             &spawners,
             12345,
@@ -289,7 +293,7 @@ mod tests {
         ]);
         let spawners = table(&[("minecraft:ocean", doc)]);
         let out = spawn_candidates_for_chunk(
-            |_lx, _lz| "minecraft:ocean".to_owned(),
+            |_lx, _lz| BiomeRef::builtin(BuiltinBiome::Ocean),
             |_lx, _lz| 60,
             &spawners,
             12345,
@@ -310,9 +314,9 @@ mod tests {
     /// no panic, no placement.
     #[test]
     fn unknown_biome_proposes_nothing() {
-        let spawners: HashMap<String, BiomeSpawners> = HashMap::new();
+        let spawners = array::from_fn(|_| None);
         let out = spawn_candidates_for_chunk(
-            |_lx, _lz| "minecraft:nonexistent".to_owned(),
+            |_lx, _lz| BiomeRef::extension(lodestone_data::biomes::ExtensionId::from_index(0)),
             |_lx, _lz| 64,
             &spawners,
             1,
@@ -332,7 +336,7 @@ mod tests {
         let spawners = table(&[("minecraft:beach", beach_doc())]);
         let run = || {
             spawn_candidates_for_chunk(
-                |_lx, _lz| "minecraft:beach".to_owned(),
+                |_lx, _lz| BiomeRef::builtin(BuiltinBiome::Beach),
                 |_lx, _lz| 64,
                 &spawners,
                 999,

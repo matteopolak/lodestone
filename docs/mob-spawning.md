@@ -72,7 +72,9 @@ as "a full collision cube emitting under 14 light" — rejects slabs/stairs vani
 
 `crates/lodestone-worldgen/src/spawners.rs` parses the `spawners`/`spawn_costs` fields every 26.2
 biome document carries, from the same `Resolver::biome_document` value the climate parser already
-consumes. `OverworldGenerator::biome_spawners(biome)` exposes the per-biome answer; a biome with
+consumes. The chunk-generation candidate path stores built-in answers in a fixed `BuiltinBiome`
+indexed table and passes `BiomeRef` values directly; string parsing remains at the resolver boundary.
+`OverworldGenerator::biome_spawners(biome)` exposes the per-biome answer; a biome with
 neither field is **absent** from the map, not stored empty. Measured across the 66 bundled
 documents: 795 spawner entries, non-empty in `monster` (63 biomes), `ambient` (54),
 `underground_water_creature` (53), `creature` (43), `water_ambient` (13), `water_creature` (11),

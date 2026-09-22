@@ -1037,7 +1037,7 @@ impl OverworldGenerator {
     /// [`Self::pre_ore_stage`]) and the `OCEAN_FLOOR_WG` heightmap over the
     /// same region, then runs all 9 source chunks' own ore decoration step —
     /// each source resolving its own biome the same way
-    /// [`Self::biome_for_carver_source`] resolves carver biome — and returns
+    /// [`Self::carver_biome_for_source`] resolves carver biome — and returns
     /// `center_world` with the centre 16×16's own cells overwritten by
     /// whatever the driver placed there (from any of the 9 sources, matching
     /// vanilla's real spill).

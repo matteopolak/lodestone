@@ -43,7 +43,7 @@
 //!
 //! **The per-consumer sampling heights are deliberately divergent and must not be
 //! unified.** Carver and ore selection resolve at `y = 0`
-//! ([`super::OverworldGenerator::biome_for_carver_source`]); vegetation resolves at
+//! ([`super::OverworldGenerator::carver_biome_for_source`]); vegetation resolves at
 //! the surface. See [`crate::biome`]'s "y = 0 trap" section: at `y = 0` the `depth`
 //! gradient is already ≈ +1.0, so a surface `dark_forest` chunk resolves as
 //! `lush_caves`. Having a 3-D grid gives each consumer its own correct Y; it does

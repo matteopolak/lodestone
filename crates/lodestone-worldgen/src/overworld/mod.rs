@@ -176,7 +176,7 @@
 //! exclusion is removed (`usable_overworld_table` is a pass-through), so a
 //! column can resolve to any of the three real names again — which means
 //! the per-source-chunk carver biome and ore biome (both driven through the
-//! same table [`Self::biome_for_carver_source`] resolves) now see them too,
+//! same table [`Self::carver_biome_for_source`] resolves) now see them too,
 //! closing the specific gap `docs/worldgen-parity.md` measured: chunk
 //! `(-120,-120)`'s real vanilla biome is badlands, and the substitute biome
 //! this exclusion used to force could never carry badlands' bonus
@@ -218,7 +218,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::biome::ClimateSampler;
-use crate::carver::CarverConfig;
+use crate::carver::CarverCatalog;
 
 /// Request-local callback for transitions in the mutable pre-ore centre
 /// chunk. The callback is short-lived and never retained by a generator cache.
@@ -604,7 +604,7 @@ pub struct CompiledOverworldGenerator {
     /// Per-biome carver list, resolved once at construction for every biome
     /// name the [`Resolver`]'s biome-parameter table (or the fallback biome)
     /// can produce — see `crate::compose::build_biome_carvers`.
-    carvers_by_biome: HashMap<String, Vec<CarverConfig>>,
+    carvers_by_biome: CarverCatalog,
     /// Every ore-capable placed feature in the global decoration catalog.
     /// [`Self::ore_stage`] selects a source's eligible subset from that catalog
     /// with global per-step indices, rather than treating a biome document's
@@ -654,6 +654,8 @@ pub struct CompiledOverworldGenerator {
     /// rather than through this generator's already-parsed copy — two parses
     /// of the same data rather than one, not a missing consumer.
     spawners_by_biome: HashMap<String, crate::spawners::BiomeSpawners>,
+    spawners_by_builtin:
+        [Option<crate::spawners::BiomeSpawners>; BuiltinBiome::COUNT as usize],
     /// Which biomes list `minecraft:freeze_top_layer` in their
     /// `TOP_LAYER_MODIFICATION` step. In vanilla 26.2 that is **every** biome
     /// (vanilla's own default per-biome feature registration adds it
@@ -1172,7 +1174,7 @@ impl OverworldGenerator {
             biome_source_order.iter().cloned().collect();
         let possible_structure_biomes: HashSet<String> = biome_names.iter().cloned().collect();
 
-        let mut carvers_by_biome = HashMap::new();
+        let mut carvers_by_biome = CarverCatalog::new();
         // The same per-biome document walk also yields each
         // biome's `ClimateSettings` and whether it lists `freeze_top_layer`, so
         // `TOP_LAYER_MODIFICATION` composition costs no extra JSON parses.
@@ -1182,6 +1184,7 @@ impl OverworldGenerator {
         let mut freeze_biomes_typed = [false; BuiltinBiome::COUNT as usize];
         // The SPAWN generation's part 1 rides the same walk, for the same reason.
         let mut spawners_by_biome = HashMap::new();
+        let mut spawners_by_builtin = std::array::from_fn(|_| None);
         for name in &biome_names {
             carvers_by_biome.insert(
                 name.clone(),
@@ -1202,6 +1205,9 @@ impl OverworldGenerator {
             }
             let spawners = crate::spawners::parse_biome_spawners(&document);
             if !spawners.is_empty() {
+                if let Some(biome) = BuiltinBiome::from_name(name) {
+                    spawners_by_builtin[biome as usize] = Some(spawners.clone());
+                }
                 spawners_by_biome.insert(name.clone(), spawners);
             }
         }
@@ -1267,6 +1273,7 @@ impl OverworldGenerator {
             biome_climates,
             biome_climates_typed,
             spawners_by_biome,
+            spawners_by_builtin,
             freeze_biomes,
             freeze_biomes_typed,
             snow_support,
