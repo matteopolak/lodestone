@@ -67,6 +67,12 @@ scalar source replay. Radius-one contexts leave non-target source-plan slots emp
 widening `C`; target-owned dispatch never executes those slots. Every context still carries the
 full global `(step,index)` ordering.
 
+After shaped admission has covered the replay dependency union, production uses
+`mixed_replay_batch_with_radius_prepared`. This reuses the admitted prefix lease instead of
+opening a second replay lease. A seven-target line now uses one 775-coordinate lease (64 shard
+touches); the previous path used seven target slices and 973 pins. Scalar and diagnostic callers
+retain the preparing path.
+
 The catalog also materializes each placed feature's eligible-biome map once and
 shares it by `Arc` with replay contexts and vegetation grids. This map is immutable
 after generator construction; rebuilding its `String` keys and sets for every

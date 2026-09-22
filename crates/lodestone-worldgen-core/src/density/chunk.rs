@@ -219,6 +219,22 @@ impl NoiseChunkRegionSampler {
         self.sampler.final_density_cell(x0, y0, z0, output);
     }
 
+    /// Proves a cell is solid or fills `output` with its exact densities.
+    #[must_use]
+    pub fn final_density_cell_or_positive(
+        &self,
+        x0: i32,
+        y0: i32,
+        z0: i32,
+        output: &mut [f64; 128],
+    ) -> bool {
+        assert!(x0 >= self.bounds.x.0 && x0 + 3 <= self.bounds.x.1);
+        assert!(y0 >= self.bounds.y.0 && y0 + 7 <= self.bounds.y.1);
+        assert!(z0 >= self.bounds.z.0 && z0 + 3 <= self.bounds.z.1);
+        self.sampler
+            .final_density_cell_or_positive(x0, y0, z0, output)
+    }
+
     /// Proves that every emitted block in a production cell has positive
     /// final density without materialising its 128 values. A false result is
     /// conservative; callers must use [`Self::final_density_cell`] unchanged
@@ -401,6 +417,63 @@ impl NoiseChunkSampler {
     /// scalar evaluator as a correctness fallback.
     pub fn final_density_cell(&self, x0: i32, y0: i32, z0: i32, output: &mut [f64; 128]) {
         self.assert_cell_in_bounds(x0, y0, z0);
+        self.final_density_cell_with_field(x0, y0, z0, output);
+    }
+
+    /// Proves a cell is solid, or fills `output` with its exact densities when
+    /// the proof is inconclusive. The same field evaluator handles both paths,
+    /// so a failed proof can reuse the corner and slot values it populated.
+    pub fn final_density_cell_or_positive(
+        &self,
+        x0: i32,
+        y0: i32,
+        z0: i32,
+        output: &mut [f64; 128],
+    ) -> bool {
+        self.assert_cell_in_bounds(x0, y0, z0);
+        let Some(plan) = self.program.overworld_final_density_plan() else {
+            self.final_density_cell(x0, y0, z0, output);
+            return false;
+        };
+        if self.geom.cell_width != 4
+            || self.geom.cell_height != 8
+            || x0.rem_euclid(4) != 0
+            || y0.rem_euclid(8) != 0
+            || z0.rem_euclid(4) != 0
+        {
+            self.final_density_cell(x0, y0, z0, output);
+            return false;
+        }
+
+        let mut borrow = self.scratch.borrow_mut();
+        let scratch = borrow
+            .as_mut()
+            .expect("the scratch is only taken in Drop, after the last query");
+        let mut field = Field::new_with_products(
+            self.program.graph(),
+            self.geom,
+            scratch,
+            self.products.as_deref(),
+        );
+        if field.eval_overworld_final_density_cell_is_positive(plan, x0, y0, z0) {
+            return true;
+        }
+        crate::counters::bump_logical_read(
+            crate::counters::MemoryBoundary::BlockField,
+            128,
+            128 * 8,
+        );
+        field.eval_overworld_final_density_cell(plan, x0, y0, z0, output);
+        false
+    }
+
+    fn final_density_cell_with_field(
+        &self,
+        x0: i32,
+        y0: i32,
+        z0: i32,
+        output: &mut [f64; 128],
+    ) {
         crate::counters::bump_logical_read(
             crate::counters::MemoryBoundary::BlockField,
             128,
@@ -836,6 +909,20 @@ mod tests {
         assert!(positive.final_density_cell_is_positive(0, 0, 0));
         let mut positive_cell = [0.0; 128];
         positive.final_density_cell(0, 0, 0, &mut positive_cell);
+        let positive_combined = NoiseChunkSampler::from_program(
+            positive_program.clone(),
+            18,
+            CELL_WIDTH,
+            CELL_HEIGHT,
+            Some(Bounds {
+                x: (0, 3),
+                y: (0, 7),
+                z: (0, 3),
+            }),
+        );
+        let mut positive_output = [f64::NAN; 128];
+        assert!(positive_combined.final_density_cell_or_positive(0, 0, 0, &mut positive_output));
+        assert!(positive_output.iter().all(|value| value.is_nan()));
         let positive_scalar = NoiseChunkSampler::from_program(
             positive_program,
             18,
@@ -887,6 +974,29 @@ mod tests {
         assert!(!mixed.final_density_cell_is_positive(0, 0, 0));
         let mut mixed_cell = [0.0; 128];
         mixed.final_density_cell(0, 0, 0, &mut mixed_cell);
+        let mixed_combined = NoiseChunkSampler::from_program(
+            mixed_program.clone(),
+            18,
+            CELL_WIDTH,
+            CELL_HEIGHT,
+            Some(Bounds {
+                x: (0, 3),
+                y: (0, 7),
+                z: (0, 3),
+            }),
+        );
+        let mut mixed_output = [0.0; 128];
+        assert!(!mixed_combined.final_density_cell_or_positive(0, 0, 0, &mut mixed_output));
+        assert_eq!(
+            mixed_output
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            mixed_cell
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
         let mixed_scalar = NoiseChunkSampler::from_program(
             mixed_program,
             18,

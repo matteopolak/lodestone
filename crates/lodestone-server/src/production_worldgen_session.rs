@@ -1736,7 +1736,7 @@ where
                 &mut self.shared_prefixes,
             )?;
             self.materializer
-                .prepare_lifecycle_replay_contexts(&plan.targets);
+                .prepare_lifecycle_replay_contexts_prepared(&plan.targets);
             self.settlement_padding = plan.padding.clone();
             self.materializer
                 .declare_mutable_targets(plan.targets.iter().copied());
@@ -1844,7 +1844,7 @@ where
                 &mut self.shared_prefixes,
             )?;
             self.materializer
-                .prepare_lifecycle_replay_contexts(&plan.targets);
+                .prepare_lifecycle_replay_contexts_prepared(&plan.targets);
             self.settlement_padding = plan.padding.clone();
             self.materializer
                 .declare_mutable_targets(plan.targets.iter().copied());
@@ -1978,7 +1978,7 @@ where
                 return batch_session_error(sessions.len(), error);
             }
             self.materializer
-                .prepare_lifecycle_replay_contexts(&plan.targets);
+                .prepare_lifecycle_replay_contexts_prepared(&plan.targets);
             self.settlement_padding = plan.padding.clone();
             self.materializer
                 .declare_mutable_targets(plan.targets.iter().copied());
@@ -2156,7 +2156,7 @@ where
                 return batch_session_error(sessions.len(), error);
             }
             self.materializer
-                .prepare_lifecycle_replay_contexts(&plan.targets);
+                .prepare_lifecycle_replay_contexts_prepared(&plan.targets);
             self.settlement_padding = plan.padding.clone();
             self.materializer
                 .declare_mutable_targets(plan.targets.iter().copied());
