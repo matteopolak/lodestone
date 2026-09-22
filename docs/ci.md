@@ -10,6 +10,25 @@ Minecraft oracle, none of which exist on a hosted runner, and stay exactly as `#
 they are locally. CI proves the hermetic majority of the suite on every push; the rest stays a
 local, explicit, opt-in run (`docs/oracles-and-benchmarks.md`).
 
+### Opt-in branch checks
+
+`.github/workflows/branch-check.yml` is a separate, disposable-runner workflow
+for branches named `codex/ci/**`, or for a manual `workflow_dispatch` run. It
+does not change the `main`/pull-request CI policy. Each new run for the same
+branch cancels its superseded run, has read-only repository permissions, and
+uses only Ubuntu runners.
+
+It runs `just check`, the `lodestone-worldgen` and `lodestone-server` library
+tests, and `just wasm-check`. These are the initial native and browser checks
+that best cover world-generation or server edits without repeating the full
+CI matrix. It restores Cargo dependency caches without caching or uploading
+`target/` or downloadable artifacts; logs remain in the run. It separately
+uses the existing `sccache` compiler-object cache, so later branch commits can
+reuse compilation work without downloading a full Cargo target directory.
+Edit the checked-in commands on the branch when that branch needs a different
+focused test. There are no dispatch inputs, so a manual run cannot evaluate
+caller-supplied shell text.
+
 ## How it works
 
 ### The jobs
