@@ -34,7 +34,7 @@ const HEIGHT: i32 = 16;
 
 #[derive(Debug, Default)]
 struct FlatWorld {
-    state: std::sync::Mutex<Option<(BlockPos, String)>>,
+    state: std::sync::Mutex<Option<(BlockPos, StateId)>>,
 }
 
 impl ChunkSource for FlatWorld {
@@ -42,19 +42,18 @@ impl ChunkSource for FlatWorld {
         ChunkColumn::new(MIN_Y, HEIGHT)
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         let state = self.state.lock().expect("test world lock");
         state
             .as_ref()
             .filter(|(pos, _)| pos.x == x && pos.y == y && pos.z == z)
-            .map_or_else(|| "minecraft:air".to_owned(), |(_, value)| value.clone())
+            .map_or(StateId::AIR, |(_, value)| *value)
     }
 
     fn resident_block_state_id(&self, x: i32, y: i32, z: i32) -> Option<StateId> {
         (MIN_Y..MIN_Y + HEIGHT)
             .contains(&y)
-            .then(|| self.block_state(x, y, z))
-            .and_then(|state| StateId::from_state_str(&state))
+            .then(|| self.block_state_id(x, y, z))
     }
 
     fn resident_column(&self, _cx: i32, _cz: i32) -> Option<ChunkColumn> {
@@ -65,9 +64,9 @@ impl ChunkSource for FlatWorld {
         "minecraft:plains".to_owned()
     }
 
-    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+    fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
         *self.state.lock().expect("test world lock") =
-            Some((BlockPos::new(x, y, z), name.to_owned()));
+            Some((BlockPos::new(x, y, z), state));
     }
 }
 

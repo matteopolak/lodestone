@@ -193,10 +193,11 @@ fn block_use(
     }
 }
 
-fn wire_state(canonical: u32) -> Result<u32, ChunkEncodeError> {
-    wire_state_for(canonical).ok_or_else(|| {
+fn wire_state(canonical: StateId) -> Result<u32, ChunkEncodeError> {
+    wire_state_for(canonical.raw()).ok_or_else(|| {
         ChunkEncodeError::new(format!(
-            "canonical state {canonical} has no unique exact protocol-404 representation"
+            "canonical state {} has no unique exact protocol-404 representation",
+            canonical.raw()
         ))
     })
 }
@@ -221,7 +222,7 @@ fn pack_indices(values: &[u32], bits: u8) -> Vec<u64> {
     longs
 }
 
-fn encode_section(blob: &mut Writer, states: &[u32]) -> Result<(), ChunkEncodeError> {
+fn encode_section(blob: &mut Writer, states: &[StateId]) -> Result<(), ChunkEncodeError> {
     let mut palette = Vec::new();
     let mut indices = Vec::with_capacity(states.len());
     let mut palette_indices = BTreeMap::new();
@@ -275,7 +276,7 @@ fn encode_chunk_body(cx: i32, cz: i32, column: &ChunkColumn) -> Result<Vec<u8>, 
         )));
     }
 
-    let air = lodestone_data::block_states::air_state_id();
+    let air = StateId::AIR;
     let mut bitmask = 0_u32;
     let mut blob = Writer::default();
     for section in 0..usize::try_from(LEGACY_HEIGHT / SECTION_EDGE).expect("fixed section count") {
@@ -320,7 +321,7 @@ impl V404ServerProtocol {
         z: i32,
         state: StateId,
     ) -> Result<ServerDirective, ChunkEncodeError> {
-        let wire = wire_state(state.raw())?;
+        let wire = wire_state(state)?;
         let mut payload = Writer::default();
         payload.i64(pack_position(BlockPos::new(x, y, z)));
         payload.var_i32(i32::try_from(wire).expect("protocol-404 state fits in i32"));

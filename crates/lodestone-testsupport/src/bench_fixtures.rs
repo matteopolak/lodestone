@@ -17,9 +17,8 @@
 //! - [`RealTerrain`] (behind this crate's `worldgen` feature, default off)
 //!   -- **Tier 1 (real, exact, slow)**. Drives
 //!   `lodestone_worldgen::overworld::OverworldGenerator` and converts its
-//!   output into an ordinary [`lodestone_world::ChunkColumn`] with the
-//!   block-state-name-to-id conversion used by
-//!   `lodestone-world/tests/pool_footprint.rs`. Use this for throughput and
+//!   output into an ordinary [`lodestone_world::ChunkColumn`] with its typed
+//!   canonical block-state ids intact. Use this for throughput and
 //!   stage-split benchmarks where realism is the point.
 //!
 //! Neither tier performs network I/O, needs a live server, or needs
@@ -114,7 +113,6 @@ pub fn synthetic_overworld_column(seed: u64) -> ChunkColumn {
 
 #[cfg(feature = "worldgen")]
 mod real {
-    use std::collections::HashMap;
     use std::path::Path;
 
     use lodestone_world::{ChunkColumn, PaletteKind};
@@ -162,8 +160,8 @@ mod real {
 
     /// Tier 1 (real, exact, slow): drives [`OverworldGenerator`] and converts
     /// its output into an ordinary [`ChunkColumn`] via
-    /// [`ChunkColumn::set_block`]. Block-state names are interned into a
-    /// stable `u32` space and air is elided; the lower-level
+    /// [`ChunkColumn::set_block`]. Canonical block-state ids are copied
+    /// directly into the receiving palette; the lower-level
     /// `PalettedContainer` plumbing used by
     /// `lodestone-world/tests/pool_footprint.rs` is unnecessary for a bench
     /// fixture.
@@ -173,8 +171,6 @@ mod real {
     #[allow(missing_debug_implementations)] // `OverworldGenerator` has none either.
     pub struct RealTerrain {
         generator: OverworldGenerator,
-        ids: HashMap<String, u32>,
-        next_id: u32,
     }
 
     impl RealTerrain {
@@ -196,23 +192,7 @@ mod real {
             .expect("parsing noise_settings/overworld.json");
             let generator =
                 OverworldGenerator::new(seed, &settings, &resolver, "minecraft:plains", false);
-            let mut ids = HashMap::new();
-            ids.insert("minecraft:air".to_string(), 0u32);
-            Self {
-                generator,
-                ids,
-                next_id: 1,
-            }
-        }
-
-        fn intern(&mut self, name: &str) -> u32 {
-            if let Some(&id) = self.ids.get(name) {
-                return id;
-            }
-            let id = self.next_id;
-            self.next_id += 1;
-            self.ids.insert(name.to_string(), id);
-            id
+            Self { generator }
         }
 
         /// Generates real terrain for chunk `(cx, cz)` and converts it into a
@@ -220,7 +200,7 @@ mod real {
         /// column always matches the noise settings this `RealTerrain` was
         /// built from, rather than assuming the modern overworld shape).
         #[must_use]
-        pub fn column(&mut self, cx: i32, cz: i32) -> ChunkColumn {
+        pub fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
             let min_y = self.generator.min_y();
             let height = self.generator.height();
             let sections = (height / 16) as usize;
@@ -237,12 +217,8 @@ mod real {
                 for x in 0..16usize {
                     for y in 0..height {
                         let world_y = min_y + y;
-                        let name = gen_col.block_state(x, world_y, z);
-                        if name == "minecraft:air" {
-                            continue; // already air by construction; skip the intern+write
-                        }
-                        let id = self.intern(name);
-                        col.set_block(x, world_y, z, id);
+                        let state = gen_col.block_state_id(x, world_y, z);
+                        col.set_block(x, world_y, z, state.raw());
                     }
                 }
             }
@@ -335,7 +311,7 @@ mod tests {
     #[cfg(feature = "worldgen")]
     #[test]
     fn real_terrain_produces_varied_non_air_blocks() {
-        let mut terrain = RealTerrain::new(42);
+        let terrain = RealTerrain::new(42);
         let col = terrain.column(0, 0);
         assert_eq!(col.min_y(), -64);
 

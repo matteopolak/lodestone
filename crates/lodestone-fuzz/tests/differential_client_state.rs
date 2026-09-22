@@ -20,6 +20,7 @@ use lodestone_client::{
     Rotation, ServerAddress, Vec3, VersionAdapter,
 };
 use lodestone_core::State;
+use lodestone_data::block_states::StateId;
 use lodestone_fuzz::differential::{
     Action, DifferentialOutcome, Script, ScriptStep, WorldOracle, run_differential,
 };
@@ -566,7 +567,7 @@ impl WorldOracle for ClientStateOracle {
 
 #[derive(Clone, Default)]
 struct IntegratedFixtureSource {
-    edits: Arc<Mutex<HashMap<(i32, i32, i32), String>>>,
+    edits: Arc<Mutex<HashMap<(i32, i32, i32), StateId>>>,
 }
 
 impl ChunkSource for IntegratedFixtureSource {
@@ -575,30 +576,30 @@ impl ChunkSource for IntegratedFixtureSource {
         let edits = self.edits.lock().expect("integrated source lock poisoned");
         for (&(x, y, z), state) in edits.iter() {
             if x.div_euclid(16) == cx && z.div_euclid(16) == cz {
-                column.set_block(x.rem_euclid(16), y, z.rem_euclid(16), state);
+                column.set_block_id(x.rem_euclid(16), y, z.rem_euclid(16), *state);
             }
         }
         column
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         self.edits
             .lock()
             .expect("integrated source lock poisoned")
             .get(&(x, y, z))
-            .cloned()
-            .unwrap_or_else(|| AIR.into())
+            .copied()
+            .unwrap_or(StateId::AIR)
     }
 
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
         "minecraft:plains".into()
     }
 
-    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+    fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
         self.edits
             .lock()
             .expect("integrated source lock poisoned")
-            .insert((x, y, z), name.into());
+            .insert((x, y, z), state);
     }
 }
 
@@ -687,9 +688,11 @@ impl WorldOracle for IntegratedServerOracle {
         let Action::SetBlock { pos, state } = action else {
             return Err("integrated fixture accepts only SetBlock actions".into());
         };
-        if state != AIR && state != STONE {
-            return Err(format!("unknown integrated fixture state {state}"));
-        }
+        let state = match state.as_str() {
+            AIR => StateId::AIR,
+            STONE => StateId::from_state_str(STONE).expect("fixture state exists"),
+            other => return Err(format!("unknown integrated fixture state {other}")),
+        };
         self.source.set_block(pos.0, pos.1, pos.2, state);
         Ok(())
     }
@@ -724,22 +727,24 @@ impl WorldOracle for IntegratedServerOracle {
         pos: (i32, i32, i32),
         candidates: &[String],
     ) -> Result<Option<String>, Self::Error> {
-        let actual = self.source.block_state(pos.0, pos.1, pos.2);
+        let actual = self.source.block_state_id(pos.0, pos.1, pos.2);
+        let stone = StateId::from_state_str(STONE).expect("fixture state exists");
         let actual = if self
             .fault_after_ticks
             .is_some_and(|fault_after| self.tick >= fault_after)
         {
-            match actual.as_str() {
-                AIR => STONE,
-                STONE => AIR,
-                _ => actual.as_str(),
+            match actual {
+                StateId::AIR => stone,
+                state if state == stone => StateId::AIR,
+                state => state,
             }
         } else {
-            actual.as_str()
+            actual
         };
+        let actual = actual.canonical_state();
         Ok(candidates
             .iter()
-            .find(|candidate| candidate.as_str() == actual)
+            .find(|candidate| candidate.as_str() == actual.as_str())
             .cloned())
     }
 }

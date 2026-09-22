@@ -250,6 +250,7 @@ mod grid;
 pub mod ids;
 mod place;
 mod root_system;
+mod template;
 mod tree;
 
 pub use self::config::*;
@@ -487,7 +488,7 @@ fn place_placed_feature_with_seed<R: RandomSource>(
     placed: &PlacedRef,
     grid: &mut VegGrid,
     tags: &VegTags,
-) {
+) -> bool {
     fn recurse<R: RandomSource>(
         random: &mut R,
         mods: &[VegPlacement],
@@ -498,10 +499,9 @@ fn place_placed_feature_with_seed<R: RandomSource>(
         feature: &ConfiguredFeature,
         placed_feature_id: Option<&str>,
         world_seed: i64,
-    ) {
+    ) -> bool {
         if i == mods.len() {
-            place_configured_feature_with_seed(random, world_seed, pos, feature, grid, tags);
-            return;
+            return place_configured_feature_with_seed(random, world_seed, pos, feature, grid, tags);
         }
         // U8: `get_positions` returns [`Positions`] instead of a freshly
         // allocated `Vec<BlockPos>`. The walk below is the same depth-first
@@ -510,7 +510,7 @@ fn place_placed_feature_with_seed<R: RandomSource>(
         // [`Positions`]'s own doc for why three shapes are exhaustive here.
         let next_positions = mods[i].get_positions(random, pos, grid, tags, placed_feature_id);
         match next_positions {
-            Positions::None => {}
+            Positions::None => false,
             Positions::One(next) => recurse(
                 random,
                 mods,
@@ -523,8 +523,9 @@ fn place_placed_feature_with_seed<R: RandomSource>(
                 world_seed,
             ),
             Positions::Repeat(next, n) => {
+                let mut placed = false;
                 for _ in 0..n {
-                    recurse(
+                    placed |= recurse(
                         random,
                         mods,
                         i + 1,
@@ -536,13 +537,15 @@ fn place_placed_feature_with_seed<R: RandomSource>(
                         world_seed,
                     );
                 }
+                placed
             }
             // This modifier's fan-out shape — a *different* position per recursion,
             // which is why it is not a `Repeat`. Still depth-first, still in the
             // order the modifier produced.
             Positions::List(list) => {
+                let mut placed = false;
                 for next in list {
-                    recurse(
+                    placed |= recurse(
                         random,
                         mods,
                         i + 1,
@@ -554,6 +557,7 @@ fn place_placed_feature_with_seed<R: RandomSource>(
                         world_seed,
                     );
                 }
+                placed
             }
         }
     }
@@ -567,7 +571,7 @@ fn place_placed_feature_with_seed<R: RandomSource>(
         &placed.feature,
         placed.registry_id.as_deref(),
         world_seed,
-    );
+    )
 }
 
 #[cfg(test)]
@@ -588,8 +592,9 @@ fn place_configured_feature_with_seed<R: RandomSource>(
     feature: &ConfiguredFeature,
     grid: &mut VegGrid,
     tags: &VegTags,
-) {
+) -> bool {
     feature.bind_states();
+    let writes_before = grid.dirty_len();
     match feature {
         ConfiguredFeature::SimpleBlock(provider) => {
             census_bump(|c| c.simple_block += 1);
@@ -609,7 +614,7 @@ fn place_configured_feature_with_seed<R: RandomSource>(
         }
         ConfiguredFeature::RootSystem(cfg) => {
             census_bump(|c| c.other_feature += 1);
-            root_system::place_root_system(random, pos, cfg, grid, tags, |random, pos, placed, grid, tags| {
+            return root_system::place_root_system(random, pos, cfg, grid, tags, |random, pos, placed, grid, tags| {
                 place_placed_feature_at_seed(random, world_seed, pos, placed, grid, tags);
             });
         }
@@ -621,19 +626,18 @@ fn place_configured_feature_with_seed<R: RandomSource>(
             census_bump(|c| c.random_selector += 1);
             for (chance, option) in options {
                 if random.next_float() < *chance {
-                    place_placed_feature_with_seed(random, world_seed, pos, option, grid, tags);
-                    return;
+                    return place_placed_feature_with_seed(random, world_seed, pos, option, grid, tags);
                 }
             }
-            place_placed_feature_with_seed(random, world_seed, pos, default, grid, tags);
+            return place_placed_feature_with_seed(random, world_seed, pos, default, grid, tags);
         }
         ConfiguredFeature::SimpleRandomSelector(list) => {
             census_bump(|c| c.simple_random_selector += 1);
             if list.is_empty() {
-                return;
+                return false;
             }
             let idx = random.next_int_bounded(list.len() as i32) as usize;
-            place_placed_feature_with_seed(random, world_seed, pos, &list[idx], grid, tags);
+            return place_placed_feature_with_seed(random, world_seed, pos, &list[idx], grid, tags);
         }
         // ------------------------------------------------------------------
         // Bodies in [`features`]; census counters are deliberately
@@ -760,7 +764,7 @@ fn place_configured_feature_with_seed<R: RandomSource>(
         ConfiguredFeature::RandomBooleanSelector { yes, no } => {
             census_bump(|c| c.other_feature += 1);
             let branch = if random.next_bool() { yes } else { no };
-            place_placed_feature_with_seed(random, world_seed, pos, branch, grid, tags);
+            return place_placed_feature_with_seed(random, world_seed, pos, branch, grid, tags);
         }
         ConfiguredFeature::WeightedRandomSelector(list) => {
             census_bump(|c| c.other_feature += 1);
@@ -769,22 +773,26 @@ fn place_configured_feature_with_seed<R: RandomSource>(
             // in vanilla only via that pick's own guard, which returns early.
             let total: i32 = list.iter().map(|(w, _)| *w).sum();
             if total <= 0 {
-                return;
+                return false;
             }
             let mut roll = random.next_int_bounded(total);
             for (weight, option) in list {
                 roll -= *weight;
                 if roll < 0 {
-                    place_placed_feature_with_seed(random, world_seed, pos, option, grid, tags);
-                    return;
+                    return place_placed_feature_with_seed(random, world_seed, pos, option, grid, tags);
                 }
             }
+            return false;
         }
+        ConfiguredFeature::Template(cfg) => return cfg.place(random, pos, grid),
         ConfiguredFeature::Sequence(list) => {
             census_bump(|c| c.other_feature += 1);
             for option in list {
-                place_placed_feature_with_seed(random, world_seed, pos, option, grid, tags);
+                if !place_placed_feature_with_seed(random, world_seed, pos, option, grid, tags) {
+                    return false;
+                }
             }
+            return true;
         }
         ConfiguredFeature::Geode(cfg) => {
             census_bump(|c| c.other_feature += 1);
@@ -833,6 +841,7 @@ fn place_configured_feature_with_seed<R: RandomSource>(
             });
         }
     }
+    grid.dirty_len() != writes_before
 }
 
 #[cfg(test)]
@@ -3279,6 +3288,42 @@ mod tests {
             counts.push(writes);
         }
         assert!(counts.windows(2).all(|w| w[0] != w[1]), "the three coral kinds must not collapse to one geometry: {counts:?}");
+    }
+
+    #[test]
+    fn sequence_stops_before_its_next_feature_when_a_placement_has_no_candidates() {
+        let placed = |count, state| PlacedRef {
+            registry_id: None,
+            placements: vec![VegPlacement::Count(IntProvider::Constant(count))],
+            feature: Box::new(ConfiguredFeature::SimpleBlock(BlockStateProvider::simple(state))),
+        };
+        let follow_up = || PlacedRef {
+            registry_id: None,
+            placements: Vec::new(),
+            feature: Box::new(ConfiguredFeature::SimpleBlock(BlockStateProvider::simple("minecraft:potent_sulfur"))),
+        };
+        let origin = BlockPos { x: 8, y: 1, z: 8 };
+        let mut random = LegacyRandomSource::new(42);
+        let mut rejected = grid_with_flat_ground(0, 16, 0);
+        place_configured_feature(
+            &mut random,
+            origin,
+            &ConfiguredFeature::Sequence(vec![placed(0, "minecraft:tuff"), follow_up()]),
+            &mut rejected,
+            &VegTags::default(),
+        );
+        assert_eq!(rejected.get_id(origin.x, origin.y, origin.z), Block::Air.default_state());
+
+        let mut random = LegacyRandomSource::new(42);
+        let mut accepted = grid_with_flat_ground(0, 16, 0);
+        place_configured_feature(
+            &mut random,
+            origin,
+            &ConfiguredFeature::Sequence(vec![placed(1, "minecraft:tuff"), follow_up()]),
+            &mut accepted,
+            &VegTags::default(),
+        );
+        assert_eq!(accepted.get_id(origin.x, origin.y, origin.z), Block::PotentSulfur.default_state());
     }
 
     #[test]

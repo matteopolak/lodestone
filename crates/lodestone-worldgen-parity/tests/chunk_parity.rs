@@ -113,6 +113,7 @@ fn control_empty_and_non_empty_beard_scopes_do_not_compare_equal() {
             refine: None,
         }],
         terrain_adaptation: TerrainAdjustment::BeardThin,
+        mineshaft_tree: None,
         pieces_complete: true,
     };
     let non_empty = Beardifier::for_chunk(0, 0, std::iter::once(&start));
@@ -302,7 +303,7 @@ fn ore_composition_gap_is_reported_against_single_source_fixture() {
         let report = diff_field(
             f.min_y,
             f.height,
-            |lx, y, lz| generated.block_state(lx as usize, y, lz as usize).to_string(),
+            |lx, y, lz| generated.block_state_id(lx as usize, y, lz as usize).canonical_state(),
             |lx, y, lz| f.postfeatures.get(lx, y, lz).to_string(),
         );
         assert_eq!(report.total, 16 * 16 * f.height as usize);
@@ -335,8 +336,8 @@ fn control_full_column_differs_from_shaped_prefix() {
         let report = diff_field(
             f.min_y,
             f.height,
-            |lx, y, lz| full.block_state(lx as usize, y, lz as usize).to_string(),
-            |lx, y, lz| shaped.block_state(lx as usize, y, lz as usize).to_string(),
+            |lx, y, lz| full.block_state_id(lx as usize, y, lz as usize).canonical_state(),
+            |lx, y, lz| shaped.block_state_id(lx as usize, y, lz as usize).canonical_state(),
         );
         assert_eq!(report.total, 16 * 16 * f.height as usize);
         assert!(
@@ -406,7 +407,7 @@ fn ore_counts_by_type_are_predicted_and_measured() {
             f.min_y,
             f.height,
             |lx, y, lz| f.postcarve.get(lx, y, lz).to_string(),
-            |lx, y, lz| generated.block_state(lx as usize, y, lz as usize).to_string(),
+            |lx, y, lz| generated.block_state_id(lx as usize, y, lz as usize).canonical_state(),
         );
 
         eprintln!(
@@ -478,7 +479,7 @@ fn composed_pipeline_vs_vanilla_postsurface_reference() {
         let report = diff_field(
             f.min_y,
             f.height,
-            |lx, y, lz| generated.block_state(lx as usize, y, lz as usize).to_string(),
+            |lx, y, lz| generated.block_state_id(lx as usize, y, lz as usize).canonical_state(),
             |lx, y, lz| f.postsurface.get(lx, y, lz).to_string(),
         );
         assert_eq!(report.total, 16 * 16 * f.height as usize, "diff must visit every cell");
@@ -532,7 +533,7 @@ fn full_vanilla_pipeline_gap_is_measured_and_reported() {
         let report = diff_field(
             f.min_y,
             f.height,
-            |lx, y, lz| generated.block_state(lx as usize, y, lz as usize).to_string(),
+            |lx, y, lz| generated.block_state_id(lx as usize, y, lz as usize).canonical_state(),
             |lx, y, lz| f.postcarve.get(lx, y, lz).to_string(),
         );
         assert_eq!(report.total, 16 * 16 * f.height as usize);
@@ -590,7 +591,7 @@ fn water_to_stone_bucket_is_resolved_for_chunk_0_0() {
     let report = diff_field(
         f.min_y,
         f.height,
-        |lx, y, lz| generated.block_state(lx as usize, y, lz as usize).to_string(),
+            |lx, y, lz| generated.block_state_id(lx as usize, y, lz as usize).canonical_state(),
         |lx, y, lz| f.postcarve.get(lx, y, lz).to_string(),
     );
 

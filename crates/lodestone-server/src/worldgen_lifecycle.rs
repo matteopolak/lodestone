@@ -2108,11 +2108,11 @@ pub struct LifecycleMaterializer<S: LifecycleWorldgenSource> {
     /// Writes retained for sparse padding destinations, grouped by destination.
     sparse_padding_overrides: BTreeMap<ChunkPos, BTreeMap<AbsoluteCell, StateId>>,
     sparse_completed_targets: BTreeSet<ChunkPos>,
-    /// The canonical FEATURES write for each cell emitted by target-owned
-    /// requests in this region. Region traversal order can differ from the
-    /// ledger's provenance order, so outputs apply these winners only after
-    /// every requested and sparse writer has completed.
-    target_feature_winners: BTreeMap<AbsoluteCell, TargetFeatureWinner>,
+    /// Canonical FEATURES writes by destination column, then absolute cell.
+    /// Region traversal order can differ from the ledger's provenance order,
+    /// so outputs apply each target's winners only after every requested and
+    /// sparse writer has completed.
+    target_feature_winners: BTreeMap<ChunkPos, BTreeMap<AbsoluteCell, TargetFeatureWinner>>,
     /// Writes visible through the CARVERS read view. A target-scoped source
     /// body sees every preceding authenticated FEATURES write, including
     /// writes into a source's own column; source-local top-layer writes are
@@ -2289,7 +2289,13 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             ordinal,
             state,
         };
-        match self.target_feature_winners.entry(position) {
+        let destination = (position.0.div_euclid(16), position.2.div_euclid(16));
+        match self
+            .target_feature_winners
+            .entry(destination)
+            .or_default()
+            .entry(position)
+        {
             Entry::Vacant(entry) => {
                 entry.insert(candidate);
             }
@@ -2700,6 +2706,26 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             && !self.source.target_spills_persist()
             && !self.mutable_targets.contains(&destination)
             && !self.resident.contains_key(&destination)
+    }
+
+    /// A sparse padding source can run before the requested target that will
+    /// consume its revision stream directly. Keep that target compact until
+    /// its direct completion folds the ordered write into the final column.
+    fn defer_sparse_write_for_direct_target(
+        &self,
+        mode: LifecycleCompletionMode,
+        destination: ChunkPos,
+        sparse_padding_destination: bool,
+    ) -> bool {
+        matches!(mode, LifecycleCompletionMode::SparsePadding)
+            && !sparse_padding_destination
+            && self.mutable_targets.contains(&destination)
+            && self.generated_resident.contains_key(&destination)
+            && !self.resident.contains_key(&destination)
+            && self.has_authenticated_target_output(destination)
+            && self.source.direct_target_output_from_generated_prefix()
+            && self.replay_contexts.contains_key(&destination)
+            && !self.target_features_completed(destination)
     }
 
     /// Share one immutable shaped resident and its derived metadata across
@@ -3678,11 +3704,16 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                     || (matches!(mode, LifecycleCompletionMode::SparsePadding)
                         && destination != target
                         && !sparse_requested_destination));
-            let mut deferred = false;
+            let defer_direct_target = self.defer_sparse_write_for_direct_target(
+                mode,
+                destination,
+                sparse_padding_destination,
+            );
+            let mut deferred = defer_direct_target;
             if transient {
-                deferred = sparse_padding_destination
+                deferred |= sparse_padding_destination
                     || self.defer_target_spill(target_scoped, target_owned, destination);
-                if deferred {
+                if deferred && !defer_direct_target {
                     self.retain_temporary_carvers_override(mode, spill.position);
                 }
                 if !deferred {
@@ -3932,8 +3963,9 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
     pub fn apply_canonical_target_feature_winners(&mut self, target: ChunkPos) {
         let winners = self
             .target_feature_winners
-            .iter()
-            .filter(|((x, _, z), _)| (x.div_euclid(16), z.div_euclid(16)) == target)
+            .get(&target)
+            .into_iter()
+            .flat_map(|winners| winners.iter())
             .map(|(&cell, winner)| (cell, winner.state))
             .collect::<Vec<_>>();
         if winners.is_empty() {
@@ -4225,6 +4257,8 @@ mod tests {
 
     struct DirectHeightmapSource;
 
+    struct SparseBeforeDirectSource;
+
     struct TargetLocalReadSource {
         local_marker: bool,
         top_layer_marker: bool,
@@ -4328,6 +4362,95 @@ mod tests {
         }
 
         fn target_feature_reads_carvers(&self) -> bool {
+            true
+        }
+    }
+
+    impl LifecycleWorldgenSource for SparseBeforeDirectSource {
+        type ReplayContext = ();
+
+        fn feature_dispatch(&self) -> LifecycleFeatureDispatch {
+            LifecycleFeatureDispatch::TargetOwned
+        }
+
+        fn lifecycle_replay_context(&self, _target: ChunkPos) -> Arc<Self::ReplayContext> {
+            Arc::new(())
+        }
+
+        fn shaped_column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            ChunkColumn::new(0, 1)
+        }
+
+        fn lifecycle_client_heightmaps(
+            &self,
+            _cx: i32,
+            _cz: i32,
+        ) -> Option<LifecycleClientHeightmaps> {
+            test_heightmaps()
+        }
+
+        fn feature_result(
+            &self,
+            _source: ChunkPos,
+            _overrides: &BTreeMap<AbsoluteCell, StateId>,
+            _resident: &BTreeMap<ChunkPos, ChunkColumn>,
+        ) -> LifecycleFeatureResult {
+            LifecycleFeatureResult::default()
+        }
+
+        fn target_feature_result_direct(
+            &self,
+            target: ChunkPos,
+            overrides: &BTreeMap<AbsoluteCell, StateId>,
+            _resident: &BTreeMap<ChunkPos, ChunkColumn>,
+        ) -> Option<LifecycleTargetFeatureResult> {
+            assert_eq!(target, (1, 0));
+            let mut column = ChunkColumn::new(0, 1);
+            column.set_block_id(
+                0,
+                0,
+                0,
+                *overrides
+                    .get(&(16, 0, 0))
+                    .expect("the earlier sparse write must reach the direct read view"),
+            );
+            column.install_client_heightmaps_raw([[0; 256]; 3]);
+            Some(LifecycleTargetFeatureResult {
+                column,
+                spills: Vec::new(),
+                local_features: Vec::new(),
+            })
+        }
+
+        fn target_feature_result_sparse_with_replay_context(
+            &self,
+            target: ChunkPos,
+            _overrides: &BTreeMap<AbsoluteCell, StateId>,
+            _resident: &BTreeMap<ChunkPos, ChunkColumn>,
+            _context: &Self::ReplayContext,
+        ) -> Option<LifecycleSparseTargetFeatureResult> {
+            assert_eq!(target, (0, 0));
+            Some(LifecycleSparseTargetFeatureResult {
+                spills: vec![LifecycleSpill {
+                    source: target,
+                    position: (16, 0, 0),
+                    state: sid("minecraft:dirt"),
+                    transient: false,
+                }],
+                local_features: Vec::new(),
+                block_entities: Vec::new(),
+            })
+        }
+
+        fn target_feature_reads_carvers(&self) -> bool {
+            true
+        }
+
+        fn direct_target_output_requires_authentication(&self) -> bool {
+            true
+        }
+
+        fn direct_target_output_from_generated_prefix(&self) -> bool {
             true
         }
     }
@@ -5710,6 +5833,48 @@ mod tests {
         assert_eq!(actual.client_heightmaps_raw(), expected.client_heightmaps_raw());
         assert_eq!(actual.structure_starts().len(), expected.structure_starts().len());
         assert_eq!(actual.block_entities().len(), expected.block_entities().len());
+    }
+
+    #[test]
+    fn sparse_write_reaches_a_later_direct_target_without_materializing_it() {
+        crate::chunk::reset_generated_materializations();
+        let source = SparseBeforeDirectSource;
+        let generator = crate::overworld_generator(42);
+        let mut materializer = LifecycleMaterializer::new(source);
+        for target in [(0, 0), (1, 0)] {
+            materializer.admit_generated_existing(
+                target,
+                Arc::new(generator.column_shaped(target.0, target.1)),
+            );
+            materializer.install_lifecycle_replay_context(target, Arc::new(()));
+        }
+        materializer.mark_authenticated_prefix((1, 0), [7; 32]);
+        materializer.declare_mutable_targets([(0, 0), (1, 0)]);
+        materializer.declare_sparse_padding_targets([(0, 0)]);
+
+        materializer.complete_target_features_sparse_observing((0, 0), 0, |_| {});
+        materializer.finish_target((0, 0));
+        assert_eq!(
+            crate::chunk::generated_materializations(),
+            0,
+            "the future direct target stays compact after a sparse spill",
+        );
+
+        materializer.complete_target_features_observing((1, 0), 1, |_| {});
+        assert!(materializer.has_direct_target_output());
+        assert_eq!(
+            materializer
+                .resident_column((1, 0))
+                .expect("direct completion installs its output")
+                .block_state_id(0, 0, 0),
+            sid("minecraft:dirt"),
+            "the direct read view retains the earlier sparse write",
+        );
+        assert_eq!(
+            crate::chunk::generated_materializations(),
+            0,
+            "direct output must not materialize the shaped prefix",
+        );
     }
 
     #[test]

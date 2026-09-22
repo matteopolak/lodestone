@@ -25,6 +25,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lodestone_client::{ClientBuilder, LoginProfile, ServerAddress};
+use lodestone_data::block::Block;
 use lodestone_model::BlockPos;
 use lodestone_server::plugin_dimension::DimensionRegistry;
 use lodestone_server::{IntegratedServer, NoEntities};
@@ -73,8 +74,8 @@ async fn a_real_client_observes_the_registered_dimensions_terrain_and_both_struc
     let written = lodestone_void_world::place_marker_live(&*source, marker_at);
     assert_eq!(written, 1, "control: the live marker template must write exactly one block");
     assert_eq!(
-        source.block_state(marker_at[0], marker_at[1], marker_at[2]),
-        "minecraft:emerald_block",
+        source.block_state_id(marker_at[0], marker_at[1], marker_at[2]),
+        Block::EmeraldBlock.default_state(),
         "control: the live-placed marker must read back through the source before anyone joins"
     );
 

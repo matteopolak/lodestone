@@ -1927,7 +1927,7 @@ impl V770ServerProtocol {
     pub fn compute_initial_column_light_with_neighbours_seeded<F>(
         &self,
         center: &ServerChunkColumn,
-        neighbours: &[(i32, i32, ServerChunkColumn)],
+        neighbours: &[(i32, i32, &ServerChunkColumn)],
         dimension: Dimension,
         seed: F,
     ) -> ColumnLight
@@ -1960,7 +1960,7 @@ impl V770ServerProtocol {
     pub fn compute_initial_column_lights_with_neighbours_and_storage_in_dimension(
         &self,
         column: &lodestone_server::ChunkColumn,
-        neighbours: &[(i32, i32, lodestone_server::ChunkColumn)],
+        neighbours: &[(i32, i32, &lodestone_server::ChunkColumn)],
         stored: &[Option<&lodestone_world::ColumnLight>; 9],
         dimension: Dimension,
     ) -> Option<[lodestone_world::ColumnLight; 9]> {
@@ -3576,7 +3576,7 @@ impl ServerProtocol for V770ServerProtocol {
         cx: i32,
         cz: i32,
         column: &ServerChunkColumn,
-        neighbours: &[(i32, i32, ServerChunkColumn)],
+        neighbours: &[(i32, i32, &ServerChunkColumn)],
     ) -> Result<ServerDirective, lodestone_server::ChunkEncodeError> {
         self.try_encode_chunk_with_neighbours_in_dimension(
             cx,
@@ -3592,7 +3592,7 @@ impl ServerProtocol for V770ServerProtocol {
         cx: i32,
         cz: i32,
         column: &ServerChunkColumn,
-        neighbours: &[(i32, i32, ServerChunkColumn)],
+        neighbours: &[(i32, i32, &ServerChunkColumn)],
         dimension: Dimension,
     ) -> Result<ServerDirective, lodestone_server::ChunkEncodeError> {
         let shape = shape_for_dimension(dimension);
@@ -3636,7 +3636,7 @@ impl ServerProtocol for V770ServerProtocol {
     fn compute_initial_column_light_with_neighbours_in_dimension(
         &self,
         column: &ServerChunkColumn,
-        neighbours: &[(i32, i32, ServerChunkColumn)],
+        neighbours: &[(i32, i32, &ServerChunkColumn)],
         dimension: Dimension,
     ) -> Option<ColumnLight> {
         let shape = shape_for_dimension(dimension);
@@ -3653,7 +3653,7 @@ impl ServerProtocol for V770ServerProtocol {
     fn compute_initial_column_lights_with_neighbours_in_dimension(
         &self,
         column: &ServerChunkColumn,
-        neighbours: &[(i32, i32, ServerChunkColumn)],
+        neighbours: &[(i32, i32, &ServerChunkColumn)],
         dimension: Dimension,
     ) -> Option<ColumnLightSettlement> {
         let mut stored: [Option<&ColumnLight>; 9] = [None; 9];
@@ -3724,7 +3724,7 @@ impl ServerProtocol for V770ServerProtocol {
     fn compute_column_light_with_neighbours(
         &self,
         column: &ServerChunkColumn,
-        neighbours: &[(i32, i32, ServerChunkColumn)],
+        neighbours: &[(i32, i32, &ServerChunkColumn)],
     ) -> Option<ColumnLight> {
         self.compute_column_light_with_neighbours_in_dimension(
             column,
@@ -3736,7 +3736,7 @@ impl ServerProtocol for V770ServerProtocol {
     fn compute_column_light_with_neighbours_in_dimension(
         &self,
         column: &ServerChunkColumn,
-        neighbours: &[(i32, i32, ServerChunkColumn)],
+        neighbours: &[(i32, i32, &ServerChunkColumn)],
         dimension: Dimension,
     ) -> Option<ColumnLight> {
         Some(compute_served_light_with_neighbours(column, neighbours, dimension))

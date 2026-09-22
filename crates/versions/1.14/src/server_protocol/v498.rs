@@ -13,7 +13,7 @@ impl V498ServerProtocol {
         z: i32,
         state: StateId,
     ) -> Result<ServerDirective, ChunkEncodeError> {
-        let wire = wire_state_498(state.raw())?;
+        let wire = wire_state_498(state)?;
         let mut payload = Writer::default();
         payload.i64(pack_position(BlockPos::new(x, y, z)));
         payload.var_i32(i32::try_from(wire).expect("protocol-498 state fits in i32"));

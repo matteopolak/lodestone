@@ -434,7 +434,7 @@ pub trait ServerProtocol: Send + Sync {
         cx: i32,
         cz: i32,
         column: &ChunkColumn,
-        _neighbours: &[(i32, i32, ChunkColumn)],
+        _neighbours: &[(i32, i32, &ChunkColumn)],
     ) -> Result<ServerDirective, ChunkEncodeError> {
         self.try_encode_chunk(cx, cz, column)
     }
@@ -445,7 +445,7 @@ pub trait ServerProtocol: Send + Sync {
         cx: i32,
         cz: i32,
         column: &ChunkColumn,
-        neighbours: &[(i32, i32, ChunkColumn)],
+        neighbours: &[(i32, i32, &ChunkColumn)],
         _dimension: Dimension,
     ) -> Result<ServerDirective, ChunkEncodeError> {
         self.try_encode_chunk_with_neighbours(cx, cz, column, neighbours)
@@ -462,7 +462,7 @@ pub trait ServerProtocol: Send + Sync {
     fn compute_initial_column_light_with_neighbours_in_dimension(
         &self,
         column: &ChunkColumn,
-        neighbours: &[(i32, i32, ChunkColumn)],
+        neighbours: &[(i32, i32, &ChunkColumn)],
         dimension: Dimension,
     ) -> Option<lodestone_world::ColumnLight> {
         self.compute_column_light_with_neighbours_in_dimension(column, neighbours, dimension)
@@ -475,7 +475,7 @@ pub trait ServerProtocol: Send + Sync {
     fn compute_initial_column_lights_with_neighbours_in_dimension(
         &self,
         column: &ChunkColumn,
-        neighbours: &[(i32, i32, ChunkColumn)],
+        neighbours: &[(i32, i32, &ChunkColumn)],
         dimension: Dimension,
     ) -> Option<ColumnLightSettlement> {
         self.compute_initial_column_light_with_neighbours_in_dimension(
@@ -602,7 +602,7 @@ pub trait ServerProtocol: Send + Sync {
     fn compute_column_light_with_neighbours(
         &self,
         column: &ChunkColumn,
-        _neighbours: &[(i32, i32, ChunkColumn)],
+        _neighbours: &[(i32, i32, &ChunkColumn)],
     ) -> Option<lodestone_world::ColumnLight> {
         self.compute_column_light(column)
     }
@@ -611,7 +611,7 @@ pub trait ServerProtocol: Send + Sync {
     fn compute_column_light_with_neighbours_in_dimension(
         &self,
         column: &ChunkColumn,
-        neighbours: &[(i32, i32, ChunkColumn)],
+        neighbours: &[(i32, i32, &ChunkColumn)],
         _dimension: Dimension,
     ) -> Option<lodestone_world::ColumnLight> {
         self.compute_column_light_with_neighbours(column, neighbours)
@@ -1943,7 +1943,7 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         cx: i32,
         cz: i32,
         column: &ChunkColumn,
-        neighbours: &[(i32, i32, ChunkColumn)],
+        neighbours: &[(i32, i32, &ChunkColumn)],
     ) -> Result<ServerDirective, ChunkEncodeError> {
         (**self).try_encode_chunk_with_neighbours(cx, cz, column, neighbours)
     }
@@ -1953,7 +1953,7 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         cx: i32,
         cz: i32,
         column: &ChunkColumn,
-        neighbours: &[(i32, i32, ChunkColumn)],
+        neighbours: &[(i32, i32, &ChunkColumn)],
         dimension: Dimension,
     ) -> Result<ServerDirective, ChunkEncodeError> {
         (**self).try_encode_chunk_with_neighbours_in_dimension(
@@ -1964,7 +1964,7 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
     fn compute_initial_column_light_with_neighbours_in_dimension(
         &self,
         column: &ChunkColumn,
-        neighbours: &[(i32, i32, ChunkColumn)],
+        neighbours: &[(i32, i32, &ChunkColumn)],
         dimension: Dimension,
     ) -> Option<lodestone_world::ColumnLight> {
         (**self).compute_initial_column_light_with_neighbours_in_dimension(
@@ -1977,7 +1977,7 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
     fn compute_initial_column_lights_with_neighbours_in_dimension(
         &self,
         column: &ChunkColumn,
-        neighbours: &[(i32, i32, ChunkColumn)],
+        neighbours: &[(i32, i32, &ChunkColumn)],
         dimension: Dimension,
     ) -> Option<ColumnLightSettlement> {
         (**self).compute_initial_column_lights_with_neighbours_in_dimension(
@@ -2027,7 +2027,7 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
     fn compute_column_light_with_neighbours(
         &self,
         column: &ChunkColumn,
-        neighbours: &[(i32, i32, ChunkColumn)],
+        neighbours: &[(i32, i32, &ChunkColumn)],
     ) -> Option<lodestone_world::ColumnLight> {
         (**self).compute_column_light_with_neighbours(column, neighbours)
     }
@@ -2035,7 +2035,7 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
     fn compute_column_light_with_neighbours_in_dimension(
         &self,
         column: &ChunkColumn,
-        neighbours: &[(i32, i32, ChunkColumn)],
+        neighbours: &[(i32, i32, &ChunkColumn)],
         dimension: Dimension,
     ) -> Option<lodestone_world::ColumnLight> {
         (**self).compute_column_light_with_neighbours_in_dimension(column, neighbours, dimension)

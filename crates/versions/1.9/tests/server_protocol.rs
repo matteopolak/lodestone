@@ -80,7 +80,7 @@ fn protocol_110_uses_its_captured_ids_and_rejects_1_11_only_states() {
     ));
 
     let mut column = ChunkColumn::new(0, 256);
-    column.set_block(0, 0, 0, "minecraft:stone");
+    column.set_block_id(0, 0, 0, StateId::from_state_str("minecraft:stone").unwrap());
     assert!(matches!(
         protocol.try_encode_chunk(0, 0, &column),
         Ok(ServerDirective::Send { packet_id: 32, .. })
@@ -98,7 +98,7 @@ fn protocol_110_uses_its_captured_ids_and_rejects_1_11_only_states() {
     assert!(protocol
         .try_encode_block_update(0, 64, 0, StateId::from_state_str("minecraft:magma_block").unwrap())
         .is_err());
-    column.set_block(1, 0, 0, "minecraft:magma_block");
+    column.set_block_id(1, 0, 0, StateId::from_state_str("minecraft:magma_block").unwrap());
     assert!(protocol.try_encode_chunk(0, 0, &column).is_err());
 }
 
@@ -164,7 +164,7 @@ fn protocol_210_uses_its_captured_ids_and_rejects_1_11_only_states() {
     ));
 
     let mut column = ChunkColumn::new(0, 256);
-    column.set_block(0, 0, 0, "minecraft:stone");
+    column.set_block_id(0, 0, 0, StateId::from_state_str("minecraft:stone").unwrap());
     assert!(matches!(
         protocol.try_encode_chunk(0, 0, &column),
         Ok(ServerDirective::Send { packet_id: 32, .. })
@@ -182,7 +182,7 @@ fn protocol_210_uses_its_captured_ids_and_rejects_1_11_only_states() {
     assert!(protocol
         .try_encode_block_update(0, 64, 0, StateId::from_state_str("minecraft:magma_block").unwrap())
         .is_err());
-    column.set_block(1, 0, 0, "minecraft:magma_block");
+    column.set_block_id(1, 0, 0, StateId::from_state_str("minecraft:magma_block").unwrap());
     assert!(protocol.try_encode_chunk(0, 0, &column).is_err());
 }
 
@@ -248,7 +248,7 @@ fn protocol_316_uses_its_captured_ids_and_rejects_1_12_only_states() {
     ));
 
     let mut column = ChunkColumn::new(0, 256);
-    column.set_block(0, 0, 0, "minecraft:stone");
+    column.set_block_id(0, 0, 0, StateId::from_state_str("minecraft:stone").unwrap());
     assert!(matches!(
         protocol.try_encode_chunk(0, 0, &column),
         Ok(ServerDirective::Send { packet_id: 32, .. })
@@ -266,7 +266,7 @@ fn protocol_316_uses_its_captured_ids_and_rejects_1_12_only_states() {
     assert!(protocol
         .try_encode_block_update(0, 64, 0, StateId::from_state_str("minecraft:white_glazed_terracotta[facing=north]").unwrap())
         .is_err());
-    column.set_block(1, 0, 0, "minecraft:white_glazed_terracotta[facing=north]");
+    column.set_block_id(1, 0, 0, StateId::from_state_str("minecraft:white_glazed_terracotta[facing=north]").unwrap());
     assert!(protocol.try_encode_chunk(0, 0, &column).is_err());
 }
 
@@ -685,7 +685,7 @@ fn play_join_chunk_and_block_update_have_340_wire_ids() {
     ));
 
     let mut column = ChunkColumn::new(0, 256);
-    column.set_block(0, 0, 0, "minecraft:stone");
+    column.set_block_id(0, 0, 0, StateId::from_state_str("minecraft:stone").unwrap());
     let ServerDirective::Send { packet_id, payload } = protocol
         .try_encode_chunk(0, 0, &column)
         .expect("stone has an exact protocol-340 state")
@@ -742,7 +742,7 @@ fn unsupported_states_are_errors_not_air_substitutions() {
 fn projects_the_legacy_window_from_a_covering_canonical_column() {
     let protocol = V340ServerProtocol;
     let mut column = ChunkColumn::new(-64, 384);
-    column.set_block(3, 64, 4, "minecraft:stone");
+    column.set_block_id(3, 64, 4, StateId::from_state_str("minecraft:stone").unwrap());
 
     assert!(matches!(
         protocol.try_encode_chunk(0, 0, &column),

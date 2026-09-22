@@ -453,6 +453,7 @@ mod tests {
     use crate::random_tick::propagate_and_react;
     use crate::scheduled_tick::ScheduledTickQueue;
     use crate::{redstone, redstone_torch, redstone_wire};
+    use lodestone_data::block_states::StateId;
 
     /// The counters this module measures are **process-global**, by design
     /// (see the module doc) — so `cargo test`'s default parallel test
@@ -471,15 +472,20 @@ mod tests {
     const ROW_Z: i32 = 8;
     const NOW: u64 = 1_000;
 
-    fn at(column: &ChunkColumn, x: i32, y: i32, z: i32) -> String {
-        column.block_state(x, y, z).to_string()
+    fn state(text: &str) -> StateId {
+        StateId::from_state_str(text).expect("redstone fixture state must resolve")
+    }
+
+    fn at(column: &ChunkColumn, x: i32, y: i32, z: i32) -> StateId {
+        column.block_state_id(x, y, z)
     }
 
     fn column_with_floor() -> ChunkColumn {
         let mut column = ChunkColumn::new(MIN_Y, HEIGHT);
+        let stone = state("minecraft:stone");
         for x in 0..16 {
             for z in 0..16 {
-                column.set_block(x, FLOOR_Y, z, "minecraft:stone");
+                column.set_block_id(x, FLOOR_Y, z, stone);
             }
         }
         column
@@ -495,12 +501,12 @@ mod tests {
     #[test]
     fn a_settled_circuit_notified_at_an_unrelated_cell_costs_every_counter_zero() {
         let mut column = column_with_floor();
-        column.set_block(1, Y, ROW_Z, &redstone_torch::set_standing_lit(true));
+        column.set_block_id(1, Y, ROW_Z, redstone_torch::set_standing_lit(true));
         // Already at the settled power a lit torch at x=1 drives: real
         // steady state, not merely "some value" — a wrong settled value would
         // make this control pass by accident (every cell would still change
         // once, the same defect a stale expectation would produce).
-        column.set_block(2, Y, ROW_Z, &redstone_wire::set_power(15));
+        column.set_block_id(2, Y, ROW_Z, redstone_wire::set_power(15));
 
         let _guard = TEST_LOCK.lock().unwrap();
         reset();
@@ -538,12 +544,12 @@ mod tests {
     #[test]
     fn the_same_circuit_notified_at_the_dust_moves_every_counter_the_control_required_zero() {
         let mut column = column_with_floor();
-        column.set_block(1, Y, ROW_Z, &redstone_torch::set_standing_lit(true));
+        column.set_block_id(1, Y, ROW_Z, redstone_torch::set_standing_lit(true));
         // Deliberately UNSETTLED here (power 0), so the notification at the
         // dust has real work to do — re-deriving 15 from the adjacent lit
         // torch and re-fanning-out, matching `redstone_oracle_gate.rs`'s own
         // rig shape for the same reason its own doc gives.
-        column.set_block(2, Y, ROW_Z, &redstone_wire::set_power(0));
+        column.set_block_id(2, Y, ROW_Z, redstone_wire::set_power(0));
 
         let _guard = TEST_LOCK.lock().unwrap();
         reset();
@@ -603,8 +609,8 @@ mod tests {
     #[test]
     fn wire_recomputes_matches_the_hand_derived_count_for_a_single_settling_cell() {
         let mut column = column_with_floor();
-        column.set_block(0, Y, ROW_Z, &redstone_torch::set_standing_lit(true));
-        column.set_block(1, Y, ROW_Z, &redstone_wire::set_power(0));
+        column.set_block_id(0, Y, ROW_Z, redstone_torch::set_standing_lit(true));
+        column.set_block_id(1, Y, ROW_Z, redstone_wire::set_power(0));
         // Deliberately left air: a second dust cell here would let the
         // cascade reach a cell this derivation does not account for.
 
@@ -615,7 +621,7 @@ mod tests {
         let snap = snapshot();
 
         assert_eq!(
-            redstone::wire_power(&at(&column, 1, Y, ROW_Z)),
+            redstone::wire_power(at(&column, 1, Y, ROW_Z)),
             15,
             "PREMISE: the single dust cell must actually settle to 15, or the derivation above \
              (which assumes exactly one power change) does not apply"
@@ -660,9 +666,9 @@ mod tests {
     fn measured_cost_split_for_a_fifteen_cell_dust_run() {
         const RUN_LEN: i32 = 15;
         let mut column = column_with_floor();
-        column.set_block(0, Y, ROW_Z, &redstone_torch::set_standing_lit(true));
+        column.set_block_id(0, Y, ROW_Z, redstone_torch::set_standing_lit(true));
         for x in 1..=RUN_LEN {
-            column.set_block(x, Y, ROW_Z, &redstone_wire::set_power(0));
+            column.set_block_id(x, Y, ROW_Z, redstone_wire::set_power(0));
         }
 
         let _guard = TEST_LOCK.lock().unwrap();
@@ -673,7 +679,7 @@ mod tests {
 
         // PREMISE: the whole run must actually settle end to end, or this
         // measures an aborted cascade rather than a real 15-cell contraption.
-        let far_power = redstone::wire_power(&at(&column, RUN_LEN, Y, ROW_Z));
+        let far_power = redstone::wire_power(at(&column, RUN_LEN, Y, ROW_Z));
         assert!(
             far_power > 0,
             "PREMISE FAILED: the far end of a 15-cell run from a lit torch must carry non-zero \
@@ -755,18 +761,33 @@ mod tests {
 
         const RUN_LEN: i32 = 15;
         let mut column = column_with_floor();
-        column.set_block(0, Y, ROW_Z, &redstone_torch::set_standing_lit(true));
+        column.set_block_id(0, Y, ROW_Z, redstone_torch::set_standing_lit(true));
         for x in 1..=RUN_LEN {
-            column.set_block(x, Y, ROW_Z, &redstone_wire::set_power(0));
+            column.set_block_id(x, Y, ROW_Z, redstone_wire::set_power(0));
         }
         // A second row of non-dust families beside the run, so the histogram
         // has more than two populated buckets and assertion 2 below is
         // exercised for more than one class. Placed one row over (`ROW_Z +
         // 2`) so it neither feeds nor is fed by the run — this measures
         // dispatch classification, not a bigger circuit.
-        column.set_block(4, Y, ROW_Z + 2, "minecraft:repeater[delay=1,facing=north,locked=false,powered=false]");
-        column.set_block(6, Y, ROW_Z + 2, "minecraft:observer[facing=north,powered=false]");
-        column.set_block(8, Y, ROW_Z + 2, "minecraft:comparator[facing=north,mode=compare,powered=false]");
+        column.set_block_id(
+            4,
+            Y,
+            ROW_Z + 2,
+            state("minecraft:repeater[delay=1,facing=north,locked=false,powered=false]"),
+        );
+        column.set_block_id(
+            6,
+            Y,
+            ROW_Z + 2,
+            state("minecraft:observer[facing=north,powered=false]"),
+        );
+        column.set_block_id(
+            8,
+            Y,
+            ROW_Z + 2,
+            state("minecraft:comparator[facing=north,mode=compare,powered=false]"),
+        );
 
         let _guard = TEST_LOCK.lock().unwrap();
         reset();

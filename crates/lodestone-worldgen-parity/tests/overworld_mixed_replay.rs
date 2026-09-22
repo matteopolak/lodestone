@@ -8,8 +8,8 @@ fn production_features_replay_retains_a_neighbour_dungeon_spill() {
     let column = source.generator().column(-8, -8);
 
     assert_eq!(
-        column.block_state(15, -33, 3).split('[').next(),
-        Some("minecraft:chest"),
+        column.block_state_id(15, -33, 3).block(),
+        lodestone_data::block::Block::Chest,
         "the target must retain the dungeon chest spilled from its east source",
     );
 }

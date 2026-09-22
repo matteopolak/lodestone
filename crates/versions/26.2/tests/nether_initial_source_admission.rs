@@ -20,6 +20,15 @@ fn block_at(light: &lodestone_world::ColumnLight, y: i32, x: usize, z: usize) ->
     light.section_light(section).block_at(x, local_y, z)
 }
 
+fn borrowed_neighbours(
+    neighbours: &[(i32, i32, ChunkColumn)],
+) -> Vec<(i32, i32, &ChunkColumn)> {
+    neighbours
+        .iter()
+        .map(|(dx, dz, column)| (*dx, *dz, column))
+        .collect()
+}
+
 #[test]
 fn initial_nether_admits_cardinal_sources_but_defers_diagonal_sources() {
     let shape = ChunkShape::nether_or_end_1_21();
@@ -31,7 +40,7 @@ fn initial_nether_admits_cardinal_sources_but_defers_diagonal_sources() {
     let with_west = proto
         .compute_initial_column_light_with_neighbours_in_dimension(
             &center,
-            &[(-1, 0, west)],
+            &[(-1, 0, &west)],
             Dimension::Nether,
         )
         .expect("initial Nether light with cardinal source");
@@ -51,7 +60,7 @@ fn initial_nether_admits_cardinal_sources_but_defers_diagonal_sources() {
     let with_diagonal = proto
         .compute_initial_column_light_with_neighbours_in_dimension(
             &center,
-            &[(-1, -1, north_west)],
+            &[(-1, -1, &north_west)],
             Dimension::Nether,
         )
         .expect("initial Nether light with diagonal source");
@@ -67,7 +76,7 @@ fn retained_diagonal_light_crosses_only_admitted_bridges() {
     let proto = V770ServerProtocol;
     let with_bridge = proto.compute_initial_column_light_with_neighbours_seeded(
         &center,
-        &[(-1, -1, north_west), (0, -1, north)],
+        &[(-1, -1, &north_west), (0, -1, &north)],
         Dimension::Nether,
         |dx, dz, x, y, z| {
             if (dx, dz, x, y, z) == (-1, -1, 15, 82, 15) {
@@ -85,7 +94,7 @@ fn retained_diagonal_light_crosses_only_admitted_bridges() {
 
     let without_bridge = proto.compute_initial_column_light_with_neighbours_seeded(
         &center,
-        &[(-1, -1, ChunkColumn::new(shape.min_y, shape.world_height as i32))],
+        &[(-1, -1, &ChunkColumn::new(shape.min_y, shape.world_height as i32))],
         Dimension::Nether,
         |dx, dz, x, y, z| {
             if (dx, dz, x, y, z) == (-1, -1, 15, 82, 15) {
@@ -108,7 +117,7 @@ fn plural_admission_commits_center_and_dependency_readiness_atomically() {
     let center = source.column(0, 0);
     let protocol = V770ServerProtocol;
     let mut compute = |centre: &ChunkColumn,
-                       neighbours: &[(i32, i32, ChunkColumn)]| {
+                       neighbours: &[(i32, i32, &ChunkColumn)]| {
         protocol.compute_initial_column_lights_with_neighbours_in_dimension(
             centre,
             neighbours,
@@ -159,7 +168,7 @@ fn plural_admission_commits_center_and_dependency_readiness_atomically() {
         .expect("the east dependency remains resident for its own admission");
     let mut centre_admission_calls = 0;
     let mut centre_compute = |centre: &ChunkColumn,
-                              neighbours: &[(i32, i32, ChunkColumn)]| {
+                              neighbours: &[(i32, i32, &ChunkColumn)]| {
         centre_admission_calls += 1;
         protocol.compute_initial_column_lights_with_neighbours_in_dimension(
             centre,
@@ -196,7 +205,7 @@ fn plural_admission_commits_center_and_dependency_readiness_atomically() {
 
     let mut skipped_calls = 0;
     let mut skipped_compute = |centre: &ChunkColumn,
-                               neighbours: &[(i32, i32, ChunkColumn)]| {
+                               neighbours: &[(i32, i32, &ChunkColumn)]| {
         skipped_calls += 1;
         protocol.compute_initial_column_lights_with_neighbours_in_dimension(
             centre,
@@ -269,7 +278,7 @@ fn dependency_initialization_uses_its_own_unsettled_neighbour_sources() {
     let baseline = V770ServerProtocol
         .compute_initial_column_lights_with_neighbours_in_dimension(
             &centre,
-            &without_future,
+            &borrowed_neighbours(&without_future),
             Dimension::Nether,
         )
         .expect("baseline dependency light admission");
@@ -277,7 +286,7 @@ fn dependency_initialization_uses_its_own_unsettled_neighbour_sources() {
     let settlement = V770ServerProtocol
         .compute_initial_column_lights_with_neighbours_in_dimension(
             &centre,
-            &neighbours,
+            &borrowed_neighbours(&neighbours),
             Dimension::Nether,
         )
         .expect("dependency light admission");
@@ -369,7 +378,7 @@ fn dependency_centre_admission_preserves_values_and_center_storage_shape() {
         proto
             .compute_initial_column_light_with_neighbours_in_dimension(
                 &column,
-                &neighbours,
+                &borrowed_neighbours(&neighbours),
                 Dimension::Nether,
             )
             .expect("fresh Nether centre computation")
@@ -634,7 +643,7 @@ fn trace_admission<S: ChunkSource>(
     let mut returned = None;
     let mut pre_centre = None;
     let mut pre_plus_z = None;
-    let mut compute = |current: &ChunkColumn, neighbours: &[(i32, i32, ChunkColumn)]| {
+    let mut compute = |current: &ChunkColumn, neighbours: &[(i32, i32, &ChunkColumn)]| {
         pre_centre = Some(observe_column(current));
         pre_plus_z = Some(
             neighbours

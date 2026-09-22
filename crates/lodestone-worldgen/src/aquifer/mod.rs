@@ -3075,10 +3075,12 @@ mod tests {
         );
         assert!(route.is_compiled());
         assert!(!route.scratch_allocated());
+        #[cfg(feature = "gen-counters")]
         assert_eq!(route.scratch_allocations(), 0);
         let context = Context::new(7, 3, -11);
         assert_eq!(route.compute(context).to_bits(), tree.compute(context).to_bits());
         assert!(route.scratch_allocated());
+        #[cfg(feature = "gen-counters")]
         assert_eq!(route.scratch_allocations(), 1);
     }
 
@@ -3095,9 +3097,8 @@ mod tests {
 
         assert!(system.prelim.is_compiled());
         assert!(system.preliminary_surface_program_nodes() > 0);
-        assert_eq!(
-            system.preliminary_surface_scratch_allocations(),
-            0,
+        assert!(
+            !system.prelim.scratch_allocated(),
             "shared preliminary cache should own compiled scratch"
         );
 

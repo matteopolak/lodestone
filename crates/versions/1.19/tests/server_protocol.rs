@@ -86,7 +86,7 @@ fn protocol_762_uses_its_capture_ids_and_encodes_a_registry_shaped_chunk() {
     ));
 
     let mut column = ChunkColumn::new(-64, 384);
-    column.set_block(3, 100, 5, "minecraft:stone");
+    column.set_block_id(3, 100, 5, StateId::from_state_str("minecraft:stone").unwrap());
     let ServerDirective::Send { packet_id, payload } = protocol
         .try_encode_chunk(7, -4, &column)
         .expect("stone has an exact 1.19.4 representation")

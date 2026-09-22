@@ -49,7 +49,8 @@ impl HeightmapKind {
 
     fn scan(self, grid: &VegGrid, x: i32, z: i32) -> i32 {
         match self {
-            Self::OceanFloor | Self::OceanFloorWg => grid.height_ocean_floor(x, z),
+            Self::OceanFloor => grid.height_ocean_floor(x, z),
+            Self::OceanFloorWg => grid.height_ocean_floor_wg(x, z),
             Self::WorldSurface => grid.height_world_surface(x, z),
             Self::WorldSurfaceWg => grid.height_world_surface_wg(x, z),
             Self::MotionBlocking => grid.height_motion_blocking(x, z),
@@ -2074,9 +2075,10 @@ pub enum ConfiguredFeature {
     },
     /// The weighted-random-selector feature — a weighted list of placed features.
     WeightedRandomSelector(Vec<(i32, PlacedRef)>),
-    /// The sequence feature — every entry in order, stopping at the first that
-    /// reports failure. This engine's placement bodies do not report success, so
-    /// every entry runs; that matches a faithful implementation for the one bundled instance.
+    /// An anchored, weighted selection from structure templates.
+    Template(Box<super::template::TemplateCfg>),
+    /// The sequence feature — every entry runs in order only while its
+    /// predecessor reports success.
     Sequence(Vec<PlacedRef>),
     /// A bounded noise-shaped shell with optional cracks and crystal growth.
     Geode(Box<super::geode::GeodeCfg>),
@@ -2123,6 +2125,7 @@ impl ConfiguredFeature {
             Self::WeightedRandomSelector(list) => {
                 list.iter().for_each(|(_, p)| p.feature.bind_states());
             }
+            Self::Template(_) => {}
             Self::RandomBooleanSelector { yes, no } => {
                 yes.feature.bind_states();
                 no.feature.bind_states();
@@ -2951,6 +2954,10 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
                 .unwrap_or_default();
             ConfiguredFeature::WeightedRandomSelector(list)
         }
+        "template" => match super::template::TemplateCfg::try_parse(resolver, &doc["config"]) {
+            Some(config) => ConfiguredFeature::Template(Box::new(config)),
+            None => ConfiguredFeature::Unsupported("template: invalid entries".into()),
+        },
         "sequence" => {
             let list = doc["config"]["features"]
                 .as_array()
@@ -3003,6 +3010,7 @@ pub fn collect_unsupported(placed: &PlacedRef) -> Vec<String> {
                     walk(&opt.feature, out);
                 }
             }
+            ConfiguredFeature::Template(_) => {}
             ConfiguredFeature::VegetationPatch(cfg) => walk(&cfg.vegetation_feature.feature, out),
             // The direct compiled-server map is exact, but the real composed
             // cave fixture remains red. Keep this feature visible to the
@@ -3081,6 +3089,45 @@ mod tests {
 
     fn state(spec: &str) -> StateId {
         StateId::from_state_str(spec).expect("test state is in the generated table")
+    }
+
+    #[test]
+    fn template_configuration_resolves_a_bundled_structure_asset() {
+        struct TemplateResolver;
+
+        impl Resolver for TemplateResolver {
+            fn density_function(&self, _: &str) -> Value {
+                Value::Null
+            }
+
+            fn noise(&self, _: &str) -> NoiseParams {
+                unreachable!("template configuration does not use noise")
+            }
+
+            fn structure_template(&self, id: &str) -> Option<Vec<u8>> {
+                (id == "minecraft:spring/sulfur_spring_small_1").then(|| {
+                    std::fs::read(
+                        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                            .join("../lodestone-server/assets/structure/spring/sulfur_spring_small_1.nbt"),
+                    )
+                    .expect("bundled template")
+                })
+            }
+        }
+
+        let feature = super::parse_configured_feature_doc(
+            &TemplateResolver,
+            &serde_json::json!({
+                "type": "minecraft:template",
+                "config": {
+                    "templates": [{
+                        "data": {"id": "minecraft:spring/sulfur_spring_small_1"},
+                        "weight": 1
+                    }]
+                }
+            }),
+        );
+        assert!(matches!(feature, ConfiguredFeature::Template(_)));
     }
 
     #[test]
@@ -3512,8 +3559,9 @@ mod tests {
 
 #[cfg(test)]
 mod heightmap_tests {
-    use super::{HeightmapKind, VegGrid};
+    use super::{HeightmapKind, VegGrid, VegPlacement};
     use lodestone_data::block_states::StateId;
+    use serde_json::Value;
 
     fn state(spec: &str) -> StateId {
         StateId::from_state_str(spec).expect("test state is in the generated table")
@@ -3529,5 +3577,34 @@ mod heightmap_tests {
 
         assert_eq!(HeightmapKind::WorldSurface.scan(&grid, 8, 8), 9);
         assert_eq!(HeightmapKind::WorldSurfaceWg.scan(&grid, 8, 8), 5);
+    }
+
+    #[test]
+    fn glow_lichen_uses_the_frozen_ocean_floor_worldgen_height() {
+        let doc: Value = serde_json::from_str(include_str!(
+            "../../../../lodestone-server/assets/worldgen/placed_feature/glow_lichen.json"
+        ))
+        .expect("bundled glow-lichen placement JSON");
+        let placement = VegPlacement::try_parse(&doc["placement"][3])
+            .expect("glow-lichen surface-relative threshold placement");
+        let VegPlacement::SurfaceRelativeThresholdFilter {
+            heightmap: HeightmapKind::OceanFloorWg,
+            max_inclusive,
+            ..
+        } = placement else {
+            panic!("glow lichen must use OCEAN_FLOOR_WG");
+        };
+        assert_eq!(max_inclusive, -13);
+
+        let mut grid = VegGrid::new(0, 64, 0, 0);
+        grid.seed_id(8, 30, 8, state("minecraft:stone"));
+        assert!(grid.set_id_if_in_bounds(8, 45, 8, state("minecraft:stone")));
+
+        let candidate_y = 28;
+        let frozen = HeightmapKind::OceanFloorWg.scan(&grid, 8, 8);
+        let live = HeightmapKind::OceanFloor.scan(&grid, 8, 8);
+        assert_eq!((frozen, live), (31, 46));
+        assert!(candidate_y > frozen + max_inclusive);
+        assert!(candidate_y <= live + max_inclusive);
     }
 }

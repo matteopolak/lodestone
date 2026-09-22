@@ -1,5 +1,6 @@
 //! Regression coverage for vegetation feature iteration order.
 
+use lodestone_data::block::Block;
 use lodestone_server::overworld_chunk_source;
 use lodestone_worldgen_parity::lifecycle::LifecycleMaterializer;
 
@@ -21,8 +22,8 @@ fn vegetation_patch_stream_uses_seed_42_reference_hash_order() {
     assert_eq!(
         materializer
             .snapshot_for_packet(TARGET)
-            .block_state(WITNESS.0, WITNESS.1, WITNESS.2),
-        "minecraft:short_grass",
+            .block_state_id(WITNESS.0, WITNESS.1, WITNESS.2),
+        Block::ShortGrass.default_state(),
         "vegetation patch iteration must retain reference hash-table order for its random stream",
     );
 }

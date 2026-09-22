@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use tokio::io::DuplexStream;
 
 use lodestone_core::{Reader, State, Writer};
+use lodestone_data::block_states::StateId;
 use lodestone_fuzz::differential::{
     Action, DifferentialOutcome, Script, ScriptStep, WorldOracle, run_differential,
 };
@@ -108,21 +109,22 @@ async fn drive_login_and_join<T: Transport>(client: &mut Connection<T>, username
 
 #[derive(Clone)]
 struct WaterloggingSource {
-    blocks: Arc<Mutex<HashMap<(i32, i32, i32), String>>>,
+    blocks: Arc<Mutex<HashMap<(i32, i32, i32), StateId>>>,
 }
 
 impl WaterloggingSource {
     fn new() -> Self {
         let mut blocks = HashMap::new();
-        blocks.insert(FLOOR_POS, STONE.to_owned());
-        blocks.insert(SLAB_FLOOR_POS, STONE.to_owned());
-        blocks.insert(OTHER_FLOOR_POS, STONE.to_owned());
+        let stone = StateId::from_state_str(STONE).expect("fixture state exists");
+        blocks.insert(FLOOR_POS, stone);
+        blocks.insert(SLAB_FLOOR_POS, stone);
+        blocks.insert(OTHER_FLOOR_POS, stone);
         for x in (SOURCE_POS.0 - 1)..=(OTHER_SOURCE_POS.0 + 1) {
-            blocks.insert((x, SOURCE_POS.1, -1), STONE.to_owned());
-            blocks.insert((x, SOURCE_POS.1, 1), STONE.to_owned());
+            blocks.insert((x, SOURCE_POS.1, -1), stone);
+            blocks.insert((x, SOURCE_POS.1, 1), stone);
         }
-        blocks.insert((SOURCE_POS.0 - 1, SOURCE_POS.1, 0), STONE.to_owned());
-        blocks.insert((OTHER_SOURCE_POS.0 + 1, SOURCE_POS.1, 0), STONE.to_owned());
+        blocks.insert((SOURCE_POS.0 - 1, SOURCE_POS.1, 0), stone);
+        blocks.insert((OTHER_SOURCE_POS.0 + 1, SOURCE_POS.1, 0), stone);
         Self {
             blocks: Arc::new(Mutex::new(blocks)),
         }
@@ -135,30 +137,30 @@ impl ChunkSource for WaterloggingSource {
         let blocks = self.blocks.lock().expect("waterlogging source lock");
         for (&(x, y, z), state) in blocks.iter() {
             if x.div_euclid(16) == cx && z.div_euclid(16) == cz {
-                column.set_block(x.rem_euclid(16), y, z.rem_euclid(16), state);
+                column.set_block_id(x.rem_euclid(16), y, z.rem_euclid(16), *state);
             }
         }
         column
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         self.blocks
             .lock()
             .expect("waterlogging source lock")
             .get(&(x, y, z))
-            .cloned()
-            .unwrap_or_else(|| AIR.to_owned())
+            .copied()
+            .unwrap_or(StateId::AIR)
     }
 
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
         "minecraft:plains".to_owned()
     }
 
-    fn set_block(&self, x: i32, y: i32, z: i32, state: &str) {
+    fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
         self.blocks
             .lock()
             .expect("waterlogging source lock")
-            .insert((x, y, z), state.to_owned());
+            .insert((x, y, z), state);
     }
 }
 

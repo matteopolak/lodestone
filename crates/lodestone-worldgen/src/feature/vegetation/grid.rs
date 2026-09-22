@@ -32,10 +32,7 @@ fn base_facts(state: StateId) -> BaseStateFacts {
                 | lodestone_data::block::Block::CaveAir
                 | lodestone_data::block::Block::VoidAir
         ),
-        is_fluid: matches!(
-            block,
-            lodestone_data::block::Block::Water | lodestone_data::block::Block::Lava
-        ),
+        is_fluid: lodestone_data::snow_support::has_fluid_state(state),
         blocks_motion: lodestone_data::block_solidity::blocks_motion(state),
     }
 }
@@ -48,10 +45,11 @@ impl HeightLaneMask {
     const WORLD_SURFACE_WG: Self = Self(1 << 1);
     const MOTION_BLOCKING: Self = Self(1 << 2);
     const OCEAN_FLOOR: Self = Self(1 << 3);
+    const OCEAN_FLOOR_WG: Self = Self(1 << 4);
     const LIVE: Self = Self(
         Self::LIVE_SURFACE.0 | Self::MOTION_BLOCKING.0 | Self::OCEAN_FLOOR.0,
     );
-    const WG: Self = Self(Self::WORLD_SURFACE_WG.0);
+    const WG: Self = Self(Self::WORLD_SURFACE_WG.0 | Self::OCEAN_FLOOR_WG.0);
 
     const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
@@ -297,14 +295,14 @@ pub(super)     height: i32,
     ///
     /// Height queries are frequent during vegetation placement. A miss walks
     /// the vertical span once for the compatible live lanes, or separately for
-    /// the immutable WG lane; each cache memoises its result for the local
+    /// the immutable WG lanes; each cache memoises its result for the local
     /// column. They are interior-mutable because the public height accessors
     /// intentionally stay shared (`&self`), while writes invalidate only the
     /// column they touch.
-    /// A single four-lane cell keeps the caches compact (one allocation and
-    /// 16 bytes per column). [`HEIGHT_CACHE_UNSET`] is outside the generated build range
+    /// A single five-lane cell keeps the caches compact (one allocation and
+    /// 20 bytes per column). [`HEIGHT_CACHE_UNSET`] is outside the generated build range
     /// and represents an uncomputed lane.
-    height_cache: Vec<Cell<[i32; 4]>>,
+    height_cache: Vec<Cell<[i32; 5]>>,
     local_width: usize,
     /// Block entities decoration produced, with **absolute** world
     /// positions, in write order. Alongside [`Self::dirty`] for the same reason
@@ -380,7 +378,7 @@ impl VegGrid {
             local_lo,
             local_hi,
             air_ids,
-            height_cache: std::iter::repeat_with(|| Cell::new([HEIGHT_CACHE_UNSET; 4]))
+            height_cache: std::iter::repeat_with(|| Cell::new([HEIGHT_CACHE_UNSET; 5]))
                 .take(column_count)
                 .collect(),
             local_width,
@@ -603,7 +601,7 @@ impl VegGrid {
         self.ore_entry_active = false;
         self.structure_mutation_capture = None;
         for cache in &self.height_cache {
-            cache.set([HEIGHT_CACHE_UNSET; 4]);
+            cache.set([HEIGHT_CACHE_UNSET; 5]);
         }
         self.epoch_target_prepared = true;
     }
@@ -1051,7 +1049,7 @@ impl VegGrid {
         std::mem::size_of::<Self>()
             + self.blocks.len() * std::mem::size_of::<(i32, i32, i32, StateId)>()
             + self.dirty_len() * std::mem::size_of::<(i32, i32, i32)>()
-            + self.height_cache.capacity() * std::mem::size_of::<Cell<[i32; 4]>>()
+            + self.height_cache.capacity() * std::mem::size_of::<Cell<[i32; 5]>>()
             + self
                 .dynamic_sources
                 .as_ref()
@@ -1142,7 +1140,7 @@ impl VegGrid {
     /// Seeds one column position (absolute world coordinates) from the post-ore
     /// composed grid, by interned id — the zero-allocation seeding path.
     /// Source-less fixtures retain a second sparse copy for the immutable WG
-    /// heightmap; source-backed production grids continue to read that lane
+    /// heightmaps; source-backed production grids continue to read those lanes
     /// from their source snapshot.
     pub fn seed_id(&mut self, x: i32, y: i32, z: i32, state: StateId) {
         let (lx, lz) = self.to_local_exact(x, z);
@@ -1153,8 +1151,8 @@ impl VegGrid {
             if self.seeded_baseline.is_some() || self.sources.iter().all(Option::is_none) {
                 // Source-less fixtures store their immutable baseline in a
                 // separate sparse snapshot. Seeding after a prior probe must
-                // invalidate the WG lane; ordinary decoration writes
-                // intentionally do not, because that lane is immutable for
+                // invalidate the WG lanes; ordinary decoration writes
+                // intentionally do not, because those lanes are immutable for
                 // the pass.
                 let local_lo = self.local_lo;
                 let local_hi = self.local_hi;
@@ -1165,7 +1163,9 @@ impl VegGrid {
                 });
                 baseline.insert_in_bounds((lx, y, lz), state);
                 let cache_index = self.height_cache_index(lx, lz);
-                self.height_cache[cache_index].get_mut()[1] = HEIGHT_CACHE_UNSET;
+                let cache = self.height_cache[cache_index].get_mut();
+                cache[1] = HEIGHT_CACHE_UNSET;
+                cache[4] = HEIGHT_CACHE_UNSET;
             }
         }
     }
@@ -1290,17 +1290,24 @@ impl VegGrid {
                     pending = pending.without(HeightLaneMask::OCEAN_FLOOR);
                 }
             }
-            if pending.contains(HeightLaneMask::WORLD_SURFACE_WG)
-                && !self.is_air_id(self.worldgen_id(source, lx, y, lz))
-            {
-                self.cache_height(lx, lz, 1, y + 1);
-                pending = pending.without(HeightLaneMask::WORLD_SURFACE_WG);
+            if !pending.intersection(HeightLaneMask::WG).is_empty() {
+                let id = self.worldgen_id(source, lx, y, lz);
+                if pending.contains(HeightLaneMask::WORLD_SURFACE_WG) && !self.is_air_id(id) {
+                    self.cache_height(lx, lz, 1, y + 1);
+                    pending = pending.without(HeightLaneMask::WORLD_SURFACE_WG);
+                }
+                if pending.contains(HeightLaneMask::OCEAN_FLOOR_WG)
+                    && base_facts(id).is_ocean_floor()
+                {
+                    self.cache_height(lx, lz, 4, y + 1);
+                    pending = pending.without(HeightLaneMask::OCEAN_FLOOR_WG);
+                }
             }
             if pending.is_empty() {
                 break;
             }
         }
-        for lane in 0..4 {
+        for lane in 0..5 {
             if pending.contains(HeightLaneMask::for_lane(lane)) {
                 self.cache_height(lx, lz, lane, self.min_y);
             }
@@ -1312,12 +1319,19 @@ impl VegGrid {
         if self.cached_height(lx, lz, lane).is_none() {
             let (group, primary) = match lane {
                 0 => (HeightLaneMask::LIVE_SURFACE, HeightLaneMask::LIVE_SURFACE),
-                1 => (HeightLaneMask::WG, HeightLaneMask::WORLD_SURFACE_WG),
+                1 => (
+                    HeightLaneMask::WORLD_SURFACE_WG,
+                    HeightLaneMask::WORLD_SURFACE_WG,
+                ),
                 2 => (
                     HeightLaneMask::LIVE_SURFACE.union(HeightLaneMask::MOTION_BLOCKING),
                     HeightLaneMask::MOTION_BLOCKING,
                 ),
                 3 => (HeightLaneMask::LIVE, HeightLaneMask::OCEAN_FLOOR),
+                4 => (
+                    HeightLaneMask::OCEAN_FLOOR_WG,
+                    HeightLaneMask::OCEAN_FLOOR_WG,
+                ),
                 _ => unreachable!("height cache lane out of range"),
             };
             self.scan_height_lanes(lx, lz, group, primary);
@@ -1415,6 +1429,39 @@ impl VegGrid {
         self.height_for_lane(lx, lz, 2)
     }
 
+    /// Scans the live overlay using the resolver's predicate, without priming other heightmaps.
+    #[inline]
+    pub(crate) fn top_layer_motion_blocking_first_free_if_extent<F>(
+        &self,
+        x: i32,
+        z: i32,
+        min_y: i32,
+        height: i32,
+        motion_blocking: F,
+    ) -> Option<i32>
+    where
+        F: Fn(StateId) -> bool,
+    {
+        if min_y != self.min_y || height != self.height {
+            return None;
+        }
+        let (lx, lz) = self.to_local_exact(x, z);
+        if !self.in_bounds_local(lx, lz) {
+            return None;
+        }
+        let source = self.source_grid(lx, lz);
+        for y in (min_y..min_y + height).rev() {
+            let state = self
+                .blocks
+                .get_in_bounds(&self.overlay_key(lx, y, lz))
+                .unwrap_or_else(|| self.source_id_from_grid(source, lx, y, lz));
+            if motion_blocking(state) {
+                return Some(y + 1);
+            }
+        }
+        Some(min_y)
+    }
+
     /// Whether `id` is one of the three air states.
     ///
     /// # Why this can be an id comparison and the fluid test below cannot
@@ -1435,8 +1482,8 @@ impl VegGrid {
         self.air_ids.contains(&id)
     }
 
-    /// `Heightmap.Types.OCEAN_FLOOR`/`OCEAN_FLOOR_WG` — topmost **motion-blocking**
-    /// block, plus one. `x`/`z` are absolute world coordinates.
+    /// Ocean-floor height: topmost **motion-blocking** block, plus one,
+    /// including decoration writes. `x`/`z` are absolute world coordinates.
     ///
     /// The scan consumes the generated per-state blocks-motion table through
     /// [`BaseStateFacts`], so fluids are excluded while blocks such as leaves
@@ -1445,6 +1492,14 @@ impl VegGrid {
     pub fn height_ocean_floor(&self, x: i32, z: i32) -> i32 {
         let (lx, lz) = self.to_local_clamped(x, z);
         self.height_for_lane(lx, lz, 3)
+    }
+
+    /// Ocean-floor world-generation height: topmost **motion-blocking** block,
+    /// plus one, in the immutable pre-decoration terrain snapshot.
+    #[must_use]
+    pub fn height_ocean_floor_wg(&self, x: i32, z: i32) -> i32 {
+        let (lx, lz) = self.to_local_clamped(x, z);
+        self.height_for_lane(lx, lz, 4)
     }
 
 }
@@ -1771,7 +1826,7 @@ mod heightmap_tests {
     }
 
     #[test]
-    fn source_less_seeded_baseline_drives_world_surface_wg_without_live_overlay() {
+    fn source_less_seeded_baseline_drives_frozen_heightmaps_without_live_overlay() {
         let mut grid = VegGrid::with_footprint(0, 16, 0, 0, 0, 1);
         let dirt = state("minecraft:dirt");
 
@@ -1786,11 +1841,42 @@ mod heightmap_tests {
         assert!(grid.set_id_if_in_bounds(0, 8, 0, dirt));
         assert_eq!(grid.height_world_surface(0, 0), 9);
         assert_eq!(grid.height_world_surface_wg(0, 0), 5);
+        assert_eq!(grid.height_ocean_floor_wg(0, 0), 5);
 
         // Seeding a changed baseline after a cached probe must invalidate the
-        // fixture's WG lane without making ordinary overlay writes do so.
+        // fixture's WG lanes without making ordinary overlay writes do so.
         grid.seed_id(0, 10, 0, dirt);
         assert_eq!(grid.height_world_surface_wg(0, 0), 11);
+        assert_eq!(grid.height_ocean_floor_wg(0, 0), 11);
+    }
+
+    #[test]
+    fn source_backed_heightmaps_keep_waterlogged_state_facts() {
+        let air = state("minecraft:air");
+        let grass = state("minecraft:grass_block");
+        let waterlogged_coral = state("minecraft:brain_coral_fan[waterlogged=true]");
+        let waterlogged_stairs = state(
+            "minecraft:stone_stairs[facing=north,half=bottom,shape=straight,waterlogged=true]",
+        );
+        assert!(lodestone_data::snow_support::has_fluid_state(waterlogged_coral));
+        assert!(!lodestone_data::block_solidity::blocks_motion(waterlogged_coral));
+        assert!(lodestone_data::snow_support::has_fluid_state(waterlogged_stairs));
+        assert!(lodestone_data::block_solidity::blocks_motion(waterlogged_stairs));
+
+        let mut source = DenseBlockGrid::with_default(0, 0, 0, 16, 16, 16, air);
+        source.set_id(0, 1, 0, grass);
+        source.set_id(0, 5, 0, waterlogged_coral);
+        source.set_id(1, 1, 0, grass);
+        source.set_id(1, 7, 0, waterlogged_stairs);
+        let source = Arc::new(source);
+        let grid = VegGrid::with_sources(0, 16, 0, 0, 0, 16, move |dx, dz| {
+            ((dx, dz) == (0, 0)).then(|| Arc::clone(&source))
+        });
+
+        assert_eq!(grid.height_motion_blocking(0, 0), 6);
+        assert_eq!(grid.height_ocean_floor(0, 0), 2);
+        assert_eq!(grid.height_motion_blocking(1, 0), 8);
+        assert_eq!(grid.height_ocean_floor(1, 0), 8);
     }
 
     #[test]
@@ -1814,6 +1900,10 @@ mod heightmap_tests {
         let air = state("minecraft:air");
         let grass = state("minecraft:grass_block");
         let water = state("minecraft:water[level=0]");
+        let waterlogged_coral = state("minecraft:brain_coral_fan[waterlogged=true]");
+        let waterlogged_stairs = state(
+            "minecraft:stone_stairs[facing=north,half=bottom,shape=straight,waterlogged=true]",
+        );
         let short_grass = state("minecraft:short_grass");
 
         // Prime all four caches with an all-air answer before any writes.
@@ -1833,6 +1923,22 @@ mod heightmap_tests {
         assert!(grid.set_id_if_in_bounds(0, 3, 0, water));
         assert_eq!(grid.height_world_surface(0, 0), 4);
         assert_eq!(grid.height_motion_blocking(0, 0), 4);
+        assert_eq!(grid.height_ocean_floor(0, 0), 2);
+
+        assert!(lodestone_data::snow_support::has_fluid_state(waterlogged_coral));
+        assert!(!lodestone_data::block_solidity::blocks_motion(waterlogged_coral));
+        assert!(grid.set_id_if_in_bounds(0, 5, 0, waterlogged_coral));
+        assert_eq!(grid.height_motion_blocking(0, 0), 6);
+        assert_eq!(grid.height_ocean_floor(0, 0), 2);
+
+        // The solid predicate, not the presence of fluid, defines Ocean Floor.
+        assert!(lodestone_data::snow_support::has_fluid_state(waterlogged_stairs));
+        assert!(lodestone_data::block_solidity::blocks_motion(waterlogged_stairs));
+        assert!(grid.set_id_if_in_bounds(0, 7, 0, waterlogged_stairs));
+        assert_eq!(grid.height_motion_blocking(0, 0), 8);
+        assert_eq!(grid.height_ocean_floor(0, 0), 8);
+        assert!(grid.set_id_if_in_bounds(0, 7, 0, air));
+        assert_eq!(grid.height_motion_blocking(0, 0), 6);
         assert_eq!(grid.height_ocean_floor(0, 0), 2);
 
         // A plant is part of WORLD_SURFACE but does not raise the two

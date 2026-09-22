@@ -51,9 +51,7 @@ impl BaseStateFacts {
     #[inline]
     pub const fn is_ocean_floor(self) -> bool {
         match self {
-            Self::Builtin { is_air, is_fluid, blocks_motion } => {
-                !is_air && !is_fluid && blocks_motion
-            }
+            Self::Builtin { blocks_motion, .. } => blocks_motion,
         }
     }
 
@@ -87,10 +85,7 @@ pub(crate) fn base_facts(state: StateId) -> BaseStateFacts {
                 | lodestone_data::block::Block::CaveAir
                 | lodestone_data::block::Block::VoidAir
         ),
-        is_fluid: matches!(
-            block,
-            lodestone_data::block::Block::Water | lodestone_data::block::Block::Lava
-        ),
+        is_fluid: lodestone_data::snow_support::has_fluid_state(state),
         blocks_motion: lodestone_data::block_solidity::blocks_motion(state),
     }
 }
@@ -116,7 +111,7 @@ pub struct DenseBlockGrid {
     palette: Vec<StateId>,
     /// The base-state id for each palette entry.
     palette_bases: Vec<StateId>,
-    /// Typed facts for each palette entry's base state.
+    /// Typed physical facts for each palette entry's canonical state.
     palette_base_facts: Vec<BaseStateFacts>,
     /// Reverse lookup for [`Self::palette`] — **not** an ordered structure, and
     /// never iterated (see U17's note on [`FastMap`]). `palette` is the thing
@@ -151,7 +146,7 @@ fn palette_index(
         palette.push(state);
         let base = base_state(state);
         palette_bases.push(base);
-        palette_base_facts.push(base_facts(base));
+        palette_base_facts.push(base_facts(state));
         index_of.insert(state, id);
         id
     }
@@ -178,7 +173,7 @@ fn direct_palette_index(
     palette.push(state);
     let base = base_state(state);
     palette_bases.push(base);
-    palette_base_facts.push(base_facts(base));
+    palette_base_facts.push(base_facts(state));
     index_of.insert(state, id);
     *slot = id;
     id
@@ -260,7 +255,7 @@ impl DenseBlockGrid {
         let mut palette_bases = Vec::with_capacity(INITIAL_PALETTE_CAPACITY);
         palette_bases.push(default_base);
         let mut palette_base_facts = Vec::with_capacity(INITIAL_PALETTE_CAPACITY);
-        palette_base_facts.push(base_facts(default_base));
+        palette_base_facts.push(base_facts(default));
         Self {
             min_x,
             min_y,
@@ -433,7 +428,7 @@ impl DenseBlockGrid {
         }
     }
 
-    /// Typed canonical facts for the base state at `(x, y, z)`.
+    /// Typed physical facts for the canonical state at `(x, y, z)`.
     #[must_use]
     pub fn get_base_facts(&self, x: i32, y: i32, z: i32) -> BaseStateFacts {
         crate::counters::bump_logical_read(crate::counters::MemoryBoundary::BlockGrid, 1, 2);
@@ -618,7 +613,7 @@ impl DenseBlockGrid {
                             self.palette.push(state);
                             let base = base_state(state);
                             self.palette_bases.push(base);
-                            self.palette_base_facts.push(base_facts(base));
+                            self.palette_base_facts.push(base_facts(state));
                             self.index_of.insert(state, id);
                             id
                         };

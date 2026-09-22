@@ -166,7 +166,7 @@ impl ServerProtocol for ProbeProtocol {
         cx: i32,
         cz: i32,
         _column: &ChunkColumn,
-        neighbours: &[(i32, i32, ChunkColumn)],
+        neighbours: &[(i32, i32, &ChunkColumn)],
         _dimension: Dimension,
     ) -> Result<ServerDirective, ChunkEncodeError> {
         self.record_encoded((cx, cz), neighbours.len());
@@ -176,7 +176,7 @@ impl ServerProtocol for ProbeProtocol {
     fn compute_initial_column_lights_with_neighbours_in_dimension(
         &self,
         _column: &ChunkColumn,
-        _neighbours: &[(i32, i32, ChunkColumn)],
+        _neighbours: &[(i32, i32, &ChunkColumn)],
         _dimension: Dimension,
     ) -> Option<ColumnLightSettlement> {
         // Returning None drives the source-aware encoder's explicit fallback,

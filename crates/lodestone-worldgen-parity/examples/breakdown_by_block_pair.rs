@@ -21,7 +21,7 @@ fn main() {
         for (label, field) in [("surface", &f.postsurface), ("carve", &f.postcarve)] {
             let report = diff_field(
                 f.min_y, f.height,
-                |lx, y, lz| generated.block_state(lx as usize, y, lz as usize).to_string(),
+                |lx, y, lz| generated.block_state_id(lx as usize, y, lz as usize).canonical_state(),
                 |lx, y, lz| field.get(lx, y, lz).to_string(),
             );
             let mut base_only_same = 0;

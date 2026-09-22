@@ -897,7 +897,7 @@ pub(super) fn elide_zero_block_light_for_chunk(light: &mut ColumnLight) {
 /// the version seam as the ordinary column encoder.
 pub(super) fn compute_served_light_with_neighbours(
     column: &ServerChunkColumn,
-    neighbours: &[(i32, i32, ServerChunkColumn)],
+    neighbours: &[(i32, i32, &ServerChunkColumn)],
     dimension: Dimension,
 ) -> ColumnLight {
     let shape = shape_for_dimension(dimension);
@@ -929,7 +929,7 @@ pub(super) fn compute_served_light_with_neighbours(
 pub(super) fn compute_served_initial_light_with_neighbours(
     center: &WorldChunkColumn,
     shape: &ChunkShape,
-    neighbours: &[(i32, i32, ServerChunkColumn)],
+    neighbours: &[(i32, i32, &ServerChunkColumn)],
     dimension: Dimension,
     admit_neighbour_sources: bool,
 ) -> ColumnLight {
@@ -983,7 +983,7 @@ pub(super) fn compute_served_initial_light_with_neighbours(
 /// its centre can be encoded, but fresh neighbour emissions must wait for the
 /// retained-light settlement that has a complete footprint.
 pub(super) fn neighbours_have_complete_footprint(
-    neighbours: &[(i32, i32, ServerChunkColumn)],
+    neighbours: &[(i32, i32, &ServerChunkColumn)],
 ) -> bool {
     const OFFSETS: [(i32, i32); 8] = [
         (-1, -1),
@@ -1003,7 +1003,7 @@ pub(super) fn neighbours_have_complete_footprint(
 pub(super) fn compute_served_initial_lights_with_neighbours_and_storage(
     center: &WorldChunkColumn,
     shape: &ChunkShape,
-    neighbours: &[(i32, i32, ServerChunkColumn)],
+    neighbours: &[(i32, i32, &ServerChunkColumn)],
     stored: &[Option<&ColumnLight>; 9],
     statuses: &[Option<RetainedLightStatus>; 9],
     dimension: Dimension,
@@ -1210,7 +1210,7 @@ pub(super) fn compute_nether_dependency_light(
     target_dx: i32,
     target_dz: i32,
     center: &WorldChunkColumn,
-    neighbours: &[(i32, i32, ServerChunkColumn)],
+    neighbours: &[(i32, i32, &ServerChunkColumn)],
     neighbour_columns: &[WorldChunkColumn],
     stored: &[Option<&ColumnLight>; 9],
     statuses: &[Option<RetainedLightStatus>; 9],

@@ -3,6 +3,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use lodestone_data::block_states::StateId;
 use lodestone_client::{ClientBuilder, LoginProfile, PlayerLoadedPolicy, ServerAddress};
 use lodestone_model::{
     BlockActionKind, BlockFace, BlockPos, ChatKind, ClientAction, ClientEvent, EntityInteraction,
@@ -21,7 +22,7 @@ struct LegacyFixtureSource {
 impl LegacyFixtureSource {
     fn new() -> Self {
         let mut column = ChunkColumn::new(-64, 384);
-        column.set_block(TARGET.x, TARGET.y, TARGET.z, "minecraft:dandelion");
+        column.set_block_id(TARGET.x, TARGET.y, TARGET.z, fixture_state("minecraft:dandelion"));
         Self {
             column: Mutex::new(column),
         }
@@ -33,24 +34,27 @@ impl ChunkSource for LegacyFixtureSource {
         self.column.lock().expect("fixture column lock poisoned").clone()
     }
 
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+    fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         self.column
             .lock()
             .expect("fixture column lock poisoned")
-            .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
-            .to_owned()
+            .block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
     }
 
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
         "minecraft:plains".to_owned()
     }
 
-    fn set_block(&self, x: i32, y: i32, z: i32, state: &str) {
+    fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
         self.column
             .lock()
             .expect("fixture column lock poisoned")
-            .set_block(x.rem_euclid(16), y, z.rem_euclid(16), state);
+            .set_block_id(x.rem_euclid(16), y, z.rem_euclid(16), state);
     }
+}
+
+fn fixture_state(name: &str) -> StateId {
+    StateId::from_state_str(name).expect("fixture state exists")
 }
 
 fn profile() -> LoginProfile {
@@ -85,9 +89,9 @@ async fn registry_selected_legacy_server_reaches_play_and_confirms_a_block_break
         .wait_for_chunk(lodestone_client::ChunkPos::new(0, 0), Duration::from_secs(10))
         .await
         .expect("the projected legacy chunk must arrive");
-    let flower = lodestone_data::block_states::state_id("minecraft:dandelion")
+    let flower = StateId::from_state_str("minecraft:dandelion")
         .expect("fixture state exists");
-    assert_eq!(handle.block_at(TARGET), Some(flower));
+    assert_eq!(handle.block_at(TARGET), Some(flower.raw()));
 
     handle
         .send_action(ClientAction::BlockAction {
@@ -97,9 +101,9 @@ async fn registry_selected_legacy_server_reaches_play_and_confirms_a_block_break
             sequence: 0,
         })
         .expect("joined client accepts a block action");
-    let air = lodestone_data::block_states::air_state_id();
+    let air = StateId::AIR;
     handle
-        .wait_for(Duration::from_secs(10), move |client| client.block_at(TARGET) == Some(air))
+        .wait_for(Duration::from_secs(10), move |client| client.block_at(TARGET) == Some(air.raw()))
         .await
         .expect("the server block-update must replace the known block with air");
 

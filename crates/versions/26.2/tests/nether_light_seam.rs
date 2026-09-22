@@ -20,7 +20,7 @@ fn fixture_value(key: &str) -> u8 {
 
 fn initial_packet(
     center: &ChunkColumn,
-    neighbours: &[(i32, i32, ChunkColumn)],
+    neighbours: &[(i32, i32, &ChunkColumn)],
 ) -> LevelChunkWithLight {
     let shape = ChunkShape::nether_or_end_1_21();
     let ServerDirective::Send { payload, .. } = V770ServerProtocol
@@ -49,7 +49,7 @@ fn neighbour_emitter_is_deferred_but_center_emitter_is_retained() {
     let mut north = ChunkColumn::new(shape.min_y, shape.world_height as i32);
     north.set_block_id(8, 64, 0, Block::Glowstone.default_state());
 
-    let deferred = initial_packet(&center, &[(0, 1, north)]);
+    let deferred = initial_packet(&center, &[(0, 1, &north)]);
     assert_eq!(
         deferred.light.section_light(5).block_at(8, 0, 15),
         fixture_value("neighbor_initial"),
@@ -72,7 +72,7 @@ fn wrong_direction_neighbor_does_not_change_the_north_seam_control() {
     let mut east = ChunkColumn::new(shape.min_y, shape.world_height as i32);
     east.set_block_id(0, 64, 8, Block::Glowstone.default_state());
 
-    let packet = initial_packet(&center, &[(1, 0, east)]);
+    let packet = initial_packet(&center, &[(1, 0, &east)]);
     assert_eq!(
         packet.light.section_light(5).block_at(8, 0, 15),
         fixture_value("neighbor_initial"),

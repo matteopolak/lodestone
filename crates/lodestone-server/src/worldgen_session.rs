@@ -939,7 +939,7 @@ pub struct PacketNeighbour {
 
 #[derive(Debug)]
 enum PacketNeighbourColumn {
-    Materialized(ChunkColumn),
+    Materialized(Arc<ChunkColumn>),
     Generated {
         column: Arc<lodestone_worldgen::overworld::GeneratedColumn>,
         overlay: Arc<[(i32, i32, i32, StateId)]>,
@@ -984,6 +984,10 @@ impl Clone for PacketNeighbour {
 
 impl PacketNeighbour {
     pub(crate) fn materialized(coordinate: ChunkCoordinate, column: ChunkColumn) -> Self {
+        Self::shared_materialized(coordinate, Arc::new(column))
+    }
+
+    pub(crate) fn shared_materialized(coordinate: ChunkCoordinate, column: Arc<ChunkColumn>) -> Self {
         Self {
             coordinate,
             column: PacketNeighbourColumn::Materialized(column),
@@ -1076,7 +1080,7 @@ impl PacketNeighbour {
     #[must_use]
     pub fn into_column(self) -> ChunkColumn {
         match self.column {
-            PacketNeighbourColumn::Materialized(column) => column,
+            PacketNeighbourColumn::Materialized(column) => Arc::unwrap_or_clone(column),
             PacketNeighbourColumn::Generated {
                 column,
                 overlay,
@@ -1150,13 +1154,13 @@ impl FeatureSettlementProof {
 
 /// A detached target and its concrete neighbour columns.
 ///
-/// The snapshot owns every column it exposes, so encoding can run after the
-/// generation session releases its admission halo.
+/// The snapshot retains every column it exposes, so encoding can run after
+/// the generation session releases its admission halo.
 pub struct PacketSnapshot {
     coordinate: ChunkCoordinate,
     target: GenerationTarget,
     revision: SessionRevision,
-    column: ChunkColumn,
+    column: Arc<ChunkColumn>,
     neighbours: Vec<PacketNeighbour>,
     light_settlement: std::sync::OnceLock<ColumnLightSettlement>,
 }
@@ -1393,10 +1397,15 @@ impl PacketSnapshot {
             coordinate: (0, 0),
             target: GenerationTarget::Full,
             revision: SessionRevision(0),
-            column,
+            column: Arc::new(column),
             neighbours: Vec::new(),
             light_settlement: std::sync::OnceLock::new(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn column_handle(&self) -> Arc<ChunkColumn> {
+        Arc::clone(&self.column)
     }
 
     #[must_use]
@@ -1415,8 +1424,8 @@ impl PacketSnapshot {
     }
 
     #[must_use]
-    pub const fn column(&self) -> &ChunkColumn {
-        &self.column
+    pub fn column(&self) -> &ChunkColumn {
+        self.column.as_ref()
     }
 
     #[must_use]
@@ -3135,7 +3144,7 @@ impl GenerationSession {
         neighbours: impl IntoIterator<Item = (ChunkCoordinate, ChunkColumn)>,
     ) -> Result<PacketSnapshot, SessionError> {
         self.finalize_packet_snapshot_through(
-            column,
+            Arc::new(column),
             neighbours
                 .into_iter()
                 .map(|(coordinate, column)| PacketNeighbour::materialized(coordinate, column)),
@@ -3156,7 +3165,7 @@ impl GenerationSession {
         neighbours: impl IntoIterator<Item = (ChunkCoordinate, ChunkColumn)>,
     ) -> Result<PacketSnapshot, SessionError> {
         self.finalize_packet_snapshot_through(
-            column,
+            Arc::new(column),
             neighbours
                 .into_iter()
                 .map(|(coordinate, column)| PacketNeighbour::materialized(coordinate, column)),
@@ -3171,7 +3180,7 @@ impl GenerationSession {
     /// actually needs the mutable server carrier.
     pub(crate) fn finalize_packet_snapshot_with_packet_neighbours(
         &self,
-        column: ChunkColumn,
+        column: Arc<ChunkColumn>,
         neighbours: impl IntoIterator<Item = PacketNeighbour>,
     ) -> Result<PacketSnapshot, SessionError> {
         self.finalize_packet_snapshot_through(column, neighbours, GenerationTarget::Shaped)
@@ -3179,7 +3188,7 @@ impl GenerationSession {
 
     fn finalize_packet_snapshot_through(
         &self,
-        column: ChunkColumn,
+        column: Arc<ChunkColumn>,
         neighbours: impl IntoIterator<Item = PacketNeighbour>,
         neighbour_target: GenerationTarget,
     ) -> Result<PacketSnapshot, SessionError> {
@@ -3287,12 +3296,30 @@ mod packet_snapshot_tests {
     use lodestone_world::{ColumnLight, LightData};
 
     #[test]
+    fn shared_neighbours_detach_when_consumed_for_mutation() {
+        let stone = StateId::from_state_str("minecraft:stone").unwrap();
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_block_id(0, 0, 0, stone);
+        column.prime_client_heightmaps();
+        let first = PacketNeighbour::materialized((0, 0), column);
+        let second = first.clone();
+        assert!(std::ptr::eq(first.column(), second.column()));
+        let original_maps = first.column().client_heightmaps_raw();
+
+        let mut detached = second.into_column();
+        detached.set_block_id(0, 0, 0, StateId::AIR);
+        assert_eq!(detached.block_state_id(0, 0, 0), StateId::AIR);
+        assert_eq!(first.column().block_state_id(0, 0, 0), stone);
+        assert_eq!(first.column().client_heightmaps_raw(), original_maps);
+    }
+
+    #[test]
     fn packet_light_product_is_absent_until_prepared_and_cannot_be_replaced() {
         let snapshot = PacketSnapshot {
             coordinate: (0, 0),
             target: GenerationTarget::Full,
             revision: SessionRevision(1),
-            column: ChunkColumn::new(0, 16),
+            column: Arc::new(ChunkColumn::new(0, 16)),
             neighbours: Vec::new(),
             light_settlement: std::sync::OnceLock::new(),
         };

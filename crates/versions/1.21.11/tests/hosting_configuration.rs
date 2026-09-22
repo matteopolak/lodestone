@@ -11,9 +11,11 @@ impl lodestone_server::ChunkSource for EmptySource {
     fn column(&self, _x: i32, _z: i32) -> lodestone_server::ChunkColumn {
         lodestone_server::ChunkColumn::new(-64, 384)
     }
-    fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String { "minecraft:air".to_owned() }
+    fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> lodestone_data::block_states::StateId {
+        lodestone_data::block_states::StateId::AIR
+    }
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String { "minecraft:plains".to_owned() }
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: lodestone_data::block_states::StateId) {
         panic!("configuration-only fixture does not accept gameplay edits");
     }
 }

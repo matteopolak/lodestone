@@ -14,7 +14,7 @@ use lodestone_world::{ColumnLight, LightData, NibbleArray};
 
 fn initial_packet(
     column: &ChunkColumn,
-    neighbours: &[(i32, i32, ChunkColumn)],
+    neighbours: &[(i32, i32, &ChunkColumn)],
 ) -> LevelChunkWithLight {
     let shape = ChunkShape::overworld_1_21();
     let ServerDirective::Send { payload, .. } = V770ServerProtocol
@@ -93,7 +93,11 @@ fn generated_overworld_fallback_is_distinct_from_retained_snapshot() {
             }
         }
     }
-    let generated = initial_packet(&generated_column, &neighbours);
+    let neighbour_refs = neighbours
+        .iter()
+        .map(|(dx, dz, column)| (*dx, *dz, column))
+        .collect::<Vec<_>>();
+    let generated = initial_packet(&generated_column, &neighbour_refs);
 
     // The generated path has no persisted allocation snapshot. Its compact
     // initial form omits high redundant sky and zero block sections. This is

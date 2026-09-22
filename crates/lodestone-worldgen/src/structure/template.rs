@@ -1315,7 +1315,7 @@ mod tests {
         let stair = BlockState::parse("minecraft:oak_stairs[facing=north,half=bottom]");
         assert_eq!(
             stair.rotate(Rotation::Cw90).id.canonical_state(),
-            "minecraft:oak_stairs[facing=east,half=bottom]"
+            "minecraft:oak_stairs[facing=east,half=bottom,shape=straight,waterlogged=false]"
         );
         let log = BlockState::parse("minecraft:oak_log[axis=x]");
         assert_eq!(log.rotate(Rotation::Cw90).id.canonical_state(), "minecraft:oak_log[axis=z]");
@@ -1329,7 +1329,7 @@ mod tests {
         let fence = BlockState::parse("minecraft:oak_fence[east=true,north=false,south=false,west=false]");
         assert_eq!(
             fence.rotate(Rotation::Cw90).id.canonical_state(),
-            "minecraft:oak_fence[east=false,north=false,south=true,west=false]"
+            "minecraft:oak_fence[east=false,north=false,south=true,waterlogged=false,west=false]"
         );
     }
 
@@ -1357,7 +1357,7 @@ mod tests {
         let state = BlockState::parse("minecraft:oak_trapdoor[open=false,facing=north,half=top]");
         assert_eq!(
             state.id.canonical_state(),
-            "minecraft:oak_trapdoor[facing=north,half=top,open=false]"
+            "minecraft:oak_trapdoor[facing=north,half=top,open=false,powered=false,waterlogged=false]"
         );
     }
 

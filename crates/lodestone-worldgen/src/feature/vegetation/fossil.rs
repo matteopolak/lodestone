@@ -413,7 +413,7 @@ fn count_empty_corners(grid: &VegGrid, bounds: crate::structure::BoundingBox) ->
     empty
 }
 
-fn place_template(
+pub(super) fn place_template(
     template: &StructureTemplate,
     processors: &[Processor],
     target: [i32; 3],

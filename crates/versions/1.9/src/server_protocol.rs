@@ -452,10 +452,11 @@ fn pack_indices(values: &[u32], bits: u8) -> Vec<u64> {
     longs
 }
 
-fn legacy_state(protocol: i32, state: u32) -> Result<u32, ChunkEncodeError> {
-    let legacy = inverse::resolve(state).map_err(|_| {
+fn legacy_state(protocol: i32, state: StateId) -> Result<u32, ChunkEncodeError> {
+    let legacy = inverse::resolve(state.raw()).map_err(|_| {
         ChunkEncodeError::new(format!(
-            "canonical state {state} has no exact protocol-{protocol} representation"
+            "canonical state {} has no exact protocol-{protocol} representation",
+            state.raw()
         ))
     })?;
     let block_id = legacy >> 4;
@@ -467,7 +468,8 @@ fn legacy_state(protocol: i32, state: u32) -> Result<u32, ChunkEncodeError> {
     };
     if !supported {
         return Err(ChunkEncodeError::new(format!(
-            "canonical state {state} has no exact protocol-{protocol} representation"
+            "canonical state {} has no exact protocol-{protocol} representation",
+            state.raw()
         )));
     }
     Ok(legacy)
@@ -476,7 +478,7 @@ fn legacy_state(protocol: i32, state: u32) -> Result<u32, ChunkEncodeError> {
 fn encode_section(
     protocol: i32,
     blob: &mut Writer,
-    states: &[u32],
+    states: &[StateId],
 ) -> Result<(), ChunkEncodeError> {
     let mut palette = Vec::new();
     let mut indices = Vec::with_capacity(states.len());
@@ -544,7 +546,7 @@ fn encode_chunk_body(
         )));
     }
 
-    let air = lodestone_data::block_states::air_state_id();
+    let air = StateId::AIR;
     let mut bitmask = 0_u32;
     let mut blob = Writer::default();
     for section in 0..usize::try_from(LEGACY_HEIGHT / SECTION_EDGE).expect("fixed section count") {
@@ -587,7 +589,7 @@ impl V340ServerProtocol {
         z: i32,
         state: StateId,
     ) -> Result<ServerDirective, ChunkEncodeError> {
-        let legacy = legacy_state(PROTOCOL, state.raw())?;
+        let legacy = legacy_state(PROTOCOL, state)?;
         let mut payload = Writer::default();
         payload.i64(pack_position(BlockPos::new(x, y, z)));
         payload.var_i32(i32::try_from(legacy).expect("legacy state fits in i32"));
@@ -608,7 +610,7 @@ impl V110ServerProtocol {
         z: i32,
         state: StateId,
     ) -> Result<ServerDirective, ChunkEncodeError> {
-        let legacy = legacy_state(PROTOCOL_1_9_4, state.raw())?;
+        let legacy = legacy_state(PROTOCOL_1_9_4, state)?;
         let mut payload = Writer::default();
         payload.i64(pack_position(BlockPos::new(x, y, z)));
         payload.var_i32(i32::try_from(legacy).expect("legacy state fits in i32"));
@@ -629,7 +631,7 @@ impl V210ServerProtocol {
         z: i32,
         state: StateId,
     ) -> Result<ServerDirective, ChunkEncodeError> {
-        let legacy = legacy_state(PROTOCOL_1_10_2, state.raw())?;
+        let legacy = legacy_state(PROTOCOL_1_10_2, state)?;
         let mut payload = Writer::default();
         payload.i64(pack_position(BlockPos::new(x, y, z)));
         payload.var_i32(i32::try_from(legacy).expect("legacy state fits in i32"));
@@ -650,7 +652,7 @@ impl V316ServerProtocol {
         z: i32,
         state: StateId,
     ) -> Result<ServerDirective, ChunkEncodeError> {
-        let legacy = legacy_state(PROTOCOL_1_11_2, state.raw())?;
+        let legacy = legacy_state(PROTOCOL_1_11_2, state)?;
         let mut payload = Writer::default();
         payload.i64(pack_position(BlockPos::new(x, y, z)));
         payload.var_i32(i32::try_from(legacy).expect("legacy state fits in i32"));

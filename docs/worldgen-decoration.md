@@ -204,6 +204,18 @@ processor-list and rule-test records cross a closed Serde boundary: unsupported 
 names and unexpected fields reject the whole fossil chain instead of silently changing its writes
 or random-draw order.
 
+Template configured features select one positive-weight entry before drawing a
+per-entry rotation. Their anchor is the candidate minus the rotated half-width
+and half-depth, so an asymmetric template remains centred through every quarter
+turn. The shared structure-template adapter performs the actual writes against
+the live decoration grid; it preserves waterlogging and avoids a second block
+placement implementation. A valid template reports success even when clipping
+leaves no local write. Existing decoration bodies report an accepted local write
+when they have no native result; sequence features stop at the first failed
+placed-feature pipeline rather than running later entries after a candidate
+filter produces no positions. Add a body-specific result before placing a
+no-write feature in a sequence.
+
 Ice spikes use a dedicated configured-feature body rather than the generic block placer. The body
 settles an air candidate onto a snow block, consumes the height/width draws, writes the tapered
 packed-ice layers into air or the resolved replacement-tag closure, and then fills the narrow support

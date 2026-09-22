@@ -2936,6 +2936,7 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "lodestone-core",
+ "lodestone-data",
  "lodestone-net",
  "lodestone-server",
  "lz4_flex",
@@ -3183,6 +3184,7 @@ dependencies = [
  "bevy_ecs",
  "lodestone-app",
  "lodestone-client",
+ "lodestone-data",
  "lodestone-ecs",
  "lodestone-model",
  "lodestone-net",

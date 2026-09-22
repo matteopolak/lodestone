@@ -2918,7 +2918,7 @@ mod tests {
         let mut east_light = lodestone_world::ColumnLight::new(centre.section_count());
         *east_light.sky_mut(0) = lodestone_world::LightData::Uniform(3);
         let offsets = [(1, 0)];
-        let mut compute = |_: &ChunkColumn, _: &[(i32, i32, ChunkColumn)]| {
+        let mut compute = |_: &ChunkColumn, _: &[(i32, i32, &ChunkColumn)]| {
             crate::chunk::ColumnLightSettlement::with_neighbours(
                 centre_light.clone(),
                 [(1, 0, east_light.clone())],

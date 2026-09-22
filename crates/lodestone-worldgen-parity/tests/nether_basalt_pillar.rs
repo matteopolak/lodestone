@@ -1,5 +1,6 @@
 //! Focused controls for Nether local-modification basalt pillars.
 
+use lodestone_data::block::Block;
 use lodestone_server::nether_chunk_source;
 
 #[test]
@@ -10,10 +11,11 @@ fn local_modification_pillars_reach_both_reported_columns() {
         (3, 64, 13, 31, 0),
     ] {
         let column = source.generator().column(chunk_x, chunk_z);
-        let state = column.block_state(local_x, y, local_z);
-        assert!(
-            state.starts_with("minecraft:basalt"),
-            "step-2 pillar missing at chunk ({chunk_x},{chunk_z}) local ({local_x},{y},{local_z}): {state}"
+        let state = column.block_state_id(local_x, y, local_z);
+        assert_eq!(
+            state.block(),
+            Block::Basalt,
+            "step-2 pillar missing at chunk ({chunk_x},{chunk_z}) local ({local_x},{y},{local_z}): {state:?}"
         );
     }
 }

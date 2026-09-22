@@ -153,7 +153,9 @@ fn encode_heightmaps(column: &ChunkColumn) -> Result<Vec<u8>, ChunkEncodeError> 
             let height = (MIN_Y..MIN_Y + HEIGHT)
                 .rev()
                 .find(|&y| !matches!(
-                    lodestone_data::block_states::block_name(column.block_state_id(x as i32, y, z as i32)),
+                    lodestone_data::block_states::block_name(
+                        column.block_state_id(x as i32, y, z as i32).raw(),
+                    ),
                     Some("minecraft:air" | "minecraft:cave_air" | "minecraft:void_air")
                 ))
                 .map_or(0, |y| {
@@ -179,7 +181,7 @@ impl lodestone_world::BlockVolume for HostedLightVolume<'_> {
         if !(MIN_Y..MIN_Y + HEIGHT).contains(&y) {
             return lodestone_data::block_states::air_state_id();
         }
-        self.0.block_state_id(x as i32, y, z as i32)
+        self.0.block_state_id(x as i32, y, z as i32).raw()
     }
 
     fn min_y(&self) -> i32 { MIN_Y }
@@ -209,7 +211,7 @@ fn served_light(column: &ChunkColumn) -> lodestone_world::ColumnLight {
 
 fn served_light_with_neighbours(
     column: &ChunkColumn,
-    neighbours: &[(i32, i32, ChunkColumn)],
+    neighbours: &[(i32, i32, &ChunkColumn)],
 ) -> lodestone_world::ColumnLight {
     let center = HostedLightVolume(column);
     let volumes = neighbours
@@ -316,7 +318,7 @@ fn encode_chunk_body(
         }
     }
 
-    let air = lodestone_data::block_states::air_state_id();
+    let air = StateId::AIR;
     let block_kind = PaletteKind::block_states().with_framing(LongArrayFraming::Prefixed);
     let biome_kind = PaletteKind::biomes().with_framing(LongArrayFraming::Prefixed);
     let biome_values = [u32::try_from(registry_index("minecraft:worldgen/biome", "minecraft:plains"))
@@ -335,7 +337,11 @@ fn encode_chunk_body(
         }
         let non_air = states.iter().filter(|&&state| state != air).count();
         sections.i16(i16::try_from(non_air).expect("section has at most 4096 blocks"));
-        let wire_states: Result<Vec<u32>, _> = states.iter().copied().map(wire_state).collect();
+        let wire_states: Result<Vec<u32>, _> = states
+            .iter()
+            .copied()
+            .map(|state| wire_state(state.raw()))
+            .collect();
         let _ = encode_container(&mut sections, block_kind, &wire_states?);
         let _ = encode_container(&mut sections, biome_kind, &biome_values);
     }
@@ -659,7 +665,7 @@ impl ServerProtocol for V766ServerProtocol {
         cx: i32,
         cz: i32,
         column: &ChunkColumn,
-        neighbours: &[(i32, i32, ChunkColumn)],
+        neighbours: &[(i32, i32, &ChunkColumn)],
     ) -> Result<ServerDirective, ChunkEncodeError> {
         let light = column
             .centre_settled_light()
@@ -768,7 +774,7 @@ impl ServerProtocol for V766ServerProtocol {
     fn compute_column_light_with_neighbours(
         &self,
         column: &ChunkColumn,
-        neighbours: &[(i32, i32, ChunkColumn)],
+        neighbours: &[(i32, i32, &ChunkColumn)],
     ) -> Option<lodestone_world::ColumnLight> {
         let end = column.min_y.checked_add(column.height)?;
         if column.min_y > MIN_Y || end < MIN_Y + HEIGHT {

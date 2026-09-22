@@ -100,6 +100,7 @@ use std::time::Duration;
 
 use lodestone_anvil::schematic::{self, Schematic, SchematicBlock, SchematicPendingTick};
 use lodestone_core::State;
+use lodestone_data::block_states::BlockStateValue;
 use lodestone_net::Connection;
 use lodestone_server::{
     ChunkColumn, ChunkSource, IntegratedServer, ScheduledTickKind, ScheduledTickQueue, ServerBound,
@@ -302,7 +303,15 @@ fn stamp(
     let mut max_z = i32::MIN;
     for block in blocks {
         let (wx, wy, wz) = (origin_x + block.x, dy + block.y, origin_z + block.z);
-        source.set_block(wx, wy, wz, &block.state);
+        let state = BlockStateValue::parse(&block.state)
+            .state_id()
+            .unwrap_or_else(|| {
+                panic!(
+                    "fixture block state at ({}, {}, {}) must resolve: {}",
+                    block.x, block.y, block.z, block.state
+                )
+            });
+        source.set_block(wx, wy, wz, state);
         min_x = min_x.min(wx);
         max_x = max_x.max(wx);
         min_z = min_z.min(wz);

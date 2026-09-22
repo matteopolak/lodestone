@@ -1,5 +1,6 @@
 //! End lifecycle replay keeps a source's decoration context source-centred.
 
+use lodestone_data::{block::Block, block_states::StateId};
 use lodestone_server::end_chunk_source;
 use lodestone_worldgen_parity::lifecycle::{
     LifecycleCompletion, LifecycleMaterializer, LifecycleReplayEvent, LifecycleReplayPlan,
@@ -16,7 +17,7 @@ fn source_window() -> Vec<(i32, i32)> {
         .collect()
 }
 
-fn focus_after_direct_sources(sources: &[(i32, i32)]) -> String {
+fn focus_after_direct_sources(sources: &[(i32, i32)]) -> StateId {
     let admitted = source_window();
     let mut materializer = LifecycleMaterializer::new(end_chunk_source(SEED));
     for chunk in admitted {
@@ -27,8 +28,7 @@ fn focus_after_direct_sources(sources: &[(i32, i32)]) -> String {
     }
     let snapshot = materializer.snapshot_for_packet(TARGET);
     snapshot
-        .block_state(FOCUS_LOCAL.0, FOCUS_LOCAL.1, FOCUS_LOCAL.2)
-        .to_owned()
+        .block_state_id(FOCUS_LOCAL.0, FOCUS_LOCAL.1, FOCUS_LOCAL.2)
 }
 
 #[test]
@@ -50,10 +50,11 @@ fn authenticated_end_replay_uses_the_source_context_for_chorus() {
     let mut materializer = LifecycleMaterializer::new(end_chunk_source(SEED));
     materializer.replay_plan(&plan);
     let snapshot = materializer.snapshot_for_packet(TARGET);
-    let focus = snapshot.block_state(FOCUS_LOCAL.0, FOCUS_LOCAL.1, FOCUS_LOCAL.2);
-    assert!(
-        focus.starts_with("minecraft:chorus_plant["),
-        "source {CHORUS_SOURCE:?} must write the target focus cell, got {focus}",
+    let focus = snapshot.block_state_id(FOCUS_LOCAL.0, FOCUS_LOCAL.1, FOCUS_LOCAL.2);
+    assert_eq!(
+        focus.block(),
+        Block::ChorusPlant,
+        "source {CHORUS_SOURCE:?} must write the target focus cell, got {focus:?}",
     );
 }
 
@@ -69,6 +70,6 @@ fn withholding_the_chorus_source_is_a_live_negative_control() {
     let complete_focus = focus_after_direct_sources(&complete);
     let withheld_focus = focus_after_direct_sources(&withheld);
 
-    assert!(complete_focus.starts_with("minecraft:chorus_plant["));
-    assert_eq!(withheld_focus, "minecraft:air");
+    assert_eq!(complete_focus.block(), Block::ChorusPlant);
+    assert_eq!(withheld_focus, Block::Air.default_state());
 }

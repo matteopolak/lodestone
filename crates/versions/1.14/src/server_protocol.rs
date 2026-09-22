@@ -308,26 +308,29 @@ fn json_string(value: &str) -> String {
     escaped
 }
 
-fn wire_state(canonical: u32) -> Result<u32, ChunkEncodeError> {
-    wire_state_for_578(canonical).ok_or_else(|| {
+fn wire_state(canonical: StateId) -> Result<u32, ChunkEncodeError> {
+    wire_state_for_578(canonical.raw()).ok_or_else(|| {
         ChunkEncodeError::new(format!(
-            "canonical state {canonical} has no exact protocol-578 representation"
+            "canonical state {} has no exact protocol-578 representation",
+            canonical.raw()
         ))
     })
 }
 
-fn wire_state_754(canonical: u32) -> Result<u32, ChunkEncodeError> {
-    wire_state_for_754(canonical).ok_or_else(|| {
+fn wire_state_754(canonical: StateId) -> Result<u32, ChunkEncodeError> {
+    wire_state_for_754(canonical.raw()).ok_or_else(|| {
         ChunkEncodeError::new(format!(
-            "canonical state {canonical} has no exact protocol-754 representation"
+            "canonical state {} has no exact protocol-754 representation",
+            canonical.raw()
         ))
     })
 }
 
-fn wire_state_498(canonical: u32) -> Result<u32, ChunkEncodeError> {
-    wire_state_for_498(canonical).ok_or_else(|| {
+fn wire_state_498(canonical: StateId) -> Result<u32, ChunkEncodeError> {
+    wire_state_for_498(canonical.raw()).ok_or_else(|| {
         ChunkEncodeError::new(format!(
-            "canonical state {canonical} has no exact protocol-498 representation"
+            "canonical state {} has no exact protocol-498 representation",
+            canonical.raw()
         ))
     })
 }
@@ -352,7 +355,7 @@ fn pack_indices(values: &[u32], bits: u8) -> Vec<u64> {
     longs
 }
 
-fn encode_section(blob: &mut Writer, states: &[u32]) -> Result<(), ChunkEncodeError> {
+fn encode_section(blob: &mut Writer, states: &[StateId]) -> Result<(), ChunkEncodeError> {
     let mut palette = Vec::new();
     let mut indices = Vec::with_capacity(states.len());
     let mut palette_indices = BTreeMap::new();
@@ -392,7 +395,7 @@ fn encode_section(blob: &mut Writer, states: &[u32]) -> Result<(), ChunkEncodeEr
     Ok(())
 }
 
-fn encode_section_498(blob: &mut Writer, states: &[u32]) -> Result<(), ChunkEncodeError> {
+fn encode_section_498(blob: &mut Writer, states: &[StateId]) -> Result<(), ChunkEncodeError> {
     let mut palette = Vec::new();
     let mut indices = Vec::with_capacity(states.len());
     let mut palette_indices = BTreeMap::new();
@@ -439,8 +442,7 @@ fn encode_heightmaps(column: &ChunkColumn) -> Result<Vec<u8>, ChunkEncodeError> 
             let height = (MIN_Y..MIN_Y + HEIGHT)
                 .rev()
                 .find(|&y| {
-                    column.block_state_id(x as i32, y, z as i32)
-                        != lodestone_data::block_states::air_state_id()
+                    column.block_state_id(x as i32, y, z as i32) != StateId::AIR
                 })
                 .map_or(0, |y| u32::try_from(y + 1).expect("height is non-negative"));
             heightmap.set(x, z, height);
@@ -483,7 +485,7 @@ fn encode_chunk_body(cx: i32, cz: i32, column: &ChunkColumn) -> Result<Vec<u8>, 
         }
     }
 
-    let air = lodestone_data::block_states::air_state_id();
+    let air = StateId::AIR;
     let mut bitmask = 0_u32;
     let mut sections = Writer::default();
     for section in 0..SECTION_COUNT {
@@ -553,7 +555,7 @@ fn encode_chunk_body_754(
         }
     }
 
-    let air = lodestone_data::block_states::air_state_id();
+    let air = StateId::AIR;
     let wire_kind = PaletteKind::block_states().with_framing(LongArrayFraming::Prefixed);
     let mut bitmask = 0_u32;
     let mut sections = Writer::default();
@@ -627,7 +629,7 @@ fn encode_chunk_body_498(
         }
     }
 
-    let air = lodestone_data::block_states::air_state_id();
+    let air = StateId::AIR;
     let mut bitmask = 0_u32;
     let mut sections = Writer::default();
     for section in 0..SECTION_COUNT {
@@ -679,7 +681,7 @@ impl V578ServerProtocol {
         z: i32,
         state: StateId,
     ) -> Result<ServerDirective, ChunkEncodeError> {
-        let wire = wire_state(state.raw())?;
+        let wire = wire_state(state)?;
         let mut payload = Writer::default();
         payload.i64(pack_position(BlockPos::new(x, y, z)));
         payload.var_i32(i32::try_from(wire).expect("protocol-578 state fits in i32"));
@@ -978,7 +980,7 @@ impl V754ServerProtocol {
         z: i32,
         state: StateId,
     ) -> Result<ServerDirective, ChunkEncodeError> {
-        let wire = wire_state_754(state.raw())?;
+        let wire = wire_state_754(state)?;
         let mut payload = Writer::default();
         payload.i64(pack_position(BlockPos::new(x, y, z)));
         payload.var_i32(i32::try_from(wire).expect("protocol-754 state fits in i32"));
