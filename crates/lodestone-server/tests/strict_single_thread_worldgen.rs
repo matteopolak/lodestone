@@ -28,7 +28,7 @@ use lodestone_v26_2::V770ServerProtocol;
 use lodestone_server::dimension::Dimension as ServerDimension;
 use lodestone_worldgen::counters;
 #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
-use lodestone_worldgen::counters::{Stage, StageEvent, STAGE_COUNT};
+use lodestone_worldgen::counters::{RegionPhase, Stage, StageEvent, STAGE_COUNT};
 use lodestone_worldgen::stage_schedule::{Dimension as WorldgenDimension, GenerationTarget};
 
 #[cfg(target_os = "macos")]
@@ -104,11 +104,16 @@ static STAGE_INSTRUCTIONS: [AtomicU64; STAGE_COUNT] =
 #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
 static STAGE_CYCLES: [AtomicU64; STAGE_COUNT] = [const { AtomicU64::new(0) }; STAGE_COUNT];
 #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
+static REGION_INSTRUCTIONS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+#[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
+static REGION_CYCLES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+#[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
 static PMU_READ_COST: OnceLock<(u64, u64)> = OnceLock::new();
 
 #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
 thread_local! {
     static STAGE_START: Cell<Option<(Stage, u64, u64)>> = const { Cell::new(None) };
+    static REGION_START: Cell<Option<(RegionPhase, u64, u64)>> = const { Cell::new(None) };
 }
 
 #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
@@ -148,6 +153,43 @@ fn stage_pmu_observer(stage: Stage, event: StageEvent) {
 }
 
 #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
+fn region_pmu_observer(phase: RegionPhase, event: StageEvent) {
+    match event {
+        StageEvent::Enter => {
+            let (instructions, cycles) = retired().expect("region PMU requires retired counters");
+            REGION_START.with(|start| {
+                assert!(start.get().is_none(), "region PMU scopes may not overlap");
+                start.set(Some((phase, instructions, cycles)));
+            });
+        }
+        StageEvent::Exit => {
+            let (started_phase, before_instructions, before_cycles) = REGION_START
+                .with(|start| start.take())
+                .expect("region PMU exit without an enter");
+            assert_eq!(started_phase, phase, "region PMU scope changed phases");
+            let (after_instructions, after_cycles) =
+                retired().expect("region PMU requires retired counters");
+            let (read_instructions, read_cycles) = *PMU_READ_COST
+                .get()
+                .expect("region PMU read cost must be initialized");
+            let index = phase as usize;
+            REGION_INSTRUCTIONS[index].fetch_add(
+                after_instructions
+                    .saturating_sub(before_instructions)
+                    .saturating_sub(read_instructions),
+                Relaxed,
+            );
+            REGION_CYCLES[index].fetch_add(
+                after_cycles
+                    .saturating_sub(before_cycles)
+                    .saturating_sub(read_cycles),
+                Relaxed,
+            );
+        }
+    }
+}
+
+#[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
 fn install_stage_pmu() {
     let before = retired().expect("stage PMU requires retired counters");
     let after = retired().expect("stage PMU requires retired counters");
@@ -166,6 +208,10 @@ fn install_stage_pmu() {
     assert!(
         counters::install_stage_observer(stage_pmu_observer),
         "stage PMU observer can only be installed once"
+    );
+    assert!(
+        counters::install_region_observer(region_pmu_observer),
+        "region PMU observer can only be installed once"
     );
 }
 
@@ -230,6 +276,14 @@ fn report_stage_pmu(total: &Measurement<impl Sized>, columns: usize, phase: &str
         Stage::Intern,
     ] {
         report(counters::STAGE_NAMES[stage as usize], instructions[stage as usize], cycles[stage as usize]);
+    }
+    for (name, index) in [
+        ("replay_context", 0),
+        ("mutable_target", 1),
+        ("mutable_padding", 2),
+        ("snapshot_finalization", 3),
+    ] {
+        report(name, REGION_INSTRUCTIONS[index].load(Relaxed), REGION_CYCLES[index].load(Relaxed));
     }
 }
 

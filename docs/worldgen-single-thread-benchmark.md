@@ -41,6 +41,11 @@ read from each interval, and do not enable the ordinary generation counters.
 The session remainder includes production admission, materialization, ledger,
 publication, and diagnostic observer overhead; compare it with the uninstrumented
 `production_request` total rather than treating it as a generator stage.
+The same feature reports four non-overlapping lifecycle regions: replay-context
+preparation, requested-target mutable advancement, sparse-padding completion, and
+packet-snapshot finalization. These regions explain the session remainder without
+changing the default build; packet light and encoding remain the separate
+`light_encode` metric.
 
 ## How to change it
 
