@@ -1022,6 +1022,20 @@ impl<T: LifecycleWorldgenSource + ?Sized> LifecycleWorldgenSource for &T {
         )
     }
 
+    fn target_feature_result_direct_with_replay_context_and_epoch_revisions(
+        &self,
+        target: ChunkPos,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
+        resident: &BTreeMap<ChunkPos, ChunkColumn>,
+        context: &Self::ReplayContext,
+        epoch: &mut lodestone_worldgen::overworld::RegionFeatureEpoch,
+        revisions: &[(AbsoluteCell, StateId)],
+    ) -> Option<LifecycleTargetFeatureResult> {
+        LifecycleWorldgenSource::target_feature_result_direct_with_replay_context_and_epoch_revisions(
+            *self, target, overrides, resident, context, epoch, revisions,
+        )
+    }
+
     fn target_feature_result_sparse_with_replay_context(
         &self,
         target: ChunkPos,
@@ -1053,6 +1067,20 @@ impl<T: LifecycleWorldgenSource + ?Sized> LifecycleWorldgenSource for &T {
             resident,
             context,
             epoch,
+        )
+    }
+
+    fn target_feature_result_sparse_with_replay_context_and_epoch_revisions(
+        &self,
+        target: ChunkPos,
+        overrides: &BTreeMap<AbsoluteCell, StateId>,
+        resident: &BTreeMap<ChunkPos, ChunkColumn>,
+        context: &Self::ReplayContext,
+        epoch: &mut lodestone_worldgen::overworld::RegionFeatureEpoch,
+        revisions: &[(AbsoluteCell, StateId)],
+    ) -> Option<LifecycleSparseTargetFeatureResult> {
+        LifecycleWorldgenSource::target_feature_result_sparse_with_replay_context_and_epoch_revisions(
+            *self, target, overrides, resident, context, epoch, revisions,
         )
     }
 
@@ -4629,6 +4657,36 @@ mod tests {
                 local_features: Vec::new(),
             })
         }
+
+        fn target_feature_result_direct_with_replay_context_and_epoch_revisions(
+            &self,
+            _target: ChunkPos,
+            _overrides: &BTreeMap<AbsoluteCell, StateId>,
+            _resident: &BTreeMap<ChunkPos, ChunkColumn>,
+            context: &Self::ReplayContext,
+            _epoch: &mut lodestone_worldgen::overworld::RegionFeatureEpoch,
+            revisions: &[(AbsoluteCell, StateId)],
+        ) -> Option<LifecycleTargetFeatureResult> {
+            assert_eq!(*context, 7);
+            assert_eq!(revisions, &[((2, 3, 4), StateId::AIR), ((2, 3, 4), sid("minecraft:stone"))]);
+            self.direct_calls.fetch_add(2, Ordering::Relaxed);
+            None
+        }
+
+        fn target_feature_result_sparse_with_replay_context_and_epoch_revisions(
+            &self,
+            _target: ChunkPos,
+            _overrides: &BTreeMap<AbsoluteCell, StateId>,
+            _resident: &BTreeMap<ChunkPos, ChunkColumn>,
+            context: &Self::ReplayContext,
+            _epoch: &mut lodestone_worldgen::overworld::RegionFeatureEpoch,
+            revisions: &[(AbsoluteCell, StateId)],
+        ) -> Option<LifecycleSparseTargetFeatureResult> {
+            assert_eq!(*context, 7);
+            assert_eq!(revisions, &[((2, 3, 4), StateId::AIR), ((2, 3, 4), sid("minecraft:stone"))]);
+            self.direct_calls.fetch_add(4, Ordering::Relaxed);
+            None
+        }
     }
 
     impl LifecycleWorldgenSource for TargetReplaySource {
@@ -5990,6 +6048,29 @@ mod tests {
         materializer.finish_target(target);
         assert_eq!(direct_calls.load(Ordering::Relaxed), 1);
         assert!(materializer.has_direct_target_output());
+    }
+
+    #[test]
+    fn borrowed_source_preserves_both_epoch_revision_hooks() {
+        let source = ContextDirectSource {
+            direct_calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let generator = crate::overworld_generator(42);
+        let context = generator.lifecycle_replay_context(0, 0);
+        let mut epoch = generator.begin_region_feature_epoch_from_context(&context, &[(0, 0)]);
+        let revisions = [((2, 3, 4), StateId::AIR), ((2, 3, 4), sid("minecraft:stone"))];
+        let overrides = BTreeMap::new();
+        let resident = BTreeMap::new();
+        let direct = <&ContextDirectSource as LifecycleWorldgenSource>::
+            target_feature_result_direct_with_replay_context_and_epoch_revisions(
+                &&source, (0, 0), &overrides, &resident, &7, &mut epoch, &revisions,
+            );
+        let sparse = <&ContextDirectSource as LifecycleWorldgenSource>::
+            target_feature_result_sparse_with_replay_context_and_epoch_revisions(
+                &&source, (0, 0), &overrides, &resident, &7, &mut epoch, &revisions,
+            );
+        assert_eq!(source.direct_calls.load(Ordering::Relaxed), 6);
+        assert!(direct.is_none() && sparse.is_none());
     }
 
     #[test]
