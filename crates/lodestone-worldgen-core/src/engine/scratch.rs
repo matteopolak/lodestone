@@ -729,6 +729,21 @@ impl Scratch {
         (self.column_cell_y[slot] == Some(cell_y)).then(|| self.column_values[slot][offset])
     }
 
+    #[inline]
+    pub(crate) fn copy_column_values(
+        &self,
+        slot: usize,
+        cell_y: i32,
+        offset: usize,
+        output: &mut [f64],
+    ) -> bool {
+        if self.column_cell_y[slot] != Some(cell_y) {
+            return false;
+        }
+        output.copy_from_slice(&self.column_values[slot][offset..offset + output.len()]);
+        true
+    }
+
     pub(crate) fn take_column_values(&mut self, slot: usize) -> Vec<f64> {
         self.column_cell_y[slot] = None;
         std::mem::take(&mut self.column_values[slot])

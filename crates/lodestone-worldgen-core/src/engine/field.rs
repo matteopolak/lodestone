@@ -125,19 +125,60 @@ impl<'a> Field<'a> {
             .scratch
             .cell_column_indices(x.div_euclid(cw), z.div_euclid(cw));
         self.scratch.begin_column();
-        let ch = self.geom.cell_height;
-        for (offset, value) in output.iter_mut().enumerate() {
-            let y = y_start + offset as i32;
-            self.column_y = Some((
-                y,
-                y.div_euclid(ch),
-                f64::from(y.rem_euclid(ch)) / f64::from(ch),
-            ));
-            *value = self.eval::<true>(id, x, y, z);
+        let root = self.ops[id as usize];
+        if root.kind == OpKind::Interpolated {
+            self.eval_interpolated_column(root, x, z, y_start, output);
+        } else {
+            let ch = self.geom.cell_height;
+            for (offset, value) in output.iter_mut().enumerate() {
+                let y = y_start + offset as i32;
+                self.column_y = Some((
+                    y,
+                    y.div_euclid(ch),
+                    f64::from(y.rem_euclid(ch)) / f64::from(ch),
+                ));
+                *value = self.eval::<true>(id, x, y, z);
+            }
         }
         self.column_xz = None;
         self.cell_xz = None;
         self.column_y = None;
+    }
+
+    fn eval_interpolated_column(
+        &mut self,
+        op: Op,
+        x: i32,
+        z: i32,
+        y_start: i32,
+        output: &mut [f64],
+    ) {
+        let ch = self.geom.cell_height;
+        let slot = op.b as usize;
+        let mut output_offset = 0;
+        while output_offset < output.len() {
+            let y = y_start + output_offset as i32;
+            let cell_y = y.div_euclid(ch);
+            let cell_offset = y.rem_euclid(ch) as usize;
+            let len = (ch as usize - cell_offset).min(output.len() - output_offset);
+            let range = output_offset..output_offset + len;
+            if !self.scratch.copy_column_values(
+                slot,
+                cell_y,
+                cell_offset,
+                &mut output[range.clone()],
+            ) {
+                self.interpolate_cell_column(op.a, slot, x, z, cell_y);
+                let copied = self.scratch.copy_column_values(
+                    slot,
+                    cell_y,
+                    cell_offset,
+                    &mut output[range],
+                );
+                debug_assert!(copied, "cell-column interpolation was populated");
+            }
+            output_offset += len;
+        }
     }
 
     pub(crate) fn eval_overworld_final_density_cell(

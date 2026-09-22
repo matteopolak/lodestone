@@ -126,6 +126,13 @@ queries use the interpolating instance, while corner and point queries use the
 non-interpolating instance; recursive calls no longer carry a runtime mode
 branch through every operator.
 
+When a column's root is `interpolated`, the field walks contiguous Y slices of
+each interpolation cell directly. A missing slice uses the existing cell-column
+interpolation and publishes its full vertical cache before copying the requested
+range; a cached slice only copies that range. Other roots keep the ordinary
+per-Y evaluator, and the shared corner-demand and cache-publication order stay
+with the existing cell-column path.
+
 The aquifer route control uses the same Darwin process counters to compare a
 16-level recursive point tree with its reusable compiled program:
 ```text

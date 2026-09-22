@@ -628,30 +628,37 @@ mod tests {
     }
 
     #[test]
-    fn column_run_matches_point_queries_bit_for_bit() {
+    fn interpolated_column_partial_negative_run_matches_independent_points_bit_for_bit() {
         let root = Density::Interpolated {
-            inner: Box::new(Density::YClampedGradient {
+            inner: Box::new(Density::Square(Box::new(Density::YClampedGradient {
                 from_y: -16.0,
                 to_y: 32.0,
                 from_value: -1.0,
                 to_value: 1.0,
-            }),
+            }))),
             slot: 0,
         };
-        let sampler = NoiseChunkSampler::new_bounded(
-            root,
+        let program = Program::compile(&root);
+        let bounds = Bounds {
+            x: (-16, 15),
+            y: (-24, 31),
+            z: (-16, 15),
+        };
+        let column_sampler = NoiseChunkSampler::from_program(
+            program.clone(),
             1,
             4,
             8,
-            (0, 15),
-            (-16, 31),
-            (0, 15),
+            Some(bounds),
         );
-        let mut column = vec![0.0; 48];
-        sampler.final_density_column(7, 9, -16, &mut column);
+        let point_sampler = NoiseChunkSampler::from_program(program, 1, 4, 8, Some(bounds));
+        let y_start = -15;
+        let mut column = vec![0.0; 31];
+        column_sampler.final_density_column(-7, 9, y_start, &mut column);
         for (offset, got) in column.iter().enumerate() {
-            let want = sampler.final_density(7, -16 + offset as i32, 9);
-            assert_eq!(got.to_bits(), want.to_bits(), "y={}", -16 + offset as i32);
+            let y = y_start + offset as i32;
+            let want = point_sampler.final_density(-7, y, 9);
+            assert_eq!(got.to_bits(), want.to_bits(), "y={y}");
         }
     }
 
