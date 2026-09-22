@@ -4,21 +4,9 @@
 //!
 //! # What it is
 //!
-//! Unit 8 of [`docs/plans/worldgen-rewrite.md`](../../../../../docs/plans/worldgen-rewrite.md),
-//! candidate 2 of its "Vegetation: cost per draw" section. Every ground check,
-//! every trunk-position test, every air-or-leaves anchor and every heightmap cell
-//! used to cost:
-//!
-//! 1. Reverse state-text lookup — an `RwLock` **read guard**, on a cache line
-//!    shared by every concurrent generator call (the shape `4307b59` was reverted
-//!    for, at 289 concurrent columns);
-//! 2. `split('[')` to recover the base name;
-//! 3. a string-set probe — hashing ~20 bytes of UTF-8.
-//!
-//! `docs/worldgen-vegetation-census.md` counts **74,745 ground rejections in one
-//! 136-chunk sweep**, and that is only the rejections that reach a census bump —
-//! the tree footprint scan, the leaf rows and the two heightmap scans do far more.
-//! Here the same question is one relaxed atomic load and a bit test.
+//! Membership and property rewrites are resolved from canonical numeric state
+//! ids. Tag checks use fixed bitsets; property rewrites use a bounded atomic
+//! direct-mapped cache and recompute on collision.
 //!
 //! # How it works
 //!
@@ -59,8 +47,6 @@
 //!   string. **`Fluid` must stay base-aware**: `carver/mod.rs` writes
 //!   `minecraft:water[level=0]`, so a fluid is not a fixed handful of ids.
 
-use lodestone_worldgen_core::hash::FastMap;
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicI8, AtomicU64, Ordering};
 
 use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey};
@@ -177,8 +163,8 @@ impl Tag {
 /// Number of bitsets in an [`IdTags`].
 pub(super) const TAG_COUNT: usize = Tag::ALL.len();
 
-/// The whole [`StateId`] space: `StateId` wraps a `u16`, so this is exact rather
-/// than a guess, and the table can never need to grow.
+/// The whole [`StateId`] space. The generated count is exact, so the table can
+/// never need to grow.
 const ID_SPACE: usize = lodestone_data::block_states::STATE_COUNT as usize;
 
 /// 64-bit words per tag.
@@ -217,29 +203,100 @@ pub(super) struct IdTags {
     /// cell it visits, so it is as hot as a tag test and gets the same treatment.
     /// 64 KiB, one byte per id — the property's range is `0..=7`.
     distance: Box<[AtomicI8]>,
-    /// Memo for [`VegTags::rewrite`]: `(state, what) -> rewritten
-    /// state`, with `None` recorded for a state that does not carry the property at
-    /// all (so a repeated miss is still one hash lookup, not a repeated string
-    /// scan).
-    ///
-    /// Keys use canonical state ids, which are process-wide and therefore valid
-    /// across every generator and grid.
-    ///
-    /// A lock rather than an atomic table because the key space is
-    /// two-dimensional and sparse — only leaf-ish states carry `distance` or
-    /// `waterlogged`. It is taken **per rewritten leaf**, tens of times per
-    /// column, never per block; and at steady state every entry is present, so it
-    /// is a read guard and a hash, with no allocation.
-    /// [`FastMap`], not the default hasher — U17 measured this among the
-    /// vegetation maps still paying SipHash (0.8% of all worldgen CPU, shared with
-    /// `VegGrid`'s overlay and `tree.rs`'s BFS visited set) and left the row for
-    /// whoever owned these files; U19 took it.
-    ///
-    /// Order-safe because this map is **never iterated**: it is a pure memo reached
-    /// only through `get` and `insert` (grep the field name, not the file —
-    /// that is the check `docs/worldgen-fast-hashing.md` prescribes). Nothing about
-    /// a rewrite's *value* changes; only which bucket it lands in.
-    rewrites: RwLock<FastMap<(u32, Rewrite), Option<u32>>>,
+    /// Fixed-size lock-free memo keyed by numeric state id and rewrite ordinal.
+    /// Collisions only recompute a value, so the cache is bounded and never
+    /// affects output.
+    rewrites: RewriteCache,
+}
+
+const REWRITE_CACHE_BITS: usize = 10;
+const REWRITE_CACHE_SLOTS: usize = 1 << REWRITE_CACHE_BITS;
+
+struct RewriteCache {
+    entries: Box<[AtomicU64]>,
+}
+
+impl Default for RewriteCache {
+    fn default() -> Self {
+        Self {
+            entries: (0..REWRITE_CACHE_SLOTS)
+                .map(|_| AtomicU64::new(0))
+                .collect(),
+        }
+    }
+}
+
+impl RewriteCache {
+    #[inline(always)]
+    fn slot(key: u32) -> usize {
+        (key.wrapping_mul(0x9e37_79b9) >> (u32::BITS as usize - REWRITE_CACHE_BITS)) as usize
+    }
+
+    #[inline(always)]
+    fn key(id: StateId, what: Rewrite) -> u32 {
+        (id.raw() << 5) | u32::from(what.code())
+    }
+
+    #[inline(always)]
+    fn get(&self, key: u32) -> Option<Option<StateId>> {
+        let entry = self.entries[Self::slot(key)].load(Ordering::Relaxed);
+        if entry >> 32 != u64::from(key) + 1 {
+            return None;
+        }
+        let value = entry as u32;
+        Some((value != 0).then(|| StateId::new(value - 1)).flatten())
+    }
+
+    #[inline(always)]
+    fn insert(&self, key: u32, value: Option<StateId>) {
+        let encoded = value.map_or(0, |id| id.raw() + 1);
+        self.entries[Self::slot(key)].store(
+            ((u64::from(key) + 1) << 32) | u64::from(encoded),
+            Ordering::Relaxed,
+        );
+    }
+}
+
+#[cfg(feature = "gen-counters")]
+thread_local! {
+    static REWRITE_CACHE_HITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static REWRITE_CACHE_MISSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(feature = "gen-counters")]
+#[inline(always)]
+fn rewrite_cache_hit() {
+    REWRITE_CACHE_HITS.with(|count| count.set(count.get().wrapping_add(1)));
+}
+
+#[cfg(not(feature = "gen-counters"))]
+#[inline(always)]
+fn rewrite_cache_hit() {}
+
+#[cfg(feature = "gen-counters")]
+#[inline(always)]
+fn rewrite_cache_miss() {
+    REWRITE_CACHE_MISSES.with(|count| count.set(count.get().wrapping_add(1)));
+}
+
+#[cfg(not(feature = "gen-counters"))]
+#[inline(always)]
+fn rewrite_cache_miss() {}
+
+/// Returns `(hits, misses)` for this thread's bounded rewrite cache.
+#[cfg(feature = "gen-counters")]
+pub fn rewrite_cache_stats() -> (u64, u64) {
+    (
+        REWRITE_CACHE_HITS.with(std::cell::Cell::get),
+        REWRITE_CACHE_MISSES.with(std::cell::Cell::get),
+    )
+}
+
+/// Clears this thread's bounded rewrite-cache counters.
+#[cfg(feature = "gen-counters")]
+pub fn reset_rewrite_cache_stats() {
+    REWRITE_CACHE_HITS.with(|count| count.set(0));
+    REWRITE_CACHE_MISSES.with(|count| count.set(0));
 }
 
 /// A block-state property edit vegetal decoration performs on an
@@ -260,6 +317,20 @@ pub(super) enum Rewrite {
     Axis(Axis),
 }
 
+impl Rewrite {
+    #[inline(always)]
+    fn code(self) -> u8 {
+        match self {
+            Self::Distance(n) => n.min(15),
+            Self::Waterlogged(false) => 16,
+            Self::Waterlogged(true) => 17,
+            Self::Axis(Axis::X) => 18,
+            Self::Axis(Axis::Y) => 19,
+            Self::Axis(Axis::Z) => 20,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum Axis {
     X,
@@ -275,7 +346,7 @@ impl Default for IdTags {
                 .map(|_| AtomicU64::new(0))
                 .collect(),
             distance: (0..ID_SPACE).map(|_| AtomicI8::new(-1)).collect(),
-            rewrites: RwLock::new(FastMap::default()),
+            rewrites: RewriteCache::default(),
         }
     }
 }
@@ -422,8 +493,8 @@ impl VegTags {
     /// The id of `id`'s state with one property changed, or `None` if `id` does not
     /// carry that property at all.
     ///
-    /// Memoised (see [`IdTags::rewrites`]), so at steady state this is a read
-    /// guard and a hash lookup with no string work and no allocation. The `None`
+    /// Memoised (see [`IdTags::rewrites`]), so at steady state this is one
+    /// atomic lookup with no string work and no allocation. The `None`
     /// answer is memoised too — `try_place_leaf` asks for a `waterlogged` rewrite
     /// on every leaf it places, and a species whose leaves have no such property
     /// would otherwise re-scan the name every time.
@@ -432,16 +503,12 @@ impl VegTags {
         id: StateId,
         what: Rewrite,
     ) -> Option<StateId> {
-        let key = (id.raw(), what);
-        if let Some(&hit) = self
-            .id_tags
-            .rewrites
-            .read()
-            .expect("veg id rewrite memo poisoned")
-            .get(&key)
-        {
-            return hit.and_then(StateId::new);
+        let key = RewriteCache::key(id, what);
+        if let Some(hit) = self.id_tags.rewrites.get(key) {
+            rewrite_cache_hit();
+            return hit;
         }
+        rewrite_cache_miss();
         let (property, value) = match what {
             Rewrite::Distance(n) => (PropertyKey::Distance, distance_property(n.min(15))),
             Rewrite::Waterlogged(true) => (PropertyKey::Waterlogged, BuiltinPropertyValue::True),
@@ -454,11 +521,7 @@ impl VegTags {
             .with_builtin(property, value)
             .ok()
             .and_then(|properties| Properties::state_for_block(id.block(), &properties));
-        self.id_tags
-            .rewrites
-            .write()
-            .expect("veg id rewrite memo poisoned")
-            .insert(key, out.map(StateId::raw));
+        self.id_tags.rewrites.insert(key, out);
         out
     }
 
@@ -629,5 +692,38 @@ mod tests {
                 .and_then(|value| value.builtin_value()),
             Some(BuiltinPropertyValue::Value3),
         );
+    }
+
+    #[test]
+    fn bounded_rewrite_cache_round_trips_empty_and_present_values() {
+        let cache = RewriteCache::default();
+        let id = StateId::new(0).expect("state zero is generated");
+        let key = RewriteCache::key(id, Rewrite::Waterlogged(false));
+        assert_eq!(cache.get(key), None);
+        cache.insert(key, None);
+        assert_eq!(cache.get(key), Some(None));
+        cache.insert(key, Some(id));
+        assert_eq!(cache.get(key), Some(Some(id)));
+    }
+
+    #[test]
+    fn rewrite_distance_keys_collapse_to_the_property_range() {
+        let id = StateId::new(0).expect("state zero is generated");
+        assert_eq!(
+            RewriteCache::key(id, Rewrite::Distance(15)),
+            RewriteCache::key(id, Rewrite::Distance(u8::MAX)),
+        );
+    }
+
+    #[cfg(feature = "gen-counters")]
+    #[test]
+    fn rewrite_cache_counters_distinguish_first_lookup_from_reuse() {
+        let tags = VegTags::default();
+        let id = StateId::AIR;
+        reset_rewrite_cache_stats();
+        let _ = tags.rewrite(id, Rewrite::Waterlogged(false));
+        assert_eq!(rewrite_cache_stats(), (0, 1));
+        let _ = tags.rewrite(id, Rewrite::Waterlogged(false));
+        assert_eq!(rewrite_cache_stats(), (1, 1));
     }
 }
