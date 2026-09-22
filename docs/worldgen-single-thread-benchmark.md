@@ -47,11 +47,11 @@ packet-snapshot finalization. These regions explain the session remainder withou
 changing the default build; packet light and encoding remain the separate
 `light_encode` metric.
 
-The surface stage receives a typed built-in biome and snow-temperature result from
-the region prefix. This keeps the production predicate loop free of resource-name
-parsing and temperature-table lookups; string-based biome callbacks remain only on
-compatibility paths. Surface measurements therefore include the typed callback
-contract used by production generation.
+The production prefix carries its sixteen surface biomes as `BiomeRef` values with
+their snow-temperature results. Surface and top-layer consumers keep that typed
+handoff through the final output; resource-name parsing and string callbacks remain
+only at configuration or compatibility boundaries. Surface measurements therefore
+include the typed callback contract used by production generation.
 
 ## How to change it
 

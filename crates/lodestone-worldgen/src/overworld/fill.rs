@@ -21,6 +21,7 @@ use crate::engine::Bounds;
 use crate::engine::{PointProgram, Program, XzProductLattice};
 use crate::dense_grid::BaseStateFacts;
 use lodestone_data::block_states::StateId;
+use lodestone_data::biomes::BiomeRef;
 use crate::rng::RandomSource;
 use crate::surface::{PreClass, PreState, SurfaceDiff};
 
@@ -1421,7 +1422,7 @@ impl OverworldGenerator {
         cz: i32,
         aquifer: &AquiferSystem,
         heights: [i32; 256],
-        biome_quarts: [(String, bool); 16],
+        biome_quarts: [(BiomeRef, bool); 16],
         biome_cells: Arc<crate::overworld::biome_cells::BiomeCells>,
         carrier: PackedStateCarrier,
     ) -> PreOreResult {
@@ -1491,7 +1492,7 @@ impl OverworldGenerator {
         cz: i32,
         aquifer: &AquiferSystem,
         heights: &[i32; 256],
-        biome_quarts: &[(String, bool); 16],
+        biome_quarts: &[(BiomeRef, bool); 16],
         base_x: i32,
         base_z: i32,
         world: crate::dense_grid::DenseBlockGrid,
@@ -1517,7 +1518,7 @@ impl OverworldGenerator {
         cz: i32,
         aquifer: &AquiferSystem,
         heights: &[i32; 256],
-        biome_quarts: &[(String, bool); 16],
+        biome_quarts: &[(BiomeRef, bool); 16],
         base_x: i32,
         base_z: i32,
         world: crate::dense_grid::DenseBlockGrid,
@@ -1545,7 +1546,7 @@ impl OverworldGenerator {
         cz: i32,
         aquifer: &AquiferSystem,
         heights: &[i32; 256],
-        biome_quarts: &[(String, bool); 16],
+        biome_quarts: &[(BiomeRef, bool); 16],
         base_x: i32,
         base_z: i32,
         world: crate::dense_grid::DenseBlockGrid,
@@ -1565,9 +1566,16 @@ impl OverworldGenerator {
             if !(0..16).contains(&lx) || !(0..16).contains(&lz) {
                 return None;
             }
-            let (biome, cold) = &biome_quarts[((lz >> 2) * 4 + (lx >> 2)) as usize];
-            self.surface
-                .top_material(x, y, z, under_fluid, &heightmap_fn, biome, *cold)
+            let (biome, cold) = biome_quarts[((lz >> 2) * 4 + (lx >> 2)) as usize];
+            self.surface.top_material_typed(
+                x,
+                y,
+                z,
+                under_fluid,
+                &heightmap_fn,
+                biome,
+                cold,
+            )
         };
         let mut carvers_for_source = |source_x: i32, source_z: i32| -> &[CarverConfig] {
             let biome = if let Some(cursor) = cursor.as_deref_mut() {

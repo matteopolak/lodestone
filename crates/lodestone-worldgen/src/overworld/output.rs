@@ -6,7 +6,7 @@
 
 use super::OverworldGenerator;
 use crate::generated_storage::CompactBlockStorage;
-use lodestone_data::biomes::{BiomeRef, BuiltinBiome};
+use lodestone_data::biomes::BiomeRef;
 use lodestone_data::block_states::StateId as CanonicalStateId;
 
 /// Which stages a [`GeneratedColumn`] carries — the wire-facing tag
@@ -45,36 +45,9 @@ impl OverworldGenerator {
     /// that were never touched by vegetation and gets an empty
     /// `spawn_candidates` here regardless of what `world` contains — two
     /// independent reasons for the same empty list, not one.
-    pub(super) fn intern_from_dense(
-        &self,
-        cx: i32,
-        cz: i32,
-        stage: GenStage,
-        world: crate::dense_grid::DenseBlockGrid,
-        biome_quarts: [(String, bool); 16],
-        biome_cells: super::BiomeCells,
-        block_entities: Vec<super::block_entities::GeneratedBlockEntity>,
-    ) -> GeneratedColumn {
-        let biome_quarts = biome_quarts.map(|(name, cold)| {
-            let biome = BuiltinBiome::parse(&name)
-                .unwrap_or_else(|error| panic!("generated biome is not built-in: {error}"));
-            (BiomeRef::builtin(biome), cold)
-        });
-        self.intern_from_dense_typed(
-            cx,
-            cz,
-            stage,
-            world,
-            biome_quarts,
-            biome_cells,
-            block_entities,
-        )
-    }
-
     /// Adopts the dense field when the biome stage already carries typed
-    /// identities. The string-taking adapter above remains only for the
-    /// resource/configuration seam while callers migrate; this is the
-    /// allocation-free production hand-off.
+    /// identities. The production hand-off never reparses generated biome
+    /// names.
     pub(super) fn intern_from_dense_typed(
         &self,
         cx: i32,
