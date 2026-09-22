@@ -10,6 +10,7 @@
 #![allow(unsafe_code)]
 
 use std::hint::black_box;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -435,6 +436,45 @@ fn request_for(coordinate: (i32, i32)) -> GenerationRequest {
     )
 }
 
+fn output_checksums(columns: &[((i32, i32), ChunkColumn)]) -> [u64; 3] {
+    let mut blocks = DefaultHasher::new();
+    let mut biomes = DefaultHasher::new();
+    let mut heightmaps = DefaultHasher::new();
+    for (coordinate, column) in columns {
+        for digest in [&mut blocks, &mut biomes, &mut heightmaps] {
+            coordinate.hash(digest);
+            column.min_y.hash(digest);
+            column.height.hash(digest);
+        }
+        for y in column.min_y..column.min_y + column.height {
+            for z in 0..16 {
+                for x in 0..16 {
+                    column.block_state_id(x, y, z).raw().hash(&mut blocks);
+                }
+            }
+        }
+        for qy in 0..column.biome_y_quarts() {
+            for qz in 0..4 {
+                for qx in 0..4 {
+                    column.biome_cell(qx, qy, qz).hash(&mut biomes);
+                }
+            }
+        }
+        column.client_heightmaps_raw().hash(&mut heightmaps);
+    }
+    [blocks.finish(), biomes.finish(), heightmaps.finish()]
+}
+
+#[test]
+fn output_checksum_detects_a_changed_block() {
+    let mut columns = [((3, -7), ChunkColumn::new(-64, 16))];
+    let before = output_checksums(&columns);
+    columns[0].1.set_block_id(5, -61, 9, lodestone_data::block::Block::Stone.default_state());
+    let after = output_checksums(&columns);
+    assert_ne!(before[0], after[0]);
+    assert_eq!(before[1..], after[1..]);
+}
+
 fn request_one<S: ChunkSource>(
     source: &S,
     request: GenerationRequest,
@@ -651,6 +691,10 @@ fn strict_single_thread_production_worldgen() {
         "STRICT_WORLDGEN metric=request_results phase=sustained_batch layout={layout} batch_size={batch_size} columns={count} generated={generated_count} promoted={promoted_count}"
     );
     assert_eq!(generated_count + promoted_count, count);
+    let [blocks, biomes, heightmaps] = output_checksums(&columns);
+    println!(
+        "STRICT_WORLDGEN metric=output_checksum phase=sustained_batch layout={layout} batch_size={batch_size} columns={count} blocks={blocks:016x} biomes={biomes:016x} heightmaps={heightmaps:016x}"
+    );
     if production_only {
         black_box(columns);
         return;

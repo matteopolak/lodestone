@@ -22,6 +22,13 @@ process resource counters for retired instructions and cycles, and asserts both
 deltas are nonzero; elapsed time is diagnostic context. Source construction and
 request-session initialization are reported independently.
 
+After measurement, `output_checksum` hashes canonical block IDs, every 3D biome
+cell, and the three client heightmaps separately. These non-cryptographic checksums
+use the same Rust toolchain for before/after comparisons and ignore palette layout.
+They do not cover structure sidecars, block entities, or lighting, so they complement
+rather than replace focused parity checks. A changed-block control verifies that
+the block checksum responds to a mutation.
+
 The counter reads occur once immediately before and once immediately after each
 measured closure; no PMU call or event allocation is placed in the generation
 loop. The fixed `pmu_calibration` kernel proves that the selected xctrace or
