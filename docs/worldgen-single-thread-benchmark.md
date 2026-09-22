@@ -87,6 +87,13 @@ column until the batch future completes, so the browser scheduler keeps its
 separate first-emit and memory contract until browser measurements justify a
 change.
 
+Follow-up native one-worker line controls on the clean production path reached
+24.25 columns/s at width 16 (875 million instructions and 177.5 million cycles
+per column) and 24.65 columns/s at width 32 (831 million instructions and
+174.4 million cycles per column). The plateau shows that larger cohorts reduce
+halo overhead but do not approach the 200-column target; the remaining work is
+inside the terrain and mutable stages rather than the scheduler window alone.
+
 ## Configuration
 
 Run the ignored test with `LODESTONE_WORLDGEN_WORKERS=1`. Optional variables are
