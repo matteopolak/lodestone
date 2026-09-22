@@ -1954,13 +1954,18 @@ where
             }
         }
         if let Some(plan) = settlement.as_ref() {
-            if let Err(error) = self.admit_chunks_with_context_executor(
+            #[cfg(feature = "worldgen-stage-pmu")]
+            let _admission = RegionGuard::enter(RegionPhase::Admission);
+            let admission = self.admit_chunks_with_context_executor(
                 &plan.targets,
                 &plan.context,
                 &plan.targets,
                 TARGET_FEATURE_RADIUS,
                 executor,
-            ) {
+            );
+            #[cfg(feature = "worldgen-stage-pmu")]
+            drop(_admission);
+            if let Err(error) = admission {
                 return batch_session_error(sessions.len(), error);
             }
             self.admission_counts = RegionAdmissionCounts {
@@ -1996,7 +2001,12 @@ where
                 .declare_sparse_padding_targets(plan.padding.iter().copied());
         } else {
             let halo = self.declared_halo.iter().copied().collect::<Vec<_>>();
-            if let Err(error) = self.admit_chunks_with_executor(&halo, &halo, 0, executor) {
+            #[cfg(feature = "worldgen-stage-pmu")]
+            let _admission = RegionGuard::enter(RegionPhase::Admission);
+            let admission = self.admit_chunks_with_executor(&halo, &halo, 0, executor);
+            #[cfg(feature = "worldgen-stage-pmu")]
+            drop(_admission);
+            if let Err(error) = admission {
                 return batch_session_error(sessions.len(), error);
             }
             self.admission_counts = RegionAdmissionCounts {

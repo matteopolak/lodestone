@@ -104,9 +104,9 @@ static STAGE_INSTRUCTIONS: [AtomicU64; STAGE_COUNT] =
 #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
 static STAGE_CYCLES: [AtomicU64; STAGE_COUNT] = [const { AtomicU64::new(0) }; STAGE_COUNT];
 #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
-static REGION_INSTRUCTIONS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+static REGION_INSTRUCTIONS: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
 #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
-static REGION_CYCLES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+static REGION_CYCLES: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
 #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
 static PMU_READ_COST: OnceLock<(u64, u64)> = OnceLock::new();
 
@@ -278,10 +278,11 @@ fn report_stage_pmu(total: &Measurement<impl Sized>, columns: usize, phase: &str
         report(counters::STAGE_NAMES[stage as usize], instructions[stage as usize], cycles[stage as usize]);
     }
     for (name, index) in [
-        ("replay_context", 0),
-        ("mutable_target", 1),
-        ("mutable_padding", 2),
-        ("snapshot_finalization", 3),
+        ("admission", 0),
+        ("replay_context", 1),
+        ("mutable_target", 2),
+        ("mutable_padding", 3),
+        ("snapshot_finalization", 4),
     ] {
         report(name, REGION_INSTRUCTIONS[index].load(Relaxed), REGION_CYCLES[index].load(Relaxed));
     }

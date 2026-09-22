@@ -151,6 +151,7 @@ mod stage_pmu {
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum RegionPhase {
+        Admission,
         ReplayContext,
         MutableTarget,
         MutablePadding,
