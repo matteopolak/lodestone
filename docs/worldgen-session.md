@@ -46,7 +46,10 @@ already-prepared replay window. It owns the mutable feature overlay for the
 complete canonical target sequence, including sparse padding targets. Each
 target applies the epoch's prior writes before running its feature and top-layer
 passes, records new local and cross-column writes, and advances the same ordered
-overlay. Padding runs FEATURES and TOP_LAYER directly against that overlay and
+overlay. Owned and borrowed sources forward the append-only override revision
+stream to the epoch, which consumes only revisions newer than its cursor. The
+map-based compatibility path is not used for production Overworld epochs.
+Padding runs FEATURES and TOP_LAYER directly against that overlay and
 its immutable sources, without constructing a disposable dense working column.
 Only sparse writes and entities needed by requested targets are retained.
 TOP_LAYER keeps its motion-blocking scan and observes each ice write before
@@ -220,6 +223,11 @@ columns join generated columns in that final commit rather than publishing an
 intermediate cache write against the same halo revision. Only the execution step
 differs; browser batches await the yielding source boundary so a multi-column
 batch cannot starve the server worker's tick and packet tasks.
+
+After that revision-validated commit, the store consumes the gathered columns.
+It captures only mutation destinations for source persistence, so persistence
+uses the exact committed content without rereading a later resident revision or
+duplicating the full batch map.
 
 Ledger publication uses a bounded journal over only touched pipeline entries.
 Validation or capacity failure restores those entries and the ledger stamp

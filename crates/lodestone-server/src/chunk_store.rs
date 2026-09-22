@@ -3516,13 +3516,19 @@ pub(crate) enum GenerationCommitError {
     DuplicateCoordinate((i32, i32)),
     #[error("generation commit coordinate {0:?} is outside its halo")]
     OutsideHalo((i32, i32)),
+    #[error("generation mutation destination {0:?} is absent from its commit columns")]
+    MissingMutationDestination((i32, i32)),
     #[error("generation commit revision conflict at {coordinate:?}: expected {expected}, found {found}")]
     RevisionConflict { coordinate: (i32, i32), expected: u64, found: u64 },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) struct GenerationCommitReport {
     pub(crate) coordinates: Vec<(i32, i32)>,
+    /// Post-mutation copies of just the columns which the source must retain.
+    /// They are captured after the halo revision check, before the gathered
+    /// commit columns move into the resident cache.
+    persistence_columns: Vec<(ChunkCoordinate, ChunkColumn)>,
 }
 
 impl<S: ChunkSource> ChunkStore<S> {
@@ -3531,11 +3537,11 @@ impl<S: ChunkSource> ChunkStore<S> {
     /// neighbour is authoritative state and must outlive cache eviction.
     fn persist_generation_mutations(
         &self,
-        session: &GenerationSession,
-        columns: &[(ChunkCoordinate, ChunkColumn)],
+        mutations: &[ProvenanceMutation],
+        captured_columns: &[(ChunkCoordinate, ChunkColumn)],
     ) -> bool {
-        let destinations = session
-            .committed_mutations()
+        let destinations = mutations
+            .iter()
             .map(|mutation| {
                 let destination = mutation.provenance().destination();
                 (
@@ -3547,45 +3553,17 @@ impl<S: ChunkSource> ChunkStore<S> {
         if destinations.is_empty() {
             return true;
         }
-        let mut retained = columns
+        let retained = captured_columns
             .iter()
             .filter(|(coordinate, _)| destinations.contains(coordinate))
             .map(|(coordinate, column)| (coordinate.0, coordinate.1, column.clone()))
             .collect::<Vec<_>>();
-        for coordinate in destinations {
-            if retained.iter().any(|(cx, cz, _)| (*cx, *cz) == coordinate) {
-                continue;
-            }
-            let mut column = self
-                .resident_column(coordinate.0, coordinate.1)
-                .unwrap_or_else(|| self.source.column(coordinate.0, coordinate.1));
-            let mut writes = Vec::<(i32, i32, i32, StateId)>::new();
-            for mutation in session.committed_mutations().filter(|mutation| {
-                let destination = mutation.provenance().destination();
-                (destination.x().div_euclid(16), destination.z().div_euclid(16)) == coordinate
-            }) {
-                let state = *mutation
-                    .get::<StateId>()
-                    .expect("worldgen mutations carry StateId");
-                let destination = mutation.provenance().destination();
-                writes.push((
-                    destination.x().rem_euclid(16),
-                    destination.y(),
-                    destination.z().rem_euclid(16),
-                    state,
-                ));
-            }
-            let writes = writes
-                .iter()
-                .map(|(x, y, z, state)| (*x, *y, *z, *state))
-                .collect::<Vec<_>>();
-            column.apply_ordered_block_id_batch(&writes);
-            retained.push((coordinate.0, coordinate.1, column));
-        }
-        if !retained.is_empty() {
-            return self.source.store_resident_columns(&retained);
-        }
-        false
+        debug_assert_eq!(
+            retained.len(),
+            destinations.len(),
+            "a validated generation commit must capture every mutation destination"
+        );
+        self.source.store_resident_columns(&retained)
     }
 
     fn apply_generation_mutations(
@@ -4151,6 +4129,17 @@ impl<S: ChunkSource> ChunkStore<S> {
                 .collect());
         }
 
+        let persistence_destinations = generated_snapshots
+            .iter()
+            .flat_map(|(index, _, _)| sessions[*index].committed_mutations())
+            .map(|mutation| mutation.provenance().destination())
+            .map(|destination| {
+                (
+                    destination.x().div_euclid(16),
+                    destination.z().div_euclid(16),
+                )
+            })
+            .collect::<BTreeSet<_>>();
         let committed_mutations = committed_mutations
             .into_iter()
             .filter(|mutation| {
@@ -4165,80 +4154,76 @@ impl<S: ChunkSource> ChunkStore<S> {
         drop(final_outputs);
         if !commit_columns.is_empty() {
             let columns = commit_columns.into_iter().collect::<Vec<_>>();
-            if let Err(error) = self.commit_generation_with_mutations(
+            match self.commit_generation_with_mutations_and_persistence_destinations(
                 &halo,
-                columns.clone(),
+                columns,
                 &committed_mutations,
+                &persistence_destinations,
             ) {
-                if matches!(error, GenerationCommitError::RevisionConflict { .. }) {
-                    for (_, entry, _) in &generated_snapshots {
+                Err(error) => {
+                    if matches!(error, GenerationCommitError::RevisionConflict { .. }) {
+                        for (_, entry, _) in &generated_snapshots {
+                            self.generation_ledger()
+                                .rollback_admission(entry.pipeline, &entry.admitted);
+                        }
+                        return GenerationBatchFinish::RevisionConflict;
+                    }
+                    for index in commit_indices {
+                        results[index] = Some(Err(
+                            crate::worldgen_session::GenerationRequestError::Boundary(
+                                error.to_string(),
+                            ),
+                        ));
+                    }
+                    for (index, entry, _) in generated_snapshots {
                         self.generation_ledger()
                             .rollback_admission(entry.pipeline, &entry.admitted);
+                        results[index] = Some(Err(
+                            crate::worldgen_session::GenerationRequestError::Boundary(
+                                error.to_string(),
+                            ),
+                        ));
                     }
-                    return GenerationBatchFinish::RevisionConflict;
                 }
-                for index in commit_indices {
-                    results[index] = Some(Err(
-                        crate::worldgen_session::GenerationRequestError::Boundary(
-                            error.to_string(),
-                        ),
-                    ));
-                }
-                for (index, entry, _) in generated_snapshots {
-                    self.generation_ledger()
-                        .rollback_admission(entry.pipeline, &entry.admitted);
-                    results[index] = Some(Err(
-                        crate::worldgen_session::GenerationRequestError::Boundary(
-                            error.to_string(),
-                        ),
-                    ));
-                }
-            } else {
-                let ready_destinations = columns
-                    .iter()
-                    .map(|(coordinate, _)| *coordinate)
-                    .collect::<Vec<_>>();
-                for (index, _) in &reused_columns {
-                    let mutations = sessions[*index]
-                        .committed_mutations()
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    self.generation_ledger().settle_mutations(
-                        sessions[*index].pipeline(),
-                        &mutations,
-                        false,
-                        &ready_destinations,
-                    );
-                }
-                let packet_neighbour_admissions = generated_snapshots
-                    .iter()
-                    .map(|(_, _, snapshot)| snapshot.neighbours().len())
-                    .sum();
-                crate::world_spawn::record_packet_neighbour_admissions(
-                    packet_neighbour_admissions,
-                );
-                for (index, entry, snapshot) in generated_snapshots {
-                    let source_stored = self.persist_generation_mutations(&sessions[index], &columns);
-                    let mutations = sessions[index]
-                        .committed_mutations()
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    let ready_destinations = columns
+                Ok(report) => {
+                    for (index, _) in &reused_columns {
+                        let mutations = sessions[*index]
+                            .committed_mutations()
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        self.generation_ledger().settle_mutations(
+                            sessions[*index].pipeline(),
+                            &mutations,
+                            false,
+                            &report.coordinates,
+                        );
+                    }
+                    let packet_neighbour_admissions = generated_snapshots
                         .iter()
-                        .map(|(coordinate, _)| *coordinate)
-                        .collect::<BTreeSet<_>>()
-                        .into_iter()
-                        .collect::<Vec<_>>();
-                    self.generation_ledger()
-                        .settle_mutations(
+                        .map(|(_, _, snapshot)| snapshot.neighbours().len())
+                        .sum();
+                    crate::world_spawn::record_packet_neighbour_admissions(
+                        packet_neighbour_admissions,
+                    );
+                    for (index, entry, snapshot) in generated_snapshots {
+                        let mutations = sessions[index]
+                            .committed_mutations()
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        let source_stored = self.persist_generation_mutations(
+                            &mutations,
+                            &report.persistence_columns,
+                        );
+                        self.generation_ledger().settle_mutations(
                             entry.pipeline,
                             &mutations,
                             source_stored,
-                            &ready_destinations,
+                            &report.coordinates,
                         );
-                    results[index] = Some(Ok(Some(
-                        crate::worldgen_session::GenerationRequestResult::Generated(snapshot),
-                    )));
+                        results[index] = Some(Ok(Some(
+                            crate::worldgen_session::GenerationRequestResult::Generated(snapshot),
+                        )));
+                    }
                 }
             }
         }
@@ -4505,22 +4490,18 @@ impl<S: ChunkSource> ChunkStore<S> {
                     .map(|neighbour| (neighbour.coordinate(), neighbour.column().clone())),
             );
             let committed_mutations = session.committed_mutations().cloned().collect::<Vec<_>>();
-            self.commit_generation_with_mutations(&halo, columns.clone(), &committed_mutations)?;
+            let report =
+                self.commit_generation_with_mutations(&halo, columns, &committed_mutations)?;
             crate::world_spawn::record_packet_neighbour_admissions(snapshot.neighbours().len());
-            let source_stored = self.persist_generation_mutations(session, &columns);
+            let source_stored = self
+                .persist_generation_mutations(&committed_mutations, &report.persistence_columns);
             let mutations = session.committed_mutations().cloned().collect::<Vec<_>>();
-            let ready_destinations = columns
-                .iter()
-                .map(|(coordinate, _)| *coordinate)
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>();
             self.generation_ledger()
                 .settle_mutations(
                     pipeline,
                     &mutations,
                     source_stored,
-                    &ready_destinations,
+                    &report.coordinates,
                 );
             Ok(crate::worldgen_session::GenerationRequestResult::Generated(snapshot))
         })();
@@ -4664,22 +4645,18 @@ impl<S: ChunkSource> ChunkStore<S> {
                     .map(|neighbour| (neighbour.coordinate(), neighbour.column().clone())),
             );
             let committed_mutations = session.committed_mutations().cloned().collect::<Vec<_>>();
-            self.commit_generation_with_mutations(&halo, columns.clone(), &committed_mutations)?;
+            let report =
+                self.commit_generation_with_mutations(&halo, columns, &committed_mutations)?;
             crate::world_spawn::record_packet_neighbour_admissions(snapshot.neighbours().len());
-            let source_stored = self.persist_generation_mutations(session, &columns);
+            let source_stored = self
+                .persist_generation_mutations(&committed_mutations, &report.persistence_columns);
             let mutations = session.committed_mutations().cloned().collect::<Vec<_>>();
-            let ready_destinations = columns
-                .iter()
-                .map(|(coordinate, _)| *coordinate)
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>();
             self.generation_ledger()
                 .settle_mutations(
                     pipeline,
                     &mutations,
                     source_stored,
-                    &ready_destinations,
+                    &report.coordinates,
                 );
             Ok(crate::worldgen_session::GenerationRequestResult::Generated(snapshot))
         }
@@ -4742,6 +4719,31 @@ impl<S: ChunkSource> ChunkStore<S> {
         columns: Vec<((i32, i32), ChunkColumn)>,
         mutations: &[ProvenanceMutation],
     ) -> Result<GenerationCommitReport, GenerationCommitError> {
+        let persistence_destinations = mutations
+            .iter()
+            .map(|mutation| mutation.provenance().destination())
+            .map(|destination| {
+                (
+                    destination.x().div_euclid(16),
+                    destination.z().div_euclid(16),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        self.commit_generation_with_mutations_and_persistence_destinations(
+            halo,
+            columns,
+            mutations,
+            &persistence_destinations,
+        )
+    }
+
+    fn commit_generation_with_mutations_and_persistence_destinations(
+        &self,
+        halo: &ChunkHaloLease<'_, S>,
+        columns: Vec<((i32, i32), ChunkColumn)>,
+        mutations: &[ProvenanceMutation],
+        persistence_destinations: &BTreeSet<ChunkCoordinate>,
+    ) -> Result<GenerationCommitReport, GenerationCommitError> {
         if columns.is_empty() {
             return Err(GenerationCommitError::Empty);
         }
@@ -4771,6 +4773,26 @@ impl<S: ChunkSource> ChunkStore<S> {
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
+        if let Some(coordinate) = mutations
+            .iter()
+            .map(|mutation| mutation.provenance().destination())
+            .map(|destination| {
+                (
+                    destination.x().div_euclid(16),
+                    destination.z().div_euclid(16),
+                )
+            })
+            .find(|coordinate| coordinates.binary_search(coordinate).is_err())
+        {
+            return Err(GenerationCommitError::MissingMutationDestination(coordinate));
+        }
+        if let Some(coordinate) = persistence_destinations
+            .iter()
+            .copied()
+            .find(|coordinate| coordinates.binary_search(coordinate).is_err())
+        {
+            return Err(GenerationCommitError::MissingMutationDestination(coordinate));
+        }
         let gate = self.write_gates.acquire_many(&coordinates, false);
         for (index, coordinate) in coordinates.iter().copied().enumerate() {
             let expected = halo.revisions[halo
@@ -4788,6 +4810,11 @@ impl<S: ChunkSource> ChunkStore<S> {
                 });
             }
         }
+        let persistence_columns = columns
+            .iter()
+            .filter(|(coordinate, _)| persistence_destinations.contains(coordinate))
+            .map(|(coordinate, column)| (*coordinate, column.clone()))
+            .collect();
         let mut cache = self.lock();
         let mut changed = false;
         for (coordinate, column) in columns {
@@ -4815,7 +4842,10 @@ impl<S: ChunkSource> ChunkStore<S> {
         gate.bump_revision = changed;
         drop(gate);
         self.evict_excess();
-        Ok(GenerationCommitReport { coordinates })
+        Ok(GenerationCommitReport {
+            coordinates,
+            persistence_columns,
+        })
     }
 
     fn evict_excess(&self) {
@@ -6656,6 +6686,65 @@ mod tests {
         assert_eq!(scalar_calls.load(Ordering::Relaxed), 0);
     }
 
+    #[test]
+    fn mixed_batch_persists_a_generated_spill_into_a_source_existing_target() {
+        use lodestone_worldgen::stage_schedule::{Dimension, GenerationTarget, END_PIPELINE};
+
+        let source_target = (0, 0);
+        let existing_target = (1, 0);
+        let destination = BlockCoordinate::new(16, 4, 0);
+        let store = ChunkStore::with_capacity(
+            MixedBatchSource {
+                driver: ResumableDriver::with_feature_spill(
+                    source_target,
+                    destination,
+                    Block::Dirt.default_state(),
+                ),
+                existing_target,
+                persisted: Arc::new(Mutex::new(HashMap::new())),
+            },
+            0,
+        );
+        let mut sessions = [source_target, existing_target]
+            .into_iter()
+            .map(|target| {
+                GenerationSession::new(crate::worldgen_session::GenerationRequest::new(
+                    Dimension::End,
+                    target,
+                    GenerationTarget::Full,
+                    1,
+                ))
+            })
+            .collect::<Vec<_>>();
+
+        let results = ChunkSource::request_generation_batch(&store, &mut sessions);
+
+        assert!(matches!(
+            &results[0],
+            Ok(Some(crate::worldgen_session::GenerationRequestResult::Generated(_)))
+        ));
+        assert!(matches!(
+            &results[1],
+            Ok(Some(crate::worldgen_session::GenerationRequestResult::Existing(_)))
+        ));
+        assert!(
+            store
+                .generation_ledger()
+                .output_column(END_PIPELINE, existing_target)
+                .is_none(),
+            "the source-existing target has no retained output product"
+        );
+        assert!(
+            !store.is_column_resident(existing_target.0, existing_target.1),
+            "capacity zero forces the mixed-batch target out of the resident cache"
+        );
+        assert_eq!(
+            ChunkSource::block_state_id(&store, destination.x(), destination.y(), destination.z()),
+            Block::Dirt.default_state(),
+            "the generated spill survives eviction through the captured source payload"
+        );
+    }
+
     struct RejectingDriver;
 
     impl crate::worldgen_session::RequestStageDriver for RejectingDriver {
@@ -6701,6 +6790,7 @@ mod tests {
         calls: Arc<AtomicUsize>,
         fill_completions: Arc<AtomicUsize>,
         cancel_after_fill: AtomicBool,
+        feature_spill: Option<(ChunkCoordinate, BlockCoordinate, StateId)>,
     }
 
     impl ResumableDriver {
@@ -6709,7 +6799,18 @@ mod tests {
                 calls: Arc::new(AtomicUsize::new(0)),
                 fill_completions: Arc::new(AtomicUsize::new(0)),
                 cancel_after_fill: AtomicBool::new(cancel_after_fill),
+                feature_spill: None,
             }
+        }
+
+        fn with_feature_spill(
+            target: ChunkCoordinate,
+            destination: BlockCoordinate,
+            state: StateId,
+        ) -> Self {
+            let mut driver = Self::new(false);
+            driver.feature_spill = Some((target, destination, state));
+            driver
         }
     }
 
@@ -6755,6 +6856,16 @@ mod tests {
                             key,
                             source_order as u64,
                         )?;
+                        let mut transaction = transaction;
+                        if stage == lodestone_worldgen::stage_schedule::ColumnStage::Features
+                            && self.feature_spill.is_some_and(|(target, _, _)| {
+                                target == session.request().target() && source == target
+                            })
+                        {
+                            let (_, destination, state) =
+                                self.feature_spill.expect("feature spill remains configured");
+                            transaction.push(0, destination, state)?;
+                        }
                         session.complete_mutable_source(transaction)?;
                     }
                     let products = descriptor
@@ -6842,6 +6953,78 @@ mod tests {
             &self,
         ) -> Option<&dyn crate::worldgen_session::RequestStageDriver> {
             Some(&self.driver)
+        }
+    }
+
+    struct MixedBatchSource {
+        driver: ResumableDriver,
+        existing_target: ChunkCoordinate,
+        persisted: Arc<Mutex<HashMap<ChunkCoordinate, ChunkColumn>>>,
+    }
+
+    impl ChunkSource for MixedBatchSource {
+        fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
+            self.persisted
+                .lock()
+                .unwrap()
+                .get(&(cx, cz))
+                .cloned()
+                .unwrap_or_else(|| ChunkColumn::new(0, 16))
+        }
+
+        fn request_generation_batch(
+            &self,
+            sessions: &mut [GenerationSession],
+        ) -> Vec<
+            Result<
+                Option<crate::worldgen_session::GenerationRequestResult>,
+                crate::worldgen_session::GenerationRequestError,
+            >,
+        > {
+            sessions
+                .iter_mut()
+                .map(|session| {
+                    if session.request().target() == self.existing_target {
+                        Ok(Some(
+                            crate::worldgen_session::GenerationRequestResult::Existing(
+                                self.column(self.existing_target.0, self.existing_target.1),
+                            ),
+                        ))
+                    } else {
+                        crate::worldgen_session::RequestStageDriver::generate(&self.driver, session)
+                            .map(crate::worldgen_session::GenerationRequestResult::Generated)
+                            .map(Some)
+                            .map_err(Into::into)
+                    }
+                })
+                .collect()
+        }
+
+        fn block_state_id(
+            &self,
+            x: i32,
+            y: i32,
+            z: i32,
+        ) -> lodestone_data::block_states::StateId {
+            self.column(x.div_euclid(16), z.div_euclid(16)).block_state_id(
+                x.rem_euclid(16),
+                y,
+                z.rem_euclid(16),
+            )
+        }
+
+        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+            crate::chunk::DEFAULT_BIOME.to_owned()
+        }
+
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
+
+        fn store_resident_columns(&self, columns: &[(i32, i32, ChunkColumn)]) -> bool {
+            let mut persisted = self.persisted.lock().unwrap();
+            for (cx, cz, column) in columns {
+                persisted.insert((*cx, *cz), column.clone());
+            }
+            true
         }
     }
 
@@ -10123,6 +10306,33 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, GenerationCommitError::RevisionConflict { coordinate: (0, 0), .. }));
         assert_eq!(store.len(), 0, "a conflicting batch must not partially commit");
+    }
+
+    #[test]
+    fn generation_commit_rejects_a_mutation_destination_outside_the_gathered_map() {
+        use lodestone_worldgen::stage_schedule::{ColumnStage, Dimension, StageKey};
+
+        let store = ChunkStore::with_capacity(CountingSource::new(), 4);
+        let halo = store.lease_halo(&[(0, 0)]).unwrap();
+        let mutation = ProvenanceMutation::test_block_state(
+            (0, 0),
+            (0, 0),
+            StageKey::new(Dimension::Overworld, ColumnStage::Features),
+            0,
+            BlockCoordinate::new(16, 4, 0),
+            1,
+            Block::Dirt.default_state(),
+        );
+
+        let error = store
+            .commit_generation_with_mutations(
+                &halo,
+                vec![((0, 0), ChunkColumn::new(0, 16))],
+                std::slice::from_ref(&mutation),
+            )
+            .unwrap_err();
+        assert_eq!(error, GenerationCommitError::MissingMutationDestination((1, 0)));
+        assert_eq!(store.len(), 0, "the rejected mutation must not partly commit");
     }
 
     #[test]
