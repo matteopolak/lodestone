@@ -163,7 +163,8 @@ The End-specific families sit outside this common interpreter but are production
 `EndGenerator`'s three-by-three decoration region: the fixed platform, outer islands, chorus plants,
 return gateways, and spike blocks. An `end_spike` configuration with a non-empty `spikes` list now
 keeps each explicit center, radius, height and cage flag; the empty list retains the seed-derived
-ten-spike fallback. Their independent feature fixtures cover the platform, island,
+ten-spike fallback. Cage states keep the directional connections and explicitly select their dry
+variant. Their independent feature fixtures cover the platform, island,
 chorus, and gateway shapes. The independent feature-order fixture also pins the global per-step
 indices: `end_gateway_return` is step-4 index 0 and `end_spike` is step-4 index 1, so
 `EndDecoration` derives each feature seed from the dimension-wide order rather than its local

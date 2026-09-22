@@ -49,6 +49,7 @@ fn iron_bar_states() -> &'static [StateId; 16] {
                     (PropertyKey::East, bool_value(east)),
                     (PropertyKey::North, bool_value(north)),
                     (PropertyKey::South, bool_value(south)),
+                    (PropertyKey::Waterlogged, V::False),
                     (PropertyKey::West, bool_value(west)),
                 ],
             )
@@ -424,7 +425,7 @@ mod tests {
         let writes = end_spike_blocks(&spike, -64);
         // crystal_y = height + 1 = 86; one below is height itself (85).
         assert_eq!(find(&writes, 0, 85, 0).unwrap().state.canonical_state(), "minecraft:bedrock", "one below the crystal");
-        assert_eq!(find(&writes, 0, 86, 0).unwrap().state.canonical_state(), "minecraft:fire", "at the crystal's own cell");
+        assert_eq!(find(&writes, 0, 86, 0).unwrap().state, Block::Fire.default_state(), "at the crystal's own cell");
         assert_eq!(find(&writes, 0, 85 - 20, 0).unwrap().state.canonical_state(), "minecraft:obsidian", "well below the crystal, inside the column");
     }
 
@@ -459,7 +460,7 @@ mod tests {
         // west  = z_edge && dx != -2 = true && true  = true
         // east  = z_edge && dx != 2  = true && false = false
         let corner = find(&writes, 2, 76, -2).expect("corner cage cell must be written");
-        assert_eq!(corner.state.canonical_state(), "minecraft:iron_bars[east=false,north=false,south=true,west=true]");
+        assert_eq!(corner.state.canonical_state(), "minecraft:iron_bars[east=false,north=false,south=true,waterlogged=false,west=true]");
     }
 
     /// **Control**: translating the spike must translate every write —

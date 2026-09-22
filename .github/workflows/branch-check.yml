@@ -44,8 +44,11 @@ jobs:
         with:
           just-version: "1.58.0"
       - run: just check
-      - run: cargo test -p lodestone-worldgen --lib --no-fail-fast
-      - run: cargo test -p lodestone-server --lib --no-fail-fast
+      - name: Run worldgen library tests with LLVM
+        run: CARGO_PROFILE_DEV_CODEGEN_BACKEND=llvm cargo test -p lodestone-worldgen --lib --no-fail-fast
+      - name: Run server library tests with LLVM
+        if: always()
+        run: CARGO_PROFILE_DEV_CODEGEN_BACKEND=llvm cargo test -p lodestone-server --lib --no-fail-fast
 
   wasm:
     name: wasm32 check
@@ -76,4 +79,11 @@ jobs:
             https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz \
             | tar xz -C "$HOME/.cargo/bin" trunk
           trunk --version
+      - name: Install wasm-bindgen CLI
+        run: |
+          set -eu
+          curl -sSfL \
+            https://github.com/wasm-bindgen/wasm-bindgen/releases/download/0.2.126/wasm-bindgen-0.2.126-x86_64-unknown-linux-musl.tar.gz \
+            | tar xz --strip-components=1 -C "$HOME/.cargo/bin"
+          wasm-bindgen --version
       - run: just wasm-check

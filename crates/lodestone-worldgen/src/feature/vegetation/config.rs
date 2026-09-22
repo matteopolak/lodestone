@@ -3075,12 +3075,9 @@ pub fn collect_unsupported(placed: &PlacedRef) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
-
     use super::{BlockPredicate, CanonicalStateId, ConfiguredFeature};
     use crate::density::{NoiseParams, Resolver};
     use crate::feature::BlockPos;
-    use crate::feature::top_layer::StatePredicate;
     use crate::feature::vegetation::grid::VegGrid;
     use crate::feature::vegetation::ids::Tag;
     use lodestone_data::block::Block;
@@ -3191,18 +3188,14 @@ mod tests {
     fn has_sturdy_face_down_tests_the_state_at_the_scan_target() {
         let predicate = BlockPredicate::HasSturdyFaceDown { offset: (0, 0, 0) };
         let mut grid = VegGrid::new(0, 4, 0, 0);
-        grid.seed_id(8, 3, 8, state("minecraft:stone"));
-        let mut tags = super::VegTags::default();
-        tags.simple_block_support.center_support_down = StatePredicate::new(
-            HashSet::from(["minecraft:test_support".to_string()]),
-            HashMap::new(),
-        );
+        grid.seed_id(8, 3, 8, Block::Stone.default_state());
+        let tags = super::VegTags::default();
 
         assert!(predicate.test(&grid, &tags, BlockPos { x: 8, y: 3, z: 8 }));
         assert!(!predicate.test(&grid, &tags, BlockPos { x: 8, y: 2, z: 8 }));
 
-        grid.seed_id(9, 3, 9, state("minecraft:test_support"));
-        assert!(predicate.test(&grid, &tags, BlockPos { x: 9, y: 3, z: 9 }));
+        let offset = BlockPredicate::HasSturdyFaceDown { offset: (0, 1, 0) };
+        assert!(offset.test(&grid, &tags, BlockPos { x: 8, y: 2, z: 8 }));
     }
 
     #[test]
