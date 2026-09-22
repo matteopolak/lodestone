@@ -551,6 +551,7 @@ impl<'a> Field<'a> {
             y,
             z,
             self.scratch.probe_scope(),
+            INTERPOLATE,
         );
         if op.kind != OpKind::FlatCache && let Some(value) = self.product_value(id, x, z) {
             return value;
@@ -605,8 +606,8 @@ impl<'a> Field<'a> {
             | OpKind::HalfNegative
             | OpKind::QuarterNegative
             | OpKind::Squeeze
-            | OpKind::Invert
-            | OpKind::Clamp => self.eval_unary::<INTERPOLATE>(op, x, y, z),
+            | OpKind::Invert => self.eval_unary::<INTERPOLATE>(op, x, y, z),
+            OpKind::Clamp => self.eval_clamp::<INTERPOLATE>(op, x, y, z),
             OpKind::Interpolated => self.eval_interpolated::<INTERPOLATE>(op, x, y, z),
             OpKind::FlatCache => self.eval_flat_cache(op, id, x, z),
             OpKind::Noise => self.eval_noise(op, id, x, y, z),
@@ -640,12 +641,31 @@ impl<'a> Field<'a> {
                 value / 2.0 - value * value * value / 24.0
             }
             OpKind::Invert => 1.0 / value,
-            OpKind::Clamp => value.clamp(
-                self.params[op.b as usize],
-                self.params[(op.b + 1) as usize],
-            ),
             _ => unreachable!(),
         }
+    }
+
+    #[inline(always)]
+    fn eval_clamp<const INTERPOLATE: bool>(
+        &mut self,
+        op: Op,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> f64 {
+        let low = self.params[op.b as usize];
+        let high = self.params[(op.b + 1) as usize];
+        if let Some(maximum) = self.graph.clamp_max_rhs_first(op) {
+            let right = self.eval::<INTERPOLATE>(maximum.b, x, y, z);
+            if right > high {
+                return high;
+            }
+            return self
+                .eval::<INTERPOLATE>(maximum.a, x, y, z)
+                .max(right)
+                .clamp(low, high);
+        }
+        self.eval::<INTERPOLATE>(op.a, x, y, z).clamp(low, high)
     }
 
     #[inline(always)]
@@ -1047,6 +1067,7 @@ impl<'a> Field<'a> {
             y,
             z,
             self.scratch.probe_scope(),
+            false,
         );
         let branch = if input >= self.params[op.b as usize]
             && input < self.params[(op.b + 1) as usize]
@@ -1360,7 +1381,7 @@ fn eval_tile_plan_node(
         if missing & (1 << lane) != 0 {
             crate::counters::bump_density_eval(op.kind as usize);
             let (x, y, z) = contexts[lane];
-            super::redundancy_probe::visit_field(
+            super::redundancy_probe::visit_field_tile(
                 graph.cast::<()>(),
                 op.source,
                 op.kind as usize,
@@ -2119,6 +2140,86 @@ mod tests {
         assert!(!program.graph().tile_eligible(program.root()));
         let program = Program::compile(&Density::Spline(crate::density::Spline::Constant(1.0)));
         assert!(!program.graph().tile_eligible(program.root()));
+    }
+
+    fn eval_scalar(program: &Program, x: i32, y: i32, z: i32) -> f64 {
+        let mut scratch = Scratch::acquire(1, 4, 8, None);
+        let mut field = Field::new(
+            program.graph(),
+            Geom {
+                cell_width: 4,
+                cell_height: 8,
+            },
+            &mut scratch,
+        );
+        field.eval::<false>(program.root(), x, y, z)
+    }
+
+    fn varying() -> Density {
+        Density::YClampedGradient {
+            from_y: -1.0,
+            to_y: 1.0,
+            from_value: -0.5,
+            to_value: 0.5,
+        }
+    }
+
+    #[test]
+    fn clamp_max_pure_left_returns_the_saturating_bound() {
+        let root = Density::Clamp {
+            input: Box::new(Density::Max(
+                Box::new(varying()),
+                Box::new(Density::Const(2.0)),
+            )),
+            min: -1.0,
+            max: 1.0,
+        };
+        let program = Program::compile(&root);
+        assert!(program
+            .graph()
+            .clamp_max_rhs_first(program.graph().op(program.root()))
+            .is_some());
+        assert_eq!(eval_scalar(&program, 0, 0, 0).to_bits(), 1.0_f64.to_bits());
+    }
+
+    #[test]
+    fn clamp_max_nan_right_uses_the_normal_max_path() {
+        let root = Density::Clamp {
+            input: Box::new(Density::Max(
+                Box::new(varying()),
+                Box::new(Density::Const(f64::NAN)),
+            )),
+            min: -1.0,
+            max: 1.0,
+        };
+        let program = Program::compile(&root);
+        assert!(program
+            .graph()
+            .clamp_max_rhs_first(program.graph().op(program.root()))
+            .is_some());
+        assert_eq!(eval_scalar(&program, 0, -1, 0).to_bits(), (-0.5_f64).to_bits());
+    }
+
+    #[test]
+    fn clamp_max_does_not_reorder_a_cache_writing_left() {
+        let root = Density::Clamp {
+            input: Box::new(Density::Max(
+                Box::new(Density::FlatCache {
+                    inner: Box::new(varying()),
+                    slot: 0,
+                    memo: crate::density::XzMemoId::NONE,
+                }),
+                Box::new(Density::Const(2.0)),
+            )),
+            min: -1.0,
+            max: 1.0,
+        };
+        let program = Program::compile(&root);
+        assert!(program
+            .graph()
+            .clamp_max_rhs_first(program.graph().op(program.root()))
+            .is_none());
+        assert_eq!(eval_scalar(&program, 0, 0, 0).to_bits(), 1.0_f64.to_bits());
     }
 
     #[test]

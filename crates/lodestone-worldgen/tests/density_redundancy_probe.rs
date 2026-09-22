@@ -1,103 +1,117 @@
-//! Sizes the evaluation redundancy in both density evaluators, per interior
-//! column of the same 12×12 sweep §12.130's `C_ss`/`I_ss` are the median of.
+//! Bounded, ignored measurement of density-evaluator visit redundancy.
 //!
-//! # What it is
+//! One counter window covers the complete contiguous target stream. Its
+//! two-chunk pre-ore halo is prepared while every selected target remains
+//! unprepared, but an earlier `column` call can prepare a later target through
+//! its own closure. Reported totals are therefore normalized by submitted
+//! targets, not independent cold-call samples. Field own-sampler counts span a
+//! `Scratch` lifetime, not one `Field::eval` call.
 //!
-//! DESIGN.md §12.134 measured a 4.87× `noise_scaled` redundancy ratio per column
-//! and established that the `Op`-table node-sharing pass could not collect it,
-//! because neither evaluator has a per-node memo. Before designing one, this
-//! answers *which* memo would hit: it reports, per node kind and per evaluator,
-//! how many visits a **one-slot last-`(x, z)`** memo (vanilla's
-//! `NoiseChunk.Cache2D`), a full **`(node, x, z)`** map, and a full
-//! **`(node, x, y, z)`** map would have answered — all three simultaneously, from
-//! one run, without changing a value.
-//!
-//! # How it works
-//!
-//! `#[ignore]`d and printing rather than asserting: it is a measurement, and the
-//! numbers it produces belong in DESIGN.md, not in a threshold. The window is one
-//! **column**, reset between columns, because that is the widest scope a
-//! per-chunk memo could have — a probe left running across the whole sweep would
-//! report a hit rate no real cache could deliver.
-//!
+//! Run two contiguous targets with:
 //! ```text
-//! cargo test --release -p lodestone-worldgen --features gen-counters \
-//!   --test density_redundancy_probe -- --ignored --nocapture
+//! LODESTONE_DENSITY_PROBE_COLUMNS=2 cargo test --release -p lodestone-worldgen \
+//!   --features gen-counters --test density_redundancy_probe \
+//!   redundancy_per_interior_column -- --ignored --exact --nocapture --test-threads=1
 //! ```
 //!
-//! Without `gen-counters` the probe is inert and the test reports zero visits,
-//! which it fails on rather than passing vacuously.
-//!
-//! # How to change it
-//!
-//! `SIDE` and the interior definition must stay identical to
-//! `benches/generation.rs`'s, or the ratios stop being comparable to `I_ss`.
+//! `LODESTONE_DENSITY_PROBE_COLUMNS` accepts `1..=100` and defaults to 100.
 
 use lodestone_worldgen::density::Density;
 use lodestone_worldgen::engine::redundancy_probe as probe;
 
 const SEED: i64 = 42;
 const SIDE: i32 = 12;
+const DEFAULT_COLUMNS: usize = 100;
+const TARGET_HALO_RADIUS: i32 = 2;
+
+fn probe_column_count() -> usize {
+    let requested = match std::env::var("LODESTONE_DENSITY_PROBE_COLUMNS") {
+        Ok(value) => value.parse::<usize>().unwrap_or_else(|error| {
+            panic!("LODESTONE_DENSITY_PROBE_COLUMNS must be an integer: {error}")
+        }),
+        Err(std::env::VarError::NotPresent) => DEFAULT_COLUMNS,
+        Err(error) => panic!("reading LODESTONE_DENSITY_PROBE_COLUMNS: {error}"),
+    };
+    assert!(
+        (1..=DEFAULT_COLUMNS).contains(&requested),
+        "LODESTONE_DENSITY_PROBE_COLUMNS must be in 1..={DEFAULT_COLUMNS}, got {requested}"
+    );
+    requested
+}
+
+fn contiguous_interior_targets(columns: usize) -> Vec<(i32, i32)> {
+    (1..SIDE - 1)
+        .flat_map(|cz| (1..SIDE - 1).map(move |cx| (cx, cz)))
+        .take(columns)
+        .collect()
+}
 
 #[test]
 #[ignore = "measurement probe; needs --features gen-counters and is driven by hand"]
 fn redundancy_per_interior_column() {
+    let requested_columns = probe_column_count();
+    let targets = contiguous_interior_targets(requested_columns);
+    assert_eq!(targets.len(), requested_columns, "target lattice is too small");
+
     let generator = lodestone_server::overworld_generator(SEED);
-    probe::enable();
 
-    let mut per_column: Vec<(u64, u64)> = Vec::new();
-    let mut agg = probe::snapshot();
-    agg = {
-        let mut z = agg.clone();
-        for i in 0..Density::KIND_COUNT {
-            z.point_visits[i] = 0;
-            z.field_visits[i] = 0;
-        }
-        z
-    };
-    let mut interior = 0usize;
-
-    let mut memo_hits = 0u64;
-    let mut memo_misses = 0u64;
-    let mut leaf_hits = 0u64;
-    let mut leaf_misses = 0u64;
-    for cz in 0..SIDE {
-        for cx in 0..SIDE {
-            probe::reset();
-            lodestone_worldgen::density::xz_memo::reset_stats();
-            lodestone_worldgen::engine::reset_leaf_memo_stats();
-            let column = generator.column(cx, cz);
-            std::hint::black_box(column.non_air_count());
-            let is_interior = cx > 0 && cz > 0 && cx < SIDE - 1 && cz < SIDE - 1;
-            if is_interior {
-                let s = probe::snapshot();
-                per_column.push((s.point_total(), s.field_total()));
-                agg.accumulate(&s);
-                let (h, m) = lodestone_worldgen::density::xz_memo::stats();
-                memo_hits += h;
-                memo_misses += m;
-                let (lh, lm) = lodestone_worldgen::engine::leaf_memo_stats();
-                leaf_hits += lh;
-                leaf_misses += lm;
-                interior += 1;
+    // Prepare the production five-by-five pre-ore halo while excluding every
+    // submitted target. The first stream element is cold; later elements can
+    // become ready through that stream's earlier column closures.
+    let mut halo = Vec::new();
+    for &(cx, cz) in &targets {
+        for dz in -TARGET_HALO_RADIUS..=TARGET_HALO_RADIUS {
+            for dx in -TARGET_HALO_RADIUS..=TARGET_HALO_RADIUS {
+                let position = (cx + dx, cz + dz);
+                if !targets.contains(&position) && !halo.contains(&position) {
+                    halo.push(position);
+                }
             }
         }
     }
+    probe::reset();
     probe::disable();
-
-    assert_eq!(interior, 100, "the interior definition drifted from the bench's");
+    let warmed = generator.prepare_pre_ore_targets_with_radius(&halo, 0);
+    assert_eq!(warmed, halo.len(), "warm-up skipped a halo prefix");
     assert!(
-        agg.point_total() > 0 || agg.field_total() > 0,
+        halo.iter().all(|position| !targets.contains(position)),
+        "warm-up must not prepare a measured target"
+    );
+
+    probe::reset();
+    probe::enable();
+
+    lodestone_worldgen::density::xz_memo::reset_stats();
+    lodestone_worldgen::engine::reset_leaf_memo_stats();
+    for &(cx, cz) in &targets {
+        let column = generator.column(cx, cz);
+        std::hint::black_box(column.non_air_count());
+    }
+    probe::disable();
+    let agg = probe::snapshot();
+    let (memo_hits, memo_misses) = lodestone_worldgen::density::xz_memo::stats();
+    let (leaf_hits, leaf_misses) = lodestone_worldgen::engine::leaf_memo_stats();
+
+    assert!(
+        agg.point_total() > 0
+            || agg.field_total() > 0
+            || agg.compiled_point_scalar_total() > 0
+            || agg.compiled_point_batch_total() > 0,
         "the probe recorded nothing — this build has no `gen-counters` feature, so \
          every number below would be a vacuous zero"
     );
 
-    let n = interior as f64;
-    println!("\n== redundancy over {interior} interior columns of a {SIDE}x{SIDE} sweep, seed {SEED} ==");
+    let n = requested_columns as f64;
+    println!(
+        "\n== redundancy over one {requested_columns}-target contiguous stream of a {SIDE}x{SIDE} lattice, seed {SEED} =="
+    );
+    println!(
+        "  pre-ore halo: radius {TARGET_HALO_RADIUS}, target prefixes excluded before the stream; later targets can warm through earlier closures"
+    );
     let memo_total = memo_hits + memo_misses;
     if memo_total > 0 {
         println!(
-            "  xz_memo: {:>10.0} lookups/column, hit rate {:>6.2}%  ({memo_hits} hits, {memo_misses} misses)",
+            "  xz_memo: {:>10.0} lookups/submitted target, hit rate {:>6.2}%  ({memo_hits} hits, {memo_misses} misses)",
             memo_total as f64 / n,
             100.0 * memo_hits as f64 / memo_total as f64,
         );
@@ -107,7 +121,7 @@ fn redundancy_per_interior_column() {
     let leaf_total = leaf_hits + leaf_misses;
     if leaf_total > 0 {
         println!(
-            "  leaf_memo: {:>9.0} lookups/column, hit rate {:>6.2}%  ({leaf_hits} hits, {leaf_misses} misses)",
+            "  leaf_memo: {:>9.0} lookups/submitted target, hit rate {:>6.2}%  ({leaf_hits} hits, {leaf_misses} misses)",
             leaf_total as f64 / n,
             100.0 * leaf_hits as f64 / leaf_total as f64,
         );
@@ -115,12 +129,20 @@ fn redundancy_per_interior_column() {
         println!("  leaf_memo: no lookups — the field evaluator's leaf memo is an island");
     }
     println!(
-        "  point-interpreter visits/column : {:>12.0}",
+        "  point-interpreter visits/submitted target : {:>12.0}",
         agg.point_total() as f64 / n
     );
     println!(
-        "  field-evaluator  visits/column  : {:>12.0}",
+        "  field-evaluator  visits/submitted target  : {:>12.0}",
         agg.field_total() as f64 / n
+    );
+    println!(
+        "  compiled point scalar visits/submitted target : {:>9.0}",
+        agg.compiled_point_scalar_total() as f64 / n
+    );
+    println!(
+        "  compiled point batch  visits/submitted target : {:>9.0}",
+        agg.compiled_point_batch_total() as f64 / n
     );
 
     let report = |label: &str,
@@ -136,7 +158,9 @@ fn redundancy_per_interior_column() {
         let ts: u64 = single.iter().sum();
         let txz: u64 = xz.iter().sum();
         let txyz: u64 = xyz.iter().sum();
-        println!("\n  {label} — totals per column and hit rates of three hypothetical memos");
+        println!(
+            "\n  {label} — stream totals normalized per submitted target and hit rates of three hypothetical memos"
+        );
         println!(
             "    visits {:>12.0}   1-slot(x,z) {:>6.2}%   map(x,z) {:>6.2}%   map(x,y,z) {:>6.2}%",
             tv as f64 / n,
@@ -148,7 +172,7 @@ fn redundancy_per_interior_column() {
         rows.sort_by(|a, b| b.1.cmp(&a.1));
         println!(
             "    {:<18} {:>12} {:>10} {:>10} {:>10}",
-            "kind", "visits/col", "1slot%", "mapxz%", "mapxyz%"
+            "kind", "visits/target", "1slot%", "mapxz%", "mapxyz%"
         );
         for (kind, v) in rows.into_iter().filter(|&(_, v)| v > 0) {
             println!(
@@ -176,6 +200,53 @@ fn redundancy_per_interior_column() {
         &agg.field_xz_map_hits,
         &agg.field_xyz_map_hits,
     );
+    println!(
+        "    field own-sampler counters span one Scratch lifetime, not one Field::eval call"
+    );
+    let report_compiled_point = |label: &str,
+                                 visits: &[u64; Density::KIND_COUNT],
+                                 exact_scope_hits: &[u64; Density::KIND_COUNT],
+                                 scopes: u64| {
+        let total_visits: u64 = visits.iter().sum();
+        if total_visits == 0 {
+            println!("\n  {label}: no visits");
+            return;
+        }
+        let total_hits: u64 = exact_scope_hits.iter().sum();
+        println!(
+            "\n  {label} — exact (graph, node, x, y, z) repeats within one evaluation"
+        );
+        println!(
+            "    visits {:>12.0}   scopes {:>9.0}   readiness candidates {:>6.2}%",
+            total_visits as f64 / n,
+            scopes as f64 / n,
+            100.0 * total_hits as f64 / total_visits as f64,
+        );
+        let mut rows: Vec<(usize, u64)> = visits.iter().copied().enumerate().collect();
+        rows.sort_by(|a, b| exact_scope_hits[b.0].cmp(&exact_scope_hits[a.0]));
+        println!("    {:<18} {:>12} {:>12} {:>12}", "kind", "visits/target", "hits/target", "hits%");
+        for (kind, visits) in rows.into_iter().filter(|&(_, visits)| visits > 0) {
+            println!(
+                "    {:<18} {:>12.0} {:>12.0} {:>11.2}%",
+                Density::KIND_NAMES[kind],
+                visits as f64 / n,
+                exact_scope_hits[kind] as f64 / n,
+                100.0 * exact_scope_hits[kind] as f64 / visits as f64,
+            );
+        }
+    };
+    report_compiled_point(
+        "COMPILED POINT SCALAR",
+        &agg.compiled_point_scalar_visits,
+        &agg.compiled_point_scalar_xyz_scope_hits,
+        agg.compiled_point_scalar_scopes,
+    );
+    report_compiled_point(
+        "COMPILED POINT BATCH",
+        &agg.compiled_point_batch_visits,
+        &agg.compiled_point_batch_xyz_scope_hits,
+        agg.compiled_point_batch_scopes,
+    );
 
     // The cross-sampler split. A `Scratch` is per-sampler, so of the `map(x,y,z)`
     // duplication above only the part that is *not* also duplicated within one
@@ -183,12 +254,12 @@ fn redundancy_per_interior_column() {
     // memo already answers (or already refuses). Printing the unscoped rate alone
     // is what makes the field evaluator's 46.9% `flat_cache` row unreadable.
     println!(
-        "\n  CROSS-SAMPLER SPLIT (field evaluator) — {:.1} distinct samplers/column",
+        "\n  CROSS-SAMPLER SPLIT (field evaluator) — {:.1} distinct samplers/submitted target",
         agg.field_scopes as f64 / n
     );
     println!(
         "    {:<18} {:>12} {:>12} {:>12} {:>12} {:>12}",
-        "kind", "visits/col", "dup(x,y,z)", "own-sampler", "cross-sampler", "1slot(xyz)"
+        "kind", "visits/target", "dup(x,y,z)", "own-sampler", "cross-sampler", "1slot(xyz)"
     );
     let mut rows: Vec<(usize, u64)> = agg.field_visits.iter().copied().enumerate().collect();
     rows.sort_by(|a, b| {
@@ -217,7 +288,7 @@ fn redundancy_per_interior_column() {
     }
     println!(
         "    {:<18} {:>12} {:>12} {:>12} {:>12.0}",
-        "TOTAL cross/col", "", "", "", cross_total as f64 / n
+        "TOTAL cross/target", "", "", "", cross_total as f64 / n
     );
 
     // The point interpreter's own one-slot-`(x, y, z)` column, for the leaf kinds
@@ -234,19 +305,13 @@ fn redundancy_per_interior_column() {
             continue;
         }
         println!(
-            "    {:<18} visits/col {:>10.0}   1slot(x,y,z) {:>6.2}%",
+            "    {:<18} visits/target {:>10.0}   1slot(x,y,z) {:>6.2}%",
             Density::KIND_NAMES[kind],
             v as f64 / n,
             100.0 * s1 as f64 / v as f64,
         );
     }
 
-    per_column.sort();
-    let med = per_column[per_column.len() / 2];
-    println!(
-        "\n  median column: point {} visits, field {} visits\n",
-        med.0, med.1
-    );
 }
 
 /// Where a steady-state column's cost actually is, by stage — the measurement

@@ -1,95 +1,37 @@
 //! `ImprovedNoise` — a single 3D Perlin (improved) noise octave.
 //!
-//! Reproduces vanilla's own improved-noise class: three
+//! Reproduces the reference improved-noise algorithm: three
 //! `nextDouble`-derived offsets, a Fisher–Yates permutation of `0..256` drawn
 //! from the source, and the gradient-dot / trilinear-smoothstep sample. Only the
 //! non-derivative `noise(x, y, z)` path (the one terrain uses) is implemented.
 //!
-//! ## Why this kernel is vectorised, and why that is parity-safe
-//!
-//! Unit 5 of [the worldgen rewrite plan] SIMDs the numeric kernels. This is the
-//! one that measured worth doing: a release profile of the C_ss sweep attributes
-//! **11.23% of all column CPU** to `noise_scaled` as *self* time — the largest
-//! single leaf in the numeric core, and roughly a quarter of it arrives through
-//! callers (`aquifer`, `surface`) that query one position at a time, so there is
-//! no batched seam to exploit above this function. The vectorisation therefore
-//! lives *inside* one call, where it needs no caller change and reaches every
-//! call site.
-//!
 //! [`sample_and_lerp`](ImprovedNoise::sample_and_lerp) evaluates the eight
-//! gradient dot products of one noise lattice cell in eight lanes. Those eight
-//! corners are **independent positions** — the shape the plan's SIMD policy
-//! permits — and every lane computes `gx * x + gy * y + gz * z` in the same
-//! left-to-right order the scalar `dot` did, so **no reassociation is possible
-//! and the result is bit-identical by construction**, not by tolerance.
+//! gradient dot products of one lattice cell in eight lanes. Transposed f64
+//! tables supply each lane's three coefficients without per-call conversion;
+//! the dot product and fixed trilinear reduction retain their scalar evaluation
+//! order.
 //!
-//! ## The premise that was false: the old kernel was *already* vectorised
-//!
-//! Do not read the change here as "scalar code became vector code". A
-//! disassembly control on the pre-change binary found the shipped scalar kernel
-//! already carried **17 `fmul.2d` and 15 `fadd.2d`** — LLVM had auto-vectorised
-//! the eight gradient dots on its own. What it *also* carried, and this is where
-//! the win actually came from, was **12 `sshll.2d` + 12 `scvtf.2d` per call**:
-//! widening and converting the `i32` `GRADIENT` entries to `f64` on every single
-//! sample. Storing the table as `f64` deletes all 24.
-//!
-//! Measured, four arms interleaved in one process against the same 65,536
-//! positions, bit-identical throughout (median-of-paired ratios, reproducible
-//! across runs — the absolute times on this shared machine are not):
-//!
-//! | arm | ratio vs shipped | ns/position |
-//! |---|---|---|
-//! | shipped scalar (`i32` table, auto-vectorised) | 1.000 | 5.955 |
-//! | scalar code, `f64` table, **no `std::simd`** | 0.891 | 5.305 |
-//! | this kernel: `std::simd`, 8 lanes | **0.791** | 4.712 |
-//! | `std::simd` batched over 4 independent positions | 0.756 | 4.487 |
-//!
-//! So of the 1.26× total, about **1.12× needs no `std::simd` at all** (the table
-//! type) and the remaining ~1.13× is what the explicit lane structure buys. That
-//! is the honest accounting, and it is why the fourth row did **not** ship:
-//! batching across positions is slightly faster still, but it only reaches the
-//! ~42% of this kernel's cost that arrives through U4's interpolated-corner seam
-//! — the aquifer and surface callers query one position at a time — so it would
-//! deliver *less* total than the in-kernel form while requiring a lane-parallel
-//! evaluator, and `Mul`'s `v1 == 0.0` short-circuit makes lane divergence in that
-//! evaluator semantically observable, not merely awkward. Full numbers in
-//! `docs/worldgen-simd-kernels.md`.
-//!
-//! The trilinear reduction that follows keeps vanilla's own three-axis lerp nesting
-//! exactly. Only *sibling* nodes at the same level of that fixed tree share a
-//! vector (4 lerps, then 2, then a scalar root); the tree's shape is untouched.
-//! A horizontal add across the eight corners would be a different summation
-//! order and a different world — see `docs/worldgen-simd-kernels.md`.
-//!
-//! Two things here are deliberately *not* optimised, both because they would
-//! change bits rather than only cost:
+//! Two operations deliberately remain literal because changing either changes
+//! result bits:
 //!
 //! * **The multiply by a `0.0`/`±1.0` gradient component stays a multiply.**
 //!   Replacing `0.0 * x` with `0.0` loses the sign of zero (`0.0 * -x` is
 //!   `-0.0`), and `-0.0 + -0.0` is `-0.0` where `0.0 + -0.0` is `0.0`, so the
 //!   difference can survive the lerp tree into the returned value. Equal under
 //!   `==`, not equal under `to_bits`, and this repo's parity gates read bits.
-//! * **No `mul_add`.** Fused rounding differs from vanilla's separate
+//! * **No `mul_add`.** Fused rounding differs from separate
 //!   multiply-then-add. `StdFloat` is deliberately not imported.
 //!
-//! [the worldgen rewrite plan]: https://example.invalid/ (see docs/plans/worldgen-rewrite.md)
-
 use std::simd::prelude::*;
 
 use crate::math::{floor, lerp, smoothstep};
 use crate::rng::RandomSource;
 
-/// The 16 gradient vectors (vanilla's own gradient table), exactly as vanilla lists
-/// them.
+/// The 16 gradient vectors in reference-table order.
 ///
-/// **Test-only, and that is the point.** The lanes read the transposed
-/// [`GRADIENT_X`]/[`GRADIENT_Y`]/[`GRADIENT_Z`] tables instead, so this array's
-/// job is to be the *independent* statement of the same data that
-/// `tests::transposed_gradient_tables_agree_with_vanilla_layout` checks them
-/// against. Keeping it in vanilla's row-major shape is what makes that check
-/// worth running — a hand-written transpose is exactly the kind of table that is
-/// silently wrong, and a wrong entry here shifts terrain without failing to
-/// compile.
+/// **Test-only.** This row-major form is independent of the production encoding,
+/// so `tests::transposed_gradient_tables_agree_with_row_layout` detects an
+/// incorrect entry.
 #[cfg(test)]
 const GRADIENT: [[i32; 3]; 16] = [
     [1, 1, 0],
@@ -111,11 +53,6 @@ const GRADIENT: [[i32; 3]; 16] = [
 ];
 
 /// X components of [`GRADIENT`], as `f64`, for lane gathering.
-///
-/// `f64` rather than `i32` so the lanes hold the value `f64::from(g[0])` would
-/// have produced, with no per-lane integer conversion. Each entry is a small
-/// integer and exactly representable, so this is a re-spelling of the same
-/// constant, not a rounding of it.
 const GRADIENT_X: [f64; 16] = [
     1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0, 0.0,
 ];
@@ -142,7 +79,7 @@ pub struct ImprovedNoise {
 
 impl ImprovedNoise {
     /// Builds an octave, consuming three `nextDouble`s and a 256-step shuffle
-    /// from `random` in exactly vanilla's order.
+    /// from `random` in the required order.
     pub fn new<R: RandomSource>(random: &mut R) -> Self {
         let xo = random.next_double() * 256.0;
         let yo = random.next_double() * 256.0;
@@ -270,8 +207,8 @@ impl ImprovedNoise {
         self.sample_and_lerp(xf, yf, zf, xr, yr - yr_fudge, zr, yr)
     }
 
-    /// The eight gradient dot products of one lattice cell, then vanilla's
-    /// own three-axis lerp reduction over them.
+    /// The eight gradient dot products of one lattice cell, then the reference
+    /// three-axis lerp reduction over them.
     ///
     /// Lane order groups the x=0 siblings before the x=1 siblings —
     /// `d000, d010, d001, d011, d100, d110, d101, d111` — so the first
@@ -385,27 +322,24 @@ mod tests {
     use super::{GRADIENT, GRADIENT_X, GRADIENT_Y, GRADIENT_Z, ImprovedNoise};
     use crate::math::{floor, lerp3, smoothstep};
 
-    /// The lane tables are a hand-written transpose, which is exactly the kind of
-    /// table that is silently wrong — a bad entry shifts terrain and compiles
-    /// fine. `GRADIENT` is kept in vanilla's row-major shape purely so this can
-    /// check against it.
+    /// The production tables are a hand-written transpose, while `GRADIENT` is
+    /// independently row-major. Compare them so one wrong value cannot silently
+    /// shift terrain.
     #[test]
-    fn transposed_gradient_tables_agree_with_vanilla_layout() {
+    fn transposed_gradient_tables_agree_with_row_layout() {
         for (i, g) in GRADIENT.iter().enumerate() {
             assert_eq!(GRADIENT_X[i], f64::from(g[0]), "GRADIENT_X[{i}]");
             assert_eq!(GRADIENT_Y[i], f64::from(g[1]), "GRADIENT_Y[{i}]");
             assert_eq!(GRADIENT_Z[i], f64::from(g[2]), "GRADIENT_Z[{i}]");
         }
-        // Control: the comparison is against a table that is not all one value,
-        // so a transpose collapsing to a constant would be caught.
         assert!(
-            GRADIENT_X.iter().any(|&v| v != GRADIENT_X[0]),
+            GRADIENT_X.iter().any(|&value| value != GRADIENT_X[0]),
             "GRADIENT_X is constant — this test would pass against a collapsed table"
         );
     }
 
-    /// An independent, deliberately naive scalar transcription of vanilla's
-    /// own sample-and-lerp routine, written from the algorithm rather than from
+    /// An independent, deliberately naive scalar transcription of the reference
+    /// sample-and-lerp routine, written from the algorithm rather than from
     /// [`ImprovedNoise::sample_and_lerp`], used **only** as a bit-equality oracle.
     ///
     /// This is not a production scalar twin — nothing outside this test module can
@@ -592,9 +526,10 @@ mod tests {
     #[test]
     fn zero_gradient_component_keeps_sign_of_zero() {
         // GRADIENT[8] is [0, 1, 1] — its x component is a real zero.
-        assert_eq!(GRADIENT_X[8], 0.0);
+        let x = GRADIENT_X[8];
+        assert_eq!(x, 0.0);
         let neg = -1.0f64;
-        assert_eq!((GRADIENT_X[8] * neg).to_bits(), (-0.0f64).to_bits());
+        assert_eq!((x * neg).to_bits(), (-0.0f64).to_bits());
         assert_ne!((-0.0f64 + -0.0f64).to_bits(), (0.0f64 + -0.0f64).to_bits());
     }
 

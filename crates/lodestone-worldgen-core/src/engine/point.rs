@@ -816,6 +816,7 @@ impl PointProgram {
     /// Evaluates one context with exact point semantics.
     #[must_use]
     pub fn compute(&self, ctx: Context, scratch: &mut PointScratch) -> f64 {
+        crate::engine::redundancy_probe::begin_point_scalar_scope();
         self.eval(self.root, ctx, scratch)
     }
 
@@ -836,7 +837,9 @@ impl PointProgram {
         };
         assert_eq!(contexts.len(), output.len());
         for (context, pair) in contexts.iter().copied().zip(output.iter_mut()) {
+            crate::engine::redundancy_probe::begin_point_scalar_scope();
             pair.0 = self.eval(factor, context, scratch);
+            crate::engine::redundancy_probe::begin_point_scalar_scope();
             pair.1 = self.eval(offset, context, scratch);
         }
         true
@@ -886,6 +889,7 @@ impl PointProgram {
             } else {
                 (1u8 << lanes) - 1
             };
+            crate::engine::redundancy_probe::begin_point_batch_scope();
             self.eval_batch(self.root, batch, mask, scratch);
             for lane in 0..lanes {
                 output[offset * POINT_BATCH_WIDTH + lane] =
@@ -940,6 +944,7 @@ impl PointProgram {
             } else {
                 (1u8 << lanes) - 1
             };
+            crate::engine::redundancy_probe::begin_point_batch_scope();
             self.eval_batch(self.root, batch, mask, scratch);
             for lane in 0..lanes {
                 output[offset * POINT_BATCH_WIDTH + lane] =
@@ -963,8 +968,22 @@ impl PointProgram {
             for lane in 0..contexts.len() {
                 if mask & (1 << lane) != 0 {
                     crate::counters::bump_density_point_compute(op.kind as usize);
-                    crate::engine::redundancy_probe::visit_point(
+                    crate::engine::redundancy_probe::visit_compiled_point_batch(
                         std::ptr::from_ref(self.graph.as_ref()).cast::<()>(),
+                        id,
+                        op.kind as usize,
+                        contexts[lane].x,
+                        contexts[lane].y,
+                        contexts[lane].z,
+                    );
+                }
+            }
+        } else if !matches!(op.kind, PointKind::Spline) {
+            for lane in 0..contexts.len() {
+                if mask & (1 << lane) != 0 {
+                    crate::engine::redundancy_probe::visit_compiled_point_batch(
+                        std::ptr::from_ref(self.graph.as_ref()).cast::<()>(),
+                        id,
                         op.kind as usize,
                         contexts[lane].x,
                         contexts[lane].y,
@@ -1278,7 +1297,7 @@ impl PointProgram {
                     if mask & (1 << lane) != 0 {
                         let context = contexts[lane];
                         if op.kind == PointKind::Spline {
-                            self.bump_spline(context);
+                            self.bump_spline(id, context, true);
                             let value = f64::from(self.eval_spline(op.a, context, scratch));
                             scratch.set_batch_value(id, lane, value);
                         } else {
@@ -1339,8 +1358,18 @@ impl PointProgram {
         let op = self.graph.ops[id as usize];
         if !matches!(op.kind, PointKind::Spline | PointKind::Blended | PointKind::EndIslands) {
             crate::counters::bump_density_point_compute(op.kind as usize);
-            crate::engine::redundancy_probe::visit_point(
+            crate::engine::redundancy_probe::visit_compiled_point_scalar(
                 std::ptr::from_ref(self.graph.as_ref()).cast::<()>(),
+                id,
+                op.kind as usize,
+                ctx.x,
+                ctx.y,
+                ctx.z,
+            );
+        } else if !matches!(op.kind, PointKind::Spline) {
+            crate::engine::redundancy_probe::visit_compiled_point_scalar(
+                std::ptr::from_ref(self.graph.as_ref()).cast::<()>(),
+                id,
                 op.kind as usize,
                 ctx.x,
                 ctx.y,
@@ -1462,7 +1491,7 @@ impl PointProgram {
             }
             PointKind::Spline | PointKind::Blended | PointKind::EndIslands => {
                 if op.kind == PointKind::Spline {
-                    self.bump_spline(ctx);
+                    self.bump_spline(id, ctx, false);
                     f64::from(self.eval_spline(op.a, ctx, scratch))
                 } else {
                     self.graph.leaves[op.a as usize].compute(ctx)
@@ -1490,15 +1519,27 @@ impl PointProgram {
     }
 
     #[inline]
-    fn bump_spline(&self, ctx: Context) {
+    fn bump_spline(&self, id: NodeId, ctx: Context, batch: bool) {
         crate::counters::bump_density_point_compute(PointKind::Spline as usize);
-        crate::engine::redundancy_probe::visit_point(
-            std::ptr::from_ref(self.graph.as_ref()).cast::<()>(),
-            PointKind::Spline as usize,
-            ctx.x,
-            ctx.y,
-            ctx.z,
-        );
+        if batch {
+            crate::engine::redundancy_probe::visit_compiled_point_batch(
+                std::ptr::from_ref(self.graph.as_ref()).cast::<()>(),
+                id,
+                PointKind::Spline as usize,
+                ctx.x,
+                ctx.y,
+                ctx.z,
+            );
+        } else {
+            crate::engine::redundancy_probe::visit_compiled_point_scalar(
+                std::ptr::from_ref(self.graph.as_ref()).cast::<()>(),
+                id,
+                PointKind::Spline as usize,
+                ctx.x,
+                ctx.y,
+                ctx.z,
+            );
+        }
     }
 
     /// Evaluates a compiled spline node. The control points and nested spline
