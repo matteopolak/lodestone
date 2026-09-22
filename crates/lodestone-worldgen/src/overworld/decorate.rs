@@ -3146,12 +3146,12 @@ impl OverworldGenerator {
             feature_biomes.allows(membership, biome)
         };
 
-        // The centre clone is the immutable source snapshot while
-        // `center_world` remains the one dense grid this function may return.
-        let centre_grid = Arc::new(center_world.clone());
         let grid_sources = &wide_pre;
         let grid_biomes = &wide_pre;
         let mut owned_grid = if epoch_grid.is_none() {
+            // The centre clone is the immutable source snapshot while
+            // `center_world` remains the one dense grid this function may return.
+            let centre_grid = Arc::new(center_world.clone());
             Some(
                 crate::feature::vegetation::VegGrid::with_sources_and_biomes_shared_zoomed(
                     self.min_y,

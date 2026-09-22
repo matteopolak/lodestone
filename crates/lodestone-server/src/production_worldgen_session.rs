@@ -28,7 +28,7 @@ use lodestone_worldgen::stage_schedule::{
 use lodestone_worldgen::counters::{RegionGuard, RegionPhase};
 use lodestone_worldgen::structure::StructureBlocks;
 
-const EXECUTOR_VERSION: u32 = 4;
+const EXECUTOR_VERSION: u32 = 5;
 
 pub(crate) trait DimensionPolicy<S: LifecycleWorldgenSource> {
     const DIMENSION: Dimension;
@@ -294,11 +294,11 @@ fn generated_prefix_provenance(
     boundary: ColumnStage,
 ) -> [u8; 32] {
     let mut digest = Sha256::new();
-    digest.update(b"lodestone-overworld-xoroshiro-generated-prefix-v1");
+    digest.update(b"lodestone-overworld-xoroshiro-generated-prefix-v2");
     digest.update(EXECUTOR_VERSION.to_le_bytes());
     digest.update(identity.seed().to_le_bytes());
     digest.update(identity.resolver_fingerprint().to_le_bytes());
-    digest.update(identity.settings().as_bytes());
+    digest.update(identity.settings_fingerprint());
     digest.update(identity.fallback_biome().as_bytes());
     digest.update([0]);
     digest.update([u8::from(identity.fallback_cold_enough_to_snow())]);
