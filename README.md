@@ -1,38 +1,47 @@
 # Lodestone
 
-Lodestone is an independent Minecraft Java Edition client and integrated server written from
-scratch in Rust (edition 2024) with wgpu. `lodestone-client` is the reusable client library;
-the `lodestone` binary is its interactive native shell.
+Lodestone is an unofficial Minecraft Java Edition client written in Rust. You can
+play singleplayer or connect to multiplayer servers. The default build targets Minecraft 26.2.
 
 Work in progress. Gameplay, rendering, and world generation still have bugs and differences
 from the original game.
 
-## Current scope
+## Screenshots
 
-The workspace contains the client library, native shell, integrated server, renderer,
-world-generation code, protocol adapters, and optional plugins. The native shell's default
-features enable the `v26-2` adapter for Minecraft 26.2 (protocol 776), plus multiplayer and
-windowed presentation. Older protocol adapters are opt-in; joining and hosting support differ.
+Captured in Lodestone while connected to a Minecraft 26.2 server.
 
-There is also a separate browser build for `wasm32-unknown-unknown`. It shares the shell and
-renderer but has its own launch, asset, and runtime requirements; see
-[`web/README.md`](./web/README.md) and [`docs/browser-shell-port.md`](./docs/browser-shell-port.md).
+| | |
+|---|---|
+| ![Text displays](./docs/images/01-text-displays.png) | ![Signs](./docs/images/02-signs.png) |
+| ![Banners, chests, and other block entities](./docs/images/03-block-entities.png) | ![Mobs and armour stands](./docs/images/04-entities.png) |
 
-## Quick start
+![In-game HUD and chat](./docs/images/05-hud.png)
 
-Install the Rust toolchain specified in [`rust-toolchain.toml`](./rust-toolchain.toml) and
-[`just`](https://github.com/casey/just). Then run:
+## Play
+
+There are no prebuilt releases yet. To build and launch the client, install
+[Rust](https://rustup.rs/) and [`just`](https://github.com/casey/just), then run:
 
 ```sh
-just run                                # build and open the native shell
-just run --host example.org --port 25565  # connect on launch
-just health                             # workspace checks, tests, and comment lint
+git clone https://github.com/matteopolak/lodestone.git
+cd lodestone
+cargo run -p xtask -- fetch-assets --version 26.2
+just run
 ```
 
-`just run-wasm` starts the browser development loop at `http://127.0.0.1:8080/`. It additionally
-requires `trunk` and the `wasm32-unknown-unknown` target; the launcher reports missing
-prerequisites. Browser assets and runtime constraints are documented in
-[`web/README.md`](./web/README.md).
+Rust uses the toolchain pinned in this repository. The first build may take a while.
+Once the client opens, choose singleplayer or multiplayer from the main menu.
+On Debian or Ubuntu, install the build dependencies first with
+`sudo apt install libasound2-dev pkg-config`.
+
+You can also connect directly when launching:
+
+```sh
+just run --host example.org --port 25565
+```
+
+For the experimental browser version, see the [browser setup instructions](./web/README.md).
+Please report bugs through [GitHub issues](https://github.com/matteopolak/lodestone/issues).
 
 ## License
 
@@ -44,12 +53,4 @@ Lodestone is not affiliated with Mojang Studios or Microsoft. See
 
 ## AI use
 
-This project is developed with AI assistance. Generated code can contain mistakes;
-review and test it before relying on it.
-
-## Reading further
-
-- [`docs/architecture.md`](./docs/architecture.md) — crate structure and cross-cutting constraints
-- [`docs/multi-protocol-seam.md`](./docs/multi-protocol-seam.md) — protocol-family selection
-- [`docs/repo-tooling.md`](./docs/repo-tooling.md) — build and test commands
-- [`docs/README.md`](./docs/README.md) — subsystem documentation index
+AI is used extensively to develop this project. Bugs and incomplete features remain.
