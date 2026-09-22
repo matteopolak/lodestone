@@ -416,6 +416,81 @@ def control_collision_fixture_still_collides() -> None:
     assert a != b, "fixture libraries no longer disagree at RVA 0x1000"
 
 
+def same_resolved_symbol_fixture() -> dict:
+    """Two distinct func entries resolving to one `liba` symbol.
+
+    Stack 2 then contains both entries. The old `func_index` detector credits
+    that one symbol twice for each of its two samples, while resolved identity
+    must credit it once.
+    """
+    raw = load_fixture(V55)
+    funcs = raw["threads"][0]["funcTable"]
+    funcs["resource"][1] = 0  # liba, same raw RVA and sidecar symbol as func 0
+    return raw
+
+
+SAME_SYMBOL_INCL = {"fixture_plain_main": 100.0, "liba::alpha_symbol": 100.0}
+
+
+def test_inclusive_deduplicates_distinct_func_entries_for_one_resolved_symbol() -> None:
+    raw = same_resolved_symbol_fixture()
+    profile = pct.Profile(raw, sidecar_for(V55))
+    tables = profile.tables_for(0)
+    assert tables.func_name(0) == tables.func_name(1) == "liba::alpha_symbol"
+    assert tables.func_identity(0) == tables.func_identity(1) == ("liba", "liba::alpha_symbol")
+
+    text = report(raw, sidecar_for(V55))
+    assert parse_section(text, SELF) == {"liba::alpha_symbol": 100.0}, text
+    assert parse_section(text, INCL) == SAME_SYMBOL_INCL, text
+
+
+def legacy_func_index_inclusive(tables, thread: dict) -> dict[str, float]:
+    """The replaced detector, retained only as an executed negative control."""
+    inclusive: dict[str, float] = {}
+    for stack_index, weight in zip(thread["samples"]["stack"], thread["samples"]["threadCPUDelta"]):
+        if stack_index is None:
+            continue
+        seen: set[int] = set()
+        for frame_index in tables.stack_chain(stack_index):
+            func_index = tables.frame_table["func"][frame_index]
+            if func_index in seen:
+                continue
+            seen.add(func_index)
+            name = tables.func_name(func_index)
+            inclusive[name] = inclusive.get(name, 0.0) + weight
+    return inclusive
+
+
+def control_func_index_dedup_overcounts_one_resolved_symbol() -> None:
+    raw = same_resolved_symbol_fixture()
+    profile = pct.Profile(raw, sidecar_for(V55))
+    wrong = legacy_func_index_inclusive(profile.tables_for(0), raw["threads"][0])
+    assert wrong == {"fixture_plain_main": 100.0, "liba::alpha_symbol": 190.0}, wrong
+    require_wrong("func-index inclusive dedup", lambda: _assert_same_symbol_incl(wrong))
+
+
+def _assert_same_symbol_incl(incl: dict[str, float]) -> None:
+    assert incl == SAME_SYMBOL_INCL
+
+
+def test_inclusive_keeps_like_named_symbols_from_different_libraries_distinct() -> None:
+    raw = load_fixture(V55)
+    sidecar_raw = pct.load_json_maybe_gz(sidecar_path_for(V55))
+    sidecar_raw["string_table"][2] = "liba::alpha_symbol"
+    syms = pct.SymsSidecar(sidecar_raw)
+    tables = pct.Profile(raw, syms).tables_for(0)
+    assert tables.func_name(0) == tables.func_name(1) == "liba::alpha_symbol"
+    assert tables.func_identity(0) != tables.func_identity(1)
+
+    text = report(raw, syms)
+    # The rendered table groups equal display names, but the two library
+    # identities must each receive the stack's weight before that grouping.
+    assert parse_section(text, INCL) == {
+        "fixture_plain_main": 100.0,
+        "liba::alpha_symbol": 190.0,
+    }, text
+
+
 # --------------------------------------------------------------------------
 # 3. per-thread tables are per-thread
 # --------------------------------------------------------------------------
@@ -624,6 +699,9 @@ def main() -> int:
         ("collision fixture, hoisted layout (v56)", test_collision_fixture_shared_v56),
         ("CONTROL: fixture libraries really do collide at 0x1000", control_collision_fixture_still_collides),
         ("CONTROL: address-only join misattributes 100 units", control_address_only_join_misattributes),
+        ("inclusive cost de-duplicates one resolved symbol across func entries", test_inclusive_deduplicates_distinct_func_entries_for_one_resolved_symbol),
+        ("CONTROL: func-index inclusive dedup overcounts one resolved symbol", control_func_index_dedup_overcounts_one_resolved_symbol),
+        ("inclusive cost keeps like-named cross-library symbols distinct", test_inclusive_keeps_like_named_symbols_from_different_libraries_distinct),
         ("per-thread tables are not borrowed across threads", test_per_thread_tables_are_not_borrowed_across_threads),
         ("CONTROL: borrowing thread 0's tables is detectable", control_borrowing_thread_zero_tables_is_detectable),
         ("future version is a loud error naming the version", test_future_version_is_a_loud_error_naming_the_version),
