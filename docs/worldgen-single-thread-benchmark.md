@@ -33,6 +33,15 @@ names them in the summary (or pass an explicit comma-separated `--events` list
 when a template uses multi-word names); unavailable events are reported as
 unavailable rather than inferred from the software counters.
 
+The opt-in `worldgen-stage-pmu` feature adds calibrated retired-instruction and
+cycle scopes to outermost worldgen stages. It reports terrain-prefix, features,
+finalization, and session-remainder totals, followed by each stage's IPC. The
+scopes are installed only by this ignored harness, subtract one measured PMU
+read from each interval, and do not enable the ordinary generation counters.
+The session remainder includes production admission, materialization, ledger,
+publication, and diagnostic observer overhead; compare it with the uninstrumented
+`production_request` total rather than treating it as a generator stage.
+
 ## How to change it
 
 Keep the cold target and contiguous sustained coordinates distinct. A benchmark
@@ -73,6 +82,10 @@ requiring macOS Instruments.
 `LODESTONE_WORLDGEN_XCTRACE_TEMPLATE` selects the Instruments template and
 `LODESTONE_WORLDGEN_XCTRACE_EVENTS` optionally supplies its comma-separated
 counter names to the summary when the TOC uses ambiguous multi-word labels.
+For the stage decomposition, add the server feature
+`worldgen-stage-pmu`; it requires macOS retired-instruction counters and is
+diagnostic-only. The same seed, coordinates, worker count, and batch size must
+be used for the uninstrumented total and the PMU run.
 
 `scripts/profile-worldgen-hardware.sh` exports the xctrace TOC and the target
 stdout to `scripts/summarize-xctrace-counters.py`. The summary combines

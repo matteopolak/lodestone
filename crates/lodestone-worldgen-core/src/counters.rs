@@ -137,6 +137,34 @@ pub const STAGE_NAMES: [&str; STAGE_COUNT] = [
     "other",
 ];
 
+#[cfg(feature = "stage-pmu")]
+mod stage_pmu {
+    use std::sync::OnceLock;
+
+    use super::Stage;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Event {
+        Enter,
+        Exit,
+    }
+
+    type Observer = fn(Stage, Event);
+
+    static OBSERVER: OnceLock<Observer> = OnceLock::new();
+
+    pub fn install(observer: Observer) -> bool {
+        OBSERVER.set(observer).is_ok()
+    }
+
+    #[inline(always)]
+    pub fn notify(stage: Stage, event: Event) {
+        if let Some(observer) = OBSERVER.get() {
+            observer(stage, event);
+        }
+    }
+}
+
 /// Logical cache boundaries visible to the world-generation implementation.
 /// These are software representations, not CPU cache levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -536,6 +564,8 @@ mod imp {
         CACHE_COUNT, MAX_TRACKED_SLOTS, MEMORY_BOUNDARY_COUNT, STAGE_COUNT, CacheKind,
         MemoryBoundary, Snapshot, Stage,
     };
+    #[cfg(feature = "stage-pmu")]
+    use super::stage_pmu::{self, Event};
 
     const KINDS: usize = crate::density::Density::KIND_COUNT;
 
@@ -970,21 +1000,45 @@ mod imp {
 
     /// Enters `stage` on this thread; the previous tag is restored on drop.
     #[derive(Debug)]
-    pub struct StageGuard(Stage);
+    pub struct StageGuard {
+        previous: Stage,
+        #[cfg(feature = "stage-pmu")]
+        observed: bool,
+    }
 
     impl StageGuard {
         #[inline]
         pub fn enter(stage: Stage) -> Self {
             bump(&C.stage_entered[stage as usize]);
-            Self(STAGE.replace(stage))
+            let previous = STAGE.replace(stage);
+            #[cfg(feature = "stage-pmu")]
+            let observed = previous == Stage::Other;
+            #[cfg(feature = "stage-pmu")]
+            if observed {
+                stage_pmu::notify(stage, Event::Enter);
+            }
+            Self {
+                previous,
+                #[cfg(feature = "stage-pmu")]
+                observed,
+            }
         }
     }
 
     impl Drop for StageGuard {
         #[inline]
         fn drop(&mut self) {
-            STAGE.set(self.0);
+            #[cfg(feature = "stage-pmu")]
+            if self.observed {
+                stage_pmu::notify(STAGE.get(), Event::Exit);
+            }
+            STAGE.set(self.previous);
         }
+    }
+
+    #[cfg(feature = "stage-pmu")]
+    pub fn install_stage_observer(observer: fn(Stage, Event)) -> bool {
+        stage_pmu::install(observer)
     }
 
     pub fn reset() {
@@ -1142,10 +1196,24 @@ mod imp {
 #[cfg(not(feature = "gen-counters"))]
 mod imp {
     use super::{CacheKind, MemoryBoundary, Snapshot, Stage};
+    #[cfg(feature = "stage-pmu")]
+    use super::stage_pmu;
+    #[cfg(feature = "stage-pmu")]
+    use std::cell::Cell;
+
+    #[cfg(feature = "stage-pmu")]
+    thread_local! {
+        static STAGE: Cell<Stage> = const { Cell::new(Stage::Other) };
+    }
 
     #[inline(always)]
+    #[cfg(not(feature = "stage-pmu"))]
     pub fn current_stage() -> Stage {
         Stage::Other
+    }
+    #[cfg(feature = "stage-pmu")]
+    pub fn current_stage() -> Stage {
+        STAGE.get()
     }
     #[inline(always)]
     pub fn bump_logical_read(_boundary: MemoryBoundary, _items: u64, _bytes: u64) {}
@@ -1241,15 +1309,52 @@ mod imp {
     #[inline(always)]
     pub fn bump_structure_ring_reach_build() {}
 
-    /// Zero-sized in the default build: `StageGuard::enter` compiles to nothing.
+    #[cfg(not(feature = "stage-pmu"))]
     #[derive(Debug)]
     pub struct StageGuard;
 
+    #[cfg(not(feature = "stage-pmu"))]
     impl StageGuard {
         #[inline(always)]
         pub fn enter(_stage: Stage) -> Self {
             Self
         }
+    }
+
+    #[cfg(feature = "stage-pmu")]
+    #[derive(Debug)]
+    pub struct StageGuard {
+        previous: Stage,
+        observed: bool,
+    }
+
+    #[cfg(feature = "stage-pmu")]
+    impl StageGuard {
+        #[inline]
+        pub fn enter(stage: Stage) -> Self {
+            let previous = STAGE.replace(stage);
+            let observed = previous == Stage::Other;
+            if observed {
+                stage_pmu::notify(stage, stage_pmu::Event::Enter);
+            }
+            Self { previous, observed }
+        }
+    }
+
+    #[cfg(feature = "stage-pmu")]
+    impl Drop for StageGuard {
+        #[inline]
+        fn drop(&mut self) {
+            if self.observed {
+                stage_pmu::notify(STAGE.get(), stage_pmu::Event::Exit);
+            }
+            STAGE.set(self.previous);
+        }
+    }
+
+    #[cfg(feature = "stage-pmu")]
+    pub fn install_stage_observer(observer: fn(Stage, super::StageEvent)) -> bool {
+        stage_pmu::install(observer)
     }
 
     #[inline(always)]
@@ -1282,6 +1387,11 @@ pub use imp::{
     bump_structure_ring_reach_build,
     current_stage, reset, snapshot,
 };
+
+#[cfg(feature = "stage-pmu")]
+pub use imp::install_stage_observer;
+#[cfg(feature = "stage-pmu")]
+pub use stage_pmu::Event as StageEvent;
 
 /// Whether this build has counters compiled in.
 ///

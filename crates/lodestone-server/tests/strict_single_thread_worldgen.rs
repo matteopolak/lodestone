@@ -13,6 +13,13 @@ use std::hint::black_box;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
+use std::cell::Cell;
+#[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
+use std::sync::OnceLock;
+#[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
 use lodestone_server::worldgen_session::{
     GenerationRequest, GenerationRequestResult, GenerationSession,
 };
@@ -20,6 +27,8 @@ use lodestone_server::{ChunkColumn, ChunkSource, ServerProtocol, overworld_chunk
 use lodestone_v26_2::V770ServerProtocol;
 use lodestone_server::dimension::Dimension as ServerDimension;
 use lodestone_worldgen::counters;
+#[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
+use lodestone_worldgen::counters::{Stage, StageEvent, STAGE_COUNT};
 use lodestone_worldgen::stage_schedule::{Dimension as WorldgenDimension, GenerationTarget};
 
 #[cfg(target_os = "macos")]
@@ -87,6 +96,155 @@ fn retired() -> Option<(u64, u64)> {
 #[cfg(not(target_os = "macos"))]
 fn retired() -> Option<(u64, u64)> {
     None
+}
+
+#[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
+static STAGE_INSTRUCTIONS: [AtomicU64; STAGE_COUNT] =
+    [const { AtomicU64::new(0) }; STAGE_COUNT];
+#[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
+static STAGE_CYCLES: [AtomicU64; STAGE_COUNT] = [const { AtomicU64::new(0) }; STAGE_COUNT];
+#[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
+static PMU_READ_COST: OnceLock<(u64, u64)> = OnceLock::new();
+
+#[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
+thread_local! {
+    static STAGE_START: Cell<Option<(Stage, u64, u64)>> = const { Cell::new(None) };
+}
+
+#[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
+fn stage_pmu_observer(stage: Stage, event: StageEvent) {
+    match event {
+        StageEvent::Enter => {
+            let (instructions, cycles) = retired().expect("stage PMU requires retired counters");
+            STAGE_START.with(|start| {
+                assert!(start.get().is_none(), "stage PMU scopes may not overlap");
+                start.set(Some((stage, instructions, cycles)));
+            });
+        }
+        StageEvent::Exit => {
+            let (started_stage, before_instructions, before_cycles) = STAGE_START
+                .with(|start| start.take())
+                .expect("stage PMU exit without an enter");
+            assert_eq!(started_stage, stage, "stage PMU scope changed stages");
+            let (after_instructions, after_cycles) =
+                retired().expect("stage PMU requires retired counters");
+            let (read_instructions, read_cycles) = *PMU_READ_COST
+                .get()
+                .expect("stage PMU read cost must be initialized");
+            STAGE_INSTRUCTIONS[stage as usize].fetch_add(
+                after_instructions
+                    .saturating_sub(before_instructions)
+                    .saturating_sub(read_instructions),
+                Relaxed,
+            );
+            STAGE_CYCLES[stage as usize].fetch_add(
+                after_cycles
+                    .saturating_sub(before_cycles)
+                    .saturating_sub(read_cycles),
+                Relaxed,
+            );
+        }
+    }
+}
+
+#[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
+fn install_stage_pmu() {
+    let before = retired().expect("stage PMU requires retired counters");
+    let after = retired().expect("stage PMU requires retired counters");
+    PMU_READ_COST
+        .set((
+            after.0.saturating_sub(before.0),
+            after.1.saturating_sub(before.1),
+        ))
+        .expect("stage PMU read cost initialized once");
+    assert!(
+        PMU_READ_COST.get().is_some_and(|(instructions, cycles)| {
+            *instructions > 0 && *cycles > 0
+        }),
+        "stage PMU read-cost control did not observe work"
+    );
+    assert!(
+        counters::install_stage_observer(stage_pmu_observer),
+        "stage PMU observer can only be installed once"
+    );
+}
+
+#[cfg(all(feature = "worldgen-stage-pmu", not(target_os = "macos")))]
+fn install_stage_pmu() {
+    panic!("stage PMU diagnostics require macOS retired-instruction counters");
+}
+
+#[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
+fn report_stage_pmu(total: &Measurement<impl Sized>, columns: usize, phase: &str) {
+    let per_column = columns.max(1) as f64;
+    let instructions: [u64; STAGE_COUNT] =
+        std::array::from_fn(|index| STAGE_INSTRUCTIONS[index].load(Relaxed));
+    let cycles: [u64; STAGE_COUNT] =
+        std::array::from_fn(|index| STAGE_CYCLES[index].load(Relaxed));
+    let sum_instructions = instructions.iter().sum::<u64>();
+    let sum_cycles = cycles.iter().sum::<u64>();
+    let remainder_instructions = total
+        .counters
+        .map_or(0, |(value, _)| value.saturating_sub(sum_instructions));
+    let remainder_cycles = total
+        .counters
+        .map_or(0, |(_, value)| value.saturating_sub(sum_cycles));
+    let report = |stage: &str, instruction_count: u64, cycle_count: u64| {
+        println!(
+            "STRICT_WORLDGEN metric=stage_pmu phase={phase} stage={stage} columns={columns} instructions={instruction_count} instructions_per_column={:.0} cycles={cycle_count} cycles_per_column={:.0} ipc={:.3}",
+            instruction_count as f64 / per_column,
+            cycle_count as f64 / per_column,
+            instruction_count as f64 / cycle_count.max(1) as f64,
+        );
+    };
+    let (prefix_instructions, prefix_cycles) = grouped_stage_totals(
+        &instructions,
+        &cycles,
+        &[Stage::Aquifer, Stage::Shape, Stage::Biome, Stage::Surface, Stage::Materialize, Stage::Carve, Stage::Structure],
+    );
+    let (feature_instructions, feature_cycles) = grouped_stage_totals(
+        &instructions,
+        &cycles,
+        &[Stage::Ore, Stage::Vegetation],
+    );
+    let (final_instructions, final_cycles) = grouped_stage_totals(
+        &instructions,
+        &cycles,
+        &[Stage::TopLayer, Stage::Intern],
+    );
+    report("terrain_prefix", prefix_instructions, prefix_cycles);
+    report("features", feature_instructions, feature_cycles);
+    report("finalization", final_instructions, final_cycles);
+    report("session_remainder", remainder_instructions, remainder_cycles);
+    for stage in [
+        Stage::Aquifer,
+        Stage::Shape,
+        Stage::Biome,
+        Stage::Surface,
+        Stage::Materialize,
+        Stage::Carve,
+        Stage::Structure,
+        Stage::Ore,
+        Stage::Vegetation,
+        Stage::TopLayer,
+        Stage::Intern,
+    ] {
+        report(counters::STAGE_NAMES[stage as usize], instructions[stage as usize], cycles[stage as usize]);
+    }
+}
+
+#[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
+fn grouped_stage_totals(
+    instructions: &[u64; STAGE_COUNT],
+    cycles: &[u64; STAGE_COUNT],
+    stages: &[Stage],
+) -> (u64, u64) {
+    stages.iter().fold((0, 0), |(instruction_sum, cycle_sum), stage| {
+        (
+            instruction_sum + instructions[*stage as usize],
+            cycle_sum + cycles[*stage as usize],
+        )
+    })
 }
 
 fn parse(name: &str, default: usize) -> usize {
@@ -368,6 +526,8 @@ fn strict_single_thread_production_worldgen() {
     }
     let generation_counter_before = counters_enabled.then(counters::snapshot);
     base_source.generator().reset_store_lease_stats();
+    #[cfg(feature = "worldgen-stage-pmu")]
+    install_stage_pmu();
     let sustained = measure_request(retired(), || {
         let mut results = Vec::with_capacity(count);
         for sessions in &mut session_batches {
@@ -405,6 +565,8 @@ fn strict_single_thread_production_worldgen() {
         count,
         "sustained_batch",
     );
+    #[cfg(feature = "worldgen-stage-pmu")]
+    report_stage_pmu(&sustained, count, "sustained_batch");
     let mut columns = Vec::<((i32, i32), ChunkColumn)>::with_capacity(count);
     let mut generated_count = 0usize;
     let mut promoted_count = 0usize;

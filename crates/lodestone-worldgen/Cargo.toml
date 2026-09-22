@@ -38,6 +38,8 @@ default = []
 # no RNG draw, so it cannot change generated terrain. `just test` covers both
 # settings via `--all-features`.
 gen-counters = ["lodestone-worldgen-core/gen-counters"]
+# Forward the diagnostic stage observer without enabling hot-path counters.
+stage-pmu = ["lodestone-worldgen-core/stage-pmu"]
 
 [dependencies]
 serde = { workspace = true }
