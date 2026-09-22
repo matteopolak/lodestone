@@ -89,6 +89,12 @@ fluid/air checks compare interned base IDs, and its repeated fills never clone a
 Provider configuration accepts text only at the explicit generated-data boundary, then binds
 canonical ids before placement; runtime providers carry ids exclusively.
 
+Vegetation property rewrites use a bounded 1,024-slot numeric memo keyed by `StateId` and rewrite
+ordinal. It stores both absent-property results and rewritten ids in one atomic word; collisions
+recompute the property transition and cannot change output. The table is 8 KiB per tag set and
+does not grow with the number of generated columns. `gen-counters` builds expose per-thread
+rewrite hit/miss counters for focused measurements.
+
 `UNDERGROUND_ORES` is dispatched through the same catalog rather than treated as an ore-only
 list. `select_ores` emits the configured ore entries, while `select_step6_disks` emits disk
 features to the existing `VegGrid` placement interpreter, and

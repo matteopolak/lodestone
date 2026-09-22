@@ -146,6 +146,7 @@ pub(crate) struct TilePlan {
     pub(crate) params: Vec<f64>,
     pub(crate) branches: Vec<u16>,
     pub(crate) root: u16,
+    pub(crate) roots: Vec<u16>,
 }
 
 /// A compiled density graph: immutable, `Sync`, and shared by `Arc`.
@@ -181,6 +182,9 @@ pub struct Graph {
     /// The exact production final-density shape, when this graph is eligible
     /// for the bounded cell evaluator.
     overworld_final_density: Option<OverworldFinalDensityPlan>,
+    /// A shared pure plan for the terrain and four noodle roots. The roots are
+    /// compiled together so their common register subtrees are evaluated once.
+    overworld_final_density_tile_plan: Option<TilePlan>,
     /// Product labels are collected only during compilation. The compact
     /// per-node table is immutable after the graph is published.
     product_manifest: Option<XzProductManifest>,
@@ -364,6 +368,7 @@ impl Program {
             splines: Vec::new(),
             interner: Interner::default(),
             overworld_final_density: None,
+            overworld_final_density_tile_plan: None,
             product_manifest: manifest,
             product_nodes: Vec::new(),
             product_kinds: Vec::new(),
@@ -403,6 +408,19 @@ impl Program {
         }
         g.tile_plan_ids.resize(g.ops.len(), None);
         if let Some(plan) = g.overworld_final_density {
+            let final_roots = [
+                plan.terrain_inner,
+                plan.noodle_control_inner,
+                plan.noodle_ridge_a_inner,
+                plan.noodle_ridge_b_inner,
+                plan.noodle_thickness_inner,
+            ];
+            if final_roots
+                .iter()
+                .all(|&root| g.tile_eligible[root as usize])
+            {
+                g.overworld_final_density_tile_plan = Some(g.compile_tile_plan_for_roots(&final_roots));
+            }
             for root in [
                 plan.terrain_inner,
                 plan.noodle_control_inner,
@@ -941,6 +959,10 @@ impl Graph {
             .and_then(|index| index.map(|index| &self.tile_plans[index as usize]))
     }
 
+    pub(crate) fn overworld_final_density_tile_plan(&self) -> Option<&TilePlan> {
+        self.overworld_final_density_tile_plan.as_ref()
+    }
+
     #[cfg(test)]
     pub(crate) fn compile_tile_plan_for_test(&self, root: NodeId) -> TilePlan {
         assert!(self.tile_eligible(root));
@@ -948,6 +970,10 @@ impl Graph {
     }
 
     fn compile_tile_plan(&self, root: NodeId) -> TilePlan {
+        self.compile_tile_plan_for_roots(&[root])
+    }
+
+    fn compile_tile_plan_for_roots(&self, roots: &[NodeId]) -> TilePlan {
         fn visit(graph: &Graph, id: NodeId, plan: &mut TilePlan, ids: &mut [u16]) -> u16 {
             if ids[id as usize] != u16::MAX {
                 return ids[id as usize];
@@ -1055,9 +1081,16 @@ impl Graph {
             params: Vec::new(),
             branches: Vec::new(),
             root: 0,
+            roots: Vec::with_capacity(roots.len()),
         };
         let mut ids = vec![u16::MAX; self.ops.len()];
-        plan.root = visit(self, root, &mut plan, &mut ids);
+        for &root in roots {
+            let compiled = visit(self, root, &mut plan, &mut ids);
+            if plan.roots.is_empty() {
+                plan.root = compiled;
+            }
+            plan.roots.push(compiled);
+        }
         plan
     }
 
