@@ -105,6 +105,13 @@ per XZ column and index the palette's validated state ids directly. This avoids
 re-reading packed sections for the same metadata while preserving the packed
 block output and the independently rescanned heightmap values.
 
+After a column enters FEATURES, an edit rescans its affected XZ column once for
+all three client maps. The scan records each predicate's own first matching
+state, so `MOTION_BLOCKING_NO_LEAVES` can continue below a leaf while the other
+maps retain their higher result; fluid and waterlogged states still use the
+same motion predicate. Keep this path cache-free and compare it with the test
+only naïve scan when changing a heightmap predicate or vertical bound.
+
 The unified FEATURES dispatcher also takes its short-lived seeded-state map,
 ore-transfer map, and two cross-adapter write buffers from a worker-local
 scratch slot. They are cleared and returned after each dispatch, so their

@@ -177,6 +177,7 @@ const CLIENT_WORLD_SURFACE_HEIGHTMAP_TYPE_ID: u32 = 1;
 const CLIENT_MOTION_BLOCKING_HEIGHTMAP_TYPE_ID: u32 = 4;
 const CLIENT_MOTION_BLOCKING_NO_LEAVES_HEIGHTMAP_TYPE_ID: u32 = 5;
 
+#[cfg(test)]
 fn client_heightmap_includes(type_id: u32, state: lodestone_data::block_states::StateId) -> bool {
     let motion = lodestone_data::block_solidity::blocks_motion(state)
         || lodestone_data::snow_support::has_fluid_state(state);
@@ -190,7 +191,67 @@ fn client_heightmap_includes(type_id: u32, state: lodestone_data::block_states::
     }
 }
 
+/// Resolve all three client heightmaps for one XZ column in a single top-down
+/// walk. Each map keeps its own first matching state, so the common walk does
+/// not make the no-leaves map inherit the motion-blocking answer.
+#[inline]
+fn client_heightmap_values_at(
+    min_y: i32,
+    height: i32,
+    mut state_at: impl FnMut(i32) -> StateId,
+) -> [u32; 3] {
+    let mut values = [0; 3];
+    let mut remaining = 0b111u8;
+    for y in (min_y..min_y + height).rev() {
+        let state = state_at(y);
+        let stored = (y + 1 - min_y) as u32;
+        if remaining & 1 != 0 && state != lodestone_data::block_states::air_state() {
+            values[0] = stored;
+            remaining &= !1;
+        }
+        if remaining & 0b110 != 0 {
+            let motion = lodestone_data::block_solidity::blocks_motion(state)
+                || lodestone_data::snow_support::has_fluid_state(state);
+            if remaining & 2 != 0 && motion {
+                values[1] = stored;
+                remaining &= !2;
+            }
+            if remaining & 4 != 0
+                && motion
+                && !lodestone_data::tool::builtin_block_tag_contains(
+                    "minecraft:leaves",
+                    state.block(),
+                )
+            {
+                values[2] = stored;
+                remaining &= !4;
+            }
+        }
+        if remaining == 0 {
+            break;
+        }
+    }
+    values
+}
+
 fn derive_client_heightmaps(column: &ChunkColumn) -> lodestone_world::Heightmaps {
+    let mut raw = [[0u16; 256]; 3];
+    for z in 0..16i32 {
+        for x in 0..16i32 {
+            let values = client_heightmap_values_at(column.min_y, column.height, |y| {
+                column.block_state_id(x, y, z)
+            });
+            let index = x as usize + z as usize * 16;
+            for (map, value) in raw.iter_mut().zip(values) {
+                map[index] = value as u16;
+            }
+        }
+    }
+    heightmaps_from_raw(column.height, raw)
+}
+
+#[cfg(test)]
+fn derive_client_heightmaps_naive(column: &ChunkColumn) -> lodestone_world::Heightmaps {
     let mut maps = lodestone_world::Heightmaps::new();
     for type_id in [
         CLIENT_WORLD_SURFACE_HEIGHTMAP_TYPE_ID,
@@ -1440,15 +1501,17 @@ impl ChunkColumn {
         };
         #[cfg(test)]
         HEIGHTMAP_REPAIRS.with(|c| c.set(c.get() + 1));
-        for type_id in [
+        let values = client_heightmap_values_at(self.min_y, self.height, |y| {
+            self.block_state_id(x, y, z)
+        });
+        for (type_id, stored) in [
             CLIENT_WORLD_SURFACE_HEIGHTMAP_TYPE_ID,
             CLIENT_MOTION_BLOCKING_HEIGHTMAP_TYPE_ID,
             CLIENT_MOTION_BLOCKING_NO_LEAVES_HEIGHTMAP_TYPE_ID,
-        ] {
-            let stored = (self.min_y..self.min_y + self.height)
-                .rev()
-                .find(|&y| client_heightmap_includes(type_id, self.block_state_id(x, y, z)))
-                .map_or(0, |y| (y + 1 - self.min_y) as u32);
+        ]
+        .into_iter()
+        .zip(values)
+        {
             if let Some(map) = maps.get_mut(type_id) {
                 map.set(x as usize, z as usize, stored);
             }
@@ -5942,6 +6005,44 @@ mod tests {
         assert_eq!(batch.client_heightmaps_raw(), scalar.client_heightmaps_raw());
         assert_eq!(batch.section_ticking_counts(), scalar.section_ticking_counts());
         assert_eq!(heightmap_repairs(), 2, "one repair per dirty XZ cell");
+    }
+
+    #[test]
+    fn shared_heightmap_refresh_matches_naive_for_negative_fluid_leaves_and_removal() {
+        let mut column = ChunkColumn::new(-64, 16);
+        let x = 4;
+        let z = 9;
+        let leaves = sid("minecraft:oak_leaves[distance=7,persistent=false,waterlogged=false]");
+        let waterlogged = sid("minecraft:oak_slab[type=bottom,waterlogged=true]");
+        let water = sid("minecraft:water[level=0]");
+
+        column.set_block_id(x, -61, z, leaves);
+        column.set_block_id(x, -62, z, waterlogged);
+        column.set_block_id(x, -63, z, water);
+        column.prime_client_heightmaps();
+
+        let assert_matches_naive = |column: &ChunkColumn| {
+            let expected = derive_client_heightmaps_naive(column);
+            let actual = column.client_heightmaps_raw().unwrap();
+            for (map_index, type_id) in [1u32, 4, 5].into_iter().enumerate() {
+                assert_eq!(
+                    actual[map_index][x as usize + z as usize * 16],
+                    expected.get(type_id).unwrap().get(x as usize, z as usize) as u16,
+                    "map {type_id} must retain its own first matching state"
+                );
+            }
+        };
+
+        assert_matches_naive(&column);
+        assert_eq!(column.client_heightmaps_raw().unwrap()[2][x as usize + z as usize * 16], 3);
+
+        column.set_block_id(x, -61, z, sid("minecraft:air"));
+        assert_matches_naive(&column);
+        assert_eq!(column.client_heightmaps_raw().unwrap()[0][x as usize + z as usize * 16], 3);
+
+        column.set_block_id(x, -62, z, sid("minecraft:air"));
+        assert_matches_naive(&column);
+        assert_eq!(column.client_heightmaps_raw().unwrap()[1][x as usize + z as usize * 16], 2);
     }
 
     #[test]
