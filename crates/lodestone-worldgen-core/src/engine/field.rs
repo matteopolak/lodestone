@@ -1351,7 +1351,7 @@ fn eval_tile_plan_node(
     products: Option<&XzProductLattice>,
     graph: *const Graph,
 ) {
-    let missing = active & !scratch.plan_mask(reg);
+    let missing = scratch.plan_missing(reg, active);
     if missing == 0 {
         return;
     }
@@ -1393,7 +1393,7 @@ fn eval_tile_plan_node(
         }
         scratch.plan_put(reg, product_mask, values);
     }
-    let missing = missing & !scratch.plan_mask(reg);
+    let missing = scratch.plan_missing(reg, missing);
     if missing == 0 {
         return;
     }
@@ -1608,16 +1608,12 @@ fn eval_tile_plan_node(
                 scratch.plan_set_select(reg, lane, selected);
             }
             for index in 0..usize::from(op.branch_count) {
-                let mut branch_mask = 0_u8;
-                for lane in 0..8 {
-                    if missing & (1 << lane) != 0
-                        && usize::from(scratch.plan_select(reg, lane))
-                            .min(usize::from(op.branch_count.saturating_sub(1)))
-                            == index
-                    {
-                        branch_mask |= 1 << lane;
-                    }
-                }
+                let branch_mask = scratch.plan_branch_mask(
+                    reg,
+                    missing,
+                    index as u16,
+                    op.branch_count,
+                );
                 if branch_mask != 0 {
                     eval_tile_plan_node(
                         plan,

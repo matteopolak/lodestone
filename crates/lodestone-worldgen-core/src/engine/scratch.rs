@@ -57,6 +57,94 @@ use super::point::PointScratch;
 /// way.
 type FxBuild = crate::hash::FastBuildHasher;
 
+/// Fixed-size values and control state for one compiled field-plan register.
+/// The 32-bit readiness mask supports future fused evaluators with more than
+/// the current eight lanes without changing the scratch layout contract.
+#[derive(Clone, Copy)]
+pub(crate) struct LaneState<const LANES: usize> {
+    values: [f64; LANES],
+    ready: u32,
+    select: [u16; LANES],
+}
+
+impl<const LANES: usize> Default for LaneState<LANES> {
+    fn default() -> Self {
+        assert!(LANES <= u32::BITS as usize);
+        Self {
+            values: [0.0; LANES],
+            ready: 0,
+            select: [0; LANES],
+        }
+    }
+}
+
+impl<const LANES: usize> LaneState<LANES> {
+    #[inline]
+    fn reset_ready(&mut self) {
+        self.ready = 0;
+    }
+
+    #[inline]
+    fn reset(&mut self) {
+        self.ready = 0;
+        self.select.fill(0);
+    }
+
+    #[cfg(test)]
+    #[inline]
+    fn ready_mask(&self) -> u32 {
+        self.ready
+    }
+
+    #[inline]
+    fn missing(&self, active: u32) -> u32 {
+        active & !self.ready
+    }
+
+    #[inline]
+    fn value(&self, lane: usize) -> f64 {
+        self.values[lane]
+    }
+
+    #[inline]
+    fn values(&self) -> [f64; LANES] {
+        self.values
+    }
+
+    #[inline]
+    fn selected(&self, lane: usize) -> u16 {
+        self.select[lane]
+    }
+
+    #[inline]
+    fn set_selected(&mut self, lane: usize, value: u16) {
+        self.select[lane] = value;
+    }
+
+    #[inline]
+    fn put(&mut self, mask: u32, values: [f64; LANES]) {
+        for lane in 0..LANES {
+            if mask & (1 << lane) != 0 {
+                self.values[lane] = values[lane];
+            }
+        }
+        self.ready |= mask;
+    }
+
+    #[inline]
+    fn branch_mask(&self, active: u32, branch: u16, branch_count: u16) -> u32 {
+        let branch = usize::from(branch);
+        let last = usize::from(branch_count.saturating_sub(1));
+        let mut mask = 0;
+        for lane in 0..LANES {
+            if active & (1 << lane) != 0 && usize::from(self.select[lane]).min(last) == branch {
+                mask |= 1 << lane;
+            }
+        }
+        mask
+    }
+}
+
 /// The declared inclusive query bounds of a sampler, from which both the slot
 /// grid and the cell grid are derived.
 ///
@@ -336,9 +424,7 @@ pub struct Scratch {
     /// The graph identity is part of each point memo key because one field
     /// graph may hold several distinct spline programs.
     point: PointScratch,
-    plan_values: Vec<[f64; 8]>,
-    plan_masks: Vec<u8>,
-    plan_select: Vec<[u16; 8]>,
+    plan_lanes: Vec<LaneState<8>>,
 }
 
 impl Default for Scratch {
@@ -356,9 +442,7 @@ impl Default for Scratch {
             retained_bytes: 0,
             leaf_memo: [LEAF_MEMO_EMPTY; LEAF_MEMO_LEN],
             point: PointScratch::new(),
-            plan_values: Vec::new(),
-            plan_masks: Vec::new(),
-            plan_select: Vec::new(),
+            plan_lanes: Vec::new(),
         }
     }
 }
@@ -445,8 +529,9 @@ impl Scratch {
         // from a different function, at a plausible magnitude.
         self.leaf_memo = [LEAF_MEMO_EMPTY; LEAF_MEMO_LEN];
         self.point.clear();
-        self.plan_masks.fill(0);
-        self.plan_select.fill([0; 8]);
+        for state in &mut self.plan_lanes {
+            state.reset();
+        }
         if self.config == Some(want) {
             for s in &mut self.slots {
                 match s {
@@ -480,9 +565,7 @@ impl Scratch {
         self.cells.clear();
         self.column_values.clear();
         self.column_cell_y.clear();
-        self.plan_values.clear();
-        self.plan_masks.clear();
-        self.plan_select.clear();
+        self.plan_lanes.clear();
         self.slots.reserve(slot_count);
         self.cells.reserve(slot_count);
         self.column_values.reserve(slot_count);
@@ -567,9 +650,7 @@ impl Scratch {
             .sum::<usize>()
             * std::mem::size_of::<f64>();
         let point = self.point.retained_bytes();
-        let plan = self.plan_values.capacity() * std::mem::size_of::<[f64; 8]>()
-            + self.plan_masks.capacity()
-            + self.plan_select.capacity() * std::mem::size_of::<[u16; 8]>();
+        let plan = self.plan_lanes.capacity() * std::mem::size_of::<LaneState<8>>();
         (slots + cells + columns + slot_payloads + cell_payloads + column_payloads + point + plan)
             as u64
     }
@@ -580,59 +661,62 @@ impl Scratch {
 
     pub(crate) fn begin_tile_plan(&mut self, register_count: usize) {
         #[cfg(feature = "gen-counters")]
-        let old_bytes = self.plan_values.capacity() * std::mem::size_of::<[f64; 8]>()
-            + self.plan_masks.capacity()
-            + self.plan_select.capacity() * std::mem::size_of::<[u16; 8]>();
-        if self.plan_values.len() < register_count {
-            self.plan_values.resize(register_count, [0.0; 8]);
-            self.plan_masks.resize(register_count, 0);
-            self.plan_select.resize(register_count, [0; 8]);
+        let old_bytes = self.plan_lanes.capacity() * std::mem::size_of::<LaneState<8>>();
+        if self.plan_lanes.len() < register_count {
+            self.plan_lanes
+                .resize(register_count, LaneState::default());
         } else {
-            self.plan_masks[..register_count].fill(0);
+            for state in &mut self.plan_lanes[..register_count] {
+                state.reset_ready();
+            }
         }
         #[cfg(feature = "gen-counters")]
         self.account_payload_change(
             old_bytes,
-            self.plan_values.capacity() * std::mem::size_of::<[f64; 8]>()
-                + self.plan_masks.capacity()
-                + self.plan_select.capacity() * std::mem::size_of::<[u16; 8]>(),
+            self.plan_lanes.capacity() * std::mem::size_of::<LaneState<8>>(),
         );
     }
 
     #[inline]
-    pub(crate) fn plan_mask(&self, register: u16) -> u8 {
-        self.plan_masks[register as usize]
+    pub(crate) fn plan_missing(&self, register: u16, active: u8) -> u8 {
+        self.plan_lanes[register as usize].missing(u32::from(active)) as u8
     }
 
     #[inline]
     pub(crate) fn plan_value(&self, register: u16, lane: usize) -> f64 {
-        self.plan_values[register as usize][lane]
+        self.plan_lanes[register as usize].value(lane)
     }
 
     #[inline]
     pub(crate) fn plan_values(&self, register: u16) -> [f64; 8] {
-        self.plan_values[register as usize]
+        self.plan_lanes[register as usize].values()
     }
 
     #[inline]
     pub(crate) fn plan_select(&self, register: u16, lane: usize) -> u16 {
-        self.plan_select[register as usize][lane]
+        self.plan_lanes[register as usize].selected(lane)
     }
 
     #[inline]
     pub(crate) fn plan_set_select(&mut self, register: u16, lane: usize, value: u16) {
-        self.plan_select[register as usize][lane] = value;
+        self.plan_lanes[register as usize].set_selected(lane, value);
     }
 
     #[inline]
     pub(crate) fn plan_put(&mut self, register: u16, mask: u8, values: [f64; 8]) {
-        let index = register as usize;
-        for lane in 0..8 {
-            if mask & (1 << lane) != 0 {
-                self.plan_values[index][lane] = values[lane];
-            }
-        }
-        self.plan_masks[index] |= mask;
+        self.plan_lanes[register as usize].put(u32::from(mask), values);
+    }
+
+    #[inline]
+    pub(crate) fn plan_branch_mask(
+        &self,
+        register: u16,
+        active: u8,
+        branch: u16,
+        branch_count: u16,
+    ) -> u8 {
+        self.plan_lanes[register as usize]
+            .branch_mask(u32::from(active), branch, branch_count) as u8
     }
 
     #[inline]
@@ -1000,6 +1084,30 @@ mod tests {
         let c = CellShape::for_bounds(4, 8, B);
         assert_eq!((c.nx, c.ny, c.nz), (4, 48, 4), "cell grid");
         assert_eq!(c.len(), 768);
+    }
+
+    #[test]
+    fn lane_state_tracks_readiness_and_branch_masks() {
+        let mut state = LaneState::<8>::default();
+        assert_eq!(state.ready_mask(), 0);
+        assert_eq!(state.missing(0b1111), 0b1111);
+
+        state.put(0b0101, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+        assert_eq!(state.ready_mask(), 0b0101);
+        assert_eq!(state.missing(0b1111), 0b1010);
+        assert_eq!(state.value(2), 3.0);
+
+        state.set_selected(0, 0);
+        state.set_selected(1, 1);
+        state.set_selected(2, 2);
+        state.set_selected(3, 4);
+        assert_eq!(state.branch_mask(0b1111, 0, 3), 0b0001);
+        assert_eq!(state.branch_mask(0b1111, 1, 3), 0b0010);
+        assert_eq!(state.branch_mask(0b1111, 2, 3), 0b0100 | 0b1000);
+
+        state.reset_ready();
+        assert_eq!(state.ready_mask(), 0);
+        assert_eq!(state.selected(3), 4);
     }
 
     #[test]

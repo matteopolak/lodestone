@@ -64,6 +64,10 @@ registers, parameters, noise references, product labels, and branch ranges are
 decoded once at graph construction. The masked executor evaluates only selected
 lanes and preserves zero-multiply short-circuit and selector order. Cache
 writers and opaque terrain boundaries remain on the exact scalar cell fallback.
+Each plan register stores its values, readiness mask, and branch selections in a
+reusable lane-state record. The current executor uses eight lanes; the bounded
+mask and const-generic storage keep a wider fused evaluator possible without
+adding another allocation or changing the scalar fallback.
 Graph construction records the complete final-density shape and product labels.
 A field context performs a constant-time admission check against the shared
 immutable product identity; matching product values bypass their child walks,
