@@ -8,7 +8,7 @@
 use crate::biome::{
     BiomeSearchCursor, BiomeTable, CachedBiomeAnswer, ClimateSampler, PreparedClimateGrid,
 };
-use lodestone_data::biomes::BiomeRef;
+use lodestone_data::biomes::{BiomeRef, BuiltinBiome};
 use sha2::{Digest as _, Sha256};
 use std::sync::Arc;
 
@@ -28,6 +28,7 @@ pub(super) struct DynamicBiome {
     /// `overworld/mod.rs` compiling untouched — see [`BiomeTable`]'s doc.
     pub(super) table: BiomeTable,
     pub(super) temperatures: std::collections::HashMap<String, f32>,
+    pub(super) cold_biomes: [bool; BuiltinBiome::COUNT as usize],
 }
 
 /// Lazy biome answers for the surface scan's expanded block footprint.
@@ -521,19 +522,22 @@ impl OverworldGenerator {
         &self,
         cells: &BiomeCells,
         heights: &[i32; 256],
-    ) -> [(String, bool); 16] {
+    ) -> [(BiomeRef, bool); 16] {
         std::array::from_fn(|i| {
             let qx = i % 4;
             let qz = i / 4;
             let (lx, lz) = (qx as i32 * 4, qz as i32 * 4);
             let y = (heights[(lz * 16 + lx) as usize] >> 2) << 2;
             let qy = ((y - self.min_y) >> 2).max(0) as usize;
-            let name = cells.at_quart(qx, qy, qz);
+            let biome = cells.at_quart_ref(qx, qy, qz);
             let cold = match &self.dynamic_biome {
-                Some(d) => crate::biome::cold_enough_to_snow(&d.temperatures, name),
+                Some(d) => d.cold_biomes[biome
+                    .builtin_or_none()
+                    .expect("strict worldgen biome cells contain only built-in biomes")
+                    as usize],
                 None => self.fallback_cold_enough_to_snow,
             };
-            (name.to_string(), cold)
+            (biome, cold)
         })
     }
 

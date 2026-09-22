@@ -1700,6 +1700,49 @@ impl SurfaceSystem {
         self.try_apply_compiled(heightmap, &mut ctx)
     }
 
+    /// Typed top-material lookup for generated built-in biomes. The textual
+    /// entrypoint above remains for configuration and compatibility callers;
+    /// generation stages use this path so a resolved biome is never reparsed.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn top_material_typed(
+        &self,
+        block_x: i32,
+        block_y: i32,
+        block_z: i32,
+        under_fluid: bool,
+        heightmap: &dyn Fn(i32, i32) -> i32,
+        biome: lodestone_data::biomes::BiomeRef,
+        cold_enough_to_snow: bool,
+    ) -> Option<StateId> {
+        let biome = biome
+            .builtin_or_none()
+            .expect("extension biome requires its owning registry at the name boundary");
+        let surface_depth = self.surface_depth(block_x, block_z);
+        let mut cache = EvalCache::new(self.xz_cache_slots, self.y_cache_slots);
+        cache.begin_column(true);
+        cache.begin_y();
+        let mut ctx = Ctx {
+            block_x,
+            block_z,
+            surface_depth,
+            surface_secondary: self.surface_secondary(block_x, block_z),
+            min_surface_level: self.min_surface_level(block_x, block_z, surface_depth),
+            block_y,
+            water_height: if under_fluid { block_y + 1 } else { NO_WATER },
+            stone_depth_above: 1,
+            stone_depth_below: 1,
+            biome: None,
+            typed_biome: Some((biome, cold_enough_to_snow)),
+            biome_builtin: Some(Some(biome)),
+            biome_at: None,
+            typed_biome_at: None,
+            cache: &mut cache,
+            cache_y: true,
+        };
+        self.try_apply_compiled(heightmap, &mut ctx)
+    }
+
     #[inline]
     fn try_apply_compiled<H: Fn(i32, i32) -> i32 + ?Sized>(
         &self,
@@ -1981,7 +2024,7 @@ impl SurfaceSystem {
     ) -> bool {
         match cond {
             Cond::BiomeIs { set, .. } => {
-                if ctx.typed_biome_at.is_some() {
+                if ctx.typed_biome_at.is_some() || ctx.typed_biome.is_some() {
                     set.contains_builtin(ctx.typed_biome().0)
                 } else {
                     let name = ctx.biome().0;
@@ -2035,7 +2078,7 @@ impl SurfaceSystem {
                 stone_depth <= 1 + offset + surface_depth + secondary
             }
             Cond::Temperature { .. } => {
-                if ctx.typed_biome_at.is_some() {
+                if ctx.typed_biome_at.is_some() || ctx.typed_biome.is_some() {
                     ctx.typed_biome().1
                 } else {
                     ctx.biome().1
@@ -2112,8 +2155,12 @@ impl SurfaceSystem {
                 if let Some(value) = ctx.get_y_cache(*cache) {
                     return value;
                 }
-                let name = ctx.biome().0;
-                let value = set.contains_resolved(ctx.biome_builtin(), name);
+                let value = if ctx.typed_biome_at.is_some() || ctx.typed_biome.is_some() {
+                    set.contains_builtin(ctx.typed_biome().0)
+                } else {
+                    let name = ctx.biome().0;
+                    set.contains_resolved(ctx.biome_builtin(), name)
+                };
                 ctx.set_y_cache(*cache, value);
                 value
             }

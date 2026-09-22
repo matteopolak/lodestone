@@ -1214,7 +1214,7 @@ impl OverworldGenerator {
                         local_states.insert((x, y, z), state);
                     },
                 );
-            let column = self.intern_from_dense(
+            let column = self.intern_from_dense_typed(
                 target_x,
                 target_z,
                 super::output::GenStage::Full,
@@ -1446,7 +1446,7 @@ impl OverworldGenerator {
                         local_states.insert((x, y, z), state);
                     },
                 );
-            let column = self.intern_from_dense(
+            let column = self.intern_from_dense_typed(
                 target_x,
                 target_z,
                 super::output::GenStage::Full,
@@ -1510,7 +1510,7 @@ impl OverworldGenerator {
                 (x >> 4) == target_x && (z >> 4) == target_z
             })
             .collect();
-        let column = self.intern_from_dense(
+        let column = self.intern_from_dense_typed(
             target_x,
             target_z,
             super::output::GenStage::Full,
@@ -2135,7 +2135,7 @@ impl OverworldGenerator {
                 (x.div_euclid(16), z.div_euclid(16)) == target
             })
             .collect();
-        let column = self.intern_from_dense(
+        let column = self.intern_from_dense_typed(
             target.0,
             target.1,
             super::output::GenStage::Full,
@@ -2777,7 +2777,7 @@ impl OverworldGenerator {
                     world.set_id(*x, *y, *z, *state);
                 }
                 let (world, _) = self.top_layer_stage(target.0, target.1, world, &pre.2);
-                let column = self.intern_from_dense(
+                let column = self.intern_from_dense_typed(
                     target.0,
                     target.1,
                     super::GenStage::Full,
@@ -3357,7 +3357,7 @@ impl OverworldGenerator {
         cx: i32,
         cz: i32,
         world: crate::dense_grid::DenseBlockGrid,
-        biome_quarts: &[(String, bool); 16],
+        biome_quarts: &[(BiomeRef, bool); 16],
     ) -> (
         crate::dense_grid::DenseBlockGrid,
         crate::feature::top_layer::FreezeCounts,
@@ -3371,7 +3371,7 @@ impl OverworldGenerator {
         cx: i32,
         cz: i32,
         world: crate::dense_grid::DenseBlockGrid,
-        biome_quarts: &[(String, bool); 16],
+        biome_quarts: &[(BiomeRef, bool); 16],
         observer: &mut dyn FnMut(i32, i32, i32, CanonicalStateId),
     ) -> (
         crate::dense_grid::DenseBlockGrid,
@@ -3402,22 +3402,22 @@ impl OverworldGenerator {
         }
         // `level.getBiome(topPos)` resolves through the quart grid. `biome_stage`
         // samples each quart at its own corner, so a column's quart index is
-        // `(lz >> 2) * 4 + (lx >> 2)` — the same rounding `Self::surface_stage`'s
-        // own `biome_at` uses. See `crate::feature::top_layer`'s
-        // "Approximations, named" for the 2-D-biome caveat this inherits.
-        let biome_at = |lx: i32, lz: i32| -> &str {
-            let quart = ((lz >> 2) * 4 + (lx >> 2)) as usize;
-            let name = biome_quarts[quart].0.as_str();
-            // A biome that does not list the step contributes no snow. Handing
-            // back a name absent from `biome_climates` is how that is expressed,
-            // since `apply_freeze_top_layer` skips an unknown biome.
-            if self.freeze_biomes.contains(name) {
-                name
-            } else {
-                ""
+        // `(lz >> 2) * 4 + (lx >> 2)`.
+        let mut climates = self.biome_climates_typed;
+        for (climate, &enabled) in climates.iter_mut().zip(self.freeze_biomes_typed.iter()) {
+            if !enabled {
+                *climate = None;
             }
+        }
+        let biome_at = |lx: i32, lz: i32| -> lodestone_data::biomes::BuiltinBiome {
+            let quart = ((lz >> 2) * 4 + (lx >> 2)) as usize;
+            let biome = biome_quarts[quart]
+                .0
+                .builtin_or_none()
+                .expect("extension biome requires its owning registry at the name boundary");
+            biome
         };
-        let counts = crate::feature::top_layer::apply_freeze_top_layer_with_observer(
+        let counts = crate::feature::top_layer::apply_freeze_top_layer_typed_with_observer(
             &mut world,
             cx,
             cz,
@@ -3425,7 +3425,7 @@ impl OverworldGenerator {
             self.height,
             self.sea_level,
             &biome_at,
-            &self.biome_climates,
+            &climates,
             &self.snow_support,
             &self.climate_noise,
             observer,
@@ -3577,7 +3577,14 @@ mod tests {
                         0, -64, 0, 16, 384, 16, "minecraft:air",
                     )),
                     [0; 256],
-                    std::array::from_fn(|_| ("minecraft:plains".to_owned(), false)),
+                    std::array::from_fn(|_| {
+                        (
+                            lodestone_data::biomes::BiomeRef::builtin(
+                                lodestone_data::biomes::BuiltinBiome::Plains,
+                            ),
+                            false,
+                        )
+                    }),
                     Arc::new(crate::overworld::biome_cells::BiomeCells::uniform(
                         "minecraft:plains",
                         -64,

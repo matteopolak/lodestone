@@ -232,6 +232,7 @@ pub(crate) type BlockMutationObserverHandle = std::rc::Rc<
     ),
 >;
 use lodestone_data::block::Block;
+use lodestone_data::biomes::{BiomeRef, BuiltinBiome};
 use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey};
 use lodestone_data::block_states::StateId;
 use lodestone_data::block_states::StateId as CanonicalStateId;
@@ -275,7 +276,7 @@ pub use self::structures::{BEARD_REACH, REFS_RADIUS, StructureRefs};
 type PreOreResult = (
     Arc<crate::dense_grid::DenseBlockGrid>,
     [i32; 256],
-    [(String, bool); 16],
+    [(BiomeRef, bool); 16],
     // The full 4x4x4 biome grid for this chunk. Behind an `Arc` for the same
     // reason the world is: neighbourhood consumers must not copy 1,536 cells
     // per neighbour. The 16-entry surface array above is *derived from* this
@@ -637,6 +638,8 @@ pub struct CompiledOverworldGenerator {
     /// resolver method was needed. Only populated for biomes whose document
     /// carries a `temperature` field; a biome absent here does not freeze.
     biome_climates: HashMap<String, crate::feature::top_layer::BiomeClimate>,
+    biome_climates_typed:
+        [Option<crate::feature::top_layer::BiomeClimate>; BuiltinBiome::COUNT as usize],
     /// Per-biome `MobSpawnSettings` — `spawners` and `spawn_costs` — read out of
     /// the same `Resolver::biome_document` walk as `biome_climates`, so it costs
     /// no extra JSON parse. See
@@ -658,6 +661,7 @@ pub struct CompiledOverworldGenerator {
     /// there so a trimmed or modified datapack that omits the step gets a
     /// snow-free world rather than snow this engine invented.
     freeze_biomes: HashSet<String>,
+    freeze_biomes_typed: [bool; BuiltinBiome::COUNT as usize],
     /// The five per-block-state predicates plus two tags
     /// [`Self::top_layer_stage`] needs. Empty (making the stage a no-op) when
     /// the resolver supplies no `block_freeze_facts` — the same "no data
@@ -971,11 +975,17 @@ impl OverworldGenerator {
 
         let dynamic_biome = if let Some(table) = crate::biome::overworld_table(resolver) {
             let temperatures = crate::biome::parse_temperatures(&resolver.biome_temperatures());
+            let cold_biomes = std::array::from_fn(|index| {
+                let biome = BuiltinBiome::from_canonical_id(index as u32)
+                    .expect("generated biome table index");
+                crate::biome::cold_enough_to_snow(&temperatures, biome.name())
+            });
             let climate = ClimateSampler::new(settings, &builder);
             Some(DynamicBiome {
                 climate,
                 table,
                 temperatures,
+                cold_biomes,
             })
         } else {
             None
@@ -1167,7 +1177,9 @@ impl OverworldGenerator {
         // biome's `ClimateSettings` and whether it lists `freeze_top_layer`, so
         // `TOP_LAYER_MODIFICATION` composition costs no extra JSON parses.
         let mut biome_climates = HashMap::new();
+        let mut biome_climates_typed = [None; BuiltinBiome::COUNT as usize];
         let mut freeze_biomes = HashSet::new();
+        let mut freeze_biomes_typed = [false; BuiltinBiome::COUNT as usize];
         // The SPAWN generation's part 1 rides the same walk, for the same reason.
         let mut spawners_by_biome = HashMap::new();
         for name in &biome_names {
@@ -1178,9 +1190,15 @@ impl OverworldGenerator {
             let document = resolver.biome_document(name);
             if let Some(climate) = crate::feature::top_layer::parse_biome_climate(&document) {
                 biome_climates.insert(name.clone(), climate);
+                if let Some(biome) = BuiltinBiome::from_name(name) {
+                    biome_climates_typed[biome as usize] = Some(climate);
+                }
             }
             if crate::compose::biome_lists_freeze_top_layer(&document) {
                 freeze_biomes.insert(name.clone());
+                if let Some(biome) = BuiltinBiome::from_name(name) {
+                    freeze_biomes_typed[biome as usize] = true;
+                }
             }
             let spawners = crate::spawners::parse_biome_spawners(&document);
             if !spawners.is_empty() {
@@ -1247,8 +1265,10 @@ impl OverworldGenerator {
             decoration_catalog,
             veg_tags,
             biome_climates,
+            biome_climates_typed,
             spawners_by_biome,
             freeze_biomes,
+            freeze_biomes_typed,
             snow_support,
             climate_noise: crate::noise::ClimateNoise::new(),
             structures,
@@ -1643,7 +1663,7 @@ impl OverworldGenerator {
             || self.top_layer_stage(cx, cz, world, &cached.2),
         );
         let column = schedule.run(crate::stage_schedule::ColumnStage::Output, || {
-            self.intern_from_dense(
+            self.intern_from_dense_typed(
                 cx,
                 cz,
                 output::GenStage::Full,
@@ -1697,7 +1717,7 @@ impl OverworldGenerator {
         preliminary: &Arc<crate::aquifer::PreliminarySurfaceCache>,
     ) -> GeneratedColumn {
         let cached = self.pre_ore_stage_with_preliminary_cache(cx, cz, preliminary);
-        self.intern_from_dense(
+        self.intern_from_dense_typed(
             cx,
             cz,
             output::GenStage::Shaped,
@@ -1914,7 +1934,7 @@ impl OverworldGenerator {
         let (world, _) = self.top_layer_stage(cx, cz, world, &biome_quarts);
         schedule.enter(crate::stage_schedule::ColumnStage::Output);
         let t_intern_start = lodestone_time::Instant::now();
-        let col = self.intern_from_dense(
+        let col = self.intern_from_dense_typed(
             cx,
             cz,
             output::GenStage::Full,

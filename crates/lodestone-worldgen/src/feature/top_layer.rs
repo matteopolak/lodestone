@@ -780,6 +780,64 @@ pub fn apply_freeze_top_layer_with_observer<'b>(
     noise: &ClimateNoise,
     observer: &mut dyn FnMut(i32, i32, i32, StateId),
 ) -> FreezeCounts {
+    let climate_at = |x: i32, z: i32| climates.get(biome_at(x, z));
+    apply_freeze_top_layer_impl(
+        grid,
+        chunk_x,
+        chunk_z,
+        min_y,
+        height,
+        sea_level,
+        &climate_at,
+        support,
+        noise,
+        observer,
+    )
+}
+
+/// Typed top-layer entrypoint for generated built-in biome identities.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_freeze_top_layer_typed_with_observer(
+    grid: &mut DenseBlockGrid,
+    chunk_x: i32,
+    chunk_z: i32,
+    min_y: i32,
+    height: i32,
+    sea_level: i32,
+    biome_at: &dyn Fn(i32, i32) -> lodestone_data::biomes::BuiltinBiome,
+    climates: &[Option<BiomeClimate>; lodestone_data::biomes::BuiltinBiome::COUNT as usize],
+    support: &SnowSupport,
+    noise: &ClimateNoise,
+    observer: &mut dyn FnMut(i32, i32, i32, StateId),
+) -> FreezeCounts {
+    let climate_at = |x: i32, z: i32| climates[biome_at(x, z) as usize].as_ref();
+    apply_freeze_top_layer_impl(
+        grid,
+        chunk_x,
+        chunk_z,
+        min_y,
+        height,
+        sea_level,
+        &climate_at,
+        support,
+        noise,
+        observer,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_freeze_top_layer_impl<'a>(
+    grid: &mut DenseBlockGrid,
+    chunk_x: i32,
+    chunk_z: i32,
+    min_y: i32,
+    height: i32,
+    sea_level: i32,
+    climate_at: &dyn Fn(i32, i32) -> Option<&'a BiomeClimate>,
+    support: &SnowSupport,
+    noise: &ClimateNoise,
+    observer: &mut dyn FnMut(i32, i32, i32, StateId),
+) -> FreezeCounts {
     let mut counts = FreezeCounts::default();
     if support.is_empty() {
         return counts;
@@ -807,7 +865,7 @@ pub fn apply_freeze_top_layer_with_observer<'b>(
         for dz in 0..16 {
             let x = base_x + dx;
             let z = base_z + dz;
-            let Some(climate) = climates.get(biome_at(dx, dz)) else {
+            let Some(climate) = climate_at(dx, dz) else {
                 continue;
             };
             let top_y = motion_blocking_first_free(grid, support, x, z, min_y, height);

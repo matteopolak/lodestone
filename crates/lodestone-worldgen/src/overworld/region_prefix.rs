@@ -585,7 +585,12 @@ mod prefix_comparison_tests {
             }
         }
         for (biome, cold) in &result.2 {
-            for byte in biome.as_bytes() {
+            for byte in biome
+                .builtin_or_none()
+                .expect("strict worldgen biome prefix contains built-ins")
+                .name()
+                .as_bytes()
+            {
                 add(*byte);
             }
             add(u8::from(*cold));
