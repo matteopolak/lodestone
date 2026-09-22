@@ -149,18 +149,39 @@ mod stage_pmu {
         Exit,
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum RegionPhase {
+        ReplayContext,
+        MutableTarget,
+        MutablePadding,
+        SnapshotFinalization,
+    }
+
     type Observer = fn(Stage, Event);
+    type RegionObserver = fn(RegionPhase, Event);
 
     static OBSERVER: OnceLock<Observer> = OnceLock::new();
+    static REGION_OBSERVER: OnceLock<RegionObserver> = OnceLock::new();
 
     pub fn install(observer: Observer) -> bool {
         OBSERVER.set(observer).is_ok()
+    }
+
+    pub fn install_region(observer: RegionObserver) -> bool {
+        REGION_OBSERVER.set(observer).is_ok()
     }
 
     #[inline(always)]
     pub fn notify(stage: Stage, event: Event) {
         if let Some(observer) = OBSERVER.get() {
             observer(stage, event);
+        }
+    }
+
+    #[inline(always)]
+    pub fn notify_region(phase: RegionPhase, event: Event) {
+        if let Some(observer) = REGION_OBSERVER.get() {
+            observer(phase, event);
         }
     }
 }
@@ -565,7 +586,7 @@ mod imp {
         MemoryBoundary, Snapshot, Stage,
     };
     #[cfg(feature = "stage-pmu")]
-    use super::stage_pmu::{self, Event};
+    use super::stage_pmu::{self, Event, RegionPhase};
 
     const KINDS: usize = crate::density::Density::KIND_COUNT;
 
@@ -1037,8 +1058,36 @@ mod imp {
     }
 
     #[cfg(feature = "stage-pmu")]
+    #[derive(Debug)]
+    pub struct RegionGuard {
+        phase: RegionPhase,
+    }
+
+    #[cfg(feature = "stage-pmu")]
+    impl RegionGuard {
+        #[inline]
+        pub fn enter(phase: RegionPhase) -> Self {
+            stage_pmu::notify_region(phase, Event::Enter);
+            Self { phase }
+        }
+    }
+
+    #[cfg(feature = "stage-pmu")]
+    impl Drop for RegionGuard {
+        #[inline]
+        fn drop(&mut self) {
+            stage_pmu::notify_region(self.phase, Event::Exit);
+        }
+    }
+
+    #[cfg(feature = "stage-pmu")]
     pub fn install_stage_observer(observer: fn(Stage, Event)) -> bool {
         stage_pmu::install(observer)
+    }
+
+    #[cfg(feature = "stage-pmu")]
+    pub fn install_region_observer(observer: fn(RegionPhase, Event)) -> bool {
+        stage_pmu::install_region(observer)
     }
 
     pub fn reset() {
@@ -1353,8 +1402,36 @@ mod imp {
     }
 
     #[cfg(feature = "stage-pmu")]
+    #[derive(Debug)]
+    pub struct RegionGuard {
+        phase: stage_pmu::RegionPhase,
+    }
+
+    #[cfg(feature = "stage-pmu")]
+    impl RegionGuard {
+        #[inline]
+        pub fn enter(phase: stage_pmu::RegionPhase) -> Self {
+            stage_pmu::notify_region(phase, stage_pmu::Event::Enter);
+            Self { phase }
+        }
+    }
+
+    #[cfg(feature = "stage-pmu")]
+    impl Drop for RegionGuard {
+        #[inline]
+        fn drop(&mut self) {
+            stage_pmu::notify_region(self.phase, stage_pmu::Event::Exit);
+        }
+    }
+
+    #[cfg(feature = "stage-pmu")]
     pub fn install_stage_observer(observer: fn(Stage, super::StageEvent)) -> bool {
         stage_pmu::install(observer)
+    }
+
+    #[cfg(feature = "stage-pmu")]
+    pub fn install_region_observer(observer: fn(stage_pmu::RegionPhase, super::StageEvent)) -> bool {
+        stage_pmu::install_region(observer)
     }
 
     #[inline(always)]
@@ -1389,9 +1466,14 @@ pub use imp::{
 };
 
 #[cfg(feature = "stage-pmu")]
-pub use imp::install_stage_observer;
+pub use imp::RegionGuard;
+
+#[cfg(feature = "stage-pmu")]
+pub use imp::{install_region_observer, install_stage_observer};
 #[cfg(feature = "stage-pmu")]
 pub use stage_pmu::Event as StageEvent;
+#[cfg(feature = "stage-pmu")]
+pub use stage_pmu::RegionPhase;
 
 /// Whether this build has counters compiled in.
 ///

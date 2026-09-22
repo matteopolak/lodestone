@@ -24,6 +24,8 @@ use lodestone_worldgen::stage_schedule::{
     ChunkRequest, ColumnStage, Dimension, GenerationTarget, ResourceKey, SidecarKey, SourceSchedule,
     StageKey, END_SOURCES, NETHER_SOURCES, OVERWORLD_SOURCES,
 };
+#[cfg(feature = "worldgen-stage-pmu")]
+use lodestone_worldgen::counters::{RegionGuard, RegionPhase};
 use lodestone_worldgen::structure::StructureBlocks;
 
 const EXECUTOR_VERSION: u32 = 4;
@@ -1735,8 +1737,12 @@ where
                 &mut self.materializer,
                 &mut self.shared_prefixes,
             )?;
+            #[cfg(feature = "worldgen-stage-pmu")]
+            let _replay_context = RegionGuard::enter(RegionPhase::ReplayContext);
             self.materializer
                 .prepare_lifecycle_replay_contexts_prepared(&plan.targets);
+            #[cfg(feature = "worldgen-stage-pmu")]
+            drop(_replay_context);
             self.settlement_padding = plan.padding.clone();
             self.materializer
                 .declare_mutable_targets(plan.targets.iter().copied());
@@ -1977,8 +1983,12 @@ where
             ) {
                 return batch_session_error(sessions.len(), error);
             }
+            #[cfg(feature = "worldgen-stage-pmu")]
+            let _replay_context = RegionGuard::enter(RegionPhase::ReplayContext);
             self.materializer
                 .prepare_lifecycle_replay_contexts_prepared(&plan.targets);
+            #[cfg(feature = "worldgen-stage-pmu")]
+            drop(_replay_context);
             self.settlement_padding = plan.padding.clone();
             self.materializer
                 .declare_mutable_targets(plan.targets.iter().copied());
@@ -2009,6 +2019,8 @@ where
                     cancelled[index] = true;
                     continue;
                 }
+                #[cfg(feature = "worldgen-stage-pmu")]
+                let _mutable_target = RegionGuard::enter(RegionPhase::MutableTarget);
                 let result = {
                     let mut machine = match GenerationStateMachine::<S, S::Policy>::new(
                         self.source,
@@ -2026,6 +2038,8 @@ where
                     }
                     machine.advance_mutable(executor)
                 };
+                #[cfg(feature = "worldgen-stage-pmu")]
+                drop(_mutable_target);
                 if let Err(error) = result {
                     self.materializer.abort_target(target);
                     if sessions[index].cancellation().is_cancelled() {
@@ -2036,6 +2050,8 @@ where
                 }
             } else if settlement.is_some() {
                 if !self.materializer.target_features_completed(target) {
+                    #[cfg(feature = "worldgen-stage-pmu")]
+                    let _mutable_padding = RegionGuard::enter(RegionPhase::MutablePadding);
                     self.materializer
                         .complete_target_features_with_mode_observing(
                             target,
@@ -2049,6 +2065,8 @@ where
         }
 
         let mut results = Vec::with_capacity(sessions.len());
+        #[cfg(feature = "worldgen-stage-pmu")]
+        let _snapshot_finalization = RegionGuard::enter(RegionPhase::SnapshotFinalization);
         for index in 0..sessions.len() {
             if cancelled[index] {
                 results.push(Err(
