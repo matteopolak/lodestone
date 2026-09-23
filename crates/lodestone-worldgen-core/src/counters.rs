@@ -156,6 +156,13 @@ mod stage_pmu {
         MutableTarget,
         MutablePadding,
         SnapshotFinalization,
+        PrefixImport,
+        LedgerCheckpointCapture,
+        SessionHydration,
+        CheckpointExport,
+        LedgerPublishInner,
+        MutationWinnerScan,
+        DirectTransitionMirror,
     }
 
     type Observer = fn(Stage, Event);

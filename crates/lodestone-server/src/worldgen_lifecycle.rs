@@ -16,6 +16,8 @@ use crate::{
 };
 use crate::worldgen_session::ProvenanceMutation;
 use lodestone_data::block_states::StateId;
+#[cfg(feature = "worldgen-stage-pmu")]
+use lodestone_worldgen::counters::{RegionGuard, RegionPhase};
 use lodestone_worldgen::overworld::{GeneratedBlockEntity, OverworldGenerator};
 use lodestone_worldgen::structure::StructureBlocks;
 use lodestone_worldgen::stage_schedule::ColumnStage;
@@ -3398,6 +3400,8 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
 
         let mut target_local_features = Vec::new();
         let mut dirty_sparse_residents = BTreeSet::new();
+        #[cfg(feature = "worldgen-stage-pmu")]
+        let mut direct_epoch_output = false;
         let (result, completed_feature_sources) = if target_owned {
             assert_eq!(source, target, "target-owned FEATURES source must be its target");
             if promoting_sparse {
@@ -3428,6 +3432,10 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                             epoch,
                             override_revisions,
                         );
+                    #[cfg(feature = "worldgen-stage-pmu")]
+                    if result.is_some() {
+                        direct_epoch_output = true;
+                    }
                     #[cfg(test)]
                     if result.is_some() {
                         record_region_feature_epoch(LifecycleCompletionMode::SparsePadding);
@@ -3481,6 +3489,10 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                                         epoch,
                                         override_revisions,
                                     );
+                                #[cfg(feature = "worldgen-stage-pmu")]
+                                if result.is_some() {
+                                    direct_epoch_output = true;
+                                }
                                 #[cfg(test)]
                                 if result.is_some() {
                                     record_region_feature_epoch(LifecycleCompletionMode::Full);
@@ -3583,6 +3595,9 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         if matches!(mode, LifecycleCompletionMode::SparsePadding) {
             self.sparse_completed_targets.insert(target);
         }
+        #[cfg(feature = "worldgen-stage-pmu")]
+        let _direct_transition_mirror = direct_epoch_output
+            .then(|| RegionGuard::enter(RegionPhase::DirectTransitionMirror));
         for (ordinal, local) in target_local_features.iter().enumerate() {
             if target_owned && stage == LifecycleCompletion::Features {
                 self.record_target_feature_winner(
@@ -3622,6 +3637,8 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 dirty_sparse_residents.insert(destination);
             }
         }
+        #[cfg(feature = "worldgen-stage-pmu")]
+        drop(_direct_transition_mirror);
         self.feature_structure_blocks.append(result.structure_blocks);
         self.completed_feature_sources
             .extend(completed_feature_sources);
