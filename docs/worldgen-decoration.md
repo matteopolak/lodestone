@@ -62,10 +62,9 @@ broader radius-two window, but the production lifecycle calls
 feature/ore selection across target contexts. The product is not retained on the generator and
 its `retained_bytes` report covers the dependency union and source plans, so callers should
 drop it at the end of the request. Radius-one production batches retain complete plans for each
-target origin in `W`; the broader diagnostic batch retains the complete 3x3 source set used by
-scalar source replay. Radius-one contexts leave non-target source-plan slots empty rather than
-widening `C`; target-owned dispatch never executes those slots. Every context still carries the
-full global `(step,index)` ordering.
+target origin in `W`; the scalar column path builds the complete 3×3 source set from a 5×5
+prerequisite rim. Lifecycle dispatch still completes one source owner at a time. Every context
+carries the full global `(step,index)` ordering.
 
 After shaped admission has covered the replay dependency union, production uses
 `mixed_replay_batch_with_radius_prepared`. This reuses the admitted prefix lease instead of
@@ -412,15 +411,15 @@ Other configuration fields remain textual where they are targets or registry/imp
 ### Ore allocation
 
 `feature/mod.rs`'s ore engine (`UNDERGROUND_ORES`) is the same placement-modifier/positions shape as
-vegetation. A production FEATURES completion is owned by its target source and may mutate the
-immediate neighbouring ring. It selects ore-capable entries from the global decoration catalog
-using every section biome in that source chunk; the retained global step index, not a biome
-document's local array offset, seeds that ore. Terrain and heightmap probes use a 5×5 read context,
-so a blob at the source edge can inspect the real neighbour column rather than a clamped substitute.
-The immutable replay product retains feature selection only for the source being completed; the
-source-ordered compatibility path may explicitly retain the full source set. Those probes
+vegetation. Lifecycle FEATURES completes one source owner at a time and may mutate the immediate
+neighbouring ring. Each source selects ore-capable entries using section biomes from its own 3×3
+possible-biome neighbourhood; the retained global step index, not a local array offset, seeds that
+ore. Terrain and heightmap probes use a 5×5 read context, so a blob at the source edge can inspect
+the real neighbour column rather than a clamped substitute. Scalar column generation folds the
+complete 3×3 source set in fixed order; lifecycle replay retains only the source being completed. Those probes
 read `OCEAN_FLOOR_WG` from the completed pre-ore grid, after carving and structure
-placement; the earlier fill height is only for biome and surface selection. `OrePositions::{None, One, Repeat}` replaces a
+placement; the earlier fill height is only for biome and surface selection.
+`OrePositions::{None, One, Repeat}` replaces a
 per-attempt-allocated `Vec<BlockPos>`, matching vegetation's `Positions` shape; per-blob scratch (the
 sphere-fill table and its visited-bitset) is taken from and returned to thread-local free lists rather
 than allocated fresh per ore blob. **A recycled visited-bitset must be cleared before resize, not
@@ -440,11 +439,10 @@ evaluates every rule in declaration order. Later targets therefore remain reacha
 target still receives its own air-exposure decision draw before the next rule is considered.
 
 `overworld_ore_ne_250_neg250_oracle.txt` preserves a packet-derived boundary
-control for that separation. Two independent frozen-world packet exports agree
-on twenty non-copper cells at chunk `(250,-250)`'s positive-Z edge. Including
-the neighbouring chunk containers in this source's selection reintroduces
-copper at all twenty cells; keeping those containers only as the 3×3 driver's
-read/write context restores the external states.
+control. Its positive-Z edge includes a diorite body placed by a neighboring
+source, while a one-source lifecycle completion leaves that cell as stone. The
+scalar column path folds the admitted source set and matches the retained packet
+cells without changing lifecycle ownership.
 
 ### Generation-time mob spawns
 
