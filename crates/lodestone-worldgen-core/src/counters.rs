@@ -163,6 +163,18 @@ mod stage_pmu {
         LedgerPublishInner,
         MutationWinnerScan,
         DirectTransitionMirror,
+        OutputSnapshot,
+        PacketNeighbours,
+        PacketFinalize,
+        MachineRebuild,
+        SettlementResume,
+        CommitFeatures,
+        CommitTopLayer,
+        ResumeOutput,
+        FeatureSourceCommit,
+        FeatureSnapshot,
+        FeatureStagePublish,
+        FeatureSettlement,
     }
 
     type Observer = fn(Stage, Event);

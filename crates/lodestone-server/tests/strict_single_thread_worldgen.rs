@@ -105,9 +105,9 @@ static STAGE_INSTRUCTIONS: [AtomicU64; STAGE_COUNT] =
 #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
 static STAGE_CYCLES: [AtomicU64; STAGE_COUNT] = [const { AtomicU64::new(0) }; STAGE_COUNT];
 #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
-static REGION_INSTRUCTIONS: [AtomicU64; 12] = [const { AtomicU64::new(0) }; 12];
+static REGION_INSTRUCTIONS: [AtomicU64; 24] = [const { AtomicU64::new(0) }; 24];
 #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
-static REGION_CYCLES: [AtomicU64; 12] = [const { AtomicU64::new(0) }; 12];
+static REGION_CYCLES: [AtomicU64; 24] = [const { AtomicU64::new(0) }; 24];
 #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
 static PMU_READ_COST: OnceLock<(u64, u64)> = OnceLock::new();
 
@@ -300,6 +300,18 @@ fn report_stage_pmu(total: &Measurement<impl Sized>, columns: usize, phase: &str
         ("ledger_publish_inner", 9),
         ("mutation_winner_scan", 10),
         ("direct_transition_mirror", 11),
+        ("output_snapshot", 12),
+        ("packet_neighbours", 13),
+        ("packet_finalize", 14),
+        ("machine_rebuild", 15),
+        ("settlement_resume", 16),
+        ("commit_features", 17),
+        ("commit_top_layer", 18),
+        ("resume_output", 19),
+        ("feature_source_commit", 20),
+        ("feature_snapshot", 21),
+        ("feature_stage_publish", 22),
+        ("feature_settlement", 23),
     ] {
         report(name, REGION_INSTRUCTIONS[index].load(Relaxed), REGION_CYCLES[index].load(Relaxed));
     }

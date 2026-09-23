@@ -52,6 +52,12 @@ The same feature reports lifecycle regions for admission, replay-context
 preparation, requested-target mutable advancement, sparse-padding completion,
 packet-snapshot finalization, shaped-prefix import, checkpoint capture and
 export, session hydration, ledger publication, and mutation-winner scanning.
+The packet-snapshot region also reports its output snapshot, neighbour
+construction, final packet boundary, state-machine reconstruction, and
+post-wavefront settlement advancement as nested scopes. The latter includes
+resume-output, FEATURES commit, and top-layer commit scopes.
+FEATURES commit separates source transactions, snapshot and sidecars, stage
+publication, and foreign-winner settlement.
 Admission overlaps the terrain-prefix stage counters. Prefix import is nested
 inside mutable-target advancement, so those two rows are inclusive and must not
 be added together. `direct_transition_mirror` measures the successful direct
