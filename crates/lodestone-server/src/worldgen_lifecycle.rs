@@ -3994,10 +3994,6 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
     /// Settle each target cell from the minimum-provenance target-owned
     /// FEATURES writer before its immutable output snapshot is captured.
     pub fn apply_canonical_target_feature_winners(&mut self, target: ChunkPos) {
-        let pending = self
-            .pending_target_block_entities
-            .remove(&target)
-            .unwrap_or_default();
         if !self
             .target_feature_winners
             .get(&target)
@@ -4045,6 +4041,11 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             });
             column.set_block_entities(entities);
         }
+        let pending = self
+            .pending_target_block_entities
+            .get(&target)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         if pending.is_empty() {
             return;
         }
@@ -4071,7 +4072,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             }
             match accepted.entry(position) {
                 Entry::Vacant(entry) => {
-                    entry.insert(Some(candidate.entity));
+                    entry.insert(Some(candidate.entity.clone()));
                 }
                 Entry::Occupied(mut entry) => match entry.get() {
                     Some(existing) if existing == &candidate.entity => {}

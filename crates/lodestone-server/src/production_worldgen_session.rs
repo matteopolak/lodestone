@@ -3461,11 +3461,22 @@ mod tests {
                 1
             );
             materializer.apply_canonical_target_feature_winners((0, 0));
-            let column = materializer
+            let (state, entities) = {
+                let column = materializer
+                    .resident_column((0, 0))
+                    .expect("requested target is resident");
+                (column.block_state_id(15, 4, 0), column.block_entities().to_vec())
+            };
+            materializer.apply_canonical_target_feature_winners((0, 0));
+            let repeated = materializer
                 .resident_column((0, 0))
-                .expect("requested target is resident");
-            let state = column.block_state_id(15, 4, 0);
-            let entities = column.block_entities().to_vec();
+                .expect("requested target is resident after repeat settlement");
+            assert_eq!(repeated.block_state_id(15, 4, 0), state);
+            assert_eq!(
+                repeated.block_entities(),
+                entities.as_slice(),
+                "repeated settlement must preserve canonical sidecars"
+            );
             (before, state, entities)
         }
 
