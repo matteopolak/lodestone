@@ -182,7 +182,9 @@ fn client_heightmap_includes(type_id: u32, state: lodestone_data::block_states::
     let motion = lodestone_data::block_solidity::blocks_motion(state)
         || lodestone_data::snow_support::has_fluid_state(state);
     match type_id {
-        CLIENT_WORLD_SURFACE_HEIGHTMAP_TYPE_ID => state != lodestone_data::block_states::air_state(),
+        CLIENT_WORLD_SURFACE_HEIGHTMAP_TYPE_ID => {
+            !matches!(state.block(), Block::Air | Block::CaveAir | Block::VoidAir)
+        }
         CLIENT_MOTION_BLOCKING_HEIGHTMAP_TYPE_ID => motion,
         CLIENT_MOTION_BLOCKING_NO_LEAVES_HEIGHTMAP_TYPE_ID => {
             motion && !lodestone_data::tool::builtin_block_tag_contains("minecraft:leaves", state.block())
@@ -205,7 +207,9 @@ fn client_heightmap_values_at(
     for y in (min_y..min_y + height).rev() {
         let state = state_at(y);
         let stored = (y + 1 - min_y) as u32;
-        if remaining & 1 != 0 && state != lodestone_data::block_states::air_state() {
+        if remaining & 1 != 0
+            && !matches!(state.block(), Block::Air | Block::CaveAir | Block::VoidAir)
+        {
             values[0] = stored;
             remaining &= !1;
         }
@@ -6025,6 +6029,23 @@ mod tests {
         column.set_block_id(x, -62, z, sid("minecraft:air"));
         assert_matches_naive(&column);
         assert_eq!(column.client_heightmaps_raw().unwrap()[1][x as usize + z as usize * 16], 2);
+    }
+
+    #[test]
+    fn client_surface_heightmap_excludes_all_air_variants() {
+        let mut column = ChunkColumn::new(-64, 16);
+        column.set_block_id(3, -63, 5, sid("minecraft:stone"));
+        column.set_block_id(3, -62, 5, sid("minecraft:cave_air"));
+        column.set_block_id(3, -61, 5, sid("minecraft:void_air"));
+        column.prime_client_heightmaps();
+        let index = 3 + 5 * 16;
+        assert_eq!(column.client_heightmaps_raw().unwrap()[0][index], 2);
+        assert_ne!(column.client_heightmaps_raw().unwrap()[0][index], 4);
+
+        column.set_block_id(3, -60, 5, sid("minecraft:dirt"));
+        assert_eq!(column.client_heightmaps_raw().unwrap()[0][index], 5);
+        column.set_block_id(3, -60, 5, sid("minecraft:cave_air"));
+        assert_eq!(column.client_heightmaps_raw().unwrap()[0][index], 2);
     }
 
     #[test]

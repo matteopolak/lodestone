@@ -5,6 +5,7 @@
 use super::OverworldGenerator;
 use crate::generated_storage::{CompactBlockStorage, GeneratedColumnSummaries};
 use lodestone_data::biomes::BiomeRef;
+use lodestone_data::block::Block;
 use lodestone_data::block_states::StateId as CanonicalStateId;
 use std::sync::OnceLock;
 
@@ -81,6 +82,7 @@ impl OverworldGenerator {
                 &client_motion_predicate,
                 &client_motion_no_leaves_predicate,
                 generation_motion_predicate.as_deref(),
+                extra_air_palette_indices(&palette),
             );
             (blocks, Some(summaries))
         } else {
@@ -153,6 +155,18 @@ fn client_motion_predicates(palette: &[CanonicalStateId]) -> Vec<bool> {
         .collect()
 }
 
+fn extra_air_palette_indices(palette: &[CanonicalStateId]) -> [u16; 2] {
+    let mut indices = [u16::MAX; 2];
+    for (index, state) in palette.iter().enumerate() {
+        match state.block() {
+            Block::CaveAir => indices[0] = index as u16,
+            Block::VoidAir => indices[1] = index as u16,
+            _ => {}
+        }
+    }
+    indices
+}
+
 fn client_motion_no_leaves_predicates(
     palette: &[CanonicalStateId],
     motion_blocking: &[bool],
@@ -183,6 +197,7 @@ fn generated_summaries(
         &motion_blocking,
         &motion_blocking_no_leaves,
         generation_motion_predicate,
+        extra_air_palette_indices(palette),
     )
 }
 
