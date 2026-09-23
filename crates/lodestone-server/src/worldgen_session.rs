@@ -1150,6 +1150,75 @@ impl FeatureSettlementProof {
             && coordinate.1 >= self.min.1
             && coordinate.1 <= self.max.1
     }
+
+    pub(crate) fn matches_square(self, output: ChunkCoordinate, radius: i32) -> bool {
+        self == Self::square(output, radius)
+    }
+
+    fn has_complete_square(self, coordinates: &BTreeSet<ChunkCoordinate>) -> bool {
+        let width = i64::from(self.max.0) - i64::from(self.min.0) + 1;
+        let depth = i64::from(self.max.1) - i64::from(self.min.1) + 1;
+        let Some(expected) = width.checked_mul(depth).and_then(|area| usize::try_from(area).ok()) else {
+            return false;
+        };
+        coordinates.len() == expected
+            && (self.min.1..=self.max.1).all(|z| {
+                (self.min.0..=self.max.0).all(|x| coordinates.contains(&(x, z)))
+            })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TargetFeatureWrite {
+    owner: ChunkCoordinate,
+    source: ChunkCoordinate,
+    ordinal: u32,
+    destination: BlockCoordinate,
+    state: StateId,
+}
+
+impl TargetFeatureWrite {
+    #[must_use]
+    pub(crate) const fn new(
+        owner: ChunkCoordinate,
+        source: ChunkCoordinate,
+        ordinal: u32,
+        destination: BlockCoordinate,
+        state: StateId,
+    ) -> Self {
+        Self {
+            owner,
+            source,
+            ordinal,
+            destination,
+            state,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn owner(self) -> ChunkCoordinate {
+        self.owner
+    }
+
+    #[must_use]
+    pub(crate) const fn source(self) -> ChunkCoordinate {
+        self.source
+    }
+
+    #[must_use]
+    pub(crate) const fn ordinal(self) -> u32 {
+        self.ordinal
+    }
+
+    #[must_use]
+    pub(crate) const fn destination(self) -> BlockCoordinate {
+        self.destination
+    }
+
+    #[must_use]
+    pub(crate) const fn state(self) -> StateId {
+        self.state
+    }
 }
 
 /// A detached target and its concrete neighbour columns.
@@ -1290,6 +1359,7 @@ impl GenerationCheckpoint {
         aggregates: Vec<(ChunkCoordinate, AggregatePrefix)>,
         committed_mutations: Vec<ProvenanceMutation>,
         source_completions: Vec<SourceCompletionRecord>,
+        feature_settlement: Option<FeatureSettlementProof>,
         current_revision: u64,
     ) -> Self {
         let mut committed_mutations = committed_mutations;
@@ -1308,7 +1378,7 @@ impl GenerationCheckpoint {
             committed_mutations,
             committed_mutation_order,
             source_completions,
-            feature_settlement: None,
+            feature_settlement,
             current_revision: SessionRevision(current_revision),
             packet_neighbour_domain: Some(BTreeSet::new()),
         }
@@ -1641,6 +1711,7 @@ pub struct GenerationSession {
     next_revision: u64,
     current_revision: SessionRevision,
     mutation_index: BTreeSet<MutationProvenance>,
+    has_foreign_feature_mutations: bool,
     light_domain_revision: Option<SessionRevision>,
     packet_neighbour_domain: Option<BTreeSet<ChunkCoordinate>>,
     feature_settlement: Option<FeatureSettlementProof>,
@@ -1726,6 +1797,7 @@ impl GenerationSession {
             next_revision: 1,
             current_revision: SessionRevision(0),
             mutation_index: BTreeSet::new(),
+            has_foreign_feature_mutations: false,
             light_domain_revision: None,
             packet_neighbour_domain: Some(BTreeSet::new()),
             feature_settlement: None,
@@ -1740,6 +1812,11 @@ impl GenerationSession {
     #[must_use]
     pub const fn request(&self) -> GenerationRequest {
         self.request
+    }
+
+    #[must_use]
+    pub(crate) const fn feature_settlement(&self) -> Option<FeatureSettlementProof> {
+        self.feature_settlement
     }
 
     #[must_use]
@@ -1839,12 +1916,133 @@ impl GenerationSession {
         &self.committed_mutation_order
     }
 
-    pub(crate) fn mark_target_owned_feature_settlement(
+    pub(crate) fn commit_target_feature_settlement(
         &mut self,
         proof: FeatureSettlementProof,
-    ) {
-        debug_assert_eq!(proof.output(), self.request.target);
+        completed_owners: &[ChunkCoordinate],
+        writes: &[TargetFeatureWrite],
+    ) -> Result<(), SessionError> {
+        if proof.output() != self.request.target
+            || self.feature_settlement.is_some_and(|current| current != proof)
+        {
+            return Err(SessionError::InvalidCheckpoint);
+        }
+        let stage = StageKey::new(self.pipeline.dimension(), ColumnStage::Features);
+        let descriptor = self.descriptor(stage)?;
+        if !proof.matches_square(
+            self.request.target,
+            i32::from(descriptor.mutable_write_radius().chunks_value()),
+        ) {
+            return Err(SessionError::InvalidCheckpoint);
+        }
+        let target_frontier = self
+            .frontiers
+            .get(&self.request.target)
+            .expect("the target is always in its own halo");
+        if !target_frontier.records().iter().any(|record| record.key() == stage) {
+            return Err(SessionError::InvalidCheckpoint);
+        }
+
+        let mut owners = BTreeSet::new();
+        if completed_owners
+            .iter()
+            .any(|owner| !owners.insert(*owner) || !self.halo.contains(*owner))
+            || !proof.has_complete_square(&owners)
+        {
+            return Err(SessionError::InvalidCheckpoint);
+        }
+        let mut logical_writes = BTreeSet::new();
+        let mut pending = Vec::with_capacity(writes.len());
+        let mut next_revision = self.next_revision;
+        let mut existing_writes = BTreeMap::new();
+        if self.has_foreign_feature_mutations {
+            for (provenance, mutation) in &self.committed_mutations {
+                if provenance.stage() == stage {
+                    if let Some(state) = mutation.get::<StateId>() {
+                        existing_writes.entry((
+                            provenance.target(),
+                            provenance.source(),
+                            provenance.stage(),
+                            provenance.ordinal(),
+                            provenance.destination(),
+                        )).or_insert(*state);
+                    }
+                }
+            }
+        }
+        for write in writes {
+            let destination = write.destination();
+            let destination_chunk = (
+                destination.x().div_euclid(16),
+                destination.z().div_euclid(16),
+            );
+            if write.owner() == self.request.target
+                || write.owner() != write.source()
+                || !owners.contains(&write.owner())
+                || !proof.contains(write.source())
+                || !self.halo.contains(destination_chunk)
+                || destination_chunk != self.request.target
+                || !descriptor.mutable_write_radius().contains_offset(
+                    destination_chunk.0 - write.source().0,
+                    destination_chunk.1 - write.source().1,
+                )
+            {
+                return Err(SessionError::InvalidCheckpoint);
+            }
+            let logical_key = (
+                write.owner(),
+                write.source(),
+                stage,
+                write.ordinal(),
+                destination,
+            );
+            if !logical_writes.insert(logical_key) {
+                return Err(SessionError::InvalidCheckpoint);
+            }
+            if let Some(existing) = existing_writes.get(&logical_key) {
+                if *existing == write.state() {
+                    continue;
+                }
+                return Err(SessionError::InvalidCheckpoint);
+            }
+            let revision = SessionRevision(next_revision);
+            next_revision = next_revision.saturating_add(1);
+            let provenance = MutationProvenance {
+                target: write.owner(),
+                source: write.source(),
+                stage,
+                ordinal: write.ordinal(),
+                destination,
+                revision,
+            };
+            pending.push(ProvenanceMutation {
+                provenance,
+                value: Arc::new(write.state()),
+                retained_bytes: size_of::<StateId>(),
+            });
+            existing_writes.insert(logical_key, write.state());
+        }
+        let retained_bytes = pending
+            .iter()
+            .map(ProvenanceMutation::retained_bytes)
+            .fold(0usize, usize::saturating_add);
+        let mutation_count = pending.len();
+        self.check_usage(0, 0, pending.len(), retained_bytes)?;
         self.feature_settlement = Some(proof);
+        self.next_revision = next_revision;
+        for mutation in pending {
+            let provenance = mutation.provenance();
+            self.mutation_index.insert(provenance);
+            self.committed_mutation_order.push(provenance);
+            self.committed_mutations.insert(provenance, mutation);
+            self.has_foreign_feature_mutations = true;
+        }
+        if retained_bytes != 0 {
+            self.add_usage(0, 0, mutation_count, retained_bytes);
+            self.bump_revision();
+            self.light_domain_revision = None;
+        }
+        Ok(())
     }
 
     fn ensure_active(&self) -> Result<(), SessionError> {
@@ -2565,6 +2763,9 @@ impl GenerationSession {
                 .expect("preflighted mutable source remains queued");
             let source_order = transaction.source_order;
             for write in transaction.writes {
+                let provenance = write.provenance();
+                self.has_foreign_feature_mutations |=
+                    provenance.stage() == stage && provenance.target() != self.request.target;
                 self.committed_mutation_order.push(write.provenance);
                 self.committed_mutations.insert(write.provenance, write);
             }
@@ -2953,6 +3154,7 @@ impl GenerationSession {
         session.committed_source_completions = source_completions;
 
         let mutations = checkpoint.committed_mutations;
+        let features_stage = StageKey::new(session.pipeline.dimension(), ColumnStage::Features);
         for mutation in mutations {
             let provenance = mutation.provenance();
             let Some(descriptor) = session.pipeline.descriptor(provenance.stage().stage()) else {
@@ -2993,6 +3195,8 @@ impl GenerationSession {
             {
                 return Err(SessionError::InvalidCheckpoint);
             }
+            session.has_foreign_feature_mutations |=
+                provenance.stage() == features_stage && foreign_target_overlay;
             session.committed_mutations.insert(provenance, mutation);
             session.mutation_index.insert(provenance);
         }
@@ -3012,24 +3216,45 @@ impl GenerationSession {
             return Err(SessionError::InvalidCheckpoint);
         }
         if let Some(proof) = session.feature_settlement {
+            let features_stage =
+                StageKey::new(session.pipeline.dimension(), ColumnStage::Features);
             let output_stage = StageKey::new(session.pipeline.dimension(), ColumnStage::Output);
             let output_key = ProductKey::new(
                 session.request.target,
                 output_stage,
                 ResourceKey::OutputColumn,
             );
-            if proof.output() != session.request.target
+            let radius = i32::from(
+                session
+                    .descriptor(features_stage)?
+                    .mutable_write_radius()
+                    .chunks_value(),
+            );
+            let output_frontier = session
+                .frontiers
+                .get(&session.request.target)
+                .is_some_and(|frontier| {
+                    frontier
+                        .records()
+                        .iter()
+                        .any(|record| record.key() == output_stage)
+                });
+            let output_product = session
+                .products
+                .get(&output_key)
+                .and_then(|product| product.get::<ChunkColumn>())
+                .is_some();
+            if !proof.matches_square(session.request.target, radius)
+                || output_frontier != output_product
                 || !session
                     .frontiers
                     .get(&session.request.target)
                     .is_some_and(|frontier| {
-                        frontier.records().iter().any(|record| record.key() == output_stage)
+                        frontier
+                            .records()
+                            .iter()
+                            .any(|record| record.key() == features_stage)
                     })
-                || session
-                    .products
-                    .get(&output_key)
-                    .and_then(|product| product.get::<ChunkColumn>())
-                    .is_none()
             {
                 return Err(SessionError::InvalidCheckpoint);
             }
@@ -3287,6 +3512,40 @@ fn pipeline_for(dimension: Dimension) -> DimensionPipeline {
         Dimension::Overworld => OVERWORLD_PIPELINE,
         Dimension::Nether => NETHER_PIPELINE,
         Dimension::End => END_PIPELINE,
+    }
+}
+
+#[cfg(test)]
+mod foreign_feature_mutation_tests {
+    use super::*;
+
+    #[test]
+    fn foreign_feature_index_is_derived_from_restored_mutations() {
+        let request = GenerationRequest::new(
+            Dimension::Overworld,
+            (0, 0),
+            GenerationTarget::Full,
+            2,
+        );
+        let session = GenerationSession::new(request);
+        assert!(!session.has_foreign_feature_mutations);
+
+        let mut checkpoint = session.export_checkpoint();
+        let stage = StageKey::new(Dimension::Overworld, ColumnStage::Features);
+        let mutation = ProvenanceMutation::test_block_state(
+            (1, 0),
+            (1, 0),
+            stage,
+            0,
+            BlockCoordinate::new(15, 0, 8),
+            1,
+            StateId::from_state_str("minecraft:stone").unwrap(),
+        );
+        checkpoint.committed_mutation_order.push(mutation.provenance());
+        checkpoint.committed_mutations.push(mutation);
+
+        let restored = GenerationSession::from_checkpoint(checkpoint).unwrap();
+        assert!(restored.has_foreign_feature_mutations);
     }
 }
 
