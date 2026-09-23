@@ -67,12 +67,15 @@ TOP_LAYER in order, but retains only final local writes, outward spills, and
 block entities destined for requested columns. It does not create an output
 product, attach padding structures, settle light, or repair padding-local
 entities. Local writes are retained in a coordinate-keyed sparse overlay and
-are applied to the shaped prefix only if that padding column later becomes a
-packet neighbour or another mutable consumer; unrelated transaction overrides
-are not folded into it. A generated `PacketNeighbour` owns that overlay and
-applies it once, lazily at its first `column()` or `into_column()` call, so
-repeated packet or light reads reuse the same materialized column and its
-incremental heightmaps.
+cross-target entities remain pending until the destination's canonical FEATURES
+winner is applied; the winner's source and final block-entity type must match
+before the generated sidecar is attached. Unrequested destinations stay
+deferred. The local overlay is applied to the shaped prefix only if that padding
+column later becomes a packet neighbour or another mutable consumer; unrelated
+transaction overrides are not folded into it. A generated `PacketNeighbour`
+owns that overlay and applies it once, lazily at its first `column()` or
+`into_column()` call, so repeated packet or light reads reuse the same
+materialized column and its incremental heightmaps.
 Once sparse settlement has completed the local mutable sequence, the region
 retains its generated prefix, overlay, and output sidecars as a compact
 terminal neighbour. A later request for that coordinate promotes this retained

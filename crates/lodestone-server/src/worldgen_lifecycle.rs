@@ -2141,6 +2141,7 @@ pub struct LifecycleMaterializer<S: LifecycleWorldgenSource> {
     /// so outputs apply each target's winners only after every requested and
     /// sparse writer has completed.
     target_feature_winners: BTreeMap<ChunkPos, BTreeMap<AbsoluteCell, TargetFeatureWinner>>,
+    pending_target_block_entities: BTreeMap<ChunkPos, Vec<PendingTargetBlockEntity>>,
     /// Writes visible through the CARVERS read view. A target-scoped source
     /// body sees every preceding authenticated FEATURES write, including
     /// writes into a source's own column; source-local top-layer writes are
@@ -2164,6 +2165,12 @@ struct TargetFeatureWinner {
     source: ChunkPos,
     ordinal: u32,
     state: StateId,
+}
+
+struct PendingTargetBlockEntity {
+    target: ChunkPos,
+    source: ChunkPos,
+    entity: GeneratedBlockEntity,
 }
 
 fn target_feature_winner_precedes(candidate: TargetFeatureWinner, current: TargetFeatureWinner) -> bool {
@@ -2224,6 +2231,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             sparse_padding_overrides: BTreeMap::new(),
             sparse_completed_targets: BTreeSet::new(),
             target_feature_winners: BTreeMap::new(),
+            pending_target_block_entities: BTreeMap::new(),
             carvers_overrides: BTreeMap::new(),
             overrides: BTreeMap::new(),
             override_revisions: Vec::new(),
@@ -2295,6 +2303,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         self.sparse_padding_overrides.clear();
         self.sparse_completed_targets.clear();
         self.target_feature_winners.clear();
+        self.pending_target_block_entities.clear();
         self.carvers_overrides.clear();
         self.overrides.clear();
         self.override_revisions.clear();
@@ -3657,26 +3666,22 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         for entity in &result.block_entities {
             let (x, _y, z) = entity.position();
             let destination = (x.div_euclid(16), z.div_euclid(16));
-            // A feature can create a block entity while writing a future
-            // dependency. The external lifecycle leaves that entity as a
-            // deferred sidecar when the dependency has already crossed
-            // FEATURES; the initial chunk record enumerates only entities
-            // materialized while the requested centre is being completed. A
-            // target-scoped replay has no later source event to promote such
-            // a deferred record, so attaching it merely because the
-            // destination is mutable would make a future packet report an
-            // entity the external record omits. Direct source completion
-            // retains the historical source-owned behavior because it has no
-            // target transaction.
-            if target_scoped
-                && destination != target
-                && (matches!(mode, LifecycleCompletionMode::Full)
-                    || matches!(mode, LifecycleCompletionMode::SparsePadding)
-                    || destination == source
-                    || self.sparse_padding_targets.contains(&destination)
-                    || (matches!(mode, LifecycleCompletionMode::SparsePadding)
-                        && !self.mutable_targets.contains(&destination)))
-            {
+            if target_scoped && destination != target {
+                if target_owned
+                    && stage == LifecycleCompletion::Features
+                    && matches!(mode, LifecycleCompletionMode::SparsePadding)
+                    && self.mutable_targets.contains(&destination)
+                    && !self.sparse_padding_targets.contains(&destination)
+                {
+                    self.pending_target_block_entities
+                        .entry(destination)
+                        .or_default()
+                        .push(PendingTargetBlockEntity {
+                            target,
+                            source,
+                            entity: entity.clone(),
+                        });
+                }
                 continue;
             }
             if !self.is_admitted(destination) {
@@ -3989,34 +3994,110 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
     /// Settle each target cell from the minimum-provenance target-owned
     /// FEATURES writer before its immutable output snapshot is captured.
     pub fn apply_canonical_target_feature_winners(&mut self, target: ChunkPos) {
-        let winners = self
+        let pending = self
+            .pending_target_block_entities
+            .remove(&target)
+            .unwrap_or_default();
+        if !self
             .target_feature_winners
             .get(&target)
-            .into_iter()
-            .flat_map(|winners| winners.iter())
-            .map(|(&cell, winner)| (cell, winner.state))
-            .collect::<Vec<_>>();
-        if winners.is_empty() {
+            .is_some_and(|winners| !winners.is_empty())
+        {
             return;
         }
         self.materialize_resident(target);
-        let column = self
-            .resident
-            .get(&target)
-            .expect("canonical FEATURES target was admitted");
-        let writes = winners
-            .into_iter()
-            .filter_map(|(cell, state)| {
-                let local = (cell.0.rem_euclid(16), cell.1, cell.2.rem_euclid(16));
-                (column.block_state_id(local.0, local.1, local.2) != state)
-                    .then_some((local.0, local.1, local.2, state))
-            })
-            .collect::<Vec<_>>();
+        let writes = {
+            let column = self
+                .resident
+                .get(&target)
+                .expect("canonical FEATURES target was admitted");
+            self.target_feature_winners
+                .get(&target)
+                .into_iter()
+                .flat_map(|winners| winners.iter())
+                .filter_map(|(&(x, y, z), winner)| {
+                    let local = (x.rem_euclid(16), y, z.rem_euclid(16));
+                    (column.block_state_id(local.0, local.1, local.2) != winner.state)
+                        .then_some((local.0, local.1, local.2, winner.state))
+                })
+                .collect::<Vec<_>>()
+        };
         if !writes.is_empty() {
             self.resident
                 .get_mut(&target)
                 .expect("canonical FEATURES target was admitted")
                 .apply_ordered_block_id_batch(&writes);
+        }
+        let winners = self
+            .target_feature_winners
+            .get(&target)
+            .expect("canonical FEATURES target winner set was checked above");
+        let column = self
+            .resident
+            .get_mut(&target)
+            .expect("canonical FEATURES target was admitted");
+        if !column.block_entities().is_empty() {
+            let mut entities = column.block_entities().to_vec();
+            entities.retain(|(position, _)| {
+                !winners
+                    .get(&(position.x, position.y, position.z))
+                    .is_some_and(|winner| winner.target != target)
+            });
+            column.set_block_entities(entities);
+        }
+        if pending.is_empty() {
+            return;
+        }
+        let column = self.resident.get(&target).expect("canonical FEATURES target was admitted");
+
+        let mut accepted = BTreeMap::<AbsoluteCell, Option<GeneratedBlockEntity>>::new();
+        for candidate in pending {
+            let position = candidate.entity.position();
+            let Some(winner) = winners.get(&position) else {
+                continue;
+            };
+            if (winner.target, winner.source) != (candidate.target, candidate.source) {
+                continue;
+            }
+            let state = column.block_state_id(
+                position.0.rem_euclid(16),
+                position.1,
+                position.2.rem_euclid(16),
+            );
+            if lodestone_data::block_entity_types::block_entity_type(state)
+                != Some(candidate.entity.type_id())
+            {
+                continue;
+            }
+            match accepted.entry(position) {
+                Entry::Vacant(entry) => {
+                    entry.insert(Some(candidate.entity));
+                }
+                Entry::Occupied(mut entry) => match entry.get() {
+                    Some(existing) if existing == &candidate.entity => {}
+                    Some(_) => {
+                        entry.insert(None);
+                    }
+                    None => {}
+                }
+            }
+        }
+        let replacements = accepted
+            .iter()
+            .filter_map(|(&position, entity)| entity.as_ref().map(|_| position))
+            .collect::<BTreeSet<_>>();
+        if !replacements.is_empty() {
+            let mut existing = column.block_entities().to_vec();
+            existing.retain(|(position, _)| {
+                !replacements.contains(&(position.x, position.y, position.z))
+            });
+            let column = self
+                .resident
+                .get_mut(&target)
+                .expect("canonical FEATURES target was admitted");
+            column.set_block_entities(existing);
+            let entities = accepted.into_values().flatten().collect::<Vec<_>>();
+            column.add_generated_block_entities(&entities);
         }
     }
 
