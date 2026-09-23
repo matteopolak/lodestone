@@ -381,6 +381,14 @@ jobs:
             | tar xz -C "$HOME/.cargo/bin" trunk
           trunk --version
       - run: just wasm-check
+      - name: Preserve failed browser build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-browser-build-log
+          path: target/wasm-check/lodestone-web-trunk.log
+          if-no-files-found: warn
+          retention-days: 7
 
   # The cargo-fuzz tripwire, and it exists for the same reason the wasm job
   # above does: `fuzz/` was a real, working, eleven-target libFuzzer workspace
