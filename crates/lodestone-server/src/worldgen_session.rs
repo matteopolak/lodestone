@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use crate::chunk::{ChunkColumn, ChunkGenerationStage, ColumnLightSettlement};
 use lodestone_data::block_states::StateId;
+use lodestone_worldgen::hash::FastSet;
 use lodestone_worldgen::stage_schedule::{
     BarrierPolicy, ChunkRequest, ColumnStage, Dimension, DimensionPipeline, END_PIPELINE,
     GenerationTarget, PipelineOptions, ResourceKey, StageDescriptor, StageFrontier, StageKey,
@@ -1727,7 +1728,7 @@ pub struct GenerationSession {
     committed_mutation_order: Vec<MutationProvenance>,
     next_revision: u64,
     current_revision: SessionRevision,
-    mutation_index: BTreeSet<MutationProvenance>,
+    mutation_index: FastSet<MutationProvenance>,
     has_foreign_feature_mutations: bool,
     light_domain_revision: Option<SessionRevision>,
     packet_neighbour_domain: Option<BTreeSet<ChunkCoordinate>>,
@@ -1814,7 +1815,7 @@ impl GenerationSession {
             committed_mutation_order: Vec::new(),
             next_revision: 1,
             current_revision: SessionRevision(0),
-            mutation_index: BTreeSet::new(),
+            mutation_index: FastSet::default(),
             has_foreign_feature_mutations: false,
             light_domain_revision: None,
             packet_neighbour_domain: Some(BTreeSet::new()),
@@ -2003,7 +2004,7 @@ impl GenerationSession {
         {
             return Err(SessionError::InvalidCheckpoint);
         }
-        let mut logical_writes = BTreeSet::new();
+        let mut logical_writes = FastSet::default();
         let mut pending = Vec::with_capacity(writes.len());
         let mut next_revision = self.next_revision;
         let mut existing_writes = BTreeMap::new();
