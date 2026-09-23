@@ -597,6 +597,7 @@ pub struct GeneratedColumnSummaries {
 }
 
 impl GeneratedColumnSummaries {
+    #[cfg(test)]
     pub(crate) fn from_flat_with_predicates(
         height: i32,
         cells: &[u16],
@@ -619,7 +620,7 @@ impl GeneratedColumnSummaries {
         );
         for section in 0..(height as usize).div_ceil(SECTION_ROWS) {
             let start = section * SECTION_CELLS;
-            let rows = (height as usize - start / SECTION_CELLS).min(SECTION_ROWS);
+            let rows = (height as usize - section * SECTION_ROWS).min(SECTION_ROWS);
             let end = start + rows * ROW_CELLS;
             for (cell, &id) in cells[start..end].iter().enumerate() {
                 summaries.observe(
@@ -631,6 +632,44 @@ impl GeneratedColumnSummaries {
                     generation_motion_blocking,
                 );
             }
+        }
+        summaries
+    }
+
+    pub(crate) fn from_storage_with_predicates(
+        storage: &CompactBlockStorage,
+        palette_len: usize,
+        motion_blocking: &[bool],
+        motion_blocking_no_leaves: &[bool],
+        generation_motion_blocking: Option<&[bool]>,
+    ) -> Self {
+        let height = storage.height;
+        let mut summaries = Self::new_with_palette_len(
+            height,
+            palette_len.max(1),
+            true,
+            true,
+            generation_motion_blocking.is_some(),
+        );
+        let mut max_id = 0usize;
+        for ly in 0..height as usize {
+            let section_row = ly / SECTION_ROWS * SECTION_ROWS;
+            let row_in_section = ly % SECTION_ROWS;
+            for horizontal in 0..ROW_CELLS {
+                let id = storage.cell_at_flat(ly * ROW_CELLS + horizontal);
+                max_id = max_id.max(usize::from(id));
+                summaries.observe(
+                    section_row,
+                    row_in_section * ROW_CELLS + horizontal,
+                    id,
+                    Some(motion_blocking),
+                    Some(motion_blocking_no_leaves),
+                    generation_motion_blocking,
+                );
+            }
+        }
+        for counts in &mut summaries.section_state_counts {
+            counts.truncate(max_id + 1);
         }
         summaries
     }
@@ -647,6 +686,22 @@ impl GeneratedColumnSummaries {
             .copied()
             .max()
             .map_or(1, |id| usize::from(id) + 1);
+        Self::new_with_palette_len(
+            height,
+            palette_len,
+            with_motion_blocking,
+            with_motion_blocking_no_leaves,
+            with_generation_motion_blocking,
+        )
+    }
+
+    fn new_with_palette_len(
+        height: i32,
+        palette_len: usize,
+        with_motion_blocking: bool,
+        with_motion_blocking_no_leaves: bool,
+        with_generation_motion_blocking: bool,
+    ) -> Self {
         Self {
             non_air_first_free: [0; 256],
             motion_blocking_first_free: with_motion_blocking.then_some([0; 256]),
@@ -939,6 +994,50 @@ mod tests {
             base.motion_blocking_first_free().unwrap()[0],
             changed_motion.motion_blocking_first_free().unwrap()[0],
             "the motion-blocking control must detect a changed top cell"
+        );
+    }
+
+    #[test]
+    fn lazy_storage_summary_matches_flat_control_and_rejects_changed_cell() {
+        let height = 17;
+        let mut cells = vec![0; height * ROW_CELLS];
+        cells[0] = 1;
+        let motion = [false, true, false];
+        let motion_no_leaves = [false, true, false];
+        let expected = GeneratedColumnSummaries::from_flat_with_predicates(
+            height as i32,
+            &cells,
+            Some(&motion),
+            Some(&motion_no_leaves),
+            None,
+        );
+        let storage = CompactBlockStorage::from_flat(0, height as i32, &cells);
+        let actual = GeneratedColumnSummaries::from_storage_with_predicates(
+            &storage,
+            3,
+            &motion,
+            &motion_no_leaves,
+            None,
+        );
+        assert_eq!(actual, expected);
+
+        cells[0] = 2;
+        let changed = CompactBlockStorage::from_flat(0, height as i32, &cells);
+        let negative_control = GeneratedColumnSummaries::from_storage_with_predicates(
+            &changed,
+            3,
+            &motion,
+            &motion_no_leaves,
+            None,
+        );
+        assert_ne!(negative_control, expected);
+        assert_ne!(
+            negative_control.motion_blocking_first_free(),
+            expected.motion_blocking_first_free(),
+        );
+        assert_ne!(
+            negative_control.section_state_counts(),
+            expected.section_state_counts(),
         );
     }
 

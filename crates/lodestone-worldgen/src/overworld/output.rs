@@ -2,12 +2,11 @@
 //! [`GeneratedColumn`] (the canonical block field) and [`StageTimes`] (the per-stage
 //! split `column_timed` measures), plus the adopt-the-dense-grid step between them.
 //!
-//! Moved here verbatim from `overworld.rs` by U16 Phase A.
-
 use super::OverworldGenerator;
-use crate::generated_storage::CompactBlockStorage;
+use crate::generated_storage::{CompactBlockStorage, GeneratedColumnSummaries};
 use lodestone_data::biomes::BiomeRef;
 use lodestone_data::block_states::StateId as CanonicalStateId;
+use std::sync::OnceLock;
 
 /// Which stages a [`GeneratedColumn`] carries — the wire-facing tag
 /// `docs/plans/progressive-chunk-generation.md`'s Stage 1 asks for.
@@ -70,45 +69,24 @@ impl OverworldGenerator {
                 self.snow_support.motion_blocking_id(state)
             }).collect::<Vec<_>>())
         };
-        let client_motion_predicate = local_palette
-            .iter()
-            .map(|&state| {
-                lodestone_data::block_solidity::blocks_motion(state)
-                    || lodestone_data::snow_support::has_fluid_state(state)
-            })
-            .collect::<Vec<_>>();
-        let client_motion_no_leaves_predicate = local_palette
-            .iter()
-            .enumerate()
-            .map(|(palette_index, &state)| {
-                client_motion_predicate[palette_index]
-                    && !lodestone_data::tool::builtin_block_tag_contains(
-                        "minecraft:leaves",
-                        state.block(),
-                    )
-            })
-            .collect::<Vec<_>>();
         let palette = local_palette;
-        let (compact_blocks, summaries) = if matches!(stage, GenStage::Full) {
-            CompactBlockStorage::from_flat_with_predicates(
+        let (compact_blocks, eager_summaries) = if matches!(stage, GenStage::Full) {
+            let client_motion_predicate = client_motion_predicates(&palette);
+            let client_motion_no_leaves_predicate =
+                client_motion_no_leaves_predicates(&palette, &client_motion_predicate);
+            let (blocks, summaries) = CompactBlockStorage::from_flat_with_predicates(
                 self.min_y,
                 self.height,
                 &dense_blocks,
                 &client_motion_predicate,
                 &client_motion_no_leaves_predicate,
                 generation_motion_predicate.as_deref(),
-            )
-        } else {
-            let summaries = crate::generated_storage::GeneratedColumnSummaries::from_flat_with_predicates(
-                self.height,
-                &dense_blocks,
-                Some(&client_motion_predicate),
-                Some(&client_motion_no_leaves_predicate),
-                generation_motion_predicate.as_deref(),
             );
+            (blocks, Some(summaries))
+        } else {
             (
                 CompactBlockStorage::from_shared_flat(self.min_y, self.height, dense_blocks),
-                summaries,
+                None,
             )
         };
         // The SPAWN stage's part 2. Computed here, alongside
@@ -120,6 +98,7 @@ impl OverworldGenerator {
         // server-side consumer re-validates. Gated on `stage` — see this
         // function's own doc for why `Shaped` must never produce one.
         let spawn_candidates = if matches!(stage, GenStage::Full) {
+            let summaries = eager_summaries.as_ref().expect("full stage summaries");
             let min_y = self.min_y;
             let surface_y_at = |lx: usize, lz: usize| -> i32 {
                 min_y + i32::from(summaries.non_air_first_free()[lx + lz * 16])
@@ -138,20 +117,10 @@ impl OverworldGenerator {
         } else {
             Vec::new()
         };
-        // Full output packing and shaped output summary construction both
-        // traverse the dense field once. An absent predicate retains the
-        // historical `None` sidecar semantics.
-        let motion_blocking = summaries
-            .generation_motion_blocking_first_free()
-            .copied();
-        let client_heightmaps = [
-            *summaries.non_air_first_free(),
-            *summaries.motion_blocking_first_free().expect("client motion summary"),
-            *summaries
-                .motion_blocking_no_leaves_first_free()
-                .expect("client no-leaves summary"),
-        ];
-        let section_state_counts = summaries.into_section_state_counts();
+        let summaries = OnceLock::new();
+        if let Some(eager) = eager_summaries {
+            summaries.set(eager).expect("new column has no summary");
+        }
 
         GeneratedColumn {
             min_y: self.min_y,
@@ -161,13 +130,60 @@ impl OverworldGenerator {
             biome_quarts: biome_quarts.map(|(biome, _)| biome),
             biome_cells,
             block_entities,
-            client_heightmaps,
-            section_state_counts,
-            motion_blocking,
+            summaries,
+            client_heightmaps: OnceLock::new(),
+            deferred_generation_predicate: if matches!(stage, GenStage::Shaped) {
+                generation_motion_predicate
+            } else {
+                None
+            },
             spawn_candidates,
             stage,
         }
     }
+}
+
+fn client_motion_predicates(palette: &[CanonicalStateId]) -> Vec<bool> {
+    palette
+        .iter()
+        .map(|&state| {
+            lodestone_data::block_solidity::blocks_motion(state)
+                || lodestone_data::snow_support::has_fluid_state(state)
+        })
+        .collect()
+}
+
+fn client_motion_no_leaves_predicates(
+    palette: &[CanonicalStateId],
+    motion_blocking: &[bool],
+) -> Vec<bool> {
+    palette
+        .iter()
+        .enumerate()
+        .map(|(palette_index, &state)| {
+            motion_blocking[palette_index]
+                && !lodestone_data::tool::builtin_block_tag_contains(
+                    "minecraft:leaves",
+                    state.block(),
+                )
+        })
+        .collect()
+}
+
+fn generated_summaries(
+    blocks: &CompactBlockStorage,
+    palette: &[CanonicalStateId],
+    generation_motion_predicate: Option<&[bool]>,
+) -> GeneratedColumnSummaries {
+    let motion_blocking = client_motion_predicates(palette);
+    let motion_blocking_no_leaves = client_motion_no_leaves_predicates(palette, &motion_blocking);
+    GeneratedColumnSummaries::from_storage_with_predicates(
+        blocks,
+        palette.len(),
+        &motion_blocking,
+        &motion_blocking_no_leaves,
+        generation_motion_predicate,
+    )
 }
 
 /// Vanilla's own `MOTION_BLOCKING` heightmap-type registry id, read off its
@@ -390,15 +406,9 @@ pub struct GeneratedColumn {
     /// heightmap, which the save-parity work found is worse than none — vanilla
     /// re-derives any type we omit but trusts one we send.
     ///
-    /// Inline rather than boxed on purpose: `blocks` is already ~196 KB per
-    /// column, so 512 bytes is noise, and a `Box` would add one allocation per
-    /// column to a crate with four allocation-attribution gates.
-    motion_blocking: Option<[u16; HEIGHTMAP_COLUMNS]>,
-    /// The three client heightmaps, in wire registry-id order.
-    client_heightmaps: [[u16; HEIGHTMAP_COLUMNS]; 3],
-    /// Per-section counts of each generated palette index. Consumed by the
-    /// server to derive ticking counts without revisiting the block field.
-    section_state_counts: Vec<Vec<u16>>,
+    summaries: OnceLock<GeneratedColumnSummaries>,
+    client_heightmaps: OnceLock<[[u16; HEIGHTMAP_COLUMNS]; 3]>,
+    deferred_generation_predicate: Option<Vec<bool>>,
     /// The SPAWN stage's part 2: proposed creature placements —
     /// unconditioned on light/ground legality. See
     /// [`crate::spawn_stage`]'s module doc and [`Self::spawn_candidates`].
@@ -427,9 +437,9 @@ pub struct CompactGeneratedColumn {
     biome_quarts: [BiomeRef; 16],
     biome_cells: super::BiomeCells,
     block_entities: Vec<super::block_entities::GeneratedBlockEntity>,
-    motion_blocking: Option<[u16; HEIGHTMAP_COLUMNS]>,
-    client_heightmaps: [[u16; HEIGHTMAP_COLUMNS]; 3],
-    section_state_counts: Vec<Vec<u16>>,
+    summaries: OnceLock<GeneratedColumnSummaries>,
+    client_heightmaps: OnceLock<[[u16; HEIGHTMAP_COLUMNS]; 3]>,
+    deferred_generation_predicate: Option<Vec<bool>>,
     spawn_candidates: Vec<crate::spawn_stage::GenerationSpawn>,
     stage: GenStage,
 }
@@ -464,6 +474,16 @@ pub struct CompactGeneratedColumnParts {
 }
 
 impl CompactGeneratedColumn {
+    fn summaries(&self) -> &GeneratedColumnSummaries {
+        self.summaries.get_or_init(|| {
+            generated_summaries(
+                &self.blocks,
+                &self.palette,
+                self.deferred_generation_predicate.as_deref(),
+            )
+        })
+    }
+
     /// Which stages produced this column.
     #[must_use]
     pub const fn stage(&self) -> GenStage {
@@ -549,25 +569,41 @@ impl CompactGeneratedColumn {
     /// Optional motion-blocking heightmap sidecar.
     #[must_use]
     pub fn motion_blocking_heightmap(&self) -> Option<&[u16; HEIGHTMAP_COLUMNS]> {
-        self.motion_blocking.as_ref()
+        self.summaries()
+            .generation_motion_blocking_first_free()
     }
 
     /// The three client heightmaps in stable type-id order: surface, motion,
     /// and motion excluding leaves.
     #[must_use]
     pub fn client_heightmaps(&self) -> &[[u16; HEIGHTMAP_COLUMNS]; 3] {
-        &self.client_heightmaps
+        self.client_heightmaps.get_or_init(|| {
+            let summaries = self.summaries();
+            [
+                *summaries.non_air_first_free(),
+                *summaries.motion_blocking_first_free().expect("client motion summary"),
+                *summaries
+                    .motion_blocking_no_leaves_first_free()
+                    .expect("client no-leaves summary"),
+            ]
+        })
     }
 
     /// Per-section counts of each generated palette index.
     #[must_use]
     pub fn section_state_counts(&self) -> &[Vec<u16>] {
-        &self.section_state_counts
+        self.summaries().section_state_counts()
     }
 
     /// Consumes the compact column without expanding its block sections.
     #[must_use]
     pub fn into_parts(self) -> CompactGeneratedColumnParts {
+        let _ = self.client_heightmaps();
+        let client_heightmaps = self
+            .client_heightmaps
+            .into_inner()
+            .expect("client heightmaps initialized");
+        let summaries = self.summaries.into_inner().expect("column summaries initialized");
         CompactGeneratedColumnParts {
             min_y: self.min_y,
             height: self.height,
@@ -576,9 +612,9 @@ impl CompactGeneratedColumn {
             biome_quarts: self.biome_quarts,
             biome_cells: self.biome_cells,
             block_entities: self.block_entities,
-            motion_blocking: self.motion_blocking,
-            client_heightmaps: self.client_heightmaps,
-            section_state_counts: self.section_state_counts,
+            motion_blocking: summaries.generation_motion_blocking_first_free().copied(),
+            client_heightmaps,
+            section_state_counts: summaries.into_section_state_counts(),
             spawn_candidates: self.spawn_candidates,
             stage: self.stage,
         }
@@ -586,6 +622,16 @@ impl CompactGeneratedColumn {
 }
 
 impl GeneratedColumn {
+    fn summaries(&self) -> &GeneratedColumnSummaries {
+        self.summaries.get_or_init(|| {
+            generated_summaries(
+                &self.blocks,
+                &self.palette,
+                self.deferred_generation_predicate.as_deref(),
+            )
+        })
+    }
+
     /// Consumes this result into the section-aligned hand-off representation.
     /// A shaped dense carrier remains lazy until the hand-off consumer asks for
     /// section storage; a full carrier is already packed.
@@ -599,9 +645,9 @@ impl GeneratedColumn {
             biome_quarts: self.biome_quarts,
             biome_cells: self.biome_cells,
             block_entities: self.block_entities,
-            motion_blocking: self.motion_blocking,
+            summaries: self.summaries,
             client_heightmaps: self.client_heightmaps,
-            section_state_counts: self.section_state_counts,
+            deferred_generation_predicate: self.deferred_generation_predicate,
             spawn_candidates: self.spawn_candidates,
             stage: self.stage,
         }
@@ -770,20 +816,30 @@ impl GeneratedColumn {
     /// width has to be chosen here either.
     #[must_use]
     pub fn motion_blocking_heightmap(&self) -> Option<&[u16; HEIGHTMAP_COLUMNS]> {
-        self.motion_blocking.as_ref()
+        self.summaries()
+            .generation_motion_blocking_first_free()
     }
 
     /// The three client heightmaps in stable type-id order: surface, motion,
     /// and motion excluding leaves.
     #[must_use]
     pub fn client_heightmaps(&self) -> &[[u16; HEIGHTMAP_COLUMNS]; 3] {
-        &self.client_heightmaps
+        self.client_heightmaps.get_or_init(|| {
+            let summaries = self.summaries();
+            [
+                *summaries.non_air_first_free(),
+                *summaries.motion_blocking_first_free().expect("client motion summary"),
+                *summaries
+                    .motion_blocking_no_leaves_first_free()
+                    .expect("client no-leaves summary"),
+            ]
+        })
     }
 
     /// Per-section counts of each generated palette index.
     #[must_use]
     pub fn section_state_counts(&self) -> &[Vec<u16>] {
-        &self.section_state_counts
+        self.summaries().section_state_counts()
     }
 
     /// The world Y vanilla's own heightmap "first available" lookup at
@@ -814,6 +870,56 @@ mod tests {
 
     use super::*;
     use crate::feature::top_layer::{SnowSupport, StatePredicate};
+
+    fn shaped_column_with_stone(stone: bool) -> GeneratedColumn {
+        let height = 2;
+        let mut cells = vec![0; height * 16 * 16];
+        if stone {
+            cells[16 * 16] = 1;
+        }
+        GeneratedColumn {
+            min_y: 0,
+            height: height as i32,
+            palette: vec![
+                lodestone_data::block_states::air_state(),
+                lodestone_data::block::Block::Stone.default_state(),
+            ],
+            blocks: CompactBlockStorage::from_shared_flat(0, height as i32, std::sync::Arc::new(cells)),
+            biome_quarts: [BiomeRef::builtin(lodestone_data::biomes::BuiltinBiome::Plains); 16],
+            biome_cells: crate::overworld::biome_cells::BiomeCells::uniform(
+                "minecraft:plains",
+                0,
+                height as i32,
+            ),
+            block_entities: Vec::new(),
+            summaries: OnceLock::new(),
+            client_heightmaps: OnceLock::new(),
+            deferred_generation_predicate: None,
+            spawn_candidates: Vec::new(),
+            stage: GenStage::Shaped,
+        }
+    }
+
+    #[test]
+    fn shaped_metadata_is_deferred_until_read_and_negative_control_changes_it() {
+        let empty = shaped_column_with_stone(false);
+        assert!(empty.summaries.get().is_none());
+        assert_eq!(
+            empty.block_state_id(0, 0, 0),
+            lodestone_data::block_states::air_state()
+        );
+        assert!(empty.summaries.get().is_none());
+
+        let empty_maps = *empty.client_heightmaps();
+        assert_eq!(empty_maps[0][0], 0);
+        assert!(empty.summaries.get().is_some());
+
+        let changed = shaped_column_with_stone(true);
+        let changed_maps = *changed.client_heightmaps();
+        assert_eq!(changed_maps[0][0], 2);
+        assert_eq!(changed_maps[1][0], 2);
+        assert_ne!(changed_maps, empty_maps);
+    }
 
     /// The three claims a wrong `MOTION_BLOCKING` port gets wrong, on a
     /// hand-built field: the `+1`, the `lx + lz * 16` index, and that an air
