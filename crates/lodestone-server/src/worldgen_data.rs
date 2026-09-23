@@ -695,14 +695,7 @@ fn cached_overworld_generator(seed: i64, world_type: WorldType) -> OverworldGene
 /// same way it already threads a seed.
 #[must_use]
 pub fn overworld_generator_of_type(seed: i64, world_type: WorldType) -> OverworldGenerator {
-    ACTIVE_WORLD_SEED.store(seed, std::sync::atomic::Ordering::Relaxed);
-    OverworldGenerator::new(
-        seed,
-        settings_for(world_type),
-        &embedded_resolver(),
-        DEFAULT_BIOME,
-        DEFAULT_BIOME_SNOWS,
-    )
+    cached_overworld_generator(seed, world_type)
 }
 
 /// Every bundled biome's parsed `MobSpawnSettings`, biome name to settings —
@@ -1514,6 +1507,41 @@ mod tests {
         }
         Properties::state_for_block(block, &properties_set)
             .expect("fixture block state exists in the registry")
+    }
+
+    #[test]
+    fn direct_generator_and_chunk_source_share_compiled_configuration() {
+        let seed = 0x4c4f_4445_5354_4f4e;
+        let before = bundled_generator_cache_stats();
+        drop(overworld_generator_of_type(seed, WorldType::Overworld));
+        let after_generator = bundled_generator_cache_stats();
+
+        drop(overworld_chunk_source_of_type(seed, WorldType::Overworld));
+        let after_source = bundled_generator_cache_stats();
+
+        assert!(
+            after_source.hits > after_generator.hits,
+            "the second factory should reuse the same immutable generator: {before:?} -> {after_generator:?} -> {after_source:?}"
+        );
+
+        let overworld = BundledGeneratorCacheKey {
+            seed,
+            world_type: WorldType::Overworld,
+            settings_identity: settings_identity(settings_for(WorldType::Overworld)),
+            resolver_fingerprint: bundled_resolver_fingerprint(),
+            executor_version: BUNDLED_GENERATOR_EXECUTOR_VERSION,
+        };
+        let amplified = BundledGeneratorCacheKey {
+            world_type: WorldType::Amplified,
+            settings_identity: settings_identity(settings_for(WorldType::Amplified)),
+            ..overworld.clone()
+        };
+        let other_seed = BundledGeneratorCacheKey {
+            seed: seed + 1,
+            ..overworld.clone()
+        };
+        assert_ne!(overworld, amplified);
+        assert_ne!(overworld, other_seed);
     }
 
     fn vegetal_features_for(

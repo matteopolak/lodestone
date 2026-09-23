@@ -1060,10 +1060,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   `overworld/veins.rs`), surface rule application (`surface/`), and the final
   `TOP_LAYER_MODIFICATION` decoration step (`feature/top_layer.rs`).
 - [Compiled worldgen configuration cache](./worldgen-compiled-cache.md) — The
-  bundled Overworld source factory retains a bounded cache of immutable, compiled
-  generator configurations. Repeated production source/lease creation for the same
-  seed and world configuration reuses parsed templates, pools, structures and density
-  programs while each source receives fresh mutable column state.
+  bundled Overworld factories retain a bounded cache of immutable, compiled generator
+  configurations. Repeated generator or source creation for the same seed and world
+  configuration reuses parsed templates, pools, structures and density programs while
+  each new instance receives fresh mutable column state.
 - [Worldgen coral features](./worldgen-coral-features.md) — The coral feature module
   places the three configured warm-ocean geometries: a branching tree, a claw-shaped
   set of branches, and a hollow shell-like mushroom. They share the registry-selected
