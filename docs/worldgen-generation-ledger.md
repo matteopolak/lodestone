@@ -9,22 +9,23 @@ The generation ledger is the world-owned retention lane for resumable world gene
 `GenerationLedger` groups state by `PipelineIdentity`. Each pipeline has a bounded coordinate set, a `StageFrontier` for every admitted coordinate, immutable products and sidecars, shaped aggregate prefixes and terminal output products, globally deduplicated `(target, source, stage)` completions with a contiguous source-order cursor, sparse provenance-bearing overlays owned by their absolute destination, and a per-coordinate revision counter. A new pipeline identity evicts the least-recently-used identity; per-pipeline lane caps reject an operation before inserting the overflowing item.
 
 Target-owned settlement may finish a padding coordinate before that coordinate
-is requested directly. The ledger retains its shaped aggregate prefix,
-sidecars, source completions, and sparse provenance overlays. A later request
-resumes mutable stages from that prefix without rerunning completed source
-bodies; shaped packet neighbours remain distinct from full requested outputs.
+is requested directly. A completion is specific to the target's read view:
+the requested session receives the canonical winning foreign writes with their
+actual source and original ordinal, but does not claim that a padding source
+completed in every later request context. Shaped packet neighbours remain
+distinct from full requested outputs.
 
-Before a requested output is captured, its mutable stages finish and the
-canonical provenance winner for each destination cell is applied to the target
-column. The resulting Output product is immutable. A completed target-owned
-feature region publishes a compact proof of the exact reverse-writer domain
-settled around that output. Recomputing one of those target-owned writers is a
-no-op even when its losing state differs from the canonical cell already in the
-output. Writes outside the proven domain, writes whose source is not their
-target, and dimensions without this proof still fail closed. Settlement retires
-an overlay only after confirming that the persisted source contains it or that
-the destination Output already contains the same state; it never patches a
-published product.
+Before a requested output is captured, every owner in its reverse-writer domain
+completes and the canonical provenance winner for each destination cell is
+applied to the target column. The session records those winning foreign writes
+and a compact proof of the completed domain; the packet snapshot, retained
+Output product, and cache are then checked against one final column. Recomputing
+a settled target-owned writer is a no-op even when its losing state differs from
+the canonical cell. Writes outside the proven domain, writes whose source is
+not their target, and dimensions without this proof still fail closed.
+Settlement retires an overlay only after confirming that the persisted source
+contains it or that the destination Output already contains the same state;
+it never patches a published product.
 
 `ChunkStore::lease_halo` canonicalizes coordinates, captures their write-gate revisions, and pins them in the cache. The lease holds the gate state records but not the gates themselves, so generation may run without blocking unrelated writes. `ChunkStore::execute_generation_session` admits the halo and snapshots a validated ledger checkpoint under the ledger lock, releases that lock while the borrowed driver runs, then publishes the session's immutable records, ordered source completions, and overlays through an atomic clone-and-swap. It rechecks cancellation immediately before `ChunkStore::commit_generation`; a cancelled request therefore leaves any committed ledger prefix and removes only newly admitted coordinates that are still empty. `ChunkStore::commit_generation` reacquires the canonical write gates, rejects any cache revision change, inserts the complete batch, and releases the gates before eviction work. Dropping the lease removes its pins and performs deferred LRU eviction.
 
@@ -36,11 +37,14 @@ Add new retained values through the typed `ImmutableProduct`/`ImmutableSidecar` 
 
 Reverse-settlement proof belongs to `GenerationSession` rather than packet
 encoding. The production region installs it only after every target-owned
-writer in the domain completes, and checkpoint publication journals it with
-the Output product. Keep this path shared by scalar, batch, native, and browser
-execution. If feature ownership becomes non-square or permits a distinct
-source coordinate, replace the compact domain type with a representation that
-can authenticate that shape instead of weakening the replay predicate.
+writer in the domain completes. A cancelled request can publish that proof with
+its committed FEATURES prefix; a later ledger checkpoint restores it. The proof
+authorizes replay of a losing writer only after the Output product exists, and
+the final column must still match the canonical winning writes. Keep this path
+shared by scalar, batch, native, and browser execution. If feature ownership
+becomes non-square or permits a distinct source coordinate, replace the compact
+domain type with a representation that can authenticate that shape instead of
+weakening the replay predicate.
 
 Publication is monotonic across overlapping requests: a checkpoint whose records are already a prefix of the current frontier is accepted only when its aggregate metadata and covered records agree with the current state. The existing frontier, aggregate, sidecars, products, source completions, and overlays remain authoritative; a divergent stale checkpoint fails transactionally without replacing newer state.
 

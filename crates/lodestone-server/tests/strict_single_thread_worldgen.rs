@@ -531,6 +531,61 @@ fn output_checksum_detects_a_changed_block() {
     assert_eq!(before[1..], after[1..]);
 }
 
+#[test]
+fn singleton_padding_settlement_matches_one_batch_and_cache() {
+    let coordinates = (20_000..20_006)
+        .map(|x| (x, -20_000))
+        .collect::<Vec<_>>();
+    let single = lodestone_server::retained_chunk_source_for_view_radius(
+        Arc::new(overworld_chunk_source(42)),
+        2,
+    );
+    let mut single_columns = Vec::new();
+    for &coordinate in &coordinates {
+        let GenerationRequestResult::Generated(snapshot) =
+            expect_generated(request_one(&single, request_for(coordinate)), coordinate)
+        else {
+            unreachable!()
+        };
+        let column = snapshot.column().clone();
+        let cached = single.column(coordinate.0, coordinate.1);
+        assert_eq!(
+            output_checksums(&[(coordinate, column.clone())]),
+            output_checksums(&[(coordinate, cached)]),
+            "packet snapshot and cache differ at {coordinate:?}"
+        );
+        single_columns.push((coordinate, column));
+    }
+
+    let batched = lodestone_server::retained_chunk_source_for_view_radius(
+        Arc::new(overworld_chunk_source(42)),
+        2,
+    );
+    let mut sessions = coordinates
+        .iter()
+        .copied()
+        .map(request_for)
+        .map(GenerationSession::new)
+        .collect::<Vec<_>>();
+    let batch_columns = coordinates
+        .iter()
+        .copied()
+        .zip(batched.request_generation_batch(&mut sessions))
+        .map(|(coordinate, result)| {
+            let GenerationRequestResult::Generated(snapshot) = expect_generated(result, coordinate)
+            else {
+                unreachable!()
+            };
+            (coordinate, snapshot.column().clone())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(output_checksums(&single_columns), output_checksums(&batch_columns));
+    assert_eq!(
+        single_columns[5].1.block_state_id(0, 32, 0),
+        lodestone_data::block_states::StateId::from_raw(4)
+    );
+}
+
 fn request_one<S: ChunkSource>(
     source: &S,
     request: GenerationRequest,

@@ -14,8 +14,9 @@ use crate::{
     ChunkColumn, ChunkGenerationStage, ChunkSource, EndChunkSource, NetherChunkSource,
     OverworldChunkSource,
 };
-use crate::worldgen_session::ProvenanceMutation;
+use crate::worldgen_session::{BlockCoordinate, ProvenanceMutation, TargetFeatureWrite};
 use lodestone_data::block_states::StateId;
+use lodestone_worldgen::hash::FastMap;
 #[cfg(feature = "worldgen-stage-pmu")]
 use lodestone_worldgen::counters::{RegionGuard, RegionPhase};
 use lodestone_worldgen::overworld::{GeneratedBlockEntity, OverworldGenerator};
@@ -798,6 +799,11 @@ pub trait LifecycleWorldgenSource {
         false
     }
 
+    /// Whether direct-epoch local writes are replayed through the CARVERS view.
+    fn direct_epoch_local_writes_use_carvers_view(&self) -> bool {
+        false
+    }
+
     /// Whether writes emitted while replaying a target are part of the
     /// resident world's durable source state even when their destination has
     /// not reached FEATURES yet. End decoration is source-owned and its
@@ -1152,6 +1158,10 @@ impl<T: LifecycleWorldgenSource + ?Sized> LifecycleWorldgenSource for &T {
 
     fn target_feature_reads_carvers(&self) -> bool {
         LifecycleWorldgenSource::target_feature_reads_carvers(*self)
+    }
+
+    fn direct_epoch_local_writes_use_carvers_view(&self) -> bool {
+        LifecycleWorldgenSource::direct_epoch_local_writes_use_carvers_view(*self)
     }
 
     fn target_spills_persist(&self) -> bool {
@@ -1787,6 +1797,10 @@ impl LifecycleWorldgenSource for OverworldChunkSource {
         true
     }
 
+    fn direct_epoch_local_writes_use_carvers_view(&self) -> bool {
+        true
+    }
+
     fn post_features_spills(
         &self,
         source: ChunkPos,
@@ -2143,6 +2157,7 @@ pub struct LifecycleMaterializer<S: LifecycleWorldgenSource> {
     /// so outputs apply each target's winners only after every requested and
     /// sparse writer has completed.
     target_feature_winners: BTreeMap<ChunkPos, BTreeMap<AbsoluteCell, TargetFeatureWinner>>,
+    target_feature_receipts: BTreeMap<ChunkPos, TargetFeatureOwnerReceipt>,
     pending_target_block_entities: BTreeMap<ChunkPos, Vec<PendingTargetBlockEntity>>,
     /// Writes visible through the CARVERS read view. A target-scoped source
     /// body sees every preceding authenticated FEATURES write, including
@@ -2156,6 +2171,7 @@ pub struct LifecycleMaterializer<S: LifecycleWorldgenSource> {
     override_revisions: Vec<(AbsoluteCell, StateId)>,
     carvers_override_revisions: Vec<(AbsoluteCell, StateId)>,
     direct_target_output: bool,
+    direct_target_outputs: BTreeSet<ChunkPos>,
     /// Structure placement output accumulated from each source body without
     /// replaying the mixed stream.
     feature_structure_blocks: StructureBlocks,
@@ -2167,6 +2183,36 @@ struct TargetFeatureWinner {
     source: ChunkPos,
     ordinal: u32,
     state: StateId,
+}
+
+#[derive(Default)]
+struct TargetFeatureOwnerReceipt {
+    spills: Vec<(LifecycleSpill, u32)>,
+    structure_blocks: StructureBlocks,
+}
+
+pub(crate) struct TargetFeatureSettlement {
+    pub(crate) completed_owners: Vec<ChunkPos>,
+    pub(crate) winners: Vec<TargetFeatureWrite>,
+    pub(crate) owner_spills: Vec<(LifecycleSpill, u32)>,
+    pub(crate) owner_structure_blocks: StructureBlocks,
+}
+
+fn target_feature_owner_projection(
+    output: ChunkPos,
+    radius: i32,
+    owners: &BTreeSet<ChunkPos>,
+) -> Option<Vec<ChunkPos>> {
+    let projected = owners
+        .iter()
+        .copied()
+        .filter(|owner| {
+            owner.0.abs_diff(output.0) <= radius as u32
+                && owner.1.abs_diff(output.1) <= radius as u32
+        })
+        .collect::<Vec<_>>();
+    let width = usize::try_from(radius.checked_mul(2)?.checked_add(1)?).ok()?;
+    (projected.len() == width.checked_mul(width)?).then_some(projected)
 }
 
 struct PendingTargetBlockEntity {
@@ -2233,12 +2279,14 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             sparse_padding_overrides: BTreeMap::new(),
             sparse_completed_targets: BTreeSet::new(),
             target_feature_winners: BTreeMap::new(),
+            target_feature_receipts: BTreeMap::new(),
             pending_target_block_entities: BTreeMap::new(),
             carvers_overrides: BTreeMap::new(),
             overrides: BTreeMap::new(),
             override_revisions: Vec::new(),
             carvers_override_revisions: Vec::new(),
             direct_target_output: false,
+            direct_target_outputs: BTreeSet::new(),
             feature_structure_blocks: StructureBlocks::default(),
         }
     }
@@ -2305,12 +2353,14 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         self.sparse_padding_overrides.clear();
         self.sparse_completed_targets.clear();
         self.target_feature_winners.clear();
+        self.target_feature_receipts.clear();
         self.pending_target_block_entities.clear();
         self.carvers_overrides.clear();
         self.overrides.clear();
         self.override_revisions.clear();
         self.carvers_override_revisions.clear();
         self.direct_target_output = false;
+        self.direct_target_outputs.clear();
         self.feature_structure_blocks = StructureBlocks::default();
     }
 
@@ -2413,6 +2463,44 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         std::mem::take(&mut self.feature_structure_blocks)
     }
 
+    pub(crate) fn target_feature_settlement(
+        &self,
+        output: ChunkPos,
+        expected_owners: &BTreeSet<ChunkPos>,
+    ) -> Option<TargetFeatureSettlement> {
+        let completed_owners =
+            target_feature_owner_projection(output, TARGET_FEATURE_RADIUS, expected_owners)?;
+        if completed_owners.iter().any(|owner| {
+            !self.target_features_completed(*owner)
+                || !self.target_feature_receipts.contains_key(owner)
+        }) {
+            return None;
+        }
+        let owner = self.target_feature_receipts.get(&output)?;
+        let winners = self
+            .target_feature_winners
+            .get(&output)
+            .into_iter()
+            .flat_map(|winners| winners.iter())
+            .filter(|(_, winner)| winner.target != output)
+            .map(|(&(x, y, z), winner)| {
+                TargetFeatureWrite::new(
+                    winner.target,
+                    winner.source,
+                    winner.ordinal,
+                    BlockCoordinate::new(x, y, z),
+                    winner.state,
+                )
+            })
+            .collect();
+        Some(TargetFeatureSettlement {
+            completed_owners,
+            winners,
+            owner_spills: owner.spills.clone(),
+            owner_structure_blocks: owner.structure_blocks.clone(),
+        })
+    }
+
     /// Admit and apply a validated target plan without changing its order.
     pub fn replay_plan(&mut self, plan: &LifecycleReplayPlan) {
         for &admission in plan.admissions() {
@@ -2495,6 +2583,11 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
     pub fn target_features_completed(&self, target: ChunkPos) -> bool {
         self.target_completions
             .contains(&(target, target, LifecycleCompletion::Features))
+    }
+
+    #[must_use]
+    pub(crate) fn target_features_fully_completed(&self, target: ChunkPos) -> bool {
+        self.target_features_completed(target) && !self.sparse_completed_targets.contains(&target)
     }
 
     /// Generate independent shaped admissions on the server's process-wide
@@ -2854,7 +2947,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
     /// therefore cheaper and safer than hashing that column again.
     pub fn mark_authenticated_features(&mut self, chunk: ChunkPos, digest: [u8; 32]) {
         assert!(
-            self.has_direct_target_output(),
+            self.has_direct_target_output_for(chunk),
             "authenticated FEATURES require direct target output"
         );
         let prefix = self
@@ -3213,12 +3306,13 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 .get(&target)
                 .cloned()
                 .or_else(|| (!target_owned).then(|| self.source.lifecycle_replay_context(target)));
-            self.direct_target_output = false;
+            self.direct_target_output = self.direct_target_outputs.contains(&target);
         }
         self.active_target = Some(target);
         self.mutable_targets.insert(target);
         if promote_sparse {
             self.direct_target_output = true;
+            self.direct_target_outputs.insert(target);
         }
     }
 
@@ -3280,6 +3374,18 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
     #[must_use]
     pub fn has_direct_target_output(&self) -> bool {
         self.direct_target_output
+    }
+
+    #[must_use]
+    pub fn has_direct_target_output_for(&self, target: ChunkPos) -> bool {
+        self.direct_target_outputs.contains(&target)
+    }
+
+    pub fn clear_direct_target_output(&mut self, target: ChunkPos) {
+        self.direct_target_outputs.remove(&target);
+        if self.active_target == Some(target) {
+            self.direct_target_output = false;
+        }
     }
 
     /// Run the source-local post-FEATURES pass once for a target after all of
@@ -3409,7 +3515,6 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
 
         let mut target_local_features = Vec::new();
         let mut dirty_sparse_residents = BTreeSet::new();
-        #[cfg(feature = "worldgen-stage-pmu")]
         let mut direct_epoch_output = false;
         let (result, completed_feature_sources) = if target_owned {
             assert_eq!(source, target, "target-owned FEATURES source must be its target");
@@ -3441,7 +3546,6 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                             epoch,
                             override_revisions,
                         );
-                    #[cfg(feature = "worldgen-stage-pmu")]
                     if result.is_some() {
                         direct_epoch_output = true;
                     }
@@ -3498,7 +3602,6 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                                         epoch,
                                         override_revisions,
                                     );
-                                #[cfg(feature = "worldgen-stage-pmu")]
                                 if result.is_some() {
                                     direct_epoch_output = true;
                                 }
@@ -3539,6 +3642,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                     }
                     self.resident.insert(target, column);
                     self.direct_target_output = true;
+                    self.direct_target_outputs.insert(target);
                     target_local_features = direct.local_features;
                     (
                         LifecycleFeatureResult {
@@ -3607,6 +3711,9 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         #[cfg(feature = "worldgen-stage-pmu")]
         let _direct_transition_mirror = direct_epoch_output
             .then(|| RegionGuard::enter(RegionPhase::DirectTransitionMirror));
+        let retain_general_override = !direct_epoch_output
+            || !self.source.direct_epoch_local_writes_use_carvers_view()
+            || matches!(mode, LifecycleCompletionMode::SparsePadding);
         for (ordinal, local) in target_local_features.iter().enumerate() {
             if target_owned && stage == LifecycleCompletion::Features {
                 self.record_target_feature_winner(
@@ -3636,7 +3743,9 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             if self.source.target_feature_reads_carvers() {
                 self.set_carvers_override(local.position, local.state);
             }
-            self.set_override(local.position, local.state);
+            if retain_general_override {
+                self.set_override(local.position, local.state);
+            }
             if self.retain_sparse_padding_write(
                 mode,
                 destination,
@@ -3648,7 +3757,12 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         }
         #[cfg(feature = "worldgen-stage-pmu")]
         drop(_direct_transition_mirror);
-        self.feature_structure_blocks.append(result.structure_blocks);
+        if target_owned && stage == LifecycleCompletion::Features {
+            let receipt = self.target_feature_receipts.entry(target).or_default();
+            receipt.structure_blocks.append(result.structure_blocks);
+        } else {
+            self.feature_structure_blocks.append(result.structure_blocks);
+        }
         self.completed_feature_sources
             .extend(completed_feature_sources);
         for spill in &result.spills {
@@ -3726,6 +3840,13 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             let ordinal = source_ordinals.entry(spill.source).or_default();
             let spill_ordinal = *ordinal;
             *ordinal = spill_ordinal.saturating_add(1);
+            if target_owned && stage == LifecycleCompletion::Features {
+                self.target_feature_receipts
+                    .entry(target)
+                    .or_default()
+                    .spills
+                    .push((*spill, spill_ordinal));
+            }
             let destination = (
                 spill.position.0.div_euclid(16),
                 spill.position.2.div_euclid(16),
@@ -3982,32 +4103,22 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 ));
             }
         }
-        for (destination, writes) in writes {
+        for (destination, mut writes) in writes {
             self.materialize_resident(destination);
             let column = self
                 .resident
                 .get(&destination)
                 .expect("restored mutation destination was checked above");
-            // A target's detached direct output already contains its own
-            // ordered feature and top-layer writes. Keep the provenance log
-            // authoritative, but avoid replaying a write when the final
-            // value for that cell is already resident. Grouping by final
-            // value is important: filtering individual writes would drop an
-            // intermediate feature write followed by a later top-layer write
-            // and could change the observable order.
-            let writes = writes
-                .iter()
-                .filter(|(x, y, z, _)| {
-                    writes
-                        .iter()
-                        .rev()
-                        .find(|(fx, fy, fz, _)| (*fx, *fy, *fz) == (*x, *y, *z))
-                        .is_some_and(|(_, _, _, state)| {
-                            *state != column.block_state_id(*x, *y, *z)
-                        })
-                })
-                .map(|(x, y, z, state)| (*x, *y, *z, *state))
-                .collect::<Vec<_>>();
+            let mut changed_cells =
+                FastMap::with_capacity_and_hasher(writes.len(), Default::default());
+            for &(x, y, z, state) in writes.iter().rev() {
+                if let std::collections::hash_map::Entry::Vacant(entry) =
+                    changed_cells.entry((x, y, z))
+                {
+                    entry.insert(state != column.block_state_id(x, y, z));
+                }
+            }
+            writes.retain(|write| changed_cells[&(write.0, write.1, write.2)]);
             if !writes.is_empty() {
                 self.resident
                     .get_mut(&destination)
@@ -6256,6 +6367,34 @@ mod tests {
     }
 
     #[test]
+    fn direct_outputs_survive_interleaved_sparse_padding() {
+        let first = (0, 0);
+        let padding = (0, 1);
+        let second = (1, 0);
+        let mut materializer = LifecycleMaterializer::new(DirectHeightmapSource);
+        for target in [first, padding, second] {
+            materializer.admit(target);
+            materializer.install_lifecycle_replay_context(target, Arc::new(()));
+        }
+        materializer.declare_mutable_targets([first, second]);
+        materializer.declare_sparse_padding_targets([padding]);
+
+        materializer.complete_target_features_observing(first, 0, |_| {});
+        materializer.finish_target(first);
+        materializer.complete_target_features_sparse_observing(padding, 1, |_| {});
+        materializer.finish_target(padding);
+        materializer.complete_target_features_observing(second, 2, |_| {});
+        materializer.finish_target(second);
+
+        assert!(materializer.has_direct_target_output_for(first));
+        assert!(materializer.has_direct_target_output_for(second));
+        assert!(!materializer.has_direct_target_output_for(padding));
+        materializer.clear_direct_target_output(first);
+        assert!(!materializer.has_direct_target_output_for(first));
+        assert!(materializer.has_direct_target_output_for(second));
+    }
+
+    #[test]
     fn direct_target_output_preserves_restored_leading_edge_write() {
         use lodestone_worldgen::stage_schedule::{Dimension, StageKey};
 
@@ -6281,6 +6420,45 @@ mod tests {
         assert_eq!(
             materializer.snapshot_for_packet(target).block_state_id(0, 0, 0),
             sid("minecraft:stone"),
+        );
+    }
+
+    #[test]
+    fn restored_duplicate_writes_keep_their_order() {
+        use lodestone_worldgen::stage_schedule::{Dimension, StageKey};
+
+        let target = (0, 0);
+        let destination = crate::worldgen_session::BlockCoordinate::new(0, 0, 0);
+        let stage = StageKey::new(Dimension::Overworld, ColumnStage::Features);
+        let first = ProvenanceMutation::test_block_state(
+            (-1, 0),
+            (-1, 0),
+            stage,
+            0,
+            destination,
+            1,
+            sid("minecraft:stone"),
+        );
+        let last = ProvenanceMutation::test_block_state(
+            (-1, 0),
+            (-1, 0),
+            stage,
+            1,
+            destination,
+            2,
+            sid("minecraft:gold_block"),
+        );
+
+        let mut materializer = LifecycleMaterializer::new(DirectHeightmapSource);
+        materializer.admit(target);
+        materializer.restore_committed_mutations([&first, &last]);
+
+        assert_eq!(
+            materializer
+                .resident_column(target)
+                .expect("target remains resident")
+                .block_state_id(0, 0, 0),
+            sid("minecraft:gold_block"),
         );
     }
 
@@ -6558,6 +6736,26 @@ mod tests {
             Some(&before),
             "speculative writes must remain outside the authenticated identity",
         );
+    }
+
+    #[test]
+    fn batch_settlement_projects_one_exact_owner_square() {
+        let output = (10, -10);
+        let owners = (-2..=2)
+            .flat_map(|dz| (-2..=2).map(move |dx| (output.0 + dx, output.1 + dz)))
+            .collect::<BTreeSet<_>>();
+        let projected = target_feature_owner_projection(output, 1, &owners)
+            .expect("the batch closure contains the output proof square");
+        assert_eq!(projected.len(), 9);
+        assert!(projected
+            .iter()
+            .all(|&(x, z)| (x - output.0).abs() <= 1 && (z - output.1).abs() <= 1));
+
+        let incomplete = owners
+            .into_iter()
+            .filter(|owner| *owner != (output.0 + 1, output.1))
+            .collect::<BTreeSet<_>>();
+        assert!(target_feature_owner_projection(output, 1, &incomplete).is_none());
     }
 
 }

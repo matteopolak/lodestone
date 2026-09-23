@@ -12,7 +12,7 @@ use crate::chunk::{ChunkColumn, ChunkGenerationStage};
 use crate::worldgen_lifecycle::{
     ImmutableComputeExecutor, LifecycleCompletion, LifecycleCompletionMode,
     LifecycleFeatureDispatch, LifecycleMaterializer, LifecycleSpill,
-    LifecycleWorldgenSource, TARGET_FEATURE_RADIUS,
+    LifecycleWorldgenSource, TargetFeatureSettlement, TARGET_FEATURE_RADIUS,
     PersistentWorldgenExecutor,
 };
 use crate::worldgen_session::{
@@ -385,18 +385,6 @@ struct TargetSettlementPlan {
     targets: Vec<ChunkCoordinate>,
     context: Vec<ChunkCoordinate>,
     padding: BTreeSet<ChunkCoordinate>,
-    mutable_radius: i32,
-}
-
-impl TargetSettlementPlan {
-    fn proof_for(&self, output: ChunkCoordinate) -> FeatureSettlementProof {
-        let proof = FeatureSettlementProof::square(output, self.mutable_radius);
-        debug_assert!(self.targets.iter().copied().filter(|target| proof.contains(*target)).count()
-            >= usize::try_from(self.mutable_radius * 2 + 1)
-                .expect("the mutable radius is non-negative")
-                .pow(2));
-        proof
-    }
 }
 
 fn canonical_coordinates(coordinates: BTreeSet<ChunkCoordinate>) -> Vec<ChunkCoordinate> {
@@ -473,8 +461,22 @@ fn target_settlement_plan(
         targets: canonical_coordinates(targets),
         context: canonical_coordinates(context),
         padding,
-        mutable_radius: radius,
     }))
+}
+
+fn settlement_padding_needed_by_live_target(
+    coordinate: ChunkCoordinate,
+    sessions: &[GenerationSession],
+) -> bool {
+    let radius = i64::from(TARGET_FEATURE_RADIUS);
+    sessions.iter().any(|session| {
+        if session.cancellation().is_cancelled() {
+            return false;
+        }
+        let target = session.request().target();
+        (i64::from(coordinate.0) - i64::from(target.0)).abs() <= radius
+            && (i64::from(coordinate.1) - i64::from(target.1)).abs() <= radius
+    })
 }
 
 /// Return the complete resident halo required by production target-owned
@@ -659,6 +661,7 @@ fn commit_features<S>(
     sources: &[(i32, i32)],
     spills: &[LifecycleSpill],
     structure_blocks: StructureBlocks,
+    settlement: Option<TargetFeatureSettlement>,
     authenticated_content_fingerprint: Option<[u8; 32]>,
     retain_direct_output: bool,
 ) -> Result<([u8; 32], Option<Arc<ChunkColumn>>), SessionError>
@@ -671,6 +674,13 @@ where
         .frontier(target)
         .is_some_and(|frontier| frontier.records().iter().any(|record| record.key() == key));
     if already_committed {
+        if let Some(settlement) = settlement.as_ref() {
+            session.commit_target_feature_settlement(
+                FeatureSettlementProof::square(target, TARGET_FEATURE_RADIUS),
+                &settlement.completed_owners,
+                &settlement.winners,
+            )?;
+        }
         let column = materializer
             .resident_column(target)
             .expect("committed FEATURES target remains resident");
@@ -689,22 +699,40 @@ where
             .map(|(order, source)| (order as u64, source)),
     )?;
     let mut winners = HashMap::new();
-    for (source_order, &source) in sources.iter().enumerate() {
-        for (spill_order, spill) in spills
-            .iter()
-            .filter(|spill| spill.source == source)
-            .enumerate()
-        {
+    let mut settled_winners = HashMap::new();
+    if let Some(settlement) = settlement.as_ref() {
+        for (spill, ordinal) in &settlement.owner_spills {
             let destination = BlockCoordinate::new(
                 spill.position.0,
                 spill.position.1,
                 spill.position.2,
             );
-            if session.halo().contains((
-                spill.position.0.div_euclid(16),
-                spill.position.2.div_euclid(16),
-            )) {
-                winners.entry(destination).or_insert((source_order, spill_order));
+            let destination_chunk = (
+                destination.x().div_euclid(16),
+                destination.z().div_euclid(16),
+            );
+            if destination_chunk != target && session.halo().contains(destination_chunk) {
+                settled_winners.entry(destination).or_insert(*ordinal);
+            }
+        }
+    } else {
+        for (source_order, &source) in sources.iter().enumerate() {
+            for (spill_order, spill) in spills
+                .iter()
+                .filter(|spill| spill.source == source)
+                .enumerate()
+            {
+                let destination = BlockCoordinate::new(
+                    spill.position.0,
+                    spill.position.1,
+                    spill.position.2,
+                );
+                if session.halo().contains((
+                    spill.position.0.div_euclid(16),
+                    spill.position.2.div_euclid(16),
+                )) {
+                    winners.entry(destination).or_insert((source_order, spill_order));
+                }
             }
         }
     }
@@ -713,45 +741,46 @@ where
             continue;
         }
         let mut transaction = session.begin_mutable_source(source, key, source_order as u64)?;
-        for (ordinal, spill) in spills
-            .iter()
-            .filter(|spill| {
-                spill.source == source
-                    && session.halo().contains((
-                        spill.position.0.div_euclid(16),
-                        spill.position.2.div_euclid(16),
-                    ))
-            })
-            .enumerate()
-        {
-            let destination = BlockCoordinate::new(
-                spill.position.0,
-                spill.position.1,
-                spill.position.2,
-            );
-            if winners.get(&destination) != Some(&(source_order, ordinal)) {
-                continue;
-            }
-            // The target resident column already contains its own ordered
-            // FEATURES writes. Only a write crossing the target boundary is
-            // a reusable overlay; retaining target-local copies makes every
-            // later mutable-source validation rebuild a large provenance set.
-            if (
-                destination.x().div_euclid(16),
-                destination.z().div_euclid(16),
-            ) == target
+        if let Some(settlement) = settlement.as_ref() {
+            for (spill, ordinal) in settlement
+                .owner_spills
+                .iter()
+                .filter(|(spill, _)| spill.source == source)
             {
-                continue;
-            }
-            transaction.push(
-                ordinal as u32,
-                BlockCoordinate::new(
+                let destination = BlockCoordinate::new(
                     spill.position.0,
                     spill.position.1,
                     spill.position.2,
-                ),
-                spill.state,
-            )?;
+                );
+                if settled_winners.get(&destination) != Some(ordinal) {
+                    continue;
+                }
+                transaction.push(*ordinal, destination, spill.state)?;
+            }
+        } else {
+            for (ordinal, spill) in spills
+                .iter()
+                .filter(|spill| {
+                    spill.source == source
+                        && session.halo().contains((
+                            spill.position.0.div_euclid(16),
+                            spill.position.2.div_euclid(16),
+                        ))
+                })
+                .enumerate()
+            {
+                let destination = BlockCoordinate::new(
+                    spill.position.0,
+                    spill.position.1,
+                    spill.position.2,
+                );
+                if winners.get(&destination) != Some(&(source_order, ordinal))
+                    || (destination.x().div_euclid(16), destination.z().div_euclid(16)) == target
+                {
+                    continue;
+                }
+                transaction.push(ordinal as u32, destination, spill.state)?;
+            }
         }
         session.complete_mutable_source(transaction)?;
     }
@@ -761,11 +790,19 @@ where
             .cloned()
             .expect("target was admitted before FEATURES"),
     );
-    let content_fingerprint = authenticated_content_fingerprint
-        .unwrap_or_else(|| column_content_fingerprint(&column));
+    let content_fingerprint =
+        authenticated_content_fingerprint.unwrap_or_else(|| column_content_fingerprint(&column));
     let fingerprint = stage_fingerprint(target, ColumnStage::Features, content_fingerprint);
     let retained_bytes = column.memory_census().logical_total();
-    let sidecars = feature_sidecars(session.pipeline().dimension(), spills, &column);
+    let settled_feature_spills = settlement.as_ref().map(|settlement| {
+        settlement
+            .owner_spills
+            .iter()
+            .map(|(spill, _)| *spill)
+            .collect::<Vec<_>>()
+    });
+    let feature_spills = settled_feature_spills.as_deref().unwrap_or(spills);
+    let sidecars = feature_sidecars(session.pipeline().dimension(), feature_spills, &column);
     let mut products = vec![ImmutableProduct::from_arc(
         ResourceKey::ResidentOverlay,
         Arc::clone(&column),
@@ -776,6 +813,9 @@ where
         .descriptor(ColumnStage::Features)
         .is_some_and(|descriptor| descriptor.outputs().contains(&ResourceKey::StructureBlocks))
     {
+        let structure_blocks = settlement
+            .as_ref()
+            .map_or(structure_blocks, |settlement| settlement.owner_structure_blocks.clone());
         let retained_bytes = structure_blocks_retained_bytes(&structure_blocks);
         products.push(ImmutableProduct::new_with_retained_bytes(
             ResourceKey::StructureBlocks,
@@ -791,6 +831,13 @@ where
         products,
         sidecars,
     )?;
+    if let Some(settlement) = settlement {
+        session.commit_target_feature_settlement(
+            FeatureSettlementProof::square(target, TARGET_FEATURE_RADIUS),
+            &settlement.completed_owners,
+            &settlement.winners,
+        )?;
+    }
     Ok((
         content_fingerprint,
         retain_direct_output.then_some(column),
@@ -869,6 +916,7 @@ enum GenerationPhase {
     TargetFeatures,
     FeatureSource(usize),
     FinishFeatures,
+    SettlementPending,
     CommitFeatures,
     TopLayer,
     CommitTopLayer,
@@ -948,6 +996,7 @@ impl GenerationPhase {
             Self::TargetFeatures
             | Self::FeatureSource(_)
             | Self::FinishFeatures
+            | Self::SettlementPending
             | Self::CommitFeatures
             | Self::TopLayer
             | Self::CommitTopLayer => "mutable",
@@ -981,6 +1030,7 @@ where
     phase: GenerationPhase,
     defer_packet_finalization: bool,
     padding_targets: Option<&'m BTreeSet<ChunkCoordinate>>,
+    settlement_targets: Option<&'m BTreeSet<ChunkCoordinate>>,
     policy: PhantomData<P>,
     #[cfg(target_arch = "wasm32")]
     timing: Option<GenerationTiming>,
@@ -1042,6 +1092,7 @@ where
             phase: GenerationPhase::Admission,
             defer_packet_finalization,
             padding_targets: None,
+            settlement_targets: None,
             policy: PhantomData,
             #[cfg(target_arch = "wasm32")]
             timing,
@@ -1052,7 +1103,10 @@ where
         &mut self,
         executor: &dyn ImmutableComputeExecutor,
     ) -> Result<(), SessionError> {
-        while self.phase != GenerationPhase::PacketDeferred {
+        while !matches!(
+            self.phase,
+            GenerationPhase::PacketDeferred | GenerationPhase::SettlementPending
+        ) {
             self.step(executor)?;
         }
         Ok(())
@@ -1063,7 +1117,10 @@ where
         &mut self,
         executor: &dyn ImmutableComputeExecutor,
     ) -> Result<(), SessionError> {
-        while self.phase != GenerationPhase::PacketDeferred {
+        while !matches!(
+            self.phase,
+            GenerationPhase::PacketDeferred | GenerationPhase::SettlementPending
+        ) {
             self.step(executor)?;
             crate::chunk::yield_to_browser().await;
         }
@@ -1091,7 +1148,9 @@ where
         &mut self,
         executor: &dyn ImmutableComputeExecutor,
     ) -> Result<PacketSnapshot, SessionError> {
-        self.phase = GenerationPhase::PacketDeferred;
+        if self.phase != GenerationPhase::PacketDeferred {
+            return Err(SessionError::InvalidCheckpoint);
+        }
         self.finalize_deferred(executor)
     }
 
@@ -1100,7 +1159,9 @@ where
         &mut self,
         executor: &dyn ImmutableComputeExecutor,
     ) -> Result<PacketSnapshot, SessionError> {
-        self.phase = GenerationPhase::PacketDeferred;
+        if self.phase != GenerationPhase::PacketDeferred {
+            return Err(SessionError::InvalidCheckpoint);
+        }
         self.phase = if self.output.is_some() {
             GenerationPhase::PacketNeighbours
         } else {
@@ -1200,7 +1261,14 @@ where
                 } else if self.materializer.feature_dispatch()
                     == LifecycleFeatureDispatch::TargetOwned
                 {
-                    self.phase = GenerationPhase::TargetFeatures;
+                    self.phase = if self
+                        .materializer
+                        .target_features_fully_completed(self.session.request().target())
+                    {
+                        GenerationPhase::CommitFeatures
+                    } else {
+                        GenerationPhase::TargetFeatures
+                    };
                 } else {
                     self.phase = GenerationPhase::FeatureSource(0);
                 }
@@ -1216,13 +1284,14 @@ where
                     |spill| spills.push(spill.clone()),
                 );
                 self.feature_spills.extend(spills);
-                if self.materializer.has_direct_target_output() {
+                let target = self.session.request().target();
+                if self.materializer.has_direct_target_output_for(target) {
                     if let Some(digest) = P::generated_feature_provenance(
                         self.source,
-                        self.session.request().target(),
+                        target,
                     ) {
                         self.materializer
-                            .mark_authenticated_features(self.session.request().target(), digest);
+                            .mark_authenticated_features(target, digest);
                     }
                 }
                 crate::worldgen_progress::emit(crate::worldgen_progress::WorldgenProgress {
@@ -1270,12 +1339,37 @@ where
                 if self.session.cancellation().is_cancelled() {
                     return Err(SessionError::Cancelled);
                 }
-                self.phase = GenerationPhase::CommitFeatures;
+                self.phase = if self.settlement_targets.is_some() {
+                    GenerationPhase::SettlementPending
+                } else {
+                    GenerationPhase::CommitFeatures
+                };
             }
+            GenerationPhase::SettlementPending => return Ok(None),
             GenerationPhase::CommitFeatures => {
+                let target = self.session.request().target();
+                let settlement = self
+                    .settlement_targets
+                    .map(|targets| {
+                        self.materializer
+                            .target_feature_settlement(
+                                target,
+                                targets,
+                            )
+                            .ok_or(SessionError::InvalidCheckpoint)
+                    })
+                    .transpose()?;
+                if settlement.is_some() {
+                    self.materializer
+                        .apply_canonical_target_feature_winners(target);
+                }
                 let direct_output_to_top_layer =
-                    P::has_top_layer() && self.materializer.has_direct_target_output();
-                let structure_blocks = self.materializer.take_feature_structure_blocks();
+                    P::has_top_layer() && self.materializer.has_direct_target_output_for(target);
+                let structure_blocks = if settlement.is_some() {
+                    StructureBlocks::default()
+                } else {
+                    self.materializer.take_feature_structure_blocks()
+                };
                 let authenticated_content_fingerprint = self
                     .materializer
                     .authenticated_features_digest(self.session.request().target());
@@ -1285,11 +1379,15 @@ where
                     &self.commit_sources,
                     &self.feature_spills,
                     structure_blocks,
+                    settlement,
                     authenticated_content_fingerprint,
                     direct_output_to_top_layer,
                 )?;
                 self.target_content_fingerprint = Some(content_fingerprint);
                 self.direct_feature_output = direct_feature_output;
+                if !P::has_top_layer() {
+                    self.materializer.clear_direct_target_output(target);
+                }
                 crate::worldgen_progress::emit(crate::worldgen_progress::WorldgenProgress {
                     session: self.session.id().value(),
                     admitted: self.admissions.len() as u32,
@@ -1299,7 +1397,9 @@ where
                     retained_bytes: self.session.usage().retained_bytes(),
                     stage: "features-committed",
                 });
-                self.phase = if P::has_top_layer() && !self.materializer.has_direct_target_output() {
+                self.phase = if P::has_top_layer()
+                    && !self.materializer.has_direct_target_output_for(target)
+                {
                     GenerationPhase::TopLayer
                 } else if P::has_top_layer() {
                     GenerationPhase::CommitTopLayer
@@ -1322,10 +1422,11 @@ where
                 self.phase = GenerationPhase::CommitTopLayer;
             }
             GenerationPhase::CommitTopLayer => {
+                let target = self.session.request().target();
                 let authenticated_content_fingerprint = self
                     .materializer
-                    .authenticated_features_digest(self.session.request().target());
-                let direct_feature_output = if self.materializer.has_direct_target_output() {
+                    .authenticated_features_digest(target);
+                let direct_feature_output = if self.materializer.has_direct_target_output_for(target) {
                     self.direct_feature_output.take()
                 } else {
                     None
@@ -1338,6 +1439,7 @@ where
                     authenticated_content_fingerprint,
                     direct_feature_output,
                 )?);
+                self.materializer.clear_direct_target_output(target);
                 self.phase = if self.defer_packet_finalization {
                     GenerationPhase::PacketDeferred
                 } else {
@@ -1653,6 +1755,7 @@ where
     materializer: LifecycleMaterializer<&'a S>,
     shared_prefixes: SharedPrefixCache,
     settlement_padding: BTreeSet<ChunkCoordinate>,
+    settlement_targets: BTreeSet<ChunkCoordinate>,
     admission_counts: RegionAdmissionCounts,
 }
 
@@ -1677,6 +1780,7 @@ where
             materializer: LifecycleMaterializer::new(source),
             shared_prefixes: SharedPrefixCache::new(),
             settlement_padding: BTreeSet::new(),
+            settlement_targets: BTreeSet::new(),
             admission_counts: RegionAdmissionCounts::default(),
         }
     }
@@ -1803,12 +1907,16 @@ where
             #[cfg(feature = "worldgen-stage-pmu")]
             drop(_replay_context);
             self.settlement_padding = plan.padding.clone();
+            self.settlement_targets = plan.targets.iter().copied().collect();
             self.materializer
                 .declare_mutable_targets(plan.targets.iter().copied());
             self.materializer
                 .declare_sparse_padding_targets(plan.padding.iter().copied());
             let target = session.request().target();
             for (sequence, &coordinate) in plan.targets.iter().enumerate() {
+                if session.cancellation().is_cancelled() {
+                    return Err(SessionError::Cancelled);
+                }
                 if coordinate == target {
                     let mut machine = GenerationStateMachine::<S, S::Policy>::new(
                         self.source,
@@ -1819,6 +1927,7 @@ where
                         1,
                     )?;
                     machine.padding_targets = Some(&self.settlement_padding);
+                    machine.settlement_targets = Some(&self.settlement_targets);
                     machine.advance_mutable(executor)?;
                 } else {
                     if !self.materializer.target_features_completed(coordinate) {
@@ -1841,8 +1950,9 @@ where
                 1,
             )?;
             machine.padding_targets = Some(&self.settlement_padding);
+            machine.settlement_targets = Some(&self.settlement_targets);
+            machine.advance_mutable(executor)?;
             let snapshot = machine.finalize_batch_target(executor)?;
-            session.mark_target_owned_feature_settlement(plan.proof_for(target));
             return Ok(snapshot);
         }
         let missing = session
@@ -1911,12 +2021,16 @@ where
             self.materializer
                 .prepare_lifecycle_replay_contexts_prepared(&plan.targets);
             self.settlement_padding = plan.padding.clone();
+            self.settlement_targets = plan.targets.iter().copied().collect();
             self.materializer
                 .declare_mutable_targets(plan.targets.iter().copied());
             self.materializer
                 .declare_sparse_padding_targets(plan.padding.iter().copied());
             let target = session.request().target();
             for (sequence, &coordinate) in plan.targets.iter().enumerate() {
+                if session.cancellation().is_cancelled() {
+                    return Err(SessionError::Cancelled);
+                }
                 if coordinate == target {
                     let mut machine = GenerationStateMachine::<S, S::Policy>::new(
                         self.source,
@@ -1927,6 +2041,7 @@ where
                         1,
                     )?;
                     machine.padding_targets = Some(&self.settlement_padding);
+                    machine.settlement_targets = Some(&self.settlement_targets);
                     machine
                         .advance_mutable_yielding(&PersistentWorldgenExecutor)
                         .await?;
@@ -1952,10 +2067,13 @@ where
                 1,
             )?;
             machine.padding_targets = Some(&self.settlement_padding);
+            machine.settlement_targets = Some(&self.settlement_targets);
+            machine
+                .advance_mutable_yielding(&PersistentWorldgenExecutor)
+                .await?;
             let snapshot = machine
                 .finalize_batch_target_yielding(&PersistentWorldgenExecutor)
                 .await?;
-            session.mark_target_owned_feature_settlement(plan.proof_for(target));
             return Ok(snapshot);
         }
         let missing = session
@@ -2054,6 +2172,7 @@ where
             #[cfg(feature = "worldgen-stage-pmu")]
             drop(_replay_context);
             self.settlement_padding = plan.padding.clone();
+            self.settlement_targets = plan.targets.iter().copied().collect();
             self.materializer
                 .declare_mutable_targets(plan.targets.iter().copied());
             self.materializer
@@ -2076,6 +2195,7 @@ where
             };
             self.refresh_admission_counts();
             self.settlement_padding.clear();
+            self.settlement_targets.clear();
             self.materializer.declare_mutable_targets(targets.iter().copied());
         }
         let mut cancelled = vec![false; sessions.len()];
@@ -2105,6 +2225,7 @@ where
                     };
                     if settlement.is_some() {
                         machine.padding_targets = Some(&self.settlement_padding);
+                        machine.settlement_targets = Some(&self.settlement_targets);
                     }
                     machine.advance_mutable(executor)
                 };
@@ -2118,7 +2239,9 @@ where
                     }
                     return batch_session_error(sessions.len(), error);
                 }
-            } else if settlement.is_some() {
+            } else if settlement.is_some()
+                && settlement_padding_needed_by_live_target(target, sessions)
+            {
                 if !self.materializer.target_features_completed(target) {
                     #[cfg(feature = "worldgen-stage-pmu")]
                     let _mutable_padding = RegionGuard::enter(RegionPhase::MutablePadding);
@@ -2156,23 +2279,23 @@ where
                     true,
                     batch_size,
                 ) {
-                Ok(machine) => machine,
-                Err(error) => return batch_session_error(sessions.len(), error),
-            };
-            if settlement.is_some() {
+                    Ok(machine) => machine,
+                    Err(error) => return batch_session_error(sessions.len(), error),
+                };
+                if settlement.is_some() {
                     machine.padding_targets = Some(&self.settlement_padding);
+                    machine.settlement_targets = Some(&self.settlement_targets);
                 }
-                machine.packet_columns = Some(&mut packet_columns);
-                machine.finalize_batch_target(executor)
+                let advance = if settlement.is_some() {
+                    machine.advance_mutable(executor)
+                } else {
+                    Ok(())
+                };
+                advance.and_then(|()| {
+                    machine.packet_columns = Some(&mut packet_columns);
+                    machine.finalize_batch_target(executor)
+                })
             };
-            if result.is_ok() && settlement.is_some() {
-                sessions[index].mark_target_owned_feature_settlement(
-                    settlement
-                        .as_ref()
-                        .expect("settlement was checked above")
-                        .proof_for(targets[index]),
-                );
-            }
             results.push(
                 result
                     .map(|snapshot| {
@@ -2248,6 +2371,7 @@ where
             self.materializer
                 .prepare_lifecycle_replay_contexts_prepared(&plan.targets);
             self.settlement_padding = plan.padding.clone();
+            self.settlement_targets = plan.targets.iter().copied().collect();
             self.materializer
                 .declare_mutable_targets(plan.targets.iter().copied());
             self.materializer
@@ -2270,6 +2394,7 @@ where
             };
             self.refresh_admission_counts();
             self.settlement_padding.clear();
+            self.settlement_targets.clear();
             self.materializer.declare_mutable_targets(targets.iter().copied());
         }
         let mut cancelled = vec![false; sessions.len()];
@@ -2297,13 +2422,16 @@ where
                     };
                     if settlement.is_some() {
                         machine.padding_targets = Some(&self.settlement_padding);
+                        machine.settlement_targets = Some(&self.settlement_targets);
                     }
                     machine
                         .advance_mutable_yielding(&PersistentWorldgenExecutor)
                         .await
                 };
                 Some(result)
-            } else if settlement.is_some() {
+            } else if settlement.is_some()
+                && settlement_padding_needed_by_live_target(target, sessions)
+            {
                 if !self.materializer.target_features_completed(target) {
                     self.materializer
                         .complete_target_features_with_mode_observing(
@@ -2357,25 +2485,29 @@ where
                     true,
                     batch_size,
                 ) {
-                Ok(machine) => machine,
-                Err(error) => return batch_session_error(sessions.len(), error),
-            };
-            if settlement.is_some() {
+                    Ok(machine) => machine,
+                    Err(error) => return batch_session_error(sessions.len(), error),
+                };
+                if settlement.is_some() {
                     machine.padding_targets = Some(&self.settlement_padding);
+                    machine.settlement_targets = Some(&self.settlement_targets);
                 }
-                machine.packet_columns = Some(&mut packet_columns);
-                machine
-                    .finalize_batch_target_yielding(&PersistentWorldgenExecutor)
-                    .await
+                let advance = if settlement.is_some() {
+                    machine
+                        .advance_mutable_yielding(&PersistentWorldgenExecutor)
+                        .await
+                } else {
+                    Ok(())
+                };
+                if let Err(error) = advance {
+                    Err(error)
+                } else {
+                    machine.packet_columns = Some(&mut packet_columns);
+                    machine
+                        .finalize_batch_target_yielding(&PersistentWorldgenExecutor)
+                        .await
+                }
             };
-            if result.is_ok() && settlement.is_some() {
-                sessions[index].mark_target_owned_feature_settlement(
-                    settlement
-                        .as_ref()
-                        .expect("settlement was checked above")
-                        .proof_for(targets[index]),
-                );
-            }
             results.push(
                 result
                     .map(|snapshot| {
@@ -3611,6 +3743,19 @@ mod tests {
             sid("minecraft:diorite"),
             "the right-edge writer targets the requested column",
         );
+        assert!(
+            session.committed_mutations().any(|mutation| {
+                let provenance = mutation.provenance();
+                provenance.target() == (1, 0)
+                    && provenance.source() == (1, 0)
+                    && provenance.stage().stage() == ColumnStage::Features
+                    && provenance.destination() == BlockCoordinate::new(15, 0, 0)
+                    && mutation
+                        .get::<StateId>()
+                        .is_some_and(|state| state.as_ref() == &sid("minecraft:diorite"))
+            }),
+            "the canonical foreign winner must remain in the settlement proof"
+        );
         let output_record = session
             .frontier((0, 0))
             .expect("scalar target frontier exists")
@@ -3803,6 +3948,60 @@ mod tests {
                 }
             };
             assert_eq!(snapshot.coordinate(), target);
+        }
+    }
+
+    #[test]
+    fn overworld_singleton_and_batch_settlement_fingerprints_match() {
+        let source = crate::chunk::OverworldChunkSource::new(crate::overworld_generator(42));
+        let mut singleton = GenerationSession::new(GenerationRequest::new(
+            Dimension::Overworld,
+            (0, 0),
+            GenerationTarget::Full,
+            1,
+        ));
+        generate_request_with_executor::<crate::chunk::OverworldChunkSource, OverworldPolicy>(
+            &source,
+            &mut singleton,
+            &PersistentWorldgenExecutor,
+        )
+        .expect("singleton target succeeds");
+
+        let mut batch = [(0, 0), (1, 0)]
+            .into_iter()
+            .map(|target| {
+                GenerationSession::new(GenerationRequest::new(
+                    Dimension::Overworld,
+                    target,
+                    GenerationTarget::Full,
+                    1,
+                ))
+            })
+            .collect::<Vec<_>>();
+        generate_batch_with_executor(&source, &mut batch, &PersistentWorldgenExecutor)
+            .into_iter()
+            .for_each(|result| {
+                result
+                    .expect("batch target succeeds")
+                    .expect("target is generated");
+            });
+
+        for stage in [ColumnStage::Features, ColumnStage::Output] {
+            let fingerprint = |session: &GenerationSession| {
+                session
+                    .frontier((0, 0))
+                    .expect("target frontier exists")
+                    .records()
+                    .iter()
+                    .find(|record| record.key().stage() == stage)
+                    .expect("stage is committed")
+                    .output_fingerprint()
+            };
+            assert_eq!(
+                fingerprint(&singleton),
+                fingerprint(&batch[0]),
+                "singleton and batch {stage:?} identities must match",
+            );
         }
     }
 
