@@ -65,11 +65,9 @@ pub struct Snapshot {
     /// Of those, reads answered by the write overlay rather than a source grid —
     /// the ones that previously required a reverse state-text lookup.
     pub region_reads_overlay: u64,
-    /// `RuleTest` evaluations — one per target of every candidate, until one
-    /// matches.
+    /// `RuleTest` evaluations on target-cache misses and uncached configurations.
     pub target_tests: u64,
-    /// Of those, the `TagMatch` ones: one `ore_tag_map` lookup plus one member-set
-    /// lookup, each hashing a string.
+    /// Of those, tag tests, including compiled block-mask checks.
     pub target_tests_tag: u64,
     /// Candidate biome membership lookups and bounded-cache hits/misses.
     pub biome_cache_queries: u64,
