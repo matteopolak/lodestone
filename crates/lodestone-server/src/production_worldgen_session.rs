@@ -2647,6 +2647,11 @@ mod tests {
 
     struct OverlappingSparseSource;
 
+    struct SparseBlockEntitySource {
+        entity_target: (i32, i32),
+        same_block_competitor: bool,
+    }
+
     struct SettlementPolicy;
     struct SparsePaddingPolicy;
     struct LiveOrderPolicy;
@@ -2927,6 +2932,92 @@ mod tests {
                 }],
                 local_features: Vec::new(),
                 block_entities: Vec::new(),
+            })
+        }
+    }
+
+    impl LifecycleWorldgenSource for SparseBlockEntitySource {
+        type ReplayContext = ();
+
+        fn feature_dispatch(&self) -> LifecycleFeatureDispatch {
+            LifecycleFeatureDispatch::TargetOwned
+        }
+
+        fn lifecycle_replay_context(&self, _target: (i32, i32)) -> Arc<Self::ReplayContext> {
+            Arc::new(())
+        }
+
+        fn shaped_column(&self, cx: i32, cz: i32) -> ChunkColumn {
+            let mut column = ChunkColumn::new(0, 16);
+            if (cx, cz) == (0, 0) {
+                column.set_block_id(15, 4, 0, sid("minecraft:spawner"));
+                column.add_generated_block_entities(&[
+                    lodestone_worldgen::overworld::GeneratedBlockEntity::DungeonSpawner {
+                        x: 15,
+                        y: 4,
+                        z: 0,
+                        entity_type: lodestone_data::entity_type::EntityType::Pig.into(),
+                    },
+                ]);
+            }
+            column
+        }
+
+        fn lifecycle_client_heightmaps(
+            &self,
+            _cx: i32,
+            _cz: i32,
+        ) -> Option<crate::worldgen_lifecycle::LifecycleClientHeightmaps> {
+            Some([[0; 256]; 3])
+        }
+
+        fn feature_result(
+            &self,
+            _source: (i32, i32),
+            _overrides: &BTreeMap<crate::worldgen_lifecycle::AbsoluteCell, StateId>,
+            _resident: &BTreeMap<(i32, i32), ChunkColumn>,
+        ) -> LifecycleFeatureResult {
+            LifecycleFeatureResult::default()
+        }
+
+        fn target_feature_result_sparse_with_replay_context(
+            &self,
+            target: (i32, i32),
+            _overrides: &BTreeMap<crate::worldgen_lifecycle::AbsoluteCell, StateId>,
+            _resident: &BTreeMap<(i32, i32), ChunkColumn>,
+            _context: &Self::ReplayContext,
+        ) -> Option<LifecycleSparseTargetFeatureResult> {
+            if !matches!(target, (1, 0) | (1, 1)) {
+                return Some(LifecycleSparseTargetFeatureResult {
+                    spills: Vec::new(),
+                    local_features: Vec::new(),
+                    block_entities: Vec::new(),
+                });
+            }
+            let owns_entity = target == self.entity_target;
+            Some(LifecycleSparseTargetFeatureResult {
+                spills: vec![LifecycleSpill {
+                    source: target,
+                    position: (15, 4, 0),
+                    state: if owns_entity || self.same_block_competitor {
+                        sid("minecraft:spawner")
+                    } else {
+                        sid("minecraft:stone")
+                    },
+                    transient: false,
+                }],
+                local_features: Vec::new(),
+                block_entities: owns_entity
+                    .then(|| {
+                        lodestone_worldgen::overworld::GeneratedBlockEntity::DungeonSpawner {
+                            x: 15,
+                            y: 4,
+                            z: 0,
+                            entity_type: lodestone_data::entity_type::EntityType::Zombie.into(),
+                        }
+                    })
+                    .into_iter()
+                    .collect(),
             })
         }
     }
@@ -3325,6 +3416,83 @@ mod tests {
         assert_eq!(reverse.0, diamond, "reverse order exposes the other sparse writer");
         assert_eq!(forward.1, diamond, "minimum target provenance wins in forward order");
         assert_eq!(reverse.1, diamond, "minimum target provenance wins in reverse order");
+    }
+
+    #[test]
+    fn sparse_cross_target_entity_follows_the_canonical_state_owner() {
+        fn settled(
+            entity_target: (i32, i32),
+            same_block_competitor: bool,
+        ) -> (
+            StateId,
+            StateId,
+            Vec<(lodestone_model::BlockPos, crate::block_entities::BlockEntity)>,
+        ) {
+            let source = SparseBlockEntitySource {
+                entity_target,
+                same_block_competitor,
+            };
+            let mut materializer = LifecycleMaterializer::new(&source);
+            let targets = [(0, 0), (1, 0), (1, 1)];
+            materializer.admit_many_parallel(&targets);
+            materializer.declare_mutable_targets(targets);
+            materializer.declare_sparse_padding_targets([(1, 0), (1, 1)]);
+            materializer.prepare_lifecycle_replay_contexts(&[(1, 0), (1, 1)]);
+
+            for (sequence, target) in [(1, 0), (1, 1)].into_iter().enumerate() {
+                materializer.complete_target_features_with_mode_observing(
+                    target,
+                    sequence as u64,
+                    LifecycleCompletionMode::SparsePadding,
+                    |_| {},
+                );
+                materializer.finish_target(target);
+            }
+
+            let before = materializer
+                .resident_block_state((0, 0), 15, 4, 0)
+                .expect("requested target is admitted");
+            assert_eq!(
+                materializer
+                    .resident_column((0, 0))
+                    .expect("requested target is resident")
+                    .block_entities()
+                    .len(),
+                1
+            );
+            materializer.apply_canonical_target_feature_winners((0, 0));
+            let column = materializer
+                .resident_column((0, 0))
+                .expect("requested target is resident");
+            let state = column.block_state_id(15, 4, 0);
+            let entities = column.block_entities().to_vec();
+            (before, state, entities)
+        }
+
+        let spawner = sid("minecraft:spawner");
+        let stone = sid("minecraft:stone");
+        let (before, state, entities) = settled((1, 0), false);
+        assert_eq!(before, stone, "the later source overwrites the winning source's block");
+        assert_eq!(state, spawner);
+        let expected = crate::chunk_nbt::generated_block_entity(
+            &lodestone_worldgen::overworld::GeneratedBlockEntity::DungeonSpawner {
+                x: 15,
+                y: 4,
+                z: 0,
+                entity_type: lodestone_data::entity_type::EntityType::Zombie.into(),
+            },
+        );
+        assert_eq!(entities, [expected]);
+
+        let (before, state, entities) = settled((1, 1), false);
+        assert_eq!(before, spawner, "the later source leaves its stale state before settlement");
+        assert_eq!(state, stone, "canonical provenance restores the winning block");
+        assert!(entities.is_empty(), "a losing source's entity must not survive the overwrite");
+
+        let (before, state, entities) = settled((1, 1), true);
+        assert_eq!(before, spawner);
+        assert_eq!(state, spawner, "both writers place the same state");
+        assert!(entities.is_empty(), "same-type sidecars must still follow the canonical owner");
     }
 
     #[test]
