@@ -82,8 +82,12 @@ jobs:
       - name: Install wasm-bindgen CLI
         run: |
           set -eu
+          archive="$RUNNER_TEMP/wasm-bindgen-0.2.126.tar.gz"
           curl -sSfL \
             https://github.com/wasm-bindgen/wasm-bindgen/releases/download/0.2.126/wasm-bindgen-0.2.126-x86_64-unknown-linux-musl.tar.gz \
-            | tar xz --strip-components=1 -C "$HOME/.cargo/bin"
+            -o "$archive"
+          echo "064948d58e2d6c0a745216477a639ba696216d6309aaa902939d1b865b1d869d  $archive" | sha256sum -c -
+          tar xzf "$archive" --strip-components=1 -C "$HOME/.cargo/bin" \
+            wasm-bindgen-0.2.126-x86_64-unknown-linux-musl/wasm-bindgen
           wasm-bindgen --version
       - run: just wasm-check

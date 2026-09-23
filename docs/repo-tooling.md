@@ -52,11 +52,13 @@ baseline `cargo check --workspace --all-targets`; and Linux jobs for all-feature
 the version seam, structural checks, the full test suite, the wasm32 tripwire,
 fuzz smoke, and benchmark controls. The wasm job retains its full browser build
 log as a short-lived artifact when that build fails, since Trunk can report only
-that a shell hook failed. GitHub bills non-Linux runner minutes at a real
-multiplier (roughly 10x for macOS, 2x for Windows), so the three-OS matrix
-costs an order of magnitude more than its Linux-only siblings for one job's
-worth of coverage — worth remembering before adding a platform to a job that
-does not vary by platform.
+that a shell hook failed. The worker hook invokes `wasm-bindgen` directly, so
+the wasm job installs the CLI version matching the web workspace lockfile;
+Trunk's private cached copy is not on the hook's `PATH`. GitHub bills non-Linux
+runner minutes at a real multiplier (roughly 10x for macOS, 2x for Windows),
+so the three-OS matrix costs an order of magnitude more than its Linux-only
+siblings for one job's worth of coverage — worth remembering before adding a
+platform to a job that does not vary by platform.
 
 **`cargo check` never links**, so no `check` job on any OS can see an unresolved symbol; only
 the Linux `test` job actually links every test/bench binary. A handful of test/bench-only sites
