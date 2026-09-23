@@ -660,7 +660,7 @@ fn strict_single_thread_production_worldgen() {
         count,
         "sustained_batch",
     );
-    #[cfg(feature = "worldgen-stage-pmu")]
+    #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
     report_stage_pmu(&sustained, count, "sustained_batch");
     let mut columns = Vec::<((i32, i32), ChunkColumn)>::with_capacity(count);
     let mut generated_count = 0usize;
