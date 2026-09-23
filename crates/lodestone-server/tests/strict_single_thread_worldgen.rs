@@ -81,7 +81,7 @@ unsafe extern "C" {
 }
 
 #[cfg(target_os = "macos")]
-fn retired() -> Option<(u64, u64)> {
+fn rusage() -> RusageInfoV4 {
     let mut usage = RusageInfoV4::default();
     let result = unsafe {
         proc_pid_rusage(
@@ -91,6 +91,12 @@ fn retired() -> Option<(u64, u64)> {
         )
     };
     assert_eq!(result, 0, "proc_pid_rusage failed with {result}");
+    usage
+}
+
+#[cfg(target_os = "macos")]
+fn retired() -> Option<(u64, u64)> {
+    let usage = rusage();
     Some((usage.ri_instructions, usage.ri_cycles))
 }
 
@@ -785,6 +791,15 @@ fn strict_single_thread_production_worldgen() {
         batch_size,
         layout,
     );
+    #[cfg(target_os = "macos")]
+    {
+        let usage = rusage();
+        println!(
+            "STRICT_WORLDGEN metric=memory phase=sustained_batch layout={layout} batch_size={batch_size} columns={count} current_bytes={} peak_bytes={}",
+            usage.ri_phys_footprint,
+            usage.ri_lifetime_max_phys_footprint,
+        );
+    }
     report_generation_counters(
         generation_counter_before,
         counters_enabled.then(counters::snapshot),
