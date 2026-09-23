@@ -36,6 +36,8 @@ enum Kind {
     /// the right and only place for these strings to live. A typed id resolves
     /// *through* it.
     CanonicalNames,
+    /// Canonical paths indexed with a namespace supplied separately.
+    CanonicalPaths,
     /// A genuinely open string space with no registry behind it: block property
     /// keys and values, translation keys.
     OpenStringSpace,
@@ -54,6 +56,8 @@ use Kind::{CanonicalNames, OpenStringSpace};
 /// queue, in table-size order.
 const ALLOWED: &[(&str, &str, Kind, &str)] = &[
     ("attribute_types.rs", "ATTRIBUTE_NAMES", CanonicalNames, "the minecraft:attribute registry"),
+    ("biome_enum.rs", "BIOME_NAMES", Kind::CanonicalPaths, "the minecraft:worldgen/biome registry paths used for canonical id lookup"),
+    ("biome_enum.rs", "BIOME_QUALIFIED_NAMES", CanonicalNames, "the namespaced minecraft:worldgen/biome names used at display and serialization boundaries"),
     ("block_entity_types.rs", "TYPE_NAMES", CanonicalNames, "the minecraft:block_entity_type registry"),
     ("block_registry.rs", "BLOCK_REGISTRY_NAMES", CanonicalNames, "the minecraft:block registry, in registration order; Block::name reads this"),
     ("block_states.rs", "PROPERTY_SETS", OpenStringSpace, "block property keys and values are not a registry"),
