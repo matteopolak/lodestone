@@ -831,6 +831,16 @@ pub struct ColumnPipeline<S: ?Sized> {
     inflight: VecDeque<InflightBatch>,
 }
 
+impl<S: ?Sized> Drop for ColumnPipeline<S> {
+    fn drop(&mut self) {
+        for batch in &self.inflight {
+            for request in &batch.requests {
+                request.cancellation.cancel();
+            }
+        }
+    }
+}
+
 impl<S: ?Sized> std::fmt::Debug for ColumnPipeline<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ColumnPipeline")
@@ -2006,6 +2016,39 @@ mod tests {
         .await
         .expect("request cancellation must reach the source");
         assert!(pipeline.next().await.expect("cancelled stream cannot fail").is_none());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropping_pipeline_cancels_inflight_request() {
+        let source = Arc::new(CancellableRequestSource {
+            started: Arc::new(AtomicUsize::new(0)),
+            cancelled: Arc::new(AtomicUsize::new(0)),
+        });
+        let mut pipeline = ColumnPipeline::with_window(Arc::clone(&source), vec![(0, 0)], 1);
+        let mut next = Box::pin(pipeline.next());
+        let started = Arc::clone(&source.started);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::select! {
+                result = &mut next => panic!("request completed before drop: {result:?}"),
+                () = async {
+                    while started.load(Ordering::SeqCst) == 0 {
+                        tokio::task::yield_now().await;
+                    }
+                } => {}
+            }
+        })
+        .await
+        .expect("request worker must start");
+        drop(next);
+        drop(pipeline);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while source.cancelled.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("drop must cancel the running request");
     }
 
     /// **Distance is the primary key**, so no amount of looking one way can
