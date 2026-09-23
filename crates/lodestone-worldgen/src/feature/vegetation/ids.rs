@@ -10,15 +10,11 @@
 //!
 //! # How it works
 //!
-//! [`IdTags`] is one bitset per [`Tag`], each covering the **entire** `StateId`
-//! space. That is not a generous over-allocation, it is exact: [`StateId`] wraps a
-//! `u16`, so 65,536 ids is the whole space and the table can never need to grow.
-//! 26 tags × 65,536 bits = 208 KiB per [`super::VegTags`], one `alloc_zeroed` at
-//! construction, and a [`super::VegTags`] is per-generator.
+//! [`IdTags`] is one bitset per [`Tag`], sized to the generated state table.
+//! A [`super::VegTags`] owns one table per generator.
 //!
-//! The canonical state table is fixed at startup, so [`super::VegTags::bind`]
-//! fills every mask once and the driver only needs to call it per decoration
-//! pass to publish the process-wide table.
+//! The canonical state table is fixed at startup. [`super::VegTags::bind`]
+//! fills a generator's masks once and publishes them only after completion.
 //!
 //! # How to change it, and the gotchas
 //!
@@ -28,10 +24,8 @@
 //!   [`super::build_veg_tags`] and never touches them again; the tests that do
 //!   mutate them never bind. If you ever need both, add a `rebind` that clears
 //!   the masks and resets the watermark to 0.
-//! * **[`Clone`] deliberately returns an *unbound* table.** Cloning the atomics'
-//!   values would make publication timing observable. An unbound clone binds
-//!   from the canonical table on first use, so the failure mode is a slow pass,
-//!   never a wrong block.
+//! * **[`Clone`] deliberately returns an *unbound* table.** Call `bind` before
+//!   using a cloned tag set for placement.
 //! * **Add a [`Tag`] by adding a variant, a [`Tag::ALL`] entry and a
 //!   [`super::VegTags::member`] arm.** `TAG_COUNT` is derived from `Tag::ALL`, and
 //!   `tag_count_matches_the_all_table` fails if a variant is added without an
@@ -47,7 +41,8 @@
 //!   string. **`Fluid` must stay base-aware**: `carver/mod.rs` writes
 //!   `minecraft:water[level=0]`, so a fluid is not a fixed handful of ids.
 
-use std::sync::atomic::{AtomicBool, AtomicI8, AtomicU64, Ordering};
+use std::sync::Once;
+use std::sync::atomic::{AtomicI8, AtomicU64, Ordering};
 
 use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey};
 use lodestone_data::block_states::StateId;
@@ -191,9 +186,7 @@ fn distance_property(value: u8) -> BuiltinPropertyValue {
 /// however many threads are generating, which is the property `palette_names`
 /// buys the same way in [`crate::dense_grid`].
 pub(super) struct IdTags {
-    /// The canonical state table has one process-wide identity, so a completed
-    /// bind is valid for every generator using these tags.
-    bound: AtomicBool,
+    bound: Once,
     /// `TAG_COUNT` bitsets, concatenated, `WORDS_PER_TAG` words each.
     masks: Box<[AtomicU64]>,
     /// Each state's `distance=N` property value, or `-1` for a state that has no
@@ -341,7 +334,7 @@ pub(super) enum Axis {
 impl Default for IdTags {
     fn default() -> Self {
         Self {
-            bound: AtomicBool::new(false),
+            bound: Once::new(),
             masks: (0..TAG_COUNT * WORDS_PER_TAG)
                 .map(|_| AtomicU64::new(0))
                 .collect(),
@@ -365,7 +358,7 @@ impl std::fmt::Debug for IdTags {
     /// are the actually useful part.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IdTags")
-            .field("bound", &self.bound.load(Ordering::Relaxed))
+            .field("bound", &self.bound.is_completed())
             .field("tags", &TAG_COUNT)
             .finish()
     }
@@ -450,27 +443,25 @@ impl VegTags {
         }
     }
 
-    /// Builds the canonical-state masks once. State ids are process-global, so
-    /// no generator-local identity or late binding is needed.
+    /// Builds and publishes this generator's canonical-state masks once.
     pub fn bind(&self) {
-        if self.id_tags.bound.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        for raw in 0..ID_SPACE {
-            let id = StateId::new(raw as u32).expect("generated state id is valid");
-            let block = id.block();
-            for tag in Tag::ALL.iter().copied() {
-                if self.member(tag, block) {
-                    self.id_tags.set_bit(tag, raw);
+        self.id_tags.bound.call_once(|| {
+            for raw in 0..ID_SPACE {
+                let id = StateId::new(raw as u32).expect("generated state id is valid");
+                let block = id.block();
+                for tag in Tag::ALL.iter().copied() {
+                    if self.member(tag, block) {
+                        self.id_tags.set_bit(tag, raw);
+                    }
+                }
+                if let Some(d) = parse_distance(id) {
+                    self.id_tags.distance[raw].store(
+                        i8::try_from(d).unwrap_or(-1),
+                        Ordering::Relaxed,
+                    );
                 }
             }
-            if let Some(d) = parse_distance(id) {
-                self.id_tags.distance[raw].store(
-                    i8::try_from(d).unwrap_or(-1),
-                    Ordering::Relaxed,
-                );
-            }
-        }
+        });
     }
 
     /// The leaf-distance lookup's non-tag half, by id — the value of
@@ -480,7 +471,7 @@ impl VegTags {
     /// its BFS visits.
     pub(super) fn distance_of(&self, id: StateId) -> Option<i32> {
         let index = id.index();
-        if self.id_tags.bound.load(Ordering::Acquire) {
+        if self.id_tags.bound.is_completed() {
             bump_fast();
             let d = self.id_tags.distance[index].load(Ordering::Relaxed);
             (d >= 0).then_some(i32::from(d))
@@ -531,7 +522,7 @@ impl VegTags {
     /// are rejected until the next bind pass.
     pub(super) fn has(&self, tag: Tag, id: StateId) -> bool {
         let index = id.index();
-        if self.id_tags.bound.load(Ordering::Acquire) {
+        if self.id_tags.bound.is_completed() {
             bump_fast();
             self.id_tags.bit(tag, index)
         } else {
@@ -652,7 +643,7 @@ mod tests {
 
         tags.bind();
         assert!(
-            tags.id_tags.bound.load(Ordering::Relaxed),
+            tags.id_tags.bound.is_completed(),
             "bind must publish the canonical state masks"
         );
 
@@ -673,6 +664,27 @@ mod tests {
         );
         assert!(fast_hits() > 0, "the bitset path must actually have been used");
 
+    }
+
+    #[test]
+    fn concurrent_bind_waits_for_complete_membership() {
+        let first = StateId::new(0).expect("first generated state");
+        let last = StateId::new((ID_SPACE - 1) as u32).expect("last generated state");
+        let mut tags = VegTags::default();
+        tags.logs.insert(first.block());
+        tags.logs.insert(last.block());
+
+        std::thread::scope(|scope| {
+            let binder = scope.spawn(|| tags.bind());
+            let start = std::time::Instant::now();
+            while !tags.id_tags.bit(Tag::Logs, first.index()) {
+                assert!(start.elapsed().as_secs() < 5, "bind did not start");
+                std::hint::spin_loop();
+            }
+            tags.bind();
+            assert!(tags.has(Tag::Logs, last));
+            binder.join().expect("binder must complete");
+        });
     }
 
     #[test]
