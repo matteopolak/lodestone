@@ -55,7 +55,7 @@ pub fn entity_type_id(name: &str) -> Option<i32> {
 /// type to guess at.
 #[must_use]
 pub fn entity_type_id_parts(namespace: &str, path: &str) -> Option<i32> {
-    if namespace != "minecraft" {
+    if namespace != "minecraft" || path.contains(':') {
         return None;
     }
     EntityType::from_name(path).map(|entity_type| i32::from(entity_type.registry_id()))
