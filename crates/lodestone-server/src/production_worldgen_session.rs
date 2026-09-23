@@ -678,7 +678,9 @@ where
             session.commit_target_feature_settlement(
                 FeatureSettlementProof::square(target, TARGET_FEATURE_RADIUS),
                 &settlement.completed_owners,
-                &settlement.winners,
+                &settlement.writes,
+                &settlement.overlay_conflict_winners,
+                settlement.foreign_winner_count,
             )?;
         }
         let column = materializer
@@ -849,7 +851,9 @@ where
         session.commit_target_feature_settlement(
             FeatureSettlementProof::square(target, TARGET_FEATURE_RADIUS),
             &settlement.completed_owners,
-            &settlement.winners,
+            &settlement.writes,
+            &settlement.overlay_conflict_winners,
+            settlement.foreign_winner_count,
         )?;
     }
     Ok((
@@ -1369,10 +1373,13 @@ where
                 let settlement = self
                     .settlement_targets
                     .map(|targets| {
+                        let overlay_destinations =
+                            self.session.feature_overlay_destinations(target);
                         self.materializer
                             .target_feature_settlement(
                                 target,
                                 targets,
+                                &overlay_destinations,
                             )
                             .ok_or(SessionError::InvalidCheckpoint)
                     })

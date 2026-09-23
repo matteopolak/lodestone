@@ -2241,7 +2241,9 @@ struct TargetFeatureOwnerReceipt {
 
 pub(crate) struct TargetFeatureSettlement {
     pub(crate) completed_owners: Vec<ChunkPos>,
-    pub(crate) winners: Vec<TargetFeatureWrite>,
+    pub(crate) writes: Vec<TargetFeatureWrite>,
+    pub(crate) overlay_conflict_winners: Vec<TargetFeatureWrite>,
+    pub(crate) foreign_winner_count: usize,
     pub(crate) owner_spills: Vec<(LifecycleSpill, u32)>,
     pub(crate) owner_structure_blocks: StructureBlocks,
 }
@@ -2515,6 +2517,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         &self,
         output: ChunkPos,
         expected_owners: &BTreeSet<ChunkPos>,
+        prior_overlay_destinations: &BTreeSet<BlockCoordinate>,
     ) -> Option<TargetFeatureSettlement> {
         let completed_owners =
             target_feature_owner_projection(output, TARGET_FEATURE_RADIUS, expected_owners)?;
@@ -2525,25 +2528,45 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             return None;
         }
         let owner = self.target_feature_receipts.get(&output)?;
-        let winners = self
-            .target_feature_winners
-            .get(&output)
+        let output_winners = self.target_feature_winners.get(&output);
+        let mut foreign_winner_count = 0;
+        let writes = output_winners
             .into_iter()
             .flat_map(|winners| winners.iter())
-            .filter(|(_, winner)| winner.target != output)
-            .map(|(&(x, y, z), winner)| {
-                TargetFeatureWrite::new(
+            .filter_map(|(&(x, y, z), winner)| {
+                (winner.target != output).then(|| {
+                    foreign_winner_count += 1;
+                    TargetFeatureWrite::new(
+                        winner.target,
+                        winner.source,
+                        winner.ordinal,
+                        BlockCoordinate::new(x, y, z),
+                        winner.state,
+                    )
+                })
+            })
+            .collect();
+        let overlay_conflict_winners = prior_overlay_destinations
+            .iter()
+            .filter_map(|&destination| {
+                let winner = self
+                    .target_feature_winners
+                    .get(&output)?
+                    .get(&(destination.x(), destination.y(), destination.z()))?;
+                Some(TargetFeatureWrite::new(
                     winner.target,
                     winner.source,
                     winner.ordinal,
-                    BlockCoordinate::new(x, y, z),
+                    destination,
                     winner.state,
-                )
+                ))
             })
             .collect();
         Some(TargetFeatureSettlement {
             completed_owners,
-            winners,
+            writes,
+            overlay_conflict_winners,
+            foreign_winner_count,
             owner_spills: owner.spills.clone(),
             owner_structure_blocks: owner.structure_blocks.clone(),
         })

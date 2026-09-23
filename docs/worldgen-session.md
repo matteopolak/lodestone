@@ -176,6 +176,8 @@ transaction and provenance path. The session's reusable provenance map remains
 sparse because committed target-local writes are represented by the finished
 column and its settlement records.
 
+When a later target finalizes a column that already has a committed feature spill, settlement also retains a typed receipt if an output-owned winner outranks that spill. The receipt carries its destination, owner, source, ordinal, and state through checkpoints and cancellation. Publication compares that exact state with the finalized column, then retires only the dominated overlay under the ledger rollback journal; a higher-priority mutation still has to match the output.
+
 Batch sessions share the materializer's immutable shaped-prefix handles while
 they import their frontier coverage. The resident column remains mutable and
 authoritative; its short-lived shared-prefix cache is invalidated at each
