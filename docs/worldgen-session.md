@@ -104,6 +104,10 @@ The client `WORLD_SURFACE` map excludes ordinary, cave, and void air. Generated
 column summaries classify typed palette indices during section packing;
 resident maps use the same block-type rule when primed or updated. The other
 client maps retain their separate motion and leaf predicates.
+An authenticated direct FEATURES result supplies post-write client maps; those
+maps replace the pre-feature resident maps along with its block field. A source
+that omits maps falls back to the resident snapshot. Subsequent neighbour
+writes update the installed maps incrementally.
 
 Immutable output products and packet snapshots share one `Arc<ChunkColumn>`.
 When a direct FEATURES result already includes TOP_LAYER, the two stage records
