@@ -3695,12 +3695,13 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                         })
                 };
                 if let Some(direct) = direct {
-                    let retained_heightmaps = self
-                        .resident
-                        .get(&target)
-                        .and_then(ChunkColumn::client_heightmaps_raw);
                     let mut column = direct.column;
-                    if let Some(heightmaps) = retained_heightmaps {
+                    if column.client_heightmaps().is_none()
+                        && let Some(heightmaps) = self
+                            .resident
+                            .get(&target)
+                            .and_then(ChunkColumn::client_heightmaps_raw)
+                    {
                         column.install_client_heightmaps_raw(heightmaps);
                     }
                     self.resident.insert(target, column);
@@ -6566,7 +6567,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_target_output_preserves_authenticated_heightmaps() {
+    fn direct_target_output_keeps_final_heightmaps() {
         let target = (0, 0);
         let expected = [[1u16; 256]; 3];
         let mut materializer = LifecycleMaterializer::new(DirectHeightmapSource);
@@ -6579,7 +6580,7 @@ mod tests {
         materializer.complete_target_features_observing(target, 0, |_| {});
         assert_eq!(
             materializer.snapshot_for_packet(target).client_heightmaps_raw(),
-            Some(expected),
+            Some([[0u16; 256]; 3]),
         );
     }
 
