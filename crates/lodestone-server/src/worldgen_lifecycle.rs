@@ -284,6 +284,41 @@ fn authenticated_features_identity(generated: [u8; 32], prefix: [u8; 32]) -> [u8
     hasher.finalize().into()
 }
 
+struct AuthenticatedWriteIdentity {
+    seed: [u8; 32],
+    transcript: Option<Sha256>,
+}
+
+impl AuthenticatedWriteIdentity {
+    fn new(seed: [u8; 32]) -> Self {
+        Self {
+            seed,
+            transcript: None,
+        }
+    }
+
+    fn append(&mut self, position: AbsoluteCell, state: StateId) {
+        let transcript = self.transcript.get_or_insert_with(|| {
+            let mut hasher = Sha256::new();
+            hasher.update(b"lodestone-worldgen-authenticated-write-transcript-v2");
+            hasher.update(self.seed);
+            hasher
+        });
+        let mut record = [0; 16];
+        record[0..4].copy_from_slice(&position.0.to_le_bytes());
+        record[4..8].copy_from_slice(&position.1.to_le_bytes());
+        record[8..12].copy_from_slice(&position.2.to_le_bytes());
+        record[12..16].copy_from_slice(&state.raw().to_le_bytes());
+        transcript.update(record);
+    }
+
+    fn digest(&self) -> [u8; 32] {
+        self.transcript
+            .as_ref()
+            .map_or(self.seed, |hasher| hasher.clone().finalize().into())
+    }
+}
+
 /// A target-owned source may return its finished target column directly when
 /// its feature and post-feature stages share one dense working field.
 #[derive(Debug)]
@@ -2120,12 +2155,12 @@ pub struct LifecycleMaterializer<S: LifecycleWorldgenSource> {
     /// separate from `generated_resident`: a typed product can still come
     /// from a dynamic resolver, for which only the exact content fallback is
     /// safe.
-    authenticated_prefixes: BTreeMap<ChunkPos, [u8; 32]>,
+    authenticated_prefixes: BTreeMap<ChunkPos, AuthenticatedWriteIdentity>,
     /// Authenticated identities after a generated target has completed its
     /// target-owned FEATURES body. This is kept separate from the shaped
-    /// prefix identity so a later stage can chain sparse cross-target writes
+    /// prefix identity so a later stage can append sparse cross-target writes
     /// without pretending the shaped field was rescanned.
-    authenticated_stages: BTreeMap<(ChunkPos, LifecycleCompletion), [u8; 32]>,
+    authenticated_stages: BTreeMap<(ChunkPos, LifecycleCompletion), AuthenticatedWriteIdentity>,
     shared_prefixes: BTreeMap<(ChunkPos, ColumnStage), SharedPrefix>,
     /// Per-column lifecycle status. This is separate from the retained client
     /// maps because a cross-chunk FEATURES write can materialize maps before
@@ -2945,13 +2980,16 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             self.generated_resident.contains_key(&chunk),
             "authenticated prefix {chunk:?} was not admitted as a generated resident"
         );
-        self.authenticated_prefixes.insert(chunk, digest);
+        self.authenticated_prefixes
+            .insert(chunk, AuthenticatedWriteIdentity::new(digest));
     }
 
     /// Return the authenticated prefix identity for one resident, if any.
     #[must_use]
     pub fn authenticated_prefix_digest(&self, chunk: ChunkPos) -> Option<[u8; 32]> {
-        self.authenticated_prefixes.get(&chunk).copied()
+        self.authenticated_prefixes
+            .get(&chunk)
+            .map(AuthenticatedWriteIdentity::digest)
     }
 
     /// Replace the shaped identity with the authenticated FEATURES identity
@@ -2964,22 +3002,23 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             "authenticated FEATURES require direct target output"
         );
         let prefix = self
-            .authenticated_prefixes
-            .get(&chunk)
-            .copied()
+            .authenticated_prefix_digest(chunk)
             .expect("authenticated FEATURES require an authenticated shaped prefix");
-        self.authenticated_stages.insert(
-            (chunk, LifecycleCompletion::Features),
-            authenticated_features_identity(digest, prefix),
-        );
+        let key = (chunk, LifecycleCompletion::Features);
+        self.authenticated_stages
+            .insert(
+                key,
+                AuthenticatedWriteIdentity::new(authenticated_features_identity(digest, prefix)),
+            );
     }
 
     /// Return the authenticated FEATURES identity, when the target has one.
     #[must_use]
     pub fn authenticated_features_digest(&self, chunk: ChunkPos) -> Option<[u8; 32]> {
+        let key = (chunk, LifecycleCompletion::Features);
         self.authenticated_stages
-            .get(&(chunk, LifecycleCompletion::Features))
-            .copied()
+            .get(&key)
+            .map(AuthenticatedWriteIdentity::digest)
     }
 
     fn record_authenticated_write(
@@ -2995,29 +3034,17 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         // A direct target result already contains its own target writes. The
         // target's digest is replaced with that complete-result identity once
         // the dispatcher returns; folding those same writes here would count
-        // them twice. Cross-target writes still extend the destination's
-        // sparse authenticated chain when that destination is mutable.
+        // them twice. Persistent cross-target writes extend the destination's
+        // transcript when that destination is mutable.
         if transient || (target == source && destination == target) {
             return;
         }
-        let update = |digest: &mut [u8; 32]| {
-            let mut hasher = Sha256::new();
-            hasher.update(b"lodestone-worldgen-authenticated-write-v1");
-            hasher.update(&*digest);
-            hasher.update(position.0.to_le_bytes());
-            hasher.update(position.1.to_le_bytes());
-            hasher.update(position.2.to_le_bytes());
-            hasher.update(state.raw().to_le_bytes());
-            *digest = hasher.finalize().into();
-        };
-        if let Some(digest) = self.authenticated_prefixes.get_mut(&destination) {
-            update(digest);
+        if let Some(identity) = self.authenticated_prefixes.get_mut(&destination) {
+            identity.append(position, state);
         }
-        if let Some(digest) = self
-            .authenticated_stages
-            .get_mut(&(destination, LifecycleCompletion::Features))
-        {
-            update(digest);
+        let key = (destination, LifecycleCompletion::Features);
+        if let Some(identity) = self.authenticated_stages.get_mut(&key) {
+            identity.append(position, state);
         }
     }
 
@@ -6801,11 +6828,9 @@ mod tests {
         let destination = (0, 0);
         materializer
             .authenticated_prefixes
-            .insert(destination, [7; 32]);
+            .insert(destination, AuthenticatedWriteIdentity::new([7; 32]));
         let before = materializer
-            .authenticated_prefixes
-            .get(&destination)
-            .copied()
+            .authenticated_prefix_digest(destination)
             .expect("test identity was installed");
         materializer.record_authenticated_write(
             (1, 0),
@@ -6816,11 +6841,84 @@ mod tests {
             false,
         );
         let after = materializer
-            .authenticated_prefixes
-            .get(&destination)
-            .copied()
+            .authenticated_prefix_digest(destination)
             .expect("destination identity remains resident");
         assert_ne!(before, after, "one persistent block write must change its identity");
+    }
+
+    #[test]
+    fn authenticated_write_transcript_preserves_order_and_replays_after_reset() {
+        let destination = (0, 0);
+        let seed = [13; 32];
+        let stone = sid("minecraft:stone");
+        let dirt = sid("minecraft:dirt");
+        let writes = [((3, 4, 5), stone), ((6, 7, 8), dirt)];
+        let mut materializer = LifecycleMaterializer::new(CountingSource {
+            feature_calls: Rc::new(Cell::new(0)),
+        });
+        materializer
+            .authenticated_prefixes
+            .insert(destination, AuthenticatedWriteIdentity::new(seed));
+        for &(position, state) in &writes {
+            materializer.record_authenticated_write(
+                (1, 0),
+                (1, 0),
+                destination,
+                position,
+                state,
+                false,
+            );
+        }
+        let first = materializer
+            .authenticated_prefix_digest(destination)
+            .expect("transcript identity is available on demand");
+
+        let mut reversed = LifecycleMaterializer::new(CountingSource {
+            feature_calls: Rc::new(Cell::new(0)),
+        });
+        reversed
+            .authenticated_prefixes
+            .insert(destination, AuthenticatedWriteIdentity::new(seed));
+        for &(position, state) in writes.iter().rev() {
+            reversed.record_authenticated_write(
+                (1, 0),
+                (1, 0),
+                destination,
+                position,
+                state,
+                false,
+            );
+        }
+        assert_ne!(
+            first,
+            reversed.authenticated_prefix_digest(destination).unwrap(),
+            "distinct ordered write streams must produce distinct identities",
+        );
+
+        materializer.reset_for_lifecycle_replay();
+        assert_eq!(
+            materializer.authenticated_prefix_digest(destination),
+            None,
+            "reset must discard the previous transcript",
+        );
+        materializer
+            .authenticated_prefixes
+            .insert(destination, AuthenticatedWriteIdentity::new(seed));
+        for &(position, state) in &writes {
+            materializer.record_authenticated_write(
+                (1, 0),
+                (1, 0),
+                destination,
+                position,
+                state,
+                false,
+            );
+        }
+        assert_eq!(
+            materializer.authenticated_prefix_digest(destination),
+            Some(first),
+            "replaying the same ordered writes after reset must reproduce the identity",
+        );
     }
 
     #[test]
@@ -6833,7 +6931,7 @@ mod tests {
         let initial_prefix = [7; 32];
         materializer
             .authenticated_prefixes
-            .insert(destination, initial_prefix);
+            .insert(destination, AuthenticatedWriteIdentity::new(initial_prefix));
         materializer.record_authenticated_write(
             (1, 0),
             (1, 0),
@@ -6842,7 +6940,9 @@ mod tests {
             sid("minecraft:stone"),
             false,
         );
-        let updated_prefix = materializer.authenticated_prefixes[&destination];
+        let updated_prefix = materializer
+            .authenticated_prefix_digest(destination)
+            .expect("updated prefix identity is available");
         assert_ne!(initial_prefix, updated_prefix);
         assert_ne!(
             authenticated_features_identity(generated, initial_prefix),
@@ -6858,9 +6958,13 @@ mod tests {
         let destination = (0, 0);
         materializer
             .authenticated_stages
-            .insert((destination, LifecycleCompletion::Features), [8; 32]);
-        let before = materializer.authenticated_stages
-            [&(destination, LifecycleCompletion::Features)];
+            .insert(
+                (destination, LifecycleCompletion::Features),
+                AuthenticatedWriteIdentity::new([8; 32]),
+            );
+        let before = materializer
+            .authenticated_features_digest(destination)
+            .expect("stage identity was installed");
         materializer.record_authenticated_write(
             (1, 0),
             (1, 0),
@@ -6871,8 +6975,7 @@ mod tests {
         );
         assert_ne!(
             before,
-            materializer.authenticated_stages
-                [&(destination, LifecycleCompletion::Features)],
+            materializer.authenticated_features_digest(destination).unwrap(),
         );
     }
 
@@ -6884,11 +6987,9 @@ mod tests {
         let destination = (0, 0);
         materializer
             .authenticated_prefixes
-            .insert(destination, [9; 32]);
+            .insert(destination, AuthenticatedWriteIdentity::new([9; 32]));
         let before = materializer
-            .authenticated_prefixes
-            .get(&destination)
-            .copied()
+            .authenticated_prefix_digest(destination)
             .expect("test identity was installed");
         materializer.record_authenticated_write(
             (1, 0),
@@ -6899,8 +7000,8 @@ mod tests {
             true,
         );
         assert_eq!(
-            materializer.authenticated_prefixes.get(&destination),
-            Some(&before),
+            materializer.authenticated_prefix_digest(destination),
+            Some(before),
             "speculative writes must remain outside the authenticated identity",
         );
     }

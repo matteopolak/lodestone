@@ -28,7 +28,7 @@ use lodestone_worldgen::stage_schedule::{
 use lodestone_worldgen::counters::{RegionGuard, RegionPhase};
 use lodestone_worldgen::structure::StructureBlocks;
 
-const EXECUTOR_VERSION: u32 = 5;
+const EXECUTOR_VERSION: u32 = 6;
 
 pub(crate) trait DimensionPolicy<S: LifecycleWorldgenSource> {
     const DIMENSION: Dimension;
