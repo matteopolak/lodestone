@@ -690,6 +690,8 @@ where
             None,
         ));
     }
+    #[cfg(feature = "worldgen-stage-pmu")]
+    let _feature_source_commit = RegionGuard::enter(RegionPhase::FeatureSourceCommit);
     session.declare_mutable_sources(
         key,
         sources
@@ -784,6 +786,10 @@ where
         }
         session.complete_mutable_source(transaction)?;
     }
+    #[cfg(feature = "worldgen-stage-pmu")]
+    drop(_feature_source_commit);
+    #[cfg(feature = "worldgen-stage-pmu")]
+    let _feature_snapshot = RegionGuard::enter(RegionPhase::FeatureSnapshot);
     let column = Arc::new(
         materializer
             .resident_column(target)
@@ -803,6 +809,8 @@ where
     });
     let feature_spills = settled_feature_spills.as_deref().unwrap_or(spills);
     let sidecars = feature_sidecars(session.pipeline().dimension(), feature_spills, &column);
+    #[cfg(feature = "worldgen-stage-pmu")]
+    drop(_feature_snapshot);
     let mut products = vec![ImmutableProduct::from_arc(
         ResourceKey::ResidentOverlay,
         Arc::clone(&column),
@@ -823,6 +831,8 @@ where
             retained_bytes,
         ));
     }
+    #[cfg(feature = "worldgen-stage-pmu")]
+    let _feature_stage_publish = RegionGuard::enter(RegionPhase::FeatureStagePublish);
     session.commit_mutable_stage(
         key,
         fingerprint,
@@ -831,7 +841,11 @@ where
         products,
         sidecars,
     )?;
+    #[cfg(feature = "worldgen-stage-pmu")]
+    drop(_feature_stage_publish);
     if let Some(settlement) = settlement {
+        #[cfg(feature = "worldgen-stage-pmu")]
+        let _feature_settlement = RegionGuard::enter(RegionPhase::FeatureSettlement);
         session.commit_target_feature_settlement(
             FeatureSettlementProof::square(target, TARGET_FEATURE_RADIUS),
             &settlement.completed_owners,
@@ -1242,6 +1256,8 @@ where
                 self.phase = GenerationPhase::ResumeOutput;
             }
             GenerationPhase::ResumeOutput => {
+                #[cfg(feature = "worldgen-stage-pmu")]
+                let _resume_output = RegionGuard::enter(RegionPhase::ResumeOutput);
                 if self.session.cancellation().is_cancelled() {
                     return Err(SessionError::Cancelled);
                 }
@@ -1347,6 +1363,8 @@ where
             }
             GenerationPhase::SettlementPending => return Ok(None),
             GenerationPhase::CommitFeatures => {
+                #[cfg(feature = "worldgen-stage-pmu")]
+                let _commit_features = RegionGuard::enter(RegionPhase::CommitFeatures);
                 let target = self.session.request().target();
                 let settlement = self
                     .settlement_targets
@@ -1422,6 +1440,8 @@ where
                 self.phase = GenerationPhase::CommitTopLayer;
             }
             GenerationPhase::CommitTopLayer => {
+                #[cfg(feature = "worldgen-stage-pmu")]
+                let _commit_top_layer = RegionGuard::enter(RegionPhase::CommitTopLayer);
                 let target = self.session.request().target();
                 let authenticated_content_fingerprint = self
                     .materializer
@@ -1450,6 +1470,8 @@ where
                 if self.session.cancellation().is_cancelled() {
                     return Err(SessionError::Cancelled);
                 }
+                #[cfg(feature = "worldgen-stage-pmu")]
+                let _output_snapshot = RegionGuard::enter(RegionPhase::OutputSnapshot);
                 let target = self.session.request().target();
                 if let Some(columns) = self.packet_columns.as_deref_mut() {
                     columns.remove(&target);
@@ -1502,6 +1524,8 @@ where
                 if self.session.cancellation().is_cancelled() {
                     return Err(SessionError::Cancelled);
                 }
+                #[cfg(feature = "worldgen-stage-pmu")]
+                let _packet_neighbours = RegionGuard::enter(RegionPhase::PacketNeighbours);
                 let target = self.session.request().target();
                 let neighbours = self
                     .session
@@ -1605,6 +1629,8 @@ where
                 if self.session.cancellation().is_cancelled() {
                     return Err(SessionError::Cancelled);
                 }
+                #[cfg(feature = "worldgen-stage-pmu")]
+                let _packet_finalize = RegionGuard::enter(RegionPhase::PacketFinalize);
                 let output = self.output.take().expect("output phase retains packet column");
                 let neighbours = std::mem::take(&mut self.packet_neighbours);
                 let snapshot = self
@@ -2271,6 +2297,8 @@ where
                 continue;
             }
             let result = {
+                #[cfg(feature = "worldgen-stage-pmu")]
+                let _machine_rebuild = RegionGuard::enter(RegionPhase::MachineRebuild);
                 let mut machine = match GenerationStateMachine::<S, S::Policy>::new(
                     self.source,
                     &mut sessions[index],
@@ -2282,11 +2310,15 @@ where
                     Ok(machine) => machine,
                     Err(error) => return batch_session_error(sessions.len(), error),
                 };
+                #[cfg(feature = "worldgen-stage-pmu")]
+                drop(_machine_rebuild);
                 if settlement.is_some() {
                     machine.padding_targets = Some(&self.settlement_padding);
                     machine.settlement_targets = Some(&self.settlement_targets);
                 }
                 let advance = if settlement.is_some() {
+                    #[cfg(feature = "worldgen-stage-pmu")]
+                    let _settlement_resume = RegionGuard::enter(RegionPhase::SettlementResume);
                     machine.advance_mutable(executor)
                 } else {
                     Ok(())
