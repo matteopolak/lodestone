@@ -90,7 +90,6 @@ impl OverworldGenerator {
             .collect::<Vec<_>>();
         let palette = local_palette;
         let (compact_blocks, summaries) = if matches!(stage, GenStage::Full) {
-            crate::counters::bump_full_column_conversion(dense_blocks.len() as u64);
             CompactBlockStorage::from_flat_with_predicates(
                 self.min_y,
                 self.height,
