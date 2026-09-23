@@ -769,6 +769,14 @@ fn strict_single_thread_production_worldgen() {
         lease_stats.batch_opens <= expected_batch_groups as u64,
         "production admission opened more union leases than submitted batches",
     );
+    assert_eq!(sustained.value.len(), count, "every request needs a result");
+    for (coordinate, result) in coordinates.iter().copied().zip(&sustained.value) {
+        match result {
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("production source returned no snapshot for {coordinate:?}"),
+            Err(error) => panic!("production generation request {coordinate:?} failed: {error}"),
+        }
+    }
     report(
         "production_request",
         "sustained_batch",
