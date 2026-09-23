@@ -256,6 +256,7 @@ struct WaterloggingServerOracle {
     _client: Connection<DuplexStream>,
     next_server_tick: u64,
     first_advance: bool,
+    last_scheduled_fluid_ticks: u64,
     runtime: tokio::runtime::Runtime,
 }
 
@@ -281,6 +282,11 @@ impl WaterloggingServerOracle {
         let initial_tick = server
             .server_tick_count()
             .expect("waterlogging fixture must have a live tick loop");
+        let initial_fluid_ticks = server
+            .tick_stats()
+            .expect("waterlogging fixture must expose tick stats")
+            .owner_work
+            .scheduled_fluid_ticks;
         let feed = server
             .block_ticks()
             .expect("waterlogging fixture must expose its block-tick feed")
@@ -291,6 +297,7 @@ impl WaterloggingServerOracle {
             _client: client,
             next_server_tick: initial_tick + 1,
             first_advance: true,
+            last_scheduled_fluid_ticks: initial_fluid_ticks,
             runtime,
         }
     }
@@ -326,20 +333,24 @@ impl WorldOracle for WaterloggingServerOracle {
     }
 
     fn advance_tick(&mut self) -> Result<(), Self::Error> {
-        // The feed is asynchronous: the first request may arrive before or
-        // after the loop's next drain. Give that initial handoff one extra
-        // server tick so this oracle's relative tick 0 always observes the
-        // scheduled source reaction, independent of thread scheduling.
+        // The feed is asynchronous. The first advance waits for the initial
+        // handoff window and a completed fluid tick before comparing states.
         let target = if self.first_advance {
             self.next_server_tick + 1
         } else {
             self.next_server_tick
         };
+        let wait_for_fluid_tick = self.first_advance;
+        let previous_fluid_ticks = self.last_scheduled_fluid_ticks;
         let deadline = Instant::now() + Duration::from_secs(2);
         let server = &self.server;
         self.runtime.block_on(async move {
             loop {
-                if server.server_tick_count().is_some_and(|tick| tick >= target) {
+                let reached_tick = server.server_tick_count().is_some_and(|tick| tick >= target);
+                let fluid_tick_completed = server
+                    .tick_stats()
+                    .is_some_and(|stats| stats.owner_work.scheduled_fluid_ticks > previous_fluid_ticks);
+                if reached_tick && (!wait_for_fluid_tick || fluid_tick_completed) {
                     return Ok(());
                 }
                 if Instant::now() >= deadline {
@@ -348,6 +359,12 @@ impl WorldOracle for WaterloggingServerOracle {
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
         })?;
+        self.last_scheduled_fluid_ticks = self
+            .server
+            .tick_stats()
+            .expect("waterlogging fixture must expose tick stats")
+            .owner_work
+            .scheduled_fluid_ticks;
         self.first_advance = false;
         self.next_server_tick = target + 1;
         Ok(())
