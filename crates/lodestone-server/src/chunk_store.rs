@@ -1123,6 +1123,28 @@ struct GenerationLedgerJournal {
     revisions: BTreeMap<(i32, i32), Option<u64>>,
 }
 
+#[derive(Debug)]
+enum GenerationPublicationCommitError {
+    Ledger(GenerationLedgerError),
+    Commit(GenerationCommitError),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GenerationCommitMode {
+    Standard,
+    Cohort,
+}
+
+impl GenerationCommitMode {
+    const fn checks_full_halo(self) -> bool {
+        matches!(self, Self::Cohort)
+    }
+
+    const fn defers_eviction(self) -> bool {
+        matches!(self, Self::Cohort)
+    }
+}
+
 impl GenerationLedgerJournal {
     fn new(ledger: &GenerationLedger, identity: PipelineIdentity) -> Self {
         let pipeline_last_used = ledger
@@ -2132,8 +2154,37 @@ impl GenerationLedger {
         sessions: &[(DimensionPipeline, &GenerationSession)],
         final_outputs: &BTreeMap<ChunkCoordinate, &ChunkColumn>,
     ) -> Result<(), GenerationLedgerError> {
+        self.publish_sessions_with_final_outputs_journaled(sessions, final_outputs)
+            .map(|_| ())
+    }
+
+    fn publish_sessions_with_final_outputs_and_commit(
+        &mut self,
+        sessions: &[(DimensionPipeline, &GenerationSession)],
+        final_outputs: &BTreeMap<ChunkCoordinate, &ChunkColumn>,
+        commit: impl FnOnce() -> Result<GenerationCommitReport, GenerationCommitError>,
+    ) -> Result<GenerationCommitReport, GenerationPublicationCommitError> {
+        let journals = self
+            .publish_sessions_with_final_outputs_journaled(sessions, final_outputs)
+            .map_err(GenerationPublicationCommitError::Ledger)?;
+        match commit() {
+            Ok(report) => Ok(report),
+            Err(error) => {
+                for journal in journals.into_iter().rev() {
+                    journal.rollback(self);
+                }
+                Err(GenerationPublicationCommitError::Commit(error))
+            }
+        }
+    }
+
+    fn publish_sessions_with_final_outputs_journaled(
+        &mut self,
+        sessions: &[(DimensionPipeline, &GenerationSession)],
+        final_outputs: &BTreeMap<ChunkCoordinate, &ChunkColumn>,
+    ) -> Result<Vec<GenerationLedgerJournal>, GenerationLedgerError> {
         if sessions.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
         let finalized = final_outputs.keys().copied().collect::<BTreeSet<_>>();
@@ -2224,7 +2275,7 @@ impl GenerationLedger {
                 return Err(error);
             }
         }
-        Ok(())
+        Ok(journals)
     }
 
     fn publish_session_inner(
@@ -3059,6 +3110,7 @@ struct ChunkWriteLease<'a> {
     coordinates: Vec<(i32, i32)>,
     states: Vec<Arc<ChunkWriteState>>,
     bump_revision: bool,
+    revision_filter: Option<Vec<(i32, i32)>>,
 }
 
 impl ChunkWriteLease<'_> {
@@ -3083,7 +3135,11 @@ impl Drop for ChunkWriteLease<'_> {
                 .iter()
                 .any(|state| Arc::strong_count(state) > 1);
         for (chunk, state) in self.coordinates.iter().copied().zip(&self.states) {
-            if retain_revisions {
+            let selected = self
+                .revision_filter
+                .as_ref()
+                .is_none_or(|coordinates| coordinates.binary_search(&chunk).is_ok());
+            if retain_revisions && selected {
                 let revision = state.revision.fetch_add(1, Ordering::AcqRel) + 1;
                 if let Some(record) = table.get_mut(&chunk) {
                     record.revision = revision;
@@ -3194,8 +3250,23 @@ impl ChunkWriteGates {
                 coordinates: canonical,
                 states,
                 bump_revision,
+                revision_filter: None,
             };
         }
+    }
+
+    fn acquire_many_with_revision_filter<'a>(
+        &'a self,
+        chunks: &[(i32, i32)],
+        revision_filter: &[(i32, i32)],
+    ) -> ChunkWriteLease<'a> {
+        let mut lease = self.acquire_many(chunks, false);
+        let mut revision_filter = revision_filter.to_vec();
+        revision_filter.sort_unstable();
+        revision_filter.dedup();
+        lease.bump_revision = true;
+        lease.revision_filter = Some(revision_filter);
+        lease
     }
 
     /// Attempts to claim one or more coordinate gates without waiting.
@@ -3242,6 +3313,7 @@ impl ChunkWriteGates {
             coordinates: canonical,
             states,
             bump_revision,
+            revision_filter: None,
         })
     }
 
@@ -3633,6 +3705,17 @@ impl<S: ChunkSource> ChunkHaloLease<'_, S> {
             .position(|candidate| *candidate == coordinate)
             .map(|index| self.revisions[index])
     }
+
+    fn acknowledge(&mut self, report: &GenerationCommitReport) {
+        for &(coordinate, before, after) in &report.revisions {
+            let index = self
+                .coordinates
+                .binary_search(&coordinate)
+                .expect("committed coordinate belongs to its halo");
+            assert_eq!(self.revisions[index], before);
+            self.revisions[index] = after;
+        }
+    }
 }
 
 impl<S: ChunkSource> Drop for ChunkHaloLease<'_, S> {
@@ -3857,9 +3940,27 @@ fn validate_finalized_mutation_value(
     Ok(())
 }
 
+fn cohort_mutation_destination_coordinates(
+    target: ChunkCoordinate,
+    mutations: &[ProvenanceMutation],
+) -> BTreeSet<ChunkCoordinate> {
+    mutations
+        .iter()
+        .map(|mutation| mutation.provenance().destination())
+        .map(|destination| {
+            (
+                destination.x().div_euclid(16),
+                destination.z().div_euclid(16),
+            )
+        })
+        .filter(|coordinate| *coordinate != target)
+        .collect()
+}
+
 #[derive(Debug)]
 pub(crate) struct GenerationCommitReport {
     pub(crate) coordinates: Vec<(i32, i32)>,
+    revisions: Vec<(ChunkCoordinate, u64, u64)>,
     /// Post-mutation copies of just the columns which the source must retain.
     /// They are captured after the halo revision check, before the gathered
     /// commit columns move into the resident cache.
@@ -3899,6 +4000,410 @@ impl<S: ChunkSource> ChunkStore<S> {
             "a validated generation commit must capture every mutation destination"
         );
         self.source.store_resident_columns(&retained)
+    }
+
+    fn emit_completed_cohort_results(
+        &self,
+        sessions: &[GenerationSession],
+        results: Vec<
+            Result<
+                Option<crate::worldgen_session::GenerationRequestResult>,
+                crate::worldgen_session::GenerationRequestError,
+            >,
+        >,
+        emit: &mut dyn FnMut(
+            usize,
+            &GenerationSession,
+            crate::worldgen_session::GenerationRequestResult,
+        ) -> Result<(), crate::worldgen_session::GenerationRequestError>,
+    ) -> Result<Vec<Result<(), crate::worldgen_session::GenerationRequestError>>, crate::worldgen_session::GenerationRequestError> {
+        if results.len() != sessions.len() {
+            return Err(crate::worldgen_session::GenerationRequestError::Boundary(
+                "generation cohort returned the wrong result count".to_owned(),
+            ));
+        }
+        let mut statuses = Vec::with_capacity(results.len());
+        for (index, result) in results.into_iter().enumerate() {
+            match result {
+                Ok(Some(result)) if !sessions[index].cancellation().is_cancelled() => {
+                    emit(index, &sessions[index], result)?;
+                    statuses.push(Ok(()));
+                }
+                Ok(Some(_)) => statuses.push(Err(
+                    crate::worldgen_session::GenerationRequestError::Session(
+                        SessionError::Cancelled,
+                    ),
+                )),
+                Ok(None) => statuses.push(Err(
+                    crate::worldgen_session::GenerationRequestError::Unsupported,
+                )),
+                Err(error) => statuses.push(Err(error)),
+            }
+        }
+        Ok(statuses)
+    }
+
+    fn commit_cohort_output(
+        &self,
+        halo: &mut ChunkHaloLease<'_, S>,
+        entry: &GenerationBatchEntry,
+        session: &GenerationSession,
+        result: &crate::worldgen_session::GenerationRequestResult,
+    ) -> Result<(), crate::worldgen_session::GenerationRequestError> {
+        if session.cancellation().is_cancelled() {
+            return Err(crate::worldgen_session::GenerationRequestError::Session(
+                SessionError::Cancelled,
+            ));
+        }
+        let crate::worldgen_session::GenerationRequestResult::Generated(snapshot) = result else {
+            let crate::worldgen_session::GenerationRequestResult::Existing(column) = result else {
+                unreachable!();
+            };
+            let report = self
+                .commit_generation_with_mutations_and_persistence_destinations_and_receipts_policy(
+                    halo,
+                    vec![(session.request().target(), column.clone())],
+                    &[],
+                    &BTreeSet::new(),
+                    &BTreeSet::new(),
+                    &[],
+                    GenerationCommitMode::Cohort,
+                )
+                .map_err(|error| {
+                    crate::worldgen_session::GenerationRequestError::Boundary(error.to_string())
+                })?;
+            halo.acknowledge(&report);
+            self.evict_excess();
+            return Ok(());
+        };
+        let target = session.request().target();
+        if snapshot.coordinate() != target {
+            return Err(crate::worldgen_session::GenerationRequestError::Boundary(
+                "generation cohort output does not match its admitted target".to_owned(),
+            ));
+        }
+        let finalized = BTreeSet::from([target]);
+        let mutations = session
+            .committed_mutations()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mutation_coordinates = cohort_mutation_destination_coordinates(target, &mutations);
+        let mut columns = Vec::with_capacity(mutation_coordinates.len() + 1);
+        columns.push((target, snapshot.column().clone()));
+        for coordinate in &mutation_coordinates {
+            let neighbour = snapshot
+                .neighbours()
+                .iter()
+                .find(|neighbour| neighbour.coordinate() == *coordinate)
+                .ok_or_else(|| {
+                    crate::worldgen_session::GenerationRequestError::Boundary(format!(
+                        "generation output omitted mutation destination {coordinate:?}"
+                    ))
+                })?;
+            columns.push((*coordinate, neighbour.column().clone()));
+        }
+        let commit_mutations = mutations
+            .iter()
+            .filter(|mutation| {
+                let destination = mutation.provenance().destination();
+                (
+                    destination.x().div_euclid(16),
+                    destination.z().div_euclid(16),
+                ) != target
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let persistence_destinations = mutations
+            .iter()
+            .map(|mutation| mutation.provenance().destination())
+            .map(|destination| {
+                (
+                    destination.x().div_euclid(16),
+                    destination.z().div_euclid(16),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        let final_outputs = BTreeMap::from([(target, snapshot.column())]);
+        let receipts = session.feature_winner_receipts().copied().collect::<Vec<_>>();
+        let report = self
+            .publish_and_commit_generation(
+                &[(entry.pipeline, session)],
+                &final_outputs,
+                halo,
+                columns,
+                &commit_mutations,
+                &persistence_destinations,
+                &finalized,
+                &receipts,
+            )
+            .map_err(|error| match error {
+                GenerationPublicationCommitError::Ledger(error) => {
+                    crate::worldgen_session::GenerationRequestError::Boundary(error.to_string())
+                }
+                GenerationPublicationCommitError::Commit(error) => {
+                    crate::worldgen_session::GenerationRequestError::Boundary(error.to_string())
+                }
+            })?;
+        halo.acknowledge(&report);
+        let source_stored = self.persist_generation_mutations(&mutations, &report.persistence_columns);
+        self.generation_ledger().settle_mutations(
+            entry.pipeline,
+            &mutations,
+            source_stored,
+            &report.coordinates,
+        );
+        crate::world_spawn::record_packet_neighbour_admissions(snapshot.neighbours().len());
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn execute_generation_cohort(
+        &self,
+        sessions: &mut [GenerationSession],
+        emit: &mut dyn FnMut(
+            usize,
+            &GenerationSession,
+            crate::worldgen_session::GenerationRequestResult,
+        ) -> Result<(), crate::worldgen_session::GenerationRequestError>,
+    ) -> Result<Vec<Result<(), crate::worldgen_session::GenerationRequestError>>, crate::worldgen_session::GenerationRequestError> {
+        if sessions.len() >= 2 && !Self::batch_pipeline_identities_match(sessions) {
+            return Err(crate::worldgen_session::GenerationRequestError::Boundary(
+                "generation cohort requires one pipeline identity".to_owned(),
+            ));
+        }
+        let has_retained_target = sessions.iter().any(|session| {
+            let target = session.request().target();
+            self.resident_column(target.0, target.1)
+                .is_some_and(|column| column.generation_stage() >= ChunkGenerationStage::Full)
+                || self
+                    .retained_output_column(session.pipeline(), target)
+                    .is_some()
+        });
+        if sessions.len() < 2
+            || has_retained_target
+            || sessions.iter().any(|session| {
+                session.request().generation_target() != GenerationTarget::Full
+            })
+        {
+            let outcomes = self.execute_generation_batch(sessions);
+            return self.emit_completed_cohort_results(sessions, outcomes, emit);
+        }
+
+        let prepared = match self.prepare_generation_batch(sessions) {
+            Ok(prepared) => prepared,
+            Err(results) => {
+                if results.len() != sessions.len() {
+                    return Err(crate::worldgen_session::GenerationRequestError::Boundary(
+                        "generation cohort admission returned the wrong result count".to_owned(),
+                    ));
+                }
+                return self.emit_completed_cohort_results(sessions, results, emit);
+            }
+        };
+        if prepared.entries.is_empty() {
+            let outcomes = prepared
+                .results
+                .into_iter()
+                .map(|result| result.unwrap_or(Ok(None)))
+                .collect();
+            return self.emit_completed_cohort_results(sessions, outcomes, emit);
+        }
+        if !prepared.reused_columns.is_empty()
+            || prepared.results.iter().any(|result| {
+                matches!(result, Some(Ok(Some(_))))
+            })
+        {
+            let PreparedGenerationBatch {
+                entries,
+                active_sessions,
+                ..
+            } = prepared;
+            for entry in &entries {
+                self.generation_ledger()
+                    .rollback_admission(entry.pipeline, &entry.admitted);
+            }
+            for (entry, active) in entries.into_iter().zip(active_sessions) {
+                sessions[entry.index] = active;
+            }
+            let outcomes = self.execute_generation_batch(sessions);
+            return self.emit_completed_cohort_results(sessions, outcomes, emit);
+        }
+
+        let PreparedGenerationBatch {
+            region_lease: _region_lease,
+            mut halo,
+            entries,
+            leases,
+            mut results,
+            mut active_sessions,
+            ..
+        } = prepared;
+        let mut statuses = (0..sessions.len()).map(|_| None).collect::<Vec<_>>();
+        for (index, result) in results.iter_mut().enumerate() {
+            if let Some(result) = result.take() {
+                statuses[index] = Some(match result {
+                    Ok(Some(_)) | Ok(None) => {
+                        Err(crate::worldgen_session::GenerationRequestError::Unsupported)
+                    }
+                    Err(error) => Err(error),
+                });
+            }
+        }
+        let mut committed = vec![false; entries.len()];
+        let mut committed_existing = vec![false; entries.len()];
+        let mut discard_uncommitted = vec![false; entries.len()];
+        let mut on_stable = |active_index: usize,
+                             session: &GenerationSession,
+                             result: crate::worldgen_session::GenerationRequestResult| {
+            let Some(entry) = entries.get(active_index) else {
+                return Err(crate::worldgen_session::GenerationRequestError::Boundary(
+                    "generation cohort emitted an unknown owner index".to_owned(),
+                ));
+            };
+            if session.cancellation().is_cancelled() {
+                discard_uncommitted[active_index] = true;
+                return Err(crate::worldgen_session::GenerationRequestError::Session(
+                    SessionError::Cancelled,
+                ));
+            }
+            if let Err(error) = self.commit_cohort_output(&mut halo, entry, session, &result) {
+                discard_uncommitted[active_index] = true;
+                return Err(error);
+            }
+            committed_existing[active_index] = matches!(
+                &result,
+                crate::worldgen_session::GenerationRequestResult::Existing(_)
+            );
+            committed[active_index] = true;
+            emit(entry.index, session, result)
+        };
+        let cohort_result = self
+            .source
+            .request_generation_cohort(&mut active_sessions, &mut on_stable);
+        drop(on_stable);
+        for (entry, active) in entries.iter().zip(active_sessions) {
+            sessions[entry.index] = active;
+        }
+
+        let mut cohort_error = None;
+        let mut source_statuses = match cohort_result {
+            Ok(source_statuses) if source_statuses.len() == entries.len() => Some(source_statuses),
+            Ok(_) => {
+                cohort_error = Some(
+                    crate::worldgen_session::GenerationRequestError::Boundary(
+                        "generation cohort returned the wrong status count".to_owned(),
+                    ),
+                );
+                None
+            }
+            Err(error) => {
+                cohort_error = Some(error);
+                None
+            }
+        };
+        let cohort_failed = cohort_error.is_some();
+
+        for (active_index, entry) in entries.iter().enumerate() {
+            if committed[active_index] {
+                statuses[entry.index] = Some(Ok(()));
+                continue;
+            }
+            let session = &sessions[entry.index];
+            let source_status = source_statuses
+                .as_mut()
+                .and_then(|statuses| statuses.get_mut(active_index))
+                .map(|status| std::mem::replace(status, Ok(())));
+            let was_cancelled = session.cancellation().is_cancelled()
+                || source_status.as_ref().is_some_and(|status| {
+                    matches!(
+                        status,
+                        Err(crate::worldgen_session::GenerationRequestError::Session(
+                            SessionError::Cancelled
+                        ))
+                    )
+                });
+            discard_uncommitted[active_index] |= was_cancelled || cohort_failed;
+            if !discard_uncommitted[active_index] {
+                if let Err(error) = self
+                    .generation_ledger()
+                    .publish_session(entry.pipeline, session)
+                {
+                    statuses[entry.index] = Some(Err(
+                        crate::worldgen_session::GenerationRequestError::Boundary(
+                            error.to_string(),
+                        ),
+                    ));
+                    self.generation_ledger()
+                        .rollback_admission(entry.pipeline, &entry.admitted);
+                    continue;
+                }
+            }
+            self.generation_ledger()
+                .rollback_admission(entry.pipeline, &entry.admitted);
+            if let Some(source_status) = source_status {
+                statuses[entry.index] = Some(source_status);
+            } else if discard_uncommitted[active_index] {
+                statuses[entry.index] = Some(Err(
+                    crate::worldgen_session::GenerationRequestError::Session(
+                        SessionError::Cancelled,
+                    ),
+                ));
+            }
+        }
+        for (active_index, entry) in entries.iter().enumerate() {
+            if committed_existing[active_index] {
+                self.generation_ledger()
+                    .rollback_admission(entry.pipeline, &entry.admitted);
+            }
+        }
+        drop(leases);
+        if let Some(error) = cohort_error {
+            return Err(error);
+        }
+        Ok(statuses
+            .into_iter()
+            .map(|status| {
+                status.unwrap_or_else(|| {
+                    Err(crate::worldgen_session::GenerationRequestError::Boundary(
+                        "generation cohort did not settle a target".to_owned(),
+                    ))
+                })
+            })
+            .collect())
+    }
+
+    fn publish_and_commit_generation(
+        &self,
+        sessions: &[(DimensionPipeline, &GenerationSession)],
+        final_outputs: &BTreeMap<ChunkCoordinate, &ChunkColumn>,
+        halo: &ChunkHaloLease<'_, S>,
+        columns: Vec<(ChunkCoordinate, ChunkColumn)>,
+        mutations: &[ProvenanceMutation],
+        persistence_destinations: &BTreeSet<ChunkCoordinate>,
+        finalized: &BTreeSet<ChunkCoordinate>,
+        receipts: &[TargetFeatureWrite],
+    ) -> Result<GenerationCommitReport, GenerationPublicationCommitError> {
+        let mut ledger = self.generation_ledger();
+        let result = ledger.publish_sessions_with_final_outputs_and_commit(
+            sessions,
+            final_outputs,
+            || {
+                self.commit_generation_with_mutations_and_persistence_destinations_and_receipts_policy(
+                    halo,
+                    columns,
+                    mutations,
+                    persistence_destinations,
+                    finalized,
+                    receipts,
+                    GenerationCommitMode::Cohort,
+                )
+            },
+        );
+        drop(ledger);
+        if result.is_ok() {
+            self.evict_excess();
+        }
+        result
     }
 
     fn apply_generation_mutations(
@@ -5234,6 +5739,27 @@ impl<S: ChunkSource> ChunkStore<S> {
         finalized: &BTreeSet<ChunkCoordinate>,
         receipts: &[TargetFeatureWrite],
     ) -> Result<GenerationCommitReport, GenerationCommitError> {
+        self.commit_generation_with_mutations_and_persistence_destinations_and_receipts_policy(
+            halo,
+            columns,
+            mutations,
+            persistence_destinations,
+            finalized,
+            receipts,
+            GenerationCommitMode::Standard,
+        )
+    }
+
+    fn commit_generation_with_mutations_and_persistence_destinations_and_receipts_policy(
+        &self,
+        halo: &ChunkHaloLease<'_, S>,
+        columns: Vec<((i32, i32), ChunkColumn)>,
+        mutations: &[ProvenanceMutation],
+        persistence_destinations: &BTreeSet<ChunkCoordinate>,
+        finalized: &BTreeSet<ChunkCoordinate>,
+        receipts: &[TargetFeatureWrite],
+        mode: GenerationCommitMode,
+    ) -> Result<GenerationCommitReport, GenerationCommitError> {
         if columns.is_empty() {
             return Err(GenerationCommitError::Empty);
         }
@@ -5288,14 +5814,28 @@ impl<S: ChunkSource> ChunkStore<S> {
         {
             return Err(GenerationCommitError::MissingMutationDestination(coordinate));
         }
-        let gate = self.write_gates.acquire_many(&coordinates, false);
-        for (index, coordinate) in coordinates.iter().copied().enumerate() {
-            let expected = halo.revisions[halo
+        let gate = if mode.checks_full_halo() {
+            self.write_gates
+                .acquire_many_with_revision_filter(&halo.coordinates, &coordinates)
+        } else {
+            self.write_gates.acquire_many(&coordinates, false)
+        };
+        let checked_coordinates = if mode.checks_full_halo() {
+            &halo.coordinates
+        } else {
+            &coordinates
+        };
+        for &coordinate in checked_coordinates {
+            let lease_index = halo
                 .coordinates
-                .iter()
-                .position(|candidate| *candidate == coordinate)
-                .expect("coordinate was checked")];
-            let found = gate.states[index].revision.load(Ordering::Acquire);
+                .binary_search(&coordinate)
+                .expect("checked generation coordinate belongs to the halo");
+            let gate_index = gate
+                .coordinates
+                .binary_search(&coordinate)
+                .expect("checked generation coordinate has a write gate");
+            let expected = halo.revisions[lease_index];
+            let found = gate.states[gate_index].revision.load(Ordering::Acquire);
             if found != expected {
                 drop(gate);
                 return Err(GenerationCommitError::RevisionConflict {
@@ -5304,6 +5844,14 @@ impl<S: ChunkSource> ChunkStore<S> {
                     found,
                 });
             }
+        }
+        let mut revisions = Vec::with_capacity(coordinates.len());
+        for coordinate in coordinates.iter().copied() {
+            let expected = halo.revisions[halo
+                .coordinates
+                .binary_search(&coordinate)
+                .expect("coordinate was checked")];
+            revisions.push((coordinate, expected, expected));
         }
         let persistence_columns = columns
             .iter()
@@ -5320,7 +5868,9 @@ impl<S: ChunkSource> ChunkStore<S> {
                     entry.last_used = stamp;
                     if column.generation_stage() > entry.column.generation_stage()
                         || (column.generation_stage() == entry.column.generation_stage()
-                            && mutation_destinations.contains(&coordinate))
+                            && (mutation_destinations.contains(&coordinate)
+                                || (mode == GenerationCommitMode::Cohort
+                                    && finalized.contains(&coordinate))))
                     {
                         entry.column = column;
                         changed = true;
@@ -5335,10 +5885,18 @@ impl<S: ChunkSource> ChunkStore<S> {
         drop(cache);
         let mut gate = gate;
         gate.bump_revision = changed;
+        if changed {
+            for (_, _, after) in &mut revisions {
+                *after += 1;
+            }
+        }
         drop(gate);
-        self.evict_excess();
+        if !mode.defers_eviction() {
+            self.evict_excess();
+        }
         Ok(GenerationCommitReport {
             coordinates,
+            revisions,
             persistence_columns,
         })
     }
@@ -6141,6 +6699,24 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
     >,
     > {
         self.execute_generation_batch(sessions)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn generation_cohort_width_hint(&self) -> Option<usize> {
+        self.source.generation_cohort_width_hint()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn request_generation_cohort(
+        &self,
+        sessions: &mut [GenerationSession],
+        emit: &mut dyn FnMut(
+            usize,
+            &GenerationSession,
+            crate::worldgen_session::GenerationRequestResult,
+        ) -> Result<(), crate::worldgen_session::GenerationRequestError>,
+    ) -> Result<Vec<Result<(), crate::worldgen_session::GenerationRequestError>>, crate::worldgen_session::GenerationRequestError> {
+        self.execute_generation_cohort(sessions, emit)
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -7238,6 +7814,90 @@ mod tests {
             Block::Dirt.default_state(),
             "the generated spill survives eviction through the captured source payload"
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn persisted_existing_cohort_target_releases_empty_admission_and_failed_suffix() {
+        use lodestone_worldgen::stage_schedule::{
+            Dimension, END_PIPELINE, GenerationTarget, PipelineOptions,
+        };
+        use crate::worldgen_session::GenerationRequestResult;
+
+        let existing_target = (0, 0);
+        let persisted = Arc::new(Mutex::new(HashMap::from([(
+            existing_target,
+            ChunkColumn::new(0, 16),
+        )])));
+        let store = ChunkStore::with_capacity(
+            MixedBatchSource {
+                driver: ResumableDriver::new(false),
+                existing_target,
+                persisted,
+            },
+            0,
+        );
+        let mut sessions = [existing_target, (1, 0), (2, 0)]
+            .into_iter()
+            .map(|target| {
+                GenerationSession::new(crate::worldgen_session::GenerationRequest::new(
+                    Dimension::End,
+                    target,
+                    GenerationTarget::Full,
+                    1,
+                ))
+            })
+            .collect::<Vec<_>>();
+        let admission_union = sessions
+            .iter()
+            .flat_map(|session| session.admission_order().iter().copied())
+            .collect::<BTreeSet<_>>();
+        let mut emitted = Vec::new();
+
+        let error = ChunkSource::request_generation_cohort(
+            &store,
+            &mut sessions,
+            &mut |index, session, result| {
+                emitted.push((
+                    index,
+                    session.request().target(),
+                    matches!(&result, GenerationRequestResult::Existing(_)),
+                ));
+                if index == 1 {
+                    Err(crate::worldgen_session::GenerationRequestError::Boundary(
+                        "consumer stopped after stable neighbour".to_owned(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            crate::worldgen_session::GenerationRequestError::Boundary(message)
+                if message == "consumer stopped after stable neighbour"
+        ));
+        assert_eq!(admission_union.len(), 15);
+        assert_eq!(
+            emitted,
+            vec![(0, existing_target, true), (1, (1, 0), false)]
+        );
+
+        let ledger = store.generation_ledger();
+        let stats = ledger.stats();
+        assert_eq!(stats.coordinates, sessions[1].admission_order().len());
+        assert!(stats.coordinates < admission_union.len());
+        assert!(stats.sources > 0);
+        assert!(ledger
+            .output_column(END_PIPELINE, (1, 0))
+            .is_some());
+        assert!(ledger.output_column(END_PIPELINE, existing_target).is_none());
+        assert!(ledger.output_column(END_PIPELINE, (2, 0)).is_none());
+        assert!(ledger
+            .frontier(END_PIPELINE.identity(PipelineOptions::ALL), existing_target)
+            .is_ok(), "the adjacent generated target's shared source state must survive cleanup");
     }
 
     struct RejectingDriver;
@@ -10801,6 +11461,241 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, GenerationCommitError::RevisionConflict { coordinate: (0, 0), .. }));
         assert_eq!(store.len(), 0, "a conflicting batch must not partially commit");
+    }
+
+    #[test]
+    fn cohort_halo_accepts_only_its_own_committed_revision() {
+        let store = ChunkStore::with_capacity(CountingSource::new(), 4);
+        let mut halo = store.lease_halo(&[(0, 0), (1, 0)]).unwrap();
+        let first = store
+            .commit_generation(&halo, vec![((0, 0), ChunkColumn::new(0, 16))])
+            .unwrap();
+        halo.acknowledge(&first);
+        assert_eq!(halo.revision((0, 0)), Some(1));
+        assert_eq!(halo.revision((1, 0)), Some(0));
+
+        let second = store
+            .commit_generation(&halo, vec![((1, 0), ChunkColumn::new(0, 16))])
+            .unwrap();
+        halo.acknowledge(&second);
+        store.write_gates.with((0, 0), || {});
+        let error = store
+            .commit_generation(&halo, vec![((0, 0), ChunkColumn::new(0, 16))])
+            .unwrap_err();
+        assert!(matches!(error, GenerationCommitError::RevisionConflict { coordinate: (0, 0), expected: 1, found: 2 }));
+    }
+
+    #[test]
+    fn cohort_commit_rejects_external_edits_anywhere_in_its_pinned_halo() {
+        use lodestone_worldgen::stage_schedule::END_PIPELINE;
+
+        let store = ChunkStore::with_capacity(CountingSource::new(), 8);
+        let mut halo = store.lease_halo(&[(0, 0), (1, 0), (2, 0)]).unwrap();
+        let first = store
+            .commit_generation_with_mutations_and_persistence_destinations_and_receipts_policy(
+                &halo,
+                vec![((0, 0), ChunkColumn::new(0, 16))],
+                &[],
+                &BTreeSet::new(),
+                &BTreeSet::from([(0, 0)]),
+                &[],
+                GenerationCommitMode::Cohort,
+            )
+            .unwrap();
+        halo.acknowledge(&first);
+        store.write_gates.with((2, 0), || {});
+
+        let mut session = end_shaped_session_at((1, 0), 1, 0);
+        complete_end_suffix(&mut session, 2);
+        let output = ChunkColumn::new(0, 16);
+        let final_outputs = BTreeMap::from([((1, 0), &output)]);
+        store
+            .generation_ledger()
+            .admit(END_PIPELINE, session.admission_order())
+            .unwrap();
+        let error = store
+            .publish_and_commit_generation(
+                &[(END_PIPELINE, &session)],
+                &final_outputs,
+                &halo,
+                vec![((1, 0), output.clone())],
+                &[],
+                &BTreeSet::new(),
+                &BTreeSet::from([(1, 0)]),
+                &[],
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, GenerationPublicationCommitError::Commit(
+            GenerationCommitError::RevisionConflict {
+                coordinate: (2, 0), expected: 0, found: 1,
+            }
+        )));
+        assert!(store.generation_ledger().output_column(END_PIPELINE, (1, 0)).is_none());
+        assert!(store.resident_column(1, 0).is_none());
+    }
+
+    #[test]
+    fn cohort_ledger_publication_rolls_back_when_the_cache_commit_conflicts() {
+        use lodestone_worldgen::stage_schedule::END_PIPELINE;
+
+        let mut session = end_shaped_session_at((0, 0), 1, 0);
+        complete_end_suffix(&mut session, 2);
+        let output = ChunkColumn::new(0, 16);
+        let final_outputs = BTreeMap::from([((0, 0), &output)]);
+        let mut ledger = GenerationLedger::new();
+        ledger.admit(END_PIPELINE, session.admission_order()).unwrap();
+        let before = ledger.stats();
+
+        let error = ledger
+            .publish_sessions_with_final_outputs_and_commit(
+                &[(END_PIPELINE, &session)],
+                &final_outputs,
+                || {
+                    Err(GenerationCommitError::RevisionConflict {
+                        coordinate: (0, 0),
+                        expected: 0,
+                        found: 1,
+                    })
+                },
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            GenerationPublicationCommitError::Commit(
+                GenerationCommitError::RevisionConflict { .. }
+            )
+        ));
+        assert_eq!(ledger.stats(), before);
+        assert!(ledger.output_column(END_PIPELINE, (0, 0)).is_none());
+    }
+
+    #[test]
+    fn cohort_cache_coordinates_include_only_mutation_destinations() {
+        use lodestone_worldgen::stage_schedule::{ColumnStage, Dimension, StageKey};
+
+        let stage = StageKey::new(Dimension::Overworld, ColumnStage::Features);
+        let target = (4, -3);
+        let mutations = [
+            ProvenanceMutation::test_block_state(
+                target,
+                target,
+                stage,
+                0,
+                BlockCoordinate::new(65, 8, -47),
+                1,
+                Block::Stone.default_state(),
+            ),
+            ProvenanceMutation::test_block_state(
+                target,
+                (5, -3),
+                stage,
+                1,
+                BlockCoordinate::new(80, 8, -47),
+                1,
+                Block::Dirt.default_state(),
+            ),
+            ProvenanceMutation::test_block_state(
+                target,
+                (4, -2),
+                stage,
+                2,
+                BlockCoordinate::new(65, 8, -32),
+                1,
+                Block::Dirt.default_state(),
+            ),
+        ];
+
+        assert_eq!(
+            cohort_mutation_destination_coordinates(target, &mutations),
+            BTreeSet::from([(4, -2), (5, -3)]),
+        );
+    }
+
+    #[test]
+    fn cohort_final_output_replaces_a_same_stage_interim_neighbour() {
+        let store = ChunkStore::with_capacity(CountingSource::new(), 4);
+        let coordinate = (0, 0);
+        let mut interim = ChunkColumn::new(0, 16);
+        interim.set_block_id(1, 4, 1, Block::Stone.default_state());
+        let mut halo = store.lease_halo(&[coordinate]).unwrap();
+        let report = store
+            .commit_generation(&halo, vec![(coordinate, interim)])
+            .unwrap();
+        halo.acknowledge(&report);
+        drop(halo);
+
+        let mut finalized = ChunkColumn::new(0, 16);
+        finalized.set_block_id(1, 4, 1, Block::Dirt.default_state());
+        let halo = store.lease_halo(&[coordinate]).unwrap();
+        store
+            .commit_generation_with_mutations_and_persistence_destinations_and_receipts_policy(
+                &halo,
+                vec![(coordinate, finalized)],
+                &[],
+                &BTreeSet::new(),
+                &BTreeSet::from([coordinate]),
+                &[],
+                GenerationCommitMode::Cohort,
+            )
+            .unwrap();
+
+        assert_eq!(
+            store.resident_column(0, 0).unwrap().block_state_id(1, 4, 1),
+            Block::Dirt.default_state(),
+        );
+    }
+
+    #[test]
+    fn cancellation_after_a_committed_cohort_prefix_does_not_install_the_next_output() {
+        use lodestone_worldgen::stage_schedule::{Dimension, END_PIPELINE, GenerationTarget};
+        use crate::worldgen_session::{GenerationRequest, GenerationRequestError, GenerationRequestResult, RequestCancellation};
+
+        let store = ChunkStore::with_capacity(CountingSource::new(), 4);
+        let mut halo = store.lease_halo(&[(0, 0), (1, 0)]).unwrap();
+        let first_session = GenerationSession::new(GenerationRequest::new(
+            Dimension::End,
+            (0, 0),
+            GenerationTarget::Full,
+            0,
+        ));
+        let first_entry = GenerationBatchEntry {
+            index: 0,
+            pipeline: END_PIPELINE,
+            admitted: vec![(0, 0)],
+        };
+        store
+            .commit_cohort_output(
+                &mut halo,
+                &first_entry,
+                &first_session,
+                &GenerationRequestResult::Existing(ChunkColumn::new(0, 16)),
+            )
+            .unwrap();
+
+        let cancellation = RequestCancellation::new();
+        cancellation.cancel();
+        let cancelled_session = GenerationSession::with_cancellation(
+            GenerationRequest::new(Dimension::End, (1, 0), GenerationTarget::Full, 0),
+            cancellation,
+        );
+        let second_entry = GenerationBatchEntry {
+            index: 1,
+            pipeline: END_PIPELINE,
+            admitted: vec![(1, 0)],
+        };
+        assert!(matches!(
+            store.commit_cohort_output(
+                &mut halo,
+                &second_entry,
+                &cancelled_session,
+                &GenerationRequestResult::Existing(ChunkColumn::new(0, 16)),
+            ),
+            Err(GenerationRequestError::Session(SessionError::Cancelled)),
+        ));
+        assert!(store.resident_column(0, 0).is_some());
+        assert!(store.resident_column(1, 0).is_none());
     }
 
     #[test]

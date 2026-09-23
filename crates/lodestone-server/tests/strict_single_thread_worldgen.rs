@@ -638,6 +638,79 @@ fn expect_generated(
     }
 }
 
+fn request_cohort(
+    source: &dyn ChunkSource,
+    sessions: &mut [GenerationSession],
+    on_output: &mut dyn FnMut(),
+) -> Vec<
+    Result<
+        Option<GenerationRequestResult>,
+        lodestone_server::worldgen_session::GenerationRequestError,
+    >,
+> {
+    let mut emitted = (0..sessions.len()).map(|_| None).collect::<Vec<_>>();
+    let statuses = source.request_generation_cohort(sessions, &mut |index, _, result| {
+        on_output();
+        let Some(slot) = emitted.get_mut(index) else {
+            return Err(lodestone_server::worldgen_session::GenerationRequestError::Boundary(
+                format!("cohort emitted out-of-range index {index}"),
+            ));
+        };
+        if slot.replace(result).is_some() {
+            return Err(lodestone_server::worldgen_session::GenerationRequestError::Boundary(
+                format!("cohort emitted index {index} more than once"),
+            ));
+        }
+        Ok(())
+    });
+    let statuses = match statuses {
+        Ok(statuses) if statuses.len() == sessions.len() => statuses,
+        Ok(statuses) => {
+            let message = format!(
+                "cohort returned {} statuses for {} sessions",
+                statuses.len(),
+                sessions.len()
+            );
+            return (0..sessions.len())
+                .map(|_| {
+                    Err(lodestone_server::worldgen_session::GenerationRequestError::Boundary(
+                        message.clone(),
+                    ))
+                })
+                .collect();
+        }
+        Err(error) => {
+            let message = error.to_string();
+            return (0..sessions.len())
+                .map(|_| {
+                    Err(lodestone_server::worldgen_session::GenerationRequestError::Boundary(
+                        message.clone(),
+                    ))
+                })
+                .collect();
+        }
+    };
+
+    statuses
+        .into_iter()
+        .enumerate()
+        .map(|(index, status)| match (status, emitted[index].take()) {
+            (Ok(()), Some(result)) => Ok(Some(result)),
+            (Ok(()), None) => Err(
+                lodestone_server::worldgen_session::GenerationRequestError::Boundary(format!(
+                    "cohort did not emit successful index {index}"
+                )),
+            ),
+            (Err(error), None) => Err(error),
+            (Err(_), Some(_)) => Err(
+                lodestone_server::worldgen_session::GenerationRequestError::Boundary(format!(
+                    "cohort emitted failed index {index}"
+                )),
+            ),
+        })
+        .collect()
+}
+
 #[test]
 #[ignore = "production benchmark; run on a quiet machine with LODESTONE_WORLDGEN_WORKERS=1"]
 fn strict_single_thread_production_worldgen() {
@@ -654,6 +727,12 @@ fn strict_single_thread_production_worldgen() {
     assert!(count > 0, "benchmark must have at least one target");
     let batch_size = parse("LODESTONE_WORLDGEN_BENCH_BATCH", 2);
     assert!(batch_size > 0, "benchmark batch must contain at least one target");
+    let cohort_mode = std::env::var("LODESTONE_WORLDGEN_BENCH_COHORT").as_deref() == Ok("1");
+    let sustained_phase = if cohort_mode {
+        "sustained_cohort"
+    } else {
+        "sustained_batch"
+    };
     let requested_layout = std::env::var("LODESTONE_WORLDGEN_BENCH_LAYOUT")
         .unwrap_or_else(|_| "line".to_owned());
     let layout = match requested_layout.as_str() {
@@ -783,16 +862,36 @@ fn strict_single_thread_production_worldgen() {
     base_source.generator().reset_store_lease_stats();
     #[cfg(feature = "worldgen-stage-pmu")]
     install_stage_pmu();
+    let sustained_started = Instant::now();
+    let mut first_output_latency = None;
     let sustained = measure_request(retired(), || {
         let mut results = Vec::with_capacity(count);
         for sessions in &mut session_batches {
-            results.extend(source.request_generation_batch(sessions));
+            if cohort_mode {
+                results.extend(request_cohort(&source, sessions, &mut || {
+                    if first_output_latency.is_none() {
+                        first_output_latency = Some(sustained_started.elapsed());
+                    }
+                }));
+            } else {
+                results.extend(source.request_generation_batch(sessions));
+                if first_output_latency.is_none() {
+                    first_output_latency = Some(sustained_started.elapsed());
+                }
+            }
         }
         results
     });
+    println!(
+        "STRICT_WORLDGEN metric=first_output phase={sustained_phase} layout={layout} batch_size={batch_size} columns={count} elapsed_ms={:.3}",
+        first_output_latency
+            .expect("generation must produce a first output")
+            .as_secs_f64()
+            * 1000.0,
+    );
     let lease_stats = base_source.generator().store_lease_stats();
     println!(
-        "STRICT_WORLDGEN metric=generator_leases phase=sustained_batch layout={layout} batch_size={batch_size} columns={count} opens={} batch_opens={} pins={} pin_shards={} unpins={} unpin_shards={}",
+        "STRICT_WORLDGEN metric=generator_leases phase={sustained_phase} layout={layout} batch_size={batch_size} columns={count} opens={} batch_opens={} pins={} pin_shards={} unpins={} unpin_shards={}",
         lease_stats.opens,
         lease_stats.batch_opens,
         lease_stats.pins,
@@ -816,7 +915,7 @@ fn strict_single_thread_production_worldgen() {
     }
     report(
         "production_request",
-        "sustained_batch",
+        sustained_phase,
         &sustained,
         count,
         batch_size,
@@ -826,7 +925,7 @@ fn strict_single_thread_production_worldgen() {
     {
         let usage = rusage();
         println!(
-            "STRICT_WORLDGEN metric=memory phase=sustained_batch layout={layout} batch_size={batch_size} columns={count} current_bytes={} peak_bytes={}",
+            "STRICT_WORLDGEN metric=memory phase={sustained_phase} layout={layout} batch_size={batch_size} columns={count} current_bytes={} peak_bytes={}",
             usage.ri_phys_footprint,
             usage.ri_lifetime_max_phys_footprint,
         );
@@ -835,10 +934,10 @@ fn strict_single_thread_production_worldgen() {
         generation_counter_before,
         counters_enabled.then(counters::snapshot),
         count,
-        "sustained_batch",
+        sustained_phase,
     );
     #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
-    report_stage_pmu(&sustained, count, "sustained_batch");
+    report_stage_pmu(&sustained, count, sustained_phase);
     let mut columns = Vec::<((i32, i32), ChunkColumn)>::with_capacity(count);
     let mut generated_count = 0usize;
     let mut promoted_count = 0usize;
@@ -865,12 +964,12 @@ fn strict_single_thread_production_worldgen() {
         columns.push((coordinate, column));
     }
     println!(
-        "STRICT_WORLDGEN metric=request_results phase=sustained_batch layout={layout} batch_size={batch_size} columns={count} generated={generated_count} promoted={promoted_count}"
+        "STRICT_WORLDGEN metric=request_results phase={sustained_phase} layout={layout} batch_size={batch_size} columns={count} generated={generated_count} promoted={promoted_count}"
     );
     assert_eq!(generated_count + promoted_count, count);
     let [blocks, biomes, heightmaps] = output_checksums(&columns);
     println!(
-        "STRICT_WORLDGEN metric=output_checksum phase=sustained_batch layout={layout} batch_size={batch_size} columns={count} blocks={blocks:016x} biomes={biomes:016x} heightmaps={heightmaps:016x}"
+        "STRICT_WORLDGEN metric=output_checksum phase={sustained_phase} layout={layout} batch_size={batch_size} columns={count} blocks={blocks:016x} biomes={biomes:016x} heightmaps={heightmaps:016x}"
     );
     if let Ok(compare_batch_size) = std::env::var("LODESTONE_WORLDGEN_BENCH_COMPARE_BATCH") {
         let compare_batch_size = compare_batch_size.parse::<usize>().expect("compare batch size");

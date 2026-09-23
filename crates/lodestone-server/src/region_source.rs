@@ -1217,25 +1217,45 @@ impl<S: ChunkSource> RegionChunkSource<S> {
     /// snapshots in its own resident ledger; sources without that capability
     /// still get the precedence guarantee for the target through the terminal
     /// check above.
-    fn hydrate_generation_halo(
+    fn hydrate_generation_halos(
         &self,
-        request: crate::worldgen_session::GenerationRequest,
-    ) -> Vec<(i32, i32)> {
-        let target = request.target();
-        let coordinates = lodestone_worldgen::stage_schedule::ChunkRequest::single(
-            target.0,
-            target.1,
-            i32::from(request.dependency_radius()),
-        )
-        .admission_order();
-        coordinates
-            .into_iter()
-            .filter_map(|(cx, cz)| {
-                self.terminal_column(cx, cz)
-                    .filter(|column| self.inner.retain_generation_input(cx, cz, column))
-                    .map(|_| (cx, cz))
-            })
-            .collect()
+        requests: &[crate::worldgen_session::GenerationRequest],
+    ) -> (Vec<(i32, i32)>, HashMap<(i32, i32), ChunkColumn>) {
+        let targets: HashSet<_> = requests.iter().map(|request| request.target()).collect();
+        let mut visited = HashSet::new();
+        let mut retained = Vec::new();
+        let mut terminal_targets = HashMap::new();
+
+        for request in requests {
+            let target = request.target();
+            let coordinates = lodestone_worldgen::stage_schedule::ChunkRequest::single(
+                target.0,
+                target.1,
+                i32::from(request.dependency_radius()),
+            )
+            .admission_order();
+            for (cx, cz) in coordinates {
+                if !visited.insert((cx, cz)) {
+                    continue;
+                }
+                let Some(column) = self.terminal_column(cx, cz) else {
+                    continue;
+                };
+                if targets.contains(&(cx, cz)) {
+                    terminal_targets.insert((cx, cz), column.clone());
+                }
+                if self.inner.retain_generation_input(cx, cz, &column) {
+                    retained.push((cx, cz));
+                }
+            }
+        }
+        (retained, terminal_targets)
+    }
+
+    fn release_generation_halos(&self, retained: &[(i32, i32)]) {
+        for &(cx, cz) in retained {
+            self.inner.release_generation_input(cx, cz);
+        }
     }
 }
 
@@ -1375,6 +1395,129 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
         self.inner.generation_request_dependency_radius(target)
     }
 
+    fn request_generation_batch(
+        &self,
+        sessions: &mut [crate::worldgen_session::GenerationSession],
+    ) -> Vec<
+        Result<
+            Option<crate::worldgen_session::GenerationRequestResult>,
+            crate::worldgen_session::GenerationRequestError,
+        >,
+    > {
+        let requests: Vec<_> = sessions.iter().map(|session| session.request()).collect();
+        let (retained, terminal_targets) = self.hydrate_generation_halos(&requests);
+        let results = if terminal_targets.is_empty() {
+            self.state
+                .stats
+                .generated
+                .fetch_add(sessions.len() as u64, Ordering::Relaxed);
+            self.inner.request_generation_batch(sessions)
+        } else {
+            sessions
+                .iter_mut()
+                .map(|session| {
+                    let request = session.request();
+                    if let Some(column) = terminal_targets.get(&request.target()) {
+                        return Ok(Some(
+                            crate::worldgen_session::GenerationRequestResult::Existing(
+                                column.clone(),
+                            ),
+                        ));
+                    }
+                    self.state.stats.generated.fetch_add(1, Ordering::Relaxed);
+                    self.inner.request_generation(request, Some(session))
+                })
+                .collect()
+        };
+        self.release_generation_halos(&retained);
+        results
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn generation_cohort_width_hint(&self) -> Option<usize> {
+        self.inner.generation_cohort_width_hint()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn request_generation_cohort(
+        &self,
+        sessions: &mut [crate::worldgen_session::GenerationSession],
+        emit: &mut dyn FnMut(
+            usize,
+            &crate::worldgen_session::GenerationSession,
+            crate::worldgen_session::GenerationRequestResult,
+        ) -> Result<(), crate::worldgen_session::GenerationRequestError>,
+    ) -> Result<
+        Vec<Result<(), crate::worldgen_session::GenerationRequestError>>,
+        crate::worldgen_session::GenerationRequestError,
+    > {
+        let requests: Vec<_> = sessions.iter().map(|session| session.request()).collect();
+        let (retained, terminal_targets) = self.hydrate_generation_halos(&requests);
+        let mut original_indices: Vec<_> = (0..sessions.len()).collect();
+        let mut swaps = Vec::new();
+        let mut cold_len = 0;
+        for index in 0..sessions.len() {
+            if terminal_targets.contains_key(&sessions[index].request().target()) {
+                continue;
+            }
+            if cold_len != index {
+                sessions.swap(cold_len, index);
+                original_indices.swap(cold_len, index);
+                swaps.push((cold_len, index));
+            }
+            cold_len += 1;
+        }
+        self.state
+            .stats
+            .generated
+            .fetch_add(cold_len as u64, Ordering::Relaxed);
+        let cold_result = if cold_len == 0 {
+            Ok(Vec::new())
+        } else {
+            self.inner.request_generation_cohort(
+                &mut sessions[..cold_len],
+                &mut |index, session, result| emit(original_indices[index], session, result),
+            )
+        };
+        for (left, right) in swaps.into_iter().rev() {
+            sessions.swap(left, right);
+        }
+        let result = (|| {
+            let cold_statuses = cold_result?;
+            if cold_statuses.len() != cold_len {
+                return Err(crate::worldgen_session::GenerationRequestError::Boundary(
+                    "generation cohort returned the wrong result count".to_owned(),
+                ));
+            }
+            let mut statuses: Vec<Option<Result<(), crate::worldgen_session::GenerationRequestError>>> =
+                std::iter::repeat_with(|| None).take(sessions.len()).collect();
+            for (index, status) in cold_statuses.into_iter().enumerate() {
+                statuses[original_indices[index]] = Some(status);
+            }
+            for (index, session) in sessions.iter().enumerate() {
+                let Some(column) = terminal_targets.get(&session.request().target()) else {
+                    continue;
+                };
+                emit(
+                    index,
+                    session,
+                    crate::worldgen_session::GenerationRequestResult::Existing(column.clone()),
+                )?;
+                statuses[index] = Some(Ok(()));
+            }
+            Ok(statuses
+                .into_iter()
+                .map(|status| {
+                    status.unwrap_or(Err(
+                        crate::worldgen_session::GenerationRequestError::Unsupported,
+                    ))
+                })
+                .collect())
+        })();
+        self.release_generation_halos(&retained);
+        result
+    }
+
     fn request_generation(
         &self,
         request: crate::worldgen_session::GenerationRequest,
@@ -1383,21 +1526,18 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
         Option<crate::worldgen_session::GenerationRequestResult>,
         crate::worldgen_session::GenerationRequestError,
     > {
-        let hydrated = self.hydrate_generation_halo(request);
-        if let Some(column) = self.terminal_column(request.target().0, request.target().1) {
-            for &(cx, cz) in &hydrated {
-                self.inner.release_generation_input(cx, cz);
-            }
+        let (hydrated, mut terminal_targets) = self.hydrate_generation_halos(&[request]);
+        if let Some(column) = terminal_targets.remove(&request.target()) {
+            self.release_generation_halos(&hydrated);
             return Ok(Some(
                 crate::worldgen_session::GenerationRequestResult::Existing(column),
             ));
         }
         // Delegate only the high-level capability so an outer store can own
         // ledger hydration and publication around generation.
+        self.state.stats.generated.fetch_add(1, Ordering::Relaxed);
         let result = self.inner.request_generation(request, session);
-        for &(cx, cz) in &hydrated {
-            self.inner.release_generation_input(cx, cz);
-        }
+        self.release_generation_halos(&hydrated);
         result
     }
 
@@ -1416,23 +1556,20 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
                 > + 'a,
         >,
     > {
-        let hydrated = self.hydrate_generation_halo(request);
-        if let Some(column) = self.terminal_column(request.target().0, request.target().1) {
-            for &(cx, cz) in &hydrated {
-                self.inner.release_generation_input(cx, cz);
-            }
+        let (hydrated, mut terminal_targets) = self.hydrate_generation_halos(&[request]);
+        if let Some(column) = terminal_targets.remove(&request.target()) {
+            self.release_generation_halos(&hydrated);
             return Box::pin(async move {
                 Ok(Some(
                     crate::worldgen_session::GenerationRequestResult::Existing(column),
                 ))
             });
         }
+        self.state.stats.generated.fetch_add(1, Ordering::Relaxed);
         let inner = &self.inner;
         Box::pin(async move {
             let result = inner.request_generation_yielding(request, session).await;
-            for &(cx, cz) in &hydrated {
-                inner.release_generation_input(cx, cz);
-            }
+            self.release_generation_halos(&hydrated);
             result
         })
     }
@@ -2697,6 +2834,187 @@ mod tests {
         fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {
             // No storage; edits are discarded by design for this fixture.
         }
+    }
+
+    #[derive(Default)]
+    struct CohortProbe {
+        batches: AtomicU64,
+        cohorts: AtomicU64,
+        scalar_requests: AtomicU64,
+    }
+
+    impl ChunkSource for CohortProbe {
+        fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            ChunkColumn::new(MIN_Y, HEIGHT)
+        }
+
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
+            let column = self.column(x.div_euclid(16), z.div_euclid(16));
+            column.block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
+        }
+
+        fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+            self.column(x.div_euclid(16), z.div_euclid(16))
+                .biome_state_at(x.rem_euclid(16), y, z.rem_euclid(16))
+                .to_string()
+        }
+
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
+
+        fn request_generation(
+            &self,
+            request: crate::worldgen_session::GenerationRequest,
+            _session: Option<&mut crate::worldgen_session::GenerationSession>,
+        ) -> Result<
+            Option<crate::worldgen_session::GenerationRequestResult>,
+            crate::worldgen_session::GenerationRequestError,
+        > {
+            self.scalar_requests.fetch_add(1, Ordering::Relaxed);
+            let mut column = self.column(0, 0);
+            column.set_block_id(0, 70, 0, Block::Stone.default_state());
+            let _ = request;
+            Ok(Some(
+                crate::worldgen_session::GenerationRequestResult::Existing(column),
+            ))
+        }
+
+        fn request_generation_batch(
+            &self,
+            sessions: &mut [crate::worldgen_session::GenerationSession],
+        ) -> Vec<
+            Result<
+                Option<crate::worldgen_session::GenerationRequestResult>,
+                crate::worldgen_session::GenerationRequestError,
+            >,
+        > {
+            self.batches.fetch_add(1, Ordering::Relaxed);
+            sessions
+                .iter()
+                .map(|_| {
+                    Ok(Some(
+                        crate::worldgen_session::GenerationRequestResult::Existing(
+                            self.column(0, 0),
+                        ),
+                    ))
+                })
+                .collect()
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        fn generation_cohort_width_hint(&self) -> Option<usize> {
+            Some(16)
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        fn request_generation_cohort(
+            &self,
+            sessions: &mut [crate::worldgen_session::GenerationSession],
+            emit: &mut dyn FnMut(
+                usize,
+                &crate::worldgen_session::GenerationSession,
+                crate::worldgen_session::GenerationRequestResult,
+            ) -> Result<(), crate::worldgen_session::GenerationRequestError>,
+        ) -> Result<
+            Vec<Result<(), crate::worldgen_session::GenerationRequestError>>,
+            crate::worldgen_session::GenerationRequestError,
+        > {
+            self.cohorts.fetch_add(1, Ordering::Relaxed);
+            let mut statuses = Vec::with_capacity(sessions.len());
+            for (index, session) in sessions.iter().enumerate() {
+                emit(
+                    index,
+                    session,
+                    crate::worldgen_session::GenerationRequestResult::Existing(
+                        self.column(0, 0),
+                    ),
+                )?;
+                statuses.push(Ok(()));
+            }
+            Ok(statuses)
+        }
+    }
+
+    fn cohort_request(cx: i32, cz: i32) -> crate::worldgen_session::GenerationRequest {
+        crate::worldgen_session::GenerationRequest::new(
+            lodestone_worldgen::stage_schedule::Dimension::Overworld,
+            (cx, cz),
+            lodestone_worldgen::stage_schedule::GenerationTarget::Full,
+            0,
+        )
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pristine_persistent_cohort_reaches_inner_and_edits_remain_terminal() {
+        let dir = tempdir("cohort-forwarding");
+        let probe = CohortProbe::default();
+        let source = RegionChunkSource::new(probe, &dir, Dimension::Overworld, MIN_Y, HEIGHT)
+            .expect("open world");
+        let mut sessions = [
+            crate::worldgen_session::GenerationSession::new(cohort_request(0, 0)),
+            crate::worldgen_session::GenerationSession::new(cohort_request(1, 0)),
+        ];
+        let batch_results = source.request_generation_batch(&mut sessions);
+        assert_eq!(batch_results.len(), 2);
+        assert_eq!(source.inner.batches.load(Ordering::Relaxed), 1);
+        assert_eq!(source.inner.scalar_requests.load(Ordering::Relaxed), 0);
+        let mut sessions = [
+            crate::worldgen_session::GenerationSession::new(cohort_request(0, 0)),
+            crate::worldgen_session::GenerationSession::new(cohort_request(1, 0)),
+        ];
+        let mut emitted = Vec::new();
+        let statuses = source
+            .request_generation_cohort(&mut sessions, &mut |index, _, result| {
+                let crate::worldgen_session::GenerationRequestResult::Existing(column) = result
+                else {
+                    panic!("probe returns an owned column");
+                };
+                emitted.push((index, column));
+                Ok(())
+            })
+            .expect("cohort forwarding succeeds");
+        assert_eq!(statuses.len(), 2);
+        assert_eq!(source.inner.cohorts.load(Ordering::Relaxed), 1);
+        assert_eq!(source.inner.scalar_requests.load(Ordering::Relaxed), 0);
+        assert_eq!(emitted.len(), 2);
+
+        source.set_block(1, 70, 1, marker());
+        let mut sessions: [_; 8] = std::array::from_fn(|index| {
+            crate::worldgen_session::GenerationSession::new(cohort_request(index as i32, 0))
+        });
+        emitted.clear();
+        let cohorts_before = source.inner.cohorts.load(Ordering::Relaxed);
+        let statuses = source
+            .request_generation_cohort(&mut sessions, &mut |index, _, result| {
+                let crate::worldgen_session::GenerationRequestResult::Existing(column) = result
+                else {
+                    panic!("probe returns an owned column");
+                };
+                emitted.push((index, column));
+                Ok(())
+            })
+            .expect("mixed cohort preserves the edit");
+        assert_eq!(statuses.len(), 8);
+        assert_eq!(
+            source.inner.cohorts.load(Ordering::Relaxed) - cohorts_before,
+            1
+        );
+        assert_eq!(source.inner.scalar_requests.load(Ordering::Relaxed), 0);
+        assert_eq!(emitted.len(), 8);
+        assert_eq!(emitted.last().map(|(index, _)| *index), Some(0));
+        assert_eq!(
+            emitted
+                .iter()
+                .find(|(index, _)| *index == 0)
+                .expect("terminal output is emitted after the cold cohort")
+                .1
+                .block_state_id(1, 70, 1),
+            marker()
+        );
+        assert_eq!(
+            source.state.stats.generated.load(Ordering::Relaxed),
+            12
+        );
     }
 
     /// A direct persistence-layer mutation invalidates every saved light

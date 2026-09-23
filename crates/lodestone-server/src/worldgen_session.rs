@@ -946,7 +946,7 @@ enum PacketNeighbourColumn {
         overlay: Arc<[(i32, i32, i32, StateId)]>,
         sidecar: Option<Arc<ChunkColumn>>,
         terminal: bool,
-        materialized: std::sync::OnceLock<ChunkColumn>,
+        materialized: Arc<std::sync::OnceLock<ChunkColumn>>,
     },
 }
 
@@ -963,16 +963,12 @@ impl Clone for PacketNeighbour {
                 terminal,
                 materialized,
             } => {
-                let copied = std::sync::OnceLock::new();
-                if let Some(materialized) = materialized.get() {
-                    let _ = copied.set(materialized.clone());
-                }
                 PacketNeighbourColumn::Generated {
                     column: Arc::clone(column),
                     overlay: Arc::clone(overlay),
                     sidecar: sidecar.as_ref().map(Arc::clone),
                     terminal: *terminal,
-                    materialized: copied,
+                    materialized: Arc::clone(materialized),
                 }
             }
         };
@@ -988,7 +984,10 @@ impl PacketNeighbour {
         Self::shared_materialized(coordinate, Arc::new(column))
     }
 
-    pub(crate) fn shared_materialized(coordinate: ChunkCoordinate, column: Arc<ChunkColumn>) -> Self {
+    pub(crate) fn shared_materialized(
+        coordinate: ChunkCoordinate,
+        column: Arc<ChunkColumn>,
+    ) -> Self {
         Self {
             coordinate,
             column: PacketNeighbourColumn::Materialized(column),
@@ -1007,9 +1006,51 @@ impl PacketNeighbour {
                 overlay: Arc::from(overlay),
                 sidecar: None,
                 terminal: false,
-                materialized: std::sync::OnceLock::new(),
+                materialized: Arc::new(std::sync::OnceLock::new()),
             },
         }
+    }
+
+    pub(crate) fn generated_with_id_overlay_cached(
+        coordinate: ChunkCoordinate,
+        column: Arc<lodestone_worldgen::overworld::GeneratedColumn>,
+        overlay: Vec<(i32, i32, i32, StateId)>,
+        cache: &mut BTreeMap<ChunkCoordinate, Self>,
+    ) -> Self {
+        let mut neighbour = Self::generated_with_id_overlay(coordinate, column, overlay);
+        if let Some(cached) = cache.get(&coordinate) {
+            if let (
+                PacketNeighbourColumn::Generated {
+                    column: cached_column,
+                    overlay: cached_overlay,
+                    sidecar: cached_sidecar,
+                    terminal: cached_terminal,
+                    materialized: cached_materialized,
+                },
+                PacketNeighbourColumn::Generated {
+                    column,
+                    overlay,
+                    sidecar,
+                    terminal,
+                    materialized,
+                },
+            ) = (&cached.column, &mut neighbour.column)
+            {
+                if Arc::ptr_eq(cached_column, column)
+                    && cached_overlay.as_ref() == overlay.as_ref()
+                    && match (cached_sidecar, sidecar) {
+                        (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                        (None, None) => true,
+                        _ => false,
+                    }
+                    && cached_terminal == terminal
+                {
+                    *materialized = Arc::clone(cached_materialized);
+                }
+            }
+        }
+        cache.insert(coordinate, neighbour.clone());
+        neighbour
     }
 
     pub(crate) fn materialized_with_id_overlay(
@@ -1052,24 +1093,12 @@ impl PacketNeighbour {
                 terminal,
                 materialized,
             } => materialized.get_or_init(|| {
-                #[cfg(test)]
-                crate::chunk::record_generated_materialization();
-                let mut column = ChunkColumn::from_generated((**column).clone());
-                apply_packet_id_overlay(&mut column, overlay);
-                if let Some(sidecar) = sidecar {
-                    column.set_structures(
-                        sidecar.structure_starts().to_vec(),
-                        sidecar.structure_references().clone(),
-                    );
-                    let mut entities = column.block_entities().to_vec();
-                    entities.extend(sidecar.block_entities().iter().cloned());
-                    column.set_block_entities(entities);
-                }
-                if *terminal {
-                    column.prime_client_heightmaps();
-                    column.mark_generation_stage(ChunkGenerationStage::Full);
-                }
-                column
+                materialize_generated_packet_column(
+                    column,
+                    overlay,
+                    sidecar.as_deref(),
+                    *terminal,
+                )
             }),
         }
     }
@@ -1089,8 +1118,27 @@ impl PacketNeighbour {
                 terminal,
                 materialized,
             } => {
-                if let Some(column) = materialized.into_inner() {
-                    return column;
+                match Arc::try_unwrap(materialized) {
+                    Ok(materialized) => {
+                        if let Some(column) = materialized.into_inner() {
+                            return column;
+                        }
+                    }
+                    Err(materialized) => {
+                        if let Some(column) = materialized.get() {
+                            return column.clone();
+                        }
+                        return materialized
+                            .get_or_init(|| {
+                                materialize_generated_packet_column(
+                                    &column,
+                                    &overlay,
+                                    sidecar.as_deref(),
+                                    terminal,
+                                )
+                            })
+                            .clone();
+                    }
                 }
                 #[cfg(test)]
                 crate::chunk::record_generated_materialization();
@@ -1116,6 +1164,32 @@ impl PacketNeighbour {
             }
         }
     }
+}
+
+fn materialize_generated_packet_column(
+    generated: &lodestone_worldgen::overworld::GeneratedColumn,
+    overlay: &[(i32, i32, i32, StateId)],
+    sidecar: Option<&ChunkColumn>,
+    terminal: bool,
+) -> ChunkColumn {
+    #[cfg(test)]
+    crate::chunk::record_generated_materialization();
+    let mut column = ChunkColumn::from_generated(generated.clone());
+    apply_packet_id_overlay(&mut column, overlay);
+    if let Some(sidecar) = sidecar {
+        column.set_structures(
+            sidecar.structure_starts().to_vec(),
+            sidecar.structure_references().clone(),
+        );
+        let mut entities = column.block_entities().to_vec();
+        entities.extend(sidecar.block_entities().iter().cloned());
+        column.set_block_entities(entities);
+    }
+    if terminal {
+        column.prime_client_heightmaps();
+        column.mark_generation_stage(ChunkGenerationStage::Full);
+    }
+    column
 }
 
 fn apply_packet_id_overlay(column: &mut ChunkColumn, overlay: &[(i32, i32, i32, StateId)]) {
@@ -3741,6 +3815,54 @@ mod foreign_feature_mutation_tests {
 mod packet_snapshot_tests {
     use super::*;
     use lodestone_world::{ColumnLight, LightData};
+
+    #[test]
+    fn generated_neighbour_cache_requires_matching_product_and_overlay() {
+        crate::chunk::reset_generated_materializations();
+        let generated = Arc::new(crate::overworld_generator(42).column_shaped(0, 0));
+        let mut cache = BTreeMap::new();
+        let stone = StateId::from_state_str("minecraft:stone").unwrap();
+        let gold = StateId::from_state_str("minecraft:gold_block").unwrap();
+        let first = PacketNeighbour::generated_with_id_overlay_cached(
+            (0, 0),
+            Arc::clone(&generated),
+            vec![(0, -63, 0, stone)],
+            &mut cache,
+        );
+        let same = PacketNeighbour::generated_with_id_overlay_cached(
+            (0, 0),
+            Arc::clone(&generated),
+            vec![(0, -63, 0, stone)],
+            &mut cache,
+        );
+        assert!(std::ptr::eq(first.column(), same.column()));
+        assert_eq!(crate::chunk::generated_materializations(), 1);
+
+        let changed_overlay = PacketNeighbour::generated_with_id_overlay_cached(
+            (0, 0),
+            Arc::clone(&generated),
+            vec![(0, -63, 0, gold)],
+            &mut cache,
+        );
+        assert!(!std::ptr::eq(first.column(), changed_overlay.column()));
+        assert_eq!(first.column().block_state_id(0, -63, 0), stone);
+        assert_eq!(changed_overlay.column().block_state_id(0, -63, 0), gold);
+        assert_eq!(crate::chunk::generated_materializations(), 2);
+        let mut detached = changed_overlay.clone().into_column();
+        detached.set_block_id(0, -63, 0, StateId::AIR);
+        assert_eq!(changed_overlay.column().block_state_id(0, -63, 0), gold);
+
+        let different_product = PacketNeighbour::generated_with_id_overlay_cached(
+            (0, 0),
+            Arc::new(crate::overworld_generator(42).column_shaped(0, 0)),
+            vec![(0, -63, 0, gold)],
+            &mut cache,
+        );
+        assert!(!std::ptr::eq(changed_overlay.column(), different_product.column()));
+        assert_eq!(changed_overlay.column().block_state_id(0, -63, 0), gold);
+        assert_eq!(different_product.column().block_state_id(0, -63, 0), gold);
+        assert_eq!(crate::chunk::generated_materializations(), 3);
+    }
 
     #[test]
     fn shared_neighbours_detach_when_consumed_for_mutation() {
