@@ -55,6 +55,9 @@ admission call and therefore overlaps the terrain-prefix stage counters; the
 other regions are disjoint lifecycle scopes. These regions explain the session
 remainder without changing the default build; packet light and encoding remain
 the separate `light_encode` metric.
+With `lodestone-worldgen/gen-counters`, `gen_work` also counts structure piece
+bounding-box checks and reached pieces, separating placement traversal from
+height probing.
 
 The production prefix carries its sixteen surface biomes as `BiomeRef` values with
 their snow-temperature results. Surface and top-layer consumers keep that typed

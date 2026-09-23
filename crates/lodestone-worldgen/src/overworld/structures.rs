@@ -1715,6 +1715,7 @@ impl OverworldGenerator {
             // `axis_aligned_linear_pos` rule measures from here.
             let reference = crate::structure::jigsaw::reference_position(&start.pieces);
             for piece in &start.pieces {
+                crate::counters::bump_structure_place_piece_bbox_check();
                 let portal_terrain_reaches = matches!(
                     piece.refine.as_ref(),
                     Some(PieceRefinement::RuinedPortalTerrain { .. })
@@ -1724,6 +1725,7 @@ impl OverworldGenerator {
                 if !piece.bounding_box.intersects_xz(bx, bz, bx + 15, bz + 15) && !portal_terrain_reaches {
                     continue;
                 }
+                crate::counters::bump_structure_place_piece_reached();
                 // A coded piece writes a pre-resolved block list; a template piece
                 // writes its template. Both are clipped by the grid.
                 if let Some(blocks) = &piece.blocks {

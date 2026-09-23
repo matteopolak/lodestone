@@ -1699,6 +1699,8 @@ fn print_counters(s: &Snapshot, chunks: u64) {
     row("structure_reference_computations", s.structure_reference_computations);
     row("structure_candidate_cell_probes", s.structure_candidate_cell_probes);
     row("structure_ring_reach_builds", s.structure_ring_reach_builds);
+    row("structure_place_piece_bbox_checks", s.structure_place_piece_bbox_checks);
+    row("structure_place_pieces_reached", s.structure_place_pieces_reached);
     row("rng_draws (all stages)", s.rng_draws_total());
     println!("  software cache traffic:");
     for (i, name) in lodestone_worldgen::counters::CACHE_NAMES.iter().enumerate() {
