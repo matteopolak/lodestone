@@ -70,7 +70,7 @@ the browser worker and rendering paths but are not a second application.
 | tool | version | notes |
 |---|---|---|
 | `trunk` | **0.21.14** | current stable. `0.22.0-beta.2` needs Rust 1.96.1 (> our 1.95.0). |
-| `wasm-bindgen-cli` | 0.2.126 | trunk fetches a matching one automatically. |
+| `wasm-bindgen-cli` | 0.2.126 | Required on `PATH` by the server-worker staging hook; Trunk's private copy is not enough. |
 | target | `wasm32-unknown-unknown` | `rustup target add wasm32-unknown-unknown` |
 | component | `rust-src` | `rustup component add rust-src` (required by the threaded worker's `-Z build-std`) |
 
@@ -83,6 +83,10 @@ trunk --version   # => trunk 0.21.14
 ```
 
 (or `cargo install trunk --version 0.21.14`, which compiles from source.)
+
+The server-worker staging hook also invokes `wasm-bindgen` directly. Install
+the matching CLI with `cargo install wasm-bindgen-cli --version 0.2.126 --locked`
+if it is not already on `PATH`.
 
 ## Run it
 

@@ -371,8 +371,6 @@ jobs:
       # Pinned to the version CLAUDE.md and web/README.md both name (0.21.x), and
       # taken as a prebuilt tarball rather than `cargo install trunk`, which is a
       # multi-minute from-source build of a tool this job only shells out to.
-      # trunk fetches its own wasm-bindgen-cli into its cache, so nothing else is
-      # needed for the `(cd web && trunk build)` step inside wasm-check.
       - name: Install trunk
         run: |
           set -eu
@@ -380,6 +378,17 @@ jobs:
             https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz \
             | tar xz -C "$HOME/.cargo/bin" trunk
           trunk --version
+      - name: Install wasm-bindgen CLI
+        run: |
+          set -eu
+          archive="$RUNNER_TEMP/wasm-bindgen-0.2.126.tar.gz"
+          curl -sSfL \
+            https://github.com/wasm-bindgen/wasm-bindgen/releases/download/0.2.126/wasm-bindgen-0.2.126-x86_64-unknown-linux-musl.tar.gz \
+            -o "$archive"
+          echo "064948d58e2d6c0a745216477a639ba696216d6309aaa902939d1b865b1d869d  $archive" | sha256sum -c -
+          tar xzf "$archive" --strip-components=1 -C "$HOME/.cargo/bin" \
+            wasm-bindgen-0.2.126-x86_64-unknown-linux-musl/wasm-bindgen
+          wasm-bindgen --version
       - run: just wasm-check
       - name: Preserve failed browser build log
         if: failure()
