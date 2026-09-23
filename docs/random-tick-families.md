@@ -8,6 +8,8 @@ The random-tick scheduler selects positions and delegates each eligible block to
 
 `random_tick.rs` owns section eligibility, the position LCG, typed state predicates, and dispatch. `lodestone_server::is_randomly_ticking_id(StateId)` exposes the block-family classification without converting state IDs back to text. `random_tick/grass.rs`, `lava.rs`, `gravity.rs`, and `redstone.rs` provide the behavior-specific handlers; crop, sapling, and leaf transitions are implemented by typed helpers in `growth_tick.rs`. Runtime reads, writes, and `RandomTickEvent` fields use `lodestone_data::block_states::StateId`; text remains only at explicit fixture or wire boundaries. The scheduler still visits sections and positions in the same order; each handler uses the scheduler's behavior RNG and appends events in its existing mutation order.
 
+`ChunkColumn` derives ticking and reaction metadata together, once per palette state. Section counters then answer the eligibility gate without rescanning a column on each tick. Keep both metadata vectors in the same pass if the classification changes.
+
 Redstone notification fan-out remains deterministic: centers and directions are enumerated with `UPDATE_ORDER`. Cross-column reads and writes continue to use the resident-column view owned by the redstone family.
 
 ## How to change it

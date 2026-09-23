@@ -418,7 +418,8 @@ pub enum Processor {
     /// Vanilla's own blackstone-replace processor singleton — the nether-side ruined-portal
     /// variant's stone-to-blackstone swap. Unconditional per block (no roll), and
     /// carries `facing`/`half`/`type` across the replacement when the source had
-    /// them. Bundled with the overworld sets too (`replace_with_blackstone`
+    /// them. Target defaults supply properties not carried from the source.
+    /// Bundled with the overworld sets too (`replace_with_blackstone`
     /// exists as a `Setup` field) even though none of the six overworld ids sets
     /// it `true` today — `ruined_portal_nether` is the one that does, and it is
     /// out of scope (see the structure's module doc), so this arm is untested
@@ -552,7 +553,7 @@ impl Processor {
                     return Some(block);
                 };
                 let source_properties = Properties::from_state_id(block.state);
-                let mut properties = Properties::empty();
+                let mut properties = Properties::from_state_id(replacement.default_state());
                 for key in [PropertyKey::Facing, PropertyKey::Half, PropertyKey::Type] {
                     if let Some(value) = source_properties.get(key).and_then(|value| value.builtin_value()) {
                         properties = properties
@@ -561,7 +562,7 @@ impl Processor {
                     }
                 }
                 let state = Properties::state_for_block(replacement, &properties)
-                    .unwrap_or_else(|| replacement.default_state());
+                    .expect("carried blackstone replacement properties resolve to a target state");
                 Some(ProcessedBlock { pos: block.pos, state })
             }
         }
@@ -1340,7 +1341,7 @@ mod tests {
     /// `facing`/`half`/`type`; anything else, including a block with no entry,
     /// passes through.
     #[test]
-    fn blackstone_replace_swaps_the_table_and_carries_orientation() {
+    fn blackstone_replace_swaps_the_table_and_overlays_selected_properties_on_defaults() {
         let processor = Processor::BlackstoneReplace;
         let world = Air;
         let ctx = ctx(&world, None);
@@ -1353,7 +1354,7 @@ mod tests {
                 &ctx,
                 ProcessedBlock {
                     pos: [0, 0, 0],
-                    state: state("minecraft:stone_brick_stairs[facing=east,half=top]"),
+                    state: state("minecraft:stone_brick_stairs[facing=east,half=top,waterlogged=true]"),
                 },
             )
             .expect("kept");
@@ -1365,6 +1366,10 @@ mod tests {
         assert_eq!(
             stairs.state.properties().iter().find(|(key, _)| *key == "half").map(|(_, value)| *value),
             Some("top"),
+        );
+        assert_eq!(
+            stairs.state.properties().iter().find(|(key, _)| *key == "waterlogged").map(|(_, value)| *value),
+            Some("false"),
         );
         let untouched = processor
             .process(&ctx, at([0, 0, 0], "minecraft:oak_planks"))

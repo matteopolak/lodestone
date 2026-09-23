@@ -371,6 +371,9 @@ pub(crate) fn is_snowy_family_id(state: StateId) -> bool {
 /// leaf decay, all cited in `crate::growth_tick`'s own module doc comment.
 #[must_use]
 pub fn is_randomly_ticking_id(state: StateId) -> bool {
+    #[cfg(test)]
+    predicate_calls::bump();
+
     match state.block() {
         Block::GrassBlock | Block::Lava => true,
         Block::Wheat | Block::Carrots | Block::Potatoes => {
@@ -398,17 +401,6 @@ pub fn is_randomly_ticking_id(state: StateId) -> bool {
         | Block::FloweringAzaleaLeaves => growth_tick::leaves_should_decay_id(state),
         _ => false,
     }
-}
-
-#[cfg(test)]
-#[must_use]
-pub fn is_randomly_ticking(block_state: &str) -> bool {
-    predicate_calls::bump();
-    base_name(block_state) == "minecraft:grass_block"
-        || base_name(block_state) == "minecraft:lava"
-        || growth_tick::is_growable_crop(block_state)
-        || growth_tick::is_sapling(block_state)
-        || growth_tick::leaves_should_decay(block_state)
 }
 
 fn property_number(state: StateId, key: PropertyKey) -> Option<u32> {
@@ -443,8 +435,7 @@ fn property_number(state: StateId, key: PropertyKey) -> Option<u32> {
     }
 }
 
-/// An instrument, not a mechanism: how many times [`is_randomly_ticking`] has
-/// been evaluated on **this thread**.
+/// Counts typed random-tick classifications on this thread in test builds.
 ///
 /// This gate is a claim about an operation *count*, and this repo's
 /// evidence rule says to measure a count rather than a duration (this machine's
@@ -2070,48 +2061,12 @@ mod tests {
 
     // ---- the counter is O(1), proven as a count ---------------
 
-    /// **U3-b, the O(1) claim as a count.** The section *decision* evaluates
-    /// [`is_randomly_ticking`] zero times, so `tick_chunk`'s per-tick predicate
-    /// count depends on `tick_speed` and on how many sections tick — never on
-    /// the column's height or block count.
-    ///
-    /// Both hypotheses are computed from outside the code under test, so this is
-    /// a prediction rather than a sign check (`DESIGN.md` §12.43's *magnitude*
-    /// species). Per `tick_chunk` call, a correct counter implementation
-    /// evaluates the predicate exactly:
-    ///
-    /// * `tick_speed` times — vanilla's own per-picked-position
-    ///   `blockState.isRandomlyTicking()` check, one per
-    ///   position draw in the one randomly-ticking section. This term is
-    ///   *supposed* to be there; it is bounded by `tick_speed`, not by cells.
-    /// * plus `palette.len()` **in debug builds only**, for the definitional
-    ///   scan the permanent tripwire runs as its reference arm.
-    ///
-    /// The competing hypothesis — the pre-`bdf93a28` per-block string scan —
-    /// evaluates the predicate up to 4096 times per non-ticking section per
-    /// tick, so it predicts ~200k for the short column below and ~2.4M for the
-    /// tall one. The **12× column-height ratio is the discriminator**: the two
-    /// arms carry byte-identical content in one section and differ only in how
-    /// many empty sections sit above it, so any implementation whose decision
-    /// touches cells must report different counts for them.
-    ///
-    /// **What this gate deliberately cannot separate:** the interim palette mask
-    /// (`bdf93a28`) also evaluated the predicate `palette.len()` times per tick
-    /// and no more, so a predicate count cannot tell it from counters-plus-debug-
-    /// tripwire. What separated them was *index-grid reads*, and that proof is
-    /// structural rather than measured:
-    /// [`section_has_randomly_ticking_block`] and
-    /// [`randomly_ticking_palette_mask`] are `#[cfg(any(test, debug_assertions))]`,
-    /// so they **do not exist** in a release build and the shipped decision
-    /// provably reads no cell of the index grid.
+    /// The section decision uses maintained counters; classification is limited
+    /// to selected positions and the debug reference scan.
     #[test]
     fn per_tick_predicate_count_is_independent_of_column_height() {
-        /// A stage-1 sapling: randomly ticking (`is_sapling`), and its handler
-        /// is a named no-op at stage 1 (`SaplingOutcome::TreeGrowthNotModeled`),
-        /// so nothing this gate ticks ever mutates a block. That keeps the
-        /// palette at a fixed 2 entries and makes the per-tick count exact
-        /// rather than "exact plus however many states the run happened to
-        /// intern".
+        /// A stage-1 sapling is randomly ticking, and its handler is a no-op.
+        /// That keeps the palette fixed and the expected count exact.
         const INERT_TICKING_STATE: &str = "minecraft:oak_sapling[stage=1]";
         const TICKS: u64 = 25;
         const TICK_SPEED: u32 = 7;
@@ -2157,9 +2112,7 @@ mod tests {
         let (tall_count, tall_sections, _) = measure(384);
         assert_eq!((short_sections, tall_sections), (2, 24));
 
-        // The debug tripwire's reference scan classifies the palette once per
-        // `tick_chunk` call. Derived from the same `cfg` the tripwire itself
-        // uses, not restated as a literal.
+        // The debug reference scan classifies each palette entry per tick.
         let tripwire_per_tick = if cfg!(debug_assertions) { 2u64 } else { 0 };
         let expected = TICKS * (u64::from(TICK_SPEED) + tripwire_per_tick);
 
@@ -2177,24 +2130,17 @@ mod tests {
         );
     }
 
-    /// **U3-b's other half, and U3-c's instrument control.** Building a column
-    /// evaluates the predicate exactly `palette.len()` times — one per palette
-    /// entry, once, ever.
-    ///
-    /// This is also what proves the instrument in the gate above is not simply
-    /// broken: a counter that never increments would report two vacuous zeros.
-    /// Here it must report a specific non-zero number, predicted from the
-    /// palette the constructor adopts.
+    /// The instrument must observe the typed function used by constructors and
+    /// generators, including every palette classification.
     #[test]
     fn constructing_a_column_evaluates_the_predicate_once_per_palette_entry() {
-        // Control first: the instrument really does count a bare call.
+        // Control first: the instrument counts the production classifier.
         let before_bare = predicate_calls::get();
-        let _ = is_randomly_ticking(GRASS_BLOCK);
+        let _ = is_randomly_ticking_id(Block::GrassBlock.default_state());
         assert_eq!(
             predicate_calls::get() - before_bare,
             1,
-            "instrument control failed: a single `is_randomly_ticking` call must register as 1, \
-             otherwise the zero this gate's sibling reports means nothing"
+            "one typed classification must register exactly once"
         );
 
         // `ChunkColumn::new` is the all-air constructor: palette of exactly 1.

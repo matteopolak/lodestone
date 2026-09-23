@@ -4058,9 +4058,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         y: i32,
         lz: usize,
     ) -> Option<StateId> {
-        self.resident
-            .get(&chunk)
-            .map(|column| column.block_state_id(lx as i32, y, lz as i32))
+        self.resident_block_state_id(chunk, lx, y, lz)
     }
 
     /// Read one canonical state id without materializing a generated resident.

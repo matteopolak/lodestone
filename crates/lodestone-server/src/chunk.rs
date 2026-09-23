@@ -287,14 +287,13 @@ fn derive_palette_metadata(
     Vec<bool>,
     Vec<crate::redstone_graph::ReactionClass>,
 ) {
-    let palette_ticking = palette
-        .iter()
-        .map(|&state| state_metadata(state).0)
-        .collect::<Vec<_>>();
-    let palette_reaction = palette
-        .iter()
-        .map(|&state| state_metadata(state).1)
-        .collect::<Vec<_>>();
+    let mut palette_ticking = Vec::with_capacity(palette.len());
+    let mut palette_reaction = Vec::with_capacity(palette.len());
+    for &state in palette {
+        let (ticking, reaction) = state_metadata(state);
+        palette_ticking.push(ticking);
+        palette_reaction.push(reaction);
+    }
     (palette_ticking, palette_reaction)
 }
 
@@ -735,31 +734,15 @@ impl ChunkColumn {
     #[must_use]
     pub fn new(min_y: i32, height: i32) -> Self {
         assert!(height > 0, "height must be positive");
+        let (air_ticking, air_reaction) = state_metadata(air_state());
         Self {
             min_y,
             height,
             generation_stage: ChunkGenerationStage::Full,
             palette: vec![lodestone_data::block_states::air_state()],
             blocks: SectionedBlocks::new_air(height),
-            // All-air, so every section count is zero and every palette entry
-            // is classified — correct by construction with no counting pass,
-            // exactly like vanilla's own empty-section constructor,
-            // which likewise does not run the block-count recalculation. The one classification is still routed
-            // through the predicate rather than hardcoded `false`, so the
-            // table cannot drift from the definition.
-            palette_ticking: vec![state_metadata(air_state()).0],
-            // Routed through the resolver rather than written as `0` for the
-            // same reason the line above routes through the predicate: a
-            // regenerated table that renumbered air must not silently desync
-            // this from the real registry id.
-            // Third derived table, same append-time contract: air
-            // reacts to nothing, but it is classified rather than
-            // assumed so the one place a class is decided stays
-            // `redstone_graph::classify`.
-            palette_reaction: vec![state_metadata(air_state()).1],
-            // Fourth derived table, same append-time contract. Built-in states
-            // point into the lazy process-wide canonical table; only unknown
-            // plugin/data-pack text gets a column-owned allocation.
+            palette_ticking: vec![air_ticking],
+            palette_reaction: vec![air_reaction],
             section_ticking: vec![0u16; (height as usize).div_ceil(SECTION_ROWS)],
             biome_quarts: std::array::from_fn(|_| DEFAULT_BIOME.to_string()),
             biome_palette: vec![DEFAULT_BIOME.to_string()],
