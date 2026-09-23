@@ -3562,9 +3562,6 @@ mod tests {
         format!("{:x}", digest.finalize())
     }
 
-    /// The external trace drives all 3×3 step-4 entries before the centre
-    /// source's step-7 index zero.  Hashing that identical bounded field keeps
-    /// a terrain/step-4 mismatch from being blamed on its first blob modifier.
     #[test]
     fn captured_nether_pre_index0_field_matches_step4_output() {
         let assets = NetherAssets { root: nether_assets_root() };
@@ -3582,8 +3579,19 @@ mod tests {
             }
         }
         let mut grid = VegGrid::with_sources(
-            generator.min_y, generator.height,
-            center_x * 16, center_z * 16,
+            generator.min_y,
+            generator.height,
+            center_x * 16,
+            center_z * 16,
+            crate::feature::REGION_MIN - crate::feature::VEG_PADDING,
+            crate::feature::REGION_MAX + crate::feature::VEG_PADDING,
+            |dx, dz| sources.get(&(dx, dz)).map(|source| Arc::clone(&source.0)),
+        );
+        let mut single_biome_control = VegGrid::with_sources(
+            generator.min_y,
+            generator.height,
+            center_x * 16,
+            center_z * 16,
             crate::feature::REGION_MIN - crate::feature::VEG_PADDING,
             crate::feature::REGION_MAX + crate::feature::VEG_PADDING,
             |dx, dz| sources.get(&(dx, dz)).map(|source| Arc::clone(&source.0)),
@@ -3593,15 +3601,40 @@ mod tests {
             for dz in -1..=1 {
                 let source_x = center_x + dx;
                 let source_z = center_z + dz;
-                let origin = crate::feature::BlockPos { x: source_x * 16, y: generator.min_y, z: source_z * 16 };
+                let origin = crate::feature::BlockPos {
+                    x: source_x * 16,
+                    y: generator.min_y,
+                    z: source_z * 16,
+                };
                 let mut random = decoration_random();
+                let mut negative_control_random = decoration_random();
                 random.begin_decoration_source();
-                let decoration_seed = random.set_decoration_seed(generator.seed, origin.x, origin.z);
+                negative_control_random.begin_decoration_source();
+                let decoration_seed =
+                    random.set_decoration_seed(generator.seed, origin.x, origin.z);
+                let negative_control_seed =
+                    negative_control_random.set_decoration_seed(generator.seed, origin.x, origin.z);
+                assert_eq!(decoration_seed, negative_control_seed);
                 let biome = match generator.carver_biome_for_source(source_x, source_z) {
                     crate::carver::CarverBiome::Builtin(biome) => biome.name(),
                     crate::carver::CarverBiome::Extension(name) => name,
                 };
-                let (_, decorations) = build_nether_feature_lists(&assets, biome);
+                let (_, negative_control_decorations) =
+                    build_nether_feature_lists(&assets, biome);
+                let source_plan = generator.source_mixed_features(source_x, source_z);
+                let decorations = source_plan.1.as_slice();
+                generator.structure_step_into_grid(
+                    source_x,
+                    source_z,
+                    crate::stage_schedule::DecorationStep::SurfaceStructures,
+                    &mut grid,
+                );
+                generator.structure_step_into_grid(
+                    source_x,
+                    source_z,
+                    crate::stage_schedule::DecorationStep::SurfaceStructures,
+                    &mut single_biome_control,
+                );
                 for (_, index, placed) in decorations.iter().filter(|(step, _, _)| *step == 4) {
                     if (source_x, source_z, *index) == (-251, -249, 0) {
                         assert_eq!(
@@ -3612,15 +3645,49 @@ mod tests {
                                 generator.min_y, generator.height,
                             ),
                             "c057c17bc26d8d95038fce12a550f9d58468778cf9854b71465bda9e8eb23a07",
-                            "the reference delta's padded input must be identical before local write order can be compared",
+                            "the captured padded input uses the source's selected biome neighbourhood",
+                        );
+                    }
+                    crate::feature::vegetation::apply_decoration_entry_at_seed(
+                        &mut random,
+                        decoration_seed,
+                        origin,
+                        4,
+                        *index,
+                        placed,
+                        &mut grid,
+                        &generator.veg_tags,
+                    );
+                }
+                for (_, index, placed) in negative_control_decorations
+                    .iter()
+                    .filter(|(step, _, _)| *step == 4)
+                {
+                    if (source_x, source_z, *index) == (-251, -249, 0) {
+                        assert_eq!(
+                            grid_hash(
+                                &single_biome_control, center_x, center_z,
+                                crate::feature::REGION_MIN - crate::feature::VEG_PADDING,
+                                crate::feature::REGION_MAX + crate::feature::VEG_PADDING,
+                                generator.min_y, generator.height,
+                            ),
+                            "79c4be34d081fd3f36cc854bbcbba916d44714881b5bde4089c218c483cafdc1",
+                            "negative control: one source biome omits the selected neighbourhood feature set",
                         );
                         assert_eq!(
-                            grid.get(-4_018, 57, -3_972),
+                            single_biome_control.get(-4_018, 57, -3_972),
                             StateId::from_state_str("minecraft:netherrack").unwrap(),
                         );
                     }
                     crate::feature::vegetation::apply_decoration_entry_at_seed(
-                        &mut random, decoration_seed, origin, 4, *index, placed, &mut grid, &generator.veg_tags,
+                        &mut negative_control_random,
+                        negative_control_seed,
+                        origin,
+                        4,
+                        *index,
+                        placed,
+                        &mut single_biome_control,
+                        &generator.veg_tags,
                     );
                 }
             }
