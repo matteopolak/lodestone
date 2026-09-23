@@ -20,7 +20,11 @@ result extraction, cloning, or assertions. A separate fresh
 and packet encoding run afterward as a separate phase. On macOS the report uses
 process resource counters for retired instructions and cycles, and asserts both
 deltas are nonzero; elapsed time is diagnostic context. Source construction and
-request-session initialization are reported independently.
+request-session initialization are reported independently. On macOS the
+production phase also reports current physical footprint and process peak
+footprint after all requests complete; compare separate fresh processes with
+the same target set when assessing batch-width memory cost. The process peak
+includes source construction and is not an exact count of retained region bytes.
 
 After measurement, `output_checksum` hashes canonical block IDs, every 3D biome
 cell, and the three client heightmaps separately. These non-cryptographic checksums
