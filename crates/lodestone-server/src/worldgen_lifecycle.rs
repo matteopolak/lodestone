@@ -7,7 +7,7 @@
 //! server uses, then applies its absolute transitions to every resident column
 //! reached by the write. All lifecycle state transitions use canonical ids.
 
-use std::collections::{btree_map::Entry, BTreeMap, BTreeSet};
+use std::collections::{btree_map::Entry, hash_map::Entry as HashEntry, BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::{
@@ -2204,7 +2204,7 @@ pub struct LifecycleMaterializer<S: LifecycleWorldgenSource> {
     /// Region traversal order can differ from the ledger's provenance order,
     /// so outputs apply each target's winners only after every requested and
     /// sparse writer has completed.
-    target_feature_winners: BTreeMap<ChunkPos, BTreeMap<AbsoluteCell, TargetFeatureWinner>>,
+    target_feature_winners: BTreeMap<ChunkPos, FastMap<AbsoluteCell, TargetFeatureWinner>>,
     target_feature_receipts: BTreeMap<ChunkPos, TargetFeatureOwnerReceipt>,
     pending_target_block_entities: BTreeMap<ChunkPos, Vec<PendingTargetBlockEntity>>,
     /// Writes visible through the CARVERS read view. A target-scoped source
@@ -2435,17 +2435,17 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             .or_default()
             .entry(position)
         {
-            Entry::Vacant(entry) => {
+            HashEntry::Vacant(entry) => {
                 entry.insert(candidate);
                 lodestone_worldgen::counters::bump_canonical_winner_update();
             }
-            Entry::Occupied(mut entry)
+            HashEntry::Occupied(mut entry)
                 if target_feature_winner_precedes(candidate, *entry.get()) =>
             {
                 entry.insert(candidate);
                 lodestone_worldgen::counters::bump_canonical_winner_update();
             }
-            Entry::Occupied(_) => {}
+            HashEntry::Occupied(_) => {}
         }
     }
 
@@ -2530,7 +2530,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         let owner = self.target_feature_receipts.get(&output)?;
         let output_winners = self.target_feature_winners.get(&output);
         let mut foreign_winner_count = 0;
-        let writes = output_winners
+        let mut writes: Vec<TargetFeatureWrite> = output_winners
             .into_iter()
             .flat_map(|winners| winners.iter())
             .filter_map(|(&(x, y, z), winner)| {
@@ -2546,6 +2546,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 })
             })
             .collect();
+        writes.sort_unstable_by_key(|write| write.destination());
         let overlay_conflict_winners = prior_overlay_destinations
             .iter()
             .filter_map(|&destination| {
@@ -4210,7 +4211,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             return;
         }
         self.materialize_resident(target);
-        let writes = {
+        let mut writes = {
             let column = self
                 .resident
                 .get(&target)
@@ -4226,6 +4227,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 })
                 .collect::<Vec<_>>()
         };
+        writes.sort_unstable_by_key(|write| (write.0, write.1, write.2));
         if !writes.is_empty() {
             self.resident
                 .get_mut(&target)
