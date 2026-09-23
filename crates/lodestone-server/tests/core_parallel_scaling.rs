@@ -165,7 +165,7 @@ fn combine_digests(positions: &[(i32, i32)], chunks: &[[u8; 32]]) -> [u8; 32] {
 struct Arm {
     workers: usize,
     wall_seconds: f64,
-    cpu_seconds: f64,
+    cpu_seconds: Option<f64>,
     allocations: u64,
     allocation_bytes: u64,
     digest: [u8; 32],
@@ -188,7 +188,9 @@ fn run_arm(dimension: Dimension, positions: &[(i32, i32)], workers: usize, basel
             .collect::<Vec<_>>()
     });
     let wall_seconds = started.elapsed().as_secs_f64();
-    let cpu_seconds = cpu_seconds() - before_cpu;
+    let cpu_seconds = before_cpu
+        .zip(cpu_seconds())
+        .map(|(start, end)| end - start);
     assert_eq!(values.len(), positions.len());
     black_box(reduce(&values));
     let digest = parallel_digest(&pool, &generator, positions);
@@ -352,16 +354,24 @@ fn hash_u64(digest: &mut Sha256, value: u64) {
     digest.update(value.to_le_bytes());
 }
 
-fn cpu_seconds() -> f64 {
+#[cfg(unix)]
+fn cpu_seconds() -> Option<f64> {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
     // SAFETY: `getrusage` writes the complete value for `RUSAGE_SELF`.
     let result = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
-    assert_eq!(result, 0, "getrusage(RUSAGE_SELF) failed");
+    if result != 0 {
+        return None;
+    }
     // SAFETY: the successful call initialized `usage`.
     let usage = unsafe { usage.assume_init() };
     let user = usage.ru_utime.tv_sec as f64 + usage.ru_utime.tv_usec as f64 / 1_000_000.0;
     let system = usage.ru_stime.tv_sec as f64 + usage.ru_stime.tv_usec as f64 / 1_000_000.0;
-    user + system
+    Some(user + system)
+}
+
+#[cfg(not(unix))]
+fn cpu_seconds() -> Option<f64> {
+    None
 }
 
 #[test]
@@ -395,14 +405,16 @@ fn core_worldgen_scales_without_nested_parallelism_and_preserves_content() {
                 single_thread_chunks_per_second = Some(chunks_per_second);
             }
             eprintln!(
-                "  {:<10} {:<9} {:>7} {:>10.2} {:>10.2} {:>8.1} {:>10.3} {:>12.1} {:>8.1} {}",
+                "  {:<10} {:<9} {:>7} {:>10.2} {:>10.2} {:>8.1} {:>10} {:>12.1} {:>8.1} {}",
                 scene,
                 dimension.label(),
                 arm.workers,
                 chunks_per_second,
                 per_thread,
                 efficiency.unwrap_or(100.0),
-                arm.cpu_seconds,
+                arm.cpu_seconds
+                    .map(|seconds| format!("{seconds:.3}"))
+                    .unwrap_or_else(|| "n/a".to_string()),
                 arm.allocations as f64 / positions.len().min(8) as f64,
                 arm.allocation_bytes as f64 / positions.len().min(8) as f64,
                 arm.digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
