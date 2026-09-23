@@ -219,6 +219,10 @@ Mutable stages require `declare_mutable_sources` with a complete zero-based
 canonical source set. A stage cannot commit after only a contiguous prefix;
 source coordinate and order are both checked at submission. Ordered source
 transactions are preflighted before any member of a ready prefix is applied.
+Duplicate-provenance checks use keyed membership sets; the committed mutation
+map and explicit source-order record still define checkpoint and replay order.
+Settlement assigns revisions from destination-ordered writes, never from set
+iteration.
 
 `export_checkpoint` and `from_checkpoint` provide a validated in-memory
 handoff for committed frontiers, products, sidecars, ordered source identities,
