@@ -12,6 +12,18 @@ Each pass reports chunks per second, process CPU utilization when the host expos
 
 With `gen-counters`, `full_column_conversions` counts logical complete-column conversion operations and `full_column_conversion_cells` reports their covered cells; neither is a byte-traffic measurement. Full Overworld output packing is counted once at the dense-to-compact packing boundary. These counters cover worldgen work, not packet encoding or neighbor-light preparation.
 
+The strict server benchmark also reports `target_write_bookkeeping` when built
+with `lodestone-worldgen/gen-counters`. Its local and spill counts are unique
+dirty epoch cells by destination chunk. Override and carver revision attempts
+count calls to the materializer's setters; insertions count new or changed
+values appended to the ordered revision streams. Canonical-winner updates count
+winner-map inserts or replacements, and authenticated-write calls include
+calls that return early because the target output already contains the write.
+The line includes totals and averages per measured output. These are structural
+diagnostics for the bookkeeping path, not counts of final block changes or a
+throughput score. The counter control checks a reset followed by zero work,
+then a small known sequence with both changed and unchanged revision attempts.
+
 Production Overworld batches use the source's indexed `columns` hook rather than
 the scalar default. A pristine batch fans out over the shared world-generation
 pool; when the hook is called from an already-admitted pool worker it joins that

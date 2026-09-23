@@ -54,10 +54,12 @@ packet-snapshot finalization, shaped-prefix import, checkpoint capture and
 export, session hydration, ledger publication, and mutation-winner scanning.
 Admission overlaps the terrain-prefix stage counters. Prefix import is nested
 inside mutable-target advancement, so those two rows are inclusive and must not
-be added together. The checkpoint and publication rows isolate their named
-operations from the session remainder. These diagnostics are absent from the
-default build; packet light and encoding remain the separate `light_encode`
-metric.
+be added together. `direct_transition_mirror` measures the successful direct
+feature result's local-write replay, including canonical-winner bookkeeping;
+it is an upper bound on work a direct-only path could remove. The checkpoint
+and publication rows isolate their named operations from the session remainder.
+These diagnostics are absent from the default build; packet light and encoding
+remain the separate `light_encode` metric.
 With `lodestone-worldgen/gen-counters`, `gen_work` also counts structure piece
 bounding-box checks and reached pieces, separating placement traversal from
 height probing.
