@@ -5048,13 +5048,15 @@ where
                 // this connection can exclude its own entity. The ticket moves
                 // into `serve_play`, whose `Drop` implementation deregisters
                 // the player on every exit path.
-                let player_ticket = entities.players().map(|registry| {
-                    registry.join(
-                        &username,
-                        login_uuid.unwrap_or_else(uuid::Uuid::nil),
-                        join_pos,
-                    )
-                });
+                let (player_ticket, initial_swing_cursor) =
+                    entities.players().map_or((None, None), |registry| {
+                        let (ticket, cursor) = registry.join_with_swing_cursor(
+                            &username,
+                            login_uuid.unwrap_or_else(uuid::Uuid::nil),
+                            join_pos,
+                        );
+                        (Some(ticket), Some(cursor))
+                    });
 
                 // The connection's chunk-residency ticket pair
                 // (`PLAYER_LOADING` + `PLAYER_SIMULATION`) is keyed by the
@@ -5223,6 +5225,7 @@ where
                     streamer,
                     player_list,
                     player_ticket,
+                    initial_swing_cursor,
                     player_ticket_guard,
                     view,
                     username,
@@ -14821,6 +14824,8 @@ async fn serve_play<T, P, S, E>(
     // player deregistration on disconnect, error, and cancellation; borrowing
     // it could let the guard outlive the task that owns the connection.
     player_ticket: Option<PlayerTicket>,
+    // Captured with player registration so join-time swings remain visible.
+    initial_swing_cursor: Option<u64>,
     // The guard withdraws this connection's `PLAYER_LOADING` and
     // `PLAYER_SIMULATION` tickets when the task exits. Move it with each
     // tracked-view recenter or radius change so residency follows the player.
@@ -15056,11 +15061,9 @@ where
     // the log's *current end* so a joining player receives only messages
     // published during this session.
     let mut chat_cursor = entities.players().map_or(0, PlayerRegistry::chat_cursor);
-    // This connection's read position in the shared arm-swing broadcast log —
-    // same "start at the current end" reasoning as `chat_cursor`, so a
-    // freshly joined connection is not replayed swings that happened before
-    // it arrived.
-    let mut swing_cursor = entities.players().map_or(0, PlayerRegistry::swing_cursor);
+    // The registration-time snapshot excludes older swings while retaining
+    // events appended before this loop reaches its first drain.
+    let mut swing_cursor = initial_swing_cursor.unwrap_or(0);
     // This connection's read position in the shared plugin-channel
     // broadcast queue. Started at 0 — unlike chat, a *broadcast* is
     // host-published state a new connection legitimately receives: a client
@@ -17957,6 +17960,7 @@ async fn serve_play<T, P, S, E>(
     // packet-driven through `FallTracker`; the browser timer separately runs
     // the shared entity diff for world changes that occur while idle.
     player_ticket: Option<PlayerTicket>,
+    _initial_swing_cursor: Option<u64>,
     // The guard withdraws this connection's `PLAYER_LOADING` and
     // `PLAYER_SIMULATION` tickets when the task exits. Move it with each
     // tracked-view recenter or radius change so residency follows the player.

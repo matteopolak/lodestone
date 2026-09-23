@@ -370,6 +370,18 @@ async fn assert_registry_selected_host_broadcasts_arm_swing(protocol_version: i3
         .wait_for_spawn(Duration::from_secs(10))
         .await
         .expect("the swing observer must reach Play");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while server
+            .players()
+            .expect("the published host must expose its shared player registry")
+            .len()
+            < 2
+        {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the observer must register before the sender swings");
     sender
         .send_action(ClientAction::SwingArm { hand: Hand::Off })
         .expect("the joined sender accepts an off-hand swing");

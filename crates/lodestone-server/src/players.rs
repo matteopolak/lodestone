@@ -471,7 +471,19 @@ impl PlayerRegistry {
     /// forever — on every one of the others.
     #[must_use]
     pub fn join(&self, username: &str, uuid: Uuid, position: Vec3) -> PlayerTicket {
-        let entity_id = {
+        self.join_with_swing_cursor(username, uuid, position).0
+    }
+
+    /// Registers a player and captures the swing-log start under the same lock.
+    /// Swings appended after registration remain visible while join setup runs.
+    #[must_use]
+    pub(crate) fn join_with_swing_cursor(
+        &self,
+        username: &str,
+        uuid: Uuid,
+        position: Vec3,
+    ) -> (PlayerTicket, u64) {
+        let (entity_id, swing_cursor) = {
             let mut inner = self.lock();
             let raw_entity_id = PLAYER_ENTITY_ID_BASE.wrapping_add(inner.next_offset);
             let entity_id =
@@ -501,13 +513,17 @@ impl PlayerRegistry {
                 inventory: crate::inventory::PlayerInventory::default(),
                 shared_flags: 0,
             });
-            entity_id
+            let swing_cursor = inner.swings_base + inner.swings.len() as u64;
+            (entity_id, swing_cursor)
         };
-        PlayerTicket {
-            entity_id,
-            uuid,
-            registry: self.clone(),
-        }
+        (
+            PlayerTicket {
+                entity_id,
+                uuid,
+                registry: self.clone(),
+            },
+            swing_cursor,
+        )
     }
 
     /// Moves a tracked player. A no-op for an id that is not registered, which
@@ -1335,6 +1351,33 @@ mod tests {
             registry.swings_since(&mut cursor),
             Vec::new(),
             "a cursor started at the current end must see none of the prior swings"
+        );
+    }
+
+    #[test]
+    fn join_cursor_excludes_earlier_swings_and_keeps_join_setup_swings() {
+        let registry = PlayerRegistry::new();
+        let (swinger, _) = registry.join_with_swing_cursor(
+            "Swinger",
+            uuid(1),
+            Vec3::new(0.0, 0.0, 0.0),
+        );
+        registry.swing(swinger.entity_id(), lodestone_model::Hand::Main);
+
+        let (_observer, mut cursor) = registry.join_with_swing_cursor(
+            "Observer",
+            uuid(2),
+            Vec3::new(0.0, 0.0, 0.0),
+        );
+        registry.swing(swinger.entity_id(), lodestone_model::Hand::Off);
+
+        assert_eq!(
+            registry.swings_since(&mut cursor),
+            vec![SwingEvent {
+                entity_id: swinger.entity_id(),
+                hand: lodestone_model::Hand::Off,
+            }],
+            "the join cursor excludes old swings but keeps swings before the play loop starts"
         );
     }
 
