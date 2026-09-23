@@ -46,7 +46,9 @@
 //! `power=N` property.
 
 use crate::neighbor_update::Direction;
-use crate::redstone::{self, is_redstone_conductor, wire_power, WorldState};
+use crate::redstone::{self, is_redstone_conductor, wire_power};
+#[cfg(test)]
+use crate::redstone::WorldState;
 use lodestone_data::block::Block;
 use lodestone_data::block_properties::{PropertyKey, PropertyValue};
 use lodestone_data::block_states::StateId;
@@ -69,22 +71,22 @@ pub fn set_power(power: u8) -> StateId {
 #[must_use]
 pub fn incoming_wire_signal<F>(lookup: &F, pos: BlockPos) -> u8
 where
-    F: Fn(BlockPos) -> WorldState,
+    F: redstone::RedstoneLookup + ?Sized,
 {
-    let above_state = lookup(Direction::Up.relative(pos));
+    let above_state = lookup.state_at(Direction::Up.relative(pos));
     let above_is_conductor = is_redstone_conductor(above_state);
     let mut wire_signal: u8 = 0;
 
     for direction in [Direction::North, Direction::South, Direction::West, Direction::East] {
         let neighbor_pos = direction.relative(pos);
-        let neighbor_state = lookup(neighbor_pos);
+        let neighbor_state = lookup.state_at(neighbor_pos);
         wire_signal = wire_signal.max(wire_power(neighbor_state));
 
         if is_redstone_conductor(neighbor_state) && !above_is_conductor {
-            let above_neighbor = lookup(Direction::Up.relative(neighbor_pos));
+            let above_neighbor = lookup.state_at(Direction::Up.relative(neighbor_pos));
             wire_signal = wire_signal.max(wire_power(above_neighbor));
         } else if !is_redstone_conductor(neighbor_state) {
-            let below_neighbor = lookup(Direction::Down.relative(neighbor_pos));
+            let below_neighbor = lookup.state_at(Direction::Down.relative(neighbor_pos));
             wire_signal = wire_signal.max(wire_power(below_neighbor));
         }
     }
@@ -97,7 +99,7 @@ where
 #[must_use]
 pub fn calculate_target_strength<F>(lookup: &F, pos: BlockPos) -> u8
 where
-    F: Fn(BlockPos) -> WorldState,
+    F: redstone::RedstoneLookup + ?Sized,
 {
     let block_signal = redstone::best_neighbor_signal(lookup, pos, true);
     if block_signal >= 15 {

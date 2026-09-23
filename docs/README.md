@@ -781,10 +781,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   The server's redstone model: dust/torch signal propagation, repeaters, comparators,
   observers, pistons, the player-facing input devices (levers, buttons, plates, rails,
   dispensers, note blocks, tripwire, target blocks), and two consumers built on top
-  — the beacon and the vibration/warden substrate. All of it is pure query/decision
-  functions over a `Fn(BlockPos) -> String` world lookup, the same shape
-  [`docs/tick-scheduling.md`](./tick-scheduling.md) established for gravity blocks —
-  no `ChunkColumn` in scope except through that closure.
+  — the beacon and the vibration/warden substrate. Signal queries use
+  `RedstoneLookup`, which reads typed `StateId` values and position-specific
+  comparator output. Production queries use a borrowed column view and block-entity
+  registry; state-only closures explicitly adapt with zero comparator output.
 - [Region decoration overlay](./region-overlay.md) —
   `lodestone_worldgen::feature::region_view::RegionView` provides an overlay-first
   read/write surface over the source chunk grids used by decoration. Its scratch

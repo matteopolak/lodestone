@@ -120,6 +120,25 @@ use lodestone_model::BlockPos;
 /// The validated global state read by redstone queries and mutations.
 pub type WorldState = StateId;
 
+/// A world read with comparator analog output attached to its position.
+pub trait RedstoneLookup {
+    fn state_at(&self, pos: BlockPos) -> WorldState;
+    fn comparator_output(&self, pos: BlockPos) -> u8;
+}
+
+impl<F> RedstoneLookup for F
+where
+    F: Fn(BlockPos) -> WorldState,
+{
+    fn state_at(&self, pos: BlockPos) -> WorldState {
+        self(pos)
+    }
+
+    fn comparator_output(&self, _pos: BlockPos) -> u8 {
+        0
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn configured_state(
     block: Block,
@@ -629,18 +648,6 @@ pub fn repeater_delay_ticks(state: StateId) -> u32 {
 pub fn comparator_mode_subtract(state: StateId) -> bool {
     get_str_property(state, PropertyKey::Mode) == Some(BuiltinPropertyValue::Subtract)
 }
-/// The comparator's last-computed analog output, `0..=15`.
-///
-/// The value belongs to the comparator's block-entity sidecar, not its block
-/// state. The sidecar is not threaded through this query-only API yet, so
-/// callers without that data see the neutral value until the storage seam is
-/// connected.
-#[must_use]
-pub fn comparator_output(state: StateId) -> u8 {
-    let _ = state;
-    0
-}
-
 #[must_use]
 pub fn observer_facing(state: StateId) -> Direction {
     get_str_property(state, PropertyKey::Facing)
@@ -656,12 +663,11 @@ pub fn observer_powered(state: StateId) -> bool {
 /// output-signal getter
 /// defaults to `15` (unmodified by
 /// the repeater block); the comparator block overrides it to read its stored
-/// analog output — see
-/// [`comparator_output`]'s own doc comment for where that value lives here.
+/// analog output from the coordinate-aware lookup.
 #[must_use]
-fn diode_output_signal(state: StateId) -> u8 {
+fn diode_output_signal(state: StateId, comparator_output: u8) -> u8 {
     if is_comparator(state) {
-        comparator_output(state)
+        comparator_output.min(15)
     } else {
         15
     }
@@ -673,7 +679,12 @@ fn diode_output_signal(state: StateId) -> u8 {
 /// signal if `POWERED` else `0` (its own diode-block override);
 /// observer -> `15` if `POWERED` else `0` (its own observer-block override).
 #[must_use]
+#[cfg(test)]
 pub fn own_signal(state: StateId) -> u8 {
+    own_signal_with_comparator_output(state, 0)
+}
+
+fn own_signal_with_comparator_output(state: StateId, comparator_output: u8) -> u8 {
     crate::redstone_counters::bump_state_parse();
     if is_wire(state) {
         wire_power(state)
@@ -685,7 +696,7 @@ pub fn own_signal(state: StateId) -> u8 {
         }
     } else if is_diode(state) {
         if diode_powered(state) {
-            diode_output_signal(state)
+            diode_output_signal(state, comparator_output)
         } else {
             0
         }
@@ -755,7 +766,17 @@ pub fn is_signal_source(state: StateId) -> bool {
 /// separately, and with a `-1` decay, by
 /// [`crate::redstone_wire::incoming_wire_signal`]).
 #[must_use]
+#[cfg(test)]
 pub fn weak_signal(state: StateId, direction: Direction, ignore_wire: bool) -> u8 {
+    weak_signal_with_comparator_output(state, direction, ignore_wire, 0)
+}
+
+fn weak_signal_with_comparator_output(
+    state: StateId,
+    direction: Direction,
+    ignore_wire: bool,
+    comparator_output: u8,
+) -> u8 {
     if is_wire(state) {
         if ignore_wire || direction == Direction::Down {
             0
@@ -784,14 +805,14 @@ pub fn weak_signal(state: StateId, direction: Direction, ignore_wire: bool) -> u
     } else if is_diode(state) {
         // DiodeBlock.getSignal (`:152-154`): only in its own FACING direction.
         if diode_facing(state) == direction {
-            own_signal(state)
+            own_signal_with_comparator_output(state, comparator_output)
         } else {
             0
         }
     } else if is_observer(state) {
         // ObserverBlock.getSignal (`:110-112`): only in its own FACING direction.
         if observer_facing(state) == direction {
-            own_signal(state)
+            own_signal_with_comparator_output(state, comparator_output)
         } else {
             0
         }
@@ -806,7 +827,7 @@ pub fn weak_signal(state: StateId, direction: Direction, ignore_wire: bool) -> u
         // that these do too. A lever really does weakly power a wire directly
         // above it, and the direction-restricted half of a lever lives entirely
         // in [`direct_signal`].
-        own_signal(state)
+        own_signal_with_comparator_output(state, comparator_output)
     } else {
         0
     }
@@ -830,14 +851,24 @@ pub fn weak_signal(state: StateId, direction: Direction, ignore_wire: bool) -> u
 /// `crate::redstone_wire::a_wire_reads_a_higher_wire_across_a_one_block_conductor_step`
 /// initially reading `15` instead of the predicted `14`.
 #[must_use]
+#[cfg(test)]
 pub fn direct_signal(state: StateId, direction: Direction, ignore_wire: bool) -> u8 {
+    direct_signal_with_comparator_output(state, direction, ignore_wire, 0)
+}
+
+fn direct_signal_with_comparator_output(
+    state: StateId,
+    direction: Direction,
+    ignore_wire: bool,
+    comparator_output: u8,
+) -> u8 {
     if is_torch(state) {
         // RedstoneTorchBlock.getDirectSignal (`:99-101`): only straight DOWN
         // from the querier's perspective — i.e. only the block directly
         // ABOVE a torch receives strong power from it. Wall torches inherit
         // this unmodified (no override in vanilla's own wall-torch block).
         if direction == Direction::Down {
-            own_signal(state)
+            own_signal_with_comparator_output(state, comparator_output)
         } else {
             0
         }
@@ -845,12 +876,12 @@ pub fn direct_signal(state: StateId, direction: Direction, ignore_wire: bool) ->
         if ignore_wire {
             0
         } else {
-            weak_signal(state, direction, false)
+            weak_signal_with_comparator_output(state, direction, false, comparator_output)
         }
     } else if is_diode(state) || is_observer(state) {
         // Vanilla's own diode-block/observer-block direct-signal getters:
         // both delegate straight to `getSignal`.
-        weak_signal(state, direction, false)
+        weak_signal_with_comparator_output(state, direction, false, comparator_output)
     } else if is_lever(state) || is_button(state) {
         // Vanilla's own lever-block/button-block direct-signal getters:
         // `POWERED && getConnectedDirection(state) == direction ? 15 : 0`.
@@ -905,14 +936,20 @@ pub fn direct_signal(state: StateId, direction: Direction, ignore_wire: bool) ->
 /// erroring outside the currently-loaded chunk column (the same cross-chunk
 /// limitation `crate::gravity_tick`'s own trigger surface already accepts).
 #[must_use]
-pub fn direct_signal_to<F>(lookup: &F, pos: BlockPos, ignore_wire: bool) -> u8
+pub fn direct_signal_to<L>(lookup: &L, pos: BlockPos, ignore_wire: bool) -> u8
 where
-    F: Fn(BlockPos) -> WorldState,
+    L: RedstoneLookup + ?Sized,
 {
     let mut best = 0u8;
     for direction in ALL_DIRECTIONS {
-        let neighbor_state = lookup(direction.relative(pos));
-        let signal = direct_signal(neighbor_state, direction, ignore_wire);
+        let neighbor_pos = direction.relative(pos);
+        let neighbor_state = lookup.state_at(neighbor_pos);
+        let output = if is_comparator(neighbor_state) {
+            lookup.comparator_output(neighbor_pos)
+        } else {
+            0
+        };
+        let signal = direct_signal_with_comparator_output(neighbor_state, direction, ignore_wire, output);
         if signal > best {
             best = signal;
         }
@@ -929,12 +966,13 @@ where
 /// why that is what lets a lever on the side of a block power a wire
 /// sitting on top of it.
 #[must_use]
-pub fn signal_at<F>(lookup: &F, pos: BlockPos, direction: Direction, ignore_wire: bool) -> u8
+pub fn signal_at<L>(lookup: &L, pos: BlockPos, direction: Direction, ignore_wire: bool) -> u8
 where
-    F: Fn(BlockPos) -> WorldState,
+    L: RedstoneLookup + ?Sized,
 {
-    let state = lookup(pos);
-    let weak = weak_signal(state, direction, ignore_wire);
+    let state = lookup.state_at(pos);
+    let output = if is_comparator(state) { lookup.comparator_output(pos) } else { 0 };
+    let weak = weak_signal_with_comparator_output(state, direction, ignore_wire, output);
     if is_redstone_conductor(state) {
         weak.max(direct_signal_to(lookup, pos, ignore_wire))
     } else {
@@ -945,9 +983,9 @@ where
 /// Vanilla's own signal-getter best-neighbor-signal routine: the strongest signal
 /// any of `pos`'s six neighbours presents back at it.
 #[must_use]
-pub fn best_neighbor_signal<F>(lookup: &F, pos: BlockPos, ignore_wire: bool) -> u8
+pub fn best_neighbor_signal<L>(lookup: &L, pos: BlockPos, ignore_wire: bool) -> u8
 where
-    F: Fn(BlockPos) -> WorldState,
+    L: RedstoneLookup + ?Sized,
 {
     crate::redstone_counters::bump_signal_query();
     let mut best = 0u8;
@@ -974,14 +1012,15 @@ where
 /// a block of redstone beside a comparator supplies no side input at all, which
 /// looks like a comparator bug rather than a missing table row.
 #[must_use]
-pub fn control_input_signal<F>(lookup: &F, pos: BlockPos, direction: Direction, only_diodes: bool) -> u8
+pub fn control_input_signal<L>(lookup: &L, pos: BlockPos, direction: Direction, only_diodes: bool) -> u8
 where
-    F: Fn(BlockPos) -> WorldState,
+    L: RedstoneLookup + ?Sized,
 {
-    let state = lookup(pos);
+    let state = lookup.state_at(pos);
+    let output = if is_comparator(state) { lookup.comparator_output(pos) } else { 0 };
     if only_diodes {
         if is_diode(state) {
-            direct_signal(state, direction, false)
+            direct_signal_with_comparator_output(state, direction, false, output)
         } else {
             0
         }
@@ -990,7 +1029,7 @@ where
     } else if is_wire(state) {
         wire_power(state)
     } else if is_signal_source(state) {
-        direct_signal(state, direction, false)
+        direct_signal_with_comparator_output(state, direction, false, output)
     } else {
         0
     }
@@ -1003,9 +1042,9 @@ where
 /// lock a repeater), `false` for comparators (any signal source counts as a
 /// side input).
 #[must_use]
-pub fn alternate_signal<F>(lookup: &F, pos: BlockPos, facing: Direction, side_input_diodes_only: bool) -> u8
+pub fn alternate_signal<L>(lookup: &L, pos: BlockPos, facing: Direction, side_input_diodes_only: bool) -> u8
 where
-    F: Fn(BlockPos) -> WorldState,
+    L: RedstoneLookup + ?Sized,
 {
     let cw = facing.clockwise();
     let ccw = facing.counterclockwise();
@@ -1025,16 +1064,16 @@ where
 /// belt-and-suspenders read, since `getSignal` for a wire in a
 /// horizontal direction already returns the same value).
 #[must_use]
-pub fn input_signal<F>(lookup: &F, pos: BlockPos, facing: Direction) -> u8
+pub fn input_signal<L>(lookup: &L, pos: BlockPos, facing: Direction) -> u8
 where
-    F: Fn(BlockPos) -> WorldState,
+    L: RedstoneLookup + ?Sized,
 {
     let target_pos = facing.relative(pos);
     let signal = signal_at(lookup, target_pos, facing, false);
     if signal >= 15 {
         return signal;
     }
-    let target_state = lookup(target_pos);
+    let target_state = lookup.state_at(target_pos);
     signal.max(wire_power(target_state))
 }
 

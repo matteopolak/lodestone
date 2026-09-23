@@ -840,6 +840,25 @@ fn publish_moving_piston<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
     });
 }
 
+pub(crate) fn publish_comparator_output(
+    out: &BlockTickFeed,
+    block_entities: &BlockEntityHandle,
+    pos: BlockPos,
+    output: u8,
+) -> bool {
+    let output = output.min(15);
+    if !block_entities.with(|registry| registry.set_comparator_output(pos, output)) {
+        return false;
+    }
+    let entity = crate::block_entities::BlockEntity::Comparator { output };
+    out.publish_effect(crate::effects::WorldEffect::BlockEntityData {
+        pos,
+        block_entity_type: crate::block_entities::BlockEntityKind::Comparator,
+        nbt: crate::chunk_nbt::block_entity_update_nbt(pos, &entity),
+    });
+    true
+}
+
 /// entity-aware reaction surface: shoves every mob standing in
 /// a moving piston cell's own swept path, the instant that cell first
 /// appears. Called at the same four `propagate_and_react_with_entities`
@@ -3041,6 +3060,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                 block_ticks,
                 game_tick,
                 Some(&block_entities),
+                None,
             );
             if resident_world.had_cold_read() {
                 pending_projectile_block_hits.extend(
@@ -3251,6 +3271,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                         block_ticks,
                         game_tick,
                         Some(&block_entities),
+                        None,
                     ) {
                         let (ex, ey, ez) = event.pos;
                         if !resident_tick_set_block(&*world, ex, ey, ez, event.to) {
@@ -3345,8 +3366,13 @@ async fn run_tick_loop_with_weather_impl<W>(
                         // the whole arm: the world edits it makes go through
                         // `world`, so nothing here needs a write path.
                         let column_extent = (column.min_y, column.height);
-                        let columns =
-                            crate::random_tick::RedstoneColumns::new(&mut column, min_x, min_z, &resident_world);
+                        let columns = crate::random_tick::RedstoneColumns::new(
+                            &mut column,
+                            min_x,
+                            min_z,
+                            &resident_world,
+                            Some(&block_entities),
+                        );
                         let lookup = crate::redstone::make_columns_lookup(&columns);
 
                         // `consumed`: one item leaves the picked slot.
@@ -3917,6 +3943,14 @@ async fn run_tick_loop_with_weather_impl<W>(
                     publish_openable_sound(&block_tick_out, BlockPos::new(x, y, z), state, new_state, game_tick);
                     block_tick_out.publish(x, y, z, new_state);
                 }
+                if let Some(output) = reaction.comparator_output {
+                    publish_comparator_output(
+                        &block_tick_out,
+                        &block_entities,
+                        BlockPos::new(x, y, z),
+                        output,
+                    );
+                }
                 for event in reaction.events {
                     let (ex, ey, ez) = event.pos;
                     if !resident_tick_set_block(&*world, ex, ey, ez, event.to) {
@@ -4251,6 +4285,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                     block_ticks,
                     game_tick,
                     Some(&block_entities),
+                    None,
                 ) {
                     let (ex, ey, ez) = event.pos;
                     if !resident_tick_set_block(&*world, ex, ey, ez, event.to) {

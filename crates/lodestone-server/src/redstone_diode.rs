@@ -100,9 +100,11 @@
 
 use crate::neighbor_update::Direction;
 use crate::redstone::{
-    self, comparator_mode_subtract, comparator_output, diode_facing, diode_powered, is_diode,
-    repeater_delay_ticks, repeater_locked, WorldState,
+    self, comparator_mode_subtract, diode_facing, diode_powered, is_diode,
+    repeater_delay_ticks, repeater_locked,
 };
+#[cfg(test)]
+use crate::redstone::WorldState;
 use crate::scheduled_tick::TickPriority;
 use lodestone_data::block::Block;
 use lodestone_data::block_properties::{BuiltinPropertyValue, PropertyKey, PropertyValue};
@@ -196,10 +198,10 @@ pub fn repeater_delay(state: StateId) -> u32 {
 #[must_use]
 pub fn should_prioritize<F>(lookup: &F, pos: BlockPos, facing: Direction) -> bool
 where
-    F: Fn(BlockPos) -> WorldState,
+    F: redstone::RedstoneLookup + ?Sized,
 {
     let direction = facing.opposite();
-    let opposite_state = lookup(direction.relative(pos));
+    let opposite_state = lookup.state_at(direction.relative(pos));
     is_diode(opposite_state) && diode_facing(opposite_state) != direction
 }
 
@@ -207,7 +209,7 @@ where
 #[must_use]
 pub fn is_locked<F>(lookup: &F, pos: BlockPos, facing: Direction) -> bool
 where
-    F: Fn(BlockPos) -> WorldState,
+    F: redstone::RedstoneLookup + ?Sized,
 {
     redstone::alternate_signal(lookup, pos, facing, true) > 0
 }
@@ -219,7 +221,7 @@ where
 #[must_use]
 pub fn repeater_should_turn_on<F>(lookup: &F, pos: BlockPos, facing: Direction) -> bool
 where
-    F: Fn(BlockPos) -> WorldState,
+    F: redstone::RedstoneLookup + ?Sized,
 {
     redstone::input_signal(lookup, pos, facing) > 0
 }
@@ -238,7 +240,7 @@ pub fn should_schedule_repeater_check(state: StateId, should_turn_on: bool) -> b
 #[must_use]
 pub fn repeater_schedule_priority<F>(lookup: &F, pos: BlockPos, facing: Direction, currently_on: bool) -> TickPriority
 where
-    F: Fn(BlockPos) -> WorldState,
+    F: redstone::RedstoneLookup + ?Sized,
 {
     if should_prioritize(lookup, pos, facing) {
         TickPriority::ExtremelyHigh
@@ -299,7 +301,7 @@ pub fn run_scheduled_tick(state: StateId, should_turn_on: bool) -> RepeaterTickO
 #[must_use]
 pub fn recompute_locked<F>(lookup: &F, pos: BlockPos, state: StateId) -> Option<StateId>
 where
-    F: Fn(BlockPos) -> WorldState,
+    F: redstone::RedstoneLookup + ?Sized,
 {
     let facing = diode_facing(state);
     let new_locked = is_locked(lookup, pos, facing);
@@ -341,12 +343,6 @@ pub fn comparator_should_turn_on(input: u8, side: u8, subtract: bool) -> bool {
     }
 }
 
-/// The real comparator's neighbor-check hook's scheduling condition.
-#[must_use]
-pub fn should_schedule_comparator_check(state: StateId, input: u8, side: u8) -> bool {
-    should_schedule_comparator_check_with_output(state, input, side, comparator_output(state))
-}
-
 /// Comparator scheduling with the block-entity output supplied explicitly.
 /// Block state carries only mode and powered status; output is a numeric
 /// sidecar and must survive a state transition independently.
@@ -368,22 +364,13 @@ pub fn should_schedule_comparator_check_with_output(
 #[must_use]
 pub fn comparator_schedule_priority<F>(lookup: &F, pos: BlockPos, facing: Direction) -> TickPriority
 where
-    F: Fn(BlockPos) -> WorldState,
+    F: redstone::RedstoneLookup + ?Sized,
 {
     if should_prioritize(lookup, pos, facing) {
         TickPriority::High
     } else {
         TickPriority::Normal
     }
-}
-
-/// The real comparator's scheduled-tick hook and its refresh-output-state
-/// step — see this module's own doc
-/// comment for why the `!subtract` disjunct (compare mode always cascades)
-/// is real and derived, not an approximation.
-#[must_use]
-pub fn run_scheduled_comparator_tick(state: StateId, input: u8, side: u8) -> Option<StateId> {
-    run_scheduled_comparator_tick_with_output(state, input, side, comparator_output(state)).map(|result| result.state)
 }
 
 /// Comparator refresh with its numeric block-entity output carried separately

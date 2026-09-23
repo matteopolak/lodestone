@@ -810,7 +810,7 @@ fn axis_of(direction: Direction) -> char {
 #[must_use]
 pub fn has_extend_signal<F>(lookup: &F, pos: BlockPos, push_direction: Direction) -> bool
 where
-    F: Fn(BlockPos) -> redstone::WorldState,
+    F: redstone::RedstoneLookup + ?Sized,
 {
     for direction in ALL_DIRECTIONS {
         if direction != push_direction

@@ -6,10 +6,10 @@ The server's redstone model: dust/torch signal propagation, repeaters,
 comparators, observers, pistons, the player-facing input devices (levers,
 buttons, plates, rails, dispensers, note blocks, tripwire, target blocks), and
 two consumers built on top — the beacon and the vibration/warden substrate.
-All of it is pure query/decision functions over a `Fn(BlockPos) -> String`
-world lookup, the same shape [`docs/tick-scheduling.md`](./tick-scheduling.md)
-established for gravity blocks — no `ChunkColumn` in scope except through that
-closure.
+Signal queries use `RedstoneLookup`, which reads typed `StateId` values and
+position-specific comparator output. Production queries use a borrowed column
+view and block-entity registry; state-only closures explicitly adapt with zero
+comparator output.
 
 ## How it works
 
@@ -95,6 +95,13 @@ comparator does **not** lock a repeater by itself — a diode's lock
 contribution is its *output signal* (for a comparator, its stored analog
 output), not its `powered` flag, so a freshly-placed `comparator[powered=true]`
 has output 0 and locks nothing.
+
+Comparator analog output is stored in the typed comparator block-entity sidecar,
+not synthesized as a block-state property. The scheduled tick's reaction carries
+the new output through the world-tick commit: it updates the sidecar and emits a
+block-entity-data effect with numeric `OutputSignal`. Signal reads query that
+sidecar by position, and chunk NBT saves and restores the same output. New
+comparator sidecars start at 0.
 
 ### A partial state string does not survive the encoder — every dust change is delivered as zero
 
