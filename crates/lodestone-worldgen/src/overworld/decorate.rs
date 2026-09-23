@@ -2948,8 +2948,8 @@ impl OverworldGenerator {
     /// Runs the complete Overworld FEATURES stage for normal generation.  The
     /// parent orchestration module can hand this the shaped prefix directly;
     /// the returned dense grid is the centre result and the entity list is in
-    /// feature write order. The normal path selects only the target origin;
-    /// the source-filtered seam remains available for source-ordered parity.
+    /// feature write order. The scalar path folds its nine admitted sources
+    /// into the target while lifecycle generation settles one source at a time.
     pub(super) fn features_stage(
         &self,
         cx: i32,
@@ -2962,13 +2962,22 @@ impl OverworldGenerator {
         if self.decoration_catalog.is_empty() {
             return (center_world, Vec::new());
         }
-        let context = self.lifecycle_replay_context(cx, cz);
+        let centre = self.pre_ore_stage(cx, cz);
+        let context = self.build_mixed_replay_context(
+            cx,
+            cz,
+            &centre.1,
+            Arc::clone(&centre.3),
+            Some(Arc::clone(&centre)),
+            None,
+            crate::feature::region_view::WIDE_RADIUS,
+        );
         self.features_stage_with_context(
             cx,
             cz,
             center_world,
             &context,
-            Some((cx, cz)),
+            None,
             &[],
             false,
         )
@@ -3006,7 +3015,7 @@ impl OverworldGenerator {
             cz,
             center_world,
             &context,
-            Some((cx, cz)),
+            None,
             &[],
             false,
         )

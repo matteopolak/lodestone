@@ -2,11 +2,8 @@
 //!
 //! `support/overworld_ore_ne_250_neg250_oracle.txt` is derived from two
 //! independent read-only packet exports of the same frozen seed-42 world. The
-//! witness cells are on chunk `(250,-250)`'s positive-Z edge. Treating the
-//! surrounding eight biome containers as part of this chunk's feature list
-//! produced an extra copper source there; a source owns only the full section
-//! biome container stored by that source chunk. The nine-source driver still
-//! provides neighbouring read/write context.
+//! witness cells are on chunk `(250,-250)`'s positive-Z edge. They include a
+//! neighboring source body's diorite spill into the target column.
 
 use std::path::{Path, PathBuf};
 
@@ -110,7 +107,7 @@ fn fixture() -> Vec<(usize, i32, usize, &'static str)> {
 }
 
 #[test]
-fn source_biome_selection_does_not_import_neighbour_copper_into_the_ne_edge() {
+fn scalar_column_includes_admitted_neighbour_source_spill() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../lodestone-server/assets/worldgen");
     let assets = Assets { root: root.clone() };
     let settings: Value = serde_json::from_str(
@@ -119,7 +116,20 @@ fn source_biome_selection_does_not_import_neighbour_copper_into_the_ne_edge() {
     )
     .expect("parse overworld settings");
     let generator = OverworldGenerator::new(42, &settings, &assets, "minecraft:plains", false);
+
+    let target_owned = generator.direct_decoration_with_overrides(250, -250, &[]);
+    assert_eq!(
+        target_owned.column.block_state_id(11, 34, 14),
+        StateId::from_state_str("minecraft:stone").expect("known state"),
+        "one-source lifecycle control must not execute the neighboring source body",
+    );
+
     let column = generator.column(250, -250);
+    assert_eq!(
+        column.block_state_id(11, 34, 14),
+        StateId::from_state_str("minecraft:diorite").expect("known state"),
+        "the scalar composition must include the positive-Z source body",
+    );
     let expected = fixture();
     assert_eq!(
         expected.len(),
