@@ -148,6 +148,8 @@ For the stage decomposition, add the server feature
 `worldgen-stage-pmu`; it requires macOS retired-instruction counters and is
 diagnostic-only. The same seed, coordinates, worker count, and batch size must
 be used for the uninstrumented total and the PMU run.
+The sustained-batch throughput and PMU lines are emitted only after every
+request has returned a column; a failed batch is a diagnostic, not a rate.
 
 `scripts/profile-worldgen-hardware.sh` exports the xctrace TOC and the target
 stdout to `scripts/summarize-xctrace-counters.py`. The summary combines
