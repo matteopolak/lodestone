@@ -1,9 +1,11 @@
 //! Proposal-backed event ordering and failure isolation.
 
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 use bevy_app::{App, Plugin};
+use bevy_ecs::world::World;
 use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockFace, BlockPos, Hand, ResourceKey, Vec3};
 use lodestone_server::ecs::{
@@ -19,6 +21,32 @@ fn key(value: &str) -> ResourceKey {
 
 fn state(value: &str) -> StateId {
     StateId::from_state_str(value).expect("test block state")
+}
+
+fn submit_despawn_on_tick(
+    handle: lodestone_server::ecs::ServerProposalHandle,
+    world: &mut World,
+    id: i32,
+) -> Result<ServerProposalAction, lodestone_server::ecs::ProposalRefusal> {
+    let (started_sender, started_receiver) = std::sync::mpsc::channel();
+    let worker = thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let mut request = Box::pin(handle.despawn_mob(id));
+        let mut started = Some(started_sender);
+        runtime.block_on(std::future::poll_fn(|context| {
+            let result = request.as_mut().poll(context);
+            if let Some(started) = started.take() {
+                started.send(()).expect("tick driver receiver");
+            }
+            result
+        }))
+    });
+    started_receiver.recv().expect("proposal submitted");
+    world.run_schedule(GameTick);
+    worker.join().expect("proposal worker")
 }
 
 fn assert_census_status(kind: PaperEventKind) {
@@ -592,29 +620,21 @@ fn entity_despawn_handle_reaches_the_production_proposal_queue() {
     });
     let handle = server.proposal_handle();
     let mut world = server.into_world();
-    let (sender, receiver) = std::sync::mpsc::channel();
-    let worker = thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("test runtime");
-        let outcome = runtime.block_on(handle.despawn_mob(7));
-        sender.send(outcome).expect("proposal result receiver");
-    });
-    let mut result = None;
-    for _ in 0..128 {
-        world.run_schedule(GameTick);
-        if let Ok(outcome) = receiver.try_recv() {
-            result = Some(outcome);
-            break;
-        }
-        thread::yield_now();
-    }
-    worker.join().expect("proposal worker");
     assert!(matches!(
-        result.or_else(|| receiver.try_recv().ok()).expect("proposal result"),
+        submit_despawn_on_tick(handle, &mut world, 7),
         Err(lodestone_server::ecs::ProposalRefusal::Denied)
     ));
+}
+
+#[test]
+fn entity_despawn_without_listener_reaches_the_proposal_queue_unchanged() {
+    let server = ServerApp::bootstrap();
+    let handle = server.proposal_handle();
+    let mut world = server.into_world();
+    assert_eq!(
+        submit_despawn_on_tick(handle, &mut world, 7),
+        Ok(ServerProposalAction::DespawnMob { id: 7 })
+    );
 }
 
 #[test]
