@@ -332,13 +332,16 @@ typed column, an edit, a hydrated column, or a cross-target override therefore
 cannot accidentally take the provenance shortcut. The one-block mutation
 control remains on the exact path and must change the resulting fingerprint.
 When an authenticated target receives a persistent cross-target write, the
-lifecycle folds that ordered `(position, state)` event into the resident
-identity in constant work; temporary speculative writes are never folded.
-The FEATURES identity is seeded from both the generated result and the current
-prefix identity, retaining writes that arrived before target completion. Once
-the region finishes its canonical mutable sequence, OUTPUT reads that terminal
-identity directly; dynamic, edited, and persisted columns retain the complete
-block-field scan.
+lifecycle appends its fixed-width `(position, state)` record to a request-scoped
+SHA-256 transcript seeded by the current identity. It finalizes a cloned hash
+state only when a caller asks for the fingerprint, so callers can inspect the
+current identity without consuming or reordering later writes. The transcript
+domain changes with this encoding; temporary speculative writes are never
+folded. The FEATURES identity is seeded from both the generated result and the
+current prefix identity, retaining writes that arrived before target
+completion. Once the region finishes its canonical mutable sequence, OUTPUT
+reads that terminal identity directly; dynamic, edited, and persisted columns
+retain the complete block-field scan.
 Target-owned FEATURES commits wait for the surrounding source-owner square and
 reuse its terminal identity, avoiding a second full-column scan; the content
 digest remains the fallback when no authenticated identity is available.
