@@ -2297,9 +2297,10 @@ mod tests {
     ///
     /// Terrain here is a synthetic flat grass plane rather than a generated
     /// column, so the `heightmap` row above is exactly 1 by construction and the
-    /// product stays a product of JSON constants. The production seam — real
-    /// embedded data, real generated terrain, the 3×3 driver, the fold back into
-    /// a `GeneratedColumn` — is
+    /// product stays a product of JSON constants. The source-less grid uses the
+    /// inline document form so its biome modifier takes the fixture's permissive
+    /// path. The production seam — real embedded data, real generated terrain,
+    /// the 3×3 driver, the fold back into a `GeneratedColumn` — is
     /// [`vegetation_reaches_real_blocks_over_a_production_sweep`]'s job.
     #[test]
     fn plains_grass_patch_attempt_count_matches_the_placement_json() {
@@ -2336,10 +2337,7 @@ mod tests {
         assert_eq!(count["count"].as_u64(), Some(COUNT as u64));
 
         let tags = build_veg_tags(&embedded_resolver());
-        let placed = resolve_placed_feature_ref(
-            &embedded_resolver(),
-            &Value::String("minecraft:patch_grass_plain".to_owned()),
-        );
+        let placed = resolve_placed_feature_ref(&embedded_resolver(), &doc);
 
         // A flat grass plane over dirt, filling chunk (0,0)'s own footprint, so
         // `heightmap: WORLD_SURFACE_WG` resolves to exactly one position per
@@ -4151,9 +4149,17 @@ mod top_layer_parity {
     /// nothing else stops the snow.
     #[test]
     fn control_dropping_the_cannot_support_tag_puts_snow_on_frozen_ocean_ice() {
-        let mut support = support();
-        support.cannot_support_snow_layer = HashSet::new();
         let ocean = load("frozen_ocean");
+        let baseline_support = support();
+        let (baseline, baseline_diff) = run(&ocean, &baseline_support, ocean.sea_level);
+        assert_eq!(baseline.snow, ocean.snow, "baseline snow count");
+        assert_eq!(baseline_diff, ocean.freeze, "baseline output");
+
+        let support = SnowSupport::parse(
+            &embedded_resolver().block_freeze_facts(),
+            HashSet::new(),
+            baseline_support.support_override_snow_layer,
+        );
         let (counts, diff) = run(&ocean, &support, ocean.sea_level);
         assert!(
             counts.snow > 0,
