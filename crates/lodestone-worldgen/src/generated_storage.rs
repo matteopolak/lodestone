@@ -239,7 +239,13 @@ impl CompactBlockStorage {
             min_y,
             height,
             cells,
-            Some((&mut summaries, motion_blocking, None, motion_blocking)),
+            Some((
+                &mut summaries,
+                motion_blocking,
+                None,
+                motion_blocking,
+                [u16::MAX; 2],
+            )),
         );
         (storage, summaries)
     }
@@ -256,6 +262,7 @@ impl CompactBlockStorage {
         motion_blocking: &[bool],
         motion_blocking_no_leaves: &[bool],
         generation_motion_blocking: Option<&[bool]>,
+        extra_air: [u16; 2],
     ) -> (Self, GeneratedColumnSummaries) {
         let mut summaries = GeneratedColumnSummaries::new(
             height,
@@ -273,6 +280,7 @@ impl CompactBlockStorage {
                 Some(motion_blocking),
                 Some(motion_blocking_no_leaves),
                 generation_motion_blocking,
+                extra_air,
             )),
         );
         (storage, summaries)
@@ -287,6 +295,7 @@ impl CompactBlockStorage {
             Option<&[bool]>,
             Option<&[bool]>,
             Option<&[bool]>,
+            [u16; 2],
         )>,
     ) -> Self {
         assert!(height >= 0, "column height is negative");
@@ -316,6 +325,7 @@ impl CompactBlockStorage {
             Option<&[bool]>,
             Option<&[bool]>,
             Option<&[bool]>,
+            [u16; 2],
         )>,
     ) -> Vec<CompactSection> {
         let section_count = (height as usize).div_ceil(SECTION_ROWS);
@@ -330,6 +340,7 @@ impl CompactBlockStorage {
                 motion_blocking,
                 motion_blocking_no_leaves,
                 generation_motion_blocking,
+                extra_air,
             )) = summaries.as_mut()
             {
                 sections.push(CompactSection::pack_observed(slice, rows, |cell, id| {
@@ -340,6 +351,7 @@ impl CompactBlockStorage {
                         *motion_blocking,
                         *motion_blocking_no_leaves,
                         *generation_motion_blocking,
+                        *extra_air,
                     );
                 }));
             } else {
@@ -604,6 +616,7 @@ impl GeneratedColumnSummaries {
         motion_blocking: Option<&[bool]>,
         motion_blocking_no_leaves: Option<&[bool]>,
         generation_motion_blocking: Option<&[bool]>,
+        extra_air: [u16; 2],
     ) -> Self {
         assert!(height >= 0, "column height is negative");
         assert_eq!(
@@ -630,6 +643,7 @@ impl GeneratedColumnSummaries {
                     motion_blocking,
                     motion_blocking_no_leaves,
                     generation_motion_blocking,
+                    extra_air,
                 );
             }
         }
@@ -642,6 +656,7 @@ impl GeneratedColumnSummaries {
         motion_blocking: &[bool],
         motion_blocking_no_leaves: &[bool],
         generation_motion_blocking: Option<&[bool]>,
+        extra_air: [u16; 2],
     ) -> Self {
         let height = storage.height;
         let mut summaries = Self::new_with_palette_len(
@@ -665,6 +680,7 @@ impl GeneratedColumnSummaries {
                     Some(motion_blocking),
                     Some(motion_blocking_no_leaves),
                     generation_motion_blocking,
+                    extra_air,
                 );
             }
         }
@@ -721,6 +737,7 @@ impl GeneratedColumnSummaries {
         motion_blocking: Option<&[bool]>,
         motion_blocking_no_leaves: Option<&[bool]>,
         generation_motion_blocking: Option<&[bool]>,
+        extra_air: [u16; 2],
     ) {
         let ly = section_row + cell / ROW_CELLS;
         self.section_state_counts[ly / SECTION_ROWS][id as usize] += 1;
@@ -729,7 +746,7 @@ impl GeneratedColumnSummaries {
         let lx = horizontal % 16;
         let index = lx + lz * 16;
         let first_free = (ly + 1) as u16;
-        if id != 0 {
+        if id != 0 && id != extra_air[0] && id != extra_air[1] {
             self.non_air_first_free[index] = first_free;
         }
         if let (Some(out), Some(predicate)) =
@@ -948,6 +965,27 @@ mod tests {
     }
 
     #[test]
+    fn summary_excludes_nondefault_air_palette_entries() {
+        let mut cells = vec![0u16; 3 * ROW_CELLS];
+        cells[0] = 1;
+        cells[ROW_CELLS] = 2;
+        cells[2 * ROW_CELLS] = 3;
+        let (_, wrong) = CompactBlockStorage::from_flat_with_summaries(-64, 3, &cells, None);
+        let (_, summaries) = CompactBlockStorage::from_flat_with_predicates(
+            -64,
+            3,
+            &cells,
+            &[false; 4],
+            &[false; 4],
+            None,
+            [2, 3],
+        );
+        assert_eq!(wrong.non_air_first_free()[0], 3);
+        assert_eq!(summaries.non_air_first_free()[0], 1);
+        assert_eq!(summaries.non_air_first_free()[1], 0);
+    }
+
+    #[test]
     fn fused_summary_negative_controls_change_each_independent_product() {
         let height = 17usize;
         let idx = |ly: usize, lz: usize, lx: usize| (ly * 16 + lz) * 16 + lx;
@@ -1010,6 +1048,7 @@ mod tests {
             Some(&motion),
             Some(&motion_no_leaves),
             None,
+            [u16::MAX; 2],
         );
         let storage = CompactBlockStorage::from_flat(0, height as i32, &cells);
         let actual = GeneratedColumnSummaries::from_storage_with_predicates(
@@ -1018,6 +1057,7 @@ mod tests {
             &motion,
             &motion_no_leaves,
             None,
+            [u16::MAX; 2],
         );
         assert_eq!(actual, expected);
 
@@ -1029,6 +1069,7 @@ mod tests {
             &motion,
             &motion_no_leaves,
             None,
+            [u16::MAX; 2],
         );
         assert_ne!(negative_control, expected);
         assert_ne!(
