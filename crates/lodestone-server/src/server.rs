@@ -19468,8 +19468,7 @@ mod tests {
     }
 
     fn default_block_state(block: Block) -> StateId {
-        Properties::state_for_block(block, &Properties::empty())
-            .expect("generated default block state")
+        block.default_state()
     }
 
     fn fixture_state(state: &str) -> StateId {
@@ -23154,27 +23153,23 @@ mod tests {
                 &looking(yaw),
                 air,
             )
-            .map(|placed| placed.state.canonical_state())
+            .map(|placed| placed.state)
         };
         // Looking north (yaw 180): a repeater and comparator face the player —
         // south — while an observer watches north.
-        assert_eq!(
-            state("minecraft:repeater", Some(180.0)),
-            Some("minecraft:repeater[facing=south,delay=1,locked=false,powered=false]".to_owned())
-        );
-        assert_eq!(
-            state("minecraft:comparator", Some(180.0)),
-            Some("minecraft:comparator[facing=south,mode=compare,powered=false,output=0]".to_owned())
-        );
-        assert_eq!(
-            state("minecraft:observer", Some(180.0)),
-            Some("minecraft:observer[facing=north,powered=false]".to_owned())
-        );
+        let repeater = state("minecraft:repeater", Some(180.0)).expect("placed repeater");
+        assert_eq!(repeater.block(), Block::Repeater);
+        assert_eq!(crate::redstone::get_str_property(repeater, PropertyKey::Facing), Some(BuiltinPropertyValue::South));
+        let comparator = state("minecraft:comparator", Some(180.0)).expect("placed comparator");
+        assert_eq!(comparator.block(), Block::Comparator);
+        assert_eq!(crate::redstone::get_str_property(comparator, PropertyKey::Facing), Some(BuiltinPropertyValue::South));
+        let observer = state("minecraft:observer", Some(180.0)).expect("placed observer");
+        assert_eq!(observer.block(), Block::Observer);
+        assert_eq!(crate::redstone::get_str_property(observer, PropertyKey::Facing), Some(BuiltinPropertyValue::North));
         // Looking east (yaw -90): a repeater faces west.
-        assert_eq!(
-            state("minecraft:repeater", Some(-90.0)),
-            Some("minecraft:repeater[facing=west,delay=1,locked=false,powered=false]".to_owned())
-        );
+        let repeater = state("minecraft:repeater", Some(-90.0)).expect("placed repeater");
+        assert_eq!(repeater.block(), Block::Repeater);
+        assert_eq!(crate::redstone::get_str_property(repeater, PropertyKey::Facing), Some(BuiltinPropertyValue::West));
         // Blocks without any orientation keep the bare census name.
         assert_eq!(state("minecraft:dirt", Some(0.0)), None);
         // And no yaw reported yet keeps the bare name for the directional

@@ -69,6 +69,7 @@ use crate::hopper::Hopper;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BlockEntityKind {
     EndGateway,
+    Comparator,
     Composter,
     Furnace,
     Smoker,
@@ -97,6 +98,7 @@ impl BlockEntityKind {
     pub fn from_name(name: &str) -> Self {
         match name {
             "minecraft:end_gateway" => Self::EndGateway,
+            "minecraft:comparator" => Self::Comparator,
             "minecraft:composter" => Self::Composter,
             "minecraft:furnace" => Self::Furnace,
             "minecraft:smoker" => Self::Smoker,
@@ -155,6 +157,7 @@ impl BlockEntityKind {
     pub const fn builtin_name(&self) -> Option<&'static str> {
         Some(match self {
             Self::EndGateway => "minecraft:end_gateway",
+            Self::Comparator => "minecraft:comparator",
             Self::Composter => "minecraft:composter",
             Self::Furnace => "minecraft:furnace",
             Self::Smoker => "minecraft:smoker",
@@ -244,6 +247,7 @@ pub enum BlockEntity {
     /// may not have received an exit yet; such a gateway is safe to contact but
     /// cannot teleport until the metadata is populated.
     EndGateway { exit: Option<BlockPos>, exact: bool },
+    Comparator { output: u8 },
     /// `minecraft:composter`.
     Composter(Composter),
     /// `minecraft:furnace`/`minecraft:smoker`/`minecraft:blast_furnace`
@@ -582,6 +586,7 @@ impl BlockEntity {
     pub fn kind(&self) -> BlockEntityKind {
         match self {
             BlockEntity::EndGateway { .. } => BlockEntityKind::EndGateway,
+            BlockEntity::Comparator { .. } => BlockEntityKind::Comparator,
             BlockEntity::Composter(_) => BlockEntityKind::Composter,
             BlockEntity::Furnace(f) => match f.kind() {
                 FurnaceKind::Furnace => BlockEntityKind::Furnace,
@@ -621,7 +626,7 @@ impl BlockEntity {
             // dispenser/dropper's `Container` — hopper adjacency into one
             // works the identical way.
             BlockEntity::Crafter { slots, .. } => Some(slots.as_mut_slice()),
-            BlockEntity::EndGateway { .. } | BlockEntity::Composter(_) | BlockEntity::Furnace(_) | BlockEntity::BrewingStand(_)
+            BlockEntity::EndGateway { .. } | BlockEntity::Comparator { .. } | BlockEntity::Composter(_) | BlockEntity::Furnace(_) | BlockEntity::BrewingStand(_)
             | BlockEntity::Opaque { .. } | BlockEntity::CommandBlock(_)
             | BlockEntity::Spawner(_) | BlockEntity::Sign(_) | BlockEntity::Beacon(_) | BlockEntity::Lectern(_) => {
                 None
@@ -677,7 +682,7 @@ impl BlockEntity {
             } else {
                 "minecraft:generic_9x3"
             }),
-            BlockEntity::EndGateway { .. } | BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
+            BlockEntity::EndGateway { .. } | BlockEntity::Comparator { .. } | BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
             // A command block opens its own dedicated GUI
             // (`Player.openCommandBlock`), not an `AbstractContainerMenu` —
             // there is no vanilla menu identifier for it at all.
@@ -715,7 +720,7 @@ impl BlockEntity {
             // `CrafterMenu.addSlots`'s own `x + y * 3` order — already this
             // array's own indexing.
             BlockEntity::Crafter { slots, .. } => slots.to_vec(),
-            BlockEntity::EndGateway { .. } | BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
+            BlockEntity::EndGateway { .. } | BlockEntity::Comparator { .. } | BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
             | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) => Vec::new(),
         }
     }
@@ -788,7 +793,7 @@ impl BlockEntity {
                     *cell = item;
                 }
             }
-            BlockEntity::EndGateway { .. } | BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
+            BlockEntity::EndGateway { .. } | BlockEntity::Comparator { .. } | BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
             | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) => {}
         }
     }
@@ -801,7 +806,7 @@ impl BlockEntity {
             BlockEntity::Beacon(_) => 1,
             BlockEntity::Lectern(_) => 1,
             BlockEntity::Crafter { slots, .. } => slots.len(),
-            BlockEntity::EndGateway { .. } | BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
+            BlockEntity::EndGateway { .. } | BlockEntity::Comparator { .. } | BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
             | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) => 0,
         }
     }
@@ -878,7 +883,7 @@ impl BlockEntity {
                 props.push(0);
                 props
             }
-            BlockEntity::EndGateway { .. } | BlockEntity::Hopper(_) | BlockEntity::Composter(_) | BlockEntity::BrewingStand(_)
+            BlockEntity::EndGateway { .. } | BlockEntity::Comparator { .. } | BlockEntity::Hopper(_) | BlockEntity::Composter(_) | BlockEntity::BrewingStand(_)
             | BlockEntity::Container { .. } | BlockEntity::Opaque { .. }
             | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) | BlockEntity::Lectern(_) => {
                 Vec::new()
@@ -940,7 +945,7 @@ impl BlockEntity {
             // No `craftingTicksRemaining` countdown here — see this variant's
             // own doc comment for why the trigger itself is out of scope.
             BlockEntity::Crafter { .. } | BlockEntity::Lectern(_) => None,
-            BlockEntity::EndGateway { .. } | BlockEntity::Container { .. } | BlockEntity::Opaque { .. } | BlockEntity::CommandBlock(_)
+            BlockEntity::EndGateway { .. } | BlockEntity::Comparator { .. } | BlockEntity::Container { .. } | BlockEntity::Opaque { .. } | BlockEntity::CommandBlock(_)
             | BlockEntity::Spawner(_) | BlockEntity::Sign(_) | BlockEntity::Beacon(_) => None,
         }
     }
@@ -1010,6 +1015,7 @@ const PLACEMENT_STACK_BUDGET: usize = 256 * 1024;
 /// 9,168 bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlacedBlockEntity {
+    Comparator,
     Composter,
     Furnace(FurnaceKind),
     Hopper,
@@ -1031,6 +1037,7 @@ impl PlacedBlockEntity {
     /// container variants need as their type key.
     fn instantiate(self, block: &str) -> BlockEntity {
         match self {
+            PlacedBlockEntity::Comparator => BlockEntity::Comparator { output: 0 },
             PlacedBlockEntity::Composter => BlockEntity::Composter(Composter::new()),
             PlacedBlockEntity::Furnace(kind) => BlockEntity::Furnace(Furnace::new(kind)),
             PlacedBlockEntity::Hopper => BlockEntity::Hopper(Hopper::new()),
@@ -1062,6 +1069,7 @@ impl PlacedBlockEntity {
 /// has.
 fn placed_block_entity_for_item(item: &str) -> Option<(&'static str, PlacedBlockEntity)> {
     let placed = match item {
+        "minecraft:comparator" => ("minecraft:comparator", PlacedBlockEntity::Comparator),
         "minecraft:furnace" => ("minecraft:furnace", PlacedBlockEntity::Furnace(FurnaceKind::Furnace)),
         "minecraft:smoker" => ("minecraft:smoker", PlacedBlockEntity::Furnace(FurnaceKind::Smoker)),
         "minecraft:blast_furnace" => (
@@ -1491,6 +1499,34 @@ impl BlockEntityRegistry {
     /// A mutable view of the entity at `pos`, if any.
     pub fn get_mut(&mut self, pos: BlockPos) -> Option<&mut BlockEntity> {
         self.entities.get_mut(&pos)
+    }
+
+    #[must_use]
+    pub fn comparator_output(&self, pos: BlockPos) -> Option<u8> {
+        match self.entities.get(&pos) {
+            Some(BlockEntity::Comparator { output }) => Some(*output),
+            _ => None,
+        }
+    }
+
+    pub fn set_comparator_output(&mut self, pos: BlockPos, output: u8) -> bool {
+        let output = output.min(15);
+        match self.entities.entry(pos) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(BlockEntity::Comparator { output });
+                true
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                let BlockEntity::Comparator { output: current } = entry.get_mut() else {
+                    return false;
+                };
+                if *current == output {
+                    return false;
+                }
+                *current = output;
+                true
+            }
+        }
     }
 
     /// Snapshots the current registry into deterministic chunk-local owners.

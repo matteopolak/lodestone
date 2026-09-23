@@ -59,6 +59,7 @@ use lodestone_data::block_states::StateId;
 
 use crate::block_entities::BlockEntityHandle;
 use crate::chunk::{ChunkColumn, ChunkSource};
+use crate::redstone::RedstoneLookup;
 use crate::random_tick::RandomTickEvent;
 use crate::scheduled_tick::{ScheduledTickKind, ScheduledTickQueueAccess, TickPriority};
 
@@ -69,6 +70,7 @@ pub struct BlockTickReaction {
     /// change at all. `Some` with a value equal to the old state is a real
     /// outcome, not a no-op — see the module doc.
     pub new_state: Option<StateId>,
+    pub comparator_output: Option<u8>,
     /// Every *other* cell the change rewrote, in the order the cascade
     /// produced them. Written into the home column already, but **not**
     /// through `world`: the cascade's view of a neighbouring column is a
@@ -102,24 +104,17 @@ pub fn run_due_block_tick<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Size
     block_entities: Option<&BlockEntityHandle>,
 ) -> BlockTickReaction {
     let (x, y, z) = (pos.x, pos.y, pos.z);
+    let mut comparator_output = None;
     // Scoped so the borrow this view holds on `column` ends before the direct
     // `column.set_block` below and before the cascade builds its own view.
     let new_state = {
-        let columns = crate::random_tick::RedstoneColumns::new(column, min_x, min_z, world);
+        let columns = crate::random_tick::RedstoneColumns::new(column, min_x, min_z, world, block_entities);
         if kind == &ScheduledTickKind::Torch {
-            let has_signal = crate::redstone_torch::has_neighbor_signal(
-                &crate::redstone::make_columns_lookup(&columns),
-                pos,
-                state,
-            );
+            let has_signal = crate::redstone_torch::has_neighbor_signal(&columns, pos, state);
             crate::redstone_torch::run_scheduled_tick(state, has_signal)
         } else if kind == &ScheduledTickKind::Repeater {
             let facing = crate::redstone::diode_facing(state);
-            let should_on = crate::redstone_diode::repeater_should_turn_on(
-                &crate::redstone::make_columns_lookup(&columns),
-                pos,
-                facing,
-            );
+            let should_on = crate::redstone_diode::repeater_should_turn_on(&columns, pos, facing);
             match crate::redstone_diode::run_scheduled_tick(state, should_on) {
                 crate::redstone_diode::RepeaterTickOutcome::TurnedOff(s) => Some(s),
                 crate::redstone_diode::RepeaterTickOutcome::TurnedOn { new_state, reschedule } => {
@@ -139,18 +134,22 @@ pub fn run_due_block_tick<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Size
             }
         } else if kind == &ScheduledTickKind::Comparator {
             let facing = crate::redstone::diode_facing(state);
-            let input = crate::redstone::input_signal(
-                &crate::redstone::make_columns_lookup(&columns),
-                pos,
-                facing,
-            );
-            let side = crate::redstone::alternate_signal(
-                &crate::redstone::make_columns_lookup(&columns),
-                pos,
-                facing,
-                false,
-            );
-            crate::redstone_diode::run_scheduled_comparator_tick(state, input, side)
+            let input = crate::redstone::input_signal(&columns, pos, facing);
+            let side = crate::redstone::alternate_signal(&columns, pos, facing, false);
+            let stored_output = columns.comparator_output(pos);
+            crate::redstone_diode::run_scheduled_comparator_tick_with_output(
+                state,
+                input,
+                side,
+                stored_output,
+            )
+            .map(|result| {
+                if result.output != stored_output {
+                    comparator_output = Some(result.output);
+                    columns.override_comparator_output(pos, result.output);
+                }
+                result.state
+            })
         } else if kind == &ScheduledTickKind::Observer {
             let (new_state, reschedule) = crate::redstone_observer::run_scheduled_tick(state);
             if reschedule {
@@ -213,9 +212,11 @@ pub fn run_due_block_tick<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Size
         block_ticks,
         current_tick,
         block_entities,
+        comparator_output.map(|output| (pos, output)),
     );
     BlockTickReaction {
         new_state: Some(new_state),
+        comparator_output,
         events,
     }
 }

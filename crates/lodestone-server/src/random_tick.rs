@@ -721,7 +721,7 @@ impl RandomTickScheduler {
             // reachable; see [`RedstoneColumns`] for the residency boundary
             // that still stops the cascade at the edge of loaded simulation.
             events.extend(propagate_and_react_with_entities_across_chunks(
-                column, min_x, min_z, world, ex, ey, ez, block_ticks, current_tick, None,
+                column, min_x, min_z, world, ex, ey, ez, block_ticks, current_tick, None, None,
             ));
         }
         events
@@ -1141,7 +1141,9 @@ mod tests {
         let mut column = ChunkColumn::new(0, 16);
         column.set_block(3, 5, 3, GRASS_BLOCK);
         column.set_block(3, 6, 3, "minecraft:stone"); // covers it: not air-exposed
-        assert_eq!(column.block_state(3, 5, 3), GRASS_BLOCK);
+        let grass = column.block_state_id(3, 5, 3);
+        assert_eq!(grass.block(), Block::GrassBlock);
+        assert_eq!(crate::redstone::property_bool(grass, PropertyKey::Snowy), Some(false));
 
         let mut scheduler = RandomTickScheduler::new(1, 1);
         let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
@@ -1161,7 +1163,7 @@ mod tests {
             }
         }
         assert!(converted, "a covered grass block must eventually die to dirt");
-        assert_eq!(column.block_state(3, 5, 3), DIRT_BLOCK);
+        assert_eq!(column.block_state_id(3, 5, 3), sid(DIRT_BLOCK));
     }
 
     /// Negative control for the end-to-end test: an UNCOVERED grass block
@@ -1182,7 +1184,9 @@ mod tests {
                 "an air-exposed grass block must never die to dirt"
             );
         }
-        assert_eq!(column.block_state(3, 5, 3), GRASS_BLOCK);
+        let grass = column.block_state_id(3, 5, 3);
+        assert_eq!(grass.block(), Block::GrassBlock);
+        assert_eq!(crate::redstone::property_bool(grass, PropertyKey::Snowy), Some(false));
     }
 
     /// **Which above-block kills grass, predicted from the documented rules:**
@@ -1352,8 +1356,8 @@ mod tests {
         column.set_block(3, 5, 3, GRASS_BLOCK);
         column.set_block(3, 6, 3, "minecraft:short_grass");
         assert_eq!(
-            column.block_state(3, 6, 3),
-            "minecraft:short_grass",
+            column.block_state_id(3, 6, 3),
+            sid("minecraft:short_grass"),
             "fixture precondition: the cover is short grass, not air and not stone \
              — a fixture of either cannot see this bug"
         );
@@ -1367,7 +1371,9 @@ mod tests {
                 "grass under short grass must never die to dirt"
             );
         }
-        assert_eq!(column.block_state(3, 5, 3), GRASS_BLOCK);
+        let grass = column.block_state_id(3, 5, 3);
+        assert_eq!(grass.block(), Block::GrassBlock);
+        assert_eq!(crate::redstone::property_bool(grass, PropertyKey::Snowy), Some(false));
         // The tick really ran: with `tick_speed = 200` over 3,000 calls the
         // position pick lands on this cell ~146 times, and each visit costs
         // 12 behaviour draws on the live branch and 0 on the die branch. So a
@@ -1595,7 +1601,10 @@ mod tests {
             let events = scheduler.tick_chunk(&mut column, 0, 0, 8, &mut block_ticks, 0, &NoNeighbors);
             assert!(events.is_empty(), "a persistent leaf must never be selected for a random tick");
         }
-        assert_eq!(column.block_state(6, 5, 6), "minecraft:oak_leaves[distance=7,persistent=true]");
+        assert_eq!(
+            column.block_state_id(6, 5, 6),
+            sid("minecraft:oak_leaves[distance=7,persistent=true]")
+        );
     }
 
     /// Negative control: a leaf within range of a log (`distance < 7`) never
@@ -1610,7 +1619,10 @@ mod tests {
             let events = scheduler.tick_chunk(&mut column, 0, 0, 8, &mut block_ticks, 0, &NoNeighbors);
             assert!(events.is_empty(), "a leaf within range of a log must never be selected for a random tick");
         }
-        assert_eq!(column.block_state(6, 5, 6), "minecraft:oak_leaves[distance=3,persistent=false]");
+        assert_eq!(
+            column.block_state_id(6, 5, 6),
+            sid("minecraft:oak_leaves[distance=3,persistent=false]")
+        );
     }
 
     // # Gravity blocks reached through `NeighborPropagator`'s first real
@@ -2032,11 +2044,10 @@ mod tests {
 
         let events = flip_torch_and_propagate(&mut column, torch, false);
         assert!(events.is_empty(), "an unlit torch must produce no reaction events");
-        assert_eq!(
-            column.block_state(3, 5, 3),
-            "minecraft:oak_trapdoor[half=bottom,open=false,powered=false]",
-            "the trapdoor must stay closed"
-        );
+        let trapdoor = column.block_state_id(3, 5, 3);
+        assert_eq!(trapdoor.block(), Block::OakTrapdoor);
+        assert_eq!(crate::redstone::property_bool(trapdoor, PropertyKey::Open), Some(false));
+        assert_eq!(crate::redstone::property_bool(trapdoor, PropertyKey::Powered), Some(false));
     }
 
     /// A fence gate follows the same shape as the trapdoor — opens when
@@ -2364,9 +2375,10 @@ mod tests {
         let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         let events = react_at_removal(&mut column, 0, 0, &NoNeighbors, 2, 5, 0, sid(&broken), &mut block_ticks, 0);
 
-        let hook_now = column.block_state(0, 5, 0).to_string();
+        let hook_now = column.block_state_id(0, 5, 0);
         assert_eq!(
-            hook_now, "minecraft:tripwire_hook[facing=east,attached=true,powered=true]",
+            hook_now,
+            sid("minecraft:tripwire_hook[facing=east,attached=true,powered=true]"),
             "even though neither surviving wire cell is itself powered, breaking the \
              middle one must pulse the controlling hook powered=true for one instant"
         );
@@ -2380,9 +2392,10 @@ mod tests {
         );
 
         // One scan, two endpoints: the receiver hook is rewritten too.
-        let receiver_now = column.block_state(4, 5, 0).to_string();
+        let receiver_now = column.block_state_id(4, 5, 0);
         assert_eq!(
-            receiver_now, "minecraft:tripwire_hook[facing=west,attached=true,powered=true]"
+            receiver_now,
+            sid("minecraft:tripwire_hook[facing=west,attached=true,powered=true]")
         );
 
         // The pulse is transient: a recheck is scheduled so the hook settles
@@ -2461,10 +2474,6 @@ mod tests {
 
         fn insert(&self, cx: i32, cz: i32, column: ChunkColumn) {
             self.columns.lock().expect("test world poisoned").insert((cx, cz), column);
-        }
-
-        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
-            self.block_state_id(x, y, z).canonical_state()
         }
 
         fn set_block<S: FixtureState>(&self, x: i32, y: i32, z: i32, state: S) {
@@ -2571,7 +2580,7 @@ mod tests {
 
         let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         let events = propagate_and_react_with_entities_across_chunks(
-            &mut home, 0, 0, &world, 15, 5, 8, &mut block_ticks, 0, None,
+            &mut home, 0, 0, &world, 15, 5, 8, &mut block_ticks, 0, None, None,
         );
         let neighbor_event = events
             .iter()
@@ -2626,7 +2635,7 @@ mod tests {
 
         let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         let events = propagate_and_react_with_entities_across_chunks(
-            &mut home, 0, 0, &world, 15, 5, 8, &mut block_ticks, 0, None,
+            &mut home, 0, 0, &world, 15, 5, 8, &mut block_ticks, 0, None, None,
         );
         assert!(
             !events.iter().any(|e| e.pos == (16, 5, 8)),
@@ -2845,16 +2854,18 @@ mod tests {
             BlockPos::new(5, SEAM_ROW_Y, SEAM_ROW_Z),
             sid(SEAM_TRIPWIRE),
         );
-        let reference_scanning = reference.block_state(2, SEAM_ROW_Y, SEAM_ROW_Z);
-        let reference_receiving = reference.block_state(7, SEAM_ROW_Y, SEAM_ROW_Z);
+        let reference_scanning =
+            ChunkSource::block_state_id(&reference, 2, SEAM_ROW_Y, SEAM_ROW_Z);
+        let reference_receiving =
+            ChunkSource::block_state_id(&reference, 7, SEAM_ROW_Y, SEAM_ROW_Z);
         assert_eq!(
             reference_scanning,
-            seam_hook("east", true, true),
+            sid(&seam_hook("east", true, true)),
             "reference premise: a snapped armed string must pulse the scanning hook"
         );
         assert_eq!(
             reference_receiving,
-            seam_hook("west", true, true),
+            sid(&seam_hook("west", true, true)),
             "reference premise: one scan rewrites both endpoints"
         );
         assert_eq!(reference_changed.len(), 2, "reference premise: exactly the two hooks: {reference_changed:?}");
@@ -2907,13 +2918,13 @@ mod tests {
         );
 
         assert_eq!(
-            world.block_state(SCANNING_X, SEAM_ROW_Y, SEAM_ROW_Z),
+            ChunkSource::block_state_id(&world, SCANNING_X, SEAM_ROW_Y, SEAM_ROW_Z),
             reference_scanning,
             "the controlling hook at world x={SCANNING_X} is in chunk (0, 0) while the broken cell is in \
              chunk (1, 0); its state must not depend on where the seam fell"
         );
         assert_eq!(
-            world.block_state(RECEIVING_X, SEAM_ROW_Y, SEAM_ROW_Z),
+            ChunkSource::block_state_id(&world, RECEIVING_X, SEAM_ROW_Y, SEAM_ROW_Z),
             reference_receiving,
             "the receiving hook at world x={RECEIVING_X}"
         );
@@ -2933,8 +2944,8 @@ mod tests {
         // here rather than passing on the hook states alone.
         for x in [SCANNING_X + 1, 15, 16, RECEIVING_X - 1] {
             assert_eq!(
-                world.block_state(x, SEAM_ROW_Y, SEAM_ROW_Z),
-                SEAM_TRIPWIRE,
+                ChunkSource::block_state_id(&world, x, SEAM_ROW_Y, SEAM_ROW_Z),
+                sid(SEAM_TRIPWIRE),
                 "wire cell at world x={x} must be untouched"
             );
         }
@@ -2965,8 +2976,8 @@ mod tests {
              got {control_changed:?} / {control_scheduled:?}"
         );
         assert_eq!(
-            control.block_state(SCANNING_X, SEAM_ROW_Y, SEAM_ROW_Z),
-            seam_hook("east", true, false),
+            ChunkSource::block_state_id(&control, SCANNING_X, SEAM_ROW_Y, SEAM_ROW_Z),
+            sid(&seam_hook("east", true, false)),
             "control failed: the unreachable hook must keep the state it was seeded with"
         );
     }

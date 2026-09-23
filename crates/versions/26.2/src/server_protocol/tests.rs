@@ -2096,6 +2096,47 @@ mod block_edit_tests {
         ));
     }
 
+    #[test]
+    fn comparator_output_update_reaches_wire_as_numeric_fifteen() {
+        let proto = V770ServerProtocol;
+        let pos = lodestone_model::BlockPos::new(11, 64, -4);
+        let effect = lodestone_server::effects::WorldEffect::BlockEntityData {
+            pos,
+            block_entity_type: lodestone_server::BlockEntityKind::Comparator,
+            nbt: lodestone_core::Nbt::Compound(vec![(
+                "OutputSignal".to_owned(),
+                lodestone_core::Nbt::Int(15),
+            )]),
+        };
+        let ServerDirective::Send { packet_id, payload } = proto.encode_world_effect(&effect) else {
+            panic!("the comparator output must reach the wire");
+        };
+        assert_eq!(packet_id, play::clientbound::BLOCK_ENTITY_DATA);
+
+        let mut r = Reader::new(&payload);
+        assert_eq!(
+            unpack_block_pos(r.i64().expect("packed position")),
+            pos
+        );
+        let type_id = r.var_i32().expect("type id") as u32;
+        assert_eq!(
+            lodestone_data::block_entity_types::block_entity_type_name(
+                lodestone_data::block_entity_types::BlockEntityType::new(type_id)
+                    .expect("wire type validates"),
+            ),
+            "minecraft:comparator"
+        );
+        let nbt = lodestone_core::read_network_nbt(&mut r).expect("network nbt");
+        r.ensure_empty().expect("no trailing bytes");
+        assert_eq!(
+            nbt,
+            lodestone_core::Nbt::Compound(vec![(
+                "OutputSignal".to_owned(),
+                lodestone_core::Nbt::Int(15),
+            )])
+        );
+    }
+
     /// Pins `encode_game_event`'s wire layout end to end: one unsigned byte
     /// event id, then a big-endian `f32` param, nothing else — the shape
     /// vanilla's own clientbound game-event packet writes (confirmed against

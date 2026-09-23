@@ -43,21 +43,25 @@
 //!
 //! The **scheduling decisions** (which position, which kind, which exact
 //! trigger tick) are asserted on the return of
-//! [`crate::random_tick::propagate_and_react`] — the production entry point
-//! `crate::tick::run_tick_loop` itself calls. The **state transitions** those
-//! scheduled ticks then perform are driven through the same per-family
-//! functions `run_tick_loop`'s drain calls, in the same order; that drain
-//! mirror is a re-implementation and is named as one rather than presented as
-//! production coverage.
+//! [`crate::random_tick::propagate_and_react`]. Comparator ticks use the
+//! production scheduled-tick drain and output commit path. Repeater and
+//! observer transitions remain checked through their family functions in the
+//! order used by the tick loop.
 
 use crate::chunk::ChunkColumn;
+use crate::chunk::ChunkSource;
+use crate::block_entities::{BlockEntity, BlockEntityHandle};
 use crate::neighbor_update::Direction;
-use crate::random_tick::propagate_and_react;
-use crate::scheduled_tick::ScheduledTickQueue;
+use crate::random_tick::{
+    NoNeighbors, propagate_and_react, propagate_and_react_with_entities_across_chunks,
+};
+use crate::scheduled_tick::{ScheduledTickKind, ScheduledTickQueue};
+use crate::tick::{BlockTickFeed, publish_comparator_output};
 use crate::{redstone, redstone_diode, redstone_observer, redstone_torch, redstone_wire};
 use lodestone_data::block::Block;
 use lodestone_data::block_states::StateId;
 use lodestone_model::BlockPos;
+use std::sync::Mutex;
 
 const MIN_Y: i32 = -64;
 const HEIGHT: i32 = 384;
@@ -497,12 +501,17 @@ fn comparator_output_matches_the_live_server_in_both_modes() {
 /// The comparator's own rig, end to end: input dust fed by a lit torch to the
 /// west, an optional side arm fed by its own lit torch to the south, output
 /// dust to the east.
-fn comparator_rig(subtract: bool, with_side: bool) -> ChunkColumn {
+fn comparator_rig(subtract: bool, with_side: bool, stored_output: u8) -> ChunkColumn {
     let mut column = column_with_floor();
     // Input arm (west): torch at x=6, dust at x=7 -> power 15.
     column.set_block_id(6, Y, ROW_Z, redstone_torch::set_standing_lit(true));
     column.set_block_id(7, Y, ROW_Z, redstone_wire::set_power(0));
-    column.set_block_id(8, Y, ROW_Z, redstone_diode::set_comparator(Direction::West, subtract, false, 0));
+    column.set_block_id(
+        8,
+        Y,
+        ROW_Z,
+        redstone_diode::set_comparator(Direction::West, subtract, stored_output > 0, stored_output),
+    );
     column.set_block_id(9, Y, ROW_Z, redstone_wire::set_power(0));
     if with_side {
         // Side arm (south = +z): torch at z+2, dust at z+1 -> power 15.
@@ -510,6 +519,31 @@ fn comparator_rig(subtract: bool, with_side: bool) -> ChunkColumn {
         column.set_block_id(8, Y, ROW_Z + 1, redstone_wire::set_power(0));
     }
     column
+}
+
+#[derive(Default)]
+struct ComparatorTickSource(Mutex<Vec<(i32, i32, i32, StateId)>>);
+
+impl ChunkSource for ComparatorTickSource {
+    fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+        unreachable!("the comparator rig does not admit neighbour columns")
+    }
+
+    fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
+        unreachable!("the comparator rig does not admit neighbour columns")
+    }
+
+    fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+        unreachable!("the comparator rig does not admit neighbour columns")
+    }
+
+    fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
+        self.0.lock().expect("comparator rig source poisoned").push((x, y, z, state));
+    }
+
+    fn is_column_resident(&self, _cx: i32, _cz: i32) -> bool {
+        false
+    }
 }
 
 /// **End to end through the production path**, for the two live rows this rig
@@ -533,10 +567,35 @@ fn a_comparator_rig_reaches_the_live_output_through_the_production_path() {
         (true, true, 0),
     ] {
         let mode = if subtract { "subtract" } else { "compare" };
-        let mut column = comparator_rig(subtract, with_side);
-        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        let old_output = if oracle_out == 0 { 15 } else { 0 };
+        let mut column = comparator_rig(subtract, with_side, old_output);
+        let position = BlockPos::new(8, Y, ROW_Z);
+        let block_entities = BlockEntityHandle::default();
+        block_entities.with(|registry| {
+            registry.insert(position, BlockEntity::Comparator { output: old_output });
+        });
+        column.set_block_id(9, Y, ROW_Z, redstone_wire::set_power(old_output));
+        let mut block_ticks = ScheduledTickQueue::<ScheduledTickKind>::new();
+        let source = ComparatorTickSource::default();
         // Drive from the input torch, exactly as a torch flip does in production.
-        let _ = propagate_and_react(&mut column, 0, 0, 6, Y, ROW_Z, &mut block_ticks, NOW);
+        let _ = propagate_and_react_with_entities_across_chunks(
+            &mut column,
+            0,
+            0,
+            &source,
+            6,
+            Y,
+            ROW_Z,
+            &mut block_ticks,
+            NOW,
+            Some(&block_entities),
+            None,
+        );
+        assert_eq!(
+            redstone::wire_power(at(&column, 9, Y, ROW_Z)),
+            old_output,
+            "mode={mode}: the comparator rig's persisted output must reach downstream dust before its scheduled refresh"
+        );
 
         let input = redstone::wire_power(at(&column, 7, Y, ROW_Z));
         assert_eq!(
@@ -553,26 +612,106 @@ fn a_comparator_rig_reaches_the_live_output_through_the_production_path() {
             );
         }
 
-        let entries = scheduled(&mut block_ticks);
-        let due = find(&entries, (8, Y, ROW_Z), redstone::TICK_COMPARATOR).unwrap_or_else(|| {
-            panic!("mode={mode}: no comparator tick scheduled at (x=8, y={Y}, z={ROW_Z}); entries {entries:?}")
-        });
+        let due = block_ticks
+            .drain_due(NOW + 4_096, 4_096)
+            .into_iter()
+            .find(|tick| tick.pos == (8, Y, ROW_Z) && tick.kind == ScheduledTickKind::Comparator)
+            .unwrap_or_else(|| panic!("mode={mode}: no comparator tick scheduled at (x=8, y={Y}, z={ROW_Z})"));
         assert_eq!(
-            due - NOW,
+            due.trigger_tick - NOW,
             ORACLE_COMPARATOR_DELAY,
             "mode={mode}: our model schedules the comparator {} tick(s) out; the live 26.2 server \
              changed its output after {ORACLE_COMPARATOR_DELAY}",
-            due - NOW
+            due.trigger_tick - NOW
         );
 
         let state = at(&column, 8, Y, ROW_Z);
-        let flipped = redstone_diode::run_scheduled_comparator_tick(state, input, side);
-        let out = flipped.map_or_else(|| redstone::comparator_output(state), redstone::comparator_output);
+        let reaction = crate::block_tick_reaction::run_due_block_tick(
+            &mut column,
+            0,
+            0,
+            &source,
+            &due.kind,
+            position,
+            state,
+            &mut block_ticks,
+            due.trigger_tick,
+            Some(&block_entities),
+        );
+        let out = reaction.comparator_output.unwrap_or(old_output);
         assert_eq!(
             out, oracle_out,
             "comparator[mode={mode}] at (x=8, y={Y}, z={ROW_Z}) with input={input}, side={side}: \
-             our model's scheduled tick produced output {out}, the live 26.2 server measured \
+             the production scheduled tick produced output {out}, the live 26.2 server measured \
              {oracle_out}"
+        );
+        assert_eq!(
+            redstone::wire_power(at(&column, 9, Y, ROW_Z)),
+            oracle_out,
+            "mode={mode}: downstream dust did not receive the comparator's analog output"
+        );
+        assert_eq!(
+            reaction.events.iter().find(|event| event.pos == (9, Y, ROW_Z)).map(|event| event.to),
+            Some(redstone_wire::set_power(oracle_out)),
+            "mode={mode}: the output dust update was not carried by the production reaction"
+        );
+
+        let feed = BlockTickFeed::default();
+        if let Some(output) = reaction.comparator_output {
+            assert!(publish_comparator_output(
+                &feed,
+                &block_entities,
+                position,
+                output,
+            ));
+        }
+        assert_eq!(block_entities.with(|registry| registry.comparator_output(position)), Some(oracle_out));
+        let effects = feed.drain_effects_for(uuid::Uuid::nil());
+        assert_eq!(effects.len(), 1, "mode={mode}: comparator update did not enter the packet effect lane");
+        let crate::effects::WorldEffect::BlockEntityData {
+            pos: effect_pos,
+            block_entity_type,
+            nbt: update_tag,
+        } = &effects[0]
+        else {
+            panic!("mode={mode}: comparator output must use the block-entity packet lane");
+        };
+        assert_eq!(*effect_pos, position);
+        assert_eq!(block_entity_type, &crate::block_entities::BlockEntityKind::Comparator);
+        assert_eq!(
+            update_tag,
+            &lodestone_core::Nbt::Compound(vec![("OutputSignal".to_owned(), lodestone_core::Nbt::Int(i32::from(oracle_out)))]),
+            "mode={mode}: the block-entity update payload must carry the independently captured output"
+        );
+
+        let saved = block_entities.with(|registry| {
+            crate::chunk_nbt::block_entity_to_nbt(position, registry.get(position).expect("comparator is persisted"))
+        });
+        let (saved_position, saved_entity) = crate::chunk_nbt::block_entity_from_nbt(&saved).expect("comparator NBT decodes");
+        assert_eq!(saved_position, position);
+        let restored_entities = BlockEntityHandle::default();
+        restored_entities.with(|registry| registry.insert(saved_position, saved_entity));
+        let columns = crate::random_tick::RedstoneColumns::new(
+            &mut column,
+            0,
+            0,
+            &NoNeighbors,
+            Some(&restored_entities),
+        );
+        assert_eq!(
+            redstone::best_neighbor_signal(&columns, BlockPos::new(9, Y, ROW_Z), false),
+            oracle_out,
+            "mode={mode}: downstream signal did not survive comparator sidecar persistence"
+        );
+        let expected_writes = if reaction.new_state != Some(state) {
+            vec![(8, Y, ROW_Z, reaction.new_state.expect("state changed"))]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(
+            source.0.lock().expect("comparator rig source poisoned").as_slice(),
+            expected_writes.as_slice(),
+            "mode={mode}: the scheduled transition did not use the world write path"
         );
     }
 }

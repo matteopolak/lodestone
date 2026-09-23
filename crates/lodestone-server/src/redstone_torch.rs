@@ -40,7 +40,9 @@
 //! repo's own "islands" rule warns against.
 
 use crate::neighbor_update::Direction;
-use crate::redstone::{self, is_wall_torch, torch_lit, wall_torch_facing, WorldState};
+use crate::redstone::{self, is_wall_torch, torch_lit, wall_torch_facing};
+#[cfg(test)]
+use crate::redstone::WorldState;
 use lodestone_data::block::Block;
 use lodestone_data::block_properties::{BuiltinPropertyValue, PropertyKey, PropertyValue};
 use lodestone_data::block_states::StateId;
@@ -91,7 +93,7 @@ pub fn set_lit(state: StateId, lit: bool) -> StateId {
 #[must_use]
 pub fn has_neighbor_signal<F>(lookup: &F, pos: BlockPos, state: StateId) -> bool
 where
-    F: Fn(BlockPos) -> WorldState,
+    F: crate::redstone::RedstoneLookup + ?Sized,
 {
     let watch_direction = if is_wall_torch(state) { wall_torch_facing(state).opposite() } else { Direction::Down };
     redstone::signal_at(lookup, watch_direction.relative(pos), watch_direction, false) > 0

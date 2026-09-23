@@ -1203,13 +1203,15 @@ impl ChunkColumn {
             return;
         }
         self.block_entities.extend(missing.into_iter().map(|(pos, id)| {
-            (
-                pos,
-                BlockEntity::Opaque {
-                    id: BlockEntityKind::from_registry_type(id),
+            let id = BlockEntityKind::from_registry_type(id);
+            let entity = match id {
+                BlockEntityKind::Comparator => BlockEntity::Comparator { output: 0 },
+                id => BlockEntity::Opaque {
+                    id,
                     nbt: lodestone_core::Nbt::End,
                 },
-            )
+            };
+            (pos, entity)
         }));
     }
 
@@ -5495,11 +5497,8 @@ mod tests {
             Some(fused.client_heightmaps.clone())
         );
 
-        let ticking_state = palette
-            .iter()
-            .copied()
-            .find(|&state| state_metadata(state).0 && state != air_state())
-            .expect("the production fixture must contain a ticking state");
+        let ticking_state = Block::GrassBlock.default_state();
+        assert!(state_metadata(ticking_state).0, "the mutation control requires a ticking state");
         let target = (0..height as usize)
             .rev()
             .flat_map(|ly| {

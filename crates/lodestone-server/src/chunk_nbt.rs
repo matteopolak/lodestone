@@ -1372,6 +1372,10 @@ pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
             }
             ("minecraft:end_gateway", fields)
         }
+        BlockEntity::Comparator { output } => (
+            "minecraft:comparator",
+            vec![("OutputSignal".to_owned(), Nbt::Int(i32::from(*output)))],
+        ),
         BlockEntity::Furnace(f) => {
             let (lit_remaining, lit_total, cooking_spent, cooking_total) = f.burn_state();
             let recipes: Vec<(String, Nbt)> = {
@@ -1700,6 +1704,10 @@ pub fn block_entity_update_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
             }
             Nbt::Compound(fields)
         }
+        BlockEntity::Comparator { output } => Nbt::Compound(vec![(
+            "OutputSignal".to_owned(),
+            Nbt::Int(i32::from(*output)),
+        )]),
         BlockEntity::Spawner(_) => {
             let Nbt::Compound(fields) = block_entity_to_nbt(pos, entity) else {
                 return Nbt::Compound(Vec::new());
@@ -1889,6 +1897,9 @@ pub(crate) fn block_entity_from_nbt(nbt: &Nbt) -> Option<(BlockPos, BlockEntity)
                 exact: matches!(field(nbt, "ExactTeleport"), Some(Nbt::Byte(value)) if *value != 0),
             }
         }
+        "minecraft:comparator" => BlockEntity::Comparator {
+            output: int_field(nbt, "OutputSignal").unwrap_or(0).clamp(0, 15) as u8,
+        },
         "minecraft:furnace" | "minecraft:smoker" | "minecraft:blast_furnace" => {
             let kind = match id {
                 "minecraft:smoker" => FurnaceKind::Smoker,

@@ -79,7 +79,9 @@
 //! new wood types land.
 
 use crate::neighbor_update::Direction;
-use crate::redstone::{best_neighbor_signal, get_bool_property, get_str_property, with_property, WorldState};
+use crate::redstone::{best_neighbor_signal, get_bool_property, get_str_property, with_property};
+#[cfg(test)]
+use crate::redstone::WorldState;
 use lodestone_data::block_properties::{BuiltinPropertyValue, PropertyKey, PropertyValue};
 use lodestone_data::block_states::StateId;
 use lodestone_model::BlockPos;
@@ -163,7 +165,7 @@ pub fn other_door_half_pos(pos: BlockPos, state: StateId) -> Option<BlockPos> {
 #[must_use]
 pub fn has_neighbor_signal<F>(lookup: &F, pos: BlockPos, state: StateId) -> bool
 where
-    F: Fn(BlockPos) -> WorldState,
+    F: crate::redstone::RedstoneLookup + ?Sized,
 {
     if best_neighbor_signal(lookup, pos, false) > 0 {
         return true;
