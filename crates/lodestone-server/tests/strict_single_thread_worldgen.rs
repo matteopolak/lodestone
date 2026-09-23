@@ -654,10 +654,13 @@ fn strict_single_thread_production_worldgen() {
     assert!(count > 0, "benchmark must have at least one target");
     let batch_size = parse("LODESTONE_WORLDGEN_BENCH_BATCH", 2);
     assert!(batch_size > 0, "benchmark batch must contain at least one target");
-    let layout = if std::env::var("LODESTONE_WORLDGEN_BENCH_LAYOUT").as_deref() == Ok("square") {
-        "square"
-    } else {
-        "line"
+    let requested_layout = std::env::var("LODESTONE_WORLDGEN_BENCH_LAYOUT")
+        .unwrap_or_else(|_| "line".to_owned());
+    let layout = match requested_layout.as_str() {
+        "line" => "line",
+        "square" => "square",
+        "ring" => "ring",
+        other => panic!("unsupported benchmark layout {other}"),
     };
     let production_only =
         std::env::var("LODESTONE_WORLDGEN_BENCH_PHASES").as_deref() == Ok("production");
@@ -708,18 +711,46 @@ fn strict_single_thread_production_worldgen() {
         );
     }
 
-    let coordinates: Vec<(i32, i32)> = if std::env::var("LODESTONE_WORLDGEN_BENCH_LAYOUT").as_deref()
-        == Ok("square")
-    {
-        let side = (count as f64).sqrt() as usize;
-        assert_eq!(side * side, count, "square layout needs a perfect-square column count");
-        (0..side)
-            .flat_map(|z| (0..side).map(move |x| (20_000 + x as i32, -20_000 + z as i32)))
-            .collect()
-    } else {
-        (0..count)
+    if layout == "ring" {
+        let center = (20_000, -20_000);
+        let primed = measure_request(retired(), || request_one(&source, request_for(center)));
+        report("production_request", "primed_center", &primed, 1, 1, layout);
+        black_box(expect_generated(primed.value, center));
+    }
+
+    let coordinates: Vec<(i32, i32)> = match layout {
+        "square" => {
+            let side = (count as f64).sqrt() as usize;
+            assert_eq!(side * side, count, "square layout needs a perfect-square column count");
+            (0..side)
+                .flat_map(|z| (0..side).map(move |x| (20_000 + x as i32, -20_000 + z as i32)))
+                .collect()
+        }
+        "ring" => {
+            let mut coordinates = Vec::with_capacity(count);
+            for radius in 1i32.. {
+                for dz in -radius..=radius {
+                    for dx in -radius..=radius {
+                        if dx.abs().max(dz.abs()) == radius {
+                            coordinates.push((20_000 + dx, -20_000 + dz));
+                            if coordinates.len() == count {
+                                break;
+                            }
+                        }
+                    }
+                    if coordinates.len() == count {
+                        break;
+                    }
+                }
+                if coordinates.len() == count {
+                    break;
+                }
+            }
+            coordinates
+        }
+        _ => (0..count)
             .map(|index| (20_000 + index as i32, -20_000))
-            .collect()
+            .collect(),
     };
     let session_initialization = measure_request(retired(), || {
         coordinates
@@ -841,6 +872,80 @@ fn strict_single_thread_production_worldgen() {
     println!(
         "STRICT_WORLDGEN metric=output_checksum phase=sustained_batch layout={layout} batch_size={batch_size} columns={count} blocks={blocks:016x} biomes={biomes:016x} heightmaps={heightmaps:016x}"
     );
+    if let Ok(compare_batch_size) = std::env::var("LODESTONE_WORLDGEN_BENCH_COMPARE_BATCH") {
+        let compare_batch_size = compare_batch_size.parse::<usize>().expect("compare batch size");
+        assert!(compare_batch_size > 0);
+        let compare_base = Arc::new(overworld_chunk_source(seed));
+        let compare_source = lodestone_server::retained_chunk_source_for_view_radius(
+            compare_base,
+            2,
+        );
+        if layout == "ring" {
+            let center = (20_000, -20_000);
+            black_box(expect_generated(
+                request_one(&compare_source, request_for(center)),
+                center,
+            ));
+        }
+        let mut compared = Vec::with_capacity(count);
+        for batch in coordinates.chunks(compare_batch_size) {
+            let mut sessions = batch
+                .iter()
+                .copied()
+                .map(request_for)
+                .map(GenerationSession::new)
+                .collect::<Vec<_>>();
+            for (coordinate, result) in batch.iter().copied().zip(
+                compare_source.request_generation_batch(&mut sessions),
+            ) {
+                let result = result
+                    .unwrap_or_else(|error| panic!("comparison {coordinate:?}: {error}"))
+                    .expect("comparison must return a column");
+                let column = match result {
+                    GenerationRequestResult::Generated(snapshot) => snapshot.column().clone(),
+                    GenerationRequestResult::Existing(column) => column,
+                };
+                compared.push((coordinate, column));
+            }
+        }
+        let [compare_blocks, compare_biomes, compare_heightmaps] = output_checksums(&compared);
+        println!(
+            "STRICT_WORLDGEN metric=comparison_checksum layout={layout} batch_size={batch_size} compare_batch_size={compare_batch_size} blocks={compare_blocks:016x} biomes={compare_biomes:016x} heightmaps={compare_heightmaps:016x}"
+        );
+        let mut differences = 0usize;
+        for ((coordinate, column), (other_coordinate, other)) in columns.iter().zip(&compared) {
+            assert_eq!(coordinate, other_coordinate);
+            for y in column.min_y..column.min_y + column.height {
+                for z in 0..16 {
+                    for x in 0..16 {
+                        let left = column.block_state_id(x, y, z);
+                        let right = other.block_state_id(x, y, z);
+                        if left != right {
+                            if differences < 32 {
+                                println!(
+                                    "STRICT_WORLDGEN metric=comparison_cell coordinate={coordinate:?} local=({x},{y},{z}) batch_state={} batch_block={} compare_state={} compare_block={}",
+                                    left.raw(),
+                                    left.name(),
+                                    right.raw(),
+                                    right.name(),
+                                );
+                            }
+                            differences += 1;
+                        }
+                    }
+                }
+            }
+        }
+        println!("STRICT_WORLDGEN metric=comparison_differences cells={differences}");
+        if compare_batch_size == batch_size {
+            assert_eq!(differences, 0, "identical batch widths must reproduce block output");
+            assert_eq!(
+                [blocks, biomes, heightmaps],
+                [compare_blocks, compare_biomes, compare_heightmaps],
+                "identical batch widths must reproduce every output checksum"
+            );
+        }
+    }
     if production_only {
         black_box(columns);
         return;
@@ -883,11 +988,19 @@ fn strict_single_thread_production_worldgen() {
         count,
         "source_once",
     );
-    let expected_sources = if layout == "square" {
-        let side = (count as f64).sqrt() as usize;
-        (side + 2) * (side + 2)
-    } else {
-        3 * (count + 2)
+    let expected_sources = match layout {
+        "square" => {
+            let side = (count as f64).sqrt() as usize;
+            (side + 2) * (side + 2)
+        }
+        "ring" => coordinates
+            .iter()
+            .flat_map(|&(x, z)| {
+                (-1..=1).flat_map(move |dz| (-1..=1).map(move |dx| (x + dx, z + dz)))
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        _ => 3 * (count + 2),
     };
     assert_eq!(source_once.value.source_execution_count(), expected_sources);
     println!(

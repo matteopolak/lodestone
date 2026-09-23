@@ -139,10 +139,18 @@ set the column count to `1`; release runs should be performed on an otherwise
 quiet machine. The dispatcher override is a benchmark control, not a production
 default. `LODESTONE_WORLDGEN_BENCH_LAYOUT=square` arranges a perfect-square
 column count as a compact region; the default line layout stresses dependency
-halo turnover. Report the selected layout because the two answer different
-questions. The hardware profiler accepts positional `seed`, `columns`,
+halo turnover. `ring` first generates the centre as a separate measured
+request, then takes the next outward-ring coordinates in join-stream order.
+Its sustained metric isolates the production window after first-chunk delivery.
+Report the layout because the shapes answer
+different questions. The hardware profiler accepts positional `seed`, `columns`,
 `batch_size`, and `layout` arguments and launches this test binary directly; it
 does not profile the raw generator example. Set
+`LODESTONE_WORLDGEN_BENCH_COMPARE_BATCH` to run the same coordinates on a fresh
+source with another batch width after the measured phase. It prints all three
+output checksums, the exact block-difference count, and at most 32 differing
+cells. Comparison work is excluded from the reported production rate.
+Set
 `LODESTONE_WORLDGEN_PROFILE_DRY_RUN=1` to print the resolved command without
 requiring macOS Instruments.
 `LODESTONE_WORLDGEN_XCTRACE_TEMPLATE` selects the Instruments template and
