@@ -6119,12 +6119,20 @@ mod tests {
 
     #[test]
     fn authenticated_generated_target_uses_direct_output_before_materialization() {
-        let target = (0, 0);
-        let expected = OverworldChunkSource::new(crate::overworld_generator(42)).column(0, 0);
+        let target = (250, -250);
+        let source = OverworldChunkSource::new(crate::overworld_generator(42));
+        let context = source.generator().lifecycle_replay_context(target.0, target.1);
+        let direct = source.generator().direct_source_decoration_with_context(
+            target.0,
+            target.1,
+            &[],
+            &context,
+        );
+        let mut expected = ChunkColumn::from_generated(direct.column);
+        source.attach_structures(&mut expected, target.0, target.1);
+        expected.populate_missing_block_entity_states(target.0, target.1);
         crate::chunk::reset_generated_materializations();
         reset_region_feature_epoch_counts();
-        let source = OverworldChunkSource::new(crate::overworld_generator(42));
-        let context = source.generator().lifecycle_replay_context(0, 0);
         let mut materializer = LifecycleMaterializer::new(source);
         materializer.admit(target);
         materializer.mark_authenticated_prefix(target, [4; 32]);
@@ -6142,6 +6150,13 @@ mod tests {
         assert_eq!(actual.client_heightmaps_raw(), expected.client_heightmaps_raw());
         assert_eq!(actual.structure_starts().len(), expected.structure_starts().len());
         assert_eq!(actual.block_entities().len(), expected.block_entities().len());
+
+        let one_source = sid("minecraft:stone");
+        let full_column = OverworldChunkSource::new(crate::overworld_generator(42))
+            .column(target.0, target.1);
+        let neighbor_source_spill = sid("minecraft:diorite");
+        assert_eq!(actual.block_state_id(11, 34, 14), one_source);
+        assert_eq!(full_column.block_state_id(11, 34, 14), neighbor_source_spill);
     }
 
     #[test]
