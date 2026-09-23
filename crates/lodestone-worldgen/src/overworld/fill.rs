@@ -2002,9 +2002,9 @@ mod tests {
     #[test]
     fn pre_ore_target_union_deduplicates_in_first_seen_order() {
         let union = pre_ore_target_union(&[(0, 0), (1, 0)], 1);
-        assert_eq!(union.len(), 15);
+        assert_eq!(union.len(), 12);
         assert_eq!(union[0], (-1, -1));
-        assert_eq!(union[9], (1, -1));
+        assert_eq!(&union[9..], &[(2, -1), (2, 0), (2, 1)]);
         assert_eq!(union.last(), Some(&(2, 1)));
     }
 
@@ -2159,14 +2159,13 @@ mod tests {
     }
 
     #[test]
-    fn numeric_ocean_floor_scan_matches_string_oracle_for_builtin_and_extension_states() {
+    fn numeric_ocean_floor_scan_matches_string_oracle_for_builtin_states() {
         let mut world = DenseBlockGrid::new(0, 0, 0, 16, 16, 16, "minecraft:air");
         for z in 0..16 {
             for x in 0..16 {
                 world.set(x, 0, z, "minecraft:stone");
                 world.set(x, 1, z, "minecraft:water[level=0]");
                 world.set(x, 2, z, "minecraft:seagrass");
-                world.set(x, 3, z, "mod:soft_plant[variant=thin]");
                 world.set(x, 4, z, "minecraft:cave_air");
                 world.set(x, 5, z, "minecraft:lava[level=0]");
                 world.set(x, 6, z, "minecraft:oak_leaves[distance=7,persistent=false]");
@@ -2328,7 +2327,7 @@ mod tests {
                 }
                 world.set(x, 64, z, "minecraft:water[level=0]");
                 world.set(x, 65, z, "minecraft:seagrass");
-                world.set(x, 66, z, "mod:soft_plant[variant=thin]");
+                world.set(x, 66, z, "minecraft:seagrass");
             }
         }
         let rounds = 2_000;

@@ -1293,11 +1293,7 @@ impl SurfaceSystem {
                             }
                         }
                         1 => {
-                            let next_ceiling_stone_y = if span_bottom == end_y {
-                                end_y
-                            } else {
-                                span_bottom + 1
-                            };
+                            let next_ceiling_stone_y = span_bottom;
                             let skip_deep = self.compiled_rule.deep_no_output
                                 && deep_biome_absent[(z * 16 + x) as usize];
                             let dead_hi = (ctx.min_surface_level - 1).min(span_top);
@@ -1449,11 +1445,7 @@ impl SurfaceSystem {
                                 carrier.pre_state(block_x, block_y, block_z).state
                                     == self.default_block
                             }), "stone fill span must contain only the configured default block");
-                            let next_ceiling_stone_y = if span_bottom == end_y {
-                                end_y
-                            } else {
-                                span_bottom + 1
-                            };
+                            let next_ceiling_stone_y = span_bottom;
                             let skip_deep = use_deep_skip
                                 && deep_biome_absent[(z * 16 + x) as usize];
                             let dead_hi = (ctx.min_surface_level - 1).min(span_top);
@@ -3132,6 +3124,99 @@ mod tests {
             assert_eq!(optimized.changes, baseline.changes, "case={name}");
             assert_eq!(optimized.column_offsets, baseline.column_offsets, "case={name}");
         }
+    }
+
+    #[test]
+    fn packed_span_ceiling_depth_matches_scalar_and_detects_old_boundary() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/worldgen_data");
+        let resolver = FsResolver { root: root.clone() };
+        let mut settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join("noise_settings/overworld.json")).unwrap(),
+        )
+        .unwrap();
+        settings["surface_rule"] = serde_json::json!({
+            "type": "minecraft:sequence",
+            "sequence": [
+                {
+                    "type": "minecraft:condition",
+                    "if_true": {
+                        "type": "minecraft:stone_depth",
+                        "offset": 0,
+                        "add_surface_depth": false,
+                        "secondary_depth_range": 0,
+                        "surface_type": "ceiling"
+                    },
+                    "then_run": {
+                        "type": "minecraft:block",
+                        "result_state": { "Name": "minecraft:stone" }
+                    }
+                },
+                {
+                    "type": "minecraft:block",
+                    "result_state": { "Name": "minecraft:gravel" }
+                }
+            ]
+        });
+        let builder = Builder::new(42, &resolver);
+        let canon = super::identity_canon(&settings);
+        let surface = SurfaceSystem::new(&settings, &builder, &canon);
+        assert!(!surface.compiled_rule.deep_no_output);
+
+        let mut blocks = vec![0u16; 16 * 16 * surface.gen_depth as usize];
+        let heights = [50; 256];
+        let span_bottom = 36;
+        for x in 0..16 {
+            for z in 0..16 {
+                for y in span_bottom..=50 {
+                    blocks[packed_index(x, y - surface.min_y, z, surface.gen_depth)] = 1;
+                }
+            }
+        }
+        let stone = PreState::from_name("minecraft:stone");
+        let pre = |x: i32, y: i32, z: i32| {
+            match blocks[packed_index(x, y - surface.min_y, z, surface.gen_depth)] {
+                0 => PreState::AIR,
+                1 => stone,
+                other => panic!("invalid test packed block kind: {other}"),
+            }
+        };
+        let heightmap = |_x: i32, _z: i32| 50;
+        let biome_at = |_x: i32, _y: i32, _z: i32| ("minecraft:plains", false);
+        let scalar = surface.build_surface_reusing_with_preliminary_cache(
+            SurfaceDiff::default(),
+            &pre,
+            &heightmap,
+            &biome_at,
+            &|_, _, _| {},
+            0,
+            0,
+            surface.preliminary_shared.as_ref(),
+        );
+        let packed = surface.build_surface_reusing_packed_with_deep_skip(
+            SurfaceDiff::default(),
+            &blocks,
+            surface.gen_depth,
+            &heights,
+            &[false; 256],
+            &biome_at,
+            &|_, _, _| {},
+            0,
+            0,
+            surface.preliminary_shared.as_ref(),
+        );
+
+        let position = (3, 37, 1);
+        let expected = StateId::from_state_str("minecraft:gravel").expect("gravel state");
+        let scalar_depth_below = position.1 - span_bottom + 1;
+        let old_packed_depth_below = position.1 - (span_bottom + 1) + 1;
+        assert_eq!(scalar_depth_below, 2);
+        assert_eq!(old_packed_depth_below, 1);
+        assert!(!(scalar_depth_below <= 1));
+        assert!(old_packed_depth_below <= 1, "old boundary must trip the control");
+        assert_eq!(scalar.get(&position).copied(), Some(expected));
+        assert_eq!(packed.get(&position).copied(), Some(expected));
+        assert_eq!(packed.changes, scalar.changes);
+        assert_eq!(packed.column_offsets, scalar.column_offsets);
     }
 
     struct PackedAbFixture {

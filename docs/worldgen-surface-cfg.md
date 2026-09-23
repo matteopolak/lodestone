@@ -27,6 +27,8 @@ to the typed built-in id at most once. Packed stone spans assert the default
 state invariant in debug builds once per span; release scans therefore do not
 perform a second state read for every block. Both optimizations leave the
 column, descending-Y, short-circuit, and random-draw order unchanged.
+For a stone span, the next ceiling is its bottom row. Using the row above it
+changes the depth-below condition at the span boundary.
 
 ## How to change it
 
