@@ -490,6 +490,24 @@ pub struct Snapshot {
     pub structure_place_pieces_reached: u64,
     /// Overworld cells filled directly after a terrain-only nonpositive proof.
     pub nonpositive_cell_skips: u64,
+    /// Dirty cells emitted by a target-owned FEATURES epoch whose destination
+    /// is the completing target.
+    pub epoch_dirty_local_writes: u64,
+    /// Dirty cells emitted by a target-owned FEATURES epoch whose destination
+    /// is a neighbouring chunk.
+    pub epoch_dirty_spill_writes: u64,
+    /// Calls to the materializer's ordinary override revision setter.
+    pub materializer_override_revision_attempts: u64,
+    /// Override setter calls that appended a new or changed state revision.
+    pub materializer_override_revision_insertions: u64,
+    /// Calls to the materializer's carver-view revision setter.
+    pub materializer_carver_revision_attempts: u64,
+    /// Carver-view setter calls that appended a new or changed state revision.
+    pub materializer_carver_revision_insertions: u64,
+    /// Canonical target-feature winner map insertions or replacements.
+    pub canonical_winner_updates: u64,
+    /// Calls to authenticated-write bookkeeping, including early-return cases.
+    pub authenticated_write_calls: u64,
 }
 
 impl Default for Snapshot {
@@ -555,6 +573,14 @@ impl Default for Snapshot {
             structure_place_piece_bbox_checks: 0,
             structure_place_pieces_reached: 0,
             nonpositive_cell_skips: 0,
+            epoch_dirty_local_writes: 0,
+            epoch_dirty_spill_writes: 0,
+            materializer_override_revision_attempts: 0,
+            materializer_override_revision_insertions: 0,
+            materializer_carver_revision_attempts: 0,
+            materializer_carver_revision_insertions: 0,
+            canonical_winner_updates: 0,
+            authenticated_write_calls: 0,
         }
     }
 }
@@ -666,6 +692,14 @@ mod imp {
         structure_place_piece_bbox_checks: AtomicU64,
         structure_place_pieces_reached: AtomicU64,
         nonpositive_cell_skips: AtomicU64,
+        epoch_dirty_local_writes: AtomicU64,
+        epoch_dirty_spill_writes: AtomicU64,
+        materializer_override_revision_attempts: AtomicU64,
+        materializer_override_revision_insertions: AtomicU64,
+        materializer_carver_revision_attempts: AtomicU64,
+        materializer_carver_revision_insertions: AtomicU64,
+        canonical_winner_updates: AtomicU64,
+        authenticated_write_calls: AtomicU64,
     }
 
     static C: Counters = Counters {
@@ -727,6 +761,14 @@ mod imp {
         structure_place_piece_bbox_checks: AtomicU64::new(0),
         structure_place_pieces_reached: AtomicU64::new(0),
         nonpositive_cell_skips: AtomicU64::new(0),
+        epoch_dirty_local_writes: AtomicU64::new(0),
+        epoch_dirty_spill_writes: AtomicU64::new(0),
+        materializer_override_revision_attempts: AtomicU64::new(0),
+        materializer_override_revision_insertions: AtomicU64::new(0),
+        materializer_carver_revision_attempts: AtomicU64::new(0),
+        materializer_carver_revision_insertions: AtomicU64::new(0),
+        canonical_winner_updates: AtomicU64::new(0),
+        authenticated_write_calls: AtomicU64::new(0),
     };
 
     thread_local! {
@@ -1057,6 +1099,41 @@ mod imp {
         bump(&C.nonpositive_cell_skips);
     }
 
+    #[inline]
+    pub fn bump_epoch_dirty_write(local: bool) {
+        bump(if local {
+            &C.epoch_dirty_local_writes
+        } else {
+            &C.epoch_dirty_spill_writes
+        });
+    }
+
+    #[inline]
+    pub fn bump_materializer_override_revision(inserted: bool) {
+        bump(&C.materializer_override_revision_attempts);
+        if inserted {
+            bump(&C.materializer_override_revision_insertions);
+        }
+    }
+
+    #[inline]
+    pub fn bump_materializer_carver_revision(inserted: bool) {
+        bump(&C.materializer_carver_revision_attempts);
+        if inserted {
+            bump(&C.materializer_carver_revision_insertions);
+        }
+    }
+
+    #[inline]
+    pub fn bump_canonical_winner_update() {
+        bump(&C.canonical_winner_updates);
+    }
+
+    #[inline]
+    pub fn bump_authenticated_write_call() {
+        bump(&C.authenticated_write_calls);
+    }
+
     /// Enters `stage` on this thread; the previous tag is restored on drop.
     #[derive(Debug)]
     pub struct StageGuard {
@@ -1216,6 +1293,14 @@ mod imp {
         C.structure_place_piece_bbox_checks.store(0, Relaxed);
         C.structure_place_pieces_reached.store(0, Relaxed);
         C.nonpositive_cell_skips.store(0, Relaxed);
+        C.epoch_dirty_local_writes.store(0, Relaxed);
+        C.epoch_dirty_spill_writes.store(0, Relaxed);
+        C.materializer_override_revision_attempts.store(0, Relaxed);
+        C.materializer_override_revision_insertions.store(0, Relaxed);
+        C.materializer_carver_revision_attempts.store(0, Relaxed);
+        C.materializer_carver_revision_insertions.store(0, Relaxed);
+        C.canonical_winner_updates.store(0, Relaxed);
+        C.authenticated_write_calls.store(0, Relaxed);
     }
 
     pub fn snapshot() -> Snapshot {
@@ -1282,6 +1367,14 @@ mod imp {
             structure_place_piece_bbox_checks: C.structure_place_piece_bbox_checks.load(Relaxed),
             structure_place_pieces_reached: C.structure_place_pieces_reached.load(Relaxed),
             nonpositive_cell_skips: C.nonpositive_cell_skips.load(Relaxed),
+            epoch_dirty_local_writes: C.epoch_dirty_local_writes.load(Relaxed),
+            epoch_dirty_spill_writes: C.epoch_dirty_spill_writes.load(Relaxed),
+            materializer_override_revision_attempts: C.materializer_override_revision_attempts.load(Relaxed),
+            materializer_override_revision_insertions: C.materializer_override_revision_insertions.load(Relaxed),
+            materializer_carver_revision_attempts: C.materializer_carver_revision_attempts.load(Relaxed),
+            materializer_carver_revision_insertions: C.materializer_carver_revision_insertions.load(Relaxed),
+            canonical_winner_updates: C.canonical_winner_updates.load(Relaxed),
+            authenticated_write_calls: C.authenticated_write_calls.load(Relaxed),
         }
     }
 }
@@ -1408,6 +1501,16 @@ mod imp {
 
     #[inline(always)]
     pub fn bump_nonpositive_cell_skip() {}
+    #[inline(always)]
+    pub fn bump_epoch_dirty_write(_local: bool) {}
+    #[inline(always)]
+    pub fn bump_materializer_override_revision(_inserted: bool) {}
+    #[inline(always)]
+    pub fn bump_materializer_carver_revision(_inserted: bool) {}
+    #[inline(always)]
+    pub fn bump_canonical_winner_update() {}
+    #[inline(always)]
+    pub fn bump_authenticated_write_call() {}
 
     #[cfg(not(feature = "stage-pmu"))]
     #[derive(Debug)]
@@ -1514,7 +1617,9 @@ pub use imp::{
     bump_structure_reference_computation, bump_structure_candidate_cell_probe,
     bump_structure_ring_reach_build, bump_structure_place_piece_bbox_check,
     bump_structure_place_piece_reached,
-    bump_nonpositive_cell_skip,
+    bump_nonpositive_cell_skip, bump_epoch_dirty_write,
+    bump_materializer_override_revision, bump_materializer_carver_revision,
+    bump_canonical_winner_update, bump_authenticated_write_call,
     current_stage, reset, snapshot,
 };
 
@@ -1567,6 +1672,12 @@ mod tests {
         bump_structure_reference_computation();
         bump_structure_candidate_cell_probe();
         bump_structure_ring_reach_build();
+        bump_epoch_dirty_write(true);
+        bump_epoch_dirty_write(false);
+        bump_materializer_override_revision(true);
+        bump_materializer_carver_revision(false);
+        bump_canonical_winner_update();
+        bump_authenticated_write_call();
         bump_rng_draw();
         bump_preliminary_surface_request(-4, 8);
         bump_preliminary_surface_compute();
@@ -1600,6 +1711,34 @@ mod tests {
     fn hooks_count_and_stage_tag_restores() {
         assert!(enabled());
         reset();
+        let empty = snapshot();
+        assert_eq!(empty.epoch_dirty_local_writes, 0);
+        assert_eq!(empty.epoch_dirty_spill_writes, 0);
+        assert_eq!(empty.materializer_override_revision_attempts, 0);
+        assert_eq!(empty.materializer_carver_revision_attempts, 0);
+        assert_eq!(empty.canonical_winner_updates, 0);
+        assert_eq!(empty.authenticated_write_calls, 0);
+        bump_epoch_dirty_write(true);
+        bump_epoch_dirty_write(false);
+        bump_epoch_dirty_write(false);
+        bump_materializer_override_revision(true);
+        bump_materializer_override_revision(false);
+        bump_materializer_carver_revision(true);
+        bump_materializer_carver_revision(false);
+        bump_canonical_winner_update();
+        bump_authenticated_write_call();
+        let target_writes = snapshot();
+        assert_eq!(target_writes.epoch_dirty_local_writes, 1);
+        assert_eq!(target_writes.epoch_dirty_spill_writes, 2);
+        assert_eq!(target_writes.materializer_override_revision_attempts, 2);
+        assert_eq!(target_writes.materializer_override_revision_insertions, 1);
+        assert_eq!(target_writes.materializer_carver_revision_attempts, 2);
+        assert_eq!(target_writes.materializer_carver_revision_insertions, 1);
+        assert_eq!(target_writes.canonical_winner_updates, 1);
+        assert_eq!(target_writes.authenticated_write_calls, 1);
+        reset();
+        assert_eq!(snapshot(), Snapshot::default());
+
         bump_block_at();
         bump_block_at();
         bump_structure_context_replaceable_block_at();
@@ -1674,6 +1813,12 @@ mod tests {
         assert_eq!(s.full_column_scan_cells, 384);
         assert_eq!(s.full_column_conversions, 1);
         assert_eq!(s.full_column_conversion_cells, 384);
+        assert_eq!(s.epoch_dirty_local_writes, 0);
+        assert_eq!(s.epoch_dirty_spill_writes, 0);
+        assert_eq!(s.materializer_override_revision_attempts, 0);
+        assert_eq!(s.materializer_carver_revision_attempts, 0);
+        assert_eq!(s.canonical_winner_updates, 0);
+        assert_eq!(s.authenticated_write_calls, 0);
 
         reset();
         assert_eq!(snapshot(), Snapshot::default());

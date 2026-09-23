@@ -2337,11 +2337,13 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         {
             Entry::Vacant(entry) => {
                 entry.insert(candidate);
+                lodestone_worldgen::counters::bump_canonical_winner_update();
             }
             Entry::Occupied(mut entry)
                 if target_feature_winner_precedes(candidate, *entry.get()) =>
             {
                 entry.insert(candidate);
+                lodestone_worldgen::counters::bump_canonical_winner_update();
             }
             Entry::Occupied(_) => {}
         }
@@ -2349,32 +2351,38 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
 
     #[inline]
     fn set_override(&mut self, position: AbsoluteCell, state: StateId) {
-        match self.overrides.entry(position) {
+        let inserted = match self.overrides.entry(position) {
             Entry::Vacant(entry) => {
                 entry.insert(state);
                 self.override_revisions.push((position, state));
+                true
             }
             Entry::Occupied(mut entry) if *entry.get() != state => {
                 entry.insert(state);
                 self.override_revisions.push((position, state));
+                true
             }
-            Entry::Occupied(_) => {}
-        }
+            Entry::Occupied(_) => false,
+        };
+        lodestone_worldgen::counters::bump_materializer_override_revision(inserted);
     }
 
     #[inline]
     fn set_carvers_override(&mut self, position: AbsoluteCell, state: StateId) {
-        match self.carvers_overrides.entry(position) {
+        let inserted = match self.carvers_overrides.entry(position) {
             Entry::Vacant(entry) => {
                 entry.insert(state);
                 self.carvers_override_revisions.push((position, state));
+                true
             }
             Entry::Occupied(mut entry) if *entry.get() != state => {
                 entry.insert(state);
                 self.carvers_override_revisions.push((position, state));
+                true
             }
-            Entry::Occupied(_) => {}
-        }
+            Entry::Occupied(_) => false,
+        };
+        lodestone_worldgen::counters::bump_materializer_carver_revision(inserted);
     }
 
     /// Read the optional source computation counter used by lifecycle parity
@@ -2877,6 +2885,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         state: StateId,
         transient: bool,
     ) {
+        lodestone_worldgen::counters::bump_authenticated_write_call();
         // A direct target result already contains its own target writes. The
         // target's digest is replaced with that complete-result identity once
         // the dispatcher returns; folding those same writes here would count

@@ -851,6 +851,8 @@ impl RegionFeatureEpoch {
             if !seen.insert(position) {
                 continue;
             }
+            let local_write = (x.div_euclid(16), z.div_euclid(16)) == target;
+            crate::counters::bump_epoch_dirty_write(local_write);
             let mutation = ParityDecorationSpill {
                 source: target,
                 position,
@@ -861,7 +863,7 @@ impl RegionFeatureEpoch {
             if let Some(slot) = self.column_slot(x.div_euclid(16), z.div_euclid(16)) {
                 self.column_writes[slot].push(index);
             }
-            if (x.div_euclid(16), z.div_euclid(16)) == target {
+            if local_write {
                 local.push(mutation);
             } else {
                 spills.push(mutation);

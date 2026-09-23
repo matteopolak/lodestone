@@ -444,6 +444,43 @@ fn report_generation_counters(
         delta(before.structure_place_pieces_reached, after.structure_place_pieces_reached),
         delta(before.nonpositive_cell_skips, after.nonpositive_cell_skips),
     );
+    let epoch_dirty_local = delta(before.epoch_dirty_local_writes, after.epoch_dirty_local_writes);
+    let epoch_dirty_spill = delta(before.epoch_dirty_spill_writes, after.epoch_dirty_spill_writes);
+    let override_attempts = delta(
+        before.materializer_override_revision_attempts,
+        after.materializer_override_revision_attempts,
+    );
+    let override_insertions = delta(
+        before.materializer_override_revision_insertions,
+        after.materializer_override_revision_insertions,
+    );
+    let carver_attempts = delta(
+        before.materializer_carver_revision_attempts,
+        after.materializer_carver_revision_attempts,
+    );
+    let carver_insertions = delta(
+        before.materializer_carver_revision_insertions,
+        after.materializer_carver_revision_insertions,
+    );
+    let canonical_winner_updates = delta(
+        before.canonical_winner_updates,
+        after.canonical_winner_updates,
+    );
+    let authenticated_write_calls = delta(
+        before.authenticated_write_calls,
+        after.authenticated_write_calls,
+    );
+    println!(
+        "STRICT_WORLDGEN metric=target_write_bookkeeping phase={phase} outputs={columns} epoch_dirty_local={epoch_dirty_local} epoch_dirty_local_per_output={:.3} epoch_dirty_spill={epoch_dirty_spill} epoch_dirty_spill_per_output={:.3} override_revision_attempts={override_attempts} override_revision_attempts_per_output={:.3} override_revision_insertions={override_insertions} override_revision_insertions_per_output={:.3} carver_revision_attempts={carver_attempts} carver_revision_attempts_per_output={:.3} carver_revision_insertions={carver_insertions} carver_revision_insertions_per_output={:.3} canonical_winner_updates={canonical_winner_updates} canonical_winner_updates_per_output={:.3} authenticated_write_calls={authenticated_write_calls} authenticated_write_calls_per_output={:.3}",
+        epoch_dirty_local as f64 / per_column,
+        epoch_dirty_spill as f64 / per_column,
+        override_attempts as f64 / per_column,
+        override_insertions as f64 / per_column,
+        carver_attempts as f64 / per_column,
+        carver_insertions as f64 / per_column,
+        canonical_winner_updates as f64 / per_column,
+        authenticated_write_calls as f64 / per_column,
+    );
 }
 
 fn request_for(coordinate: (i32, i32)) -> GenerationRequest {
