@@ -171,15 +171,16 @@ mutable target boundary, so later targets cannot observe stale blocks while
 avoiding one deep column copy per session.
 
 The generated resident map is request/region scoped and bounded by the
-admission halo. It preserves block access, stage identity, structures,
-heightmaps, sidecars, fingerprints, mutation transactions, and packet output
-through the existing materialization boundary; it is not a completed-column
-cache. When the typed product has no other outstanding handle, materialization
-consumes it directly into the mutable `ChunkColumn`; a concurrently shared
-product takes the existing clone fallback, with both paths preserving the same
-observable column output. This boundary also leaves room for a future producer
-to hand off section-aligned compact storage without forcing an intermediate
-flat-grid repack.
+admission halo. Read-only StateId access checks either the mutable resident or
+the typed generated product directly, without materializing a column. The map
+preserves stage identity, structures, heightmaps, sidecars, fingerprints,
+mutation transactions, and packet output through the existing materialization
+boundary; it is not a completed-column cache. If no other handle exists,
+materialization consumes the typed product directly into the mutable
+`ChunkColumn`; a concurrently shared product takes the existing clone fallback,
+with both paths preserving the same observable column output. This boundary
+also leaves room for a future producer to hand off section-aligned compact
+storage without forcing an intermediate flat-grid repack.
 
 `SessionBudget` bounds product, sidecar, mutation, and explicitly accounted
 retained-byte usage. `new` accounts inline value size; heap-backed values use

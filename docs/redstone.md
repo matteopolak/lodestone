@@ -183,9 +183,10 @@ armor) remain unmodelled because each needs an entity or mechanism this crate
 does not have at all (a full enumeration with its own citation lives in
 `redstone_dispenser.rs`'s module doc). Note blocks: per-block instrument
 selection (9 single-block overrides, 7 heads, the small snare family; the two
-largest families, bass/basedrum, are ~330 blocks and unmodelled) and the
-rising-edge pulse; right-click cycling and the sound/particle pulse itself
-are not wired. Tripwire: the full scan/attach/power algorithm and its 10-tick
+largest families, bass/basedrum, are ~330 blocks and unmodelled), rising-edge
+pulses, and hand-use pitch cycling through 25 values with wraparound. Audible
+sound and particles still need a client-visible block-action message. Tripwire:
+the full scan/attach/power algorithm and its 10-tick
 recheck, wired for **placement** (vanilla drives this from `setPlacedBy`, not
 `neighborChanged`); entity-crossing detection and the instant break-pulse
 both need machinery (an entity-AABB census; a block-removal callback carrying

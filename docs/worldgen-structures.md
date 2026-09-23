@@ -88,7 +88,9 @@ use this trace instead of reconstructing history from a final block diff.
 
 Template palettes and processor outputs are bound to canonical StateId values while the template is
 loaded. Placement transforms resolve typed properties back to a state id before the grid boundary,
-so no per-block state string is parsed or interned during structure placement.
+so no per-block state string is parsed or interned during structure placement. Block substitutions
+start from the destination block's default state and overlay only the selected source properties;
+other destination properties, including waterlogging, keep their defaults.
 
 Fortress starts retain both their eager `Arc<Vec<CodedBlock>>` piece output and a typed runtime
 descriptor containing piece kind, facing, chest decision, and end-cap seed. Placement reuses the

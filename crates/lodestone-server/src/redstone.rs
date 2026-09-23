@@ -167,6 +167,16 @@ pub(crate) fn property_u8(state: StateId, key: PropertyKey) -> Option<u8> {
         BuiltinPropertyValue::Value13 => Some(13),
         BuiltinPropertyValue::Value14 => Some(14),
         BuiltinPropertyValue::Value15 => Some(15),
+        BuiltinPropertyValue::Value16 => Some(16),
+        BuiltinPropertyValue::Value17 => Some(17),
+        BuiltinPropertyValue::Value18 => Some(18),
+        BuiltinPropertyValue::Value19 => Some(19),
+        BuiltinPropertyValue::Value20 => Some(20),
+        BuiltinPropertyValue::Value21 => Some(21),
+        BuiltinPropertyValue::Value22 => Some(22),
+        BuiltinPropertyValue::Value23 => Some(23),
+        BuiltinPropertyValue::Value24 => Some(24),
+        BuiltinPropertyValue::Value25 => Some(25),
         _ => None,
     }
 }
@@ -384,6 +394,7 @@ pub fn is_pressure_plate(state: StateId) -> bool {
                 | Block::PaleOakPressurePlate
                 | Block::MangrovePressurePlate
                 | Block::BambooPressurePlate
+                | Block::PolishedBlackstonePressurePlate
                 | Block::CrimsonPressurePlate
                 | Block::WarpedPressurePlate
         )
