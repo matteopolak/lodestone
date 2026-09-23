@@ -3844,8 +3844,18 @@ mod tests {
         Arc::new(source)
     }
 
-    fn mushroom_fixture_grid(source: &Arc<DenseBlockGrid>, height: i32) -> VegGrid {
-        VegGrid::with_sources(
+    fn mushroom_fixture_grid(
+        source: &Arc<DenseBlockGrid>,
+        height: i32,
+        biome: &str,
+        feature_biomes: Arc<crate::compose::FeatureBiomePlan>,
+    ) -> VegGrid {
+        let biomes = Arc::new(crate::overworld::BiomeCells::uniform(
+            biome,
+            0,
+            super::DECORATION_WINDOW_HEIGHT,
+        ));
+        VegGrid::with_sources_and_biomes_shared(
             0,
             height,
             0,
@@ -3853,6 +3863,11 @@ mod tests {
             crate::feature::REGION_MIN - crate::feature::VEG_PADDING,
             crate::feature::REGION_MAX + crate::feature::VEG_PADDING,
             |_, _| Some(Arc::clone(source)),
+            {
+                let biomes = Arc::clone(&biomes);
+                move |_, _| Some(Arc::clone(&biomes))
+            },
+            feature_biomes,
         )
     }
 
@@ -3872,8 +3887,14 @@ mod tests {
         seed: i64,
         index: usize,
         placed: &crate::feature::vegetation::PlacedRef,
+        feature_biomes: &Arc<crate::compose::FeatureBiomePlan>,
     ) -> Vec<(i32, i32, i32, StateId)> {
-        let mut grid = mushroom_fixture_grid(source, height);
+        let mut grid = mushroom_fixture_grid(
+            source,
+            height,
+            "minecraft:nether_wastes",
+            Arc::clone(feature_biomes),
+        );
         let tags = mushroom_fixture_tags();
         tags.bind();
         let mut random = decoration_random();
@@ -3943,7 +3964,35 @@ mod tests {
         assert_normal_mushroom_contract(&brown, "minecraft:brown_mushroom");
         assert_normal_mushroom_contract(&red, "minecraft:red_mushroom");
 
+        let biome_order = ["minecraft:nether_wastes".to_owned()];
+        let feature_biomes =
+            crate::compose::build_decoration_catalog(&assets, &biome_order).feature_biomes();
         let source = mushroom_fixture_source();
+        let allowed = mushroom_fixture_grid(
+            &source,
+            super::DECORATION_WINDOW_HEIGHT,
+            "minecraft:nether_wastes",
+            Arc::clone(&feature_biomes),
+        );
+        let excluded = mushroom_fixture_grid(
+            &source,
+            super::DECORATION_WINDOW_HEIGHT,
+            "minecraft:soul_sand_valley",
+            Arc::clone(&feature_biomes),
+        );
+        for id in [
+            "minecraft:brown_mushroom_normal",
+            "minecraft:red_mushroom_normal",
+        ] {
+            assert!(
+                allowed.biome_allows_placed_feature(Some(id), 8, 128, 8),
+                "Nether Wastes must admit {id}",
+            );
+            assert!(
+                !excluded.biome_allows_placed_feature(Some(id), 8, 128, 8),
+                "Soul Sand Valley must reject {id}",
+            );
+        }
         let brown_state = StateId::from_state_str("minecraft:brown_mushroom").unwrap();
         let red_state = StateId::from_state_str("minecraft:red_mushroom").unwrap();
         let mut brown_case = None;
@@ -3954,12 +4003,20 @@ mod tests {
                 seed,
                 1,
                 &brown,
+                &feature_biomes,
             );
             if full
                 .iter()
                 .any(|(_, y, _, state)| *y >= 128 && *state == brown_state)
             {
-                let narrow = run_mushroom_fixture(&source, 128, seed, 1, &brown);
+                let narrow = run_mushroom_fixture(
+                    &source,
+                    128,
+                    seed,
+                    1,
+                    &brown,
+                    &feature_biomes,
+                );
                 brown_case = Some((seed, full, narrow));
                 break;
             }
@@ -3988,6 +4045,7 @@ mod tests {
             seed,
             2,
             &red,
+            &feature_biomes,
         );
         assert!(
             red_writes

@@ -970,7 +970,7 @@ mod tests {
 
     #[test]
     fn lazy_dense_mutation_updates_the_dense_read_path() {
-        let cells = vec![0u16; ROW_CELLS];
+        let cells = vec![0u16; 16 * ROW_CELLS];
         let mut lazy = CompactBlockStorage::from_shared_flat(0, 16, Arc::new(cells));
         lazy.set(2, 4, 3, 7);
         assert_eq!(lazy.get(2, 4, 3), 7);
