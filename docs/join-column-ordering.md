@@ -16,6 +16,10 @@ input index (or coordinate for a set) provides a deterministic tie-break.
 Keeping this calculation separate prevents the movement path and join path
 from drifting while leaving worker admission independent of ordering.
 
+`ColumnPipeline` fixes the order of admitted requests and cancels their tokens
+when the pipeline is dropped. Running native work may finish, but it cannot
+publish a result for a connection that no longer owns the request.
+
 ## How to change it
 
 Change `crates/lodestone-server/src/join_order.rs` when the distance or facing
