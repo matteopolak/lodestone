@@ -774,6 +774,12 @@ fn mushroom_fields_fixture_proves_both_huge_mushroom_branches_are_consumed() {
         ("vegetation_mushroom_fields_5_5_jvm.txt", "red_mushroom_block"),
     ] {
         let fixture = load(name);
+        let single_expected: HashMap<_, _> = fixture
+            .single_diff
+            .iter()
+            .filter(|(_, state)| state.name().contains("mushroom_block") || state.name().contains("mushroom_stem"))
+            .map(|(pos, state)| (*pos, state.clone()))
+            .collect();
         let expected: HashMap<_, _> = fixture
             .full_diff
             .iter()
@@ -781,7 +787,14 @@ fn mushroom_fields_fixture_proves_both_huge_mushroom_branches_are_consumed() {
             .map(|(pos, state)| (*pos, state.clone()))
             .collect();
         assert!(!expected.is_empty(), "{name}: external capture must contain the selected huge-mushroom branch");
-        assert!(expected.values().any(|state| state.name() == cap), "{name}: external capture must contain its selected cap branch");
+        let selected_cap = format!("minecraft:{cap}");
+        let other_cap = if cap == "brown_mushroom_block" {
+            "minecraft:red_mushroom_block"
+        } else {
+            "minecraft:brown_mushroom_block"
+        };
+        assert!(single_expected.values().any(|state| state.name() == selected_cap.as_str()), "{name}: external centre pass must contain its selected cap branch");
+        assert!(!single_expected.values().any(|state| state.name() == other_cap), "{name}: external centre pass must reject the opposite cap branch");
         assert!(expected.values().any(|state| state.name() == "minecraft:mushroom_stem"), "{name}: external capture must contain stems");
 
         // The production stage uses the widened 3x3 write-radius grid. Compare
