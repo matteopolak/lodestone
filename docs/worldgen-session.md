@@ -165,15 +165,16 @@ source owners to finish before committing FEATURES; the session projects the
 canonical winning foreign writes into its provenance record with their original
 ordinals. This keeps the finished column, checkpoint, and packet snapshot on
 one settlement boundary without treating a padding owner's completion in one
-read view as completion in every read view. The materializer also retains a sparse
-target-local final-FEATURES/top-layer read-state product: later target-owned
-operations seed their CARVERS view from it, without reapplying those writes to
-the already finished resident column or recording them as cross-target
-provenance. The session's reusable provenance map remains sparse; target-local
-writes are already represented by the committed column. Full direct results
-mirror local writes into the CARVERS read view and its ordered revisions; they
-do not duplicate those writes in the general override map. Sparse and fallback
-results keep both paths because they may still run a separate top-layer pass.
+read view as completion in every read view. The materializer keeps target-local
+winner records for canonical output settlement. Sparse padding and scalar
+fallback also retain the CARVERS and general override mirrors because they may
+precede a separate top-layer pass. For authenticated Full direct-epoch Overworld
+completion, local writes are omitted only from the materializer's CARVERS map and
+revision stream; the winner records remain, and the general override map is
+already bypassed on this path. Cross-column spills still use the ordinary
+transaction and provenance path. The session's reusable provenance map remains
+sparse because committed target-local writes are represented by the finished
+column and its settlement records.
 
 Batch sessions share the materializer's immutable shaped-prefix handles while
 they import their frontier coverage. The resident column remains mutable and

@@ -804,6 +804,11 @@ pub trait LifecycleWorldgenSource {
         false
     }
 
+    /// Whether a full direct-epoch result can skip materializer CARVERS mirrors.
+    fn direct_epoch_can_skip_local_carvers_mirror(&self) -> bool {
+        false
+    }
+
     /// Whether writes emitted while replaying a target are part of the
     /// resident world's durable source state even when their destination has
     /// not reached FEATURES yet. End decoration is source-owned and its
@@ -1162,6 +1167,10 @@ impl<T: LifecycleWorldgenSource + ?Sized> LifecycleWorldgenSource for &T {
 
     fn direct_epoch_local_writes_use_carvers_view(&self) -> bool {
         LifecycleWorldgenSource::direct_epoch_local_writes_use_carvers_view(*self)
+    }
+
+    fn direct_epoch_can_skip_local_carvers_mirror(&self) -> bool {
+        LifecycleWorldgenSource::direct_epoch_can_skip_local_carvers_mirror(*self)
     }
 
     fn target_spills_persist(&self) -> bool {
@@ -1798,6 +1807,10 @@ impl LifecycleWorldgenSource for OverworldChunkSource {
     }
 
     fn direct_epoch_local_writes_use_carvers_view(&self) -> bool {
+        true
+    }
+
+    fn direct_epoch_can_skip_local_carvers_mirror(&self) -> bool {
         true
     }
 
@@ -3708,6 +3721,11 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         if matches!(mode, LifecycleCompletionMode::SparsePadding) {
             self.sparse_completed_targets.insert(target);
         }
+        let skip_direct_epoch_local_carvers_mirror = direct_epoch_output
+            && target_owned
+            && stage == LifecycleCompletion::Features
+            && matches!(mode, LifecycleCompletionMode::Full)
+            && self.source.direct_epoch_can_skip_local_carvers_mirror();
         #[cfg(feature = "worldgen-stage-pmu")]
         let _direct_transition_mirror = direct_epoch_output
             .then(|| RegionGuard::enter(RegionPhase::DirectTransitionMirror));
@@ -3740,7 +3758,9 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 self.resident_contains_y(destination, local.position.1),
                 "direct target local FEATURES write is outside target column"
             );
-            if self.source.target_feature_reads_carvers() {
+            if self.source.target_feature_reads_carvers()
+                && !skip_direct_epoch_local_carvers_mirror
+            {
                 self.set_carvers_override(local.position, local.state);
             }
             if retain_general_override {
@@ -5246,6 +5266,18 @@ mod tests {
         materializer.begin_target((0, 0));
         materializer.complete_target_features_with_residents((0, 0), 0, &[]);
         materializer.finish_target((0, 0));
+        let mirrored_local_state = if top_layer_marker {
+            Some(sid("minecraft:snow[layers=1]"))
+        } else if local_marker {
+            Some(sid("minecraft:stone"))
+        } else {
+            None
+        };
+        assert_eq!(
+            materializer.carvers_overrides.get(&(15, 0, 0)).copied(),
+            mirrored_local_state,
+            "the scalar fallback control must detect whether local state was mirrored",
+        );
         if top_layer_marker {
             assert_eq!(
                 materializer.resident_column((0, 0)).unwrap().block_state_id(15, 0, 0),
@@ -6090,6 +6122,7 @@ mod tests {
         let target = (0, 0);
         let expected = OverworldChunkSource::new(crate::overworld_generator(42)).column(0, 0);
         crate::chunk::reset_generated_materializations();
+        reset_region_feature_epoch_counts();
         let source = OverworldChunkSource::new(crate::overworld_generator(42));
         let context = source.generator().lifecycle_replay_context(0, 0);
         let mut materializer = LifecycleMaterializer::new(source);
@@ -6100,6 +6133,7 @@ mod tests {
 
         materializer.complete_target_features_observing(target, 0, |_| {});
         assert_eq!(crate::chunk::generated_materializations(), 0);
+        assert_eq!(region_feature_epoch_counts(), (0, 0));
         assert!(materializer.has_direct_target_output());
         materializer.finish_target(target);
 
@@ -6108,6 +6142,124 @@ mod tests {
         assert_eq!(actual.client_heightmaps_raw(), expected.client_heightmaps_raw());
         assert_eq!(actual.structure_starts().len(), expected.structure_starts().len());
         assert_eq!(actual.block_entities().len(), expected.block_entities().len());
+    }
+
+    #[test]
+    fn authenticated_full_epoch_skips_local_carvers_mirror_without_changing_output() {
+        let target = (0, 0);
+        let generator = crate::overworld_generator(42);
+        let batch = generator.mixed_replay_batch_with_radius(&[target], TARGET_FEATURE_RADIUS);
+        let context = batch.context(target).expect("batch must contain target context");
+        let mut epoch = generator.begin_region_feature_epoch(&batch, &[target]);
+        let direct = generator.complete_region_feature_epoch_target_from_context_with_override_events(
+            &mut epoch,
+            target,
+            context,
+            &[],
+        );
+        let source = OverworldChunkSource::new(generator);
+        let mut expected = ChunkColumn::from_generated(direct.column);
+        source.attach_structures(&mut expected, target.0, target.1);
+        expected.populate_missing_block_entity_states(target.0, target.1);
+        let expected_local_writes = direct
+            .local_features
+            .iter()
+            .map(|write| {
+                (
+                    write.position.0.rem_euclid(16),
+                    write.position.1,
+                    write.position.2.rem_euclid(16),
+                    write.state,
+                )
+            })
+            .collect::<Vec<_>>();
+        expected.apply_ordered_block_id_batch(&expected_local_writes);
+
+        crate::chunk::reset_generated_materializations();
+        reset_region_feature_epoch_counts();
+        let mut materializer = LifecycleMaterializer::new(source);
+        materializer.admit(target);
+        materializer.mark_authenticated_prefix(target, [4; 32]);
+        materializer.prepare_lifecycle_replay_contexts(&[target]);
+        materializer.declare_mutable_targets([target]);
+
+        materializer.complete_target_features_observing(target, 0, |_| {});
+        assert_eq!(crate::chunk::generated_materializations(), 0);
+        assert_eq!(region_feature_epoch_counts(), (1, 0));
+        let has_local_epoch_write = materializer
+            .region_feature_epoch
+            .as_ref()
+            .expect("prepared replay context must create the shared epoch")
+            .writes()
+            .iter()
+            .any(|write| {
+                write.source == target
+                    && (write.position.0.div_euclid(16), write.position.2.div_euclid(16))
+                        == target
+            });
+        assert!(has_local_epoch_write, "fixture must exercise local epoch output");
+        assert!(
+            !materializer.carvers_overrides.keys().any(|position| {
+                (position.0.div_euclid(16), position.2.div_euclid(16)) == target
+            }),
+            "a full direct epoch owns local readback without a duplicate CARVERS mirror",
+        );
+        assert!(
+            !materializer.overrides.keys().any(|position| {
+                (position.0.div_euclid(16), position.2.div_euclid(16)) == target
+            }),
+            "a full direct epoch owns local state without a duplicate general override",
+        );
+        assert!(
+            materializer
+                .target_feature_winners
+                .get(&target)
+                .is_some_and(|winners| winners.values().any(|winner| winner.target == target)),
+            "same-target local winners must still reach output canonicalization",
+        );
+        assert!(materializer.has_direct_target_output());
+        materializer.finish_target(target);
+        materializer.apply_canonical_target_feature_winners(target);
+
+        let actual = materializer.snapshot_for_packet(target);
+        assert_eq!(column_digest(&actual), column_digest(&expected));
+        assert_eq!(actual.client_heightmaps_raw(), expected.client_heightmaps_raw());
+        assert_eq!(actual.structure_starts().len(), expected.structure_starts().len());
+        assert_eq!(actual.block_entities().len(), expected.block_entities().len());
+
+        let local_write = materializer
+            .region_feature_epoch
+            .as_ref()
+            .expect("prepared replay context must create the shared epoch")
+            .writes()
+            .iter()
+            .find(|write| {
+                write.source == target
+                    && (write.position.0.div_euclid(16), write.position.2.div_euclid(16))
+                        == target
+                    && actual.block_state_id(
+                        write.position.0.rem_euclid(16),
+                        write.position.1,
+                        write.position.2.rem_euclid(16),
+                    ) == write.state
+            })
+            .expect("fixture must retain an epoch-local write in the packet output");
+        let mut altered = actual.clone();
+        altered.set_block_id(
+            local_write.position.0.rem_euclid(16),
+            local_write.position.1,
+            local_write.position.2.rem_euclid(16),
+            if local_write.state == StateId::AIR {
+                sid("minecraft:stone")
+            } else {
+                StateId::AIR
+            },
+        );
+        assert_ne!(
+            column_digest(&altered),
+            column_digest(&expected),
+            "the output digest must detect a changed local epoch state",
+        );
     }
 
     #[test]
