@@ -1290,7 +1290,7 @@ mod tests {
     }
 
     #[test]
-    fn entity_command_preflights_authorizes_commits_and_reopens_one_batch() {
+    fn entity_command_preflights_and_reopens_supported_motion() {
         let _scratch = EntityScratch::create();
         let root = _scratch.path();
         let source = root.join("anvil-source");
@@ -1307,7 +1307,7 @@ mod tests {
             id: "minecraft:cow".parse().expect("canonical entity type"),
             uuid,
             pos: lodestone_model::Vec3::new(x, 64.0, z),
-            motion: lodestone_model::Vec3::new(0.0, 0.0, 0.0),
+            motion: lodestone_model::Vec3::new(0.125, -0.25, 0.5),
             rotation: lodestone_model::Rotation::new(0.0, 0.0),
             health: None,
             item: None,
@@ -1339,24 +1339,27 @@ mod tests {
         ];
         let preview = run(command).expect_err("entity preview reports and refuses mutation");
         assert!(preview.contains("Selected 2 entity sidecar chunks."));
-        assert!(preview.contains("Motion"), "motion loss is visible before apply");
+        assert!(!preview.contains("Motion"), "supported motion is not reported as lost");
         assert!(!native_destination.exists(), "preview cannot create native storage");
-        let mut unacknowledged = command.to_vec();
-        unacknowledged.push("--apply");
-        assert!(
-            run(unacknowledged)
-                .expect_err("lossy entity conversion needs its exact token")
-                .contains("Lossy conversion requires --acknowledge")
-        );
-        assert!(
-            !native_destination.exists(),
-            "unacknowledged entity loss cannot create native storage"
-        );
-        let mut approved = command.to_vec();
-        approved.extend(["--apply", "--acknowledge", token(&preview)]);
-        let applied = run(approved).expect("acknowledged entity batch commits");
+        let mut apply = command.to_vec();
+        apply.push("--apply");
+        let applied = run(apply).expect("lossless entity batch commits without a loss token");
         assert!(applied.contains("Converted 2 resident entity poses from 2 sidecar chunks"));
         assert!(applied.contains("reopened every selected pose"));
+        assert_eq!(
+            lodestone_server::world_storage::WorldStorage::open(
+                lodestone_server::world_storage::WorldStorageBackend::LodestoneNative {
+                    directory: native_destination.clone(),
+                }
+            )
+            .expect("reopen imported native entity")
+            .load_entity(*first.as_bytes(), 0, 0, 0, 128)
+            .expect("read imported native entity")
+            .expect("imported entity is present")
+            .motion,
+            lodestone_model::Vec3::new(0.125, -0.25, 0.5),
+            "the supported source motion survives conversion and native reload"
+        );
         assert_eq!(
             std::fs::read(source.join("dimensions/minecraft/overworld/entities/r.0.0.mca"))
                 .expect("re-read source sidecar"),
