@@ -1289,6 +1289,18 @@ where
                     } else {
                         GenerationPhase::TargetFeatures
                     };
+                } else if self.session.frontier(self.session.request().target()).is_some_and(
+                    |frontier| {
+                        frontier.records().iter().any(|record| {
+                            record.key()
+                                == StageKey::new(
+                                    self.session.pipeline().dimension(),
+                                    ColumnStage::Features,
+                                )
+                        })
+                    },
+                ) {
+                    self.phase = GenerationPhase::CommitFeatures;
                 } else {
                     self.phase = GenerationPhase::FeatureSource(0);
                 }
@@ -2323,13 +2335,11 @@ where
                     machine.padding_targets = Some(&self.settlement_padding);
                     machine.settlement_targets = Some(&self.settlement_targets);
                 }
-                let advance = if settlement.is_some() {
-                    #[cfg(feature = "worldgen-stage-pmu")]
-                    let _settlement_resume = RegionGuard::enter(RegionPhase::SettlementResume);
-                    machine.advance_mutable(executor)
-                } else {
-                    Ok(())
-                };
+                #[cfg(feature = "worldgen-stage-pmu")]
+                let _settlement_resume = settlement
+                    .is_some()
+                    .then(|| RegionGuard::enter(RegionPhase::SettlementResume));
+                let advance = machine.advance_mutable(executor);
                 advance.and_then(|()| {
                     machine.packet_columns = Some(&mut packet_columns);
                     machine.finalize_batch_target(executor)
@@ -2531,13 +2541,9 @@ where
                     machine.padding_targets = Some(&self.settlement_padding);
                     machine.settlement_targets = Some(&self.settlement_targets);
                 }
-                let advance = if settlement.is_some() {
-                    machine
-                        .advance_mutable_yielding(&PersistentWorldgenExecutor)
-                        .await
-                } else {
-                    Ok(())
-                };
+                let advance = machine
+                    .advance_mutable_yielding(&PersistentWorldgenExecutor)
+                    .await;
                 if let Err(error) = advance {
                     Err(error)
                 } else {

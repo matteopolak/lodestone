@@ -252,7 +252,10 @@ and rollback are identical on native and browser targets. Ledger-reused output
 columns join generated columns in that final commit rather than publishing an
 intermediate cache write against the same halo revision. Only the execution step
 differs; browser batches await the yielding source boundary so a multi-column
-batch cannot starve the server worker's tick and packet tasks.
+batch cannot starve the server worker's tick and packet tasks. Finalization
+resumes every deferred target through the same stage machine. A committed
+feature frontier skips source completion and restores transient feature state
+before output, including for dimensions without neighbor settlement.
 
 After that revision-validated commit, the store consumes the gathered columns.
 It captures only mutation destinations for source persistence, so persistence
