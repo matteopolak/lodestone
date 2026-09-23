@@ -97,6 +97,11 @@ recompute the property transition and cannot change output. The table is 8 KiB p
 does not grow with the number of generated columns. `gen-counters` builds expose per-thread
 rewrite hit/miss counters for focused measurements.
 
+Each generator binds vegetation membership masks once before decoration. Concurrent bind callers
+wait for the same completed table; membership and leaf-distance reads cannot observe a partially
+filled table. Keep tag sets immutable after binding, and add new membership kinds in the typed tag
+table rather than adding per-cell name lookups.
+
 `UNDERGROUND_ORES` is dispatched through the same catalog rather than treated as an ore-only
 list. `select_ores` emits the configured ore entries, while `select_step6_disks` emits disk
 features to the existing `VegGrid` placement interpreter, and
