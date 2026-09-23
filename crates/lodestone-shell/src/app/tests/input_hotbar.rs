@@ -2,6 +2,30 @@
 
 use super::*;
 
+#[cfg(feature = "window")]
+fn entitled_window_app() -> WindowApp {
+    let mut app = WindowApp::new(Config::default());
+    let path = std::env::temp_dir().join(format!(
+        "lodestone-terminal-input-{}-{}/servers.json",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("test")
+    ));
+    let profile_id = uuid::Uuid::new_v4();
+    let mut metadata = lodestone_auth::AccountsMetadata::default();
+    metadata.upsert(lodestone_auth::AccountProfile {
+        profile_id,
+        username: "TerminalInputTest".to_owned(),
+        skin_url: None,
+        last_used: 1,
+    });
+    metadata.selected = Some(profile_id);
+    metadata
+        .save_to(&path.parent().unwrap().join("profiles.json"))
+        .expect("test account metadata must be writable");
+    app.nav = crate::menu::nav::MenuNav::with_path(path);
+    app
+}
+
 /// Discrete scrolling collapses the delta to its **sign**, and the
 /// sensitivity multiply happens **after**.
 ///
@@ -245,7 +269,7 @@ fn the_crosshair_and_the_hotbar_disagree_behind_a_screen() {
 fn terminal_pointer_click_reaches_shared_menu_state_transition() {
     use crate::menu::Screen;
 
-    let mut app = WindowApp::new(Config::default());
+    let mut app = entitled_window_app();
     const WIDTH: u32 = 800;
     const HEIGHT: u32 = 600;
     let (x, y) = {
@@ -287,7 +311,7 @@ fn terminal_pointer_click_reaches_shared_menu_state_transition() {
 fn terminal_enter_uses_the_same_menu_action_as_the_pointer() {
     use crate::menu::Screen;
 
-    let mut app = WindowApp::new(Config::default());
+    let mut app = entitled_window_app();
     assert_eq!(app.ui.screen(), Screen::MainMenu);
     app.terminal_menu_key(crate::menu::nav::MenuKey::Enter);
     assert_eq!(
