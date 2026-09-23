@@ -27,7 +27,12 @@
 //! and the feature forward together, which is exactly the pair of things the
 //! split introduced.
 
+#[cfg(feature = "gen-counters")]
+use std::sync::Arc;
+
 use lodestone_worldgen::counters::{self, Snapshot, Stage};
+#[cfg(feature = "gen-counters")]
+use lodestone_worldgen::generated_storage::CompactBlockStorage;
 use lodestone_worldgen::rng::{RandomSource, WorldgenRandom, XoroshiroRandomSource};
 
 /// Draws `n` values through the production RNG funnel — `WorldgenRandom::next_bits`,
@@ -42,6 +47,33 @@ fn draw(n: u32) {
         let _ = random.next_int();
     }
     assert_eq!(random.count(), n, "next_int must route through next_bits once each");
+}
+
+#[cfg(feature = "gen-counters")]
+fn check_column_pack_counter() {
+    let cells = vec![0u16; 16 * 16];
+    let predicate = [false];
+
+    counters::reset();
+    let (packed, _) = CompactBlockStorage::from_flat_with_predicates(
+        0,
+        1,
+        &cells,
+        &predicate,
+        &predicate,
+        None,
+    );
+    assert!(packed.is_compact());
+    let packed_counters = counters::snapshot();
+    assert_eq!(packed_counters.full_column_conversions, 1);
+    assert_eq!(packed_counters.full_column_conversion_cells, 256);
+
+    counters::reset();
+    let shaped = CompactBlockStorage::from_shared_flat(0, 1, Arc::new(cells));
+    assert!(!shaped.is_compact());
+    let shaped_counters = counters::snapshot();
+    assert_eq!(shaped_counters.full_column_conversions, 0);
+    assert_eq!(shaped_counters.full_column_conversion_cells, 0);
 }
 
 /// With the feature forwarded, a real RNG draw must be *counted*, and counted the
@@ -82,6 +114,7 @@ fn forwarded_feature_actually_counts_through_the_re_export() {
     );
     assert_eq!(snapshot.rng_draws_total(), 11, "and nothing double-counted");
 
+    check_column_pack_counter();
     counters::reset();
     assert_eq!(
         counters::snapshot(),
