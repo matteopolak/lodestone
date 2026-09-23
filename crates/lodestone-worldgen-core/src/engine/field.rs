@@ -449,6 +449,47 @@ impl<'a> Field<'a> {
         result
     }
 
+    pub(crate) fn eval_overworld_final_density_cell_terrain_is_nonpositive(
+        &mut self,
+        plan: OverworldFinalDensityPlan,
+        x0: i32,
+        y0: i32,
+        z0: i32,
+    ) -> bool {
+        debug_assert_eq!(self.geom.cell_width, 4);
+        debug_assert_eq!(self.geom.cell_height, 8);
+        debug_assert_eq!(x0.rem_euclid(self.geom.cell_width), 0);
+        debug_assert_eq!(y0.rem_euclid(self.geom.cell_height), 0);
+        debug_assert_eq!(z0.rem_euclid(self.geom.cell_width), 0);
+        self.column_xz = None;
+        self.column_y = None;
+        self.tile_active = true;
+        self.cell_xz = self
+            .scratch
+            .cell_column_indices(
+                x0.div_euclid(self.geom.cell_width),
+                z0.div_euclid(self.geom.cell_width),
+            );
+
+        let terrain = self.cell_corners(
+            plan.terrain_inner,
+            plan.terrain_slot,
+            x0.div_euclid(self.geom.cell_width),
+            y0.div_euclid(self.geom.cell_height),
+            z0.div_euclid(self.geom.cell_width),
+            self.geom.cell_width,
+            self.geom.cell_height,
+        );
+        let result = terrain_subcell_is_strictly_nonpositive(
+            self.geom.cell_width,
+            self.geom.cell_height,
+            terrain,
+        );
+        self.cell_xz = None;
+        self.tile_active = false;
+        result
+    }
+
     fn noodle_subcell_is_positive(
         &mut self,
         plan: OverworldFinalDensityPlan,
@@ -1957,6 +1998,21 @@ fn terrain_subcell_is_positive(cw: i32, ch: i32, n: [f64; 8]) -> bool {
 }
 
 #[inline]
+fn terrain_subcell_is_strictly_nonpositive(cw: i32, ch: i32, n: [f64; 8]) -> bool {
+    if n.iter().any(|value| !value.is_finite()) {
+        return false;
+    }
+    let scale = n.iter().fold(1.0_f64, |scale, value| scale.max(value.abs()));
+    if scale > f64::MAX / 4.0 {
+        return false;
+    }
+    let margin = scale * (128.0 * f64::EPSILON) + 128.0 * f64::MIN_POSITIVE;
+    subcell_corners(cw, ch, n)
+        .into_iter()
+        .all(|value| value.is_finite() && value < -margin)
+}
+
+#[inline]
 fn noodle_control_is_inactive(cw: i32, ch: i32, n: [f64; 8]) -> bool {
     let values = subcell_corners(cw, ch, n);
     values.iter().all(|value| value.is_finite())
@@ -2026,7 +2082,8 @@ fn shift(noise: &crate::noise::NormalNoise, x: f64, y: f64, z: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        write_interpolated_corners, write_interpolated_corners_scalar, write_shared_noodle_output,
+        terrain_subcell_is_strictly_nonpositive, write_interpolated_corners,
+        write_interpolated_corners_scalar, write_shared_noodle_output,
         write_shared_noodle_output_scalar,
     };
     use super::Field;
@@ -2034,6 +2091,23 @@ mod tests {
     use crate::counters;
     use crate::density::Density;
     use crate::engine::{Bounds, Geom, Program, Scratch};
+
+    #[test]
+    fn terrain_nonpositive_proof_rejects_ambiguous_and_nonfinite_corners() {
+        assert!(terrain_subcell_is_strictly_nonpositive(4, 8, [-1.0; 8]));
+        assert!(!terrain_subcell_is_strictly_nonpositive(4, 8, [-1.0e-15; 8]));
+        assert!(!terrain_subcell_is_strictly_nonpositive(4, 8, [0.0; 8]));
+        assert!(!terrain_subcell_is_strictly_nonpositive(
+            4,
+            8,
+            [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, f64::NAN]
+        ));
+        assert!(!terrain_subcell_is_strictly_nonpositive(
+            4,
+            8,
+            [1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0]
+        ));
+    }
 
     #[test]
     fn pure_tile_walk_preserves_branch_bits_and_negative_zero() {

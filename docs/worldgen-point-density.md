@@ -103,6 +103,13 @@ single field context handles the proof and the exact 128-value fallback, so inco
 not rebuild the evaluator entry state. The fallback remains bitwise-identical to
 `final_density_cell`; positive cells leave the caller's output buffer untouched.
 
+For cells above the aquifer sampling cutoff, an empty structure-adaptation field can also use a
+terrain-only nonpositive proof. It checks finite corner bounds with a rounding margin; a successful
+proof lets fill emit the global fluid directly without evaluating the remaining density channels or
+materializing 128 values. Nonfinite, near-zero, cutoff-crossing, nonempty-adaptation, and unsupported
+geometry cases keep the ordinary path. `nonpositive_cell_skips` in the generation counters reports
+how often this branch ran.
+
 The focused bundled control compares every output bit with fresh scalar point
 queries. With `gen-counters`, the same 4×2-cell sample reports 9,276 scalar
 field visits versus 3,132 compiled-plan visits. The product-admitted route

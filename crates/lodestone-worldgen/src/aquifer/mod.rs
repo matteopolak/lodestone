@@ -2113,6 +2113,25 @@ impl AquiferSystem {
         VerticalRunState::default()
     }
 
+    pub(crate) fn fill_nonpositive_global_fluid_run(
+        &self,
+        y_start: i32,
+        output: &mut [BlockKind],
+    ) -> bool {
+        for offset in 0..output.len() {
+            let y = y_start + offset as i32;
+            let fluid = self.global_fluid(y).at(y);
+            if self.enabled && y <= self.skip_sampling_above_y && fluid != Fluid::Lava {
+                return false;
+            }
+        }
+        for (offset, block) in output.iter_mut().enumerate() {
+            let y = y_start + offset as i32;
+            *block = self.global_fluid(y).at(y).to_block();
+        }
+        true
+    }
+
     /// Resolves a consecutive vertical density run without repeating the
     /// candidate-location and squared-distance work for every block.
     pub fn block_at_density_vertical_run(
@@ -3375,6 +3394,25 @@ mod tests {
                 "preliminary_surface_level": constant_density()
             }
         })
+    }
+
+    #[test]
+    fn nonpositive_global_fluid_run_rejects_cutoff_crossing() {
+        let settings = test_settings(constant_density(), 8);
+        let resolver = NoReferences;
+        let builder = Builder::new(0, &resolver);
+        let mut system = AquiferSystem::new(&settings, &builder, 0, 0);
+        system.skip_sampling_above_y = 3;
+
+        let mut crossing = [BlockKind::Stone; 8];
+        assert!(!system.fill_nonpositive_global_fluid_run(0, &mut crossing));
+        assert_eq!(crossing, [BlockKind::Stone; 8]);
+
+        let mut safe = [BlockKind::Stone; 8];
+        assert!(system.fill_nonpositive_global_fluid_run(4, &mut safe));
+        for (offset, &block) in safe.iter().enumerate() {
+            assert_eq!(block, system.block_at_density(0, 4 + offset as i32, 0, -1.0));
+        }
     }
 
     #[test]
