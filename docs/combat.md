@@ -47,6 +47,11 @@ letting a connection task mutate the same sim the tick loop ticks.
 `minecraft:interact` (plain right-click) deliberately decodes to `Ignored` —
 there's no interaction model (taming/feeding/mounting) to consume it yet.
 
+`ServerBound::Swing` appends to `PlayerRegistry`'s shared log. Each connection
+captures its log cursor atomically with player registration, then drains from
+that point after join setup. Earlier swings are excluded, while swings during
+bootstrap remain visible to the new observer.
+
 ### Knockback
 
 Vanilla's own motion-lerp setter is an unconditional **replace**, not a lerp,
