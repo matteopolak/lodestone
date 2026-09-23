@@ -2,23 +2,24 @@
 
 ## What it is
 
-The bundled Overworld source factory retains a bounded cache of immutable,
-compiled generator configurations. Repeated production source/lease creation
-for the same seed and world configuration reuses parsed templates, pools,
-structures and density programs while each source receives fresh mutable
-column state.
+The bundled Overworld factories retain a bounded cache of immutable, compiled
+generator configurations. Repeated generator or source creation for the same
+seed and world configuration reuses parsed templates, pools, structures and
+density programs while each new instance receives fresh mutable column state.
 
 ## How it works
 
 `OverworldGenerator::compile` builds an opaque
 `CompiledOverworldGenerator`. `OverworldGenerator::from_compiled` attaches a
 new staged-column store and preliminary-surface cache to that configuration.
-`worldgen_data::overworld_chunk_source_of_type` keys a four-entry LRU by seed,
-world type, settings fingerprint, resolver fingerprint and production executor
-version. Compilation is serialized while a missing key is filled, so two
-workers cannot duplicate the same expensive build. Cache eviction only drops
-immutable configuration handles; live sources retain their own configuration
-until they finish.
+`worldgen_data::overworld_chunk_source_of_type` and
+`worldgen_data::overworld_generator_of_type` use the same four-entry LRU keyed
+by seed, world type, settings fingerprint, resolver fingerprint and production
+executor version. Compilation is serialized while a missing key is filled, so
+two workers cannot duplicate the same expensive build. Cache eviction only
+drops immutable configuration handles; live generators retain their own
+configuration until they finish. This helps repeated creation for a world, but
+the first cold creation still compiles the full configuration.
 
 ## How to change it
 
