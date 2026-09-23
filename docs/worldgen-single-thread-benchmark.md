@@ -25,6 +25,9 @@ production phase also reports current physical footprint and process peak
 footprint after all requests complete; compare separate fresh processes with
 the same target set when assessing batch-width memory cost. The process peak
 includes source construction and is not an exact count of retained region bytes.
+The `first_output` line measures from the start of sustained generation to the
+first completed callback in cohort mode, or the first returned batch otherwise.
+It does not include packet encoding, meshing, or presentation.
 
 After measurement, `output_checksum` hashes canonical block IDs, every 3D biome
 cell, and the three client heightmaps separately. These non-cryptographic checksums
@@ -134,7 +137,9 @@ Run the ignored test with `LODESTONE_WORLDGEN_WORKERS=1`. Optional variables are
 `LODESTONE_WORLDGEN_BENCH_SEED` (default `42`) and
 `LODESTONE_WORLDGEN_BENCH_COLUMNS` (default `8`).
 `LODESTONE_WORLDGEN_BENCH_BATCH` defaults to `2`, matching the minimum
-one-worker join window. For a bounded debug smoke run,
+one-worker batch control. Set `LODESTONE_WORLDGEN_BENCH_COHORT=1` to drive the
+production streaming cohort boundary with the same width and coordinates. For
+a bounded debug smoke run,
 set the column count to `1`; release runs should be performed on an otherwise
 quiet machine. The dispatcher override is a benchmark control, not a production
 default. `LODESTONE_WORLDGEN_BENCH_LAYOUT=square` arranges a perfect-square

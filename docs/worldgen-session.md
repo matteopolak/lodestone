@@ -121,6 +121,9 @@ next snapshot is taken. Earlier snapshots retain their previous version, and
 the map is discarded at the end of finalization. Canonical feature winners are
 indexed by destination column so finalizing a target does not scan unrelated
 columns' writes. Consuming a shared neighbor for mutation detaches it first.
+Generated packet neighbors also share one lazy conversion within a request when
+their immutable product and captured overlay match. A changed overlay receives
+a distinct view, so an earlier packet snapshot cannot observe later writes.
 
 Sparse padding writes into an untouched future direct-output target stay in the
 ordered mutation journal until that target consumes them. They do not materialize
@@ -256,6 +259,17 @@ batch cannot starve the server worker's tick and packet tasks. Finalization
 resumes every deferred target through the same stage machine. A committed
 feature frontier skips source completion and restores transient feature state
 before output, including for dimensions without neighbor settlement.
+
+Native Overworld cohorts admit a bounded group of requested targets into one
+ordered source region. Immutable prerequisites may run concurrently; mutable
+owners complete in canonical order. A target's detached packet snapshot becomes
+available only after admitted owners that can write either the target or its
+packet-neighbor ring have completed. The store commits each stable output and
+its mutation destinations under a pinned halo lease before exposing it to the
+join stream. The dimension and region-persistence wrappers forward the cohort
+boundary; persisted or edited targets still take precedence over generation.
+The browser keeps the yielding batch path until it has an equivalent
+non-blocking cohort driver.
 
 After that revision-validated commit, the store consumes the gathered columns.
 It captures only mutation destinations for source persistence, so persistence

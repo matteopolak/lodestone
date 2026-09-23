@@ -19,6 +19,11 @@ from drifting while leaving worker admission independent of ordering.
 `ColumnPipeline` fixes the order of admitted requests and cancels their tokens
 when the pipeline is dropped. Running native work may finish, but it cannot
 publish a result for a connection that no longer owns the request.
+On native Overworld sources, it admits a bounded coordinate-local cohort and
+receives committed stable outputs through a bounded channel. A small reorder
+buffer emits only the contiguous prefix of the original queue order; worker
+completion order never changes the wire order. The initial center remains a
+singleton. Other sources keep the existing batch boundary.
 
 ## How to change it
 
@@ -33,10 +38,13 @@ the ordering gates in `join_scheduler.rs` green when changing tie-breaks.
 The frustum half-angle and yaw-sector quantisation are constants in
 `join_scheduler.rs`. `ColumnQueue::reprioritise` only sorts after a centre
 change or sector change; it does not sort for every small rotation.
+Native cohort width is reported by the source, capped at 64 targets and an
+8-by-8 target extent. It is independent of worker count; a single worker can
+amortize one region without delaying the initial singleton center.
 
 ## Dependencies
 
 The ordering helpers use only standard floating-point and tuple operations.
 They are consumed by `join_scheduler::ColumnQueue` and the server view tracker;
-generation, protocol encoding, and the world-generation dispatcher are outside
-this module.
+protocol encoding remains outside this module. Cohort admission depends on
+`ChunkSource`, `ChunkStore`, and the native generation dispatcher.

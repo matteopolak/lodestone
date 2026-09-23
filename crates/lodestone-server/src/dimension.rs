@@ -661,6 +661,31 @@ impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
         self.primary.request_generation(request, session)
     }
 
+    fn request_generation_batch(
+        &self,
+        sessions: &mut [crate::worldgen_session::GenerationSession],
+    ) -> Vec<Result<Option<crate::worldgen_session::GenerationRequestResult>, crate::worldgen_session::GenerationRequestError>> {
+        self.primary.request_generation_batch(sessions)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn generation_cohort_width_hint(&self) -> Option<usize> {
+        self.primary.generation_cohort_width_hint()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn request_generation_cohort(
+        &self,
+        sessions: &mut [crate::worldgen_session::GenerationSession],
+        emit: &mut dyn FnMut(
+            usize,
+            &crate::worldgen_session::GenerationSession,
+            crate::worldgen_session::GenerationRequestResult,
+        ) -> Result<(), crate::worldgen_session::GenerationRequestError>,
+    ) -> Result<Vec<Result<(), crate::worldgen_session::GenerationRequestError>>, crate::worldgen_session::GenerationRequestError> {
+        self.primary.request_generation_cohort(sessions, emit)
+    }
+
     #[cfg(target_arch = "wasm32")]
     fn request_generation_yielding<'a>(
         &'a self,
@@ -677,6 +702,14 @@ impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
         >,
     > {
         self.primary.request_generation_yielding(request, session)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn request_generation_batch_yielding<'a>(
+        &'a self,
+        sessions: &'a mut [crate::worldgen_session::GenerationSession],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<Result<Option<crate::worldgen_session::GenerationRequestResult>, crate::worldgen_session::GenerationRequestError>>> + 'a>> {
+        self.primary.request_generation_batch_yielding(sessions)
     }
 
     fn block_state_id(&self, x: i32, y: i32, z: i32) -> lodestone_data::block_states::StateId {
@@ -796,6 +829,107 @@ impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct BatchSource(AtomicUsize);
+
+    impl ChunkSource for BatchSource {
+        fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            ChunkColumn::new(0, 16)
+        }
+
+        fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> lodestone_data::block_states::StateId {
+            crate::chunk::air_state()
+        }
+
+        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+            crate::chunk::DEFAULT_BIOME.to_owned()
+        }
+
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: lodestone_data::block_states::StateId) {}
+
+        fn request_generation_batch(
+            &self,
+            sessions: &mut [crate::worldgen_session::GenerationSession],
+        ) -> Vec<Result<Option<crate::worldgen_session::GenerationRequestResult>, crate::worldgen_session::GenerationRequestError>> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            sessions
+                .iter()
+                .map(|_| Ok(Some(crate::worldgen_session::GenerationRequestResult::Existing(self.column(0, 0)))))
+                .collect()
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        fn generation_cohort_width_hint(&self) -> Option<usize> {
+            Some(7)
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        fn request_generation_cohort(
+            &self,
+            sessions: &mut [crate::worldgen_session::GenerationSession],
+            emit: &mut dyn FnMut(
+                usize,
+                &crate::worldgen_session::GenerationSession,
+                crate::worldgen_session::GenerationRequestResult,
+            ) -> Result<(), crate::worldgen_session::GenerationRequestError>,
+        ) -> Result<Vec<Result<(), crate::worldgen_session::GenerationRequestError>>, crate::worldgen_session::GenerationRequestError> {
+            self.0.fetch_add(10, Ordering::Relaxed);
+            for (index, session) in sessions.iter().enumerate() {
+                emit(
+                    index,
+                    session,
+                    crate::worldgen_session::GenerationRequestResult::Existing(self.column(0, 0)),
+                )?;
+            }
+            Ok(sessions.iter().map(|_| Ok(())).collect())
+        }
+    }
+
+    #[test]
+    fn dimensional_source_preserves_batch_generation() {
+        let source = DimensionalSource::alone(
+            BatchSource(AtomicUsize::new(0)),
+            Dimension::Overworld,
+            crate::portal::PortalIndex::new(),
+        );
+        let mut sessions = [(0, 0), (1, 0)]
+            .into_iter()
+            .map(|target| crate::worldgen_session::GenerationSession::new(
+                crate::worldgen_session::GenerationRequest::new(
+                    lodestone_worldgen::stage_schedule::Dimension::Overworld,
+                    target,
+                    lodestone_worldgen::stage_schedule::GenerationTarget::Full,
+                    1,
+                ),
+            ))
+            .collect::<Vec<_>>();
+        let results = source.request_generation_batch(&mut sessions);
+        assert!(results.iter().all(|result| {
+            matches!(
+                result,
+                Ok(Some(crate::worldgen_session::GenerationRequestResult::Existing(_)))
+            )
+        }));
+        assert_eq!(source.primary().0.load(Ordering::Relaxed), 1);
+        #[cfg(not(target_arch = "wasm32"))]
+        assert_eq!(source.generation_cohort_width_hint(), Some(7));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut emitted = Vec::new();
+            let statuses = source.request_generation_cohort(
+                &mut sessions,
+                &mut |index, _, _| {
+                    emitted.push(index);
+                    Ok(())
+                },
+            ).unwrap();
+            assert_eq!(emitted, [0, 1]);
+            assert!(statuses.iter().all(Result::is_ok));
+            assert_eq!(source.primary().0.load(Ordering::Relaxed), 11);
+        }
+    }
 
     /// The two arms of the scale, against inputs where they differ — and against
     /// the input where they *do not*, as the control.
