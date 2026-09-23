@@ -144,6 +144,72 @@ mod conversion_tests {
         column
     }
 
+    fn first_cell_difference(left: &WorldChunkColumn, right: &WorldChunkColumn) -> Option<String> {
+        if left.min_y() != right.min_y() {
+            return Some(format!("min_y differs: {} != {}", left.min_y(), right.min_y()));
+        }
+        if left.section_count() != right.section_count() {
+            return Some(format!(
+                "section count differs: {} != {}",
+                left.section_count(),
+                right.section_count()
+            ));
+        }
+        for section_index in 0..left.section_count() {
+            let section_y = left.min_y() + (section_index * ChunkSection::EDGE) as i32;
+            for index in 0..ChunkSection::EDGE.pow(3) {
+                let x = index & 15;
+                let z = (index >> 4) & 15;
+                let y = index >> 8;
+                let world_y = section_y + y as i32;
+                let left_id = left.get_block(x, world_y, z);
+                let right_id = right.get_block(x, world_y, z);
+                if left_id != right_id {
+                    return Some(format!(
+                        "block differs at section {section_index}, local ({x}, {y}, {z}): {left_id} != {right_id}"
+                    ));
+                }
+            }
+            for index in 0..ChunkSection::BIOME_EDGE.pow(3) {
+                let x = index & 3;
+                let z = (index >> 2) & 3;
+                let y = index >> 4;
+                let world_y = section_y + (y * 4) as i32;
+                let left_id = left.get_biome(x, world_y, z);
+                let right_id = right.get_biome(x, world_y, z);
+                if left_id != right_id {
+                    return Some(format!(
+                        "biome differs at section {section_index}, local ({x}, {y}, {z}): {left_id} != {right_id}"
+                    ));
+                }
+            }
+        }
+        None
+    }
+
+    fn encoded_section(shape: &ChunkShape, column: &WorldChunkColumn, index: usize) -> Vec<u8> {
+        let synthesized;
+        let section = match column.section(index) {
+            Some(section) => section,
+            None => {
+                synthesized = ChunkSection::new(
+                    shape.block_kind,
+                    shape.biome_kind,
+                    shape.air_id,
+                    shape.biome_id,
+                );
+                &synthesized
+            }
+        };
+        let counts = section_packet_counts(section);
+        let mut writer = Writer::default();
+        writer.i16(counts.non_empty as i16);
+        writer.i16(counts.fluid as i16);
+        section.block_states().encode(&mut writer);
+        section.biomes().encode(&mut writer);
+        writer.into_vec()
+    }
+
     #[test]
     fn buffered_conversion_matches_cellwise_control_across_shapes() {
         for shape in [ChunkShape::overworld_1_21(), ChunkShape::nether_or_end_1_21()] {
@@ -170,7 +236,34 @@ mod conversion_tests {
                     .expect("cave air state"),
             );
             source.set_biome_cell(0, 0, 0, "minecraft:desert");
-            assert_eq!(build_world_column(&shape, &source), cellwise_column(&shape, &source));
+            let buffered = build_world_column(&shape, &source);
+            let cellwise = cellwise_column(&shape, &source);
+            if let Some(difference) = first_cell_difference(&buffered, &cellwise) {
+                panic!(
+                    "buffered conversion differs for shape min_y={} sections={}: {}",
+                    shape.min_y,
+                    shape.section_count,
+                    difference
+                );
+            }
+            for section_index in 0..shape.section_count {
+                let buffered_bytes = encoded_section(&shape, &buffered, section_index);
+                let cellwise_bytes = encoded_section(&shape, &cellwise, section_index);
+                if buffered_bytes != cellwise_bytes {
+                    let byte_index = buffered_bytes
+                        .iter()
+                        .zip(&cellwise_bytes)
+                        .position(|(left, right)| left != right)
+                        .unwrap_or(buffered_bytes.len().min(cellwise_bytes.len()));
+                    panic!(
+                        "encoded section {section_index} differs for shape min_y={} sections={} at byte {byte_index}: lengths {} != {}",
+                        shape.min_y,
+                        shape.section_count,
+                        buffered_bytes.len(),
+                        cellwise_bytes.len()
+                    );
+                }
+            }
         }
     }
 }
