@@ -385,3 +385,7 @@ codegen-backend = "llvm"
 # See docs/compile-times.md.
 [profile.dev.package.lodestone-render]
 codegen-backend = "llvm"
+
+# The pinned x86 Cranelift backend cannot lower this dependency's 256-bit CRC path.
+[profile.dev.package.crc32fast]
+codegen-backend = "llvm"
