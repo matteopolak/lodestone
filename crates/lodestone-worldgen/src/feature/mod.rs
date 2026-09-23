@@ -2011,69 +2011,20 @@ fn is_outside_build_height(y: i32, min_y: i32, height: i32) -> bool {
     y < min_y || y >= min_y + height
 }
 
-/// How many targets [`TargetCache`] can hold a bitmask for. Vanilla's widest
-/// `UNDERGROUND_ORES` config has **two** (a `stone_ore_replaceables` target and
-/// a `deepslate_ore_replaceables` one), so this is 4× headroom; a config with
-/// more evaluates every target by name per candidate, preserving the complete
-/// target list when the compact cache cannot represent it.
+/// Configurations with more targets use the uncached path so every target is checked.
 const MAX_CACHED_TARGETS: usize = 8;
 
-/// Slots in [`TargetCache`]'s direct-mapped table. A blob visits ~82 candidate
-/// positions (measured: 79,148 candidates over 962 blobs per interior column) and
-/// the states under them are a handful of terrain blocks, so 16 slots keyed on the
-/// low bits of the [`StateId`] is enough for a near-total hit rate while staying
-/// 32 bytes of stack.
 const TARGET_CACHE_SLOTS: usize = 16;
 
-/// Per-**blob** memo for the two string operations `try_place_ore` used to
-/// perform on every candidate position: resolving the cell's base name and
-/// testing it against each of the config's `RuleTest`s.
-///
-/// # Why this is where the ore stage's cost was
-///
-/// DESIGN.md §12.149: with `ore` at 38.7% of a steady-state column, a `samply`
-/// profile of the stage alone put **18.5% of it in `SipHash::write`/`hash_one::<&str>`
-/// plus 3.5% in `memcmp`** — the `ore_tag_map` lookup and its member-set probe,
-/// two string hashes per target per candidate, 81,316 target tests per column —
-/// and a further ~13% of the inlined placement loop in `memchr`, which is
-/// `current.split('[')`. All of it recomputed the same answer for the same
-/// [`StateId`] tens of thousands of times per column, because the *terrain* under
-/// a blob is a handful of distinct states.
-///
-/// # How it works
-///
-/// Direct-mapped on the raw [`StateId`], with a full key compare, holding a
-/// bitmask of which of `config.targets` match that state. A hit is one array
-/// index and one `u32` compare. A miss runs the target matcher — the
-/// original name-based code, unchanged — and stores the answer.
-///
-/// The mask is only ever *consumed* in ascending target order, so the sequence of
-/// matching targets, and therefore the `should_skip_air_check` draw sequence, is
-/// bit-for-bit what the name-based loop produced. **That is the whole correctness
-/// argument and it is why the mask is a bitmask rather than a "first match"
-/// index:** vanilla's own "can place ore" check can refuse a matching target and vanilla then continues
-/// to the *next* matching one, drawing again.
-///
-/// # How to change it, and the trap
-///
-/// **The cache must not outlive one `OreConfig`.** It is constructed inside
-/// [`do_place`], which handles exactly one config, so the config is not part of
-/// the key. Hoisting it to a `thread_local!` (the shape [`BLOB_DATA`] uses) would
-/// make it wrong in the §12.143 way — a value from a *different function* at a
-/// plausible magnitude — unless the config's identity went into the key and was
-/// cleared between generators. Do not hoist it.
-///
-/// Target states are canonical when the configuration is parsed, so the write
-/// path carries the configured id directly.
+/// Per-blob target-match cache, keyed by canonical state. The mask retains target
+/// order because a rejected match may still allow a later target to place.
+/// Its lifetime must stay within one ore configuration; the configuration is not
+/// part of the key.
 struct TargetCache {
-    /// Raw [`StateId`] per slot; `u16::MAX` means empty. `u16::MAX` is safe as a
-    /// sentinel because the canonical registry contains fewer than 65,536 states, so no live id
-    /// can equal it.
     keys: [u32; TARGET_CACHE_SLOTS],
     masks: [u8; TARGET_CACHE_SLOTS],
 }
 
-/// The sentinel both of [`TargetCache`]'s tables use for "empty".
 const NO_ID: u32 = u32::MAX;
 
 impl TargetCache {
@@ -2084,8 +2035,6 @@ impl TargetCache {
         }
     }
 
-    /// The bitmask of `config.targets` matching the state at `id`, computed on
-    /// a miss.
     #[inline]
     fn mask_for(
         &mut self,
@@ -2103,15 +2052,8 @@ impl TargetCache {
         self.masks[slot] = mask;
         mask
     }
-
 }
 
-/// Vanilla's own target-block-state test for every target of `config` against the block
-/// state `id`, as a bitmask over target index.
-///
-/// This is the original `try_place_ore` body's inner test, moved out so
-/// [`TargetCache`] and the uncached path cannot drift. Neither test draws, so
-/// hoisting them out of the placement loop cannot move the RNG.
 #[inline]
 fn target_matches(
     id: CanonicalStateId,
@@ -2159,25 +2101,7 @@ fn try_place_ore<R: RandomSource, W: OreWorldAccess>(
     z: i32,
     cache: &mut TargetCache,
 ) {
-    // Writes always land somewhere in the driven 3×3 region (clamped beyond
-    // it — see `OreInput::region_local`); whether this particular write is
-    // in the CENTRE (and therefore fixture-comparable) is decided later by
-    // the caller via `in_center`, not here — a neighbour-chunk write still
-    // has to happen so later reads (isAdjacentToAir, a later source's own
-    // placement) see it, exactly as vanilla's real, shared block field would.
     let (lx, lz) = input.region_local(x, z);
-    // Ids, not names. Until §12.149 this read the cell as a `&str`, stripped its
-    // base name with `split('[')` and hashed that string against `ore_tag_map`
-    // once per target — three string operations per candidate position, ~79,148
-    // candidates per column, all answering the same question about the same
-    // handful of terrain states. `TargetCache` answers it from a `u16` compare;
-    // the target matcher is still the only implementation of the test
-    // itself.
-    //
-    // The draw sequence is untouched, as it was by the earlier removal of the
-    // `to_string()` here: `should_skip_air_check` still fires per **matching**
-    // target, in ascending target order, and the walk still stops at the first
-    // target that places.
     let mut chosen: Option<usize> = None;
     {
         ore_probe::bump_region_read(1);
