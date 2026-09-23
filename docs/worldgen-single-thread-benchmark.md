@@ -48,13 +48,16 @@ read from each interval, and do not enable the ordinary generation counters.
 The session remainder includes production admission, materialization, ledger,
 publication, and diagnostic observer overhead; compare it with the uninstrumented
 `production_request` total rather than treating it as a generator stage.
-The same feature reports five lifecycle regions: admission, replay-context
-preparation, requested-target mutable advancement, sparse-padding completion, and
-packet-snapshot finalization. Admission is measured around the immutable region
-admission call and therefore overlaps the terrain-prefix stage counters; the
-other regions are disjoint lifecycle scopes. These regions explain the session
-remainder without changing the default build; packet light and encoding remain
-the separate `light_encode` metric.
+The same feature reports lifecycle regions for admission, replay-context
+preparation, requested-target mutable advancement, sparse-padding completion,
+packet-snapshot finalization, shaped-prefix import, checkpoint capture and
+export, session hydration, ledger publication, and mutation-winner scanning.
+Admission overlaps the terrain-prefix stage counters. Prefix import is nested
+inside mutable-target advancement, so those two rows are inclusive and must not
+be added together. The checkpoint and publication rows isolate their named
+operations from the session remainder. These diagnostics are absent from the
+default build; packet light and encoding remain the separate `light_encode`
+metric.
 With `lodestone-worldgen/gen-counters`, `gen_work` also counts structure piece
 bounding-box checks and reached pieces, separating placement traversal from
 height probing.

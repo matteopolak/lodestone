@@ -1159,12 +1159,16 @@ where
                 self.phase = GenerationPhase::ImportShaped;
             }
             GenerationPhase::ImportShaped => {
-                import_shaped_prefixes::<S, P>(
-                    self.source,
-                    self.session,
-                    &mut *self.materializer,
-                    &mut *self.shared_prefixes,
-                )?;
+                {
+                    #[cfg(feature = "worldgen-stage-pmu")]
+                    let _prefix_import = RegionGuard::enter(RegionPhase::PrefixImport);
+                    import_shaped_prefixes::<S, P>(
+                        self.source,
+                        self.session,
+                        &mut *self.materializer,
+                        &mut *self.shared_prefixes,
+                    )?;
+                }
                 crate::worldgen_progress::emit(crate::worldgen_progress::WorldgenProgress {
                     session: self.session.id().value(),
                     admitted: self.admissions.len() as u32,

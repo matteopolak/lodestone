@@ -105,16 +105,17 @@ static STAGE_INSTRUCTIONS: [AtomicU64; STAGE_COUNT] =
 #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
 static STAGE_CYCLES: [AtomicU64; STAGE_COUNT] = [const { AtomicU64::new(0) }; STAGE_COUNT];
 #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
-static REGION_INSTRUCTIONS: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+static REGION_INSTRUCTIONS: [AtomicU64; 12] = [const { AtomicU64::new(0) }; 12];
 #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
-static REGION_CYCLES: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+static REGION_CYCLES: [AtomicU64; 12] = [const { AtomicU64::new(0) }; 12];
 #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
 static PMU_READ_COST: OnceLock<(u64, u64)> = OnceLock::new();
 
 #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
 thread_local! {
     static STAGE_START: Cell<Option<(Stage, u64, u64)>> = const { Cell::new(None) };
-    static REGION_START: Cell<Option<(RegionPhase, u64, u64)>> = const { Cell::new(None) };
+    static REGION_START: Cell<([Option<(RegionPhase, u64, u64)>; 16], usize)> =
+        const { Cell::new(([None; 16], 0)) };
 }
 
 #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
@@ -158,15 +159,23 @@ fn region_pmu_observer(phase: RegionPhase, event: StageEvent) {
     match event {
         StageEvent::Enter => {
             let (instructions, cycles) = retired().expect("region PMU requires retired counters");
-            REGION_START.with(|start| {
-                assert!(start.get().is_none(), "region PMU scopes may not overlap");
-                start.set(Some((phase, instructions, cycles)));
+            REGION_START.with(|state| {
+                let (mut stack, depth) = state.get();
+                assert!(depth < stack.len(), "region PMU nesting exceeded its bound");
+                stack[depth] = Some((phase, instructions, cycles));
+                state.set((stack, depth + 1));
             });
         }
         StageEvent::Exit => {
-            let (started_phase, before_instructions, before_cycles) = REGION_START
-                .with(|start| start.take())
-                .expect("region PMU exit without an enter");
+            let (started_phase, before_instructions, before_cycles) = REGION_START.with(|state| {
+                let (mut stack, depth) = state.get();
+                assert!(depth > 0, "region PMU exit without an enter");
+                let frame = stack[depth - 1]
+                    .take()
+                    .expect("active region PMU frame is present");
+                state.set((stack, depth - 1));
+                frame
+            });
             assert_eq!(started_phase, phase, "region PMU scope changed phases");
             let (after_instructions, after_cycles) =
                 retired().expect("region PMU requires retired counters");
@@ -284,6 +293,13 @@ fn report_stage_pmu(total: &Measurement<impl Sized>, columns: usize, phase: &str
         ("mutable_target", 2),
         ("mutable_padding", 3),
         ("snapshot_finalization", 4),
+        ("prefix_import", 5),
+        ("ledger_checkpoint_capture", 6),
+        ("session_hydration", 7),
+        ("checkpoint_export", 8),
+        ("ledger_publish_inner", 9),
+        ("mutation_winner_scan", 10),
+        ("direct_transition_mirror", 11),
     ] {
         report(name, REGION_INSTRUCTIONS[index].load(Relaxed), REGION_CYCLES[index].load(Relaxed));
     }

@@ -257,6 +257,8 @@ use lodestone_worldgen::stage_schedule::{
     BarrierPolicy, ChunkRequest, ColumnStage, Dimension, DimensionPipeline, GenerationTarget, PipelineIdentity,
     PipelineOptions, ResourceKey, StageFrontier, StageKey, StageRecord,
 };
+#[cfg(feature = "worldgen-stage-pmu")]
+use lodestone_worldgen::counters::{RegionGuard, RegionPhase};
 #[cfg(test)]
 use crate::ticket::{TicketKind, TicketOwner};
 
@@ -2062,7 +2064,11 @@ impl GenerationLedger {
         pipeline: DimensionPipeline,
         session: &GenerationSession,
     ) -> Result<(), GenerationLedgerError> {
-        let checkpoint = session.export_checkpoint();
+        let checkpoint = {
+            #[cfg(feature = "worldgen-stage-pmu")]
+            let _checkpoint_export = RegionGuard::enter(RegionPhase::CheckpointExport);
+            session.export_checkpoint()
+        };
         if checkpoint
             .frontiers()
             .iter()
@@ -2100,21 +2106,26 @@ impl GenerationLedger {
             return Ok(());
         }
 
-        let mut winners = BTreeMap::<
-            BlockCoordinate,
-            (DimensionPipeline, &ProvenanceMutation),
-        >::new();
-        for &(pipeline, session) in sessions {
-            for mutation in session.committed_mutations() {
-                let destination = mutation.provenance().destination();
-                if winners
-                    .get(&destination)
-                    .is_none_or(|(_, current)| mutation.provenance() < current.provenance())
-                {
-                    winners.insert(destination, (pipeline, mutation));
+        let winners = {
+            #[cfg(feature = "worldgen-stage-pmu")]
+            let _winner_scan = RegionGuard::enter(RegionPhase::MutationWinnerScan);
+            let mut winners = BTreeMap::<
+                BlockCoordinate,
+                (DimensionPipeline, &ProvenanceMutation),
+            >::new();
+            for &(pipeline, session) in sessions {
+                for mutation in session.committed_mutations() {
+                    let destination = mutation.provenance().destination();
+                    if winners
+                        .get(&destination)
+                        .is_none_or(|(_, current)| mutation.provenance() < current.provenance())
+                    {
+                        winners.insert(destination, (pipeline, mutation));
+                    }
                 }
             }
-        }
+            winners
+        };
         for (pipeline, mutation) in winners.values() {
                 let destination = mutation.provenance().destination();
                 let coordinate = (
@@ -2180,7 +2191,11 @@ impl GenerationLedger {
                 journals.push(GenerationLedgerJournal::new(self, identity));
                 journals.len() - 1
             };
-            let checkpoint = session.export_checkpoint();
+            let checkpoint = {
+                #[cfg(feature = "worldgen-stage-pmu")]
+                let _checkpoint_export = RegionGuard::enter(RegionPhase::CheckpointExport);
+                session.export_checkpoint()
+            };
             if let Err(error) = self.publish_session_inner(
                 pipeline,
                 &checkpoint,
@@ -2203,6 +2218,8 @@ impl GenerationLedger {
         journal: &mut GenerationLedgerJournal,
         final_outputs: Option<&BTreeMap<ChunkCoordinate, &ChunkColumn>>,
     ) -> Result<(), GenerationLedgerError> {
+        #[cfg(feature = "worldgen-stage-pmu")]
+        let _ledger_publish = RegionGuard::enter(RegionPhase::LedgerPublishInner);
         let identity = pipeline.identity(PipelineOptions::ALL);
         if checkpoint.pipeline_identity() != identity {
             return Err(GenerationLedgerError::UnknownPipeline(identity));
@@ -3785,7 +3802,12 @@ impl<S: ChunkSource> ChunkStore<S> {
                         })
                         .collect());
                 }
-                let checkpoint = match ledger.checkpoint(pipeline, request) {
+                let checkpoint = match {
+                    #[cfg(feature = "worldgen-stage-pmu")]
+                    let _checkpoint_capture =
+                        RegionGuard::enter(RegionPhase::LedgerCheckpointCapture);
+                    ledger.checkpoint(pipeline, request)
+                } {
                     Ok(checkpoint) => checkpoint,
                     Err(error) => {
                         let message = error.to_string();
@@ -3829,11 +3851,15 @@ impl<S: ChunkSource> ChunkStore<S> {
                 });
                 (admitted, checkpoint)
             };
-            let hydration = GenerationSession::from_checkpoint_with_budget_and_cancellation(
-                checkpoint,
-                session.budget(),
-                session.cancellation(),
-            );
+            let hydration = {
+                #[cfg(feature = "worldgen-stage-pmu")]
+                let _session_hydration = RegionGuard::enter(RegionPhase::SessionHydration);
+                GenerationSession::from_checkpoint_with_budget_and_cancellation(
+                    checkpoint,
+                    session.budget(),
+                    session.cancellation(),
+                )
+            };
             let hydration = match hydration {
                 Ok(hydration) => hydration,
                 Err(error) => {
