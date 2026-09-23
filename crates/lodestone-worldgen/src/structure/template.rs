@@ -1321,7 +1321,7 @@ mod tests {
         assert_eq!(log.rotate(Rotation::Cw90).id.canonical_state(), "minecraft:oak_log[axis=z]");
         assert_eq!(log.rotate(Rotation::Cw180).id.canonical_state(), "minecraft:oak_log[axis=x]");
         let sign = BlockState::parse("minecraft:oak_sign[rotation=2]");
-        assert_eq!(sign.rotate(Rotation::Cw90).id.canonical_state(), "minecraft:oak_sign[rotation=6]");
+        assert_eq!(sign.rotate(Rotation::Cw90).id.canonical_state(), "minecraft:oak_sign[rotation=6,waterlogged=false]");
     }
 
     #[test]

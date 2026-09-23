@@ -413,10 +413,15 @@ mod tests {
                 let row = words.next()?;
                 let pos = words.next()?;
                 let state = words.next()?;
-                (row == "normal").then_some((
-                    pos.to_string(),
-                    StateId::from_state_str(state).expect("fixture state is in the generated table"),
-                ))
+                if row == "normal" {
+                    Some((
+                        pos.to_string(),
+                        StateId::from_state_str(state)
+                            .expect("fixture state is in the generated table"),
+                    ))
+                } else {
+                    None
+                }
             })
             .collect();
         assert!(

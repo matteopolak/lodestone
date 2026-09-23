@@ -1838,7 +1838,7 @@ mod tests {
 
         place_post_surface_blocks(&mut world, &writes);
 
-        assert_eq!(world.get(0, 0, 0), "minecraft:smooth_stone_slab");
+        assert_eq!(world.get(0, 0, 0), "minecraft:smooth_stone_slab[type=bottom,waterlogged=false]");
         assert_eq!(world.get(1, 0, 0), "minecraft:mossy_stone_bricks");
         assert_eq!(world.get(2, 0, 0), "minecraft:cave_air");
     }

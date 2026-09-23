@@ -861,6 +861,12 @@ mod tests {
             .expect("test state is in the generated table")
     }
 
+    fn bound_tags() -> VegTags {
+        let tags = VegTags::default();
+        tags.bind();
+        tags
+    }
+
     fn grid_with_flat_ground(min_y: i32, height: i32, ground_y: i32) -> VegGrid {
         let mut grid = VegGrid::new(min_y, height, 0, 0);
         for x in 0..16 {
@@ -1517,8 +1523,13 @@ mod tests {
         assert_eq!(
             cells,
             vec![
-                (3, 70, 5, "minecraft:oak_log".to_string()),
-                (4, 71, 5, "minecraft:oak_leaves".to_string()),
+                (3, 70, 5, "minecraft:oak_log[axis=y]".to_string()),
+                (
+                    4,
+                    71,
+                    5,
+                    "minecraft:oak_leaves[distance=7,persistent=false,waterlogged=false]".to_string(),
+                ),
             ],
             "the out-of-bounds attempt must not appear, and order must match write order"
         );
@@ -1681,7 +1692,7 @@ mod tests {
             root_placer: None,
         };
         let mut grid = grid_with_flat_ground(-64, 384, 69);
-        let tags = VegTags::default();
+        let tags = bound_tags();
         let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(42));
         let origin = BlockPos { x: 8, y: 70, z: 8 };
         place_tree(&mut random, origin, &cfg, &mut grid, &tags);
@@ -1854,6 +1865,7 @@ mod tests {
         // `place_dark_oak_trunk`'s `isAirOrLeaves` anchor gate needs the
         // leaves tag populated (real vanilla's `#minecraft:leaves`).
         tags.leaves.insert(Block::DarkOakLeaves);
+        tags.bind();
         let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(99));
         let origin = BlockPos { x: 8, y: 70, z: 8 };
         place_tree(&mut random, origin, &cfg, &mut grid, &tags);
@@ -1971,6 +1983,7 @@ mod tests {
         grid.seed_id(5, 70, 6, state("minecraft:air"));
         let mut tags = VegTags::default();
         tags.supports_vegetation.insert(Block::GrassBlock);
+        tags.bind();
         let provider = BlockStateProvider::simple("minecraft:short_grass");
         let mut random = LegacyRandomSource::new(1);
 
@@ -1993,6 +2006,7 @@ mod tests {
         grid.seed_id(5, 71, 5, state("minecraft:air"));
         let mut tags = VegTags::default();
         tags.supports_vegetation.insert(Block::GrassBlock);
+        tags.bind();
         let provider = BlockStateProvider::simple("minecraft:tall_grass[half=lower]");
 
         place_simple_block(
@@ -2086,7 +2100,7 @@ mod tests {
             prioritize_tip: false,
         };
         let mut grid = grid_with_flat_ground(-64, 384, 69);
-        let tags = VegTags::default();
+        let tags = bound_tags();
         let mut random = LegacyRandomSource::new(7);
         let origin = BlockPos { x: 8, y: 70, z: 8 };
         place_block_column(&mut random, origin, &cfg, &mut grid, &tags);
@@ -2122,7 +2136,7 @@ mod tests {
         };
         let mut grid = grid_with_flat_ground(-64, 384, 69);
         grid.seed_id(8, 72, 8, state("minecraft:stone"));
-        let tags = VegTags::default();
+        let tags = bound_tags();
         let mut random = LegacyRandomSource::new(7);
         let origin = BlockPos { x: 8, y: 70, z: 8 };
         place_block_column(&mut random, origin, &cfg, &mut grid, &tags);
@@ -2135,6 +2149,7 @@ mod tests {
     fn would_survive_cactus_requires_supports_cactus_below_and_clear_sides() {
         let mut tags = VegTags::default();
         tags.supports_cactus.insert(Block::Sand);
+        tags.bind();
         let pred = BlockPredicate::WouldSurviveCactus;
 
         let mut grid = VegGrid::new(-64, 384, 0, 0);
@@ -2176,6 +2191,7 @@ mod tests {
         // must therefore pass on bare sand with NO adjacent water.
         let mut tags = VegTags::default();
         tags.supports_sugar_cane.insert(Block::Sand);
+        tags.bind();
         let pred = BlockPredicate::WouldSurviveSugarCane;
         let mut grid = VegGrid::new(-64, 384, 0, 0);
         grid.seed_id(5, 69, 5, state("minecraft:sand"));
@@ -2256,7 +2272,7 @@ mod tests {
             root_placer: None,
         };
         let mut grid = grid_with_flat_ground(-64, 384, 69);
-        let tags = VegTags::default();
+        let tags = bound_tags();
         let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(11));
         let origin = BlockPos { x: 8, y: 70, z: 8 };
         place_tree(&mut random, origin, &cfg, &mut grid, &tags);
@@ -2324,7 +2340,7 @@ mod tests {
             root_placer: None,
         };
         let mut grid = grid_with_flat_ground(-64, 384, 69);
-        let tags = VegTags::default();
+        let tags = bound_tags();
         let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(2));
         let origin = BlockPos { x: 8, y: 70, z: 8 };
         place_tree(&mut random, origin, &cfg, &mut grid, &tags);
@@ -2390,7 +2406,7 @@ mod tests {
             root_placer: None,
         };
         let mut grid = grid_with_flat_ground(-64, 384, 69);
-        let tags = VegTags::default();
+        let tags = bound_tags();
         let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(3));
         let origin = BlockPos { x: 8, y: 70, z: 8 };
         place_tree(&mut random, origin, &cfg, &mut grid, &tags);
@@ -2604,7 +2620,7 @@ mod tests {
         };
         for seed in [1i64, 99] {
             let mut grid = grid_with_flat_ground(-64, 384, 69);
-            let tags = VegTags::default();
+            let tags = bound_tags();
             let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(seed));
             let origin = BlockPos { x: 8, y: 70, z: 8 };
             place_tree(&mut random, origin, &cfg, &mut grid, &tags);
@@ -2681,7 +2697,7 @@ mod tests {
         let cfg = fancy_min_clipped_height_cfg();
         let mut grid = grid_with_flat_ground(-64, 384, 69);
         grid.seed_id(8, 74, 8, state("minecraft:stone"));
-        let tags = VegTags::default();
+        let tags = bound_tags();
         let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(1));
         let origin = BlockPos { x: 8, y: 70, z: 8 };
         place_tree(&mut random, origin, &cfg, &mut grid, &tags);
@@ -2810,7 +2826,7 @@ mod tests {
         };
         for seed in [1i64, 7, 42] {
             let mut grid = grid_with_flat_ground(-64, 384, 69);
-            let tags = VegTags::default();
+            let tags = bound_tags();
             let mut random = LegacyRandomSource::new(seed);
             let origin = BlockPos { x: 8, y: 70, z: 8 };
             features::place_fallen_tree(&mut random, origin, &cfg, &mut grid, &tags);
@@ -2945,7 +2961,7 @@ mod tests {
     fn cherry_trunk_with_three_branches_places_the_full_height_column() {
         let cfg = cherry_cfg(IntProvider::Constant(3), (-5, -4));
         let mut grid = grid_with_flat_ground(-64, 384, 69);
-        let tags = VegTags::default();
+        let tags = bound_tags();
         let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(7));
         let origin = BlockPos { x: 8, y: 70, z: 8 };
         place_tree(&mut random, origin, &cfg, &mut grid, &tags);
@@ -2974,7 +2990,7 @@ mod tests {
     fn cherry_trunk_with_one_branch_places_a_strictly_shorter_column() {
         let cfg = cherry_cfg(IntProvider::Constant(1), (-5, -4));
         let mut grid = grid_with_flat_ground(-64, 384, 69);
-        let tags = VegTags::default();
+        let tags = bound_tags();
         let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(7));
         let origin = BlockPos { x: 8, y: 70, z: 8 };
         place_tree(&mut random, origin, &cfg, &mut grid, &tags);
@@ -3033,7 +3049,7 @@ mod tests {
     fn upwards_branching_trunk_with_zero_probability_is_a_plain_column() {
         let cfg = mangrove_trunk_cfg(0.0);
         let mut grid = grid_with_flat_ground(-64, 384, 69);
-        let tags = VegTags::default();
+        let tags = bound_tags();
         let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(5));
         let origin = BlockPos { x: 8, y: 70, z: 8 };
         place_tree(&mut random, origin, &cfg, &mut grid, &tags);
@@ -3071,7 +3087,7 @@ mod tests {
     fn upwards_branching_trunk_with_full_probability_places_logs_off_the_column() {
         let cfg = mangrove_trunk_cfg(1.0);
         let mut grid = grid_with_flat_ground(-64, 384, 69);
-        let tags = VegTags::default();
+        let tags = bound_tags();
         let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(5));
         let origin = BlockPos { x: 8, y: 70, z: 8 };
         place_tree(&mut random, origin, &cfg, &mut grid, &tags);
@@ -3125,7 +3141,7 @@ mod tests {
     fn mangrove_root_placer_shifts_the_trunk_origin_upward() {
         let cfg = mangrove_root_cfg(4);
         let mut grid = grid_with_flat_ground(-64, 384, 69);
-        let tags = VegTags::default();
+        let tags = bound_tags();
         let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(3));
         let origin = BlockPos { x: 8, y: 70, z: 8 };
         place_tree(&mut random, origin, &cfg, &mut grid, &tags);
@@ -3368,6 +3384,7 @@ mod tests {
             let feature = ConfiguredFeature::HugeMushroom(Box::new(cfg));
             let mut grid = grid_with_flat_ground(-64, 384, 69);
             let tags = mushroom_tags();
+            tags.bind();
             let mut random = LegacyRandomSource::new(0);
             place_configured_feature(
                 &mut random,
@@ -3400,6 +3417,7 @@ mod tests {
         let cfg = bundled_huge_mushroom_cfg("brown");
         let mut grid = grid_with_flat_ground(-64, 384, 69);
         let tags = mushroom_tags();
+        tags.bind();
         let mut random = LegacyRandomSource::new(0);
         let origin = BlockPos { x: 8, y: 70, z: 8 };
         features::place_huge_mushroom_at_height(&mut random, origin, &cfg, 4, &mut grid, &tags);
@@ -3441,6 +3459,7 @@ mod tests {
         let cfg = bundled_huge_mushroom_cfg("red");
         let mut grid = grid_with_flat_ground(-64, 384, 69);
         let tags = mushroom_tags();
+        tags.bind();
         let mut random = LegacyRandomSource::new(0);
         let origin = BlockPos { x: 8, y: 70, z: 8 };
         features::place_huge_mushroom_at_height(&mut random, origin, &cfg, 4, &mut grid, &tags);
@@ -3479,6 +3498,7 @@ mod tests {
         cfg.foliage_radius = 3;
         let mut grid = grid_with_flat_ground(-64, 384, 69);
         let tags = mushroom_tags();
+        tags.bind();
         let mut random = LegacyRandomSource::new(0);
         let origin = BlockPos { x: 8, y: 70, z: 8 };
 
@@ -3503,6 +3523,7 @@ mod tests {
         let cfg = bundled_huge_mushroom_cfg("red");
         let mut grid = grid_with_flat_ground(-64, 384, 69);
         let tags = mushroom_tags();
+        tags.bind();
         let origin = BlockPos { x: 8, y: 70, z: 8 };
         let mut random = HugeMushroomScriptRandom::new([0, 0]);
 
@@ -3529,6 +3550,7 @@ mod tests {
         let mut tags = mushroom_tags();
         tags.leaves.insert(Block::OakLeaves);
         tags.replaceable_by_mushrooms.insert(Block::OakLeaves);
+        tags.bind();
         let origin = BlockPos { x: 8, y: 70, z: 8 };
         grid.seed_id(8, 70, 8, state("minecraft:oak_leaves"));
         grid.seed_id(8, 74, 8, state("minecraft:oak_leaves"));

@@ -940,6 +940,7 @@ mod tests {
         }
         let mut tags = VegTags::default();
         tags.beneath_tree_podzol_replaceable.insert(Block::Dirt);
+        tags.bind();
         let provider = BlockStateProvider::RuleBased {
             rules: vec![(
                 super::super::config::BlockPredicate::MatchingBlockTag {
@@ -1012,6 +1013,7 @@ mod tests {
         grid.seed_id(3, 0, 4, state("minecraft:grass_block"));
         let mut tags = VegTags::default();
         tags.supports_vegetation.insert(Block::GrassBlock);
+        tags.bind();
         let provider = BlockStateProvider::simple("minecraft:tall_grass[half=lower]");
         let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
 
@@ -1058,6 +1060,7 @@ mod tests {
             HashSet::from(["minecraft:grass_block".to_string()]),
             HashMap::new(),
         );
+        tags.bind();
         let provider = BlockStateProvider::simple("minecraft:short_grass");
         let logs = [BlockPos { x: 0, y: 0, z: 0 }];
         let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
@@ -1101,6 +1104,7 @@ mod tests {
             HashSet::from(["minecraft:grass_block".to_string()]),
             HashMap::new(),
         );
+        tags.bind();
 
         let mut supported = VegGrid::new(-1, 3, 0, 0);
         supported.seed_id(0, 0, 0, state("minecraft:grass_block"));

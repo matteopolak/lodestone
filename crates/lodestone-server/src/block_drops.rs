@@ -198,7 +198,10 @@ pub struct PoppedItem {
 /// block type, so the state's properties are intentionally ignored.
 #[must_use]
 pub fn block_loot_table_id(state: StateId) -> Option<ResourceKey> {
-    let path = state.block().path();
+    block_loot_table_id_for_path(state.block().path())
+}
+
+fn block_loot_table_id_for_path(path: &str) -> Option<ResourceKey> {
     (!path.is_empty())
         .then(|| format!("minecraft:blocks/{path}").parse().ok())
         .flatten()
@@ -591,8 +594,8 @@ mod tests {
             id("minecraft:coal_ore").as_deref(),
             Some("minecraft:blocks/coal_ore")
         );
-        assert_eq!(id(""), None);
-        assert_eq!(id("minecraft:"), None);
+        assert_eq!(block_loot_table_id_for_path(""), None);
+        assert_eq!(block_loot_table_id_for_path("invalid path"), None);
     }
 
     /// **The exact predicted drop for every bundled block table**, under the

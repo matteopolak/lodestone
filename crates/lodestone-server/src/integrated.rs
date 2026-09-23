@@ -5696,7 +5696,7 @@ mod tests {
         wait_for_integrated_condition(&server, |server| {
             server
                 .resident_block_state_id(16, 1, 0)
-                .is_some_and(|state| state == state_id("minecraft:water"))
+                .is_some_and(|state| state == state_id("minecraft:water[level=1]"))
         })
         .await;
     }
@@ -5731,7 +5731,7 @@ mod tests {
         wait_for_integrated_condition(&server, |server| {
             server
                 .resident_block_state_id(16, 1, 0)
-                .is_some_and(|state| state == state_id("minecraft:water"))
+                .is_some_and(|state| state == state_id("minecraft:water[level=1]"))
         })
         .await;
     }
