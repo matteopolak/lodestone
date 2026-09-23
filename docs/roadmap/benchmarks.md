@@ -64,8 +64,8 @@ and the shared benchmark recorder.
 
 ### Worldgen parallel scaling
 
-`crates/lodestone-server/tests/join_parallel_efficiency.rs` contains a separate
-ignored `core/rayon` arm for the direct world-generation path. It builds one
+`crates/lodestone-server/tests/core_parallel_scaling.rs` contains an ignored
+direct world-generation scaling arm. It builds one
 persistent fixed-size Rayon pool per arm at 1/2/4/8 workers and dispatches the
 same 64 distinct chunks through one immutable dimension enum for Overworld,
 Nether, and End. The independent lattice and adjacent neighbourhood scenes are
@@ -75,13 +75,14 @@ the production arm measures Tokio scheduling and ordered emission.
 
 Each arm reports wall time, process CPU time, total chunks/s, chunks/s per worker,
 linear efficiency, allocation count and bytes, and the complete content digest.
+Process CPU time is `n/a` on non-Unix hosts; the other measurements remain available.
 The indexed Rayon collection preserves input order, and every 1/2/4/8 digest must
 match the serial digest. A same-non-air-count cell mutation control proves the
 detector notices content changes. The report marks nested parallelism disabled;
 workers are not allowed to create another pool. Run the gate in release mode:
 
 ```text
-cargo test --release -p lodestone-server --test join_parallel_efficiency \
+cargo test --release -p lodestone-server --test core_parallel_scaling \
   -- --ignored --nocapture core_worldgen_scales_without_nested_parallelism_and_preserves_content
 ```
 
