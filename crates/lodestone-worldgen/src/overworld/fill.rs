@@ -887,6 +887,27 @@ impl OverworldGenerator {
                     let x0 = base_x + cell_x * 4;
                     let y0 = self.min_y + cell_y * 8;
                     let z0 = base_z + cell_z * 4;
+                    if empty_beard
+                        && sampler.supports_final_density_cells()
+                        && aquifer
+                            .fill_nonpositive_global_fluid_run(y0, &mut vertical_blocks)
+                        && sampler.final_density_cell_terrain_is_nonpositive(x0, y0, z0)
+                    {
+                        crate::counters::bump_nonpositive_cell_skip();
+                        for lz in 0..4i32 {
+                            for lx in 0..4i32 {
+                                for ly in 0..8i32 {
+                                    field[Self::idx(
+                                        cell_x * 4 + lx,
+                                        cell_y * 8 + ly,
+                                        cell_z * 4 + lz,
+                                        self.height,
+                                    )] = pack_block_kind(vertical_blocks[ly as usize]);
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     let solid_cell = if empty_beard && sampler.supports_final_density_cells() {
                         sampler.final_density_cell_or_positive(x0, y0, z0, &mut densities)
                             || Self::cell_densities_are_positive(&densities)
@@ -1747,6 +1768,7 @@ mod tests {
         use crate::counters::Stage;
         use crate::overworld::output::GeneratedColumn;
         use super::OverworldGenerator;
+        use super::super::{BlockKind, unpack_block_kind};
         use crate::density::{NoiseParams, Resolver};
 
         struct FsResolver {
@@ -1996,6 +2018,108 @@ mod tests {
             let after_missing = crate::counters::snapshot().pre_ore_computed;
             assert_eq!(before_missing, 25);
             assert_eq!(after_missing, before_missing + 1);
+        }
+
+        #[test]
+        fn terrain_nonpositive_cell_skip_matches_exact_blocks_and_catches_unsafe_bypass() {
+            let generator = generator();
+            let (cx, cz) = (0, 0);
+            let preliminary = generator
+                .preliminary_cache(crate::aquifer::PRELIMINARY_CACHE_BATCH_CAPACITY);
+            let aquifer =
+                generator.build_aquifer_with_preliminary_cache(cx, cz, &preliminary);
+            let sampler = crate::density::NoiseChunkRegionSampler::from_program(
+                generator.aquifer_trees.final_density.clone(),
+                generator.slot_count,
+                generator.aquifer_trees.cell_width,
+                generator.aquifer_trees.cell_height,
+                crate::engine::Bounds {
+                    x: (cx * 16, cx * 16 + 15),
+                    y: (generator.min_y, generator.min_y + generator.height - 1),
+                    z: (cz * 16, cz * 16 + 15),
+                },
+            );
+            let beard = crate::structure::beardifier::Beardifier::empty();
+            let mut blocks = vec![0; 16 * 16 * generator.height as usize];
+            let mut heights = [generator.min_y - 1; 256];
+            crate::counters::reset();
+            generator.fill_stage_cells(
+                &aquifer,
+                cx * 16,
+                cz * 16,
+                &beard,
+                &sampler,
+                &mut blocks,
+                &mut heights,
+                None,
+            );
+            assert!(crate::counters::snapshot().nonpositive_cell_skips > 0);
+
+            let mut safe_cell = None;
+            let mut unsafe_bypass_witness = None;
+            'cells: for cell_y in 0..generator.height / 8 {
+                let y0 = generator.min_y + cell_y * 8;
+                let mut direct = [BlockKind::Air; 8];
+                if !aquifer.fill_nonpositive_global_fluid_run(y0, &mut direct) {
+                    continue;
+                }
+                for cell_z in 0..4i32 {
+                    for cell_x in 0..4i32 {
+                        let (x0, z0) = (cx * 16 + cell_x * 4, cz * 16 + cell_z * 4);
+                        let terrain_nonpositive =
+                            sampler.final_density_cell_terrain_is_nonpositive(x0, y0, z0);
+                        let mut exact = [0.0; 128];
+                        sampler.final_density_cell(x0, y0, z0, &mut exact);
+                        if terrain_nonpositive {
+                            safe_cell = Some((cell_x, cell_y, cell_z, x0, y0, z0, exact, direct));
+                        } else if exact.iter().any(|density| *density > 0.0) {
+                            let mismatch = (0..128).any(|index| {
+                                let lz = index / 32;
+                                let lx = (index % 32) / 8;
+                                let ly = index % 8;
+                                aquifer.block_at_density(
+                                    x0 + lx as i32,
+                                    y0 + ly as i32,
+                                    z0 + lz as i32,
+                                    exact[index],
+                                ) != direct[ly]
+                            });
+                            assert!(
+                                mismatch,
+                                "unconditionally bypassing a positive lane escaped the block-ID detector"
+                            );
+                            unsafe_bypass_witness = Some(());
+                        }
+                        if safe_cell.is_some() && unsafe_bypass_witness.is_some() {
+                            break 'cells;
+                        }
+                    }
+                }
+            }
+
+            let Some((cell_x, cell_y, cell_z, x0, y0, z0, exact, direct)) = safe_cell else {
+                panic!("fixture did not contain a safe terrain-nonpositive cell");
+            };
+            assert!(unsafe_bypass_witness.is_some());
+            for index in 0..128 {
+                let lz = index / 32;
+                let lx = (index % 32) / 8;
+                let ly = index % 8;
+                let expected = aquifer.block_at_density(
+                    x0 + lx as i32,
+                    y0 + ly as i32,
+                    z0 + lz as i32,
+                    exact[index],
+                );
+                let actual = unpack_block_kind(blocks[OverworldGenerator::idx(
+                    cell_x * 4 + lx as i32,
+                    cell_y * 8 + ly as i32,
+                    cell_z * 4 + lz as i32,
+                    generator.height,
+                )]);
+                assert_eq!(actual, expected, "block-ID mismatch in cell lane {index}");
+                assert_eq!(expected, direct[ly]);
+            }
         }
     }
 

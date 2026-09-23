@@ -246,6 +246,22 @@ impl NoiseChunkRegionSampler {
         assert!(z0 >= self.bounds.z.0 && z0 + 3 <= self.bounds.z.1);
         self.sampler.final_density_cell_is_positive(x0, y0, z0)
     }
+
+    /// Proves the emitted terrain term is safely nonpositive at every block
+    /// sample in this cell. A false result requires the ordinary density path.
+    #[must_use]
+    pub fn final_density_cell_terrain_is_nonpositive(
+        &self,
+        x0: i32,
+        y0: i32,
+        z0: i32,
+    ) -> bool {
+        assert!(x0 >= self.bounds.x.0 && x0 + 3 <= self.bounds.x.1);
+        assert!(y0 >= self.bounds.y.0 && y0 + 7 <= self.bounds.y.1);
+        assert!(z0 >= self.bounds.z.0 && z0 + 3 <= self.bounds.z.1);
+        self.sampler
+            .final_density_cell_terrain_is_nonpositive(x0, y0, z0)
+    }
 }
 
 impl NoiseChunkSampler {
@@ -544,6 +560,40 @@ impl NoiseChunkSampler {
             self.products.as_deref(),
         )
         .eval_overworld_final_density_cell_is_positive(plan, x0, y0, z0)
+    }
+
+    /// Proves the emitted terrain term is safely nonpositive at every block
+    /// sample in this cell. A false result requires the ordinary density path.
+    #[must_use]
+    pub fn final_density_cell_terrain_is_nonpositive(
+        &self,
+        x0: i32,
+        y0: i32,
+        z0: i32,
+    ) -> bool {
+        self.assert_cell_in_bounds(x0, y0, z0);
+        if self.geom.cell_width != 4
+            || self.geom.cell_height != 8
+            || x0.rem_euclid(4) != 0
+            || y0.rem_euclid(8) != 0
+            || z0.rem_euclid(4) != 0
+        {
+            return false;
+        }
+        let Some(plan) = self.program.overworld_final_density_plan() else {
+            return false;
+        };
+        let mut borrow = self.scratch.borrow_mut();
+        let scratch = borrow
+            .as_mut()
+            .expect("the scratch is only taken in Drop, after the last query");
+        Field::new_with_products(
+            self.program.graph(),
+            self.geom,
+            scratch,
+            self.products.as_deref(),
+        )
+        .eval_overworld_final_density_cell_terrain_is_nonpositive(plan, x0, y0, z0)
     }
 
     fn assert_cell_in_bounds(&self, x0: i32, y0: i32, z0: i32) {

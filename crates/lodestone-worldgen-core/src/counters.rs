@@ -481,6 +481,8 @@ pub struct Snapshot {
     pub structure_place_piece_bbox_checks: u64,
     /// Structure pieces whose bounds reach the target chunk in that pass.
     pub structure_place_pieces_reached: u64,
+    /// Overworld cells filled directly after a terrain-only nonpositive proof.
+    pub nonpositive_cell_skips: u64,
 }
 
 impl Default for Snapshot {
@@ -545,6 +547,7 @@ impl Default for Snapshot {
             structure_ring_reach_builds: 0,
             structure_place_piece_bbox_checks: 0,
             structure_place_pieces_reached: 0,
+            nonpositive_cell_skips: 0,
         }
     }
 }
@@ -655,6 +658,7 @@ mod imp {
         structure_ring_reach_builds: AtomicU64,
         structure_place_piece_bbox_checks: AtomicU64,
         structure_place_pieces_reached: AtomicU64,
+        nonpositive_cell_skips: AtomicU64,
     }
 
     static C: Counters = Counters {
@@ -715,6 +719,7 @@ mod imp {
         structure_ring_reach_builds: AtomicU64::new(0),
         structure_place_piece_bbox_checks: AtomicU64::new(0),
         structure_place_pieces_reached: AtomicU64::new(0),
+        nonpositive_cell_skips: AtomicU64::new(0),
     };
 
     thread_local! {
@@ -1040,6 +1045,11 @@ mod imp {
         bump(&C.structure_place_pieces_reached);
     }
 
+    #[inline(always)]
+    pub fn bump_nonpositive_cell_skip() {
+        bump(&C.nonpositive_cell_skips);
+    }
+
     /// Enters `stage` on this thread; the previous tag is restored on drop.
     #[derive(Debug)]
     pub struct StageGuard {
@@ -1198,6 +1208,7 @@ mod imp {
         C.structure_ring_reach_builds.store(0, Relaxed);
         C.structure_place_piece_bbox_checks.store(0, Relaxed);
         C.structure_place_pieces_reached.store(0, Relaxed);
+        C.nonpositive_cell_skips.store(0, Relaxed);
     }
 
     pub fn snapshot() -> Snapshot {
@@ -1263,6 +1274,7 @@ mod imp {
             structure_ring_reach_builds: C.structure_ring_reach_builds.load(Relaxed),
             structure_place_piece_bbox_checks: C.structure_place_piece_bbox_checks.load(Relaxed),
             structure_place_pieces_reached: C.structure_place_pieces_reached.load(Relaxed),
+            nonpositive_cell_skips: C.nonpositive_cell_skips.load(Relaxed),
         }
     }
 }
@@ -1387,6 +1399,9 @@ mod imp {
     #[inline(always)]
     pub fn bump_structure_place_piece_reached() {}
 
+    #[inline(always)]
+    pub fn bump_nonpositive_cell_skip() {}
+
     #[cfg(not(feature = "stage-pmu"))]
     #[derive(Debug)]
     pub struct StageGuard;
@@ -1492,6 +1507,7 @@ pub use imp::{
     bump_structure_reference_computation, bump_structure_candidate_cell_probe,
     bump_structure_ring_reach_build, bump_structure_place_piece_bbox_check,
     bump_structure_place_piece_reached,
+    bump_nonpositive_cell_skip,
     current_stage, reset, snapshot,
 };
 
