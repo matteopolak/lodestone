@@ -24,7 +24,7 @@ use lodestone_v1_9::packets::settings::{
 };
 use lodestone_v1_9::packets::slot::Slot;
 use lodestone_v1_9::packets::window::{
-    EnchantItem, ServerboundCloseWindow, ServerboundHeldItemSlot, SetCreativeSlot,
+    EnchantItem, ServerboundCloseWindow, ServerboundHeldItemSlot, SetCreativeSlot, WindowClick,
 };
 
 const CTX: Ctx = Ctx { version: 340 };
@@ -237,18 +237,9 @@ fn clearing_creative_slot_sends_empty_but_setting_needs_registry() {
 
 #[test]
 fn actions_absent_from_1_12_fail_loudly() {
-    let cases: [ClientAction; 12] = [
+    let cases: [ClientAction; 11] = [
         ClientAction::Stab,
         ClientAction::SetPlayerInput(PlayerInput::EMPTY),
-        ClientAction::ContainerClick {
-            window_id: 0,
-            state_id: lodestone_model::ContainerStateId::INITIAL,
-            slot: 0,
-            button: 0,
-            click_type: ContainerClickType::Pickup,
-            changed_slots: Vec::new(),
-            carried_item: None,
-        },
         // Continuous spectator-follow needs a target uuid; 1.12.2's
         // `spectate` packet has one, but SpectatorAction only carries a
         // network entity id with no registry to resolve it (use
@@ -290,6 +281,29 @@ fn actions_absent_from_1_12_fail_loudly() {
             "{action:?} must be Unsupported"
         );
     }
+}
+
+#[test]
+fn container_click_encodes_the_legacy_transaction_shape() {
+    let (id, body) = encode(&ClientAction::ContainerClick {
+        window_id: 3,
+        state_id: lodestone_model::ContainerStateId::INITIAL,
+        slot: 0,
+        button: 0,
+        click_type: ContainerClickType::Pickup,
+        changed_slots: Vec::new(),
+        carried_item: None,
+    });
+    assert_eq!(id, play::serverbound::WINDOW_CLICK);
+    assert_eq!(body, [3, 0, 0, 0, 0, 0, 0, 0xff, 0xff]);
+
+    let click: WindowClick = decode(&body);
+    assert_eq!(click.window_id, 3);
+    assert_eq!(click.slot, 0);
+    assert_eq!(click.button, 0);
+    assert_eq!(click.action, 0);
+    assert_eq!(click.mode, 0);
+    assert_eq!(click.item, Slot::Empty);
 }
 
 #[test]
