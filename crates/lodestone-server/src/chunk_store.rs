@@ -251,7 +251,7 @@ use crate::worldgen_session::{
     AggregatePrefix, BlockCoordinate, ChunkCoordinate, FeatureSettlementProof,
     GenerationCheckpoint, GenerationSession, ImmutableProduct,
     ImmutableSidecar, ImmutableStageCompletion, MutationProvenance, ProvenanceMutation, SessionError,
-    SourceCompletionRecord,
+    SourceCompletionRecord, TargetFeatureWrite, target_feature_write_precedes_mutation,
 };
 use lodestone_worldgen::stage_schedule::{
     BarrierPolicy, ChunkRequest, ColumnStage, Dimension, DimensionPipeline, GenerationTarget, PipelineIdentity,
@@ -1025,6 +1025,7 @@ struct PipelineLedger {
     source_next: BTreeMap<((i32, i32), StageKey), u64>,
     overlays: BTreeMap<(i32, i32), BTreeMap<BlockCoordinate, ProvenanceMutation>>,
     feature_settlements: BTreeMap<ChunkCoordinate, FeatureSettlementProof>,
+    feature_winner_receipts: BTreeMap<ChunkCoordinate, Vec<TargetFeatureWrite>>,
     revisions: BTreeMap<(i32, i32), u64>,
     coordinate_last_used: BTreeMap<(i32, i32), u64>,
     last_used: u64,
@@ -1102,6 +1103,7 @@ impl PipelineLedger {
             !bucket.is_empty()
         });
         self.feature_settlements.remove(&coordinate);
+        self.feature_winner_receipts.remove(&coordinate);
     }
 }
 
@@ -1117,6 +1119,7 @@ struct GenerationLedgerJournal {
     source_next: BTreeMap<((i32, i32), StageKey), Option<u64>>,
     overlays: BTreeMap<(i32, i32), BTreeMap<BlockCoordinate, Option<ProvenanceMutation>>>,
     feature_settlements: BTreeMap<ChunkCoordinate, Option<FeatureSettlementProof>>,
+    feature_winner_receipts: BTreeMap<ChunkCoordinate, Option<Vec<TargetFeatureWrite>>>,
     revisions: BTreeMap<(i32, i32), Option<u64>>,
 }
 
@@ -1139,6 +1142,7 @@ impl GenerationLedgerJournal {
             source_next: BTreeMap::new(),
             overlays: BTreeMap::new(),
             feature_settlements: BTreeMap::new(),
+            feature_winner_receipts: BTreeMap::new(),
             revisions: BTreeMap::new(),
         }
     }
@@ -1217,6 +1221,12 @@ impl GenerationLedgerJournal {
             .or_insert_with(|| state.feature_settlements.get(&coordinate).copied());
     }
 
+    fn feature_winner_receipts(&mut self, state: &PipelineLedger, coordinate: ChunkCoordinate) {
+        self.feature_winner_receipts
+            .entry(coordinate)
+            .or_insert_with(|| state.feature_winner_receipts.get(&coordinate).cloned());
+    }
+
     fn rollback(self, ledger: &mut GenerationLedger) {
         ledger.stamp = self.stamp;
         let state = ledger
@@ -1232,6 +1242,7 @@ impl GenerationLedgerJournal {
         Self::restore(&mut state.source_next, self.source_next);
         Self::restore_overlays(&mut state.overlays, self.overlays);
         Self::restore(&mut state.feature_settlements, self.feature_settlements);
+        Self::restore(&mut state.feature_winner_receipts, self.feature_winner_receipts);
         Self::restore(&mut state.revisions, self.revisions);
     }
 
@@ -1333,6 +1344,7 @@ impl GenerationLedger {
                 source_next: BTreeMap::new(),
                 overlays: BTreeMap::new(),
                 feature_settlements: BTreeMap::new(),
+                feature_winner_receipts: BTreeMap::new(),
                 revisions: BTreeMap::new(),
                 coordinate_last_used: BTreeMap::new(),
                 last_used: stamp,
@@ -1385,6 +1397,7 @@ impl GenerationLedger {
                     .filter(|coordinate| {
                         !canonical.contains(coordinate)
                             && !state.has_pending_overlay_for(**coordinate)
+                            && !state.feature_winner_receipts.contains_key(coordinate)
                     })
                     .copied()
                     .collect::<Vec<_>>();
@@ -2051,6 +2064,11 @@ impl GenerationLedger {
             .map(|mutation| mutation.provenance().revision().value())
             .max()
             .unwrap_or(0);
+        let feature_winner_receipts = state
+            .feature_winner_receipts
+            .get(&request.target())
+            .cloned()
+            .unwrap_or_default();
         Ok(GenerationCheckpoint::from_ledger(
             request,
             identity,
@@ -2061,6 +2079,7 @@ impl GenerationLedger {
             committed_mutations,
             source_completions,
             state.feature_settlements.get(&request.target()).copied(),
+            feature_winner_receipts,
             current_revision,
         ))
     }
@@ -2088,6 +2107,7 @@ impl GenerationLedger {
             && checkpoint.committed_mutations().is_empty()
             && checkpoint.source_completions().is_empty()
             && checkpoint.feature_settlement().is_none()
+            && checkpoint.feature_winner_receipts().is_empty()
         {
             return Ok(());
         }
@@ -2265,23 +2285,11 @@ impl GenerationLedger {
             let current_records = self.frontier(identity, *coordinate)?.records();
             if existing_len >= records.len() {
                 if &current_records[..records.len()] != records {
-                    if generation_ledger_trace_enabled() {
-                        eprintln!(
-                            "worldgen ledger mismatch: frontier prefix coordinate={coordinate:?} existing_len={existing_len} checkpoint_len={}",
-                            records.len(),
-                        );
-                    }
                     return Err(GenerationLedgerError::CheckpointMismatch);
                 }
                 continue;
             }
             if current_records != &records[..existing_len] {
-                if generation_ledger_trace_enabled() {
-                    eprintln!(
-                        "worldgen ledger mismatch: frontier suffix coordinate={coordinate:?} existing_len={existing_len} checkpoint_len={}",
-                        records.len(),
-                    );
-                }
                 return Err(GenerationLedgerError::CheckpointMismatch);
             }
             for record in &records[existing_len..] {
@@ -2446,6 +2454,44 @@ impl GenerationLedger {
                 .feature_settlements
                 .insert(coordinate, proof);
         }
+
+        let target = checkpoint.request().target();
+        let checkpoint_receipts = checkpoint.feature_winner_receipts();
+        let state = self.pipeline_ref(identity)?;
+        let retained_receipts = state.feature_winner_receipts.get(&target).cloned();
+        if !checkpoint_receipts.is_empty()
+            && retained_receipts
+                .as_deref()
+                .is_some_and(|retained| retained != checkpoint_receipts)
+        {
+            return Err(GenerationLedgerError::CheckpointMismatch);
+        }
+        let output_is_finalized = final_outputs.is_some_and(|outputs| outputs.contains_key(&target));
+        if output_is_finalized && checkpoint.feature_settlement().is_some() {
+            let receipts = if checkpoint_receipts.is_empty() {
+                retained_receipts.as_deref().unwrap_or_default()
+            } else {
+                checkpoint_receipts
+            };
+            for &receipt in receipts {
+                self.retire_settled_feature_overlay(pipeline, receipt, journal)?;
+            }
+            let state = self.pipeline_ref(identity)?;
+            journal.feature_winner_receipts(state, target);
+            self.pipelines
+                .get_mut(&identity)
+                .expect("settled feature pipeline remains admitted")
+                .feature_winner_receipts
+                .remove(&target);
+        } else if !checkpoint_receipts.is_empty() {
+            let state = self.pipeline_ref(identity)?;
+            journal.feature_winner_receipts(state, target);
+            self.pipelines
+                .get_mut(&identity)
+                .expect("feature receipt pipeline remains admitted")
+                .feature_winner_receipts
+                .insert(target, checkpoint_receipts.to_vec());
+        }
         Ok(())
     }
 
@@ -2510,6 +2556,15 @@ impl GenerationLedger {
                         * std::mem::size_of::<(BlockCoordinate, ProvenanceMutation)>()
                     + state.feature_settlements.len()
                         * std::mem::size_of::<(ChunkCoordinate, FeatureSettlementProof)>()
+                    + state.feature_winner_receipts.len()
+                        * std::mem::size_of::<(ChunkCoordinate, Vec<TargetFeatureWrite>)>()
+                    + state
+                        .feature_winner_receipts
+                        .values()
+                        .map(|receipts| {
+                            receipts.len() * std::mem::size_of::<TargetFeatureWrite>()
+                        })
+                        .sum::<usize>()
                     + state.coordinate_last_used.len()
                         * std::mem::size_of::<((i32, i32), u64)>();
                 let payload = state
@@ -2672,6 +2727,48 @@ impl GenerationLedger {
             .or_default()
             .insert(destination, mutation);
         Ok(Self::bump_revision(state, coordinate))
+    }
+
+    fn retire_settled_feature_overlay(
+        &mut self,
+        pipeline: DimensionPipeline,
+        receipt: TargetFeatureWrite,
+        journal: &mut GenerationLedgerJournal,
+    ) -> Result<(), GenerationLedgerError> {
+        let identity = pipeline.identity(PipelineOptions::ALL);
+        let destination = receipt.destination();
+        let coordinate = (
+            destination.x().div_euclid(16),
+            destination.z().div_euclid(16),
+        );
+        let state = self.pipeline_ref(identity)?;
+        let Some(existing) = state.overlay(destination) else {
+            return Ok(());
+        };
+        if existing.provenance().stage().stage() != ColumnStage::Features
+            || existing.provenance().stage().dimension() != pipeline.dimension()
+            || !target_feature_write_precedes_mutation(receipt, existing.provenance())
+        {
+            return Ok(());
+        }
+        journal.overlay(state, destination);
+        journal.revision(state, coordinate);
+        let state = self
+            .pipelines
+            .get_mut(&identity)
+            .expect("the feature overlay pipeline remains admitted");
+        let empty = state
+            .overlays
+            .get_mut(&coordinate)
+            .is_some_and(|bucket| {
+                bucket.remove(&destination);
+                bucket.is_empty()
+            });
+        if empty {
+            state.overlays.remove(&coordinate);
+        }
+        Self::bump_revision(state, coordinate);
+        Ok(())
     }
 
     /// Retire mutations only after their source state is persisted or their
@@ -3576,10 +3673,14 @@ pub(crate) enum GenerationCommitError {
     },
     #[error("generation commit revision conflict at {coordinate:?}: expected {expected}, found {found}")]
     RevisionConflict { coordinate: (i32, i32), expected: u64, found: u64 },
+    #[error("finalized output has conflicting feature winner receipts")]
+    ConflictingFeatureWinnerReceipts,
 }
 
 struct FinalizedMutationAudit<'a> {
     winners: BTreeMap<BlockCoordinate, (DimensionPipeline, &'a ProvenanceMutation)>,
+    settled_winners: BTreeMap<BlockCoordinate, (DimensionPipeline, TargetFeatureWrite)>,
+    conflicting_receipts: bool,
 }
 
 fn finalized_mutation_audit<'a>(
@@ -3623,10 +3724,39 @@ fn finalized_mutation_audit<'a>(
 
     let mut audit = FinalizedMutationAudit {
         winners: BTreeMap::new(),
+        settled_winners: BTreeMap::new(),
+        conflicting_receipts: false,
     };
     for &(pipeline, session) in sessions {
         let emitted_target = session.request().target();
         let identity = pipeline.identity(PipelineOptions::ALL);
+        for &receipt in session.feature_winner_receipts() {
+            let destination = receipt.destination();
+            let coordinate = (
+                destination.x().div_euclid(16),
+                destination.z().div_euclid(16),
+            );
+            if !finalized.contains(&coordinate)
+                || receipt.owner() != coordinate
+                || !proofs
+                    .get(&(identity, coordinate))
+                    .is_some_and(|proof| proof.contains(receipt.source()))
+            {
+                audit.conflicting_receipts = true;
+                continue;
+            }
+            match audit.settled_winners.entry(destination) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert((pipeline, receipt));
+                }
+                std::collections::btree_map::Entry::Occupied(entry)
+                    if *entry.get() != (pipeline, receipt) =>
+                {
+                    audit.conflicting_receipts = true;
+                }
+                std::collections::btree_map::Entry::Occupied(_) => {}
+            }
+        }
         for mutation in session.committed_mutations() {
             let provenance = mutation.provenance();
             let destination = provenance.destination();
@@ -3672,7 +3802,30 @@ fn validate_finalized_mutation_audit(
     audit: &FinalizedMutationAudit<'_>,
     mut state_at: impl FnMut(ChunkCoordinate, BlockCoordinate) -> Option<StateId>,
 ) -> Result<(), GenerationCommitError> {
-    for (&destination, (_, mutation)) in &audit.winners {
+    if audit.conflicting_receipts {
+        return Err(GenerationCommitError::ConflictingFeatureWinnerReceipts);
+    }
+    for (&destination, (_, receipt)) in &audit.settled_winners {
+        let coordinate = (
+            destination.x().div_euclid(16),
+            destination.z().div_euclid(16),
+        );
+        validate_finalized_mutation_value(coordinate, destination, receipt.state(), &mut state_at)?;
+    }
+    for (&destination, (pipeline, mutation)) in &audit.winners {
+        let dominated = audit
+            .settled_winners
+            .get(&destination)
+            .is_some_and(|(receipt_pipeline, receipt)| {
+                receipt_pipeline == pipeline
+                    && target_feature_write_precedes_mutation(
+                        *receipt,
+                        mutation.provenance(),
+                    )
+            });
+        if dominated {
+            continue;
+        }
         let coordinate = (
             destination.x().div_euclid(16),
             destination.z().div_euclid(16),
@@ -3753,19 +3906,32 @@ impl<S: ChunkSource> ChunkStore<S> {
         mutations: &[ProvenanceMutation],
         finalized: &BTreeSet<ChunkCoordinate>,
     ) -> Result<(), GenerationCommitError> {
+        Self::apply_generation_mutations_with_receipts(columns, mutations, finalized, &[])
+    }
+
+    fn apply_generation_mutations_with_receipts(
+        columns: &mut [(ChunkCoordinate, ChunkColumn)],
+        mutations: &[ProvenanceMutation],
+        finalized: &BTreeSet<ChunkCoordinate>,
+        receipts: &[TargetFeatureWrite],
+    ) -> Result<(), GenerationCommitError> {
         let finalized_winners = Self::finalized_mutation_winners(mutations, finalized);
-        Self::validate_finalized_mutation_winners(&finalized_winners, |coordinate, destination| {
-            columns
-                .iter()
-                .find(|(candidate, _)| *candidate == coordinate)
-                .map(|(_, column)| {
-                    column.block_state_id(
-                        destination.x().rem_euclid(16),
-                        destination.y(),
-                        destination.z().rem_euclid(16),
-                    )
-                })
-        })?;
+        Self::validate_finalized_mutation_winners_with_receipts(
+            &finalized_winners,
+            receipts,
+            |coordinate, destination| {
+                columns
+                    .iter()
+                    .find(|(candidate, _)| *candidate == coordinate)
+                    .map(|(_, column)| {
+                        column.block_state_id(
+                            destination.x().rem_euclid(16),
+                            destination.y(),
+                            destination.z().rem_euclid(16),
+                        )
+                    })
+            },
+        )?;
         let mut writes = BTreeMap::<ChunkCoordinate, Vec<(i32, i32, i32, StateId)>>::new();
         for mutation in mutations {
             let state = *mutation
@@ -3827,15 +3993,44 @@ impl<S: ChunkSource> ChunkStore<S> {
         winners
     }
 
-    fn validate_finalized_mutation_winners(
+    fn validate_finalized_mutation_winners_with_receipts(
         winners: &BTreeMap<BlockCoordinate, (MutationProvenance, StateId)>,
+        receipts: &[TargetFeatureWrite],
         mut state_at: impl FnMut(ChunkCoordinate, BlockCoordinate) -> Option<StateId>,
     ) -> Result<(), GenerationCommitError> {
-        for (&destination, (_, expected)) in winners {
+        let mut settled_winners = BTreeMap::new();
+        for &receipt in receipts {
+            let destination = receipt.destination();
             let coordinate = (
                 destination.x().div_euclid(16),
                 destination.z().div_euclid(16),
             );
+            if receipt.owner() != coordinate
+                || settled_winners.insert(destination, receipt).is_some()
+            {
+                return Err(GenerationCommitError::ConflictingFeatureWinnerReceipts);
+            }
+            let actual = state_at(coordinate, destination)
+                .ok_or(GenerationCommitError::MissingMutationDestination(coordinate))?;
+            if actual != receipt.state() {
+                return Err(GenerationCommitError::FinalizedMutationMismatch {
+                    coordinate,
+                    destination,
+                    expected: receipt.state(),
+                    actual,
+                });
+            }
+        }
+        for (&destination, (provenance, expected)) in winners {
+            let coordinate = (
+                destination.x().div_euclid(16),
+                destination.z().div_euclid(16),
+            );
+            if settled_winners.get(&destination).is_some_and(|receipt| {
+                target_feature_write_precedes_mutation(*receipt, *provenance)
+            }) {
+                continue;
+            }
             let actual = state_at(coordinate, destination)
                 .ok_or(GenerationCommitError::MissingMutationDestination(coordinate))?;
             if actual != *expected {
@@ -4716,12 +4911,14 @@ impl<S: ChunkSource> ChunkStore<S> {
                     .map(|neighbour| (neighbour.coordinate(), neighbour.column().clone())),
             );
             let committed_mutations = session.committed_mutations().cloned().collect::<Vec<_>>();
+            let feature_winner_receipts = session.feature_winner_receipts().copied().collect::<Vec<_>>();
             let finalized = BTreeSet::from([snapshot.coordinate()]);
-            let report = self.commit_generation_with_finalized_mutations(
+            let report = self.commit_generation_with_finalized_mutations_and_receipts(
                 &halo,
                 columns,
                 &committed_mutations,
                 &finalized,
+                &feature_winner_receipts,
             )?;
             crate::world_spawn::record_packet_neighbour_admissions(snapshot.neighbours().len());
             let source_stored = self
@@ -4877,12 +5074,14 @@ impl<S: ChunkSource> ChunkStore<S> {
                     .map(|neighbour| (neighbour.coordinate(), neighbour.column().clone())),
             );
             let committed_mutations = session.committed_mutations().cloned().collect::<Vec<_>>();
+            let feature_winner_receipts = session.feature_winner_receipts().copied().collect::<Vec<_>>();
             let finalized = BTreeSet::from([snapshot.coordinate()]);
-            let report = self.commit_generation_with_finalized_mutations(
+            let report = self.commit_generation_with_finalized_mutations_and_receipts(
                 &halo,
                 columns,
                 &committed_mutations,
                 &finalized,
+                &feature_winner_receipts,
             )?;
             crate::world_spawn::record_packet_neighbour_admissions(snapshot.neighbours().len());
             let source_stored = self
@@ -4971,6 +5170,23 @@ impl<S: ChunkSource> ChunkStore<S> {
         mutations: &[ProvenanceMutation],
         finalized: &BTreeSet<ChunkCoordinate>,
     ) -> Result<GenerationCommitReport, GenerationCommitError> {
+        self.commit_generation_with_finalized_mutations_and_receipts(
+            halo,
+            columns,
+            mutations,
+            finalized,
+            &[],
+        )
+    }
+
+    fn commit_generation_with_finalized_mutations_and_receipts(
+        &self,
+        halo: &ChunkHaloLease<'_, S>,
+        columns: Vec<((i32, i32), ChunkColumn)>,
+        mutations: &[ProvenanceMutation],
+        finalized: &BTreeSet<ChunkCoordinate>,
+        receipts: &[TargetFeatureWrite],
+    ) -> Result<GenerationCommitReport, GenerationCommitError> {
         let persistence_destinations = mutations
             .iter()
             .map(|mutation| mutation.provenance().destination())
@@ -4981,12 +5197,13 @@ impl<S: ChunkSource> ChunkStore<S> {
                 )
             })
             .collect::<BTreeSet<_>>();
-        self.commit_generation_with_mutations_and_persistence_destinations(
+        self.commit_generation_with_mutations_and_persistence_destinations_and_receipts(
             halo,
             columns,
             mutations,
             &persistence_destinations,
             finalized,
+            receipts,
         )
     }
 
@@ -4998,11 +5215,35 @@ impl<S: ChunkSource> ChunkStore<S> {
         persistence_destinations: &BTreeSet<ChunkCoordinate>,
         finalized: &BTreeSet<ChunkCoordinate>,
     ) -> Result<GenerationCommitReport, GenerationCommitError> {
+        self.commit_generation_with_mutations_and_persistence_destinations_and_receipts(
+            halo,
+            columns,
+            mutations,
+            persistence_destinations,
+            finalized,
+            &[],
+        )
+    }
+
+    fn commit_generation_with_mutations_and_persistence_destinations_and_receipts(
+        &self,
+        halo: &ChunkHaloLease<'_, S>,
+        columns: Vec<((i32, i32), ChunkColumn)>,
+        mutations: &[ProvenanceMutation],
+        persistence_destinations: &BTreeSet<ChunkCoordinate>,
+        finalized: &BTreeSet<ChunkCoordinate>,
+        receipts: &[TargetFeatureWrite],
+    ) -> Result<GenerationCommitReport, GenerationCommitError> {
         if columns.is_empty() {
             return Err(GenerationCommitError::Empty);
         }
         let mut columns = columns;
-        Self::apply_generation_mutations(&mut columns, mutations, finalized)?;
+        Self::apply_generation_mutations_with_receipts(
+            &mut columns,
+            mutations,
+            finalized,
+            receipts,
+        )?;
         let mutation_destinations = mutations
             .iter()
             .map(|mutation| mutation.provenance().destination())
@@ -11097,6 +11338,8 @@ mod tests {
                 FeatureSettlementProof::square(target, 1),
                 &owners,
                 &[],
+                &[],
+                0,
             )
             .expect("settlement proof is tied to the committed feature stage");
     }
@@ -11584,6 +11827,106 @@ mod tests {
     }
 
     #[test]
+    fn overworld_small_batches_resume_overlapping_frontiers() {
+        let store = ChunkStore::new(crate::overworld_chunk_source(42));
+        let mut first_row = (0..16)
+            .map(|x| {
+                GenerationSession::new(crate::worldgen_session::GenerationRequest::new(
+                    Dimension::Overworld,
+                    (20_000 + x, -20_000),
+                    GenerationTarget::Full,
+                    1,
+                ))
+            })
+            .collect::<Vec<_>>();
+
+        let first_results = ChunkSource::request_generation_batch(&store, &mut first_row);
+        assert_eq!(first_results.len(), first_row.len());
+        for (index, result) in first_results.into_iter().enumerate() {
+            assert!(
+                result.as_ref().is_ok_and(Option::is_some),
+                "first-row target {:?} failed: {result:?}",
+                first_row[index].request().target(),
+            );
+        }
+
+        let target = (20_000, -19_999);
+        let destination = BlockCoordinate::new(320_013, 50, -319_984);
+        let prior_spill = first_row[1]
+            .committed_mutations()
+            .find(|mutation| mutation.provenance().destination() == destination)
+            .expect("the east target must have committed the boundary spill");
+        assert_eq!(
+            (
+                prior_spill.provenance().target(),
+                prior_spill.provenance().source(),
+                prior_spill.provenance().ordinal(),
+            ),
+            ((20_001, -20_000), (20_001, -20_000), 973),
+        );
+        let prior_state = *prior_spill
+            .get::<StateId>()
+            .expect("feature spill is a block-state mutation");
+        let direct = crate::overworld_chunk_source(42).column(target.0, target.1);
+        let direct_state = direct.block_state_id(13, 50, 0);
+        assert_ne!(
+            prior_state, direct_state,
+            "the independent cold scalar output must supersede the earlier target's spill"
+        );
+        let mut next_row = vec![GenerationSession::new(
+            crate::worldgen_session::GenerationRequest::new(
+                Dimension::Overworld,
+                target,
+                GenerationTarget::Full,
+                1,
+            ),
+        )];
+        let results = ChunkSource::request_generation_batch(&store, &mut next_row);
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].as_ref().is_ok_and(Option::is_some),
+            "overlapping target {target:?} failed: {:?}",
+            results[0],
+        );
+        let receipt = next_row[0]
+            .feature_winner_receipts()
+            .copied()
+            .find(|receipt| receipt.destination() == destination)
+            .expect("the target-owned winner is retained through output commit");
+        assert_eq!(receipt.owner(), target);
+        assert_eq!(receipt.state(), direct_state);
+        let output_state = match results[0].as_ref().unwrap().as_ref().unwrap() {
+            crate::worldgen_session::GenerationRequestResult::Existing(column) => {
+                column.block_state_id(13, 50, 0)
+            }
+            crate::worldgen_session::GenerationRequestResult::Generated(snapshot) => {
+                snapshot.column().block_state_id(13, 50, 0)
+            }
+        };
+        assert_eq!(output_state, receipt.state());
+        let checkpoint = store
+            .generation_ledger()
+            .checkpoint(
+                lodestone_worldgen::stage_schedule::OVERWORLD_PIPELINE,
+                crate::worldgen_session::GenerationRequest::new(
+                    Dimension::Overworld,
+                    target,
+                    GenerationTarget::Full,
+                    1,
+                ),
+            )
+            .expect("the finalized target remains checkpointable");
+        assert!(checkpoint
+            .feature_winner_receipts()
+            .iter()
+            .all(|receipt| receipt.destination() != destination));
+        assert!(checkpoint
+            .committed_mutations()
+            .iter()
+            .all(|mutation| mutation.provenance().destination() != destination));
+    }
+
+    #[test]
     fn ledger_batch_publication_rejects_a_wrong_final_output_before_partial_publish() {
         use lodestone_worldgen::stage_schedule::END_PIPELINE;
 
@@ -11607,6 +11950,65 @@ mod tests {
             .output_column(END_PIPELINE, (1, 0))
             .is_none());
         assert_eq!(ledger.stats().overlays, 0);
+    }
+
+    #[test]
+    fn feature_settlement_receipt_cannot_override_a_higher_priority_mutation() {
+        use lodestone_worldgen::stage_schedule::{ColumnStage, Dimension, END_PIPELINE};
+
+        let destination = BlockCoordinate::new(16, 4, 0);
+        let stage = StageKey::new(Dimension::End, ColumnStage::Features);
+        let mutation = ProvenanceMutation::test_block_state(
+            (0, 0),
+            (0, 0),
+            stage,
+            0,
+            destination,
+            1,
+            Block::Stone.default_state(),
+        );
+        let receipt = TargetFeatureWrite::new(
+            (1, 0),
+            (1, 0),
+            0,
+            destination,
+            Block::Dirt.default_state(),
+        );
+        let audit = FinalizedMutationAudit {
+            winners: BTreeMap::from([(destination, (END_PIPELINE, &mutation))]),
+            settled_winners: BTreeMap::from([(destination, (END_PIPELINE, receipt))]),
+            conflicting_receipts: false,
+        };
+
+        assert_eq!(
+            validate_finalized_mutation_audit(&audit, |coordinate, candidate| {
+                assert_eq!(coordinate, (1, 0));
+                assert_eq!(candidate, destination);
+                Some(Block::Dirt.default_state())
+            }),
+            Err(GenerationCommitError::FinalizedMutationMismatch {
+                coordinate: (1, 0),
+                destination,
+                expected: Block::Stone.default_state(),
+                actual: Block::Dirt.default_state(),
+            }),
+        );
+        assert_eq!(
+            ChunkStore::<BatchStoreSource>::validate_finalized_mutation_winners_with_receipts(
+                &ChunkStore::<BatchStoreSource>::finalized_mutation_winners(
+                    std::slice::from_ref(&mutation),
+                    &BTreeSet::from([(1, 0)]),
+                ),
+                &[receipt],
+                |_, _| Some(Block::Dirt.default_state()),
+            ),
+            Err(GenerationCommitError::FinalizedMutationMismatch {
+                coordinate: (1, 0),
+                destination,
+                expected: Block::Stone.default_state(),
+                actual: Block::Dirt.default_state(),
+            }),
+        );
     }
 
     #[test]

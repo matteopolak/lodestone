@@ -1221,6 +1221,15 @@ impl TargetFeatureWrite {
     }
 }
 
+pub(crate) fn target_feature_write_precedes_mutation(
+    write: TargetFeatureWrite,
+    provenance: MutationProvenance,
+) -> bool {
+    provenance.stage().stage() == ColumnStage::Features
+        && (write.owner(), write.source(), write.ordinal())
+            < (provenance.target(), provenance.source(), provenance.ordinal())
+}
+
 /// A detached target and its concrete neighbour columns.
 ///
 /// The snapshot retains every column it exposes, so encoding can run after
@@ -1280,6 +1289,7 @@ pub struct GenerationCheckpoint {
     committed_mutation_order: Vec<MutationProvenance>,
     source_completions: Vec<SourceCompletionRecord>,
     feature_settlement: Option<FeatureSettlementProof>,
+    feature_winner_receipts: Vec<TargetFeatureWrite>,
     current_revision: SessionRevision,
     packet_neighbour_domain: Option<BTreeSet<ChunkCoordinate>>,
 }
@@ -1360,6 +1370,7 @@ impl GenerationCheckpoint {
         committed_mutations: Vec<ProvenanceMutation>,
         source_completions: Vec<SourceCompletionRecord>,
         feature_settlement: Option<FeatureSettlementProof>,
+        feature_winner_receipts: Vec<TargetFeatureWrite>,
         current_revision: u64,
     ) -> Self {
         let mut committed_mutations = committed_mutations;
@@ -1379,6 +1390,7 @@ impl GenerationCheckpoint {
             committed_mutation_order,
             source_completions,
             feature_settlement,
+            feature_winner_receipts,
             current_revision: SessionRevision(current_revision),
             packet_neighbour_domain: Some(BTreeSet::new()),
         }
@@ -1424,6 +1436,11 @@ impl GenerationCheckpoint {
     #[must_use]
     pub(crate) const fn feature_settlement(&self) -> Option<FeatureSettlementProof> {
         self.feature_settlement
+    }
+
+    #[must_use]
+    pub(crate) fn feature_winner_receipts(&self) -> &[TargetFeatureWrite] {
+        &self.feature_winner_receipts
     }
 
     #[must_use]
@@ -1715,6 +1732,7 @@ pub struct GenerationSession {
     light_domain_revision: Option<SessionRevision>,
     packet_neighbour_domain: Option<BTreeSet<ChunkCoordinate>>,
     feature_settlement: Option<FeatureSettlementProof>,
+    feature_winner_receipts: BTreeMap<BlockCoordinate, TargetFeatureWrite>,
 }
 
 impl fmt::Debug for GenerationSession {
@@ -1801,6 +1819,7 @@ impl GenerationSession {
             light_domain_revision: None,
             packet_neighbour_domain: Some(BTreeSet::new()),
             feature_settlement: None,
+            feature_winner_receipts: BTreeMap::new(),
         }
     }
 
@@ -1817,6 +1836,13 @@ impl GenerationSession {
     #[must_use]
     pub(crate) const fn feature_settlement(&self) -> Option<FeatureSettlementProof> {
         self.feature_settlement
+    }
+
+    #[must_use]
+    pub(crate) fn feature_winner_receipts(
+        &self,
+    ) -> impl Iterator<Item = &TargetFeatureWrite> {
+        self.feature_winner_receipts.values()
     }
 
     #[must_use]
@@ -1911,6 +1937,30 @@ impl GenerationSession {
         self.committed_mutations.values()
     }
 
+    pub(crate) fn feature_overlay_destinations(
+        &self,
+        output: ChunkCoordinate,
+    ) -> BTreeSet<BlockCoordinate> {
+        let mut destinations = BTreeSet::new();
+        if !self.has_foreign_feature_mutations {
+            return destinations;
+        }
+        let stage = StageKey::new(self.pipeline.dimension(), ColumnStage::Features);
+        for mutation in self.committed_mutations.values() {
+            let provenance = mutation.provenance();
+            if provenance.stage() != stage {
+                continue;
+            }
+            let destination = provenance.destination();
+            if destination.x().div_euclid(16) == output.0
+                && destination.z().div_euclid(16) == output.1
+            {
+                destinations.insert(destination);
+            }
+        }
+        destinations
+    }
+
     #[must_use]
     pub fn committed_mutation_order(&self) -> &[MutationProvenance] {
         &self.committed_mutation_order
@@ -1921,6 +1971,8 @@ impl GenerationSession {
         proof: FeatureSettlementProof,
         completed_owners: &[ChunkCoordinate],
         writes: &[TargetFeatureWrite],
+        overlay_conflict_winners: &[TargetFeatureWrite],
+        foreign_winner_count: usize,
     ) -> Result<(), SessionError> {
         if proof.output() != self.request.target
             || self.feature_settlement.is_some_and(|current| current != proof)
@@ -1955,10 +2007,22 @@ impl GenerationSession {
         let mut pending = Vec::with_capacity(writes.len());
         let mut next_revision = self.next_revision;
         let mut existing_writes = BTreeMap::new();
+        let mut existing_feature_winners = BTreeMap::new();
         if self.has_foreign_feature_mutations {
             for (provenance, mutation) in &self.committed_mutations {
                 if provenance.stage() == stage {
                     if let Some(state) = mutation.get::<StateId>() {
+                        let destination = provenance.destination();
+                        if destination.x().div_euclid(16) == self.request.target.0
+                            && destination.z().div_euclid(16) == self.request.target.1
+                        {
+                            let current = existing_feature_winners
+                                .entry(destination)
+                                .or_insert((*provenance, *state));
+                            if provenance < &current.0 {
+                                *current = (*provenance, *state);
+                            }
+                        }
                         existing_writes.entry((
                             provenance.target(),
                             provenance.source(),
@@ -1968,6 +2032,28 @@ impl GenerationSession {
                         )).or_insert(*state);
                     }
                 }
+            }
+        }
+        let mut overlay_winners_by_destination = BTreeMap::new();
+        for winner in overlay_conflict_winners {
+            let destination = winner.destination();
+            let destination_chunk = (
+                destination.x().div_euclid(16),
+                destination.z().div_euclid(16),
+            );
+            if !owners.contains(&winner.owner())
+                || !proof.contains(winner.source())
+                || destination_chunk != self.request.target
+                || !descriptor.mutable_write_radius().contains_offset(
+                    destination_chunk.0 - winner.source().0,
+                    destination_chunk.1 - winner.source().1,
+                )
+                || !existing_feature_winners.contains_key(&destination)
+                || overlay_winners_by_destination
+                    .insert(destination, *winner)
+                    .is_some()
+            {
+                return Err(SessionError::InvalidCheckpoint);
             }
         }
         for write in writes {
@@ -1986,6 +2072,12 @@ impl GenerationSession {
                     destination_chunk.0 - write.source().0,
                     destination_chunk.1 - write.source().1,
                 )
+            {
+                return Err(SessionError::InvalidCheckpoint);
+            }
+            if overlay_winners_by_destination
+                .get(&destination)
+                .is_some_and(|winner| winner.owner() == self.request.target || winner != write)
             {
                 return Err(SessionError::InvalidCheckpoint);
             }
@@ -2022,14 +2114,72 @@ impl GenerationSession {
             });
             existing_writes.insert(logical_key, write.state());
         }
+        if writes.len() != foreign_winner_count {
+            return Err(SessionError::InvalidCheckpoint);
+        }
+        for winner in overlay_winners_by_destination.values() {
+            if winner.owner() != self.request.target
+                && !logical_writes.contains(&(
+                    winner.owner(),
+                    winner.source(),
+                    stage,
+                    winner.ordinal(),
+                    winner.destination(),
+                ))
+            {
+                return Err(SessionError::InvalidCheckpoint);
+            }
+        }
+        if self
+            .feature_winner_receipts
+            .iter()
+            .any(|(destination, receipt)| {
+                overlay_winners_by_destination.get(destination) != Some(receipt)
+            })
+        {
+            return Err(SessionError::InvalidCheckpoint);
+        }
+        let mut new_receipts = Vec::new();
+        for (&destination, winner) in &overlay_winners_by_destination {
+            if winner.owner() != self.request.target
+                || self.feature_winner_receipts.contains_key(&destination)
+            {
+                continue;
+            }
+            let (existing, state) = existing_feature_winners
+                .get(&destination)
+                .ok_or(SessionError::InvalidCheckpoint)?;
+            if state == &winner.state() {
+                continue;
+            }
+            if !target_feature_write_precedes_mutation(*winner, *existing) {
+                return Err(SessionError::InvalidCheckpoint);
+            }
+            new_receipts.push(*winner);
+        }
+        for receipt in &new_receipts {
+            let destination = receipt.destination();
+            if let Some(existing) = self.feature_winner_receipts.get(&destination)
+                && existing != receipt
+            {
+                return Err(SessionError::InvalidCheckpoint);
+            }
+        }
+        let receipt_bytes = new_receipts
+            .len()
+            .saturating_mul(size_of::<TargetFeatureWrite>());
         let retained_bytes = pending
             .iter()
             .map(ProvenanceMutation::retained_bytes)
-            .fold(0usize, usize::saturating_add);
-        let mutation_count = pending.len();
-        self.check_usage(0, 0, pending.len(), retained_bytes)?;
+            .fold(receipt_bytes, usize::saturating_add);
+        let mutation_count = pending.len().saturating_add(new_receipts.len());
+        self.check_usage(0, 0, mutation_count, retained_bytes)?;
         self.feature_settlement = Some(proof);
         self.next_revision = next_revision;
+        for receipt in new_receipts {
+            self.feature_winner_receipts
+                .insert(receipt.destination(), receipt);
+        }
         for mutation in pending {
             let provenance = mutation.provenance();
             self.mutation_index.insert(provenance);
@@ -2925,6 +3075,7 @@ impl GenerationSession {
             committed_mutation_order: self.committed_mutation_order.clone(),
             source_completions: self.committed_source_completions.clone(),
             feature_settlement: self.feature_settlement,
+            feature_winner_receipts: self.feature_winner_receipts.values().copied().collect(),
             current_revision: self.current_revision,
             packet_neighbour_domain: self.packet_neighbour_domain.clone(),
         }
@@ -2969,6 +3120,42 @@ impl GenerationSession {
             return Err(SessionError::InvalidCheckpoint);
         }
         session.feature_settlement = checkpoint.feature_settlement;
+        if !checkpoint.feature_winner_receipts.is_empty() {
+            let Some(proof) = session.feature_settlement else {
+                return Err(SessionError::InvalidCheckpoint);
+            };
+            let stage = StageKey::new(session.pipeline.dimension(), ColumnStage::Features);
+            let descriptor = session.descriptor(stage)?;
+            for receipt in checkpoint.feature_winner_receipts {
+                let destination = receipt.destination();
+                if receipt.owner() != session.request.target
+                    || !proof.contains(receipt.source())
+                    || (destination.x().div_euclid(16), destination.z().div_euclid(16))
+                        != session.request.target
+                    || !descriptor.mutable_write_radius().contains_offset(
+                        session.request.target.0 - receipt.source().0,
+                        session.request.target.1 - receipt.source().1,
+                    )
+                    || session
+                        .feature_winner_receipts
+                        .insert(destination, receipt)
+                        .is_some()
+                {
+                    return Err(SessionError::InvalidCheckpoint);
+                }
+            }
+            let retained_bytes = session
+                .feature_winner_receipts
+                .len()
+                .saturating_mul(size_of::<TargetFeatureWrite>());
+            session.check_usage(
+                0,
+                0,
+                session.feature_winner_receipts.len(),
+                retained_bytes,
+            )?;
+            session.add_usage(0, 0, session.feature_winner_receipts.len(), retained_bytes);
+        }
         let mut restored_frontiers = BTreeMap::new();
         for (coordinate, records) in checkpoint.frontiers {
             if !session.halo.contains(coordinate)
