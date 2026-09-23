@@ -128,6 +128,13 @@ reaches; a negative-input `sqrt`'s NaN sign bit differing between aarch64 and x8
 `cfg!` read from inside the function under test rather than passed as a parameter. None of
 these show up in `cargo check` or in a wasm confinement scan.
 
+The pinned x86 Cranelift backend cannot lower the 256-bit CRC path in
+`crc32fast`. A package-scoped LLVM override in the dev profile covers that
+dependency for `cargo test` without switching the entire workspace test build
+to LLVM. If another dependency reaches an unsupported intrinsic, identify the
+originating crate before widening the override. The local ARM build does not
+exercise this x86 path; the hosted Linux test job is the runtime check.
+
 ### The `toolchain:` input is inert, and that is not the same as removable
 
 Every job passes a `toolchain:` input to `dtolnay/rust-toolchain`, and that value is **not**
