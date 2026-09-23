@@ -477,6 +477,10 @@ pub struct Snapshot {
     pub structure_candidate_cell_probes: u64,
     /// Raw ring reach lists built for a registry.
     pub structure_ring_reach_builds: u64,
+    /// Structure pieces examined by the Overworld target-chunk placement pass.
+    pub structure_place_piece_bbox_checks: u64,
+    /// Structure pieces whose bounds reach the target chunk in that pass.
+    pub structure_place_pieces_reached: u64,
 }
 
 impl Default for Snapshot {
@@ -539,6 +543,8 @@ impl Default for Snapshot {
             structure_reference_computations: 0,
             structure_candidate_cell_probes: 0,
             structure_ring_reach_builds: 0,
+            structure_place_piece_bbox_checks: 0,
+            structure_place_pieces_reached: 0,
         }
     }
 }
@@ -647,6 +653,8 @@ mod imp {
         structure_reference_computations: AtomicU64,
         structure_candidate_cell_probes: AtomicU64,
         structure_ring_reach_builds: AtomicU64,
+        structure_place_piece_bbox_checks: AtomicU64,
+        structure_place_pieces_reached: AtomicU64,
     }
 
     static C: Counters = Counters {
@@ -705,6 +713,8 @@ mod imp {
         structure_reference_computations: AtomicU64::new(0),
         structure_candidate_cell_probes: AtomicU64::new(0),
         structure_ring_reach_builds: AtomicU64::new(0),
+        structure_place_piece_bbox_checks: AtomicU64::new(0),
+        structure_place_pieces_reached: AtomicU64::new(0),
     };
 
     thread_local! {
@@ -1020,6 +1030,16 @@ mod imp {
         bump(&C.structure_ring_reach_builds);
     }
 
+    #[inline(always)]
+    pub fn bump_structure_place_piece_bbox_check() {
+        bump(&C.structure_place_piece_bbox_checks);
+    }
+
+    #[inline(always)]
+    pub fn bump_structure_place_piece_reached() {
+        bump(&C.structure_place_pieces_reached);
+    }
+
     /// Enters `stage` on this thread; the previous tag is restored on drop.
     #[derive(Debug)]
     pub struct StageGuard {
@@ -1176,6 +1196,8 @@ mod imp {
         C.structure_reference_computations.store(0, Relaxed);
         C.structure_candidate_cell_probes.store(0, Relaxed);
         C.structure_ring_reach_builds.store(0, Relaxed);
+        C.structure_place_piece_bbox_checks.store(0, Relaxed);
+        C.structure_place_pieces_reached.store(0, Relaxed);
     }
 
     pub fn snapshot() -> Snapshot {
@@ -1239,6 +1261,8 @@ mod imp {
             structure_reference_computations: C.structure_reference_computations.load(Relaxed),
             structure_candidate_cell_probes: C.structure_candidate_cell_probes.load(Relaxed),
             structure_ring_reach_builds: C.structure_ring_reach_builds.load(Relaxed),
+            structure_place_piece_bbox_checks: C.structure_place_piece_bbox_checks.load(Relaxed),
+            structure_place_pieces_reached: C.structure_place_pieces_reached.load(Relaxed),
         }
     }
 }
@@ -1358,6 +1382,10 @@ mod imp {
     pub fn bump_structure_candidate_cell_probe() {}
     #[inline(always)]
     pub fn bump_structure_ring_reach_build() {}
+    #[inline(always)]
+    pub fn bump_structure_place_piece_bbox_check() {}
+    #[inline(always)]
+    pub fn bump_structure_place_piece_reached() {}
 
     #[cfg(not(feature = "stage-pmu"))]
     #[derive(Debug)]
@@ -1462,7 +1490,8 @@ pub use imp::{
     bump_structure_context_block_at, bump_structure_context_kind_block_at,
     bump_structure_context_replaceable_block_at, bump_structure_height_probe, bump_structure_start,
     bump_structure_reference_computation, bump_structure_candidate_cell_probe,
-    bump_structure_ring_reach_build,
+    bump_structure_ring_reach_build, bump_structure_place_piece_bbox_check,
+    bump_structure_place_piece_reached,
     current_stage, reset, snapshot,
 };
 

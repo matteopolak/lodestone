@@ -402,7 +402,7 @@ fn report_generation_counters(
         (prefix_computed + prefix_hits) as f64 / per_column,
     );
     println!(
-        "STRICT_WORLDGEN metric=gen_work phase={phase} block_at={} full_scans={} full_scan_cells={} biome_searches={} biome_rows={} climate_grids={} preliminary_requests={} preliminary_unique={} preliminary_computations={} corner_lookups={} corner_evals={} cell_fills={} slot_hits={} slot_misses={} noise_batches={} structure_starts={} structure_height_probes={} structure_probe_blocks={} structure_context_blocks={} structure_references={} structure_candidate_cells={}",
+        "STRICT_WORLDGEN metric=gen_work phase={phase} block_at={} full_scans={} full_scan_cells={} biome_searches={} biome_rows={} climate_grids={} preliminary_requests={} preliminary_unique={} preliminary_computations={} corner_lookups={} corner_evals={} cell_fills={} slot_hits={} slot_misses={} noise_batches={} structure_starts={} structure_height_probes={} structure_probe_blocks={} structure_context_blocks={} structure_references={} structure_candidate_cells={} structure_piece_checks={} structure_pieces_reached={}",
         delta(before.block_at, after.block_at),
         delta(before.full_column_scans, after.full_column_scans),
         delta(before.full_column_scan_cells, after.full_column_scan_cells),
@@ -424,6 +424,8 @@ fn report_generation_counters(
         delta(before.structure_context_block_at, after.structure_context_block_at),
         delta(before.structure_reference_computations, after.structure_reference_computations),
         delta(before.structure_candidate_cell_probes, after.structure_candidate_cell_probes),
+        delta(before.structure_place_piece_bbox_checks, after.structure_place_piece_bbox_checks),
+        delta(before.structure_place_pieces_reached, after.structure_place_pieces_reached),
     );
 }
 
