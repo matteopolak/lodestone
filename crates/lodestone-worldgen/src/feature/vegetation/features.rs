@@ -4544,6 +4544,7 @@ mod tests {
         let mut tags = VegTags::default();
         tags.leaves.insert(Block::DarkOakLeaves);
         tags.replaceable_by_mushrooms.insert(Block::DarkOakLeaves);
+        tags.bind();
         let mut random = LegacyRandomSource::new(0);
 
         place_huge_mushroom_at_height(
@@ -4921,6 +4922,7 @@ mod tests {
         grid.seed_id(pos.x, pos.y, pos.z, fixture_state("minecraft:crimson_roots"));
         let mut tags = VegTags::default();
         tags.supports_crimson_roots.insert(Block::Water);
+        tags.bind();
         let state = grid.get_id(pos.x, pos.y, pos.z);
 
         assert!(simple_block_can_survive(&grid, &tags, state, pos));
@@ -4937,6 +4939,7 @@ mod tests {
         };
         let mut tags = VegTags::default();
         tags.supports_crimson_roots.insert(Block::CrimsonNylium);
+        tags.bind();
         let mut grid = VegGrid::new(-64, 384, 0, 0);
         grid.seed_id(pos.x, pos.y - 1, pos.z, fixture_state("minecraft:crimson_nylium"));
         place_nether_forest_vegetation(

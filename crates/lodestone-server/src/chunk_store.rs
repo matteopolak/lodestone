@@ -10512,7 +10512,7 @@ mod tests {
         fingerprint: u8,
         dependency_radius: u8,
     ) -> crate::worldgen_session::GenerationSession {
-        use lodestone_worldgen::stage_schedule::{Dimension, END_PIPELINE};
+        use lodestone_worldgen::stage_schedule::Dimension;
 
         let request = crate::worldgen_session::GenerationRequest::new(
             Dimension::End,
@@ -10521,6 +10521,17 @@ mod tests {
             dependency_radius,
         );
         let mut session = GenerationSession::new(request);
+        import_end_shaped_prefix(&mut session, target, fingerprint);
+        session
+    }
+
+    fn import_end_shaped_prefix(
+        session: &mut GenerationSession,
+        target: (i32, i32),
+        fingerprint: u8,
+    ) {
+        use lodestone_worldgen::stage_schedule::END_PIPELINE;
+
         let boundary = END_PIPELINE
             .schedule()
             .target_stage(GenerationTarget::Shaped);
@@ -10535,7 +10546,6 @@ mod tests {
                 1,
             )
             .expect("End shaped prefix fixture is valid");
-        session
     }
 
     #[test]
@@ -11150,19 +11160,48 @@ mod tests {
         let mut maximum_mutation_records = 0;
         for x in 0..12 {
             let target = (x, 0);
-            let mut session = end_shaped_session_at(target, 1, 1);
-            complete_end_suffix_with_mutation(
+            let request = crate::worldgen_session::GenerationRequest::new(
+                Dimension::End,
+                target,
+                GenerationTarget::Full,
+                1,
+            );
+            let admission = GenerationSession::new(request);
+            ledger
+                .admit(END_PIPELINE, admission.admission_order())
+                .expect("the next target and its halo are admitted");
+            let checkpoint = ledger
+                .checkpoint(END_PIPELINE, request)
+                .expect("incoming destination mutations are checkpointed");
+            let mut session = GenerationSession::from_checkpoint(checkpoint)
+                .expect("the target resumes from its retained incoming mutations");
+            import_end_shaped_prefix(&mut session, target, 1);
+            let incoming_mutations = session.committed_mutations().cloned().collect::<Vec<_>>();
+            let mut output = ChunkColumn::new(0, 16);
+            for mutation in &incoming_mutations {
+                let destination = mutation.provenance().destination();
+                if (destination.x().div_euclid(16), destination.z().div_euclid(16)) == target {
+                    output.set_block_id(
+                        destination.x().rem_euclid(16),
+                        destination.y(),
+                        destination.z().rem_euclid(16),
+                        *mutation
+                            .get::<StateId>()
+                            .expect("block mutation contains a StateId"),
+                    );
+                }
+            }
+            complete_end_suffix_inner_with_state_and_output(
                 &mut session,
                 2,
-                BlockCoordinate::new((x + 1) * 16, 4, 0),
+                Some(BlockCoordinate::new((x + 1) * 16, 4, 0)),
+                Block::Stone.default_state(),
+                Some(output),
             );
-            ledger
-                .admit(END_PIPELINE, session.admission_order())
-                .expect("a closed coordinate bundle can be replaced");
             ledger
                 .publish_session(END_PIPELINE, &session)
                 .expect("the line target publishes");
-            ledger.settle_mutations(END_PIPELINE, &[], false, &[target]);
+            ledger.settle_mutations(END_PIPELINE, &incoming_mutations, false, &[target]);
             let stats = ledger.stats();
             maximum_mutation_records = maximum_mutation_records.max(stats.overlays);
             assert!(stats.coordinates <= 12);

@@ -1029,8 +1029,8 @@ mod tests {
         let expected_palette = vec![
             "minecraft:air".to_owned(),
             "minecraft:stone".to_owned(),
-            "minecraft:water".to_owned(),
-            "minecraft:lava".to_owned(),
+            "minecraft:water[level=0]".to_owned(),
+            "minecraft:lava[level=0]".to_owned(),
         ];
         let expected_blocks: Vec<u16> = packed
             .iter()
@@ -1045,7 +1045,7 @@ mod tests {
         assert_eq!(result.0, expected_palette, "packed palette order changed");
         assert_eq!(result.1, expected_blocks, "packed block indices changed");
         let digest = packed_result_digest(&result.0, &result.1);
-        assert_eq!(digest, 0xabd0_10dc_d4dd_58e6, "packed output digest changed");
+        assert_eq!(digest, 0x5917_d9f3_67b8_9eae, "packed output digest changed");
 
         let mut control = packed;
         control[0] = 3;
@@ -1193,11 +1193,14 @@ mod tests {
         let air = state("minecraft:air");
         let mut src = DenseBlockGrid::with_default(0, 0, 0, 2, 2, 2, air);
         let mut dst = DenseBlockGrid::with_default(0, 0, 0, 2, 2, 2, air);
+        let deepslate = state("minecraft:deepslate[axis=y]");
         src.set_named(1, 1, 1, "minecraft:deepslate");
 
         dst.set_id(0, 0, 0, src.get_id(1, 1, 1));
 
-        assert_eq!(dst.get_named(0, 0, 0), "minecraft:deepslate");
+        assert_eq!(src.get_id(1, 1, 1), deepslate);
+        assert_eq!(dst.get_id(0, 0, 0), deepslate);
+        assert_eq!(dst.get_named(0, 0, 0), deepslate.canonical_state());
     }
 
     #[test]
@@ -1382,7 +1385,9 @@ mod tests {
             StateId::AIR,
             |x, y, z| states[((z * 2 + x) * 3 + y) as usize],
         );
-        let packed = states.iter().map(|state| state.raw() as u16).collect();
+        let packed = (0..3)
+            .flat_map(|y| (0..2).map(move |x| states[(x * 3 + y) as usize].raw() as u16))
+            .collect();
         let actual = DenseBlockGrid::from_ordered_packed_state_fn(
             0,
             0,

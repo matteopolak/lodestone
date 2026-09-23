@@ -514,7 +514,10 @@ mod tests {
                     pos.next().expect("state y").parse().expect("state y int"),
                     pos.next().expect("state z").parse().expect("state z int"),
                 );
-                states.insert(key, rest.to_owned());
+                let state = lodestone_data::block_states::StateId::from_state_str(rest)
+                    .expect("fixture state is in the generated table")
+                    .canonical_state();
+                states.insert(key, state);
             }
         }
         Expected {
@@ -818,12 +821,14 @@ mod tests {
         let mut grid = flat_grid();
         let mut random = ScriptedRandom::new(&[0, 0, 0]);
         let feature = super::super::config::ConfiguredFeature::Fossil(Box::new(cfg()));
+        let tags = super::super::config::VegTags::default();
+        tags.bind();
         super::super::place_configured_feature(
             &mut random,
             expected.origin,
             &feature,
             &mut grid,
-            &super::super::config::VegTags::default(),
+            &tags,
         );
         assert_eq!(random.next, 3, "the dispatcher must reach the fossil body's three draws");
         for (&(x, y, z), state) in &expected.states {

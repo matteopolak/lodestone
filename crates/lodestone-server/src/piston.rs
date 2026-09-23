@@ -2046,14 +2046,13 @@ mod tests {
         );
         let mut states: Vec<StateId> = commits.iter().map(|(_, _, s)| *s).collect();
         states.sort_unstable();
-        assert_eq!(
-            states,
-            vec![
-                state("minecraft:dirt"),
-                state("minecraft:piston_head[facing=east,short=false,type=normal]"),
-                state("minecraft:stone"),
-            ]
-        );
+        let mut expected = vec![
+            state("minecraft:dirt"),
+            state("minecraft:piston_head[facing=east,short=false,type=normal]"),
+            state("minecraft:stone"),
+        ];
+        expected.sort_unstable();
+        assert_eq!(states, expected);
         // And the cells really are holding `moving_piston` right now, so the records
         // above have a state to attach to.
         for x in [5, 6, 7] {

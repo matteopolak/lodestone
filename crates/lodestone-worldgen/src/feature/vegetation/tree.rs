@@ -2774,9 +2774,11 @@ mod tests {
             grid.seed_id(pos.x, pos.y, pos.z, leaves_state);
         }
 
+        let tags = VegTags::default();
+        tags.bind();
         update_leaf_distances(
             &mut grid,
-            &VegTags::default(),
+            &tags,
             &logs,
             (-120, 73, -126, -119, 73, -124),
         );
