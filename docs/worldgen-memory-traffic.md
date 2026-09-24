@@ -53,6 +53,10 @@ These are software representation counters, not CPU cache-level measurements. Th
 
 The ignored single-worker production cohort benchmark also records source-state and shared-height reads by absolute chunk when `gen-counters` and `LODESTONE_WORLDGEN_BENCH_COUNTERS=1` are enabled. Its fixed-size owner table records distinct 16×16 horizontal lanes and, for state reads, distinct 4×8×4 cells. Overlay hits are excluded from source-state reads. The table reports overflow rather than silently dropping evidence; counter-enabled instruction and timing values are not comparable to an uninstrumented run.
 
+The same diagnostic reports Overworld fill outcomes for each 4×8×4 cell: a nonpositive terrain cell filled from the global fluid run, an all-positive solid cell, or a mixed cell requiring per-block aquifer classification. `positive_proof_cells` is the subset of all-positive cells established without materializing all 128 densities. The three outcome counts partition the production fill-cell walk; they do not partition the core evaluator's `cell_fills` count, which includes other density-cell work.
+
+In the seed-42 square-64 Full cohort, 110,592 fill cells across 144 terrain prefixes comprised 65,296 nonpositive (59.0%), 29,114 all-positive (26.3%), and 16,182 mixed (14.6%). Of the all-positive cells, 27,943 used the early proof. This makes uniform-cell representation a credible way to reduce block-buffer traffic, but it does not imply that density evaluation or feature read views can be skipped: the proof itself performs work, and adjacent cells share corner values.
+
 For the seed-42 square cohort of 64 Full Overworld outputs, 144 immutable prefixes were computed for 64 requested chunks, 36 feature-owner padding chunks, and 44 read-only context chunks. The read-only ring received 29,937 state accesses across 3,006 of its 11,264 horizontal lanes and 1,359 of its 33,792 coarse cells. Its shared height products received 63,388 accesses across 5,604 lanes. This shows sparse state access but substantial height demand; it does not establish that a lazy outer ring would save enough work to justify replacing full-prefix generation.
 
 ## How to change it

@@ -513,6 +513,9 @@ pub struct Snapshot {
     pub structure_place_pieces_reached: u64,
     /// Overworld cells filled directly after a terrain-only nonpositive proof.
     pub nonpositive_cell_skips: u64,
+    pub positive_cell_skips: u64,
+    pub positive_proof_cells: u64,
+    pub mixed_cell_fills: u64,
     /// Dirty cells emitted by a target-owned FEATURES epoch whose destination
     /// is the completing target.
     pub epoch_dirty_local_writes: u64,
@@ -616,6 +619,9 @@ impl Default for Snapshot {
             structure_place_piece_bbox_checks: 0,
             structure_place_pieces_reached: 0,
             nonpositive_cell_skips: 0,
+            positive_cell_skips: 0,
+            positive_proof_cells: 0,
+            mixed_cell_fills: 0,
             epoch_dirty_local_writes: 0,
             epoch_dirty_spill_writes: 0,
             epoch_dirty_full_raw_entries: 0,
@@ -745,6 +751,9 @@ mod imp {
         structure_place_piece_bbox_checks: AtomicU64,
         structure_place_pieces_reached: AtomicU64,
         nonpositive_cell_skips: AtomicU64,
+        positive_cell_skips: AtomicU64,
+        positive_proof_cells: AtomicU64,
+        mixed_cell_fills: AtomicU64,
         epoch_dirty_local_writes: AtomicU64,
         epoch_dirty_spill_writes: AtomicU64,
         epoch_dirty_full_raw_entries: AtomicU64,
@@ -824,6 +833,9 @@ mod imp {
         structure_place_piece_bbox_checks: AtomicU64::new(0),
         structure_place_pieces_reached: AtomicU64::new(0),
         nonpositive_cell_skips: AtomicU64::new(0),
+        positive_cell_skips: AtomicU64::new(0),
+        positive_proof_cells: AtomicU64::new(0),
+        mixed_cell_fills: AtomicU64::new(0),
         epoch_dirty_local_writes: AtomicU64::new(0),
         epoch_dirty_spill_writes: AtomicU64::new(0),
         epoch_dirty_full_raw_entries: AtomicU64::new(0),
@@ -1172,6 +1184,21 @@ mod imp {
         bump(&C.nonpositive_cell_skips);
     }
 
+    #[inline(always)]
+    pub fn bump_positive_cell_skip() {
+        bump(&C.positive_cell_skips);
+    }
+
+    #[inline(always)]
+    pub fn bump_positive_proof_cell() {
+        bump(&C.positive_proof_cells);
+    }
+
+    #[inline(always)]
+    pub fn bump_mixed_cell_fill() {
+        bump(&C.mixed_cell_fills);
+    }
+
     #[inline]
     pub fn bump_epoch_dirty_write(local: bool) {
         bump(if local {
@@ -1390,6 +1417,9 @@ mod imp {
         C.structure_place_piece_bbox_checks.store(0, Relaxed);
         C.structure_place_pieces_reached.store(0, Relaxed);
         C.nonpositive_cell_skips.store(0, Relaxed);
+        C.positive_cell_skips.store(0, Relaxed);
+        C.positive_proof_cells.store(0, Relaxed);
+        C.mixed_cell_fills.store(0, Relaxed);
         C.epoch_dirty_local_writes.store(0, Relaxed);
         C.epoch_dirty_spill_writes.store(0, Relaxed);
         C.epoch_dirty_full_raw_entries.store(0, Relaxed);
@@ -1474,6 +1504,9 @@ mod imp {
             structure_place_piece_bbox_checks: C.structure_place_piece_bbox_checks.load(Relaxed),
             structure_place_pieces_reached: C.structure_place_pieces_reached.load(Relaxed),
             nonpositive_cell_skips: C.nonpositive_cell_skips.load(Relaxed),
+            positive_cell_skips: C.positive_cell_skips.load(Relaxed),
+            positive_proof_cells: C.positive_proof_cells.load(Relaxed),
+            mixed_cell_fills: C.mixed_cell_fills.load(Relaxed),
             epoch_dirty_local_writes: C.epoch_dirty_local_writes.load(Relaxed),
             epoch_dirty_spill_writes: C.epoch_dirty_spill_writes.load(Relaxed),
             epoch_dirty_full_raw_entries: C.epoch_dirty_full_raw_entries.load(Relaxed),
@@ -1619,6 +1652,12 @@ mod imp {
     #[inline(always)]
     pub fn bump_nonpositive_cell_skip() {}
     #[inline(always)]
+    pub fn bump_positive_cell_skip() {}
+    #[inline(always)]
+    pub fn bump_positive_proof_cell() {}
+    #[inline(always)]
+    pub fn bump_mixed_cell_fill() {}
+    #[inline(always)]
     pub fn bump_epoch_dirty_write(_local: bool) {}
     #[inline(always)]
     pub fn bump_epoch_dirty_dedup(_sparse_padding: bool, _raw_entries: u64, _unique_positions: u64) {}
@@ -1738,7 +1777,9 @@ pub use imp::{
     bump_structure_reference_computation, bump_structure_candidate_cell_probe,
     bump_structure_ring_reach_build, bump_structure_place_piece_bbox_check,
     bump_structure_place_piece_reached,
-    bump_nonpositive_cell_skip, bump_epoch_dirty_write,
+    bump_nonpositive_cell_skip, bump_positive_cell_skip, bump_positive_proof_cell,
+    bump_mixed_cell_fill,
+    bump_epoch_dirty_write,
     bump_epoch_dirty_dedup,
     bump_materializer_override_revision, bump_materializer_carver_revision,
     bump_canonical_winner_update, bump_canonical_winner_attempt, bump_authenticated_write_call,
