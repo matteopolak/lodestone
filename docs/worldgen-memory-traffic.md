@@ -21,10 +21,13 @@ from 75 to 50 and scanned cells from 5,747,387 to 4,103,876, with the content
 digest unchanged.
 
 The production pre-ore path carries fill results as packed `u16` kind codes.
-Materialisation consumes that carrier in z, x, y order and rewrites its cells
-to dense palette indices in place, while surface and vein precedence remains
-inside the same ordered callback. This removes the second full-column block
-carrier that the former `Vec<BlockKind>` to `DenseBlockGrid` handoff required;
+Surface replacements use a disjoint tagged range in the same field, so the
+original fill class needs no parallel byte array and there is no intermediate
+whole-column kind-to-state conversion. Materialisation decodes each code in
+z, x, y order and rewrites its cell to a dense palette index in place, while
+surface and vein precedence remains inside the same ordered callback. This
+removes the second full-column block carrier that the former `Vec<BlockKind>`
+to `DenseBlockGrid` handoff required;
 the legacy `fill_stage` adapter still decodes packed output for shape/parity
 callers that explicitly request the enum field.
 
