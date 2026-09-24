@@ -3787,7 +3787,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         if matches!(mode, LifecycleCompletionMode::SparsePadding) {
             self.sparse_completed_targets.insert(target);
         }
-        let skip_direct_epoch_local_carvers_mirror = direct_epoch_output
+        let skip_epoch_owned_override_mirror = direct_epoch_output
             && target_owned
             && stage == LifecycleCompletion::Features
             && matches!(mode, LifecycleCompletionMode::Full)
@@ -3825,7 +3825,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 "direct target local FEATURES write is outside target column"
             );
             if self.source.target_feature_reads_carvers()
-                && !skip_direct_epoch_local_carvers_mirror
+                && !skip_epoch_owned_override_mirror
             {
                 self.set_carvers_override(local.position, local.state);
             }
@@ -3979,7 +3979,10 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             if transient {
                 deferred |= sparse_padding_destination
                     || self.defer_target_spill(target_scoped, target_owned, destination);
-                if deferred && !defer_direct_target {
+                if deferred
+                    && !defer_direct_target
+                    && !skip_epoch_owned_override_mirror
+                {
                     self.retain_temporary_carvers_override(mode, spill.position);
                 }
                 if !deferred {
@@ -4022,10 +4025,15 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             ) {
                 dirty_sparse_residents.insert(destination);
             }
-            if target_scoped && self.source.target_feature_reads_carvers() {
+            if target_scoped
+                && self.source.target_feature_reads_carvers()
+                && !skip_epoch_owned_override_mirror
+            {
                 self.set_carvers_override(spill.position, spill.state);
             }
-            self.set_override(spill.position, spill.state);
+            if !skip_epoch_owned_override_mirror {
+                self.set_override(spill.position, spill.state);
+            }
             self.record_authenticated_write(
                 target,
                 source,
@@ -5160,6 +5168,26 @@ mod tests {
             });
         }
         digest.finalize().into()
+    }
+
+    fn direct_result_column(
+        result: lodestone_worldgen::overworld::DirectDecorationResult,
+    ) -> ChunkColumn {
+        let mut column = ChunkColumn::from_generated(result.column);
+        let writes = result
+            .local_features
+            .into_iter()
+            .map(|write| {
+                (
+                    write.position.0.rem_euclid(16),
+                    write.position.1,
+                    write.position.2.rem_euclid(16),
+                    write.state,
+                )
+            })
+            .collect::<Vec<_>>();
+        column.apply_ordered_block_id_batch(&writes);
+        column
     }
 
     impl LifecycleWorldgenSource for StateOnlySpillSource {
@@ -6346,6 +6374,16 @@ mod tests {
                         == target
             });
         assert!(has_local_epoch_write, "fixture must exercise local epoch output");
+        let has_outward_epoch_write = materializer
+            .region_feature_epoch
+            .as_ref()
+            .expect("prepared replay context must create the shared epoch")
+            .writes()
+            .iter()
+            .any(|write| {
+                (write.position.0.div_euclid(16), write.position.2.div_euclid(16)) != target
+            });
+        assert!(has_outward_epoch_write, "fixture must exercise epoch-owned spill output");
         assert!(
             !materializer.carvers_overrides.keys().any(|position| {
                 (position.0.div_euclid(16), position.2.div_euclid(16)) == target
@@ -6357,6 +6395,10 @@ mod tests {
                 (position.0.div_euclid(16), position.2.div_euclid(16)) == target
             }),
             "a full direct epoch owns local state without a duplicate general override",
+        );
+        assert!(
+            materializer.carvers_overrides.is_empty() && materializer.overrides.is_empty(),
+            "the full direct epoch's outward writes must not be mirrored into lifecycle maps",
         );
         assert!(
             materializer
@@ -6407,6 +6449,129 @@ mod tests {
             column_digest(&altered),
             column_digest(&expected),
             "the output digest must detect a changed local epoch state",
+        );
+    }
+
+    #[test]
+    fn authenticated_epoch_writes_are_the_next_owner_read_plane() {
+        let targets = [(0, 0), (1, 0)];
+        let first = targets[0];
+        let second = targets[1];
+        let generator = crate::overworld_generator(42);
+        let batch = generator.mixed_replay_batch_with_radius(&targets, TARGET_FEATURE_RADIUS);
+        let first_context = batch.context(first).expect("first context is retained");
+        let second_context = batch.context(second).expect("second context is retained");
+
+        let mut direct_epoch = generator.begin_region_feature_epoch(&batch, &targets);
+        let _direct_first = generator
+            .complete_region_feature_epoch_target_from_context_with_override_events(
+                &mut direct_epoch,
+                first,
+                first_context,
+                &[],
+            );
+        let direct_second = generator
+            .complete_region_feature_epoch_target_from_context_with_override_events(
+                &mut direct_epoch,
+                second,
+                second_context,
+                &[],
+            );
+
+        let mut replay_epoch = generator.begin_region_feature_epoch(&batch, &targets);
+        let replay_first = generator
+            .complete_region_feature_epoch_target_from_context_with_override_events(
+                &mut replay_epoch,
+                first,
+                first_context,
+                &[],
+            );
+        let replay_events = replay_first
+            .spills
+            .iter()
+            .map(|spill| (spill.position, spill.state))
+            .collect::<Vec<_>>();
+        assert!(
+            replay_events.iter().any(|((x, _, z), _)| {
+                (x.div_euclid(16), z.div_euclid(16)) == second
+            }),
+            "the negative control needs a real cross-target epoch write",
+        );
+        let replay_second = generator
+            .complete_region_feature_epoch_target_from_context_with_override_events(
+                &mut replay_epoch,
+                second,
+                second_context,
+                &replay_events,
+            );
+
+        let direct_column = direct_result_column(direct_second);
+        let replay_column = direct_result_column(replay_second);
+        assert_eq!(
+            column_digest(&direct_column),
+            column_digest(&replay_column),
+            "replaying the epoch's own outward writes must be observationally redundant",
+        );
+    }
+
+    #[test]
+    fn authenticated_epoch_revision_negative_control_detects_external_write() {
+        let targets = [(0, 0), (1, 0)];
+        let first = targets[0];
+        let second = targets[1];
+        let generator = crate::overworld_generator(42);
+        let batch = generator.mixed_replay_batch_with_radius(&targets, TARGET_FEATURE_RADIUS);
+        let first_context = batch.context(first).expect("first context is retained");
+        let second_context = batch.context(second).expect("second context is retained");
+        let top_y = generator.min_y() + generator.height() - 1;
+        let position = (second.0 * 16 + 8, top_y, second.1 * 16 + 8);
+        let external_state = sid("minecraft:emerald_block");
+
+        let mut baseline_epoch = generator.begin_region_feature_epoch(&batch, &targets);
+        let _ = generator.complete_region_feature_epoch_target_from_context_with_override_events(
+            &mut baseline_epoch,
+            first,
+            first_context,
+            &[],
+        );
+        let baseline = generator
+            .complete_region_feature_epoch_target_from_context_with_override_events(
+                &mut baseline_epoch,
+                second,
+                second_context,
+                &[],
+            );
+
+        let mut control_epoch = generator.begin_region_feature_epoch(&batch, &targets);
+        let _ = generator.complete_region_feature_epoch_target_from_context_with_override_events(
+            &mut control_epoch,
+            first,
+            first_context,
+            &[],
+        );
+        let control = generator
+            .complete_region_feature_epoch_target_from_context_with_override_events(
+                &mut control_epoch,
+                second,
+                second_context,
+                &[(position, external_state)],
+            );
+        assert_ne!(
+            baseline.column.block_state_id(8, top_y, 8),
+            external_state,
+            "control position must be untouched without the external revision",
+        );
+        assert_eq!(
+            control.column.block_state_id(8, top_y, 8),
+            external_state,
+            "external revisions still seed the epoch overlay",
+        );
+        let baseline = direct_result_column(baseline);
+        let control = direct_result_column(control);
+        assert_ne!(
+            column_digest(&baseline),
+            column_digest(&control),
+            "the negative control must detect omission of an external revision",
         );
     }
 

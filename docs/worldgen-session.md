@@ -46,9 +46,11 @@ already-prepared replay window. It owns the mutable feature overlay for the
 complete canonical target sequence, including sparse padding targets. Each
 target applies the epoch's prior writes before running its feature and top-layer
 passes, records new local and cross-column writes, and advances the same ordered
-overlay. Owned and borrowed sources forward the append-only override revision
-stream to the epoch, which consumes only revisions newer than its cursor. The
-map-based compatibility path is not used for production Overworld epochs.
+overlay. The epoch already retains its own completed writes, so they do not
+re-enter the materializer's override maps or revision streams. Revisions from
+outside the authenticated epoch still enter through the append-only stream;
+the epoch consumes only entries newer than its cursor. The map-based
+compatibility path is not used for production Overworld epochs.
 Padding runs FEATURES and TOP_LAYER directly against that overlay and
 its immutable sources, without constructing a disposable dense working column.
 Only sparse writes and entities needed by requested targets are retained.
@@ -180,14 +182,14 @@ one settlement boundary without treating a padding owner's completion in one
 read view as completion in every read view. The materializer keeps target-local
 winner records for canonical output settlement. Sparse padding and scalar
 fallback also retain the CARVERS and general override mirrors because they may
-precede a separate top-layer pass. For authenticated Full direct-epoch Overworld
-completion, local writes are omitted only from the materializer's CARVERS map and
-revision stream; the winner records remain, and the general override map is
-already bypassed on this path. Cross-column spills still use the ordinary
-transaction and provenance path. The session's reusable provenance map remains
-sparse because committed target-local writes are represented by the finished
-column and its settlement records. Winner lookup uses a fast keyed table during
-mutable writes; settlement sorts by destination before assigning revisions or
+precede a separate top-layer pass. Authenticated Full direct-epoch Overworld
+completion omits duplicate override-map and revision-stream writes for both
+local cells and cross-column spills. Resident undo, winner records, and the
+ordinary transaction and provenance path remain. The session's reusable
+provenance map remains sparse because committed target-local writes are
+represented by the finished column and its settlement records. Winner lookup
+uses a fast keyed table during mutable writes; settlement sorts by destination
+before assigning revisions or
 applying block batches, so table iteration order cannot affect output.
 
 When a later target finalizes a column that already has a committed feature spill, settlement also retains a typed receipt if an output-owned winner outranks that spill. The receipt carries its destination, owner, source, ordinal, and state through checkpoints and cancellation. Publication compares that exact state with the finalized column, then retires only the dominated overlay under the ledger rollback journal; a higher-priority mutation still has to match the output.
