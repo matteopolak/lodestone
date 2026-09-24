@@ -112,17 +112,43 @@ static STAGE_INSTRUCTIONS: [AtomicU64; STAGE_COUNT] =
 #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
 static STAGE_CYCLES: [AtomicU64; STAGE_COUNT] = [const { AtomicU64::new(0) }; STAGE_COUNT];
 #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
-static REGION_INSTRUCTIONS: [AtomicU64; 24] = [const { AtomicU64::new(0) }; 24];
+const REGION_PHASE_COUNT: usize = RegionPhase::FeatureSettlement as usize + 1;
 #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
-static REGION_CYCLES: [AtomicU64; 24] = [const { AtomicU64::new(0) }; 24];
+const REGION_BUCKET_COUNT: usize = REGION_PHASE_COUNT + 1;
+#[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
+static REGION_INSTRUCTIONS: [AtomicU64; REGION_PHASE_COUNT] =
+    [const { AtomicU64::new(0) }; REGION_PHASE_COUNT];
+#[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
+static REGION_CYCLES: [AtomicU64; REGION_PHASE_COUNT] =
+    [const { AtomicU64::new(0) }; REGION_PHASE_COUNT];
+#[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
+static STAGE_REGION_INSTRUCTIONS: [AtomicU64; STAGE_COUNT * REGION_BUCKET_COUNT] =
+    [const { AtomicU64::new(0) }; STAGE_COUNT * REGION_BUCKET_COUNT];
+#[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
+static STAGE_REGION_CYCLES: [AtomicU64; STAGE_COUNT * REGION_BUCKET_COUNT] =
+    [const { AtomicU64::new(0) }; STAGE_COUNT * REGION_BUCKET_COUNT];
 #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
 static PMU_READ_COST: OnceLock<(u64, u64)> = OnceLock::new();
 
 #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
 thread_local! {
-    static STAGE_START: Cell<Option<(Stage, u64, u64)>> = const { Cell::new(None) };
+    static STAGE_START: Cell<Option<(Stage, u64, u64, usize)>> = const { Cell::new(None) };
     static REGION_START: Cell<([Option<(RegionPhase, u64, u64)>; 16], usize)> =
         const { Cell::new(([None; 16], 0)) };
+}
+
+#[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
+fn active_region_index() -> usize {
+    REGION_START.with(|state| {
+        let (stack, depth) = state.get();
+        if depth == 0 {
+            REGION_PHASE_COUNT
+        } else {
+            stack[depth - 1]
+                .expect("active region frame is present")
+                .0 as usize
+        }
+    })
 }
 
 #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
@@ -132,31 +158,31 @@ fn stage_pmu_observer(stage: Stage, event: StageEvent) {
             let (instructions, cycles) = retired().expect("stage PMU requires retired counters");
             STAGE_START.with(|start| {
                 assert!(start.get().is_none(), "stage PMU scopes may not overlap");
-                start.set(Some((stage, instructions, cycles)));
+                start.set(Some((stage, instructions, cycles, active_region_index())));
             });
         }
         StageEvent::Exit => {
-            let (started_stage, before_instructions, before_cycles) = STAGE_START
+            let (started_stage, before_instructions, before_cycles, region_index) = STAGE_START
                 .with(|start| start.take())
                 .expect("stage PMU exit without an enter");
             assert_eq!(started_stage, stage, "stage PMU scope changed stages");
+            assert_eq!(region_index, active_region_index(), "stage PMU scope crossed a region boundary");
             let (after_instructions, after_cycles) =
                 retired().expect("stage PMU requires retired counters");
             let (read_instructions, read_cycles) = *PMU_READ_COST
                 .get()
                 .expect("stage PMU read cost must be initialized");
-            STAGE_INSTRUCTIONS[stage as usize].fetch_add(
-                after_instructions
-                    .saturating_sub(before_instructions)
-                    .saturating_sub(read_instructions),
-                Relaxed,
-            );
-            STAGE_CYCLES[stage as usize].fetch_add(
-                after_cycles
-                    .saturating_sub(before_cycles)
-                    .saturating_sub(read_cycles),
-                Relaxed,
-            );
+            let instruction_count = after_instructions
+                .saturating_sub(before_instructions)
+                .saturating_sub(read_instructions);
+            let cycle_count = after_cycles
+                .saturating_sub(before_cycles)
+                .saturating_sub(read_cycles);
+            STAGE_INSTRUCTIONS[stage as usize].fetch_add(instruction_count, Relaxed);
+            STAGE_CYCLES[stage as usize].fetch_add(cycle_count, Relaxed);
+            let index = stage as usize * REGION_BUCKET_COUNT + region_index;
+            STAGE_REGION_INSTRUCTIONS[index].fetch_add(instruction_count, Relaxed);
+            STAGE_REGION_CYCLES[index].fetch_add(cycle_count, Relaxed);
         }
     }
 }
@@ -294,33 +320,44 @@ fn report_stage_pmu(total: &Measurement<impl Sized>, columns: usize, phase: &str
     ] {
         report(counters::STAGE_NAMES[stage as usize], instructions[stage as usize], cycles[stage as usize]);
     }
-    for (name, index) in [
-        ("admission", 0),
-        ("replay_context", 1),
-        ("mutable_target", 2),
-        ("mutable_padding", 3),
-        ("snapshot_finalization", 4),
-        ("prefix_import", 5),
-        ("ledger_checkpoint_capture", 6),
-        ("session_hydration", 7),
-        ("checkpoint_export", 8),
-        ("ledger_publish_inner", 9),
-        ("mutation_winner_scan", 10),
-        ("direct_transition_mirror", 11),
-        ("output_snapshot", 12),
-        ("packet_neighbours", 13),
-        ("packet_finalize", 14),
-        ("machine_rebuild", 15),
-        ("settlement_resume", 16),
-        ("commit_features", 17),
-        ("commit_top_layer", 18),
-        ("resume_output", 19),
-        ("feature_source_commit", 20),
-        ("feature_snapshot", 21),
-        ("feature_stage_publish", 22),
-        ("feature_settlement", 23),
-    ] {
+    let region_names = [
+        "admission", "replay_context", "mutable_target", "mutable_padding",
+        "snapshot_finalization", "prefix_import", "ledger_checkpoint_capture",
+        "session_hydration", "checkpoint_export", "ledger_publish_inner",
+        "mutation_winner_scan", "direct_transition_mirror", "output_snapshot",
+        "packet_neighbours", "packet_finalize", "machine_rebuild",
+        "settlement_resume", "commit_features", "commit_top_layer",
+        "resume_output", "feature_source_commit", "feature_snapshot",
+        "feature_stage_publish", "feature_settlement", "outside_region",
+    ];
+    assert_eq!(region_names.len(), REGION_BUCKET_COUNT);
+    for (index, name) in region_names.iter().take(REGION_PHASE_COUNT).enumerate() {
         report(name, REGION_INSTRUCTIONS[index].load(Relaxed), REGION_CYCLES[index].load(Relaxed));
+    }
+    for stage in [
+        Stage::Aquifer, Stage::Shape, Stage::Biome, Stage::Surface,
+        Stage::Materialize, Stage::Carve, Stage::Structure, Stage::Ore,
+        Stage::Vegetation, Stage::TopLayer, Stage::Intern,
+    ] {
+        let mut assigned_instructions = 0;
+        let mut assigned_cycles = 0;
+        for (region_index, region_name) in region_names.iter().enumerate() {
+            let index = stage as usize * REGION_BUCKET_COUNT + region_index;
+            let instruction_count = STAGE_REGION_INSTRUCTIONS[index].load(Relaxed);
+            let cycle_count = STAGE_REGION_CYCLES[index].load(Relaxed);
+            assigned_instructions += instruction_count;
+            assigned_cycles += cycle_count;
+            if instruction_count != 0 || cycle_count != 0 {
+                println!(
+                    "STRICT_WORLDGEN metric=stage_region_pmu phase={phase} stage={} region={region_name} columns={columns} instructions={instruction_count} instructions_per_column={:.0} cycles={cycle_count} cycles_per_column={:.0}",
+                    counters::STAGE_NAMES[stage as usize],
+                    instruction_count as f64 / per_column,
+                    cycle_count as f64 / per_column,
+                );
+            }
+        }
+        assert_eq!(assigned_instructions, instructions[stage as usize]);
+        assert_eq!(assigned_cycles, cycles[stage as usize]);
     }
 }
 
