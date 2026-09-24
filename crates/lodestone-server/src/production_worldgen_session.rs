@@ -696,7 +696,9 @@ where
                         (SharedPrefixColumn::Materialized(column), fingerprint, retained_bytes)
                     })
             })
-            .ok_or(SessionError::InvalidCheckpoint)?;
+            .ok_or(SessionError::InvalidCheckpointAt(
+                "shared shaped prefix was neither generated nor resident",
+            ))?;
         if provenance.is_some() && matches!(&column, SharedPrefixColumn::Generated(_)) {
             materializer.mark_authenticated_prefix(coordinate, fingerprint);
         }
@@ -739,7 +741,8 @@ where
                 &settlement.writes,
                 &settlement.overlay_conflict_winners,
                 settlement.foreign_winner_count,
-            )?;
+            )
+            .map_err(|error| checkpoint_error_context(error, "replaying target feature settlement"))?;
         }
         let column = materializer
             .resident_column(target)
@@ -912,12 +915,22 @@ where
             &settlement.writes,
             &settlement.overlay_conflict_winners,
             settlement.foreign_winner_count,
-        )?;
+        )
+        .map_err(|error| checkpoint_error_context(error, "committing target feature settlement"))?;
     }
     Ok((
         content_fingerprint,
         retain_direct_output.then_some(column),
     ))
+}
+
+fn checkpoint_error_context(error: SessionError, context: &'static str) -> SessionError {
+    match error {
+        SessionError::InvalidCheckpoint | SessionError::InvalidCheckpointAt(_) => {
+            SessionError::InvalidCheckpointAt(context)
+        }
+        other => other,
+    }
 }
 
 fn commit_top_layer<S>(
@@ -1227,7 +1240,9 @@ where
         executor: &dyn ImmutableComputeExecutor,
     ) -> Result<PacketSnapshot, SessionError> {
         if self.phase != GenerationPhase::PacketDeferred {
-            return Err(SessionError::InvalidCheckpoint);
+            return Err(SessionError::InvalidCheckpointAt(
+                "batch finalization began outside packet-deferred phase",
+            ));
         }
         self.finalize_deferred(executor)
     }
@@ -1238,7 +1253,9 @@ where
         executor: &dyn ImmutableComputeExecutor,
     ) -> Result<PacketSnapshot, SessionError> {
         if self.phase != GenerationPhase::PacketDeferred {
-            return Err(SessionError::InvalidCheckpoint);
+            return Err(SessionError::InvalidCheckpointAt(
+                "yielding batch finalization began outside packet-deferred phase",
+            ));
         }
         self.phase = if self.output.is_some() {
             GenerationPhase::PacketNeighbours
@@ -1283,7 +1300,9 @@ where
                                     self.materializer.mark_authenticated_prefix(coordinate, digest);
                                 }
                             } else {
-                                return Err(SessionError::InvalidCheckpoint);
+                                return Err(SessionError::InvalidCheckpointAt(
+                                    "shaped aggregate prefix had no supported column product",
+                                ));
                             }
                         }
                     }
@@ -1453,7 +1472,9 @@ where
                                 targets,
                                 &overlay_destinations,
                             )
-                            .ok_or(SessionError::InvalidCheckpoint)
+                            .ok_or(SessionError::InvalidCheckpointAt(
+                                "target feature settlement was unavailable at commit",
+                            ))
                     })
                     .transpose()?;
                 if settlement.is_some() {
@@ -2468,7 +2489,10 @@ where
                     match result {
                         Ok(snapshot) => {
                             if snapshot.coordinate() != output.coordinate {
-                                return Err(SessionError::InvalidCheckpoint.into());
+                                return Err(SessionError::InvalidCheckpointAt(
+                                    "cohort snapshot coordinate differed from its output fence",
+                                )
+                                .into());
                             }
                             on_stable(
                                 index,
@@ -2487,7 +2511,10 @@ where
         }
 
         if next_output != plan.outputs.len() || outcomes.iter().any(Option::is_none) {
-            return Err(SessionError::InvalidCheckpoint.into());
+            return Err(SessionError::InvalidCheckpointAt(
+                "cohort ended before every output fence settled",
+            )
+            .into());
         }
         Ok(outcomes
             .into_iter()
