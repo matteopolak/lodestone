@@ -19,6 +19,10 @@ count calls to the materializer's setters; insertions count new or changed
 values appended to the ordered revision streams. Canonical-winner updates count
 winner-map inserts or replacements, and authenticated-write calls include
 calls that return early because the target output already contains the write.
+The `epoch_dirty_*_raw` and `epoch_dirty_*_unique` counts separate append-only
+dirty entries from distinct positions, with full targets and sparse padding
+reported independently. They show the potential headroom for changing dirty
+deduplication without treating repeated writes as distinct output changes.
 The line includes totals and averages per measured output. These are structural
 diagnostics for the bookkeeping path, not counts of final block changes or a
 throughput score. The counter control checks a reset followed by zero work,

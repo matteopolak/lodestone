@@ -842,15 +842,20 @@ impl RegionFeatureEpoch {
     fn record_target_writes(
         &mut self,
         target: (i32, i32),
+        sparse_padding: bool,
     ) -> (Vec<ParityDecorationSpill>, Vec<ParityDecorationSpill>) {
         let mut seen = HashSet::new();
         let mut local = Vec::new();
         let mut spills = Vec::new();
+        let mut raw_entries = 0;
+        let mut unique_positions = 0;
         for (x, y, z, state) in self.grid.dirty_cells() {
+            raw_entries += 1;
             let position = (x, y, z);
             if !seen.insert(position) {
                 continue;
             }
+            unique_positions += 1;
             let local_write = (x.div_euclid(16), z.div_euclid(16)) == target;
             crate::counters::bump_epoch_dirty_write(local_write);
             let mutation = ParityDecorationSpill {
@@ -869,6 +874,11 @@ impl RegionFeatureEpoch {
                 spills.push(mutation);
             }
         }
+        crate::counters::bump_epoch_dirty_dedup(
+            sparse_padding,
+            raw_entries,
+            unique_positions,
+        );
         (local, spills)
     }
 }
@@ -2128,7 +2138,7 @@ impl OverworldGenerator {
             },
         );
         world = world_after_top;
-        let (local_features, spills) = epoch.record_target_writes(target);
+        let (local_features, spills) = epoch.record_target_writes(target, false);
         let block_entities = result
             .block_entities
             .into_iter()
@@ -2258,7 +2268,7 @@ impl OverworldGenerator {
             &mut epoch.grid,
             &mut discard_write,
         );
-        let (local_features, spills) = epoch.record_target_writes(target);
+        let (local_features, spills) = epoch.record_target_writes(target, true);
         SparseDirectDecorationResult {
             spills,
             local_features,
@@ -2300,7 +2310,7 @@ impl OverworldGenerator {
             &mut epoch.grid,
             &mut discard_write,
         );
-        let (local_features, spills) = epoch.record_target_writes(target);
+        let (local_features, spills) = epoch.record_target_writes(target, true);
         SparseDirectDecorationResult {
             spills,
             local_features,

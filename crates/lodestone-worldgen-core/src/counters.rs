@@ -508,6 +508,14 @@ pub struct Snapshot {
     /// Dirty cells emitted by a target-owned FEATURES epoch whose destination
     /// is a neighbouring chunk.
     pub epoch_dirty_spill_writes: u64,
+    /// Dirty-grid entries inspected by full targets before deduplication.
+    pub epoch_dirty_full_raw_entries: u64,
+    /// Distinct full-target positions retained after deduplication.
+    pub epoch_dirty_full_unique_positions: u64,
+    /// Dirty-grid entries inspected by sparse padding targets before deduplication.
+    pub epoch_dirty_sparse_raw_entries: u64,
+    /// Distinct sparse-padding positions retained after deduplication.
+    pub epoch_dirty_sparse_unique_positions: u64,
     /// Calls to the materializer's ordinary override revision setter.
     pub materializer_override_revision_attempts: u64,
     /// Override setter calls that appended a new or changed state revision.
@@ -587,6 +595,10 @@ impl Default for Snapshot {
             nonpositive_cell_skips: 0,
             epoch_dirty_local_writes: 0,
             epoch_dirty_spill_writes: 0,
+            epoch_dirty_full_raw_entries: 0,
+            epoch_dirty_full_unique_positions: 0,
+            epoch_dirty_sparse_raw_entries: 0,
+            epoch_dirty_sparse_unique_positions: 0,
             materializer_override_revision_attempts: 0,
             materializer_override_revision_insertions: 0,
             materializer_carver_revision_attempts: 0,
@@ -706,6 +718,10 @@ mod imp {
         nonpositive_cell_skips: AtomicU64,
         epoch_dirty_local_writes: AtomicU64,
         epoch_dirty_spill_writes: AtomicU64,
+        epoch_dirty_full_raw_entries: AtomicU64,
+        epoch_dirty_full_unique_positions: AtomicU64,
+        epoch_dirty_sparse_raw_entries: AtomicU64,
+        epoch_dirty_sparse_unique_positions: AtomicU64,
         materializer_override_revision_attempts: AtomicU64,
         materializer_override_revision_insertions: AtomicU64,
         materializer_carver_revision_attempts: AtomicU64,
@@ -775,6 +791,10 @@ mod imp {
         nonpositive_cell_skips: AtomicU64::new(0),
         epoch_dirty_local_writes: AtomicU64::new(0),
         epoch_dirty_spill_writes: AtomicU64::new(0),
+        epoch_dirty_full_raw_entries: AtomicU64::new(0),
+        epoch_dirty_full_unique_positions: AtomicU64::new(0),
+        epoch_dirty_sparse_raw_entries: AtomicU64::new(0),
+        epoch_dirty_sparse_unique_positions: AtomicU64::new(0),
         materializer_override_revision_attempts: AtomicU64::new(0),
         materializer_override_revision_insertions: AtomicU64::new(0),
         materializer_carver_revision_attempts: AtomicU64::new(0),
@@ -1121,6 +1141,17 @@ mod imp {
     }
 
     #[inline]
+    pub fn bump_epoch_dirty_dedup(sparse_padding: bool, raw_entries: u64, unique_positions: u64) {
+        let (raw, unique) = if sparse_padding {
+            (&C.epoch_dirty_sparse_raw_entries, &C.epoch_dirty_sparse_unique_positions)
+        } else {
+            (&C.epoch_dirty_full_raw_entries, &C.epoch_dirty_full_unique_positions)
+        };
+        bump_by(raw, raw_entries);
+        bump_by(unique, unique_positions);
+    }
+
+    #[inline]
     pub fn bump_materializer_override_revision(inserted: bool) {
         bump(&C.materializer_override_revision_attempts);
         if inserted {
@@ -1307,6 +1338,10 @@ mod imp {
         C.nonpositive_cell_skips.store(0, Relaxed);
         C.epoch_dirty_local_writes.store(0, Relaxed);
         C.epoch_dirty_spill_writes.store(0, Relaxed);
+        C.epoch_dirty_full_raw_entries.store(0, Relaxed);
+        C.epoch_dirty_full_unique_positions.store(0, Relaxed);
+        C.epoch_dirty_sparse_raw_entries.store(0, Relaxed);
+        C.epoch_dirty_sparse_unique_positions.store(0, Relaxed);
         C.materializer_override_revision_attempts.store(0, Relaxed);
         C.materializer_override_revision_insertions.store(0, Relaxed);
         C.materializer_carver_revision_attempts.store(0, Relaxed);
@@ -1381,6 +1416,10 @@ mod imp {
             nonpositive_cell_skips: C.nonpositive_cell_skips.load(Relaxed),
             epoch_dirty_local_writes: C.epoch_dirty_local_writes.load(Relaxed),
             epoch_dirty_spill_writes: C.epoch_dirty_spill_writes.load(Relaxed),
+            epoch_dirty_full_raw_entries: C.epoch_dirty_full_raw_entries.load(Relaxed),
+            epoch_dirty_full_unique_positions: C.epoch_dirty_full_unique_positions.load(Relaxed),
+            epoch_dirty_sparse_raw_entries: C.epoch_dirty_sparse_raw_entries.load(Relaxed),
+            epoch_dirty_sparse_unique_positions: C.epoch_dirty_sparse_unique_positions.load(Relaxed),
             materializer_override_revision_attempts: C.materializer_override_revision_attempts.load(Relaxed),
             materializer_override_revision_insertions: C.materializer_override_revision_insertions.load(Relaxed),
             materializer_carver_revision_attempts: C.materializer_carver_revision_attempts.load(Relaxed),
@@ -1516,6 +1555,8 @@ mod imp {
     #[inline(always)]
     pub fn bump_epoch_dirty_write(_local: bool) {}
     #[inline(always)]
+    pub fn bump_epoch_dirty_dedup(_sparse_padding: bool, _raw_entries: u64, _unique_positions: u64) {}
+    #[inline(always)]
     pub fn bump_materializer_override_revision(_inserted: bool) {}
     #[inline(always)]
     pub fn bump_materializer_carver_revision(_inserted: bool) {}
@@ -1630,6 +1671,7 @@ pub use imp::{
     bump_structure_ring_reach_build, bump_structure_place_piece_bbox_check,
     bump_structure_place_piece_reached,
     bump_nonpositive_cell_skip, bump_epoch_dirty_write,
+    bump_epoch_dirty_dedup,
     bump_materializer_override_revision, bump_materializer_carver_revision,
     bump_canonical_winner_update, bump_authenticated_write_call,
     current_stage, reset, snapshot,
@@ -1686,6 +1728,8 @@ mod tests {
         bump_structure_ring_reach_build();
         bump_epoch_dirty_write(true);
         bump_epoch_dirty_write(false);
+        bump_epoch_dirty_dedup(false, 2, 1);
+        bump_epoch_dirty_dedup(true, 3, 2);
         bump_materializer_override_revision(true);
         bump_materializer_carver_revision(false);
         bump_canonical_winner_update();
@@ -1733,6 +1777,8 @@ mod tests {
         bump_epoch_dirty_write(true);
         bump_epoch_dirty_write(false);
         bump_epoch_dirty_write(false);
+        bump_epoch_dirty_dedup(false, 2, 1);
+        bump_epoch_dirty_dedup(true, 3, 2);
         bump_materializer_override_revision(true);
         bump_materializer_override_revision(false);
         bump_materializer_carver_revision(true);
@@ -1742,6 +1788,10 @@ mod tests {
         let target_writes = snapshot();
         assert_eq!(target_writes.epoch_dirty_local_writes, 1);
         assert_eq!(target_writes.epoch_dirty_spill_writes, 2);
+        assert_eq!(target_writes.epoch_dirty_full_raw_entries, 2);
+        assert_eq!(target_writes.epoch_dirty_full_unique_positions, 1);
+        assert_eq!(target_writes.epoch_dirty_sparse_raw_entries, 3);
+        assert_eq!(target_writes.epoch_dirty_sparse_unique_positions, 2);
         assert_eq!(target_writes.materializer_override_revision_attempts, 2);
         assert_eq!(target_writes.materializer_override_revision_insertions, 1);
         assert_eq!(target_writes.materializer_carver_revision_attempts, 2);
