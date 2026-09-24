@@ -61,6 +61,16 @@ grep -q "refusing stale private-index commit" "$fixture/err"
 test "$(git -C "$fixture" log -1 --format=%s)" = concurrent
 
 current=$(git -C "$fixture" rev-parse HEAD)
+incomplete_index=$fixture/incomplete.index
+GIT_INDEX_FILE=$incomplete_index git -C "$fixture" read-tree "$base"
+GIT_INDEX_FILE=$incomplete_index git -C "$fixture" update-index --cacheinfo 100644 "$blob" owned.txt
+if (cd "$fixture" && GIT_INDEX_FILE=$incomplete_index "$guard" "$current" "must fail" owned.txt) >"$fixture/out" 2>"$fixture/err"; then
+    echo "incomplete private index unexpectedly committed" >&2
+    exit 1
+fi
+grep -q "unselected path differs from base: concurrent.txt" "$fixture/err"
+test "$(git -C "$fixture" rev-parse HEAD)" = "$current"
+
 GIT_INDEX_FILE=$private_index git -C "$fixture" read-tree "$current"
 blob=$(git -C "$fixture" hash-object -w "$fixture/owned.txt")
 GIT_INDEX_FILE=$private_index git -C "$fixture" update-index --cacheinfo 100644 "$blob" owned.txt
