@@ -13,10 +13,14 @@ connection, login, first-chunk, first-resident, and all-resident boundaries,
 then exits after the requested square is resident. It emits one `JOIN_PROFILE`
 JSON record containing aggregate update counts, resident-column high water,
 poll activity, dimensions, initial-spawn probes and generation time, errors,
-and shutdown time. It also reports request-boundary counters for raw ensure
-calls, request-session leaders, Existing hits, and packet-neighbour admissions;
-these counters make a racing spawn warm-up auditable without enabling a
-per-column log. The post-spawn retained-light warm-up submits its eight
+and shutdown time. It also records the latest chunk-event time, the current
+server-position chunk center, and the missing coordinates in the requested
+view square. At most 169 missing coordinates are included; the separate count
+and truncation flag preserve the full summary for larger radii. It reports
+request-boundary counters for raw ensure calls, request-session leaders,
+Existing hits, and packet-neighbour admissions; these counters make a racing
+spawn warm-up auditable without enabling a per-column log. The post-spawn
+retained-light warm-up submits its eight
 neighbours as one ordered generation batch, sharing the production halo and
 materializer boundary while leaving the centre out of the request list.
 `just samply-integrated-join` builds the release binary and wraps the same run
@@ -42,17 +46,29 @@ captures from the same machine and configuration.
 
 ## Configuration
 
-The `generation_requests` object contains `raw_ensure_calls`,
-`request_session_leaders`, `existing_hits`, and
-`packet_neighbour_admissions`. The binary accepts positional `seed`,
+The report's `missing_view_coordinates` contains `[x, z]` chunk-coordinate
+pairs, centered on the server-known player position or `(0, 0)` before one is
+available. `latest_chunk_event_ms` is the elapsed time of the most recent
+client chunk event, or `null` if no chunk arrived. The `generation_requests`
+object contains `raw_ensure_calls`, `request_session_leaders`, `existing_hits`,
+and `packet_neighbour_admissions`. The binary accepts positional `seed`,
 `view_radius`, and `deadline_seconds`;
 the defaults are `4242`, `1`, and `240`. The radius is capped at 32. The
+optional `LODESTONE_JOIN_PROFILE_WORLD_DIR` environment variable points at a
+persistent world directory to reopen instead of creating a throwaway in-memory
+world. The server may update that directory while running, so use a disposable
+copy when profiling an existing save. The
 wrapper accepts the same workload as `--seed`, `--radius`, and
 `--deadline-seconds`, plus `--output-dir`, `--run-id`, and `--dry-run`.
 The hardware wrapper takes `integrated` or `client` first and accepts those
 options plus `--template`. It keeps wall-time phase markers because the CPU
 counter table is process-level; a phase duration must not be presented as a
 phase CPU-counter total.
+
+Set `LODESTONE_JOIN_TRACE=1` and `LODESTONE_WORLDGEN_LEDGER_TRACE=1` to capture
+sampled join-stage events and failure-only retained-state comparisons. In this
+mode `join_profile` installs a stderr tracing subscriber, defaulting to
+warnings plus the join trace; `RUST_LOG` can override that filter.
 
 ## Dependencies
 
