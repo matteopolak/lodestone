@@ -122,6 +122,12 @@ static REGION_INSTRUCTIONS: [AtomicU64; REGION_PHASE_COUNT] =
 static REGION_CYCLES: [AtomicU64; REGION_PHASE_COUNT] =
     [const { AtomicU64::new(0) }; REGION_PHASE_COUNT];
 #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
+static REGION_EXCLUSIVE_INSTRUCTIONS: [AtomicU64; REGION_PHASE_COUNT] =
+    [const { AtomicU64::new(0) }; REGION_PHASE_COUNT];
+#[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
+static REGION_EXCLUSIVE_CYCLES: [AtomicU64; REGION_PHASE_COUNT] =
+    [const { AtomicU64::new(0) }; REGION_PHASE_COUNT];
+#[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
 static STAGE_REGION_INSTRUCTIONS: [AtomicU64; STAGE_COUNT * REGION_BUCKET_COUNT] =
     [const { AtomicU64::new(0) }; STAGE_COUNT * REGION_BUCKET_COUNT];
 #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
@@ -131,9 +137,19 @@ static STAGE_REGION_CYCLES: [AtomicU64; STAGE_COUNT * REGION_BUCKET_COUNT] =
 static PMU_READ_COST: OnceLock<(u64, u64)> = OnceLock::new();
 
 #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
+#[derive(Clone, Copy)]
+struct RegionFrame {
+    phase: RegionPhase,
+    instructions: u64,
+    cycles: u64,
+    child_instructions: u64,
+    child_cycles: u64,
+}
+
+#[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
 thread_local! {
     static STAGE_START: Cell<Option<(Stage, u64, u64, usize)>> = const { Cell::new(None) };
-    static REGION_START: Cell<([Option<(RegionPhase, u64, u64)>; 16], usize)> =
+    static REGION_START: Cell<([Option<RegionFrame>; 16], usize)> =
         const { Cell::new(([None; 16], 0)) };
 }
 
@@ -146,7 +162,7 @@ fn active_region_index() -> usize {
         } else {
             stack[depth - 1]
                 .expect("active region frame is present")
-                .0 as usize
+                .phase as usize
         }
     })
 }
@@ -195,12 +211,18 @@ fn region_pmu_observer(phase: RegionPhase, event: StageEvent) {
             REGION_START.with(|state| {
                 let (mut stack, depth) = state.get();
                 assert!(depth < stack.len(), "region PMU nesting exceeded its bound");
-                stack[depth] = Some((phase, instructions, cycles));
+                stack[depth] = Some(RegionFrame {
+                    phase,
+                    instructions,
+                    cycles,
+                    child_instructions: 0,
+                    child_cycles: 0,
+                });
                 state.set((stack, depth + 1));
             });
         }
         StageEvent::Exit => {
-            let (started_phase, before_instructions, before_cycles) = REGION_START.with(|state| {
+            let frame = REGION_START.with(|state| {
                 let (mut stack, depth) = state.get();
                 assert!(depth > 0, "region PMU exit without an enter");
                 let frame = stack[depth - 1]
@@ -209,25 +231,36 @@ fn region_pmu_observer(phase: RegionPhase, event: StageEvent) {
                 state.set((stack, depth - 1));
                 frame
             });
-            assert_eq!(started_phase, phase, "region PMU scope changed phases");
+            assert_eq!(frame.phase, phase, "region PMU scope changed phases");
             let (after_instructions, after_cycles) =
                 retired().expect("region PMU requires retired counters");
             let (read_instructions, read_cycles) = *PMU_READ_COST
                 .get()
                 .expect("region PMU read cost must be initialized");
+            let instructions = after_instructions
+                .saturating_sub(frame.instructions)
+                .saturating_sub(read_instructions);
+            let cycles = after_cycles
+                .saturating_sub(frame.cycles)
+                .saturating_sub(read_cycles);
             let index = phase as usize;
-            REGION_INSTRUCTIONS[index].fetch_add(
-                after_instructions
-                    .saturating_sub(before_instructions)
-                    .saturating_sub(read_instructions),
-                Relaxed,
-            );
-            REGION_CYCLES[index].fetch_add(
-                after_cycles
-                    .saturating_sub(before_cycles)
-                    .saturating_sub(read_cycles),
-                Relaxed,
-            );
+            REGION_INSTRUCTIONS[index].fetch_add(instructions, Relaxed);
+            REGION_CYCLES[index].fetch_add(cycles, Relaxed);
+            REGION_EXCLUSIVE_INSTRUCTIONS[index]
+                .fetch_add(instructions.saturating_sub(frame.child_instructions), Relaxed);
+            REGION_EXCLUSIVE_CYCLES[index]
+                .fetch_add(cycles.saturating_sub(frame.child_cycles), Relaxed);
+            REGION_START.with(|state| {
+                let (mut stack, depth) = state.get();
+                if depth > 0 {
+                    let parent = stack[depth - 1]
+                        .as_mut()
+                        .expect("parent region PMU frame is present");
+                    parent.child_instructions += instructions;
+                    parent.child_cycles += cycles;
+                    state.set((stack, depth));
+                }
+            });
         }
     }
 }
@@ -334,6 +367,50 @@ fn report_stage_pmu(total: &Measurement<impl Sized>, columns: usize, phase: &str
     for (index, name) in region_names.iter().take(REGION_PHASE_COUNT).enumerate() {
         report(name, REGION_INSTRUCTIONS[index].load(Relaxed), REGION_CYCLES[index].load(Relaxed));
     }
+    let mut exclusive_instructions = 0;
+    let mut exclusive_cycles = 0;
+    for (index, name) in region_names.iter().take(REGION_PHASE_COUNT).enumerate() {
+        let instructions = REGION_EXCLUSIVE_INSTRUCTIONS[index].load(Relaxed);
+        let cycles = REGION_EXCLUSIVE_CYCLES[index].load(Relaxed);
+        let stage_instructions = (0..STAGE_COUNT)
+            .map(|stage| STAGE_REGION_INSTRUCTIONS[stage * REGION_BUCKET_COUNT + index].load(Relaxed))
+            .sum::<u64>();
+        let stage_cycles = (0..STAGE_COUNT)
+            .map(|stage| STAGE_REGION_CYCLES[stage * REGION_BUCKET_COUNT + index].load(Relaxed))
+            .sum::<u64>();
+        exclusive_instructions += instructions;
+        exclusive_cycles += cycles;
+        println!(
+            "STRICT_WORLDGEN metric=region_exclusive_pmu phase={phase} region={name} columns={columns} instructions={instructions} instructions_per_column={:.0} cycles={cycles} cycles_per_column={:.0} nonstage_instructions={} nonstage_cycles={} stage_overhang_instructions={} stage_overhang_cycles={}",
+            instructions as f64 / per_column,
+            cycles as f64 / per_column,
+            instructions.saturating_sub(stage_instructions),
+            cycles.saturating_sub(stage_cycles),
+            stage_instructions.saturating_sub(instructions),
+            stage_cycles.saturating_sub(cycles),
+        );
+    }
+    let outside_instructions = total
+        .counters
+        .map_or(0, |(value, _)| value.saturating_sub(exclusive_instructions));
+    let outside_cycles = total
+        .counters
+        .map_or(0, |(_, value)| value.saturating_sub(exclusive_cycles));
+    println!(
+        "STRICT_WORLDGEN metric=region_exclusive_pmu phase={phase} region=outside_region columns={columns} instructions={outside_instructions} instructions_per_column={:.0} cycles={outside_cycles} cycles_per_column={:.0} nonstage_instructions={} nonstage_cycles={}",
+        outside_instructions as f64 / per_column,
+        outside_cycles as f64 / per_column,
+        outside_instructions.saturating_sub(
+            (0..STAGE_COUNT)
+                .map(|stage| STAGE_REGION_INSTRUCTIONS[stage * REGION_BUCKET_COUNT + REGION_PHASE_COUNT].load(Relaxed))
+                .sum::<u64>()
+        ),
+        outside_cycles.saturating_sub(
+            (0..STAGE_COUNT)
+                .map(|stage| STAGE_REGION_CYCLES[stage * REGION_BUCKET_COUNT + REGION_PHASE_COUNT].load(Relaxed))
+                .sum::<u64>()
+        ),
+    );
     for stage in [
         Stage::Aquifer, Stage::Shape, Stage::Biome, Stage::Surface,
         Stage::Materialize, Stage::Carve, Stage::Structure, Stage::Ore,
