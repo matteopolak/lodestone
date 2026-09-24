@@ -40,6 +40,7 @@ fn pressing_play_reaches_a_running_integrated_server() {
     let net = match launch_singleplayer(
         protocol,
         0,
+        false,
         None,
         seed,
         crate::menu::create_world::WorldTypePreset::Normal,

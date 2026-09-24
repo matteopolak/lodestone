@@ -510,6 +510,10 @@ impl Sim {
         self.new_world_loading
     }
 
+    pub(crate) fn finish_new_world_loading(&mut self) {
+        self.new_world_loading = false;
+    }
+
     /// Whether dimension travel currently needs an opaque destination cover.
     /// This is intentionally a separate presentation state from the initial
     /// world-generation screen.

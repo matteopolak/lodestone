@@ -91,6 +91,7 @@ fn open_session(seed: i64, view_radius: i32, world_dir: Option<PathBuf>) -> Opti
         seed,
         lodestone::menu::create_world::WorldTypePreset::Normal,
         view_radius,
+        false,
         None,
         world_dir,
     ))

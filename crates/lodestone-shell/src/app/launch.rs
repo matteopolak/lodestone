@@ -83,6 +83,7 @@ impl std::fmt::Display for LaunchError {
 pub(crate) fn launch_singleplayer(
     protocol: i32,
     view_radius: i32,
+    defer_initial_player_loaded: bool,
     session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
     seed: i64,
     world_type: crate::menu::create_world::WorldTypePreset,
@@ -96,6 +97,7 @@ pub(crate) fn launch_singleplayer(
         seed,
         world_type,
         view_radius,
+        defer_initial_player_loaded,
         session,
         #[cfg(not(target_arch = "wasm32"))]
         world_dir,
@@ -120,6 +122,7 @@ pub(crate) fn launch_singleplayer(
 pub(crate) fn launch_open_to_lan_online(
     protocol: i32,
     view_radius: i32,
+    defer_initial_player_loaded: bool,
     session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
     seed: i64,
     world_type: crate::menu::create_world::WorldTypePreset,
@@ -133,6 +136,7 @@ pub(crate) fn launch_open_to_lan_online(
         seed,
         world_type,
         view_radius,
+        defer_initial_player_loaded,
         session,
         world_dir,
         0,

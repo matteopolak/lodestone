@@ -118,7 +118,7 @@ use std::time::Duration;
 
 pub(super) use lodestone_client::{
     BlockPos, ChunkPos, ChunkSection, ClientAction, ClientBuilder, ClientEvent, ClientHandle,
-    EntityView, LoginProfile, OpenMenuSnapshot, PlayerListEntry, RespawnPolicy,
+    EntityView, LoginProfile, OpenMenuSnapshot, PlayerListEntry, PlayerLoadedPolicy, RespawnPolicy,
     Rotation, SectionLight, ServerAddress, Vec3, WorldDimensions,
 };
 #[cfg(not(target_arch = "wasm32"))]
@@ -809,6 +809,7 @@ enum Origin {
         world_type: crate::menu::create_world::WorldTypePreset,
         /// Chunk radius the server streams around the player.
         view_radius: i32,
+        defer_initial_player_loaded: bool,
         /// Where to save this world, or `None` for a throwaway in-memory one.
         ///
         /// `Some` is what makes singleplayer persist — it selects
@@ -1215,6 +1216,7 @@ impl NetClient {
         seed: i64,
         world_type: crate::menu::create_world::WorldTypePreset,
         view_radius: i32,
+        defer_initial_player_loaded: bool,
         session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
         #[cfg(not(target_arch = "wasm32"))] world_dir: Option<std::path::PathBuf>,
     ) -> Self {
@@ -1224,6 +1226,7 @@ impl NetClient {
                 seed,
                 world_type,
                 view_radius,
+                defer_initial_player_loaded,
                 #[cfg(not(target_arch = "wasm32"))]
                 world_dir,
                 #[cfg(not(target_arch = "wasm32"))]
@@ -1268,6 +1271,7 @@ impl NetClient {
         seed: i64,
         world_type: crate::menu::create_world::WorldTypePreset,
         view_radius: i32,
+        defer_initial_player_loaded: bool,
         session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
         world_dir: Option<std::path::PathBuf>,
         port: u16,
@@ -1279,6 +1283,7 @@ impl NetClient {
                 seed,
                 world_type,
                 view_radius,
+                defer_initial_player_loaded,
                 world_dir,
                 lan_port: Some(port),
                 online_mode,
@@ -1504,6 +1509,14 @@ impl NetClient {
                 tracing::warn!(target: "net", action = ?kind, "outbound action dropped: relay is closed");
             }
         }
+    }
+
+    #[must_use]
+    pub fn try_send_player_loaded(&self) -> bool {
+        matches!(
+            self.action_tx.send(ClientAction::PlayerLoaded),
+            ActionAdmission::Accepted
+        )
     }
 
     /// Release the driver's deferred correction response after this frame has
@@ -2282,6 +2295,13 @@ async fn run_async(
         // that transport distinction after `origin` is consumed by the setup
         // match below.
         let integrated_session = matches!(&origin, Origin::Integrated { .. });
+        let defer_initial_player_loaded = matches!(
+            &origin,
+            Origin::Integrated {
+                defer_initial_player_loaded: true,
+                ..
+            }
+        );
         let Some(adapter) = lodestone_registry::adapter_for_protocol(protocol) else {
             let _ = tx.try_send(NetUpdate::Error(format!(
                 "no version family compiled in for protocol {protocol}; build with the `live` feature"
@@ -2324,6 +2344,7 @@ async fn run_async(
                 seed,
                 world_type,
                 view_radius,
+                defer_initial_player_loaded: _,
                 #[cfg(not(target_arch = "wasm32"))]
                 world_dir,
                 #[cfg(not(target_arch = "wasm32"))]
@@ -2904,6 +2925,11 @@ async fn run_async(
         let mut builder = ClientBuilder::new(server, profile, adapter)
             .connect_timeout(Some(Duration::from_secs(10)))
             .read_timeout((!integrated_session).then_some(READ_TIMEOUT))
+            .player_loaded_policy(if defer_initial_player_loaded {
+                PlayerLoadedPolicy::DeferredInitial
+            } else {
+                PlayerLoadedPolicy::Automatic
+            })
             .respawn_policy(RespawnPolicy::Manual);
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(explicit_port) = remote_explicit_port {
@@ -3397,6 +3423,7 @@ async fn run_async(
                     )
                     .is_err()
                     {
+                        tracing::warn!(target: "net", "event forwarding ended the network session");
                         break;
                     }
                 }
@@ -4854,7 +4881,17 @@ fn forward(
             return Ok(());
         }
     };
-    tx.try_send(update).map_err(|_| ())
+    match tx.try_send(update) {
+        Ok(()) => Ok(()),
+        Err(mpsc::TrySendError::Full(update)) => {
+            tracing::error!(target: "net", capacity = NET_RELAY_CAPACITY, update = ?std::mem::discriminant(&update), "inbound relay full; ending network session");
+            Err(())
+        }
+        Err(mpsc::TrySendError::Disconnected(_)) => {
+            tracing::info!(target: "net", "inbound relay receiver closed");
+            Err(())
+        }
+    }
 }
 
 // `entity_snapshot` (the `EntityView` -> `EntitySnapshot` lowering) and

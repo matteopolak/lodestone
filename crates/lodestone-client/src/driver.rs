@@ -88,6 +88,7 @@ pub(crate) struct Driver<T: Transport> {
     /// the wire when the adapter encodes a `player_loaded` packet (older versions
     /// encode `None`).
     awaiting_player_load: bool,
+    defer_initial_player_load: bool,
     /// A protocol acknowledgement held until the simulation has adopted the
     /// matching authoritative player correction.
     pending_correction: Option<CorrectionTransaction>,
@@ -403,6 +404,7 @@ impl<T: Transport> Driver<T> {
             // this reset to take effect — see `docs/secure-chat.md`.
             chat_tracker: LastSeenTracker::vanilla(),
             awaiting_player_load: false,
+            defer_initial_player_load: player_loaded == PlayerLoadedPolicy::DeferredInitial,
             pending_correction: None,
             pending_initial_correction: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1430,7 +1432,9 @@ impl<T: Transport> Driver<T> {
                 }
             }
             ClientEvent::TeleportPlayer { pos, .. } if self.awaiting_player_load => {
-                let sending_player_loaded = self.player_loaded.is_automatic();
+                let sending_player_loaded = self.player_loaded.is_automatic()
+                    || (self.player_loaded == PlayerLoadedPolicy::DeferredInitial
+                        && !self.defer_initial_player_load);
                 tracing::debug!(
                     target: "net",
                     pos_x = pos.x,
@@ -1447,6 +1451,7 @@ impl<T: Transport> Driver<T> {
                 // later teleport in the same epoch finds the latch disarmed and
                 // falls through untouched.
                 self.awaiting_player_load = false;
+                self.defer_initial_player_load = false;
                 if sending_player_loaded {
                     auto_actions.push(ClientAction::PlayerLoaded);
                 }
