@@ -1,0 +1,353 @@
+syntax = "proto3";
+
+package lodestone.storage.v1;
+
+// The outer record version changes only for incompatible storage-record
+// semantics. New optional fields within this version retain their field number.
+message StorageRecord {
+  uint32 format_version = 1;
+
+  oneof record {
+    ChunkRecord chunk = 10;
+    GeneralRecord general = 11;
+  }
+}
+
+// A column is independently replaceable. Palette entries are canonical numeric
+// block-state IDs, and block_state_indices is the packed bit stream selected by
+// palette_bits; neither representation carries registry strings.
+message ChunkRecord {
+  sint32 column_x = 1;
+  sint32 column_z = 2;
+  uint32 game_data_version = 3;
+  repeated ChunkSection sections = 4;
+  // The complete 4x4x4 biome container for each 16-row block section. Built-in
+  // biome values are enum discriminants, never resource-location strings.
+  repeated BiomeSection biome_sections = 5;
+  // The 4x4 surface-biome answer used by surface-facing consumers. It is kept
+  // separately because it is not always the top row of the 3-D container.
+  repeated BuiltinBiome surface_biome_ids = 6 [packed = true];
+  // The optional 16x16 MOTION_BLOCKING heightmap in stored `top_y + 1` form,
+  // indexed by `local_x + local_z * 16`. An absent map means the source had no
+  // retained answer; a present map must have exactly 256 unsigned 16-bit values.
+  repeated uint32 motion_blocking_heights = 7 [packed = true];
+  // Complete named-NBT roots for the resident block entities. Position and type
+  // stay inside the NBT tree so opaque entries retain every field this build
+  // does not simulate; readers must reject malformed roots or roots outside
+  // this column rather than silently dropping them.
+  repeated bytes block_entity_nbt = 8;
+  // Block and fluid queues stay distinct because they have different drain
+  // phases. The absolute trigger, priority and insertion order reconstruct
+  // the scheduler's complete ordering key.
+  repeated ScheduledTick block_scheduled_ticks = 9;
+  repeated ExtensionValue extensions = 10;
+  repeated ScheduledTick fluid_scheduled_ticks = 11;
+  // The complete canonical light column, including one section below and one
+  // section above the block range. An absent repeated field means this record
+  // predates native light persistence; when present it must contain the full
+  // contiguous light-section range for the requested dimension.
+  repeated LightSection light_sections = 12;
+}
+
+// Sky and block light for one canonical light-section coordinate. The section
+// coordinate is independent of ChunkSection: light section zero sits below
+// the world's lowest block section.
+message LightSection {
+  sint32 section_y = 1;
+  LightData sky_light = 2;
+  LightData block_light = 3;
+}
+
+// A light layer uses no `data` member for Missing, a compact uniform value for
+// common all-zero/full sections, or exactly 2048 packed nibbles for Values.
+// The adapter validates the 0..15 uniform range and exact array length.
+message LightData {
+  oneof data {
+    uint32 uniform = 1;
+    bytes values = 2;
+  }
+}
+
+// Built-in actions use the compact enum. An extension action leaves kind at
+// UNSPECIFIED and carries its exact producer-owned discriminator in
+// extension_kind, so a reader can preserve an action it does not execute yet.
+message ScheduledTick {
+  sint32 x = 1;
+  sint32 y = 2;
+  sint32 z = 3;
+  ScheduledTickKind kind = 4;
+  uint64 trigger_tick = 5;
+  ScheduledTickPriority priority = 6;
+  uint64 insertion_order = 7;
+  string extension_kind = 8;
+}
+
+enum ScheduledTickKind {
+  SCHEDULED_TICK_KIND_UNSPECIFIED = 0;
+  SCHEDULED_TICK_KIND_FLUID = 1;
+  SCHEDULED_TICK_KIND_TORCH = 2;
+  SCHEDULED_TICK_KIND_REPEATER = 3;
+  SCHEDULED_TICK_KIND_COMPARATOR = 4;
+  SCHEDULED_TICK_KIND_OBSERVER = 5;
+  SCHEDULED_TICK_KIND_TARGET_DECAY = 6;
+  SCHEDULED_TICK_KIND_TRIPWIRE_RECHECK = 7;
+  SCHEDULED_TICK_KIND_PISTON = 8;
+  SCHEDULED_TICK_KIND_GRAVITY = 9;
+  SCHEDULED_TICK_KIND_FIRE = 10;
+  SCHEDULED_TICK_KIND_TNT_PRIME = 11;
+  SCHEDULED_TICK_KIND_COMMAND_BLOCK = 12;
+  SCHEDULED_TICK_KIND_BUTTON_RELEASE = 13;
+  SCHEDULED_TICK_KIND_DISPENSER_FIRE = 14;
+}
+
+enum ScheduledTickPriority {
+  SCHEDULED_TICK_PRIORITY_NORMAL = 0;
+  SCHEDULED_TICK_PRIORITY_EXTREMELY_HIGH = 1;
+  SCHEDULED_TICK_PRIORITY_VERY_HIGH = 2;
+  SCHEDULED_TICK_PRIORITY_HIGH = 3;
+  SCHEDULED_TICK_PRIORITY_LOW = 4;
+  SCHEDULED_TICK_PRIORITY_VERY_LOW = 5;
+  SCHEDULED_TICK_PRIORITY_EXTREMELY_LOW = 6;
+}
+
+message ChunkSection {
+  sint32 section_y = 1;
+  uint32 palette_bits = 2;
+  repeated uint32 palette_state_ids = 3 [packed = true];
+  bytes block_state_indices = 4;
+  bytes sky_light = 5;
+  bytes block_light = 6;
+}
+
+// One 16-row block section's 4x4x4 biome cells in `(qy * 4 + qz) * 4 + qx`
+// order. `quart_rows` is four for a full section and narrows only the final
+// partial section of a dimension.
+message BiomeSection {
+  sint32 section_y = 1;
+  uint32 quart_rows = 2;
+  repeated BuiltinBiome biome_ids = 3 [packed = true];
+}
+
+// Stable built-in biome discriminants for this game-data version. Extension
+// biomes require an explicit future extension-table representation rather than
+// being silently coerced into a built-in value.
+enum BuiltinBiome {
+  BUILTIN_BIOME_UNSPECIFIED = 0;
+  BUILTIN_BIOME_BADLANDS = 1;
+  BUILTIN_BIOME_BAMBOO_JUNGLE = 2;
+  BUILTIN_BIOME_BASALT_DELTAS = 3;
+  BUILTIN_BIOME_BEACH = 4;
+  BUILTIN_BIOME_BIRCH_FOREST = 5;
+  BUILTIN_BIOME_CHERRY_GROVE = 6;
+  BUILTIN_BIOME_COLD_OCEAN = 7;
+  BUILTIN_BIOME_CRIMSON_FOREST = 8;
+  BUILTIN_BIOME_DARK_FOREST = 9;
+  BUILTIN_BIOME_DEEP_COLD_OCEAN = 10;
+  BUILTIN_BIOME_DEEP_DARK = 11;
+  BUILTIN_BIOME_DEEP_FROZEN_OCEAN = 12;
+  BUILTIN_BIOME_DEEP_LUKEWARM_OCEAN = 13;
+  BUILTIN_BIOME_DEEP_OCEAN = 14;
+  BUILTIN_BIOME_DESERT = 15;
+  BUILTIN_BIOME_DRIPSTONE_CAVES = 16;
+  BUILTIN_BIOME_END_BARRENS = 17;
+  BUILTIN_BIOME_END_HIGHLANDS = 18;
+  BUILTIN_BIOME_END_MIDLANDS = 19;
+  BUILTIN_BIOME_ERODED_BADLANDS = 20;
+  BUILTIN_BIOME_FLOWER_FOREST = 21;
+  BUILTIN_BIOME_FOREST = 22;
+  BUILTIN_BIOME_FROZEN_OCEAN = 23;
+  BUILTIN_BIOME_FROZEN_PEAKS = 24;
+  BUILTIN_BIOME_FROZEN_RIVER = 25;
+  BUILTIN_BIOME_GROVE = 26;
+  BUILTIN_BIOME_ICE_SPIKES = 27;
+  BUILTIN_BIOME_JAGGED_PEAKS = 28;
+  BUILTIN_BIOME_JUNGLE = 29;
+  BUILTIN_BIOME_LUKEWARM_OCEAN = 30;
+  BUILTIN_BIOME_LUSH_CAVES = 31;
+  BUILTIN_BIOME_MANGROVE_SWAMP = 32;
+  BUILTIN_BIOME_MEADOW = 33;
+  BUILTIN_BIOME_MUSHROOM_FIELDS = 34;
+  BUILTIN_BIOME_NETHER_WASTES = 35;
+  BUILTIN_BIOME_OCEAN = 36;
+  BUILTIN_BIOME_OLD_GROWTH_BIRCH_FOREST = 37;
+  BUILTIN_BIOME_OLD_GROWTH_PINE_TAIGA = 38;
+  BUILTIN_BIOME_OLD_GROWTH_SPRUCE_TAIGA = 39;
+  BUILTIN_BIOME_PALE_GARDEN = 40;
+  BUILTIN_BIOME_PLAINS = 41;
+  BUILTIN_BIOME_RIVER = 42;
+  BUILTIN_BIOME_SAVANNA = 43;
+  BUILTIN_BIOME_SAVANNA_PLATEAU = 44;
+  BUILTIN_BIOME_SMALL_END_ISLANDS = 45;
+  BUILTIN_BIOME_SNOWY_BEACH = 46;
+  BUILTIN_BIOME_SNOWY_PLAINS = 47;
+  BUILTIN_BIOME_SNOWY_SLOPES = 48;
+  BUILTIN_BIOME_SNOWY_TAIGA = 49;
+  BUILTIN_BIOME_SOUL_SAND_VALLEY = 50;
+  BUILTIN_BIOME_SPARSE_JUNGLE = 51;
+  BUILTIN_BIOME_STONY_PEAKS = 52;
+  BUILTIN_BIOME_STONY_SHORE = 53;
+  BUILTIN_BIOME_SULFUR_CAVES = 54;
+  BUILTIN_BIOME_SUNFLOWER_PLAINS = 55;
+  BUILTIN_BIOME_SWAMP = 56;
+  BUILTIN_BIOME_TAIGA = 57;
+  BUILTIN_BIOME_THE_END = 58;
+  BUILTIN_BIOME_THE_VOID = 59;
+  BUILTIN_BIOME_WARM_OCEAN = 60;
+  BUILTIN_BIOME_WARPED_FOREST = 61;
+  BUILTIN_BIOME_WINDSWEPT_FOREST = 62;
+  BUILTIN_BIOME_WINDSWEPT_GRAVELLY_HILLS = 63;
+  BUILTIN_BIOME_WINDSWEPT_HILLS = 64;
+  BUILTIN_BIOME_WINDSWEPT_SAVANNA = 65;
+  BUILTIN_BIOME_WOODED_BADLANDS = 66;
+}
+
+// General state is typed rather than a string-keyed property map. Future
+// built-in records are added as new GeneralRecord oneof members.
+message GeneralRecord {
+  oneof record {
+    WorldProperties world_properties = 1;
+    PlayerRecord player = 2;
+    EntityRecord entity = 3;
+    EntityRoster entity_roster = 4;
+  }
+  repeated ExtensionValue extensions = 10;
+}
+
+message WorldProperties {
+  uint32 game_data_version = 1;
+  sint64 seed = 2;
+  BuiltinDimension spawn_dimension = 3;
+  sint32 spawn_x = 4;
+  sint32 spawn_y = 5;
+  sint32 spawn_z = 6;
+  uint64 day_time = 7;
+  GameMode default_game_mode = 8;
+}
+
+message PlayerRecord {
+  bytes player_uuid = 1;
+  BuiltinDimension dimension = 2;
+  sint32 x_fixed = 3;
+  sint32 y_fixed = 4;
+  sint32 z_fixed = 5;
+  sint32 yaw_millidegrees = 6;
+  sint32 pitch_millidegrees = 7;
+  // Unspecified preserves compatibility with locator-only records written
+  // before this independently consumable full-player field was introduced.
+  GameMode game_mode = 8;
+  // Absent for locator-only and early native records. This group contains the
+  // Complete scalar player state currently consumed by the live server loop.
+  PlayerRuntimeState runtime_state = 9;
+  // Sparse durable inventory state; session-only menu and crafting state stays
+  // outside the world format.
+  PlayerInventory inventory = 10;
+}
+
+message PlayerRuntimeState {
+  float health = 1;
+  sint32 air_supply = 2;
+  sint32 experience_level = 3;
+  float experience_progress = 4;
+  sint32 experience_total = 5;
+}
+
+message PlayerInventory {
+  uint32 selected_hotbar_slot = 1;
+  repeated PlayerInventorySlot occupied_slots = 2;
+}
+
+message PlayerInventorySlot {
+  uint32 slot = 1;
+  // Canonical resource key remains textual because plugin/datapack items do
+  // not have durable built-in ordinals.
+  string item_key = 2;
+  uint32 count = 3;
+  // The modeled custom-data component is intentionally opaque NBT; plugins
+  // own its schema and the normal extension registry cannot type it globally.
+  bytes custom_data = 4;
+}
+
+message EntityRecord {
+  // Retained only to keep the original unconsumed vocabulary wire-compatible.
+  // The native adapter never reads or writes these registry-local fields.
+  uint64 entity_id = 1 [deprecated = true];
+  uint32 entity_type_id = 2 [deprecated = true];
+  BuiltinDimension dimension = 3;
+  sint32 x_fixed = 4 [deprecated = true];
+  sint32 y_fixed = 5 [deprecated = true];
+  sint32 z_fixed = 6 [deprecated = true];
+  // A complete UUID is the durable identity. The native adapter uses these
+  // fields instead of the legacy runtime ID and registry ordinal above.
+  bytes entity_uuid = 7;
+  // Canonical resource key, retained as text because entity-type numeric IDs
+  // are registry-local rather than durable storage identities.
+  string entity_type = 8;
+  // Feet position and look direction retain their live IEEE values exactly.
+  // The native adapter rejects non-finite values and verifies the resident
+  // column and vertical extent before saving or returning a record.
+  double x = 9;
+  double y = 10;
+  double z = 11;
+  float yaw = 12;
+  float pitch = 13;
+  double motion_x = 14;
+  double motion_y = 15;
+  double motion_z = 16;
+  oneof durable_state {
+    LivingEntityState living = 17;
+    ItemEntityState item = 18;
+  }
+}
+
+message LivingEntityState {
+  float health = 1;
+}
+
+message ItemEntityState {
+  string item_key = 1;
+  uint32 count = 2;
+  sint32 age = 3;
+  sint32 pickup_delay = 4;
+}
+
+// The roster is the atomic liveness boundary for a dimension. Entity records
+// omitted from the latest roster are stale and never restored.
+message EntityRoster {
+  BuiltinDimension dimension = 1;
+  repeated bytes entity_uuids = 2;
+}
+
+enum BuiltinDimension {
+  BUILTIN_DIMENSION_UNSPECIFIED = 0;
+  BUILTIN_DIMENSION_OVERWORLD = 1;
+  BUILTIN_DIMENSION_NETHER = 2;
+  BUILTIN_DIMENSION_END = 3;
+}
+
+enum GameMode {
+  GAME_MODE_UNSPECIFIED = 0;
+  GAME_MODE_SURVIVAL = 1;
+  GAME_MODE_CREATIVE = 2;
+  GAME_MODE_ADVENTURE = 3;
+  GAME_MODE_SPECTATOR = 4;
+}
+
+// Extension registrations are the one place the format carries names. Core
+// records retain only local_id, so an extension payload never repeats its
+// namespace or schema label.
+message ExtensionTable {
+  uint32 table_version = 1;
+  repeated RegisteredExtension extensions = 2;
+}
+
+message RegisteredExtension {
+  uint32 local_id = 1;
+  string namespace = 2;
+  string name = 3;
+  uint32 schema_version = 4;
+}
+
+message ExtensionValue {
+  uint32 local_id = 1;
+  bytes payload = 2;
+}

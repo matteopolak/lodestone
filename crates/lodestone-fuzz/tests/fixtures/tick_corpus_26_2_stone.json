@@ -1,0 +1,33 @@
+{
+  "format_version": 1,
+  "scenario": "live-stone-placement-single-tick",
+  "provenance": {
+    "source": "real-java-rcon",
+    "minecraft_version": "26.2",
+    "capture_command": "scripts/live-oracles/capture-differential-ticks.py --spec scripts/live-oracles/tick-corpus-example.json --out /private/tmp/lodestone-batch-549/tick-corpus.json --endpoint 127.0.0.1:25571 --password <redacted>"
+  },
+  "settle_ticks": 0,
+  "region": [
+    {
+      "pos": [20000, 200, 20000],
+      "candidates": ["minecraft:stone"]
+    }
+  ],
+  "steps": [
+    {
+      "tick": 0,
+      "action": {
+        "kind": "set_block",
+        "pos": [20000, 200, 20000],
+        "state": "minecraft:stone"
+      }
+    }
+  ],
+  "observations": [
+    {
+      "tick": 0,
+      "game_time": 10901877,
+      "states": ["minecraft:stone"]
+    }
+  ]
+}

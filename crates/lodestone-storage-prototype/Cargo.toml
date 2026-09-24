@@ -1,0 +1,24 @@
+[package]
+name = "lodestone-storage-prototype"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+autobenches = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# The comparison target. It is intentionally confined to this prototype crate:
+# no save/load consumer depends on it, and this manifest does not decide a
+# production backend.
+redb = "3.1"
+
+[dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+tempfile.workspace = true
+
+[[bench]]
+name = "incremental"
+harness = false

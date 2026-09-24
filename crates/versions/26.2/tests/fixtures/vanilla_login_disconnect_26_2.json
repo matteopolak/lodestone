@@ -1,0 +1,15 @@
+{
+  "login_disconnect_packet_id": 0,
+  "reason_json_parsed": {
+    "translate": "multiplayer.disconnect.outdated_client",
+    "with": [
+      "26.2"
+    ]
+  },
+  "reason_json_raw": "{\"translate\":\"multiplayer.disconnect.outdated_client\",\"with\":[\"26.2\"]}",
+  "reason_top_level_keys": [
+    "translate",
+    "with"
+  ],
+  "trailing_bytes_after_reason_string": 0
+}

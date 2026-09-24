@@ -1,0 +1,1439 @@
+//! `TOP_LAYER_MODIFICATION` — vanilla's `freeze_top_layer` step: snow
+//! layers and surface ice.
+//!
+//! This is the **eleventh and last** decoration step (ordinal 10), and it
+//! is in **every** biome's step list — vanilla's own default per-biome
+//! feature registration adds it
+//! unconditionally from a shared tail, so
+//! the step self-gates on temperature rather than on biome membership. That is
+//! why its absence showed up everywhere cold at once: before this module,
+//! nothing in this engine ever wrote `minecraft:snow` or surface ice.
+//!
+//! ## What vanilla does, line by line
+//!
+//! Vanilla's own feature body walks the
+//! chunk's 16×16 columns, `dx` outer and `dz` inner, and per column:
+//!
+//! 1. The first **free** Y
+//!    above the column's top motion-blocking-or-fluid block. See
+//!    [`motion_blocking_first_free`] for the two cancelling `±1`s behind that.
+//! 2. `topPos = (x, y, z)`, `belowPos` = the position directly below `topPos`.
+//! 3. The biome at `topPos`.
+//! 4. **Ice**: if the biome's freeze predicate says yes at `belowPos` (with
+//!    neighbour checking off) → write ice at `belowPos`. Neighbour checking
+//!    off means the four-way adjacent-water test that predicate would
+//!    otherwise run never fires during world
+//!    generation — it is a *live-world* freeze concern only.
+//! 5. **Snow**: if the biome's snow predicate says yes at `topPos` → write
+//!    one snow layer at `topPos`,
+//!    then if the block at `belowPos` has the `snowy` property, set it `true`.
+//!
+//! Step 4 happens **before** step 5 and writes into the same column, which is
+//! load-bearing: on a frozen ocean the ice written at `belowPos` is what step 5
+//! then reads for its own survival check, and `minecraft:ice` is in
+//! `cannot_support_snow_layer`. So frozen oceans get bare ice, never
+//! snow-on-ice. Reordering the two produces a snow blanket over every frozen
+//! ocean, and no unit test of either predicate alone would notice.
+//!
+//! ## RNG: none, at all
+//!
+//! Vanilla's own feature source does not contain the string `random` — not as a
+//! field, a parameter, or an unused import. Its placed feature
+//! (`placed_feature/freeze_top_layer.json`) is `[{"type": "minecraft:biome"}]`
+//! and nothing else, and the biome placement filter never touches the
+//! RNG source it is handed. So this step consumes **zero draws**, and the
+//! `TrapezoidInt`-as-`Uniform` draw-count desync that broke vegetation parity
+//! (`crate::feature::IntProvider::Trapezoid`'s doc comment) has no analogue
+//! here. Adding it also cannot desynchronise any earlier step: vanilla reseeds
+//! per feature from the decoration seed, a global feature index and the
+//! step index, and this step's index is 10, past
+//! every step this engine composes.
+//!
+//! ## The temperature source, which is the whole trap
+//!
+//! Vanilla's own "warm enough to rain" check is a per-position temperature
+//! query against a `0.15` threshold, and that query is **height-adjusted**:
+//! above
+//! `seaLevel + 17` it subtracts a noise-perturbed lapse rate. Using the flat
+//! biome `temperature` field instead — which is exactly what this crate's
+//! pre-existing [`crate::biome::cold_enough_to_snow`] does for *surface rules* —
+//! is a plausible-looking error with a very visible signature:
+//!
+//! * `windswept_hills` has `temperature = 0.2`, comfortably above the `0.15`
+//!   threshold, so a flat reading says "never snows". The height-adjusted
+//!   reading crosses the threshold at roughly `y = 120`, which is why vanilla's
+//!   windswept hills have bare stone low down and a snow cap on top. A flat port
+//!   deletes the snow cap.
+//! * Conversely `snowy_plains` (`temperature = 0.0`) snows at every altitude
+//!   under either reading, so **a fixture in a snowy biome cannot tell the two
+//!   apart**. `tests/top_layer_parity.rs`'s `windswept_hills` fixture exists
+//!   specifically to discriminate them.
+//!
+//! [`crate::biome::cold_enough_to_snow`] is *not* wrong for its own caller
+//! (surface rules ask a different question at a different Y), and this module
+//! deliberately does not reuse it. See [`height_adjusted_temperature`].
+//!
+//! ## Approximations, named
+//!
+//! * **Block light is not modelled, and does not need to be.** Both predicates
+//!   gate on the block light at that position being below `10`.
+//!   At the `features` chunk status that value is
+//!   **always 0**: light initialization runs strictly after the `features`
+//!   status, and a section with no light data
+//!   returns `0` for any block-light query. So the gate is unconditionally
+//!   satisfied in vanilla too. This is agreement, not a shortcut — do not
+//!   "improve" it by supplying real light.
+//! * **Biome is per-quart-column, not per block.** Vanilla's own biome
+//!   lookup at `topPos` is a
+//!   3-D lookup; this engine's biome stage is 2-D (one sample per horizontal
+//!   quart, broadcast down the column — see `crate::biome`'s module doc and
+//!   census row 2 of `docs/plans/worldgen-parity.md`). Since `topPos` is at the
+//!   surface, which is the Y that stage already samples at, this is the closest
+//!   available answer rather than a new approximation, and it becomes exact when
+//!   a future change lands 3-D biomes.
+//! * **Vanilla's own per-position temperature memo** is a pure cache keyed
+//!   by position. Omitted: it
+//!   cannot change a value, only how often one is computed.
+//! * **Collision shapes are read with no neighbours.** Vanilla's own
+//!   survival check reads a
+//!   face-full answer that arrives pre-computed through [`SnowSupport`] from
+//!   `lodestone_data::snow_support`, whose dump calls the same
+//!   collision-shape query vanilla's own check does. See that module's
+//!   "Known scope".
+
+use std::collections::{HashMap, HashSet};
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey};
+use lodestone_data::block_states::{BlockStateValue, StateId, STATE_COUNT};
+use lodestone_worldgen_core::hash::{FastMap, FastSet};
+use serde_json::Value;
+
+use crate::dense_grid::DenseBlockGrid;
+use crate::feature::vegetation::VegGrid;
+use crate::noise::ClimateNoise;
+use crate::stage_schedule::DecorationStep;
+
+/// Vanilla's own decoration-step ordinal — the eleventh
+/// and last decoration step. One past `VEGETAL_DECORATION`
+/// ([`super::STEP_VEGETAL_DECORATION`], 9).
+pub const STEP_TOP_LAYER_MODIFICATION: i32 = DecorationStep::TopLayerModification.ordinal();
+
+/// The block state vanilla's own feature writes at `topPos`:
+/// one snow layer (vanilla's snow-layer block registers a single layer as
+/// its default state).
+pub const SNOW_LAYER: StateId = StateId::from_raw(6919);
+
+/// The block state written at `belowPos` when a column freezes: vanilla's
+/// default ice state. Ice has no properties.
+pub const ICE: StateId = StateId::from_raw(6927);
+
+/// Vanilla's own "warm enough to rain" threshold. A column snows when
+/// its height-adjusted temperature is **strictly below** this.
+pub const RAIN_TEMPERATURE_THRESHOLD: f32 = 0.15;
+
+/// Vanilla's own height-adjusted-temperature `snowLevel` offset above sea level.
+/// Below this Y the biome's declared temperature is used
+/// unmodified; above it the lapse rate applies.
+pub const SNOW_LEVEL_ABOVE_SEA: i32 = 17;
+
+/// Vanilla's own per-biome temperature modifier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TemperatureModifier {
+    /// `NONE` — returns the biome's declared temperature unchanged.
+    #[default]
+    None,
+    /// `FROZEN` — the ice-patch noise blend used by `frozen_ocean` and
+    /// `deep_frozen_ocean`, and by nothing else in 26.2 (verified across
+    /// `data/minecraft/worldgen/biome/*.json`). See
+    /// [`height_adjusted_temperature`] for the ported formula.
+    Frozen,
+}
+
+impl TemperatureModifier {
+    /// Parses a biome document's `temperature_modifier` field. Absent means
+    /// `NONE` (vanilla's own climate-settings codec defaults it to `NONE`
+    /// when the field is omitted).
+    ///
+    /// # Panics
+    /// Panics on an unrecognised value rather than silently falling back to
+    /// `NONE`: a new modifier in a future version changes where snow lands, and
+    /// a silent fallback would look like a subtle parity residual instead of a
+    /// missing port.
+    #[must_use]
+    pub fn parse(value: Option<&str>) -> Self {
+        match value.map(|v| v.strip_prefix("minecraft:").unwrap_or(v)) {
+            None | Some("none") => TemperatureModifier::None,
+            Some("frozen") => TemperatureModifier::Frozen,
+            Some(other) => panic!("unsupported temperature_modifier: {other}"),
+        }
+    }
+}
+
+/// One biome's own climate settings, minus `downfall`
+/// (which no generation step reads — it is a client visual and a grass-colour
+/// input).
+#[derive(Clone, Copy, Debug)]
+pub struct BiomeClimate {
+    /// `hasPrecipitation`. Gates **snow only**: vanilla's own snow predicate
+    /// goes through its own precipitation-at query, which returns `NONE`
+    /// without it, while vanilla's own freeze predicate does **not** consult it
+    /// at all. So a `has_precipitation: false` biome that
+    /// is nonetheless cold enough would still form ice — vanilla's behaviour,
+    /// preserved here even though no overworld biome reaches it (the coldest such
+    /// biome is `temperature = 0.5`, which needs `y > ~360` to cross the
+    /// threshold, above the overworld's `maxY` of 319).
+    pub has_precipitation: bool,
+    /// `temperature`, the declared field — **not** the value the predicates use.
+    /// See [`height_adjusted_temperature`].
+    pub temperature: f32,
+    /// `temperature_modifier`.
+    pub temperature_modifier: TemperatureModifier,
+}
+
+/// Freeze and snow predicates resolved from registry facts and block tags.
+/// Text is consumed at construction; generation reads typed state tables.
+#[derive(Clone, Debug, Default)]
+pub struct SnowSupport {
+    /// Vanilla's own motion-blocking predicate, from `lodestone_data::block_solidity`.
+    pub blocks_motion: StatePredicate,
+    /// Vanilla's own non-empty-fluid-state predicate.
+    pub has_fluid_state: StatePredicate,
+    /// `getFluidState().is(Fluids.WATER) && block instanceof LiquidBlock`.
+    pub water_source: StatePredicate,
+    /// Vanilla's own full-upward-face collision predicate.
+    pub face_full_up: StatePredicate,
+    /// Vanilla's own `snowy` block-state property presence check.
+    pub snowy_property: StatePredicate,
+    /// `BlockTags.CANNOT_SUPPORT_SNOW_LAYER`, by block resource id.
+    pub cannot_support_snow_layer: HashSet<String>,
+    /// `BlockTags.SUPPORT_OVERRIDE_SNOW_LAYER`, by block resource id.
+    pub support_override_snow_layer: HashSet<String>,
+    cannot_support_blocks: FastSet<Block>,
+    support_override_blocks: FastSet<Block>,
+}
+
+/// A per-block-state boolean, stored as "the answer for each block's default
+/// state" plus an override for every state that disagrees with its own default.
+///
+/// This is the compaction the resolver JSON uses: 26.2 has 32,366 states across
+/// 1,196 blocks, and for most blocks every state agrees, so a per-block answer
+/// plus a short override list is two orders of magnitude smaller than a
+/// per-state map — while staying **exact**, because the overrides are complete
+/// rather than a curated subset.
+/// A state predicate retains resolver text maps only at its input boundary and
+/// stores the complete answer table in canonical state-id order.
+#[derive(Debug)]
+pub struct StatePredicate {
+    /// Built-in defaults parsed once into the generated state's typed domain.
+    /// Each entry is a block's canonical default state; all of that block's
+    /// states inherit the answer unless an exact typed override exists.
+    builtin_defaults: FastSet<StateId>,
+    /// Exact built-in overrides parsed once from the resolver document.
+    builtin_states: FastMap<StateId, bool>,
+    answers: Box<[bool]>,
+}
+
+impl Clone for StatePredicate {
+    fn clone(&self) -> Self {
+        Self {
+            builtin_defaults: self.builtin_defaults.clone(),
+            builtin_states: self.builtin_states.clone(),
+            answers: self.answers.clone(),
+        }
+    }
+}
+
+impl Default for StatePredicate {
+    fn default() -> Self {
+        Self {
+            builtin_defaults: FastSet::default(),
+            builtin_states: FastMap::default(),
+            answers: vec![false; STATE_COUNT as usize].into_boxed_slice(),
+        }
+    }
+}
+
+impl StatePredicate {
+    /// Builds from the two halves. `overrides` must list **every** disagreeing
+    /// state; a partial list is silently wrong, which is why it is produced by a
+    /// full walk of the state registry rather than by hand.
+    ///
+    /// The signature keeps `std`'s containers deliberately: every caller
+    /// (including `lodestone-server`'s gates and [`SnowSupport::parse`] below)
+    /// builds them that way, and this runs **once per generator**, so the
+    /// re-hash into the internal [`FastSet`]/[`FastMap`] is paid at construction
+    /// and never again. Changing the signature would push a hasher choice across
+    /// a crate boundary for no gain.
+    #[must_use]
+    pub fn new(by_block_default: HashSet<String>, overrides: HashMap<String, bool>) -> Self {
+        let builtin_defaults = by_block_default
+            .iter()
+            .filter_map(|state| exact_builtin_state(state))
+            .map(|state| state.block().default_state())
+            .collect();
+        let builtin_states = overrides
+            .iter()
+            .filter_map(|(state, &answer)| {
+                exact_builtin_state(state).map(|state| (state, answer))
+            })
+            .collect();
+        let mut predicate = Self {
+            builtin_defaults,
+            builtin_states,
+            answers: vec![false; STATE_COUNT as usize].into_boxed_slice(),
+        };
+        for raw in 0..STATE_COUNT {
+            let state = StateId::new(raw as u32).expect("generated state id");
+            predicate.answers[state.index()] = predicate.builtin_answer(state);
+        }
+        predicate
+    }
+
+    /// Text lookup is retained only for unit tests at the config boundary.
+    #[cfg(test)]
+    #[must_use]
+    fn test(&self, state: &str) -> bool {
+        exact_builtin_state(state).is_some_and(|state| self.builtin_answer(state))
+    }
+
+    /// The built-in answer in the typed state domain.
+    #[inline]
+    fn builtin_answer(&self, state: StateId) -> bool {
+        self.builtin_states
+            .get(&state)
+            .copied()
+            .unwrap_or_else(|| self.builtin_defaults.contains(&state.block().default_state()))
+    }
+
+    /// Tests a canonical state without resolving its spelling.
+    #[inline]
+    #[must_use]
+    pub fn test_id(&self, id: StateId) -> bool {
+        self.answers[id.index()]
+    }
+
+    /// `true` when nothing was supplied — the "no data supplied" convention
+    /// every other resolver-fed table in this crate follows.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.builtin_defaults.is_empty() && self.builtin_states.is_empty()
+    }
+
+    /// Parses one column of the resolver's `block_freeze_facts` document:
+    /// `{"default": ["minecraft:stone", ...], "states": {"minecraft:snow[layers=8]": false, ...}}`.
+    ///
+    /// # Panics
+    /// Panics on a malformed document — this is embedded, generated data, so a
+    /// shape error is a build-time defect rather than untrusted input.
+    #[must_use]
+    pub fn parse(value: &Value) -> Self {
+        if value.is_null() {
+            return Self::default();
+        }
+        let by_block_default = value
+            .get("default")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .map(|v| v.as_str().expect("default entry is a string").to_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let overrides = value
+            .get("states")
+            .and_then(Value::as_object)
+            .map(|o| {
+                o.iter()
+                    .map(|(k, v)| {
+                        (
+                            k.clone(),
+                            v.as_bool().expect("states entry is a boolean"),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self::new(by_block_default, overrides)
+    }
+}
+
+/// Parses only an exact generated state. The forgiving `StateId::from_state_str`
+/// API intentionally accepts shorthand/default forms, but a predicate override
+/// with an unknown property must not be silently applied to a block default.
+fn exact_builtin_state(encoded: &str) -> Option<StateId> {
+    BlockStateValue::parse(encoded).state_id()
+}
+
+impl SnowSupport {
+    /// Binds all per-state predicates to one generator's interner. This is a
+    /// construction/pass boundary; the repeated queries use local IDs only.
+    pub fn bind(&self) {}
+
+    /// Parses the whole `block_freeze_facts` document plus the two already-
+    /// resolved tag sets.
+    #[must_use]
+    pub fn parse(
+        facts: &Value,
+        cannot_support_snow_layer: HashSet<String>,
+        support_override_snow_layer: HashSet<String>,
+    ) -> Self {
+        let cannot_support_blocks = cannot_support_snow_layer
+            .iter()
+            .filter_map(|name| Block::from_name(name))
+            .collect();
+        let support_override_blocks = support_override_snow_layer
+            .iter()
+            .filter_map(|name| Block::from_name(name))
+            .collect();
+        Self {
+            blocks_motion: StatePredicate::parse(&facts["blocks_motion"]),
+            has_fluid_state: StatePredicate::parse(&facts["has_fluid_state"]),
+            water_source: StatePredicate::parse(&facts["water_source"]),
+            face_full_up: StatePredicate::parse(&facts["face_full_up"]),
+            snowy_property: StatePredicate::parse(&facts["snowy_property"]),
+            cannot_support_snow_layer,
+            support_override_snow_layer,
+            cannot_support_blocks,
+            support_override_blocks,
+        }
+    }
+
+    /// `true` when no per-state facts were supplied at all, i.e. this engine has
+    /// no data to run on and [`apply_freeze_top_layer`] must be a no-op. The two
+    /// tags are deliberately **not** part of this test: both are legitimately
+    /// small, and an empty `cannot_support_snow_layer` is a plausible (if wrong)
+    /// datapack rather than "no data".
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.blocks_motion.is_empty()
+            || self.has_fluid_state.is_empty()
+            || self.face_full_up.is_empty()
+    }
+
+    /// Motion-blocking lookup for the generation scan.
+    #[inline]
+    #[must_use]
+    pub fn motion_blocking_id(&self, state: StateId) -> bool {
+        self.blocks_motion.test_id(state) || self.has_fluid_state.test_id(state)
+    }
+
+    #[inline]
+    fn snow_can_survive_id(&self, state: StateId) -> bool {
+        let block = state.block();
+        if self.cannot_support_blocks.contains(&block) {
+            return false;
+        }
+        if self.support_override_blocks.contains(&block) {
+            return true;
+        }
+        self.face_full_up.test_id(state)
+            || (block == Block::Snow
+                && state
+                    .properties()
+                    .iter()
+                    .any(|(name, value)| *name == "layers" && *value == "8"))
+    }
+
+    /// Vanilla's own snow-layer survival check, where
+    /// `below_state` is the state at `pos.below()`.
+    ///
+    /// The two tag checks run **before** the geometry check, and both directions
+    /// are load-bearing (measured in `lodestone-data`'s `tests/snow_support.rs`):
+    /// `ice`/`packed_ice` have a full UP face and are only kept snow-free by
+    /// `cannot_support_snow_layer`, while `mud`/`honey_block`/`soul_sand` have no
+    /// full UP face and only support snow via `support_override_snow_layer`.
+    ///
+    /// The trailing `layers == 8` clause is not redundant: **no** snow state has
+    /// a full UP collision face (a full snow layer is 14/16 tall), so without
+    /// that clause snow could never stack on a full layer.
+    #[must_use]
+    #[cfg(test)]
+    fn snow_can_survive(&self, below_state: &str) -> bool {
+        let Some(canonical) = exact_builtin_state(below_state) else {
+            return false;
+        };
+        let block = canonical.block();
+        if self.cannot_support_blocks.contains(&block) {
+            return false;
+        }
+        if self.support_override_blocks.contains(&block) {
+            return true;
+        }
+        self.face_full_up.builtin_answer(canonical)
+            || (block == Block::Snow && snow_layers(below_state) == Some(8))
+    }
+}
+
+/// Resolves a [`SnowSupport`] from a [`crate::density::Resolver`]: the five
+/// top-layer per-state columns from
+/// [`Resolver::block_freeze_facts`](crate::density::Resolver::block_freeze_facts)
+/// (the same document also carries dungeon solidity) and the two tags from
+/// [`Resolver::block_tag`](crate::density::Resolver::block_tag).
+///
+/// Empty sets (never a panic) when the resolver has no data — matching
+/// [`crate::feature::vegetation::build_veg_tags`] and every other
+/// resolver convention, so every existing `Resolver` in this
+/// crate's tests and benches keeps compiling and keeps generating exactly the
+/// snow-free world it did before.
+#[must_use]
+pub fn build_snow_support(resolver: &dyn crate::density::Resolver) -> SnowSupport {
+    let resolve = |id: &str| {
+        let mut out = HashSet::new();
+        let mut seen = HashSet::new();
+        crate::compose::resolve_block_tag(resolver, id, &mut out, &mut seen);
+        out
+    };
+    SnowSupport::parse(
+        &resolver.block_freeze_facts(),
+        resolve("minecraft:cannot_support_snow_layer"),
+        resolve("minecraft:support_override_snow_layer"),
+    )
+}
+
+/// Parses one biome document's `ClimateSettings` — `has_precipitation`,
+/// `temperature` and `temperature_modifier`, straight out of
+/// [`Resolver::biome_document`](crate::density::Resolver::biome_document).
+///
+/// **No new resolver method is needed for climate**: vanilla's own
+/// `worldgen/biome/*.json` carries all three fields, the embedded assets are
+/// verbatim copies of them, and `biome_document` already returns the whole
+/// document (added for `carvers` and the per-step `features`
+/// lists). This crate's pre-existing
+/// [`Resolver::biome_temperatures`](crate::density::Resolver::biome_temperatures)
+/// carries `temperature` alone and is deliberately left to its own caller —
+/// surface rules ask a *different* question, at a different Y, and answering it
+/// with the height-adjusted value would change composed surface output.
+///
+/// Returns `None` for a document with no `temperature` field (including
+/// `Value::Null`, the no-data-supplied case), which
+/// [`apply_freeze_top_layer`] treats as "this biome does not freeze" rather than
+/// defaulting.
+///
+/// Defaults follow vanilla's own climate-settings codec:
+/// `has_precipitation` is required in vanilla's schema but defaulted to `true`
+/// here for robustness against a trimmed asset, and `temperature_modifier`
+/// defaults to `none`.
+#[must_use]
+pub fn parse_biome_climate(document: &Value) -> Option<BiomeClimate> {
+    let temperature = document.get("temperature")?.as_f64()? as f32;
+    Some(BiomeClimate {
+        has_precipitation: document
+            .get("has_precipitation")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        temperature,
+        temperature_modifier: TemperatureModifier::parse(
+            document
+                .get("temperature_modifier")
+                .and_then(Value::as_str),
+        ),
+    })
+}
+
+/// Test helper for the legacy textual fixture assertions.
+#[cfg(test)]
+#[must_use]
+pub fn base_id(state: &str) -> &str {
+    state.split('[').next().unwrap_or(state)
+}
+
+/// Test helper for the legacy textual fixture assertions.
+#[cfg(test)]
+fn snow_layers(state: &str) -> Option<u32> {
+    let props = state.split_once('[')?.1.strip_suffix(']')?;
+    props
+        .split(',')
+        .find_map(|kv| kv.strip_prefix("layers="))
+        .and_then(|v| v.parse().ok())
+}
+
+/// Vanilla's own height-adjusted temperature at a position, given a sea
+/// level — the value its own temperature query returns once its memo is
+/// stripped.
+///
+/// ```text
+/// adjusted = temperature_modifier.modify(pos, base_temperature)   // f32
+/// snow_level = sea_level + 17
+/// if pos.y > snow_level:
+///     v = noise.get_value(pos.x / 8.0 as f32, pos.z / 8.0 as f32, false) * 8.0   // f32
+///     return adjusted - (v + pos.y - snow_level) * 0.05 / 40.0                   // f32
+/// return adjusted
+/// ```
+///
+/// # Float typing is not incidental
+///
+/// Every arithmetic step above is vanilla's `float`, and the noise *input* is a
+/// `float` division widened to `double`: `pos.x / 8.0` as vanilla computes it is
+/// the float division widened afterward,
+/// **not** a direct double division. Those differ for large coordinates,
+/// and computing the whole expression in `f64` shifts the snow line by a
+/// fraction of a block near the threshold — enough to move which columns snow.
+/// This port keeps `f32` throughout and widens only at the noise call, matching
+/// the JVM bit for bit.
+///
+/// # The `FROZEN` modifier
+///
+/// Vanilla's own frozen-modifier temperature blend blends
+/// three noise reads into an ice-patch mask and clamps the result to `0.2`
+/// (above the `0.15` rain threshold, i.e. *warmer*) inside a patch — so a frozen
+/// ocean is mostly ice with warmer, unfrozen gaps. Its `pos.x * 0.05`
+/// inputs are an int-times-double product, genuine `f64`, unlike the `/ 8.0` above.
+#[must_use]
+pub fn height_adjusted_temperature(
+    climate: &BiomeClimate,
+    noise: &ClimateNoise,
+    x: i32,
+    y: i32,
+    z: i32,
+    sea_level: i32,
+) -> f32 {
+    let adjusted = match climate.temperature_modifier {
+        TemperatureModifier::None => climate.temperature,
+        TemperatureModifier::Frozen => {
+            let large_variation = noise.frozen_temperature(f64::from(x) * 0.05, f64::from(z) * 0.05)
+                * 7.0;
+            let edge_variation = noise.biome_info(f64::from(x) * 0.2, f64::from(z) * 0.2);
+            let ice_patches = large_variation + edge_variation;
+            if ice_patches < 0.3 {
+                let small_variation =
+                    noise.biome_info(f64::from(x) * 0.09, f64::from(z) * 0.09);
+                if small_variation < 0.8 {
+                    0.2
+                } else {
+                    climate.temperature
+                }
+            } else {
+                climate.temperature
+            }
+        }
+    };
+    let snow_level = sea_level + SNOW_LEVEL_ABOVE_SEA;
+    if y > snow_level {
+        // `pos.getX() / 8.0F`: a float divide, then widened for `getValue`.
+        let nx = f64::from(x as f32 / 8.0);
+        let nz = f64::from(z as f32 / 8.0);
+        let v = (noise.temperature(nx, nz) * 8.0) as f32;
+        adjusted - (v + y as f32 - snow_level as f32) * 0.05 / 40.0
+    } else {
+        adjusted
+    }
+}
+
+/// Vanilla's own "warm enough to rain" check.
+#[must_use]
+pub fn warm_enough_to_rain(
+    climate: &BiomeClimate,
+    noise: &ClimateNoise,
+    x: i32,
+    y: i32,
+    z: i32,
+    sea_level: i32,
+) -> bool {
+    height_adjusted_temperature(climate, noise, x, y, z, sea_level) >= RAIN_TEMPERATURE_THRESHOLD
+}
+
+/// Vanilla's own `MOTION_BLOCKING` heightmap query as
+/// vanilla's own feature sees it: the first **free** Y above the column's
+/// topmost motion-blocking-or-fluid block, or `min_y` for an entirely empty
+/// column.
+///
+/// # The two `±1`s that cancel
+///
+/// Vanilla's own heightmap stores `topMatchingY + 1` (its own priming pass
+/// stores that offset value), so
+/// its own "first available" query is the first free Y.
+/// Its own "highest taken" query subtracts one and
+/// the chunk-level height query routes to it — then the world-gen-region-level
+/// height query adds
+/// one back. Net: the feature receives the first
+/// free Y, so `topPos` is where snow goes and `belowPos` is the top solid or
+/// fluid block. Dropping either `±1` puts every snow layer one block out.
+///
+/// # Why recomputing is equivalent to vanilla's incremental heightmap
+///
+/// Vanilla primes these heightmaps once at the start of the `features` status
+/// and then maintains them through
+/// incremental per-block updates as each feature places a block. That update is
+/// an incremental
+/// form of exactly this scan: it early-outs below `firstAvailable - 2`, raises
+/// the height for an opaque block at or above it, and rescans downward when a
+/// non-opaque block replaces the current top. A fresh
+/// top-down scan of the finished field lands on the same answer, and this step
+/// runs after every other feature, so there is nothing left to place.
+#[must_use]
+pub fn motion_blocking_first_free(
+    grid: &DenseBlockGrid,
+    support: &SnowSupport,
+    x: i32,
+    z: i32,
+    min_y: i32,
+    height: i32,
+) -> i32 {
+    motion_blocking_first_free_scalar(grid, support, x, z, min_y, height)
+}
+
+pub(crate) trait TopLayerGrid {
+    fn top_layer_get_id(&self, x: i32, y: i32, z: i32) -> StateId;
+
+    fn top_layer_set_id(&mut self, x: i32, y: i32, z: i32, state: StateId);
+
+    fn top_layer_motion_blocking_first_free(
+        &self,
+        support: &SnowSupport,
+        x: i32,
+        z: i32,
+        min_y: i32,
+        height: i32,
+    ) -> i32 {
+        motion_blocking_first_free_scalar(self, support, x, z, min_y, height)
+    }
+}
+
+impl TopLayerGrid for DenseBlockGrid {
+    fn top_layer_get_id(&self, x: i32, y: i32, z: i32) -> StateId {
+        self.get_id(x, y, z)
+    }
+
+    fn top_layer_set_id(&mut self, x: i32, y: i32, z: i32, state: StateId) {
+        self.set_id(x, y, z, state);
+    }
+}
+
+impl TopLayerGrid for VegGrid {
+    fn top_layer_get_id(&self, x: i32, y: i32, z: i32) -> StateId {
+        self.get_id(x, y, z)
+    }
+
+    fn top_layer_set_id(&mut self, x: i32, y: i32, z: i32, state: StateId) {
+        let _ = self.set_id_if_in_bounds(x, y, z, state);
+    }
+
+    fn top_layer_motion_blocking_first_free(
+        &self,
+        support: &SnowSupport,
+        x: i32,
+        z: i32,
+        min_y: i32,
+        height: i32,
+    ) -> i32 {
+        self.top_layer_motion_blocking_first_free_if_extent(
+            x,
+            z,
+            min_y,
+            height,
+            |state| support.motion_blocking_id(state),
+        )
+        .unwrap_or_else(|| motion_blocking_first_free_scalar(self, support, x, z, min_y, height))
+    }
+}
+
+fn motion_blocking_first_free_scalar<G: TopLayerGrid + ?Sized>(
+    grid: &G,
+    support: &SnowSupport,
+    x: i32,
+    z: i32,
+    min_y: i32,
+    height: i32,
+) -> i32 {
+    let mut y = min_y + height - 1;
+    while y >= min_y {
+        if support.motion_blocking_id(grid.top_layer_get_id(x, y, z)) {
+            return y + 1;
+        }
+        y -= 1;
+    }
+    min_y
+}
+
+/// What one [`apply_freeze_top_layer`] pass did, for gates that need to assert a
+/// count rather than scan a chunk.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FreezeCounts {
+    /// Columns where `minecraft:ice` replaced a water source.
+    pub ice: usize,
+    /// Columns where a `minecraft:snow[layers=1]` was placed.
+    pub snow: usize,
+    /// Snow placements that additionally flipped a `snowy` property below.
+    pub snowy_flips: usize,
+}
+
+impl FreezeCounts {
+    /// `true` when the pass wrote nothing at all.
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        self.ice == 0 && self.snow == 0 && self.snowy_flips == 0
+    }
+}
+
+/// Runs the whole `TOP_LAYER_MODIFICATION` step for one chunk, in place.
+///
+/// `grid` must cover at least the chunk's own 16×16×`height` box in **absolute**
+/// coordinates; `biome_at(local_x, local_z)` supplies the biome id for a column
+/// (the caller resolves quart rounding — see this module's "Approximations,
+/// named"), and `climates` maps biome id to its `ClimateSettings`.
+///
+/// **This step never writes outside its own chunk.** `SnowAndFreezeFeature`'s
+/// loops are `dx`/`dz` in `0..16` from the chunk origin and every write is at
+/// `(x, y, z)` or `(x, y - 1, z)` of that same column, so unlike the unified
+/// FEATURES dispatcher and vegetation there is no
+/// `blockStateWriteRadius(1)` spill to model and no 3×3 driver: a centre-only
+/// pass **is** vanilla's full behaviour here. That is why this function takes one
+/// chunk's grid rather than a stitched region.
+///
+/// A biome missing from `climates` is skipped, not defaulted — a defaulted
+/// climate would place snow (or refuse to) on a guess, and this engine's whole
+/// convention is that missing data means "do nothing", never "assume".
+#[allow(clippy::too_many_arguments)]
+pub fn apply_freeze_top_layer<'b>(
+    grid: &mut DenseBlockGrid,
+    chunk_x: i32,
+    chunk_z: i32,
+    min_y: i32,
+    height: i32,
+    sea_level: i32,
+    biome_at: &dyn Fn(i32, i32) -> &'b str,
+    climates: &HashMap<String, BiomeClimate>,
+    support: &SnowSupport,
+    noise: &ClimateNoise,
+) -> FreezeCounts {
+    let mut discard_write = |_x: i32, _y: i32, _z: i32, _state: StateId| {};
+    apply_freeze_top_layer_with_observer(
+        grid,
+        chunk_x,
+        chunk_z,
+        min_y,
+        height,
+        sea_level,
+        biome_at,
+        climates,
+        support,
+        noise,
+        &mut discard_write,
+    )
+}
+
+/// Runs [`apply_freeze_top_layer`] while observing each ordered block write.
+/// The existing adapter above remains the normal production entrypoint; this
+/// bounded sink is for callers that need the sparse final state without a
+/// second full-column diff.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_freeze_top_layer_with_observer<'b>(
+    grid: &mut DenseBlockGrid,
+    chunk_x: i32,
+    chunk_z: i32,
+    min_y: i32,
+    height: i32,
+    sea_level: i32,
+    biome_at: &dyn Fn(i32, i32) -> &'b str,
+    climates: &HashMap<String, BiomeClimate>,
+    support: &SnowSupport,
+    noise: &ClimateNoise,
+    observer: &mut dyn FnMut(i32, i32, i32, StateId),
+) -> FreezeCounts {
+    let climate_at = |x: i32, z: i32| climates.get(biome_at(x, z));
+    apply_freeze_top_layer_impl(
+        grid,
+        chunk_x,
+        chunk_z,
+        min_y,
+        height,
+        sea_level,
+        &climate_at,
+        support,
+        noise,
+        observer,
+    )
+}
+
+/// Typed top-layer entrypoint for generated built-in biome identities.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_freeze_top_layer_typed_with_observer(
+    grid: &mut DenseBlockGrid,
+    chunk_x: i32,
+    chunk_z: i32,
+    min_y: i32,
+    height: i32,
+    sea_level: i32,
+    biome_at: &dyn Fn(i32, i32) -> lodestone_data::biomes::BuiltinBiome,
+    climates: &[Option<BiomeClimate>; lodestone_data::biomes::BuiltinBiome::COUNT as usize],
+    support: &SnowSupport,
+    noise: &ClimateNoise,
+    observer: &mut dyn FnMut(i32, i32, i32, StateId),
+) -> FreezeCounts {
+    apply_freeze_top_layer_typed_with_observer_on(
+        grid,
+        chunk_x,
+        chunk_z,
+        min_y,
+        height,
+        sea_level,
+        biome_at,
+        climates,
+        support,
+        noise,
+        observer,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_freeze_top_layer_typed_with_observer_on<G: TopLayerGrid>(
+    grid: &mut G,
+    chunk_x: i32,
+    chunk_z: i32,
+    min_y: i32,
+    height: i32,
+    sea_level: i32,
+    biome_at: &dyn Fn(i32, i32) -> lodestone_data::biomes::BuiltinBiome,
+    climates: &[Option<BiomeClimate>; lodestone_data::biomes::BuiltinBiome::COUNT as usize],
+    support: &SnowSupport,
+    noise: &ClimateNoise,
+    observer: &mut dyn FnMut(i32, i32, i32, StateId),
+) -> FreezeCounts {
+    let climate_at = |x: i32, z: i32| climates[biome_at(x, z) as usize].as_ref();
+    apply_freeze_top_layer_impl(
+        grid,
+        chunk_x,
+        chunk_z,
+        min_y,
+        height,
+        sea_level,
+        &climate_at,
+        support,
+        noise,
+        observer,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_freeze_top_layer_impl<'a, G: TopLayerGrid>(
+    grid: &mut G,
+    chunk_x: i32,
+    chunk_z: i32,
+    min_y: i32,
+    height: i32,
+    sea_level: i32,
+    climate_at: &dyn Fn(i32, i32) -> Option<&'a BiomeClimate>,
+    support: &SnowSupport,
+    noise: &ClimateNoise,
+    observer: &mut dyn FnMut(i32, i32, i32, StateId),
+) -> FreezeCounts {
+    let mut counts = FreezeCounts::default();
+    if support.is_empty() {
+        return counts;
+    }
+    let ice_id = ICE;
+    let snow_layer_id = SNOW_LAYER;
+    let snow_base_id = snow_layer_id;
+    let air_ids = [
+        Block::Air.default_state(),
+        Block::CaveAir.default_state(),
+        Block::VoidAir.default_state(),
+    ];
+    let snowy_states = [
+        bind_snowy_pair(Block::GrassBlock),
+        bind_snowy_pair(Block::Podzol),
+        bind_snowy_pair(Block::Mycelium),
+    ];
+    let base_x = chunk_x * 16;
+    let base_z = chunk_z * 16;
+    let max_y = min_y + height - 1;
+    for dx in 0..16 {
+        for dz in 0..16 {
+            let x = base_x + dx;
+            let z = base_z + dz;
+            let Some(climate) = climate_at(dx, dz) else {
+                continue;
+            };
+            let top_y = grid.top_layer_motion_blocking_first_free(support, x, z, min_y, height);
+            let below_y = top_y - 1;
+
+            // --- ice: vanilla's own freeze predicate at belowPos, neighbour checking off
+            let inside_below = below_y >= min_y && below_y <= max_y;
+            if inside_below && !warm_enough_to_rain(climate, noise, x, below_y, z, sea_level) {
+                // The block-light gate (`< 10`) is unconditionally true during
+                // worldgen — see this module's "Approximations, named".
+                if support
+                    .water_source
+                    .test_id(grid.top_layer_get_id(x, below_y, z))
+                {
+                    grid.top_layer_set_id(x, below_y, z, ice_id);
+                    observer(
+                        x,
+                        below_y,
+                        z,
+                        ice_id,
+                    );
+                    counts.ice += 1;
+                }
+            }
+
+            // --- snow: vanilla's own snow predicate at topPos
+            if !climate.has_precipitation {
+                continue;
+            }
+            let inside_top = top_y >= min_y && top_y <= max_y;
+            if !inside_top || warm_enough_to_rain(climate, noise, x, top_y, z, sea_level) {
+                continue;
+            }
+            let top_base = grid.top_layer_get_id(x, top_y, z);
+            // Vanilla's own check: air, or already a snow layer.
+            if !(air_ids.contains(&top_base) || top_base == snow_base_id) {
+                continue;
+            }
+            // `canSurvive` reads the block BELOW topPos — which the ice write
+            // above may just have changed. Reading it here rather than earlier is
+            // what makes frozen oceans bare ice instead of snow-covered ice.
+            let below_state = if inside_below {
+                grid.top_layer_get_id(x, below_y, z)
+            } else {
+                StateId::AIR
+            };
+            if !support.snow_can_survive_id(below_state) {
+                continue;
+            }
+            grid.top_layer_set_id(x, top_y, z, snow_layer_id);
+            observer(
+                x,
+                top_y,
+                z,
+                snow_layer_id,
+            );
+            counts.snow += 1;
+            if inside_below
+                && support
+                    .snowy_property
+                    .test_id(below_state)
+            {
+                let Some((_, snowy)) = snowy_states
+                    .iter()
+                    .find(|(plain, _)| *plain == below_state)
+                else {
+                    continue;
+                };
+                grid.top_layer_set_id(x, below_y, z, *snowy);
+                observer(
+                    x,
+                    below_y,
+                    z,
+                    *snowy,
+                );
+                counts.snowy_flips += 1;
+            }
+        }
+    }
+    counts
+}
+
+fn bind_snowy_pair(block: Block) -> (StateId, StateId) {
+    let plain_properties = Properties::empty()
+        .with_builtin(PropertyKey::Snowy, BuiltinPropertyValue::False)
+        .expect("snowy=false property");
+    let plain = Properties::state_for_block(block, &plain_properties)
+        .expect("snowy=false state");
+    let snowy_properties = Properties::empty()
+        .with_builtin(PropertyKey::Snowy, BuiltinPropertyValue::True)
+        .expect("snowy=true property");
+    let snowy = Properties::state_for_block(block, &snowy_properties)
+        .expect("snowy=true state");
+    (plain, snowy)
+}
+
+/// Test-only text rewrite control for the input predicate.
+///
+/// Property order in a canonical string is alphabetical (see
+/// [`super::canon_state`]), and `snowy` is only ever carried by `grass_block`,
+/// `podzol` and `mycelium` — each of which has `snowy` as its **only** property
+/// (measured in `lodestone-data`'s `tests/snow_support.rs`: six states, three
+/// blocks, two states each). The general rewrite is still done properly rather
+/// than special-casing those three, so a future block with `snowy` alongside
+/// other properties keeps working.
+#[must_use]
+#[cfg(test)]
+fn with_snowy_true(state: &str) -> String {
+    let Some((base, rest)) = state.split_once('[') else {
+        return format!("{state}[snowy=true]");
+    };
+    let props = rest.strip_suffix(']').unwrap_or(rest);
+    let mut kv: Vec<(&str, &str)> = props
+        .split(',')
+        .filter_map(|p| p.split_once('='))
+        .map(|(k, v)| if k == "snowy" { (k, "true") } else { (k, v) })
+        .collect();
+    if !kv.iter().any(|(k, _)| *k == "snowy") {
+        kv.push(("snowy", "true"));
+    }
+    kv.sort_by(|a, b| a.0.cmp(b.0));
+    let body: Vec<String> = kv.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    format!("{base}[{}]", body.join(","))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn climate(temperature: f32) -> BiomeClimate {
+        BiomeClimate {
+            has_precipitation: true,
+            temperature,
+            temperature_modifier: TemperatureModifier::None,
+        }
+    }
+
+    #[test]
+    fn snowy_rewrite_sets_the_property_and_keeps_canonical_order() {
+        assert_eq!(
+            with_snowy_true("minecraft:grass_block[snowy=false]"),
+            "minecraft:grass_block[snowy=true]"
+        );
+        assert_eq!(
+            with_snowy_true("minecraft:grass_block[snowy=true]"),
+            "minecraft:grass_block[snowy=true]"
+        );
+        // Property-less form (the generator's shortest canonical spelling).
+        assert_eq!(
+            with_snowy_true("minecraft:podzol"),
+            "minecraft:podzol[snowy=true]"
+        );
+        // A hypothetical multi-property block must stay alphabetically sorted.
+        assert_eq!(
+            with_snowy_true("minecraft:x[waterlogged=false,snowy=false,axis=y]"),
+            "minecraft:x[axis=y,snowy=true,waterlogged=false]"
+        );
+    }
+
+    #[test]
+    fn snow_layers_parses_only_the_layers_property() {
+        assert_eq!(snow_layers("minecraft:snow[layers=8]"), Some(8));
+        assert_eq!(snow_layers("minecraft:snow[layers=1]"), Some(1));
+        assert_eq!(snow_layers("minecraft:snow"), None);
+        assert_eq!(snow_layers("minecraft:stone"), None);
+    }
+
+    #[test]
+    fn freeze_observer_reports_the_ordered_write_without_a_grid_diff() {
+        let support = SnowSupport {
+            blocks_motion: StatePredicate::new(
+                ["minecraft:stone".to_owned()].into_iter().collect(),
+                HashMap::new(),
+            ),
+            has_fluid_state: StatePredicate::new(
+                ["minecraft:stone".to_owned()].into_iter().collect(),
+                HashMap::new(),
+            ),
+            face_full_up: StatePredicate::new(
+                ["minecraft:stone".to_owned()].into_iter().collect(),
+                HashMap::new(),
+            ),
+            ..SnowSupport::default()
+        };
+        let mut grid = DenseBlockGrid::new(0, 0, 0, 16, 2, 16, "minecraft:air");
+        grid.set(0, 0, 0, "minecraft:stone");
+        let biome_at = |_x: i32, _z: i32| "cold";
+        let climates = HashMap::from([(String::from("cold"), climate(0.0))]);
+        let mut writes = Vec::new();
+        let counts = apply_freeze_top_layer_with_observer(
+            &mut grid,
+            0,
+            0,
+            0,
+            2,
+            63,
+            &biome_at,
+            &climates,
+            &support,
+            &ClimateNoise::new(),
+            &mut |x, y, z, state| writes.push((x, y, z, state)),
+        );
+        assert_eq!(counts.snow, 1);
+        assert_eq!(
+            writes,
+            vec![
+                (
+                    0,
+                    1,
+                    0,
+                    SNOW_LAYER,
+                ),
+            ],
+            "the observer must expose the exact top-layer write order",
+        );
+        assert_eq!(grid.get_id(0, 1, 0), SNOW_LAYER);
+
+        let ice_support = SnowSupport {
+            blocks_motion: StatePredicate::new(
+                ["minecraft:stone".to_owned()].into_iter().collect(),
+                HashMap::new(),
+            ),
+            has_fluid_state: StatePredicate::new(
+                ["minecraft:water".to_owned()].into_iter().collect(),
+                HashMap::new(),
+            ),
+            water_source: StatePredicate::new(
+                ["minecraft:water".to_owned()].into_iter().collect(),
+                HashMap::new(),
+            ),
+            face_full_up: StatePredicate::new(
+                ["minecraft:ice".to_owned()].into_iter().collect(),
+                HashMap::new(),
+            ),
+            cannot_support_blocks: [Block::Ice].into_iter().collect(),
+            ..SnowSupport::default()
+        };
+        let mut dense_ice = DenseBlockGrid::new(0, 0, 0, 16, 2, 16, "minecraft:air");
+        dense_ice.set_id(0, 0, 0, Block::Water.default_state());
+        let mut veg_ice = VegGrid::new(0, 2, 0, 0);
+        assert!(veg_ice.set_id_if_in_bounds(0, 0, 0, Block::Water.default_state()));
+        let ice_climate = climate(0.0);
+        let ice_climate_at = |_x: i32, _z: i32| Some(&ice_climate);
+        let mut dense_ice_writes = Vec::new();
+        let dense_ice_counts = apply_freeze_top_layer_impl(
+            &mut dense_ice,
+            0,
+            0,
+            0,
+            2,
+            63,
+            &ice_climate_at,
+            &ice_support,
+            &ClimateNoise::new(),
+            &mut |x, y, z, state| dense_ice_writes.push((x, y, z, state)),
+        );
+        let mut veg_ice_writes = Vec::new();
+        let veg_ice_counts = apply_freeze_top_layer_impl(
+            &mut veg_ice,
+            0,
+            0,
+            0,
+            2,
+            63,
+            &ice_climate_at,
+            &ice_support,
+            &ClimateNoise::new(),
+            &mut |x, y, z, state| veg_ice_writes.push((x, y, z, state)),
+        );
+        let expected_ice_writes = vec![(0, 0, 0, ICE)];
+        assert_eq!(
+            dense_ice_counts,
+            FreezeCounts {
+                ice: 1,
+                snow: 0,
+                snowy_flips: 0,
+            }
+        );
+        assert_eq!(veg_ice_counts, dense_ice_counts);
+        assert_eq!(dense_ice_writes, expected_ice_writes);
+        assert_eq!(veg_ice_writes, expected_ice_writes);
+        assert_eq!(dense_ice.get_id(0, 0, 0), ICE);
+        assert_eq!(veg_ice.get_id(0, 0, 0), ICE);
+        assert_eq!(dense_ice.get_id(0, 1, 0), StateId::AIR);
+        assert_eq!(veg_ice.get_id(0, 1, 0), StateId::AIR);
+    }
+
+    /// The two-level lookup: an exact state wins, and a property-less name falls
+    /// back to the block's default-state answer. This is what keeps the
+    /// generator's `level`-less `minecraft:water` freezing.
+    #[test]
+    fn state_predicate_falls_back_from_state_to_block_default() {
+        let mut by_state = HashMap::new();
+        by_state.insert("minecraft:water[level=1]".to_owned(), false);
+        let mut default = HashSet::new();
+        default.insert("minecraft:water".to_owned());
+        let p = StatePredicate::new(default, by_state);
+
+        assert!(p.test("minecraft:water"), "property-less name uses the default state");
+        assert!(
+            p.test("minecraft:water[level=0]"),
+            "the default state itself is not in `states`, so it falls through to the default"
+        );
+        assert!(!p.test("minecraft:water[level=1]"), "an override wins");
+        assert!(!p.test("minecraft:stone"), "an unknown block is false");
+    }
+
+    #[test]
+    fn state_predicate_late_builtin_state_is_correct_before_and_after_rebind() {
+        let mut defaults = HashSet::new();
+        defaults.insert("minecraft:stone".to_owned());
+        let predicate = StatePredicate::new(defaults, HashMap::new());
+        let stone = StateId::from_state_str("minecraft:stone").expect("stone state");
+        let dirt = StateId::from_state_str("minecraft:dirt").expect("dirt state");
+        assert!(predicate.test_id(stone));
+        assert!(!predicate.test_id(dirt));
+    }
+
+    /// The height adjustment must be inert at or below `seaLevel + 17` and active
+    /// above it — the branch vanilla's own check takes.
+    #[test]
+    fn height_adjustment_is_inert_at_or_below_snow_level() {
+        let noise = ClimateNoise::new();
+        let c = climate(0.2);
+        for y in [-64, 0, 63, 79, 80] {
+            let t = height_adjusted_temperature(&c, &noise, 100, y, 200, 63);
+            assert_eq!(
+                t.to_bits(),
+                0.2_f32.to_bits(),
+                "y={y} is at or below seaLevel+17=80 and must be unadjusted"
+            );
+        }
+        let above = height_adjusted_temperature(&c, &noise, 100, 81, 200, 63);
+        assert_ne!(
+            above.to_bits(),
+            0.2_f32.to_bits(),
+            "y=81 is above snowLevel and must be adjusted"
+        );
+    }
+
+    /// The predicted-value gate on the lapse rate, not a direction check.
+    ///
+    /// At `y = snowLevel + d` the adjustment is `-(v + d) * 0.05 / 40`, where
+    /// `v = noise * 8` is bounded by `±8` (a single-octave simplex field is in
+    /// `[-1, 1]`). So the drop at `d` blocks above snow level lies in
+    /// `[(d - 8) / 800, (d + 8) / 800]` — an interval that comes from vanilla's
+    /// own constants and the noise field's range, not from this implementation.
+    /// `windswept_hills` (`temperature = 0.2`) must therefore cross the `0.15`
+    /// threshold somewhere in `d ∈ [32, 48]`, i.e. `y ∈ [112, 128]`.
+    #[test]
+    fn lapse_rate_lands_in_the_interval_vanilla_constants_predict() {
+        let noise = ClimateNoise::new();
+        let c = climate(0.2);
+        let sea_level = 63;
+        let snow_level = sea_level + SNOW_LEVEL_ABOVE_SEA;
+        for d in [1, 10, 40, 100, 239] {
+            let y = snow_level + d;
+            let t = height_adjusted_temperature(&c, &noise, 1234, y, -567, sea_level);
+            let drop = 0.2_f32 - t;
+            let lo = (d as f32 - 8.0) / 800.0;
+            let hi = (d as f32 + 8.0) / 800.0;
+            assert!(
+                (lo..=hi).contains(&drop),
+                "d={d}: drop {drop} outside the [{lo}, {hi}] interval vanilla's \
+                 0.05/40 lapse rate and the ±8 noise term allow"
+            );
+        }
+        // The discriminating claim: a windswept-hills column snows high up and
+        // does not snow low down. A flat-temperature port fails the first of
+        // these (0.2 >= 0.15 everywhere), which is exactly the trap.
+        assert!(
+            !warm_enough_to_rain(&c, &noise, 1234, 200, -567, sea_level),
+            "windswept_hills at y=200 must be cold enough to snow"
+        );
+        assert!(
+            warm_enough_to_rain(&c, &noise, 1234, 70, -567, sea_level),
+            "windswept_hills at y=70 must be too warm to snow"
+        );
+    }
+
+    /// `snowy_plains` (`temperature = 0.0`) snows at every altitude under both a
+    /// flat and a height-adjusted reading — the control proving the fixture
+    /// choice in `tests/top_layer_parity.rs` matters. A gate built only on a
+    /// snowy biome cannot detect the flat-temperature error.
+    #[test]
+    fn a_snowy_biome_cannot_discriminate_the_temperature_source() {
+        let noise = ClimateNoise::new();
+        let c = climate(0.0);
+        for y in [-60, 0, 63, 80, 120, 200, 319] {
+            assert!(
+                !warm_enough_to_rain(&c, &noise, 55, y, -99, 63),
+                "snowy_plains snows at y={y} regardless of the temperature source"
+            );
+        }
+    }
+
+    /// `canSurvive`'s three branches, in order, against the jar-measured facts.
+    #[test]
+    fn snow_survival_respects_both_tags_before_the_geometry() {
+        let mut face_full = HashSet::new();
+        // `ice` genuinely HAS a full up face (measured) — only the tag stops it.
+        face_full.insert("minecraft:ice".to_owned());
+        face_full.insert("minecraft:grass_block".to_owned());
+        let support = SnowSupport {
+            face_full_up: StatePredicate::new(face_full, HashMap::new()),
+            cannot_support_snow_layer: ["minecraft:ice".to_owned()].into_iter().collect(),
+            support_override_snow_layer: ["minecraft:mud".to_owned()].into_iter().collect(),
+            cannot_support_blocks: [Block::Ice].into_iter().collect(),
+            support_override_blocks: [Block::Mud].into_iter().collect(),
+            ..SnowSupport::default()
+        };
+        assert!(support.snow_can_survive("minecraft:grass_block[snowy=false]"));
+        assert!(
+            !support.snow_can_survive("minecraft:ice"),
+            "cannot_support_snow_layer must beat a full up face"
+        );
+        assert!(
+            support.snow_can_survive("minecraft:mud"),
+            "support_override_snow_layer must beat a missing up face"
+        );
+        assert!(!support.snow_can_survive("minecraft:short_grass"));
+        // The `layers == 8` clause, which no geometry satisfies.
+        assert!(support.snow_can_survive("minecraft:snow[layers=8]"));
+        assert!(!support.snow_can_survive("minecraft:snow[layers=7]"));
+    }
+
+    #[test]
+    fn temperature_modifier_parses_and_rejects_the_unknown() {
+        assert_eq!(TemperatureModifier::parse(None), TemperatureModifier::None);
+        assert_eq!(
+            TemperatureModifier::parse(Some("none")),
+            TemperatureModifier::None
+        );
+        assert_eq!(
+            TemperatureModifier::parse(Some("frozen")),
+            TemperatureModifier::Frozen
+        );
+        assert_eq!(
+            TemperatureModifier::parse(Some("minecraft:frozen")),
+            TemperatureModifier::Frozen
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "unsupported temperature_modifier")]
+    fn an_unknown_temperature_modifier_is_a_hard_stop() {
+        let _ = TemperatureModifier::parse(Some("scorching"));
+    }
+
+    /// The `FROZEN` modifier must actually change the answer somewhere, and it
+    /// must clamp *upward* to `0.2` (warmer than the `0.15` threshold) inside an
+    /// ice patch — `frozen_ocean`'s declared temperature is `0.0`, so the patches
+    /// are the parts that DON'T freeze.
+    #[test]
+    fn frozen_modifier_produces_warm_patches_in_a_cold_ocean() {
+        let noise = ClimateNoise::new();
+        let plain = BiomeClimate {
+            has_precipitation: true,
+            temperature: 0.0,
+            temperature_modifier: TemperatureModifier::None,
+        };
+        let frozen = BiomeClimate {
+            temperature_modifier: TemperatureModifier::Frozen,
+            ..plain
+        };
+        let mut patched = 0;
+        let mut cold = 0;
+        for x in 0..64 {
+            for z in 0..64 {
+                let t = height_adjusted_temperature(&frozen, &noise, x, 63, z, 63);
+                assert_eq!(
+                    height_adjusted_temperature(&plain, &noise, x, 63, z, 63).to_bits(),
+                    0.0_f32.to_bits(),
+                    "the unmodified biome is flat 0.0 at or below snow level"
+                );
+                if t == 0.2 {
+                    patched += 1;
+                } else {
+                    assert_eq!(t.to_bits(), 0.0_f32.to_bits());
+                    cold += 1;
+                }
+            }
+        }
+        assert!(
+            patched > 0,
+            "the FROZEN modifier never fired across 4096 positions, so its noise blend is \
+             not being evaluated"
+        );
+        assert!(
+            cold > 0,
+            "the FROZEN modifier fired everywhere, so a frozen ocean would never freeze"
+        );
+        println!("FROZEN warm patches: {patched}/4096, cold: {cold}/4096");
+    }
+}

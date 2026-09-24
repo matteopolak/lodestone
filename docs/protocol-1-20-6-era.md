@@ -1,0 +1,430 @@
+# The 1.20.6 era crate: a join with a configuration phase, and items made of components
+
+## What it is
+
+`crates/versions/1.20.6` (package `lodestone-v1-20-6`) serves Minecraft 1.20.5
+and 1.20.6 — both protocol **766** — from a single adapter, one generated
+packet-id table, one generated block-state table, one generated entity
+registry, and the era's own configuration-phase, item-component and chunk-shape
+code. It is the sixth era crate, after [`1.9`](./protocol-1-9-era.md),
+[`1.14`](./protocol-1-14-era.md), [`1.13`](./protocol-1-13-era.md),
+[`1.17`](./protocol-1-17-era.md) and [`1.19`](./protocol-1-19-era.md).
+
+The protocol number comes from two independent sources that agree: the jar's own
+`version.json` in `.cache/mc/1.20.6/server.jar` reports
+`"protocol_version": 766`, and `minecraft-data`'s `protocolVersions.json` lists
+766 for both 1.20.5 and 1.20.6. One wire version covering two Minecraft releases
+is why this crate's `minecraft_versions()` returns two strings for one number.
+
+Two breaks land inside this era and both reshape the join:
+
+* **A connection now has a configuration phase.** Login no longer ends in Play.
+  The client acknowledges login, the server sends its registries, feature flags
+  and tags in a state of its own, and Play begins only after both sides exchange
+  a finish-configuration packet. Every era below goes straight from login
+  success into Play, with the registries carried inline in the join packet.
+* **An item stack is a component map.** A stack on the wire is a count, an item
+  id and two component lists — the ones to add and the ones to remove — where
+  every era below carries an id, a count, a damage/metadata short and an
+  optional NBT compound.
+
+## How it works
+
+### A singleton crate inside a wider era, measured
+
+`PROTOCOLS` lists one number. Unlike every era crate before it, that is **not**
+because the measurement says the era is one protocol wide.
+
+Re-derived from `minecraft-data` with named types inlined recursively and
+**primitive aliases kept** (collapsing `varint`/`i64`/`u8`/`f32` to a single
+token hides every retype, and this era retypes several — a metadata amplifier
+went from a signed byte to a varint with no other change):
+
+| boundary | identical shapes | identity |
+|---|---|---|
+| 1.19.4 → 1.20.6 | 119 of 220 | **54%** |
+| 1.20.4 → 1.20.6 | 177 of 220 | **80%** |
+| 1.20.6 → 1.21 | 204 of 226 | **90%** |
+
+The grouping threshold for one crate to serve two protocols is 85% agreement.
+So the era's **lower** boundary is real — both readings below it are under the
+threshold — and its **upper** boundary is not: protocol 767 (Minecraft 1.21 and
+1.21.1) is inside the same wire era by that measure and is the natural second
+member of this crate. `PROTOCOLS` lists what is implemented and checked against
+real bytes, which is 766 alone; the measurement is recorded here and in
+`adapter::PROTOCOLS`'s own doc so the gap is a stated decision rather than an
+unexamined default. The next protocol past 767 is 1.21.11's 774, which agrees
+with its own predecessor on 66% and is a separate era.
+
+`adapter_for` already selects the id table from the negotiated protocol rather
+than naming a generated module, so adding 767 is a table entry and an arm
+rather than a restructure.
+
+### The configuration phase, and what depends on it
+
+`handle_configuration` is the whole of the phase. Four packets matter:
+
+| packet | what the adapter does |
+|---|---|
+| `registry_data` | records `minecraft:dimension_type`'s entries, in order |
+| `select_known_packs` | answers with an **empty** list |
+| `keep_alive` / `ping` | echoes, because the phase can last arbitrarily long |
+| `finish_configuration` | acknowledges, then `SetState(Play)` |
+
+The empty known-packs reply is load-bearing, not politeness. That packet offers
+to *elide* registry payloads for any data pack the client claims to already
+have. Claiming none is what makes the dimension registry arrive with its `min_y`
+and `height` values inside it — and those two values are the only way to frame a
+column. Claiming the vanilla core pack saves a few kilobytes and leaves every
+column unframeable, with nothing logged anywhere.
+
+Everything else the phase carries (tags, feature flags, resource-pack pushes,
+cookies) is passed over. Unlike the play state, this phase has no dispatch table
+with an enumerated ignore list, because the packets that matter are the four
+above and `finish_configuration` is matched explicitly rather than by
+fallthrough.
+
+The phase is also not a login-time detour. `start_configuration` can pull a
+*playing* connection back into it at any time — a resource-pack change, a
+datapack reload — so the play dispatch table handles it, replies with
+`configuration_acknowledged` and returns `SetState(Configuration)`. A client
+that treats configuration as something it left behind reads the next
+`registry_data` as a play packet.
+
+### Where the vertical window comes from
+
+The join packet does **not** name its dimension. It carries a
+`SpawnInfo` whose first field is a varint **index into the dimension-type
+registry** the configuration phase delivered. The eras below either carry the
+resolved dimension entry inline (through 1.18) or name it with a string (1.19),
+so this is a third mechanism, not a variation on either:
+
+1. configuration `registry_data` for `minecraft:dimension_type` →
+   `DimensionRegistry::adopt`, keeping only each entry's `id`, `min_y` and
+   `height`;
+2. join or respawn → `ChunkShape::from_dimension_index`, which returns `None`
+   rather than guessing when the registry has no such index, when the entry
+   arrived with no payload, or when `height` is not a positive multiple of 16.
+
+Guessing a height is the one thing that must not happen: a section count is a
+byte count, so a wrong one consumes the wrong number of bytes and produces a
+populated but wrong column instead of an error. `ChunkShape::overworld` is the
+pre-join fallback (`min_y` -64, 24 sections, which is what this era's own jar
+declares for `minecraft:overworld`), and it exists only so a column arriving
+before the registry does not panic.
+
+`respawn` carries the same `SpawnInfo`, so a respawn into a dimension of a
+different height re-resolves the shape rather than inheriting a stale one.
+
+### Item components, and why an unknown one is a hard error
+
+`packets::slot::Slot` models the era's stack: a varint count, and when non-zero,
+a varint item id, a count of components to add, a count of components to remove,
+then those components. A component's payload has **no length prefix** — its
+width is implied by its type id — so a component this crate does not model
+cannot be skipped. `read_component_payload` therefore errors by name
+(`Error::InvalidEnumVariant`) rather than guessing a width, because the
+alternative is silently desynchronising every byte after it.
+
+The 56-entry component id table comes from the jar's own registry report,
+cross-checked against `minecraft-data`'s identical id-to-name mapping.
+
+### The metadata serializer table
+
+31 entries, renumbered at this era: the armadillo-state and wolf-variant
+serializers were inserted, moving everything after them. A wrong number does not
+fail loudly — it reads the next field's bytes as some other type and either
+succeeds with nonsense or reports a corrupted stream several fields later. Three
+serializers (particle, particle list, and optional global position) are refused
+**by name** rather than approximated, for the same reason the component table
+refuses an unknown id.
+
+`handle_play_entity_metadata` reports only index `0`, the shared entity flags
+byte. Every other index at this protocol is claimed by more than one entity
+category with the same serializer, and the adapter has no id-to-category map to
+tell them apart; surfacing one anyway would put an arrow's crit bit where a
+player's using-item bit belongs. The whole entry list is still decoded, so an
+unmodelled serializer fails rather than desynchronising.
+
+### Basic container sessions
+
+The hosted protocol-766 seam covers the complete generic chest control loop:
+the server emits `open_window` with the protocol's menu-registry id, then
+`window_items`/`set_slot` with component-shaped slots; the client resolves
+those ids through the era-local item and menu tables and folds them into its
+canonical menu state. A client `window_click` carries its state id, changed
+slot predictions, and cursor prediction, but the host decodes those fields
+into `ServerBound::ContainerClicked` and the shared server derives the move
+from its authoritative inventories. A mismatching prediction receives a full
+content correction before `close_window` ends the session.
+
+The focused literal controls live in `tests/container.rs`; the integrated
+test in `tests/container_integration.rs` opens a live fixture chest, sends a
+deliberately false quick-move prediction, observes the authoritative move and
+correction, and closes the window. The implementation currently encodes bare
+item stacks; stacks carrying component patches are rejected rather than
+silently losing their component data.
+
+### Chunk-batch pacing
+
+`chunk_batch_finished` must be answered with `chunk_batch_received` carrying a
+columns-per-tick rate. A server that receives no reply throttles chunk delivery
+to its floor, so a client that ignores the packet loads the world at a trickle
+with nothing logged anywhere. The rate this client asks for is a request, not a
+measurement.
+
+### Two disconnect shapes at one protocol
+
+The login-state disconnect carries a **JSON string**; the configuration- and
+play-state ones carry a component in **anonymous NBT**. The adapter keeps two
+functions (`json_reason_text`, `nbt_reason_text`) rather than one that sniffs
+the payload: the connection state decides the form, and a sniff would silently
+accept the wrong one.
+
+### Sparse world changes and bounded explosion decoding
+
+`multi_block_change` updates one section at a time. Its coordinate long has
+signed 22-bit x, 22-bit z, and 20-bit y fields; its records are **VarInt**
+values, with `state << 12 | x << 8 | z << 4 | y`. The decoder translates every
+source state through the same 766-to-canonical table as chunk columns and
+single-block changes, applies the resolved records through the one-section
+batched world sink, synchronizes block-entity ownership per cell, and emits
+one `ClientEvent::SectionBlocksChanged` for the affected local coordinates.
+`block_break_animation` similarly now delivers its entity id, packed position,
+and untouched progress byte to `ClientEvent::BlockDestruction`.
+
+The explosion handler consumes the whole packet: centre, radius, signed
+affected-block offsets, player motion, block-interaction kind, both particles,
+and the sound holder. Its local protocol schema supplies all 109 particle ids
+and their option shapes, including nested item and vibration options, so the
+decoder can skip visual parameters exactly without inventing an event model for
+them. The sound holder accepts either an inline identifier/range or a registry
+reference. Malformed or unknown framing fails before any world write.
+
+Each affected offset is a canonical-air write at the floored explosion centre,
+with the same block-entity cleanup used for ordinary block updates. It also
+emits `ClientEvent::SectionBlocksChanged` for the touched loaded-world regions
+before the explosion event, allowing the world consumer to rebuild the changed
+sections.
+
+`game_state_change` now maps reasons `1` and `2` to rain start/stop, and `7`
+and `8` to the independent rain and thunder intensity fields. Reason `3`
+updates game mode only for a finite integral ordinal from `0` through `3`, so a
+malformed float cannot silently select a different mode. Each weather event
+changes only the wire aspect that arrived, which lets the consumer retain the
+other weather state.
+
+### Evidence: what is checked against what
+
+The jar for this version ships **no machine-readable packet report** — its data
+generator emits block, item, command and registry reports and no packet report —
+so the packet ids come from `minecraft-data`, which is a cross-check-grade
+source rather than an authority. The authority is a recorded join:
+`tests/capture_join.rs` drives a real server through this crate's own adapter and
+commits every packet it received to `tests/captures/join_1_20_6.txt`.
+
+| claim | what checks it |
+|---|---|
+| the join choreography works | the recorder asserts it reached Configuration *and* Play |
+| the dimension registry arrives with payloads | replay decodes it and asserts every entry has one |
+| the column is framed right | the decoded column parses to the packet's last byte |
+| the block-state bridge works | the flat floor reads back as canonical 26.2 bedrock/dirt/grass |
+| `unload_chunk` is (z, x) | see below |
+| chat round-trips | the recorder sends one and the server broadcasts it back |
+| the metadata table is right | every recorded body decodes to its `0xff` terminator |
+| every clientbound id is accounted for | `dispatch::Table::build`, with a negative control |
+
+`unload_chunk` deserves its own note. Its two coordinates are plain
+big-endian ints with **z first**, and a square view distance makes a swapped
+pair invisible: every column a stationary player's server drops has `|x|` and
+`|z|` in the same range. The recorder therefore RCON-teleports the joined player
+1000 blocks along **+x only** and back, so the far columns it then drops have a
+large chunk x and a near-zero chunk z. `unload_chunk_reads_z_before_x` rejects
+any body that puts the x displacement in `chunk_z`.
+
+The block-state and entity-type tables are generated from the jar's own reports
+and pinned by an FNV-1a content hash on the committed dump, with a `#[ignore]`d
+drift guard that regenerates under `LODESTONE_REGEN=1`.
+
+`cargo xtask connectedness` reports this family at **70/122 clientbound
+decoded, 69/122 emitting, 0 decoded-but-stranded, 32/58 serverbound encoded**.
+The 55 that decode nothing are enumerated in `adapter::IGNORED` with a reason
+each, so the dispatch table refuses to build if a packet is dropped by
+omission. The commonest reason is a missing 766 registry table — item ids, sound
+ids and attribute ids all name registry entries this crate cannot yet resolve
+into canonical keys, which still keeps the sound packets out.
+
+`entity_equipment`, `entity_update_attributes`, and `block_action` use the
+generated `generated_registry` table. `tests/registry_mappings.rs` renders its
+1,330 item, 22 attribute, and 1,060 block rows from the committed jar report;
+the production adapter binary-searches that table and never consults test data
+at runtime. Equipment uses the continuation bit to preserve every changed slot,
+then enters the existing entity/ECS render flow as canonical `ItemStack` values.
+An added or removed component patch is retained as `ItemComponents::has_unmodeled`,
+so a consumer cannot mistake a prototype-only stack for its complete effective
+value. Attributes carry a numeric registry holder, base value, and UUID modifiers;
+the adapter removes the wire registry's `generic.*`, `player.*`, and `zombie.*`
+prefixes to form the model's canonical attribute keys before the existing attribute
+consumer merges them. Block events
+preserve their packed position, both opaque bytes, and canonical block key; the
+shell's established event stream feeds chest lids, bells, gateways, and spawners.
+`tests/packet_parity.rs` supplies independent literal bodies for the metadata,
+equipment, attribute, and block-event paths, including a continued equipment
+list and a non-square packed position; the metadata and attribute fixtures
+assert that their events enter the existing ingest route.
+
+## How to change it
+
+* **Adding 767 to this era.** Generate its id table
+  (`cargo run -p xtask -- gen-packet-ids --version 1.21 --protocol 767 --source
+  minecraft-data`), add a `packet_ids_from!` static and an `ids_for` arm, extend
+  `PROTOCOLS`, widen the `#[mc(protocols = ...)]` range on each packet whose
+  shape the adjacency table says is unchanged, and record a second capture. The
+  22 shapes the measurement says differ are the work; the rest is a table.
+* **Wiring one of the 58 ignored packets.** Move its `IGNORED` entry to
+  `CLIENTBOUND` and write the handler. Spell the row as a literal
+  `Handler::new(` with the packet name beside it: `cargo xtask connectedness`
+  anchors on exactly that text, and a helper function that builds the row leaves
+  the instrument reporting zero arms examined while the table is correct.
+* **Refreshing a registry bridge.** Update the jar-generated report, update the
+  pinned counts in `tests/registry_mappings.rs` if the report shape genuinely
+  changed, then run its ignored `committed_table_matches_dump` test with
+  `LODESTONE_REGEN=1`. Do not import the test report from production code or
+  borrow a neighbouring protocol's numeric order: a valid but shifted id names
+  the wrong item, attribute, or block without a decode error.
+* **Adding a component type.** Extend `read_component_payload`'s table in
+  `packets/slot.rs`. Never add a default arm: the payload widths are
+  type-implied, so a wrong guess desynchronises the stream.
+* **Anything text-shaped.** Use `packets::common::NetworkNbt`, not the derive's
+  `#[mc(nbt)]`. That attribute reads the *named* NBT form; every text component
+  and registry payload at this protocol is the anonymous form, a tag byte
+  followed immediately by its payload.
+* **Re-recording the capture.** Start the oracle
+  (`./scripts/live-oracles/legacy.sh 1.20.6`), then
+  `cargo test -p lodestone-v1-20-6 --test capture_join -- --ignored --nocapture
+  record_1_20_6`. The recorder needs RCON as well as the game port; both come up
+  with the container.
+* **Do not derive the protocol from the folder name.** The folder is `1.20.6`,
+  the package suffix `v1-20-6`, the feature `v1-20-6`, and the protocol 766. Ask
+  `VersionAdapter::supports` or `PROTOCOLS`.
+
+## Configuration
+
+| knob | where | effect |
+|---|---|---|
+| `v1-20-6` feature | `lodestone-registry` | compiles this family in and registers its adapter. Off by default, like every family |
+| `LODESTONE_REGEN=1` | environment, with `--ignored` | rewrites the committed generated tables from their dumps instead of asserting against them |
+| oracle ports 25598 / 25599 | `scripts/live-oracles/legacy.sh` | game and RCON for the 1.20.6 container (`lodestone-mc1206`) |
+
+The crate itself reads no environment variable and has no runtime
+configuration: the negotiated protocol is the only per-connection input, and it
+is resolved once at construction.
+
+The same feature registers `V766ServerProtocol` for hosting protocol 766.
+
+## Hosting
+
+`server_protocol::V766ServerProtocol` implements offline login, configuration,
+the Overworld join and teleport, chunk batches, player movement, block
+breaking updates, inventory drops, held-item release, hand swaps, chat, and
+block-use placement. `chat_message` carries its bounded text, timestamp, salt,
+optional signature, and fixed acknowledgement tail into `ServerBound::Chat`;
+the shared server verifies or accepts it according to its connection policy and
+publishes the result back through this era's anonymous-NBT `system_chat`
+encoder. Its 766 `block_place` decoder lifts
+the hand, signed packed position, face, block-local cursor, and prediction
+sequence into `ServerBound::UseItemOn`, the existing integrated-server placement
+consumer; it rejects invalid hand or face values and never accepts those bytes
+before Play. All four Play movement shapes preserve the position,
+optional rotation, and grounded status the shared server uses to recenter the
+view and check interactions. The shared `block_dig` envelope also lifts its
+non-breaking statuses into the existing server consumers: `3` and `4` drop the
+whole selected stack or one item, `5` releases an in-progress held-item use,
+and `6` swaps the selected main-hand slot with the off hand. Their target,
+face, and prediction fields are padding rather than an interaction target; an
+unknown status or any such packet before Play is ignored.
+
+The initial view is a typed `ChunkBatchStart`, its columns, then a typed
+`ChunkBatchFinished`; the serverbound `ChunkBatchReceived` decoder becomes
+`ServerBound::ChunkBatchAcknowledged`. The shared server consumes that event
+with connection-local `awaiting_chunk_batch_ack` and
+`pending_chunk_batches` state: it writes at most one queued batch until the
+client replies, then releases the next batch. `chunks_per_tick` remains the
+client's request rather than a server-side within-batch rate, so changing
+batch sizing belongs in the shared consumer rather than either protocol codec.
+
+The configuration fixture in `src/generated/hosting-configuration.txt` contains
+all eight synchronized registries, plus features and tags, recorded directly
+from the headless 1.20.6 server. Every registry entry has its NBT payload, so no
+known-pack agreement is needed. Dimension and plains biome IDs are resolved
+from the captured ordered stream. The source server jar's SHA-256 is
+`c6d01d018ca782e506f0ec60652d47fd565078be9122b625c1681bc86c29c7ec`.
+
+Chunks cover y=-64 through 319, use anonymous NBT heightmaps, counted palette
+long arrays, and inline light framing without a trust-edges byte. The outbound
+block-state inverse accepts only unique canonical mappings. Unsupported states,
+non-plains biomes and block entities return explicit chunk-encoding errors.
+Sky and block light are computed over canonical states with the shared light
+solver and the canonical per-state opacity/emission table. Initial chunks and
+relevant edits supply the shared solver with the loaded 3×3 column
+neighbourhood, so adjacent columns contribute at seams from the first load
+when already resident and throughout later relights. Missing columns retain an
+opaque seam rather than being generated for light. An edit recomputes and sends
+that whole bounded footprint. Broader Play coverage remains unverified.
+
+### External-client acceptance
+
+The opt-in release-client gate covers this hosted protocol as row **766**. Run it with
+`just external-client-acceptance --protocol 766 --output /private/tmp/lodestone-v766` and an
+external driver. A passing evidence file records configuration completion, an acknowledged chunk
+batch, world join, at least one movement update, exactly one observed `start_destroy_block` result,
+and a client-initiated clean disconnect, with client-log and capture provenance. This gate was not
+launched while this documentation was updated; protocol 766 therefore remains unverified by a real
+external client until that manual run produces `report.json`.
+
+To extend hosting, change this family's `server_protocol` and add outside wire
+controls to `tests/server_protocol.rs`. `tests/hosting_configuration.rs` records
+all registry packets without a per-ID cap and stops at FinishConfiguration.
+With the headless oracle running, use
+`LODESTONE_REGEN=1 cargo test -p lodestone-v1-20-6 --test hosting_configuration --no-fail-fast -- --ignored --nocapture`.
+Omit `LODESTONE_REGEN` to compare the committed fixture against a fresh capture.
+Each capture is bounded to 30 seconds and performs no gameplay actions.
+Its hermetic companion reads an actual registry-selected hosted connection and
+requires every recorded payload to arrive before the finish signal.
+`tests/server_integration.rs` checks the actual registry-selected server/client
+path through Play, chunk receipt, movement-driven view recentering, and block
+break. It also sends chat through the real adapter, registry-selected host, and
+shared broadcast queue, then requires the pre-existing client decoder to expose
+the exact rendered system-chat event.
+Its enclosed-room lighting gate checks sky 0 inside and 15 outside, torch 14,
+adjacent air 13, and extinction after removing the torch. A separate boundary
+gate starts from isolated sky 0 beneath an opaque roof, removes a border
+occluder, and observes the independent 14-level light entering from the open
+east column in the client's render-light snapshot. Fixture opacity and emission
+are cross-checked against the protocol-766 block report in the vendored dataset.
+
+## Dependencies
+
+The wire implementation uses `lodestone-core`
+(codecs, NBT, dispatch table), `lodestone-model` (the version-free
+`VersionAdapter`, `ClientEvent` and `Directive` vocabulary), `lodestone-macros`
+(the `Encode`/`Decode`/`Packet` derives), `lodestone-protocol-common` (one
+shared packet, the brand payload), `lodestone-data` (the canonical 26.2
+block-state, block-entity and mob-effect registries) and `lodestone-world`
+(paletted column storage and light). Hosting uses `lodestone-server`'s protocol
+trait and checked chunk boundary. Tests additionally use `lodestone-client`,
+`lodestone-registry`, `lodestone-net`,
+`lodestone-testsupport` (RCON), `tokio` and `serde_json`.
+
+Nothing else depends on this crate except `lodestone-registry`, through one
+optional feature-gated edge, so the whole era can be removed by deleting the
+folder and three manifest lines — `cargo xtask check-deletable 1.20.6` reports
+which.
+
+The 1.20.6 era shares **no** `lodestone-protocol-common` definitions beyond the
+brand payload. Every other shared definition there is range-capped at 762 or
+below, and none of those ranges was widened for this era: at 766 the resource-pack
+reply is keyed by UUID, `settings` gained two fields and moved into the
+configuration state, `abilities` lost its two speed hints, and the movement
+packets are the only genuinely unchanged group — a group too small to be worth
+the inheritance-by-range hazard.

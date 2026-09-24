@@ -1,0 +1,1 @@
+minecraft:acacia_wall_sign[facing=north,waterlogged=true]

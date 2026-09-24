@@ -1,0 +1,124 @@
+# Vanilla-authored structure starts from the survival oracle world.
+#
+# Provenance: every line below was read out of `structures.starts` in the
+# per-chunk NBT of `.cache/mc/survival/world/dimensions/minecraft/overworld/region`
+# (29 region files, 14,499 generated overworld chunks), written by the real
+# vanilla 26.2 server. Seed **-195764831**, read from
+# `world/data/minecraft/world_gen_settings.dat` -- 26.2 does *not* keep the seed
+# in `level.dat`. Starts whose `id` is `INVALID` are excluded; the list is
+# deduplicated on (id, ChunkX, ChunkZ) and sorted.
+#
+# Nothing here round-trips through this repo's own encoder: these are expected
+# values authored by a different implementation, which is the whole point.
+#
+# Format: `<structure id> <ChunkX> <ChunkZ>`.
+#
+# Census by structure: buried_treasure 2, mineshaft 46, monument 2,
+# ocean_ruin_cold 14, ocean_ruin_warm 2, ruined_portal 4,
+# ruined_portal_mountain 1, ruined_portal_ocean 4, shipwreck 10,
+# shipwreck_beached 1, trail_ruins 1, trial_chambers 13, village_plains 2.
+# Absent from the generated area (so unusable as evidence): stronghold,
+# desert_pyramid, igloo, swamp_hut, jungle_temple, pillager_outpost,
+# ancient_city, mansion.
+minecraft:buried_treasure 10 33
+minecraft:buried_treasure 52 -10
+minecraft:mineshaft -45 -79
+minecraft:mineshaft -37 -74
+minecraft:mineshaft -31 -41
+minecraft:mineshaft -23 -42
+minecraft:mineshaft -22 -61
+minecraft:mineshaft -18 -49
+minecraft:mineshaft -14 -55
+minecraft:mineshaft -13 -26
+minecraft:mineshaft -10 -24
+minecraft:mineshaft -9 -80
+minecraft:mineshaft -8 -78
+minecraft:mineshaft -8 -73
+minecraft:mineshaft 10 24
+minecraft:mineshaft 13 26
+minecraft:mineshaft 20 -52
+minecraft:mineshaft 26 -36
+minecraft:mineshaft 31 -29
+minecraft:mineshaft 39 -34
+minecraft:mineshaft 43 -6
+minecraft:mineshaft 48 -11
+minecraft:mineshaft 63 -17
+minecraft:mineshaft 65 -2
+minecraft:mineshaft 68 27
+minecraft:mineshaft 71 -39
+minecraft:mineshaft 74 -23
+minecraft:mineshaft 74 6
+minecraft:mineshaft 74 11
+minecraft:mineshaft 78 -19
+minecraft:mineshaft 79 21
+minecraft:mineshaft 83 -2
+minecraft:mineshaft 84 7
+minecraft:mineshaft 88 23
+minecraft:mineshaft 91 -12
+minecraft:mineshaft 92 -9
+minecraft:mineshaft 93 22
+minecraft:mineshaft 94 -1
+minecraft:mineshaft 107 0
+minecraft:mineshaft 108 -15
+minecraft:mineshaft 109 19
+minecraft:mineshaft 301 310
+minecraft:mineshaft 304 324
+minecraft:mineshaft 304 326
+minecraft:mineshaft 311 309
+minecraft:mineshaft 314 324
+minecraft:mineshaft 322 321
+minecraft:mineshaft 322 326
+minecraft:monument -14 9
+minecraft:monument 108 -17
+minecraft:ocean_ruin_cold -34 11
+minecraft:ocean_ruin_cold -19 -9
+minecraft:ocean_ruin_cold -18 26
+minecraft:ocean_ruin_cold -13 6
+minecraft:ocean_ruin_cold -10 -30
+minecraft:ocean_ruin_cold 2 24
+minecraft:ocean_ruin_cold 5 3
+minecraft:ocean_ruin_cold 23 -10
+minecraft:ocean_ruin_cold 41 -9
+minecraft:ocean_ruin_cold 47 1
+minecraft:ocean_ruin_cold 71 -18
+minecraft:ocean_ruin_cold 71 3
+minecraft:ocean_ruin_cold 87 -10
+minecraft:ocean_ruin_cold 90 -30
+minecraft:ocean_ruin_warm -35 -14
+minecraft:ocean_ruin_warm -32 -32
+minecraft:ruined_portal -26 -65
+minecraft:ruined_portal 7 -37
+minecraft:ruined_portal 12 -65
+minecraft:ruined_portal 52 -31
+minecraft:ruined_portal_mountain 89 5
+minecraft:ruined_portal_ocean -17 13
+minecraft:ruined_portal_ocean -16 -16
+minecraft:ruined_portal_ocean 2 6
+minecraft:ruined_portal_ocean 62 14
+minecraft:shipwreck -42 -14
+minecraft:shipwreck -36 -42
+minecraft:shipwreck -24 -37
+minecraft:shipwreck -23 28
+minecraft:shipwreck -21 -6
+minecraft:shipwreck -5 10
+minecraft:shipwreck 5 7
+minecraft:shipwreck 10 -6
+minecraft:shipwreck 86 -9
+minecraft:shipwreck 89 -29
+minecraft:shipwreck_beached 37 17
+minecraft:trail_ruins 35 -16
+minecraft:trial_chambers -47 -53
+minecraft:trial_chambers -21 4
+minecraft:trial_chambers -20 -50
+minecraft:trial_chambers -19 -34
+minecraft:trial_chambers 6 -63
+minecraft:trial_chambers 14 13
+minecraft:trial_chambers 19 -13
+minecraft:trial_chambers 38 -30
+minecraft:trial_chambers 41 -47
+minecraft:trial_chambers 53 6
+minecraft:trial_chambers 74 5
+minecraft:trial_chambers 86 -19
+minecraft:trial_chambers 326 313
+minecraft:village_plains -67 -57
+minecraft:village_plains 4 -44

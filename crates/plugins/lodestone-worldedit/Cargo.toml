@@ -1,0 +1,31 @@
+# A WorldEdit-class bulk-edit plugin: region selection,
+# fill/replace/copy/paste, and a per-session undo/redo stack, built entirely
+# on top of `lodestone_world::World::fill_region_capturing` (the batched
+# write primitive it backs onto) and `lodestone_ecs::ChunkWorldWrite` — no
+# engine change of its own.
+#
+# "This is a *second* plugin, conceptually — WorldEdit itself is a plugin in
+# the Java ecosystem, not a server feature". Everything region-selection/
+# undo-shaped lives here rather than in `lodestone-world` or `lodestone-ecs`.
+[package]
+name = "lodestone-worldedit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The batched write/read primitives this plugin is built on:
+# `World::fill_region_capturing`, `World::block_state_at`,
+# `World::set_block_with_physics`.
+lodestone-world = { workspace = true }
+# `ChunkWorldWrite`, the resource wrapping the chunk store a plugin system
+# holds to reach a `lodestone_world::World` at all.
+lodestone-ecs = { workspace = true }
+# Direct, for `#[derive(Resource)]`'s absolute `bevy_ecs::` paths — see
+# `docs/plugin-api.md`'s "how to change it" and every sibling plugin's
+# `Cargo.toml` for the same note.
+bevy_ecs = { workspace = true }
+bevy_app = { workspace = true }

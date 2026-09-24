@@ -1,0 +1,359 @@
+# Registries: synchronized data, canonical block states, and generated tables
+
+## What it is
+
+How Minecraft's data-driven registries reach this client and this server: the
+Configuration-phase `registry_data` wire packet and what we keep from it, the
+`lodestone-canonical` bridge that maps a legacy protocol family's own block-id space onto
+the canonical 26.2 block-state space, the generated-enum representation used for registry
+types (`Block`, `Item`, `EntityType`), and the `lodestone-data` crate that owns the ~20
+generated game-data censuses (block states, hardness, collision shapes, item prototypes, and
+the rest) neither a protocol family nor the game logic should hand-roll.
+
+## How it works
+
+### Registry data ingest (`registry_data`)
+
+During Configuration the server sends one `registry_data` packet per **synchronized
+registry** — 29 of them. **The authoritative list is the jar's own
+`RegistryDataLoader.SYNCHRONIZED_REGISTRIES`, not `generated/reports/registries.json`**,
+which omits `minecraft:dimension_type` and `minecraft:world_clock` entirely because both are
+data-pack-loaded registries the report does not enumerate; following the report literally
+builds a set missing the registry the client needs most. Each packet is a registry
+identifier plus a list of `(entry id, optional NBT)` pairs, and **entry order is the
+holder-id space** — `login`/`respawn` and `set_time` reference entries by a bare VarInt
+index into that order, so a registry whose entries arrive out of the order you expect (they
+are typically alphabetical by resource location, not by any bootstrap class's registration
+order — measured directly against several dynamic registries elsewhere in this codebase, and
+worth checking again for any new one) silently mis-resolves every later reference. Never
+assume a holder id without reading the actual entry order.
+
+Only `minecraft:dimension_type` and `minecraft:world_clock` are parsed into typed values
+today (chunk-column height/sky-light defaults and the day-clock selection come from them);
+the other 27 keep only their ordered **names**, since retaining raw NBT for registries
+nothing reads (enchantments, biomes) would cost real memory per connection for no consumer.
+Add a typed arm beside the existing ones when a third registry becomes load-bearing, rather
+than growing a generic NBT cache. An elided or unparseable entry keeps its slot (as
+`Option<T>`) rather than being dropped, because dropping one would shift every later holder
+id; a resent registry (a Configuration re-run) replaces the whole set rather than appending,
+for the same reason.
+
+`login` and `respawn` keep their dimension-type holder field as the raw signed VarInt in
+their packet structs, because that is the wire shape and the canonical event retains it for
+diagnostics. `DimensionTypeHolderId::from_wire` validates it exactly once at the v26 adapter
+ingress before `ClientRegistries::dimension_type` can index the per-connection table. The type
+rejects negative values only: a non-negative id is not validated against a built-in census,
+because a data pack may add or reorder dimension types. A well-formed but unknown id stays an
+explicit unresolved lookup and follows the existing level-name fallback; it is never coerced to
+an overworld holder.
+
+The server side is the mirror: `ServerProtocol::encode_registry_data` emits the same 29-packet
+burst (`select_known_packs` with an empty requested-pack list, all 29 registries, then
+`update_tags`) so a real vanilla client can join our integrated server.
+`dimension_type`/`world_clock` stay hand-built structured tables, since this server resolves
+holder ids out of them elsewhere; the other 27 are relayed as opaque bytes captured verbatim
+from a real vanilla server, because nothing here needs to parse their contents — a joining
+client just needs a self-consistent copy to resolve tag/holder references inside data
+components it already decodes.
+
+### `lodestone-canonical`: the shared pre-Flattening bridge
+
+Every pre-1.13 protocol family (`v1-8`, `v1-9`, and any future one below protocol 404) maps
+its own wire block representation through this one shared crate rather than each carrying a
+private copy of a large generated table. Two modules in series:
+
+- `flattening::lookup(old_block_id, meta)` — the `(id, meta)` → 1.13-era block name and
+  properties, dumped reflectively from the real 1.13.2 server jar's own `DataFixerUpper` (the
+  same conversion vanilla itself runs upgrading a pre-1.13 world). It distinguishes a
+  resolved entry from *no table entry*, from *requires additional context* (flower pots,
+  skulls, double-plant upper halves — identity depends on TileEntity data the id/meta pair
+  cannot supply), and one structurally out-of-bounds slot.
+- `canonical` — bridges that 1.13-era name/properties to a concrete 26.2 block-state id
+  (`lodestone_data::block_states`), via a small hand-verified rename table (a few names are
+  stale even relative to 1.13.2's own final registry, and a few more relative to later 26.2
+  renames) and property fixups for properties 26.2 added that pre-1.13 storage cannot
+  express. A successful `CanonicalBlockState::Resolved` carries `StateId`, not a primitive:
+  it is necessarily a member of the compiled-in canonical census. The family converts it to a
+  raw palette value only at the protocol/world boundary. Session-local or extension states do
+  not enter this bridge as forged `StateId`s; unresolved legacy input remains an explicit
+  fallback outcome for the consuming family to handle.
+
+Neither module collapses a failure into air itself — the decision to substitute air belongs
+to the **consuming family**, made in its own chunk decoder and counted on a `FallbackTally`
+so it stays visible rather than silent. One table serves every pre-1.13 version because the
+dumped table upgrades *1.12.2-space* ids and older versions' ids are a strict subset (ids
+were only ever added), so the per-version difference is only which slots are populated. This
+crate is shared game data, not a protocol family, and names none in
+`lodestone-registry` — see `docs/multi-protocol-seam.md` for how `v1-8`/`v1-9`/`v1-14` each use
+their own canonicalisation path (`v1-14` is post-Flattening and needs a different,
+per-family baked table instead, since 1.16.5 already speaks a flat state-id space).
+
+### Registry types: generated enums instead of strings
+
+`lodestone_model::Identifier` keeps its namespace and path in private `SmolStr`
+fields. `Identifier::new` continues to accept the owned `Into<String>` inputs used
+by existing callers, while `Identifier::new_borrowed` is the allocation-avoiding
+entry point for parser and generated/static paths. `FromStr` uses the borrowed
+constructor directly, so parsing does not first build a temporary formatted
+string. Generated registry tables remain `&'static str`; they are not converted
+into an eagerly allocated identifier table.
+
+`lodestone_data::block::Block`, `item::Item`, and `entity_type::EntityType` are each a
+generated `#[repr(u16)]`/`#[repr(u8)]` enum whose discriminant **is** the registry id a
+`Holder<T>` carries on the wire — no lookup, no branch, and a per-entry census is a plain
+array indexed by the enum. None carries a `Custom` variant and none is
+`#[non_exhaustive]`, so a match over one is exhaustive and a version bump that adds an entry
+fails every incomplete match at compile time rather than falling through a wildcard — the
+enum is built specifically so that a terminal `_ =>` arm, this repo's named island factory,
+is never needed. The plugin/custom case lives one level out, in a `*Ref` wrapper (`BlockRef`,
+etc.): a `u32` where a value below the built-in count is a registry id and at or above it
+indexes an opaque host-owned interner, so an application with no plugins links zero bytes of
+interner code.
+
+At a built-in block-registry boundary, convert the decoded non-negative integer to `u16` and
+call `Block::from_registry_id`; only call `Block::name` after that validation succeeds. Do not
+replace this with a raw id-to-string helper: it loses the distinction between a block type and a
+state. A custom or data-pack key stays as its parsed identifier in the owning dynamic registry;
+it is not coerced into `Block` merely because its path resembles a built-in name.
+
+`Item` follows the same boundary rule. A packet or synchronized recipe keeps an
+`lodestone_model::ItemId` while it needs to preserve an unknown/custom entry;
+the value's `ProtocolLocal` source prevents a built-in consumer from treating
+it as canonical. Such a consumer requires `ItemId::canonical_raw()` and then
+converts it with `u16::try_from(raw).ok().and_then(Item::from_registry_id)`
+before it reads `Item::name`, a prototype, or a sprite-table slot. Writers use
+`Item::from_name` and emit `i32::from(item.registry_id())`; an unresolved custom
+identifier stays unresolved rather than acquiring a made-up built-in id. The
+literal controls in the item-enum and packet fixtures pin `air = 0`, `stone = 1`,
+and independently selected encoded item values, so the conversion is not only a
+round trip over generated tables.
+
+Block-entity types use the same boundary discipline without an enum: there are
+49 fixed entries, represented by the validated `BlockEntityType` newtype. The
+state-to-type census returns that type, `block_entity_type_id` resolves an
+in-process record's key back to it, and packet writers call `raw` only at the
+VarInt write. This prevents a block-state id or arbitrary `u32` from reaching a
+block-entity packet by accident. A key not in the built-in census stays a miss;
+it must remain in the dynamic registry that supplied it rather than being
+coerced into a built-in slot.
+
+The monster-spawner block has two names at different boundaries: its block
+state is `minecraft:spawner`, while the block-entity registry and chunk-NBT
+key are `minecraft:mob_spawner` (fixed registry id 9). Server records expose
+the latter through `BlockEntity::type_id`, and the decoder accepts the former
+only as a compatibility alias for worlds written by older Lodestone builds.
+
+Entity writers follow the same two-stage boundary. `EntitySnapshot` deliberately
+keeps a `ResourceKey`: the server protocol trait also serves legacy families,
+and a custom/session-synchronized key cannot honestly be represented by the
+closed 26.2 enum. At the 26.2 `add_entity` and entity-stat writers,
+`EntityType::from_resource_key`/`EntityType::from_name` validate a built-in
+key, and only `EntityType::registry_id` reaches the VarInt. The older
+`entity_types` module remains a compatibility facade for raw-id consumers;
+each legacy protocol family keeps its own numeric-to-name translation table.
+An unresolved key is not converted into an arbitrary fixed enum merely to
+make the type checker happy; the entity-spawn writer preserves its documented
+recoverable fallback explicitly as `EntityType::AcaciaBoat` until the
+custom-disguise registry is supplied to that production seam.
+
+**`Block` and `StateId` are two different id spaces and conflating them is the mistake that
+surfaces late.** `Block` has 1,196 values in **registration** order (wire use: `Holder<Block>`
+in `block_event`, tool rules); `StateId` has 32,366 values in **name-sorted** order (wire use:
+chunk palettes, `block_update`) and is a validated newtype rather than an enum, because
+32,366 hand-named variants buys nothing when no code ever matches on one. The orders are
+unrelated permutations — going between them always goes through the generated join
+(`StateId::block`, `Block::default_state`), never by assuming the indexes coincide. At an
+in-process built-in-state boundary, resolve text with `StateId::from_state_str` and use
+`StateId::block`/`StateId::properties`; call `StateId::raw` only where a protocol packet actually
+writes the global state id. A dynamic plugin or data-pack state that does not resolve must stay
+text in its owning registry or import path, rather than being substituted with a built-in state
+merely to obtain this type.
+
+The legacy `block_action` packets are a useful in-process canonical boundary: the
+wire carries a legacy block *type* without metadata, so the adapter scans the fixed legacy table
+for one resolved canonical `StateId`, falls back to `block_states::air_state`, and immediately
+uses `StateId::block`. The resulting `Block::name` becomes the event's `ResourceKey`; no raw
+26.2 state id enters that path. A legacy table miss is static import data, not a dynamic registry
+key, so air is the established packet-family fallback and no plugin or data-pack identifier is
+discarded there.
+
+Portal-overlap detection in `lodestone-shell` is another in-process boundary: the chunk snapshot
+supplies its raw state id, validates it once with `StateId::new`, then passes `StateId` to the
+classifier. The classifier compares `StateId::block` with `Block::NetherPortal`, covering both
+axis states without spelling a block name or admitting an out-of-census snapshot value. This is
+not a dynamic-registry decision: a snapshot value outside the built-in census fails closed, while
+plugin or data-pack identifiers remain in their owning registry paths.
+The raw block-state table keeps its first field as the alphabetical block index required by
+the name-keyed state report, but it does **not** carry a second block-name column: lookup
+resolves that field through `generated_block_enum::REGISTRY_IDS_BY_NAME` into the one
+registration-order `BLOCK_REGISTRY_NAMES` column. This preserves the state table's source
+ordering without making a second 1,196-name rodata copy. Air (registry 0, alphabetical 19)
+and stone (registry 1, alphabetical 975) are the standing controls that distinguish those
+orders; an unknown report name, mismatched canonical name, or incomplete 1,196-entry join
+fails generation rather than choosing a plausible wrong block.
+`block_states::state_id` is the reverse map (a canonical state string → its global state id)
+and is deliberately **derived at first use from the already-committed tables**, behind a
+`OnceLock`, rather than itself generated — generating it would add a second drift surface
+that must stay in lockstep with the tables it derives from, and a stale one fails in the
+worst possible way (a plausible-looking wrong id). Its resolver has three tiers — exact
+match, default-plus-named-overrides, default alone — and the default is deliberately not
+simply "the lowest id"; do not hand-roll a copy of this fallback, which has silently drifted
+from the real one before.
+
+The sound-event registry keeps one canonical id-indexed name column rather than duplicating
+those names beside entry metadata. Optional fixed audible ranges are a sparse `(u32, f32)`
+table sorted by registry id; absence means the ordinary volume-derived range. The 26.2 report
+has 1,968 names and zero fixed-range rows, while the generator still emits any future rows
+present in the report. `sound_events::sound_event` bounds-checks the name table first and then
+joins the sparse metadata, preserving the same `(name, Option<range>)` API without storing a
+second set of 1,968 string pointers.
+
+`lodestone_data::particle_types::ParticleTypeId` is the equivalent boundary for the built-in
+particle registry. Packet decoders validate their raw VarInt before looking up a name or deciding
+whether a particle has no option payload; those data lookups are total for the resulting type.
+The integrated-server encoder obtains the typed value from its name cache and unwraps it to a raw
+integer only at the writer. This prevents a state, sound, or arbitrary integer from selecting a
+particle-table row by accident, while an unknown or future wire value remains an explicit decode
+failure. When the generated particle census changes, keep `ParticleTypeId::new` tied to the
+generated count and extend the classification controls rather than adding a raw lookup escape
+hatch.
+
+Potion display-name keys use the same canonical-column rule. A generated 46-entry `u8` table
+maps each potion registry id to the registry id of its explicitly declared base potion, then
+`potion::potion_effect_key` resolves that id through `POTION_NAMES` and returns the bare path.
+The 24 unique base mappings come from the committed `potion_effect_bases_26_2.txt` fixture;
+duration and potency aliases are source data, not names inferred by removing `long_` or
+`strong_`. The fixture-backed generator rejects missing, duplicate, or out-of-range ids and a
+base name absent from the canonical potion registry.
+
+`lodestone_data::potion::PotionId` is the built-in-potion boundary. Construct it only with
+`PotionId::from_registry_id` before calling a census lookup; that makes every lookup total and
+keeps invalid numeric values out of display, tint, and splash-effect logic. The wire value stays
+raw in `lodestone_model::ItemComponents` because that version-free carrier must preserve an
+unknown custom, datapack, or future holder exactly. Its consumers validate on entry to the
+built-in census and fail closed: an unknown holder contributes no built-in effects and falls
+back to the component's custom data. When adding a generated potion row, regenerate the census
+and let `PotionId`'s length check follow the regenerated name table; do not add an unchecked
+numeric constructor or replace an unknown raw model value with a built-in default.
+
+`lodestone_data::attribute_types::AttributeId` is the equivalent boundary for the attribute
+registry. The 26.2 metadata codec validates each raw wire varint with `AttributeId::new` before
+calling `attribute_name`; the data lookup is total for the resulting type. Encoding obtains the
+same type from `attribute_id` and writes it back with `AttributeId::raw`. Keep raw integers at
+that codec seam: callers holding a validated id must not reintroduce a fallible data lookup or an
+unchecked constructor. The committed-table suite checks the type's lower and upper controls, and
+the metadata codec's hand-built byte fixtures independently pin the registry values used in both
+directions.
+
+`lodestone_data::menus::MenuId` gives the menu registry the same boundary. The open-screen decoder
+turns its raw VarInt into a `MenuId` before calling the total `menu_name` lookup, so an unknown
+wire id still fails explicitly. The server encoder obtains a `MenuId` from `menu_id` and emits its
+`raw` value only at the wire writer; an unknown custom or future menu name remains a failed lookup
+and therefore produces no made-up built-in id. The data suite checks lower and upper bounds plus
+literal furnace and merchant ids, while the packet fixture independently pins furnace's encoded
+VarInt.
+
+`lodestone_data::data_component_types::DataComponentTypeId` is the built-in
+data-component-type boundary. `DataComponentTypeId::new` validates an item
+patch's raw VarInt before `component_type_name` performs its total lookup;
+`component_type_id` provides the reverse path for outbound item writers.
+An added id outside the built-in census remains explicitly unknown/custom and
+makes the stack patch partial, because that payload has no generic length to
+skip. An unknown removal remains safe to consume because removals contain only
+the id. The table suite checks the entire domain and literal `custom_data = 0`,
+`tool = 28`, and `shulker/color = 110` controls; no raw public lookup may turn
+an invalid id into a built-in component name.
+
+### `lodestone-data`: the crate these censuses live in
+
+Owns roughly twenty generated 26.2 game-data tables — block states, hardness, collision
+shapes, block solidity, item prototypes, entity census/dimensions, tools, sound events,
+particle types, menus, data component types, and more — split from the protocol crate
+because they describe **the game**, not the wire format (`packet_ids` is the one table that
+stayed behind, in `v26-2`, for exactly that reason). Each table has three parts: a generated
+`src/generated/*.rs` raw rodata file (never hand-edited), a hand-written `src/*.rs` lookup API
+returning `lodestone-model` types, and a dump program under `oracle-java/` that produces the
+data it is regenerated from. Two provenance shapes: **registry-report tables**
+(`attribute_types`, `entity_types`, `block_states`, `sound_events`, `particle_types`, `menus`,
+`items`, `data_component_types`) parse Mojang's own `registries.json`/`blocks.json` reports
+directly; **JVM-walked tables** (`hardness`, `collision_shapes`, `block_solidity`,
+`entity_census`, `entity_dimensions`, `item_prototypes`, `outline_shapes`, `path_types`,
+`snow_support`, `tools`, `block_entity_types`) need a real headless 26.2 server booted and
+walked, because the fact in question has no getter and is absent from the reports (block
+entity coverage, for instance, is recovered from vanilla's own per-type state-validity check
+rather than
+by constructing a live `BlockEntity`).
+
+`lodestone-v26-2`'s adapter delegates every data-shaped `VersionAdapter` trait method
+(`block_hardness`, `block_collision`, `item_prototype`, `entity_dimensions`, and similar)
+straight into this crate, one line each — the seam `lodestone-shell`/`lodestone-physics`
+already used before the split and still use unchanged. A version crate other than `v26-2`
+needing one of these tables is a different question from this crate becoming version-generic:
+per the canonical-internal-version design, 26.2 is the one canonical version and these are
+that version's data; `v1-8`/`v1-9`/`v1-14` keep their own *translation* tables for their own
+protocol, which is not a second copy of the canonical census.
+
+## How to change it, and the gotchas
+
+- **Every generated file in this cluster is generated — never hand-edit one.** Regenerate
+  with `LODESTONE_REGEN=1 cargo test -p <crate> --test <name> <fn> -- --ignored --nocapture`;
+  each test file's own header carries the exact invocation. The hermetic potion base-id table
+  uses `LODESTONE_REGEN=1 cargo test -p lodestone-data --test potion_effect_ids
+  committed_table_matches_the_committed_fixture -- --nocapture` (without `--ignored`).
+- **Large generated arrays use compile-time include shards.** The path-type table keeps its
+  public `STATE_PATH_TYPE` static and exact indexing API in `generated/path_types.rs`, while
+  the generator emits fixed 1,024-state contiguous files named `path_types_0000.rs` and onward.
+  A const assembler copies those arrays into the final static, so sharding changes source-file
+  size only: there is no heap allocation, lookup indirection, or runtime initialization. The
+  ignored drift guard derives the complete expected shard set from the dump, compares every
+  shard byte-for-byte, and rejects both missing and extra/stale shards. Regeneration removes
+  only obsolete files with that exact reserved prefix.
+- **A generated census keyed by a built-in registry must reuse that registry's canonical
+  names.** For example, the blast/fire facts use a `Block` registry-id → fact-index
+  mapping; they do not repeat block names beside the facts. Its generator checks that
+  dump ids are the exact `0..BLOCK_COUNT` permutation and that each dump name joins to the
+  same `Block` id before emitting the table.
+- **Registry-report tables** use
+  `cargo xtask gen-registries --version 26.2 --protocol 776`; run
+  `cargo xtask gen-registries --version 26.2 --protocol 776 --check` to detect drift without
+  writing. The sound-event generator derives the sparse fixed-range keys from each entry's
+  protocol id, so adding a range requires no parallel hand-maintained table.
+- **Adding a field to a typed registry struct** (e.g. `DimensionType`): add it to the wire
+  struct, to the version-free carrier in `lodestone-model` if a version-free consumer needs
+  it, and to the adapter that builds the carrier. Watch for a field that moved into a generic
+  `attributes`/component map in 26.2 versus where an older doc or issue describes it as a
+  top-level field — a stale description reads as a real gap and is not one.
+- **Adding a new `lodestone-data` census**: a dump program or registry-report parser, a
+  generated raw table, and a lookup-API file, wired into `lib.rs`'s module declarations.
+  `tests/generated_string_columns.rs` fails if a new `&'static str` column is not classified
+  in its `ALLOWED` table, so a genuinely new string column needs that entry, not a workaround.
+- **Adding a rename or property fixup to the canonical bridge is hand-written work** and
+  needs its own justification checked against the decompiled 26.2 source, not merely "the
+  registry has a plausible-shaped entry."
+- **A dynamic (datapack) registry's entry order is not its bootstrap class's registration
+  order** — it is typically alphabetical by resource location. Assuming the bootstrap order
+  has silently mis-mapped entries before; settle order against a captured `registry_data`
+  fixture or the registry report, never against the class that constructs the entries.
+- **`cargo xtask connectedness` cannot see a canonicalisation defect** — it is blind to what
+  *value* flows through an already-connected wire, only whether the wire is connected at all.
+  A jar-derived oracle (a captured real-server section, or a live server via RCON) is what
+  actually verifies a decoded block id.
+
+## Configuration
+
+- `LODESTONE_REGEN=1` switches every generator above from assert to write.
+- `live-registry` (Cargo feature) gates the live registry-capture test; `LODESTONE_CAPTURE_
+  FIXTURES=1` rewrites captured passthrough-registry fixtures from a live run.
+- No other environment variables or feature flags gate any of this; every table is
+  `&'static` rodata read unconditionally.
+
+## Dependencies
+
+- `lodestone-model` for every public type these lookup APIs return (`BlockAabb`, `PathType`,
+  `DimensionTypeInfo`, `Identifier`, and the rest); `lodestone-data` depends on nothing else.
+- `lodestone-canonical` depends only on `lodestone-data`, consumed by `v1-8`/`v1-9` today.
+- `lodestone-ecs`/`lodestone-client`/`lodestone-shell` as the consumers of the typed
+  `dimension_type`/`world_clock` registry data (chunk geometry, sky-light default, day clock).
+- `.cache/mc/26.2/{generated/reports,client-src}` and the 1.13.2 server jar (gitignored,
+  fetched per this repo's oracle conventions) as the outside sources every generator dumps
+  from; see `docs/oracles-and-benchmarks.md` for how the JVM oracles actually run.

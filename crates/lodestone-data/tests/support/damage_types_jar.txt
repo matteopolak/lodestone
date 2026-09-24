@@ -1,0 +1,699 @@
+# Vanilla Minecraft 26.2 damage-type registry, VERBATIM datapack JSON.
+#
+# Provenance: extracted with `unzip` from the real server jar's embedded
+# vanilla datapack --
+#   .cache/mc/26.2/versions/26.2/server-26.2.jar
+# (note the OUTER .cache/mc/26.2/server.jar is a *bundler* and contains
+# none of these paths -- searching it returns zero hits).
+#
+# These are the game's own data files, not a program's reading of them, so
+# this dump needs no JVM boot: it is a strictly more direct anchor than the
+# registry-walking oracles next to it (HardnessOracle and friends exist
+# because hardness/collision have NO datapack representation at all).
+#
+# Regenerate with `just regen-damage-types` (see the recipe for the exact
+# unzip invocation). Entry bodies are byte-for-byte as shipped.
+#
+# 51 damage types, 34 tags.
+
+>>> damage_type/arrow.json
+{
+  "exhaustion": 0.1,
+  "message_id": "arrow",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/bad_respawn_point.json
+{
+  "death_message_type": "intentional_game_design",
+  "exhaustion": 0.1,
+  "message_id": "badRespawnPoint",
+  "scaling": "always"
+}
+>>> damage_type/cactus.json
+{
+  "exhaustion": 0.1,
+  "message_id": "cactus",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/campfire.json
+{
+  "effects": "burning",
+  "exhaustion": 0.1,
+  "message_id": "inFire",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/cramming.json
+{
+  "exhaustion": 0.0,
+  "message_id": "cramming",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/dragon_breath.json
+{
+  "exhaustion": 0.0,
+  "message_id": "dragonBreath",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/drown.json
+{
+  "effects": "drowning",
+  "exhaustion": 0.0,
+  "message_id": "drown",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/dry_out.json
+{
+  "exhaustion": 0.1,
+  "message_id": "dryout",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/ender_pearl.json
+{
+  "death_message_type": "fall_variants",
+  "exhaustion": 0.0,
+  "message_id": "fall",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/explosion.json
+{
+  "exhaustion": 0.1,
+  "message_id": "explosion",
+  "scaling": "always"
+}
+>>> damage_type/fall.json
+{
+  "death_message_type": "fall_variants",
+  "exhaustion": 0.0,
+  "message_id": "fall",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/falling_anvil.json
+{
+  "exhaustion": 0.1,
+  "message_id": "anvil",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/falling_block.json
+{
+  "exhaustion": 0.1,
+  "message_id": "fallingBlock",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/falling_stalactite.json
+{
+  "exhaustion": 0.1,
+  "message_id": "fallingStalactite",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/fireball.json
+{
+  "effects": "burning",
+  "exhaustion": 0.1,
+  "message_id": "fireball",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/fireworks.json
+{
+  "exhaustion": 0.1,
+  "message_id": "fireworks",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/fly_into_wall.json
+{
+  "exhaustion": 0.0,
+  "message_id": "flyIntoWall",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/freeze.json
+{
+  "effects": "freezing",
+  "exhaustion": 0.0,
+  "message_id": "freeze",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/generic.json
+{
+  "exhaustion": 0.0,
+  "message_id": "generic",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/generic_kill.json
+{
+  "exhaustion": 0.0,
+  "message_id": "genericKill",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/hot_floor.json
+{
+  "effects": "burning",
+  "exhaustion": 0.1,
+  "message_id": "hotFloor",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/in_fire.json
+{
+  "effects": "burning",
+  "exhaustion": 0.1,
+  "message_id": "inFire",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/in_wall.json
+{
+  "exhaustion": 0.0,
+  "message_id": "inWall",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/indirect_magic.json
+{
+  "exhaustion": 0.0,
+  "message_id": "indirectMagic",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/lava.json
+{
+  "effects": "burning",
+  "exhaustion": 0.1,
+  "message_id": "lava",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/lightning_bolt.json
+{
+  "exhaustion": 0.1,
+  "message_id": "lightningBolt",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/mace_smash.json
+{
+  "exhaustion": 0.1,
+  "message_id": "mace_smash",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/magic.json
+{
+  "exhaustion": 0.0,
+  "message_id": "magic",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/mob_attack.json
+{
+  "exhaustion": 0.1,
+  "message_id": "mob",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/mob_attack_no_aggro.json
+{
+  "exhaustion": 0.1,
+  "message_id": "mob",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/mob_projectile.json
+{
+  "exhaustion": 0.1,
+  "message_id": "mob",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/on_fire.json
+{
+  "effects": "burning",
+  "exhaustion": 0.0,
+  "message_id": "onFire",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/out_of_world.json
+{
+  "exhaustion": 0.0,
+  "message_id": "outOfWorld",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/outside_border.json
+{
+  "exhaustion": 0.0,
+  "message_id": "outsideBorder",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/player_attack.json
+{
+  "exhaustion": 0.1,
+  "message_id": "player",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/player_explosion.json
+{
+  "exhaustion": 0.1,
+  "message_id": "explosion.player",
+  "scaling": "always"
+}
+>>> damage_type/sonic_boom.json
+{
+  "exhaustion": 0.0,
+  "message_id": "sonic_boom",
+  "scaling": "always"
+}
+>>> damage_type/spear.json
+{
+  "exhaustion": 0.1,
+  "message_id": "spear",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/spit.json
+{
+  "exhaustion": 0.1,
+  "message_id": "mob",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/stalagmite.json
+{
+  "exhaustion": 0.0,
+  "message_id": "stalagmite",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/starve.json
+{
+  "exhaustion": 0.0,
+  "message_id": "starve",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/sting.json
+{
+  "exhaustion": 0.1,
+  "message_id": "sting",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/sulfur_cube_hot.json
+{
+  "effects": "burning",
+  "exhaustion": 0.1,
+  "message_id": "sulfurCubeHot",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/sweet_berry_bush.json
+{
+  "effects": "poking",
+  "exhaustion": 0.1,
+  "message_id": "sweetBerryBush",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/thorns.json
+{
+  "effects": "thorns",
+  "exhaustion": 0.1,
+  "message_id": "thorns",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/thrown.json
+{
+  "exhaustion": 0.1,
+  "message_id": "thrown",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/trident.json
+{
+  "exhaustion": 0.1,
+  "message_id": "trident",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/unattributed_fireball.json
+{
+  "effects": "burning",
+  "exhaustion": 0.1,
+  "message_id": "onFire",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/wind_charge.json
+{
+  "exhaustion": 0.1,
+  "message_id": "mob",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/wither.json
+{
+  "exhaustion": 0.0,
+  "message_id": "wither",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> damage_type/wither_skull.json
+{
+  "exhaustion": 0.1,
+  "message_id": "witherSkull",
+  "scaling": "when_caused_by_living_non_player"
+}
+>>> tags/damage_type/always_hurts_ender_dragons.json
+{
+  "values": [
+    "#minecraft:is_explosion"
+  ]
+}
+>>> tags/damage_type/always_kills_armor_stands.json
+{
+  "values": [
+    "minecraft:arrow",
+    "minecraft:trident",
+    "minecraft:fireball",
+    "minecraft:wither_skull",
+    "minecraft:wind_charge"
+  ]
+}
+>>> tags/damage_type/always_most_significant_fall.json
+{
+  "values": [
+    "minecraft:out_of_world"
+  ]
+}
+>>> tags/damage_type/always_triggers_silverfish.json
+{
+  "values": [
+    "minecraft:magic"
+  ]
+}
+>>> tags/damage_type/avoids_guardian_thorns.json
+{
+  "values": [
+    "minecraft:magic",
+    "minecraft:thorns",
+    "#minecraft:is_explosion"
+  ]
+}
+>>> tags/damage_type/burn_from_stepping.json
+{
+  "values": [
+    "minecraft:campfire",
+    "minecraft:hot_floor",
+    "minecraft:sulfur_cube_hot"
+  ]
+}
+>>> tags/damage_type/burns_armor_stands.json
+{
+  "values": [
+    "minecraft:on_fire"
+  ]
+}
+>>> tags/damage_type/bypasses_armor.json
+{
+  "values": [
+    "minecraft:on_fire",
+    "minecraft:in_wall",
+    "minecraft:cramming",
+    "minecraft:drown",
+    "minecraft:fly_into_wall",
+    "minecraft:generic",
+    "minecraft:wither",
+    "minecraft:dragon_breath",
+    "minecraft:starve",
+    "minecraft:fall",
+    "minecraft:ender_pearl",
+    "minecraft:freeze",
+    "minecraft:stalagmite",
+    "minecraft:magic",
+    "minecraft:indirect_magic",
+    "minecraft:out_of_world",
+    "minecraft:generic_kill",
+    "minecraft:sonic_boom",
+    "minecraft:outside_border"
+  ]
+}
+>>> tags/damage_type/bypasses_effects.json
+{
+  "values": [
+    "minecraft:starve"
+  ]
+}
+>>> tags/damage_type/bypasses_enchantments.json
+{
+  "values": [
+    "minecraft:sonic_boom"
+  ]
+}
+>>> tags/damage_type/bypasses_invulnerability.json
+{
+  "values": [
+    "minecraft:out_of_world",
+    "minecraft:generic_kill"
+  ]
+}
+>>> tags/damage_type/bypasses_resistance.json
+{
+  "values": [
+    "minecraft:out_of_world",
+    "minecraft:generic_kill"
+  ]
+}
+>>> tags/damage_type/bypasses_shield.json
+{
+  "values": [
+    "#minecraft:bypasses_armor",
+    "minecraft:cactus",
+    "minecraft:campfire",
+    "minecraft:dry_out",
+    "minecraft:falling_anvil",
+    "minecraft:falling_stalactite",
+    "minecraft:hot_floor",
+    "minecraft:sulfur_cube_hot",
+    "minecraft:in_fire",
+    "minecraft:lava",
+    "minecraft:lightning_bolt",
+    "minecraft:sweet_berry_bush"
+  ]
+}
+>>> tags/damage_type/bypasses_wolf_armor.json
+{
+  "values": [
+    "#minecraft:bypasses_invulnerability",
+    "minecraft:cramming",
+    "minecraft:drown",
+    "minecraft:dry_out",
+    "minecraft:freeze",
+    "minecraft:in_wall",
+    "minecraft:indirect_magic",
+    "minecraft:magic",
+    "minecraft:outside_border",
+    "minecraft:starve",
+    "minecraft:thorns",
+    "minecraft:wither"
+  ]
+}
+>>> tags/damage_type/can_break_armor_stand.json
+{
+  "values": [
+    "minecraft:player_explosion",
+    "#minecraft:is_player_attack"
+  ]
+}
+>>> tags/damage_type/damages_helmet.json
+{
+  "values": [
+    "minecraft:falling_anvil",
+    "minecraft:falling_block",
+    "minecraft:falling_stalactite"
+  ]
+}
+>>> tags/damage_type/ignites_armor_stands.json
+{
+  "values": [
+    "minecraft:in_fire",
+    "minecraft:campfire"
+  ]
+}
+>>> tags/damage_type/is_drowning.json
+{
+  "values": [
+    "minecraft:drown"
+  ]
+}
+>>> tags/damage_type/is_explosion.json
+{
+  "values": [
+    "minecraft:fireworks",
+    "minecraft:explosion",
+    "minecraft:player_explosion",
+    "minecraft:bad_respawn_point"
+  ]
+}
+>>> tags/damage_type/is_fall.json
+{
+  "values": [
+    "minecraft:fall",
+    "minecraft:ender_pearl",
+    "minecraft:stalagmite"
+  ]
+}
+>>> tags/damage_type/is_fire.json
+{
+  "values": [
+    "minecraft:in_fire",
+    "minecraft:campfire",
+    "minecraft:on_fire",
+    "minecraft:lava",
+    "minecraft:hot_floor",
+    "minecraft:sulfur_cube_hot",
+    "minecraft:unattributed_fireball",
+    "minecraft:fireball"
+  ]
+}
+>>> tags/damage_type/is_freezing.json
+{
+  "values": [
+    "minecraft:freeze"
+  ]
+}
+>>> tags/damage_type/is_lightning.json
+{
+  "values": [
+    "minecraft:lightning_bolt"
+  ]
+}
+>>> tags/damage_type/is_player_attack.json
+{
+  "values": [
+    "minecraft:player_attack",
+    "minecraft:spear",
+    "minecraft:mace_smash"
+  ]
+}
+>>> tags/damage_type/is_projectile.json
+{
+  "values": [
+    "minecraft:arrow",
+    "minecraft:trident",
+    "minecraft:mob_projectile",
+    "minecraft:unattributed_fireball",
+    "minecraft:fireball",
+    "minecraft:wither_skull",
+    "minecraft:thrown",
+    "minecraft:wind_charge"
+  ]
+}
+>>> tags/damage_type/mace_smash.json
+{
+  "values": [
+    "minecraft:mace_smash"
+  ]
+}
+>>> tags/damage_type/no_anger.json
+{
+  "values": [
+    "minecraft:mob_attack_no_aggro"
+  ]
+}
+>>> tags/damage_type/no_impact.json
+{
+  "values": [
+    "minecraft:drown"
+  ]
+}
+>>> tags/damage_type/no_knockback.json
+{
+  "values": [
+    "minecraft:explosion",
+    "minecraft:player_explosion",
+    "minecraft:bad_respawn_point",
+    "minecraft:in_fire",
+    "minecraft:lightning_bolt",
+    "minecraft:on_fire",
+    "minecraft:lava",
+    "minecraft:hot_floor",
+    "minecraft:sulfur_cube_hot",
+    "minecraft:in_wall",
+    "minecraft:cramming",
+    "minecraft:drown",
+    "minecraft:starve",
+    "minecraft:cactus",
+    "minecraft:fall",
+    "minecraft:ender_pearl",
+    "minecraft:fly_into_wall",
+    "minecraft:out_of_world",
+    "minecraft:generic",
+    "minecraft:magic",
+    "minecraft:wither",
+    "minecraft:dragon_breath",
+    "minecraft:dry_out",
+    "minecraft:sweet_berry_bush",
+    "minecraft:freeze",
+    "minecraft:stalagmite",
+    "minecraft:outside_border",
+    "minecraft:generic_kill",
+    "minecraft:campfire",
+    "minecraft:spear"
+  ]
+}
+>>> tags/damage_type/panic_causes.json
+{
+  "values": [
+    "#minecraft:panic_environmental_causes",
+    "minecraft:arrow",
+    "minecraft:dragon_breath",
+    "minecraft:explosion",
+    "minecraft:fireball",
+    "minecraft:fireworks",
+    "minecraft:indirect_magic",
+    "minecraft:magic",
+    "minecraft:mob_attack",
+    "minecraft:mob_projectile",
+    "minecraft:player_explosion",
+    "minecraft:sonic_boom",
+    "minecraft:sting",
+    "minecraft:thrown",
+    "minecraft:trident",
+    "minecraft:unattributed_fireball",
+    "minecraft:wind_charge",
+    "minecraft:wither",
+    "minecraft:wither_skull",
+    "#minecraft:is_player_attack"
+  ]
+}
+>>> tags/damage_type/panic_environmental_causes.json
+{
+  "values": [
+    "minecraft:cactus",
+    "minecraft:freeze",
+    "minecraft:hot_floor",
+    "minecraft:sulfur_cube_hot",
+    "minecraft:in_fire",
+    "minecraft:lava",
+    "minecraft:lightning_bolt",
+    "minecraft:on_fire"
+  ]
+}
+>>> tags/damage_type/sulfur_cube_with_block_immune_to.json
+{
+  "values": [
+    "minecraft:arrow",
+    "minecraft:cactus",
+    "minecraft:dry_out",
+    "minecraft:fall",
+    "minecraft:falling_anvil",
+    "minecraft:falling_block",
+    "minecraft:falling_stalactite",
+    "minecraft:freeze",
+    "minecraft:mace_smash",
+    "minecraft:hot_floor",
+    "minecraft:mob_attack",
+    "minecraft:mob_attack_no_aggro",
+    "minecraft:mob_projectile",
+    "minecraft:player_attack",
+    "minecraft:spear",
+    "minecraft:spit",
+    "minecraft:stalagmite",
+    "minecraft:sting",
+    "minecraft:sulfur_cube_hot",
+    "minecraft:sweet_berry_bush",
+    "minecraft:thrown",
+    "minecraft:trident",
+    "minecraft:wind_charge",
+    "#minecraft:is_explosion"
+  ]
+}
+>>> tags/damage_type/witch_resistant_to.json
+{
+  "values": [
+    "minecraft:magic",
+    "minecraft:indirect_magic",
+    "minecraft:sonic_boom",
+    "minecraft:thorns"
+  ]
+}
+>>> tags/damage_type/wither_immune_to.json
+{
+  "values": [
+    "minecraft:drown"
+  ]
+}

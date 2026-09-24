@@ -1,0 +1,9 @@
+# Captured by scripts/worldgen-oracle/RuinedPortalTerrainOracle.java against
+# the bundled 26.2 server jar. The detector uses a Xoroshiro-backed
+# WorldgenRandom, surface_structures step 4, and the ruined_portal runtime
+# registry index 8. Each hash covers the resulting netherrack cells in the
+# asymmetric 64x65x64 in-memory world described by that oracle.
+case 42 0 0 2 09385ca7b5898d33b9d364ea187fc3b93b8fc8dbb9458227ab99eb658f845baa
+case 42 1 0 0 022795a0807cbe6c0873eefb557e7cc23399b24e913c5ed748f1033f08be3c4a
+case 42 0 1 3 3bfa55b4d7ee4eaae2c1d6f21ba782ca1f55ef33e12fff57dd57b94f87c7771f
+case -195764831 0 0 5 d343f331e0323e110fe2cc0a64b1af4672363c5909d41c451ab838f989e67575

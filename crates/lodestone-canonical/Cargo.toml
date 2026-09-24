@@ -1,0 +1,17 @@
+[package]
+name = "lodestone-canonical"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+# Version-free by construction. This crate names **no** protocol family and
+# must not gain one: it is shared game data (the pre-Flattening `id:meta`
+# table and the bridge from it to canonical 26.2 state ids), in the same role
+# `lodestone-data` plays for block/item facts. Every pre-1.13 family depends
+# on it; it depends on none of them, so deleting a family stays a folder plus
+# two registry lines.
+[dependencies]
+lodestone-data = { workspace = true }

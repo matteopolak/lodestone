@@ -1,0 +1,1 @@
+minecraft:acacia_fence_gate[facing=north,in_wall=true,open=true,powered=true]

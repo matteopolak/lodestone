@@ -1,0 +1,17 @@
+# Captured from the external 26.2 dedicated-server survival oracle (protocol 776).
+# Packet: clientbound container_set_slot, captured before adapter decoding.
+# Source command: give <session player> minecraft:potion[minecraft:potion_contents={
+# potion:"minecraft:swiftness",custom_color:1193046,custom_effects:[{
+# id:"minecraft:poison",amplifier:1,duration:45,ambient:false,
+# show_particles:true,show_icon:true}],custom_name:"night_vision"}] 1
+# Re-capture: start scripts/live-oracles/survival.sh, then run
+# LODESTONE_CAPTURE_FIXTURES=1 cargo test -p lodestone-v26-2
+# --features live-item --test live
+# live_item_components::potion_contents_capture_covers_holder_effect_and_name
+# -- --ignored --nocapture
+# The leading window/state/slot fields are session-scoped; drift comparison
+# starts at the stack count. The payload covers a base holder, fixed color,
+# one custom effect with explicit flags, and a component-local name.
+00 02 00 24 01 fe 08 01 00 33 01 0d 01 00 12 34
+56 01 12 01 2d 00 01 01 00 01 0c 6e 69 67 68 74
+5f 76 69 73 69 6f 6e

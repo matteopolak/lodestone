@@ -1,0 +1,1 @@
+minecraft:activator_rail[powered=true,shape=north_south,waterlogged=true]

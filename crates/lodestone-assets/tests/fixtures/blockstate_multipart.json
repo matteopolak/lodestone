@@ -1,0 +1,24 @@
+{
+  "multipart": [
+    {
+      "apply": {
+        "model": "minecraft:block/oak_fence_post"
+      }
+    },
+    {
+      "when": {
+        "OR": [
+          { "north": "true" },
+          { "south": false }
+        ]
+      },
+      "apply": [
+        {
+          "model": "minecraft:block/oak_fence_side",
+          "uvlock": true,
+          "weight": 2
+        }
+      ]
+    }
+  ]
+}

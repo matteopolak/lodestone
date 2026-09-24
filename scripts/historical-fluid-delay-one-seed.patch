@@ -1,0 +1,45 @@
+diff --git a/crates/lodestone-server/src/fluid.rs b/crates/lodestone-server/src/fluid.rs
+--- a/crates/lodestone-server/src/fluid.rs
++++ b/crates/lodestone-server/src/fluid.rs
+@@ -1582,25 +1582,24 @@ pub fn ticks_after_edit<S: ChunkSource + ?Sized>(
+ ) -> Vec<ScheduledTick<String>> {
+     // Built through a real queue rather than struct literals because
+     // `ScheduledTick::sub_tick_order` is private — the same idiom
+     // `server::propagate_placement` uses, and for the same reason.
+     let mut pending: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+-    for candidate in [
+-        pos,
+-        Direction::Down.relative(pos),
+-        Direction::Up.relative(pos),
+-        Direction::North.relative(pos),
+-        Direction::South.relative(pos),
+-        Direction::West.relative(pos),
+-        Direction::East.relative(pos),
+-    ] {
+-        if let Some(fluid) = fluid_state_of(&block_at(world, env, candidate)) {
+-            pending.schedule(
+-                (candidate.x, candidate.y, candidate.z),
+-                TICK_FLUID.to_owned(),
+-                env.tick_delay(fluid.kind),
+-                TickPriority::Normal,
+-            );
+-        }
++    pending.schedule((pos.x, pos.y, pos.z), TICK_FLUID.to_owned(), 1, TickPriority::Normal);
++    for direction in [
++        Direction::Down,
++        Direction::Up,
++        Direction::North,
++        Direction::South,
++        Direction::West,
++        Direction::East,
++    ] {
++        let neighbour = direction.relative(pos);
++        pending.schedule(
++            (neighbour.x, neighbour.y, neighbour.z),
++            TICK_FLUID.to_owned(),
++            1,
++            TickPriority::Normal,
++        );
+     }
+     pending.drain_due(u64::MAX, usize::MAX)
+ }

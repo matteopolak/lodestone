@@ -1,0 +1,16 @@
+# Captured from vanilla 26.2 (protocol 776) survival oracle.
+# Packet: clientbound set_entity_data for a `/summon item` drop of
+# {id:"minecraft:diamond",count:1} with no data components.
+#
+# ..        VarInt entity id (session-scoped; not compared)
+# 08        metadata index 8 = ItemEntity.DATA_ITEM
+# 07        serializer 7 = ITEM_STACK
+# 01        VarInt stack count = 1
+# 9e 07     VarInt item registry id 926 = minecraft:diamond
+# 00        DataComponentPatch: 0 added
+# 00        DataComponentPatch: 0 removed
+# ff        end-of-list sentinel
+#
+# Note there is no field after the item: a dropped item's whole
+# identity is this one index.
+9f e3 01 08 07 01 9e 07 00 00 ff

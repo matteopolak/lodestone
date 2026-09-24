@@ -1,0 +1,22 @@
+# Issue #150's reference plugin: two crafting-station hooks proving the
+# `lodestone_server::plugin_crafting` seam actually reaches production —
+# `AnvilBlessing` tweaks a real anvil rename result (`StationVerdict::Replace`)
+# and `SmithingSwordBan` vetoes one specific netherite upgrade
+# (`StationVerdict::Deny`). See `docs/plugin-crafting-hooks.md`.
+[package]
+name = "lodestone-crafting-warden"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# `CraftingStationHook`/`CraftingStationHooks`/`StationInputs`/
+# `StationVerdict`, and `Station` (re-exported from `container_click`) — the
+# whole seam this plugin exercises. Path, not a workspace alias, matching how
+# `lodestone-void-world` spells its own `lodestone-server` dependency: neither
+# crate has a `[workspace.dependencies]` entry.
+lodestone-server = { path = "../../lodestone-server" }
+lodestone-model = { workspace = true }

@@ -1,0 +1,7 @@
+# Captured with scripts/worldgen-oracle/run.sh EndFeatureOrderOracle.
+# Each row is: feature <generation-step> <global-seed-index> <placed-feature-id>.
+feature 0 0 minecraft:end_island_decorated
+feature 4 0 minecraft:end_gateway_return
+feature 4 1 minecraft:end_spike
+feature 9 0 minecraft:chorus_plant
+feature 10 0 minecraft:end_platform

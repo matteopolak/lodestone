@@ -1,0 +1,31 @@
+# Direct compiled-server fixture: sulfur cluster, seed 0, cinnabar floor/ceiling
+# over x,z=-1..=1 at y=60/68, origin (0,64,0). Only changed states are listed.
+cluster.0 result=true
+cluster.0 -1,60,-1 minecraft:sulfur
+cluster.0 -1,60,0 minecraft:sulfur
+cluster.0 -1,60,1 minecraft:sulfur
+cluster.0 -1,61,-1 minecraft:sulfur_spike[thickness=base,vertical_direction=up,waterlogged=false]
+cluster.0 -1,61,1 minecraft:sulfur_spike[thickness=tip,vertical_direction=up,waterlogged=false]
+cluster.0 -1,62,-1 minecraft:sulfur_spike[thickness=frustum,vertical_direction=up,waterlogged=false]
+cluster.0 -1,63,-1 minecraft:sulfur_spike[thickness=tip,vertical_direction=up,waterlogged=false]
+cluster.0 -1,65,-1 minecraft:sulfur_spike[thickness=tip,vertical_direction=down,waterlogged=false]
+cluster.0 -1,66,-1 minecraft:sulfur_spike[thickness=frustum,vertical_direction=down,waterlogged=false]
+cluster.0 -1,67,-1 minecraft:sulfur_spike[thickness=base,vertical_direction=down,waterlogged=false]
+cluster.0 -1,68,-1 minecraft:sulfur
+cluster.0 -1,68,0 minecraft:sulfur
+cluster.0 -1,68,1 minecraft:sulfur
+cluster.0 0,60,-1 minecraft:sulfur
+cluster.0 0,60,0 minecraft:sulfur
+cluster.0 0,60,1 minecraft:sulfur
+cluster.0 0,61,0 minecraft:sulfur_spike[thickness=tip,vertical_direction=up,waterlogged=false]
+cluster.0 0,61,1 minecraft:sulfur_spike[thickness=tip,vertical_direction=up,waterlogged=false]
+cluster.0 0,68,-1 minecraft:sulfur
+cluster.0 0,68,0 minecraft:sulfur
+cluster.0 0,68,1 minecraft:sulfur
+cluster.0 1,60,-1 minecraft:sulfur
+cluster.0 1,60,0 minecraft:sulfur
+cluster.0 1,60,1 minecraft:sulfur
+cluster.0 1,61,0 minecraft:sulfur_spike[thickness=tip,vertical_direction=up,waterlogged=false]
+cluster.0 1,68,-1 minecraft:sulfur
+cluster.0 1,68,0 minecraft:sulfur
+cluster.0 1,68,1 minecraft:sulfur

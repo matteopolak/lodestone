@@ -1,0 +1,3 @@
+# Captured with scripts/worldgen-oracle/run.sh StrongholdRingOracle 42 1 1 1.
+# index initial_chunk_x initial_chunk_z preferred_chunk_x preferred_chunk_z
+0 0 -4 1 -5

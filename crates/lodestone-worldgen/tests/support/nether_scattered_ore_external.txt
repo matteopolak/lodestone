@@ -1,0 +1,12 @@
+# Independently captured sealed Nether column for seed 42, source chunk (-8,-8).
+# The LargeParityOracle packet export includes the structure-bearing
+# pre-decoration prefix and the mixed source-completion lifecycle used by a
+# packet-ready Nether column. Coordinates are local to the captured chunk.
+seed 42
+chunk -8 -8
+step 7
+scope full-column
+count 3
+cell 2 21 13
+cell 2 21 14
+cell 2 86 3

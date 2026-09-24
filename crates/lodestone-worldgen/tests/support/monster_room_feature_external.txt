@@ -1,0 +1,17 @@
+positive.result true
+positive.writes 314
+positive.digest 8c93cd856bf727e2
+positive.count minecraft:cave_air 139
+positive.count minecraft:chest[facing=north,type=single,waterlogged=false] 1
+positive.count minecraft:chest[facing=west,type=single,waterlogged=false] 1
+positive.count minecraft:cobblestone 122
+positive.count minecraft:mossy_cobblestone 50
+positive.count minecraft:spawner 1
+positive.cell 0,64,0 minecraft:spawner
+positive.cell 0,64,2 minecraft:chest[facing=north,type=single,waterlogged=false]
+positive.cell 3,64,1 minecraft:chest[facing=west,type=single,waterlogged=false]
+positive.cell -4,65,0 minecraft:cave_air
+positive.entity.chest 3,64,1 west ResourceKey[minecraft:loot_table / minecraft:chests/simple_dungeon] 3643673726902110894
+positive.entity.spawner 0,64,0
+positive.entity.chest 0,64,2 north ResourceKey[minecraft:loot_table / minecraft:chests/simple_dungeon] 3662846766743174097
+control.sealed result=false writes=0

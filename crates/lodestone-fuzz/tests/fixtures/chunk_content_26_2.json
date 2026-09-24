@@ -1,0 +1,61 @@
+{
+  "source": "Unmodified payload captured from the external 26.2 creative server on 25570, protocol 776. Before the capture client joined, RCON force-loaded chunk (0,0) and placed oak_log[axis=x] at (3,300,3), oak_log[axis=z] at (7,300,3), and glowstone at (11,300,3). The state and MOTION_BLOCKING-top annotations derive from those external source commands; the three blocks are above every other block in their columns. Capture entry point: acquire_chunk_content_from_external_server.",
+  "protocol": 776,
+  "chunk": [
+    0,
+    0
+  ],
+  "blocks": [
+    {
+      "pos": [
+        3,
+        300,
+        3
+      ],
+      "state": "minecraft:oak_log[axis=x]"
+    },
+    {
+      "pos": [
+        7,
+        300,
+        3
+      ],
+      "state": "minecraft:oak_log[axis=z]"
+    },
+    {
+      "pos": [
+        11,
+        300,
+        3
+      ],
+      "state": "minecraft:glowstone"
+    }
+  ],
+  "motion_blocking_tops": [
+    {
+      "pos": [
+        3,
+        3
+      ],
+      "top_y": 301
+    },
+    {
+      "pos": [
+        7,
+        3
+      ],
+      "top_y": 301
+    },
+    {
+      "pos": [
+        11,
+        3
+      ],
+      "top_y": 301
+    }
+  ],
+  "packet": {
+    "packet_id": 45,
+    "payload": "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"
+  }
+}

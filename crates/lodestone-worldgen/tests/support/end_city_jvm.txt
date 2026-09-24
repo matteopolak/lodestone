@@ -1,0 +1,14 @@
+# A positive End-city capture from the independently compiled 26.2 server.
+#
+# The reference server generated the End chunk after `locate structure` identified
+# the candidate. `EndCityFixtureOracle.java` then opened the produced region with
+# the server's own RegionFile reader and emitted the start record plus these block
+# controls. No Lodestone generator wrote or read the expected values.
+#
+# seed -195764831; start chunk 45 -115; reference End region r.1.-4.
+# Format:
+#   start <ChunkX> <ChunkZ> <originX> <originY> <originZ> <rotation> <piece names...>
+#   block <x> <y> <z> <canonical state>
+start 45 -115 727 60 -1833 cw90 base_floor second_floor_1 third_floor_1 third_roof tower_base tower_piece tower_piece tower_piece tower_top
+block 720 60 -1825 minecraft:purpur_block
+block 720 92 -1825 minecraft:purpur_stairs[facing=north,half=top,shape=outer_right,waterlogged=false]

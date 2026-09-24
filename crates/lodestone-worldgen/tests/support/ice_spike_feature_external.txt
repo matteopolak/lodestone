@@ -1,0 +1,18 @@
+# Hand-authored output control for a supported snow-block candidate.
+# The scripted draws are offset=0, height=7, width=1; edge floats are 0.0.
+origin 8,64,8
+state.7,64,8 minecraft:packed_ice
+state.8,64,7 minecraft:packed_ice
+state.8,64,8 minecraft:packed_ice
+state.8,64,9 minecraft:packed_ice
+state.9,64,8 minecraft:packed_ice
+state.7,65,8 minecraft:packed_ice
+state.8,65,7 minecraft:packed_ice
+state.8,65,8 minecraft:packed_ice
+state.8,65,9 minecraft:packed_ice
+state.9,65,8 minecraft:packed_ice
+state.8,66,8 minecraft:packed_ice
+state.8,67,8 minecraft:packed_ice
+state.8,68,8 minecraft:packed_ice
+state.8,69,8 minecraft:packed_ice
+state.8,70,8 minecraft:packed_ice

@@ -1,0 +1,1 @@
+minecraft:brick_wall[east=none,north=none,south=none,up=true,waterlogged=true,west=none]
