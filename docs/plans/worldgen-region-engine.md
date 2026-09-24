@@ -36,6 +36,10 @@ Before the cutover, measure the remaining discriminators in one bounded diagnost
 - Per-role complete-column passes and retained bytes from packed fill through section encoding. Count eliminated passes rather than allocating an additional slab and comparing only wall time.
 - Read, write, winner, and palette-event volumes per feature owner. A final-state-only experiment must fail a deliberate overwritten-palette-state control.
 
+The next carrier experiment should keep 4×8×4 fill cells as one of three forms: solid, one eight-value vertical fluid run shared across XZ, or 128 mixed values. In the measured square-64 cohort, 85.4% of fill cells took one of the first two forms. Surface, vein, carver, and structure writes need a sparse canonical-state delta over that base; read-only contexts should not acquire a dense palette. Requested outputs can expand once in the established z,x,y palette order, then replay ordered first-introduction events from later stages. A final-state map alone loses overwritten palette entries. A second compressed copy alongside the current full field would be a regression in design, even if one benchmark happens to run faster.
+
+The exact upper terrain plateau may permit a compile-time-gated sign proof for eight Y cells per horizontal tile. It is a bounded shortcut, not the region redesign: cache sharing means skipping 128 cell decisions per column saves far fewer than 1,024 fresh corner evaluations. Keep it behind a structural graph check and reject it on a modified gradient control.
+
 The first implementation slice should replace one complete ownership path: a canonical terrain reader, latest-write plane, and requested-output materialization over a bounded region. It must remove the corresponding replay or conversion path, not coexist as another cache. Run it against the same square-64 controls before adding sliding eviction or more dimensions. If it cannot preserve exact reads and palette history or save measured work, remove the slice rather than widening it.
 
 ## How to change it

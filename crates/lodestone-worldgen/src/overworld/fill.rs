@@ -916,14 +916,20 @@ impl OverworldGenerator {
                         }
                         continue;
                     }
+                    let mut proved_positive = false;
                     let solid_cell = if empty_beard && sampler.supports_final_density_cells() {
-                        sampler.final_density_cell_or_positive(x0, y0, z0, &mut densities)
-                            || Self::cell_densities_are_positive(&densities)
+                        proved_positive =
+                            sampler.final_density_cell_or_positive(x0, y0, z0, &mut densities);
+                        proved_positive || Self::cell_densities_are_positive(&densities)
                     } else {
                         sampler.final_density_cell(x0, y0, z0, &mut densities);
                         empty_beard && Self::cell_densities_are_positive(&densities)
                     };
                     if solid_cell {
+                        crate::counters::bump_positive_cell_skip();
+                        if proved_positive {
+                            crate::counters::bump_positive_proof_cell();
+                        }
                         Self::write_solid_cell(
                             cell_x,
                             cell_y,
@@ -936,6 +942,7 @@ impl OverworldGenerator {
                         );
                         continue;
                     }
+                    crate::counters::bump_mixed_cell_fill();
                     for lz in 0..4i32 {
                         for lx in 0..4i32 {
                             let wx = x0 + lx;
@@ -2094,7 +2101,15 @@ mod tests {
                 &mut heights,
                 None,
             );
-            assert!(crate::counters::snapshot().nonpositive_cell_skips > 0);
+            let counts = crate::counters::snapshot();
+            assert!(counts.nonpositive_cell_skips > 0);
+            assert!(counts.positive_proof_cells <= counts.positive_cell_skips);
+            assert_eq!(
+                counts.nonpositive_cell_skips
+                    + counts.positive_cell_skips
+                    + counts.mixed_cell_fills,
+                (16 * generator.height / 8) as u64,
+            );
 
             let mut safe_cell = None;
             let mut unsafe_bypass_witness = None;
