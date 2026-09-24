@@ -904,11 +904,12 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   domains that should be parsed into types before production dispatch.
 - [Terrain loading readiness](./terrain-loading-readiness.md) — The labelled
   `Loading terrain...` overlay is reserved for the first creation of a survival
-  singleplayer world. It releases only when every column in the declared initial view
-  is resident and renderer-settled. A non-empty section must be CPU-meshed and handed
-  to `RenderState`; an all-air section must be explicitly classified as empty.
-  Existing saves, creative/hardcore creations, and multiplayer joins do not get a fake
-  chunk counter or grid.
+  singleplayer world. It releases when the initial spawn view, capped at radius six,
+  is resident and renderer-settled; the rest of the selected render distance streams
+  after play begins. A non-empty section must be CPU-meshed and handed to
+  `RenderState`; an all-air section must be explicitly classified as empty. Existing
+  saves, creative/hardcore creations, and multiplayer joins do not get a fake chunk
+  counter or grid.
 - [Terrain rendering](./terrain-rendering.md) — Everything between "a chunk section
   changed" and "its quads are the right shape, in the right place, drawn or correctly
   not drawn, on screen": meshing and mesh invalidation as chunks stream in,
@@ -1096,10 +1097,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   fight rather than missing terrain or a disconnected dimension source.
 - [Integrated world-generation dispatch](./worldgen-dispatch.md) — The integrated
   server generates chunk columns on native workers while keeping the async connection
-  and tick tasks serviceable. One reusable Rayon pool is shared by join streams, view
-  batches, and background seed work. A process-wide semaphore admits at most the
-  pool's worker count, so simultaneous players wait asynchronously instead of
-  multiplying native workers or growing an unbounded queue.
+  and tick tasks serviceable. A bounded blocking pool owns generation requests; a
+  persistent Rayon pool executes their parallel immutable work. A process-wide
+  semaphore limits admitted requests, so simultaneous players wait asynchronously
+  instead of growing an unbounded queue.
 - [World-generation dungeons](./worldgen-dungeons.md) — The `monster_room`
   configured feature places an underground cobblestone room, up to two deferred-loot
   chests, and one monster spawner during Overworld decoration. Generated block

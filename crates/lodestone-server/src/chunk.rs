@@ -3879,12 +3879,9 @@ pub(crate) async fn yield_to_browser() {
 /// *every* task in the process — the world tick included — so an inline
 /// chunk-boundary generation can drop one or more 50 ms ticks.
 ///
-/// # Why a Rayon handoff and not `spawn_blocking`
-///
-/// A Rayon job is correct on both current-thread and multi-thread Tokio
-/// runtimes: generation runs on the shared native pool and the caller awaits a
-/// oneshot result, so no runtime worker is blocked and no second blocking pool
-/// is created per connection.
+/// Generation requests run on bounded blocking workers. Their parallel
+/// immutable work runs on the shared Rayon pool, so a request waiting for a
+/// region lease cannot strand a Rayon worker needed by another request.
 ///
 /// # Why `Arc<S>` rather than `&S`
 ///
@@ -3921,7 +3918,7 @@ pub(crate) async fn generate_columns_offloaded<S: ChunkSource + 'static + ?Sized
         })
             .await
             .await
-            .expect("worldgen Rayon worker panicked")
+            .expect("worldgen worker panicked")
     }
 }
 

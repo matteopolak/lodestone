@@ -76,8 +76,11 @@ A save writes only the dirty set, not everything resident — a player standing 
 cost megabytes of disk writes every autosave interval — and untouched chunks inside a rewritten
 region file are re-emitted as their original compressed bytes rather than being decoded and
 re-encoded, since the region-file format has no incremental single-chunk update and always rewrites
-a whole file in one pass. An evicted column's unload is a bounded, coordinate-scoped token in the
-`RegionChunkSource` ledger. The world owner captures it in a single-use `WorldSaveJob` before
+a whole file in one pass. `RegionChunkSource` retains only complete resident generation snapshots
+for saving; a shaped dependency remains in the generation cache until a full column replaces it.
+Partial terrain cannot be encoded as a complete saved column. An evicted column's unload is a
+bounded, coordinate-scoped token in the `RegionChunkSource` ledger. The world owner captures it
+in a single-use `WorldSaveJob` before
 dispatching a blocking writer; that job partitions its deterministic dirty snapshot by physical
 region-file owner and runs at most two independent rewrites at once. Results are consumed in
 canonical owner order: every failed owner is requeued and no token is acknowledged until every

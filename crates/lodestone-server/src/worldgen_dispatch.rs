@@ -3,12 +3,13 @@
 //! Tokio's blocking pool admits far more threads than a typical machine has
 //! cores. A per-connection window therefore does not bound total generation
 //! when multiple players join together. Native world-generation work enters
-//! one dedicated, persistent Rayon work-stealing pool instead. Admission is a
-//! synchronous try-operation, so an authoritative tick never waits for a free
-//! worker; async callers receive results through oneshot channels.
+//! bounded blocking orchestration pool and a persistent Rayon compute pool.
+//! Admission is a synchronous try-operation, so an authoritative tick never
+//! waits for a free worker; async callers receive results through oneshot channels.
 
 #![cfg(not(target_arch = "wasm32"))]
 
+use std::cell::Cell;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,6 +22,24 @@ use tokio::sync::{oneshot, Notify, OwnedSemaphorePermit, Semaphore};
 /// authoritative world tick. The floor keeps a single-core host functional;
 /// the scheduler's own window floor still preserves its ordering contract.
 const TICK_RESERVE: usize = 1;
+
+thread_local! {
+    static IN_DISPATCH_JOB: Cell<bool> = const { Cell::new(false) };
+}
+
+struct DispatchJobScope(bool);
+
+impl DispatchJobScope {
+    fn enter() -> Self {
+        Self(IN_DISPATCH_JOB.with(|active| active.replace(true)))
+    }
+}
+
+impl Drop for DispatchJobScope {
+    fn drop(&mut self) {
+        IN_DISPATCH_JOB.with(|active| active.set(self.0));
+    }
+}
 
 fn worker_count_for(available: usize) -> usize {
     available.saturating_sub(TICK_RESERVE).max(1)
@@ -62,16 +81,10 @@ where
     if jobs.len() <= 1 {
         return jobs.into_iter().map(work).collect();
     }
-    // An offloaded source call already runs inside this dispatcher's Rayon
-    // pool while holding its one admission permit. Requiring that worker to
-    // acquire the whole semaphore can never succeed, and serialising here
-    // strands every otherwise-idle worker. Rayon supports nested joins on the
-    // same work-stealing pool, so reuse it directly; indexed collection keeps
-    // the caller's deterministic result order.
-    if rayon::current_thread_index().is_some() {
+    if IN_DISPATCH_JOB.with(Cell::get) || rayon::current_thread_index().is_some() {
         use rayon::prelude::*;
 
-        return jobs.into_par_iter().map(work).collect();
+        return dispatcher().pool.install(|| jobs.into_par_iter().map(work).collect());
     }
     let workers = dispatcher().workers;
     let permits = u32::try_from(jobs.len().min(workers))
@@ -190,13 +203,13 @@ impl<T> Drop for DispatchHandle<T> {
     }
 }
 
-/// Try to submit a native world-generation operation to the bounded pool.
+/// Try to submit a native world-generation operation to the bounded dispatcher.
 ///
 /// This function never waits. `Err(f)` is backpressure: all worker permits are
 /// already held by running or queued jobs, so the caller retains its closure
 /// and retries from an async service point. The permit is acquired before the
-/// Rayon job is queued, which bounds both active work and the pool's internal
-/// queue across all connections.
+/// blocking job is queued, which bounds outstanding orchestration across all
+/// connections. Nested immutable work uses the separate Rayon compute pool.
 pub(crate) fn try_spawn<F, T>(f: F) -> Result<DispatchHandle<T>, F>
 where
     F: FnOnce() -> T + Send + 'static,
@@ -213,7 +226,7 @@ where
     let cancelled = Arc::new(AtomicBool::new(false));
     let worker_cancelled = Arc::clone(&cancelled);
     let capacity = Arc::clone(&dispatcher().capacity);
-    dispatcher().pool.spawn(move || {
+    tokio::task::spawn_blocking(move || {
         let _permit = PermitGuard {
             permit: Some(permit),
             capacity,
@@ -221,6 +234,7 @@ where
         if worker_cancelled.load(Ordering::Acquire) {
             return;
         }
+        let _scope = DispatchJobScope::enter();
         let value = f();
         if !worker_cancelled.load(Ordering::Acquire) {
             let _ = sender.send(value);
@@ -307,7 +321,7 @@ mod tests {
         assert_eq!(
             runtime
                 .block_on(async { spawn(|| 7_u8).await.await })
-                .expect("Rayon worker returned"),
+                .expect("worldgen worker returned"),
             7
         );
     }
@@ -325,7 +339,7 @@ mod tests {
 
         drop(held);
         let handle = spawn(returned).await;
-        assert_eq!(handle.await.expect("Rayon worker returned"), 7);
+        assert_eq!(handle.await.expect("worldgen worker returned"), 7);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -401,18 +415,22 @@ mod tests {
             return;
         }
         let runtime = tokio::runtime::Runtime::new().expect("test runtime");
-        let results = runtime
+        let (orchestration_thread, results) = runtime
             .block_on(async {
                 spawn(|| {
-                    run_ordered((0_u8..32).collect(), |value| {
-                        std::thread::sleep(std::time::Duration::from_millis(2));
-                        (value, std::thread::current().id())
-                    })
+                    (
+                        rayon::current_thread_index(),
+                        run_ordered((0_u8..32).collect(), |value| {
+                            std::thread::sleep(std::time::Duration::from_millis(2));
+                            (value, std::thread::current().id())
+                        }),
+                    )
                 })
                 .await
                 .await
             })
-            .expect("Rayon worker returned");
+            .expect("worldgen worker returned");
+        assert_eq!(orchestration_thread, None);
         assert_eq!(
             results.iter().map(|(value, _)| *value).collect::<Vec<_>>(),
             (0_u8..32).collect::<Vec<_>>(),
