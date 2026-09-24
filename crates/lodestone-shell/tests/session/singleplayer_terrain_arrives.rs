@@ -83,6 +83,7 @@ fn open_session_of_type(
         seed,
         world_type,
         view_radius,
+        false,
         None,
         world_dir,
     ))
@@ -508,6 +509,7 @@ fn a_sim_at_the_owners_render_distance_drains_real_terrain_meshes() {
         4242,
         lodestone::menu::create_world::WorldTypePreset::Normal,
         OWNER_VIEW_RADIUS,
+        false,
         None,
         None,
     ));

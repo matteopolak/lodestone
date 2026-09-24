@@ -190,6 +190,7 @@ fn open_session(view_radius: i32, world_dir: std::path::PathBuf, sim: &Sim) -> O
         0,
         lodestone::menu::create_world::WorldTypePreset::Normal,
         view_radius,
+        false,
         Some((sim.ecs().clone(), sim.local_player())),
         Some(world_dir),
     ))

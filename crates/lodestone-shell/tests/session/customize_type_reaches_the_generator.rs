@@ -115,6 +115,7 @@ fn a_flat_customize_choice_survives_into_the_served_singleplayer_world() {
         REQUESTED_SEED,
         WorldTypePreset::Normal,
         VIEW_RADIUS,
+        false,
         None,
         Some(world_dir),
     );

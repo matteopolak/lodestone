@@ -193,6 +193,7 @@ fn a_saved_world_serves_terrain_for_a_column_it_never_saved() {
         SEED,
         lodestone::menu::create_world::WorldTypePreset::Normal,
         OWNER_VIEW_RADIUS,
+        false,
         None,
         Some(dir.clone()),
     );

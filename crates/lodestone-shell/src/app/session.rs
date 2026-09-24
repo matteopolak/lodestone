@@ -1884,6 +1884,7 @@ impl WindowApp {
             launch_open_to_lan_online(
                 self.config.protocol,
                 view_radius,
+                show_new_world_loading,
                 session,
                 seed,
                 world_type,
@@ -1893,6 +1894,7 @@ impl WindowApp {
             launch_singleplayer(
                 self.config.protocol,
                 view_radius,
+                show_new_world_loading,
                 session,
                 seed,
                 world_type,
@@ -1903,6 +1905,7 @@ impl WindowApp {
         let launch_result = launch_singleplayer(
             self.config.protocol,
             view_radius,
+            show_new_world_loading,
             session,
             seed,
             world_type,
@@ -1912,6 +1915,7 @@ impl WindowApp {
         let launch_result = launch_singleplayer(
             self.config.protocol,
             view_radius,
+            show_new_world_loading,
             session,
             seed,
             world_type,

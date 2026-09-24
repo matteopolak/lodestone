@@ -84,6 +84,7 @@ fn main() {
         SEED,
         lodestone::menu::create_world::WorldTypePreset::Normal,
         i32::try_from(server_radius).expect("profile radius fits i32"),
+        false,
         None,
         None,
     );

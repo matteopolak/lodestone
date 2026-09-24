@@ -1686,6 +1686,60 @@ async fn player_loaded_suppressed_under_manual_policy() {
     drop(handle);
 }
 
+#[tokio::test]
+async fn player_loaded_deferred_only_for_initial_placement() {
+    const LOGIN_PKT: i32 = 0x2B;
+    const TP_PKT: i32 = 0x40;
+    const DEATH_PKT: i32 = 0x52;
+    const KEEPALIVE_PKT: i32 = 0x41;
+    const PLAYER_LOADED_ID: i32 = 0x2A;
+
+    let adapter = FakeAdapter::new()
+        .player_loaded_to(PLAYER_LOADED_ID)
+        .respawn_to(RESPAWN_RESP_ID)
+        .on(
+            ConnectionState::Handshaking,
+            LOGIN_PKT,
+            vec![Directive::Emit(login_event())],
+        )
+        .on(
+            ConnectionState::Handshaking,
+            TP_PKT,
+            vec![Directive::Emit(teleport_event())],
+        )
+        .on(
+            ConnectionState::Handshaking,
+            KEEPALIVE_PKT,
+            vec![Directive::Emit(ClientEvent::KeepAlive { id: 7 })],
+        )
+        .on(
+            ConnectionState::Handshaking,
+            DEATH_PKT,
+            vec![Directive::Emit(ClientEvent::Death {
+                message: Text::literal("slain"),
+            })],
+        );
+    let (handle, mut events, mut peer) =
+        start_with_player_loaded(adapter, PlayerLoadedPolicy::DeferredInitial);
+
+    peer.write_packet(LOGIN_PKT, &[]).await.unwrap();
+    assert_eq!(events.recv().await, Some(login_event()));
+    peer.write_packet(TP_PKT, &[]).await.unwrap();
+    assert_eq!(events.recv().await, Some(teleport_event()));
+    peer.write_packet(KEEPALIVE_PKT, &[]).await.unwrap();
+    assert_eq!(peer.read_packet().await.unwrap().unwrap().0, KEEPALIVE_RESP_ID);
+
+    handle.send_action(ClientAction::PlayerLoaded).unwrap();
+    assert_eq!(peer.read_packet().await.unwrap().unwrap().0, PLAYER_LOADED_ID);
+    peer.write_packet(DEATH_PKT, &[]).await.unwrap();
+    assert_eq!(peer.read_packet().await.unwrap().unwrap().0, RESPAWN_RESP_ID);
+    let _ = events.recv().await;
+    peer.write_packet(TP_PKT, &[]).await.unwrap();
+    assert_eq!(peer.read_packet().await.unwrap().unwrap().0, PLAYER_LOADED_ID);
+
+    drop(handle);
+}
+
 /// The client announces its brand on entering Configuration, as vanilla does.
 /// This is protocol hygiene with no game/UI input; the driver injects it on the
 /// state transition, and `encode_action` maps it to the state-appropriate packet

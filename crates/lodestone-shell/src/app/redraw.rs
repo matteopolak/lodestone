@@ -2921,6 +2921,13 @@ impl WindowApp {
             window.pre_present_notify();
         }
         frame.present(queue);
+        if self.sim.shows_new_world_loading()
+            && !self.sim.dimension_transition_pending()
+            && self.sim.world_wait().is_none()
+            && self.sim.net().is_some_and(crate::net::NetClient::try_send_player_loaded)
+        {
+            self.sim.finish_new_world_loading();
+        }
         render.allow_deferred_entity_assets();
         self.frame_profile.mark(FramePhase::Present, Instant::now());
         #[cfg(target_arch = "wasm32")]

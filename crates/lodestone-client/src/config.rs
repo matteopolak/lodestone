@@ -78,6 +78,10 @@ pub enum PlayerLoadedPolicy {
     #[default]
     Automatic,
 
+    /// The first placement waits for an explicit `PlayerLoaded` action; later
+    /// respawns announce readiness automatically.
+    DeferredInitial,
+
     /// The driver never sends `player_loaded`; the server therefore ignores the
     /// player's movement until its client-load timer elapses on its own. Useful
     /// only for testing that window; not recommended for real clients.

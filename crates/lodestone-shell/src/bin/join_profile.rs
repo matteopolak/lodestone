@@ -107,6 +107,7 @@ fn main() {
         seed,
         lodestone::menu::create_world::WorldTypePreset::Normal,
         radius,
+        false,
         None,
         world_dir,
     );
