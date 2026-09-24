@@ -27,6 +27,8 @@ The `epoch_dirty_*_raw` and `epoch_dirty_*_unique` counts separate append-only
 dirty entries from distinct positions, with full targets and sparse padding
 reported independently. They show the potential headroom for changing dirty
 deduplication without treating repeated writes as distinct output changes.
+The ordered deduplication probes integer coordinates with a non-cryptographic
+set; it never iterates the set, so write order still comes from the dirty log.
 The line includes totals and averages per measured output. These are structural
 diagnostics for the bookkeeping path, not counts of final block changes or a
 throughput score. The counter control checks a reset followed by zero work,

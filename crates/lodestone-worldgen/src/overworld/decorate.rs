@@ -1,37 +1,8 @@
-//! Stages 5-7 of [`OverworldGenerator::column`]: the unified FEATURES
-//! neighbourhood dispatcher and `TOP_LAYER_MODIFICATION`.
+//! Overworld FEATURES and top-layer decoration.
 //!
-//! Moved here verbatim from `overworld.rs` by U16 Phase A; see [`super`]'s own module
-//! doc for the parity history of the 3×3 drivers.
-//!
-//! # Unit 7: the two region stitches that used to feed these drivers are gone
-//!
-//! The FEATURES dispatcher needs to read *and write* across a 3×3 chunk neighbourhood, and
-//! until Unit 7 of `docs/plans/worldgen-rewrite.md` the way that neighbourhood was
-//! made addressable was to copy it: `stitch_region` materialised a
-//! `48 × height × 48` `DenseBlockGrid` from the nine sources (884,736 cells),
-//! `apply_ore_step_3x3_per_source` cloned it (884,736 more),
-//! `stitch_veg_region` copied the nine terrain fields into a `VegGrid`'s
-//! `HashMap` (884,736 again), and each driver's output was folded back over the
-//! centre's full 98,304 cells. ~2.85M cell copies per served column, **every one of
-//! them warm** — the neighbours were already computed and memoised in
-//! [`super::store`]; the copies existed only to give them one coordinate space.
-//!
-//! [`crate::feature::region_view::RegionView`] and
-//! [`crate::feature::vegetation::VegGrid::with_sources`] route reads to whichever
-//! source chunk owns the column instead, holding writes in a sparse overlay, so
-//! `crate::counters::Counters::stitch_cells` reads **zero** for a served column —
-//! this unit's acceptance criterion. The returned parity result also reports
-//! zero `bridge_sync_events` and `bridge_sync_cells`: no per-entry projection
-//! remains. What is left is one `Vec<u16>` clone of the
-//! centre's own terrain grid (the store's copy is shared and must not be mutated)
-//! and sparse transfers of what each decoration adapter actually wrote.
-//!
-//! **The trap, if you edit this file:** the fold-back order decides the served
-//! palette, because a `DenseBlockGrid` appends to its local palette in first-write
-//! order. The unified dispatcher preserves each adapter's established ordering
-//! while transferring writes between them, and the byte-identity controls are
-//! what notice any drift.
+//! Adjacent immutable columns supply reads while a sparse overlay holds writes.
+//! Mutation order also determines palette order, so transfers between feature
+//! steps preserve their recorded sequence.
 
 use std::{collections::{BTreeMap, BTreeSet, HashMap, HashSet}, sync::Arc};
 
@@ -39,6 +10,7 @@ use std::cell::{Cell, RefCell};
 
 use lodestone_data::block_states::StateId as CanonicalStateId;
 use lodestone_data::biomes::BiomeRef;
+use lodestone_worldgen_core::hash::FastSet;
 
 use crate::feature::{
     FeatureMembershipId, OreWorldAccess, PlacedOre,
@@ -844,7 +816,7 @@ impl RegionFeatureEpoch {
         target: (i32, i32),
         sparse_padding: bool,
     ) -> (Vec<ParityDecorationSpill>, Vec<ParityDecorationSpill>) {
-        let mut seen = HashSet::new();
+        let mut seen = FastSet::default();
         let mut local = Vec::new();
         let mut spills = Vec::new();
         let mut raw_entries = 0;
