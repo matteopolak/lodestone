@@ -204,9 +204,10 @@ daylight had just opened up, because the check never looked at what the edit had
 Tick-driven changes use the connection's delivered-column ledger rather than the server cache's
 resident set. A pending join column needs no block or light update because its later complete
 snapshot contains the mutation; an already-delivered neighbour still receives any cross-boundary
-light change. Block updates are sent first. Affected light destinations enter a per-connection
-FIFO queue, deduplicated across batches, and the connection loop services one destination per pass
-so a large relight batch does not hold up packets and other timer work.
+light change. Producers that know both block states compare emission and dampening when they
+publish the change; an unknown prior state conservatively requires relighting. Every block update
+is still sent. Only light-changing updates add destinations to the per-connection FIFO queue,
+which deduplicates across batches and services one destination per connection-loop pass.
 
 ### Cross-chunk propagation after an edit
 
@@ -314,6 +315,10 @@ above.
   known area, but a world-tick feed may precede a join snapshot. Use
   `send_resident_lighting_for_tick` for the latter so a background mutation cannot starve connection
   progress by generating terrain from the connection runtime.
+- **Keep the block-change feed's light decision at the producer.** A connection sees the new block
+  after the write and cannot recover the old light properties from that cell. When extending a tick
+  producer, publish both old and new states if available; use the conservative unknown-old path
+  otherwise. LAN relays must forward the decision unchanged.
 - **Never compute light on the client's own live (multiplayer) path.** The client's contract is that
   a live server connection supplies light and a local/offline world computes its own — this
   subsystem exists precisely so the server side of that contract is actually held up.

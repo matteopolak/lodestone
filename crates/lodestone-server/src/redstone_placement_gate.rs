@@ -353,11 +353,11 @@ async fn drive(world: Arc<RigWorld>, feed: &BlockTickFeed, ticks: u64) -> Vec<Pu
     for tick in 1..=ticks {
         tokio::time::advance(TICK_PERIOD).await;
         tokio::task::yield_now().await;
-        for (x, y, z, state) in feed.drain_all() {
+        for change in feed.drain_all() {
             published.push(Published {
                 tick,
-                pos: (x, y, z),
-                state,
+                pos: (change.x, change.y, change.z),
+                state: change.state,
             });
         }
     }
@@ -971,11 +971,11 @@ async fn the_delay_is_measured_from_the_tick_that_drained_the_request_not_from_t
             }
             tokio::time::advance(TICK_PERIOD).await;
             tokio::task::yield_now().await;
-            for (x, y, z, state) in feed.drain_all() {
+            for change in feed.drain_all() {
                 published.push(Published {
                     tick,
-                    pos: (x, y, z),
-                    state,
+                    pos: (change.x, change.y, change.z),
+                    state: change.state,
                 });
             }
         }
@@ -1243,8 +1243,12 @@ async fn drive_hoppers(
     for tick in 1..=ticks {
         tokio::time::advance(TICK_PERIOD).await;
         tokio::task::yield_now().await;
-        for (x, y, z, state) in feed.drain_all() {
-            published.push(Published { tick, pos: (x, y, z), state });
+        for change in feed.drain_all() {
+            published.push(Published {
+                tick,
+                pos: (change.x, change.y, change.z),
+                state: change.state,
+            });
         }
     }
     published
@@ -1509,8 +1513,12 @@ async fn drive_with_handle(
     for tick in 1..=ticks {
         tokio::time::advance(TICK_PERIOD).await;
         tokio::task::yield_now().await;
-        for (x, y, z, state) in feed.drain_all() {
-            published.push(Published { tick, pos: (x, y, z), state });
+        for change in feed.drain_all() {
+            published.push(Published {
+                tick,
+                pos: (change.x, change.y, change.z),
+                state: change.state,
+            });
         }
     }
     published
