@@ -1514,6 +1514,12 @@ of these caught the *brief* being wrong rather than the code.
   already expects (structures and the other unported decoration steps), names
   agent-sized units with file ownership, and states what "full parity" cannot mean
   yet.
+- [Region-owned world-generation engine](./plans/worldgen-region-engine.md) — This
+  is the performance design gate for production Full-column generation. It proposes
+  replacing repeated column representations and mutable replay with one bounded
+  request region, while preserving the existing stage, ownership, and packet
+  contracts. The 200-column/s single-worker goal and a roughly threefold instruction
+  reduction are targets, not measured outcomes.
 - [Worldgen rewrite plan](./plans/worldgen-rewrite.md) — The plan for rewriting
   `crates/lodestone-worldgen`'s generation engine from scratch for speed — targeting
   sub-millisecond steady-state serial chunk generation at bit-exact 26.2 parity —

@@ -196,7 +196,9 @@ direction.
    ```
    `--save-only` writes a capture without opening the interactive UI; the sidecar emitted
    by `--unstable-presymbolicate` supplies symbols to the next step. Profile a real
-   session, not only startup frames.
+   session, not only startup frames. On macOS, put environment assignments before
+   `samply record`; using the system `env` command after `--` prevents Samply from
+   obtaining the profiled task.
 4. **Run the join**:
    ```bash
    python3 scripts/profile-cost-table.py profile.json.gz
@@ -218,7 +220,10 @@ direction.
    Inclusive attribution credits a recursive symbol once per sample by its
    resolved `(library, symbol)` identity, so separate profile entries for one
    symbol do not multiply its cost while like-named symbols in different
-   libraries receive separate credit.
+   libraries receive separate credit. Use `--under <symbol-substring>` to restrict
+   both tables and their denominator to sampled stacks beneath a production
+   boundary. This excludes setup work in the same capture; an unmatched filter
+   fails rather than printing an empty cost table.
 5. **Read the sidecar-join warning line.** `symbolicated N raw address(es) via sidecar,
    M unresolved` -- a high `M` usually means the binary changed between recording and
    the sidecar being written (rebuild, then re-record) or the profiled process wasn't

@@ -499,7 +499,9 @@ def require_positive_cpu_time(thread: dict) -> None:
         )
 
 
-def compute_cost_tables(tables: Tables, thread: dict) -> tuple[dict, dict, float, str]:
+def compute_cost_tables(
+    tables: Tables, thread: dict, under: str | None = None
+) -> tuple[dict, dict, float, str]:
     """Returns `(self_time, inclusive_time, total_weight, weight_kind)`,
     where `weight_kind` is `"threadCPUDelta"` or `"sample count (fallback)"`.
     """
@@ -567,9 +569,13 @@ def compute_cost_tables(tables: Tables, thread: dict) -> tuple[dict, dict, float
     for i, stack_index in enumerate(stacks):
         if stack_index is None:
             continue
+        chain = tables.stack_chain(stack_index)
+        if under is not None and not any(
+            under in tables.func_name(frame_func[frame_index]) for frame_index in chain
+        ):
+            continue
         w = weight_of(i)
         total += w
-        chain = tables.stack_chain(stack_index)
         leaf_func = frame_func[chain[0]]
         leaf_name = tables.func_name(leaf_func)
         self_time[leaf_name] = self_time.get(leaf_name, 0.0) + w
@@ -584,6 +590,8 @@ def compute_cost_tables(tables: Tables, thread: dict) -> tuple[dict, dict, float
             name = tables.func_name(func_index)
             inclusive_time[name] = inclusive_time.get(name, 0.0) + w
 
+    if under is not None and total <= 0:
+        raise SystemExit(f"no sampled CPU work has a stack containing {under!r}")
     return self_time, inclusive_time, total, weight_kind
 
 
@@ -602,7 +610,11 @@ def render_table(title: str, costs: dict, total: float, top: int) -> str:
 
 
 def build_report(
-    profile: Profile, thread_name: str | None, top: int, require_cpu_time: bool = False
+    profile: Profile,
+    thread_name: str | None,
+    top: int,
+    require_cpu_time: bool = False,
+    under: str | None = None,
 ) -> str:
     """The whole stdout body, as a string, so a test can assert on it."""
     thread_index = profile.pick_thread(thread_name)
@@ -610,7 +622,7 @@ def build_report(
     if require_cpu_time:
         require_positive_cpu_time(thread)
     tables = profile.tables_for(thread_index)
-    self_time, inclusive_time, total, weight_kind = compute_cost_tables(tables, thread)
+    self_time, inclusive_time, total, weight_kind = compute_cost_tables(tables, thread, under)
 
     version_text = "absent" if profile.version is None else str(profile.version)
     out = [
@@ -622,6 +634,8 @@ def build_report(
             f"symbolicated {tables.resolved_unsymbolicated} raw address(es) via sidecar, "
             f"{tables.unresolved_unsymbolicated} unresolved"
         )
+    if under is not None:
+        out.append(f"stack filter: {under!r}")
     out.append("")
     out.append(
         render_table("Inclusive (function or something it called):", inclusive_time, total, top)
@@ -669,6 +683,10 @@ def main(argv: list[str] | None = None) -> int:
         help="how many functions to print per table (default: 20)",
     )
     parser.add_argument(
+        "--under",
+        help="report only samples whose stack contains this symbol substring",
+    )
+    parser.add_argument(
         "--require-cpu-time",
         action="store_true",
         help="fail unless every sampled stack has a finite non-negative threadCPUDelta "
@@ -693,7 +711,7 @@ def main(argv: list[str] | None = None) -> int:
 
     raw_profile = load_json_maybe_gz(args.profile)
     profile = Profile(raw_profile, syms)
-    print(build_report(profile, args.thread, args.top, args.require_cpu_time))
+    print(build_report(profile, args.thread, args.top, args.require_cpu_time, args.under))
     return 0
 
 

@@ -491,6 +491,25 @@ def test_inclusive_keeps_like_named_symbols_from_different_libraries_distinct() 
     }, text
 
 
+def test_stack_filter_excludes_unrelated_samples() -> None:
+    profile = pct.Profile(load_fixture(V55), sidecar_for(V55))
+    text = pct.build_report(profile, "main", 20, True, "libb::beta_symbol")
+    assert "stack filter: 'libb::beta_symbol'" in text, text
+    assert "total: 90.00" in text, text
+    assert parse_section(text, SELF) == {"libb::beta_symbol": 90.0}, text
+    assert parse_section(text, INCL) == {
+        "fixture_plain_main": 90.0,
+        "liba::alpha_symbol": 90.0,
+        "libb::beta_symbol": 90.0,
+    }, text
+    try:
+        pct.build_report(profile, "main", 20, True, "missing_symbol")
+    except SystemExit as error:
+        assert "no sampled CPU work" in str(error), error
+    else:
+        raise AssertionError("an unmatched stack filter must fail")
+
+
 # --------------------------------------------------------------------------
 # 3. per-thread tables are per-thread
 # --------------------------------------------------------------------------
@@ -702,6 +721,7 @@ def main() -> int:
         ("inclusive cost de-duplicates one resolved symbol across func entries", test_inclusive_deduplicates_distinct_func_entries_for_one_resolved_symbol),
         ("CONTROL: func-index inclusive dedup overcounts one resolved symbol", control_func_index_dedup_overcounts_one_resolved_symbol),
         ("inclusive cost keeps like-named cross-library symbols distinct", test_inclusive_keeps_like_named_symbols_from_different_libraries_distinct),
+        ("stack filter excludes unrelated samples", test_stack_filter_excludes_unrelated_samples),
         ("per-thread tables are not borrowed across threads", test_per_thread_tables_are_not_borrowed_across_threads),
         ("CONTROL: borrowing thread 0's tables is detectable", control_borrowing_thread_zero_tables_is_detectable),
         ("future version is a loud error naming the version", test_future_version_is_a_loud_error_naming_the_version),
