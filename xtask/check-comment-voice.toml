@@ -1,0 +1,24 @@
+# Explicit exceptions for `cargo xtask check-comment-voice`.
+#
+# Each entry needs a `file` (relative to the workspace root), an `owner` and a
+# `reason` so an exception is a recorded decision, not a silent miss. `line`
+# is optional -- omit it to allow every hit in that file, or set it to allow
+# only that one line. Delete entries as their file/line is swept clean; a
+# stale entry (matching zero hits) is reported, not silently ignored.
+[[allow]]
+file = "docs/repo-tooling.md"
+text = "a bare `#123`-shaped issue"
+owner = "issue-553"
+reason = "self-referential: names the literal patterns check-comment-voice detects, as documentation of the scanner itself, not decay. Keyed on text, not line: all three were pinned at 185/186/187 and broke together when a paragraph was inserted above them"
+
+[[allow]]
+file = "docs/repo-tooling.md"
+text = "this patch"
+owner = "issue-553"
+reason = "self-referential: names the literal patterns check-comment-voice detects, as documentation of the scanner itself, not decay. Keyed on text, not line: all three were pinned at 185/186/187 and broke together when a paragraph was inserted above them"
+
+[[allow]]
+file = "docs/repo-tooling.md"
+text = "Both rot the same way"
+owner = "issue-553"
+reason = "self-referential: names the literal patterns check-comment-voice detects, as documentation of the scanner itself, not decay. Keyed on text, not line: all three were pinned at 185/186/187 and broke together when a paragraph was inserted above them"

@@ -1,0 +1,21 @@
+[package]
+name = "lodestone-hotbar-lock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The native plugin surface: this crate claims a key, emits the existing
+# one-shot SelectSlotIntent, and orders against the public GameTick anchors.
+lodestone-ecs = { workspace = true }
+bevy_ecs = { workspace = true }
+
+[dev-dependencies]
+# The integration control composes the real shell App so the intent reaches
+# drive_select_slot, including its server-echo queue, rather than a copied
+# consumer system.
+lodestone = { package = "lodestone-shell", path = "../../lodestone-shell", default-features = false }
+lodestone-model = { workspace = true }

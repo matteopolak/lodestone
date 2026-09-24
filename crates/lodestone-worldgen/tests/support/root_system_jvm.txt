@@ -1,0 +1,25 @@
+# Output from `bash scripts/worldgen-oracle/run.sh RootSystemOracle` on the
+# compiled 26.2 server. The setup has a real one-block air cave beneath the
+# root column, so hanging-root survival is exercised against a solid ceiling.
+# `blocked` is the occupied-origin control.
+normal -1,62,1 minecraft:hanging_roots
+normal -1,63,-2 minecraft:rooted_dirt
+normal -1,63,1 minecraft:rooted_dirt
+normal -1,63,2 minecraft:rooted_dirt
+normal -2,62,0 minecraft:hanging_roots
+normal -2,62,1 minecraft:hanging_roots
+normal -2,63,-1 minecraft:rooted_dirt
+normal -2,63,0 minecraft:rooted_dirt
+normal 0,62,-2 minecraft:hanging_roots
+normal 0,63,-1 minecraft:rooted_dirt
+normal 0,63,0 minecraft:hanging_roots
+normal 0,63,1 minecraft:rooted_dirt
+normal 0,63,2 minecraft:rooted_dirt
+normal 0,65,0 minecraft:oak_log
+normal 1,62,-1 minecraft:hanging_roots
+normal 1,63,-1 minecraft:rooted_dirt
+normal 1,62,-2 minecraft:hanging_roots
+normal 1,63,0 minecraft:rooted_dirt
+normal 1,63,1 minecraft:rooted_dirt
+normal 2,63,-2 minecraft:rooted_dirt
+blocked 0,63,0 minecraft:stone

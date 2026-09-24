@@ -1,0 +1,15 @@
+# Independent 26.2 End-city marker/loot capture.
+#
+# The native server generated this city in the preserved megaworld, then the
+# region reader captured the structure start and chest block entity. Lodestone
+# did not generate or inspect the expected values.
+#
+# Format:
+#   city <origin chunk x> <origin chunk z>
+#   piece <template> <origin x> <origin y> <origin z> <rotation>
+#   marker <template-local x> <template-local y> <template-local z> <metadata>
+#   chest <receiving chunk x> <receiving chunk z> <x> <y> <z> <loot table> <loot seed>
+city 24 -117
+piece third_floor_2 377 138 -1863 ccw90
+marker 6 6 2 Chest
+chest 23 -117 379 143 -1869 minecraft:chests/end_city_treasure 7196274600489825157

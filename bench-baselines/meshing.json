@@ -1,0 +1,33 @@
+{
+  "bench": "meshing",
+  "note": "Committed baseline for deterministic bench metrics: counts, byte totals and fractions of a fixed capacity. NEVER a duration -- scripts/bench-gate.py refuses to write one, because a committed duration is a wall-clock ceiling on whatever machine recorded it. Move a value with `just bench-baseline-update` and commit the diff alongside the change that moved it; the band is two-way, so an unexplained improvement is red too. First recorded on macbook.local (aarch64, macOS, `bench` profile); cross-machine agreement is verified by CI's own first run of the bench-gate job, and a disagreement there is evidence that the metric is not machine-independent rather than evidence of a regression.",
+  "entries": [
+    {
+      "metric": "frontier_remesh_sections",
+      "scene": "fixture=synthetic_overworld_column rd=10 arriving=(3,3) mesher=mesh_greedy",
+      "unit": "sections",
+      "value": 63.0,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "mesh_models_surface_quads",
+      "scene": "fixture=synthetic_overworld_column patch=3x3 section=6(surface)",
+      "unit": "quads",
+      "value": 256.0,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "mesh_simple_surface_quads",
+      "scene": "fixture=synthetic_overworld_column patch=3x3 section=6(surface)",
+      "unit": "quads",
+      "value": 256.0,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    }
+  ]
+}

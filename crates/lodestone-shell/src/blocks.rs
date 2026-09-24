@@ -1,0 +1,512 @@
+//! The shell's **demo block palette**, its [`BlockClassifier`], and a procedural
+//! texture atlas.
+//!
+//! This is deliberately version-free and self-contained: the shell must run with
+//! no downloaded assets and must name no protocol version, so instead of the
+//! real 26.2 block registry + `lodestone-assets` atlas it uses a tiny hand-built
+//! palette. The *shape* of the data is exactly what the real pipeline needs — a
+//! `state_id → Cell` classifier ([`lodestone_render::BlockClassifier`]) and a
+//! GPU atlas + sprite-UV table — so swapping in the real registry later is a
+//! drop-in, not a redesign. That missing bridge (real state id → baked model →
+//! atlas sprite) is called out in the report as a seam the library still owes.
+
+use std::sync::Arc;
+
+use lodestone_data::block_states::StateId;
+use lodestone_render::{
+    BlockAtlas, BlockClassifier, BlockModels, Cell, FluidKind, SpriteId, Surface,
+};
+use lodestone_world::LightProperties;
+
+/// Block-state ids used by [`crate::worldgen`]. These are the shell's own tiny
+/// namespace, unrelated to any real protocol's ids.
+pub mod id {
+    /// Empty / non-rendered.
+    pub const AIR: u32 = 0;
+    /// Stone.
+    pub const STONE: u32 = 1;
+    /// Dirt.
+    pub const DIRT: u32 = 2;
+    /// Grass block (grassy top, dirt bottom, grassy sides).
+    pub const GRASS: u32 = 3;
+    /// Sand.
+    pub const SAND: u32 = 4;
+    /// Water (rendered opaque in this demo).
+    pub const WATER: u32 = 5;
+    /// Log (bark sides, ringed top/bottom).
+    pub const LOG: u32 = 6;
+    /// Leaves.
+    pub const LEAVES: u32 = 7;
+    /// Bedrock.
+    pub const BEDROCK: u32 = 8;
+    /// Gravel (ocean floor / surface-rule result).
+    pub const GRAVEL: u32 = 9;
+}
+
+/// A validated state in the shell's offline demo palette.
+///
+/// This is deliberately separate from [`StateId`]: the demo palette's numbers
+/// are local fixture indexes and must never be interpreted as canonical states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DemoStateId(u32);
+
+impl DemoStateId {
+    /// Validates one of the demo palette's ten state slots.
+    #[must_use]
+    pub const fn new(raw: u32) -> Option<Self> {
+        if raw <= id::GRAVEL {
+            Some(Self(raw))
+        } else {
+            None
+        }
+    }
+
+    /// The local demo-palette index.
+    #[must_use]
+    pub const fn raw(self) -> u32 {
+        self.0
+    }
+}
+
+/// A block state in the ID space selected for one shell session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellStateId {
+    /// The offline demo palette's local ID space.
+    Demo(DemoStateId),
+    /// The canonical built-in block-state table used by live sessions.
+    Vanilla(StateId),
+}
+
+impl From<DemoStateId> for ShellStateId {
+    fn from(state_id: DemoStateId) -> Self {
+        Self::Demo(state_id)
+    }
+}
+
+impl From<StateId> for ShellStateId {
+    fn from(state_id: StateId) -> Self {
+        Self::Vanilla(state_id)
+    }
+}
+
+/// Light opacity/emission for the demo palette, keyed by the [`id`] constants.
+///
+/// This feeds [`lodestone_world::compute_column_light`] at generation time so the
+/// local world carries **real sky-light gradients** — cave and overhang cells go
+/// dark, open sky stays at `15` — instead of the flat full-bright field the mesh
+/// path used to assume. Without it, wiring the light-aware mesher would be
+/// vacuous: every cell would resolve to `sky = 15`, which renders identically to
+/// the old `UniformLight` bridge.
+///
+/// Values mirror vanilla's coarse behaviour for the handful of demo blocks: air
+/// is transparent, water and leaves dampen light by one level (a lake bottom /
+/// forest floor is dimmer, not black), and every other block is a full solid.
+/// The demo palette emits no light.
+#[derive(Debug)]
+pub struct DemoLightProps;
+
+impl LightProperties for DemoLightProps {
+    fn opacity(&self, state: u32) -> u8 {
+        match state {
+            id::AIR => 0,
+            id::WATER | id::LEAVES => 1,
+            _ => 15,
+        }
+    }
+
+    fn emission(&self, _state: u32) -> u8 {
+        0
+    }
+}
+
+/// Sprite (atlas tile) indices. One per distinct texture.
+mod sprite {
+    pub const STONE: u16 = 0;
+    pub const DIRT: u16 = 1;
+    pub const GRASS_TOP: u16 = 2;
+    pub const GRASS_SIDE: u16 = 3;
+    pub const SAND: u16 = 4;
+    pub const WATER: u16 = 5;
+    pub const LOG_SIDE: u16 = 6;
+    pub const LOG_TOP: u16 = 7;
+    pub const LEAVES: u16 = 8;
+    pub const BEDROCK: u16 = 9;
+    pub const GRAVEL: u16 = 10;
+    pub const COUNT: u16 = 11;
+}
+
+/// Face order matches [`lodestone_render::Face`]:
+/// `[NegX, PosX, NegY, PosY, NegZ, PosZ]` (index 2 = bottom, 3 = top).
+#[derive(Debug, Clone, Copy)]
+pub struct Block {
+    /// Block-state id.
+    pub id: u32,
+    /// Human name, used by the debug overlay / logging.
+    pub name: &'static str,
+    /// Per-face sprite indices.
+    pub sprites: [u16; 6],
+}
+
+const fn uniform(name: &'static str, id: u32, s: u16) -> Block {
+    Block {
+        id,
+        name,
+        sprites: [s, s, s, s, s, s],
+    }
+}
+
+/// The demo palette (excludes air).
+const PALETTE: &[Block] = &[
+    uniform("stone", id::STONE, sprite::STONE),
+    uniform("dirt", id::DIRT, sprite::DIRT),
+    Block {
+        id: id::GRASS,
+        name: "grass_block",
+        // NegX,PosX,NegY(bottom),PosY(top),NegZ,PosZ
+        sprites: [
+            sprite::GRASS_SIDE,
+            sprite::GRASS_SIDE,
+            sprite::DIRT,
+            sprite::GRASS_TOP,
+            sprite::GRASS_SIDE,
+            sprite::GRASS_SIDE,
+        ],
+    },
+    uniform("sand", id::SAND, sprite::SAND),
+    uniform("water", id::WATER, sprite::WATER),
+    Block {
+        id: id::LOG,
+        name: "log",
+        sprites: [
+            sprite::LOG_SIDE,
+            sprite::LOG_SIDE,
+            sprite::LOG_TOP,
+            sprite::LOG_TOP,
+            sprite::LOG_SIDE,
+            sprite::LOG_SIDE,
+        ],
+    },
+    uniform("leaves", id::LEAVES, sprite::LEAVES),
+    uniform("bedrock", id::BEDROCK, sprite::BEDROCK),
+    uniform("gravel", id::GRAVEL, sprite::GRAVEL),
+];
+
+/// The demo palette (all non-air blocks).
+#[must_use]
+pub fn palette() -> &'static [Block] {
+    PALETTE
+}
+
+/// Look up a block by id.
+#[must_use]
+pub fn block(id: u32) -> Option<&'static Block> {
+    PALETTE.iter().find(|b| b.id == id)
+}
+
+/// The shell's classifier: resolves a demo block-state id into a render [`Cell`].
+///
+/// Crucially, air is a **lit but empty** cell (not [`Cell::EMPTY`]) so that the
+/// faces of neighbouring blocks sample real light and don't render black — the
+/// "air must carry light" hazard the render crate documents.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DemoClassifier;
+
+impl BlockClassifier for DemoClassifier {
+    fn classify(&self, state_id: u32, block_light: u8, sky_light: u8) -> Cell {
+        match block(state_id) {
+            None => Cell {
+                occludes: false,
+                surface: None,
+                block_light,
+                sky_light,
+            },
+            Some(b) => Cell {
+                occludes: true,
+                surface: Some(Surface {
+                    sprites: b.sprites.map(SpriteId),
+                }),
+                block_light,
+                sky_light,
+            },
+        }
+    }
+}
+
+/// The classifier the shell actually meshes with, selected once per session.
+///
+/// The shell runs in two mutually exclusive block-id worlds and must never mix
+/// them, because they share no id space:
+///
+/// * [`Demo`](ShellClassifier::Demo) — the hand-built 10-id palette
+///   ([`id`]) the local worldgen stand-in emits. Used for the offline dev world
+///   and as the fail-closed fallback when vanilla assets can't be loaded.
+/// * [`Vanilla`](ShellClassifier::Vanilla) — a real [`BlockAtlas`] keyed on the
+///   *vanilla global block-state ids* a live server streams (tens of thousands
+///   of them). Used for the live multiplayer world.
+///
+/// Meshing a live column through [`Demo`](ShellClassifier::Demo) is the exact
+/// island this type closes: `block(id)` returns `None` for every vanilla id
+/// `>= 10`, so the live world would mesh as air. The session picks one variant
+/// and meshes only the world whose ids that variant understands (demo world iff
+/// `Demo`, live world iff `Vanilla`).
+///
+/// [`Vanilla`](ShellClassifier::Vanilla) holds the atlas behind an [`Arc`] so
+/// every mesh worker shares one stitched atlas (a clone is a refcount bump, not
+/// a 32k-state rebuild).
+#[derive(Debug, Clone)]
+pub enum ShellClassifier {
+    /// The offline 10-id demo palette.
+    Demo(DemoClassifier),
+    /// The real vanilla atlas, keyed on global block-state ids.
+    Vanilla(Arc<BlockAtlas>),
+}
+
+impl ShellClassifier {
+    /// Whether this is the vanilla (live-server) classifier. The session meshes
+    /// the live world only under this variant and the demo world only under
+    /// [`Demo`](ShellClassifier::Demo).
+    #[must_use]
+    pub fn is_vanilla(&self) -> bool {
+        matches!(self, ShellClassifier::Vanilla(_))
+    }
+
+    /// The baked per-state model geometry for the live world, or `None` on the
+    /// demo palette. The mesher branches on this: `Some` meshes the vanilla world
+    /// through the model path ([`crate::mesher::mesh_snapshot_models`]); `None`
+    /// meshes the demo world through the packed full-cube path.
+    #[must_use]
+    pub fn models(&self) -> Option<&BlockModels> {
+        match self {
+            ShellClassifier::Demo(_) => None,
+            ShellClassifier::Vanilla(a) => a.models(),
+        }
+    }
+}
+
+impl BlockClassifier for ShellClassifier {
+    fn classify(&self, state_id: u32, block_light: u8, sky_light: u8) -> Cell {
+        match self {
+            ShellClassifier::Demo(d) => d.classify(state_id, block_light, sky_light),
+            ShellClassifier::Vanilla(a) => a.classify(state_id, block_light, sky_light),
+        }
+    }
+}
+
+/// The fluid a **vanilla** block state exposes, or `None`.
+///
+/// This is the shell's *single* answer to "does this state carry a fluid", and it
+/// is deliberately a thin delegation rather than a rule of its own: the rule lives
+/// once, in [`BlockModels::fluid`], which the mesher already meshes water from.
+/// That one classifier knows the three cases a block-id match cannot:
+///
+/// * `minecraft:water` / `minecraft:lava` and their `level` property;
+/// * **any** state with `waterlogged=true` (stairs, slabs, fences, trapdoors…);
+/// * the five classes whose `getFluidState` hardcodes a water source with no
+///   blockstate property at all (kelp, kelp plant, seagrass, tall seagrass,
+///   bubble column) — structurally invisible to a property-driven classifier.
+///
+/// Physics reads this through [`crate::collision::LiveCollision`], so the swim
+/// path, the submerged fog, the underwater overlay and the ambient sounds are all
+/// gated by the *same* boolean the water surface is drawn from. Four consumers,
+/// one answer — a second local copy of the waterlogged rule is exactly the drift
+/// this exists to prevent.
+///
+/// Returns `None` when the atlas carries no baked models (never true for a live
+/// session: [`crate::resources::BlockResources::try_vanilla`] always attaches them
+/// before the atlas escapes).
+#[must_use]
+pub fn vanilla_fluid(atlas: &BlockAtlas, state_id: StateId) -> Option<FluidKind> {
+    atlas.models()?.fluid(state_id).map(|cell| cell.kind)
+}
+
+/// The fluid a **demo-palette** state exposes, or `None`.
+///
+/// The demo palette's counterpart to [`vanilla_fluid`]. It is a one-line table
+/// rather than a delegation because the palette is a nine-block fixture in its own
+/// id space with no models, no waterlogging and no lava — there is no vanilla rule
+/// to share, only this fixture's own fact, and it belongs next to the [`id`]
+/// constants it reads.
+#[must_use]
+pub fn demo_fluid(state_id: DemoStateId) -> Option<FluidKind> {
+    (state_id.raw() == id::WATER).then_some(FluidKind::Water)
+}
+
+impl ShellClassifier {
+    /// The fluid a state exposes, in whichever id space this session picked.
+    ///
+    /// Dispatches to [`vanilla_fluid`] or [`demo_fluid`]; see [`vanilla_fluid`]
+    /// for why this is the only place the question is answered.
+    #[must_use]
+    pub fn fluid(&self, state_id: impl Into<ShellStateId>) -> Option<FluidKind> {
+        match (self, state_id.into()) {
+            (ShellClassifier::Demo(_), ShellStateId::Demo(state_id)) => demo_fluid(state_id),
+            (ShellClassifier::Vanilla(atlas), ShellStateId::Vanilla(state_id)) => {
+                vanilla_fluid(atlas, state_id)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// One 16×16 atlas tile.
+const TILE: u32 = 16;
+
+/// Base RGB colour per sprite index.
+fn base_color(s: u16) -> [u8; 3] {
+    match s {
+        sprite::STONE => [124, 124, 124],
+        sprite::DIRT => [134, 96, 67],
+        sprite::GRASS_TOP => [91, 153, 74],
+        sprite::GRASS_SIDE => [120, 130, 74],
+        sprite::SAND => [214, 203, 152],
+        sprite::WATER => [54, 96, 196],
+        sprite::LOG_SIDE => [102, 81, 51],
+        sprite::LOG_TOP => [160, 130, 86],
+        sprite::LEAVES => [56, 110, 46],
+        sprite::BEDROCK => [64, 64, 68],
+        sprite::GRAVEL => [126, 120, 116],
+        _ => [255, 0, 255],
+    }
+}
+
+/// Build the procedural atlas: `COUNT` 16×16 tiles laid left-to-right in a
+/// single row whose **width is padded up to a power of two**.
+///
+/// The padding is not cosmetic. `lodestone_render`'s isolated-mip generator
+/// floors each sprite's origin and the atlas width independently at every mip
+/// level (`sprite.x >> level` vs `width >> level`); for a tightly-packed
+/// non-power-of-two width the last sprite's floored origin can land exactly on
+/// the floored row width and index one texel past the destination buffer. A
+/// power-of-two width keeps `sprite.x >> level < width >> level` at every level,
+/// so no sprite ever writes out of bounds. (Reported as a robustness gap in the
+/// render crate — its own tests only exercise a 16×16 single-sprite atlas.)
+///
+/// Returns [`AtlasData`] where `uv_table[i]` is
+/// `[uv_min.x, uv_min.y, uv_size.x, uv_size.y]` for sprite `i` — the exact
+/// layout [`lodestone_render::block::sprite_uv_buffer`] expects.
+#[must_use]
+pub fn build_atlas() -> AtlasData {
+    let count = u32::from(sprite::COUNT);
+    let width = (count * TILE).next_power_of_two();
+    let height = TILE;
+    let mut rgba = vec![0u8; (width * height * 4) as usize];
+
+    for s in 0..sprite::COUNT {
+        let base = base_color(s);
+        let ox = u32::from(s) * TILE;
+        for ty in 0..TILE {
+            for tx in 0..TILE {
+                // A subtle deterministic per-texel dither so surfaces read as
+                // textured, not flat — also makes readback variation visible.
+                let n = ((tx.wrapping_mul(7) ^ ty.wrapping_mul(13)).wrapping_add(u32::from(s) * 5)
+                    % 24) as i32
+                    - 12;
+                let px = ((ty * width) + ox + tx) as usize * 4;
+                for c in 0..3 {
+                    rgba[px + c] = (i32::from(base[c]) + n).clamp(0, 255) as u8;
+                }
+                rgba[px + 3] = 255;
+            }
+        }
+    }
+
+    let mut sprite_rects = Vec::with_capacity(sprite::COUNT as usize);
+    let mut uv_table = Vec::with_capacity(sprite::COUNT as usize);
+    let w = width as f32;
+    for s in 0..sprite::COUNT {
+        let ox = u32::from(s) * TILE;
+        sprite_rects.push(lodestone_render::SpriteRect {
+            x: ox,
+            y: 0,
+            w: TILE,
+            h: TILE,
+        });
+        uv_table.push([ox as f32 / w, 0.0, TILE as f32 / w, 1.0]);
+    }
+
+    AtlasData {
+        width,
+        height,
+        rgba,
+        sprite_rects,
+        uv_table,
+    }
+}
+
+/// CPU-side atlas payload, ready to upload with
+/// [`lodestone_render::GpuAtlas::from_rgba`].
+#[derive(Debug, Clone)]
+pub struct AtlasData {
+    /// Atlas width in pixels.
+    pub width: u32,
+    /// Atlas height in pixels.
+    pub height: u32,
+    /// Tightly packed RGBA8 pixels.
+    pub rgba: Vec<u8>,
+    /// Per-sprite rectangles (for isolated mip generation).
+    pub sprite_rects: Vec<lodestone_render::SpriteRect>,
+    /// Per-sprite UV rectangles for the shader's sprite-UV storage buffer.
+    pub uv_table: Vec<[f32; 4]>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn air_is_lit_but_empty() {
+        let c = DemoClassifier.classify(id::AIR, 3, 12);
+        assert!(!c.occludes);
+        assert!(c.surface.is_none());
+        assert_eq!(c.sky_light, 12, "air must carry light");
+    }
+
+    #[test]
+    fn grass_has_distinct_top_and_bottom() {
+        let c = DemoClassifier.classify(id::GRASS, 0, 15);
+        let s = c.surface.expect("grass has a surface");
+        // index 3 = PosY (top) is grass_top; index 2 = NegY (bottom) is dirt.
+        assert_eq!(s.sprites[3], SpriteId(sprite::GRASS_TOP));
+        assert_eq!(s.sprites[2], SpriteId(sprite::DIRT));
+        assert_ne!(s.sprites[3], s.sprites[2]);
+    }
+
+    #[test]
+    fn atlas_layout_is_consistent() {
+        let a = build_atlas();
+        assert_eq!(
+            a.width,
+            (u32::from(sprite::COUNT) * TILE).next_power_of_two()
+        );
+        assert!(
+            a.width.is_power_of_two(),
+            "width must be pow2 for safe mips"
+        );
+        assert_eq!(a.rgba.len(), (a.width * a.height * 4) as usize);
+        assert_eq!(a.uv_table.len(), sprite::COUNT as usize);
+        // First sprite starts at u=0, each spans exactly one tile of the width.
+        assert!((a.uv_table[0][0] - 0.0).abs() < 1e-6);
+        assert!((a.uv_table[0][2] - TILE as f32 / a.width as f32).abs() < 1e-6);
+        // No sprite's floored origin can reach the floored row width at any mip
+        // level — the invariant that keeps isolated-mip generation in bounds.
+        for level in 0..=a.width.ilog2() {
+            let lw = (a.width >> level).max(1);
+            for r in &a.sprite_rects {
+                assert!(
+                    (r.x >> level) < lw,
+                    "sprite x={} overflows at mip {level}",
+                    r.x
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_palette_sprite_is_in_range() {
+        for b in palette() {
+            for s in b.sprites {
+                assert!(s < sprite::COUNT, "sprite {s} out of range for {}", b.name);
+            }
+        }
+    }
+}

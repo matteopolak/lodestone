@@ -1,0 +1,555 @@
+//! Cave root-column configured-feature placement.
+//!
+//! A root-system call first finds a viable elevated candidate, runs its nested
+//! placed feature on the same random stream, then scatters replacement roots
+//! through the intervening column and hanging roots around the original
+//! position. The nested placement is a callback because it belongs to the
+//! parent configured-feature dispatcher; this module must not create a second
+//! feature-routing path or re-seed the caller's generator.
+
+use lodestone_worldgen_core::hash::FastSet;
+use lodestone_data::block_states::StateId;
+
+use crate::feature::BlockPos;
+use crate::rng::RandomSource;
+
+use super::config::{
+    BlockPredicate, BlockStateProvider, PlacedRef, VegTags,
+};
+use super::ids::Tag;
+use super::grid::VegGrid;
+
+/// Parsed configuration for the cave root-column feature.
+///
+/// `feature` remains a placed-feature reference so its modifiers run at the
+/// selected elevated candidate, in the same way they do when reached directly
+/// from a biome's decoration list.
+#[derive(Clone, Debug)]
+pub struct RootSystemCfg {
+    pub feature: PlacedRef,
+    pub required_vertical_space_for_tree: i32,
+    pub level_test_distance: i32,
+    pub max_level_deviation: i32,
+    pub root_radius: i32,
+    pub root_replaceable: FastSet<StateId>,
+    pub root_state_provider: BlockStateProvider,
+    pub root_placement_attempts: i32,
+    pub root_column_max_height: i32,
+    pub hanging_root_radius: i32,
+    pub hanging_roots_vertical_span: i32,
+    pub hanging_root_state_provider: BlockStateProvider,
+    pub hanging_root_placement_attempts: i32,
+    pub allowed_vertical_water_for_tree: i32,
+    pub allowed_tree_position: BlockPredicate,
+}
+
+/// Places one root system, returning the feature body's unconditional success
+/// result. An occupied outer origin is the one false result; every other
+/// attempted placement reports success even when no nested feature lands.
+///
+/// `place_nested` is deliberately supplied by the vegetation dispatcher. It
+/// receives the exact mutable `random` passed to this function, rather than a
+/// derived or re-seeded source, so a successful nested placement and both root
+/// passes retain their one shared draw sequence.
+pub(super) fn place_root_system<R, F>(
+    random: &mut R,
+    origin: BlockPos,
+    cfg: &RootSystemCfg,
+    grid: &mut VegGrid,
+    tags: &VegTags,
+    mut place_nested: F,
+) -> bool
+where
+    R: RandomSource,
+    F: FnMut(&mut R, BlockPos, &PlacedRef, &mut VegGrid, &VegTags),
+{
+    if !air_at(grid, origin) {
+        return false;
+    }
+
+    let Some(target_height) = find_and_place_nested(
+        random,
+        origin,
+        cfg,
+        grid,
+        tags,
+        &mut place_nested,
+    ) else {
+        return true;
+    };
+
+    let root_replaceable = cfg.root_replaceable.clone();
+    place_column_roots(random, origin, target_height, cfg, grid, tags, &root_replaceable);
+    place_hanging_roots(random, origin, cfg, grid, tags);
+    true
+}
+
+fn find_and_place_nested<R, F>(
+    random: &mut R,
+    origin: BlockPos,
+    cfg: &RootSystemCfg,
+    grid: &mut VegGrid,
+    tags: &VegTags,
+    place_nested: &mut F,
+) -> Option<i32>
+where
+    R: RandomSource,
+    F: FnMut(&mut R, BlockPos, &PlacedRef, &mut VegGrid, &VegTags),
+{
+    for y in 0..cfg.root_column_max_height {
+        let candidate = BlockPos {
+            x: origin.x,
+            y: origin.y + y + 1,
+            z: origin.z,
+        };
+        if grid.height_world_surface(candidate.x, candidate.z) < candidate.y {
+            return None;
+        }
+        if !cfg.allowed_tree_position.test(grid, tags, candidate)
+            || !space_for_nested_feature(candidate, cfg, grid)
+        {
+            continue;
+        }
+
+        let below = BlockPos {
+            x: candidate.x,
+            y: candidate.y - 1,
+            z: candidate.z,
+        };
+        let below_base = base_at(grid, below);
+        if tags.has(Tag::Lava, below_base) || !solid_at(grid, tags, below) {
+            return None;
+        }
+
+        // The nested feature's own boolean success is not available through
+        // the generic dispatcher. A dirty-overlay delta is the local success
+        // signal: it correctly admits cross-chunk writes that land inside this
+        // caller-owned region and rejects a no-op nested feature.
+        let writes_before = grid.dirty_cells().count();
+        place_nested(random, candidate, &cfg.feature, grid, tags);
+        if grid.dirty_cells().count() != writes_before {
+            return Some(origin.y + y);
+        }
+        // A nested placed feature can reject this candidate after consuming
+        // part of the shared stream. The reference loop keeps scanning, so a
+        // later supported candidate gets the stream exactly where the failed
+        // attempt left it instead of turning the first rejection into a hard
+        // stop.
+        continue;
+    }
+    None
+}
+
+fn place_column_roots<R: RandomSource>(
+    random: &mut R,
+    origin: BlockPos,
+    target_height: i32,
+    cfg: &RootSystemCfg,
+    grid: &mut VegGrid,
+    tags: &VegTags,
+    root_replaceable: &FastSet<StateId>,
+) {
+    for y in origin.y..target_height {
+        for _ in 0..cfg.root_placement_attempts {
+            // These are four independent draws per attempt. Keep this shape:
+            // sampling a combined offset changes every following provider and
+            // feature draw.
+            let pos = BlockPos {
+                x: origin.x + random.next_int_bounded(cfg.root_radius)
+                    - random.next_int_bounded(cfg.root_radius),
+                y,
+                z: origin.z + random.next_int_bounded(cfg.root_radius)
+                    - random.next_int_bounded(cfg.root_radius),
+            };
+            if !root_replaceable.contains(&base_at(grid, pos)) {
+                continue;
+            }
+            if let Some(state) = cfg.root_state_provider.get_state_id(grid, tags, random, pos) {
+                grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state);
+            }
+        }
+    }
+}
+
+fn place_hanging_roots<R: RandomSource>(
+    random: &mut R,
+    origin: BlockPos,
+    cfg: &RootSystemCfg,
+    grid: &mut VegGrid,
+    tags: &VegTags,
+) {
+    for _ in 0..cfg.hanging_root_placement_attempts {
+        let pos = BlockPos {
+            x: origin.x + random.next_int_bounded(cfg.hanging_root_radius)
+                - random.next_int_bounded(cfg.hanging_root_radius),
+            y: origin.y + random.next_int_bounded(cfg.hanging_roots_vertical_span)
+                - random.next_int_bounded(cfg.hanging_roots_vertical_span),
+            z: origin.z + random.next_int_bounded(cfg.hanging_root_radius)
+                - random.next_int_bounded(cfg.hanging_root_radius),
+        };
+        if !air_at(grid, pos) {
+            continue;
+        }
+
+        // State selection precedes its survival test. In particular, a
+        // weighted provider still consumes its draw at an unsupported ceiling;
+        // moving this call after `hanging_state_can_survive` shifts every later
+        // attempt and is externally observable.
+        let Some(state) = cfg
+            .hanging_root_state_provider
+            .get_state_id(grid, tags, random, pos)
+        else {
+            continue;
+        };
+        if hanging_state_can_survive(grid, tags, state, pos) {
+            grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state);
+        }
+    }
+}
+
+/// The state family reachable from the bundled root-system records either
+/// hangs from a sturdy ceiling or has no placement support requirement. The
+/// latter is represented by the sulfur spring's provider. New state families
+/// need their own survival rule here; accepting one by default would make a
+/// newly added provider silently place through an invalid ceiling.
+fn hanging_state_can_survive(
+    grid: &VegGrid,
+    tags: &VegTags,
+    state: StateId,
+    pos: BlockPos,
+) -> bool {
+    match state.block() {
+        lodestone_data::block::Block::HangingRoots => solid_at(
+            grid,
+            tags,
+            BlockPos {
+                x: pos.x,
+                y: pos.y + 1,
+                z: pos.z,
+            },
+        ),
+        lodestone_data::block::Block::Sulfur => true,
+        _ => false,
+    }
+}
+
+fn space_for_nested_feature(pos: BlockPos, cfg: &RootSystemCfg, grid: &VegGrid) -> bool {
+    for distance in 1..=cfg.required_vertical_space_for_tree {
+        let at = BlockPos {
+            x: pos.x,
+            y: pos.y + distance,
+            z: pos.z,
+        };
+        if !allowed_tree_space(
+            grid,
+            grid.get_id(at.x, at.y, at.z),
+            distance,
+            cfg.allowed_vertical_water_for_tree,
+        ) {
+            return false;
+        }
+    }
+
+    if cfg.level_test_distance == 0 {
+        return true;
+    }
+    for (dx, dz) in [(0, -1), (1, 0), (0, 1), (-1, 0)] {
+        let probe_x = pos.x + dx * cfg.level_test_distance;
+        let probe_z = pos.z + dz * cfg.level_test_distance;
+        if air_at(
+            grid,
+            BlockPos {
+                x: probe_x,
+                y: pos.y - cfg.max_level_deviation,
+                z: probe_z,
+            },
+        ) || !air_at(
+            grid,
+            BlockPos {
+                x: probe_x,
+                y: pos.y + cfg.max_level_deviation,
+                z: probe_z,
+            },
+        ) {
+            return false;
+        }
+    }
+    true
+}
+
+fn allowed_tree_space(
+    grid: &VegGrid,
+    state: StateId,
+    distance: i32,
+    allowed_water_height: i32,
+) -> bool {
+    tags_for_grid(grid, Tag::Air, state)
+        || (distance + 1 <= allowed_water_height && tags_for_grid(grid, Tag::Water, state))
+}
+
+fn tags_for_grid(_grid: &VegGrid, tag: Tag, state: StateId) -> bool {
+    // Root placement has no separate tag table at this helper boundary; these
+    // built-in identities are exact canonical block-state facts.
+    match tag {
+        Tag::Air => matches!(
+            state.block(),
+            lodestone_data::block::Block::Air
+                | lodestone_data::block::Block::CaveAir
+                | lodestone_data::block::Block::VoidAir
+        ),
+        Tag::Water => state.block() == lodestone_data::block::Block::Water,
+        Tag::Lava => state.block() == lodestone_data::block::Block::Lava,
+        Tag::Fluid => matches!(
+            state.block(),
+            lodestone_data::block::Block::Water | lodestone_data::block::Block::Lava
+        ),
+        _ => false,
+    }
+}
+
+fn base_at(grid: &VegGrid, pos: BlockPos) -> StateId {
+    grid.get_id(pos.x, pos.y, pos.z).block().default_state()
+}
+
+fn air_at(grid: &VegGrid, pos: BlockPos) -> bool {
+    tags_for_grid(grid, Tag::Air, grid.get_id(pos.x, pos.y, pos.z))
+}
+
+/// The root column's support and hanging-root ceiling both need a full solid
+/// surface. Production tags carry the exact per-state solidity predicate;
+/// compact fixtures without that census use the base-id motion approximation.
+fn solid_at(grid: &VegGrid, tags: &VegTags, pos: BlockPos) -> bool {
+    let state = grid.get_id(pos.x, pos.y, pos.z);
+    if !tags.solid.is_empty() {
+        tags.solid.test_id(state)
+    } else {
+        !tags_for_grid(grid, Tag::Air, state)
+            && !tags_for_grid(grid, Tag::Fluid, state)
+            && lodestone_data::block_solidity::blocks_motion(state)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use lodestone_data::block::Block;
+
+    use crate::LegacyRandomSource;
+    use crate::feature::BlockPos;
+
+    use super::*;
+    use super::super::config::{BlockPredicate, BlockStateProvider, ConfiguredFeature, PlacedRef};
+
+    fn state(value: &str) -> StateId {
+        StateId::from_state_str(value).expect("fixture state is in the generated table")
+    }
+
+    fn fixture_grid(origin_state: StateId) -> VegGrid {
+        fixture_grid_at(0, origin_state)
+    }
+
+    fn fixture_grid_at(origin_x: i32, origin_state: StateId) -> VegGrid {
+        let mut grid = VegGrid::with_footprint(-64, 384, 0, 0, -16, 32);
+        for x in -16..32 {
+            for y in -64..=64 {
+                for z in -16..32 {
+                    grid.seed_id(x, y, z, Block::Stone.default_state());
+                }
+            }
+        }
+        for x in origin_x - 3..=origin_x + 3 {
+            for z in -3..=3 {
+                grid.seed_id(x, 62, z, StateId::AIR);
+            }
+        }
+        grid.seed_id(origin_x, 63, 0, origin_state);
+        grid
+    }
+
+    fn fixture_cfg() -> RootSystemCfg {
+        RootSystemCfg {
+            feature: PlacedRef {
+                registry_id: None,
+                placements: Vec::new(),
+                feature: Box::new(ConfiguredFeature::SimpleBlock(BlockStateProvider::simple(
+                    "minecraft:oak_log",
+                ))),
+            },
+            required_vertical_space_for_tree: 3,
+            level_test_distance: 0,
+            max_level_deviation: 0,
+            root_radius: 3,
+            root_replaceable: [Block::Stone.default_state()].into_iter().collect(),
+            root_state_provider: BlockStateProvider::simple("minecraft:rooted_dirt"),
+            root_placement_attempts: 20,
+            root_column_max_height: 8,
+            hanging_root_radius: 3,
+            hanging_roots_vertical_span: 2,
+            hanging_root_state_provider: BlockStateProvider::simple("minecraft:hanging_roots"),
+            hanging_root_placement_attempts: 20,
+            allowed_vertical_water_for_tree: 2,
+            allowed_tree_position: BlockPredicate::MatchingBlocks {
+                blocks: [Block::Air].into_iter().collect(),
+                offset: (0, 0, 0),
+            },
+        }
+    }
+
+    fn fixture_tags() -> VegTags {
+        let mut tags = VegTags::default();
+        tags.supports_vegetation.insert(Block::Stone);
+        tags.bind();
+        tags
+    }
+
+    #[test]
+    fn compiled_runtime_fixture_matches_column_roots_and_hanging_roots() {
+        let fixture = include_str!("../../../tests/support/root_system_jvm.txt");
+        let expected: BTreeMap<_, _> = fixture
+            .lines()
+            .filter_map(|line| {
+                let mut words = line.splitn(3, ' ');
+                let row = words.next()?;
+                let pos = words.next()?;
+                let state = words.next()?;
+                if row == "normal" {
+                    Some((
+                        pos.to_string(),
+                        StateId::from_state_str(state)
+                            .expect("fixture state is in the generated table"),
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(
+            expected.keys().any(|pos| pos.contains(",62,")),
+            "external fixture must exercise a hanging root below the root column"
+        );
+
+        let mut grid = fixture_grid(StateId::AIR);
+        let tags = fixture_tags();
+        let mut random = LegacyRandomSource::new(19);
+        let result = place_root_system(
+            &mut random,
+            BlockPos { x: 0, y: 63, z: 0 },
+            &fixture_cfg(),
+            &mut grid,
+            &tags,
+            |_, pos, _, grid, _| {
+                grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state("minecraft:oak_log"));
+            },
+        );
+        let got: BTreeMap<_, _> = grid
+            .dirty_cells()
+            .map(|(x, y, z, state)| (format!("{x},{y},{z}"), state))
+            .collect();
+        assert!(result);
+        assert_eq!(got, expected, "root-system placement diverged from the external prediction");
+    }
+
+    #[test]
+    fn occupied_outer_origin_is_a_negative_control_with_no_nested_call_or_draws() {
+        let fixture = include_str!("../../../tests/support/root_system_jvm.txt");
+        assert!(
+            fixture.contains("blocked 0,63,0 minecraft:stone"),
+            "external fixture must retain the occupied-origin negative control"
+        );
+        let mut grid = fixture_grid(Block::Stone.default_state());
+        let tags = fixture_tags();
+        let mut random = LegacyRandomSource::new(19);
+        let mut nested_calls = 0;
+        assert!(!place_root_system(
+            &mut random,
+            BlockPos { x: 0, y: 63, z: 0 },
+            &fixture_cfg(),
+            &mut grid,
+            &tags,
+            |_, _, _, _, _| nested_calls += 1,
+        ));
+        assert_eq!(nested_calls, 0);
+        assert_eq!(grid.dirty_cells().count(), 0);
+        assert_eq!(random.next_int(), LegacyRandomSource::new(19).next_int());
+    }
+
+    #[test]
+    fn root_writes_cross_the_source_chunk_edge_when_the_region_owns_the_neighbour() {
+        let mut grid = fixture_grid_at(15, StateId::AIR);
+        let tags = fixture_tags();
+        let mut random = LegacyRandomSource::new(19);
+        assert!(place_root_system(
+            &mut random,
+            BlockPos { x: 15, y: 63, z: 0 },
+            &fixture_cfg(),
+            &mut grid,
+            &tags,
+            |_, pos, _, grid, _| {
+                grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state("minecraft:oak_log"));
+            },
+        ));
+        assert!(
+            grid.dirty_cells().any(|(x, _, _, _)| x >= 16),
+            "the region overlay must retain roots that cross the source chunk edge"
+        );
+    }
+
+    #[test]
+    fn failed_nested_candidate_retries_on_the_same_random_stream() {
+        let mut grid = fixture_grid(StateId::AIR);
+        // Candidate y=64 is intentionally rejected by the configured
+        // predicate. Candidate y=65 is viable but its nested feature returns
+        // no writes. Candidate y=66 is viable and succeeds, proving that a
+        // failed nested attempt does not terminate the vertical scan.
+        grid.seed_id(0, 64, 0, state("minecraft:dirt"));
+        grid.seed_id(0, 65, 0, Block::Stone.default_state());
+        grid.seed_id(0, 66, 0, StateId::AIR);
+        grid.seed_id(0, 67, 0, StateId::AIR);
+        grid.seed_id(0, 68, 0, Block::Stone.default_state());
+
+        let mut cfg = fixture_cfg();
+        cfg.root_column_max_height = 8;
+        cfg.allowed_tree_position = BlockPredicate::AnyOf(vec![
+            BlockPredicate::MatchingBlocks {
+                blocks: [Block::Stone].into_iter().collect(),
+                offset: (0, 0, 0),
+            },
+            BlockPredicate::MatchingBlocks {
+                blocks: [Block::Air].into_iter().collect(),
+                offset: (0, 0, 0),
+            },
+        ]);
+        cfg.required_vertical_space_for_tree = 1;
+        cfg.root_placement_attempts = 0;
+        cfg.hanging_root_placement_attempts = 0;
+
+        let tags = fixture_tags();
+        let mut random = LegacyRandomSource::new(7);
+        let mut expected_random = LegacyRandomSource::new(7);
+        let expected_draws = [expected_random.next_int(), expected_random.next_int()];
+        let mut callback_positions = Vec::new();
+        let mut callback_draws = Vec::new();
+        assert!(place_root_system(
+            &mut random,
+            BlockPos { x: 0, y: 63, z: 0 },
+            &cfg,
+            &mut grid,
+            &tags,
+            |random, pos, _, grid, _| {
+                callback_positions.push(pos.y);
+                callback_draws.push(random.next_int());
+                if pos.y == 66 {
+                    grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state("minecraft:oak_log"));
+                }
+            },
+        ));
+        assert_eq!(callback_positions, [65, 66]);
+        assert_eq!(callback_draws, expected_draws);
+        assert_eq!(random.next_int(), expected_random.next_int());
+        assert_eq!(
+            grid.get(0, 66, 0),
+            state("minecraft:oak_log")
+        );
+    }
+}

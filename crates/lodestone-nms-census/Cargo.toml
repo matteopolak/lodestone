@@ -1,0 +1,30 @@
+# The NMS reference census: a pure-Rust Java class-file constant-pool scanner.
+#
+# Deliberately **not** a plugin and not under `crates/plugins/` — it consumes no
+# plugin API and links nothing. It is a measurement tool, in the same family as
+# the collision-shape and entity censuses this repo already dumps from real
+# jars, and it exists to size the Java-plugin bridge before anyone writes it.
+# See `docs/java-plugin-bridge.md`.
+#
+# **No `jni`, and nothing that links `libjvm`.** The whole point is that this
+# runs on a machine with no Java at all — which is this one.
+[package]
+name = "lodestone-nms-census"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The archive reader. Already a workspace dependency (the asset and jar-dump
+# paths use it), so this crate adds nothing to the lockfile.
+zip.workspace = true
+# Error reporting in the binary only; the library returns its own `ScanError`
+# so a caller is not forced into `anyhow`.
+anyhow.workspace = true
+
+[[bin]]
+name = "nms-census"
+path = "src/main.rs"

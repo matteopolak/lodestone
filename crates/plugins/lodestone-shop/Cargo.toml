@@ -1,0 +1,24 @@
+# The toy **publisher** in issue #107's cross-plugin messaging example: it writes
+# `lodestone_shop_api::ShopPurchase` and knows nothing about who reads it.
+#
+# Note what is NOT here: no dependency on `lodestone-shop-stats`. The publisher
+# has never heard of its subscribers, which is half of the property #107 is
+# about. See `docs/cross-plugin-messages.md`.
+[package]
+name = "lodestone-shop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The published contract. The only thing the publisher and its subscribers share.
+lodestone-shop-api = { path = "../lodestone-shop-api" }
+# `GameTick`, `TickSet`, `EventPriority`.
+lodestone-ecs = { workspace = true }
+# Direct, for the derive macros' absolute `bevy_ecs::`/`bevy_app::` paths — see
+# `lodestone-shop-api/Cargo.toml`'s note.
+bevy_ecs = { workspace = true }
+bevy_app = { workspace = true }

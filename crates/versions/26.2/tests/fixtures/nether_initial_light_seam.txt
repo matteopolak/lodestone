@@ -1,0 +1,10 @@
+# Independent Nether initial-light seam fixture.
+# A neighboring emitter is deferred until the later light update; a center
+# emitter remains in the initial packet.
+dimension=nether
+neighbor_offset=0,1
+neighbor_source=8,64,0
+target_cell=8,64,15
+neighbor_initial=0
+center_source=8,64,15
+center_initial=15

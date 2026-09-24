@@ -1,0 +1,51 @@
+[package]
+name = "lodestone-entity"
+autobenches = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+lodestone-model = { workspace = true }
+# The `minecraft:damage_type` registry + resolved tag table (issue #263), so
+# `DamageFlags` is derived from real vanilla tag data instead of each caller
+# hand-writing `bypasses_armor: true`. Version-free like lodestone-model, so it
+# does not touch the version seam; no cycle -- lodestone-data depends only on
+# lodestone-model.
+lodestone-data = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+lodestone-testsupport = { workspace = true, features = ["bench-record"] }
+# Direct dependency (not a workspace alias), per the harness decision in
+# `docs/roadmap/benchmarks.md`: pure in-memory, no-GPU benches use criterion
+# for its statistically-robust sampling and free local `--baseline` diffing.
+# `default-features = false` + only `cargo_bench_support`: the default feature
+# set pulls in `plotters` (HTML report charts) and `rayon`, neither of which
+# this crate's benches need — see the matching note in
+# `lodestone-worldgen/Cargo.toml`. Dev-only.
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+# E4 acceptance gate only (`tests/live_entity_seam.rs`): drives the *public*
+# lodestone-client API against the live oracle to establish whether real entity
+# packets cross the seam. Test-only — none of this reaches the crate's own
+# dependency graph, so the default build stays version-free. Version selection
+# goes through the registry; this crate never names a concrete version crate in
+# its `src/`. The `v26-2` family is enabled here (not via a crate feature, which
+# cannot reference dev-dependencies) so the ignored live test compiles on demand.
+lodestone-client = { workspace = true }
+lodestone-registry = { workspace = true, features = ["v26-2"] }
+tokio = { workspace = true }
+
+[[bench]]
+name = "pathfinding_search"
+harness = false
+
+[[bench]]
+name = "mob_tick"
+harness = false

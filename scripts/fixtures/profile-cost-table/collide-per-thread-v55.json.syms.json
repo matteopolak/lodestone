@@ -1,0 +1,55 @@
+{
+ "data": [
+  {
+   "code_id": "AAAA0000AAAA0000AAAA0000AAAA0000",
+   "debug_id": "AAAA0000AAAA0000AAAA0000AAAA00000",
+   "debug_name": "liba",
+   "known_addresses": [
+    [
+     4096,
+     0
+    ],
+    [
+     12288,
+     1
+    ]
+   ],
+   "symbol_table": [
+    {
+     "rva": 4096,
+     "size": 32,
+     "symbol": 1
+    },
+    {
+     "rva": 12288,
+     "size": 32,
+     "symbol": 3
+    }
+   ]
+  },
+  {
+   "code_id": "BBBB0000BBBB0000BBBB0000BBBB0000",
+   "debug_id": "BBBB0000BBBB0000BBBB0000BBBB00000",
+   "debug_name": "libb",
+   "known_addresses": [
+    [
+     4096,
+     0
+    ]
+   ],
+   "symbol_table": [
+    {
+     "rva": 4096,
+     "size": 32,
+     "symbol": 2
+    }
+   ]
+  }
+ ],
+ "string_table": [
+  "UNKNOWN",
+  "liba::alpha_symbol",
+  "libb::beta_symbol",
+  "liba::gamma_symbol"
+ ]
+}

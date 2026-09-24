@@ -1,0 +1,14 @@
+# Captured with scripts/worldgen-oracle/run.sh EndCompositeOrderOracle.
+# Digests cover the sorted final coordinate/state map for each order.
+format end-composite-order-v1
+case outer_island_structure seed=918273 origin=0,50,0 expected=outer_island,structure wrong=structure,outer_island
+expected_digest 9c5558a808b488c9b5f419c9e55cda9e4bbfd356915b7c29be9b822973507227
+wrong_digest fc4f93069775cd76092b82d01cfce1c087b2a7c053d96d9c27a625071fab01db
+probe 0,50,0 expected=minecraft:purpur_block wrong=minecraft:end_stone
+probe 1,49,0 expected=minecraft:end_stone wrong=minecraft:end_stone
+case chorus_platform seed=12345 origin=0,65,0 expected=chorus,platform wrong=platform,chorus
+expected_digest 2a9ebdf73ab0e4f1dd3ef9be71b71d2aa08d617ce85dfe870a8f2f83af6c8e95
+wrong_digest 1d31b74b76755ad2c2871220a54cea3adbceda95441b68f88e014d86fb8e11f5
+probe 0,64,0 expected=minecraft:obsidian wrong=minecraft:obsidian
+probe 0,65,0 expected=minecraft:air wrong=minecraft:chorus_plant[down=false,east=false,north=false,south=false,up=true,west=false]
+probe 0,66,0 expected=minecraft:air wrong=minecraft:chorus_plant[down=true,east=false,north=false,south=false,up=true,west=false]

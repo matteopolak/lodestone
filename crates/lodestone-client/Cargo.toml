@@ -1,0 +1,114 @@
+[package]
+name = "lodestone-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+lodestone-core = { workspace = true }
+lodestone-model = { workspace = true }
+lodestone-net = { workspace = true }
+# The bevy_ecs-backed World that owns WorldTime (docs/bevy-migration.md, Stage
+# 0): SharedState holds an EcsHandle so this crate can be the authoritative
+# owner of world_age/time_of_day without also touching spawn.rs/net.rs.
+lodestone-ecs = { workspace = true }
+# The read-model stores decoded chunk columns that arrive on
+# `ClientEvent::ChunkLoaded`; this is the same version-free `ChunkColumn` type
+# the model exposes, not any protocol-version knowledge.
+lodestone-world = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+# The wall clock a signed chat message's timestamp is stamped with
+# (`ClientAction::SendSignedChat::timestamp_millis`). `epoch_duration()` is the
+# one portable seam — `std::time::SystemTime::now()` compiles for wasm32 and
+# panics at runtime, same family as `Instant::now()`, which this crate already
+# bans crate-wide (see `scripts/wasm-check.sh`'s `lodestone-client instant-ban`
+# rule). The signing call site itself is native-only anyway (chat-signing
+# needs `lodestone-auth`'s RSA, which is `cfg(not(wasm32))`), but going through
+# this seam rather than `std::time` directly keeps the crate's "no bare wall-
+# clock read" invariant a checked one rather than one with a native-only
+# exception nobody grepped for.
+lodestone-time = { workspace = true }
+
+# The version-free signed-chat acknowledgement algorithm (`chat_ack`: the vanilla
+# 20-slot last-seen tracker). The stateful tracker accumulates across a session,
+# so it must live in the long-lived driver rather than the stateless adapter; this
+# is game-independent protocol bookkeeping, not version knowledge. Default
+# features only, so nothing beyond `lodestone-model` + `uuid` is pulled in and the
+# wasm build stays clean.
+lodestone-game = { workspace = true }
+
+# Version selection is delegated entirely to the registry crate: this crate never
+# names a concrete protocol version for adapter selection. Enabling a live-join
+# feature turns on the matching family *inside the registry* (see `[features]`),
+# so deleting a version family never requires editing this manifest.
+lodestone-registry = { workspace = true }
+
+# --- Native (non-wasm) target dependencies ---
+# The full workspace tokio (runtime, `net`, `time`). The driver is spawned onto
+# the multi-threaded runtime here via `tokio::spawn`. This target is the primary
+# one and its behaviour, API and performance are unchanged.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true }
+# The identity half of online-mode login: `Session`/`server_hash`/
+# `join_server`. `lodestone-net` already carries the crypto half
+# (`generate_shared_secret`/`rsa_encrypt`/`Connection::enable_encryption`);
+# this is the missing piece that turns a `Directive::BeginEncryption` into an
+# actual authenticated join. Native-only for the same reason `lodestone-auth`
+# itself is: the session-server call needs a real HTTP client and there is no
+# wasm32 story for it yet (see that crate's docs).
+lodestone-auth = { workspace = true }
+# Used directly (not just transitively through `lodestone-auth`) to hold the
+# one `reqwest::Client` a driver's session-server `join` call goes through.
+reqwest = { workspace = true }
+
+# --- wasm32 target dependencies ---
+# `wasm32-unknown-unknown` cannot build `mio`, so tokio must NOT pull `net`/`rt-
+# multi-thread`. The driver only uses the runtime-agnostic pieces there: channels
+# (`sync`) and `select!` (`macros`). The executor is `wasm-bindgen-futures`'
+# `spawn_local` (single-threaded, `!Send`), and the browser transport comes from
+# `lodestone-net`'s `ws-web` `WebSocket` — never from tokio.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio = { version = "1", default-features = false, features = ["sync", "macros"] }
+wasm-bindgen-futures = { workspace = true }
+
+[features]
+# Enables the high-level live-join test that joins a real vanilla server using the
+# v26-2 protocol adapter, resolved through the registry. Off by default so the
+# default build stays version-free and hermetic.
+live-v26-2 = ["lodestone-registry/v26-2"]
+# Enables the high-level live-join test that joins a real 1.8.x server using the
+# v1-8 protocol adapter, resolved through the registry. Off by default for the
+# same reason as `live-v26-2`.
+live-v1-8 = ["lodestone-registry/v1-8"]
+# Enables the high-level live-join test that joins a real 1.12.2 server using the
+# v1-9 protocol adapter, resolved through the registry. Off by default for the
+# same reason as `live-v26-2`.
+live-v1-9 = ["lodestone-registry/v1-9"]
+# The white-box chunk/respawn decode tests moved into the version crate whose
+# concrete packet types they name (see that crate's `live-chunk` feature). This
+# client no longer references any protocol version except through the registry.
+# Enables the cross-format text oracle: a live capture harness that records real
+# chat components from both a 1.8 (JSON) and a modern (NBT) server, plus a live
+# join-message equivalence test. Both families are resolved through the registry,
+# so this feature names no concrete version crate.
+capture-text-oracle = ["lodestone-registry/v1-8", "lodestone-registry/v26-2"]
+
+[dev-dependencies]
+tokio = { workspace = true }
+lodestone-core = { workspace = true }
+lodestone-testsupport = { workspace = true }
+# `tests/online_mode_handshake.rs` plays the server side of the encryption
+# handshake against a real (test-generated) RSA keypair, independent of the
+# `rsa`/`rand` calls the driver itself makes under test — see that file's
+# module docs for exactly what this does and does not prove.
+rsa = { workspace = true }
+rand = { workspace = true }
+# Decodes the same fixed PKCS#8-DER test RSA key `lodestone-auth`'s own chat
+# signing tests use (a public, throwaway fixture — reused rather than
+# duplicated as raw bytes) for `driver.rs`'s signed-chat unit test.
+base64 = { workspace = true }

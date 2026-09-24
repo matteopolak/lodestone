@@ -1,0 +1,113 @@
+# Block entities: the block types whose 26.2 model file is *empty*, so every
+# one of them is a hole in the terrain mesh until a render source supplies it.
+#
+# Banners (layered loom patterns composited into one flag mesh, with sway),
+# decorated pots (four independent sherd faces), chests and shulker boxes,
+# skulls and heads, an inactive conduit shell, a lit campfire cooking real
+# items, a lectern holding a book, a bell, an enchanting table (four animated
+# book values, none of them on the wire), and a beacon firing its beam.
+#
+# Two placement traps, each of which produced a false defect report:
+#
+#   * `minecraft:conduit`'s default block state is `waterlogged=true`, so a
+#     bare `setblock` puts a real water source on the stage and the server
+#     floods it out to a radius-6 diamond. That is vanilla behaviour, not a
+#     renderer bug; place it `waterlogged=false`. With no prismarine frame
+#     around it the conduit is *inactive*, which is the small spinning shell
+#     drawn from `entity/conduit/base` — no cage, no wind, no eye.
+#   * a skull's `rotation` segment 0 faces **north** (`-Z`), so a camera on
+#     the `-Z` side sees the face at `rotation=0` and the back of the head at
+#     `rotation=8`. The back of a skeleton skull or a zombie head is a flat
+#     untextured-looking field of one colour, which reads exactly like a
+#     missing texture. Banners here use `rotation=8` for the opposite reason:
+#     `BannerRenderer` applies no `scale(-1, -1, 1)` flip, so their segment 0
+#     points the other way.
+#   * a double chest's `type=left`/`type=right` is only half the placement —
+#     which neighbour a half pairs with **depends on its `facing`**.
+#     `ChestBlock.getConnectedDirection` gives `LEFT` the block at
+#     `facing.getClockWise()` and `RIGHT` the one at `getCounterClockWise()`,
+#     so for `facing=north` a `left` half pairs **east** and for `facing=south`
+#     it pairs **west**. Get the pair the wrong way round and both halves are
+#     orphans, each drawing the open seam face it exists to hide against its
+#     partner — a chest-shaped hole on each side, which reads as a broken
+#     renderer. The pair below is `left` west of `right` and `facing=north`,
+#     which is consistent.
+#
+# Everything with a front — the chests, the barrel — faces **north**, so the
+# camera sees its face rather than its back. The same trap as the skulls, one
+# block type up: a chest photographed from behind has no latch and looks like a
+# crate.
+
+@size 2560 1440
+@camera 0.0 66.3 4.6
+@look 0.0 64.9 12.4
+@fov 68
+@wait 3000
+
+fill -16 63 0 16 90 32 minecraft:air
+kill @e[type=!player,x=-14,y=60,z=2,dx=28,dy=30,dz=28]
+fill -14 63 2 14 63 30 minecraft:smooth_stone
+fill -9 63 6 9 63 20 minecraft:polished_andesite
+fill -9 63 20 9 63 20 minecraft:chiseled_polished_blackstone
+
+# --- beacon, centre and furthest back -------------------------------------
+fill -1 63 17 1 63 19 minecraft:iron_block
+setblock 0 64 18 minecraft:beacon
+setblock -3 64 18 minecraft:sea_lantern
+setblock 3 64 18 minecraft:sea_lantern
+
+# --- banners, flanking the beacon -----------------------------------------
+setblock -6 64 17 minecraft:red_banner[rotation=8]{patterns:[{pattern:"minecraft:stripe_bottom",color:"white"},{pattern:"minecraft:cross",color:"black"},{pattern:"minecraft:border",color:"yellow"}]}
+setblock -5 64 17 minecraft:blue_banner[rotation=8]{patterns:[{pattern:"minecraft:rhombus",color:"white"},{pattern:"minecraft:circle",color:"light_blue"},{pattern:"minecraft:curly_border",color:"white"}]}
+setblock -4 64 17 minecraft:white_banner[rotation=8]{patterns:[{pattern:"minecraft:gradient_up",color:"purple"},{pattern:"minecraft:creeper",color:"lime"},{pattern:"minecraft:bordure_indented",color:"black"}]}
+setblock 4 64 17 minecraft:green_banner[rotation=8]{patterns:[{pattern:"minecraft:half_horizontal",color:"lime"},{pattern:"minecraft:skull",color:"white"},{pattern:"minecraft:border",color:"black"}]}
+setblock 5 64 17 minecraft:orange_banner[rotation=8]{patterns:[{pattern:"minecraft:diagonal_up_right",color:"magenta"},{pattern:"minecraft:flower",color:"yellow"},{pattern:"minecraft:triangles_bottom",color:"black"}]}
+setblock 6 64 17 minecraft:black_banner[rotation=8]{patterns:[{pattern:"minecraft:mojang",color:"white"},{pattern:"minecraft:border",color:"red"}]}
+
+# --- middle row: chests, heads, lectern, campfire, bell --------------------
+setblock -6 64 13 minecraft:chest[facing=north,type=left]
+setblock -5 64 13 minecraft:chest[facing=north,type=right]
+setblock -4 64 13 minecraft:dragon_head[rotation=0]
+setblock -3 64 13 minecraft:ender_chest[facing=north]
+setblock -1 64 13 minecraft:enchanting_table
+setblock 1 64 13 minecraft:lectern[facing=south,has_book=true]{Book:{id:"minecraft:written_book",count:1,components:{"minecraft:written_book_content":{title:"Lodestone",author:"lodestone",pages:[{raw:"hello"}]}}},Page:0}
+# `CookingTotalTimes` is not optional decoration, and leaving it out is what a
+# `setblock` with a bare `Items` list does: `CampfireBlockEntity.cookTick`
+# compares each slot's elapsed time against its total, an absent total reads as
+# **0**, and both items therefore finish on the first tick and are ejected as
+# real item entities. Measured, over RCON, against exactly the line this
+# replaces: the block came back `Items: []` with `CookingTotalTimes: [I; 0, 0,
+# 0, 0]`, and a `Cooked Porkchop` and a `Baked Potato` were lying on the stage.
+#
+# So the scene did not photograph what its own header claims — the campfire was
+# empty, and the two things beside it were litter whose eject velocity and yaw
+# are rolled fresh every run. That was the last source of run-to-run pixel noise
+# in this set: two loose items drifting somewhere different each capture. 600
+# ticks is vanilla's own `CampfireCookingRecipe` time, so the food sits on the
+# grill for thirty seconds, which is far longer than a capture.
+setblock 3 64 13 minecraft:campfire[lit=true,facing=south]{Items:[{Slot:0b,id:"minecraft:porkchop",count:1},{Slot:1b,id:"minecraft:potato",count:1}],CookingTimes:[I;0,0,0,0],CookingTotalTimes:[I;600,600,0,0]}
+setblock 4 64 13 minecraft:piglin_head[rotation=0]
+setblock 5 64 13 minecraft:bell[facing=south,attachment=floor]
+setblock 6 64 13 minecraft:trapped_chest[facing=north]
+
+# --- front row: shulkers, pots, heads, conduit -----------------------------
+setblock -5 64 9 minecraft:purple_shulker_box[facing=up]
+setblock -4 64 9 minecraft:light_blue_shulker_box[facing=south]
+setblock -3 64 9 minecraft:zombie_head[rotation=0]
+setblock -2 64 9 minecraft:decorated_pot[facing=south]{sherds:["minecraft:angler_pottery_sherd","minecraft:brewer_pottery_sherd","minecraft:danger_pottery_sherd","minecraft:explorer_pottery_sherd"]}
+setblock -1 64 9 minecraft:player_head[rotation=0]
+setblock 0 64 9 minecraft:decorated_pot[facing=south]{sherds:["minecraft:heart_pottery_sherd","minecraft:friend_pottery_sherd","minecraft:mourner_pottery_sherd","minecraft:skull_pottery_sherd"]}
+setblock 1 64 9 minecraft:skeleton_skull[rotation=0]
+setblock 2 64 9 minecraft:barrel[facing=north]
+setblock 3 64 9 minecraft:conduit[waterlogged=false]
+setblock 4 64 9 minecraft:lime_shulker_box[facing=up]
+setblock 5 64 9 minecraft:blue_shulker_box[facing=south]
+
+# The player position is load-bearing, not tidy-up. `EnchantingTableBlockEntity
+# .bookAnimationTick` opens its book only for a player within 3 blocks of the
+# block centre, so this stands the player beside the enchanting table at
+# (-1, 64, 13): from anywhere further the book is drawn **closed**, which is
+# correct and shows none of the four animated values this scene exists to
+# demonstrate. The render camera is set separately by `@camera`, so moving the
+# player does not move the shot, and the harness draws no player body.
+tp Lodestone -1.0 64.0 15.0 180 8
