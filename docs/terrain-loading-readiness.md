@@ -2,7 +2,7 @@
 
 ## What it is
 
-The labelled `Loading terrain...` overlay is reserved for the first creation of a survival singleplayer world. It releases only when every column in the declared initial view is resident and renderer-settled. A non-empty section must be CPU-meshed and handed to `RenderState`; an all-air section must be explicitly classified as empty. Existing saves, creative/hardcore creations, and multiplayer joins do not get a fake chunk counter or grid.
+The labelled `Loading terrain...` overlay is reserved for the first creation of a survival singleplayer world. It releases when the initial spawn view, capped at radius six, is resident and renderer-settled; the rest of the selected render distance streams after play begins. A non-empty section must be CPU-meshed and handed to `RenderState`; an all-air section must be explicitly classified as empty. Existing saves, creative/hardcore creations, and multiplayer joins do not get a fake chunk counter or grid.
 
 Dimension travel has a separate opaque transition cover. It hides the old dimension while the destination is installed, but deliberately has no initial-world label, progress bar, or chunk grid. This keeps a portal transition from looking like first-world generation and prevents a remote join from getting stuck behind a local progress denominator.
 
@@ -12,11 +12,13 @@ Dimension travel has a separate opaque transition cover. It hides the old dimens
 
 After the frame drains removals and uploads, `Sim::refresh_terrain_readiness` evaluates every column in the declared view. The result is a one-way producer latch for the current dimension. `Sim::terrain_wait` still requires the player's decoded column while `TerrainProgressTracker` remains telemetry for the loading bar and never substitutes for section settlement. A session with no declared view retains the own-column fallback.
 
+The server separately holds the joining player's vitals and fall damage until it has sent the same bounded spawn square. That protects the player while the client is loading, but packet delivery is not proof of renderer settlement; the client keeps its own mesh gate. The world tick loop continues so generation and other world work can progress.
+
 `Sim` carries two presentation latches next to the producer readiness state: `new_world_loading` is armed only by the newly-created survival launch path, while `dimension_transition_pending` is armed by a cross-dimension respawn. The renderer checks the transition latch before the ordinary world wait and draws its opaque cover independently. The producer readiness state itself remains with the mesh ledger rather than duplicating section state in the simulation struct.
 
 Focus loss does not turn either loading cover into the pause overlay. The window lifecycle checks initial-world ownership, `Sim::world_wait`, and `Sim::dimension_transition_pending` before applying pause-on-lost-focus, so only a presentable `Screen::Playing` state can become `Screen::Paused`; the full-frame `Screen::Connecting` state is guarded by the same state-machine transition.
 
-The initial-world grid uses the selected render distance, capped at `MAX_GRID_RADIUS`, and is centred on the canvas. The session streams one neighbour ring for horizontal meshing, but that implementation ring is not shown as an extra player-facing distance. Cells use a typed status enum and the complete twelve-colour palette; network paths may currently expose only empty/full observations, but no status is collapsed through string comparisons or a uniform colour.
+The initial-world grid covers the playable spawn square and is centred on the canvas. The server continues streaming the selected render distance and an extra neighbour ring for meshing after the gate releases. Cells use a typed status enum and the complete twelve-colour palette; network paths may currently expose only empty/full observations, but no status is collapsed through string comparisons or a uniform colour.
 
 Dimension changes use the existing `Sim::apply_respawn` edge detector. Before old-world removals can be presented, `reset_for_dimension_change` clears the producer latch and calls `TerrainMesh::end_session`, which discards in-flight work and the old section ledger. Destination packets build a new ledger. The cover remains active through the transition and has no timeout escape. Same-dimension death respawns do not reset terrain.
 
@@ -30,7 +32,7 @@ Do not derive readiness from the progress numerator, the scheduler's global pend
 
 ## Configuration
 
-There are no new flags or environment variables. `config.render_distance` chooses the initial-world square (currently bounded by `MAX_GRID_RADIUS`). Readiness has no timeout; incomplete terrain or asset work keeps the cover visible.
+There are no new flags or environment variables. `config.render_distance` chooses the background stream; `INITIAL_TERRAIN_RADIUS` caps the first playable square at six columns around the player. Readiness has no timeout; incomplete terrain or asset work keeps the cover visible.
 
 ## Dependencies
 

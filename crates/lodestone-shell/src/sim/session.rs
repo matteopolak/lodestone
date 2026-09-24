@@ -67,6 +67,8 @@ use super::*;
 // type comes from.
 use lodestone_model::text::TextSpan;
 
+const INITIAL_TERRAIN_RADIUS: u32 = 6;
+
 /// Subtracts a client-chosen epoch-millisecond ping timestamp from a current
 /// portable epoch reading.
 ///
@@ -522,7 +524,7 @@ impl Sim {
     pub fn arm_new_world_loading(&mut self, view_radius: u32) {
         self.new_world_loading = true;
         self.dimension_transition_pending = false;
-        self.set_view_radius(view_radius);
+        self.set_view_radius(view_radius.min(INITIAL_TERRAIN_RADIUS));
         self.set_connect_phase(crate::menu::loading::ConnectPhase::LoadingTerrain);
     }
 

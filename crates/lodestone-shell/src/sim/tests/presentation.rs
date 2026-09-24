@@ -596,8 +596,8 @@ fn initial_terrain_screen_is_scoped_to_the_new_world_latch() {
     assert!(sim.shows_new_world_loading());
     assert_eq!(
         sim.terrain_progress.snapshot().map(|progress| progress.expected),
-        Some(65 * 65),
-        "arming a new world must establish the selected 32-radius square"
+        Some(13 * 13),
+        "the playable spawn square must not wait for the full streamed view"
     );
 
     sim.reset_loading_state();

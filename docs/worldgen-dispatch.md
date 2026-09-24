@@ -3,36 +3,30 @@
 ## What it is
 
 The integrated server generates chunk columns on native workers while keeping
-the async connection and tick tasks serviceable. One reusable Rayon pool is
-shared by join streams, view batches, and background seed work. A process-wide
-semaphore admits at most the pool's worker count, so simultaneous players wait
-asynchronously instead of multiplying native workers or growing an unbounded
-queue.
+the async connection and tick tasks serviceable. A bounded blocking pool owns
+generation requests; a persistent Rayon pool executes their parallel immutable
+work. A process-wide semaphore limits admitted requests, so simultaneous
+players wait asynchronously instead of growing an unbounded queue.
 
 ## How it works
 
 `ColumnPipeline` keeps wire order in its own queue and submits one job per
-window slot to the shared Rayon pool. Results return through Tokio oneshot
-channels, so awaiting a slow ordered head never blocks the runtime. Batch paths
-submit indexed Rayon work to that same pool, so they share the same CPU budget.
+window slot to Tokio's blocking pool. Results return through oneshot channels,
+so awaiting a slow ordered head never blocks the runtime. A request can hold a
+region lease while its immutable batch runs on the Rayon compute pool. Keeping
+the blocking lease wait off Rayon prevents it from occupying a worker needed
+by another request's nested batch.
 The synchronous ordered-batch seam reserves the complete dispatcher budget
 before entering Rayon; if an unrelated async producer already owns any permit,
-it runs the batch serially instead of adding another Rayon queue behind the
-active work. A nested batch invoked by an admitted dispatcher worker reuses the
-same Rayon's work-stealing workers directly. Its parent permit remains the
-admission boundary, so Nether prewarming and sparse End dependency generation
-can occupy idle workers without acquiring an impossible second full-pool lease.
-The batch helper's indexed iterator runs on this same persistent Rayon pool
-after the full budget is reserved; it does not create a scoped thread set or a
-second blocking pool. The join path avoids a whole-batch reservation by
-admitting one column per window slot, which keeps its global backpressure and
-ordered-emission accounting explicit.
+it runs the batch serially. A nested batch from an admitted request reuses
+Rayon without acquiring a second permit. Indexed collection preserves the
+request's result order. The join path admits one request per window slot,
+keeping backpressure and ordered emission explicit.
 
 The initial-spawn search uses the same handoff through the server runtime seam:
 native joins submit the synchronous probe to this dispatcher, while the browser
-keeps its single-threaded path inline. This prevents a join's result wait from
-depending on Tokio's blocking-pool completion path and does not introduce a
-second world-tick executor.
+keeps its single-threaded path inline. The blocking work never occupies the
+world-tick runtime thread.
 
 Several connections share this same bounded permit gate. Admission is a
 non-blocking try-operation: when the pool is saturated, a caller keeps its job

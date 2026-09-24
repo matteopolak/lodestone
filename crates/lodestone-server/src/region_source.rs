@@ -1661,6 +1661,9 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
     /// is used after both initial settlement and a resident light recompute,
     /// not only after a block edit.
     fn store_resident_column(&self, cx: i32, cz: i32, column: &ChunkColumn) -> bool {
+        if column.generation_stage() != crate::chunk::ChunkGenerationStage::Full {
+            return false;
+        }
         let mut edits = self.state.edits.lock().expect("world edit lock poisoned");
         edits.insert((cx, cz), column.clone());
         self.state
@@ -3190,6 +3193,25 @@ mod tests {
         .expect("build fixture region");
         std::fs::write(source.state.region_dir.join("r.0.0.mca"), built.bytes)
             .expect("write fixture region");
+    }
+
+    #[test]
+    fn shaped_resident_is_not_queued_for_full_persistence() {
+        let dir = tempdir("shaped-resident");
+        let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT)
+            .expect("open world");
+        let shaped =
+            ChunkColumn::from_generated(crate::overworld_generator(42).column_shaped(0, 0));
+
+        assert!(!source.store_resident_column(0, 0, &shaped));
+        assert_eq!(
+            source.save_handle().save().expect("save complete columns"),
+            0
+        );
+        assert_eq!(
+            source.column(0, 0).generation_stage(),
+            crate::chunk::ChunkGenerationStage::Full
+        );
     }
 
     #[test]
