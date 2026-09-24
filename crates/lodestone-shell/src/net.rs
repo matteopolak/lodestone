@@ -4588,13 +4588,14 @@ fn forward(
         | ClientEvent::SubtitleText { .. }
         | ClientEvent::TitlesAnimation { .. }
         | ClientEvent::TitlesCleared { .. }) => NetUpdate::TitleEvent(event),
-        // §12.24: the shell treats `ChunkLoaded` as a *dirty-region signal* and
-        // ignores any payload — the ruling is that decoded chunks live in a
-        // client-owned `World` that consumers query, not in the (bounded,
-        // backpressuring) event stream. `impl-world` has since widened this
-        // event to also carry `column`; we deliberately do not consume it, both
-        // to honour the ruling and to stay robust if that field is reverted.
+        // §12.24: decoded chunk data lives in the client-owned world; this event
+        // signals a chunk or biome-region change. Light patches route separately.
         ClientEvent::ChunkLoaded { pos, .. } => NetUpdate::Chunk { x: pos.x, z: pos.z },
+        ClientEvent::ChunkLightChanged { pos, sections } => NetUpdate::ChunkLightChanged {
+            x: pos.x,
+            z: pos.z,
+            sections,
+        },
         // The eviction twin of the arm above carries no payload: the adapter
         // has already dropped the column through the `WorldSink`, so collision
         // follows it while the renderer must discard any geometry it holds for
@@ -5542,6 +5543,31 @@ mod tests {
         {
             NetUpdate::ChunkCacheRadiusChanged { radius } => assert_eq!(radius, 13),
             other => panic!("expected ChunkCacheRadiusChanged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forward_preserves_light_patch_sections_without_marking_a_chunk_arrival() {
+        let (tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
+        forward(
+            &tx,
+            &WeatherCell::default(),
+            &BiomeClimateCell::default(),
+            &BiomeNameCell::default(),
+            &CommandTreeCell::default(),
+            ClientEvent::ChunkLightChanged {
+                pos: lodestone_model::ChunkPos { x: -3, z: 7 },
+                sections: vec![0, 5, 6],
+            },
+        )
+        .expect("a light patch does not end the session");
+
+        match rx.try_recv().expect("the light patch must reach Sim") {
+            NetUpdate::ChunkLightChanged { x, z, sections } => {
+                assert_eq!((x, z), (-3, 7));
+                assert_eq!(sections, [0, 5, 6]);
+            }
+            other => panic!("expected a typed light update, got {other:?}"),
         }
     }
 

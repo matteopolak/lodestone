@@ -234,6 +234,9 @@ impl Sim {
                     self.join_trace.mark("received", x, z);
                     self.on_column_arrived(x, z);
                 }
+                NetUpdate::ChunkLightChanged { x, z, sections } => {
+                    self.on_column_light_changed(x, z, &sections);
+                }
                 NetUpdate::ChunkUnloaded { x, z } => {
                     // That fix's missing half. The column is already out of the
                     // store (the adapter unloads before it emits), so this drops

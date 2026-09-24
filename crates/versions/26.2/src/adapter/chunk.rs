@@ -270,11 +270,11 @@ impl V770Adapter {
                 &empty_block_mask,
                 block_arrays,
             );
+            let sections = patch.affected_sections();
             world.merge_light(WorldChunkPos::new(x, z), patch);
-            // `ChunkLoaded` doubles as "the region at pos is dirty; re-read or
-            // re-mesh it" (its own docs) — exactly what a light change needs.
-            return Ok(vec![Directive::Emit(ClientEvent::ChunkLoaded {
+            return Ok(vec![Directive::Emit(ClientEvent::ChunkLightChanged {
                 pos: ChunkPos::new(x, z),
+                sections,
             })]);
         }
         if packet_id == play::clientbound::FORGET_LEVEL_CHUNK {

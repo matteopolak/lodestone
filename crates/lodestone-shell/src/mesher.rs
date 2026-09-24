@@ -1735,6 +1735,47 @@ impl TerrainMesh {
         self.route(key, outcome, false);
     }
 
+    /// Queue meshes that can sample light sections overwritten by a server patch.
+    pub fn queue_light_update(
+        &mut self,
+        store: &ChunkWorld,
+        cx: i32,
+        cz: i32,
+        light_sections: &[usize],
+    ) -> usize {
+        let Some(extent) = store.extent() else {
+            return 0;
+        };
+        if extent.section_count == 0 || !store.contains_column(cx, cz) {
+            return 0;
+        }
+        let base_si = extent.min_y.div_euclid(16);
+        let before = self.light_dirty_sections.len();
+        for &light_si in light_sections {
+            if light_si >= extent.section_count.saturating_add(2) {
+                continue;
+            }
+            let block_si = (light_si as i32 - 1).clamp(0, extent.section_count as i32 - 1);
+            for si in (block_si - 1).max(0)..=(block_si + 1).min(extent.section_count as i32 - 1)
+            {
+                for dx in -1..=1 {
+                    for dz in -1..=1 {
+                        let (nx, nz) = (cx + dx, cz + dz);
+                        if store.contains_column(nx, nz) {
+                            self.light_dirty_sections.insert((nx, nz, base_si + si));
+                        }
+                    }
+                }
+            }
+        }
+        self.light_dirty_sections.len() - before
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_pending_arrival(&self, cx: i32, cz: i32) -> bool {
+        self.pending_arrivals.contains(&(cx, cz))
+    }
+
     /// Queue the eight **loaded** horizontal neighbours of `(cx, cz)` for a
     /// boundary re-mesh. The centre is meshed by the caller, immediately, for load
     /// responsiveness; the neighbours coalesce.

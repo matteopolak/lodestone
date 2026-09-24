@@ -328,6 +328,21 @@ impl Sim {
         self.join_trace.mark("remesh_queued", cx, cz);
     }
 
+    /// Invalidate meshes affected by a light-only update without resetting arrival state.
+    pub(crate) fn on_column_light_changed(&mut self, cx: i32, cz: i32, sections: &[usize]) {
+        let queued = self.terrain_and_world(|store, terrain| {
+            terrain.queue_light_update(store, cx, cz, sections)
+        });
+        tracing::trace!(
+            target: "light",
+            cx,
+            cz,
+            changed_light_sections = sections.len(),
+            newly_queued_mesh_sections = queued,
+            "server light update invalidated terrain",
+        );
+    }
+
     /// Handle a `ChunkLoaded` / [`NetUpdate::Chunk`] dirty-region signal: the
     /// column at `(cx, cz)` changed, so re-mesh every section it holds.
     ///

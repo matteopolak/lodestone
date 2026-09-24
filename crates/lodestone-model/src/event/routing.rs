@@ -374,6 +374,11 @@ pub fn route(event: &ClientEvent) -> Route {
             client: true,
             ..Route::NOWHERE
         },
+        ClientEvent::ChunkLightChanged { .. } => Route {
+            shell: true,
+            client: true,
+            ..Route::NOWHERE
+        },
         // The eviction twin, and this entry used to read `CLIENT` with the
         // comment "the adapter has already dropped the column through the
         // `WorldSink`, so the event is a notification with nothing left to do."
@@ -1099,6 +1104,17 @@ mod route_tests {
         assert!(route.shell, "the shell owns the loading-grid center");
         assert!(route.must_forward(), "the center must cross net::forward");
         assert!(!route.is_island());
+    }
+
+    #[test]
+    fn chunk_light_changes_reach_the_shell_and_client() {
+        let event = ClientEvent::ChunkLightChanged {
+            pos: crate::ChunkPos { x: -3, z: 7 },
+            sections: vec![0, 5],
+        };
+        let r = route(&event);
+        assert!(r.shell && r.client);
+        assert!(!r.ingest && !r.session);
     }
 
     #[test]

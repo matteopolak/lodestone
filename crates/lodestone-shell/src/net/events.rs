@@ -70,15 +70,22 @@ pub enum NetUpdate {
         /// is not computed anywhere here.
         verified: bool,
     },
-    /// A chunk became dirty at this position: the server sent (and the client
-    /// applied to its world) chunk data here, so any mesh covering this column
-    /// should be rebuilt. Block data is *not* carried — it is queried from the
-    /// client-owned world per the §12.24 ruling (see the module docs).
+    /// A chunk region changed at this position. The shell reads data from the
+    /// client-owned world, not this event; light patches have a section route.
     Chunk {
         /// Chunk X.
         x: i32,
         /// Chunk Z.
         z: i32,
+    },
+    /// Light changed in an already-loaded column; sections are light-section indices.
+    ChunkLightChanged {
+        /// Chunk X.
+        x: i32,
+        /// Chunk Z.
+        z: i32,
+        /// Sorted, unique light-section indices overwritten by the patch.
+        sections: Vec<usize>,
     },
     /// A chunk column left the server's tracking view (`forget_level_chunk`):
     /// the client has **already** dropped it from the one [`lodestone_ecs::ChunkWorld`]

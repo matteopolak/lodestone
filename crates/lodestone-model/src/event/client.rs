@@ -538,23 +538,35 @@ pub enum ClientEvent {
         /// Updated player entries.
         entries: Vec<PlayerListEntry>,
     },
-    /// A chunk's data at `pos` became available or was replaced.
+    /// Chunk data at `pos` became available or changed.
     ///
-    /// This is a lightweight *notification*, not a data carrier. The adapter
-    /// applies the fully decoded, version-free chunk (block-state and biome
-    /// sections, light, heightmaps, block entities) directly into the
-    /// client-owned [`World`](lodestone_world::World) as it decodes the packet;
-    /// consumers read that data by querying the world, keyed by `pos`.
+    /// This is a lightweight *notification*, not a data carrier. Full chunk
+    /// packets and biome patches are applied directly to the client-owned
+    /// [`World`](lodestone_world::World); consumers query that world by `pos`.
     ///
     /// Deliberately carrying only the position keeps this event cheap and, more
     /// importantly, keeps world correctness independent of consumer liveness:
     /// the event travels a bounded channel, so a payload here could be dropped
     /// under backpressure, and a dropped `ChunkLoaded` would be an unrecoverable
     /// hole. As a bare signal it is idempotent and safe to coalesce — treat it
-    /// as "the region at `pos` is dirty; re-read or re-mesh it."
+    /// as "the chunk region at `pos` is dirty". Light-only updates use
+    /// [`ClientEvent::ChunkLightChanged`] for section-level invalidation.
     ChunkLoaded {
         /// Chunk position; look the data up in the world by this key.
         pos: ChunkPos,
+    },
+    /// Light changed in an already-loaded chunk column.
+    ///
+    /// The adapter has merged the patch into the client-owned world. Indices
+    /// use light-section coordinates: index `0` is the boundary below the
+    /// column, and index `i` covers block section `i - 1`. Keeping this separate
+    /// from [`ClientEvent::ChunkLoaded`] lets consumers refresh affected meshes
+    /// without resetting the column's arrival/readiness state.
+    ChunkLightChanged {
+        /// Chunk position; read the merged light from the world at this key.
+        pos: ChunkPos,
+        /// Sorted, unique light-section indices overwritten by this packet.
+        sections: Vec<usize>,
     },
     /// A chunk became unavailable. The adapter has already removed it from the
     /// client-owned world; this notifies consumers to drop anything derived
@@ -1605,4 +1617,3 @@ pub enum ClientEvent {
         can_restock: bool,
     },
 }
-
