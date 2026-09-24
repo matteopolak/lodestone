@@ -2123,8 +2123,8 @@ impl IntegratedServer {
                 let mut subs = relay_subscribers.lock().expect("subscriber list poisoned");
                 subs.retain(LanSubscriber::is_alive);
                 for subscriber in subs.iter() {
-                    for (x, y, z, state) in &changes {
-                        subscriber.block_ticks.publish(*x, *y, *z, state.clone());
+                    for &change in &changes {
+                        subscriber.block_ticks.publish_record(change);
                     }
                     for detonation in &detonations {
                         subscriber.explosions.publish(*detonation);
@@ -4328,8 +4328,8 @@ impl IntegratedServer {
                         // accumulating rather than growing forever.
                         subscribers.retain(LanSubscriber::is_alive);
                         for subscriber in &subscribers {
-                            for (x, y, z, state) in &changes {
-                                subscriber.block_ticks.publish(*x, *y, *z, state.clone());
+                            for &change in &changes {
+                                subscriber.block_ticks.publish_record(change);
                             }
                             for detonation in &detonations {
                                 subscriber.explosions.publish(*detonation);

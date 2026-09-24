@@ -6773,30 +6773,8 @@ where
     .await
 }
 
-/// [`resend_column_for_light`] with the predicate removed — recompute and send one
-/// column's light unconditionally.
-///
-/// # Why this exists separately
-///
-/// [`crate::light::should_relight`] needs the state the cell held *before* the
-/// edit, and there is one real production path that cannot supply it: the world
-/// tick loop's changes arrive over [`BlockTickFeed`] as `(x, y, z, new_state)`
-/// only, with the old state already overwritten in the shared source by the time
-/// this connection drains them.
-///
-/// World-tick block changes are drained after the source stores the replacement
-/// state, so this function resends light unconditionally after each update.
-/// Otherwise a fluid tick can remove an underwater torch while the client
-/// retains its light. Fire, grass, crops, redstone torches, and falling blocks
-/// use the same update feed.
-///
-/// The absent old state is why this is unconditional rather than predicated. That
-/// is the conservative direction and it is affordable: `should_relight` already
-/// fires on essentially every placement and break (see [`crate::light`]), so the
-/// predicate was not buying much, and the caller **deduplicates by column** —
-/// which is what actually bounds the cost, because a fluid cascade can rewrite
-/// dozens of cells in one column in a single tick and each flood is a whole-column
-/// recompute.
+/// Recompute and send one column's light after a caller has established that an
+/// edit changed emission or dampening, or when the prior block state is unknown.
 async fn send_column_light<T, P, S>(
     conn: &mut Connection<T>,
     proto: &P,
@@ -7039,7 +7017,7 @@ async fn send_tick_block_updates<T, P>(
     state: &mut State,
     delivered: &HashSet<(i32, i32)>,
     pending_relights: &mut PendingTickRelights,
-    changes: Vec<(i32, i32, i32, lodestone_data::block_states::StateId)>,
+    changes: Vec<crate::tick::TickBlockChange>,
 ) -> Result<(), ServerError>
 where
     T: Transport,
@@ -7051,16 +7029,17 @@ where
     let started = crate::tick::PlayTimerInstant::now();
     let change_count = changes.len();
     let radius = i32::from(proto.uses_cross_column_light());
-    for &(x, y, z, block_state) in &changes {
+    for change in &changes {
+        let (x, y, z, block_state) = (change.x, change.y, change.z, change.state);
         let column = (x.div_euclid(16), z.div_euclid(16));
         if delivered.contains(&column) {
             apply(conn, state, proto.encode_block_update(x, y, z, block_state)).await?;
         }
     }
     let queued_relight_count = pending_relights.enqueue_batch(tick_relight_targets(
-        changes
-            .iter()
-            .map(|(x, _y, z, _state)| (x.div_euclid(16), z.div_euclid(16))),
+        changes.iter().filter(|change| change.needs_relight).map(|change| {
+            (change.x.div_euclid(16), change.z.div_euclid(16))
+        }),
         delivered,
         radius,
     ));
@@ -19844,18 +19823,20 @@ mod tests {
             &HashSet::from([(0, 0)]),
             &mut pending_relights,
             vec![
-                (
-                    1,
-                    64,
-                    1,
-                    default_block_state(Block::GrassBlock),
-                ),
-                (
-                    17,
-                    64,
-                    1,
-                    default_block_state(Block::Dirt),
-                ),
+                crate::tick::TickBlockChange {
+                    x: 1,
+                    y: 64,
+                    z: 1,
+                    state: default_block_state(Block::GrassBlock),
+                    needs_relight: true,
+                },
+                crate::tick::TickBlockChange {
+                    x: 17,
+                    y: 64,
+                    z: 1,
+                    state: default_block_state(Block::Dirt),
+                    needs_relight: false,
+                },
             ],
         )
         .await
@@ -19873,6 +19854,38 @@ mod tests {
                 .is_err(),
             "the pending column's later snapshot supersedes its tick update"
         );
+    }
+
+    #[tokio::test]
+    async fn tick_block_updates_without_light_changes_skip_relight() {
+        let (client_end, server_end) = lodestone_net::memory_pair();
+        let mut conn = Connection::new(server_end);
+        let mut state = State::Play;
+        let mut pending_relights = PendingTickRelights::default();
+
+        send_tick_block_updates(
+            &mut conn,
+            &RefusingChunkProtocol,
+            &mut state,
+            &HashSet::from([(0, 0)]),
+            &mut pending_relights,
+            vec![crate::tick::TickBlockChange {
+                x: 1,
+                y: 64,
+                z: 1,
+                state: default_block_state(Block::GrassBlock),
+                needs_relight: false,
+            }],
+        )
+        .await
+        .expect("block updates are independent of light changes");
+
+        let mut peer = Connection::new(client_end);
+        assert_eq!(
+            peer.read_packet().await.expect("block update decodes"),
+            Some((43, vec![1, 64, 1]))
+        );
+        assert!(pending_relights.is_empty());
     }
 
     #[test]

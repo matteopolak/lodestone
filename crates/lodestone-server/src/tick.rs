@@ -417,6 +417,16 @@ const RANDOM_TICK_BEHAVIOR_SEED: u64 = 0x5EED_5678;
 /// their per-chunk column.
 const LIGHTNING_RAND_VALUE_SEED: i32 = 0x5EED_4C49u32 as i32;
 
+/// A block update and whether its light properties require a fresh light packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TickBlockChange {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) z: i32,
+    pub(crate) state: StateId,
+    pub(crate) needs_relight: bool,
+}
+
 /// A shared feed of block changes the world tick loop wants every connection
 /// to learn about. The current producer is grass ↔ dirt via
 /// `crate::random_tick`. Mirrors [`LiveMobSource`]'s
@@ -491,7 +501,7 @@ const LIGHTNING_RAND_VALUE_SEED: i32 = 0x5EED_4C49u32 as i32;
 /// connection, so `Clone` already shares both halves.
 #[derive(Debug, Clone, Default)]
 pub struct BlockTickFeed(
-    Arc<Mutex<Vec<(i32, i32, i32, StateId)>>>,
+    Arc<Mutex<Vec<TickBlockChange>>>,
     /// block ticks a connection's own mutation scheduled, waiting
     /// to be rebased onto the tick loop's counter and hosted in its
     /// typed `block_ticks` queue. `trigger_tick` is a relative delay.
@@ -523,16 +533,47 @@ impl BlockTickFeed {
     /// Records one block change for every consumer to learn about on their
     /// next [`drain_all`](Self::drain_all).
     pub(crate) fn publish(&self, x: i32, y: i32, z: i32, state: StateId) {
+        self.publish_unknown_old(x, y, z, state);
+    }
+
+    pub(crate) fn publish_unknown_old(&self, x: i32, y: i32, z: i32, state: StateId) {
+        self.publish_record(TickBlockChange {
+            x,
+            y,
+            z,
+            state,
+            needs_relight: true,
+        });
+    }
+
+    pub(crate) fn publish_change(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        old_state: StateId,
+        state: StateId,
+    ) {
+        self.publish_record(TickBlockChange {
+            x,
+            y,
+            z,
+            state,
+            needs_relight: crate::light::should_relight(old_state, state),
+        });
+    }
+
+    pub(crate) fn publish_record(&self, change: TickBlockChange) {
         self.0
             .lock()
             .expect("block tick feed lock poisoned")
-            .push((x, y, z, state));
+            .push(change);
     }
 
     /// Drains and returns every change published since the last call —
     /// see the struct doc comment for why this is safe only for exactly one
     /// consumer.
-    pub fn drain_all(&self) -> Vec<(i32, i32, i32, StateId)> {
+    pub fn drain_all(&self) -> Vec<TickBlockChange> {
         std::mem::take(&mut *self.0.lock().expect("block tick feed lock poisoned"))
     }
 
@@ -1605,7 +1646,7 @@ fn apply_block_entity_effects<W: ChunkSource>(
                 deferred.extend(effects);
                 break;
             }
-            block_tick_out.publish(pos.x, pos.y, pos.z, new_state);
+            block_tick_out.publish_change(pos.x, pos.y, pos.z, state, new_state);
         }
     }
     deferred
@@ -2411,7 +2452,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                 pending_grazes.extend(grazes);
                 break;
             }
-            block_tick_out.publish(target.x, target.y, target.z, state);
+            block_tick_out.publish_change(target.x, target.y, target.z, broken, state);
         }
         // Mob hurt and death sounds. `MobSim::apply_damage` already
         // damaged and killed mobs with no audible result at all — the sim records
@@ -3041,7 +3082,13 @@ async fn run_tick_loop_with_weather_impl<W>(
                 );
                 break;
             }
-            block_tick_out.publish(hit.pos.x, hit.pos.y, hit.pos.z, outcome.new_state);
+            block_tick_out.publish_change(
+                hit.pos.x,
+                hit.pos.y,
+                hit.pos.z,
+                state,
+                outcome.new_state,
+            );
             block_ticks.schedule(
                 (hit.pos.x, hit.pos.y, hit.pos.z),
                 target_decay_kind.clone(),
@@ -3086,7 +3133,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                 }
                 shove_entities_from_piston(&mobs, &block_tick_out, &*block_ticks, ex, ey, ez, event.to);
                 post_note_block_vibration(&world, &mobs, (ex, ey, ez), event.from, event.to);
-                block_tick_out.publish(ex, ey, ez, event.to);
+                block_tick_out.publish_change(ex, ey, ez, event.from, event.to);
             }
         }
 
@@ -3285,7 +3332,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                         publish_moving_piston(&block_tick_out, &*block_ticks, ex, ey, ez, event.to);
                         shove_entities_from_piston(&mobs, &block_tick_out, &*block_ticks, ex, ey, ez, event.to);
                         post_note_block_vibration(&world, &mobs, (ex, ey, ez), event.from, event.to);
-                        block_tick_out.publish(ex, ey, ez, event.to);
+                        block_tick_out.publish_change(ex, ey, ez, event.from, event.to);
                     }
                     if resident_world.had_cold_read() {
                         requeue_scheduled_tail(block_ticks, &due_block_ticks, due_index);
@@ -3309,7 +3356,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                         requeue_scheduled_tail(block_ticks, &due_block_ticks, due_index);
                         continue 'block_ticks;
                     }
-                    block_tick_out.publish(ex, ey, ez, event.to);
+                    block_tick_out.publish_change(ex, ey, ez, event.from, event.to);
                 }
                 if resident_world.had_cold_read() {
                     requeue_scheduled_tail(block_ticks, &due_block_ticks, due_index);
@@ -3479,7 +3526,13 @@ async fn run_tick_loop_with_weather_impl<W>(
                                         requeue_scheduled_tail(block_ticks, &due_block_ticks, due_index);
                                         continue 'block_ticks;
                                     }
-                                    block_tick_out.publish(target.x, target.y, target.z, new_state);
+                                    block_tick_out.publish_change(
+                                        target.x,
+                                        target.y,
+                                        target.z,
+                                        target_state,
+                                        new_state,
+                                    );
                                 }
                                 crate::bone_meal::BoneMealOutcome::ConsumedNoChange => {}
                                 // Not a target, or a family this crate cannot
@@ -3557,7 +3610,13 @@ async fn run_tick_loop_with_weather_impl<W>(
                                     requeue_scheduled_tail(block_ticks, &due_block_ticks, due_index);
                                     continue 'block_ticks;
                                 }
-                                block_tick_out.publish(target.x, target.y, target.z, new_state);
+                                block_tick_out.publish_change(
+                                    target.x,
+                                    target.y,
+                                    target.z,
+                                    target_state,
+                                    new_state,
+                                );
                                 swap_remainder =
                                     Some("minecraft:bucket".parse().expect("valid key"));
                             } else {
@@ -3580,7 +3639,13 @@ async fn run_tick_loop_with_weather_impl<W>(
                                     requeue_scheduled_tail(block_ticks, &due_block_ticks, due_index);
                                     continue 'block_ticks;
                                 }
-                                block_tick_out.publish(target.x, target.y, target.z, crate::chunk::air_state());
+                                block_tick_out.publish_change(
+                                    target.x,
+                                    target.y,
+                                    target.z,
+                                    target_state,
+                                    crate::chunk::air_state(),
+                                );
                                 swap_remainder = Some(
                                     crate::fluid::filled_bucket_item(kind)
                                         .parse()
@@ -3694,7 +3759,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                         requeue_scheduled_tail(block_ticks, &due_block_ticks, due_index);
                         continue 'block_ticks;
                     }
-                    block_tick_out.publish(x, y, z, crate::chunk::air_state());
+                    block_tick_out.publish_change(x, y, z, state, crate::chunk::air_state());
                     mobs.with(|sim| {
                         sim.spawn_tnt(
                             lodestone_model::Vec3::new(f64::from(origin.x) + 0.5, f64::from(origin.y), f64::from(origin.z) + 0.5),
@@ -3945,7 +4010,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                     // toggled. The one openable path that is genuinely
                     // server-driven, so nothing predicts it and it was silent.
                     publish_openable_sound(&block_tick_out, BlockPos::new(x, y, z), state, new_state, game_tick);
-                    block_tick_out.publish(x, y, z, new_state);
+                    block_tick_out.publish_change(x, y, z, state, new_state);
                 }
                 if let Some(output) = reaction.comparator_output {
                     publish_comparator_output(
@@ -3965,7 +4030,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                     publish_moving_piston(&block_tick_out, &*block_ticks, ex, ey, ez, event.to);
                     shove_entities_from_piston(&mobs, &block_tick_out, &*block_ticks, ex, ey, ez, event.to);
                     post_note_block_vibration(&world, &mobs, (ex, ey, ez), event.from, event.to);
-                    block_tick_out.publish(ex, ey, ez, event.to);
+                    block_tick_out.publish_change(ex, ey, ez, event.from, event.to);
                 }
             }
         }
@@ -4083,7 +4148,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                             }
                             publish_moving_piston(&block_tick_out, &*block_ticks, x, y, z, event.to);
                             shove_entities_from_piston(&mobs, &block_tick_out, &*block_ticks, x, y, z, event.to);
-                            block_tick_out.publish(x, y, z, event.to);
+                            block_tick_out.publish_change(x, y, z, event.from, event.to);
                         }
                         random_ticks = candidate_random_ticks;
                     }
@@ -4219,7 +4284,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                     pending_lightning_fires.extend(lightning_fires);
                     break;
                 }
-                block_tick_out.publish(pos.x, pos.y, pos.z, new_state);
+                block_tick_out.publish_change(pos.x, pos.y, pos.z, state, new_state);
             } else if resident_world.had_cold_read() {
                 pending_lightning_fires.push(pos);
                 pending_lightning_fires.extend(lightning_fires);
@@ -4300,7 +4365,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                     publish_moving_piston(&block_tick_out, &*block_ticks, ex, ey, ez, event.to);
                     shove_entities_from_piston(&mobs, &block_tick_out, &*block_ticks, ex, ey, ez, event.to);
                     post_note_block_vibration(&world, &mobs, (ex, ey, ez), event.from, event.to);
-                    block_tick_out.publish(ex, ey, ez, event.to);
+                    block_tick_out.publish_change(ex, ey, ez, event.from, event.to);
                 }
                 if resident_world.had_cold_read() {
                     pending_falling_block_effects.push(effect.clone());
@@ -4733,6 +4798,64 @@ mod tests {
         let feed = BlockTickFeed::default();
         feed.publish_effect(effect.clone());
         assert_eq!(feed.drain_effects_for(actor), vec![effect]);
+    }
+
+    #[test]
+    fn block_tick_changes_preserve_light_invalidation_decisions() {
+        let feed = BlockTickFeed::default();
+        let stone = lodestone_data::block::Block::Stone.default_state();
+        let dirt = lodestone_data::block::Block::Dirt.default_state();
+        let torch = lodestone_data::block::Block::Torch.default_state();
+        let air = crate::chunk::air_state();
+
+        feed.publish_change(1, 2, 3, stone, dirt);
+        feed.publish_change(4, 5, 6, air, torch);
+        feed.publish_change(7, 8, 9, torch, air);
+        feed.publish(10, 11, 12, stone);
+
+        assert_eq!(
+            feed.drain_all(),
+            vec![
+                TickBlockChange {
+                    x: 1,
+                    y: 2,
+                    z: 3,
+                    state: dirt,
+                    needs_relight: false,
+                },
+                TickBlockChange {
+                    x: 4,
+                    y: 5,
+                    z: 6,
+                    state: torch,
+                    needs_relight: true,
+                },
+                TickBlockChange {
+                    x: 7,
+                    y: 8,
+                    z: 9,
+                    state: air,
+                    needs_relight: true,
+                },
+                TickBlockChange {
+                    x: 10,
+                    y: 11,
+                    z: 12,
+                    state: stone,
+                    needs_relight: true,
+                },
+            ]
+        );
+
+        let relayed = TickBlockChange {
+            x: 13,
+            y: 14,
+            z: 15,
+            state: dirt,
+            needs_relight: false,
+        };
+        feed.publish_record(relayed);
+        assert_eq!(feed.drain_all(), vec![relayed]);
     }
 
     /// Predicted value: `now` built as exactly [`overload_threshold`] past
@@ -5325,7 +5448,11 @@ mod tests {
         for _ in 0..max_ticks {
             tokio::time::advance(TICK_PERIOD).await;
             tokio::task::yield_now().await;
-            published.extend(feed.drain_all());
+            published.extend(
+                feed.drain_all()
+                    .into_iter()
+                    .map(|change| (change.x, change.y, change.z, change.state)),
+            );
             if !recorded.lock().expect("poisoned").is_empty() {
                 break;
             }
@@ -6245,9 +6372,9 @@ mod tests {
             "the requeued fire tick must execute after its column becomes resident"
         );
         assert!(
-            feed.drain_all().iter().any(|event| {
-                (event.0, event.1, event.2) == pos && event.3 == StateId::AIR
-            }),
+            feed.drain_all()
+                .iter()
+                .any(|event| (event.x, event.y, event.z) == pos && event.state == StateId::AIR),
             "the resumed scheduled work must publish its block mutation"
         );
 
@@ -6302,7 +6429,11 @@ mod tests {
         for _ in 0..4 {
             tokio::time::advance(TICK_PERIOD).await;
             tokio::task::yield_now().await;
-            published.extend(feed.drain_all());
+            published.extend(
+                feed.drain_all()
+                    .into_iter()
+                    .map(|change| (change.x, change.y, change.z, change.state)),
+            );
         }
         (world.get(pos), published)
     }
