@@ -2206,6 +2206,7 @@ pub struct LifecycleMaterializer<S: LifecycleWorldgenSource> {
     /// sparse writer has completed.
     target_feature_winners: BTreeMap<ChunkPos, FastMap<AbsoluteCell, TargetFeatureWinner>>,
     target_feature_receipts: BTreeMap<ChunkPos, TargetFeatureOwnerReceipt>,
+    retained_mutations_preseeded: bool,
     pending_target_block_entities: BTreeMap<ChunkPos, Vec<PendingTargetBlockEntity>>,
     /// Writes visible through the CARVERS read view. A target-scoped source
     /// body sees every preceding authenticated FEATURES write, including
@@ -2330,6 +2331,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             sparse_completed_targets: BTreeSet::new(),
             target_feature_winners: BTreeMap::new(),
             target_feature_receipts: BTreeMap::new(),
+            retained_mutations_preseeded: false,
             pending_target_block_entities: BTreeMap::new(),
             carvers_overrides: BTreeMap::new(),
             overrides: BTreeMap::new(),
@@ -2404,6 +2406,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         self.sparse_completed_targets.clear();
         self.target_feature_winners.clear();
         self.target_feature_receipts.clear();
+        self.retained_mutations_preseeded = false;
         self.pending_target_block_entities.clear();
         self.carvers_overrides.clear();
         self.overrides.clear();
@@ -4220,6 +4223,14 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                     .apply_ordered_block_id_batch(&writes);
             }
         }
+    }
+
+    pub(crate) fn mark_retained_mutations_preseeded(&mut self) {
+        self.retained_mutations_preseeded = true;
+    }
+
+    pub(crate) fn retained_mutations_preseeded(&self) -> bool {
+        self.retained_mutations_preseeded
     }
 
     /// Settle each target cell from the minimum-provenance target-owned
@@ -6958,6 +6969,40 @@ mod tests {
             .get_mut(&target)
             .expect("target is resident")
             .set_block_id(0, 0, 0, sid("minecraft:gold_block"));
+        materializer.apply_canonical_target_feature_winners(target);
+
+        assert_eq!(
+            materializer.snapshot_for_packet(target).block_state_id(0, 0, 0),
+            sid("minecraft:stone"),
+        );
+    }
+
+    #[test]
+    fn restored_feature_mutation_wins_equal_identity_recomputation() {
+        use lodestone_worldgen::stage_schedule::{Dimension, StageKey};
+
+        let target = (0, 0);
+        let owner = (-1, 0);
+        let cell = (0, 0, 0);
+        let restored = ProvenanceMutation::test_block_state(
+            owner,
+            owner,
+            StageKey::new(Dimension::Overworld, ColumnStage::Features),
+            7,
+            crate::worldgen_session::BlockCoordinate::new(cell.0, cell.1, cell.2),
+            1,
+            sid("minecraft:stone"),
+        );
+        let mut materializer = LifecycleMaterializer::new(DirectHeightmapSource);
+        materializer.admit(target);
+        materializer.restore_committed_mutations([&restored]);
+        materializer.record_target_feature_winner(
+            owner,
+            owner,
+            7,
+            cell,
+            sid("minecraft:gold_block"),
+        );
         materializer.apply_canonical_target_feature_winners(target);
 
         assert_eq!(
