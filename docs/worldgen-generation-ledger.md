@@ -27,6 +27,15 @@ Settlement retires an overlay only after confirming that the persisted source
 contains it or that the destination Output already contains the same state;
 it never patches a published product.
 
+Batch commits capture requested outputs and packet-neighbour columns, which need
+not cover every mutation destination in the admitted generation halo. Writes
+outside that materialized set remain sparse ledger overlays until their own
+destination is captured. Source persistence receives only captured destinations;
+an uncaptured write cannot be declared durable merely because its source target
+finished. If a captured target came from persisted terrain, canonical winning
+spills are applied to that copy before ledger validation, persistence, and packet
+publication, so all three consumers see the same state.
+
 `ChunkStore::lease_halo` canonicalizes coordinates, captures their write-gate revisions, and pins them in the cache. The lease holds the gate state records but not the gates themselves, so generation may run without blocking unrelated writes. `ChunkStore::execute_generation_session` admits the halo and snapshots a validated ledger checkpoint under the ledger lock, releases that lock while the borrowed driver runs, then publishes the session's immutable records, ordered source completions, and overlays through an atomic clone-and-swap. It rechecks cancellation immediately before `ChunkStore::commit_generation`; a cancelled request therefore leaves any committed ledger prefix and removes only newly admitted coordinates that are still empty. `ChunkStore::commit_generation` reacquires the canonical write gates, rejects any cache revision change, inserts the complete batch, and releases the gates before eviction work. Dropping the lease removes its pins and performs deferred LRU eviction.
 
 Native cohort streaming commits each finished target before emitting it. If an external write changes a later target's captured revision, the store keeps the already emitted prefix, releases the old halo lease, and retries only unfinished targets with fresh leases. A revision conflict stays typed across the source boundary; other generation or consumer errors still stop the cohort.
