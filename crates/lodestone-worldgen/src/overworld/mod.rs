@@ -611,9 +611,6 @@ pub struct CompiledOverworldGenerator {
     /// with global per-step indices, rather than treating a biome document's
     /// local array offset as a seed index.
     ore_definitions: HashMap<String, PlacedOre>,
-    /// Block-tag closures for every tag referenced by any biome's ore
-    /// targets, resolved once — see `crate::compose::build_ore_tag_map`.
-    ore_tag_map: HashMap<String, HashSet<String>>,
     /// Per-biome decoration list, resolved alongside the generator's ore
     /// definitions and global [`crate::compose::DecorationCatalog`]. Empty
     /// (whole map) when the resolver supplies no biome documents with any driven
@@ -627,10 +624,9 @@ pub struct CompiledOverworldGenerator {
     decoration_catalog: crate::compose::DecorationCatalog,
     /// Block-tag closures [`crate::feature::vegetation`]'s own predicates/
     /// checks need (`supports_vegetation`, `replaceable_by_trees`, `logs`,
-    /// `cannot_replace_below_tree_trunk`) — resolved once, analogous to
-    /// `ore_tag_map` but via `crate::feature::vegetation::build_veg_tags`
-    /// rather than a per-ore-target walk (this module's own tag set is
-    /// fixed, not data-dependent — see that function's doc comment).
+    /// `cannot_replace_below_tree_trunk`) — resolved once via
+    /// `crate::feature::vegetation::build_veg_tags` (this module's own tag set
+    /// is fixed, not data-dependent — see that function's doc comment).
     veg_tags: crate::feature::vegetation::VegTags,
     /// Per-biome `ClimateSettings` (`has_precipitation`, `temperature`,
     /// `temperature_modifier`), read straight out of each biome's own
@@ -1214,10 +1210,6 @@ impl OverworldGenerator {
         }
         let decoration_catalog = crate::compose::build_decoration_catalog(resolver, &biome_source_order);
         let ore_definitions = crate::compose::build_ore_definitions(resolver, &decoration_catalog);
-        let ore_tag_map = crate::compose::build_ore_tag_map(
-            resolver,
-            &ore_definitions.values().cloned().collect::<Vec<_>>(),
-        );
         let veg_tags = crate::feature::vegetation::build_veg_tags(resolver);
         let snow_support = crate::feature::top_layer::build_snow_support(resolver);
 
@@ -1268,7 +1260,6 @@ impl OverworldGenerator {
             carver_replaceable,
             carvers_by_biome,
             ore_definitions,
-            ore_tag_map,
             decoration_catalog,
             veg_tags,
             biome_climates,

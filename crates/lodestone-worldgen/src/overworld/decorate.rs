@@ -1684,11 +1684,7 @@ impl OverworldGenerator {
                 .map(Vec::as_slice)
                 .unwrap_or(&[])
         };
-        let in_tag = |block: &str, tag: &str| -> bool {
-            self.ore_tag_map
-                .get(tag)
-                .is_some_and(|members| members.contains(block))
-        };
+        let in_tag = |_: &str, _: &str| false;
         let feature_biomes = self.decoration_catalog.feature_biomes();
         let biome_zoom_seed = super::biome::biome_zoom_seed(self.seed);
         let biome_sources = |source_x: i32, source_z: i32| {
@@ -2601,11 +2597,7 @@ impl OverworldGenerator {
                 .as_ref()
                 .is_some_and(|grid| grid.allows(pos, membership))
         };
-        let in_tag = |block: &str, tag: &str| -> bool {
-            self.ore_tag_map
-                .get(tag)
-                .is_some_and(|members| members.contains(block))
-        };
+        let in_tag = |_: &str, _: &str| false;
 
         let mut grid = crate::feature::vegetation::VegGrid::with_dynamic_sources_and_biomes_shared_zoomed(
             self.min_y,
@@ -3125,11 +3117,7 @@ impl OverworldGenerator {
         let centre_biomes = &context.centre_biomes;
         let ocean_floor_wg = &context.ocean_floor_wg;
 
-        let in_tag = |block: &str, tag: &str| -> bool {
-            self.ore_tag_map
-                .get(tag)
-                .is_some_and(|members| members.contains(block))
-        };
+        let in_tag = |_: &str, _: &str| false;
         let feature_biomes = &context.window.feature_biomes;
         let biome_zoom_seed = super::biome::biome_zoom_seed(self.seed);
         let biome_sources = |source_x: i32, source_z: i32| {
