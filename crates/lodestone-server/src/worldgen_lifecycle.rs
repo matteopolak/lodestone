@@ -2429,6 +2429,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             state,
         };
         let destination = (position.0.div_euclid(16), position.2.div_euclid(16));
+        let local_owner = destination == target;
         match self
             .target_feature_winners
             .entry(destination)
@@ -2436,16 +2437,29 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             .entry(position)
         {
             HashEntry::Vacant(entry) => {
+                lodestone_worldgen::counters::bump_canonical_winner_attempt(
+                    local_owner,
+                    lodestone_worldgen::counters::CanonicalWinnerOutcome::Vacant,
+                );
                 entry.insert(candidate);
                 lodestone_worldgen::counters::bump_canonical_winner_update();
             }
             HashEntry::Occupied(mut entry)
                 if target_feature_winner_precedes(candidate, *entry.get()) =>
             {
+                lodestone_worldgen::counters::bump_canonical_winner_attempt(
+                    local_owner,
+                    lodestone_worldgen::counters::CanonicalWinnerOutcome::Replaced,
+                );
                 entry.insert(candidate);
                 lodestone_worldgen::counters::bump_canonical_winner_update();
             }
-            HashEntry::Occupied(_) => {}
+            HashEntry::Occupied(_) => {
+                lodestone_worldgen::counters::bump_canonical_winner_attempt(
+                    local_owner,
+                    lodestone_worldgen::counters::CanonicalWinnerOutcome::Lost,
+                );
+            }
         }
     }
 
@@ -6718,6 +6732,88 @@ mod tests {
         assert_eq!(
             materializer.snapshot_for_packet(target).block_state_id(0, 0, 0),
             sid("minecraft:stone"),
+        );
+    }
+
+    #[test]
+    fn target_feature_winner_counter_splits_owner_and_outcome() {
+        use lodestone_worldgen::counters;
+
+        if !counters::enabled() {
+            return;
+        }
+        let before = counters::snapshot();
+        let mut materializer = LifecycleMaterializer::new(DirectHeightmapSource);
+        let local = (0, 0);
+        let foreign = (1, 0);
+        let local_cell = (0, 0, 0);
+        let foreign_cell = (1, 0, 0);
+        materializer.record_target_feature_winner(
+            local,
+            local,
+            1,
+            local_cell,
+            sid("minecraft:stone"),
+        );
+        materializer.record_target_feature_winner(
+            local,
+            local,
+            0,
+            local_cell,
+            sid("minecraft:gold_block"),
+        );
+        materializer.record_target_feature_winner(
+            local,
+            local,
+            2,
+            local_cell,
+            sid("minecraft:diamond_block"),
+        );
+        materializer.record_target_feature_winner(
+            foreign,
+            foreign,
+            1,
+            foreign_cell,
+            sid("minecraft:stone"),
+        );
+        materializer.record_target_feature_winner(
+            foreign,
+            foreign,
+            0,
+            foreign_cell,
+            sid("minecraft:gold_block"),
+        );
+        materializer.record_target_feature_winner(
+            foreign,
+            foreign,
+            2,
+            foreign_cell,
+            sid("minecraft:diamond_block"),
+        );
+        let after = counters::snapshot();
+        let count = |before: u64, after: u64| after.saturating_sub(before);
+        assert!(
+            count(before.canonical_winner_local_vacant, after.canonical_winner_local_vacant) >= 1
+        );
+        assert!(
+            count(before.canonical_winner_local_replaced, after.canonical_winner_local_replaced)
+                >= 1
+        );
+        assert!(
+            count(before.canonical_winner_local_lost, after.canonical_winner_local_lost) >= 1
+        );
+        assert!(
+            count(before.canonical_winner_foreign_vacant, after.canonical_winner_foreign_vacant)
+                >= 1
+        );
+        assert!(
+            count(
+                before.canonical_winner_foreign_replaced,
+                after.canonical_winner_foreign_replaced,
+            ) >= 1
+        );
+        assert!(
+            count(before.canonical_winner_foreign_lost, after.canonical_winner_foreign_lost) >= 1
         );
     }
 
