@@ -114,8 +114,9 @@ Concurrent agents construct commits in private Git indexes so they never stage a
 The index must be based on a recorded `HEAD`, and publication goes through
 `scripts/private-index-commit.sh <recorded-head> <message> <path>...`. The helper fails before writing a
 commit when the branch has advanced, requiring the caller to re-read current blobs and rebuild the
-selected files. The private index must first be populated from that `HEAD`; an empty or incomplete
-index would otherwise delete unselected files. The helper rejects any private-index difference outside
+selected files. Populate the private index from that `HEAD`, then stage the exact selected files in it.
+An incomplete index could delete unselected files; an unchanged index would publish an empty commit.
+The helper rejects both, rejects any private-index difference outside
 the named paths and requires every named path to exist, then uses `git
 update-ref` with the recorded old object as a compare-and-swap, closing
 the smaller race between validation and publication. This protects unrelated shared working-tree edits:
@@ -133,7 +134,7 @@ another agent's dirty hunks even when the path list looks narrow. Build the priv
 publish it through the helper instead; this makes the committed tree an auditable set of exact blobs.
 
 Run `scripts/test-private-index-commit.sh` for all controls: a pathspec commit must be rejected, an
-intentionally stale private index must fail without changing the branch, a rebuilt index must retain the
+intentionally stale or unchanged private index must fail without changing the branch, a rebuilt index must retain the
 concurrently landed file, and two interleaved private commits must leave the shared index at the later
 commit while preserving an unrelated staged path.
 
