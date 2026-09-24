@@ -2212,6 +2212,55 @@ mod tests {
     }
 
     #[test]
+    fn compiled_ore_tag_match_uses_mask_and_uncompiled_match_uses_callback() {
+        let stone = state("minecraft:stone");
+        let heights = RegionHeights::unset();
+        let positive_tag = |block: &str, tag: &str| {
+            block == "minecraft:stone" && tag == "test:stone"
+        };
+        let fixture_input = OreInput {
+            chunk_x: 0,
+            chunk_z: 0,
+            center_x: 0,
+            center_z: 0,
+            min_y: 0,
+            height: 8,
+            min_gen_y: 0,
+            gen_depth: 8,
+            read_min: REGION_MIN,
+            read_max: REGION_MAX,
+            ocean_floor_wg: &heights,
+            in_tag: &positive_tag,
+            biome_allows: None,
+        };
+        let fixture_target = OreTarget {
+            state: state("minecraft:gold_ore"),
+            target: RuleTest::TagMatch("test:stone".to_string()),
+        };
+        assert!(target_matches(stone, &fixture_target, &fixture_input));
+
+        let no_tag_fallback = |_: &str, _: &str| false;
+        let compiled_input = OreInput {
+            in_tag: &no_tag_fallback,
+            ..fixture_input
+        };
+        assert!(!target_matches(stone, &fixture_target, &compiled_input));
+        let compiled_target = OreTarget {
+            state: state("minecraft:gold_ore"),
+            target: RuleTest::TagMatchCompiled {
+                id: TagId(0),
+                blocks: Arc::new([Block::Stone].into_iter().collect()),
+            },
+        };
+        assert!(target_matches(stone, &compiled_target, &compiled_input));
+        assert!(!target_matches(
+            state("minecraft:dirt"),
+            &compiled_target,
+            &compiled_input,
+        ));
+    }
+
+    #[test]
     fn uncached_ore_targets_preserve_rules_after_eighth() {
         let stone = state("minecraft:stone");
         let grid = DenseBlockGrid::with_default(-16, 0, -16, 48, 8, 48, stone);

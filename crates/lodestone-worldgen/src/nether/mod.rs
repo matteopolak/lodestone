@@ -130,7 +130,7 @@ use crate::biome::{BiomeTable, ClimateSampler};
 use crate::carver::{CarveGrid, CarverCatalog, CarverConfig, NoObserver};
 use crate::density::{Builder, Resolver};
 use crate::engine::Program;
-use crate::feature::{PlacedOre, PlacedScatteredOre, RuleTest};
+use crate::feature::{PlacedOre, PlacedScatteredOre};
 use crate::overworld::structures::{BEARD_REACH, REFS_RADIUS, StructureRefs};
 use crate::structure::beardifier::Beardifier;
 use crate::structure::{
@@ -484,13 +484,6 @@ impl NetherOre {
             }
         }
     }
-
-    fn config(&self) -> &crate::feature::OreConfig {
-        match self {
-            Self::Standard(ore) => &ore.config,
-            Self::Scattered(ore) => &ore.config,
-        }
-    }
 }
 
 /// The final block state one completed decoration source wrote in a target's
@@ -670,7 +663,6 @@ pub struct NetherGenerator {
     /// climate is y-invariant, so the mixed dispatcher can resolve an exact
     /// candidate position from the resident chunk's horizontal quart data.
     feature_biomes: Arc<crate::compose::FeatureBiomePlan>,
-    ore_tag_map: HashMap<String, HashSet<String>>,
     veg_tags: crate::feature::vegetation::VegTags,
     /// The Nether's structure engine, or `None` for a resolver that supplies no
     /// structure sets (every shape/surface fixture in this workspace). `None` makes
@@ -1201,29 +1193,6 @@ fn build_nether_feature_lists(
     (ores, decoration)
 }
 
-/// Resolves every target tag used by either step-7 ore body. The shared
-/// Overworld helper accepts only standard entries, while Nether scattered ore
-/// has its own target tag and must be included in the same membership closure.
-fn build_nether_ore_tag_map(
-    resolver: &dyn Resolver,
-    ores: &[NetherOre],
-) -> HashMap<String, HashSet<String>> {
-    let mut map = HashMap::new();
-    for ore in ores {
-        for target in &ore.config().targets {
-            if let RuleTest::TagMatch(tag) = &target.target {
-                map.entry(tag.clone()).or_insert_with(|| {
-                    let mut members = HashSet::new();
-                    let mut seen = HashSet::new();
-                    crate::compose::resolve_block_tag(resolver, tag, &mut members, &mut seen);
-                    members
-                });
-            }
-        }
-    }
-    map
-}
-
 impl NetherGenerator {
     /// The named pass order consumed by this generator and its parity tools.
     #[must_use]
@@ -1357,8 +1326,6 @@ impl NetherGenerator {
                 ore_definitions.entry(id.to_owned()).or_insert_with(|| ore.clone());
             }
         }
-        let all_ores: Vec<NetherOre> = ores_by_biome.values().flatten().cloned().collect();
-        let ore_tag_map = build_nether_ore_tag_map(resolver, &all_ores);
         let veg_tags = crate::feature::vegetation::build_veg_tags(resolver);
 
         // Structure placement's dimension half. Filtered by `possible_biomes`
@@ -1399,7 +1366,6 @@ impl NetherGenerator {
             biome_source_order,
             ore_definitions,
             feature_biomes,
-            ore_tag_map,
             veg_tags,
             structures,
             starts: ShardedMemo::new(STARTS_MEMO_CEILING),
@@ -1935,7 +1901,7 @@ impl NetherGenerator {
             }
             }
         }
-        let in_tag = |block: &str, tag: &str| self.ore_tag_map.get(tag).is_some_and(|members| members.contains(block));
+        let in_tag = |_: &str, _: &str| false;
         let resident_source = |dx: i32, dz: i32| {
             if selected_source.is_some() && dx == 0 && dz == 0 {
                 Some(&center_world)
