@@ -4583,6 +4583,8 @@ mod tests {
 
     struct StateOnlySpillSource;
 
+    struct TransientPaletteSource;
+
     struct GeneratedEntitySpillSource;
 
     struct HeightmapLifecycleSource;
@@ -5199,6 +5201,52 @@ mod tests {
         }
     }
 
+    impl LifecycleWorldgenSource for TransientPaletteSource {
+        type ReplayContext = ();
+
+        fn feature_dispatch(&self) -> LifecycleFeatureDispatch {
+            LifecycleFeatureDispatch::TargetOwned
+        }
+
+        fn lifecycle_replay_context(&self, _target: ChunkPos) -> Arc<Self::ReplayContext> {
+            Arc::new(())
+        }
+
+        fn shaped_column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            ChunkColumn::new(0, 1)
+        }
+
+        fn lifecycle_client_heightmaps(
+            &self,
+            _cx: i32,
+            _cz: i32,
+        ) -> Option<LifecycleClientHeightmaps> {
+            test_heightmaps()
+        }
+
+        fn feature_result(
+            &self,
+            source: ChunkPos,
+            _overrides: &BTreeMap<AbsoluteCell, StateId>,
+            _resident: &BTreeMap<ChunkPos, ChunkColumn>,
+        ) -> LifecycleFeatureResult {
+            LifecycleFeatureResult {
+                spills: (source == (0, 0))
+                    .then(|| LifecycleSpill {
+                        source,
+                        position: (16, 0, 0),
+                        state: sid("minecraft:diamond_block"),
+                        transient: false,
+                    })
+                    .into_iter()
+                    .collect(),
+                block_entities: Vec::new(),
+                structure_blocks: StructureBlocks::default(),
+                end_gateways: Vec::new(),
+            }
+        }
+    }
+
     impl LifecycleWorldgenSource for GeneratedEntitySpillSource {
         type ReplayContext = ();
 
@@ -5306,6 +5354,24 @@ mod tests {
             .get(1)
             .expect("WORLD_SURFACE map")
             .get(0, 0)
+    }
+
+    #[test]
+    fn transient_neighbour_restore_keeps_palette_introduction() {
+        let mut materializer = LifecycleMaterializer::new(TransientPaletteSource);
+        materializer.admit((0, 0));
+        materializer.admit((1, 0));
+        materializer.materialize_admitted((1, 0));
+
+        materializer.complete_target_features_observing((0, 0), 0, |_| {});
+        let neighbour = materializer.resident_column((1, 0)).unwrap();
+        assert_eq!(neighbour.block_state_id(0, 0, 0), sid("minecraft:diamond_block"));
+
+        materializer.finish_target((0, 0));
+        let neighbour = materializer.resident_column((1, 0)).unwrap();
+        assert_eq!(neighbour.block_state_id(0, 0, 0), StateId::AIR);
+        assert!(neighbour.palette().contains(&sid("minecraft:diamond_block")));
+        assert_ne!(column_digest(neighbour), column_digest(&ChunkColumn::new(0, 1)));
     }
 
     #[test]
