@@ -28,6 +28,7 @@ use lodestone_server::{ChunkColumn, ChunkSource, ServerProtocol, overworld_chunk
 use lodestone_v26_2::V770ServerProtocol;
 use lodestone_server::dimension::Dimension as ServerDimension;
 use lodestone_worldgen::counters;
+use lodestone_worldgen::feature::vegetation::census as vegetation_census;
 #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
 use lodestone_worldgen::counters::{RegionPhase, Stage, StageEvent, STAGE_COUNT};
 use lodestone_worldgen::stage_schedule::{Dimension as WorldgenDimension, GenerationTarget};
@@ -906,6 +907,9 @@ fn strict_single_thread_production_worldgen() {
     if counters_enabled {
         counters::reset();
     }
+    if counters_enabled {
+        vegetation_census::reset_source_reads();
+    }
     let generation_counter_before = counters_enabled.then(counters::snapshot);
     base_source.generator().reset_store_lease_stats();
     #[cfg(feature = "worldgen-stage-pmu")]
@@ -984,6 +988,53 @@ fn strict_single_thread_production_worldgen() {
         count,
         sustained_phase,
     );
+    if counters_enabled {
+        let reads = vegetation_census::source_read_snapshot();
+        assert!(reads.is_complete(), "source-read census exceeded its declared bounds");
+        let mut role_totals = [(0_u64, 0_u64, 0_u64, 0_u64); 3];
+        let mut height_totals = [(0_u64, 0_u64, 0_u64); 3];
+        for owner in reads.owners() {
+            let coordinate = (owner.chunk_x, owner.chunk_z);
+            let role = if coordinates.contains(&coordinate) {
+                0
+            } else if coordinates.iter().any(|&(x, z)| {
+                x.abs_diff(owner.chunk_x) <= 1 && z.abs_diff(owner.chunk_z) <= 1
+            }) {
+                1
+            } else {
+                2
+            };
+            let totals = &mut role_totals[role];
+            totals.0 += u64::from(owner.reads > 0);
+            totals.1 += owner.reads;
+            totals.2 += u64::from(owner.unique_xz_lanes());
+            totals.3 += u64::from(owner.unique_4x8x4_cells());
+            let heights = &mut height_totals[role];
+            heights.0 += u64::from(owner.height_reads > 0);
+            heights.1 += owner.height_reads;
+            heights.2 += u64::from(owner.unique_height_xz_lanes());
+        }
+        for (role, (owners, accesses, lanes, cells)) in
+            ["requested", "padding_owner", "read_only_context"]
+                .into_iter()
+                .zip(role_totals)
+        {
+            println!(
+                "STRICT_WORLDGEN metric=feature_source_reads phase={sustained_phase} role={role} owners={owners} accesses={accesses} unique_xz_lanes={lanes} unique_4x8x4_cells={cells} owner_overflow={}",
+                reads.owner_overflow,
+            );
+        }
+        for (role, (owners, accesses, lanes)) in
+            ["requested", "padding_owner", "read_only_context"]
+                .into_iter()
+                .zip(height_totals)
+        {
+            println!(
+                "STRICT_WORLDGEN metric=feature_height_reads phase={sustained_phase} role={role} owners={owners} accesses={accesses} unique_xz_lanes={lanes} owner_overflow={}",
+                reads.owner_overflow,
+            );
+        }
+    }
     #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
     report_stage_pmu(&sustained, count, sustained_phase);
     let mut columns = Vec::<((i32, i32), ChunkColumn)>::with_capacity(count);

@@ -23,13 +23,14 @@ At `6e7731960`, a one-worker, seed-42, square-64 production cohort retired 268.9
 
 The larger 256-output cohort previously reached about 211 million instructions/output and 93 outputs/s, but used roughly 964 MB. Cohort widening alone is therefore neither a bounded-memory design nor a solution to the single-worker target. At the 64-output baseline, a threefold instruction reduction would require about 179 million fewer instructions/output. No current component-level measurement supports claiming that saving from the region representation alone.
 
-Before the cutover, measure three discriminators in one bounded diagnostic cohort:
+The first bounded diagnostic cohort measured the outer-context read contract. Of 44 read-only chunks, 42 supplied state reads, but only 3,006 of 11,264 possible XZ lanes and 1,359 of 33,792 coarse vertical cells were touched. All 44 supplied height reads, covering 5,604 XZ lanes. This confirms that full state materialization is often wasted in the rim, but a state-only lazy reader would still leave substantial height work and cannot plausibly supply the whole threefold reduction. Do not add a second terrain representation solely for this role.
 
-- For read-only outer contexts, total and unique feature-read lanes/cells, and whether they require mutable state. A lazy terrain projection is unjustified if reads cover most cells or if it needs another full backing column.
+Before the cutover, measure the remaining discriminators in one bounded diagnostic cohort:
+
 - Per-role complete-column passes and retained bytes from packed fill through section encoding. Count eliminated passes rather than allocating an additional slab and comparing only wall time.
 - Read, write, winner, and palette-event volumes per feature owner. A final-state-only experiment must fail a deliberate overwritten-palette-state control.
 
-Then implement one vertical slice: canonical terrain read access for the read-only context role, with the existing owners and requested outputs unchanged. Promote a context to the mutable/output role only at its actual boundary. If the slice does not reduce measured work or cannot preserve exact reads, remove it before widening the redesign. Subsequent slices replace owner replay and final materialization together, then make the owner cursor sliding and memory-bounded.
+The first implementation slice should replace one complete ownership path: a canonical terrain reader, latest-write plane, and requested-output materialization over a bounded region. It must remove the corresponding replay or conversion path, not coexist as another cache. Run it against the same square-64 controls before adding sliding eviction or more dimensions. If it cannot preserve exact reads and palette history or save measured work, remove the slice rather than widening it.
 
 ## How to change it
 

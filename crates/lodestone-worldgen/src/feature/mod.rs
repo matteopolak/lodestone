@@ -961,6 +961,8 @@ pub struct RegionHeights {
     shared: Option<std::sync::Arc<RegionHeightStorage>>,
     /// Product indices for chunk offsets `[-2, 2]²`, row-major in z.
     slots: [u16; 25],
+    #[cfg(feature = "gen-counters")]
+    read_origin: Option<(i32, i32)>,
 }
 
 impl std::fmt::Debug for RegionHeights {
@@ -1000,6 +1002,8 @@ impl RegionHeights {
             dense: Some(vec![Self::UNSET; Self::AREA].into_boxed_slice()),
             shared: None,
             slots: std::array::from_fn(|index| index as u16),
+            #[cfg(feature = "gen-counters")]
+            read_origin: None,
         }
     }
 
@@ -1015,7 +1019,16 @@ impl RegionHeights {
             dense: None,
             shared: Some(shared),
             slots,
+            #[cfg(feature = "gen-counters")]
+            read_origin: None,
         }
+    }
+
+    #[cfg(feature = "gen-counters")]
+    #[must_use]
+    pub(crate) fn with_read_origin(mut self, chunk_x: i32, chunk_z: i32) -> Self {
+        self.read_origin = Some((chunk_x, chunk_z));
+        self
     }
 
     /// Reuses an existing dense height buffer, restoring the same absence
@@ -1067,6 +1080,15 @@ impl RegionHeights {
         let chunk_x = lx.div_euclid(16) + 2;
         let chunk_z = lz.div_euclid(16) + 2;
         let slot = self.slots[(chunk_x * 5 + chunk_z) as usize];
+        #[cfg(feature = "gen-counters")]
+        if let Some((origin_x, origin_z)) = self.read_origin {
+            crate::feature::vegetation::census::record_height_read(
+                origin_x + chunk_x - 2,
+                origin_z + chunk_z - 2,
+                lx.rem_euclid(16) as usize,
+                lz.rem_euclid(16) as usize,
+            );
+        }
         self.shared
             .as_ref()
             .expect("shared RegionHeights view has no storage")
@@ -1123,6 +1145,39 @@ mod shared_region_tests {
                 assert_eq!(shared.get(lx, lz), dense.get(lx, lz), "at ({lx},{lz})");
             }
         }
+    }
+
+    #[cfg(feature = "gen-counters")]
+    #[test]
+    fn shared_height_reads_census_absolute_negative_lanes_and_slots() {
+        use crate::feature::vegetation::census::{reset_source_reads, source_read_snapshot};
+
+        let columns = (0..25)
+            .map(|slot| [slot; 256])
+            .collect::<Vec<_>>();
+        let heights = RegionHeights::from_shared(
+            RegionHeightStorage::from_columns(columns),
+            std::array::from_fn(|index| index as u16),
+        )
+        .with_read_origin(-1, -1);
+
+        reset_source_reads();
+        assert_eq!(heights.get(-17, -1), 1);
+        assert_eq!(heights.get(-16, -16), 6);
+
+        let snapshot = source_read_snapshot();
+        let northwest = snapshot
+            .owners()
+            .find(|owner| (owner.chunk_x, owner.chunk_z) == (-3, -2))
+            .expect("negative offset should resolve to its absolute source chunk");
+        assert_eq!(northwest.height_reads, 1);
+        assert_eq!(northwest.height_lane_mask[3], 1 << 63);
+        let southwest = snapshot
+            .owners()
+            .find(|owner| (owner.chunk_x, owner.chunk_z) == (-2, -2))
+            .expect("negative boundary should resolve to its absolute source chunk");
+        assert_eq!(southwest.height_reads, 1);
+        assert_eq!(southwest.height_lane_mask[0], 1);
     }
 }
 
