@@ -1,6 +1,0 @@
-# State selector, expected emission nibble, expected smooth-AO gate result.
-# Selectors use the registry's state properties rather than hand-written ids.
-minecraft:stone 0 true
-minecraft:sea_lantern 15 false
-minecraft:oak_slab[type=bottom,waterlogged=false] 0 true
-minecraft:oak_stairs[facing=south,half=bottom,shape=straight,waterlogged=false] 0 true

@@ -1,1 +1,0 @@
-minecraft:acacia_shelf[facing=north,powered=true,side_chain=unconnected,waterlogged=true]

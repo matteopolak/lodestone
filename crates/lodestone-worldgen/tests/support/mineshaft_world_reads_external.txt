@@ -1,6 +1,0 @@
-# External packet states, seed 42, target chunk (-249, 250).
-# These cells were decoded independently from the same packet capture as
-# mineshaft_scope_seed42.txt. They are cave-air states in the receiving chunk;
-# the pre-surface four-way fallback reports them as solid stone.
--3975 12 4001 minecraft:cave_air
--3974 13 4004 minecraft:cave_air
