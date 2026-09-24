@@ -10,7 +10,6 @@ use std::cell::{Cell, RefCell};
 
 use lodestone_data::block_states::StateId as CanonicalStateId;
 use lodestone_data::biomes::BiomeRef;
-use lodestone_worldgen_core::hash::FastSet;
 
 use crate::feature::{
     FeatureMembershipId, OreWorldAccess, PlacedOre,
@@ -652,9 +651,14 @@ pub struct MixedReplayBatch {
     window: Arc<MixedReplayWindow>,
 }
 
+const EPOCH_DIRTY_SIDE: usize = (crate::feature::REGION_MAX - crate::feature::REGION_MIN
+    + 2 * crate::feature::vegetation::GEODE_PADDING) as usize;
+
 #[derive(Debug)]
 pub struct RegionFeatureEpoch {
     grid: crate::feature::vegetation::VegGrid,
+    dirty_min_y: i32,
+    dirty_seen: Vec<u64>,
     min_chunk_x: i32,
     min_chunk_z: i32,
     width: usize,
@@ -689,6 +693,7 @@ impl RegionFeatureEpoch {
     pub fn retained_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             + self.grid.retained_bytes()
+            + self.dirty_seen.capacity() * std::mem::size_of::<u64>()
             + self.column_writes.capacity() * std::mem::size_of::<Vec<usize>>()
             + self
                 .column_writes
@@ -816,7 +821,11 @@ impl RegionFeatureEpoch {
         target: (i32, i32),
         sparse_padding: bool,
     ) -> (Vec<ParityDecorationSpill>, Vec<ParityDecorationSpill>) {
-        let mut seen = FastSet::default();
+        let min_x = target.0 * 16 + crate::feature::REGION_MIN
+            - crate::feature::vegetation::GEODE_PADDING;
+        let min_z = target.1 * 16 + crate::feature::REGION_MIN
+            - crate::feature::vegetation::GEODE_PADDING;
+        self.dirty_seen.fill(0);
         let mut local = Vec::new();
         let mut spills = Vec::new();
         let mut raw_entries = 0;
@@ -824,9 +833,15 @@ impl RegionFeatureEpoch {
         for (x, y, z, state) in self.grid.dirty_cells() {
             raw_entries += 1;
             let position = (x, y, z);
-            if !seen.insert(position) {
+            let index = (((y - self.dirty_min_y) as usize * EPOCH_DIRTY_SIDE
+                + (z - min_z) as usize) * EPOCH_DIRTY_SIDE)
+                + (x - min_x) as usize;
+            let bit = 1u64 << (index & 63);
+            let word = &mut self.dirty_seen[index >> 6];
+            if *word & bit != 0 {
                 continue;
             }
+            *word |= bit;
             unique_positions += 1;
             let local_write = (x.div_euclid(16), z.div_euclid(16)) == target;
             crate::counters::bump_epoch_dirty_write(local_write);
@@ -2017,6 +2032,11 @@ impl OverworldGenerator {
         ));
         RegionFeatureEpoch {
             grid,
+            dirty_min_y: self.min_y,
+            dirty_seen: vec![
+                0;
+                (EPOCH_DIRTY_SIDE * EPOCH_DIRTY_SIDE * self.height as usize).div_ceil(64)
+            ],
             min_chunk_x,
             min_chunk_z,
             width,
