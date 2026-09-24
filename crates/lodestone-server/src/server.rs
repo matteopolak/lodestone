@@ -7046,6 +7046,11 @@ where
     P: ServerProtocol,
     S: ChunkSource + ?Sized,
 {
+    if changes.is_empty() {
+        return Ok(());
+    }
+    let started = crate::tick::PlayTimerInstant::now();
+    let change_count = changes.len();
     let mut relight = HashSet::new();
     let radius = i32::from(proto.uses_cross_column_light());
     for (x, y, z, block_state) in changes {
@@ -7064,8 +7069,21 @@ where
     }
     let mut relight = relight.into_iter().collect::<Vec<_>>();
     relight.sort_unstable();
+    let relight_count = relight.len();
+    let light_started = crate::tick::PlayTimerInstant::now();
     for (cx, cz) in relight {
         send_resident_column_light(conn, proto, source, state, cx, cz).await?;
+    }
+    let total = started.elapsed();
+    if total >= STALL_REPORT {
+        tracing::warn!(
+            target: "lodestone_server::stall",
+            change_count,
+            relight_count,
+            light_millis = light_started.elapsed().as_millis() as u64,
+            total_millis = total.as_millis() as u64,
+            "tick block updates stalled the connection loop",
+        );
     }
     Ok(())
 }

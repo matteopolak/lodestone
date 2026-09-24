@@ -22,6 +22,9 @@ completes; GPU upload and presentation remain separate frame-profiler phases.
 An integrated connection error is logged at the server task boundary before
 that task closes its transport. Without that error, the client's subsequent
 write can report only `broken pipe`, which does not identify the failed stage.
+When tick-driven block updates hold the connection loop for at least 200 ms,
+the stall log includes the number of changed blocks, relit columns, and time
+spent in lighting. This separates update fan-out from generation delay.
 
 ## How to change it
 

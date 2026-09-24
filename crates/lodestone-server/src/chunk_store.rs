@@ -4044,12 +4044,11 @@ impl<S: ChunkSource> ChunkStore<S> {
             .filter(|(coordinate, _)| destinations.contains(coordinate))
             .map(|(coordinate, column)| (coordinate.0, coordinate.1, column.clone()))
             .collect::<Vec<_>>();
-        debug_assert_eq!(
-            retained.len(),
-            destinations.len(),
-            "a validated generation commit must capture every mutation destination"
-        );
-        self.source.store_resident_columns(&retained)
+        if retained.is_empty() {
+            return false;
+        }
+        let complete = retained.len() == destinations.len();
+        self.source.store_resident_columns(&retained) && complete
     }
 
     fn emit_completed_cohort_results(
@@ -4997,6 +4996,7 @@ impl<S: ChunkSource> ChunkStore<S> {
         let mut generated_snapshots = Vec::new();
         let mut failed_entries = Vec::<GenerationBatchEntry>::new();
         let mut committed_mutations = Vec::new();
+        let mut source_existing = Vec::new();
         for (index, _) in &reused_columns {
             let target = sessions[*index].request().target();
             committed_mutations.extend(
@@ -5038,6 +5038,7 @@ impl<S: ChunkSource> ChunkStore<S> {
                     crate::world_spawn::record_existing_hit();
                     self.generation_ledger()
                         .rollback_admission(entry.pipeline, &entry.admitted);
+                    source_existing.push((index, session.request().target()));
                     commit_columns.insert(session.request().target(), column.clone());
                     finalized_coordinates.insert(session.request().target());
                     commit_indices.push(index);
@@ -5068,6 +5069,35 @@ impl<S: ChunkSource> ChunkStore<S> {
                     generated_snapshots.push((index, entry, snapshot));
                 }
             }
+        }
+
+        let source_existing_coordinates = source_existing
+            .iter()
+            .map(|(_, coordinate)| *coordinate)
+            .collect::<BTreeSet<_>>();
+        for (destination, (_, state)) in
+            Self::finalized_mutation_winners(&committed_mutations, &source_existing_coordinates)
+        {
+            let coordinate = (
+                destination.x().div_euclid(16),
+                destination.z().div_euclid(16),
+            );
+            let column = commit_columns
+                .get_mut(&coordinate)
+                .expect("a source-existing target is in the batch commit");
+            column.set_block_id(
+                destination.x().rem_euclid(16),
+                destination.y(),
+                destination.z().rem_euclid(16),
+                state,
+            );
+        }
+        for (index, coordinate) in source_existing {
+            results[index] = Some(Ok(Some(
+                crate::worldgen_session::GenerationRequestResult::Existing(
+                    commit_columns[&coordinate].clone(),
+                ),
+            )));
         }
 
         let final_outputs: BTreeMap<ChunkCoordinate, &ChunkColumn> = finalized_coordinates
@@ -5144,6 +5174,7 @@ impl<S: ChunkSource> ChunkStore<S> {
                     destination.z().div_euclid(16),
                 )
             })
+            .filter(|coordinate| commit_columns.contains_key(coordinate))
             .collect::<BTreeSet<_>>();
         let committed_mutations = committed_mutations
             .into_iter()
@@ -5154,6 +5185,7 @@ impl<S: ChunkSource> ChunkStore<S> {
                     destination.z().div_euclid(16),
                 );
                 !finalized_coordinates.contains(&coordinate)
+                    && commit_columns.contains_key(&coordinate)
             })
             .collect::<Vec<_>>();
         drop(final_outputs);
@@ -7879,11 +7911,12 @@ mod tests {
         assert!(matches!(
             &results[0],
             Ok(Some(crate::worldgen_session::GenerationRequestResult::Generated(_)))
-        ));
-        assert!(matches!(
-            &results[1],
-            Ok(Some(crate::worldgen_session::GenerationRequestResult::Existing(_)))
-        ));
+        ), "{results:?}");
+        let column = match &results[1] {
+            Ok(Some(crate::worldgen_session::GenerationRequestResult::Existing(column))) => column,
+            other => panic!("expected a source-existing result, got {other:?}"),
+        };
+        assert_eq!(column.block_state_id(0, 4, 0), Block::Dirt.default_state());
         assert!(
             store
                 .generation_ledger()
@@ -7900,6 +7933,44 @@ mod tests {
             Block::Dirt.default_state(),
             "the generated spill survives eviction through the captured source payload"
         );
+    }
+
+    #[test]
+    fn mixed_batch_defers_a_spill_outside_its_materialized_columns() {
+        use lodestone_worldgen::stage_schedule::{Dimension, GenerationTarget};
+
+        let target = (0, 0);
+        let destination = BlockCoordinate::new(16, 4, 0);
+        let persisted = Arc::new(Mutex::new(HashMap::new()));
+        let store = ChunkStore::with_capacity(
+            MixedBatchSource {
+                driver: ResumableDriver::with_feature_spill(
+                    target,
+                    destination,
+                    Block::Dirt.default_state(),
+                ),
+                existing_target: (0, 1),
+                persisted: Arc::clone(&persisted),
+            },
+            0,
+        );
+        let mut sessions = [target, (0, 1)]
+            .into_iter()
+            .map(|target| {
+                GenerationSession::new(crate::worldgen_session::GenerationRequest::new(
+                    Dimension::End,
+                    target,
+                    GenerationTarget::Full,
+                    1,
+                ))
+            })
+            .collect::<Vec<_>>();
+
+        let results = ChunkSource::request_generation_batch(&store, &mut sessions);
+
+        assert!(results.iter().all(Result::is_ok), "{results:?}");
+        assert!(store.generation_ledger().stats().overlays > 0);
+        assert!(!persisted.lock().unwrap().contains_key(&(1, 0)));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
