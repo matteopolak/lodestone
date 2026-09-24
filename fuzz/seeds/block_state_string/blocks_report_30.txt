@@ -1,1 +1,0 @@
-minecraft:resin_clump[down=true,east=true,north=true,south=true,up=true,waterlogged=true,west=true]
