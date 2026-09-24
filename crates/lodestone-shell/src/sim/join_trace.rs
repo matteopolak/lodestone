@@ -65,8 +65,8 @@ impl JoinTrace {
         };
         *count = count.saturating_add(1);
         let first = *count == 1;
-        #[cfg(target_arch = "wasm32")]
-        if !first && !count.is_multiple_of(16) {
+        let sample_interval = if stage == "remeshed" { 256 } else { 16 };
+        if !first && !count.is_multiple_of(sample_interval) {
             return;
         }
         tracing::info!(
