@@ -1371,6 +1371,26 @@ mod block_edit_tests {
         );
     }
 
+    #[test]
+    fn overworld_dependency_sky_does_not_darken_fresh_centre() {
+        let mut center = ServerChunkColumn::new(-64, 384);
+        let mut retained = ColumnLight::new(24);
+        *retained.sky_mut(25) = LightData::Uniform(15);
+        center.set_retained_light_with_status(
+            retained,
+            RetainedLightStatus::DependencyInitialized,
+        );
+
+        let light = V770ServerProtocol
+            .compute_initial_column_lights_with_neighbours_in_dimension(
+                &center,
+                &[],
+                Dimension::Overworld,
+            )
+            .expect("fresh Overworld centre admission");
+        assert_eq!(light.centre_light().section_light(9).sky_at(8, 0, 8), 15);
+    }
+
     /// A sparse centre-settled snapshot remains authoritative even when its
     /// terrain is all air. This is distinct from the dependency-initialized
     /// all-sections control above: the centre's own saved allocation is the
