@@ -1448,7 +1448,7 @@ impl IntegratedServer {
             let access = crate::access::AccessHandle::default();
             tokio::select! {
                 _ = signal.notified() => {}
-                _ = serve_connection_with_mob_events_and_commands_shared(
+                result = serve_connection_with_mob_events_and_commands_shared(
                     &mut conn,
                     &protocol,
                     &conn_source,
@@ -1472,7 +1472,11 @@ impl IntegratedServer {
                     &access,
                     #[cfg(not(target_arch = "wasm32"))]
                     None,
-                ) => {}
+                ) => {
+                    if let Err(error) = result {
+                        tracing::error!(error = %error, "integrated connection failed");
+                    }
+                }
             }
         });
 
@@ -2496,7 +2500,7 @@ impl IntegratedServer {
                 // one core thread it shares with `run_tick_loop` below.
                 // `&conn_source` rather than `&*conn_source` is the entire
                 // call-site change — see `crate::server::SourceRef`.
-                _ = serve_connection_with_mob_events_and_commands_shared(
+                result = serve_connection_with_mob_events_and_commands_shared(
                     &mut conn,
                     &*conn_protocol,
                     &conn_source,
@@ -2527,7 +2531,11 @@ impl IntegratedServer {
                     &conn_access,
                     #[cfg(not(target_arch = "wasm32"))]
                     None,
-                ) => {}
+                ) => {
+                    if let Err(error) = result {
+                        tracing::error!(error = %error, "integrated connection failed");
+                    }
+                }
             }
             // lets the relay task above drop this connection's
             // subscriber on its next pass, exactly as `open_to_lan`'s own

@@ -1686,6 +1686,9 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
         cz: i32,
         column: &ChunkColumn,
     ) -> Option<crate::chunk_store::TryResidentEdit> {
+        if column.generation_stage() != crate::chunk::ChunkGenerationStage::Full {
+            return None;
+        }
         let mut invalidated = match self.state.invalidated_light.try_lock() {
             Ok(invalidated) => invalidated,
             Err(std::sync::TryLockError::WouldBlock) => {
@@ -1770,16 +1773,20 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
         }
     }
 
-    /// Retains a complete light-admission batch while holding the edit lock,
-    /// so a resident read cannot observe only part of the 3x3 settlement.
+    /// Retains complete columns from a light-admission or generation batch.
     fn store_resident_columns(&self, columns: &[(i32, i32, ChunkColumn)]) -> bool {
         let mut edits = self.state.edits.lock().expect("world edit lock poisoned");
-        for &(cx, cz, ref column) in columns {
-            edits.insert((cx, cz), column.clone());
-        }
         let mut dirty = self.state.dirty.lock().expect("world dirty lock poisoned");
-        dirty.extend(columns.iter().map(|&(cx, cz, _)| (cx, cz)));
-        true
+        let mut all_complete = true;
+        for &(cx, cz, ref column) in columns {
+            if column.generation_stage() != crate::chunk::ChunkGenerationStage::Full {
+                all_complete = false;
+                continue;
+            }
+            edits.insert((cx, cz), column.clone());
+            dirty.insert((cx, cz));
+        }
+        all_complete
     }
 
     /// The cache above has evicted this column, so the save path may release
@@ -3212,6 +3219,31 @@ mod tests {
             source.column(0, 0).generation_stage(),
             crate::chunk::ChunkGenerationStage::Full
         );
+    }
+
+    #[test]
+    fn shaped_generation_batch_does_not_become_a_saved_or_terminal_edit() {
+        let dir = tempdir("shaped-generation-batch");
+        let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT)
+            .expect("open world");
+        let shaped =
+            ChunkColumn::from_generated(crate::overworld_generator(42).column_shaped(0, 0));
+
+        assert!(!source.store_resident_columns(&[(0, 0, shaped)]));
+        assert!(source.terminal_column(0, 0).is_none());
+        assert_eq!(source.save_handle().save().expect("save complete columns"), 0);
+        assert_eq!(
+            source.column(0, 0).generation_stage(),
+            crate::chunk::ChunkGenerationStage::Full
+        );
+
+        let shaped =
+            ChunkColumn::from_generated(crate::overworld_generator(42).column_shaped(0, 0));
+        let full = source.column(1, 0);
+        assert!(!source.store_resident_columns(&[(0, 0, shaped), (1, 0, full)]));
+        assert!(source.terminal_column(0, 0).is_none());
+        assert!(source.terminal_column(1, 0).is_some());
+        assert_eq!(source.save_handle().save().expect("save complete columns"), 1);
     }
 
     #[test]
