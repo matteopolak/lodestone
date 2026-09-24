@@ -1334,6 +1334,12 @@ pub enum GenerationRequestError {
     /// a stable object-safe error to type-erased callers.
     #[error("generation request boundary failed: {0}")]
     Boundary(String),
+    #[error("generation revision changed at {coordinate:?}: expected {expected}, found {found}")]
+    RevisionConflict {
+        coordinate: ChunkCoordinate,
+        expected: u64,
+        found: u64,
+    },
 }
 
 /// Committed state that can be moved into another request with the same
