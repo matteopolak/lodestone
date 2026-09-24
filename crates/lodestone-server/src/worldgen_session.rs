@@ -1736,6 +1736,8 @@ pub enum SessionError {
     CheckpointPipelineMismatch,
     #[error("checkpoint contains invalid retained state")]
     InvalidCheckpoint,
+    #[error("checkpoint contains invalid retained state at {0}")]
+    InvalidCheckpointAt(&'static str),
 }
 
 /// A report from an immutable or mutable advancement attempt.
