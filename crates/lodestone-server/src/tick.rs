@@ -4049,7 +4049,7 @@ async fn run_tick_loop_with_weather_impl<W>(
         // it is being drained, which `drain_due`'s collect-then-run split keeps
         // out of this same pass — so a flow advances one cell per delay period
         // rather than resolving the whole pool inside one tick.
-        let mut fluid_changes: Vec<(BlockPos, StateId)> = Vec::new();
+        let mut fluid_changes: Vec<crate::fluid::FluidBlockChange> = Vec::new();
         let due_fluid_ticks = apply_scheduled_tick_owner_batches(
             fluid_ticks.drain_due_owner_batches(game_tick, MAX_SCHEDULED_TICKS_PER_TICK),
         );
@@ -4098,8 +4098,14 @@ async fn run_tick_loop_with_weather_impl<W>(
             // `world` (it reads the world back as it spreads, exactly as
             // vanilla's immediate `setBlock` does), so this loop only forwards
             // them to connected clients.
-            for (pos, state) in fluid_changes.drain(..) {
-                block_tick_out.publish(pos.x, pos.y, pos.z, state);
+            for change in fluid_changes.drain(..) {
+                block_tick_out.publish_change(
+                    change.pos.x,
+                    change.pos.y,
+                    change.pos.z,
+                    change.old_state,
+                    change.new_state,
+                );
             }
         }
 

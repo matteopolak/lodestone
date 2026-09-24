@@ -208,6 +208,8 @@ light change. Producers that know both block states compare emission and dampeni
 publish the change; an unknown prior state conservatively requires relighting. Every block update
 is still sent. Only light-changing updates add destinations to the per-connection FIFO queue,
 which deduplicates across batches and services one destination per connection-loop pass.
+Scheduled fluid writes capture the replaced state immediately before each write, so changes to a
+fluid's level can avoid a full light recomputation when their light properties are unchanged.
 
 ### Cross-chunk propagation after an edit
 
