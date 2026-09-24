@@ -17,8 +17,12 @@ with `lodestone-worldgen/gen-counters`. Its local and spill counts are unique
 dirty epoch cells by destination chunk. Override and carver revision attempts
 count calls to the materializer's setters; insertions count new or changed
 values appended to the ordered revision streams. Canonical-winner updates count
-winner-map inserts or replacements, and authenticated-write calls include
-calls that return early because the target output already contains the write.
+winner-map inserts or replacements. The winner attempt split classifies each
+attempt as local (writer target equals destination chunk) or foreign, then as
+vacant, replaced, or lost. `winner_vacant_share` is the share of attempts that
+found an empty winner slot; it does not prove that no later writer will collide
+with that cell. Authenticated-write calls include calls that return early
+because the target output already contains the write.
 The `epoch_dirty_*_raw` and `epoch_dirty_*_unique` counts separate append-only
 dirty entries from distinct positions, with full targets and sparse padding
 reported independently. They show the potential headroom for changing dirty

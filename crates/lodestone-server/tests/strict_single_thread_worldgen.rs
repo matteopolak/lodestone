@@ -500,12 +500,43 @@ fn report_generation_counters(
         before.canonical_winner_updates,
         after.canonical_winner_updates,
     );
+    let winner_local_vacant = delta(
+        before.canonical_winner_local_vacant,
+        after.canonical_winner_local_vacant,
+    );
+    let winner_local_replaced = delta(
+        before.canonical_winner_local_replaced,
+        after.canonical_winner_local_replaced,
+    );
+    let winner_local_lost = delta(
+        before.canonical_winner_local_lost,
+        after.canonical_winner_local_lost,
+    );
+    let winner_foreign_vacant = delta(
+        before.canonical_winner_foreign_vacant,
+        after.canonical_winner_foreign_vacant,
+    );
+    let winner_foreign_replaced = delta(
+        before.canonical_winner_foreign_replaced,
+        after.canonical_winner_foreign_replaced,
+    );
+    let winner_foreign_lost = delta(
+        before.canonical_winner_foreign_lost,
+        after.canonical_winner_foreign_lost,
+    );
+    let winner_attempts = winner_local_vacant
+        + winner_local_replaced
+        + winner_local_lost
+        + winner_foreign_vacant
+        + winner_foreign_replaced
+        + winner_foreign_lost;
+    let winner_vacant = winner_local_vacant + winner_foreign_vacant;
     let authenticated_write_calls = delta(
         before.authenticated_write_calls,
         after.authenticated_write_calls,
     );
     println!(
-        "STRICT_WORLDGEN metric=target_write_bookkeeping phase={phase} outputs={columns} epoch_dirty_local={epoch_dirty_local} epoch_dirty_local_per_output={:.3} epoch_dirty_spill={epoch_dirty_spill} epoch_dirty_spill_per_output={:.3} override_revision_attempts={override_attempts} override_revision_attempts_per_output={:.3} override_revision_insertions={override_insertions} override_revision_insertions_per_output={:.3} carver_revision_attempts={carver_attempts} carver_revision_attempts_per_output={:.3} carver_revision_insertions={carver_insertions} carver_revision_insertions_per_output={:.3} canonical_winner_updates={canonical_winner_updates} canonical_winner_updates_per_output={:.3} authenticated_write_calls={authenticated_write_calls} authenticated_write_calls_per_output={:.3}",
+        "STRICT_WORLDGEN metric=target_write_bookkeeping phase={phase} outputs={columns} epoch_dirty_local={epoch_dirty_local} epoch_dirty_local_per_output={:.3} epoch_dirty_spill={epoch_dirty_spill} epoch_dirty_spill_per_output={:.3} override_revision_attempts={override_attempts} override_revision_attempts_per_output={:.3} override_revision_insertions={override_insertions} override_revision_insertions_per_output={:.3} carver_revision_attempts={carver_attempts} carver_revision_attempts_per_output={:.3} carver_revision_insertions={carver_insertions} carver_revision_insertions_per_output={:.3} canonical_winner_updates={canonical_winner_updates} canonical_winner_updates_per_output={:.3} winner_local_vacant={winner_local_vacant} winner_local_replaced={winner_local_replaced} winner_local_lost={winner_local_lost} winner_foreign_vacant={winner_foreign_vacant} winner_foreign_replaced={winner_foreign_replaced} winner_foreign_lost={winner_foreign_lost} winner_vacant_share={:.4} authenticated_write_calls={authenticated_write_calls} authenticated_write_calls_per_output={:.3}",
         epoch_dirty_local as f64 / per_column,
         epoch_dirty_spill as f64 / per_column,
         override_attempts as f64 / per_column,
@@ -513,6 +544,7 @@ fn report_generation_counters(
         carver_attempts as f64 / per_column,
         carver_insertions as f64 / per_column,
         canonical_winner_updates as f64 / per_column,
+        winner_vacant as f64 / winner_attempts.max(1) as f64,
         authenticated_write_calls as f64 / per_column,
     );
 }

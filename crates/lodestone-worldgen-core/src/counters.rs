@@ -117,6 +117,17 @@ pub enum Stage {
     Other = 11,
 }
 
+/// Outcome of one canonical FEATURES winner-map attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanonicalWinnerOutcome {
+    /// No candidate for this cell had been recorded yet.
+    Vacant,
+    /// This candidate outranked the previously recorded candidate.
+    Replaced,
+    /// The previous candidate remains canonical.
+    Lost,
+}
+
 /// Number of [`Stage`] variants, including [`Stage::Other`].
 pub const STAGE_COUNT: usize = 12;
 
@@ -526,6 +537,18 @@ pub struct Snapshot {
     pub materializer_carver_revision_insertions: u64,
     /// Canonical target-feature winner map insertions or replacements.
     pub canonical_winner_updates: u64,
+    /// A local attempt found no prior candidate.
+    pub canonical_winner_local_vacant: u64,
+    /// A local attempt replaced the prior candidate.
+    pub canonical_winner_local_replaced: u64,
+    /// A local attempt lost to the prior candidate.
+    pub canonical_winner_local_lost: u64,
+    /// A foreign attempt found no prior candidate.
+    pub canonical_winner_foreign_vacant: u64,
+    /// A foreign attempt replaced the prior candidate.
+    pub canonical_winner_foreign_replaced: u64,
+    /// A foreign attempt lost to the prior candidate.
+    pub canonical_winner_foreign_lost: u64,
     /// Calls to authenticated-write bookkeeping, including early-return cases.
     pub authenticated_write_calls: u64,
 }
@@ -604,6 +627,12 @@ impl Default for Snapshot {
             materializer_carver_revision_attempts: 0,
             materializer_carver_revision_insertions: 0,
             canonical_winner_updates: 0,
+            canonical_winner_local_vacant: 0,
+            canonical_winner_local_replaced: 0,
+            canonical_winner_local_lost: 0,
+            canonical_winner_foreign_vacant: 0,
+            canonical_winner_foreign_replaced: 0,
+            canonical_winner_foreign_lost: 0,
             authenticated_write_calls: 0,
         }
     }
@@ -650,7 +679,7 @@ mod imp {
 
     use super::{
         CACHE_COUNT, MAX_TRACKED_SLOTS, MEMORY_BOUNDARY_COUNT, STAGE_COUNT, CacheKind,
-        MemoryBoundary, Snapshot, Stage,
+        CanonicalWinnerOutcome, MemoryBoundary, Snapshot, Stage,
     };
     #[cfg(feature = "stage-pmu")]
     use super::stage_pmu::{self, Event, RegionPhase};
@@ -727,6 +756,12 @@ mod imp {
         materializer_carver_revision_attempts: AtomicU64,
         materializer_carver_revision_insertions: AtomicU64,
         canonical_winner_updates: AtomicU64,
+        canonical_winner_local_vacant: AtomicU64,
+        canonical_winner_local_replaced: AtomicU64,
+        canonical_winner_local_lost: AtomicU64,
+        canonical_winner_foreign_vacant: AtomicU64,
+        canonical_winner_foreign_replaced: AtomicU64,
+        canonical_winner_foreign_lost: AtomicU64,
         authenticated_write_calls: AtomicU64,
     }
 
@@ -800,6 +835,12 @@ mod imp {
         materializer_carver_revision_attempts: AtomicU64::new(0),
         materializer_carver_revision_insertions: AtomicU64::new(0),
         canonical_winner_updates: AtomicU64::new(0),
+        canonical_winner_local_vacant: AtomicU64::new(0),
+        canonical_winner_local_replaced: AtomicU64::new(0),
+        canonical_winner_local_lost: AtomicU64::new(0),
+        canonical_winner_foreign_vacant: AtomicU64::new(0),
+        canonical_winner_foreign_replaced: AtomicU64::new(0),
+        canonical_winner_foreign_lost: AtomicU64::new(0),
         authenticated_write_calls: AtomicU64::new(0),
     };
 
@@ -1173,6 +1214,19 @@ mod imp {
     }
 
     #[inline]
+    pub fn bump_canonical_winner_attempt(local_owner: bool, outcome: CanonicalWinnerOutcome) {
+        let counter = match (local_owner, outcome) {
+            (true, CanonicalWinnerOutcome::Vacant) => &C.canonical_winner_local_vacant,
+            (true, CanonicalWinnerOutcome::Replaced) => &C.canonical_winner_local_replaced,
+            (true, CanonicalWinnerOutcome::Lost) => &C.canonical_winner_local_lost,
+            (false, CanonicalWinnerOutcome::Vacant) => &C.canonical_winner_foreign_vacant,
+            (false, CanonicalWinnerOutcome::Replaced) => &C.canonical_winner_foreign_replaced,
+            (false, CanonicalWinnerOutcome::Lost) => &C.canonical_winner_foreign_lost,
+        };
+        bump(counter);
+    }
+
+    #[inline]
     pub fn bump_authenticated_write_call() {
         bump(&C.authenticated_write_calls);
     }
@@ -1347,6 +1401,12 @@ mod imp {
         C.materializer_carver_revision_attempts.store(0, Relaxed);
         C.materializer_carver_revision_insertions.store(0, Relaxed);
         C.canonical_winner_updates.store(0, Relaxed);
+        C.canonical_winner_local_vacant.store(0, Relaxed);
+        C.canonical_winner_local_replaced.store(0, Relaxed);
+        C.canonical_winner_local_lost.store(0, Relaxed);
+        C.canonical_winner_foreign_vacant.store(0, Relaxed);
+        C.canonical_winner_foreign_replaced.store(0, Relaxed);
+        C.canonical_winner_foreign_lost.store(0, Relaxed);
         C.authenticated_write_calls.store(0, Relaxed);
     }
 
@@ -1425,6 +1485,12 @@ mod imp {
             materializer_carver_revision_attempts: C.materializer_carver_revision_attempts.load(Relaxed),
             materializer_carver_revision_insertions: C.materializer_carver_revision_insertions.load(Relaxed),
             canonical_winner_updates: C.canonical_winner_updates.load(Relaxed),
+            canonical_winner_local_vacant: C.canonical_winner_local_vacant.load(Relaxed),
+            canonical_winner_local_replaced: C.canonical_winner_local_replaced.load(Relaxed),
+            canonical_winner_local_lost: C.canonical_winner_local_lost.load(Relaxed),
+            canonical_winner_foreign_vacant: C.canonical_winner_foreign_vacant.load(Relaxed),
+            canonical_winner_foreign_replaced: C.canonical_winner_foreign_replaced.load(Relaxed),
+            canonical_winner_foreign_lost: C.canonical_winner_foreign_lost.load(Relaxed),
             authenticated_write_calls: C.authenticated_write_calls.load(Relaxed),
         }
     }
@@ -1432,7 +1498,7 @@ mod imp {
 
 #[cfg(not(feature = "gen-counters"))]
 mod imp {
-    use super::{CacheKind, MemoryBoundary, Snapshot, Stage};
+    use super::{CacheKind, CanonicalWinnerOutcome, MemoryBoundary, Snapshot, Stage};
     #[cfg(feature = "stage-pmu")]
     use super::stage_pmu;
     #[cfg(feature = "stage-pmu")]
@@ -1563,6 +1629,8 @@ mod imp {
     #[inline(always)]
     pub fn bump_canonical_winner_update() {}
     #[inline(always)]
+    pub fn bump_canonical_winner_attempt(_local_owner: bool, _outcome: CanonicalWinnerOutcome) {}
+    #[inline(always)]
     pub fn bump_authenticated_write_call() {}
 
     #[cfg(not(feature = "stage-pmu"))]
@@ -1673,7 +1741,7 @@ pub use imp::{
     bump_nonpositive_cell_skip, bump_epoch_dirty_write,
     bump_epoch_dirty_dedup,
     bump_materializer_override_revision, bump_materializer_carver_revision,
-    bump_canonical_winner_update, bump_authenticated_write_call,
+    bump_canonical_winner_update, bump_canonical_winner_attempt, bump_authenticated_write_call,
     current_stage, reset, snapshot,
 };
 
@@ -1733,6 +1801,12 @@ mod tests {
         bump_materializer_override_revision(true);
         bump_materializer_carver_revision(false);
         bump_canonical_winner_update();
+        bump_canonical_winner_attempt(true, CanonicalWinnerOutcome::Vacant);
+        bump_canonical_winner_attempt(true, CanonicalWinnerOutcome::Replaced);
+        bump_canonical_winner_attempt(true, CanonicalWinnerOutcome::Lost);
+        bump_canonical_winner_attempt(false, CanonicalWinnerOutcome::Vacant);
+        bump_canonical_winner_attempt(false, CanonicalWinnerOutcome::Replaced);
+        bump_canonical_winner_attempt(false, CanonicalWinnerOutcome::Lost);
         bump_authenticated_write_call();
         bump_rng_draw();
         bump_preliminary_surface_request(-4, 8);
@@ -1773,6 +1847,12 @@ mod tests {
         assert_eq!(empty.materializer_override_revision_attempts, 0);
         assert_eq!(empty.materializer_carver_revision_attempts, 0);
         assert_eq!(empty.canonical_winner_updates, 0);
+        assert_eq!(empty.canonical_winner_local_vacant, 0);
+        assert_eq!(empty.canonical_winner_local_replaced, 0);
+        assert_eq!(empty.canonical_winner_local_lost, 0);
+        assert_eq!(empty.canonical_winner_foreign_vacant, 0);
+        assert_eq!(empty.canonical_winner_foreign_replaced, 0);
+        assert_eq!(empty.canonical_winner_foreign_lost, 0);
         assert_eq!(empty.authenticated_write_calls, 0);
         bump_epoch_dirty_write(true);
         bump_epoch_dirty_write(false);
@@ -1784,6 +1864,12 @@ mod tests {
         bump_materializer_carver_revision(true);
         bump_materializer_carver_revision(false);
         bump_canonical_winner_update();
+        bump_canonical_winner_attempt(true, CanonicalWinnerOutcome::Vacant);
+        bump_canonical_winner_attempt(true, CanonicalWinnerOutcome::Replaced);
+        bump_canonical_winner_attempt(true, CanonicalWinnerOutcome::Lost);
+        bump_canonical_winner_attempt(false, CanonicalWinnerOutcome::Vacant);
+        bump_canonical_winner_attempt(false, CanonicalWinnerOutcome::Replaced);
+        bump_canonical_winner_attempt(false, CanonicalWinnerOutcome::Lost);
         bump_authenticated_write_call();
         let target_writes = snapshot();
         assert_eq!(target_writes.epoch_dirty_local_writes, 1);
@@ -1797,6 +1883,12 @@ mod tests {
         assert_eq!(target_writes.materializer_carver_revision_attempts, 2);
         assert_eq!(target_writes.materializer_carver_revision_insertions, 1);
         assert_eq!(target_writes.canonical_winner_updates, 1);
+        assert_eq!(target_writes.canonical_winner_local_vacant, 1);
+        assert_eq!(target_writes.canonical_winner_local_replaced, 1);
+        assert_eq!(target_writes.canonical_winner_local_lost, 1);
+        assert_eq!(target_writes.canonical_winner_foreign_vacant, 1);
+        assert_eq!(target_writes.canonical_winner_foreign_replaced, 1);
+        assert_eq!(target_writes.canonical_winner_foreign_lost, 1);
         assert_eq!(target_writes.authenticated_write_calls, 1);
         reset();
         assert_eq!(snapshot(), Snapshot::default());
