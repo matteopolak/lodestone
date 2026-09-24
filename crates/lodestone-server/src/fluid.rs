@@ -1383,7 +1383,7 @@ fn spread_to<S: ChunkSource + ?Sized>(
     target_state: StateId,
     direction: Direction,
     fluid: FluidState,
-    changes: &mut Vec<(BlockPos, StateId)>,
+    changes: &mut Vec<FluidBlockChange>,
 ) {
     if fluid.kind == FluidKind::Lava
         && direction == Direction::Down
@@ -1437,7 +1437,7 @@ fn spread_to_sides<S: ChunkSource + ?Sized>(
     pos: BlockPos,
     fluid: FluidState,
     state: StateId,
-    changes: &mut Vec<(BlockPos, StateId)>,
+    changes: &mut Vec<FluidBlockChange>,
 ) {
     let neighbour_amount = if fluid.falling {
         7
@@ -1468,7 +1468,7 @@ fn spread<S: ChunkSource + ?Sized>(
     pos: BlockPos,
     state: StateId,
     fluid: FluidState,
-    changes: &mut Vec<(BlockPos, StateId)>,
+    changes: &mut Vec<FluidBlockChange>,
 ) {
     let below = Direction::Down.relative(pos);
     let below_state = block_at(world, env, below);
@@ -1545,18 +1545,21 @@ fn quench_lava<S: ChunkSource + ?Sized>(
     None
 }
 
-/// Writes one cell through the world and records it for the wire.
-///
-/// Both halves, always: `spread` reads the world back as it mutates (the real
-/// block write is immediate and the real new-liquid derivation re-reads), so a version that only
-/// collected changes and applied them afterwards would compute the *second*
-/// cell of a flow against pre-flow terrain.
+/// A fluid tick's write, including the state replaced at the mutation boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FluidBlockChange {
+    pub(crate) pos: BlockPos,
+    pub(crate) old_state: StateId,
+    pub(crate) new_state: StateId,
+}
+
+/// Writes immediately so later spread decisions observe prior mutations.
 fn write_block<S: ChunkSource + ?Sized>(
     world: &S,
     env: FluidEnv,
     pos: BlockPos,
     state: StateId,
-    changes: &mut Vec<(BlockPos, StateId)>,
+    changes: &mut Vec<FluidBlockChange>,
 ) {
     // The real block-write function opens with the same guard and returns
     // `false`
@@ -1566,8 +1569,13 @@ fn write_block<S: ChunkSource + ?Sized>(
     if !env.contains_y(pos.y) {
         return;
     }
+    let old_state = block_at(world, env, pos);
     world.set_block(pos.x, pos.y, pos.z, state);
-    changes.push((pos, state));
+    changes.push(FluidBlockChange {
+        pos,
+        old_state,
+        new_state: state,
+    });
 }
 
 /// One due fluid tick — the real flowing-fluid tick with
@@ -1587,7 +1595,7 @@ pub fn run_scheduled_tick<S: ChunkSource + ?Sized, Q: ScheduledTickSink<Schedule
     pos: BlockPos,
     fluid_ticks: &mut Q,
     current_tick: u64,
-    changes: &mut Vec<(BlockPos, StateId)>,
+    changes: &mut Vec<FluidBlockChange>,
 ) {
     let state = block_at(world, env, pos);
     let Some(fluid) = fluid_state_of_id(state) else {
@@ -1712,7 +1720,7 @@ pub fn run_scheduled_tick<S: ChunkSource + ?Sized, Q: ScheduledTickSink<Schedule
     // write it is
     // air, where a drain is a documented no-op rather than a runaway.
     let delay = current_tick + env.tick_delay(fluid.kind);
-    let touched: Vec<BlockPos> = changes.iter().map(|(pos, _)| *pos).collect();
+    let touched: Vec<BlockPos> = changes.iter().map(|change| change.pos).collect();
     for changed in touched {
         for notified in [
             changed,
@@ -3179,6 +3187,32 @@ mod tests {
         assert!(pending.is_empty(), "no fluid anywhere near the edit: {pending:?}");
     }
 
+    #[test]
+    fn fluid_write_records_the_state_before_and_after_mutation() {
+        let rig = Rig::flat();
+        let pos = BlockPos::new(1, FLOOR_Y + 1, 1);
+        let new_state = Block::Water.default_state();
+        let mut changes = Vec::new();
+
+        write_block(
+            &rig,
+            FluidEnv::OVERWORLD,
+            pos,
+            new_state,
+            &mut changes,
+        );
+
+        assert_eq!(
+            changes,
+            vec![FluidBlockChange {
+                pos,
+                old_state: crate::chunk::air_state(),
+                new_state,
+            }]
+        );
+        assert_eq!(rig.block_state_id(pos.x, pos.y, pos.z), new_state);
+    }
+
     /// A position holding no fluid must be a silent no-op — world state can
     /// change between a tick being scheduled and it coming due. A version that
     /// panicked or wrote something here would make every player edit corrupt
@@ -3265,7 +3299,11 @@ mod tests {
                 let pos = BlockPos::new(entry.pos.0, entry.pos.1, entry.pos.2);
                 changes.clear();
                 run_scheduled_tick(rig, FluidEnv::OVERWORLD, pos, &mut queue, tick, &mut changes);
-                written.extend(changes.iter().map(|(pos, _)| (pos.x, pos.y, pos.z)));
+                written.extend(
+                    changes
+                        .iter()
+                        .map(|change| (change.pos.x, change.pos.y, change.pos.z)),
+                );
             }
         }
         written.sort_unstable();
