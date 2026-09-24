@@ -52,13 +52,18 @@ cycle scopes to outermost worldgen stages. It reports terrain-prefix, features,
 finalization, and session-remainder totals, followed by each stage's IPC. The
 scopes are installed only by this ignored harness, subtract one measured PMU
 read from each interval, and do not enable the ordinary generation counters.
+`stage_region_pmu` assigns each stage interval to its deepest active region
+and asserts that the assigned totals equal the stage totals. This distinguishes
+terrain work during admission from feature, top-layer, and output interning
+during mutable completion without summing overlapping region scopes.
 The session remainder includes production admission, materialization, ledger,
 publication, and diagnostic observer overhead; compare it with the uninstrumented
 `production_request` total rather than treating it as a generator stage.
 The same feature reports lifecycle regions for admission, replay-context
 preparation, requested-target mutable advancement, sparse-padding completion,
 packet-snapshot finalization, shaped-prefix import, checkpoint capture and
-export, session hydration, ledger publication, and mutation-winner scanning.
+export, session hydration, and ledger publication. A zero region row without
+an installed scope does not prove that the corresponding work is absent.
 The packet-snapshot region also reports its output snapshot, neighbour
 construction, final packet boundary, state-machine reconstruction, and
 post-wavefront settlement advancement as nested scopes. The latter includes
