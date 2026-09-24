@@ -926,11 +926,49 @@ where
 
 fn checkpoint_error_context(error: SessionError, context: &'static str) -> SessionError {
     match error {
-        SessionError::InvalidCheckpoint | SessionError::InvalidCheckpointAt(_) => {
-            SessionError::InvalidCheckpointAt(context)
-        }
+        SessionError::InvalidCheckpoint => SessionError::InvalidCheckpointAt(context),
         other => other,
     }
+}
+
+fn preseed_retained_mutations<S: LifecycleWorldgenSource>(
+    materializer: &mut LifecycleMaterializer<&S>,
+    sessions: &[GenerationSession],
+) -> Result<(), SessionError> {
+    let mut retained = BTreeMap::new();
+    for session in sessions {
+        for mutation in session.committed_mutations() {
+            let provenance = mutation.provenance();
+            let state = *mutation
+                .get::<StateId>()
+                .ok_or(SessionError::InvalidCheckpointAt(
+                    "retained mutation has no block state",
+                ))?;
+            let key = (
+                provenance.target(),
+                provenance.source(),
+                provenance.stage(),
+                provenance.ordinal(),
+                provenance.destination(),
+            );
+            match retained.entry(key) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert((mutation, state));
+                }
+                std::collections::btree_map::Entry::Occupied(entry) if entry.get().1 == state => {}
+                std::collections::btree_map::Entry::Occupied(_) => {
+                    return Err(SessionError::InvalidCheckpointAt(
+                        "generation sessions disagree on retained mutation",
+                    ));
+                }
+            }
+        }
+    }
+    materializer.restore_committed_mutations(
+        retained.into_values().map(|(mutation, _)| mutation),
+    );
+    materializer.mark_retained_mutations_preseeded();
+    Ok(())
 }
 
 fn commit_top_layer<S>(
@@ -1344,8 +1382,10 @@ where
                 if self.session.cancellation().is_cancelled() {
                     return Err(SessionError::Cancelled);
                 }
-                self.materializer
-                    .restore_committed_mutations(self.session.committed_mutations());
+                if !self.materializer.retained_mutations_preseeded() {
+                    self.materializer
+                        .restore_committed_mutations(self.session.committed_mutations());
+                }
                 let output = self
                     .session
                     .resident_read(self.session.request().target())?
@@ -2098,6 +2138,7 @@ where
                 &mut self.materializer,
                 &mut self.shared_prefixes,
             )?;
+            preseed_retained_mutations(&mut self.materializer, std::slice::from_ref(session))?;
             #[cfg(feature = "worldgen-stage-pmu")]
             let _replay_context = RegionGuard::enter(RegionPhase::ReplayContext);
             self.materializer
@@ -2216,6 +2257,7 @@ where
                 &mut self.materializer,
                 &mut self.shared_prefixes,
             )?;
+            preseed_retained_mutations(&mut self.materializer, std::slice::from_ref(session))?;
             self.materializer
                 .prepare_lifecycle_replay_contexts_prepared(&plan.targets);
             self.settlement_padding = plan.padding.clone();
@@ -2350,6 +2392,7 @@ where
             &mut self.materializer,
             &mut self.shared_prefixes,
         )?;
+        preseed_retained_mutations(&mut self.materializer, sessions)?;
         #[cfg(feature = "worldgen-stage-pmu")]
         let _replay_context = RegionGuard::enter(RegionPhase::ReplayContext);
         self.materializer
@@ -2733,6 +2776,9 @@ where
                 &mut self.materializer,
                 &mut self.shared_prefixes,
             ) {
+                return batch_session_error(sessions.len(), error);
+            }
+            if let Err(error) = preseed_retained_mutations(&mut self.materializer, sessions) {
                 return batch_session_error(sessions.len(), error);
             }
             self.materializer

@@ -264,7 +264,12 @@ before output, including for dimensions without neighbor settlement.
 
 Native Overworld cohorts admit a bounded group of requested targets into one
 ordered source region. Immutable prerequisites may run concurrently; mutable
-owners complete in canonical order. A target's detached packet snapshot becomes
+owners complete in canonical order. Every target-owned execution path restores
+retained feature writes before any owner runs; a cohort deduplicates the union
+across its sessions. This prevents a padding owner from installing a newly
+computed value under the same write identity before the checkpoint is restored.
+Conflicting retained values fail rather than choosing an arbitrary request.
+A target's detached packet snapshot becomes
 available only after admitted owners that can write either the target or its
 packet-neighbor ring have completed. The store commits each stable output and
 its mutation destinations under a pinned halo lease before exposing it to the

@@ -14767,13 +14767,6 @@ fn ticks_since(start: crate::tick::PlayTimerInstant) -> i64 {
 #[cfg(not(target_arch = "wasm32"))]
 const STALL_FLOOR: Duration = Duration::from_millis(MILLIS_PER_TICK as u64);
 
-/// A stall at or above this is logged the moment it is observed, naming the arm.
-///
-/// Four times the tick, so an ordinary busy pass is silent and a
-/// hundreds-of-milliseconds one is not. There is no threshold at which a stall
-/// stops mattering, which is why the *worst* one is reported unconditionally on
-/// the timeout path regardless of this.
-#[cfg(not(target_arch = "wasm32"))]
 const STALL_REPORT: Duration = Duration::from_millis(200);
 
 /// How long one pass through [`serve_play`]'s `select!` took, and which arm took

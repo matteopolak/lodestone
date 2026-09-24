@@ -2046,7 +2046,9 @@ impl GenerationSession {
         if proof.output() != self.request.target
             || self.feature_settlement.is_some_and(|current| current != proof)
         {
-            return Err(SessionError::InvalidCheckpoint);
+            return Err(SessionError::InvalidCheckpointAt(
+                "feature settlement proof conflicts with target",
+            ));
         }
         let stage = StageKey::new(self.pipeline.dimension(), ColumnStage::Features);
         let descriptor = self.descriptor(stage)?;
@@ -2054,14 +2056,18 @@ impl GenerationSession {
             self.request.target,
             i32::from(descriptor.mutable_write_radius().chunks_value()),
         ) {
-            return Err(SessionError::InvalidCheckpoint);
+            return Err(SessionError::InvalidCheckpointAt(
+                "feature settlement proof has wrong write radius",
+            ));
         }
         let target_frontier = self
             .frontiers
             .get(&self.request.target)
             .expect("the target is always in its own halo");
         if !target_frontier.records().iter().any(|record| record.key() == stage) {
-            return Err(SessionError::InvalidCheckpoint);
+            return Err(SessionError::InvalidCheckpointAt(
+                "feature settlement lacks committed features stage",
+            ));
         }
 
         let mut owners = BTreeSet::new();
@@ -2070,7 +2076,9 @@ impl GenerationSession {
             .any(|owner| !owners.insert(*owner) || !self.halo.contains(*owner))
             || !proof.has_complete_square(&owners)
         {
-            return Err(SessionError::InvalidCheckpoint);
+            return Err(SessionError::InvalidCheckpointAt(
+                "feature settlement owners differ from admitted square",
+            ));
         }
         let mut logical_writes = FastSet::default();
         let mut pending = Vec::with_capacity(writes.len());
@@ -2122,7 +2130,9 @@ impl GenerationSession {
                     .insert(destination, *winner)
                     .is_some()
             {
-                return Err(SessionError::InvalidCheckpoint);
+                return Err(SessionError::InvalidCheckpointAt(
+                    "feature settlement overlay winner is invalid",
+                ));
             }
         }
         for write in writes {
@@ -2142,13 +2152,17 @@ impl GenerationSession {
                     destination_chunk.1 - write.source().1,
                 )
             {
-                return Err(SessionError::InvalidCheckpoint);
+                return Err(SessionError::InvalidCheckpointAt(
+                    "feature settlement foreign write is invalid",
+                ));
             }
             if overlay_winners_by_destination
                 .get(&destination)
                 .is_some_and(|winner| winner.owner() == self.request.target || winner != write)
             {
-                return Err(SessionError::InvalidCheckpoint);
+                return Err(SessionError::InvalidCheckpointAt(
+                    "feature settlement overlay conflicts with foreign write",
+                ));
             }
             let logical_key = (
                 write.owner(),
@@ -2158,13 +2172,27 @@ impl GenerationSession {
                 destination,
             );
             if !logical_writes.insert(logical_key) {
-                return Err(SessionError::InvalidCheckpoint);
+                return Err(SessionError::InvalidCheckpointAt(
+                    "feature settlement duplicates a foreign write",
+                ));
             }
             if let Some(existing) = existing_writes.get(&logical_key) {
                 if *existing == write.state() {
                     continue;
                 }
-                return Err(SessionError::InvalidCheckpoint);
+                tracing::error!(
+                    target = ?self.request.target,
+                    owner = ?write.owner(),
+                    source = ?write.source(),
+                    ordinal = write.ordinal(),
+                    destination = ?destination,
+                    retained_state = existing.raw(),
+                    incoming_state = write.state().raw(),
+                    "feature settlement foreign write conflicts with retained state"
+                );
+                return Err(SessionError::InvalidCheckpointAt(
+                    "feature settlement foreign write conflicts with retained state",
+                ));
             }
             let revision = SessionRevision(next_revision);
             next_revision = next_revision.saturating_add(1);
@@ -2184,7 +2212,9 @@ impl GenerationSession {
             existing_writes.insert(logical_key, write.state());
         }
         if writes.len() != foreign_winner_count {
-            return Err(SessionError::InvalidCheckpoint);
+            return Err(SessionError::InvalidCheckpointAt(
+                "feature settlement foreign winner count differs",
+            ));
         }
         for winner in overlay_winners_by_destination.values() {
             if winner.owner() != self.request.target
@@ -2196,7 +2226,9 @@ impl GenerationSession {
                     winner.destination(),
                 ))
             {
-                return Err(SessionError::InvalidCheckpoint);
+                return Err(SessionError::InvalidCheckpointAt(
+                    "feature settlement overlay winner lacks foreign write",
+                ));
             }
         }
         if self
@@ -2206,7 +2238,9 @@ impl GenerationSession {
                 overlay_winners_by_destination.get(destination) != Some(receipt)
             })
         {
-            return Err(SessionError::InvalidCheckpoint);
+            return Err(SessionError::InvalidCheckpointAt(
+                "feature settlement receipt conflicts with overlay",
+            ));
         }
         let mut new_receipts = Vec::new();
         for (&destination, winner) in &overlay_winners_by_destination {
@@ -2217,12 +2251,16 @@ impl GenerationSession {
             }
             let (existing, state) = existing_feature_winners
                 .get(&destination)
-                .ok_or(SessionError::InvalidCheckpoint)?;
+                .ok_or(SessionError::InvalidCheckpointAt(
+                    "feature settlement receipt lacks retained winner",
+                ))?;
             if state == &winner.state() {
                 continue;
             }
             if !target_feature_write_precedes_mutation(*winner, *existing) {
-                return Err(SessionError::InvalidCheckpoint);
+                return Err(SessionError::InvalidCheckpointAt(
+                    "feature settlement receipt loses canonical order",
+                ));
             }
             new_receipts.push(*winner);
         }
@@ -2231,7 +2269,9 @@ impl GenerationSession {
             if let Some(existing) = self.feature_winner_receipts.get(&destination)
                 && existing != receipt
             {
-                return Err(SessionError::InvalidCheckpoint);
+                return Err(SessionError::InvalidCheckpointAt(
+                    "feature settlement receipt conflicts with prior receipt",
+                ));
             }
         }
         let receipt_bytes = new_receipts
