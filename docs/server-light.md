@@ -107,7 +107,9 @@ For both skylit dimensions, each fresh initial admission has a complete 3x3
 terrain footprint, so its centre sky layer is recomputed from current terrain
 even when older retained snapshots exist. Reusing a retained dependency's sky
 cells as the new centre's flood source would let an old full-sky layer bypass
-current terrain attenuation. The End still restores each retained dependency
+current terrain attenuation. A partial retained sky layer can also suppress
+daylight over otherwise open terrain, so neither skylit dimension seeds its
+fresh centre from it. The End still restores each retained dependency
 verbatim after that fresh centre computation, preserving its sparse per-column
 wire shape; the Overworld keeps its ordinary compact form. The Nether remains
 block-light-only and keeps its lifecycle-aware retained block-light seeds.

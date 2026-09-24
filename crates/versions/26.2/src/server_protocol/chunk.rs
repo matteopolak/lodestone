@@ -1111,17 +1111,11 @@ pub(super) fn compute_served_initial_lights_with_neighbours_and_storage(
             neighbourhood = neighbourhood.with(*dx, *dz, neighbour);
         }
     }
-    // End sky light is a terrain-derived field, not a retained source. A
-    // dependency snapshot belongs to the admission that made that column a
-    // centre; seeding the new centre's flood from it lets an old full-sky
-    // layer bypass the current terrain's attenuation. Recompute the shared
-    // 3x3 End field from current blocks, then restore retained dependencies
-    // below. Nether keeps its lifecycle-aware retained block-light path.
-    let fresh_end_storage = [None; 9];
-    let storage = if dimension == Dimension::End {
-        &fresh_end_storage
-    } else {
+    let fresh_storage = [None; 9];
+    let storage = if dimension == Dimension::Nether {
         stored
+    } else {
+        &fresh_storage
     };
     let mut lights = compute_column_lights_with_neighbours_and_storage(
         &neighbourhood,
