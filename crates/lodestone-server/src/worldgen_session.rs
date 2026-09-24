@@ -1094,7 +1094,7 @@ impl PacketNeighbour {
                 materialized,
             } => materialized.get_or_init(|| {
                 materialize_generated_packet_column(
-                    column,
+                    (**column).clone(),
                     overlay,
                     sidecar.as_deref(),
                     *terminal,
@@ -1131,7 +1131,7 @@ impl PacketNeighbour {
                         return materialized
                             .get_or_init(|| {
                                 materialize_generated_packet_column(
-                                    &column,
+                                    (*column).clone(),
                                     &overlay,
                                     sidecar.as_deref(),
                                     terminal,
@@ -1140,41 +1140,27 @@ impl PacketNeighbour {
                             .clone();
                     }
                 }
-                #[cfg(test)]
-                crate::chunk::record_generated_materialization();
-                let mut column = match Arc::try_unwrap(column) {
-                    Ok(column) => ChunkColumn::from_generated(column),
-                    Err(column) => ChunkColumn::from_generated((*column).clone()),
-                };
-                apply_packet_id_overlay(&mut column, &overlay);
-                if let Some(sidecar) = sidecar {
-                    column.set_structures(
-                        sidecar.structure_starts().to_vec(),
-                        sidecar.structure_references().clone(),
-                    );
-                    let mut entities = column.block_entities().to_vec();
-                    entities.extend(sidecar.block_entities().iter().cloned());
-                    column.set_block_entities(entities);
-                }
-                if terminal {
-                    column.prime_client_heightmaps();
-                    column.mark_generation_stage(ChunkGenerationStage::Full);
-                }
-                column
+                let generated = Arc::try_unwrap(column).unwrap_or_else(|column| (*column).clone());
+                materialize_generated_packet_column(
+                    generated,
+                    &overlay,
+                    sidecar.as_deref(),
+                    terminal,
+                )
             }
         }
     }
 }
 
 fn materialize_generated_packet_column(
-    generated: &lodestone_worldgen::overworld::GeneratedColumn,
+    generated: lodestone_worldgen::overworld::GeneratedColumn,
     overlay: &[(i32, i32, i32, StateId)],
     sidecar: Option<&ChunkColumn>,
     terminal: bool,
 ) -> ChunkColumn {
     #[cfg(test)]
     crate::chunk::record_generated_materialization();
-    let mut column = ChunkColumn::from_generated(generated.clone());
+    let mut column = ChunkColumn::from_generated(generated);
     apply_packet_id_overlay(&mut column, overlay);
     if let Some(sidecar) = sidecar {
         column.set_structures(
