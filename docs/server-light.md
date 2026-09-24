@@ -204,8 +204,9 @@ daylight had just opened up, because the check never looked at what the edit had
 Tick-driven changes use the connection's delivered-column ledger rather than the server cache's
 resident set. A pending join column needs no block or light update because its later complete
 snapshot contains the mutation; an already-delivered neighbour still receives any cross-boundary
-light change. Destinations are deduplicated across the complete tick batch before lighting runs, so
-nearby changes cannot recompute the same 3x3 light footprint repeatedly.
+light change. Block updates are sent first. Affected light destinations enter a per-connection
+FIFO queue, deduplicated across batches, and the connection loop services one destination per pass
+so a large relight batch does not hold up packets and other timer work.
 
 ### Cross-chunk propagation after an edit
 

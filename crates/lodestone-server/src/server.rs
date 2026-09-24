@@ -7026,64 +7026,137 @@ where
     Ok(())
 }
 
-/// Sends every block mutation published by the world tick and then refreshes
-/// lighting once per affected delivered column.
+/// Sends every world-tick block mutation promptly and queues lighting once per
+/// affected delivered column.
 ///
 /// This deliberately has no join-stream gate. A column snapshot that has not
 /// been sent yet will supersede an earlier block update, but a snapshot that
 /// was already sent will not. Dropping the shared feed while a later join
 /// column remains would therefore leave an already-visible column stale.
-async fn send_tick_block_updates<T, P, S>(
+async fn send_tick_block_updates<T, P>(
     conn: &mut Connection<T>,
     proto: &P,
-    source: &S,
     state: &mut State,
     delivered: &HashSet<(i32, i32)>,
+    pending_relights: &mut PendingTickRelights,
     changes: Vec<(i32, i32, i32, lodestone_data::block_states::StateId)>,
 ) -> Result<(), ServerError>
 where
     T: Transport,
     P: ServerProtocol,
-    S: ChunkSource + ?Sized,
 {
     if changes.is_empty() {
         return Ok(());
     }
     let started = crate::tick::PlayTimerInstant::now();
     let change_count = changes.len();
-    let mut relight = HashSet::new();
     let radius = i32::from(proto.uses_cross_column_light());
-    for (x, y, z, block_state) in changes {
+    for &(x, y, z, block_state) in &changes {
         let column = (x.div_euclid(16), z.div_euclid(16));
         if delivered.contains(&column) {
             apply(conn, state, proto.encode_block_update(x, y, z, block_state)).await?;
         }
-        for dz in -radius..=radius {
-            for dx in -radius..=radius {
-                let affected = (column.0 + dx, column.1 + dz);
-                if delivered.contains(&affected) {
-                    relight.insert(affected);
-                }
-            }
-        }
     }
-    let mut relight = relight.into_iter().collect::<Vec<_>>();
-    relight.sort_unstable();
-    let relight_count = relight.len();
-    let light_started = crate::tick::PlayTimerInstant::now();
-    for (cx, cz) in relight {
-        send_resident_column_light(conn, proto, source, state, cx, cz).await?;
-    }
+    let queued_relight_count = pending_relights.enqueue_batch(tick_relight_targets(
+        changes
+            .iter()
+            .map(|(x, _y, z, _state)| (x.div_euclid(16), z.div_euclid(16))),
+        delivered,
+        radius,
+    ));
     let total = started.elapsed();
     if total >= STALL_REPORT {
         tracing::warn!(
             target: "lodestone_server::stall",
             change_count,
-            relight_count,
-            light_millis = light_started.elapsed().as_millis() as u64,
+            queued_relight_count,
+            pending_relight_count = pending_relights.len(),
             total_millis = total.as_millis() as u64,
             "tick block updates stalled the connection loop",
         );
+    }
+    Ok(())
+}
+
+fn tick_relight_targets(
+    changed_columns: impl IntoIterator<Item = (i32, i32)>,
+    delivered: &HashSet<(i32, i32)>,
+    radius: i32,
+) -> HashSet<(i32, i32)> {
+    let mut targets = HashSet::new();
+    for (cx, cz) in changed_columns {
+        for dz in -radius..=radius {
+            for dx in -radius..=radius {
+                let affected = (cx + dx, cz + dz);
+                if delivered.contains(&affected) {
+                    targets.insert(affected);
+                }
+            }
+        }
+    }
+    targets
+}
+
+#[derive(Default)]
+struct PendingTickRelights {
+    queued: VecDeque<(i32, i32)>,
+    queued_set: HashSet<(i32, i32)>,
+}
+
+impl PendingTickRelights {
+    fn enqueue_batch(&mut self, positions: impl IntoIterator<Item = (i32, i32)>) -> usize {
+        let mut positions = positions.into_iter().collect::<Vec<_>>();
+        positions.sort_unstable();
+        positions.dedup();
+        let mut added = 0;
+        for position in positions {
+            if self.queued_set.insert(position) {
+                self.queued.push_back(position);
+                added += 1;
+            }
+        }
+        added
+    }
+
+    fn pop_front(&mut self) -> Option<(i32, i32)> {
+        let position = self.queued.pop_front()?;
+        self.queued_set.remove(&position);
+        Some(position)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn clear(&mut self) {
+        self.queued.clear();
+        self.queued_set.clear();
+    }
+
+    fn is_empty(&self) -> bool {
+        self.queued.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.queued.len()
+    }
+}
+
+async fn send_next_tick_relight<T, P, S>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    source: &S,
+    state: &mut State,
+    delivered: &HashSet<(i32, i32)>,
+    pending_relights: &mut PendingTickRelights,
+) -> Result<(), ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    S: ChunkSource + ?Sized,
+{
+    let Some((cx, cz)) = pending_relights.pop_front() else {
+        return Ok(());
+    };
+    if delivered.contains(&(cx, cz)) {
+        send_resident_column_light(conn, proto, source, state, cx, cz).await?;
     }
     Ok(())
 }
@@ -15034,6 +15107,7 @@ where
 {
     let mut pending_keep_alive: Option<i64> = None;
     let mut pending_break: Option<PendingBreak> = None;
+    let mut pending_tick_relights = PendingTickRelights::default();
     let mut teleport_acknowledgements = initial_teleport_id.map(TeleportAcknowledgements::after_initial);
     let mut player_pos: Option<(f64, f64, f64)> = None;
     let mut client_movement = ClientMovement::default();
@@ -15307,6 +15381,7 @@ where
     loop {
         if let Some(next) = pending_travel.take() {
             travelled = next;
+            pending_tick_relights.clear();
         }
         // Shadowing the `source` parameter is what makes a dimension change reach
         // every arm at once — the view stream, the block reads, the fall sampler and
@@ -15329,6 +15404,21 @@ where
             .unwrap_or(block_entities);
         let block_ticks = dimension_handles.block_ticks.as_ref().unwrap_or(block_ticks);
         tokio::select! {
+            // One queued column per pass keeps the loop responsive while
+            // preserving FIFO order across batches.
+            _ = std::future::ready(()), if !pending_tick_relights.is_empty() => {
+                watch.enter();
+                send_next_tick_relight(
+                    conn,
+                    proto,
+                    source.get(),
+                    &mut state,
+                    &view.delivered,
+                    &mut pending_tick_relights,
+                )
+                .await?;
+                watch.pass("tick_relight");
+            }
             // Finish the source-aware encode that was started by the join arm.
             // The future owns only the source reference and the payload, so it
             // remains safe to leave it pending while packet/timer arms win the
@@ -17280,9 +17370,9 @@ where
                 send_tick_block_updates(
                     conn,
                     proto,
-                    source.get(),
                     &mut state,
                     &view.delivered,
+                    &mut pending_tick_relights,
                     block_ticks.drain_all(),
                 )
                 .await?;
@@ -18159,6 +18249,7 @@ where
 {
     let mut pending_keep_alive: Option<i64> = None;
     let mut pending_break: Option<PendingBreak> = None;
+    let mut pending_tick_relights = PendingTickRelights::default();
     let mut teleport_acknowledgements = initial_teleport_id.map(TeleportAcknowledgements::after_initial);
     let mut sprinting = false;
     let mut sneaking = false;
@@ -18244,6 +18335,20 @@ where
     let mut browser_vitals_ticks = 0_u64;
     loop {
         let packet = tokio::select! {
+            // A queued relight is always ready, but competes with packet and
+            // timer work so large batches cannot monopolize the browser loop.
+            _ = std::future::ready(()), if !pending_tick_relights.is_empty() => {
+                send_next_tick_relight(
+                    conn,
+                    proto,
+                    source.get(),
+                    &mut state,
+                    &view.delivered,
+                    &mut pending_tick_relights,
+                )
+                .await?;
+                None
+            }
             packet = conn.read_packet() => {
                 match packet? {
                     Some(packet) => Some(packet),
@@ -18300,9 +18405,9 @@ where
                 send_tick_block_updates(
                     conn,
                     proto,
-                    source.get(),
                     &mut state,
                     &view.delivered,
+                    &mut pending_tick_relights,
                     block_ticks.drain_all(),
                 )
                 .await?;
@@ -19730,13 +19835,14 @@ mod tests {
         let (client_end, server_end) = lodestone_net::memory_pair();
         let mut conn = Connection::new(server_end);
         let mut state = State::Play;
+        let mut pending_relights = PendingTickRelights::default();
 
         send_tick_block_updates(
             &mut conn,
             &RefusingChunkProtocol,
-            &OneColumnSource,
             &mut state,
             &HashSet::from([(0, 0)]),
+            &mut pending_relights,
             vec![
                 (
                     1,
@@ -19760,12 +19866,62 @@ mod tests {
             peer.read_packet().await.expect("first tick update frame decodes"),
             Some((43, vec![1, 64, 1]))
         );
+        assert_eq!(pending_relights.pop_front(), Some((0, 0)));
         assert!(
             tokio::time::timeout(Duration::from_millis(1), peer.read_packet())
                 .await
                 .is_err(),
             "the pending column's later snapshot supersedes its tick update"
         );
+    }
+
+    #[test]
+    fn tick_relight_targets_keep_the_delivered_cross_column_footprint() {
+        let delivered = HashSet::from([
+            (-1, -1),
+            (0, -1),
+            (1, -1),
+            (-1, 0),
+            (0, 0),
+            (1, 0),
+            (-1, 1),
+            (0, 1),
+            (1, 1),
+            (2, 0),
+        ]);
+        assert_eq!(
+            tick_relight_targets([(0, 0)], &delivered, 1),
+            delivered
+                .iter()
+                .copied()
+                .filter(|&(cx, cz)| {
+                    (-1..=1).contains(&cx) && (-1..=1).contains(&cz)
+                })
+                .collect(),
+            "a seam or corner edit must queue every delivered column in the 3x3 footprint"
+        );
+        assert_eq!(
+            tick_relight_targets([(0, 0)], &delivered, 0),
+            HashSet::from([(0, 0)]),
+            "single-column protocols retain the isolated relight footprint"
+        );
+    }
+
+    #[test]
+    fn pending_tick_relights_deduplicate_batches_and_keep_fifo_fairness() {
+        let mut pending = PendingTickRelights::default();
+        assert_eq!(
+            pending.enqueue_batch([(2, 0), (0, 0), (2, 0)]),
+            2,
+            "each batch is canonicalized and duplicate targets collapse"
+        );
+        assert_eq!(pending.enqueue_batch([(1, 0), (0, 0)]), 1);
+        assert_eq!(pending.pop_front(), Some((0, 0)));
+        assert_eq!(pending.enqueue_batch([(0, 0)]), 1);
+        assert_eq!(pending.pop_front(), Some((2, 0)));
+        assert_eq!(pending.pop_front(), Some((1, 0)));
+        assert_eq!(pending.pop_front(), Some((0, 0)));
+        assert!(pending.is_empty());
     }
 
     #[test]
