@@ -35,6 +35,13 @@ diagnostics for the bookkeeping path, not counts of final block changes or a
 throughput score. The counter control checks a reset followed by zero work,
 then a small known sequence with both changed and unchanged revision attempts.
 
+With `worldgen-stage-pmu` on macOS, the strict benchmark reports both inclusive
+region costs and exclusive stack-top costs. `region_exclusive_pmu` subtracts
+nested regions, then separates named stage bodies from the remaining work in
+each region. `outside_region` covers request work without a region guard.
+These are process-wide retired counters and include observer overhead; use an
+uninstrumented run for the throughput and peak-memory control.
+
 Production Overworld batches use the source's indexed `columns` hook rather than
 the scalar default. A pristine batch fans out over the shared world-generation
 pool; when the hook is called from an already-admitted pool worker it joins that
