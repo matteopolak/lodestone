@@ -628,11 +628,14 @@ fn context_from_window(
         source_plans[((dx + 1) * 3 + dz + 1) as usize] =
             window.source_plan_index((cx + dx, cz + dz));
     }
+    let ocean_floor_wg = crate::feature::RegionHeights::from_shared(
+        Arc::clone(&window.heights),
+        wide_pre,
+    );
+    #[cfg(feature = "gen-counters")]
+    let ocean_floor_wg = ocean_floor_wg.with_read_origin(cx, cz);
     MixedReplayContext {
-        ocean_floor_wg: crate::feature::RegionHeights::from_shared(
-            Arc::clone(&window.heights),
-            wide_pre,
-        ),
+        ocean_floor_wg,
         window,
         wide_pre,
         centre_pre,

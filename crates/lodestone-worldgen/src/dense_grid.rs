@@ -1168,14 +1168,13 @@ mod tests {
 
     #[test]
     fn palette_order_is_first_write_order() {
-        // The invariant that keeps canonical id assignment order off the wire
-        // (see the canonical state registry). Written deliberately in an order
-        // that does *not* match either alphabetical order or global state ids.
         let mut g = DenseBlockGrid::new_named(0, 0, 0, 4, 4, 4, "minecraft:air");
         g.set_named(0, 0, 0, "minecraft:granite");
         g.set_named(1, 0, 0, "minecraft:andesite");
         g.set_named(2, 0, 0, "minecraft:granite");
         g.set_named(3, 0, 0, "minecraft:calcite");
+        g.set_named(3, 0, 0, "minecraft:stone");
+        assert_eq!(g.get_named(3, 0, 0), "minecraft:stone");
         let (palette, _) = g.into_named_palette_and_blocks();
         assert_eq!(
             palette,
@@ -1184,6 +1183,7 @@ mod tests {
                 "minecraft:granite".to_string(),
                 "minecraft:andesite".to_string(),
                 "minecraft:calcite".to_string(),
+                "minecraft:stone".to_string(),
             ],
         );
     }

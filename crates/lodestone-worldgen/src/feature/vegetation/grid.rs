@@ -875,6 +875,8 @@ impl VegGrid {
         lz: i32,
     ) -> StateId {
         source.map_or(StateId::AIR, |grid| {
+            #[cfg(feature = "gen-counters")]
+            census::record_source_read(grid, self.origin_x + lx, y, self.origin_z + lz, 1);
             grid.get_id(self.origin_x + lx, y, self.origin_z + lz)
         })
     }
@@ -1229,6 +1231,8 @@ impl VegGrid {
             return (id, base_facts(id));
         }
         source.map_or((StateId::AIR, BaseStateFacts::air()), |source| {
+            #[cfg(feature = "gen-counters")]
+            census::record_source_read(source, self.origin_x + lx, y, self.origin_z + lz, 2);
             (
                 source.get_id(self.origin_x + lx, y, self.origin_z + lz),
                 source.get_base_facts(self.origin_x + lx, y, self.origin_z + lz),
@@ -1251,7 +1255,11 @@ impl VegGrid {
                     .and_then(|baseline| baseline.get_in_bounds(&(lx, y, lz)))
                     .unwrap_or(StateId::AIR)
             },
-            |source| source.get_id(self.origin_x + lx, y, self.origin_z + lz),
+            |source| {
+                #[cfg(feature = "gen-counters")]
+                census::record_source_read(source, self.origin_x + lx, y, self.origin_z + lz, 1);
+                source.get_id(self.origin_x + lx, y, self.origin_z + lz)
+            },
         )
     }
 
@@ -1587,9 +1595,86 @@ impl super::super::OreWorldAccess for VegGrid {
 /// back on one thread and measures exactly what it caused.
 pub mod census {
     #[cfg(feature = "gen-counters")]
+    use crate::dense_grid::DenseBlockGrid;
+    #[cfg(feature = "gen-counters")]
     use std::cell::Cell;
     use std::cell::RefCell;
     use std::collections::BTreeMap;
+
+    const MAX_SOURCE_OWNERS: usize = 256;
+    const XZ_LANE_WORDS: usize = 4;
+    const SOURCE_CELL_WORDS: usize = 12;
+
+    /// Reads attributed to one absolute source chunk. The masks cover its
+    /// 16×16 horizontal lanes and 4×48×4 cells of size 4×8×4, indexed from
+    /// that source grid's minimum Y.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct SourceOwnerReads {
+        occupied: bool,
+        pub chunk_x: i32,
+        pub chunk_z: i32,
+        pub source_min_y: i32,
+        pub reads: u64,
+        pub height_reads: u64,
+        pub lane_mask: [u64; XZ_LANE_WORDS],
+        pub height_lane_mask: [u64; XZ_LANE_WORDS],
+        pub cell_mask: [u64; SOURCE_CELL_WORDS],
+        pub cell_reads_outside_window: u64,
+    }
+
+    impl SourceOwnerReads {
+        #[must_use]
+        pub fn unique_xz_lanes(&self) -> u32 {
+            self.lane_mask.iter().map(|word| word.count_ones()).sum()
+        }
+
+        #[must_use]
+        pub fn unique_height_xz_lanes(&self) -> u32 {
+            self.height_lane_mask
+                .iter()
+                .map(|word| word.count_ones())
+                .sum()
+        }
+
+        #[must_use]
+        pub fn unique_4x8x4_cells(&self) -> u32 {
+            self.cell_mask.iter().map(|word| word.count_ones()).sum()
+        }
+    }
+
+    /// Bounded source-read census. Empty entries are ignored; `owner_overflow`
+    /// counts reads omitted after the fixed owner table fills.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct SourceReadSnapshot {
+        owners: [SourceOwnerReads; MAX_SOURCE_OWNERS],
+        pub owner_count: usize,
+        pub owner_overflow: u64,
+    }
+
+    impl Default for SourceReadSnapshot {
+        fn default() -> Self {
+            Self {
+                owners: [SourceOwnerReads::default(); MAX_SOURCE_OWNERS],
+                owner_count: 0,
+                owner_overflow: 0,
+            }
+        }
+    }
+
+    impl SourceReadSnapshot {
+        #[must_use]
+        pub fn owners(&self) -> impl Iterator<Item = &SourceOwnerReads> {
+            self.owners.iter().filter(|owner| owner.occupied)
+        }
+
+        #[must_use]
+        pub fn is_complete(&self) -> bool {
+            self.owner_overflow == 0
+                && self
+                    .owners()
+                    .all(|owner| owner.cell_reads_outside_window == 0)
+        }
+    }
 
     /// Terminal-dispatch and write tallies for one thread's placements.
     #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1666,6 +1751,8 @@ pub mod census {
         static CENSUS: RefCell<VegCensus> = RefCell::new(VegCensus::default());
         #[cfg(feature = "gen-counters")]
         static SOURCE_SLOT_MASK: Cell<u32> = const { Cell::new(0) };
+        #[cfg(feature = "gen-counters")]
+        static SOURCE_READS: RefCell<SourceReadSnapshot> = RefCell::new(SourceReadSnapshot::default());
     }
 
     /// Whether an unmodelled terminal dispatch should panic instead of being
@@ -1689,12 +1776,123 @@ pub mod census {
     pub fn reset() {
         CENSUS.with(|c| *c.borrow_mut() = VegCensus::default());
         reset_source_slots();
+        reset_source_reads();
     }
 
     /// This thread's census so far.
     #[must_use]
     pub fn snapshot() -> VegCensus {
         CENSUS.with(|c| c.borrow().clone())
+    }
+
+    #[cfg(feature = "gen-counters")]
+    pub(super) fn record_source_read(
+        source: &DenseBlockGrid,
+        x: i32,
+        y: i32,
+        z: i32,
+        read_count: u64,
+    ) {
+        let chunk_x = x.div_euclid(16);
+        let chunk_z = z.div_euclid(16);
+        let lane = z.rem_euclid(16) as usize * 16 + x.rem_euclid(16) as usize;
+        let source_min_y = source.bounds().1;
+        let y_cell = (y - source_min_y).div_euclid(8);
+        SOURCE_READS.with(|reads| {
+            let mut snapshot = reads.borrow_mut();
+            let Some(index) = source_owner_slot(&snapshot, chunk_x, chunk_z) else {
+                snapshot.owner_overflow += 1;
+                return;
+            };
+            if !snapshot.owners[index].occupied {
+                if snapshot.owner_count == MAX_SOURCE_OWNERS {
+                    snapshot.owner_overflow += 1;
+                    return;
+                }
+                snapshot.owner_count += 1;
+                let owner = &mut snapshot.owners[index];
+                owner.occupied = true;
+                owner.chunk_x = chunk_x;
+                owner.chunk_z = chunk_z;
+                owner.source_min_y = source_min_y;
+            }
+            let owner = &mut snapshot.owners[index];
+            owner.source_min_y = source_min_y;
+            owner.reads += read_count;
+            owner.lane_mask[lane / 64] |= 1u64 << (lane % 64);
+            if (0..48).contains(&y_cell) {
+                let cell = y_cell as usize * 16
+                    + z.rem_euclid(16) as usize / 4 * 4
+                    + x.rem_euclid(16) as usize / 4;
+                owner.cell_mask[cell / 64] |= 1u64 << (cell % 64);
+            } else {
+                owner.cell_reads_outside_window += 1;
+            }
+        });
+    }
+
+    #[cfg(feature = "gen-counters")]
+    pub(crate) fn record_height_read(chunk_x: i32, chunk_z: i32, local_x: usize, local_z: usize) {
+        let lane = local_z * 16 + local_x;
+        SOURCE_READS.with(|reads| {
+            let mut snapshot = reads.borrow_mut();
+            let Some(index) = source_owner_slot(&snapshot, chunk_x, chunk_z) else {
+                snapshot.owner_overflow += 1;
+                return;
+            };
+            if !snapshot.owners[index].occupied {
+                snapshot.owner_count += 1;
+                let owner = &mut snapshot.owners[index];
+                owner.occupied = true;
+                owner.chunk_x = chunk_x;
+                owner.chunk_z = chunk_z;
+            }
+            let owner = &mut snapshot.owners[index];
+            owner.height_reads += 1;
+            owner.height_lane_mask[lane / 64] |= 1u64 << (lane % 64);
+        });
+    }
+
+    #[cfg(feature = "gen-counters")]
+    fn source_owner_slot(
+        snapshot: &SourceReadSnapshot,
+        chunk_x: i32,
+        chunk_z: i32,
+    ) -> Option<usize> {
+        let key = (u64::from(chunk_x as u32) << 32) | u64::from(chunk_z as u32);
+        let mut hash = key;
+        hash ^= hash >> 30;
+        hash = hash.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        hash ^= hash >> 27;
+        hash = hash.wrapping_mul(0x94d0_49bb_1331_11eb);
+        hash ^= hash >> 31;
+        let start = hash as usize % MAX_SOURCE_OWNERS;
+        (0..MAX_SOURCE_OWNERS)
+            .map(|offset| (start + offset) % MAX_SOURCE_OWNERS)
+            .find(|&index| {
+                let owner = &snapshot.owners[index];
+                !owner.occupied || (owner.chunk_x == chunk_x && owner.chunk_z == chunk_z)
+            })
+    }
+
+    #[cfg(feature = "gen-counters")]
+    pub fn reset_source_reads() {
+        SOURCE_READS.with(|reads| *reads.borrow_mut() = SourceReadSnapshot::default());
+    }
+
+    #[cfg(not(feature = "gen-counters"))]
+    pub fn reset_source_reads() {}
+
+    #[cfg(feature = "gen-counters")]
+    #[must_use]
+    pub fn source_read_snapshot() -> SourceReadSnapshot {
+        SOURCE_READS.with(|reads| *reads.borrow())
+    }
+
+    #[cfg(not(feature = "gen-counters"))]
+    #[must_use]
+    pub fn source_read_snapshot() -> SourceReadSnapshot {
+        SourceReadSnapshot::default()
     }
 
     pub(in crate::feature::vegetation) fn bump(f: impl FnOnce(&mut VegCensus)) {
@@ -1790,6 +1988,27 @@ mod heightmap_tests {
         let _ = grid.source_id(32, 120, 0);
         let far_slot = wide_slot_of_offset(2, 0);
         assert_ne!(census::source_slot_mask() & (1u32 << far_slot), 0);
+    }
+
+    #[cfg(feature = "gen-counters")]
+    #[test]
+    fn source_read_census_excludes_overlay_reads() {
+        let (mut grid, _, grass, short_grass) = p07_source_grid();
+        census::reset_source_reads();
+        assert_eq!(grid.get_id(-401, 121, -387), grass);
+        assert_eq!(grid.get_id(-401, 121, -387), grass);
+        let snapshot = census::source_read_snapshot();
+        assert!(snapshot.is_complete());
+        let owner = snapshot.owners().next().expect("west source was read");
+        assert_eq!((owner.chunk_x, owner.chunk_z), (-26, -25));
+        assert_eq!(snapshot.owner_count, 1);
+        assert_eq!(owner.reads, 2);
+        assert_eq!(owner.unique_xz_lanes(), 1);
+        assert_eq!(owner.unique_4x8x4_cells(), 1);
+
+        assert!(grid.set_id_if_in_bounds(-401, 121, -387, short_grass));
+        assert_eq!(grid.get_id(-401, 121, -387), short_grass);
+        assert_eq!(census::source_read_snapshot(), snapshot);
     }
 
     #[test]

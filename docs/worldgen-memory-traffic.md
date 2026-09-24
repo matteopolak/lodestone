@@ -48,6 +48,10 @@ short-circuit path and all aquifer status, barrier, and RNG work is unchanged.
 
 These are software representation counters, not CPU cache-level measurements. They cannot determine whether a load came from L1, L2, L3, or DRAM, nor can they count physical memory traffic. Use the platform hardware-counter workflow (for example, Instruments or `perf`) for those questions and correlate it with a counter-enabled run rather than treating the two measurements as interchangeable.
 
+The ignored single-worker production cohort benchmark also records source-state and shared-height reads by absolute chunk when `gen-counters` and `LODESTONE_WORLDGEN_BENCH_COUNTERS=1` are enabled. Its fixed-size owner table records distinct 16×16 horizontal lanes and, for state reads, distinct 4×8×4 cells. Overlay hits are excluded from source-state reads. The table reports overflow rather than silently dropping evidence; counter-enabled instruction and timing values are not comparable to an uninstrumented run.
+
+For the seed-42 square cohort of 64 Full Overworld outputs, 144 immutable prefixes were computed for 64 requested chunks, 36 feature-owner padding chunks, and 44 read-only context chunks. The read-only ring received 29,937 state accesses across 3,006 of its 11,264 horizontal lanes and 1,359 of its 33,792 coarse cells. Its shared height products received 63,388 accesses across 5,604 lanes. This shows sparse state access but substantial height demand; it does not establish that a lazy outer ring would save enough work to justify replacing full-prefix generation.
+
 ## How to change it
 
 Add a field to `Snapshot`, its feature-enabled atomic storage, `Default`, `reset`, and `snapshot`; add a feature-off no-op; then place the hook at the existing representation boundary. Use fixed arrays and aggregate increments. Keep payload-byte semantics separate from hardware cache-line traffic, and add a predictive counter test with a negative control that exercises the hook.
