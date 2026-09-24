@@ -72,6 +72,25 @@ for path in "$@"; do
     fi
 done
 
+changed_paths=$(git -C "$repo" diff --cached --name-only "$base_commit")
+if [ -n "$changed_paths" ]; then
+    if ! printf '%s\n' "$changed_paths" | while IFS= read -r changed; do
+        selected=false
+        for path in "$@"; do
+            if [ "$changed" = "$path" ]; then
+                selected=true
+                break
+            fi
+        done
+        if [ "$selected" = false ]; then
+            echo "refusing private-index commit: unselected path differs from base: $changed" >&2
+            exit 1
+        fi
+    done; then
+        exit 1
+    fi
+fi
+
 tree=$(git -C "$repo" write-tree)
 commit=$(printf '%s\n' "$message" | git -C "$repo" commit-tree "$tree" -p "$current_head")
 

@@ -114,7 +114,9 @@ Concurrent agents construct commits in private Git indexes so they never stage a
 The index must be based on a recorded `HEAD`, and publication goes through
 `scripts/private-index-commit.sh <recorded-head> <message> <path>...`. The helper fails before writing a
 commit when the branch has advanced, requiring the caller to re-read current blobs and rebuild the
-selected files. It also requires every named path to exist in that private index, then uses `git
+selected files. The private index must first be populated from that `HEAD`; an empty or incomplete
+index would otherwise delete unselected files. The helper rejects any private-index difference outside
+the named paths and requires every named path to exist, then uses `git
 update-ref` with the recorded old object as a compare-and-swap, closing
 the smaller race between validation and publication. This protects unrelated shared working-tree edits:
 the helper reads selected blobs from the private index and never stages or rewrites working files. After
