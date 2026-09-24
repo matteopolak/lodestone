@@ -431,8 +431,24 @@ fn report_generation_counters(
         before.full_column_conversion_cells,
         after.full_column_conversion_cells,
     );
+    let full_raw = delta(
+        before.epoch_dirty_full_raw_entries,
+        after.epoch_dirty_full_raw_entries,
+    );
+    let full_unique = delta(
+        before.epoch_dirty_full_unique_positions,
+        after.epoch_dirty_full_unique_positions,
+    );
+    let sparse_raw = delta(
+        before.epoch_dirty_sparse_raw_entries,
+        after.epoch_dirty_sparse_raw_entries,
+    );
+    let sparse_unique = delta(
+        before.epoch_dirty_sparse_unique_positions,
+        after.epoch_dirty_sparse_unique_positions,
+    );
     println!(
-        "STRICT_WORLDGEN metric=gen_counters phase={phase} columns={columns} immutable_prefix_computed={prefix_computed} immutable_prefix_hits={prefix_hits} immutable_prefix_per_column={:.3} mutable_feature_execution_ore={ore} mutable_feature_execution_vegetation={vegetation} mutable_feature_execution_top_layer={top_layer} finalization_packing_intern={intern} finalization_packing_conversions={conversions} finalization_packing_cells={conversion_cells} instructions=unavailable cycles=unavailable replay_context_construction=unavailable context_product_count=unavailable",
+        "STRICT_WORLDGEN metric=gen_counters phase={phase} columns={columns} immutable_prefix_computed={prefix_computed} immutable_prefix_hits={prefix_hits} immutable_prefix_per_column={:.3} mutable_feature_execution_ore={ore} mutable_feature_execution_vegetation={vegetation} mutable_feature_execution_top_layer={top_layer} finalization_packing_intern={intern} finalization_packing_conversions={conversions} finalization_packing_cells={conversion_cells} epoch_dirty_full_raw={full_raw} epoch_dirty_full_unique={full_unique} epoch_dirty_sparse_raw={sparse_raw} epoch_dirty_sparse_unique={sparse_unique} instructions=unavailable cycles=unavailable replay_context_construction=unavailable context_product_count=unavailable",
         (prefix_computed + prefix_hits) as f64 / per_column,
     );
     println!(
