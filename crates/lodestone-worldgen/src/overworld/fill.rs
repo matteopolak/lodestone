@@ -42,18 +42,22 @@ pub(crate) struct PackedStateCarrier {
     min_y: i32,
     height: i32,
     blocks: Vec<u16>,
-    classes: Vec<u8>,
+    base_states: [StateId; 4],
     vein_batch: Option<super::veins::VeinBatch>,
 }
 
+const _: () = assert!(lodestone_data::block_states::STATE_COUNT <= u16::MAX as u32 - 4);
+
 impl PackedStateCarrier {
+    const SURFACE_STATE_OFFSET: u16 = 4;
+
     pub(super) fn from_field(
         generator: &OverworldGenerator,
         field: PackedShapeField,
         base_x: i32,
         base_z: i32,
     ) -> Self {
-        let PackedShapeField { mut blocks, height } = field;
+        let PackedShapeField { blocks, height } = field;
         let vein_batch = generator.veins.as_ref().map(|programs| {
             programs
                 .for_chunk(
@@ -71,25 +75,18 @@ impl PackedStateCarrier {
                     generator.height,
                 )
         });
-        let mut classes = Vec::with_capacity(blocks.len());
-        for block in &mut blocks {
-            let (state, class) = match *block {
-                0 => (StateId::AIR, 0),
-                1 => (generator.default_block_pre.state, 2),
-                2 => (generator.default_fluid_pre.state, 1),
-                3 => (generator.default_lava_pre.state, 1),
-                other => panic!("invalid packed fill block kind: {other}"),
-            };
-            *block = u16::try_from(state.raw()).expect("generated state id fits packed carrier");
-            classes.push(class);
-        }
         Self {
             base_x,
             base_z,
             min_y: generator.min_y,
             height,
             blocks,
-            classes,
+            base_states: [
+                StateId::AIR,
+                generator.default_block_pre.state,
+                generator.default_fluid_pre.state,
+                generator.default_lava_pre.state,
+            ],
             vein_batch,
         }
     }
@@ -115,13 +112,17 @@ impl PackedStateCarrier {
     #[inline]
     pub(crate) fn pre_state(&self, x: i32, y: i32, z: i32) -> PreState {
         let Some(index) = self.index(x, y, z) else { return PreState::AIR };
+        let code = self.blocks[index];
         PreState {
-            state: StateId::from_raw(self.blocks[index]),
-            class: match self.classes[index] {
+            state: if code < Self::SURFACE_STATE_OFFSET {
+                self.base_states[code as usize]
+            } else {
+                StateId::from_raw(code - Self::SURFACE_STATE_OFFSET)
+            },
+            class: match code {
                 0 => PreClass::Air,
-                1 => PreClass::Fluid,
-                2 => PreClass::Stone,
-                other => panic!("invalid packed state class: {other}"),
+                2 | 3 => PreClass::Fluid,
+                _ => PreClass::Stone,
             },
         }
     }
@@ -129,18 +130,18 @@ impl PackedStateCarrier {
     #[inline]
     pub(crate) fn pre_code(&self, x: i32, y: i32, z: i32) -> u8 {
         let Some(index) = self.index(x, y, z) else { return 0 };
-        match self.classes[index] {
-            0 => 0,
-            1 => 2,
-            2 => 1,
-            other => panic!("invalid packed state class: {other}"),
-        }
+        let code = self.blocks[index];
+        if code < Self::SURFACE_STATE_OFFSET { code as u8 } else { 1 }
     }
 
     #[inline]
     pub(crate) fn set_id(&mut self, x: i32, y: i32, z: i32, state: StateId) {
         let Some(index) = self.index(x, y, z) else { return };
-        self.blocks[index] = u16::try_from(state.raw()).expect("generated state id fits packed carrier");
+        debug_assert!(self.blocks[index] == 1 || self.blocks[index] >= Self::SURFACE_STATE_OFFSET);
+        self.blocks[index] = u16::try_from(state.raw())
+            .expect("generated state id fits packed carrier")
+            .checked_add(Self::SURFACE_STATE_OFFSET)
+            .expect("surface state id fits packed carrier");
     }
 
     fn into_world(
@@ -154,6 +155,7 @@ impl PackedStateCarrier {
             min_y,
             height,
             blocks,
+            base_states,
             mut vein_batch,
             ..
         } = self;
@@ -168,11 +170,17 @@ impl PackedStateCarrier {
             16,
             StateId::AIR,
             blocks,
-            |x, y, z, index, raw| {
+            |x, y, z, index, code| {
                 let vein_state = vein_batch
                     .as_mut()
                     .and_then(|batch| batch.state_at_index(index));
-                let state = vein_state.unwrap_or_else(|| StateId::from_raw(raw));
+                let state = vein_state.unwrap_or_else(|| {
+                    if code < Self::SURFACE_STATE_OFFSET {
+                        base_states[code as usize]
+                    } else {
+                        StateId::from_raw(code - Self::SURFACE_STATE_OFFSET)
+                    }
+                });
                 let facts = base_facts(state);
                 ocean_floor.observe(x - base_x, y, z - base_z, facts);
                 state
@@ -1750,7 +1758,10 @@ fn split_pre_ore_regions(
 
 #[cfg(test)]
 mod tests {
-    use super::{OverworldGenerator, base_facts, pre_ore_target_union, split_pre_ore_regions};
+    use super::{
+        OverworldGenerator, PackedStateCarrier, base_facts, pre_ore_target_union,
+        split_pre_ore_regions,
+    };
     use crate::feature::vegetation::{blocks_motion, is_air, is_fluid};
     use crate::dense_grid::DenseBlockGrid;
     use crate::feature::{
@@ -1758,6 +1769,36 @@ mod tests {
         region_view::RegionView,
     };
     use crate::rng::{RandomSource, WorldgenRandom, XoroshiroRandomSource};
+
+    #[test]
+    fn packed_surface_state_keeps_its_original_stone_class() {
+        use crate::surface::PreClass;
+        use lodestone_data::block_states::StateId;
+
+        let mut blocks = vec![1; 16 * 16];
+        blocks[..4].copy_from_slice(&[0, 1, 2, 3]);
+        let mut carrier = PackedStateCarrier {
+            base_x: 0,
+            base_z: 0,
+            min_y: 0,
+            height: 1,
+            blocks,
+            base_states: [StateId::AIR; 4],
+            vein_batch: None,
+        };
+        assert_eq!(carrier.pre_state(0, 0, 0).class, PreClass::Air);
+        assert_eq!(carrier.pre_state(1, 0, 0).class, PreClass::Stone);
+        assert_eq!(carrier.pre_state(2, 0, 0).class, PreClass::Fluid);
+        assert_eq!(carrier.pre_state(3, 0, 0).class, PreClass::Fluid);
+
+        carrier.set_id(1, 0, 0, StateId::AIR);
+        assert_eq!(carrier.pre_code(1, 0, 0), 1);
+        assert_eq!(carrier.pre_state(1, 0, 0).state, StateId::AIR);
+        assert_eq!(carrier.pre_state(1, 0, 0).class, PreClass::Stone);
+        carrier.set_id(1, 0, 0, StateId::from_raw(1));
+        assert_eq!(carrier.pre_state(1, 0, 0).state, StateId::from_raw(1));
+        assert_eq!(carrier.pre_code(1, 0, 0), 1);
+    }
 
     #[cfg(feature = "gen-counters")]
     mod pre_ore_region_counter_test {
