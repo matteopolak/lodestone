@@ -13,7 +13,9 @@ Set `LODESTONE_JOIN_TRACE=1` and enable the `lodestone_join_trace` tracing targe
 The server emits one event per chunk at `generated`, `encoded`, and `delivered`;
 the shell emits `received`, `remesh_queued`, and `remeshed`. Each event includes
 the chunk coordinate, elapsed milliseconds from that join's chunk phase, and a
-`first` field identifying the time-to-first event for each stage. Payloads and
+`first` field identifying the time-to-first event for each stage. Client receipt
+and queue counts are sampled every 16 events; completed meshes are counted per
+section and sampled every 256 events on both native and browser builds. Payloads and
 shader/source text are never included. Deferred native join generation gives the
 connection loop a bounded 25 ms wait for its ordered head; cancelling that wait
 leaves the head in the pipeline, so socket and timer work stays serviceable
@@ -36,7 +38,7 @@ packet bytes, or mesh scheduling.
 
 ## Configuration
 
-`LODESTONE_JOIN_TRACE=1` enables the per-column trace on native builds. The tracing subscriber
+`LODESTONE_JOIN_TRACE=1` enables the sampled trace on native builds. The tracing subscriber
 must also accept the `lodestone_join_trace` target at `INFO`; for example, use
 `RUST_LOG=lodestone_join_trace=info` alongside the flag.
 `LODESTONE_WORLDGEN_LEDGER_TRACE=1` adds a failure-only comparison of published and retained
@@ -49,7 +51,7 @@ Browser builds use the same monotonic clock and expose bounded operational diagn
 duration and work counts, each worldgen session transition with elapsed time
 from worker launch, join-stream progress, the play-loop heartbeat, and world-tick
 phases that exceed one 50 ms tick period. It also records the first column and
-each sixteenth column at packet receipt, mesh admission, and completed meshing,
+each sixteenth column at packet receipt and mesh admission, plus each 256th completed section mesh,
 so server generation and client rendering stalls can be separated without a
 per-column console flood.
 Supported levels are `off`, `error`, `warn`, `info`, `debug`, and `trace`; the
