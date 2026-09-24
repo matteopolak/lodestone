@@ -3760,6 +3760,19 @@ pub(crate) enum GenerationCommitError {
     ConflictingFeatureWinnerReceipts,
 }
 
+fn generation_commit_request_error(error: GenerationCommitError) -> crate::worldgen_session::GenerationRequestError {
+    match error {
+        GenerationCommitError::RevisionConflict { coordinate, expected, found } => {
+            crate::worldgen_session::GenerationRequestError::RevisionConflict {
+                coordinate,
+                expected,
+                found,
+            }
+        }
+        other => crate::worldgen_session::GenerationRequestError::Boundary(other.to_string()),
+    }
+}
+
 struct FinalizedMutationAudit<'a> {
     winners: BTreeMap<BlockCoordinate, (DimensionPipeline, &'a ProvenanceMutation)>,
     settled_winners: BTreeMap<BlockCoordinate, (DimensionPipeline, TargetFeatureWrite)>,
@@ -4069,9 +4082,7 @@ impl<S: ChunkSource> ChunkStore<S> {
                     &[],
                     GenerationCommitMode::Cohort,
                 )
-                .map_err(|error| {
-                    crate::worldgen_session::GenerationRequestError::Boundary(error.to_string())
-                })?;
+                .map_err(generation_commit_request_error)?;
             halo.acknowledge(&report);
             self.evict_excess();
             return Ok(());
@@ -4141,7 +4152,7 @@ impl<S: ChunkSource> ChunkStore<S> {
                     crate::worldgen_session::GenerationRequestError::Boundary(error.to_string())
                 }
                 GenerationPublicationCommitError::Commit(error) => {
-                    crate::worldgen_session::GenerationRequestError::Boundary(error.to_string())
+                    generation_commit_request_error(error)
                 }
             })?;
         halo.acknowledge(&report);
@@ -4357,6 +4368,39 @@ impl<S: ChunkSource> ChunkStore<S> {
             }
         }
         drop(leases);
+        let retry_conflict = matches!(
+            &cohort_error,
+            Some(crate::worldgen_session::GenerationRequestError::RevisionConflict { .. })
+        );
+        if retry_conflict {
+            drop(halo);
+            drop(_region_lease);
+            for (active_index, entry) in entries.iter().enumerate() {
+                if committed[active_index] || sessions[entry.index].cancellation().is_cancelled() {
+                    continue;
+                }
+                let request = sessions[entry.index].request();
+                let cancellation = sessions[entry.index].cancellation();
+                let mut retry = GenerationSession::with_cancellation(request, cancellation);
+                let result = self.request_generation(request, Some(&mut retry));
+                sessions[entry.index] = retry;
+                statuses[entry.index] = Some(match result {
+                    Ok(Some(result)) => emit(entry.index, &sessions[entry.index], result),
+                    Ok(None) => Err(crate::worldgen_session::GenerationRequestError::Unsupported),
+                    Err(error) => Err(error),
+                });
+            }
+            return Ok(statuses
+                .into_iter()
+                .map(|status| {
+                    status.unwrap_or_else(|| {
+                        Err(crate::worldgen_session::GenerationRequestError::Boundary(
+                            "generation cohort did not settle a target".to_owned(),
+                        ))
+                    })
+                })
+                .collect());
+        }
         if let Some(error) = cohort_error {
             return Err(error);
         }
@@ -11533,6 +11577,83 @@ mod tests {
         )));
         assert!(store.generation_ledger().output_column(END_PIPELINE, (1, 0)).is_none());
         assert!(store.resident_column(1, 0).is_none());
+    }
+
+    #[test]
+    fn cohort_revision_conflict_retries_only_uncommitted_targets() {
+        use lodestone_worldgen::stage_schedule::{Dimension, GenerationTarget};
+
+        let store = ChunkStore::with_capacity(
+            BatchStoreSource {
+                batch_calls: Arc::new(AtomicUsize::new(0)),
+                scalar_calls: Arc::new(AtomicUsize::new(0)),
+            },
+            16,
+        );
+        let mut sessions = [(0, 0), (1, 0)]
+            .into_iter()
+            .map(|target| {
+                GenerationSession::new(crate::worldgen_session::GenerationRequest::new(
+                    Dimension::End,
+                    target,
+                    GenerationTarget::Full,
+                    1,
+                ))
+            })
+            .collect::<Vec<_>>();
+        let mut emitted = Vec::new();
+        let statuses = ChunkSource::request_generation_cohort(
+            &store,
+            &mut sessions,
+            &mut |index, _, _| {
+                emitted.push(index);
+                if index == 0 {
+                    store.write_gates.with((1, 0), || {});
+                }
+                Ok(())
+            },
+        )
+        .expect("a stale target retries with a fresh halo");
+
+        assert!(statuses.iter().all(Result::is_ok), "{statuses:?}");
+        assert_eq!(emitted, [0, 1]);
+        assert!(store.resident_column(0, 0).is_some());
+        assert!(store.resident_column(1, 0).is_some());
+    }
+
+    #[test]
+    fn generated_cohort_revision_conflict_retries_uncommitted_target() {
+        use lodestone_worldgen::stage_schedule::{Dimension, GenerationTarget};
+
+        let store = ChunkStore::with_capacity(crate::worldgen_data::end_chunk_source(42), 32);
+        let mut sessions = [(50, 50), (51, 50)]
+            .into_iter()
+            .map(|target| {
+                GenerationSession::new(crate::worldgen_session::GenerationRequest::new(
+                    Dimension::End,
+                    target,
+                    GenerationTarget::Full,
+                    1,
+                ))
+            })
+            .collect::<Vec<_>>();
+        let mut emitted = Vec::new();
+        let statuses = ChunkSource::request_generation_cohort(
+            &store,
+            &mut sessions,
+            &mut |index, _, _| {
+                emitted.push(index);
+                if index == 0 {
+                    store.write_gates.with((51, 50), || {});
+                }
+                Ok(())
+            },
+        )
+        .expect("a generated target retries after a stale cohort lease");
+
+        assert!(statuses.iter().all(Result::is_ok), "{statuses:?}");
+        assert_eq!(emitted, [0, 1]);
+        assert!(store.resident_column(51, 50).is_some());
     }
 
     #[test]
