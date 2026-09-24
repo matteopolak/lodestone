@@ -70,7 +70,7 @@ a system exists, not just that it was asked for.
 
 ### The island count
 
-**0 of 137** variants are currently `Route::NOWHERE`. Most of those are simply decoded ahead
+**0 of 138** variants are currently `Route::NOWHERE`. Most of those are simply decoded ahead
 of a consumer, a normal state for a from-scratch client, not a defect in itself — but a handful
 have been genuine islands where a fold already existed (or was cheap to add) and nothing fed
 it, found by walking the list variant by variant and asking what a real consumer would need.
@@ -154,8 +154,9 @@ folded plugin state after the ordinary game tick.
 - It does not measure whether a claimed router has a system — that is `handles_event`'s own
   coverage test.
 - It does not cover the version adapters. Heavy per-block data (chunk payloads) reaches the
-  world through `lodestone_world::WorldSink` directly and never becomes a routed event; a
-  `ChunkLoaded`/`ChunkUnloaded` variant is marked `client` as a signal only.
+  world through `lodestone_world::WorldSink` directly and never becomes a routed event.
+  `ChunkLoaded` and `ChunkLightChanged` are signals after the world write; `ChunkUnloaded`
+  is a client-only signal after the adapter removes the column.
 - It does not cover the **serverbound** direction. `ClientAction` has the mirror problem (an
   action encoded by every adapter with zero producers) and has no equivalent table — see
   `docs/packet-wiring.md`.

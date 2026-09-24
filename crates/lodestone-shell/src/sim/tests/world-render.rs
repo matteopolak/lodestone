@@ -78,6 +78,37 @@ fn chunk_arrival_also_remeshes_its_loaded_neighbours() {
 }
 
 #[test]
+fn light_update_queues_affected_sections_without_reopening_arrival() {
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    let world = sim.chunk_world();
+    let pos = *world.read().iter().next().expect("local world has a column").0;
+    let light_section = world.extent().expect("world has an extent").section_count / 2 + 1;
+
+    sim.on_column_light_changed(pos.x, pos.z, &[light_section]);
+    let queued = sim.terrain(|terrain| terrain.light_dirty_sections.clone());
+    assert!(!queued.is_empty(), "the light patch must invalidate mesh sections");
+    assert!(queued.len() <= 27, "one light section has a bounded mesh halo");
+    assert!(
+        !sim.terrain(|terrain| terrain.has_pending_arrival(pos.x, pos.z)),
+        "a light patch must not reopen column arrival"
+    );
+    assert!(
+        !sim.terrain(|terrain| terrain.dirty_columns.contains((pos.x, pos.z))),
+        "a light patch must not enqueue a whole-column remesh"
+    );
+
+    let mut arrival_control = Sim::new(test_config());
+    arrival_control.drain_all_meshes();
+    arrival_control.on_column_arrived(pos.x, pos.z);
+    assert!(
+        arrival_control
+            .terrain(|terrain| terrain.dirty_columns.contains((pos.x, pos.z))),
+        "a full column arrival remains on the whole-column path"
+    );
+}
+
+#[test]
 fn neighbour_remesh_skips_columns_that_are_not_loaded() {
     // The control for the test above: queueing absent columns would mesh
     // nothing, log a drop, and let "every arrival dirties 8 neighbours" pass

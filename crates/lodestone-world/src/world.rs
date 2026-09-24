@@ -234,6 +234,24 @@ impl LightPatch {
         self.sky.is_empty() && self.block.is_empty()
     }
 
+    /// Returns the sorted light-section indices overwritten by this patch.
+    ///
+    /// A section may be present in both the sky and block layers; it appears
+    /// only once in the result. Consumers use this to invalidate geometry
+    /// without treating a light-only update as a newly arrived chunk.
+    #[must_use]
+    pub fn affected_sections(&self) -> Vec<usize> {
+        let mut sections = self
+            .sky
+            .iter()
+            .chain(&self.block)
+            .map(|(index, _)| *index)
+            .collect::<Vec<_>>();
+        sections.sort_unstable();
+        sections.dedup();
+        sections
+    }
+
     /// Builds a light patch from the wire fields of a modern `light_update`
     /// packet (protocol ≥ 1.14, where light travels separately from the chunk).
     ///
@@ -2497,6 +2515,19 @@ mod tests {
             "second array lands at the second set bit — arrays are consumed in \
              ascending section order, not packed into the first N sections"
         );
+    }
+
+    #[test]
+    fn affected_light_sections_are_sorted_and_deduplicated_across_layers() {
+        let patch = LightPatch::from_light_masks(
+            &[1 << 6],
+            &[1 << 2],
+            vec![NibbleArray::filled(15)],
+            &[1 << 2],
+            &[1 << 4],
+            vec![NibbleArray::filled(7)],
+        );
+        assert_eq!(patch.affected_sections(), [2, 4, 6]);
     }
 
     #[test]
