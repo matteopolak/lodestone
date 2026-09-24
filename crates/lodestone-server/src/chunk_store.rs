@@ -2139,10 +2139,46 @@ impl GenerationLedger {
         }
         let mut journal = GenerationLedgerJournal::new(self, identity);
         let result = self.publish_session_inner(pipeline, &checkpoint, &mut journal, None);
-        if result.is_err() {
+        if let Err(error) = &result {
+            self.trace_checkpoint_failure(&checkpoint, identity, error);
             journal.rollback(self);
         }
         result
+    }
+
+    fn trace_checkpoint_failure(
+        &self,
+        checkpoint: &GenerationCheckpoint,
+        identity: PipelineIdentity,
+        error: &GenerationLedgerError,
+    ) {
+        if !generation_ledger_trace_enabled() {
+            return;
+        }
+        eprintln!(
+            "worldgen ledger publication failed: target={:?} error={error}",
+            checkpoint.request().target(),
+        );
+        let Some(state) = self.pipelines.get(&identity) else {
+            return;
+        };
+        for (coordinate, records) in checkpoint.frontiers() {
+            let current = state.frontiers.get(coordinate).map(StageFrontier::records);
+            let Some(current) = current else {
+                eprintln!("worldgen ledger missing coordinate: {coordinate:?}");
+                continue;
+            };
+            if let Some((index, (stored, incoming))) = current
+                .iter()
+                .zip(records)
+                .enumerate()
+                .find(|(_, (stored, incoming))| stored != incoming)
+            {
+                eprintln!(
+                    "worldgen ledger divergent record: coordinate={coordinate:?} index={index} stored={stored:?} incoming={incoming:?}"
+                );
+            }
+        }
     }
 
     /// Publish several completed sessions against one authoritative set of
@@ -2269,6 +2305,7 @@ impl GenerationLedger {
                 &mut journals[journal_index],
                 Some(final_outputs),
             ) {
+                self.trace_checkpoint_failure(&checkpoint, identity, &error);
                 for journal in journals.into_iter().rev() {
                     journal.rollback(self);
                 }
@@ -6564,6 +6601,11 @@ impl<S: ChunkSource> ChunkStore<S> {
                 lease.release_and_prune();
                 return TryBlockMutation::Absent;
             };
+            if entry.column.generation_stage() != ChunkGenerationStage::Full {
+                drop(guard);
+                lease.release_and_prune();
+                return TryBlockMutation::Absent;
+            }
             if y < entry.column.min_y || y >= entry.column.min_y + entry.column.height {
                 drop(guard);
                 lease.release_and_prune();
@@ -12839,6 +12881,17 @@ mod tests {
                 .committed_mutations()
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn shaped_resident_column_rejects_tick_mutation() {
+        let store = ChunkStore::new(crate::overworld_chunk_source(42));
+        let column = store.column_at(0, 0, ChunkGenerationStage::Shaped);
+        assert_eq!(column.generation_stage(), ChunkGenerationStage::Shaped);
+        assert_eq!(
+            store.try_set_block(0, 64, 0, Block::Stone.default_state()),
+            TryBlockMutation::Absent
         );
     }
 

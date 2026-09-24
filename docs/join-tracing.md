@@ -19,6 +19,9 @@ connection loop a bounded 25 ms wait for its ordered head; cancelling that wait
 leaves the head in the pipeline, so socket and timer work stays serviceable
 without changing chunk order. The shell trace ends when CPU meshing
 completes; GPU upload and presentation remain separate frame-profiler phases.
+An integrated connection error is logged at the server task boundary before
+that task closes its transport. Without that error, the client's subsequent
+write can report only `broken pipe`, which does not identify the failed stage.
 
 ## How to change it
 
@@ -32,8 +35,12 @@ packet bytes, or mesh scheduling.
 
 `LODESTONE_JOIN_TRACE=1` enables the per-column trace on native builds. The tracing subscriber
 must also accept the `lodestone_join_trace` target at `INFO`; for example, use
-`RUST_LOG=lodestone_join_trace=info` alongside the flag. Browser builds use the
-same monotonic clock and expose bounded operational diagnostics through the SDK's
+`RUST_LOG=lodestone_join_trace=info` alongside the flag.
+`LODESTONE_WORLDGEN_LEDGER_TRACE=1` adds a failure-only comparison of published and retained
+stage records when a generation checkpoint is rejected. It is native-only and can be enabled
+alongside the join trace to find the failure behind a disconnected join.
+
+Browser builds use the same monotonic clock and expose bounded operational diagnostics through the SDK's
 `logLevel` mount option. Use `mount({ ..., logLevel: "debug" })`, or append
 `?log=debug` to the standalone runner. The console then reports spawn-search
 duration and work counts, each worldgen session transition with elapsed time
