@@ -16,6 +16,8 @@ and resource-pack prompts—use shared cells in `net/state.rs` instead of adding
 The inbound update relay is bounded. When a burst fills it, the driver retains the next update and
 yields until the frame loop drains the relay. This preserves event order and the session without
 blocking the browser's main thread. Closing the session wakes a waiting driver so shutdown can finish.
+Backpressure waits are logged at exponentially spaced counts with their elapsed time, so a slow
+consumer remains diagnosable without logging every update.
 
 Browser singleplayer starts its integrated server in a Worker. `net/browser.rs` translates the Worker
 `MessagePort` into the client transport and waits for an explicit startup-ready response; startup errors

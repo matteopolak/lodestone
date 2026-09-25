@@ -323,6 +323,7 @@ fn take_pending_server_pack_policy() -> crate::menu::servers::ServerPackPolicy {
 /// Depth of the inbound [`NetUpdate`] relay. The producer yields when full;
 /// blocking its thread would deadlock the browser's frame loop.
 const NET_RELAY_CAPACITY: usize = 1024;
+static INBOUND_RELAY_WAITS: AtomicU64 = AtomicU64::new(0);
 
 /// Depth of the reliable outbound [`ClientAction`] relay ([`NetClient::action_tx`]).
 ///
@@ -3408,7 +3409,19 @@ async fn run_async(
                     ) {
                         Ok(()) => {}
                         Err(ForwardError::Full(update, terminal)) => {
-                            if !wait_for_relay(&tx, &relay_drained, &stop, update).await || terminal {
+                            let started = crate::platform::Instant::now();
+                            let delivered = wait_for_relay(&tx, &relay_drained, &stop, update).await;
+                            let count = INBOUND_RELAY_WAITS.fetch_add(1, Ordering::Relaxed) + 1;
+                            if count.is_power_of_two() {
+                                tracing::warn!(
+                                    target: "net",
+                                    count,
+                                    wait_ms = started.elapsed().as_millis(),
+                                    capacity = NET_RELAY_CAPACITY,
+                                    "inbound update relay applied backpressure"
+                                );
+                            }
+                            if !delivered || terminal {
                                 break;
                             }
                         }
