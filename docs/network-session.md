@@ -18,6 +18,8 @@ yields until the frame loop drains the relay. This preserves event order and the
 blocking the browser's main thread. Closing the session wakes a waiting driver so shutdown can finish.
 Backpressure waits are logged at exponentially spaced counts with their elapsed time, so a slow
 consumer remains diagnosable without logging every update.
+The frame-side update pass logs calls over 32 ms with total updates, column arrivals, and
+section-block updates; compare those counts with backpressure waits when diagnosing stalls.
 
 Browser singleplayer starts its integrated server in a Worker. `net/browser.rs` translates the Worker
 `MessagePort` into the client transport and waits for an explicit startup-ready response; startup errors

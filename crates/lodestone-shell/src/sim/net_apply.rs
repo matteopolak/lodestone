@@ -125,10 +125,14 @@ impl Sim {
         // mid-session on a portal trip, so the mesh policy is refreshed every poll
         // rather than only at attach.
         self.refresh_mesh_policy();
+        let started = crate::platform::Instant::now();
         let updates = match &self.net {
             Some(net) => net.poll(),
             None => return,
         };
+        let update_count = updates.len();
+        let mut chunk_updates = 0usize;
+        let mut section_block_updates = 0usize;
         for update in updates {
             match update {
                 NetUpdate::Connecting => {
@@ -226,6 +230,7 @@ impl Sim {
                     }
                 }
                 NetUpdate::Chunk { x, z } => {
+                    chunk_updates += 1;
                     // §12.24 dirty-region signal: no block data travels on the
                     // event — the client applies decoded chunks to its own
                     // `World`, which we read via `NetClient::sections_and_light_at`
@@ -261,6 +266,7 @@ impl Sim {
                     self.set_chunk_cache_center(x, z);
                 }
                 NetUpdate::SectionBlocks { x, y, z, blocks } => {
+                    section_block_updates += 1;
                     // A server-authoritative edit inside one loaded section.
                     // Re-mesh at *section* granularity, not the whole column:
                     // the same signal carries every redstone tick, and a column
@@ -1123,6 +1129,17 @@ impl Sim {
                     );
                 }
             });
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= std::time::Duration::from_millis(32) {
+            tracing::warn!(
+                target: "net",
+                elapsed_ms = elapsed.as_millis(),
+                update_count,
+                chunk_updates,
+                section_block_updates,
+                "applying inbound updates stalled a frame"
+            );
         }
     }
 }
