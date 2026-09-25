@@ -13,6 +13,10 @@ driver decodes client events and folds them into `NetUpdate` values for the simu
 where only the newest snapshot matters—weather, biome metadata, command suggestions, sky-light defaults,
 and resource-pack prompts—use shared cells in `net/state.rs` instead of adding queue traffic.
 
+The inbound update relay is bounded. When a burst fills it, the driver retains the next update and
+yields until the frame loop drains the relay. This preserves event order and the session without
+blocking the browser's main thread. Closing the session wakes a waiting driver so shutdown can finish.
+
 Browser singleplayer starts its integrated server in a Worker. `net/browser.rs` translates the Worker
 `MessagePort` into the client transport and waits for an explicit startup-ready response; startup errors
 and post-start crashes remain distinct so a failed launch cannot create a second world owner.
@@ -30,7 +34,8 @@ Keep `net.rs` as the compatibility façade: public types moved into a submodule 
 and callers should continue to use `lodestone_shell::net` paths. Add replayable simulation inputs to
 `net/events.rs`; add latest-value, lock-free or snapshot state to `net/state.rs`. Browser Worker control
 messages and transport shutdown belong in `net/browser.rs`. Preserve the bounded relay behavior and the
-native/wasm transport seam when changing session setup.
+native/wasm transport seam when changing session setup. Do not replace the asynchronous full-relay
+wait with a blocking send: the browser frame loop must be able to drain the queue.
 
 ## Configuration
 

@@ -115,6 +115,7 @@ use std::sync::{
 };
 use std::thread::JoinHandle;
 use std::time::Duration;
+use tokio::sync::Notify;
 
 pub(super) use lodestone_client::{
     BlockPos, ChunkPos, ChunkSection, ClientAction, ClientBuilder, ClientEvent, ClientHandle,
@@ -319,43 +320,8 @@ fn take_pending_server_pack_policy() -> crate::menu::servers::ServerPackPolicy {
     std::mem::replace(&mut *guard, crate::menu::servers::ServerPackPolicy::default())
 }
 
-/// Depth of the inbound [`NetUpdate`] relay ([`NetClient::rx`]) between the net
-/// thread and the render loop.
-///
-/// **Why bounded, and why this failure mode rather than a blocking one.**
-/// [`NetClient::poll`] drains the *entire* channel every call, not one item at
-/// a time, so under normal operation this queue never holds more than one
-/// frame's worth of forwarded events — bounded in practice by the
-/// already-bounded 256-slot `lodestone_client` event channel upstream (see
-/// `run_async`'s outbound-drain timeout comment for the incident that
-/// localised that bound). It only grows without limit if the render loop
-/// stops calling `poll` at all, which is a full game-loop stall, not a slow
-/// consumer lagging an active producer.
-///
-/// A **blocking** bound (plain `send`, backpressuring the net thread until
-/// the render loop drains) would be the textbook fix and is exactly what the
-/// existing 256-slot client channel already does one layer down. It is wrong
-/// here specifically: `run_async`'s body is shared verbatim between the
-/// native net thread (its own OS thread, safe to block) and the wasm32
-/// driver, which runs via `spawn_local` on the **same single JS thread** as
-/// the render loop it would be blocking on. A blocking send there cannot
-/// ever be unblocked — nothing can run to call `poll` while the only thread
-/// is parked inside `send` — turning a recoverable, bounded-memory stall into
-/// a permanent deadlock. That is strictly worse than the unbounded growth
-/// this issue exists to fix, and it is the same class of trap `CLAUDE.md`
-/// already documents for `tokio::time::timeout` hanging this same driver.
-///
-/// So every `tx.send` in `run_async`/`run`/[`forward`] uses `try_send`
-/// instead: never blocks on either target, and a full queue is treated
-/// exactly like a disconnected receiver — [`forward`] returns `Err(())`,
-/// and its one caller already breaks the net loop on that. A stalled render
-/// loop that never drains `rx` therefore caps this queue at
-/// `NET_RELAY_CAPACITY` entries and then stops producing more (the net
-/// thread exits), rather than growing it forever *or* wedging the thread
-/// that would otherwise recover it. The capacity is 4x the upstream client
-/// buffer: generous headroom for a single frame's burst (a multi-hundred
-/// column chunk stream can produce that many events at once), while still a
-/// hard ceiling.
+/// Depth of the inbound [`NetUpdate`] relay. The producer yields when full;
+/// blocking its thread would deadlock the browser's frame loop.
 const NET_RELAY_CAPACITY: usize = 1024;
 
 /// Depth of the reliable outbound [`ClientAction`] relay ([`NetClient::action_tx`]).
@@ -600,6 +566,7 @@ fn wasm_block_mutation_refusal(
 #[derive(Debug)]
 pub struct NetClient {
     rx: Receiver<NetUpdate>,
+    relay_drained: Arc<Notify>,
     /// Outbound actions queued for the net thread to hand to the client. The
     /// relay keeps reliable controls FIFO and coalesces replaceable movement
     /// and tick-boundary markers; see [`ActionRelaySender`].
@@ -1312,6 +1279,7 @@ impl NetClient {
         identity: LoginProfile,
     ) -> Self {
         let (tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
+        let relay_drained = Arc::new(Notify::new());
         let (action_tx, action_rx) = action_relay();
         #[cfg(not(target_arch = "wasm32"))]
         let (publish_tx, publish_rx) = mpsc::channel();
@@ -1321,6 +1289,7 @@ impl NetClient {
         let (wasm_block_mutation_result_tx, wasm_block_mutation_rx) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = Arc::clone(&stop);
+        let relay_drained_thread = Arc::clone(&relay_drained);
         let handle: SharedHandle = Arc::new(OnceLock::new());
         let handle_thread = Arc::clone(&handle);
         let horizon_surface: SharedHorizonSurface = Arc::new(OnceLock::new());
@@ -1355,6 +1324,7 @@ impl NetClient {
                     origin,
                     protocol,
                     tx,
+                    relay_drained_thread,
                     action_rx,
                     publish_rx,
                     wasm_block_mutation_request_rx,
@@ -1395,6 +1365,7 @@ impl NetClient {
             origin,
             protocol,
             tx,
+            relay_drained_thread,
             action_rx,
             stop_thread,
             handle_thread,
@@ -1413,6 +1384,7 @@ impl NetClient {
 
         Self {
             rx,
+            relay_drained,
             action_tx,
             #[cfg(not(target_arch = "wasm32"))]
             publish_tx,
@@ -1444,6 +1416,9 @@ impl NetClient {
         let mut out = Vec::new();
         while let Ok(u) = self.rx.try_recv() {
             out.push(u);
+        }
+        if !out.is_empty() {
+            self.relay_drained.notify_one();
         }
         out
     }
@@ -1909,6 +1884,7 @@ impl NetClient {
         let (action_tx, action_rx) = action_relay();
         let client = Self {
             rx,
+            relay_drained: Arc::new(Notify::new()),
             action_tx,
             // Its receiver is dropped with `_publish_rx` below, same as `_tx`
             // above: nothing on a loopback ever calls `publish_to_lan`.
@@ -1988,6 +1964,7 @@ impl NetClient {
         let (action_tx, action_rx) = action_relay();
         let client = Self {
             rx,
+            relay_drained: Arc::new(Notify::new()),
             action_tx,
             // See `loopback`'s identical field for why an immediately-dropped
             // receiver is fine here.
@@ -2018,6 +1995,7 @@ impl NetClient {
 impl Drop for NetClient {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        self.relay_drained.notify_one();
         // Browser: there is no handle to join — see the `thread` field. Setting `stop`
         // above is the whole teardown.
         #[cfg(not(target_arch = "wasm32"))]
@@ -2266,6 +2244,7 @@ async fn run_async(
     origin: Origin,
     protocol: i32,
     tx: SyncSender<NetUpdate>,
+    relay_drained: Arc<Notify>,
     action_rx: ActionRelayReceiver,
     // Native only — the capability it drives (`IntegratedServer::publish`)
     // needs a real TCP socket, which wasm32 does not have; the wasm `spawn_local`
@@ -3236,9 +3215,15 @@ async fn run_async(
             // break) so the two self-disconnect paths cannot drift apart.
             while let Ok((id, accept)) = pack_response_rx.try_recv() {
                 if apply_pack_response(id, accept, &pack_prompt, &handle) {
-                    let _ = tx.try_send(NetUpdate::Disconnected(Box::new(
-                        lodestone_model::Text::literal(REQUIRED_PACK_DISCONNECT_REASON),
-                    )));
+                    let _ = send_update(
+                        &tx,
+                        &relay_drained,
+                        &stop,
+                        NetUpdate::Disconnected(Box::new(lodestone_model::Text::literal(
+                            REQUIRED_PACK_DISCONNECT_REASON,
+                        ))),
+                    )
+                    .await;
                     break 'session;
                 }
             }
@@ -3413,18 +3398,21 @@ async fn run_async(
                         );
                         pending_transfer = Some((host.clone(), port));
                     }
-                    if forward(
+                    match forward(
                         &tx,
                         &weather,
                         &biome_climates,
                         &biome_names,
                         &command_tree,
                         event,
-                    )
-                    .is_err()
-                    {
-                        tracing::warn!(target: "net", "event forwarding ended the network session");
-                        break;
+                    ) {
+                        Ok(()) => {}
+                        Err(ForwardError::Full(update, terminal)) => {
+                            if !wait_for_relay(&tx, &relay_drained, &stop, update).await || terminal {
+                                break;
+                            }
+                        }
+                        Err(ForwardError::End | ForwardError::Closed) => break,
                     }
                 }
                 Ok(None) => {
@@ -3444,9 +3432,13 @@ async fn run_async(
                         }
                         None => "stream closed".to_string(),
                     };
-                    let _ = tx.try_send(NetUpdate::Disconnected(Box::new(
-                        lodestone_model::Text::literal(reason),
-                    )));
+                    let _ = send_update(
+                        &tx,
+                        &relay_drained,
+                        &stop,
+                        NetUpdate::Disconnected(Box::new(lodestone_model::Text::literal(reason))),
+                    )
+                    .await;
                     break;
                 }
                 Err(_timeout) => {
@@ -3508,6 +3500,7 @@ fn run(
     origin: Origin,
     protocol: i32,
     tx: SyncSender<NetUpdate>,
+    relay_drained: Arc<Notify>,
     action_rx: ActionRelayReceiver,
     publish_rx: Receiver<u16>,
     wasm_block_mutation_request_rx: Receiver<WasmBlockMutationRequest>,
@@ -3541,6 +3534,7 @@ fn run(
         origin,
         protocol,
         tx,
+        relay_drained,
         action_rx,
         publish_rx,
         wasm_block_mutation_request_rx,
@@ -4382,7 +4376,64 @@ fn verify_pack_hash(bytes: &[u8], hash: &str) -> bool {
     computed.eq_ignore_ascii_case(hash)
 }
 
-/// Forward one event; `Err` signals the loop to stop.
+#[derive(Debug)]
+enum ForwardError {
+    Full(NetUpdate, bool),
+    End,
+    Closed,
+}
+
+fn send_forwarded(
+    tx: &SyncSender<NetUpdate>,
+    update: NetUpdate,
+    terminal: bool,
+) -> Result<(), ForwardError> {
+    match tx.try_send(update) {
+        Ok(()) if terminal => Err(ForwardError::End),
+        Ok(()) => Ok(()),
+        Err(mpsc::TrySendError::Full(update)) => Err(ForwardError::Full(update, terminal)),
+        Err(mpsc::TrySendError::Disconnected(_)) => Err(ForwardError::Closed),
+    }
+}
+
+async fn wait_for_relay(
+    tx: &SyncSender<NetUpdate>,
+    relay_drained: &Notify,
+    stop: &AtomicBool,
+    mut update: NetUpdate,
+) -> bool {
+    loop {
+        let notified = relay_drained.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if stop.load(Ordering::SeqCst) {
+            return false;
+        }
+        match tx.try_send(update) {
+            Ok(()) => return true,
+            Err(mpsc::TrySendError::Full(pending)) => update = pending,
+            Err(mpsc::TrySendError::Disconnected(_)) => return false,
+        }
+        notified.await;
+    }
+}
+
+async fn send_update(
+    tx: &SyncSender<NetUpdate>,
+    relay_drained: &Notify,
+    stop: &AtomicBool,
+    update: NetUpdate,
+) -> bool {
+    match tx.try_send(update) {
+        Ok(()) => true,
+        Err(mpsc::TrySendError::Full(update)) => {
+            wait_for_relay(tx, relay_drained, stop, update).await
+        }
+        Err(mpsc::TrySendError::Disconnected(_)) => false,
+    }
+}
+
+/// Forward one event; a full relay retains the update for asynchronous retry.
 ///
 /// `weather` is folded in place for the two arms that publish into it instead of
 /// producing a [`NetUpdate`] — see [`WeatherCell`] for why. Those arms still live
@@ -4397,7 +4448,7 @@ fn forward(
     biome_names: &BiomeNameCell,
     command_tree: &CommandTreeCell,
     event: ClientEvent,
-) -> Result<(), ()> {
+) -> Result<(), ForwardError> {
     let update = match event {
         ClientEvent::Login { entity_id, .. } => NetUpdate::LoggedIn { entity_id },
         // ECS ingest has already applied this event before `forward` runs. A
@@ -4479,8 +4530,7 @@ fn forward(
             // boundary that owns translation for this class of event, so
             // flattening here would throw the translation key away before it
             // ever reaches `Sim::translator()`.
-            let _ = tx.try_send(NetUpdate::Disconnected(Box::new(reason)));
-            return Err(());
+            return send_forwarded(tx, NetUpdate::Disconnected(Box::new(reason)), true);
         }
         // The client-side twin of the arm above, and the other half of the
         // failure Matthew reported as *"join errors dont get printed anywhere,
@@ -4499,8 +4549,7 @@ fn forward(
         // Like `Disconnect`, this ends the forward loop: the driver has already
         // stopped and the only thing that could follow is the channel closing.
         ClientEvent::SessionFailed { reason } => {
-            let _ = tx.try_send(NetUpdate::Error(reason));
-            return Err(());
+            return send_forwarded(tx, NetUpdate::Error(reason), true);
         }
         // No `HealthChanged`/`ExperienceChanged` arms: those fold into the
         // `Vitals`/`Xp` components on the net thread, and forwarding them here as
@@ -4881,17 +4930,7 @@ fn forward(
             return Ok(());
         }
     };
-    match tx.try_send(update) {
-        Ok(()) => Ok(()),
-        Err(mpsc::TrySendError::Full(update)) => {
-            tracing::error!(target: "net", capacity = NET_RELAY_CAPACITY, update = ?std::mem::discriminant(&update), "inbound relay full; ending network session");
-            Err(())
-        }
-        Err(mpsc::TrySendError::Disconnected(_)) => {
-            tracing::info!(target: "net", "inbound relay receiver closed");
-            Err(())
-        }
-    }
+    send_forwarded(tx, update, false)
 }
 
 // `entity_snapshot` (the `EntityView` -> `EntitySnapshot` lowering) and
@@ -6050,32 +6089,17 @@ mod tests {
         ));
     }
 
-    /// The control for [`NET_RELAY_CAPACITY`]'s whole reasoning: a
-    /// full relay must be reported as "stop the loop", exactly like a
-    /// disconnected receiver, and must never block the caller.
-    ///
-    /// The test exercises the bounded relay directly: a blocking send would
-    /// hang when the third item is offered, while `try_send` must return
-    /// `Full`. The collection below proves capacity was enforced (exactly two
-    /// items land, not three), rather than checking only that a third call
-    /// returned.
     #[test]
-    fn forward_reports_a_full_relay_as_stop_the_loop_not_a_block() {
+    fn full_relay_retains_update_until_consumer_drains_it() {
         use lodestone_client::ResourceKey;
         use std::str::FromStr;
 
-        // A tiny, explicit capacity — this test does not use
-        // `NET_RELAY_CAPACITY` itself, so it stays a control on the
-        // *mechanism* (try_send + Err(()) on Full) rather than on today's
-        // chosen depth.
         let (tx, rx) = mpsc::sync_channel(2);
         let event = |id: i32| ClientEvent::MobEffectRemoved {
             entity_id: id,
             effect: ResourceKey::from_str("minecraft:levitation").unwrap(),
         };
 
-        // Deliberately never drained between calls: fills the channel to
-        // its 2-slot capacity...
         for id in 0..2 {
             forward(
                 &tx,
@@ -6088,39 +6112,66 @@ mod tests {
             .expect("the first two forwards fit inside capacity 2");
         }
 
-        // ...so a third has nowhere to go. `try_send` must report `Full`
-        // immediately (this call returning at all, rather than the test
-        // hanging, is the non-blocking half of the assertion) and `forward`
-        // must translate that into the same `Err(())` a disconnected
-        // receiver produces, so the net loop's existing `if forward(...)
-        // .is_err() { break; }` also stops it here.
-        assert_eq!(
-            forward(
+        let pending = match forward(
                 &tx,
                 &WeatherCell::default(),
                 &BiomeClimateCell::default(),
                 &BiomeNameCell::default(),
                 &CommandTreeCell::default(),
                 event(2),
-            ),
-            Err(()),
-            "a full relay must report Err(()) like a disconnected receiver, \
-             not silently succeed and not block"
-        );
-
-        // And capacity was a real ceiling, not a no-op: exactly the first
-        // two events are recoverable, the third was genuinely dropped
-        // rather than queued past the bound.
+            ) {
+                Err(ForwardError::Full(update, false)) => update,
+                other => panic!("expected retained update, got {other:?}"),
+            };
+        let drained = Arc::new(Notify::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let sender = tokio::spawn({
+                    let drained = Arc::clone(&drained);
+                    let stop = Arc::clone(&stop);
+                    async move { wait_for_relay(&tx, &drained, &stop, pending).await }
+                });
+                tokio::task::yield_now().await;
+                assert!(!sender.is_finished());
+                assert!(matches!(rx.try_recv(), Ok(NetUpdate::EffectRemoved { entity_id: 0, .. })));
+                drained.notify_one();
+                assert!(sender.await.unwrap());
+            });
         let mut recovered = Vec::new();
         while let Ok(NetUpdate::EffectRemoved { entity_id, .. }) = rx.try_recv() {
             recovered.push(entity_id);
         }
-        assert_eq!(
-            recovered,
-            vec![0, 1],
-            "capacity 2 must admit exactly the first two events and drop the \
-             third, not silently grow past the bound"
-        );
+        assert_eq!(recovered, vec![1, 2]);
+    }
+
+    #[test]
+    fn full_relay_shutdown_wakes_waiting_driver() {
+        let (tx, _rx) = mpsc::sync_channel(1);
+        tx.try_send(NetUpdate::Connecting).unwrap();
+        let drained = Arc::new(Notify::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let waiting = tokio::spawn({
+                    let drained = Arc::clone(&drained);
+                    let stop = Arc::clone(&stop);
+                    async move {
+                        wait_for_relay(&tx, &drained, &stop, NetUpdate::Connecting).await
+                    }
+                });
+                tokio::task::yield_now().await;
+                assert!(!waiting.is_finished());
+                stop.store(true, Ordering::SeqCst);
+                drained.notify_one();
+                assert!(!waiting.await.unwrap());
+            });
     }
 
     /// The island this feature closed: `ClientEvent::WeatherChanged` was decoded,
