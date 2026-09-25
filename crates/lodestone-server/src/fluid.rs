@@ -95,8 +95,8 @@
 //!   evaluates it as its own first step instead. Same outcome, one scheduled-tick
 //!   delay later, and it keeps the whole family reachable through one entry
 //!   point.
-//! * **Bubble columns** are not
-//!   modelled at all — this crate has no bubble-column block.
+//! * **Bubble-column motion** is outside this fluid spread path; its block still
+//!   contains a water source for neighboring fluid decisions.
 //! * **A waterlogged block does not originate a spread here.**
 //!   [`run_scheduled_tick`] returns early unless the block is
 //!   `minecraft:water`/`minecraft:lava`, so a waterlogged slab is a source for
@@ -531,13 +531,14 @@ fn property_of<'s>(state: &'s str, key: &str) -> Option<&'s str> {
 /// The real "get fluid state" query — the fluid a block state holds, or `None` for a
 /// block with no fluid.
 ///
-/// Three producers, matching the real liquid block's own fluid-state query
-/// and the real waterloggable-block interface:
+/// The fluid state of liquid, waterlogged, and intrinsically wet blocks:
 ///
 /// * `minecraft:water`/`minecraft:lava`, whose `level` decodes per this module's
 ///   own table (an absent `level` is the default state, `0`, a source);
 /// * any state carrying `waterlogged=true`, whose fluid state is a **water
 ///   source** even though its block is a slab or a fence;
+/// * kelp, seagrass, and bubble columns, which contain a water source without
+///   a `waterlogged` property;
 /// * everything else, `None`.
 #[cfg(test)]
 #[must_use]
@@ -545,6 +546,14 @@ pub fn fluid_state_of(state: &str) -> Option<FluidState> {
     let kind = match base_name(state) {
         "minecraft:water" => FluidKind::Water,
         "minecraft:lava" => FluidKind::Lava,
+        "minecraft:kelp" | "minecraft:kelp_plant" | "minecraft:seagrass"
+        | "minecraft:tall_seagrass" | "minecraft:bubble_column" => {
+            return Some(FluidState {
+                kind: FluidKind::Water,
+                amount: 8,
+                falling: false,
+            });
+        }
         _ => {
             return (property_of(state, "waterlogged") == Some("true")).then_some(FluidState {
                 kind: FluidKind::Water,
@@ -583,6 +592,14 @@ pub fn fluid_state_of_id(state: StateId) -> Option<FluidState> {
     let kind = match state.block() {
         Block::Water => FluidKind::Water,
         Block::Lava => FluidKind::Lava,
+        Block::Kelp | Block::KelpPlant | Block::Seagrass | Block::TallSeagrass
+        | Block::BubbleColumn => {
+            return Some(FluidState {
+                kind: FluidKind::Water,
+                amount: 8,
+                falling: false,
+            });
+        }
         _ => {
             let waterlogged = Properties::from_state_id(state)
                 .get(PropertyKey::Waterlogged)
@@ -2505,6 +2522,44 @@ mod tests {
                 "numeric generated classifier disagrees for {state}"
             );
         }
+    }
+
+    #[test]
+    fn underwater_plants_are_water_sources_and_survive_nearby_flow() {
+        let source = FluidState {
+            kind: FluidKind::Water,
+            amount: 8,
+            falling: false,
+        };
+        for block in [
+            Block::Kelp,
+            Block::KelpPlant,
+            Block::Seagrass,
+            Block::TallSeagrass,
+            Block::BubbleColumn,
+        ] {
+            assert_eq!(fluid_state_of_id(block.default_state()), Some(source), "{block:?}");
+        }
+
+        let rig = Rig::flat();
+        let y = FLOOR_Y + 1;
+        rig.set_block(8, y, 8, "minecraft:water[level=0]");
+        for (x, z) in [(7, 8), (8, 7), (8, 9)] {
+            rig.set_block(x, y, z, "minecraft:stone");
+        }
+        let kelp = Block::Kelp.default_state();
+        <Rig as ChunkSource>::set_block(&rig, 9, y, 8, kelp);
+        let mut queue = ScheduledTickQueue::<ScheduledTickKind>::new();
+        let mut changes = Vec::new();
+        run_scheduled_tick(
+            &rig,
+            FluidEnv::OVERWORLD,
+            BlockPos::new(8, y, 8),
+            &mut queue,
+            100,
+            &mut changes,
+        );
+        assert_eq!(rig.block_state_id(9, y, 8), kelp);
     }
 
     /// The scan's callback count is the work that reaches the spread-admission

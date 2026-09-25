@@ -40,6 +40,11 @@ shortest distance to a hole, capped at a per-fluid search distance. Unlike fire,
 RNG at all; the only randomness in the family is a tick-delay multiplier on deepening lava, which this
 crate does not model (affects lava's timing while thickening, never its final shape).
 
+Kelp, seagrass, tall seagrass, and bubble columns contain source water even without a `waterlogged`
+property. Fluid reads must treat those states as occupied water; otherwise a nearby water tick can
+replace underwater plants as chunks become active. Generated-tick admission still schedules only
+actual liquid blocks, not every block that contains fluid.
+
 Reach is fixed by a per-fluid, per-dimension drop-off: water reaches 7 cells from a source, overworld
 lava reaches 3, nether lava (faster tick, larger drop-off) effectively less far but ticks sooner. The
 block's `level` property (0..15) and the fluid's internal `amount`/`falling` state are two different
