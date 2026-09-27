@@ -178,10 +178,10 @@ cold-region number is the more dramatic-looking figure.
 
 ### Native executor isolation
 
-Native integrated singleplayer runs the shared `run_primary_tick_loop_with_weather` future on a
-dedicated OS thread with its own current-thread runtime. The connection task remains on the shell
-runtime, and terrain generation retains access to Tokio's blocking pool, so synchronous world work
-cannot starve either connection polling or the join stream's generation jobs. Before a primary
+Native integrated singleplayer runs the shared `run_primary_tick_loop_with_weather` future on the
+shell's two-worker network runtime. A long synchronous tick can occupy one worker while the other
+services the connection and client driver. Terrain generation uses a separate bounded dispatcher;
+this runtime separation does not make an individual tick phase shorter. Before a primary
 connection has published its first position, its tick-area fallback is empty: generating a cold origin
 square during that short join window would race the first streamed column. Browser builds keep the
 same tick future on the browser event loop; only the native scheduling boundary differs.
@@ -222,12 +222,15 @@ same tick future on the browser event loop; only the native scheduling boundary 
   section transition outside any held lock, and keep the instrument's own zero-cost idle-world
   control passing — a boundary that accidentally spans part of the wait between ticks, or leaks a
   previous tick's timestamp forward, will not read as exactly zero anymore.
-- **Starting another native long-running world loop**: use `spawn_world_tick_task`, not the ordinary
-  task helper. It must keep the shared tick implementation while isolating synchronous world work
-  from connection progress; do not copy the tick body into a native-only implementation.
+- **Starting another native long-running world loop**: use `spawn_world_tick_task` and keep the
+  shared tick implementation. The shell's network runtime provides two workers, but a long tick
+  still needs its own phase budget and must not synchronously generate terrain.
 
 ## Configuration
 
+- The native shell uses two Tokio workers for integrated play, configured in
+  `native_net_runtime`. Remote play keeps a current-thread runtime; browser
+  scheduling uses neither native runtime.
 - The random-tick draw count per section is vanilla's own game-rule default; this crate has no live
   game-rule registry backing it yet, so it is a fixed constant rather than something read live.
 - The scheduled-tick queues' own per-tick processing cap and the neighbor-update chain-length cap

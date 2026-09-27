@@ -5,13 +5,14 @@ use std::time::Duration;
 
 use lodestone_game::chat_ack::{LastSeenTracker, MessageSignature};
 use lodestone_model::{
-    AdapterError, ClientAction, ClientEvent, ConnectionState, Directive, DimensionId, LoginProfile,
-    PackedMessageSignature, ResourceKey, ResourcePackResponseKind, Rotation, ServerAddress, Vec3,
-    VersionAdapter,
+    AdapterError, ClientAction, ClientEvent, ConnectionState, DeferredChunkLoad, Directive,
+    DimensionId, LoginProfile, PackedMessageSignature, ResourceKey, ResourcePackResponseKind,
+    Rotation, ServerAddress, Vec3, VersionAdapter,
 };
 use lodestone_net::{Connection, NetError, Transport};
 #[cfg(not(target_arch = "wasm32"))]
 use lodestone_net::{generate_shared_secret, rsa_encrypt};
+use lodestone_time::Instant;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::config::{KeepAlivePolicy, PlayerLoadedPolicy, RespawnPolicy};
@@ -344,6 +345,89 @@ fn is_expected_move_no_op(action: &ClientAction, state: ConnectionState) -> bool
     matches!(action, ClientAction::Move { .. }) && state == ConnectionState::Play
 }
 
+fn with_world_write<T>(
+    read_model: &SharedState,
+    update: impl FnOnce(&mut lodestone_world::World) -> T,
+) -> (T, u128, u128) {
+    let waiting = Instant::now();
+    let mut world = read_model.world_write();
+    let acquired = Instant::now();
+    let result = update(&mut world);
+    drop(world);
+    let released = Instant::now();
+    (
+        result,
+        acquired.duration_since(waiting).as_micros(),
+        released.duration_since(acquired).as_micros(),
+    )
+}
+
+fn handle_inbound_packet(
+    adapter: &dyn VersionAdapter,
+    read_model: &SharedState,
+    state: ConnectionState,
+    packet_id: i32,
+    payload: &[u8],
+) -> Result<Vec<Directive>, AdapterError> {
+    let trace_world_lock = tracing::enabled!(target: "client_world", tracing::Level::TRACE);
+    let decode_started = trace_world_lock.then(Instant::now);
+    let deferred = adapter.decode_chunk_packet(state, packet_id, payload)?;
+    let deferred_decode_us = decode_started.map_or(0, |started| started.elapsed().as_micros());
+
+    let (result, lock_wait_us, lock_hold_us, route) = match (deferred, trace_world_lock) {
+        (
+            Some(DeferredChunkLoad {
+                position,
+                chunk,
+                directives,
+            }),
+            true,
+        ) => {
+            let ((), wait_us, hold_us) = with_world_write(read_model, |world| {
+                world.load(position, chunk);
+            });
+            (Ok(directives), wait_us, hold_us, "deferred_chunk")
+        }
+        (
+            Some(DeferredChunkLoad {
+                position,
+                chunk,
+                directives,
+            }),
+            false,
+        ) => {
+            let mut world = read_model.world_write();
+            world.load(position, chunk);
+            (Ok(directives), 0, 0, "deferred_chunk")
+        }
+        (None, true) => {
+            let (result, wait_us, hold_us) = with_world_write(read_model, |world| {
+                adapter.handle_packet(world, state, packet_id, payload)
+            });
+            (result, wait_us, hold_us, "adapter")
+        }
+        (None, false) => {
+            let mut world = read_model.world_write();
+            let result = adapter.handle_packet(&mut *world, state, packet_id, payload);
+            (result, 0, 0, "adapter")
+        }
+    };
+
+    if trace_world_lock {
+        tracing::trace!(
+            target: "client_world",
+            packet_id,
+            route,
+            deferred_decode_us,
+            adapter_or_apply_us = lock_hold_us,
+            lock_wait_us,
+            lock_hold_us,
+            "processed inbound packet world path"
+        );
+    }
+    result
+}
+
 impl<T: Transport> Driver<T> {
     // The driver constructor genuinely needs every collaborator it is handed
     // (connection, adapter, read-model, event sink, policies, and the login
@@ -602,15 +686,13 @@ impl<T: Transport> Driver<T> {
                             // `WorldSink` so decoded chunks are applied in place
                             // and never travel the event channel. The write
                             // guard is dropped before directives are executed.
-                            let result = {
-                                let mut world = self.read_model.world_write();
-                                self.adapter.handle_packet(
-                                    &mut *world,
-                                    self.state,
-                                    packet_id,
-                                    &payload,
-                                )
-                            };
+                            let result = handle_inbound_packet(
+                                self.adapter.as_ref(),
+                                &self.read_model,
+                                self.state,
+                                packet_id,
+                                &payload,
+                            );
                             match result {
                                 Ok(directives) => {
                                     // The world may have gained or lost chunks;

@@ -211,33 +211,9 @@ impl V770Adapter {
             return Ok(directives);
         }
         if packet_id == play::clientbound::LEVEL_CHUNK_WITH_LIGHT {
-            // The chunk framing depends on the current dimension's build-height
-            // window (set at login), which is not carried in the packet itself.
-            let shape = self.current_shape();
-            let mut reader = Reader::new(payload);
-            let chunk = LevelChunkWithLight::decode(&mut reader, &shape)
-                .map_err(|err| AdapterError::Decode(err.to_string()))?;
-            // Zero trailing bytes across the whole packet is the single best
-            // detector of a subtly wrong layout: a misparse almost always
-            // leaves the buffer misaligned, so reject rather than apply a
-            // silently truncated chunk.
-            reader
-                .ensure_empty()
-                .map_err(|err| AdapterError::Decode(err.to_string()))?;
-            // Apply the fully decoded chunk (blocks, biomes, light, heightmaps,
-            // block entities) straight into the client-owned world, moving each
-            // part with no clone. The event then carries only the position.
-            let pos = ChunkPos::new(chunk.x, chunk.z);
-            world.load(
-                WorldChunkPos::new(chunk.x, chunk.z),
-                LoadedChunk::new(
-                    chunk.column,
-                    chunk.light,
-                    chunk.heightmaps,
-                    chunk.block_entities,
-                ),
-            );
-            return Ok(vec![Directive::Emit(ClientEvent::ChunkLoaded { pos })]);
+            let deferred = self.decode_level_chunk_with_light(payload)?;
+            world.load(deferred.position, deferred.chunk);
+            return Ok(deferred.directives);
         }
         if packet_id == play::clientbound::LIGHT_UPDATE {
             // A standalone, light-only update carrying the same six-field light
@@ -929,6 +905,36 @@ impl V770Adapter {
             )]);
         }
         Ok(Vec::new())
+    }
+
+    /// Shared decoder for the normal sink path and deferred-load hook.
+    pub(super) fn decode_level_chunk_with_light(
+        &self,
+        payload: &[u8],
+    ) -> Result<DeferredChunkLoad, AdapterError> {
+        // The framing depends on the current dimension's build-height window,
+        // which is installed at login and is not carried by the packet.
+        let shape = self.current_shape();
+        let mut reader = Reader::new(payload);
+        let chunk = LevelChunkWithLight::decode(&mut reader, &shape)
+            .map_err(|err| AdapterError::Decode(err.to_string()))?;
+        // Reject trailing bytes: a subtly wrong layout otherwise tends to
+        // produce a plausible but truncated column.
+        reader
+            .ensure_empty()
+            .map_err(|err| AdapterError::Decode(err.to_string()))?;
+
+        let pos = ChunkPos::new(chunk.x, chunk.z);
+        Ok(DeferredChunkLoad {
+            position: WorldChunkPos::new(chunk.x, chunk.z),
+            chunk: LoadedChunk::new(
+                chunk.column,
+                chunk.light,
+                chunk.heightmaps,
+                chunk.block_entities,
+            ),
+            directives: vec![Directive::Emit(ClientEvent::ChunkLoaded { pos })],
+        })
     }
 }
 

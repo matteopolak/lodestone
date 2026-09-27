@@ -4860,11 +4860,8 @@ pub fn confinement_rules() -> Vec<ConfinementRule> {
             banned: "Instant::now(",
             allowlist: &[],
         },
-        // lodestone-client confines tokio::time to native_time.rs and bans the
-        // whole Instant/std::fs/std::thread family across the crate (the driver
-        // is event-driven and never reads a wall clock); tokio::spawn is
-        // confined to the spawn.rs seam, whose wasm arm uses
-        // wasm_bindgen_futures::spawn_local.
+        // The driver's opt-in lock trace uses the portable clock; direct std
+        // instants remain forbidden on every client path.
         ConfinementRule {
             label: "lodestone-client time-confinement",
             src_dir: "crates/lodestone-client/src",
@@ -4875,6 +4872,12 @@ pub fn confinement_rules() -> Vec<ConfinementRule> {
             label: "lodestone-client instant-ban",
             src_dir: "crates/lodestone-client/src",
             banned: "Instant::now(",
+            allowlist: &["driver.rs"],
+        },
+        ConfinementRule {
+            label: "lodestone-client std-instant-ban",
+            src_dir: "crates/lodestone-client/src",
+            banned: "std::time::Instant",
             allowlist: &[],
         },
         ConfinementRule {

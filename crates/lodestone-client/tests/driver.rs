@@ -51,6 +51,33 @@ struct FakeAdapter {
     /// store the same way — asserting on a `ChunkLoaded` event instead would prove
     /// only that a notification travelled.
     chunks: HashMap<(ConnectionState, i32), Vec<(i32, i32)>>,
+    deferred_chunks:
+        HashMap<(ConnectionState, i32), (lodestone_world::ChunkPos, lodestone_world::LoadedChunk)>,
+    chunk_lock_probe: Option<ChunkLockProbe>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ChunkLockProbe {
+    world: Arc<Mutex<Option<lodestone_ecs::ChunkWorld>>>,
+    observations: Arc<Mutex<Vec<bool>>>,
+}
+
+impl ChunkLockProbe {
+    fn record_is_unlocked(&self, timeout: Duration) {
+        let Some(world) = self.world.lock().unwrap().clone() else {
+            return;
+        };
+        let (read_tx, read_rx) = std::sync::mpsc::sync_channel(1);
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let _ = started_tx.send(());
+            let _ = world.len();
+            let _ = read_tx.send(());
+        });
+        let started = started_rx.recv_timeout(Duration::from_secs(1)).is_ok();
+        let unlocked = started && read_rx.recv_timeout(timeout).is_ok();
+        self.observations.lock().unwrap().push(unlocked);
+    }
 }
 
 const KEEPALIVE_RESP_ID: i32 = 0x30;
@@ -163,6 +190,39 @@ impl FakeAdapter {
         self
     }
 
+    fn deferred_chunk_on(
+        mut self,
+        state: ConnectionState,
+        packet_id: i32,
+        at: (i32, i32),
+    ) -> Self {
+        self.deferred_chunks.insert(
+            (state, packet_id),
+            (
+                lodestone_world::ChunkPos { x: at.0, z: at.1 },
+                air_column(),
+            ),
+        );
+        self.script.insert(
+            (state, packet_id),
+            vec![Directive::Emit(ClientEvent::ChunkLoaded {
+                pos: lodestone_model::ChunkPos { x: at.0, z: at.1 },
+            })],
+        );
+        self
+    }
+
+    fn probe_chunk_lock(mut self, probe: ChunkLockProbe) -> Self {
+        self.chunk_lock_probe = Some(probe);
+        self
+    }
+
+    fn record_chunk_lock_probe(&self, timeout: Duration) {
+        if let Some(probe) = &self.chunk_lock_probe {
+            probe.record_is_unlocked(timeout);
+        }
+    }
+
     fn calls(&self) -> Arc<Mutex<Vec<(ConnectionState, i32)>>> {
         Arc::clone(&self.calls)
     }
@@ -196,6 +256,9 @@ impl VersionAdapter for FakeAdapter {
         packet_id: i32,
         _payload: &[u8],
     ) -> Result<Vec<Directive>, AdapterError> {
+        if !self.deferred_chunks.contains_key(&(state, packet_id)) {
+            self.record_chunk_lock_probe(Duration::from_millis(50));
+        }
         self.calls.lock().unwrap().push((state, packet_id));
         if self.fail.contains(&(state, packet_id)) {
             return Err(AdapterError::Decode(format!("boom at {packet_id}")));
@@ -213,6 +276,27 @@ impl VersionAdapter for FakeAdapter {
             .get(&(state, packet_id))
             .cloned()
             .unwrap_or_default())
+    }
+
+    fn decode_chunk_packet(
+        &self,
+        state: ConnectionState,
+        packet_id: i32,
+        _payload: &[u8],
+    ) -> Result<Option<lodestone_model::DeferredChunkLoad>, AdapterError> {
+        let Some((position, chunk)) = self.deferred_chunks.get(&(state, packet_id)).cloned() else {
+            return Ok(None);
+        };
+        self.record_chunk_lock_probe(Duration::from_secs(1));
+        Ok(Some(lodestone_model::DeferredChunkLoad {
+            position,
+            chunk,
+            directives: self
+                .script
+                .get(&(state, packet_id))
+                .cloned()
+                .unwrap_or_default(),
+        }))
     }
 
     fn encode_action(
@@ -1590,6 +1674,62 @@ async fn a_dimension_change_empties_the_chunk_store_and_a_death_respawn_does_not
         }
     }
     assert!(wrong.is_empty(), "{wrong:#?}");
+
+    drop(handle);
+}
+
+/// The legacy locked packet path is the negative control for deferred decoding.
+#[tokio::test]
+async fn deferred_chunk_decode_releases_the_world_lock_until_apply() {
+    const DEFERRED_PACKET: i32 = 0x51;
+    const FALLBACK_PACKET: i32 = 0x52;
+    const DEFERRED_POS: (i32, i32) = (3, -5);
+    const FALLBACK_POS: (i32, i32) = (-7, 4);
+
+    let probe = ChunkLockProbe::default();
+    let adapter = FakeAdapter::new()
+        .begin(vec![Directive::SetState(ConnectionState::Play)])
+        .deferred_chunk_on(ConnectionState::Play, DEFERRED_PACKET, DEFERRED_POS)
+        .chunks_on(ConnectionState::Play, FALLBACK_PACKET, &[FALLBACK_POS])
+        .probe_chunk_lock(probe.clone());
+    let (handle, mut events, mut peer) = start(adapter, KeepAlivePolicy::Automatic);
+    *probe.world.lock().unwrap() = Some(handle.chunk_world());
+
+    peer.write_packet(DEFERRED_PACKET, &[]).await.unwrap();
+    assert_eq!(
+        events.recv().await,
+        Some(ClientEvent::ChunkLoaded {
+            pos: lodestone_model::ChunkPos {
+                x: DEFERRED_POS.0,
+                z: DEFERRED_POS.1,
+            },
+        })
+    );
+    assert!(handle.is_chunk_loaded(lodestone_model::ChunkPos {
+        x: DEFERRED_POS.0,
+        z: DEFERRED_POS.1,
+    }));
+
+    peer.write_packet(FALLBACK_PACKET, &[]).await.unwrap();
+    assert_eq!(
+        events.recv().await,
+        Some(ClientEvent::ChunkLoaded {
+            pos: lodestone_model::ChunkPos {
+                x: FALLBACK_POS.0,
+                z: FALLBACK_POS.1,
+            },
+        })
+    );
+    assert!(handle.is_chunk_loaded(lodestone_model::ChunkPos {
+        x: FALLBACK_POS.0,
+        z: FALLBACK_POS.1,
+    }));
+    assert_eq!(
+        *probe.observations.lock().unwrap(),
+        vec![true, false],
+        "the deferred decoder must run outside the world lock, while the fallback adapter path remains the detector's locked negative control"
+    );
+    assert_eq!(handle.loaded_chunk_count(), 2);
 
     drop(handle);
 }

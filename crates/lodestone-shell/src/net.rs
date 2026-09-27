@@ -23,7 +23,7 @@
 //! `cargo check -p lodestone-shell --no-default-features` meaningful.
 //!
 //! The client is async (tokio); the shell's render loop is not. So a background
-//! thread owns a current-thread runtime and the [`ClientHandle`]/`EventStream`,
+//! thread owns a runtime and the [`ClientHandle`]/`EventStream`,
 //! and forwards decoded events as [`NetUpdate`]s down a synchronous channel the
 //! app drains once per frame.
 //!
@@ -1136,13 +1136,9 @@ impl NetClient {
     /// where a build with no version family is turned into a reported error
     /// instead of a thread that starts and finds nothing.
     ///
-    /// The server and the client share the net thread's current-thread runtime.
-    /// That is deliberate rather than incidental: `IntegratedServer::open_in_memory`
-    /// spawns its serving task on whatever runtime is entered, so hosting it here
-    /// keeps the whole session — server tick, client driver, and the event fold —
-    /// on one thread with no cross-thread synchronisation at all, and makes the
-    /// server's lifetime exactly the session's. The shell's render loop is
-    /// unaffected; it still drains [`NetUpdate`]s once per frame.
+    /// The server and client share the net runtime. Its workers let a long
+    /// world tick run without also stopping socket reads and client events.
+    /// The render loop still drains [`NetUpdate`]s once per frame.
     ///
     /// `session` means what it does for [`Self::connect`] (§4.1(c)): pass the
     /// caller's `World` or the fold lands somewhere nothing reads. Prefer
@@ -2088,10 +2084,8 @@ pub fn entity_light_at(
 /// **`async fn`, and the *whole* driver — `run` below is a native wrapper.** The two
 /// targets differ only in how this future is driven:
 ///
-/// * **Native.** `run` builds a `current_thread` runtime on its own OS thread and
-///   `block_on`s this. Unchanged from before the split, including the property the
-///   comments inside rely on: a runtime *is* entered, so the integrated server's
-///   serving task has somewhere to go.
+/// * **Native.** `run` builds a two-worker runtime for integrated play and a
+///   current-thread runtime for remote play, then `block_on`s this.
 /// * **Browser.** `NetClient::spawn` hands this straight to
 ///   `wasm_bindgen_futures::spawn_local`. There is no thread and no `block_on`, and
 ///   neither is available: `std::thread::Builder::spawn` returns
@@ -3503,7 +3497,7 @@ async fn run_async(
         }
 }
 
-/// Native entry point: a `current_thread` runtime, blocking on [`run_async`].
+/// Native entry point: an integrated or remote runtime, blocking on [`run_async`].
 #[cfg(not(target_arch = "wasm32"))]
 #[expect(
     clippy::too_many_arguments,
@@ -3532,10 +3526,7 @@ fn run(
     session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
     identity: LoginProfile,
 ) {
-    let runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
+    let runtime = match native_net_runtime(matches!(&origin, Origin::Integrated { .. })) {
         Ok(rt) => rt,
         Err(e) => {
             let _ = tx.try_send(NetUpdate::Error(format!("runtime: {e}")));
@@ -3566,6 +3557,20 @@ fn run(
         session,
         identity,
     ));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_net_runtime(integrated: bool) -> std::io::Result<tokio::runtime::Runtime> {
+    if integrated {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+    } else {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+    }
 }
 
 /// Builds the chunk source (and its declared `(min_y, height)`) for a freshly
@@ -4957,6 +4962,40 @@ fn forward(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_runtime_services_packets_during_a_slow_tick() {
+        use std::time::Duration;
+
+        async fn packet_latency() -> Duration {
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let slow_tick = tokio::spawn(async move {
+                let _ = entered_tx.send(());
+                std::thread::sleep(Duration::from_millis(350));
+            });
+            entered_rx.await.expect("slow tick started");
+
+            let started = std::time::Instant::now();
+            let packet = tokio::spawn(async { 7_u8 });
+            assert_eq!(packet.await.expect("packet task completed"), 7);
+            let latency = started.elapsed();
+            slow_tick.await.expect("slow tick completed");
+            latency
+        }
+
+        let one_worker = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("control runtime");
+        let control = one_worker.block_on(packet_latency());
+        assert!(control >= Duration::from_millis(300), "control latency: {control:?}");
+
+        let runtime = native_net_runtime(true).expect("net runtime");
+        let observed = runtime.block_on(packet_latency());
+        assert!(observed < Duration::from_millis(250), "packet latency: {observed:?}");
+    }
 
     // `unique_username` is a `lodestone-testsupport` helper and this crate now
     // depends on that crate **only** as a dev dependency, so this `use` is

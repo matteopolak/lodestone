@@ -10,8 +10,9 @@ players wait asynchronously instead of growing an unbounded queue.
 
 ## How it works
 
-`ColumnPipeline` keeps wire order in its own queue and submits one job per
-window slot to Tokio's blocking pool. Results return through oneshot channels,
+`ColumnPipeline` keeps wire order in its own queue and submits bounded jobs to
+Tokio's blocking pool. A production job can own a cohort of up to 64 targets.
+Results return through oneshot channels,
 so awaiting a slow ordered head never blocks the runtime. A request can hold a
 region lease while its immutable batch runs on the Rayon compute pool. Keeping
 the blocking lease wait off Rayon prevents it from occupying a worker needed
@@ -20,13 +21,12 @@ The synchronous ordered-batch seam reserves the complete dispatcher budget
 before entering Rayon; if an unrelated async producer already owns any permit,
 it runs the batch serially. A nested batch from an admitted request reuses
 Rayon without acquiring a second permit. Indexed collection preserves the
-request's result order. The join path admits one request per window slot,
-keeping backpressure and ordered emission explicit.
+request's result order. The join path retains backpressure and ordered emission.
 
 The initial-spawn search uses the same handoff through the server runtime seam:
 native joins submit the synchronous probe to this dispatcher, while the browser
 keeps its single-threaded path inline. The blocking work never occupies the
-world-tick runtime thread.
+network runtime workers.
 
 Several connections share this same bounded permit gate. Admission is a
 non-blocking try-operation: when the pool is saturated, a caller keeps its job
@@ -130,11 +130,13 @@ cargo test --release -p lodestone-server --lib \
 
 ## Configuration
 
-No environment variable or runtime flag changes the pool. Native worker count
-is `max(available_parallelism - 1, 1)`, reserving one hardware thread for the
-runtime and authoritative tick. `generation_window` follows that worker count
-and keeps its floor of two; saturation is backpressure rather than queue
-growth. WASM has no native pool and keeps the serial platform-specific path.
+Native worker count defaults to `max(available_parallelism - 1, 1)`;
+`LODESTONE_WORLDGEN_WORKERS` can override it with a positive integer.
+`generation_window` follows that worker count and keeps its floor of two;
+saturation is backpressure rather than queue growth. The Rayon budget does not
+include blocking cohort coordinators or the shell's two network workers, so
+measure total CPU contention before increasing the override. WASM has no native
+pool and keeps the serial platform-specific path.
 
 ## Dependencies
 

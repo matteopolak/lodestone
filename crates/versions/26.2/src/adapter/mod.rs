@@ -24,7 +24,7 @@ use lodestone_model::{
     ClientSettings, CollisionRule, CommandBlockMode, ConnectionState, ContainerClickType,
     ContainerStateId,
     ContainerSlotChange, DeathLocation, DebugSampleKind, Difficulty, DimensionTypeInfo, Directive,
-    DisplaySlot,
+    DeferredChunkLoad, DisplaySlot,
     DisplayedSkinParts,
     EntityBaseDimensions,
     EntityEquipment,
@@ -805,6 +805,20 @@ impl VersionAdapter for V770Adapter {
                 Err(AdapterError::UnsupportedPacketState { state })
             }
         }
+    }
+
+    fn decode_chunk_packet(
+        &self,
+        state: ConnectionState,
+        packet_id: i32,
+        payload: &[u8],
+    ) -> Result<Option<DeferredChunkLoad>, AdapterError> {
+        if state == ConnectionState::Play
+            && packet_id == play::clientbound::LEVEL_CHUNK_WITH_LIGHT
+        {
+            return self.decode_level_chunk_with_light(payload).map(Some);
+        }
+        Ok(None)
     }
 
     fn encode_action(
