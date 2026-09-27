@@ -20,6 +20,15 @@ use super::{
     ServerBound, ServerDirective,
 };
 
+pub type DetachedLightCompute =
+    fn(&ChunkColumn, &[(i32, i32, &ChunkColumn)], Dimension) -> lodestone_world::ColumnLight;
+pub type DetachedPacketEncode = fn(
+    i32,
+    i32,
+    &crate::worldgen_session::PacketSnapshot,
+    Dimension,
+) -> Result<ServerDirective, ChunkEncodeError>;
+
 /// Which worldgen data bundle a [`ServerProtocol`]'s hosting needs — the
 /// version gate between the worldgen data this crate embeds and
 /// the protocol family being served.
@@ -592,6 +601,14 @@ pub trait ServerProtocol: Send + Sync {
     /// retained snapshot over a fresh reconstruction.
     fn retains_initial_column_light(&self) -> bool {
         false
+    }
+
+    fn detached_light_compute(&self) -> Option<DetachedLightCompute> {
+        None
+    }
+
+    fn detached_packet_encode(&self) -> Option<DetachedPacketEncode> {
+        None
     }
 
     /// Computes light for `column` with the eight adjacent columns available.
@@ -2022,6 +2039,14 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn retains_initial_column_light(&self) -> bool {
         (**self).retains_initial_column_light()
+    }
+
+    fn detached_light_compute(&self) -> Option<DetachedLightCompute> {
+        (**self).detached_light_compute()
+    }
+
+    fn detached_packet_encode(&self) -> Option<DetachedPacketEncode> {
+        (**self).detached_packet_encode()
     }
 
     fn compute_column_light_with_neighbours(

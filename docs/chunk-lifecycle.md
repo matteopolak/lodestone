@@ -114,16 +114,14 @@ generation reduces construction work, not the number of retained meshes or packe
 ceiling must therefore pair the near band with an explicit distant-LOD/residency policy rather
 than sizing the normal chunk store to the full square.
 
-### Encoding is offloaded too, and it must ride the same worker that generated the column
+### Encoding is offloaded from the connection
 
-Protocol-level encoding of a generated column is moved off the connection task and into the same
-blocking worker that generated it, so the task that owes a player a reply to something they just
-did never spends a large fraction of a millisecond's worth of instructions encoding terrain first.
-Early on, the encode step was itself accidentally left serial — generation was fanned out, joined,
-and only then walked one column at a time on a single thread to encode, which relocated the cost
-rather than removing it. The fix applies the encode inside the very worker that generated each
-column. Wire order is unaffected either way, since emission order is fixed at the moment a batch is
-*enqueued*, not by completion order.
+Generated-column jobs may encode in the worker that produced the column. A detached packet snapshot
+uses the protocol's optional `detached_packet_encode` function in the bounded dispatcher, because
+preparing its retained light and serializing the body are CPU-heavy even after generation finishes.
+The connection awaits that owned result from its selectable join future, so packet reads and tick
+updates remain serviceable. Protocols without the capability keep the direct path. Wire order is
+fixed by request admission, not worker completion order.
 
 `ChunkEncoder::try_encode_chunk` and `ServerProtocol::try_encode_chunk` make that work fallible
 without coupling an encoder to a socket or a particular transport. Both default to the established

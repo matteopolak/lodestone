@@ -3571,6 +3571,22 @@ impl ServerProtocol for V770ServerProtocol {
         true
     }
 
+    fn detached_light_compute(&self) -> Option<lodestone_server::DetachedLightCompute> {
+        Some(compute_served_light_with_neighbours)
+    }
+
+    fn detached_packet_encode(&self) -> Option<lodestone_server::DetachedPacketEncode> {
+        Some(|cx, cz, snapshot, dimension| {
+            lodestone_server::encode_packet_snapshot_with_protocol(
+                &V770ServerProtocol,
+                cx,
+                cz,
+                snapshot,
+                dimension,
+            )
+        })
+    }
+
     fn try_encode_chunk_with_neighbours(
         &self,
         cx: i32,

@@ -654,7 +654,7 @@ pub use plugin_channels::{
     UNREGISTER_CHANNEL,
 };
 pub use protocol::{
-    Abilities, ChunkEncodeError, ChunkEncoder, EntitySnapshot, MerchantOfferOut, MetadataField,
+    Abilities, ChunkEncodeError, ChunkEncoder, DetachedLightCompute, DetachedPacketEncode, EntitySnapshot, MerchantOfferOut, MetadataField,
     PlayerListing, ResourcePackPush, ResourcePackUrl, ResourcePackUrlError, ServerBound,
     ServerDirective, ServerProtocol, WorldgenScope,
 };
@@ -685,7 +685,7 @@ pub use server::{
     // time that the radius it raises the slider to is one `ViewTracker::max_radius`
     // actually permits — a premise it must not restate as a literal.
     MAX_CLIENT_VIEW_RADIUS,
-    encode_chunk_with_source, EntitySource, NoEntities, ResourcePackPushFeed, ServeSummary,
+    encode_chunk_with_source, encode_packet_snapshot_with_protocol, EntitySource, NoEntities, ResourcePackPushFeed, ServeSummary,
     ServerError, serve_connection,
     serve_connection_with_commands, serve_connection_with_mob_events,
     serve_connection_with_plugin_channels, serve_connection_with_resource_pack,

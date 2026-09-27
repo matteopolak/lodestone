@@ -207,7 +207,12 @@ snapshot contains the mutation; an already-delivered neighbour still receives an
 light change. Producers that know both block states compare emission and dampening when they
 publish the change; an unknown prior state conservatively requires relighting. Every block update
 is still sent. Only light-changing updates add destinations to the per-connection FIFO queue,
-which deduplicates across batches and services one destination per connection-loop pass.
+which deduplicates across batches. A native connection with a shared source and a protocol-provided
+pure light computation admits one destination at a time to the bounded worker dispatcher. It keeps
+reading packets while the worker settles the resident footprint, then sends the light update only
+if the settled snapshot is still current and the destination remains delivered. A later block edit
+can therefore invalidate an in-flight result without letting stale light overwrite its update.
+Other source and protocol combinations retain the synchronous resident-only path.
 Scheduled fluid writes capture the replaced state immediately before each write, so changes to a
 fluid's level can avoid a full light recomputation when their light properties are unchanged.
 
@@ -259,7 +264,7 @@ mutation in a column that the joining connection has not streamed, so it copies 
 footprint through `ChunkSource::resident_column` and sends nothing when any member is absent. The
 later chunk snapshot is authoritative and already includes that mutation. This avoids making a
 connection timer synchronously generate a cold 3×3 footprint, which would otherwise monopolize the
-current-thread connection runtime and prevent that very join stream from progressing. The compatible
+connection runtime and prevent that very join stream from progressing. The compatible
 whole-column fallback also uses the resident centre snapshot.
 
 The connection sends every tick-feed block update even while its initial join stream is still in
@@ -314,9 +319,9 @@ above.
   (a block swapped for another of identical light behavior) turns routine building into a stream of
   unnecessary full-column resends.
 - **Keep timer-driven relights resident-only.** A direct player edit can deliberately load its own
-  known area, but a world-tick feed may precede a join snapshot. Use
-  `send_resident_lighting_for_tick` for the latter so a background mutation cannot starve connection
-  progress by generating terrain from the connection runtime.
+  known area, but a world-tick feed may precede a join snapshot. A detached compute capability must
+  use the same settlement and invalidation rules as the synchronous path. Check the retained centre
+  again before sending its result, because another edit may finish while the worker runs.
 - **Keep the block-change feed's light decision at the producer.** A connection sees the new block
   after the write and cannot recover the old light properties from that cell. When extending a tick
   producer, publish both old and new states if available; use the conservative unknown-old path
@@ -328,8 +333,10 @@ above.
 ## Configuration
 
 There is no runtime setting. `ServerProtocol::retains_initial_column_light` is the capability
-boundary for exact initial-light settlement; its default is `false`. Light-relevant edits still use
-the protocol's ordinary light-computation hooks. The per-block-state census is fixed data for a given
+boundary for exact initial-light settlement; its default is `false`. The optional
+`ServerProtocol::detached_light_compute` supplies a pure function for native background tick relights;
+the 26.2 protocol implements it. Light-relevant direct player edits still use the ordinary
+light-computation hooks. The per-block-state census is fixed data for a given
 game version, regenerated from its real source only when that version changes.
 
 ## Dependencies
@@ -339,5 +346,6 @@ game version, regenerated from its real source only when that version changes.
   name/property census it is keyed through.
 - The chunk source/column types the light is computed over — see `docs/chunk-storage.md` and
   `docs/chunk-lifecycle.md`.
+- The native bounded worker dispatcher for detached tick-light settlement.
 - An independent reference server (for oracle comparison only) and the pinned game-version data
   sources behind the census; neither is required for the engine to run in production.

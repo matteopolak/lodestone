@@ -1558,6 +1558,22 @@ impl PacketSnapshot {
     }
 
     #[cfg(test)]
+    pub(crate) fn for_test_with_neighbours(
+        column: ChunkColumn,
+        neighbours: Vec<(ChunkCoordinate, ChunkColumn)>,
+    ) -> Self {
+        let mut snapshot = Self::for_test(column);
+        snapshot.neighbours = neighbours
+            .into_iter()
+            .map(|(coordinate, column)| PacketNeighbour {
+                coordinate,
+                column: PacketNeighbourColumn::Materialized(Arc::new(column)),
+            })
+            .collect();
+        snapshot
+    }
+
+    #[cfg(test)]
     pub(crate) fn column_handle(&self) -> Arc<ChunkColumn> {
         Arc::clone(&self.column)
     }
