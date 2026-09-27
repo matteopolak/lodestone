@@ -64,6 +64,12 @@ waterlogged block also does not *originate* a spread of its own in this port —
 producing more reach than vanilla, only occasionally less. No bucket item exists here, so a player's only
 route to a new fluid source is world edits.
 
+The tick path resolves fluid occupancy and waterlogging through one typed table indexed by `StateId`.
+It is built once from the built-in state corpus; repeated slope probes do not decode properties.
+Each slope search keeps its read/hole scratch in a fixed 11×11 grid around the source instead of
+allocating coordinate hash maps. The grid covers the maximum four-step slope search plus its outer
+candidate. If the slope distance changes, update that bound and the edge-case tests together.
+
 ### Bubble columns
 
 `crates/lodestone-physics/src/player.rs`'s `apply_bubble_column` applies a vertical velocity impulse

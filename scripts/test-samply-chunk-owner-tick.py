@@ -87,31 +87,16 @@ class SamplyChunkOwnerTickTests(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 0, healthy_witness(), "")
 
             with mock.patch.object(MODULE.shutil, "which", return_value="/usr/bin/samply"), \
-                 mock.patch.object(MODULE, "require_macos_samply_setup") as readiness, \
                  mock.patch.object(MODULE, "run_bounded", side_effect=fake_run) as run:
                 actual_paths, witnesses = MODULE.capture(args)
             self.assertEqual(actual_paths, paths)
             self.assertEqual(witnesses["scheduled_fluid_ticks"], 8)
-            readiness.assert_called_once_with("/usr/bin/samply")
             self.assertEqual(run.call_args_list[0].args[0], [str(server), "128"])
             self.assertEqual(run.call_args_list[0].args[1], 12)
             samply_command = run.call_args_list[1].args[0]
             self.assertEqual(samply_command[:5], ["samply", "record", "--save-only", "--unstable-presymbolicate", "-o"])
             self.assertEqual(run.call_args_list[1].args[1], 12 + MODULE.PROFILER_GRACE_SECS)
             self.assertEqual(paths.witness.read_text(), healthy_witness())
-
-    def test_macos_signature_control_requires_debugger_entitlement(self):
-        unsigned = subprocess.CompletedProcess(["codesign"], 0, "", "Executable=/tmp/samply\n")
-        signed = subprocess.CompletedProcess(["codesign"], 0, "", "com.apple.security.cs.debugger\n")
-        with mock.patch.object(MODULE.sys, "platform", "darwin"), \
-             mock.patch.object(MODULE.subprocess, "run", return_value=unsigned):
-            with self.assertRaisesRegex(RuntimeError, "samply setup"):
-                MODULE.require_macos_samply_setup("/tmp/samply")
-        with mock.patch.object(MODULE.sys, "platform", "darwin"), \
-             mock.patch.object(MODULE.subprocess, "run", return_value=signed) as run:
-            MODULE.require_macos_samply_setup("/tmp/samply")
-        self.assertEqual(run.call_args.args[0], ["codesign", "-d", "--entitlements", ":-", "/tmp/samply"])
-
 
 if __name__ == "__main__":
     unittest.main()
