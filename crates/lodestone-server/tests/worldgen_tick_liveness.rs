@@ -26,7 +26,7 @@ use support::{
     ActionProbe, BLOCK_UPDATE, BLOCKED_COLUMN, BUTTON_OFF, BUTTON_ON, BUTTON_POS, CHUNK,
     CHUNK_BATCH_FINISHED, CHUNK_BATCH_START, CLIENT_ACTION, FINISH_CONFIGURATION, GenerationGate,
     HANDSHAKE, LivenessProtocol, LivenessWorld, LOGIN_ACKNOWLEDGED, LOGIN_START, LOGIN_SUCCESS,
-    MOVE_PLAYER, USE_BUTTON,
+    MOVE_PLAYER, PLAYER_LOADED, USE_BUTTON,
 };
 
 const VIEW_RADIUS: i32 = 4;
@@ -186,6 +186,10 @@ async fn integrated_ticks_and_play_packets_continue_during_held_worldgen() {
 
     let initial_view = join_and_read_view(&mut client, VIEW_RADIUS).await;
     assert_eq!(initial_view.len(), 81, "join precondition must be complete");
+    client
+        .write_packet(PLAYER_LOADED, &[])
+        .await
+        .expect("client loaded initial terrain");
     assert_eq!(world.state(BUTTON_POS), BUTTON_OFF);
 
     // Move to the button's retained/ticked column before clicking it. The
