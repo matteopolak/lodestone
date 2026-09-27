@@ -28,10 +28,11 @@ native joins submit the synchronous probe to this dispatcher, while the browser
 keeps its single-threaded path inline. The blocking work never occupies the
 network runtime workers.
 
-The 26.2 protocol can encode a complete detached packet snapshot and settle a resident tick-light
-footprint on this pool. Packet bytes still return to the connection in admission order. Light
-settlement admits one destination per connection; before sending its result, the connection checks
-that the destination is still delivered and the retained snapshot has not been invalidated.
+The 26.2 protocol can encode a complete detached packet snapshot and settle tick or direct-edit
+lighting on this pool. Packet bytes still return to the connection in admission order. Light
+settlement admits one destination per connection; tick changes use resident terrain only, while
+direct edits may complete a cold footprint on the worker. Before sending a light result, the
+connection checks that its destination is still delivered and its retained snapshot is current.
 
 Several connections share this same bounded permit gate. Admission is a
 non-blocking try-operation: when the pool is saturated, a caller keeps its job
