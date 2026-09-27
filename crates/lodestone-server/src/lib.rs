@@ -654,7 +654,7 @@ pub use plugin_channels::{
     UNREGISTER_CHANNEL,
 };
 pub use protocol::{
-    Abilities, ChunkEncodeError, ChunkEncoder, DetachedLightCompute, DetachedPacketEncode, EntitySnapshot, MerchantOfferOut, MetadataField,
+    Abilities, ChunkEncodeError, ChunkEncoder, DetachedLightCompute, DetachedPacketEncode, DetachedSourceEncode, EntitySnapshot, MerchantOfferOut, MetadataField,
     PlayerListing, ResourcePackPush, ResourcePackUrl, ResourcePackUrlError, ServerBound,
     ServerDirective, ServerProtocol, WorldgenScope,
 };

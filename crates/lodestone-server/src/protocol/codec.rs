@@ -28,6 +28,12 @@ pub type DetachedPacketEncode = fn(
     &crate::worldgen_session::PacketSnapshot,
     Dimension,
 ) -> Result<ServerDirective, ChunkEncodeError>;
+pub type DetachedSourceEncode = fn(
+    &dyn crate::chunk::ChunkSource,
+    i32,
+    i32,
+    &ChunkColumn,
+) -> Result<ServerDirective, ChunkEncodeError>;
 
 /// Which worldgen data bundle a [`ServerProtocol`]'s hosting needs — the
 /// version gate between the worldgen data this crate embeds and
@@ -608,6 +614,10 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     fn detached_packet_encode(&self) -> Option<DetachedPacketEncode> {
+        None
+    }
+
+    fn detached_source_encode(&self) -> Option<DetachedSourceEncode> {
         None
     }
 
@@ -2047,6 +2057,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn detached_packet_encode(&self) -> Option<DetachedPacketEncode> {
         (**self).detached_packet_encode()
+    }
+
+    fn detached_source_encode(&self) -> Option<DetachedSourceEncode> {
+        (**self).detached_source_encode()
     }
 
     fn compute_column_light_with_neighbours(
