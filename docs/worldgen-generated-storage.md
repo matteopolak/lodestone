@@ -2,19 +2,22 @@
 
 ## What it is
 
-`lodestone-worldgen` returns an immutable `GeneratedColumn` whose block-state
-palette is assigned in dense first-write order and whose block indices are
-stored in 16-row sections. A section is either uniform or a packed `u16`
-index stream, while biome, entity, heightmap, spawn, and stage products remain
-sidecars on the column.
+`lodestone-worldgen` returns an immutable `GeneratedColumn` with a block-state
+palette in first-introduction order. Full columns store palette indices in
+16-row sections; shaped Overworld columns may retain canonical state IDs until
+a section-oriented consumer needs them. Biome, entity, heightmap, spawn, and
+stage products remain sidecars.
 
 ## How it works
 
-The final dense grid is converted once at the output boundary. Its palette
-order and flat `(y, z, x)` cell order are retained exactly; compaction only
-changes the cell carrier. Shaped prefixes retain the dense `u16` carrier and
-share it across clones; section words are created only if a section-oriented
-consumer asks for them. Full outputs still compact immediately. Uniform
+The production Overworld materializer rewrites its packed fill carrier into
+canonical `u16` state IDs in place. It records palette introductions in the
+existing observable `z, x, y` order, which differs from the carrier's flat
+`(y, z, x)` layout. Shaped prefixes share the raw carrier across clones and
+serve state reads without building a second palette-index field. If a shaped
+consumer asks for sections, a direct state-to-palette lookup packs them on
+demand. Full outputs pack immediately and do not retain the raw carrier. The
+older indexed-grid path remains available to other callers. Uniform
 sections own no packed payload. Mixed sections derive the smallest width needed
 by their largest column-palette index and pack values into `u64` words without
 crossing word boundaries. A write widens or promotes only its section and
@@ -32,18 +35,20 @@ to classify ticking cells from its palette metadata, so generated-column
 adoption performs no second 98,304-cell observer scan. `from_flat` remains
 available for callers that need only storage.
 
-`GeneratedColumn::into_compact` moves the carrier and all sidecars to the
-lifecycle consumer, compacting a shaped dense carrier at that boundary when
-needed. Read-only `get`, `for_each_section`, and non-zero-count operations stay
-on the dense carrier. `into_raw` remains a compatibility adapter and expands
-only an already compact carrier; a lazy dense carrier can move its existing
-flat buffer directly. Conversion counters therefore distinguish retained dense
-products from actual section packing, widening, and compatibility expansion.
+`GeneratedColumn::into_compact` moves the packed carrier and all sidecars to the
+lifecycle consumer, packing a shaped raw carrier at that boundary when needed.
+Direct state reads and the fallback content fingerprint use canonical IDs
+without forcing that conversion. `into_raw` remains a compatibility adapter;
+indexed shaped carriers can move their existing flat buffer directly.
+Conversion counters distinguish retained raw products from section packing,
+widening, and compatibility expansion.
 
 ## How to change it
 
 Keep the palette separate from section storage: section indices are local only
-to the column-wide palette. Any layout change must compare every compact read
+to the column-wide palette, while raw IDs identify states globally. Preserve
+introductions even when their final cells are overwritten. Any layout change
+must compare every compact read
 against an independently populated flat field, including a negative minimum Y,
 uniform and mixed sections, width transitions, and a single-cell mutation.
 Summary changes must likewise compare against independent scalar controls,
@@ -64,7 +69,7 @@ their indices are `u16`; widths are derived from the largest index present.
 
 ## Dependencies
 
-The storage module uses only the standard library and the worldgen counter
-boundary. `GeneratedColumn` additionally carries the existing biome, block
+The storage module uses the canonical state registry, standard library, and
+worldgen counter boundary. `GeneratedColumn` additionally carries the biome, block
 entity, heightmap, spawn, and stage sidecars; the server lifecycle owns the
 next representation after consuming the compact handoff.

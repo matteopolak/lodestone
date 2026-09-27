@@ -274,31 +274,26 @@ fn generated_column_fingerprint(
     // Authenticated production Overworld generators take the provenance path
     // below and never enter this scan.
     let mut digest = Sha256::new();
-    digest.update(b"lodestone-generated-shaped-prefix-v2");
+    digest.update(b"lodestone-generated-shaped-prefix-v3");
     digest.update(coordinate.0.to_le_bytes());
     digest.update(coordinate.1.to_le_bytes());
     digest.update([boundary as u8]);
     digest.update(column.min_y().to_le_bytes());
     digest.update(column.height().to_le_bytes());
     digest.update([column.stage() as u8]);
-    // Palette order plus the compact section indices are the complete block
-    // field. The palette is already canonical, so hash ids directly.
+    // Palette introductions and canonical final states make the exact block
+    // field without materializing shaped raw states into palette indices.
     for state in column.palette() {
         digest.update(state.raw().to_le_bytes());
     }
-    let mut section_indices = [0_u8; 4096 * 2];
-    for section in 0..column.blocks().section_count() {
-        column.blocks().for_each_section(section, |cell, palette_id| {
+    let mut section_bytes = [0_u8; 4096 * 2];
+    column.for_each_state_section(|states| {
+        for (cell, &state) in states.iter().enumerate() {
             let offset = cell * 2;
-            section_indices[offset..offset + 2].copy_from_slice(&palette_id.to_le_bytes());
-        });
-        let section_bytes = column
-            .blocks()
-            .section_rows(section)
-            .saturating_mul(16 * 16)
-            .saturating_mul(2);
-        digest.update(&section_indices[..section_bytes]);
-    }
+            section_bytes[offset..offset + 2].copy_from_slice(&state.to_le_bytes());
+        }
+        digest.update(&section_bytes[..states.len() * 2]);
+    });
     for lz in 0..4usize {
         for lx in 0..4usize {
             digest.update(column.biome_state(lx * 4, lz * 4).as_bytes());

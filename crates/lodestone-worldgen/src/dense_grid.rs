@@ -30,6 +30,8 @@ use std::sync::Arc;
 use lodestone_worldgen_core::hash::FastMap;
 use lodestone_data::block_states::{self, StateId};
 
+const _: () = assert!(block_states::STATE_COUNT - 1 <= u16::MAX as u32);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BaseStateFacts {
     Builtin {
@@ -128,6 +130,20 @@ pub struct DenseBlockGrid {
     /// returning a modified column, so this avoids eagerly copying the whole
     /// 16x128x16 carrier when a source snapshot is installed.
     blocks: Arc<Vec<u16>>,
+    raw_state_ids: bool,
+    raw_introductions: Vec<StateId>,
+    raw_introduction_index: FastMap<StateId, ()>,
+}
+
+pub(crate) enum DenseBlockGridParts {
+    Indexed {
+        palette: Vec<StateId>,
+        blocks: Arc<Vec<u16>>,
+    },
+    Raw {
+        introductions: Vec<StateId>,
+        states: Arc<Vec<u16>>,
+    },
 }
 
 fn palette_index(
@@ -268,7 +284,72 @@ impl DenseBlockGrid {
             palette_base_facts,
             index_of,
             blocks: Arc::new(blocks),
+            raw_state_ids: false,
+            raw_introductions: Vec::new(),
+            raw_introduction_index: FastMap::default(),
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn with_default_raw_and_blocks(
+        min_x: i32,
+        min_y: i32,
+        min_z: i32,
+        size_x: i32,
+        size_y: i32,
+        size_z: i32,
+        default: StateId,
+        blocks: Vec<u16>,
+    ) -> Self {
+        let cells = (size_x.max(0) as usize) * (size_y.max(0) as usize) * (size_z.max(0) as usize);
+        assert_eq!(blocks.len(), cells, "dense grid carrier length must match bounds");
+        let mut raw_introductions = Vec::with_capacity(32);
+        raw_introductions.push(default);
+        let mut raw_introduction_index = FastMap::with_capacity_and_hasher(32, Default::default());
+        raw_introduction_index.insert(default, ());
+        Self {
+            min_x,
+            min_y,
+            min_z,
+            size_x,
+            size_y,
+            size_z,
+            palette: Vec::new(),
+            palette_bases: Vec::new(),
+            palette_base_facts: Vec::new(),
+            index_of: FastMap::default(),
+            blocks: Arc::new(blocks),
+            raw_state_ids: true,
+            raw_introductions,
+            raw_introduction_index,
+        }
+    }
+
+    /// Creates an Overworld state field whose only dense cell lane contains
+    /// canonical state IDs. `default` is the first palette introduction.
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn with_default_raw(
+        min_x: i32,
+        min_y: i32,
+        min_z: i32,
+        size_x: i32,
+        size_y: i32,
+        size_z: i32,
+        default: StateId,
+    ) -> Self {
+        let cells = (size_x.max(0) as usize) * (size_y.max(0) as usize) * (size_z.max(0) as usize);
+        let raw = raw_state_id(default);
+        Self::with_default_raw_and_blocks(
+            min_x,
+            min_y,
+            min_z,
+            size_x,
+            size_y,
+            size_z,
+            default,
+            vec![raw; cells],
+        )
     }
 
     /// Builds a grid while invoking `state_at` in the palette's observable
@@ -327,6 +408,64 @@ impl DenseBlockGrid {
             crate::counters::MemoryBoundary::BlockGrid,
             cells,
             cells * std::mem::size_of::<u16>() as u64,
+        );
+        grid
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn from_ordered_state_fn_raw(
+        min_x: i32,
+        min_y: i32,
+        min_z: i32,
+        size_x: i32,
+        size_y: i32,
+        size_z: i32,
+        default: StateId,
+        mut state_at: impl FnMut(i32, i32, i32) -> StateId,
+    ) -> Self {
+        assert!(size_x >= 0 && size_y >= 0 && size_z >= 0, "grid size is negative");
+        let cells = (size_x as usize) * (size_y as usize) * (size_z as usize);
+        let raw_default = u16::try_from(default.raw()).expect("canonical state id fits raw lane");
+        let mut grid = Self::with_default_raw_and_blocks(
+            min_x,
+            min_y,
+            min_z,
+            size_x,
+            size_y,
+            size_z,
+            default,
+            vec![raw_default; cells],
+        );
+        let mut introductions = std::mem::take(&mut grid.raw_introductions);
+        let mut direct_order = vec![u16::MAX; block_states::STATE_COUNT as usize];
+        direct_order[default.index()] = 0;
+        {
+            let blocks = Arc::get_mut(&mut grid.blocks).expect("new grid carrier must be uniquely owned");
+            for lz in 0..size_z {
+                for lx in 0..size_x {
+                    for ly in 0..size_y {
+                        let state = state_at(min_x + lx, min_y + ly, min_z + lz);
+                        let order = &mut direct_order[state.index()];
+                        if *order == u16::MAX {
+                            *order = u16::try_from(introductions.len())
+                                .expect("state introduction count fits u16");
+                            introductions.push(state);
+                        }
+                        let index = ((ly * size_z + lz) * size_x + lx) as usize;
+                        blocks[index] = raw_state_id(state);
+                    }
+                }
+            }
+        }
+        for &state in &introductions {
+            grid.raw_introduction_index.insert(state, ());
+        }
+        grid.raw_introductions = introductions;
+        crate::counters::bump_logical_write(
+            crate::counters::MemoryBoundary::BlockGrid,
+            cells as u64,
+            (cells * std::mem::size_of::<u16>()) as u64,
         );
         grid
     }
@@ -395,6 +534,74 @@ impl DenseBlockGrid {
         grid
     }
 
+    /// Builds a raw-state lane in place, preserving the z,x,y introduction
+    /// order while leaving each physical cell as its canonical `u16` ID.
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn from_ordered_packed_state_fn_raw(
+        min_x: i32,
+        min_y: i32,
+        min_z: i32,
+        size_x: i32,
+        size_y: i32,
+        size_z: i32,
+        default: StateId,
+        blocks: Vec<u16>,
+        mut state_at: impl FnMut(i32, i32, i32, usize, u16) -> StateId,
+    ) -> Self {
+        assert!(size_x >= 0 && size_y >= 0 && size_z >= 0, "grid size is negative");
+        let mut grid = Self::with_default_raw_and_blocks(
+            min_x,
+            min_y,
+            min_z,
+            size_x,
+            size_y,
+            size_z,
+            default,
+            blocks,
+        );
+        let mut introductions = std::mem::take(&mut grid.raw_introductions);
+        let mut direct_order = vec![u16::MAX; block_states::STATE_COUNT as usize];
+        direct_order[default.index()] = 0;
+        {
+            let blocks = Arc::get_mut(&mut grid.blocks).expect("new grid carrier must be uniquely owned");
+            for lz in 0..size_z {
+                for lx in 0..size_x {
+                    for ly in 0..size_y {
+                        let index = ((ly * size_z + lz) * size_x + lx) as usize;
+                        let state = state_at(min_x + lx, min_y + ly, min_z + lz, index, blocks[index]);
+                        let order = &mut direct_order[state.index()];
+                        if *order == u16::MAX {
+                            *order = u16::try_from(introductions.len())
+                                .expect("state introduction count fits u16");
+                            introductions.push(state);
+                        }
+                        blocks[index] = raw_state_id(state);
+                    }
+                }
+            }
+        }
+        for &state in &introductions {
+            grid.raw_introduction_index.insert(state, ());
+        }
+        grid.raw_introductions = introductions;
+        let cells = (size_x as u64) * (size_y as u64) * (size_z as u64);
+        crate::counters::bump_logical_write(
+            crate::counters::MemoryBoundary::BlockGrid,
+            cells,
+            cells * std::mem::size_of::<u16>() as u64,
+        );
+        grid
+    }
+
+    #[inline]
+    fn remember_raw_state(&mut self, state: StateId) {
+        if !self.raw_introduction_index.contains_key(&state) {
+            self.raw_introduction_index.insert(state, ());
+            self.raw_introductions.push(state);
+        }
+    }
+
     #[inline]
     fn index(&self, x: i32, y: i32, z: i32) -> Option<usize> {
         let lx = x - self.min_x;
@@ -412,6 +619,7 @@ impl DenseBlockGrid {
     pub fn get_id(&self, x: i32, y: i32, z: i32) -> StateId {
         crate::counters::bump_logical_read(crate::counters::MemoryBoundary::BlockGrid, 1, 2);
         match self.index(x, y, z) {
+            Some(i) if self.raw_state_ids => StateId::from_raw(self.blocks[i]),
             Some(i) => self.palette[self.blocks[i] as usize],
             None => air_state(),
         }
@@ -423,6 +631,7 @@ impl DenseBlockGrid {
     pub fn get_base_id(&self, x: i32, y: i32, z: i32) -> StateId {
         crate::counters::bump_logical_read(crate::counters::MemoryBoundary::BlockGrid, 1, 2);
         match self.index(x, y, z) {
+            Some(i) if self.raw_state_ids => base_state(StateId::from_raw(self.blocks[i])),
             Some(i) => self.palette_bases[self.blocks[i] as usize],
             None => air_state(),
         }
@@ -433,6 +642,7 @@ impl DenseBlockGrid {
     pub fn get_base_facts(&self, x: i32, y: i32, z: i32) -> BaseStateFacts {
         crate::counters::bump_logical_read(crate::counters::MemoryBoundary::BlockGrid, 1, 2);
         match self.index(x, y, z) {
+            Some(i) if self.raw_state_ids => base_facts(StateId::from_raw(self.blocks[i])),
             Some(i) => self.palette_base_facts[self.blocks[i] as usize],
             None => BaseStateFacts::air(),
         }
@@ -441,6 +651,7 @@ impl DenseBlockGrid {
     #[inline]
     pub(crate) fn base_facts_untracked(&self, x: i32, y: i32, z: i32) -> BaseStateFacts {
         match self.index(x, y, z) {
+            Some(i) if self.raw_state_ids => base_facts(StateId::from_raw(self.blocks[i])),
             Some(i) => self.palette_base_facts[self.blocks[i] as usize],
             None => BaseStateFacts::air(),
         }
@@ -487,6 +698,13 @@ impl DenseBlockGrid {
     }
 
     fn set_id_at_index(&mut self, i: usize, state: StateId) {
+        if self.raw_state_ids {
+            self.remember_raw_state(state);
+            Arc::make_mut(&mut self.blocks)[i] =
+                raw_state_id(state);
+            crate::counters::bump_logical_write(crate::counters::MemoryBoundary::BlockGrid, 1, 2);
+            return;
+        }
         let id = self.palette_index(state);
         Arc::make_mut(&mut self.blocks)[i] = id;
         crate::counters::bump_logical_write(crate::counters::MemoryBoundary::BlockGrid, 1, 2);
@@ -537,6 +755,86 @@ impl DenseBlockGrid {
     ) {
         assert!(size_x >= 0 && size_y >= 0 && size_z >= 0, "copy size is negative");
         if size_x == 0 || size_y == 0 || size_z == 0 {
+            return;
+        }
+        if self.raw_state_ids && source.raw_state_ids {
+            assert!(
+                source.index(source_x, source_y, source_z).is_some()
+                    && source.index(source_x + size_x - 1, source_y + size_y - 1, source_z + size_z - 1).is_some(),
+                "source copy box is outside the grid",
+            );
+            assert!(
+                self.index(destination_x, destination_y, destination_z).is_some()
+                    && self.index(destination_x + size_x - 1, destination_y + size_y - 1, destination_z + size_z - 1).is_some(),
+                "destination copy box is outside the grid",
+            );
+            let width = size_x as usize;
+            let mut seen = vec![false; block_states::STATE_COUNT as usize];
+            let mut introductions = Vec::new();
+            let destination_offset_x = destination_x - self.min_x;
+            let destination_offset_y = destination_y - self.min_y;
+            let destination_offset_z = destination_z - self.min_z;
+            let destination_size_x = self.size_x;
+            let destination_size_z = self.size_z;
+            let destination_blocks = Arc::make_mut(&mut self.blocks);
+            for y in 0..size_y {
+                for z in 0..size_z {
+                    let source_start = source
+                        .index(source_x, source_y + y, source_z + z)
+                        .expect("validated source row");
+                    let destination_start = (((destination_offset_y + y) * destination_size_z
+                        + destination_offset_z
+                        + z)
+                        * destination_size_x
+                        + destination_offset_x) as usize;
+                    let source_row = &source.blocks[source_start..source_start + width];
+                    for &raw in source_row {
+                        let state = StateId::from_raw(raw);
+                        let mark = &mut seen[state.index()];
+                        if !*mark {
+                            *mark = true;
+                            introductions.push(state);
+                        }
+                    }
+                    destination_blocks[destination_start..destination_start + width]
+                        .copy_from_slice(source_row);
+                }
+            }
+            for state in introductions {
+                self.remember_raw_state(state);
+            }
+            let copied_cells = (size_x as u64) * (size_y as u64) * (size_z as u64);
+            crate::counters::bump_logical_read(
+                crate::counters::MemoryBoundary::BlockGrid,
+                copied_cells,
+                copied_cells * 2,
+            );
+            crate::counters::bump_logical_write(
+                crate::counters::MemoryBoundary::BlockGrid,
+                copied_cells,
+                copied_cells * 2,
+            );
+            return;
+        }
+        if self.raw_state_ids || source.raw_state_ids {
+            assert!(
+                source.index(source_x, source_y, source_z).is_some()
+                    && source.index(source_x + size_x - 1, source_y + size_y - 1, source_z + size_z - 1).is_some(),
+                "source copy box is outside the grid",
+            );
+            assert!(
+                self.index(destination_x, destination_y, destination_z).is_some()
+                    && self.index(destination_x + size_x - 1, destination_y + size_y - 1, destination_z + size_z - 1).is_some(),
+                "destination copy box is outside the grid",
+            );
+            for y in 0..size_y {
+                for z in 0..size_z {
+                    for x in 0..size_x {
+                        let state = source.get_id(source_x + x, source_y + y, source_z + z);
+                        self.set_id(destination_x + x, destination_y + y, destination_z + z, state);
+                    }
+                }
+            }
             return;
         }
         assert!(
@@ -688,8 +986,7 @@ impl DenseBlockGrid {
         for ly in 0..self.size_y {
             for lz in 0..self.size_z {
                 for lx in 0..self.size_x {
-                    let i = ((ly * self.size_z + lz) * self.size_x + lx) as usize;
-                    let state = self.palette[self.blocks[i] as usize].canonical_state();
+                    let state = self.get_id(self.min_x + lx, self.min_y + ly, self.min_z + lz).canonical_state();
                     out.insert((self.min_x + lx, self.min_y + ly, self.min_z + lz), state);
                 }
             }
@@ -710,18 +1007,11 @@ impl DenseBlockGrid {
     #[must_use]
     #[doc(hidden)]
     pub fn into_named_palette_and_blocks(self) -> (Vec<String>, Vec<u16>) {
-        crate::counters::bump_logical_read(
-            crate::counters::MemoryBoundary::BlockGrid,
-            self.blocks.len() as u64,
-            (self.blocks.len() * std::mem::size_of::<u16>()) as u64,
-        );
-        crate::counters::bump_full_column_conversion(self.blocks.len() as u64);
-        let palette = self
-            .palette
-            .iter()
-            .map(|state| state.canonical_state())
-            .collect();
-        (palette, Arc::unwrap_or_clone(self.blocks))
+        let (palette, blocks) = self.into_id_palette_and_blocks();
+        (
+            palette.into_iter().map(|state| state.canonical_state()).collect(),
+            blocks,
+        )
     }
 
     /// Consumes the grid and emits one axis-aligned box in the same palette
@@ -760,9 +1050,6 @@ impl DenseBlockGrid {
         if size_x == 0 || size_y == 0 || size_z == 0 {
             return (vec![default.canonical_state()], Vec::new());
         }
-        let source_index = |x: i32, y: i32, z: i32| {
-            self.index(x, y, z).expect("output box is outside the grid")
-        };
         assert!(
             self.index(min_x, min_y, min_z).is_some()
                 && self
@@ -772,7 +1059,8 @@ impl DenseBlockGrid {
         );
 
         let cell_count = (size_x as usize) * (size_y as usize) * (size_z as usize);
-        let capacity = self.palette.len().min(cell_count + 1);
+        let state_count = if self.raw_state_ids { self.raw_introductions.len() } else { self.palette.len() };
+        let capacity = state_count.min(cell_count + 1).max(1);
         let mut palette = Vec::with_capacity(capacity);
         let mut index_of = FastMap::with_capacity_and_hasher(capacity.max(1), Default::default());
         palette.push(default);
@@ -782,7 +1070,7 @@ impl DenseBlockGrid {
         for y in min_y..min_y + size_y {
             for z in min_z..min_z + size_z {
                 for x in min_x..min_x + size_x {
-                    let source_state = self.palette[self.blocks[source_index(x, y, z)] as usize];
+                    let source_state = self.get_id(x, y, z);
                     let local = if let Some(&local) = index_of.get(&source_state) {
                         local
                     } else {
@@ -820,12 +1108,32 @@ impl DenseBlockGrid {
     /// boundary for a consumer that can defer section packing.
     #[must_use]
     pub fn into_id_palette_and_shared_blocks(self) -> (Vec<StateId>, Arc<Vec<u16>>) {
+        match self.into_state_lane_parts() {
+            DenseBlockGridParts::Indexed { palette, blocks } => (palette, blocks),
+            DenseBlockGridParts::Raw { introductions, states } => {
+                let (palette, blocks) = remap_raw_state_lane(introductions, Arc::unwrap_or_clone(states));
+                (palette, Arc::new(blocks))
+            }
+        }
+    }
+
+    pub(crate) fn into_state_lane_parts(self) -> DenseBlockGridParts {
         crate::counters::bump_logical_read(
             crate::counters::MemoryBoundary::BlockGrid,
             self.blocks.len() as u64,
             (self.blocks.len() * std::mem::size_of::<u16>()) as u64,
         );
-        (self.palette, self.blocks)
+        if self.raw_state_ids {
+            DenseBlockGridParts::Raw {
+                introductions: self.raw_introductions,
+                states: self.blocks,
+            }
+        } else {
+            DenseBlockGridParts::Indexed {
+                palette: self.palette,
+                blocks: self.blocks,
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -853,32 +1161,30 @@ impl DenseBlockGrid {
         if size_x == 0 || size_y == 0 || size_z == 0 {
             return (vec![default], Vec::new());
         }
-        let source_index = |x: i32, y: i32, z: i32| {
-            self.index(x, y, z).expect("output box is outside the grid")
-        };
         assert!(
             self.index(min_x, min_y, min_z).is_some()
                 && self.index(min_x + size_x - 1, min_y + size_y - 1, min_z + size_z - 1).is_some(),
             "output box is outside the grid",
         );
         let cell_count = (size_x as usize) * (size_y as usize) * (size_z as usize);
-        let capacity = self.palette.len().min(cell_count + 1);
+        let state_count = if self.raw_state_ids { self.raw_introductions.len() } else { self.palette.len() };
+        let capacity = state_count.min(cell_count + 1).max(1);
         let mut palette = Vec::with_capacity(capacity);
-        let mut index_of = FastMap::with_capacity_and_hasher(capacity.max(1), Default::default());
+        let mut index_of = vec![u16::MAX; block_states::STATE_COUNT as usize];
         palette.push(default);
-        index_of.insert(default, 0);
+        index_of[default.index()] = 0;
         let mut blocks = Vec::with_capacity(cell_count);
         for y in min_y..min_y + size_y {
             for z in min_z..min_z + size_z {
                 for x in min_x..min_x + size_x {
-                    let state = self.palette[self.blocks[source_index(x, y, z)] as usize];
-                    let local = if let Some(&local) = index_of.get(&state) {
-                        local
+                    let state = self.get_id(x, y, z);
+                    let local = if index_of[state.index()] != u16::MAX {
+                        index_of[state.index()]
                     } else {
                         let local = u16::try_from(palette.len())
                             .expect("more than 65,536 palette entries in one output box");
                         palette.push(state);
-                        index_of.insert(state, local);
+                        index_of[state.index()] = local;
                         local
                     };
                     blocks.push(local);
@@ -887,6 +1193,27 @@ impl DenseBlockGrid {
         }
         (palette, blocks)
     }
+}
+
+fn remap_raw_state_lane(introductions: Vec<StateId>, mut states: Vec<u16>) -> (Vec<StateId>, Vec<u16>) {
+    let mut state_to_palette = vec![u16::MAX; block_states::STATE_COUNT as usize];
+    for (palette_index, state) in introductions.iter().copied().enumerate() {
+        state_to_palette[state.index()] =
+            u16::try_from(palette_index).expect("state palette index fits u16");
+    }
+    for raw in &mut states {
+        let state = StateId::from_raw(*raw);
+        let index = state_to_palette[state.index()];
+        assert_ne!(index, u16::MAX, "raw cell state is missing its palette introduction");
+        *raw = index;
+    }
+    (introductions, states)
+}
+
+#[inline]
+fn raw_state_id(state: StateId) -> u16 {
+    debug_assert!(state.raw() <= u16::MAX as u32);
+    state.raw() as u16
 }
 
 #[cfg(test)]
@@ -1076,6 +1403,37 @@ mod tests {
             packed_result_digest(&changed_result.0, &changed_result.1),
             "changed packed input must affect the output digest"
         );
+    }
+
+    #[test]
+    fn raw_lane_preserves_palette_history_and_box_fold_contracts() {
+        let air = state("minecraft:air");
+        let stone = state("minecraft:stone");
+        let water = state("minecraft:water");
+        let sand = state("minecraft:sand");
+        let copper_ore = state("minecraft:copper_ore");
+        let states = [stone, water, sand, stone, water, sand, air, stone];
+        let at = |x: i32, y: i32, z: i32| states[((z * 2 + x) * 2 + y) as usize];
+        let mut indexed = DenseBlockGrid::from_ordered_state_fn(0, 0, 0, 2, 2, 2, air, at);
+        let mut raw = DenseBlockGrid::from_ordered_state_fn_raw(0, 0, 0, 2, 2, 2, air, at);
+        for &(x, y, z, replacement) in &[(0, 0, 0, copper_ore), (0, 0, 0, stone)] {
+            indexed.set_id(x, y, z, replacement);
+            raw.set_id(x, y, z, replacement);
+        }
+
+        assert_eq!(raw.get_id(0, 1, 0), indexed.get_id(0, 1, 0));
+        assert_eq!(raw.get_base_id(0, 1, 0), indexed.get_base_id(0, 1, 0));
+        assert_eq!(raw.get_base_facts(0, 1, 0), indexed.get_base_facts(0, 1, 0));
+
+        let indexed_box = indexed.clone().into_id_palette_and_blocks_box(0, 0, 0, 2, 2, 2, air);
+        let raw_box = raw.clone().into_id_palette_and_blocks_box(0, 0, 0, 2, 2, 2, air);
+        assert_eq!(raw_box, indexed_box, "raw box fold changed final-cell palette order");
+        assert!(!raw_box.0.contains(&copper_ore), "box fold must omit overwritten transient states");
+
+        let indexed_output = indexed.into_id_palette_and_blocks();
+        let raw_output = raw.into_id_palette_and_blocks();
+        assert_eq!(raw_output, indexed_output, "raw lane lost overwritten palette introductions");
+        assert!(raw_output.0.contains(&copper_ore), "full palette must retain transient state introductions");
     }
 
     #[test]
