@@ -6113,6 +6113,7 @@ async fn apply_block_action<T, P, S>(
     proto: &P,
     source: &S,
     state: &mut State,
+    mut pending_relights: Option<&mut PendingRelights>,
     pending_break: &mut Option<PendingBreak>,
     block_entities: &BlockEntityHandle,
     open_container: &mut Option<OpenContainer>,
@@ -6206,6 +6207,7 @@ where
                     proto,
                     source,
                     state,
+                    pending_relights.as_deref_mut(),
                     block_entities,
                     open_container,
                     container_sync,
@@ -6268,6 +6270,7 @@ where
                 proto,
                 source,
                 state,
+                pending_relights.as_deref_mut(),
                 block_entities,
                 open_container,
                 container_sync,
@@ -6357,6 +6360,7 @@ async fn destroy_block<T, P, S>(
     proto: &P,
     source: &S,
     state: &mut State,
+    mut pending_relights: Option<&mut PendingRelights>,
     block_entities: &BlockEntityHandle,
     open_container: &mut Option<OpenContainer>,
     container_sync: &mut ContainerSync,
@@ -6530,7 +6534,16 @@ where
     // rather than a `LIGHT_UPDATE`. `new_state` rather than a hardcoded `AIR`
     // for the same reason as the write above: a broken waterlogged block keeps
     // a light-dampening fluid in the cell, not empty air.
-    resend_column_for_light(conn, proto, source, state, broken, new_state, pos).await?;
+    resend_column_for_light(
+        conn,
+        proto,
+        source,
+        state,
+        pending_relights.as_deref_mut(),
+        broken,
+        new_state,
+        pos,
+    ).await?;
 
     // A break runs two neighbour passes: shape recomputation (a torch or rail
     // that loses support turns to air) followed by redstone and gravity
@@ -6632,7 +6645,16 @@ where
     // differently than empty air.
     for (cell, was) in &collapsed {
         let now = source.block_state_id(cell.x, cell.y, cell.z);
-        resend_column_for_light(conn, proto, source, state, *was, now, *cell).await?;
+        resend_column_for_light(
+            conn,
+            proto,
+            source,
+            state,
+            pending_relights.as_deref_mut(),
+            *was,
+            now,
+            *cell,
+        ).await?;
     }
     Ok(())
 }
@@ -6725,26 +6747,12 @@ where
 /// not one. Vanilla sends it the same way, ungated, from
 /// `ChunkMap`'s light listener.
 ///
-/// The column resend survives as the fallback for a family that implements
-/// neither method (both default to "nothing"), so adopting the encoder is per
-/// family and the old behaviour is still reachable and still correct.
-///
-/// # What this does *not* fix
-///
-/// Families that opt into cross-column light receive a fresh 3×3 neighbourhood
-/// for each recompute, and this function resends that same 3×3 footprint after
-/// a relevant edit. Other families retain the isolated single-column path.
-/// `should_relight` compares emission and dampening; see `crate::light` and
-/// `docs/server-light.md`.
-///
-/// The remaining cost on this task is the `source.column(cx, cz)` fetch itself —
-/// a retained-column clone warm, a full generation cold — which is why the
-/// predicate stays narrow.
 async fn resend_column_for_light<T, P, S>(
     conn: &mut Connection<T>,
     proto: &P,
     source: &S,
     state: &mut State,
+    pending_relights: Option<&mut PendingRelights>,
     old_state: StateId,
     new_state: StateId,
     pos: BlockPos,
@@ -6755,6 +6763,14 @@ where
     S: ChunkSource + ?Sized,
 {
     if !crate::light::should_relight(old_state, new_state) {
+        return Ok(());
+    }
+    if let Some(pending_relights) = pending_relights {
+        pending_relights.enqueue_edit(
+            pos.x.div_euclid(16),
+            pos.z.div_euclid(16),
+            i32::from(proto.uses_cross_column_light()),
+        );
         return Ok(());
     }
     send_lighting_for_edit(
@@ -6873,10 +6889,7 @@ where
 }
 
 /// Clones the exact footprint needed for one live light update without turning
-/// an unloaded neighbour into a synchronous generation request. Tick-driven
-/// edits can happen before a connection has streamed that area, while direct
-/// player edits use [`send_column_light`] and intentionally retain its loading
-/// behavior.
+/// an unloaded neighbour into a synchronous generation request.
 fn resident_light_neighbourhood<S>(
     source: &S,
     cx: i32,
@@ -6903,12 +6916,17 @@ fn settle_resident_light_snapshot<S: ChunkSource + ?Sized>(
     cx: i32,
     cz: i32,
     neighbour_offsets: &[(i32, i32)],
+    resident_only: bool,
     compute: &mut dyn FnMut(
         &ChunkColumn,
         &[(i32, i32, &ChunkColumn)],
     ) -> Option<lodestone_world::ColumnLight>,
 ) -> Option<(ChunkColumn, Option<lodestone_world::ColumnLight>)> {
-    let mut fallback = resident_column(source, cx, cz)?;
+    let mut fallback = if resident_only {
+        resident_column(source, cx, cz)?
+    } else {
+        source.column(cx, cz)
+    };
     for attempt in 0..=LIGHT_SETTLEMENT_OPTIMISTIC_RETRIES {
         let exclusive = attempt == LIGHT_SETTLEMENT_OPTIMISTIC_RETRIES;
         match source.settle_resident_column_light_with_neighbours(
@@ -6916,7 +6934,7 @@ fn settle_resident_light_snapshot<S: ChunkSource + ?Sized>(
             cz,
             &fallback,
             neighbour_offsets,
-            true,
+            resident_only,
             true,
             exclusive,
             compute,
@@ -6925,7 +6943,11 @@ fn settle_resident_light_snapshot<S: ChunkSource + ?Sized>(
             Err(ColumnLightSettlementError::MissingFootprint) => return None,
             Err(ColumnLightSettlementError::NoLight) => return Some((fallback, None)),
             Err(ColumnLightSettlementError::Conflict) if !exclusive => {
-                fallback = resident_column(source, cx, cz)?;
+                fallback = if resident_only {
+                    resident_column(source, cx, cz)?
+                } else {
+                    source.column(cx, cz)
+                };
             }
             Err(ColumnLightSettlementError::Conflict) => return None,
         }
@@ -6973,6 +6995,7 @@ where
             cx,
             cz,
             &neighbour_offsets,
+            true,
             &mut compute,
         ) else {
             return Ok(());
@@ -7026,7 +7049,7 @@ async fn send_tick_block_updates<T, P>(
     proto: &P,
     state: &mut State,
     delivered: &HashSet<(i32, i32)>,
-    pending_relights: &mut PendingTickRelights,
+    pending_relights: &mut PendingRelights,
     changes: Vec<crate::tick::TickBlockChange>,
 ) -> Result<(), ServerError>
 where
@@ -7087,12 +7110,13 @@ fn tick_relight_targets(
 }
 
 #[derive(Default)]
-struct PendingTickRelights {
+struct PendingRelights {
     queued: VecDeque<(i32, i32)>,
     queued_set: HashSet<(i32, i32)>,
+    generation_required: HashSet<(i32, i32)>,
 }
 
-impl PendingTickRelights {
+impl PendingRelights {
     fn enqueue_batch(&mut self, positions: impl IntoIterator<Item = (i32, i32)>) -> usize {
         let mut positions = positions.into_iter().collect::<Vec<_>>();
         positions.sort_unstable();
@@ -7107,10 +7131,28 @@ impl PendingTickRelights {
         added
     }
 
+    fn enqueue_edit(&mut self, cx: i32, cz: i32, radius: i32) {
+        for dz in -radius..=radius {
+            for dx in -radius..=radius {
+                let coordinate = (cx + dx, cz + dz);
+                if self.queued_set.insert(coordinate) {
+                    self.queued.push_back(coordinate);
+                }
+                self.generation_required.insert(coordinate);
+            }
+        }
+    }
+
     fn pop_front(&mut self) -> Option<(i32, i32)> {
         let position = self.queued.pop_front()?;
         self.queued_set.remove(&position);
+        self.generation_required.remove(&position);
         Some(position)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn requires_generation(&self, coordinate: (i32, i32)) -> bool {
+        self.generation_required.contains(&coordinate)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -7122,6 +7164,7 @@ impl PendingTickRelights {
     fn clear(&mut self) {
         self.queued.clear();
         self.queued_set.clear();
+        self.generation_required.clear();
     }
 
     fn is_empty(&self) -> bool {
@@ -7134,17 +7177,18 @@ impl PendingTickRelights {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-struct DetachedTickRelight {
+struct DetachedRelight {
     coordinate: (i32, i32),
     handle: crate::worldgen_dispatch::DispatchHandle<Option<lodestone_world::ColumnLight>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn compute_detached_tick_relight(
+fn compute_detached_relight(
     source: &dyn ChunkSource,
     coordinate: (i32, i32),
     dimension: crate::dimension::Dimension,
     cross_column: bool,
+    resident_only: bool,
     compute: crate::protocol::DetachedLightCompute,
 ) -> Option<lodestone_world::ColumnLight> {
     let offsets = light_neighbour_offsets(cross_column);
@@ -7156,18 +7200,19 @@ fn compute_detached_tick_relight(
         coordinate.0,
         coordinate.1,
         &offsets,
+        resident_only,
         &mut calculate,
     )?
     .1
 }
 
-async fn send_next_tick_relight<T, P, S>(
+async fn send_next_relight<T, P, S>(
     conn: &mut Connection<T>,
     proto: &P,
     source: &S,
     state: &mut State,
     delivered: &HashSet<(i32, i32)>,
-    pending_relights: &mut PendingTickRelights,
+    pending_relights: &mut PendingRelights,
 ) -> Result<(), ServerError>
 where
     T: Transport,
@@ -8383,6 +8428,7 @@ async fn apply_use_item_on<T, P, S>(
     proto: &P,
     source: &S,
     state: &mut State,
+    pending_relights: Option<&mut PendingRelights>,
     pos: BlockPos,
     face: BlockFace,
     // The block-local hit position within `pos`. `crate::block_placement` reads
@@ -9352,7 +9398,7 @@ where
     // placement, captured before the `set_block`.
     {
         let placed_state = source.block_state_id(target.x, target.y, target.z);
-        resend_column_for_light(conn, proto, source, state, target_state, placed_state, target)
+        resend_column_for_light(conn, proto, source, state, pending_relights, target_state, placed_state, target)
             .await?;
     }
     Ok(())
@@ -12658,6 +12704,7 @@ async fn dispatch_play_packet<T, P, S>(
     proto: &P,
     source: SourceRef<'_, S>,
     state: &mut State,
+    mut pending_relights: Option<&mut PendingRelights>,
     view: &mut ViewTracker,
     // This connection's chunk-residency guard, so a chunk-boundary
     // crossing or a live view-radius change (the `recenter`/`set_view_radius`
@@ -13164,11 +13211,10 @@ where
             apply_block_action(
                 conn,
                 proto,
-                // `.get()`: a break/place touches one block through
-                // `block_state`/`set_block`, with no batch to offload — see
-                // `SourceRef::get`.
+                // The block write is immediate; its light update may be queued.
                 source.get(),
                 state,
+                pending_relights.as_deref_mut(),
                 pending_break,
                 block_entities,
                 open_container,
@@ -13208,9 +13254,10 @@ where
             apply_use_item_on(
                 conn,
                 proto,
-                // `.get()`: single-block read/write, nothing to offload.
+                // The block write is immediate; its light update may be queued.
                 source.get(),
                 state,
+                pending_relights.as_deref_mut(),
                 pos,
                 face,
                 cursor,
@@ -15137,8 +15184,8 @@ where
 {
     let mut pending_keep_alive: Option<i64> = None;
     let mut pending_break: Option<PendingBreak> = None;
-    let mut pending_tick_relights = PendingTickRelights::default();
-    let mut detached_tick_relight: Option<DetachedTickRelight> = None;
+    let mut pending_relights = PendingRelights::default();
+    let mut detached_relight: Option<DetachedRelight> = None;
     let mut teleport_acknowledgements = initial_teleport_id.map(TeleportAcknowledgements::after_initial);
     let mut player_pos: Option<(f64, f64, f64)> = None;
     let mut client_movement = ClientMovement::default();
@@ -15412,8 +15459,8 @@ where
     loop {
         if let Some(next) = pending_travel.take() {
             travelled = next;
-            pending_tick_relights.clear();
-            detached_tick_relight = None;
+            pending_relights.clear();
+            detached_relight = None;
         }
         // Shadowing the `source` parameter is what makes a dimension change reach
         // every arm at once — the view stream, the block reads, the fall sampler and
@@ -15435,33 +15482,35 @@ where
             .as_ref()
             .unwrap_or(block_entities);
         let block_ticks = dimension_handles.block_ticks.as_ref().unwrap_or(block_ticks);
-        let mut synchronous_tick_relight = true;
-        if let Some(coordinate) = pending_tick_relights.front() {
+        let mut synchronous_relight = true;
+        if let Some(coordinate) = pending_relights.front() {
             if let (Some(shared), Some(compute)) = (
                 source.shared_arc(),
                 proto.detached_light_compute()
                     .filter(|_| proto.retains_initial_column_light()),
             )
             {
-                synchronous_tick_relight = false;
-                if detached_tick_relight.is_none() {
+                synchronous_relight = false;
+                if detached_relight.is_none() {
                     if !view.delivered.contains(&coordinate) {
-                        pending_tick_relights.pop_front();
+                        pending_relights.pop_front();
                     } else {
                         let dimension = source.dimension();
                         let cross_column = proto.uses_cross_column_light();
+                        let resident_only = !pending_relights.requires_generation(coordinate);
                         let work = move || {
-                            compute_detached_tick_relight(
+                            compute_detached_relight(
                                 shared.as_ref(),
                                 coordinate,
                                 dimension,
                                 cross_column,
+                                resident_only,
                                 compute,
                             )
                         };
                         if let Ok(handle) = crate::worldgen_dispatch::try_spawn(work) {
-                            pending_tick_relights.pop_front();
-                            detached_tick_relight = Some(DetachedTickRelight {
+                            pending_relights.pop_front();
+                            detached_relight = Some(DetachedRelight {
                                 coordinate,
                                 handle,
                             });
@@ -15471,25 +15520,25 @@ where
             }
         }
         tokio::select! {
-            _ = std::future::ready(()), if synchronous_tick_relight && !pending_tick_relights.is_empty() => {
+            _ = std::future::ready(()), if synchronous_relight && !pending_relights.is_empty() => {
                 watch.enter();
-                send_next_tick_relight(
+                send_next_relight(
                     conn,
                     proto,
                     source.get(),
                     &mut state,
                     &view.delivered,
-                    &mut pending_tick_relights,
+                    &mut pending_relights,
                 )
                 .await?;
                 watch.pass("tick_relight");
             }
-            result = std::future::poll_fn(|cx| match detached_tick_relight.as_mut() {
+            result = std::future::poll_fn(|cx| match detached_relight.as_mut() {
                 Some(job) => std::future::Future::poll(std::pin::Pin::new(&mut job.handle), cx),
                 None => std::task::Poll::Pending,
-            }), if detached_tick_relight.is_some() => {
+            }), if detached_relight.is_some() => {
                 watch.enter();
-                let coordinate = detached_tick_relight
+                let coordinate = detached_relight
                     .take()
                     .expect("the completed relight has an owned handle")
                     .coordinate;
@@ -15720,6 +15769,10 @@ where
                     proto,
                     source,
                     &mut state,
+                    (!matches!(source, SourceRef::Borrowed(_))
+                        && proto.retains_initial_column_light()
+                        && proto.detached_light_compute().is_some())
+                        .then_some(&mut pending_relights),
                     &mut view,
                     &player_ticket_guard,
                     &mut pending_keep_alive,
@@ -16209,6 +16262,10 @@ where
                                 proto,
                                 source.get(),
                                 &mut state,
+                                (!matches!(source, SourceRef::Borrowed(_))
+                                    && proto.retains_initial_column_light()
+                                    && proto.detached_light_compute().is_some())
+                                    .then_some(&mut pending_relights),
                                 block_entities,
                                 &mut open_container,
                                 &mut container_sync,
@@ -17468,7 +17525,7 @@ where
                     proto,
                     &mut state,
                     &view.delivered,
-                    &mut pending_tick_relights,
+                    &mut pending_relights,
                     block_ticks.drain_all(),
                 )
                 .await?;
@@ -18345,7 +18402,7 @@ where
 {
     let mut pending_keep_alive: Option<i64> = None;
     let mut pending_break: Option<PendingBreak> = None;
-    let mut pending_tick_relights = PendingTickRelights::default();
+    let mut pending_relights = PendingRelights::default();
     let mut teleport_acknowledgements = initial_teleport_id.map(TeleportAcknowledgements::after_initial);
     let mut sprinting = false;
     let mut sneaking = false;
@@ -18433,14 +18490,14 @@ where
         let packet = tokio::select! {
             // A queued relight is always ready, but competes with packet and
             // timer work so large batches cannot monopolize the browser loop.
-            _ = std::future::ready(()), if !pending_tick_relights.is_empty() => {
-                send_next_tick_relight(
+            _ = std::future::ready(()), if !pending_relights.is_empty() => {
+                send_next_relight(
                     conn,
                     proto,
                     source.get(),
                     &mut state,
                     &view.delivered,
-                    &mut pending_tick_relights,
+                    &mut pending_relights,
                 )
                 .await?;
                 None
@@ -18503,7 +18560,7 @@ where
                     proto,
                     &mut state,
                     &view.delivered,
-                    &mut pending_tick_relights,
+                    &mut pending_relights,
                     block_ticks.drain_all(),
                 )
                 .await?;
@@ -18595,6 +18652,7 @@ where
                 proto,
                 source,
                 &mut state,
+                None,
                 &mut view,
                 &player_ticket_guard,
                 &mut pending_keep_alive,
@@ -19892,10 +19950,11 @@ mod tests {
                 let _ = store.column(dx, dz);
             }
         }
-        let light = compute_detached_tick_relight(
+        let light = compute_detached_relight(
             &store,
             (0, 0),
             crate::dimension::Dimension::Overworld,
+            true,
             true,
             flat_light,
         )
@@ -19911,6 +19970,49 @@ mod tests {
             Some(&light),
             "a completed worker result must not be sent after a newer edit"
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn direct_relight_can_complete_a_cold_neighbourhood_off_thread() {
+        fn flat_light(
+            centre: &ChunkColumn,
+            neighbours: &[(i32, i32, &ChunkColumn)],
+            _: crate::dimension::Dimension,
+        ) -> lodestone_world::ColumnLight {
+            assert_eq!(neighbours.len(), 8);
+            lodestone_world::ColumnLight::new(centre.section_count())
+        }
+
+        let source = ColdColumnSource {
+            column_reads: AtomicUsize::new(0),
+            store_calls: AtomicUsize::new(0),
+            resident: false,
+            center_only: false,
+        };
+        let store = crate::chunk_store::ChunkStore::with_capacity(source, 32);
+        let _ = store.column(0, 0);
+        assert!(store.resident_column(1, 0).is_none());
+        assert!(compute_detached_relight(
+            &store,
+            (0, 0),
+            crate::dimension::Dimension::Overworld,
+            true,
+            true,
+            flat_light,
+        )
+        .is_none());
+        assert!(store.resident_column(1, 0).is_none());
+        assert!(compute_detached_relight(
+            &store,
+            (0, 0),
+            crate::dimension::Dimension::Overworld,
+            true,
+            false,
+            flat_light,
+        )
+        .is_some());
+        assert!(store.resident_column(1, 0).is_some());
     }
 
     #[tokio::test]
@@ -19984,7 +20086,7 @@ mod tests {
         let (client_end, server_end) = lodestone_net::memory_pair();
         let mut conn = Connection::new(server_end);
         let mut state = State::Play;
-        let mut pending_relights = PendingTickRelights::default();
+        let mut pending_relights = PendingRelights::default();
 
         send_tick_block_updates(
             &mut conn,
@@ -20031,7 +20133,7 @@ mod tests {
         let (client_end, server_end) = lodestone_net::memory_pair();
         let mut conn = Connection::new(server_end);
         let mut state = State::Play;
-        let mut pending_relights = PendingTickRelights::default();
+        let mut pending_relights = PendingRelights::default();
 
         send_tick_block_updates(
             &mut conn,
@@ -20091,8 +20193,8 @@ mod tests {
     }
 
     #[test]
-    fn pending_tick_relights_deduplicate_batches_and_keep_fifo_fairness() {
-        let mut pending = PendingTickRelights::default();
+    fn pending_relights_deduplicate_batches_and_keep_fifo_fairness() {
+        let mut pending = PendingRelights::default();
         assert_eq!(
             pending.enqueue_batch([(2, 0), (0, 0), (2, 0)]),
             2,
@@ -20105,6 +20207,59 @@ mod tests {
         assert_eq!(pending.pop_front(), Some((1, 0)));
         assert_eq!(pending.pop_front(), Some((0, 0)));
         assert!(pending.is_empty());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn direct_block_edit_queues_a_generating_relight_without_reading_columns() {
+        let source = ColdColumnSource {
+            column_reads: AtomicUsize::new(0),
+            store_calls: AtomicUsize::new(0),
+            resident: false,
+            center_only: false,
+        };
+        let protocol = RetainedLifecycleProtocol {
+            computes: Arc::new(AtomicUsize::new(0)),
+            retain_initial_light: true,
+            fallback_encodes: Arc::new(AtomicUsize::new(0)),
+            dependency_light: None,
+        };
+        let (_client_end, server_end) = lodestone_net::memory_pair();
+        let mut conn = Connection::new(server_end);
+        let mut state = State::Play;
+        let mut pending = PendingRelights::default();
+        resend_column_for_light(
+            &mut conn,
+            &protocol,
+            &source,
+            &mut state,
+            Some(&mut pending),
+            Block::Air.default_state(),
+            Block::Air.default_state(),
+            BlockPos::new(15, 64, 0),
+        )
+        .await
+        .unwrap();
+        assert!(pending.is_empty(), "a light-neutral edit must not queue a relight");
+
+        resend_column_for_light(
+            &mut conn,
+            &protocol,
+            &source,
+            &mut state,
+            Some(&mut pending),
+            Block::Stone.default_state(),
+            Block::Air.default_state(),
+            BlockPos::new(15, 64, 0),
+        )
+        .await
+        .unwrap();
+        assert_eq!(pending.len(), 9);
+        assert_eq!(source.column_reads.load(Ordering::Relaxed), 0);
+        assert!(pending.requires_generation((0, 0)));
+        assert!(pending.requires_generation((1, 1)));
+        assert_eq!(pending.pop_front(), Some((-1, -1)));
+        assert!(!pending.requires_generation((-1, -1)));
     }
 
     #[test]
