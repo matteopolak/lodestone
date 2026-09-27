@@ -234,7 +234,7 @@ impl LightPatch {
         self.sky.is_empty() && self.block.is_empty()
     }
 
-    /// Returns the sorted light-section indices overwritten by this patch.
+    /// Returns the sorted light-section indices overwritten by the light update.
     ///
     /// A section may be present in both the sky and block layers; it appears
     /// only once in the result. Consumers use this to invalidate geometry

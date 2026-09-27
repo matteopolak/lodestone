@@ -2009,7 +2009,7 @@ impl LifecycleWorldgenSource for NetherChunkSource {
     }
 
     fn target_spills_persist(&self) -> bool {
-        true
+        false
     }
 }
 
@@ -3568,11 +3568,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         if stage == LifecycleCompletion::Full {
             return;
         }
-        // A source that reaches FEATURES is itself mutable even when it was
-        // admitted as a dependency of another packet.  Its own writes must
-        // persist in that resident column; only writes crossing into a later
-        // status boundary are transaction-local.
-        if target_scoped {
+        if target_scoped && (source == target || self.source.target_spills_persist()) {
             self.mutable_targets.insert(source);
             // A preceding source may have written into this column before it
             // entered FEATURES. That write is now part of the retained
@@ -3989,7 +3985,9 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                     self.retain_temporary_carvers_override(mode, spill.position);
                 }
                 if !deferred {
-                    self.materialize_resident(destination);
+                    if self.is_admitted(destination) {
+                        self.materialize_resident(destination);
+                    }
                     let previous = self.resident.get(&destination).map(|column| {
                         column
                             .block_state_id(
@@ -4538,11 +4536,19 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         {
             return;
         }
-        let maps = self.source.lifecycle_client_heightmaps(chunk.0, chunk.1).unwrap_or_else(|| {
-            panic!(
+        let Some(maps) = self.source.lifecycle_client_heightmaps(chunk.0, chunk.1) else {
+            let column = self
+                .resident
+                .get_mut(&chunk)
+                .expect("heightmap initialization requires a resident column");
+            assert_eq!(
+                column.generation_stage(),
+                ChunkGenerationStage::Full,
                 "lifecycle resident {chunk:?} reached a map boundary without an authenticated map seed"
-            )
-        });
+            );
+            column.prime_client_heightmaps();
+            return;
+        };
         self.resident
             .get_mut(&chunk)
             .expect("heightmap initialization requires a resident column")
