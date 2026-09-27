@@ -7,8 +7,11 @@
 //! without needing a live server; the live test proves it against real output.
 
 use lodestone_core::{Reader, Writer};
+use lodestone_model::{ClientEvent, ConnectionState, Directive, VersionAdapter};
+use lodestone_v26_2::adapter::V770Adapter;
+use lodestone_v26_2::packet_ids::play::clientbound;
 use lodestone_v26_2::packets::chunk::{ChunkShape, LevelChunkWithLight};
-use lodestone_world::{ColumnLight, Heightmaps, PalettedContainer};
+use lodestone_world::{ChunkPos, ColumnLight, Heightmaps, PalettedContainer, World};
 
 /// Builds the length-prefixed section blob for a column whose bottom section
 /// carries the given 4096 block ids and whose other sections are pure air.
@@ -114,4 +117,53 @@ fn truncated_blob_errors_rather_than_panics() {
     bytes.truncate(bytes.len() / 2);
     let mut r = Reader::new(&bytes);
     assert!(LevelChunkWithLight::decode(&mut r, &shape).is_err());
+}
+
+#[test]
+fn adapter_deferred_chunk_load_matches_the_existing_sink_path() {
+    let shape = ChunkShape::overworld_1_21();
+    let mut blocks = vec![0u32; 4096];
+    blocks[0] = 1;
+    blocks[256 + 2 * 16 + 1] = 7;
+    let payload = encode_packet(3, -5, &shape, &blocks);
+    let adapter = V770Adapter::new();
+
+    let deferred = adapter
+        .decode_chunk_packet(
+            ConnectionState::Play,
+            clientbound::LEVEL_CHUNK_WITH_LIGHT,
+            &payload,
+        )
+        .expect("the full chunk body decodes")
+        .expect("this packet supports deferred whole-column application");
+    let pos = ChunkPos::new(3, -5);
+    assert_eq!(deferred.position, pos);
+    assert_eq!(
+        deferred.directives,
+        vec![Directive::Emit(ClientEvent::ChunkLoaded {
+            pos: lodestone_model::ChunkPos { x: 3, z: -5 },
+        })]
+    );
+
+    // The deferred value owns the exact decoded column. Applying it makes both
+    // independently chosen block markers observable at their expected world Y.
+    let mut deferred_world = World::new();
+    deferred_world.load(deferred.position, deferred.chunk);
+    let loaded = deferred_world.get(pos).expect("deferred column was applied");
+    assert_eq!(loaded.column.get_block(0, -64, 0), 1);
+    assert_eq!(loaded.column.get_block(1, -63, 2), 7);
+
+    // The established WorldSink route remains byte-for-byte equivalent in its
+    // visible chunk and directives for callers that do not use the new hook.
+    let mut direct_world = World::new();
+    let direct_directives = adapter
+        .handle_packet(
+            &mut direct_world,
+            ConnectionState::Play,
+            clientbound::LEVEL_CHUNK_WITH_LIGHT,
+            &payload,
+        )
+        .expect("the established packet path still decodes");
+    assert_eq!(direct_directives, deferred.directives);
+    assert_eq!(direct_world.get(pos), deferred_world.get(pos));
 }

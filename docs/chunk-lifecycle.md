@@ -168,6 +168,19 @@ it — writing goes through the write handle alone, held only by the store's leg
 currently agrees with the store's) are tracked alongside it and recomputed whenever a session
 attaches or a dimension changes, since both can change independently of the terrain itself.
 
+The network driver keeps that shared write lock out of an expensive full-column decode when an
+adapter can represent the result as one whole-chunk insertion. It first calls
+`VersionAdapter::decode_chunk_packet` without a world sink; the 26.2 adapter uses this for its full
+chunk-with-light body and returns an owned `DeferredChunkLoad`. The driver then acquires the lock
+briefly to insert the chunk, drops it, and only then executes the returned directives. This
+preserves packet order and the notification-after-insert contract. Adapters that return `None`
+retain the original `handle_packet` path, including block updates and `sync_block_entity` behavior.
+
+The `client_world` trace records `deferred_decode_us`, `adapter_or_apply_us`, `lock_wait_us`, and
+`lock_hold_us` for each inbound packet. On the deferred route, decode time is separate from lock
+hold; on the fallback route, adapter work remains inside the lock and its duration is reflected by
+`lock_hold_us`.
+
 ### Measuring the client chunk pipeline's real cost
 
 A dedicated, instruction-denominated benchmark (using hardware performance counters rather than
@@ -208,6 +221,10 @@ cycles-per-instruction, not in the raw instruction count.
 - **Keep chunk encoding errors transport-independent.** Implement a protocol's
   `try_encode_chunk` only when it can report an owned failure; callers own the connection cleanup
   and must end a batch only after its beginning marker reached the wire.
+- **Only defer a packet whose complete world effect is one chunk load.** Decode and validate the
+  full body before returning `DeferredChunkLoad`; the driver applies it before executing directives
+  or reading the next packet. Leave sparse updates on `handle_packet`, where ordered `WorldSink`
+  calls preserve state-dependent behavior such as block-entity synchronization.
 
 ## Configuration
 
@@ -217,9 +234,11 @@ cycles-per-instruction, not in the raw instruction count.
   LAN hosting.
 - Ticket levels and timeouts are transcriptions of vanilla's own constants, not independently
   tunable.
-- The parallel-generation worker count is the process's available parallelism; there is no manual
-  override.
+- The parallel-generation worker count defaults to `max(available_parallelism - 1, 1)` and accepts a
+  positive `LODESTONE_WORLDGEN_WORKERS` override; see [`worldgen-dispatch.md`](./worldgen-dispatch.md).
 - Streaming batch size and the keep-alive stall thresholds are small constants in the server crate.
+- The deferred decode hook is opt-in per adapter; no runtime setting is required. The 26.2 adapter
+  currently uses it only for full chunk loads.
 
 ## Dependencies
 

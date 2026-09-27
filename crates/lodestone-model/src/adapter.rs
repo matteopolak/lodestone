@@ -88,6 +88,18 @@ pub enum Directive {
     BundleDelimiter,
 }
 
+/// An owned whole-chunk decode result. The driver applies the chunk before its
+/// directives, after decoding outside the shared world lock.
+#[derive(Debug)]
+pub struct DeferredChunkLoad {
+    /// Destination chunk position in world chunk coordinates.
+    pub position: lodestone_world::ChunkPos,
+    /// Decoded blocks, biomes, light, heightmaps, and block entities.
+    pub chunk: LoadedChunk,
+    /// The same packet's canonical notifications and side effects.
+    pub directives: Vec<Directive>,
+}
+
 /// Identity the client presents during login.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoginProfile {
@@ -803,6 +815,19 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
         packet_id: i32,
         payload: &[u8],
     ) -> Result<Vec<Directive>, AdapterError>;
+
+    /// Optionally decodes a packet whose world effect is exactly one whole-chunk
+    /// load. The client calls this before acquiring the world write lock and
+    /// applies the returned chunk before its directives; `None` uses
+    /// [`Self::handle_packet`].
+    fn decode_chunk_packet(
+        &self,
+        _state: ConnectionState,
+        _packet_id: i32,
+        _payload: &[u8],
+    ) -> Result<Option<DeferredChunkLoad>, AdapterError> {
+        Ok(None)
+    }
 
     /// Encodes one canonical action into a protocol packet id and payload.
     ///
