@@ -16,6 +16,8 @@ Keep worker inputs limited to `SectionSnapshot` and treat the public functions r
 
 `MeshScheduler` receives the worker count and classifier. `MeshPolicy` controls dirty-column admission, while `cutout_leaves` and `blend_radius` are stamped onto each submitted job. `ColumnSource` controls whether missing columns defer a mesh, and `SkyDefault` controls absent sky-light fallback. `MESH_SNAPSHOT_SECTION_BUDGET` bounds the frame's snapshot work by sections rather than columns; a backlog warning reports ready columns, deferred arrivals, eligible columns attempted, snapshot sections, and the current consecutive backlog duration. It is not emitted merely while arrivals are harmlessly waiting for their neighbor halo. The legacy `DIRTY_COLUMN_BUDGET` remains available to queue-focused diagnostics. The renderer can acknowledge the GPU hand-off with `Sim::mark_mesh_uploaded`, which is the readiness boundary rather than CPU scheduler completion.
 
+Native result handoff targets 2 ms of observed upload work with a 96-result and 16 MiB geometry ceiling per frame. Overflow stays queued in completion order; the first result always progresses even if it exceeds the byte ceiling. The browser keeps its existing in-frame meshing budget.
+
 ## Dependencies
 
 The modules use `lodestone-world` snapshots and light data, `lodestone-render`'s packed/model/fluid mesh APIs, shell block classifiers and network state, and Bevy ECS for scheduler presentation systems. Native builds use `crossbeam-channel` and worker threads; `wasm32` uses the in-frame budgeted scheduler arm.

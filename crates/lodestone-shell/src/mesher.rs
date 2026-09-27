@@ -30,6 +30,10 @@ use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::atomic::AtomicU64;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Duration;
 // The worker pool's plumbing. Native-only: `MeshScheduler`'s browser arm has no
 // threads and no channels — it meshes in-frame under a time budget. See that type.
 #[cfg(not(target_arch = "wasm32"))]
@@ -62,6 +66,39 @@ use lodestone_model::BlockPos;
 use lodestone_world::{
     ChunkColumn, ChunkPos, ChunkSection, PaletteKind, SectionLight as SectionLightData, World,
 };
+
+#[cfg(not(target_arch = "wasm32"))]
+/// Approximate upload-time budget; the observed cost is updated after each redraw.
+const MESH_HANDOFF_TIME_BUDGET_NS: u64 = 2_000_000;
+#[cfg(not(target_arch = "wasm32"))]
+/// The handoff cannot exceed one frame's snapshot admission even when uploads are cheap.
+const MESH_HANDOFF_MAX_COUNT: usize = MESH_SNAPSHOT_SECTION_BUDGET;
+#[cfg(not(target_arch = "wasm32"))]
+/// Approximate maximum geometry payload handed to the renderer in one frame.
+const MESH_HANDOFF_BYTE_BUDGET: usize = 16 * 1024 * 1024;
+#[cfg(not(target_arch = "wasm32"))]
+const MESH_HANDOFF_INITIAL_NS_PER_RESULT: u64 = 50_000;
+#[cfg(not(target_arch = "wasm32"))]
+static MESH_UPLOAD_NS_PER_RESULT: AtomicU64 =
+    AtomicU64::new(MESH_HANDOFF_INITIAL_NS_PER_RESULT);
+
+#[cfg(not(target_arch = "wasm32"))]
+fn mesh_handoff_count_budget(ns_per_result: u64) -> usize {
+    (MESH_HANDOFF_TIME_BUDGET_NS / ns_per_result.max(1))
+        .clamp(1, MESH_HANDOFF_MAX_COUNT as u64) as usize
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn record_native_mesh_upload_cost(elapsed: Duration, result_count: usize) {
+    if result_count == 0 {
+        return;
+    }
+    let observed = (elapsed.as_nanos() / result_count as u128)
+        .clamp(1, u64::MAX as u128) as u64;
+    let _ = MESH_UPLOAD_NS_PER_RESULT.try_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
+        Some(((old as u128 * 3 + observed as u128) / 4) as u64)
+    });
+}
 
 use crate::blocks::{ShellClassifier, id};
 use crate::net::NetClient;
@@ -143,6 +180,38 @@ impl SectionGeometry {
                 translucent_blocks,
                 ..
             } => opaque.quad_count() + water.quad_count() + translucent_blocks.quad_count(),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn upload_bytes(&self) -> usize {
+        fn bytes(vertices: usize, indices: usize, vertex_size: usize) -> usize {
+            vertices
+                .saturating_mul(vertex_size)
+                .saturating_add(indices.saturating_mul(std::mem::size_of::<u32>()))
+        }
+
+        match self {
+            SectionGeometry::Packed(mesh) => bytes(
+                mesh.vertices.len(),
+                mesh.indices.len(),
+                std::mem::size_of::<lodestone_render::PackedVertex>(),
+            ),
+            SectionGeometry::Model {
+                opaque,
+                water,
+                translucent_blocks,
+                ..
+            } => [opaque, water, translucent_blocks]
+                .into_iter()
+                .map(|mesh| {
+                    bytes(
+                        mesh.vertices.len(),
+                        mesh.indices.len(),
+                        std::mem::size_of::<lodestone_render::ModelVertex>(),
+                    )
+                })
+                .fold(0usize, usize::saturating_add),
         }
     }
 }
@@ -325,6 +394,8 @@ pub struct MeshScheduler {
     /// from the current one — see [`Self::latest_generation`]'s doc for why
     /// that pairing exists at all.
     result_rx: Mutex<Receiver<(Meshed, u64)>>,
+    /// Completed results held until a frame has capacity to upload them.
+    ready: std::collections::VecDeque<(Meshed, u64)>,
     workers: Vec<JoinHandle<()>>,
     pending: usize,
     column_source: ColumnSource,
@@ -428,6 +499,7 @@ impl MeshScheduler {
         Self {
             job_tx,
             result_rx: Mutex::new(result_rx),
+            ready: std::collections::VecDeque::new(),
             workers,
             pending: 0,
             column_source,
@@ -518,6 +590,9 @@ impl MeshScheduler {
     /// one and when a column leaves the view.
     pub fn forget_generation(&mut self, key: &SectionKey) {
         self.latest_generation.remove(key);
+        let before = self.ready.len();
+        self.ready.retain(|(meshed, _)| meshed.key != *key);
+        self.pending -= before - self.ready.len();
     }
 
     /// Collect any finished meshes without blocking. A completion whose
@@ -527,11 +602,57 @@ impl MeshScheduler {
     pub fn drain(&mut self) -> Vec<Meshed> {
         let mut out = Vec::new();
         let rx = self.result_rx.get_mut().expect("mesh result queue poisoned");
+        while let Some((meshed, generation)) = self.ready.pop_front() {
+            self.pending -= 1;
+            if self.latest_generation.get(&meshed.key) == Some(&generation) {
+                out.push(meshed);
+            }
+        }
         while let Ok((meshed, generation)) = rx.try_recv() {
             self.pending -= 1;
             if self.latest_generation.get(&meshed.key) == Some(&generation) {
                 out.push(meshed);
             }
+        }
+        out
+    }
+
+    /// Hand off a bounded batch of completed results, retaining overflow.
+    pub fn drain_frame(&mut self) -> Vec<Meshed> {
+        let count_budget = mesh_handoff_count_budget(
+            MESH_UPLOAD_NS_PER_RESULT.load(Ordering::Relaxed),
+        );
+        self.drain_frame_with_limit(count_budget)
+    }
+
+    fn drain_frame_with_limit(&mut self, count_budget: usize) -> Vec<Meshed> {
+        let mut out = Vec::new();
+        let mut bytes = 0usize;
+        let mut examined = 0usize;
+        let rx = self.result_rx.get_mut().expect("mesh result queue poisoned");
+        while examined < count_budget && out.len() < count_budget {
+            let next = self
+                .ready
+                .pop_front()
+                .or_else(|| rx.try_recv().ok());
+            let Some((meshed, generation)) = next else {
+                break;
+            };
+            examined += 1;
+            if self.latest_generation.get(&meshed.key) != Some(&generation) {
+                self.pending -= 1;
+                continue;
+            }
+            let mesh_bytes = meshed.mesh.upload_bytes();
+            if !out.is_empty()
+                && bytes.saturating_add(mesh_bytes) > MESH_HANDOFF_BYTE_BUDGET
+            {
+                self.ready.push_front((meshed, generation));
+                break;
+            }
+            self.pending -= 1;
+            bytes = bytes.saturating_add(mesh_bytes);
+            out.push(meshed);
         }
         out
     }
@@ -547,12 +668,12 @@ impl MeshScheduler {
     /// `out` and does not count toward `n`, so the caller never receives it.
     pub fn drain_blocking(&mut self, n: usize) -> Vec<Meshed> {
         let mut out = Vec::new();
-        let mut received = 0usize;
         let rx = self.result_rx.get_mut().expect("mesh result queue poisoned");
-        while out.len() < n && self.pending > received {
-            match rx.recv() {
+        while out.len() < n && self.pending > 0 {
+            let next = self.ready.pop_front().map(Ok).unwrap_or_else(|| rx.recv());
+            match next {
                 Ok((meshed, generation)) => {
-                    received += 1;
+                    self.pending -= 1;
                     if self.latest_generation.get(&meshed.key) == Some(&generation) {
                         out.push(meshed);
                     }
@@ -560,7 +681,6 @@ impl MeshScheduler {
                 Err(_) => break,
             }
         }
-        self.pending -= received;
         out
     }
 }
@@ -654,9 +774,8 @@ pub struct MeshScheduler {
     queue: std::collections::VecDeque<SectionSnapshot>,
     /// Meshed but not yet handed to the caller.
     ///
-    /// Non-empty only when a `drain` hit the budget mid-queue... which cannot
-    /// currently happen, because `drain` returns everything it meshed. It exists so
-    /// `drain_blocking(n)` can mesh past `n` without discarding the surplus.
+    /// Completed meshes retained when a frame handoff reaches its count or byte
+    /// budget, plus any surplus produced while satisfying `drain_blocking(n)`.
     ready: Vec<Meshed>,
     classifier: ShellClassifier,
     column_source: ColumnSource,
@@ -774,6 +893,11 @@ impl MeshScheduler {
             }
         }
         out
+    }
+
+    /// The browser's meshing drain already has its own time bound.
+    pub fn drain_frame(&mut self) -> Vec<Meshed> {
+        self.drain()
     }
 
     /// Mesh until at least `n` results exist (or the queue empties), ignoring the
@@ -1992,7 +2116,7 @@ impl TerrainMesh {
     /// Collect finished meshes for the caller to upload, recording each key into
     /// [`Self::uploaded_sections`].
     pub fn drain_meshes(&mut self) -> Vec<Meshed> {
-        let meshes = self.scheduler.drain();
+        let meshes = self.scheduler.drain_frame();
         self.uploaded_sections.extend(meshes.iter().map(|m| m.key));
         meshes
     }
@@ -3341,6 +3465,112 @@ mod tests {
             results.iter().any(|m| m.mesh.quad_count() > 0),
             "at least one section has geometry"
         );
+    }
+
+    #[test]
+    fn frame_mesh_handoff_keeps_byte_budget_overflow_for_later_frames() {
+        let mut scheduler = MeshScheduler::new(1, ShellClassifier::Demo(DemoClassifier));
+        let vertex_count = (MESH_HANDOFF_BYTE_BUDGET / 2)
+            / std::mem::size_of::<lodestone_render::PackedVertex>();
+        let vertices = vec![lodestone_render::PackedVertex { words: [0; 3] }; vertex_count];
+        for index in 0..3 {
+            let key = SectionKey {
+                cx: index,
+                cz: 0,
+                si: 0,
+                min_y: 0,
+            };
+            let generation = index as u64 + 1;
+            scheduler.latest_generation.insert(key, generation);
+            scheduler.pending += 1;
+            scheduler.ready.push_back((
+                Meshed {
+                    key,
+                    mesh: SectionGeometry::Packed(Mesh {
+                        vertices: vertices.clone(),
+                        indices: Vec::new(),
+                    }),
+                },
+                generation,
+            ));
+        }
+
+        let first_frame = scheduler.drain_frame_with_limit(MESH_HANDOFF_MAX_COUNT);
+        assert_eq!(first_frame.len(), 2, "two sections fit within the byte budget");
+        assert_eq!(scheduler.pending(), 1, "the overflow stays pending");
+        let next_frame = scheduler.drain_frame_with_limit(MESH_HANDOFF_MAX_COUNT);
+        assert_eq!(next_frame.len(), 1, "the retained section progresses next frame");
+        assert_eq!(next_frame[0].key.cx, 2, "FIFO handoff does not lose the tail");
+        assert_eq!(scheduler.pending(), 0);
+    }
+
+    #[test]
+    fn frame_mesh_handoff_caps_result_count_and_retains_the_tail() {
+        let mut scheduler = MeshScheduler::new(1, ShellClassifier::Demo(DemoClassifier));
+        const TEST_LIMIT: usize = 8;
+        for index in 0..(TEST_LIMIT + 2) {
+            let key = SectionKey {
+                cx: index as i32,
+                cz: 0,
+                si: 0,
+                min_y: 0,
+            };
+            let generation = index as u64 + 1;
+            scheduler.latest_generation.insert(key, generation);
+            scheduler.pending += 1;
+            scheduler.ready.push_back((
+                Meshed {
+                    key,
+                    mesh: SectionGeometry::Packed(Mesh::default()),
+                },
+                generation,
+            ));
+        }
+
+        assert_eq!(scheduler.drain_frame_with_limit(TEST_LIMIT).len(), TEST_LIMIT);
+        assert_eq!(scheduler.pending(), 2);
+        let tail = scheduler.drain_frame_with_limit(TEST_LIMIT);
+        assert_eq!(tail.len(), 2);
+        assert_eq!(tail[1].key.cx, (TEST_LIMIT + 1) as i32);
+        assert_eq!(scheduler.pending(), 0);
+    }
+
+    #[test]
+    fn frame_mesh_handoff_adapts_count_to_observed_upload_cost() {
+        assert_eq!(mesh_handoff_count_budget(50_000), 40);
+        assert_eq!(mesh_handoff_count_budget(1_000), MESH_HANDOFF_MAX_COUNT);
+        assert_eq!(mesh_handoff_count_budget(1_000_000), 2);
+        assert_eq!(mesh_handoff_count_budget(2_000_000), 1);
+    }
+
+    #[test]
+    fn forgetting_a_retained_result_adjusts_pending_count() {
+        let mut scheduler = MeshScheduler::new(1, ShellClassifier::Demo(DemoClassifier));
+        let keys = [0, 1].map(|cx| SectionKey {
+            cx,
+            cz: 0,
+            si: 0,
+            min_y: 0,
+        });
+        for (index, key) in keys.iter().copied().enumerate() {
+            let generation = index as u64 + 1;
+            scheduler.latest_generation.insert(key, generation);
+            scheduler.pending += 1;
+            scheduler.ready.push_back((
+                Meshed {
+                    key,
+                    mesh: SectionGeometry::Packed(Mesh::default()),
+                },
+                generation,
+            ));
+        }
+
+        scheduler.forget_generation(&keys[0]);
+        assert_eq!(scheduler.pending(), 1);
+        let remaining = scheduler.drain_frame_with_limit(2);
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].key, keys[1]);
+        assert_eq!(scheduler.pending(), 0);
     }
 
     /// **The bug 1 (grief-protection) reproduction.** Two jobs submitted for

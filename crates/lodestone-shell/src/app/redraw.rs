@@ -485,6 +485,10 @@ impl WindowApp {
         for key in self.sim.drain_removals() {
             render.remove_section(&key);
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        let mesh_upload_started = Instant::now();
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut mesh_upload_count = 0;
         for meshed in self.sim.drain_meshes() {
             render.upload_section(device, queue, meshed.key, &meshed.mesh);
             // `Sim::drain_meshes` has only crossed the CPU scheduler boundary.
@@ -492,7 +496,16 @@ impl WindowApp {
             // section, so acknowledge the hand-off after the upload call rather
             // than treating a worker result or a global pending count as ready.
             self.sim.mark_mesh_uploaded(meshed.key);
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                mesh_upload_count += 1;
+            }
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::mesher::record_native_mesh_upload_cost(
+            mesh_upload_started.elapsed(),
+            mesh_upload_count,
+        );
         // Empty sections have no upload call to acknowledge. Re-check after both
         // drains so an all-air player column can settle through its explicit
         // `SnapshotOutcome::Empty` records, and so the final non-air upload in
