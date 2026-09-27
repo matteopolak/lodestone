@@ -3587,6 +3587,12 @@ impl ServerProtocol for V770ServerProtocol {
         })
     }
 
+    fn detached_source_encode(&self) -> Option<lodestone_server::DetachedSourceEncode> {
+        Some(|source, cx, cz, column| {
+            lodestone_server::encode_chunk_with_source(&V770ServerProtocol, source, cx, cz, column)
+        })
+    }
+
     fn try_encode_chunk_with_neighbours(
         &self,
         cx: i32,

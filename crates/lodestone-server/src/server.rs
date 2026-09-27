@@ -3400,7 +3400,17 @@ async fn encode_column_owned<P: ServerProtocol>(
     match payload {
         crate::join_scheduler::ColumnPayload::Encoded(directive) => Ok(directive),
         crate::join_scheduler::ColumnPayload::Column(column) => {
-            let directive = encode_chunk_with_source(proto, &*source, cx, cz, &column);
+            let directive = if let Some(encode) = proto.detached_source_encode() {
+                let handle = crate::worldgen_dispatch::spawn(move || {
+                    encode(&*source, cx, cz, &column)
+                })
+                .await;
+                handle.await.map_err(|_| {
+                    ChunkEncodeError::new("detached source encode worker ended without a result")
+                })?
+            } else {
+                encode_chunk_with_source(proto, &*source, cx, cz, &column)
+            };
             if directive.is_ok()
                 && let Some(trace) = trace.as_ref()
             {
@@ -19237,6 +19247,29 @@ mod tests {
             Err(ChunkEncodeError::new("fixture rejected chunk"))
         }
 
+        fn detached_source_encode(&self) -> Option<crate::protocol::DetachedSourceEncode> {
+            #[cfg(not(target_arch = "wasm32"))]
+            fn encode(
+                _source: &dyn ChunkSource,
+                _cx: i32,
+                _cz: i32,
+                _column: &ChunkColumn,
+            ) -> Result<ServerDirective, ChunkEncodeError> {
+                Ok(ServerDirective::Send {
+                    packet_id: 44,
+                    payload: format!("{:?}", std::thread::current().id()).into_bytes(),
+                })
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                Some(encode)
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                None
+            }
+        }
+
         fn end_chunk_batch(&self, batch_size: i32) -> ServerDirective {
             ServerDirective::Send {
                 packet_id: 41,
@@ -19275,6 +19308,31 @@ mod tests {
         }
 
         fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn existing_column_packet_encoding_uses_the_bounded_worker() {
+        let source: Arc<dyn ChunkSource> = Arc::new(OneColumnSource);
+        let directive = encode_column_owned(
+            &RefusingChunkProtocol,
+            source,
+            2,
+            -3,
+            None,
+            crate::join_scheduler::ColumnPayload::Column(ChunkColumn::new(0, 256)),
+        )
+        .await
+        .expect("the detached encoder must handle an existing column");
+        let ServerDirective::Send { packet_id, payload } = directive else {
+            panic!("the detached encoder must produce a packet");
+        };
+        assert_eq!(packet_id, 44);
+        assert_ne!(
+            payload,
+            format!("{:?}", std::thread::current().id()).into_bytes(),
+            "source-aware encoding must not run on the connection task"
+        );
     }
 
     struct ColdColumnSource {

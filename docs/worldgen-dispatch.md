@@ -28,8 +28,9 @@ native joins submit the synchronous probe to this dispatcher, while the browser
 keeps its single-threaded path inline. The blocking work never occupies the
 network runtime workers.
 
-The 26.2 protocol can encode a complete detached packet snapshot and settle tick or direct-edit
-lighting on this pool. Packet bytes still return to the connection in admission order. Light
+The 26.2 protocol can encode both generated packet snapshots and existing source-backed columns,
+and settle tick or direct-edit lighting on this pool. Packet bytes still return to the connection
+in admission order. Light
 settlement admits one destination per connection; tick changes use resident terrain only, while
 direct edits may complete a cold footprint on the worker. Before sending a light result, the
 connection checks that its destination is still delivered and its retained snapshot is current.
