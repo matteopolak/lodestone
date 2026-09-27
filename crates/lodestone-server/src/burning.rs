@@ -28,7 +28,7 @@
 //!   first. Counting *up* from zero lands on the same cadence only when the duration
 //!   is a multiple of 20.
 //! * **The "not currently in lava" guard.** While actually standing in lava the
-//!   burn deals **no** damage of its own: lava's own contact damage (4.0 per tick) is
+//!   burn deals **no** damage of its own: lava's own contact damage (4.0 every 10 ticks) is
 //!   the damage, and without this guard an entity in lava takes both. The burn
 //!   counter still ticks down, so leaving lava leaves the remainder burning.
 //! * **Clearing fire on an immune entity is `min(0, remaining)` — not `0`.**
@@ -54,7 +54,7 @@
 //! | lava | 15.0 seconds | 300 |
 //!
 //! And the *contact* damage is per-block, not shared: ordinary fire deals `1.0F`
-//! and soul fire deals **`2.0F`**. Lava's contact damage is `4.0F` per tick, an
+//! and soul fire deals **`2.0F`**. Lava's contact damage is `4.0F` per hit, an
 //! order of magnitude above either.
 //!
 //! ## The negative counter is a grace period, and it is player-only
@@ -143,8 +143,13 @@ pub const FIRE_CONTACT_DAMAGE: f32 = 1.0;
 /// registration rather than assumed equal.
 pub const SOUL_FIRE_CONTACT_DAMAGE: f32 = 2.0;
 
-/// Lava's contact damage, applied **every tick** an entity is in lava.
+/// Lava's contact damage amount, applied once per contact-damage interval.
 pub const LAVA_CONTACT_DAMAGE: f32 = 4.0;
+
+/// Minimum interval between contact hits while an entity remains in a damaging
+/// block. The server runs at 20 ticks per second; the damage cooldown lets the
+/// next equal hit land once ten ticks have elapsed.
+pub const CONTACT_DAMAGE_INTERVAL: i32 = 10;
 
 /// The real ignite-for-seconds rule — floor of `seconds * 20.0F`.
 #[must_use]
@@ -191,7 +196,7 @@ impl BurnSource {
         }
     }
 
-    /// The per-tick contact damage while standing in this.
+    /// The contact damage amount while standing in this.
     #[must_use]
     pub fn contact_damage(self) -> f32 {
         match self {
@@ -229,13 +234,14 @@ impl BurnTick {
     }
 }
 
-/// One entity's burn counter — vanilla's own remaining-fire-ticks value.
+/// One entity's fire counter and damage-contact cooldown.
 ///
 /// A negative value is a *grace period*, not "not burning": see this module's doc on
 /// the fire-block-contact rule. `0` is the ordinary not-burning value.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BurnState {
     remaining: i32,
+    contact_cooldown: i32,
 }
 
 impl BurnState {
@@ -249,6 +255,11 @@ impl BurnState {
     #[must_use]
     pub fn remaining(&self) -> i32 {
         self.remaining
+    }
+
+    /// Clears both active fire and its contact-damage cooldown for a fresh life.
+    pub fn reset(&mut self) {
+        *self = Self::default();
     }
 
     /// Whether the entity is visibly on fire — the real is-on-fire rule's
@@ -329,15 +340,19 @@ impl BurnState {
         let mut out = BurnTick::default();
         let was_on_fire = self.is_on_fire();
 
-        // The block's own per-tick contact hit (the entity-inside-block damage,
+        self.contact_cooldown = (self.contact_cooldown - 1).max(0);
+
+        // The block's own contact hit when its cooldown is ready (the entity-inside-block damage,
         // including lava's separate contact damage). Independent of the burn
         // counter: a fire-immune entity takes neither, but Fire Resistance is what
         // refuses it for everyone else.
         if let Some(source) = standing_in
             && !fire_immune
             && !fire_resistance
+            && self.contact_cooldown == 0
         {
             out.damage += source.contact_damage();
+            self.contact_cooldown = CONTACT_DAMAGE_INTERVAL;
         }
 
         if self.remaining > 0 {
@@ -370,6 +385,7 @@ impl BurnState {
     pub fn restored(remaining: i32) -> Self {
         Self {
             remaining: remaining.clamp(i32::from(i16::MIN), i32::from(i16::MAX)),
+            contact_cooldown: 0,
         }
     }
 }
@@ -500,6 +516,30 @@ mod tests {
         out_of_lava.ignite_for_ticks(LAVA_IGNITE_TICKS);
         let out = out_of_lava.tick(None, false, false);
         assert_eq!(out.damage, 1.0, "out of lava, the burn tick's own 1.0 lands");
+    }
+
+    #[test]
+    fn lava_contact_damage_is_spaced_by_ten_ticks() {
+        let mut burn = BurnState::new();
+        burn.ignite_for_ticks(LAVA_IGNITE_TICKS);
+        let hits: Vec<_> = (1..=30)
+            .filter_map(|tick| {
+                (burn.tick(Some(BurnSource::Lava), false, false).damage > 0.0)
+                    .then_some(tick)
+            })
+            .collect();
+        assert_eq!(hits, vec![1, 11, 21]);
+        assert_eq!(burn.remaining(), LAVA_IGNITE_TICKS - 30);
+    }
+
+    #[test]
+    fn reset_clears_fire_and_contact_cooldown() {
+        let mut burn = BurnState::new();
+        burn.ignite_for_ticks(LAVA_IGNITE_TICKS);
+        burn.tick(Some(BurnSource::Lava), false, false);
+        burn.reset();
+        assert_eq!(burn.remaining(), 0);
+        assert_eq!(burn.tick(Some(BurnSource::Lava), false, false).damage, 4.0);
     }
 
     /// **Ignition only raises.** Stepping out of lava (300 ticks) into fire (160) must

@@ -52,10 +52,13 @@ i-frames and mob drowning are not modelled.
 
 The counter **counts down**; damage fires when `remaining % 20 == 0` **and
 the entity is not in lava** — an 8-second (160-tick) burn hits exactly 8
-times. Lava deals its own `4.0`/tick instead. Ignition only ever **raises**
+times. Contact damage from fire, soul fire, and lava is gated by a 10-tick
+cooldown, so lava's `4.0` hit lands every half-second instead of every server
+tick. Ignition only ever **raises**
 the counter, never shortens it, so stepping from lava into fire doesn't put
 the lava burn out. Fire/soul fire last 160 ticks, contact damage 1.0 vs
-**2.0** for soul fire; lava lasts 300 ticks, contact 4.0. Fire Resistance is
+**2.0** for soul fire; lava lasts 300 ticks and deals 4.0 per contact hit.
+Respawn clears the old life’s burn counter and contact cooldown. Fire Resistance is
 a damage-source check (immune to the *damage*, not the counter) — the
 entity still visibly burns, only the hit is refused. The `is_fire` tag
 needs both `on_fire` (the tick) and `in_fire` (the block) or resistance

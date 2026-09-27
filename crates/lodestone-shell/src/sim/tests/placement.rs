@@ -349,6 +349,39 @@ fn placement_facts_validate_raw_chunk_states_before_classification() {
 }
 
 #[test]
+fn placement_prediction_replaces_snow_and_short_grass_in_the_clicked_cell() {
+    let clicked = BlockPos::new(4, 69, 9);
+    for name in ["minecraft:snow[layers=1]", "minecraft:short_grass"] {
+        let state = lodestone_data::block_states::StateId::from_state_str(name)
+            .expect("replaceable placement fixture state");
+        let facts = placement_facts(clicked, BlockFace::Up, |_| Some(state.raw()), |_| false);
+        assert_eq!(
+            facts.target, clicked,
+            "placing on {name} should replace the clicked cell rather than go above it"
+        );
+        assert!(facts.clicked_replaceable, "{name} must be replaceable");
+        assert!(facts.target_replaceable, "the in-place target is replaceable");
+    }
+    let stone = lodestone_data::block_states::StateId::from_state_str("minecraft:stone")
+        .expect("stone control state");
+    let control = placement_facts(clicked, BlockFace::Up, |_| Some(stone.raw()), |_| false);
+    assert_eq!(
+        control.target,
+        BlockPos::new(4, 70, 9),
+        "solid stone is the control proving ordinary adjacent placement remains"
+    );
+    let snow_block =
+        lodestone_data::block_states::StateId::from_state_str("minecraft:snow_block")
+            .expect("full snow block control state");
+    let control = placement_facts(clicked, BlockFace::Up, |_| Some(snow_block.raw()), |_| false);
+    assert_eq!(
+        control.target,
+        BlockPos::new(4, 70, 9),
+        "a full snow block is solid and must not inherit snow-layer replaceability"
+    );
+}
+
+#[test]
 fn hotbar_selection_updates_and_echoes_to_the_server() {
     use lodestone_client::ClientAction;
     let (net, actions, _feed) = NetClient::loopback_with_feed();

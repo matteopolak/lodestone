@@ -9033,9 +9033,11 @@ where
     // Vanilla's own slab-block can-be-replaced check is the one
     // `canBeReplaced` override a hand placement can hit, and without it a slab
     // clicked onto a matching half-slab lands in the cell *above* instead of
-    // doubling. Every other block reaches the plain air-or-fluid test.
+    // doubling. Air, fluids, and tagged replaceable blocks target the clicked cell.
     let doubling_slab = placed.is_some_and(|(_, block)| slab_doubles(clicked, block, face, cursor));
-    let target = if crate::chunk::is_air_or_fluid_id(clicked) || doubling_slab {
+    let clicked_replaceable = crate::chunk::is_air_or_fluid_id(clicked)
+        || crate::block_placement::is_replaceable_for_placement(clicked);
+    let target = if clicked_replaceable || doubling_slab {
         pos
     } else {
         neighbour
@@ -9057,7 +9059,10 @@ where
     // *shadowed* in there by the placed block state — see the `let (state, extra)`
     // below — so `apply` cannot be reached from inside it.
     let mut placement_remainder: Option<Option<ItemStack>> = None;
-    if crate::chunk::is_air_or_fluid_id(target_state) || doubling_slab {
+    let target_replaceable = crate::chunk::is_air_or_fluid_id(target_state)
+        || crate::block_placement::is_replaceable_for_placement(target_state)
+        || doubling_slab;
+    if target_replaceable {
         if let Some((item, block)) = placed {
             // `placed_block_state` applies the block's own
             // `getStateForPlacement` convention (`crate::block_placement`);
@@ -9090,7 +9095,6 @@ where
                 target,
                 |p| source.block_state_id(p.x, p.y, p.z),
             );
-            let target_replaceable = crate::chunk::is_air_or_fluid_id(target_state) || doubling_slab;
             let occupied: Vec<(BlockPos, StateId)> = std::iter::once((target, placement.state))
                 .chain(placement.extra.iter().copied())
                 .collect();
@@ -9592,9 +9596,9 @@ where
 /// the bed cell at death time, so a broken or obstructed bed falls back to the
 /// world spawn.
 ///
-/// Respawn resets the modeled player vitals, sends the authoritative position,
-/// and refreshes the health and air displays. A request from a living player is
-/// ignored.
+/// Respawn resets the modeled player vitals and burn state, sends the
+/// authoritative position, and refreshes the health and air displays. A request
+/// from a living player is ignored.
 ///
 /// # `action == 2`, `REQUEST_GAMERULE_VALUES`
 ///
@@ -9606,6 +9610,7 @@ async fn apply_client_command<T, P, S>(
     proto: &P,
     state: &mut State,
     vitals: &mut PlayerVitals,
+    burn: &mut crate::burning::BurnState,
     // The fall accumulator, reset whenever respawn changes the player's
     // position.
     fall: &mut FallTracker,
@@ -9645,6 +9650,7 @@ where
     match action {
         0 if vitals.health() <= 0.0 => {
             vitals.respawn();
+            burn.reset();
             *client_loaded = false;
             // Prefer a usable bed position and fall back to the world spawn when
             // the bed is broken or obstructed.
@@ -12633,6 +12639,7 @@ async fn dispatch_play_packet<T, P, S>(
     player_rot: &mut Option<Rotation>,
     fall: &mut FallTracker,
     vitals: &mut PlayerVitals,
+    burn: &mut crate::burning::BurnState,
     world: &crate::world_state::WorldStateHandle,
     inventory: &mut PlayerInventory,
     block_entities: &BlockEntityHandle,
@@ -14241,6 +14248,7 @@ where
                 proto,
                 state,
                 vitals,
+                burn,
                 fall,
                 teleport_acknowledgements,
                 world_spawn,
@@ -15614,6 +15622,7 @@ where
                     &mut player_rot,
                     &mut fall,
                     &mut vitals,
+                    &mut burn,
                     world,
                     &mut inventory,
                     block_entities,
@@ -18488,6 +18497,7 @@ where
                 &mut player_rot,
                 &mut fall,
                 &mut vitals,
+                &mut burn,
                 world,
                 &mut inventory,
                 block_entities,
@@ -23997,6 +24007,8 @@ mod tests {
         // The precondition every existing respawn test pins too: no health, no
         // air, matching `PlayerVitals::respawn`'s own before-state.
         vitals.kill();
+        let mut burn = crate::burning::BurnState::new();
+        burn.ignite_for_ticks(crate::burning::LAVA_IGNITE_TICKS);
         let mut fall = FallTracker::default();
         let mut teleport_acknowledgements = None;
         let world_spawn = Vec3::new(11.0, 71.0, -4.0);
@@ -24016,6 +24028,7 @@ mod tests {
             &RespawnOnlyProto,
             &mut state,
             &mut vitals,
+            &mut burn,
             &mut fall,
             &mut teleport_acknowledgements,
             world_spawn,
@@ -24032,6 +24045,8 @@ mod tests {
         )
         .await
         .expect("the fixture protocol never errors");
+
+        assert_eq!(burn.remaining(), 0, "respawn must clear the old life's fire");
 
         drop(client_end);
         dimension_reset
