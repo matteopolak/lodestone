@@ -784,6 +784,18 @@ impl<'a, S: ChunkSource + 'static> SourceRef<'a, S> {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn shared_arc(self) -> Option<Arc<dyn ChunkSource>> {
+        match self {
+            Self::Borrowed(_) => None,
+            Self::Shared(source) => {
+                let owned: Arc<S> = Arc::clone(source);
+                Some(owned)
+            }
+            Self::Dimension(source) => Some(Arc::clone(source)),
+        }
+    }
+
     /// Which dimension this reference reads, treating an unlabelled source as the
     /// overworld — see [`ChunkSource::dimension`](crate::ChunkSource::dimension)
     /// for why `None` is a distinct answer at the trait but collapses here.
@@ -3150,6 +3162,39 @@ fn detached_initial_packet_snapshot_columns<P: ServerProtocol>(
     column
 }
 
+pub fn encode_packet_snapshot_with_protocol<P: ServerProtocol>(
+    proto: &P,
+    cx: i32,
+    cz: i32,
+    snapshot: &crate::worldgen_session::PacketSnapshot,
+    dimension: crate::dimension::Dimension,
+) -> Result<ServerDirective, ChunkEncodeError> {
+    if !proto.retains_initial_column_light() {
+        return proto.try_encode_chunk_in_dimension(
+            cx,
+            cz,
+            &column_for_initial_encode(snapshot.column()),
+            dimension,
+        );
+    }
+    let neighbours = snapshot
+        .neighbours()
+        .iter()
+        .map(|neighbour| {
+            let coordinate = neighbour.coordinate();
+            (coordinate.0 - cx, coordinate.1 - cz, neighbour.column())
+        })
+        .collect::<Vec<_>>();
+    let column = detached_initial_packet_snapshot_columns(proto, snapshot, &neighbours, dimension);
+    proto.try_encode_chunk_with_neighbours_in_dimension(
+        cx,
+        cz,
+        &column,
+        &neighbours,
+        dimension,
+    )
+}
+
 fn borrowed_neighbours(
     neighbours: &[(i32, i32, ChunkColumn)],
 ) -> Vec<(i32, i32, &ChunkColumn)> {
@@ -3285,40 +3330,13 @@ async fn encode_column<P: ServerProtocol, S: ChunkSource + 'static>(
             directive
         }
         crate::join_scheduler::ColumnPayload::Snapshot(snapshot) => {
-            let directive = if proto.retains_initial_column_light() {
-                let neighbours = snapshot
-                    .neighbours()
-                    .iter()
-                    .map(|neighbour| {
-                        let coordinate = neighbour.coordinate();
-                        (
-                            coordinate.0 - cx,
-                            coordinate.1 - cz,
-                            neighbour.column(),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                let column = detached_initial_packet_snapshot_columns(
-                    proto,
-                    &snapshot,
-                    &neighbours,
-                    source.dimension(),
-                );
-                proto.try_encode_chunk_with_neighbours_in_dimension(
-                    cx,
-                    cz,
-                    &column,
-                    &neighbours,
-                    source.dimension(),
-                )
-            } else {
-                proto.try_encode_chunk_in_dimension(
-                    cx,
-                    cz,
-                    &column_for_initial_encode(snapshot.column()),
-                    source.dimension(),
-                )
-            }?;
+            let directive = encode_packet_snapshot_with_protocol(
+                proto,
+                cx,
+                cz,
+                &snapshot,
+                source.dimension(),
+            )?;
             if let Some(trace) = trace {
                 trace.mark("encoded", cx, cz);
             }
@@ -3394,39 +3412,16 @@ async fn encode_column_owned<P: ServerProtocol>(
             let dimension = source
                 .dimension()
                 .unwrap_or(crate::dimension::Dimension::Overworld);
-            let directive = if proto.retains_initial_column_light() {
-                let neighbours = snapshot
-                    .neighbours()
-                    .iter()
-                    .map(|neighbour| {
-                        let coordinate = neighbour.coordinate();
-                        (
-                            coordinate.0 - cx,
-                            coordinate.1 - cz,
-                            neighbour.column(),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                let column = detached_initial_packet_snapshot_columns(
-                    proto,
-                    &snapshot,
-                    &neighbours,
-                    dimension,
-                );
-                proto.try_encode_chunk_with_neighbours_in_dimension(
-                    cx,
-                    cz,
-                    &column,
-                    &neighbours,
-                    dimension,
-                )
+            let directive = if let Some(encode) = proto.detached_packet_encode() {
+                let handle = crate::worldgen_dispatch::spawn(move || {
+                    encode(cx, cz, &snapshot, dimension)
+                })
+                .await;
+                handle.await.map_err(|_| {
+                    ChunkEncodeError::new("detached packet encode worker ended without a result")
+                })?
             } else {
-                proto.try_encode_chunk_in_dimension(
-                    cx,
-                    cz,
-                    &column_for_initial_encode(snapshot.column()),
-                    dimension,
-                )
+                encode_packet_snapshot_with_protocol(proto, cx, cz, &snapshot, dimension)
             }?;
             if let Some(trace) = trace.as_ref() {
                 trace.mark("encoded", cx, cz);
@@ -6903,6 +6898,41 @@ where
     Some((column, neighbours))
 }
 
+fn settle_resident_light_snapshot<S: ChunkSource + ?Sized>(
+    source: &S,
+    cx: i32,
+    cz: i32,
+    neighbour_offsets: &[(i32, i32)],
+    compute: &mut dyn FnMut(
+        &ChunkColumn,
+        &[(i32, i32, &ChunkColumn)],
+    ) -> Option<lodestone_world::ColumnLight>,
+) -> Option<(ChunkColumn, Option<lodestone_world::ColumnLight>)> {
+    let mut fallback = resident_column(source, cx, cz)?;
+    for attempt in 0..=LIGHT_SETTLEMENT_OPTIMISTIC_RETRIES {
+        let exclusive = attempt == LIGHT_SETTLEMENT_OPTIMISTIC_RETRIES;
+        match source.settle_resident_column_light_with_neighbours(
+            cx,
+            cz,
+            &fallback,
+            neighbour_offsets,
+            true,
+            true,
+            exclusive,
+            compute,
+        ) {
+            Ok(column) => return Some((column.clone(), column.centre_settled_light().cloned())),
+            Err(ColumnLightSettlementError::MissingFootprint) => return None,
+            Err(ColumnLightSettlementError::NoLight) => return Some((fallback, None)),
+            Err(ColumnLightSettlementError::Conflict) if !exclusive => {
+                fallback = resident_column(source, cx, cz)?;
+            }
+            Err(ColumnLightSettlementError::Conflict) => return None,
+        }
+    }
+    unreachable!("the bounded resident-light settlement loop always returns")
+}
+
 /// Sends one changed column's light from a snapshot that is already resident.
 /// Unlike [`send_column_light`], this never generates terrain while running a
 /// connection timer. A missing member means the future chunk snapshot, not a
@@ -6926,48 +6956,28 @@ where
         .unwrap_or(crate::dimension::Dimension::Overworld);
     let (column, light) = if proto.retains_initial_column_light() {
         let neighbour_offsets = light_neighbour_offsets(proto.uses_cross_column_light());
-        let Some(mut fallback) = resident_column(source, cx, cz) else {
+        let mut compute = |candidate: &ChunkColumn,
+                           neighbours: &[(i32, i32, &ChunkColumn)]| {
+            if radius != 0 {
+                proto.compute_column_light_with_neighbours_in_dimension(
+                    candidate,
+                    neighbours,
+                    dimension,
+                )
+            } else {
+                proto.compute_column_light_in_dimension(candidate, dimension)
+            }
+        };
+        let Some(settled) = settle_resident_light_snapshot(
+            source,
+            cx,
+            cz,
+            &neighbour_offsets,
+            &mut compute,
+        ) else {
             return Ok(());
         };
-        'settle: {
-            for attempt in 0..=LIGHT_SETTLEMENT_OPTIMISTIC_RETRIES {
-            let exclusive = attempt == LIGHT_SETTLEMENT_OPTIMISTIC_RETRIES;
-            let mut compute = |candidate: &ChunkColumn,
-                               neighbours: &[(i32, i32, &ChunkColumn)]| {
-                if radius != 0 {
-                    proto.compute_column_light_with_neighbours_in_dimension(
-                        candidate,
-                        neighbours,
-                        dimension,
-                    )
-                } else {
-                    proto.compute_column_light_in_dimension(candidate, dimension)
-                }
-            };
-            match source.settle_resident_column_light_with_neighbours(
-                cx,
-                cz,
-                &fallback,
-                &neighbour_offsets,
-                true,
-                true,
-                exclusive,
-                &mut compute,
-            ) {
-                Ok(column) => break 'settle (column.clone(), column.centre_settled_light().cloned()),
-                Err(ColumnLightSettlementError::MissingFootprint) => return Ok(()),
-                Err(ColumnLightSettlementError::NoLight) => break 'settle (fallback, None),
-                Err(ColumnLightSettlementError::Conflict) if !exclusive => {
-                    let Some(current) = resident_column(source, cx, cz) else {
-                        return Ok(());
-                    };
-                    fallback = current;
-                }
-                Err(ColumnLightSettlementError::Conflict) => return Ok(()),
-            }
-            }
-            unreachable!("the bounded resident-light settlement loop always returns")
-        }
+        settled
     } else {
         let Some((column, neighbours)) = resident_light_neighbourhood(source, cx, cz, radius) else {
             return Ok(());
@@ -7104,6 +7114,11 @@ impl PendingTickRelights {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    fn front(&self) -> Option<(i32, i32)> {
+        self.queued.front().copied()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     fn clear(&mut self) {
         self.queued.clear();
         self.queued_set.clear();
@@ -7116,6 +7131,34 @@ impl PendingTickRelights {
     fn len(&self) -> usize {
         self.queued.len()
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct DetachedTickRelight {
+    coordinate: (i32, i32),
+    handle: crate::worldgen_dispatch::DispatchHandle<Option<lodestone_world::ColumnLight>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn compute_detached_tick_relight(
+    source: &dyn ChunkSource,
+    coordinate: (i32, i32),
+    dimension: crate::dimension::Dimension,
+    cross_column: bool,
+    compute: crate::protocol::DetachedLightCompute,
+) -> Option<lodestone_world::ColumnLight> {
+    let offsets = light_neighbour_offsets(cross_column);
+    let mut calculate = |column: &ChunkColumn, neighbours: &[(i32, i32, &ChunkColumn)]| {
+        Some(compute(column, neighbours, dimension))
+    };
+    settle_resident_light_snapshot(
+        source,
+        coordinate.0,
+        coordinate.1,
+        &offsets,
+        &mut calculate,
+    )?
+    .1
 }
 
 async fn send_next_tick_relight<T, P, S>(
@@ -15095,6 +15138,7 @@ where
     let mut pending_keep_alive: Option<i64> = None;
     let mut pending_break: Option<PendingBreak> = None;
     let mut pending_tick_relights = PendingTickRelights::default();
+    let mut detached_tick_relight: Option<DetachedTickRelight> = None;
     let mut teleport_acknowledgements = initial_teleport_id.map(TeleportAcknowledgements::after_initial);
     let mut player_pos: Option<(f64, f64, f64)> = None;
     let mut client_movement = ClientMovement::default();
@@ -15369,6 +15413,7 @@ where
         if let Some(next) = pending_travel.take() {
             travelled = next;
             pending_tick_relights.clear();
+            detached_tick_relight = None;
         }
         // Shadowing the `source` parameter is what makes a dimension change reach
         // every arm at once — the view stream, the block reads, the fall sampler and
@@ -15390,10 +15435,43 @@ where
             .as_ref()
             .unwrap_or(block_entities);
         let block_ticks = dimension_handles.block_ticks.as_ref().unwrap_or(block_ticks);
+        let mut synchronous_tick_relight = true;
+        if let Some(coordinate) = pending_tick_relights.front() {
+            if let (Some(shared), Some(compute)) = (
+                source.shared_arc(),
+                proto.detached_light_compute()
+                    .filter(|_| proto.retains_initial_column_light()),
+            )
+            {
+                synchronous_tick_relight = false;
+                if detached_tick_relight.is_none() {
+                    if !view.delivered.contains(&coordinate) {
+                        pending_tick_relights.pop_front();
+                    } else {
+                        let dimension = source.dimension();
+                        let cross_column = proto.uses_cross_column_light();
+                        let work = move || {
+                            compute_detached_tick_relight(
+                                shared.as_ref(),
+                                coordinate,
+                                dimension,
+                                cross_column,
+                                compute,
+                            )
+                        };
+                        if let Ok(handle) = crate::worldgen_dispatch::try_spawn(work) {
+                            pending_tick_relights.pop_front();
+                            detached_tick_relight = Some(DetachedTickRelight {
+                                coordinate,
+                                handle,
+                            });
+                        }
+                    }
+                }
+            }
+        }
         tokio::select! {
-            // One queued column per pass keeps the loop responsive while
-            // preserving FIFO order across batches.
-            _ = std::future::ready(()), if !pending_tick_relights.is_empty() => {
+            _ = std::future::ready(()), if synchronous_tick_relight && !pending_tick_relights.is_empty() => {
                 watch.enter();
                 send_next_tick_relight(
                     conn,
@@ -15404,6 +15482,36 @@ where
                     &mut pending_tick_relights,
                 )
                 .await?;
+                watch.pass("tick_relight");
+            }
+            result = std::future::poll_fn(|cx| match detached_tick_relight.as_mut() {
+                Some(job) => std::future::Future::poll(std::pin::Pin::new(&mut job.handle), cx),
+                None => std::task::Poll::Pending,
+            }), if detached_tick_relight.is_some() => {
+                watch.enter();
+                let coordinate = detached_tick_relight
+                    .take()
+                    .expect("the completed relight has an owned handle")
+                    .coordinate;
+                if let Ok(Some(light)) = result {
+                    let current = resident_column(source.get(), coordinate.0, coordinate.1)
+                        .and_then(|column| column.centre_settled_light().cloned());
+                    if view.delivered.contains(&coordinate) && current.as_ref() == Some(&light) {
+                        let directive = proto.encode_light_update(coordinate.0, coordinate.1, &light);
+                        if matches!(directive, ServerDirective::None) {
+                            send_resident_column_light(
+                                conn,
+                                proto,
+                                source.get(),
+                                &mut state,
+                                coordinate.0,
+                                coordinate.1,
+                            ).await?;
+                        } else {
+                            apply(conn, &mut state, directive).await?;
+                        }
+                    }
+                }
                 watch.pass("tick_relight");
             }
             // Finish the source-aware encode that was started by the join arm.
@@ -19350,27 +19458,32 @@ mod tests {
             .filter(|&(dx, dz)| (dx, dz) != (0, 0))
             .map(|(dx, dz)| (dx, dz, ChunkColumn::new(0, 256)))
             .collect::<Vec<_>>();
-        let snapshot = crate::worldgen_session::PacketSnapshot::for_test(ChunkColumn::new(0, 256));
+        let snapshot = crate::worldgen_session::PacketSnapshot::for_test_with_neighbours(
+            ChunkColumn::new(0, 256),
+            relative_neighbours
+                .into_iter()
+                .map(|(dx, dz, column)| ((dx, dz), column))
+                .collect(),
+        );
 
-        for _ in 0..2 {
-            let neighbour_refs = borrowed_neighbours(&relative_neighbours);
-            let column = detached_initial_packet_snapshot_columns(
-                &protocol,
-                &snapshot,
-                &neighbour_refs,
-                crate::dimension::Dimension::End,
-            );
-            protocol
-                .try_encode_chunk_with_neighbours_in_dimension(
-                    0,
-                    0,
-                    &column,
-                    &neighbour_refs,
-                    crate::dimension::Dimension::End,
-                )
-                .expect("prepared packet snapshot encodes");
-        }
+        let first = encode_packet_snapshot_with_protocol(
+            &protocol,
+            0,
+            0,
+            &snapshot,
+            crate::dimension::Dimension::End,
+        )
+        .expect("prepared packet snapshot encodes");
+        let second = encode_packet_snapshot_with_protocol(
+            &protocol,
+            0,
+            0,
+            &snapshot,
+            crate::dimension::Dimension::End,
+        )
+        .expect("settled packet snapshot encodes identically");
 
+        assert_eq!(first, second);
         assert!(snapshot.is_light_settled());
         assert_eq!(protocol.computes.load(Ordering::Acquire), 1);
     }
@@ -19750,6 +19863,53 @@ mod tests {
             warm.column_reads.load(Ordering::Relaxed),
             0,
             "a complete resident footprint must also avoid the generating accessor"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn detached_tick_light_is_invalidated_by_a_later_block_edit() {
+        fn flat_light(
+            centre: &ChunkColumn,
+            neighbours: &[(i32, i32, &ChunkColumn)],
+            _: crate::dimension::Dimension,
+        ) -> lodestone_world::ColumnLight {
+            assert_eq!(neighbours.len(), 8);
+            let mut light = lodestone_world::ColumnLight::new(centre.section_count());
+            *light.sky_mut(0) = lodestone_world::LightData::Uniform(7);
+            light
+        }
+
+        let source = ColdColumnSource {
+            column_reads: AtomicUsize::new(0),
+            store_calls: AtomicUsize::new(0),
+            resident: true,
+            center_only: false,
+        };
+        let store = crate::chunk_store::ChunkStore::with_capacity(source, 32);
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                let _ = store.column(dx, dz);
+            }
+        }
+        let light = compute_detached_tick_relight(
+            &store,
+            (0, 0),
+            crate::dimension::Dimension::Overworld,
+            true,
+            flat_light,
+        )
+        .expect("a resident footprint settles off the connection path");
+        assert_eq!(
+            store.resident_column(0, 0).unwrap().centre_settled_light(),
+            Some(&light)
+        );
+
+        store.set_block(0, 0, 0, lodestone_data::block::Block::Stone.default_state());
+        assert_ne!(
+            store.resident_column(0, 0).unwrap().centre_settled_light(),
+            Some(&light),
+            "a completed worker result must not be sent after a newer edit"
         );
     }
 

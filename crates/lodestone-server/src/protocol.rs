@@ -14,7 +14,7 @@ mod codec;
 mod packets;
 mod session;
 
-pub use codec::{ChunkEncodeError, ChunkEncoder, ServerProtocol, WorldgenScope};
+pub use codec::{ChunkEncodeError, ChunkEncoder, DetachedLightCompute, DetachedPacketEncode, ServerProtocol, WorldgenScope};
 pub use packets::{ServerBound, ServerDirective};
 pub use session::{
     Abilities, BossBarSnapshot, EntitySnapshot, MerchantOfferOut, MetadataField, PlayerListing,

@@ -28,10 +28,15 @@ native joins submit the synchronous probe to this dispatcher, while the browser
 keeps its single-threaded path inline. The blocking work never occupies the
 network runtime workers.
 
+The 26.2 protocol can encode a complete detached packet snapshot and settle a resident tick-light
+footprint on this pool. Packet bytes still return to the connection in admission order. Light
+settlement admits one destination per connection; before sending its result, the connection checks
+that the destination is still delivered and the retained snapshot has not been invalidated.
+
 Several connections share this same bounded permit gate. Admission is a
 non-blocking try-operation: when the pool is saturated, a caller keeps its job
 queued and yields from an async service point instead of holding a semaphore
-waiter or blocking the runtime. Active world-generation calls never exceed the
+waiter or blocking the runtime. Active blocking jobs never exceed the
 native worker budget. Results remain emitted in queue order, independent of
 completion order, and the deterministic source digest is unchanged by
 dispatch. Dropping an admitted result handle cancels work that has not started;
