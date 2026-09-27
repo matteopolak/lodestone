@@ -112,7 +112,7 @@ pub(crate) fn placement_facts(
     // built-in 26.2 census, so validate each external value as it enters the
     // predicate layer; an unknown extension can only decline a local write.
     let clicked_state = state_at(clicked).and_then(lodestone_data::block_states::StateId::new);
-    let clicked_replaceable = clicked_state.is_some_and(is_air_state);
+    let clicked_replaceable = clicked_state.is_some_and(is_replaceable_state);
     // `resolve_target`'s rule, evaluated here because it is the same read: a
     // replaceable clicked cell is replaced in place, otherwise the placement
     // goes to the cell across the hit face.
@@ -131,7 +131,7 @@ pub(crate) fn placement_facts(
         // every other unknown here.
         target_replaceable: state_at(target)
             .and_then(lodestone_data::block_states::StateId::new)
-            .is_some_and(is_air_state),
+            .is_some_and(is_replaceable_state),
         target_obstructed: intersects_player(target),
     }
 }
@@ -158,16 +158,21 @@ pub(crate) fn block_intersects_player(bb: &Aabb, block: [i32; 3]) -> bool {
         && bb.min_z < z0 + 1.0
 }
 
-/// Whether a block state is one the client may place *into*.
+/// Whether the client can predict a placement into an existing state.
 ///
-/// Deliberately only the three air blocks, not vanilla's full
-/// `BlockState.canBeReplaced` set (water, lava, tall grass, snow layers, …):
-/// that set is per-block-state registry data no census in this tree carries, and
-/// guessing it would make the shell predict placements the server then refuses.
-/// Narrowing it costs nothing but a *missing* prediction — i.e. today's
-/// behaviour, a one-round-trip wait — for the cases it excludes, and it is what
-/// makes the `waterlogged = false` rule in [`state_for_placement`] exact rather
-/// than assumed.
+/// Air, fluids, and the synchronized built-in replaceable-block tag cover the
+/// common replaceable cells. Unknown state ids still decline prediction rather
+/// than borrowing a potentially unrelated built-in row.
+pub(crate) fn is_replaceable_state(state: lodestone_data::block_states::StateId) -> bool {
+    is_air_state(state)
+        || matches!(
+            state.block(),
+            lodestone_data::block::Block::Water | lodestone_data::block::Block::Lava
+        )
+        || lodestone_data::tool::block_tag_contains("minecraft:replaceable", state.block())
+}
+
+/// Whether a block state is one of the three air blocks.
 pub(crate) fn is_air_state(state: lodestone_data::block_states::StateId) -> bool {
     matches!(
         state.name(),

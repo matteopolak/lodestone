@@ -80,6 +80,14 @@ pub(crate) struct Placement {
     pub extra: Vec<(BlockPos, StateId)>,
 }
 
+/// Whether an existing state follows the built-in replaceable-block tag used
+/// when a hand placement targets the clicked cell. Air and fluids retain the
+/// server's separate handling; this covers partial and plant blocks such as
+/// snow layers and grass.
+pub(crate) fn is_replaceable_for_placement(state: StateId) -> bool {
+    lodestone_data::tool::block_tag_contains("minecraft:replaceable", state.block())
+}
+
 /// Adds the fluid state that belongs to every cell owned by a placement.
 ///
 /// Waterlogging is read from the world at each owned position and applied to
@@ -1015,6 +1023,26 @@ mod tests {
             pitch: Some(0.0),
             sneaking: false,
         }
+    }
+
+    #[test]
+    fn replaceable_block_tag_covers_snow_layers_and_plants_but_not_stone() {
+        for name in ["minecraft:snow", "minecraft:short_grass"] {
+            let block = Block::from_name(name).expect("registered block");
+            let state = block.default_state();
+            assert!(
+                is_replaceable_for_placement(state),
+                "{name} should be replaced in the clicked cell"
+            );
+        }
+        assert!(
+            !is_replaceable_for_placement(Block::Stone.default_state()),
+            "solid stone should keep placement targeting the adjacent cell"
+        );
+        assert!(
+            !is_replaceable_for_placement(Block::SnowBlock.default_state()),
+            "a full snow block must not be treated like replaceable snow layers"
+        );
     }
 
     fn state(text: &str) -> StateId {

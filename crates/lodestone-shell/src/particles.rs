@@ -2187,6 +2187,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn snow_layer_break_particles_follow_the_outline_height() {
+        let snow = StateId::from_state_str("minecraft:snow[layers=1]")
+            .expect("one-layer snow is a canonical state");
+        let top = 69.125;
+        let mut p = Particles::new(None);
+        p.destroy_block([0, 69, 0], BlockStateRef::canonical(snow.raw()), [1.0; 3]);
+        assert_eq!(
+            p.engine.particles().len(),
+            32,
+            "the burst grid must use the 1/8-high outline"
+        );
+        assert!(
+            p.engine.particles().iter().all(|particle| particle.y < top),
+            "every debris seed must be below the one-layer top at {top}"
+        );
+
+        p.engine.clear();
+        p.breaking_block(
+            [0, 69, 0],
+            BlockStateRef::canonical(snow.raw()),
+            [1.0; 3],
+            emit::Face::Up,
+        );
+        let chip = p.engine.particles().first().expect("mining chip emitted");
+        assert!(
+            (chip.y - (top + 0.1)).abs() < 1e-6,
+            "upward mining chip should spawn just outside the outline at {}, got {}",
+            top + 0.1,
+            chip.y
+        );
+    }
+
     /// Direct local destroy effects lower only canonical values at the same
     /// generated-state boundary as the packet family. A protocol-local value
     /// may overlap the census but must still be dropped; the canonical control

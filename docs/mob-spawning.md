@@ -141,6 +141,14 @@ spawn-time setup; before this every mob used `MobShape::land`'s defaults
 is checked against a jar-cited table so an unclassified roster species fails loudly rather than
 defaulting silently.
 
+The attribute table covers every built-in species named by the natural-spawn registrations,
+including aquatic and ambient types outside the goal rosters. `movement_speed` is seeded explicitly
+for each one; some correctly retain the registry value of `0.7`, so checks must verify the attribute
+instance exists as well as compare its value. These are registered base attributes: species that
+randomize or resize attributes during spawn need those later mutations modeled at their spawn seam.
+When adding a natural-spawn species, update `type_spec` and the natural-spawn coverage cases in
+`lodestone_entity::attribute` from that type's own attribute definition.
+
 **Movement speed is not read as blocks/tick directly.** Vanilla's own speed-setting logic sets both
 the per-tick speed scale *and* the forward-input magnitude a mob's move vector multiplies, so real
 per-tick thrust is the *square* of the speed modifier times `movement_speed`, converging under friction

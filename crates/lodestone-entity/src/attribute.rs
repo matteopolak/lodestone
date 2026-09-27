@@ -599,13 +599,14 @@ struct TypeSpec {
     overrides: &'static [(&'static str, f64)],
 }
 
-/// Resolves a modern entity type key to its vanilla base-attribute spec.
+/// Resolves a modern entity type key to its built-in base-attribute spec.
 ///
-/// This is version-free semantic content read from 26.2's per-mob
-/// `createAttributes()` builders: it is the *set* of attributes a type has plus
+/// This is version-free semantic content read from the per-type attribute
+/// builders: it is the *set* of attributes a type has plus
 /// its base-value overrides, independent of any wire index. A version whose
-/// registry differs would supply its own; this covers the mobs the client
-/// currently renders plus their close variants.
+/// registry differs would supply its own; this includes every built-in species
+/// in the natural-spawn table and the other species currently rendered by the
+/// client.
 fn type_spec(path: &str) -> Option<TypeSpec> {
     // Zombie family shares vanilla's own zombie attribute builder.
     const ZOMBIE: &[(&str, f64)] = &[
@@ -854,6 +855,143 @@ fn type_spec(path: &str) -> Option<TypeSpec> {
             template: BaseTemplate::Animal,
             overrides: &[("max_health", 10.0), ("movement_speed", 0.2)],
         },
+        "axolotl" => TypeSpec {
+            template: BaseTemplate::Animal,
+            overrides: &[
+                ("max_health", 14.0),
+                ("movement_speed", 1.0),
+                ("attack_damage", 2.0),
+                ("step_height", 1.0),
+            ],
+        },
+        "bat" => TypeSpec {
+            template: BaseTemplate::Mob,
+            overrides: &[("max_health", 6.0)],
+        },
+        "camel" => TypeSpec {
+            template: BaseTemplate::Animal,
+            overrides: &[
+                ("max_health", 32.0),
+                ("movement_speed", 0.09),
+                ("jump_strength", 0.42),
+                ("step_height", 1.5),
+            ],
+        },
+        "cod" | "pufferfish" | "salmon" | "tropical_fish" => TypeSpec {
+            template: BaseTemplate::Mob,
+            overrides: &[("max_health", 3.0)],
+        },
+        "dolphin" => TypeSpec {
+            template: BaseTemplate::Mob,
+            overrides: &[("max_health", 10.0), ("movement_speed", 1.2), ("attack_damage", 3.0)],
+        },
+        "donkey" | "llama" => TypeSpec {
+            template: BaseTemplate::Animal,
+            overrides: &[
+                ("max_health", 53.0),
+                ("movement_speed", 0.175),
+                ("jump_strength", 0.5),
+                ("step_height", 1.0),
+                ("safe_fall_distance", 6.0),
+                ("fall_damage_multiplier", 0.5),
+            ],
+        },
+        "fox" => TypeSpec {
+            template: BaseTemplate::Animal,
+            overrides: &[
+                ("max_health", 10.0),
+                ("movement_speed", 0.3),
+                ("attack_damage", 2.0),
+                ("safe_fall_distance", 5.0),
+                ("follow_range", 32.0),
+            ],
+        },
+        "frog" => TypeSpec {
+            template: BaseTemplate::Animal,
+            overrides: &[
+                ("max_health", 10.0),
+                ("movement_speed", 1.0),
+                ("attack_damage", 10.0),
+                ("step_height", 1.0),
+            ],
+        },
+        "glow_squid" | "squid" => TypeSpec {
+            template: BaseTemplate::Mob,
+            overrides: &[("max_health", 10.0)],
+        },
+        "hoglin" => TypeSpec {
+            template: BaseTemplate::Monster,
+            overrides: &[
+                ("max_health", 40.0),
+                ("movement_speed", 0.3),
+                ("knockback_resistance", 0.6),
+                ("attack_knockback", 1.0),
+                ("attack_damage", 6.0),
+            ],
+        },
+        "horse" => TypeSpec {
+            template: BaseTemplate::Animal,
+            overrides: &[
+                ("max_health", 53.0),
+                ("movement_speed", 0.225),
+                ("jump_strength", 0.7),
+                ("step_height", 1.0),
+                ("safe_fall_distance", 6.0),
+                ("fall_damage_multiplier", 0.5),
+            ],
+        },
+        "magma_cube" => TypeSpec {
+            template: BaseTemplate::Monster,
+            overrides: &[("movement_speed", 0.2)],
+        },
+        "nautilus" => TypeSpec {
+            template: BaseTemplate::Animal,
+            overrides: &[
+                ("max_health", 15.0),
+                ("movement_speed", 1.0),
+                ("attack_damage", 3.0),
+                ("knockback_resistance", 0.3),
+            ],
+        },
+        "ocelot" => TypeSpec {
+            template: BaseTemplate::Animal,
+            overrides: &[
+                ("max_health", 10.0),
+                ("movement_speed", 0.3),
+                ("attack_damage", 3.0),
+            ],
+        },
+        "piglin" => TypeSpec {
+            template: BaseTemplate::Monster,
+            overrides: &[
+                ("max_health", 16.0),
+                ("movement_speed", 0.35),
+                ("attack_damage", 5.0),
+            ],
+        },
+        "slime" => TypeSpec {
+            template: BaseTemplate::Monster,
+            overrides: &[],
+        },
+        "strider" => TypeSpec {
+            template: BaseTemplate::Animal,
+            overrides: &[("movement_speed", 0.175)],
+        },
+        "sulfur_cube" => TypeSpec {
+            template: BaseTemplate::Mob,
+            overrides: &[("tempt_range", 8.0)],
+        },
+        "zombie_horse" => TypeSpec {
+            template: BaseTemplate::Animal,
+            overrides: &[
+                ("max_health", 25.0),
+                ("movement_speed", 0.225),
+                ("jump_strength", 0.7),
+                ("step_height", 1.0),
+                ("safe_fall_distance", 6.0),
+                ("fall_damage_multiplier", 0.5),
+            ],
+        },
         "sheep" => TypeSpec {
             template: BaseTemplate::Animal,
             overrides: &[("max_health", 8.0), ("movement_speed", 0.23)],
@@ -861,6 +999,35 @@ fn type_spec(path: &str) -> Option<TypeSpec> {
         "chicken" => TypeSpec {
             template: BaseTemplate::Animal,
             overrides: &[("max_health", 4.0), ("movement_speed", 0.25)],
+        },
+        "armadillo" => TypeSpec {
+            template: BaseTemplate::Animal,
+            overrides: &[("max_health", 12.0), ("movement_speed", 0.14)],
+        },
+        "goat" => TypeSpec {
+            template: BaseTemplate::Animal,
+            overrides: &[("max_health", 10.0), ("movement_speed", 0.2), ("attack_damage", 2.0)],
+        },
+        "panda" => TypeSpec {
+            template: BaseTemplate::Animal,
+            overrides: &[("movement_speed", 0.15), ("attack_damage", 6.0)],
+        },
+        "polar_bear" => TypeSpec {
+            template: BaseTemplate::Animal,
+            overrides: &[
+                ("max_health", 30.0),
+                ("follow_range", 20.0),
+                ("movement_speed", 0.25),
+                ("attack_damage", 6.0),
+            ],
+        },
+        "turtle" => TypeSpec {
+            template: BaseTemplate::Animal,
+            overrides: &[
+                ("max_health", 30.0),
+                ("movement_speed", 0.25),
+                ("step_height", 1.0),
+            ],
         },
         // Vanilla's own rabbit attribute builder.
         // The only `Animal` here that carries `ATTACK_DAMAGE`: the killer
@@ -1185,6 +1352,11 @@ mod tests {
             ("zombified_piglin", 0.23, 20.0),
             ("bee", 0.3, 10.0),
             ("wolf", 0.3, 8.0),
+            ("turtle", 0.25, 30.0),
+            ("armadillo", 0.14, 12.0),
+            ("goat", 0.2, 10.0),
+            ("panda", 0.15, 20.0),
+            ("polar_bear", 0.25, 30.0),
         ];
 
         for &(ty, speed, health) in cases {
@@ -1301,6 +1473,81 @@ mod tests {
             "these rostered species have no type_spec arm, so every attribute \
              they read falls back to the registry default: {missing:?}"
         );
+    }
+
+    #[test]
+    fn every_naturally_spawnable_species_has_its_registered_movement_speed() {
+        // Keep aligned with the built-in natural-spawn species table. A bare
+        // AttributeMap reports 0.7 for movement_speed, so checking only value()
+        // would miss a missing type spec whenever that is the real base.
+        let cases: &[(&str, f64)] = &[
+            ("armadillo", 0.14),
+            ("axolotl", 1.0),
+            ("bat", 0.7),
+            ("bogged", 0.25),
+            ("camel", 0.09),
+            ("cave_spider", 0.3),
+            ("chicken", 0.25),
+            ("cod", 0.7),
+            ("cow", 0.2),
+            ("creeper", 0.25),
+            ("dolphin", 1.2),
+            ("donkey", 0.175),
+            ("drowned", 0.23),
+            ("enderman", 0.3),
+            ("fox", 0.3),
+            ("frog", 1.0),
+            ("ghast", 0.7),
+            ("glow_squid", 0.7),
+            ("goat", 0.2),
+            ("hoglin", 0.3),
+            ("horse", 0.225),
+            ("husk", 0.23),
+            ("llama", 0.175),
+            ("magma_cube", 0.2),
+            ("mooshroom", 0.2),
+            ("nautilus", 1.0),
+            ("ocelot", 0.3),
+            ("panda", 0.15),
+            ("parched", 0.25),
+            ("parrot", 0.2),
+            ("pig", 0.25),
+            ("piglin", 0.35),
+            ("polar_bear", 0.25),
+            ("pufferfish", 0.7),
+            ("rabbit", 0.3),
+            ("salmon", 0.7),
+            ("sheep", 0.23),
+            ("skeleton", 0.25),
+            ("slime", 0.7),
+            ("spider", 0.3),
+            ("squid", 0.7),
+            ("stray", 0.25),
+            ("strider", 0.175),
+            ("sulfur_cube", 0.7),
+            ("tropical_fish", 0.7),
+            ("turtle", 0.25),
+            ("witch", 0.25),
+            ("wolf", 0.3),
+            ("zombie", 0.23),
+            ("zombie_horse", 0.225),
+            ("zombie_villager", 0.23),
+            ("zombified_piglin", 0.23),
+        ];
+        assert_eq!(cases.len(), 52, "update coverage with the natural-spawn table");
+
+        for &(species, expected_speed) in cases {
+            let attributes = default_attributes(&id(&format!("minecraft:{species}")))
+                .unwrap_or_else(|| panic!("naturally spawnable {species} needs a type spec"));
+            let speed = attributes
+                .get(&id("minecraft:movement_speed"))
+                .unwrap_or_else(|| panic!("{species} needs an explicitly seeded movement_speed"))
+                .value();
+            assert_eq!(
+                speed, expected_speed,
+                "{species} registered movement speed must match its own attribute supplier"
+            );
+        }
     }
 
     /// The one species in the table for which `movement_speed` **is** the

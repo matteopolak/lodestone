@@ -73,6 +73,13 @@ value is not rendered by this built-in resolver rather than being coerced into a
 or dynamic-registry renderer can dispatch on its `BlockStateRef` source without reconstructing intent
 from the raw number.
 
+Local destroy bursts resolve that canonical state through `lodestone_data::outline_shapes` and pass
+each outline box to the emitter. The per-hit mining chip uses the union bounds of those boxes because
+it samples one position; an empty outline produces no chip. This keeps snow, slabs, plants and other
+partial shapes within their actual extents without using collision geometry, which is empty for many
+targetable plants. Packet-driven block particles keep their explicit packet position and are not
+reshaped by this path.
+
 Item crumbs follow the same ownership rule. `SpriteSource::Item` carries the generated
 `lodestone_data::item::Item` enum, not a numeric registry value. The only two producers are a local
 consumable after resolving its item name and three fixed built-in particle types; both validate before
@@ -132,7 +139,10 @@ one differing number rather than reusing your own prior port wholesale; a gate t
 correct and the swapped-constant hypothesis and requires the measurement to land on one is the only thing
 that reliably catches this, since the particle count, sheet and physics all look right either way.
 
-**Debris tint or texture is wrong**: check `vanilla_particle_tint_kind`
+**Debris position or count is wrong**: check the state's entry in
+`lodestone_data::outline_shapes`; destroy bursts consume every box, while the single mining chip
+samples the union bounds. Do not substitute collision boxes because targetable plants can have no
+collision shape. **Debris tint or texture is wrong**: check `vanilla_particle_tint_kind`
 (`crates/lodestone-assets/src/tint.rs`) against vanilla's tint-source table, and whether the block
 overrides `colorAsTerrainParticle` specifically (not just its face tint). **Debris draws nothing**: check
 the particle frame's own unresolved-sprite counter before anything else — an unresolved sprite is silent

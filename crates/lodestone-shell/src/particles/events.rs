@@ -1,6 +1,7 @@
 //! Particle event consumers and client-predicted environmental emitters.
 
 use super::*;
+use lodestone_physics::Aabb;
 
 /// Lowers a source-tagged state only where the built-in particle tables need a
 /// generated-state index. A protocol-local value can overlap this build's
@@ -28,13 +29,33 @@ fn built_in_state_for_particles(
     Some(state)
 }
 
+fn outline_bounds(state: lodestone_data::block_states::StateId) -> Option<Aabb> {
+    let boxes = lodestone_data::outline_shapes::outline_boxes(state);
+    let first = boxes.first()?;
+    let mut min = first.min;
+    let mut max = first.max;
+    for bounds in &boxes[1..] {
+        for axis in 0..3 {
+            min[axis] = min[axis].min(bounds.min[axis]);
+            max[axis] = max[axis].max(bounds.max[axis]);
+        }
+    }
+    Some(Aabb::new(
+        f64::from(min[0]),
+        f64::from(min[1]),
+        f64::from(min[2]),
+        f64::from(max[0]),
+        f64::from(max[1]),
+        f64::from(max[2]),
+    ))
+}
+
 impl Particles {
     /// Emit vanilla's block-destruction burst — vanilla's own client-level add-destroy-block-effect.
     ///
-    /// The shape is passed in rather than queried because vanilla reads the
-    /// block's *outline* shape, not its collision shape, and the two differ for
-    /// exactly the blocks that matter: `short_grass` has an outline and no
-    /// collision at all, so driving this from collision geometry would emit
+    /// The shape comes from the state's outline table, not its collision shape;
+    /// the two differ for exactly the blocks that matter: `short_grass` has an
+    /// outline and no collision at all, so collision geometry would emit
     /// nothing when a player breaks grass.
     ///
     /// `tint` is an **extra** multiplier applied on top of the state's own
@@ -46,12 +67,25 @@ impl Particles {
             return;
         };
         let tint = self.state_tint_of(state, tint);
+        let shape: Vec<Aabb> = lodestone_data::outline_shapes::outline_boxes(state)
+            .iter()
+            .map(|bounds| {
+                Aabb::new(
+                    f64::from(bounds.min[0]),
+                    f64::from(bounds.min[1]),
+                    f64::from(bounds.min[2]),
+                    f64::from(bounds.max[0]),
+                    f64::from(bounds.max[1]),
+                    f64::from(bounds.max[2]),
+                )
+            })
+            .collect();
         emit::destroy_block_effect(
             &mut self.engine,
             (block[0], block[1], block[2]),
             state,
             tint,
-            &[emit::FULL_CUBE],
+            &shape,
         );
     }
 
@@ -59,9 +93,9 @@ impl Particles {
     /// face — vanilla's own client-level add-breaking-block-effect.
     ///
     /// `tint` is an extra multiplier on top of the state's own particle tint,
-    /// exactly as in [`destroy_block`](Self::destroy_block): the two emitters
-    /// both construct vanilla's own terrain particle, so they must tint identically or a
-    /// block's mining flecks and its final burst come out different colours.
+    /// exactly as in [`destroy_block`](Self::destroy_block): both use the
+    /// validated state's outline and construct the same terrain particle, so
+    /// their tint must match or the mining flecks and final burst differ.
     pub fn breaking_block(
         &mut self,
         block: [i32; 3],
@@ -73,13 +107,16 @@ impl Particles {
             return;
         };
         let tint = self.state_tint_of(state, tint);
+        let Some(shape) = outline_bounds(state) else {
+            return;
+        };
         emit::breaking_block_effect(
             &mut self.engine,
             (block[0], block[1], block[2]),
             state,
             tint,
             face,
-            emit::FULL_CUBE,
+            shape,
         );
     }
 

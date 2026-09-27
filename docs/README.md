@@ -118,6 +118,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   `lodestone_data::block::BlockMask` is an exact membership representation for hot,
   repeatedly queried sets in the built-in block registry. It replaces hash tables only
   where measurement justifies paying for the full fixed-width mask.
+- [Player block placement](./block-placement.md) — This document describes how a
+  right-click block placement chooses its target cell and validates the proposed
+  state. It covers the shared server path for air, fluids, replaceable blocks, and
+  blocks with placement-specific state rules.
 - [Typed block properties](./block-properties.md) — The lodestone-data
   block_properties module represents built-in block-state keys and values as generated
   enums and exposes complete states through the Properties domain type. Its storage is
