@@ -47,6 +47,7 @@ profile-harness = ["tokio/test-util"]
 worldgen-stage-pmu = ["lodestone-worldgen/stage-pmu"]
 
 [dependencies]
+rustc-hash = "2.1.3"
 # The portable clock. Not a direct `web-time` dependency any more:
 # `lodestone-time` is the one crate that depends on `web-time` directly, so
 # every other crate's clock goes through it instead of an improvised copy. See

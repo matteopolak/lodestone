@@ -8,6 +8,8 @@ The integrated server shares a 20 Hz world-tick task with the live chunk cache. 
 
 The tick loop's `resident_tick_terrain_snapshot` builds the natural-spawn terrain view only when every selected column is already retained; it uses the same atomic resident boundary as `resident_tick_column` rather than a check-then-load pair. Fluid seeding and random ticks use that boundary too: a cold coordinate is skipped for this pass and retried after the join or seed worker installs it in `ChunkStore`. Scheduled block/fluid work and event handoffs use the same resident snapshots; a cold due record is requeued, and a cold event remains pending rather than being discarded. Cross-column probes admit their complete bounded footprint before entering fire, redstone, fluid, explosion, or physics code. The regular `snapshot_terrain` method remains available to callers that explicitly need a complete loading snapshot.
 
+The coordinate-gate table uses a non-cryptographic hash for its private `(cx, cz)` lookups. No iteration order from that table affects mutations, packet bytes, or generation order; ordered multi-coordinate admission sorts its coordinates independently.
+
 Integrated worlds pause simulation until the client reports `PlayerLoaded` and the initial terrain neighborhood has been delivered. The connection's chunk stream and generation workers remain active while paused. The tick driver continues waiting at its normal cadence, so resuming does not replay loading time as a burst of world ticks. Other server entry points keep their normal tick behavior.
 
 The shared `run_tick_loop_with_weather_impl` records the three phase durations for every tick as before. When tracing is enabled, it emits a structured event only for a phase lasting at least one 50 ms tick period, including the tick number, phase name, follow-area size, and resident-column count. Native and `wasm32` use the same tick-loop implementation; the environment-variable switch is intentionally native-only.
@@ -51,4 +53,4 @@ Tracing is off by default. On native runs, set `LODESTONE_TICK_TRACE=1` and enab
 
 ## Dependencies
 
-The handoff uses `ChunkSource` residency methods, `ChunkStore`'s cache lookup, `FollowArea`'s terrain view, and the shared `TickClock` phase boundaries. Slow-phase events use the existing `tracing` dependency and do not add a runtime worker or a second tick loop.
+The handoff uses `ChunkSource` residency methods, `ChunkStore`'s cache lookup, `FollowArea`'s terrain view, and the shared `TickClock` phase boundaries. The private gate table uses `rustc-hash`; slow-phase events use the existing `tracing` dependency and do not add a runtime worker or a second tick loop.
