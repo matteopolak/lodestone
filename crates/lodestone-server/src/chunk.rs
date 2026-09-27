@@ -4794,6 +4794,23 @@ impl ChunkSource for NetherChunkSource {
         Some(crate::dimension::Dimension::Nether)
     }
 
+    fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
+        if let Some(column) = self
+            .edits
+            .lock()
+            .expect("chunk edit cache lock poisoned")
+            .get(&(cx, cz))
+            .cloned()
+        {
+            return Some(column);
+        }
+        self.generation_inputs
+            .lock()
+            .expect("generation input lock poisoned")
+            .get(&(cx, cz))
+            .cloned()
+    }
+
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
         let edits = self.edits.lock().expect("chunk edit cache lock poisoned");
         if let Some(edited) = edits.get(&(cx, cz)) {

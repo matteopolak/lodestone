@@ -48,16 +48,15 @@ later magma attempt from `(6, 3)` observes a non-netherrack resident block and
 is rejected. Reversing those explicit completions leaves magma instead, which
 makes the ordering regression observable without special-casing either
 coordinate.
-The streaming replay retains admitted columns and completed source bodies
-across successive target rows; each target adds only its new halo and its
-not-yet-completed 3×3 sources. A target therefore observes the authenticated
-earlier prefix rather than a freshly regenerated halo.
-Each source completion builds its placement views from those live resident
-columns, including writes committed by prior completions. The sparse transition
-overlay remains the commit ledger, but it is not a substitute for the resident
-read view: neighborhood predicates such as blob replacement must see retained
-basalt, structure, and vegetation states regardless of frame batch size or
-immutable-cache worker count.
+The streaming comparator retains admitted columns and completed source bodies
+across successive target rows. Production packet requests instead complete
+each target as a transaction. Neighboring source writes remain visible to later
+sources in that transaction, but only target-owned feature writes become durable.
+This prevents a later target from revising an already-served column. A completed
+resident column takes precedence over a cached shaped prefix when a neighboring
+target is admitted, including after the column is loaded from disk. Saved full
+columns do not carry client heightmaps, so the lifecycle derives those maps
+from the saved block field when it first needs them.
 
 Live streaming can initially retain a shaped target while the join worker is
 filling the view. Before packet encoding, the source's admission hook upgrades
@@ -149,6 +148,13 @@ cross-chunk replacement decisions. The focused external controls in
 the mushroom spill and an air control that must still accept the fortress
 support.
 
+When changing admission or spill ownership, keep consecutive target output
+identical across an uninterrupted session and a save/reopen boundary. The
+focused region-source regression covers both paths and checks that a later
+target leaves a finalized neighbor unchanged. Do not promote target-local
+neighbor writes into durable source completions without persisting their full
+ordered spill state.
+
 When adding a Nether feature body, keep its entry in the mixed list even if the
 body is not supported yet. Unsupported entries still own a raw feature index;
 removing one shifts the seed of every entry after it. Extend the shared feature
@@ -168,7 +174,8 @@ index seed each carver, so dropping or reordering an entry changes the whole
 
 ## Configuration
 
-There are no runtime flags. `noise_settings/nether.json` selects
+`LODESTONE_NETHER_PROFILE=1` enables optional cache timings. The
+`noise_settings/nether.json` asset selects
 `legacy_random_source`; the biome documents under
 `crates/lodestone-server/assets/worldgen/biome/` select placed features and the
 configured/placed-feature documents provide their bodies and placement

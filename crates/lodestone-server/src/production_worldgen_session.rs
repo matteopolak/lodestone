@@ -8,7 +8,7 @@ use std::sync::Arc;
 use sha2::{Digest, Sha256};
 use lodestone_data::block_states::StateId;
 
-use crate::chunk::{ChunkColumn, ChunkGenerationStage};
+use crate::chunk::{ChunkColumn, ChunkGenerationStage, ChunkSource};
 use crate::worldgen_lifecycle::{
     ImmutableComputeExecutor, LifecycleCompletion, LifecycleCompletionMode,
     LifecycleFeatureDispatch, LifecycleMaterializer, LifecycleSpill,
@@ -42,6 +42,14 @@ pub(crate) trait DimensionPolicy<S: LifecycleWorldgenSource> {
     ) -> Vec<(StageKey, ImmutableSidecar)>;
 
     fn has_top_layer() -> bool;
+
+    fn authoritative_resident(
+        _source: &S,
+        _session: &GenerationSession,
+        _coordinate: ChunkCoordinate,
+    ) -> Option<ChunkColumn> {
+        None
+    }
 
     /// Whether this policy owns a complete FEATURES invocation whose writes
     /// must be settled around requested targets before packet finalization.
@@ -171,6 +179,23 @@ impl DimensionPolicy<crate::chunk::NetherChunkSource> for NetherPolicy {
 
     fn has_top_layer() -> bool {
         false
+    }
+
+    fn authoritative_resident(
+        source: &crate::chunk::NetherChunkSource,
+        session: &GenerationSession,
+        coordinate: ChunkCoordinate,
+    ) -> Option<ChunkColumn> {
+        source
+            .resident_column(coordinate.0, coordinate.1)
+            .filter(|column| column.generation_stage() == ChunkGenerationStage::Full)
+            .or_else(|| {
+                session
+                    .resident_read(coordinate)
+                    .ok()?
+                    .product::<ChunkColumn>(ResourceKey::OutputColumn)
+                    .map(|column| (*column).clone())
+            })
     }
 }
 
@@ -724,6 +749,7 @@ fn commit_features<S>(
     settlement: Option<TargetFeatureSettlement>,
     authenticated_content_fingerprint: Option<[u8; 32]>,
     retain_direct_output: bool,
+    persist_cross_target_spills: bool,
 ) -> Result<([u8; 32], Option<Arc<ChunkColumn>>), SessionError>
 where
     S: LifecycleWorldgenSource + Sync,
@@ -780,7 +806,7 @@ where
                 settled_winners.entry(destination).or_insert(*ordinal);
             }
         }
-    } else {
+    } else if persist_cross_target_spills {
         for (source_order, &source) in sources.iter().enumerate() {
             for (spill_order, spill) in spills
                 .iter()
@@ -792,10 +818,11 @@ where
                     spill.position.1,
                     spill.position.2,
                 );
-                if session.halo().contains((
-                    spill.position.0.div_euclid(16),
-                    spill.position.2.div_euclid(16),
-                )) {
+                let destination_chunk = (
+                    destination.x().div_euclid(16),
+                    destination.z().div_euclid(16),
+                );
+                if destination_chunk != target && session.halo().contains(destination_chunk) {
                     winners.entry(destination).or_insert((source_order, spill_order));
                 }
             }
@@ -822,7 +849,7 @@ where
                 }
                 transaction.push(*ordinal, destination, spill.state)?;
             }
-        } else {
+        } else if persist_cross_target_spills {
             for (ordinal, spill) in spills
                 .iter()
                 .filter(|spill| {
@@ -1321,6 +1348,14 @@ where
                 for &coordinate in &self.admissions {
                     if !self.materializer.is_admitted(coordinate) {
                         if let Some(product) = self.session.aggregate_prefix_product(coordinate) {
+                            if let Some(current) = P::authoritative_resident(
+                                self.source,
+                                self.session,
+                                coordinate,
+                            ) {
+                                self.materializer.admit_existing(coordinate, current);
+                                continue;
+                            }
                             if let Some(column) = product.get::<ChunkColumn>() {
                                 self.materializer.admit_existing(coordinate, (*column).clone());
                             } else if let Some(column) =
@@ -1540,6 +1575,7 @@ where
                     settlement,
                     authenticated_content_fingerprint,
                     direct_output_to_top_layer,
+                    self.source.target_spills_persist(),
                 )?;
                 self.target_content_fingerprint = Some(content_fingerprint);
                 self.direct_feature_output = direct_feature_output;
