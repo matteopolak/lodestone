@@ -21,9 +21,10 @@ dispatcher. It does not wait for a client packet or poll residency: a server
 opened without a client still seeds, and the dispatcher keeps cold generation off
 the async runtime while the shared store makes the result authoritative.
 
-The production-path liveness witness in `worldgen_tick_liveness` holds one newly
-visible column behind a bounded gate while moving a player across its chunk
-boundary. The test requires both the authoritative server tick counter and the
+The production-path liveness witness in `worldgen_tick_liveness` acknowledges
+the completed initial view, then holds one newly visible column behind a
+bounded gate while moving a player across its chunk boundary. The test
+requires both the authoritative server tick counter and the
 tick-clock counter to advance, and sends a play packet while the generation
 future is still held. The button action before the move establishes an ordered
 scheduled-block workload without making the liveness budget depend on its normal

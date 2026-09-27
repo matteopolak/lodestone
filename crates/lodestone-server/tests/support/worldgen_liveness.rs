@@ -31,6 +31,7 @@ pub const USE_BUTTON: i32 = 100;
 pub const MOVE_PLAYER: i32 = 101;
 pub const CLIENT_ACTION: i32 = 102;
 pub const BLOCK_UPDATE: i32 = 103;
+pub const PLAYER_LOADED: i32 = 104;
 
 pub const BLOCKED_COLUMN: (i32, i32) = (8, 0);
 // Keep the button in chunk (2, 0). The liveness test later moves the player to
@@ -299,6 +300,7 @@ impl ServerProtocol for LivenessProtocol {
                 self.actions.record_client_action();
                 ServerBound::ClientTickEnded
             }
+            State::Play if packet_id == PLAYER_LOADED => ServerBound::PlayerLoaded,
             _ => ServerBound::Ignored,
         }
     }
