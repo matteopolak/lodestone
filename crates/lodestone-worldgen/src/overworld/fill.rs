@@ -1,9 +1,6 @@
-//! Stages 1-4 of [`OverworldGenerator::column`]: the per-chunk aquifer, the
-//! `fillFromNoise` shape pass, the surface-rule diff, materialisation into a dense
-//! grid, and carvers — plus the uncached body of `pre_ore_stage`.
-//!
-//! Moved here verbatim from `overworld.rs` by U16 Phase A; see [`super`]'s own module
-//! doc for the pipeline order and for every measurement behind these stages.
+//! Stages 1-4 of [`OverworldGenerator::column`]: the per-chunk aquifer, packed
+//! shape fill, surface-rule diff, canonical raw-state materialisation, and
+//! carvers — plus the uncached body of `pre_ore_stage`.
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -161,7 +158,7 @@ impl PackedStateCarrier {
         } = self;
         let mut ocean_floor = OceanFloorState::new(min_y);
         ocean_floor.configure(base_x, base_z, height);
-        let world = crate::dense_grid::DenseBlockGrid::from_ordered_packed_state_fn(
+        let world = crate::dense_grid::DenseBlockGrid::from_ordered_packed_state_fn_raw(
             base_x,
             min_y,
             base_z,
@@ -1327,7 +1324,7 @@ impl OverworldGenerator {
                 .for_chunk(self.slot_count, base_x, base_z, self.min_y, self.height)
                 .prepare_batch(&field, base_x, base_z, self.min_y, self.height)
         });
-        let world = crate::dense_grid::DenseBlockGrid::from_ordered_state_fn(
+        let world = crate::dense_grid::DenseBlockGrid::from_ordered_state_fn_raw(
             base_x,
             self.min_y,
             base_z,
@@ -1403,7 +1400,7 @@ impl OverworldGenerator {
                 .for_chunk(self.slot_count, base_x, base_z, self.min_y, self.height)
                 .prepare_batch_packed(&blocks, base_x, base_z, self.min_y, self.height)
         });
-        let world = crate::dense_grid::DenseBlockGrid::from_ordered_packed_state_fn(
+        let world = crate::dense_grid::DenseBlockGrid::from_ordered_packed_state_fn_raw(
             base_x,
             self.min_y,
             base_z,

@@ -214,11 +214,14 @@ CPU. A steady-state warm column spends roughly a quarter of its time in the dens
 shift with scene and biome, so re-measure locally (`benches/generation.rs`) rather than trusting a
 recorded split.
 
-`DenseBlockGrid` stores canonical `lodestone_data::block_states::StateId` values in its palette and
-uses compact `u16` indices for cells. Base states and typed heightmap facts are cached beside that
-palette. Text is parsed only at configuration/import ingress, and an unknown or malformed state is
-rejected there. The palette still appends in first-write order, so the numeric carrier cannot affect
-palette or packet bytes.
+`DenseBlockGrid` can carry either local palette indices or canonical `u16`
+state IDs. Production Overworld materialization uses canonical IDs in the
+existing fill field and records palette introductions separately; Full output
+packs those IDs into local indices, while shaped output defers packing. The
+indexed path caches base states and typed heightmap facts beside its palette.
+Text is parsed only at configuration/import ingress, and an unknown or
+malformed state is rejected there. Palette introductions remain ordered by
+the materialization and mutation contract, not by physical cell layout.
 
 ## How to change it
 

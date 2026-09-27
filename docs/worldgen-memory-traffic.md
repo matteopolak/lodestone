@@ -24,16 +24,20 @@ The production pre-ore path carries fill results as packed `u16` kind codes.
 Surface replacements use a disjoint tagged range in the same field, so the
 original fill class needs no parallel byte array and there is no intermediate
 whole-column kind-to-state conversion. Materialisation decodes each code in
-z, x, y order and rewrites its cell to a dense palette index in place, while
-surface and vein precedence remains inside the same ordered callback. This
+z, x, y order and rewrites its cell to a canonical state ID in place, while
+recording palette introductions and keeping surface and vein precedence inside
+the same ordered callback. This
 removes the second full-column block carrier that the former `Vec<BlockKind>`
 to `DenseBlockGrid` handoff required;
 the legacy `fill_stage` adapter still decodes packed output for shape/parity
 callers that explicitly request the enum field.
 
-Both ordered materialisation constructors keep a direct table from canonical
-state id to local palette index. The table is populated lazily, so first-seen
-palette order remains unchanged while repeated cells avoid a hash probe.
+The ordered raw-state materializer uses a direct state-ID table to record the
+first introduction of each state. Full outputs use another direct lookup to
+pack canonical IDs into palette-index sections and derive vertical summaries;
+shaped outputs retain the raw field until a section consumer requires it. The
+indexed compatibility constructor still maps state IDs to local palette
+indices during materialization. Neither path hashes each repeated cell.
 
 The production pre-ore path also keeps a request-local 384-bit ocean-floor
 occupancy set for each centre XZ column. Materialisation sets the baseline bits,

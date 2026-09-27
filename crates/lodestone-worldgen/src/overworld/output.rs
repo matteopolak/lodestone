@@ -7,7 +7,7 @@ use crate::generated_storage::{CompactBlockStorage, GeneratedColumnSummaries};
 use lodestone_data::biomes::BiomeRef;
 use lodestone_data::block::Block;
 use lodestone_data::block_states::StateId as CanonicalStateId;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 /// Which stages a [`GeneratedColumn`] carries — the wire-facing tag
 /// `docs/plans/progressive-chunk-generation.md`'s Stage 1 asks for.
@@ -62,34 +62,65 @@ impl OverworldGenerator {
         debug_assert_eq!(world.bounds().3, 16, "centre chunk width must be 16");
         debug_assert_eq!(world.bounds().4, self.height, "centre chunk height must match the generator's");
         debug_assert_eq!(world.bounds().5, 16, "centre chunk depth must be 16");
-        let (local_palette, dense_blocks) = world.into_id_palette_and_shared_blocks();
+        let grid_parts = world.into_state_lane_parts();
+        let (palette, raw_states, indexed_blocks) = match grid_parts {
+            crate::dense_grid::DenseBlockGridParts::Indexed { palette, blocks } => {
+                (palette, None, Some(blocks))
+            }
+            crate::dense_grid::DenseBlockGridParts::Raw { introductions, states } => {
+                (introductions, Some(states), None)
+            }
+        };
         let generation_motion_predicate = if self.snow_support.is_empty() {
             None
         } else {
-            Some(local_palette.iter().map(|&state| {
+            Some(palette.iter().map(|&state| {
                 self.snow_support.motion_blocking_id(state)
             }).collect::<Vec<_>>())
         };
-        let palette = local_palette;
-        let (compact_blocks, eager_summaries) = if matches!(stage, GenStage::Full) {
-            let client_motion_predicate = client_motion_predicates(&palette);
-            let client_motion_no_leaves_predicate =
-                client_motion_no_leaves_predicates(&palette, &client_motion_predicate);
-            let (blocks, summaries) = CompactBlockStorage::from_flat_with_predicates(
-                self.min_y,
-                self.height,
-                &dense_blocks,
-                &client_motion_predicate,
-                &client_motion_no_leaves_predicate,
-                generation_motion_predicate.as_deref(),
-                extra_air_palette_indices(&palette),
-            );
-            (blocks, Some(summaries))
+        let client_motion_predicate = client_motion_predicates(&palette);
+        let client_motion_no_leaves_predicate =
+            client_motion_no_leaves_predicates(&palette, &client_motion_predicate);
+        let compact_blocks = OnceLock::new();
+        let eager_summaries = if let Some(raw_states) = raw_states.as_ref() {
+            let state_to_palette = state_to_palette_lookup(&palette);
+            if matches!(stage, GenStage::Full) {
+                let (blocks, summaries) = CompactBlockStorage::from_raw_states_with_predicates(
+                    self.min_y,
+                    self.height,
+                    raw_states,
+                    &state_to_palette,
+                    palette.len(),
+                    &client_motion_predicate,
+                    &client_motion_no_leaves_predicate,
+                    generation_motion_predicate.as_deref(),
+                    extra_air_palette_indices(&palette),
+                );
+                compact_blocks.set(blocks).expect("new column has no block storage");
+                Some(summaries)
+            } else {
+                None
+            }
         } else {
-            (
-                CompactBlockStorage::from_shared_flat(self.min_y, self.height, dense_blocks),
-                None,
-            )
+            let dense_blocks = indexed_blocks.expect("indexed grid has a block lane");
+            if matches!(stage, GenStage::Full) {
+                let (blocks, summaries) = CompactBlockStorage::from_flat_with_predicates(
+                    self.min_y,
+                    self.height,
+                    &dense_blocks,
+                    &client_motion_predicate,
+                    &client_motion_no_leaves_predicate,
+                    generation_motion_predicate.as_deref(),
+                    extra_air_palette_indices(&palette),
+                );
+                compact_blocks.set(blocks).expect("new column has no block storage");
+                Some(summaries)
+            } else {
+                compact_blocks
+                    .set(CompactBlockStorage::from_shared_flat(self.min_y, self.height, dense_blocks))
+                    .expect("new column has no block storage");
+                None
+            }
         };
         // The SPAWN stage's part 2. Computed here, alongside
         // the fused vertical summary, for the identical reason — this is the
@@ -129,6 +160,7 @@ impl OverworldGenerator {
             height: self.height,
             palette,
             blocks: compact_blocks,
+            raw_states: if matches!(stage, GenStage::Shaped) { raw_states } else { None },
             biome_quarts: biome_quarts.map(|(biome, _)| biome),
             biome_cells,
             block_entities,
@@ -165,6 +197,14 @@ fn extra_air_palette_indices(palette: &[CanonicalStateId]) -> [u16; 2] {
         }
     }
     indices
+}
+
+fn state_to_palette_lookup(palette: &[CanonicalStateId]) -> Vec<u16> {
+    let mut lookup = vec![u16::MAX; lodestone_data::block_states::STATE_COUNT as usize];
+    for (palette_id, &state) in palette.iter().enumerate() {
+        lookup[state.index()] = u16::try_from(palette_id).expect("generated palette fits u16");
+    }
+    lookup
 }
 
 fn client_motion_no_leaves_predicates(
@@ -387,12 +427,13 @@ impl StageTimes {
 /// A generated 16×`height`×16 block field with a column-wide palette and
 /// section-aligned block indices. Shaped prefixes retain those indices densely
 /// and pack them only at a section-oriented consumer boundary.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct GeneratedColumn {
     min_y: i32,
     height: i32,
     palette: Vec<CanonicalStateId>,
-    blocks: CompactBlockStorage,
+    blocks: OnceLock<CompactBlockStorage>,
+    raw_states: Option<Arc<Vec<u16>>>,
     /// Typed biome identity per horizontal quart, row-major `qz * 4 + qx` —
     /// see [`OverworldGenerator::biome_stage`]. **The surface answer**: this is
     /// the direct surface-height quart answer used by output consumers such as
@@ -434,6 +475,40 @@ pub struct GeneratedColumn {
     /// Stage 1 tag. See [`GenStage`] for the lattice and [`Self::stage`] for the
     /// accessor.
     stage: GenStage,
+}
+
+impl Clone for GeneratedColumn {
+    fn clone(&self) -> Self {
+        let blocks = OnceLock::new();
+        if let Some(value) = self.blocks.get() {
+            blocks
+                .set(value.clone())
+                .expect("new generated column has no block storage");
+        }
+        Self {
+            min_y: self.min_y,
+            height: self.height,
+            palette: self.palette.clone(),
+            blocks,
+            raw_states: self.raw_states.clone(),
+            biome_quarts: self.biome_quarts,
+            biome_cells: self.biome_cells.clone(),
+            block_entities: self.block_entities.clone(),
+            summaries: clone_once_lock(&self.summaries),
+            client_heightmaps: clone_once_lock(&self.client_heightmaps),
+            deferred_generation_predicate: self.deferred_generation_predicate.clone(),
+            spawn_candidates: self.spawn_candidates.clone(),
+            stage: self.stage,
+        }
+    }
+}
+
+fn clone_once_lock<T: Clone>(source: &OnceLock<T>) -> OnceLock<T> {
+    let cloned = OnceLock::new();
+    if let Some(value) = source.get() {
+        assert!(cloned.set(value.clone()).is_ok(), "new once-lock is empty");
+    }
+    cloned
 }
 
 /// An owning hand-off of a generated column with sectioned block storage.
@@ -637,10 +712,33 @@ impl CompactGeneratedColumn {
 }
 
 impl GeneratedColumn {
+    fn raw_state_at(&self, lx: usize, ly: usize, lz: usize) -> Option<CanonicalStateId> {
+        self.raw_states.as_ref().map(|states| {
+            CanonicalStateId::from_raw(states[(ly * 16 + lz) * 16 + lx])
+        })
+    }
+
+    fn blocks_ref(&self) -> &CompactBlockStorage {
+        self.blocks.get_or_init(|| {
+            let lane = self
+                .raw_states
+                .as_ref()
+                .expect("generated column has neither packed blocks nor a raw lane");
+            let state_to_palette = state_to_palette_lookup(&self.palette);
+            let blocks = CompactBlockStorage::from_raw_states(
+                self.min_y,
+                self.height,
+                lane,
+                &state_to_palette,
+            );
+            blocks
+        })
+    }
+
     fn summaries(&self) -> &GeneratedColumnSummaries {
         self.summaries.get_or_init(|| {
             generated_summaries(
-                &self.blocks,
+                self.blocks_ref(),
                 &self.palette,
                 self.deferred_generation_predicate.as_deref(),
             )
@@ -652,11 +750,26 @@ impl GeneratedColumn {
     /// section storage; a full carrier is already packed.
     #[must_use]
     pub fn into_compact(self) -> CompactGeneratedColumn {
+        let blocks = if let Some(blocks) = self.blocks.into_inner() {
+            blocks
+        } else {
+            let lane = self
+                .raw_states
+                .as_ref()
+                .expect("generated column has neither packed blocks nor a raw lane");
+            let state_to_palette = state_to_palette_lookup(&self.palette);
+            CompactBlockStorage::from_raw_states(
+                self.min_y,
+                self.height,
+                lane,
+                &state_to_palette,
+            )
+        };
         CompactGeneratedColumn {
             min_y: self.min_y,
             height: self.height,
             palette: self.palette,
-            blocks: self.blocks,
+            blocks,
             biome_quarts: self.biome_quarts,
             biome_cells: self.biome_cells,
             block_entities: self.block_entities,
@@ -697,7 +810,30 @@ impl GeneratedColumn {
     /// Borrowed compact block storage for immutable lifecycle consumers.
     #[must_use]
     pub fn blocks(&self) -> &CompactBlockStorage {
-        &self.blocks
+        self.blocks_ref()
+    }
+
+    /// Visits canonical raw IDs by section without retaining a column-sized
+    /// palette-index conversion.
+    pub fn for_each_state_section(&self, mut visit: impl FnMut(&[u16])) {
+        if let Some(raw_states) = self.raw_states.as_ref() {
+            for section in raw_states.chunks(16 * 16 * 16) {
+                visit(section);
+            }
+            return;
+        }
+
+        let blocks = self.blocks_ref();
+        let mut raw_section = [0u16; 16 * 16 * 16];
+        for section in 0..blocks.section_count() {
+            let rows = blocks.section_rows(section);
+            let cell_count = rows * 16 * 16;
+            blocks.for_each_section(section, |cell, palette_id| {
+                let state = self.palette[palette_id as usize];
+                raw_section[cell] = u16::try_from(state.raw()).expect("canonical state fits u16");
+            });
+            visit(&raw_section[..cell_count]);
+        }
     }
 
     /// Canonical block-state id at local `(lx, lz)` in `0..16` and world `y`.
@@ -708,8 +844,8 @@ impl GeneratedColumn {
         if !(0..self.height).contains(&ly) {
             return lodestone_data::block_states::air_state();
         }
-        let id = self.blocks.get(lx, y, lz);
-        self.palette[id as usize]
+        self.raw_state_at(lx, ly as usize, lz)
+            .unwrap_or_else(|| self.palette[self.blocks_ref().get(lx, y, lz) as usize])
     }
 
     /// Highest world Y whose block is not air, or `min_y - 1` for an all-air
@@ -717,7 +853,10 @@ impl GeneratedColumn {
     #[must_use]
     pub fn top_non_air_y(&self, lx: usize, lz: usize) -> i32 {
         for ly in (0..self.height).rev() {
-            if self.blocks.get(lx, self.min_y + ly, lz) != 0 {
+            let state = self.raw_state_at(lx, ly as usize, lz).unwrap_or_else(|| {
+                self.palette[self.blocks_ref().get(lx, self.min_y + ly, lz) as usize]
+            });
+            if state != lodestone_data::block_states::air_state() {
                 return self.min_y + ly;
             }
         }
@@ -727,7 +866,12 @@ impl GeneratedColumn {
     /// Number of non-air blocks (telemetry / anti-vacuity).
     #[must_use]
     pub fn non_air_count(&self) -> usize {
-        self.blocks.non_zero_count()
+        if let Some(raw_states) = self.raw_states.as_ref() {
+            let air = lodestone_data::block_states::air_state().raw() as u16;
+            raw_states.iter().filter(|&&state| state != air).count()
+        } else {
+            self.blocks_ref().non_zero_count()
+        }
     }
 
     /// Typed biome identity at local `(lx, lz)` in `0..16` — quart
@@ -899,7 +1043,18 @@ mod tests {
                 lodestone_data::block_states::air_state(),
                 lodestone_data::block::Block::Stone.default_state(),
             ],
-            blocks: CompactBlockStorage::from_shared_flat(0, height as i32, std::sync::Arc::new(cells)),
+            blocks: {
+                let blocks = OnceLock::new();
+                blocks
+                    .set(CompactBlockStorage::from_shared_flat(
+                        0,
+                        height as i32,
+                        std::sync::Arc::new(cells),
+                    ))
+                    .expect("new test column has no block storage");
+                blocks
+            },
+            raw_states: None,
             biome_quarts: [BiomeRef::builtin(lodestone_data::biomes::BuiltinBiome::Plains); 16],
             biome_cells: crate::overworld::biome_cells::BiomeCells::uniform(
                 "minecraft:plains",

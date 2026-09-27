@@ -1112,10 +1112,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   records while the save path retains the deferred loot, occupants, and spawner state
   needed after reload.
 - [Generated-column compact storage](./worldgen-generated-storage.md) —
-  `lodestone-worldgen` returns an immutable `GeneratedColumn` whose block-state
-  palette is assigned in dense first-write order and whose block indices are stored in
-  16-row sections. A section is either uniform or a packed `u16` index stream, while
-  biome, entity, heightmap, spawn, and stage products remain sidecars on the column.
+  `lodestone-worldgen` returns an immutable `GeneratedColumn` with a block-state
+  palette in first-introduction order. Full columns store palette indices in 16-row
+  sections; shaped Overworld columns may retain canonical state IDs until a
+  section-oriented consumer needs them. Biome, entity, heightmap, spawn, and stage
+  products remain sidecars.
 - [Worldgen generation ledger](./worldgen-generation-ledger.md) — The generation
   ledger is the world-owned retention lane for resumable world generation. It keeps
   typed stage frontiers and immutable products separate from packet-column caching,

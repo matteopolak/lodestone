@@ -8,6 +8,8 @@
 
 use std::sync::{Arc, OnceLock};
 
+use lodestone_data::block_states::StateId;
+
 const SECTION_ROWS: usize = 16;
 const ROW_CELLS: usize = 16 * 16;
 const SECTION_CELLS: usize = SECTION_ROWS * ROW_CELLS;
@@ -83,6 +85,51 @@ impl CompactSection {
                     word_index += 1;
                     shift = 0;
                 }
+            }
+        }
+        section
+    }
+
+    fn pack_raw_states(
+        raw_states: &[u16],
+        rows: usize,
+        state_to_palette: &[u16],
+        mut observe: impl FnMut(usize, u16),
+    ) -> Self {
+        let palette_id = |raw: u16| {
+            let state = StateId::from_raw(raw);
+            let id = state_to_palette[state.index()];
+            assert_ne!(id, u16::MAX, "raw state has no generated palette entry");
+            id
+        };
+        let first = raw_states.first().copied().map(palette_id).unwrap_or(0);
+        let mut uniform = true;
+        let mut max_id = first;
+        for (cell, &raw) in raw_states.iter().enumerate() {
+            let id = palette_id(raw);
+            observe(cell, id);
+            if cell == 0 {
+                continue;
+            }
+            uniform &= id == first;
+            max_id = max_id.max(id);
+        }
+        if uniform {
+            return Self::Uniform(first);
+        }
+
+        let bits = bits_for_id(max_id);
+        let mut section = Self::Packed {
+            bits: bits as u8,
+            words: vec![0u64; packed_word_count(rows * ROW_CELLS, bits)],
+        };
+        if let Self::Packed { bits, words } = &mut section {
+            let bits = u32::from(*bits);
+            let per_word = values_per_word(bits);
+            for (cell, &raw) in raw_states.iter().enumerate() {
+                let id = palette_id(raw);
+                words[cell / per_word] |=
+                    u64::from(id) << ((cell % per_word) as u32 * bits);
             }
         }
         section
@@ -284,6 +331,147 @@ impl CompactBlockStorage {
             )),
         );
         (storage, summaries)
+    }
+
+    /// Packs canonical raw state IDs directly into palette-index sections,
+    /// using only one section-sized working set.
+    #[must_use]
+    pub fn from_raw_states(
+        min_y: i32,
+        height: i32,
+        raw_states: &[u16],
+        state_to_palette: &[u16],
+    ) -> Self {
+        let packed_sections = Self::pack_raw_state_sections(
+            height,
+            raw_states,
+            state_to_palette,
+            None,
+        );
+        let sections = OnceLock::new();
+        sections
+            .set(Arc::new(packed_sections))
+            .expect("new compact storage has no section value");
+        Self {
+            min_y,
+            height,
+            sections,
+            dense: OnceLock::new(),
+        }
+    }
+
+    /// Packs canonical raw state IDs while deriving the requested output
+    /// summaries in the same pass that chooses each section representation.
+    #[must_use]
+    pub fn from_raw_states_with_predicates(
+        min_y: i32,
+        height: i32,
+        raw_states: &[u16],
+        state_to_palette: &[u16],
+        palette_len: usize,
+        motion_blocking: &[bool],
+        motion_blocking_no_leaves: &[bool],
+        generation_motion_blocking: Option<&[bool]>,
+        extra_air: [u16; 2],
+    ) -> (Self, GeneratedColumnSummaries) {
+        assert!(height >= 0, "column height is negative");
+        assert_eq!(
+            raw_states.len(),
+            height as usize * ROW_CELLS,
+            "raw state lane length does not match height"
+        );
+        let mut summaries = GeneratedColumnSummaries::new_with_palette_len(
+            height,
+            palette_len.max(1),
+            true,
+            true,
+            generation_motion_blocking.is_some(),
+        );
+        let packed_sections = Self::pack_raw_state_sections(
+            height,
+            raw_states,
+            state_to_palette,
+            Some((
+                &mut summaries,
+                motion_blocking,
+                motion_blocking_no_leaves,
+                generation_motion_blocking,
+                extra_air,
+            )),
+        );
+        let sections = OnceLock::new();
+        sections
+            .set(Arc::new(packed_sections))
+            .expect("new compact storage has no section value");
+        (
+            Self {
+                min_y,
+                height,
+                sections,
+                dense: OnceLock::new(),
+            },
+            summaries,
+        )
+    }
+
+    fn pack_raw_state_sections(
+        height: i32,
+        raw_states: &[u16],
+        state_to_palette: &[u16],
+        mut summaries: Option<(
+            &mut GeneratedColumnSummaries,
+            &[bool],
+            &[bool],
+            Option<&[bool]>,
+            [u16; 2],
+        )>,
+    ) -> Vec<CompactSection> {
+        assert!(height >= 0, "column height is negative");
+        assert_eq!(
+            raw_states.len(),
+            height as usize * ROW_CELLS,
+            "raw state lane length does not match height"
+        );
+        assert_eq!(
+            state_to_palette.len(),
+            lodestone_data::block_states::STATE_COUNT as usize,
+            "raw state palette lookup has the wrong domain"
+        );
+        let section_count = (height as usize).div_ceil(SECTION_ROWS);
+        let mut sections = Vec::with_capacity(section_count);
+        for section in 0..section_count {
+            let start = section * SECTION_CELLS;
+            let rows = (height as usize - section * SECTION_ROWS).min(SECTION_ROWS);
+            let end = start + rows * ROW_CELLS;
+            let slice = &raw_states[start..end];
+            if let Some((summary, motion, motion_no_leaves, generation, extra_air)) = summaries.as_mut() {
+                sections.push(CompactSection::pack_raw_states(
+                    slice,
+                    rows,
+                    state_to_palette,
+                    |cell, id| {
+                        summary.observe(
+                            section * SECTION_ROWS,
+                            cell,
+                            id,
+                            Some(*motion),
+                            Some(*motion_no_leaves),
+                            *generation,
+                            *extra_air,
+                        );
+                    },
+                ));
+            } else {
+                sections.push(CompactSection::pack_raw_states(
+                    slice,
+                    rows,
+                    state_to_palette,
+                    |_, _| {},
+                ));
+            }
+        }
+        crate::counters::bump_full_column_conversion(raw_states.len() as u64);
+        sections
     }
 
     fn from_flat_inner(
@@ -867,6 +1055,45 @@ mod tests {
             }
         }
         assert_eq!(compact.clone().into_flat(), cells);
+    }
+
+    #[test]
+    fn raw_state_packing_preserves_palette_order_and_partial_section_summaries() {
+        use lodestone_data::block::Block;
+        use lodestone_data::block_states;
+
+        let air = block_states::air_state();
+        let stone = Block::Stone.default_state();
+        let grass = Block::GrassBlock.default_state();
+        let mut lookup = vec![u16::MAX; block_states::STATE_COUNT as usize];
+        for (index, state) in [air, grass, stone].into_iter().enumerate() {
+            lookup[state.index()] = index as u16;
+        }
+        let mut raw = vec![air.raw() as u16; 17 * ROW_CELLS];
+        raw[0] = stone.raw() as u16;
+        raw[16 * ROW_CELLS + 7] = grass.raw() as u16;
+        let mut flat = vec![0u16; raw.len()];
+        flat[0] = 2;
+        flat[16 * ROW_CELLS + 7] = 1;
+        let motion = [false, true, true];
+        let no_leaves = [false, false, true];
+        let expected = CompactBlockStorage::from_flat_with_predicates(
+            -64, 17, &flat, &motion, &no_leaves, Some(&motion), [u16::MAX; 2],
+        );
+        let actual = CompactBlockStorage::from_raw_states_with_predicates(
+            -64, 17, &raw, &lookup, 3, &motion, &no_leaves, Some(&motion), [u16::MAX; 2],
+        );
+        assert_eq!(actual.0.clone().into_flat(), expected.0.into_flat());
+        assert_eq!(actual.1, expected.1);
+        assert_eq!(
+            CompactBlockStorage::from_raw_states(-64, 17, &raw, &lookup).into_flat(),
+            flat,
+        );
+        raw[0] = air.raw() as u16;
+        assert_ne!(
+            CompactBlockStorage::from_raw_states(-64, 17, &raw, &lookup).into_flat(),
+            flat,
+        );
     }
 
     #[test]
