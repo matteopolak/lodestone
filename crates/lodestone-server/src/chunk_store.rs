@@ -3150,6 +3150,26 @@ struct ChunkWriteLease<'a> {
     revision_filter: Option<Vec<(i32, i32)>>,
 }
 
+struct ChunkReadLease<'a> {
+    gates: &'a ChunkWriteGates,
+    coordinate: (i32, i32),
+    state: Arc<ChunkWriteState>,
+}
+
+impl Drop for ChunkReadLease<'_> {
+    fn drop(&mut self) {
+        let mut table = self.gates.state.lock().expect("chunk write-gate table poisoned");
+        self.state.held.store(false, Ordering::Release);
+        if table.get(&self.coordinate).is_some_and(|record| {
+            record.revision == 0 && Arc::strong_count(&self.state) == 1
+        }) {
+            table.remove(&self.coordinate);
+        }
+        drop(table);
+        self.gates.wake.notify_all();
+    }
+}
+
 impl ChunkWriteLease<'_> {
     fn release_and_prune(self) {
         let gates = self.gates;
@@ -3202,6 +3222,16 @@ struct ChunkWriteGateRecord {
 }
 
 impl ChunkWriteGates {
+    fn try_acquire_read(&self, coordinate: (i32, i32)) -> Option<ChunkReadLease<'_>> {
+        let mut table = self.state.lock().expect("chunk write-gate table poisoned");
+        let state = Self::state_for_locked(&mut table, coordinate);
+        if state.held.load(Ordering::Acquire) {
+            return None;
+        }
+        state.held.store(true, Ordering::Release);
+        Some(ChunkReadLease { gates: self, coordinate, state })
+    }
+
     fn state_for_locked(
         state: &mut rustc_hash::FxHashMap<(i32, i32), ChunkWriteGateRecord>,
         chunk: (i32, i32),
@@ -6534,19 +6564,17 @@ impl<S: ChunkSource> ChunkStore<S> {
         cx: i32,
         cz: i32,
     ) -> TryResident<ChunkColumn> {
-        let Some(lease) = self.write_gates.try_acquire_many(&[(cx, cz)], false) else {
+        let Some(_lease) = self.write_gates.try_acquire_read((cx, cz)) else {
             return TryResident::Busy;
         };
-        let result = match self.try_read(cx, cz, ChunkColumn::clone) {
+        match self.try_read(cx, cz, ChunkColumn::clone) {
             Err(()) => TryResident::Busy,
             Ok(Some(column)) => TryResident::Present(column),
             Ok(None) => self
                 .source
                 .resident_column(cx, cz)
                 .map_or(TryResident::Absent, TryResident::Present),
-        };
-        lease.release_and_prune();
-        result
+        }
     }
 
     /// Reads one resident block state without waiting or starting generation.
@@ -6566,10 +6594,10 @@ impl<S: ChunkSource> ChunkStore<S> {
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
-        let Some(lease) = self.write_gates.try_acquire_many(&[(cx, cz)], false) else {
+        let Some(_lease) = self.write_gates.try_acquire_read((cx, cz)) else {
             return TryResident::Busy;
         };
-        let result = match self.try_read(cx, cz, |column| {
+        match self.try_read(cx, cz, |column| {
             let local_y = i64::from(y) - i64::from(column.min_y);
             (0..i64::from(column.height))
                 .contains(&local_y)
@@ -6581,9 +6609,7 @@ impl<S: ChunkSource> ChunkStore<S> {
                 .resident_block_state_id(x, y, z)
                 .map_or(TryResident::Absent, TryResident::Present),
             Ok(Some(Some(state))) => TryResident::Present(state),
-        };
-        lease.release_and_prune();
-        result
+        }
     }
 
     /// Attempts a resident block mutation without waiting or starting a cold
@@ -8672,6 +8698,17 @@ mod tests {
             "the residency checks themselves must not have generated anything beyond the one \
              explicit `column()` call"
         );
+    }
+
+    #[test]
+    fn single_coordinate_read_lease_blocks_writers_and_prunes_idle_records() {
+        let gates = ChunkWriteGates::default();
+        for cx in 0..64 {
+            let lease = gates.try_acquire_read((cx, 0)).expect("coordinate is free");
+            assert!(gates.try_acquire_many(&[(cx, 0)], true).is_none());
+            drop(lease);
+        }
+        assert!(gates.state.lock().expect("gate table poisoned").is_empty());
     }
 
     /// A residency check followed by a separate mutation is not an admission
