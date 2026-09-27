@@ -503,7 +503,9 @@ claim that a particular edge is the right size for coalescing chunk owners.
 For the owner-boundary workload, run `just bench-chunk-owner-tick` first. It
 constructs the live scene and rejects a missing phase sample, scheduled drain,
 block-entity owner batch, or ambient entity owner batch before Criterion takes
-its short sample. For a local call tree, run `just samply-chunk-owner-tick`.
+its short sample. The scene retains a player ticket and marks the join ready
+before waiting for mob seeding, then resumes initial ticks after installing the
+profile workload. For a local call tree, run `just samply-chunk-owner-tick`.
 The wrapper first saves a direct witness line, then captures the same finite
 128-tick command under Samply. It caps input at 512 ticks, gives the workload
 and profiler separate deadlines, refuses to overwrite artifacts, and requires
@@ -517,8 +519,10 @@ phase beside `owner_work.random_tick_owned_chunks`,
 `owner_work.thunder_owned_chunks`, `owner_work.scheduled_block_ticks`, and
 `owner_work.scheduled_fluid_ticks`; inspect mobs-and-items beside
 `owner_work.block_entity_batches`, `entity_effect_batches`, and
-`entity_effects`. A high phase cost with a missing or unexpectedly small count
-is a fixture/wiring failure, not evidence for parallelization.
+`entity_effects`. The actual Samply capture is the capability check; the wrapper
+does not reject a working profiler based on a macOS signature probe. A high
+phase cost with a missing or unexpectedly small count is a fixture/wiring
+failure, not evidence for parallelization.
 
 ## Configuration
 

@@ -125,11 +125,11 @@
 //! spreading, and a loosened version fails toward water leaking through walls,
 //! which is unrecoverable in a saved world.
 
-use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use lodestone_data::block::Block;
 use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey, PropertyValue};
-use lodestone_data::block_states::StateId;
+use lodestone_data::block_states::{StateId, STATE_COUNT};
 use lodestone_model::BlockPos;
 
 use crate::chunk::ChunkSource;
@@ -587,8 +587,38 @@ pub fn fluid_state_of(state: &str) -> Option<FluidState> {
     })
 }
 
-#[must_use]
-pub fn fluid_state_of_id(state: StateId) -> Option<FluidState> {
+#[derive(Clone, Copy)]
+struct FluidMeta {
+    fluid: Option<FluidState>,
+    waterloggable: bool,
+    waterlogged: bool,
+}
+
+static FLUID_META: OnceLock<Box<[FluidMeta]>> = OnceLock::new();
+
+fn fluid_meta(state: StateId) -> FluidMeta {
+    FLUID_META.get_or_init(|| {
+        (0..STATE_COUNT)
+            .map(|raw| {
+                let state = StateId::new(raw).expect("fluid table ids are validated");
+                let properties = Properties::from_state_id(state);
+                let waterlogged_value = properties.get(PropertyKey::Waterlogged);
+                let waterloggable = waterlogged_value.is_some();
+                let waterlogged = waterlogged_value
+                    == Some(PropertyValue::builtin(BuiltinPropertyValue::True));
+                let fluid = fluid_state_uncached(state, &properties, waterlogged);
+                FluidMeta { fluid, waterloggable, waterlogged }
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
+    })[state.index()]
+}
+
+fn fluid_state_uncached(
+    state: StateId,
+    properties: &Properties,
+    waterlogged: bool,
+) -> Option<FluidState> {
     let kind = match state.block() {
         Block::Water => FluidKind::Water,
         Block::Lava => FluidKind::Lava,
@@ -601,12 +631,6 @@ pub fn fluid_state_of_id(state: StateId) -> Option<FluidState> {
             });
         }
         _ => {
-            let waterlogged = Properties::from_state_id(state)
-                .get(PropertyKey::Waterlogged)
-                .is_some_and(|value| {
-                    value
-                        == PropertyValue::builtin(BuiltinPropertyValue::True)
-                });
             return waterlogged.then_some(FluidState {
                 kind: FluidKind::Water,
                 amount: 8,
@@ -614,7 +638,7 @@ pub fn fluid_state_of_id(state: StateId) -> Option<FluidState> {
             });
         }
     };
-    let level = Properties::from_state_id(state)
+    let level = properties
         .get(PropertyKey::Level)
         .and_then(PropertyValue::builtin_value)
         .map(level_value)
@@ -625,6 +649,11 @@ pub fn fluid_state_of_id(state: StateId) -> Option<FluidState> {
         8 => FluidState { kind, amount: 8, falling: true },
         other => FluidState { kind, amount: 8 - other, falling: false },
     })
+}
+
+#[must_use]
+pub fn fluid_state_of_id(state: StateId) -> Option<FluidState> {
+    fluid_meta(state).fluid
 }
 
 fn level_value(value: BuiltinPropertyValue) -> u8 {
@@ -785,16 +814,11 @@ fn blocks_motion(state: StateId) -> bool {
 /// anything implementing the waterloggable-block interface, i.e. anything
 /// with a `waterlogged` property.
 fn is_waterloggable(state: StateId) -> bool {
-    Properties::from_state_id(state)
-        .get(PropertyKey::Waterlogged)
-        .is_some()
+    fluid_meta(state).waterloggable
 }
 
 fn is_waterlogged(state: StateId) -> bool {
-    Properties::from_state_id(state)
-        .get(PropertyKey::Waterlogged)
-        .and_then(PropertyValue::builtin_value)
-        == Some(BuiltinPropertyValue::True)
+    fluid_meta(state).waterlogged
 }
 
 fn cannot_hold_fluid(block: Block) -> bool {
@@ -1122,48 +1146,52 @@ fn can_pass_through(
 /// cache-key derivation, because [`slope_distance`] never changes `y`. The
 /// is-hole cache reads the cell *below* uncached, which the real
 /// implementation does too.
+const SPREAD_CACHE_RADIUS: i32 = 5;
+const SPREAD_CACHE_EDGE: usize = 11;
+const SPREAD_CACHE_CELLS: usize = SPREAD_CACHE_EDGE * SPREAD_CACHE_EDGE;
+
 struct SpreadContext {
     origin: BlockPos,
     kind: FluidKind,
     env: FluidEnv,
-    cache: HashMap<(i32, i32), StateId>,
-    holes: HashMap<(i32, i32), bool>,
+    cache: [Option<StateId>; SPREAD_CACHE_CELLS],
+    holes: [Option<bool>; SPREAD_CACHE_CELLS],
 }
 
 impl SpreadContext {
     fn new(origin: BlockPos, kind: FluidKind, env: FluidEnv) -> Self {
+        assert!(env.slope_find_distance(kind) < SPREAD_CACHE_RADIUS as u32);
         Self {
             origin,
             kind,
             env,
-            cache: HashMap::new(),
-            holes: HashMap::new(),
+            cache: [None; SPREAD_CACHE_CELLS],
+            holes: [None; SPREAD_CACHE_CELLS],
         }
     }
 
-    fn key(&self, pos: BlockPos) -> (i32, i32) {
-        (pos.x - self.origin.x, pos.z - self.origin.z)
+    fn key(&self, pos: BlockPos) -> usize {
+        let x = pos.x - self.origin.x + SPREAD_CACHE_RADIUS;
+        let z = pos.z - self.origin.z + SPREAD_CACHE_RADIUS;
+        (z as usize) * SPREAD_CACHE_EDGE + x as usize
     }
 
     fn read_cached<S: ChunkSource + ?Sized>(&mut self, world: &S, pos: BlockPos) -> StateId {
         let key = self.key(pos);
         let env = self.env;
-        self.cache
-            .entry(key)
-            .or_insert_with(|| block_at(world, env, pos))
-            .clone()
+        *self.cache[key].get_or_insert_with(|| block_at(world, env, pos))
     }
 
     fn is_hole<S: ChunkSource + ?Sized>(&mut self, world: &S, pos: BlockPos) -> bool {
         let key = self.key(pos);
-        if let Some(&cached) = self.holes.get(&key) {
+        if let Some(cached) = self.holes[key] {
             return cached;
         }
         let state = self.read_cached(world, pos);
         let below = Direction::Down.relative(pos);
         let below_state = block_at(world, self.env, below);
         let answer = is_water_hole(state, below_state, self.kind);
-        self.holes.insert(key, answer);
+        self.holes[key] = Some(answer);
         answer
     }
 }

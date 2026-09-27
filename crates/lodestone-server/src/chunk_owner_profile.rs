@@ -66,10 +66,25 @@ pub fn run<P: ServerProtocol + 'static>(protocol: P, ticks: u64) -> ChunkOwnerPr
             (8, 8),
             3,
         );
+        let _player_ticket = server
+            .players()
+            .expect("the profile scene exposes its player registry")
+            .join(
+                "profile-player",
+                uuid::Uuid::from_u128(1),
+                Vec3::new(0.5, FLOOR_TOP as f64, 0.5),
+            );
+        server.world_state().mark_join_ready();
+        #[cfg(feature = "profile-harness")]
+        {
+            tokio::task::yield_now().await;
+            tokio::time::advance(TICK_PERIOD).await;
+        }
         wait_for_reseed(&server).await;
         seed_block_entities(&server);
         seed_ambient_mobs(&server);
         seed_scheduled_ticks(&server);
+        server.world_state().resume_initial_ticks();
         tokio::task::yield_now().await;
 
         for _ in 0..ticks {
