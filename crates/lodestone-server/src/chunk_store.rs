@@ -3191,7 +3191,7 @@ impl Drop for ChunkWriteLease<'_> {
 
 #[derive(Debug, Default)]
 struct ChunkWriteGates {
-    state: Mutex<HashMap<(i32, i32), ChunkWriteGateRecord>>,
+    state: Mutex<rustc_hash::FxHashMap<(i32, i32), ChunkWriteGateRecord>>,
     wake: Condvar,
 }
 
@@ -3203,7 +3203,7 @@ struct ChunkWriteGateRecord {
 
 impl ChunkWriteGates {
     fn state_for_locked(
-        state: &mut HashMap<(i32, i32), ChunkWriteGateRecord>,
+        state: &mut rustc_hash::FxHashMap<(i32, i32), ChunkWriteGateRecord>,
         chunk: (i32, i32),
     ) -> Arc<ChunkWriteState> {
         if let Some(record) = state.get(&chunk) {
