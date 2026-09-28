@@ -337,6 +337,7 @@ impl RenderState {
             distant_terrain: None,
             distant_terrain_failed: false,
             sections: HashMap::new(),
+            section_fingerprints: HashMap::new(),
             packed_shared_cam_buffer,
             packed_cam_bind_group,
             packed_origin_arena,
@@ -1447,6 +1448,7 @@ impl RenderState {
                 model.crack_resolver = new_crack_resolver;
                 model.items = new_items;
                 model.sections.clear();
+                self.section_fingerprints.clear();
             }
             (Some(_), None) => {
                 tracing::warn!(

@@ -1986,7 +1986,7 @@ impl WindowApp {
 
         // Upload whatever has already meshed; the rest streams in per frame.
         for meshed in self.sim.drain_meshes() {
-            render.upload_section(gpu.device(), gpu.queue(), meshed.key, &meshed.mesh);
+            render.upload_meshed(gpu.device(), gpu.queue(), &meshed);
         }
 
         let menu = MenuRenderer::new(gpu.device(), format);

@@ -173,6 +173,7 @@ wgpu = { workspace = true }
 winit = { workspace = true, optional = true }
 glam = { workspace = true }
 bytemuck = { workspace = true }
+xxhash-rust = { version = "0.8", default-features = false, features = ["xxh3"] }
 
 # The portable clock behind `crate::platform::Instant`/`epoch_duration`, which as
 # of `lodestone-time` is a thin re-export rather than its own `web-time` dependency

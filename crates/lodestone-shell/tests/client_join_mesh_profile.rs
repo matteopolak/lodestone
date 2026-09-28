@@ -8,9 +8,9 @@ use std::time::Duration;
 
 use lodestone::config::{Config, Mode};
 use lodestone::app::integrated_stream_radius;
-use lodestone::gpu::RenderState;
+use lodestone::gpu::{RenderState, SectionUploadOutcome};
 use lodestone::menu::loading::ConnectPhase;
-use lodestone::mesher::{MeshBacklog, Meshed, record_native_mesh_upload_cost};
+use lodestone::mesher::{MeshBacklog, record_native_mesh_upload_cost};
 use lodestone::net::NetClient;
 use lodestone::sim::Sim;
 use lodestone_controller::Action;
@@ -680,10 +680,16 @@ fn main() {
     let mut step_count = 0u64;
     let mut mesh_count = 0usize;
     let mut section_uploads = HashMap::<_, usize>::new();
+    let mut unchanged_gpu_uploads = 0usize;
+    let mut applied_gpu_uploads = 0usize;
+    let mut failed_gpu_uploads = 0usize;
+    let mut removed_sections = 0usize;
     let mut quad_count = 0usize;
     let mut step_ns = 0u128;
+    let mut removal_ns = 0u128;
     let mut mesh_drain_ns = 0u128;
     let mut upload_ns = 0u128;
+    let mut gpu_upload_ns = 0u128;
     let mut render_ns = 0u128;
     let mut frame_samples = Vec::new();
     let mut step_samples = Vec::new();
@@ -865,18 +871,32 @@ fn main() {
         if movement_started.is_some() {
             movement_columns.observe_halos(&sim);
         }
+        let removal_started = Instant::now();
+        for key in sim.drain_removals() {
+            render.remove_section(&key);
+            removed_sections += 1;
+        }
+        removal_ns += removal_started.elapsed().as_nanos();
         let mesh_started = Instant::now();
         let meshes = sim.drain_meshes();
         mesh_drain_ns += mesh_started.elapsed().as_nanos();
         let upload_started = Instant::now();
         let mut upload_count = 0;
-        for Meshed { key, mesh } in meshes {
+        for meshed in meshes {
+            let key = meshed.key;
+            let mesh = &meshed.mesh;
             movement_columns.mesh_result(key.cx, key.cz);
             first_mesh.get_or_insert(started.elapsed());
             quad_count += mesh.quad_count();
             mesh_count += 1;
             *section_uploads.entry(key).or_default() += 1;
-            render.upload_section(device, queue, key, &mesh);
+            let gpu_upload_started = Instant::now();
+            match render.upload_meshed(device, queue, &meshed) {
+                SectionUploadOutcome::Applied => applied_gpu_uploads += 1,
+                SectionUploadOutcome::Unchanged => unchanged_gpu_uploads += 1,
+                SectionUploadOutcome::Failed => failed_gpu_uploads += 1,
+            }
+            gpu_upload_ns += gpu_upload_started.elapsed().as_nanos();
             sim.mark_mesh_uploaded(key);
             upload_count += 1;
             if let Some(probe) = edit.as_mut()
@@ -1233,6 +1253,10 @@ fn main() {
         "meshes_uploaded": mesh_count,
         "unique_sections_uploaded": section_uploads.len(),
         "repeat_section_uploads": mesh_count.saturating_sub(section_uploads.len()),
+        "gpu_uploads_applied": applied_gpu_uploads,
+        "gpu_uploads_unchanged": unchanged_gpu_uploads,
+        "gpu_uploads_failed": failed_gpu_uploads,
+        "removed_sections": removed_sections,
         "uploads_per_section_p95": p95_uploads_per_section,
         "uploads_per_section_max": max_uploads_per_section,
         "mesh_work": {
@@ -1249,8 +1273,10 @@ fn main() {
         "uploaded_quads": quad_count,
         "open_singleplayer_cpu_ms": open_ns as f64 / 1_000_000.0,
         "step_cpu_ms": step_ns as f64 / 1_000_000.0,
+        "mesh_removal_cpu_ms": removal_ns as f64 / 1_000_000.0,
         "mesh_drain_cpu_ms": mesh_drain_ns as f64 / 1_000_000.0,
         "mesh_upload_cpu_ms": upload_ns as f64 / 1_000_000.0,
+        "gpu_upload_cpu_ms": gpu_upload_ns as f64 / 1_000_000.0,
         "render_cpu_ms": render_ns as f64 / 1_000_000.0,
         "average_step_ms": step_ns as f64 / step_count.max(1) as f64 / 1_000_000.0,
         "frame_p95_ms": percentile(&frame_samples, 95),

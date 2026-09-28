@@ -52,7 +52,7 @@ use lodestone_data::block_states::StateId;
 use lodestone_ecs::app::{App, Plugin};
 use lodestone_ecs::{ChunkWorld, ChunkWorldWrite, FrameSet, LocalPlayer, PhysicsState, Update};
 use lodestone_render::{
-    BlockClassifier, BlockModels, ChunkSectionView, FluidCell, FluidKind, FluidMeshes,
+    BlockClassifier, BlockModels, ChunkSectionView, Face, FluidCell, FluidKind, FluidMeshes,
     FluidNeighborCell, FluidSectionView, FluidSprites, Mesh, ModelMesh, ModelSectionView,
     SectionLight,
     SectionNeighborhood, SkyDefault, UniformLight, WorldSectionLight, biome_tint_kind_for_slot,
@@ -169,6 +169,48 @@ pub enum SectionGeometry {
 }
 
 impl SectionGeometry {
+    pub(crate) fn fingerprint(&self) -> u128 {
+        use xxhash_rust::xxh3::Xxh3;
+
+        fn model(hash: &mut Xxh3, mesh: &ModelMesh) {
+            hash.update(&(mesh.vertices.len() as u64).to_le_bytes());
+            hash.update(bytemuck::cast_slice(&mesh.vertices));
+            hash.update(&(mesh.indices.len() as u64).to_le_bytes());
+            hash.update(bytemuck::cast_slice(&mesh.indices));
+        }
+
+        let mut hash = Xxh3::new();
+        match self {
+            Self::Packed(mesh) => {
+                hash.update(&[0]);
+                hash.update(&(mesh.vertices.len() as u64).to_le_bytes());
+                hash.update(bytemuck::cast_slice(&mesh.vertices));
+                hash.update(&(mesh.indices.len() as u64).to_le_bytes());
+                hash.update(bytemuck::cast_slice(&mesh.indices));
+            }
+            Self::Model {
+                opaque,
+                water,
+                translucent_blocks,
+                visibility,
+            } => {
+                hash.update(&[1]);
+                model(&mut hash, opaque);
+                model(&mut hash, water);
+                model(&mut hash, translucent_blocks);
+                let faces = [Face::NegX, Face::PosX, Face::NegY, Face::PosY, Face::NegZ, Face::PosZ];
+                let mut connectivity = [0u8; 36];
+                for (a_index, a) in faces.into_iter().enumerate() {
+                    for (b_index, b) in faces.into_iter().enumerate() {
+                        connectivity[a_index * 6 + b_index] = u8::from(visibility.connects(a, b));
+                    }
+                }
+                hash.update(&connectivity);
+            }
+        }
+        hash.digest128()
+    }
+
     /// The merged quad count, for stats/overlay parity across both paths.
     #[must_use]
     pub fn quad_count(&self) -> usize {
@@ -223,6 +265,14 @@ pub struct Meshed {
     pub key: SectionKey,
     /// The geometry (packed demo cubes or vanilla baked models).
     pub mesh: SectionGeometry,
+    pub(crate) fingerprint: u128,
+}
+
+impl Meshed {
+    fn new(key: SectionKey, mesh: SectionGeometry) -> Self {
+        let fingerprint = mesh.fingerprint();
+        Self { key, mesh, fingerprint }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -275,10 +325,7 @@ fn mesh_one(
         matches!(mesh, SectionGeometry::Packed(_)),
         take_tint_probe(),
     );
-    Meshed {
-        key: snap.key,
-        mesh,
-    }
+    Meshed::new(snap.key, mesh)
 }
 
 /// Report one section's [`TintProbe`], so a tint that resolved to *nothing* is
@@ -2788,6 +2835,25 @@ mod tests {
     }
 
     #[test]
+    fn mesh_fingerprint_includes_visibility_and_geometry_kind() {
+        let empty = || ModelMesh::default();
+        let model = |visibility| SectionGeometry::Model {
+            opaque: empty(),
+            water: empty(),
+            translucent_blocks: empty(),
+            visibility,
+        };
+        assert_ne!(
+            model(lodestone_render::SectionVisibility::NONE).fingerprint(),
+            model(lodestone_render::SectionVisibility::all()).fingerprint()
+        );
+        assert_ne!(
+            model(lodestone_render::SectionVisibility::NONE).fingerprint(),
+            SectionGeometry::Packed(Mesh::default()).fingerprint()
+        );
+    }
+
+    #[test]
     fn ao_occluder_census_accepts_a_leaf_and_rejects_state_count() {
         let leaf = (0..lodestone_data::block_states::STATE_COUNT)
             .find(|&raw| {
@@ -3762,13 +3828,13 @@ mod tests {
             scheduler.latest_generation.insert(key, generation);
             scheduler.pending += 1;
             scheduler.ready.push_back((
-                Meshed {
+                Meshed::new(
                     key,
-                    mesh: SectionGeometry::Packed(Mesh {
+                    SectionGeometry::Packed(Mesh {
                         vertices: vertices.clone(),
                         indices: Vec::new(),
                     }),
-                },
+                ),
                 generation,
             ));
         }
@@ -3797,10 +3863,7 @@ mod tests {
             scheduler.latest_generation.insert(key, generation);
             scheduler.pending += 1;
             scheduler.ready.push_back((
-                Meshed {
-                    key,
-                    mesh: SectionGeometry::Packed(Mesh::default()),
-                },
+                Meshed::new(key, SectionGeometry::Packed(Mesh::default())),
                 generation,
             ));
         }
@@ -3835,10 +3898,7 @@ mod tests {
             scheduler.latest_generation.insert(key, generation);
             scheduler.pending += 1;
             scheduler.ready.push_back((
-                Meshed {
-                    key,
-                    mesh: SectionGeometry::Packed(Mesh::default()),
-                },
+                Meshed::new(key, SectionGeometry::Packed(Mesh::default())),
                 generation,
             ));
         }

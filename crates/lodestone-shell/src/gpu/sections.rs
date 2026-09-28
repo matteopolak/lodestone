@@ -30,6 +30,13 @@ use crate::mesher::{SectionGeometry, SectionKey};
 /// PERF INSTRUMENT: set to true on first `upload_section` to log first-mesh timing once.
 static FIRST_SECTION_UPLOADED: AtomicBool = AtomicBool::new(false);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SectionUploadOutcome {
+    Applied,
+    Unchanged,
+    Failed,
+}
+
 use super::RenderState;
 use super::terrain::{ModelSectionGpu, ResidentMesh, SectionGpu, anim_slots_at};
 
@@ -106,6 +113,67 @@ impl RenderState {
     /// vanilla classifier and the model renderer are built from the same atlas)
     /// is a no-op.
     pub fn upload_section(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        key: SectionKey,
+        mesh: &SectionGeometry,
+    ) -> SectionUploadOutcome {
+        let fingerprint = mesh.fingerprint();
+        self.upload_section_fingerprinted(device, queue, key, mesh, fingerprint)
+    }
+
+    pub fn upload_meshed(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        meshed: &crate::mesher::Meshed,
+    ) -> SectionUploadOutcome {
+        self.upload_section_fingerprinted(device, queue, meshed.key, &meshed.mesh, meshed.fingerprint)
+    }
+
+    fn upload_section_fingerprinted(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        key: SectionKey,
+        mesh: &SectionGeometry,
+        fingerprint: u128,
+    ) -> SectionUploadOutcome {
+        if self.section_fingerprints.get(&key) == Some(&fingerprint) {
+            return SectionUploadOutcome::Unchanged;
+        }
+        self.upload_section_uncached(device, queue, key, mesh);
+        let applied = match mesh {
+            SectionGeometry::Packed(mesh) => {
+                mesh.vertices.is_empty()
+                    || mesh.indices.is_empty()
+                    || self.sections.contains_key(&key)
+            }
+            SectionGeometry::Model {
+                opaque,
+                water,
+                translucent_blocks,
+                ..
+            } => self.model.as_ref().is_some_and(|model| {
+                let resident = model.sections.get(&key);
+                (opaque.indices.is_empty() || resident.is_some_and(|section| section.mesh.is_some()))
+                    && (water.indices.is_empty()
+                        || resident.is_some_and(|section| section.water.is_some()))
+                    && (translucent_blocks.indices.is_empty()
+                        || resident.is_some_and(|section| section.translucent.is_some()))
+            }),
+        };
+        if applied {
+            self.section_fingerprints.insert(key, fingerprint);
+            SectionUploadOutcome::Applied
+        } else {
+            self.section_fingerprints.remove(&key);
+            SectionUploadOutcome::Failed
+        }
+    }
+
+    fn upload_section_uncached(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -297,6 +365,7 @@ impl RenderState {
 
     /// Remove a section (e.g. an unloaded chunk).
     pub fn remove_section(&mut self, key: &SectionKey) {
+        self.section_fingerprints.remove(key);
         // Drop its occlusion-graph entry too, or the graph is the one structure
         // here that only ever grows — the same shape as the leak that fix fixed
         // for `model.sections` and the origin arena. An absent coord reads as open
@@ -574,12 +643,35 @@ mod tests {
                     expected_bytes += mesh.vertices.len() * BYTES_PER_VERTEX
                         + mesh.indices.len() * BYTES_PER_INDEX;
                     uploaded.push(key);
-                    state.upload_section(
-                        device,
-                        queue,
-                        key,
-                        &crate::mesher::SectionGeometry::Packed(mesh),
+                    let geometry = crate::mesher::SectionGeometry::Packed(mesh);
+                    assert_eq!(
+                        state.upload_section(device, queue, key, &geometry),
+                        SectionUploadOutcome::Applied
                     );
+                    if uploaded.len() == 1 {
+                        assert_eq!(
+                            state.upload_section(device, queue, key, &geometry),
+                            SectionUploadOutcome::Unchanged
+                        );
+                        let crate::mesher::SectionGeometry::Packed(mesh) = &geometry else {
+                            unreachable!()
+                        };
+                        let mut changed = mesh.clone();
+                        changed.vertices[0].words[2] ^= 1;
+                        let changed = crate::mesher::SectionGeometry::Packed(changed);
+                        assert_eq!(
+                            state.upload_section(device, queue, key, &changed),
+                            SectionUploadOutcome::Applied
+                        );
+                        assert_eq!(
+                            state.upload_section(device, queue, key, &changed),
+                            SectionUploadOutcome::Unchanged
+                        );
+                        assert_eq!(
+                            state.upload_section(device, queue, key, &geometry),
+                            SectionUploadOutcome::Applied
+                        );
+                    }
                 }
             }
         }

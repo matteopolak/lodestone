@@ -490,7 +490,7 @@ impl WindowApp {
         #[cfg(not(target_arch = "wasm32"))]
         let mut mesh_upload_count = 0;
         for meshed in self.sim.drain_meshes() {
-            render.upload_section(device, queue, meshed.key, &meshed.mesh);
+            render.upload_meshed(device, queue, &meshed);
             // `Sim::drain_meshes` has only crossed the CPU scheduler boundary.
             // A loading gate may advance after the renderer has received this
             // section, so acknowledge the hand-off after the upload call rather
