@@ -12,7 +12,7 @@ use lodestone::mesher::Meshed;
 use lodestone::net::NetClient;
 use lodestone::sim::Sim;
 use lodestone_controller::Action;
-use lodestone_render::{Camera, GpuContext, HeadlessTarget, RenderTarget};
+use lodestone_render::{GpuContext, HeadlessTarget, RenderTarget};
 use lodestone_time::Instant;
 use lodestone_model::action::{
     ChatMode, ClientAction, ClientSettings, DisplayedSkinParts, MainHand, ParticleStatus,
@@ -21,6 +21,41 @@ use lodestone_model::action::{
 const SEED: i64 = 4242;
 const DEADLINE: Duration = Duration::from_secs(120);
 const FRAME_INTERVAL: Duration = Duration::from_nanos(16_666_667);
+
+struct EditProbe {
+    aiming_since: Instant,
+    target: Option<[i32; 3]>,
+    initial_state: Option<u32>,
+    clicked_at: Option<Instant>,
+    changed: Option<Duration>,
+    mesh_uploaded: Option<Duration>,
+    presented: Option<Duration>,
+}
+
+impl EditProbe {
+    fn new() -> Self {
+        Self {
+            aiming_since: Instant::now(),
+            target: None,
+            initial_state: None,
+            clicked_at: None,
+            changed: None,
+            mesh_uploaded: None,
+            presented: None,
+        }
+    }
+}
+
+fn edit_enabled() -> bool {
+    match std::env::var("LODESTONE_CLIENT_JOIN_EDIT") {
+        Ok(value) => {
+            assert_eq!(value, "1", "LODESTONE_CLIENT_JOIN_EDIT must be 1 when set");
+            true
+        }
+        Err(std::env::VarError::NotPresent) => false,
+        Err(error) => panic!("invalid LODESTONE_CLIENT_JOIN_EDIT: {error}"),
+    }
+}
 
 fn movement_duration() -> Duration {
     let seconds = std::env::var("LODESTONE_CLIENT_JOIN_MOVE_SECONDS")
@@ -75,22 +110,10 @@ fn profile_config(radius: u32) -> Config {
     }
 }
 
-fn camera(sim: &Sim, radius: u32) -> Camera {
-    let position = sim.player().position;
-    Camera {
-        position: glam::Vec3::new(position.x as f32, position.y as f32, position.z as f32),
-        yaw: sim.player().yaw,
-        pitch: sim.player().pitch,
-        fov_y_degrees: 70.0,
-        aspect: 1.0,
-        near: 0.05,
-        far: Camera::far_for_render_distance(radius, 0),
-    }
-}
-
 fn main() {
     let radius = profile_radius();
     let move_for = movement_duration();
+    let measure_edit = edit_enabled();
     let server_radius = radius.saturating_add(1);
     let expected_visible_columns = ((radius as usize) * 2 + 1).pow(2);
     let expected_server_columns = ((server_radius as usize) * 2 + 1).pow(2);
@@ -207,6 +230,7 @@ fn main() {
     let mut movement_steps = Vec::new();
     let mut movement_start_tick = None;
     let mut last_view_probe: Option<Instant> = None;
+    let mut edit: Option<EditProbe> = None;
 
     while started.elapsed() < DEADLINE {
         let frame_started = Instant::now();
@@ -214,6 +238,37 @@ fn main() {
         previous_frame = frame_started;
         let step_started = Instant::now();
         sim.step(dt);
+        sim.update_target(target_width as f32 / target_height as f32);
+        if let Some(probe) = edit.as_mut() {
+            if probe.clicked_at.is_none() {
+                if let Some(hit) = sim.target() {
+                    let state = sim.chunk_world().read().block_state_at(
+                        hit.block[0], hit.block[1], hit.block[2],
+                    );
+                    if state.is_some_and(|id| id != lodestone_data::block_states::StateId::AIR.raw()) {
+                        probe.target = Some(hit.block);
+                        probe.initial_state = state;
+                        probe.clicked_at = Some(Instant::now());
+                        sim.begin_attack();
+                    }
+                }
+            } else if probe.changed.is_none()
+                && probe.target.is_some_and(|block| {
+                    sim.chunk_world().read().block_state_at(block[0], block[1], block[2])
+                        == Some(lodestone_data::block_states::StateId::AIR.raw())
+                })
+            {
+                probe.changed = probe.clicked_at.map(|clicked| clicked.elapsed());
+                sim.end_attack();
+            }
+            assert!(
+                probe.aiming_since.elapsed() < Duration::from_secs(15) || probe.presented.is_some(),
+                "block edit did not reach a presented mesh: target={:?} changed={:?} uploaded={:?}",
+                probe.target,
+                probe.changed,
+                probe.mesh_uploaded,
+            );
+        }
         let step_elapsed = step_started.elapsed();
         step_ns += step_elapsed.as_nanos();
         step_samples.push(step_elapsed);
@@ -262,6 +317,16 @@ fn main() {
             mesh_count += 1;
             render.upload_section(device, queue, key, &mesh);
             sim.mark_mesh_uploaded(key);
+            if let Some(probe) = edit.as_mut()
+                && probe.changed.is_some()
+                && probe.mesh_uploaded.is_none()
+                && probe.target.is_some_and(|block| {
+                    let origin = key.origin();
+                    (0..3).all(|axis| block[axis] >= origin[axis] && block[axis] < origin[axis] + 16)
+                })
+            {
+                probe.mesh_uploaded = probe.clicked_at.map(|clicked| clicked.elapsed());
+            }
         }
         sim.refresh_terrain_readiness();
         let upload_elapsed = upload_started.elapsed();
@@ -311,8 +376,21 @@ fn main() {
 
         let render_started = Instant::now();
         let frame = target.acquire().expect("headless target acquire");
-        let stats = render.render(device, queue, frame.view(), &camera(&sim, radius), None, &[]);
+        let stats = render.render(
+            device,
+            queue,
+            frame.view(),
+            &sim.camera(target_width as f32 / target_height as f32),
+            None,
+            &[],
+        );
         frame.present(queue);
+        if let Some(probe) = edit.as_mut()
+            && probe.mesh_uploaded.is_some()
+            && probe.presented.is_none()
+        {
+            probe.presented = probe.clicked_at.map(|clicked| clicked.elapsed());
+        }
         if sim.acknowledge_presented_initial_world() {
             player_loaded_ack = Some(started.elapsed());
         }
@@ -328,10 +406,16 @@ fn main() {
             first_presented_terrain = Some(started.elapsed());
         }
 
+        if measure_edit && edit.is_none() && player_loaded_ack.is_some() {
+            sim.player_mut(|player| player.pitch = 80.0);
+            edit = Some(EditProbe::new());
+        }
+
         if move_for > Duration::ZERO
             && movement_started.is_none()
             && overlay_ready.is_some()
             && first_presented_terrain.is_some()
+            && (!measure_edit || edit.as_ref().is_some_and(|probe| probe.presented.is_some()))
         {
             let position = sim.player().position;
             movement_origin = Some((position.x, position.z));
@@ -352,6 +436,7 @@ fn main() {
             && first_presented_terrain.is_some()
             && (move_for == Duration::ZERO
                 || movement_started.is_some_and(|start| start.elapsed() >= move_for))
+            && (!measure_edit || edit.as_ref().is_some_and(|probe| probe.presented.is_some()))
         {
             break;
         }
@@ -383,8 +468,16 @@ fn main() {
         "frames_over_33ms": movement_frames.iter().filter(|elapsed| **elapsed > Duration::from_millis(33)).count(),
         "frames_over_100ms": movement_frames.iter().filter(|elapsed| **elapsed > Duration::from_millis(100)).count(),
     }));
+    let edit = edit.map(|probe| serde_json::json!({
+        "target": probe.target,
+        "initial_state": probe.initial_state,
+        "aim_ms": probe.clicked_at.map(|clicked| clicked.duration_since(probe.aiming_since).as_secs_f64() * 1000.0),
+        "input_to_air_ms": ms(probe.changed),
+        "input_to_mesh_upload_ms": ms(probe.mesh_uploaded),
+        "input_to_present_ms": ms(probe.presented),
+    }));
     let report = serde_json::json!({
-        "schema": "lodestone-client-join-mesh-profile-v8",
+        "schema": "lodestone-client-join-mesh-profile-v9",
         "seed": SEED,
         "target_size": [target_width, target_height],
         "visible_radius": radius,
@@ -435,6 +528,7 @@ fn main() {
         "frames_over_33ms": frame_samples.iter().filter(|elapsed| **elapsed > Duration::from_millis(33)).count(),
         "frames_over_100ms": frame_samples.iter().filter(|elapsed| **elapsed > Duration::from_millis(100)).count(),
         "movement": movement,
+        "edit": edit,
     });
     println!("CLIENT_JOIN_MESH_PROFILE {report}");
     assert!(!report["timed_out"].as_bool().unwrap_or(true), "{report}");
@@ -442,6 +536,9 @@ fn main() {
     assert!(player_loaded_ack.is_some(), "the new world was never acknowledged after presentation: {report}");
     if move_for > Duration::ZERO {
         assert!(movement_chunk_changes > 0, "movement never entered a new chunk: {report}");
+    }
+    if measure_edit {
+        assert!(report["edit"]["input_to_present_ms"].is_number(), "block edit never reached a presented frame: {report}");
     }
 }
 
