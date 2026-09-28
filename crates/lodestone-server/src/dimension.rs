@@ -512,6 +512,14 @@ impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
         self.primary.try_resident_column(cx, cz)
     }
 
+    fn try_resident_column_presence(
+        &self,
+        cx: i32,
+        cz: i32,
+    ) -> Option<crate::chunk_store::TryResident<()>> {
+        self.primary.try_resident_column_presence(cx, cz)
+    }
+
     fn try_resident_block_state_id(
         &self,
         x: i32,
@@ -1057,7 +1065,15 @@ mod tests {
             !wrapped.is_column_resident(0, 0),
             "an untouched column must report not-resident through the wrapper"
         );
+        assert_eq!(
+            wrapped.try_resident_column_presence(0, 0),
+            Some(crate::chunk_store::TryResident::Absent)
+        );
         let _ = wrapped.column(0, 0);
+        assert_eq!(
+            wrapped.try_resident_column_presence(0, 0),
+            Some(crate::chunk_store::TryResident::Present(()))
+        );
         assert!(
             wrapped.is_column_resident(0, 0),
             "a column just generated through the wrapper must report resident — proving \

@@ -2478,6 +2478,23 @@ pub trait ChunkSource: Send + Sync {
         None
     }
 
+    /// Checks resident admission without copying the column. Sources with an
+    /// atomic resident boundary override this; other sources retain the
+    /// existing column-snapshot fallback.
+    fn try_resident_column_presence(
+        &self,
+        cx: i32,
+        cz: i32,
+    ) -> Option<crate::chunk_store::TryResident<()>> {
+        self.try_resident_column(cx, cz).map(|result| match result {
+            crate::chunk_store::TryResident::Busy => crate::chunk_store::TryResident::Busy,
+            crate::chunk_store::TryResident::Absent => crate::chunk_store::TryResident::Absent,
+            crate::chunk_store::TryResident::Present(_) => {
+                crate::chunk_store::TryResident::Present(())
+            }
+        })
+    }
+
     /// Attempts a resident-only block snapshot through an atomic source
     /// boundary. See [`Self::try_resident_column`] for the meaning of the
     /// outer `Option` and the three resident outcomes.
@@ -2973,6 +2990,14 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
         (**self).try_resident_column(cx, cz)
     }
 
+    fn try_resident_column_presence(
+        &self,
+        cx: i32,
+        cz: i32,
+    ) -> Option<crate::chunk_store::TryResident<()>> {
+        (**self).try_resident_column_presence(cx, cz)
+    }
+
     fn try_resident_block_state_id(
         &self,
         x: i32,
@@ -3297,6 +3322,14 @@ impl<S: ChunkSource + ?Sized> ChunkSource for &S {
         cz: i32,
     ) -> Option<crate::chunk_store::TryResident<ChunkColumn>> {
         (**self).try_resident_column(cx, cz)
+    }
+
+    fn try_resident_column_presence(
+        &self,
+        cx: i32,
+        cz: i32,
+    ) -> Option<crate::chunk_store::TryResident<()>> {
+        (**self).try_resident_column_presence(cx, cz)
     }
 
     fn try_resident_block_state_id(
