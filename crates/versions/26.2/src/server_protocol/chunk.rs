@@ -5,6 +5,7 @@
 
 use super::*;
 use lodestone_core::{Nbt, Writer, write_network_nbt};
+use lodestone_world::BlockVolume;
 
 /// Converts one `lodestone-server` [`ServerChunkColumn`] into the
 /// version-free [`WorldChunkColumn`] the wire codec speaks, carrying the
@@ -264,6 +265,34 @@ mod conversion_tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn direct_relight_matches_buffered_columns_in_every_dimension() {
+        let stone = StateId::from_state_str("minecraft:stone").expect("stone state");
+        let glowstone = StateId::from_state_str("minecraft:glowstone").expect("glowstone state");
+        for dimension in [Dimension::Overworld, Dimension::Nether, Dimension::End] {
+            let shape = shape_for_dimension(dimension);
+            let mut center = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
+            let mut east = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
+            let y = shape.min_y + 72;
+            for x in 8..16 {
+                center.set_block_id(x, y + 2, 8, stone);
+            }
+            center.set_block_id(15, y, 8, glowstone);
+            east.set_block_id(0, y + 1, 8, stone);
+            let neighbours = [(0, 0, &center), (1, 0, &east)];
+            let direct = compute_served_light_with_neighbours(&center, &neighbours, dimension);
+            let buffered_center = build_world_column(&shape, &center);
+            let buffered_east = build_world_column(&shape, &east);
+            let buffered = compute_column_light_with_neighbours(
+                &Neighbourhood::new(&buffered_center).with(1, 0, &buffered_east),
+                &V770LightProps {
+                    has_skylight: dimension.has_skylight(),
+                },
+            );
+            assert_eq!(direct, buffered, "{dimension:?}");
         }
     }
 }
@@ -994,16 +1023,20 @@ pub(super) fn compute_served_light_with_neighbours(
     dimension: Dimension,
 ) -> ColumnLight {
     let shape = shape_for_dimension(dimension);
-    let center = build_world_column(&shape, column);
-    let neighbour_columns = neighbours
+    let center = ServerLightVolume {
+        source: column,
+        shape: &shape,
+    };
+    let neighbour_volumes = neighbours
         .iter()
-        .map(|(_, _, neighbour)| build_world_column(&shape, neighbour))
+        .map(|(_, _, neighbour)| ServerLightVolume {
+            source: neighbour,
+            shape: &shape,
+        })
         .collect::<Vec<_>>();
     let mut neighbourhood = Neighbourhood::new(&center);
-    for ((dx, dz, _), neighbour) in neighbours.iter().zip(&neighbour_columns) {
+    for ((dx, dz, _), neighbour) in neighbours.iter().zip(&neighbour_volumes) {
         if (*dx, *dz) == (0, 0) {
-            // Persistent-save callers carry a full 3×3 snapshot including the
-            // centre; `Neighbourhood` already owns that one separately.
             continue;
         }
         neighbourhood = neighbourhood.with(*dx, *dz, neighbour);
@@ -1014,6 +1047,29 @@ pub(super) fn compute_served_light_with_neighbours(
             has_skylight: dimension.has_skylight(),
         },
     )
+}
+
+struct ServerLightVolume<'a> {
+    source: &'a ServerChunkColumn,
+    shape: &'a ChunkShape,
+}
+
+impl BlockVolume for ServerLightVolume<'_> {
+    fn block(&self, x: usize, y: i32, z: usize) -> u32 {
+        self.source.block_state_id(x as i32, y, z as i32).raw()
+    }
+
+    fn air_state(&self) -> u32 {
+        self.shape.air_id
+    }
+
+    fn min_y(&self) -> i32 {
+        self.shape.min_y
+    }
+
+    fn section_count(&self) -> usize {
+        self.shape.section_count
+    }
 }
 
 /// Computes the initial packet value and its allocation mask from a supplied
