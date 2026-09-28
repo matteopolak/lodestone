@@ -14,8 +14,9 @@ The server emits one event per chunk at `generated`, `encoded`, and `delivered`;
 the shell emits `received`, `remesh_queued`, and `remeshed`. Each event includes
 the chunk coordinate, elapsed milliseconds from that join's chunk phase, and a
 `first` field identifying the time-to-first event for each stage. Client receipt
-and queue counts are sampled every 16 events; completed meshes are counted per
-section and sampled every 256 events on both native and browser builds. Payloads and
+and arrival-signal counts are sampled every 16 events; completed meshes are counted
+per section and sampled every 256 events on both native and browser builds. The
+`unit` field distinguishes section completions from column counts. Payloads and
 shader/source text are never included. Deferred native join generation gives the
 connection loop a bounded 25 ms wait for its ordered head; cancelling that wait
 leaves the head in the pipeline, so socket and timer work stays serviceable
