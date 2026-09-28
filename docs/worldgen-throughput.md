@@ -10,7 +10,7 @@ The executable builds one production generator per dimension and seed, walks a r
 
 Each pass reports chunks per second, process CPU utilization when the host exposes `getrusage`, and sampled resident-set growth. A separate 16-chunk allocation pass uses a benchmark-local counting allocator, so allocation counts do not distort the wall-clock throughput numbers. The legacy rolling digest over non-air counts remains in the output for historical comparison, while an out-of-band SHA-256 content digest hashes every canonical block-state string, exposed biome cell, and generated block-entity sidecar (or the dimension's equivalent loot/gateway sidecar). The content pass is outside both the timed loop and allocation-counted closure, and cold/warm digests must agree.
 
-With `gen-counters`, `full_column_conversions` counts logical complete-column conversion operations and `full_column_conversion_cells` reports their covered cells; neither is a byte-traffic measurement. Full Overworld output packing is counted once at the dense-to-compact packing boundary. These counters cover worldgen work, not packet encoding or neighbor-light preparation.
+With `gen-counters`, `full_column_conversions` counts logical complete-column conversion operations and `full_column_conversion_cells` reports their covered cells; neither is a byte-traffic measurement. Full Overworld output packing is counted once when canonical state IDs become palette-index sections. These counters cover worldgen work, not packet encoding or neighbor-light preparation.
 
 The strict server benchmark also reports `target_write_bookkeeping` when built
 with `lodestone-worldgen/gen-counters`. Its local and spill counts are unique
@@ -195,7 +195,17 @@ Heightmap scans also retain that resolved source for the full vertical column;
 the overlay remains checked per cell, but the source routing work is no longer
 repeated for every Y coordinate.
 
-Bounded density evaluation retains each thread-local `Scratch` slot's dense value and presence buffers when adjacent chunks change only their world-coordinate origin. Reconfiguration clears every presence flag before installing the new origin, so the retained allocations cannot expose a prior chunk's result; a dimension or dense/hashed-layout change still takes the existing rebuild path. The buffers are never shared between generators or worker threads.
+Bounded density evaluation retains each thread-local `Scratch` slot's dense
+value and presence buffers when a shifted region has the same slot count,
+cell geometry, and lattice dimensions. Reconfiguration installs the new origin
+and clears every presence flag, so retained allocations cannot expose a prior
+region's result. A changed lattice extent or dense/hashed layout rebuilds the
+stores. The buffers are never shared between workers. On a one-worker seed-42
+square-64 production cohort, matched runs moved from 255.99 million
+instructions and 50.75 million cycles per output to 254.35–254.65 million
+instructions and 50.10 million cycles. All three output checksums remained
+identical, with peak resident footprint near 373–374 MB. This is a modest
+reuse improvement, not a change in the generation algorithm.
 
 Overworld fill requests one final-density vertical run per `(x, z)` and then
 resolves the blocks through the target aquifer's status caches. This preserves

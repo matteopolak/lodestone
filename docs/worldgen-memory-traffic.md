@@ -12,7 +12,7 @@ Cache computation counters are bumped at the existing miss branches. The direct-
 
 Bounded scratch grids precompute bit shifts when their X/Z and Y lattice steps are powers of two. Dense cache indexing then shifts the non-negative coordinate deltas instead of performing three integer divisions; unusual geometries retain the general Euclidean-division path. The sampler's declared bounds are the contract that makes those deltas non-negative.
 
-Scratch acquisition distinguishes a free-list reuse from a fresh scratch instance. Dense vector capacity growth contributes to cumulative logical allocation bytes and retained bytes; the retained high-water mark is updated with a relaxed atomic. Hash-table allocator metadata is intentionally excluded because its implementation capacity is not a stable payload-size contract.
+Scratch acquisition distinguishes a free-list reuse from a fresh scratch instance. A shifted bounded region reuses dense buffers only when its slot count, cell geometry, and lattice dimensions match; it clears all presence flags before reuse. Dense vector capacity growth contributes to cumulative logical allocation bytes and retained bytes; the retained high-water mark is updated with a relaxed atomic. Hash-table allocator metadata is intentionally excluded because its implementation capacity is not a stable payload-size contract.
 
 The Overworld fill walk derives each solid-top height while producing the
 density field, so the surface input does not trigger a second top-down read of

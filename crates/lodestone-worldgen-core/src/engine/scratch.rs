@@ -28,10 +28,8 @@
 //! A pooled [`Scratch`] keeps its allocations across chunks, so **every
 //! presence flag must be cleared on reconfigure or a stale value from the
 //! previous chunk is returned as if it were this chunk's**. That failure is
-//! silent, position-dependent, and produces plausible terrain — the same shape
-//! as the interpolation-order bug. [`Scratch::reconfigure`] is the only place
-//! the clearing happens and `tests::reuse_clears_presence_flags` is the gate;
-//! `docs/worldgen-density-engine.md` records the measured cost of removing it.
+//! silent and position-dependent. [`Scratch::reconfigure`] is the only place
+//! the clearing happens; `tests::reuse_clears_presence_flags` guards it.
 
 use std::collections::HashMap;
 
@@ -396,9 +394,8 @@ pub struct Scratch {
     column_cell_y: Vec<Option<i32>>,
     dense: Option<DenseShape>,
     cell_shape: Option<CellShape>,
-    /// The configuration currently installed, so [`Self::reconfigure`] can tell
-    /// a compatible reuse (clear flags, keep allocations) from an incompatible
-    /// one (rebuild).
+    /// The installed configuration. A shifted region can reuse buffers when
+    /// its lattice dimensions match.
     config: Option<(usize, i32, i32, Option<Bounds>)>,
     /// A per-thread monotonic id, re-issued on every [`Self::acquire`], so
     /// `super::redundancy_probe` can tell "this node was already evaluated at
@@ -533,19 +530,32 @@ impl Scratch {
             state.reset();
         }
         if self.config == Some(want) {
-            for s in &mut self.slots {
-                match s {
-                    SlotStore::Hashed(m) => m.clear(),
-                    SlotStore::Dense { has, .. } => has.fill(false),
-                }
-            }
-            for c in &mut self.cells {
-                match c {
-                    CellStore::Hashed(m) => m.clear(),
-                    CellStore::Dense { has, .. } => has.fill(false),
-                }
-            }
-            self.column_cell_y.fill(None);
+            self.clear_reused();
+            return;
+        }
+
+        let dense = bounds.map(|b| DenseShape::for_bounds(cell_width, cell_height, b));
+        let cell_shape = bounds.map(|b| CellShape::for_bounds(cell_width, cell_height, b));
+        let compatible_geometry = self.config.is_some_and(|(count, width, height, _)| {
+            count == slot_count && width == cell_width && height == cell_height
+        });
+        let compatible_slots = match (self.dense, dense) {
+            (Some(old), Some(new)) =>
+                (old.nx, old.ny, old.nz) == (new.nx, new.ny, new.nz),
+            (None, None) => true,
+            _ => false,
+        };
+        let compatible_cells = match (self.cell_shape, cell_shape) {
+            (Some(old), Some(new)) =>
+                (old.nx, old.ny, old.nz) == (new.nx, new.ny, new.nz),
+            (None, None) => true,
+            _ => false,
+        };
+        if compatible_geometry && compatible_slots && compatible_cells {
+            self.dense = dense;
+            self.cell_shape = cell_shape;
+            self.config = Some(want);
+            self.clear_reused();
             return;
         }
 
@@ -559,8 +569,6 @@ impl Scratch {
         let old_column_cell_y_capacity = self.column_cell_y.capacity();
         #[cfg(feature = "gen-counters")]
         let old_retained_bytes = self.retained_bytes;
-        let dense = bounds.map(|b| DenseShape::for_bounds(cell_width, cell_height, b));
-        let cell_shape = bounds.map(|b| CellShape::for_bounds(cell_width, cell_height, b));
         self.slots.clear();
         self.cells.clear();
         self.column_values.clear();
@@ -615,6 +623,22 @@ impl Scratch {
                     * std::mem::size_of::<Option<i32>>()) as u64;
             crate::counters::bump_scratch_buffer_allocated_bytes(top_level_growth);
         }
+    }
+
+    fn clear_reused(&mut self) {
+        for slot in &mut self.slots {
+            match slot {
+                SlotStore::Hashed(map) => map.clear(),
+                SlotStore::Dense { has, .. } => has.fill(false),
+            }
+        }
+        for cell in &mut self.cells {
+            match cell {
+                CellStore::Hashed(map) => map.clear(),
+                CellStore::Dense { has, .. } => has.fill(false),
+            }
+        }
+        self.column_cell_y.fill(None);
     }
 
     #[cfg(feature = "gen-counters")]
@@ -1086,10 +1110,9 @@ mod tests {
 
     /// The derived grid sizes the counter predictions rest on. `5 × 49 × 5 =
     /// 1,225` is the corner lattice for one chunk-bounded interpolated slot and
-    /// `4 × 48 × 4 = 768` is its cell count; both appear in
-    /// `docs/worldgen-density-engine.md` and in the bench's predictions, so
-    /// pinning them here makes a geometry change fail loudly next to the
-    /// derivation instead of quietly moving a counter.
+    /// `4 × 48 × 4 = 768` is its cell count. Pinning them here makes a
+    /// geometry change fail beside its derivation rather than silently moving
+    /// a counter.
     #[test]
     fn grid_sizes_match_the_derived_geometry() {
         let d = DenseShape::for_bounds(4, 8, B);
@@ -1158,10 +1181,7 @@ mod tests {
     ///
     /// This is the gate for the module doc's *reuse hazard*: the `values`
     /// buffers are deliberately kept across `reconfigure`, so only the `has`
-    /// clearing stands between a pooled scratch and a stale read. The negative
-    /// control (removing the `has.fill(false)`) is recorded in
-    /// `docs/worldgen-density-engine.md` rather than expressed here, because a
-    /// test cannot un-write the code it is testing.
+    /// clearing stands between a pooled scratch and a stale read.
     #[test]
     fn reuse_clears_presence_flags() {
         let mut s = Scratch::default();
@@ -1188,6 +1208,41 @@ mod tests {
         // never stored anything, which is the vacuous reading of this test.
         s.slot_put(0, (0, 0, 0), 3.5);
         assert_eq!(s.slot_get(0, (0, 0, 0)), Some(3.5));
+    }
+
+    #[test]
+    fn shifted_equal_shape_reuses_storage_without_stale_values() {
+        let shifted = Bounds {
+            x: (16, 31),
+            y: B.y,
+            z: (-16, -1),
+        };
+        let mut scratch = Scratch::default();
+        scratch.reconfigure(1, 4, 8, Some(B));
+        scratch.slot_put(0, (0, 0, 0), 12.5);
+        scratch.cell_put(0, 0, 0, 0, [7.0; 8]);
+        scratch.reconfigure(1, 4, 8, Some(shifted));
+
+        let SlotStore::Dense { values, .. } = &scratch.slots[0] else {
+            panic!("bounded slot changed representation");
+        };
+        let CellStore::Dense { values: cells, .. } = &scratch.cells[0] else {
+            panic!("bounded cell changed representation");
+        };
+        assert_eq!(values.len(), DenseShape::for_bounds(4, 8, shifted).len());
+        assert_eq!(cells.len(), CellShape::for_bounds(4, 8, shifted).len());
+        assert_eq!(scratch.slot_get(0, (16, 0, -16)), None);
+        assert_eq!(scratch.cell_get(0, 4, 0, -4), None);
+        scratch.slot_put(0, (16, 0, -16), 4.5);
+        scratch.cell_put(0, 4, 0, -4, [3.0; 8]);
+        assert_eq!(scratch.slot_get(0, (16, 0, -16)), Some(4.5));
+        assert_eq!(scratch.cell_get(0, 4, 0, -4), Some([3.0; 8]));
+
+        scratch.reconfigure(1, 4, 8, Some(Bounds { x: (16, 47), ..shifted }));
+        let SlotStore::Dense { values, .. } = &scratch.slots[0] else {
+            panic!("bounded slot changed representation");
+        };
+        assert!(values.is_empty(), "changed lattice extent must rebuild stores");
     }
 
     /// The unbounded (hashed) form must clear too, and must accept keys far
