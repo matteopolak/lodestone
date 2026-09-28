@@ -11,6 +11,7 @@ use lodestone::menu::loading::ConnectPhase;
 use lodestone::mesher::Meshed;
 use lodestone::net::NetClient;
 use lodestone::sim::Sim;
+use lodestone_controller::Action;
 use lodestone_render::{Camera, GpuContext, HeadlessTarget, RenderTarget};
 use lodestone_time::Instant;
 use lodestone_model::action::{
@@ -20,6 +21,23 @@ use lodestone_model::action::{
 const SEED: i64 = 4242;
 const DEADLINE: Duration = Duration::from_secs(120);
 const FRAME_INTERVAL: Duration = Duration::from_nanos(16_666_667);
+
+fn movement_duration() -> Duration {
+    let seconds = std::env::var("LODESTONE_CLIENT_JOIN_MOVE_SECONDS")
+        .ok()
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .expect("LODESTONE_CLIENT_JOIN_MOVE_SECONDS must be an integer")
+        })
+        .unwrap_or(0);
+    assert!(seconds <= 60, "movement profile must be at most 60 seconds");
+    Duration::from_secs(seconds)
+}
+
+fn chunk_at(x: f64, z: f64) -> (i32, i32) {
+    ((x / 16.0).floor() as i32, (z / 16.0).floor() as i32)
+}
 
 fn profile_radius() -> u32 {
     std::env::var("LODESTONE_CLIENT_JOIN_RADIUS")
@@ -72,6 +90,7 @@ fn camera(sim: &Sim, radius: u32) -> Camera {
 
 fn main() {
     let radius = profile_radius();
+    let move_for = movement_duration();
     let server_radius = radius.saturating_add(1);
     let expected_visible_columns = ((radius as usize) * 2 + 1).pow(2);
     let expected_server_columns = ((server_radius as usize) * 2 + 1).pow(2);
@@ -114,7 +133,7 @@ fn main() {
         SEED,
         lodestone::menu::create_world::WorldTypePreset::Normal,
         i32::try_from(server_radius).expect("profile radius fits i32"),
-        false,
+        true,
         None,
         None,
     );
@@ -153,6 +172,7 @@ fn main() {
     let mut joining = None;
     let mut loading_terrain = None;
     let mut overlay_ready = None;
+    let mut player_loaded_ack = None;
     let mut all_initial_columns = None;
     let mut all_initial_meshes_settled = None;
     let mut all_visible_columns = None;
@@ -173,6 +193,20 @@ fn main() {
     let mut step_samples = Vec::new();
     let mut upload_samples = Vec::new();
     let mut render_samples = Vec::new();
+    let mut movement_started: Option<Instant> = None;
+    let mut movement_origin: Option<(f64, f64)> = None;
+    let mut movement_first_effect = None;
+    let mut movement_first_chunk_change = None;
+    let mut movement_first_settled_view = None;
+    let mut movement_last_chunk = None;
+    let mut movement_chunk_changes = 0usize;
+    let mut movement_min_settled = usize::MAX;
+    let mut movement_last_settled = 0usize;
+    let mut movement_max_pending = 0usize;
+    let mut movement_frames = Vec::new();
+    let mut movement_steps = Vec::new();
+    let mut movement_start_tick = None;
+    let mut last_view_probe: Option<Instant> = None;
 
     while started.elapsed() < DEADLINE {
         let frame_started = Instant::now();
@@ -183,6 +217,20 @@ fn main() {
         let step_elapsed = step_started.elapsed();
         step_ns += step_elapsed.as_nanos();
         step_samples.push(step_elapsed);
+        if let Some((start, (origin_x, origin_z))) = movement_started.zip(movement_origin) {
+            movement_steps.push(step_elapsed);
+            let position = sim.player().position;
+            let distance = (position.x - origin_x).hypot(position.z - origin_z);
+            if distance > 0.01 {
+                movement_first_effect.get_or_insert(start.elapsed());
+            }
+            let chunk = chunk_at(position.x, position.z);
+            if movement_last_chunk != Some(chunk) {
+                movement_chunk_changes += 1;
+                movement_last_chunk = Some(chunk);
+                movement_first_chunk_change.get_or_insert(start.elapsed());
+            }
+        }
         step_count += 1;
 
         match sim.connect_phase() {
@@ -223,24 +271,41 @@ fn main() {
         if sim.world_wait().is_none() {
             overlay_ready.get_or_insert(started.elapsed());
         }
-        if let Some((resident, settled, expected)) = sim.visible_view_settlement() {
-            assert_eq!(expected, expected_initial_columns);
-            max_settled_initial_columns = max_settled_initial_columns.max(settled);
-            if resident == expected {
-                all_initial_columns.get_or_insert(started.elapsed());
-            }
-            if settled >= expected {
-                all_initial_meshes_settled.get_or_insert(started.elapsed());
+        if all_initial_meshes_settled.is_none() {
+            if let Some((resident, settled, expected)) = sim.visible_view_settlement() {
+                assert_eq!(expected, expected_initial_columns);
+                max_settled_initial_columns = max_settled_initial_columns.max(settled);
+                if resident == expected {
+                    all_initial_columns.get_or_insert(started.elapsed());
+                }
+                if settled >= expected {
+                    all_initial_meshes_settled.get_or_insert(started.elapsed());
+                }
             }
         }
-        if let Some((resident, settled, expected)) = sim.view_settlement_at_radius(radius) {
-            assert_eq!(expected, expected_visible_columns);
-            max_settled_visible_columns = max_settled_visible_columns.max(settled);
-            if resident == expected {
-                all_visible_columns.get_or_insert(started.elapsed());
-            }
-            if settled >= expected {
-                all_visible_meshes_settled.get_or_insert(started.elapsed());
+        if player_loaded_ack.is_none()
+            || last_view_probe.is_none_or(|last| last.elapsed() >= Duration::from_millis(100))
+        {
+            last_view_probe = Some(Instant::now());
+            if let Some((resident, settled, expected)) = sim.view_settlement_at_radius(radius) {
+                assert_eq!(expected, expected_visible_columns);
+                max_settled_visible_columns = max_settled_visible_columns.max(settled);
+                if resident == expected {
+                    all_visible_columns.get_or_insert(started.elapsed());
+                }
+                if settled >= expected {
+                    all_visible_meshes_settled.get_or_insert(started.elapsed());
+                }
+                if let Some(start) = movement_started {
+                    movement_min_settled = movement_min_settled.min(settled);
+                    movement_last_settled = settled;
+                    if movement_first_chunk_change.is_some()
+                        && resident == expected
+                        && settled == expected
+                    {
+                        movement_first_settled_view.get_or_insert(start.elapsed());
+                    }
+                }
             }
         }
 
@@ -248,12 +313,36 @@ fn main() {
         let frame = target.acquire().expect("headless target acquire");
         let stats = render.render(device, queue, frame.view(), &camera(&sim, radius), None, &[]);
         frame.present(queue);
+        if sim.acknowledge_presented_initial_world() {
+            player_loaded_ack = Some(started.elapsed());
+        }
         let render_elapsed = render_started.elapsed();
         render_ns += render_elapsed.as_nanos();
         render_samples.push(render_elapsed);
         frame_samples.push(frame_started.elapsed());
+        if movement_started.is_some() {
+            movement_frames.push(frame_started.elapsed());
+            movement_max_pending = movement_max_pending.max(sim.pending_meshes());
+        }
         if first_presented_terrain.is_none() && (stats.sections_drawn > 0 || stats.water_sections_drawn > 0) {
             first_presented_terrain = Some(started.elapsed());
+        }
+
+        if move_for > Duration::ZERO
+            && movement_started.is_none()
+            && overlay_ready.is_some()
+            && first_presented_terrain.is_some()
+        {
+            let position = sim.player().position;
+            movement_origin = Some((position.x, position.z));
+            movement_last_chunk = Some(chunk_at(position.x, position.z));
+            movement_start_tick = Some(sim.tick_count());
+            sim.input_mut(|input| {
+                input.set(Action::Forward, true);
+                input.set(Action::Sprint, true);
+                input.set(Action::Jump, true);
+            });
+            movement_started = Some(Instant::now());
         }
 
         if overlay_ready.is_some()
@@ -261,6 +350,8 @@ fn main() {
             && all_visible_columns.is_some()
             && all_visible_meshes_settled.is_some()
             && first_presented_terrain.is_some()
+            && (move_for == Duration::ZERO
+                || movement_started.is_some_and(|start| start.elapsed() >= move_for))
         {
             break;
         }
@@ -269,8 +360,31 @@ fn main() {
 
     let elapsed = started.elapsed();
     let ms = |value: Option<Duration>| value.map(|d| d.as_secs_f64() * 1000.0);
+    let movement_distance = movement_origin.map(|(x, z)| {
+        let position = sim.player().position;
+        (position.x - x).hypot(position.z - z)
+    });
+    let movement = movement_started.map(|start| serde_json::json!({
+        "requested_seconds": move_for.as_secs(),
+        "elapsed_ms": start.elapsed().as_secs_f64() * 1000.0,
+        "horizontal_distance_blocks": movement_distance,
+        "first_position_effect_ms": ms(movement_first_effect),
+        "first_chunk_change_ms": ms(movement_first_chunk_change),
+        "first_shifted_view_settled_ms": ms(movement_first_settled_view),
+        "chunk_changes": movement_chunk_changes,
+        "min_settled_columns": movement_min_settled.min(expected_visible_columns),
+        "last_settled_columns": movement_last_settled,
+        "max_pending_meshes": movement_max_pending,
+        "sim_ticks": sim.tick_count().saturating_sub(movement_start_tick.unwrap_or(0)),
+        "frame_p99_ms": percentile(&movement_frames, 99),
+        "frame_max_ms": percentile(&movement_frames, 100),
+        "step_p99_ms": percentile(&movement_steps, 99),
+        "step_max_ms": percentile(&movement_steps, 100),
+        "frames_over_33ms": movement_frames.iter().filter(|elapsed| **elapsed > Duration::from_millis(33)).count(),
+        "frames_over_100ms": movement_frames.iter().filter(|elapsed| **elapsed > Duration::from_millis(100)).count(),
+    }));
     let report = serde_json::json!({
-        "schema": "lodestone-client-join-mesh-profile-v7",
+        "schema": "lodestone-client-join-mesh-profile-v8",
         "seed": SEED,
         "target_size": [target_width, target_height],
         "visible_radius": radius,
@@ -290,6 +404,7 @@ fn main() {
         "joining_phase_ms": ms(joining),
         "loading_terrain_phase_ms": ms(loading_terrain),
         "overlay_ready_ms": ms(overlay_ready),
+        "player_loaded_ack_ms": ms(player_loaded_ack),
         "all_initial_columns_ms": ms(all_initial_columns),
         "all_initial_meshes_settled_ms": ms(all_initial_meshes_settled),
         "all_visible_columns_ms": ms(all_visible_columns),
@@ -319,10 +434,15 @@ fn main() {
         "render_max_ms": percentile(&render_samples, 100),
         "frames_over_33ms": frame_samples.iter().filter(|elapsed| **elapsed > Duration::from_millis(33)).count(),
         "frames_over_100ms": frame_samples.iter().filter(|elapsed| **elapsed > Duration::from_millis(100)).count(),
+        "movement": movement,
     });
     println!("CLIENT_JOIN_MESH_PROFILE {report}");
     assert!(!report["timed_out"].as_bool().unwrap_or(true), "{report}");
     assert!(first_presented_terrain.is_some(), "no terrain reached a presented frame: {report}");
+    assert!(player_loaded_ack.is_some(), "the new world was never acknowledged after presentation: {report}");
+    if move_for > Duration::ZERO {
+        assert!(movement_chunk_changes > 0, "movement never entered a new chunk: {report}");
+    }
 }
 
 #[test]
