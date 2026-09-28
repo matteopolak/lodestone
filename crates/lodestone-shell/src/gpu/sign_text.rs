@@ -153,7 +153,10 @@
 use std::{
     cell::Cell,
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use glam::Vec3;
@@ -393,6 +396,7 @@ struct CachedSignGeometry {
     front: SideLayerState,
     back: SideLayerState,
     geometry: Arc<SignGeometry>,
+    retained_epoch: u64,
 }
 
 impl CachedSignGeometry {
@@ -401,17 +405,14 @@ impl CachedSignGeometry {
     }
 }
 
-/// Bounded per-position cache of sign layer vertices.  A position may hold
-/// only one live sign, so replacing that entry on a semantic change needs no
-/// tombstone or global scan.
+/// Per-position geometry retained only while its sign is drawn.
 #[derive(Debug, Default)]
 struct SignGeometryCache {
     entries: Mutex<HashMap<[i32; 3], CachedSignGeometry>>,
+    epoch: AtomicU64,
 }
 
 impl SignGeometryCache {
-    const MAX_ENTRIES: usize = 512;
-
     fn get_or_build(
         &self,
         raster: &RasterFont,
@@ -463,13 +464,17 @@ impl SignGeometryCache {
             &mut geometry.glyphs,
         );
         let geometry = Arc::new(geometry);
+        if geometry.outlines.is_empty() && geometry.glyphs.is_empty() {
+            self.entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&spawn.pos);
+            return geometry;
+        }
         let mut entries = self
             .entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if entries.len() >= Self::MAX_ENTRIES && !entries.contains_key(&spawn.pos) {
-            entries.clear();
-        }
         entries.insert(
             spawn.pos,
             CachedSignGeometry {
@@ -477,9 +482,24 @@ impl SignGeometryCache {
                 front,
                 back,
                 geometry: Arc::clone(&geometry),
+                retained_epoch: 0,
             },
         );
         geometry
+    }
+
+    fn retain_drawn(&self, drawn: &[&SignSpawn]) {
+        let epoch = self.epoch.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for spawn in drawn {
+            if let Some(entry) = entries.get_mut(&spawn.pos) {
+                entry.retained_epoch = epoch;
+            }
+        }
+        entries.retain(|_, entry| entry.retained_epoch == epoch);
     }
 
     fn peek(&self, pos: [i32; 3]) -> Option<Arc<SignGeometry>> {
@@ -985,6 +1005,7 @@ impl SignTextRenderer {
             &ordered[..drawn],
             outlines.len() + glyphs.len(),
         );
+        self.geometry.retain_drawn(&ordered[..drawn]);
         outlines.append(&mut glyphs);
         if !outlines.is_empty() {
             queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(&outlines));
@@ -1665,6 +1686,66 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn geometry_cache_keeps_the_drawn_working_set_above_512_signs() {
+        let mut png_bytes = Vec::new();
+        let mut pixels = vec![0u8; 8 * 8 * 4];
+        pixels[3] = 255;
+        {
+            let mut encoder = png::Encoder::new(&mut png_bytes, 8, 8);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&pixels)
+                .unwrap();
+        }
+        let mut source = lodestone_assets::MemorySource::new("sign-cache-test");
+        source.insert("assets/minecraft/textures/font/t.png", png_bytes);
+        source.insert(
+            "assets/minecraft/font/default.json",
+            br#"{"providers":[{"type":"bitmap","file":"minecraft:font/t.png","ascent":7,"height":8,"chars":["a"]}]}"#.to_vec(),
+        );
+        let manager = lodestone_assets::ResourceManager::new(vec![Box::new(source)]);
+        let raster = lodestone_assets::font::FontLoader::new(&manager)
+            .load_raster(
+                &"minecraft:default".parse().unwrap(),
+                &lodestone_assets::font::FontOptions::none(),
+            )
+            .unwrap();
+        let ink = super::super::nametag::StyledInkLayoutCache::default();
+        let light = super::super::nametag::WorldTextLight::overworld_noon();
+        let cache = SignGeometryCache::default();
+        let signs: Vec<_> = (0..600)
+            .map(|x| {
+                let mut spawn = sign_with_front_text("a");
+                spawn.pos = [x, 0, 0];
+                spawn
+            })
+            .collect();
+        let drawn: Vec<_> = signs.iter().collect();
+        let first: Vec<_> = drawn
+            .iter()
+            .map(|spawn| cache.get_or_build(&raster, &ink, spawn, 0.0, light))
+            .collect();
+        cache.retain_drawn(&drawn);
+        assert_eq!(cache.entries.lock().unwrap().len(), 600);
+        for (spawn, geometry) in drawn.iter().zip(first.iter()) {
+            let reused = cache.get_or_build(&raster, &ink, spawn, 0.0, light);
+            assert!(Arc::ptr_eq(geometry, &reused));
+        }
+
+        cache.retain_drawn(&drawn[..300]);
+        assert_eq!(cache.entries.lock().unwrap().len(), 300);
+        assert!(cache.peek(signs[0].pos).is_some());
+        assert!(cache.peek(signs[599].pos).is_none());
+
+        let blank = SignSpawn::at([0, 0, 1]);
+        cache.get_or_build(&raster, &ink, &blank, 0.0, light);
+        assert!(cache.peek(blank.pos).is_none());
     }
 
     #[test]
