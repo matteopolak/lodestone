@@ -1910,7 +1910,8 @@ impl TerrainMesh {
         let Some(extent) = store.extent() else {
             return 0;
         };
-        if extent.section_count == 0 || !store.contains_column(cx, cz) {
+        let world = store.read();
+        if extent.section_count == 0 || !world.contains(ChunkPos::new(cx, cz)) {
             return 0;
         }
         let base_si = extent.min_y.div_euclid(16);
@@ -1926,7 +1927,11 @@ impl TerrainMesh {
                 for dx in -1..=1 {
                     for dz in -1..=1 {
                         let (nx, nz) = (cx + dx, cz + dz);
-                        if store.contains_column(nx, nz) {
+                        if world
+                            .get(ChunkPos::new(nx, nz))
+                            .and_then(|chunk| chunk.column.section(si as usize))
+                            .is_some_and(|section| !section.is_air_only())
+                        {
                             self.light_dirty_sections.insert((nx, nz, base_si + si));
                         }
                     }
@@ -3427,6 +3432,49 @@ mod tests {
         assert_eq!(terrain.drops, 0);
         assert_eq!(terrain.non_air_empty_columns, 0);
         assert_eq!(terrain.pending_removals.len(), 2);
+    }
+
+    #[test]
+    fn light_patch_queues_only_sections_with_geometry() {
+        use lodestone_world::{ColumnLight, Heightmaps, LoadedChunk};
+
+        let mut world = World::new();
+        for cx in -1..=1 {
+            for cz in -1..=1 {
+                let mut column = ChunkColumn::new(
+                    0,
+                    2,
+                    PaletteKind::block_states(),
+                    PaletteKind::biomes(),
+                    id::AIR,
+                    0,
+                );
+                if (cx, cz) == (0, 0) {
+                    column.set_block(0, 0, 0, id::STONE);
+                } else if (cx, cz) == (1, 1) {
+                    column.set_block(0, 16, 0, id::STONE);
+                }
+                world.load(
+                    ChunkPos::new(cx, cz),
+                    LoadedChunk::new(column, ColumnLight::new(2), Heightmaps::new(), Vec::new()),
+                );
+            }
+        }
+        let write = ChunkWorldWrite::new(world);
+        let store = write.read_handle();
+        let mut terrain = TerrainMesh::new(MeshScheduler::new(
+            1,
+            ShellClassifier::Demo(DemoClassifier),
+        ));
+
+        assert_eq!(terrain.queue_light_update(&store, 0, 0, &[1]), 2);
+        assert_eq!(
+            terrain.light_dirty_sections,
+            BTreeSet::from([(0, 0, 0), (1, 1, 1)])
+        );
+        terrain.light_dirty_sections.clear();
+        assert_eq!(terrain.queue_light_update(&store, -1, -1, &[0]), 1);
+        assert_eq!(terrain.light_dirty_sections, BTreeSet::from([(0, 0, 0)]));
     }
 
     /// A small two-section fixture for the readiness controls below. One block
