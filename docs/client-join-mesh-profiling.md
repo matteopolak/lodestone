@@ -17,6 +17,8 @@ terrain scheduler, `RenderState`, and `HeadlessTarget`, and emits one aggregate
 every uploaded section and a presented frame on each loop; it excludes the
 window compositor and menu/HUD work. Its default target is 64×64, with a
 configurable size for realistic GPU fragment work.
+It uses the same eye camera and per-frame block/entity targeting step as the
+interactive redraw path; those are required for an attack to reach a real block.
 The new-world server pauses its initial ticks until the fixture sends the same
 post-present player-loaded acknowledgement as the interactive redraw path.
 The report includes that acknowledgement boundary.
@@ -66,6 +68,14 @@ frame/step tail latency during motion. The run fails if it never crosses a
 chunk boundary; an unmoving player is not a valid streaming workload. Movement
 can overlap delivery of the outer render-distance ring.
 
+`LODESTONE_CLIENT_JOIN_EDIT=1` aims downward after the first playable frame and
+uses the normal attack path on a loaded block. The record separates the click
+to local air-state change, replacement mesh upload, and first subsequent
+presented frame. In survival, the first interval includes intended mining time;
+it is not solely network latency. An absent ray target or unpresented edit
+fails the bounded run. When movement is also enabled, it begins after the edit
+has been presented.
+
 The browser SDK reports the same player-facing boundaries through `onProgress`.
 Its clock starts in the production create-world action and emits transition-only
 events for `joining`, `loading-terrain`, `loading-overlay-ready`,
@@ -100,6 +110,7 @@ building. `LODESTONE_CLIENT_JOIN_TARGET_SIZE=1280x720` selects a larger render
 target; `LODESTONE_CLIENT_JOIN_RADIUS=8` selects the view radius when invoking
 the test directly. `LODESTONE_CLIENT_JOIN_MOVE_SECONDS=20` adds a bounded
 movement phase; unset or zero leaves the stationary join control unchanged.
+`LODESTONE_CLIENT_JOIN_EDIT=1` adds the block-edit phase.
 The script discovers
 the test executable reported by Cargo and wraps that exact executable with
 `samply record --save-only`. If `LODESTONE_ASSETS` is unset, it uses the local
