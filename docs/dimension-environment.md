@@ -8,13 +8,13 @@ The registry-to-rendering path for a dimension type's environment attributes. It
 
 The 26.2 adapter decodes the `attributes` compound in each `minecraft:dimension_type` registry entry. The raw key/value pairs are retained in `DimensionTypeInfo::environment_attributes`, while recognized visual values are validated into typed optional fields. Invalid or non-finite typed values remain available in the raw map but are not presented as render inputs.
 
-The session folds the resolved `DimensionTypeInfo` into `PlayerSnapshot`. Each frame, the shell resolves dimension fog and cloud values and installs them on `RenderState`; the sky pass applies the day timeline and cloud alpha gate. The same sky-light-factor source feeds terrain, fluid, entity, and first-person lightmap uniforms. A negative uniform value means no source is installed; zero is a valid value and makes the End's sky contribution disappear.
+The session folds the resolved `DimensionTypeInfo` into `PlayerSnapshot`. Each frame, the shell resolves dimension fog and cloud values and installs them on `RenderState`; the sky pass applies the day timeline and cloud alpha gate. Submerged fog samples the rendered camera position from the live world, so third-person fog can differ from the player's swimming and air state. The same sky-light-factor source feeds terrain, fluid, entity, and first-person lightmap uniforms. A negative uniform value means no source is installed; zero is a valid value and makes the End's sky contribution disappear.
 
 ## How to change it
 
 Add a typed field beside the existing fields in `DimensionTypeInfo`, parse it in `DimensionType::from_nbt`, and copy it in the 26.2 adapter's `dimension_type_info`. Keep the original attribute in `environment_attributes` so unknown data-pack extensions are not lost. Add a captured registry fixture assertion and a malformed-value control before adding a render consumer.
 
-Visual consumers belong in `Sim::fog_settings`/`Sim::cloud_color` and the per-frame source installation in `app/redraw.rs`. Keep all four lightmap shader copies (`model.wgsl`, `entity.wgsl`, `fluid.wgsl`, and `block.wgsl`) synchronized when changing the sky-light-factor lane.
+Visual consumers belong in `Sim::fog_settings`/`Sim::cloud_color` and the per-frame source installation in `app/redraw.rs`. Keep camera-fluid sampling separate from player physics: the view controls fog, while player submersion controls air and movement. Keep all four lightmap shader copies (`model.wgsl`, `entity.wgsl`, `fluid.wgsl`, and `block.wgsl`) synchronized when changing the sky-light-factor lane.
 
 ## Configuration
 

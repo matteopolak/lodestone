@@ -1109,10 +1109,8 @@ impl WindowApp {
             render.set_map_source(f);
         }
 
-        // Reconcile fog with the player's bit-exact fluid state each frame,
-        // re-uploading only when it changes (crossing a water/lava surface) so a
-        // submerged eye dissolves terrain into short water/lava fog and the
-        // surface restores the render-distance sky fog.
+        // Reconcile fog with the rendered camera's fluid each frame, so a
+        // third-person view does not inherit the player's submerged fog.
         //
         // Weather darkens *both* ends of the gradient before the change check, so
         // the storm reaches the sky disc's centre, its horizon, the terrain fog and
@@ -1127,7 +1125,7 @@ impl WindowApp {
         // colours until the player happened to swim.
         let weather_state = self.weather.as_ref().map(|w| w.state());
         let desired_fog = {
-            let base = self.sim.fog_settings();
+            let base = self.sim.fog_settings(render_camera.position);
             match &weather_state {
                 Some(w) => {
                     let rain = w.rain_level();

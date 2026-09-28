@@ -197,11 +197,11 @@ fn sim_fog_follows_its_own_config_not_a_default() {
     // the renderer is handed.
     let sim = Sim::new(test_config());
     assert_eq!(
-        sim.fog_settings(),
+        sim.fog_settings(sim.camera(1.0).position),
         fog_for_render_distance(sim.config.render_distance)
     );
     assert_ne!(
-        sim.fog_settings(),
+        sim.fog_settings(sim.camera(1.0).position),
         fog_for_render_distance(8),
         "test config is not the default distance, so these must differ"
     );
@@ -219,7 +219,7 @@ fn a_submerged_eye_selects_short_dense_fog_over_the_sky_fog() {
     let sky = fog_for_render_distance(rd);
 
     // Dry: the render-distance sky fog.
-    assert_eq!(sim.fog_settings(), sky, "a dry eye keeps the sky fog");
+    assert_eq!(sim.fog_settings(sim.camera(1.0).position), sky, "a dry eye keeps the sky fog");
 
     // Eye in water: shorter than, and a different colour from, the sky fog.
     sim.set_fluid_state(FluidState {
@@ -228,7 +228,7 @@ fn a_submerged_eye_selects_short_dense_fog_over_the_sky_fog() {
         ..FluidState::NONE
     });
     assert!(sim.fluid_state().under_water());
-    let water = sim.fog_settings();
+    let water = sim.fog_settings(sim.camera(1.0).position);
     assert_ne!(water, sky, "a submerged eye must not keep the sky fog");
     assert!(
         water.end <= sky.end,
@@ -249,7 +249,7 @@ fn a_submerged_eye_selects_short_dense_fog_over_the_sky_fog() {
     });
     assert!(sim.fluid_state().under_lava());
     assert!(
-        sim.fog_settings().end < water.end,
+        sim.fog_settings(sim.camera(1.0).position).end < water.end,
         "lava blinds faster than water"
     );
 }

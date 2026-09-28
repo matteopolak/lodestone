@@ -10,7 +10,7 @@
 
 # Fetched / generated inputs — recreate with `cargo xtask`
 /vendor/
-/.cache/
+**/.cache/
 
 # Downloaded tooling (trunk et al) — recreate with scripts/
 /.tooling/
