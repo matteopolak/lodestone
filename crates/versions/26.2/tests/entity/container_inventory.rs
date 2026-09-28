@@ -124,6 +124,7 @@ fn container_set_slot_decodes_a_dyed_leather_helmet() {
                 Some(0x0033_6699),
                 "the dyed_color patch must decode to the exact wire rgb"
             );
+            assert!(item.components.wire_patch_nonempty);
         }
         other => panic!("expected ContainerSlot, got {other:?}"),
     }

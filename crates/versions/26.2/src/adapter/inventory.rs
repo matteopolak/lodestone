@@ -1095,6 +1095,7 @@ fn read_component_patch(
     // `components.field = ...` below is a deref-assign into the same
     // allocation, so the recursion's per-level frame carries a pointer.
     let mut components = Box::new(ItemComponents::default());
+    components.wire_patch_nonempty = added != 0 || removed != 0;
     if let Some(prototype) = lodestone_data::item_prototypes::prototype(item) {
         components.max_stack_size = Some(u32::from(prototype.max_stack_size));
         components.max_damage = prototype.max_damage.map(u32::from);

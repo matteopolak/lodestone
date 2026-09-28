@@ -29,6 +29,46 @@ fn prediction_is_applied_locally_and_reports_changed_slots() {
 }
 
 #[test]
+fn patched_item_clicks_wait_for_server_slot_and_cursor_updates() {
+    let mut model = lodestone_model::ItemStack::new("minecraft:paper".parse().unwrap(), 1);
+    model.components.item_model = Some("server:ticket".parse().unwrap());
+    model.components.wire_patch_nonempty = true;
+    let ticket = ItemStack::from(&model);
+    assert!(!ticket.click_prediction_safe());
+
+    let mut menu = Menu::player();
+    menu.set_slot_item(9, Some(ticket.clone()));
+    let mut client = ClientMenu::new(menu);
+
+    let pickup = client.predict(Click::left(9), PlayerCtx::survival());
+    assert!(pickup.changed_slots.is_empty());
+    assert!(pickup.carried.is_none());
+    assert_eq!(client.menu().slot_item(9), Some(&ticket));
+    assert!(client.menu().carried().is_none());
+
+    client.reconcile(ServerUpdate::SetSlot {
+        state_id: ContainerStateId::new(1),
+        slot: 9,
+        item: None,
+    });
+    client.reconcile(ServerUpdate::SetCarried { item: Some(ticket.clone()) });
+    let place = client.predict(Click::left(10), PlayerCtx::survival());
+    assert!(place.changed_slots.is_empty());
+    assert!(place.carried.is_none());
+    assert!(client.menu().slot_item(10).is_none());
+    assert_eq!(client.menu().carried(), Some(&ticket));
+
+    client.reconcile(ServerUpdate::SetSlot {
+        state_id: ContainerStateId::new(2),
+        slot: 10,
+        item: Some(ticket.clone()),
+    });
+    client.reconcile(ServerUpdate::SetCarried { item: None });
+    assert_eq!(client.menu().slot_item(10), Some(&ticket));
+    assert!(client.menu().carried().is_none());
+}
+
+#[test]
 fn matching_server_content_is_a_silent_confirmation() {
     let mut menu = Menu::generic(27);
     menu.set_carried(Some(stack("minecraft:stone", 64)));
