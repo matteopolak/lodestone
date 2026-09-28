@@ -20,6 +20,12 @@ entry points exist: computing a column in isolation, and computing it against a 
 neighborhood — the isolated compute is exact for everything except a thin band near the column's own
 edge, since light decays fast enough that nothing more than one chunk away can ever reach into it.
 
+Sky seeding fills every open cell at full strength, but only enqueues cells on the boundary with
+unlit, light-transmitting cells. Interior daylight cannot raise any neighbour and does not need a
+flood-queue entry. `lodestone_world::lighting::compute_sky` owns this distinction; when changing it,
+compare the resulting light arrays with a full-source flood across mixed roofs and partially opaque
+blocks, not only a flat open column.
+
 **An absent light section on the wire means full daylight, not darkness.** A section present in
 neither the sky nor the block light data is resolved by a real client to that dimension's own
 default (maximum, for the overworld) rather than treated as zero — which is exactly why sending no

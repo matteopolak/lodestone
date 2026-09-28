@@ -657,19 +657,52 @@ fn compute_lit(
 fn compute_sky(field: &Field, opacity: &[u8]) -> Vec<u8> {
     let mut level = vec![0u8; field.len()];
     let mut buckets = Buckets::new();
+    let mut open_bottom = vec![0; field.area()];
 
     for fz in 0..field.wz {
         for fx in 0..field.wx {
-            // Scan down from the top of the field. Every cell is a full-strength
-            // source until the first cell that dampens light at all; that cell
-            // and everything below get their light from propagation instead.
+            let column = fz * field.wx + fx;
             for y_rel in (0..field.height).rev() {
                 let idx = field.cell(fx, y_rel, fz);
                 if opacity[idx] != 0 {
+                    open_bottom[column] = y_rel + 1;
                     break;
                 }
                 level[idx] = MAX_LIGHT;
-                buckets.push(MAX_LIGHT, idx as u32);
+            }
+        }
+    }
+
+    for fz in 0..field.wz {
+        for fx in 0..field.wx {
+            let bottom = open_bottom[fz * field.wx + fx];
+            if bottom == field.height {
+                continue;
+            }
+            let west = (fx > 0).then(|| open_bottom[fz * field.wx + fx - 1]);
+            let east = (fx + 1 < field.wx).then(|| open_bottom[fz * field.wx + fx + 1]);
+            let north = (fz > 0).then(|| open_bottom[(fz - 1) * field.wx + fx]);
+            let south = (fz + 1 < field.wz).then(|| open_bottom[(fz + 1) * field.wx + fx]);
+            let horizontal_end = [west, east, north, south]
+                .into_iter()
+                .flatten()
+                .max()
+                .unwrap_or(bottom);
+            let vertical_frontier = bottom > 0
+                && opacity[field.cell(fx, bottom - 1, fz)] < MAX_LIGHT;
+            for y_rel in bottom..horizontal_end.max(bottom + usize::from(vertical_frontier)) {
+                let horizontal_frontier = west.is_some_and(|open| {
+                    open > y_rel && opacity[field.cell(fx - 1, y_rel, fz)] < MAX_LIGHT
+                }) || east.is_some_and(|open| {
+                    open > y_rel && opacity[field.cell(fx + 1, y_rel, fz)] < MAX_LIGHT
+                }) || north.is_some_and(|open| {
+                    open > y_rel && opacity[field.cell(fx, y_rel, fz - 1)] < MAX_LIGHT
+                }) || south.is_some_and(|open| {
+                    open > y_rel && opacity[field.cell(fx, y_rel, fz + 1)] < MAX_LIGHT
+                });
+                if horizontal_frontier || (y_rel == bottom && vertical_frontier) {
+                    buckets.push(MAX_LIGHT, field.cell(fx, y_rel, fz) as u32);
+                }
             }
         }
     }
@@ -1073,6 +1106,49 @@ mod tests {
         }
         fn emission(&self, state: u32) -> u8 {
             *self.emission.get(&state).unwrap_or(&0)
+        }
+    }
+
+    #[test]
+    fn sky_frontier_matches_full_source_flood() {
+        let field = Field {
+            wx: 7,
+            wz: 6,
+            height: 40,
+        };
+        let mut seed = 0x8b52_619du32;
+        for case in 0..32 {
+            let mut opacity = vec![0; field.len()];
+            for z in 0..field.wz {
+                for x in 0..field.wx {
+                    seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    let roof = 8 + (seed as usize % 30);
+                    for y in 0..=roof {
+                        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                        opacity[field.cell(x, y, z)] = match seed % 16 {
+                            0 => 15,
+                            1..=4 => 1,
+                            _ => 0,
+                        };
+                    }
+                }
+            }
+            let mut expected = vec![0; field.len()];
+            let mut buckets = Buckets::new();
+            for z in 0..field.wz {
+                for x in 0..field.wx {
+                    for y in (0..field.height).rev() {
+                        let idx = field.cell(x, y, z);
+                        if opacity[idx] != 0 {
+                            break;
+                        }
+                        expected[idx] = MAX_LIGHT;
+                        buckets.push(MAX_LIGHT, idx as u32);
+                    }
+                }
+            }
+            propagate(&field, &mut expected, &opacity, &mut buckets);
+            assert_eq!(compute_sky(&field, &opacity), expected, "case {case}");
         }
     }
 
