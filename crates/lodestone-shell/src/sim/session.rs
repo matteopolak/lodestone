@@ -659,6 +659,12 @@ impl Sim {
         Some(self.terrain(|terrain| terrain.resident_column_presented(extent, cx, cz)))
     }
 
+    #[must_use]
+    pub fn mesh_column_status(&self, cx: i32, cz: i32) -> Option<crate::mesher::MeshColumnStatus> {
+        let store = self.chunk_world();
+        self.terrain(|terrain| terrain.column_status(&store, cx, cz))
+    }
+
     fn view_coverage_at_radius(
         &self,
         radius: u32,
