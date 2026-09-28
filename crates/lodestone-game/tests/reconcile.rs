@@ -1,6 +1,8 @@
 //! Tests for the predict-then-reconcile seam.
 
-use lodestone_game::click::{Click, PlayerCtx};
+use lodestone_game::click::{
+    Click, ContainerInput, PlayerCtx, drag_header, drag_type, quick_craft_mask,
+};
 use lodestone_game::item::ItemStack;
 use lodestone_game::menu::Menu;
 use lodestone_game::reconcile::{ClientMenu, Reconciliation, ServerUpdate};
@@ -51,7 +53,9 @@ fn patched_item_pickup_and_place_clear_the_local_cursor_without_a_server_cursor_
         slot: 9,
         item: None,
     });
-    client.reconcile(ServerUpdate::SetCarried { item: Some(ticket.clone()) });
+    client.reconcile(ServerUpdate::SetCarried {
+        item: Some(ticket.clone()),
+    });
     let place = client.predict(Click::left(10), PlayerCtx::survival());
     assert_eq!(place.changed_slots, vec![(10, Some(ticket.clone()))]);
     assert!(place.carried.is_none());
@@ -64,6 +68,39 @@ fn patched_item_pickup_and_place_clear_the_local_cursor_without_a_server_cursor_
         item: Some(ticket.clone()),
     });
     assert_eq!(client.menu().slot_item(10), Some(&ticket));
+    assert!(client.menu().carried().is_none());
+}
+
+#[test]
+fn patched_item_one_slot_drag_clears_the_cursor_without_a_server_cursor_echo() {
+    let mut model = lodestone_model::ItemStack::new("minecraft:paper".parse().unwrap(), 1);
+    model.components.item_model = Some("server:ticket".parse().unwrap());
+    model.components.wire_patch_nonempty = true;
+    let ticket = ItemStack::from(&model);
+    let mut menu = Menu::player();
+    menu.set_carried(Some(ticket.clone()));
+    let mut client = ClientMenu::new(menu);
+
+    let drag = |slot, header| Click {
+        slot,
+        button: quick_craft_mask(header, drag_type::EVEN),
+        input: ContainerInput::QuickCraft,
+    };
+    client.predict(drag(-999, drag_header::START), PlayerCtx::survival());
+    client.predict(drag(9, drag_header::ADD), PlayerCtx::survival());
+    let end = client.predict(drag(-999, drag_header::END), PlayerCtx::survival());
+
+    assert_eq!(end.changed_slots, vec![(9, Some(ticket.clone()))]);
+    assert!(end.carried.is_none());
+    assert_eq!(client.menu().slot_item(9), Some(&ticket));
+    assert!(client.menu().carried().is_none());
+
+    client.reconcile(ServerUpdate::SetSlot {
+        state_id: ContainerStateId::new(1),
+        slot: 9,
+        item: Some(ticket.clone()),
+    });
+    assert_eq!(client.menu().slot_item(9), Some(&ticket));
     assert!(client.menu().carried().is_none());
 }
 
@@ -147,7 +184,8 @@ fn a_predicted_click_stamps_the_servers_state_id_not_the_bumped_one() {
 
     let intent = client.predict(Click::left(0), PlayerCtx::survival());
     assert_eq!(
-        intent.state_id, ContainerStateId::new(17),
+        intent.state_id,
+        ContainerStateId::new(17),
         "the click must carry the server's id; 18 means we sent the bumped one \
          and the server will full-resync"
     );

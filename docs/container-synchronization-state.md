@@ -12,7 +12,7 @@ Legacy adapters that have no revision field emit `ContainerStateId::INITIAL`. Ad
 
 The 26.2 click packet contains hashes of the item's component patch, not the component values.
 Plain stacks have an empty patch and can be predicted locally. For a stack with a nonempty patch,
-the client does not yet have a complete hash encoder. Ordinary pickup/place clicks still update
+the client does not yet have a complete hash encoder. Pickup/place and drag-distribution clicks update
 the local slot and cursor immediately; their outgoing stack claims use an empty component patch,
 so the server corrects any mismatch. Other click modes wait for authoritative updates. This
 prevents a placed custom item from lingering on the cursor when the server omits a redundant cursor

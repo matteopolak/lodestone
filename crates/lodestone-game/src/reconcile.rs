@@ -224,7 +224,10 @@ impl ClientMenu {
     /// [`ClickIntent`] carries the diff and state id the server needs to
     /// reconcile.
     pub fn predict(&mut self, click: Click, ctx: PlayerCtx) -> ClickIntent {
-        let uncertain = self.predicted.carried().is_some_and(|stack| !stack.click_prediction_safe())
+        let uncertain = self
+            .predicted
+            .carried()
+            .is_some_and(|stack| !stack.click_prediction_safe())
             || usize::try_from(click.slot)
                 .ok()
                 .and_then(|slot| self.predicted.slot_item(slot))
@@ -234,7 +237,12 @@ impl ClientMenu {
                     .ok()
                     .and_then(|slot| self.predicted.player_native(slot))
                     .is_some_and(|stack| !stack.click_prediction_safe()));
-        if uncertain && click.input != ContainerInput::Pickup {
+        if uncertain
+            && !matches!(
+                click.input,
+                ContainerInput::Pickup | ContainerInput::QuickCraft
+            )
+        {
             return ClickIntent {
                 slot: click.slot,
                 button: click.button,
