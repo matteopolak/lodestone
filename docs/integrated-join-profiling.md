@@ -68,7 +68,11 @@ phase CPU-counter total.
 Set `LODESTONE_JOIN_TRACE=1` and `LODESTONE_WORLDGEN_LEDGER_TRACE=1` to capture
 sampled join-stage events and failure-only retained-state comparisons. In this
 mode `join_profile` installs a stderr tracing subscriber, defaulting to
-warnings plus the join trace; `RUST_LOG` can override that filter.
+warnings plus the join trace; `RUST_LOG` can override that filter. Each traced
+generation request is tagged `existing`, `snapshot`, or `fallback` before its
+`generated` event, making reuse and fresh session work distinguishable. For
+mob seeding, the completion log reports reused full columns over the seed-area
+total.
 
 ## Dependencies
 

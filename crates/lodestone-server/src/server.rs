@@ -15425,6 +15425,9 @@ where
     > = None;
 
     loop {
+        if join_stream.is_done() && pending_join_encode.is_none() {
+            world.mark_initial_view_drained();
+        }
         if let Some(next) = pending_travel.take() {
             travelled = next;
             pending_relights.clear();

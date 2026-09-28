@@ -65,7 +65,7 @@
 
 use std::future::Future;
 use std::sync::{
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
     Arc,
     Mutex,
 };
@@ -204,6 +204,9 @@ impl Default for WorldState {
     }
 }
 
+const INITIAL_CLIENT_PENDING: u8 = 1;
+const INITIAL_SEED_PENDING: u8 = 2;
+
 /// A cheap, cloneable handle to **one** world's [`WorldState`].
 ///
 /// Deliberately has no `subscriber()`: every clone shares the store, so updates
@@ -213,7 +216,8 @@ pub struct WorldStateHandle {
     state: Arc<Mutex<WorldState>>,
     spawn_coordinator: Arc<InitialSpawnCoordinator>,
     join_ready: Arc<AtomicBool>,
-    initial_ticks_paused: Arc<AtomicBool>,
+    initial_view_drained: Arc<AtomicBool>,
+    initial_tick_holds: Arc<AtomicU8>,
     active_connections: Arc<AtomicUsize>,
     /// Where this world's players are, for
     /// [`crate::tick_area::FollowArea`] — the set that makes the world tick follow
@@ -335,16 +339,36 @@ impl WorldStateHandle {
         self.join_ready.load(Ordering::Acquire)
     }
 
+    pub(crate) fn mark_initial_view_drained(&self) {
+        self.initial_view_drained.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn is_initial_view_drained(&self) -> bool {
+        self.initial_view_drained.load(Ordering::Acquire)
+    }
+
     pub(crate) fn pause_initial_ticks(&self) {
-        self.initial_ticks_paused.store(true, Ordering::Release);
+        self.initial_tick_holds
+            .fetch_or(INITIAL_CLIENT_PENDING, Ordering::AcqRel);
+    }
+
+    pub(crate) fn require_initial_seed(&self) {
+        self.initial_tick_holds
+            .fetch_or(INITIAL_SEED_PENDING, Ordering::AcqRel);
     }
 
     pub(crate) fn resume_initial_ticks(&self) {
-        self.initial_ticks_paused.store(false, Ordering::Release);
+        self.initial_tick_holds
+            .fetch_and(!INITIAL_CLIENT_PENDING, Ordering::AcqRel);
+    }
+
+    pub(crate) fn mark_initial_seed_ready(&self) {
+        self.initial_tick_holds
+            .fetch_and(!INITIAL_SEED_PENDING, Ordering::AcqRel);
     }
 
     pub(crate) fn initial_ticks_paused(&self) -> bool {
-        self.initial_ticks_paused.load(Ordering::Acquire)
+        self.initial_tick_holds.load(Ordering::Acquire) != 0
     }
 
     pub(crate) fn connection_started(&self) {
@@ -921,6 +945,20 @@ mod tests {
         let tick_owner = world.clone();
         assert!(!tick_owner.initial_ticks_paused());
         world.pause_initial_ticks();
+        assert!(tick_owner.initial_ticks_paused());
+        tick_owner.resume_initial_ticks();
+        assert!(!world.initial_ticks_paused());
+
+        world.pause_initial_ticks();
+        tick_owner.require_initial_seed();
+        world.resume_initial_ticks();
+        assert!(world.initial_ticks_paused());
+        tick_owner.mark_initial_seed_ready();
+        assert!(!world.initial_ticks_paused());
+
+        world.pause_initial_ticks();
+        tick_owner.require_initial_seed();
+        world.mark_initial_seed_ready();
         assert!(tick_owner.initial_ticks_paused());
         tick_owner.resume_initial_ticks();
         assert!(!world.initial_ticks_paused());
