@@ -11,7 +11,7 @@ The tick loop's `resident_tick_terrain_snapshot` builds the natural-spawn terrai
 The coordinate-gate table uses a non-cryptographic hash for its private `(cx, cz)` lookups. No iteration order from that table affects mutations, packet bytes, or generation order; ordered multi-coordinate admission sorts its coordinates independently.
 Single-column and single-block resident reads hold one coordinate gate until the snapshot is complete. Their lease uses no coordinate vectors and releases and prunes the gate record under one table lock; multi-column writes keep the ordered lease path.
 
-Integrated worlds pause simulation until the client reports `PlayerLoaded` after presenting its initial terrain view. The server does not wait for the larger padded streaming radius: that can remain in flight after the client becomes interactive, and the tick-owned action adjudicator must already be running when the player breaks a block. The connection's chunk stream and generation workers remain active while paused. The tick driver continues waiting at its normal cadence, so resuming does not replay loading time as a burst of world ticks. Other server entry points keep their normal tick behavior.
+Integrated worlds pause simulation until both the client reports `PlayerLoaded` and the initial mob terrain has been installed. The client marker can arrive before the streamed view is complete, so it cannot by itself release the seed task or prove that terrain is presented. The connection's chunk stream and generation workers remain active while paused. The tick driver continues waiting at its normal cadence, so resuming does not replay loading time as a burst of world ticks. Other server entry points keep their normal tick behavior.
 
 The connection drains tick-produced block changes into an ordered local queue,
 retaining only changes for columns already delivered when the feed is drained.
@@ -21,11 +21,12 @@ batches; relighting stays on its separate queued path.
 
 The shared `run_tick_loop_with_weather_impl` records the three phase durations for every tick as before. When tracing is enabled, it emits a structured event only for a phase lasting at least one 50 ms tick period, including the tick number, phase name, follow-area size, and resident-column count. Native and `wasm32` use the same tick-loop implementation; the environment-variable switch is intentionally native-only.
 
-Integrated mob seeding waits for the production connection task to become live,
-then submits its requested columns through the bounded world-generation
-dispatcher. It does not wait for a client packet or poll residency: a server
-opened without a client still seeds, and the dispatcher keeps cold generation off
-the async runtime while the shared store makes the result authoritative.
+Integrated mob seeding waits for the first join. When its area lies inside the
+initial view, it reuses full columns as they become resident rather than
+submitting duplicate generation requests. If the initial stream drains without
+covering the whole area, the bounded dispatcher generates only the missing
+columns. A seed area outside that view uses the dispatcher directly. The seed
+task installs the terrain and persisted entities before releasing its tick hold.
 
 The production-path liveness witness in `worldgen_tick_liveness` acknowledges
 the completed initial view, then holds one newly visible column behind a
@@ -47,10 +48,10 @@ delivery-time snapshot boundary. A queued update for a column that was not yet
 visible must not arrive after its newer initial snapshot. Keep each connection
 pass bounded even when a fluid cascade publishes many changes at once.
 
-The mob seed handoff must remain after the production connection task is live and
-must continue to use the bounded dispatcher. If the seed area is expanded, keep
-it on that worker path rather than adding cold generation to the tick task or
-the connection runtime.
+Keep mob-seed residency reads nonblocking and the fallback on the bounded
+dispatcher. Do not use `PlayerLoaded` as the fallback boundary: it can arrive
+while most initial columns are still being generated. If the seed area changes,
+update its view-coverage check and the initial-view drain signal together.
 
 LAN startup similarly warms its bounded fallback tick area through the same
 dispatcher. The warm-up waits for the first join's initial chunk batch, or for

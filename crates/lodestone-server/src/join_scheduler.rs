@@ -122,21 +122,27 @@ fn map_batch_result<S: ChunkSource + ?Sized>(
     let dimension = source
         .dimension()
         .unwrap_or(crate::dimension::Dimension::Overworld);
-    let payload = match result {
-        Ok(Some(GenerationRequestResult::Existing(column))) => ColumnPayload::Column(column),
+    let (payload, outcome) = match result {
+        Ok(Some(GenerationRequestResult::Existing(column))) => {
+            (ColumnPayload::Column(column), "existing")
+        }
         Ok(Some(GenerationRequestResult::Generated(snapshot))) => {
-            ColumnPayload::Snapshot(snapshot)
+            (ColumnPayload::Snapshot(snapshot), "snapshot")
         }
         Ok(None) | Err(GenerationRequestError::Unsupported) => {
-            ColumnPayload::Column(source.column_at(
-                request.coordinate.0,
-                request.coordinate.1,
-                request.stage,
-            ))
+            (
+                ColumnPayload::Column(source.column_at(
+                    request.coordinate.0,
+                    request.coordinate.1,
+                    request.stage,
+                )),
+                "fallback",
+            )
         }
         Err(error) => return Err(ChunkEncodeError::new(error.to_string())),
     };
     if let Some(trace) = trace.as_ref() {
+        trace.mark(outcome, request.coordinate.0, request.coordinate.1);
         trace.mark("generated", request.coordinate.0, request.coordinate.1);
     }
     #[cfg(target_arch = "wasm32")]

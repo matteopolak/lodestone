@@ -49,6 +49,8 @@ use tokio::sync::Notify;
 
 use crate::block_entities::BlockEntityHandle;
 use crate::chunk::ChunkSource;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::chunk::{ChunkColumn, ChunkGenerationStage};
 use crate::command::CommandDispatch;
 use crate::chunk_store::ChunkStore;
 use crate::dimension::{Dimension, DimensionalSource};
@@ -1327,6 +1329,75 @@ impl IntegratedTickMonitor {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+async fn mob_seed_columns<S: ChunkSource + 'static>(
+    source: Arc<S>,
+    coordinates: &[(i32, i32)],
+    world: &crate::world_state::WorldStateHandle,
+    join_center: (i32, i32),
+    view_radius: i32,
+) -> (Vec<ChunkColumn>, usize) {
+    let covered_by_join = coordinates.iter().all(|&(x, z)| {
+        (i64::from(x) - i64::from(join_center.0)).abs() <= i64::from(view_radius)
+            && (i64::from(z) - i64::from(join_center.1)).abs() <= i64::from(view_radius)
+    });
+    if !covered_by_join {
+        let source: Arc<dyn ChunkSource> = source;
+        return (
+            crate::join_scheduler::generate_owned_columns(source, coordinates.to_vec()).await,
+            0,
+        );
+    }
+
+    let mut columns = vec![None; coordinates.len()];
+    loop {
+        for (index, &(cx, cz)) in coordinates.iter().enumerate() {
+            if columns[index].is_some() {
+                continue;
+            }
+            let Some(crate::chunk_store::TryResident::Present(column)) =
+                source.try_resident_column(cx, cz)
+            else {
+                continue;
+            };
+            if column.generation_stage() >= ChunkGenerationStage::Full {
+                columns[index] = Some(column);
+            }
+        }
+        if columns.iter().all(Option::is_some) || world.is_initial_view_drained() {
+            break;
+        }
+        tokio::time::sleep(crate::tick::TICK_PERIOD).await;
+    }
+
+    let reused = columns.iter().filter(|column| column.is_some()).count();
+    if reused < coordinates.len() {
+        let missing = coordinates
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &coordinate)| {
+                columns[index].is_none().then_some((index, coordinate))
+            })
+            .collect::<Vec<_>>();
+        let source: Arc<dyn ChunkSource> = source;
+        let generated = crate::join_scheduler::generate_owned_columns(
+            source,
+            missing.iter().map(|&(_, coordinate)| coordinate).collect(),
+        )
+        .await;
+        for ((index, _), column) in missing.into_iter().zip(generated) {
+            columns[index] = Some(column);
+        }
+    }
+    (
+        columns
+            .into_iter()
+            .map(|column| column.expect("mob seed column was reused or generated"))
+            .collect(),
+        reused,
+    )
+}
+
 impl IntegratedServer {
     /// Starts a single-client, in-memory integrated server (singleplayer) and
     /// returns the handle plus the **client** transport endpoint.
@@ -2269,6 +2340,7 @@ impl IntegratedServer {
         // the same anchor set this connection publishes into.
         let world_state = crate::world_state::WorldStateHandle::new();
         world_state.pause_initial_ticks();
+        world_state.require_initial_seed();
         // Install the same bounded ingress that the tick task will own before
         // the connection task is spawned. The connection reaches it through
         // `WorldStateHandle`, so no second proposal queue can sit beside the
@@ -2369,22 +2441,27 @@ impl IntegratedServer {
         let seed_generation_spawns = generation_spawns.clone();
         let seed_task = spawn_tick_task(&shutdown, async move {
             tokio::time::sleep(crate::tick::TICK_PERIOD).await;
-            while seed_players.is_empty() || !seed_world_state.is_join_ready() {
+            let join_center = loop {
+                if seed_world_state.is_join_ready()
+                    && let Some(player) = seed_players.candidates().first()
+                {
+                    break (
+                        (player.position.x / 16.0).floor() as i32,
+                        (player.position.z / 16.0).floor() as i32,
+                    );
+                }
                 tokio::time::sleep(crate::tick::TICK_PERIOD).await;
-            }
+            };
             let t_seed = lodestone_time::Instant::now();
-            tracing::info!(
-                "mob seed task: generating {} columns for mob_area",
-                seed_coords.len(),
-            );
-            let seed_source: Arc<dyn ChunkSource> = seed_source;
-            let columns = crate::join_scheduler::generate_owned_columns(seed_source, seed_coords.clone())
-                .await;
+            let (columns, reused) = mob_seed_columns(
+                seed_source,
+                &seed_coords,
+                &seed_world_state,
+                join_center,
+                view_radius,
+            )
+            .await;
             let gen_ms = t_seed.elapsed().as_millis();
-            // The request pipeline guarantees the result is aligned
-            // index-for-index with the coordinates it was given, which is what
-            // makes this zip correct rather than merely plausible — see its own
-            // doc comment on why it returns a `Vec` and not a map.
             let world = ChunkWorld::from_columns(seed_coords.iter().copied().zip(columns));
             seed_mobs.replace_world(world);
             // Restore after replacing the simulation. `MobHandle::replace_world`
@@ -2433,6 +2510,7 @@ impl IntegratedServer {
             }
             #[cfg(not(target_arch = "wasm32"))]
             seed_generation_spawns.acknowledge(seed_coords.iter().copied());
+            seed_world_state.mark_initial_seed_ready();
             // Read the clock **once**: calling `elapsed()` twice can make the
             // logged parts fail to sum to the logged total. Use `saturating_sub` for
             // the same reason as `server.rs`'s welcome timing — `as_millis()` is
@@ -2440,10 +2518,12 @@ impl IntegratedServer {
             // and panic in debug while wrapping silently in release.
             let seed_ms = t_seed.elapsed().as_millis();
             tracing::info!(
-                "mob seed task done: {}ms (gen={}ms, replace={}ms)",
+                "mob seed task done: {}ms (terrain={}ms, replace={}ms, reused={}/{})",
                 seed_ms,
                 gen_ms,
                 seed_ms.saturating_sub(gen_ms),
+                reused,
+                seed_coords.len(),
             );
         });
 
@@ -6192,6 +6272,55 @@ mod tests {
     /// area), and mob centre block `(8, 8)`.
     const VIEW_RADIUS: i32 = 9;
     const MOB_RADIUS: i32 = 3;
+
+    #[tokio::test]
+    async fn mob_seed_reuses_join_columns_and_generates_only_missing_columns() {
+        let calls = Arc::new(Mutex::new(HashMap::new()));
+        let source = Arc::new(ChunkStore::new(CountingSource::new(&calls)));
+        let coordinates = [(0, 0), (1, 0)];
+        let world = crate::world_state::WorldStateHandle::new();
+        world.pause_initial_ticks();
+
+        for &(cx, cz) in &coordinates {
+            let _ = source.column(cx, cz);
+        }
+        let before = total(&calls);
+        let (columns, reused) =
+            mob_seed_columns(Arc::clone(&source), &coordinates, &world, (0, 0), 1).await;
+        assert_eq!(columns.len(), coordinates.len());
+        assert_eq!(reused, coordinates.len());
+        assert_eq!(total(&calls), before);
+
+        let missing = (2, 0);
+        let seed_source = Arc::clone(&source);
+        let seed_world = world.clone();
+        let task = tokio::spawn(async move {
+            mob_seed_columns(seed_source, &[coordinates[0], missing], &seed_world, (0, 0), 2)
+                .await
+        });
+        world.resume_initial_ticks();
+        tokio::time::sleep(crate::tick::TICK_PERIOD * 2).await;
+        assert!(!task.is_finished());
+        assert_eq!(total(&calls), before);
+        world.mark_initial_view_drained();
+        let (columns, reused) = task.await.unwrap();
+        assert_eq!(columns.len(), 2);
+        assert_eq!(reused, 1);
+        assert!(total(&calls) > before);
+
+        let previous = total(&calls);
+        let (columns, reused) = mob_seed_columns(
+            Arc::clone(&source),
+            &[(3, 0)],
+            &crate::world_state::WorldStateHandle::new(),
+            (50, 0),
+            2,
+        )
+        .await;
+        assert_eq!(columns.len(), 1);
+        assert_eq!(reused, 0);
+        assert!(total(&calls) > previous);
+    }
 
     /// One `CountingSource` is enough to establish the constructor boundary.
     fn open_like_the_shell_does(
