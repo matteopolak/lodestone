@@ -46,10 +46,8 @@ use lodestone_data::block_states::StateId;
 use lodestone_server::region_source::RegionChunkSource;
 use lodestone_server::{ChunkSource, ScheduledTickKind, TickPriority};
 
-/// The owner's persisted `"render_distance": 32` plus the mesher's buffer ring,
-/// the arithmetic `app::session::tick_render_distance` applies. Matching his is
-/// the point: the report came from a real session at this radius.
-const OWNER_VIEW_RADIUS: i32 = 33;
+/// The streamed radius of a real singleplayer session at render distance 32.
+const OWNER_VIEW_RADIUS: i32 = lodestone::app::integrated_stream_radius(32) as i32;
 
 /// The world's seed, used for both the fixture and the session so the loaded
 /// and generated halves belong to one world.

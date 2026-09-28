@@ -18,7 +18,7 @@
 //! reaches it:
 //!
 //! ```text
-//! NetClient::open_singleplayer(view_radius = render_distance + 1)
+//! NetClient::open_singleplayer(view_radius = integrated_stream_radius(render_distance))
 //!   → Sim::attach_net → Sim::step
 //!       → run_schedule(Update) → FrameSet::Terrain → heal_dirty_columns
 //!       → poll_net → on_column_arrived → mark_column_dirty
@@ -201,10 +201,8 @@ fn open_session(view_radius: i32, world_dir: std::path::PathBuf, sim: &Sim) -> O
 fn standing_still_the_whole_render_distance_meshes_and_we_report_how_long_it_took() {
     let config = lodestone::Config::default();
     let render_distance = config.render_distance;
-    // `app/session.rs`'s `begin_singleplayer`: the server streams one ring wider
-    // than the render distance, because the outermost ring is the buffer the
-    // mesher's neighbour-complete invariant consumes and never draws.
-    let view_radius = i32::try_from(render_distance).unwrap().saturating_add(1);
+    let view_radius = i32::try_from(lodestone::app::integrated_stream_radius(render_distance))
+        .expect("render distance fits in a streamed view");
     // What the player can actually see: `render_distance` in each direction.
     let visible_radius = i32::try_from(render_distance).unwrap();
     let visible_columns = (2 * visible_radius as usize + 1).pow(2);
@@ -212,7 +210,7 @@ fn standing_still_the_whole_render_distance_meshes_and_we_report_how_long_it_too
     println!(
         "\n=== mesh fill rate ===\n\
          render_distance   {render_distance} chunks  (Config::default(), i.e. the shipped value)\n\
-         server view_radius {view_radius} (render_distance + 1, the mesher's buffer ring)\n\
+         server view_radius {view_radius} (mesh halo and movement lookahead)\n\
          streamed columns  {}\n\
          visible columns   {visible_columns}  ({}x{}, the fill target)\n\
          heal budget       {} forced + {} dirty columns per frame\n",

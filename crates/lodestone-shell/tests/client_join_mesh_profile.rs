@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use lodestone::config::{Config, Mode};
+use lodestone::app::integrated_stream_radius;
 use lodestone::gpu::RenderState;
 use lodestone::menu::loading::ConnectPhase;
 use lodestone::mesher::{MeshBacklog, Meshed, record_native_mesh_upload_cost};
@@ -316,7 +317,7 @@ fn main() {
     let radius = profile_radius();
     let move_for = movement_duration();
     let measure_edit = edit_enabled();
-    let server_radius = radius.saturating_add(1);
+    let server_radius = integrated_stream_radius(radius);
     let expected_visible_columns = ((radius as usize) * 2 + 1).pow(2);
     let expected_server_columns = ((server_radius as usize) * 2 + 1).pow(2);
     let startup_started = Instant::now();

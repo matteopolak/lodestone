@@ -1734,16 +1734,13 @@ fn client_chunk_path_cycle_attribution() {
     println!("\n--- PER-FRAME costs over {resident_columns} resident columns ---");
     row("World::heap_bytes (F3 field)", heap_bytes_call, resident_columns as f64);
     row("loaded-positions Vec (F3)", positions_vec, resident_columns as f64);
-    // The headline comparison, scaled to a real session. Render distance 8
-    // streams (2*(8+1)+1)^2 = 361 columns (`app/session.rs`'s view_radius =
-    // render_distance + 1), so the per-frame terms below are what the shipped
-    // default actually pays, extrapolated linearly from the measured per-column
-    // rate — stated as an extrapolation, not a measurement.
-    const RD8_COLUMNS: u64 = 361;
+    // Scale the measured per-column rate to the default integrated stream.
+    const RD8_STREAM_RADIUS: u64 = lodestone::app::integrated_stream_radius(8) as u64;
+    const RD8_COLUMNS: u64 = (2 * RD8_STREAM_RADIUS + 1).pow(2);
     let per_col_heap = heap_bytes_call.instructions / resident_columns as u64;
     let per_col_vec = positions_vec.instructions / resident_columns as u64;
     println!(
-        "\nextrapolated to {RD8_COLUMNS} resident columns (render distance 8, view_radius 9):"
+        "\nextrapolated to {RD8_COLUMNS} resident columns (render distance 8, view_radius {RD8_STREAM_RADIUS}):"
     );
     println!(
         "  heap_bytes          {:>12} instructions per frame",

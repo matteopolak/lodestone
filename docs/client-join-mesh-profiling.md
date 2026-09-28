@@ -28,7 +28,9 @@ An optional movement phase keeps the same client and renderer running while the
 player crosses into newly requested terrain.
 
 The report separates the capped initial loading square, the selected render
-distance, and the server's additional meshing halo. It records received and
+distance, and the integrated server's two padding rings. The first supplies the
+mesher's 3×3 dependency neighborhood; the second keeps that neighborhood ready
+as the player crosses a chunk boundary. It records received and
 renderer-settled columns for each square, plus connection, overlay, first-terrain,
 and full-server boundaries. `Sim::view_settlement_at_radius` queries the selected
 distance without changing the initial loading gate. Frame, simulation-step,
@@ -36,13 +38,15 @@ upload, and render p99/max values expose hitches that aggregate CPU totals hide.
 The initial square must not be mistaken for the full selected distance: a new
 world caps the loading screen at radius six while the outer view keeps streaming.
 
-On a quiet native seed-4242 run at selected radius eight and a 1280×720 target,
-first terrain was presented at 0.66 s, the initial 169-column view was settled
-at 9.16 s, all 289 selected-view columns at 14.48 s, and all 361 requested
-server columns at 14.08 s. Frame p99 was 4.63 ms with one 56 ms maximum; the
-remaining wall time was between chunk arrival and settled meshes, not sustained
-frame-thread or GPU submission saturation. These are local observations, not
-portable pass thresholds.
+In a paired native seed-4242 run at radius eight, a 1280×720 target, and 45
+seconds of movement, the second padding ring changed newly visible columns
+already presented on entry from 0/221 to 204/221. Median entry-to-presentation
+fell from 451 ms to 0; the few early entries still waiting for the initial
+outer stream kept p95 near 670 ms. First terrain stayed near 0.63 s, while the
+loading overlay moved from 7.46 s to 7.71 s. Both runs held 20 TPS with no
+tick overruns or frames above 33 ms. Peak resident size rose from 1.093 to
+1.130 GB, and process retired instructions from 1.259 to 1.379 trillion. These
+are local observations, not portable pass thresholds.
 Separate startup fields cover GPU-context creation, client/resource construction,
 and renderer construction without adding those costs to the world-open clock.
 `chunk_count` is sampled after each simulation step as the world-insertion

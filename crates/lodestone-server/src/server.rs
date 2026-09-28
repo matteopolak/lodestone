@@ -308,11 +308,10 @@ const TIME_SYNC_INTERVAL: Duration = Duration::from_millis(1_000);
 ///
 /// **Derived, not chosen.** The shell's render-distance slider tops out at
 /// `config::MAX_RENDER_DISTANCE = 256` chunks and
-/// `Session::set_render_distance` sends `render_distance + 1` (the outermost
-/// streamed ring can never be meshed, so asking for exactly `render_distance`
-/// loses the last visible ring) — so `33` is the largest value a real client on
-/// this project can ask for. The initial join field is a VarInt and therefore
-/// carries the resulting `257`-chunk stream radius. Live client-information
+/// The integrated client requests two rings beyond its selected render distance:
+/// one for neighbor-aware meshing and one to keep that halo ahead of movement.
+/// The initial join field is a VarInt and can carry the resulting `258`-chunk
+/// stream radius. Live client-information
 /// updates are a signed byte in every supported protocol, so they can advertise
 /// at most `127`; the shell keeps that wire limit explicit when sending an
 /// update rather than allowing a wrapping conversion.
@@ -324,7 +323,7 @@ const TIME_SYNC_INTERVAL: Duration = Duration::from_millis(1_000);
 /// `chunk_store::integrated_capacity_for_view_radius` for whose memory is being
 /// spent, and this module's own note on what the store's capacity does *not*
 /// follow.
-pub const MAX_CLIENT_VIEW_RADIUS: i32 = 257;
+pub const MAX_CLIENT_VIEW_RADIUS: i32 = 258;
 
 /// Milliseconds per tick at vanilla's normal 20 TPS, used to convert
 /// wall-clock elapsed time into the tick-based `game_time`
