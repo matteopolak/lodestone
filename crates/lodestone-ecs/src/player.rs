@@ -1439,7 +1439,7 @@ pub fn player_physics(
             // report "dry" rather than stranding a stale submerged fog from
             // before the column went away.
             player.velocity = Vec3d::ZERO;
-            player.on_ground = true;
+            player.on_ground = false;
             fluid.0 = FluidState::NONE;
             // No `CollisionView`, so there is nothing to gate the pose against.
             // `with_pose` commits box *and* eye height together — the pair
@@ -2652,6 +2652,20 @@ mod tests {
                 .eye_height,
             lodestone_physics::player::DEFAULT_EYE_HEIGHT
         );
+    }
+
+    #[test]
+    fn pending_terrain_does_not_land_a_flying_player() {
+        let (mut app, entity) = app_with_flightworthy_player(PlayerCollision::Pending);
+        app.world_mut()
+            .get_mut::<crate::session::Abilities>(entity)
+            .unwrap()
+            .flying = true;
+
+        run_tick(&mut app);
+
+        assert!(!app.world().get::<PhysicsState>(entity).unwrap().0.on_ground);
+        assert!(flying(&app, entity));
     }
 
     /// A session teardown must return the player to a first-connection state
