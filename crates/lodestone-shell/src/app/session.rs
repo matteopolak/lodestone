@@ -152,7 +152,7 @@ impl WindowApp {
             return;
         }
 
-        if self.ui.accepts_gameplay_input() {
+        if self.gameplay_input_ready() {
             let scaled = scale_scroll(
                 notches,
                 self.nav.discrete_mouse_scroll(),

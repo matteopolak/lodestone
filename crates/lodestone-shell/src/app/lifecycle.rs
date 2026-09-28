@@ -28,7 +28,7 @@ impl WindowApp {
                 },
             ),
             BrowserInput::MouseMotion { dx, dy } => {
-                if self.ui.is_playing() && self.pointer_really_locked() {
+                if self.gameplay_input_ready() && self.pointer_really_locked() {
                     self.sim.input_mut(|input| input.add_mouse(dx as f32, dy as f32));
                 }
                 false
@@ -72,11 +72,14 @@ impl WindowApp {
     }
 
     fn handle_browser_key(&mut self, code: KeyCode, pressed: bool, text: Option<&str>) {
+        if self.ui.is_playing() && !self.gameplay_input_ready() {
+            return;
+        }
         let gate = KeyGate {
             menu: crate::menu::nav::routes_menu_input(&self.ui),
             chat_open: self.ui.is_chat_open(),
             container_open: self.active_container_menu().is_some(),
-            gameplay: self.ui.accepts_gameplay_input(),
+            gameplay: self.gameplay_input_ready(),
             debug_held: self.debug_held,
             recipe_search: self.recipe_panel.open && self.recipe_panel.search_focused,
             creative_search: self.creative_search_active(),
@@ -282,6 +285,12 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
 }
 
 impl WindowApp {
+    pub(super) fn gameplay_input_ready(&self) -> bool {
+        self.ui.accepts_gameplay_input()
+            && !self.sim.dimension_transition_pending()
+            && self.sim.world_wait().is_none()
+    }
+
     pub(super) fn dispatch_window_event(&mut self, _window_id: WindowId, event: WindowEvent) -> bool {
         let mut should_exit = false;
         // Vanilla's own framerate-limit tracker resets its AFK clock on input,
@@ -877,6 +886,8 @@ impl WindowApp {
                     }
                 }
             }
+            WindowEvent::MouseInput { .. }
+                if self.ui.is_playing() && !self.gameplay_input_ready() => {}
             WindowEvent::MouseInput { state, button, .. } => {
                 // `Screen::Paused` no longer reaches this catch-all at all — the
                 // `owns_frame(...) || self.ui.is_paused()` arm above now handles
@@ -920,7 +931,7 @@ impl WindowApp {
                         }
                         _ => {}
                     }
-                } else if self.ui.is_playing() && state == ElementState::Pressed {
+                } else if self.gameplay_input_ready() && state == ElementState::Pressed {
                     // Browser only: the world-entry grab in `drive_ui_from_session`
                     // fires from the per-frame reconciliation the instant
                     // `SessionPhase` becomes `Connected`, not from a user gesture, so
@@ -1001,7 +1012,7 @@ impl WindowApp {
                     let _ = self.scroll_stonecutter(notches) || self.scroll_loom(notches);
                 }
             }
-            WindowEvent::MouseWheel { delta, .. } if self.ui.accepts_gameplay_input() => {
+            WindowEvent::MouseWheel { delta, .. } if self.gameplay_input_ready() => {
                 let dy = wheel_notches(delta);
                 let scaled = scale_scroll(dy, self.nav.discrete_mouse_scroll(), self.nav.mouse_wheel_sensitivity());
                 let step = hotbar_scroll_step(accumulate_scroll(&mut self.scroll_accum, scaled));
@@ -1115,7 +1126,7 @@ impl WindowApp {
             return;
         }
         if let DeviceEvent::MouseMotion { delta } = event
-            && self.ui.is_playing()
+            && self.gameplay_input_ready()
             && self.pointer_really_locked()
         {
             self.sim
@@ -1201,6 +1212,9 @@ impl WindowApp {
         {
             self.ctrl_held = pressed;
         }
+        if self.ui.is_playing() && !self.gameplay_input_ready() {
+            return;
+        }
 
         // Resolve *what this key means* before touching any state, then
         // perform the one side effect it names. The precedence lives in
@@ -1226,7 +1240,7 @@ impl WindowApp {
             // predicate `redraw` draws from, so hit-testing, drawing and
             // key dispatch cannot disagree about what is on screen.
             container_open: self.active_container_menu().is_some(),
-            gameplay: self.ui.accepts_gameplay_input(),
+            gameplay: self.gameplay_input_ready(),
             debug_held: self.debug_held,
             // The recipe book's search box. **Gated on `open` as well as
             // `search_focused`**: the focus flag is only cleared by a
@@ -1694,7 +1708,7 @@ impl WindowApp {
         let Some(pending) = self.pending_pick else {
             return;
         };
-        if !self.ui.is_playing() {
+        if !self.gameplay_input_ready() {
             self.pending_pick = None;
             return;
         }

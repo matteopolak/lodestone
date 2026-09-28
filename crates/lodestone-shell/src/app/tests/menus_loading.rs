@@ -101,6 +101,17 @@ fn remote_connection_cannot_relabel_its_join_as_initial_terrain_generation() {
 }
 
 #[test]
+fn destination_cover_blocks_gameplay_input() {
+    let mut app = WindowApp::new(Config::default());
+    app.ui.enter_dev_world();
+    assert!(app.gameplay_input_ready());
+
+    app.sim.reset_for_dimension_change();
+    assert!(app.sim.dimension_transition_pending());
+    assert!(!app.gameplay_input_ready());
+}
+
+#[test]
 fn benchmark_policy_is_uncapped_unvsynced_and_uses_physical_1440p() {
     let config = benchmark_config(crate::config::BenchmarkWorkload::Terrain);
     assert_eq!(window_physical_size(&config), Some((2560, 1440)));

@@ -365,6 +365,9 @@ impl Sim {
         // portal travel must hide the old dimension while its destination
         // arrives, without showing a misleading generation count or grid.
         self.dimension_transition_pending = true;
+        self.input_mut(InputState::release_all);
+        self.end_attack();
+        self.end_use();
         // The first-world screen is one-shot. Once a connected session changes
         // dimension, even a timeout must not fall back to that labelled grid.
         self.new_world_loading = false;
