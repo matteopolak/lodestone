@@ -120,6 +120,11 @@ impl Sim {
         self.terrain(|t| t.scheduler.pending())
     }
 
+    #[must_use]
+    pub fn mesh_backlog(&self) -> crate::mesher::MeshBacklog {
+        self.terrain(TerrainMesh::backlog)
+    }
+
     /// Collect finished meshes for the caller to upload to the GPU.
     ///
     /// Also records each key into `TerrainMesh::uploaded_sections`, which is how
