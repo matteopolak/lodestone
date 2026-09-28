@@ -49,6 +49,15 @@ the gap. Generation dominated each later ring: encoding and delivery followed
 the final generated column within about 10 ms. Check halo delivery before
 attributing a resident-to-settled delay to client meshing.
 
+Batch shape alone is not an adequate join optimization. In a local seed-4242,
+radius-six release comparison, walking each ring as a contiguous perimeter
+reduced the estimated cohort count but moved all-resident time only from 5.70
+to 5.58 s. Retired instructions stayed near 178 billion, while peak RSS rose
+from 493 to 546 MB, packet-neighbour admissions rose from 608 to 768, and
+existing-column hits fell from 176 to 155. A larger cohort can pre-admit a
+target that would otherwise reuse a neighbour completed by an earlier cohort;
+preserve that reuse when changing admission order or cohort size.
+
 In a paired native seed-4242 run at radius eight, a 1280×720 target, and 45
 seconds of movement, the second padding ring changed newly visible columns
 already presented on entry from 0/221 to 204/221. Median entry-to-presentation
