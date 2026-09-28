@@ -216,12 +216,8 @@ fn first_real_sound(candidates: &[String]) -> Option<String> {
 /// One periodic eating/drinking sound, played each time the consume animation's
 /// per-tick sound trigger fires.
 ///
-/// Publish with **no** excluded player: the real broadcast plays with no excluded
-/// listener at all, so the local-player exclusion that a client-side prediction
-/// path would otherwise apply does not kick in here, and the eater hears only this
-/// broadcast. That is the opposite of the block-break case in this module's doc —
-/// do not reach for `publish_effect_except` by analogy, or the player eating hears
-/// nothing at all while everyone nearby does.
+/// The acting client plays this locally on the same use tick as its particles.
+/// Publish to other players with `publish_effect_except` to avoid a duplicate.
 ///
 /// The particles are **not** here and must not be: the server-side particle spawn
 /// for eating is a no-op there, so the crumbs are the client's own prediction

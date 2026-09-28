@@ -1523,13 +1523,7 @@ pub(crate) fn add_presentation_systems(world: &mut lodestone_ecs::ecs::world::Wo
                 drive_select_slot,
                 drive_mining,
                 drive_placement,
-                // The eating/drinking crumbs. **Inside the `.chain()` for the same
-                // reason `drive_placement` is**: it shares `ResMut<ParticleSim>`
-                // with `drive_mining` and this app runs with
-                // `ambiguity_detection: LogLevel::Error`. Its position relative to
-                // the others is otherwise arbitrary — it reads the use clock, which
-                // no system in this chain writes.
-                crate::consume::emit_consume_particles,
+                crate::consume::emit_consume_effects,
             )
                 .chain()
                 .after(lodestone_controller::ecs::send_move_action)

@@ -62,6 +62,11 @@ now, using the block's `sound_types` census (see
 `pitch*0.8` scaling, which must never be retyped since the identical
 expression appears at both of vanilla's own call sites.
 
+Periodic eating and drinking sounds follow the same local-prediction rule as their item-use
+particles. The client plays each bite on the use tick, including drinks that have no particles;
+the integrated server sends that sound to other players but excludes the eater. The louder
+completion sound remains server-owned.
+
 The census lookup accepts `lodestone_data::block_states::StateId`, not a raw
 integer. Network level events retain a `BlockStateRef` source tag until this
 boundary: canonical values validate with `StateId::new`, while protocol-local
