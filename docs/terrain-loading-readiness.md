@@ -10,6 +10,14 @@ Dimension travel has a separate opaque transition cover. It hides the old dimens
 
 `TerrainMesh` keeps a per-section settlement ledger keyed by `SectionKey`. A ready mesh enters the renderer ledger only after `app/redraw.rs` calls `RenderState::upload_section`; a `SnapshotOutcome::Empty` enters the empty ledger without an upload. Deferred or queued sections remain absent from both ledgers. `TerrainMesh::column_mesh_settled` checks the decoded local column and every section in the active `ChunkWorld` extent, so scheduler-wide pending counts, visible-section counts, and unrelated uploaded columns cannot release the gate.
 
+Ongoing streaming also tracks presented coverage separately from latest-revision
+settlement. Rebuilding a section invalidates the strict ledger but does not
+erase geometry already handed to the GPU. A fresh column decode or unload
+clears both ledgers. The browser's `full-view-presented` event checks presented
+coverage across the selected render distance after a frame is submitted;
+background replacement meshes do not hold that event indefinitely. The
+initial-world and dimension-transition covers retain the strict predicate.
+
 After the frame drains removals and uploads, `Sim::refresh_terrain_readiness` evaluates every column in the declared first-world view. A dimension transition instead checks the player's destination column, including all sections in its current vertical extent. The result is a one-way producer latch for the current dimension. `Sim::terrain_wait` still requires the player's decoded column while `TerrainProgressTracker` remains telemetry for the loading bar and never substitutes for section settlement. A session with no declared view retains the own-column fallback.
 Once neither loading latch is active, frame redraw skips the view scan; ongoing chunk streaming does not need to recompute a completed loading gate.
 

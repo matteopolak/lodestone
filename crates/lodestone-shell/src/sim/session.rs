@@ -639,6 +639,25 @@ impl Sim {
     /// Count received and renderer-settled columns in a requested view square.
     #[must_use]
     pub fn view_settlement_at_radius(&self, radius: u32) -> Option<(usize, usize, usize)> {
+        self.view_coverage_at_radius(
+            radius,
+            crate::mesher::TerrainMesh::resident_column_mesh_settled,
+        )
+    }
+
+    #[must_use]
+    pub fn view_presentation_at_radius(&self, radius: u32) -> Option<(usize, usize, usize)> {
+        self.view_coverage_at_radius(
+            radius,
+            crate::mesher::TerrainMesh::resident_column_presented,
+        )
+    }
+
+    fn view_coverage_at_radius(
+        &self,
+        radius: u32,
+        covered: fn(&crate::mesher::TerrainMesh, lodestone_ecs::WorldExtent, i32, i32) -> bool,
+    ) -> Option<(usize, usize, usize)> {
         let net = self.net()?;
         let loaded: std::collections::HashSet<_> = net
             .loaded_chunks()
@@ -661,7 +680,7 @@ impl Sim {
                 for x in cx - radius..=cx + radius {
                     if loaded.contains(&(x, z)) {
                         resident += 1;
-                        if terrain.resident_column_mesh_settled(extent, x, z) {
+                        if covered(terrain, extent, x, z) {
                             settled += 1;
                         }
                     }
@@ -670,6 +689,42 @@ impl Sim {
             (resident, settled)
         });
         Some((resident, settled, expected))
+    }
+
+    #[must_use]
+    pub fn unsettled_view_columns_at_radius(
+        &self,
+        radius: u32,
+    ) -> Option<Vec<crate::mesher::MeshColumnStatus>> {
+        let loaded: std::collections::HashSet<_> = self
+            .net()?
+            .loaded_chunks()
+            .into_iter()
+            .map(|pos| (pos.x, pos.z))
+            .collect();
+        let store = self.chunk_world();
+        let extent = store.extent()?;
+        let position = self.player().position;
+        let player_center = (
+            (position.x.floor() as i32).div_euclid(16),
+            (position.z.floor() as i32).div_euclid(16),
+        );
+        let (cx, cz) = self.chunk_cache_center().unwrap_or(player_center);
+        let radius = i32::try_from(radius).ok()?;
+        Some(self.terrain(|terrain| {
+            let mut gaps = Vec::new();
+            for z in cz - radius..=cz + radius {
+                for x in cx - radius..=cx + radius {
+                    if loaded.contains(&(x, z))
+                        && !terrain.resident_column_mesh_settled(extent, x, z)
+                        && let Some(status) = terrain.column_status(&store, x, z)
+                    {
+                        gaps.push(status);
+                    }
+                }
+            }
+            gaps
+        }))
     }
 
     /// Fold the client's current admitted columns into the loading high-water
