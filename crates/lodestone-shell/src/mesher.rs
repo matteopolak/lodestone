@@ -1567,7 +1567,7 @@ impl TerrainMesh {
         store: &ChunkWorld,
         cx: i32,
         cz: i32,
-        view_center: bool,
+        _view_center: bool,
     ) -> usize {
         if !self.pending_arrivals.contains(&(cx, cz)) {
             return self.mesh_column(store, cx, cz);
@@ -1576,22 +1576,19 @@ impl TerrainMesh {
             self.pending_arrivals.remove(&(cx, cz));
             return 0;
         }
+        self.pending_arrivals.remove(&(cx, cz));
+        // A first mesh is useful even when the surrounding stream is sparse:
+        // an absent neighbour is an exposed edge, so its side faces must be
+        // visible instead of leaving a hollow-looking wall. `route` submits
+        // the deferred snapshot against air and a later arrival re-drives the
+        // boundary through `mark_neighbours_dirty`.
         if self.column_source == ColumnSource::Streaming
             && !self.column_has_prior_result(cx, cz)
             && !Self::horizontal_halo_ready(store, cx, cz)
         {
-            if view_center {
-                self.pending_arrivals.remove(&(cx, cz));
-                self.provisional_columns.insert((cx, cz));
-                return self.mesh_column_inner(store, cx, cz, true);
-            }
-            // Production admission keeps this column out of the ready queue
-            // until `mark_neighbours_dirty` observes the final dependency. A
-            // direct caller can still reach this defensive branch; leave it in
-            // the waiting set rather than reintroducing a zero-work queue item.
-            return 0;
+            self.provisional_columns.insert((cx, cz));
+            return self.mesh_column_inner(store, cx, cz, true);
         }
-        self.pending_arrivals.remove(&(cx, cz));
         self.mesh_column(store, cx, cz)
     }
 

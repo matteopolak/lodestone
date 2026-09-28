@@ -150,6 +150,21 @@ idle waiting and looks identical to a real stall under a paused clock) and only 
 keep-alive once the accounting shows the client was genuinely unreachable for a full keep-alive
 interval, rather than merely quiet because the loop itself was busy.
 
+On native hosts, each authoritative world tick runs on a dedicated timer-capable thread. The
+connection runtime receives tick effects through the existing feeds and keeps servicing packets
+while simulation runs. `spawn_world_tick_task` is the native thread boundary; the browser keeps its
+event-loop task and relies on its separate server worker. Chunk generation still uses the bounded
+dispatcher, not the tick thread.
+
+The integrated liveness gate holds a newly requested column while timing Play-state ping echoes
+through the real connection loop. It reports median, 95th-percentile, and maximum round trips plus
+tick statistics, and fails if the 95th percentile exceeds 250 ms. This is a responsiveness control
+under a held generation request. The ignored `real_worldgen_keeps_play_packets_and_ticks_responsive_while_moving`
+profile uses the production Overworld source through the same connection, then moves across five
+fresh views. Run it with `cargo test --release -p lodestone-server --test worldgen_tick_liveness
+real_worldgen_keeps_play_packets_and_ticks_responsive_while_moving -- --ignored --nocapture`.
+It prints world-open time, delivered columns, tick rate, and Play RTT percentiles.
+
 ### The client's own single source of truth for terrain
 
 The client side has the identical shape of problem in miniature: for a while there were genuinely

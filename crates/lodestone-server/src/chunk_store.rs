@@ -2868,6 +2868,19 @@ impl GenerationLedger {
         source_stored: bool,
         ready_destinations: &[(i32, i32)],
     ) -> usize {
+        let stored = source_stored
+            .then(|| ready_destinations.iter().copied().collect::<BTreeSet<_>>())
+            .unwrap_or_default();
+        self.settle_mutations_at(pipeline, mutations, &stored, ready_destinations)
+    }
+
+    pub(crate) fn settle_mutations_at(
+        &mut self,
+        pipeline: DimensionPipeline,
+        mutations: &[ProvenanceMutation],
+        stored_destinations: &BTreeSet<ChunkCoordinate>,
+        ready_destinations: &[(i32, i32)],
+    ) -> usize {
         let identity = pipeline.identity(PipelineOptions::ALL);
         let Some(state) = self.pipelines.get_mut(&identity) else {
             return 0;
@@ -2953,7 +2966,7 @@ impl GenerationLedger {
                     .is_some_and(|existing| {
                         existing.provenance() == mutation.provenance()
                     });
-                let source_persisted = source_stored
+                let source_persisted = stored_destinations.contains(&coordinate)
                     && output.is_none()
                     && source_candidates.contains(&(coordinate, destination));
                 if !is_current || (!output_matches && !source_persisted) {
@@ -4055,7 +4068,7 @@ impl<S: ChunkSource> ChunkStore<S> {
         &self,
         mutations: &[ProvenanceMutation],
         captured_columns: &[(ChunkCoordinate, ChunkColumn)],
-    ) -> bool {
+    ) -> BTreeSet<ChunkCoordinate> {
         let destinations = mutations
             .iter()
             .map(|mutation| {
@@ -4067,18 +4080,26 @@ impl<S: ChunkSource> ChunkStore<S> {
             })
             .collect::<BTreeSet<_>>();
         if destinations.is_empty() {
-            return true;
+            return BTreeSet::new();
         }
         let retained = captured_columns
             .iter()
-            .filter(|(coordinate, _)| destinations.contains(coordinate))
+            .filter(|(coordinate, column)| {
+                destinations.contains(coordinate)
+                    && column.generation_stage() == ChunkGenerationStage::Full
+            })
             .map(|(coordinate, column)| (coordinate.0, coordinate.1, column.clone()))
             .collect::<Vec<_>>();
         if retained.is_empty() {
-            return false;
+            return BTreeSet::new();
         }
-        let complete = retained.len() == destinations.len();
-        self.source.store_resident_columns(&retained) && complete
+        if !self.source.store_resident_columns(&retained) {
+            return BTreeSet::new();
+        }
+        retained
+            .into_iter()
+            .map(|(cx, cz, _)| (cx, cz))
+            .collect()
     }
 
     fn emit_completed_cohort_results(
@@ -4222,11 +4243,12 @@ impl<S: ChunkSource> ChunkStore<S> {
                 }
             })?;
         halo.acknowledge(&report);
-        let source_stored = self.persist_generation_mutations(&mutations, &report.persistence_columns);
-        self.generation_ledger().settle_mutations(
+        let stored_destinations =
+            self.persist_generation_mutations(&mutations, &report.persistence_columns);
+        self.generation_ledger().settle_mutations_at(
             entry.pipeline,
             &mutations,
-            source_stored,
+            &stored_destinations,
             &report.coordinates,
         );
         crate::world_spawn::record_packet_neighbour_admissions(snapshot.neighbours().len());
@@ -5278,14 +5300,14 @@ impl<S: ChunkSource> ChunkStore<S> {
                             .committed_mutations()
                             .cloned()
                             .collect::<Vec<_>>();
-                        let source_stored = self.persist_generation_mutations(
+                        let stored_destinations = self.persist_generation_mutations(
                             &mutations,
                             &report.persistence_columns,
                         );
-                        self.generation_ledger().settle_mutations(
+                        self.generation_ledger().settle_mutations_at(
                             entry.pipeline,
                             &mutations,
-                            source_stored,
+                            &stored_destinations,
                             &report.coordinates,
                         );
                         results[index] = Some(Ok(Some(
@@ -5569,14 +5591,14 @@ impl<S: ChunkSource> ChunkStore<S> {
                 &feature_winner_receipts,
             )?;
             crate::world_spawn::record_packet_neighbour_admissions(snapshot.neighbours().len());
-            let source_stored = self
+            let stored_destinations = self
                 .persist_generation_mutations(&committed_mutations, &report.persistence_columns);
             let mutations = session.committed_mutations().cloned().collect::<Vec<_>>();
             self.generation_ledger()
-                .settle_mutations(
+                .settle_mutations_at(
                     pipeline,
                     &mutations,
-                    source_stored,
+                    &stored_destinations,
                     &report.coordinates,
                 );
             Ok(crate::worldgen_session::GenerationRequestResult::Generated(snapshot))
@@ -5732,14 +5754,14 @@ impl<S: ChunkSource> ChunkStore<S> {
                 &feature_winner_receipts,
             )?;
             crate::world_spawn::record_packet_neighbour_admissions(snapshot.neighbours().len());
-            let source_stored = self
+            let stored_destinations = self
                 .persist_generation_mutations(&committed_mutations, &report.persistence_columns);
             let mutations = session.committed_mutations().cloned().collect::<Vec<_>>();
             self.generation_ledger()
-                .settle_mutations(
+                .settle_mutations_at(
                     pipeline,
                     &mutations,
-                    source_stored,
+                    &stored_destinations,
                     &report.coordinates,
                 );
             Ok(crate::worldgen_session::GenerationRequestResult::Generated(snapshot))

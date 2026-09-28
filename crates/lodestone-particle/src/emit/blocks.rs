@@ -15,9 +15,9 @@
 //! nothing when a player breaks grass — one of the most common actions there is.
 //!
 //! So these functions take the boxes as an argument rather than querying a
-//! world. The renderer already knows the true outline geometry from the block
-//! model, which makes it the correct source, and it keeps this crate free of a
-//! dependency on any particular world representation.
+//! world. The shell resolves the validated state's outline boxes from
+//! `lodestone-data`; this crate stays free of a world representation while
+//! keeping debris anchored to the geometry that was actually broken.
 
 use super::*;
 

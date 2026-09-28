@@ -619,8 +619,14 @@ impl Sim {
 
     #[must_use]
     pub fn visible_view_settlement(&self) -> Option<(usize, usize, usize)> {
-        let net = self.net()?;
         let radius = self.expected_view_radius?;
+        self.view_settlement_at_radius(radius)
+    }
+
+    /// Count received and renderer-settled columns in a requested view square.
+    #[must_use]
+    pub fn view_settlement_at_radius(&self, radius: u32) -> Option<(usize, usize, usize)> {
+        let net = self.net()?;
         let loaded: std::collections::HashSet<_> = net
             .loaded_chunks()
             .into_iter()

@@ -26,7 +26,7 @@ use support::{
     ActionProbe, BLOCK_UPDATE, BLOCKED_COLUMN, BUTTON_OFF, BUTTON_ON, BUTTON_POS, CHUNK,
     CHUNK_BATCH_FINISHED, CHUNK_BATCH_START, CLIENT_ACTION, FINISH_CONFIGURATION, GenerationGate,
     HANDSHAKE, LivenessProtocol, LivenessWorld, LOGIN_ACKNOWLEDGED, LOGIN_START, LOGIN_SUCCESS,
-    MOVE_PLAYER, PLAYER_LOADED, USE_BUTTON,
+    MOVE_PLAYER, PING_REQUEST, PLAYER_LOADED, PONG_RESPONSE, USE_BUTTON,
 };
 
 const VIEW_RADIUS: i32 = 4;
@@ -157,6 +157,47 @@ async fn wait_for_generation_start<T: Transport>(
     }
 }
 
+async fn sample_play_rtt<T: Transport>(
+    client: &mut Connection<T>,
+    samples: usize,
+    pause: Duration,
+) -> (Vec<Duration>, usize) {
+    let mut round_trips = Vec::with_capacity(samples);
+    let mut received_chunks = 0;
+    for sequence in 0..samples {
+        let mut ping = Writer::default();
+        ping.i64(sequence as i64);
+        let started = Instant::now();
+        client
+            .write_packet(PING_REQUEST, ping.as_slice())
+            .await
+            .expect("ping during generation");
+        loop {
+            let (id, payload) = client
+                .read_packet_timeout(Duration::from_secs(1))
+                .await
+                .expect("pong during generation")
+                .expect("connection closed before pong");
+            if id == CHUNK {
+                received_chunks += 1;
+            }
+            if id == PONG_RESPONSE {
+                let mut reader = Reader::new(&payload);
+                assert_eq!(reader.i64().expect("pong sequence"), sequence as i64);
+                break;
+            }
+        }
+        round_trips.push(started.elapsed());
+        tokio::time::sleep(pause).await;
+    }
+    round_trips.sort_unstable();
+    (round_trips, received_chunks)
+}
+
+fn percentile(samples: &[Duration], percent: usize) -> Duration {
+    samples[(samples.len() * percent).div_ceil(100) - 1]
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn integrated_ticks_and_play_packets_continue_during_held_worldgen() {
     let gate = GenerationGate::new(Duration::from_secs(5));
@@ -269,6 +310,20 @@ async fn integrated_ticks_and_play_packets_continue_during_held_worldgen() {
         let _ = client.read_packet_timeout(Duration::from_millis(20)).await;
     }
 
+    let (round_trips, received_chunks) =
+        sample_play_rtt(&mut client, 24, Duration::from_millis(10)).await;
+    let p95 = percentile(&round_trips, 95);
+    eprintln!(
+        "held-worldgen play RTT: p50={:?} p95={:?} max={:?} received_chunks={} tick={:?}",
+        percentile(&round_trips, 50),
+        p95,
+        round_trips.last().expect("ping samples"),
+        received_chunks,
+        server.tick_stats().expect("tick stats"),
+    );
+    assert!(p95 < Duration::from_millis(250), "play RTT p95={p95:?}");
+    assert!(!gate.released(), "generation ended before play RTT sampling");
+
     // Both public tick witnesses must advance while the gate remains held. The
     // button's delayed release is checked after the gate is released below;
     // keeping that assertion out of this bounded window avoids conflating the
@@ -307,6 +362,77 @@ async fn integrated_ticks_and_play_packets_continue_during_held_worldgen() {
         assert!(Instant::now() < completion_deadline, "generation worker did not finish");
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+
+    drop(client);
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "production worldgen stress profile"]
+async fn real_worldgen_keeps_play_packets_and_ticks_responsive_while_moving() {
+    let world_started = Instant::now();
+    let source = lodestone_server::overworld_chunk_source(42);
+    let (server, client_io) = IntegratedServer::open_in_memory_with_mobs(
+        LivenessProtocol::new(ActionProbe::default()),
+        source,
+        (0..=0, 0..=0),
+        (0, 0),
+        2,
+    );
+    server
+        .world_state()
+        .set_rule("spawn_mobs", "false")
+        .expect("disable natural spawning for the profile");
+    server
+        .world_state()
+        .set_rule("random_tick_speed", "0")
+        .expect("disable random ticks for the profile");
+    let mut client = Connection::new(client_io);
+    let join_started = Instant::now();
+    join_and_read_view(&mut client, 2).await;
+    let join_elapsed = join_started.elapsed();
+    let world_open_elapsed = world_started.elapsed();
+    client
+        .write_packet(PLAYER_LOADED, &[])
+        .await
+        .expect("client loaded initial terrain");
+
+    let started = Instant::now();
+    let initial_tick = server.tick_stats().expect("tick stats").tick_count;
+    let mut samples = Vec::new();
+    let mut received_chunks = 0;
+    for step in 1..=5 {
+        let mut movement = Writer::default();
+        movement.f64(f64::from(step * 32));
+        movement.f64(80.0);
+        movement.f64(0.0);
+        movement.bool(true);
+        client
+            .write_packet(MOVE_PLAYER, movement.as_slice())
+            .await
+            .expect("move into a fresh view");
+        let (step_samples, step_chunks) =
+            sample_play_rtt(&mut client, 24, Duration::from_millis(20)).await;
+        received_chunks += step_chunks;
+        samples.extend(step_samples);
+    }
+    samples.sort_unstable();
+    let stats = server.tick_stats().expect("tick stats");
+    let p95 = percentile(&samples, 95);
+    let p99 = percentile(&samples, 99);
+    eprintln!(
+        "real-worldgen play: world_open={world_open_elapsed:?} join={join_elapsed:?} active={:?} received_chunks={} ticks={} tps={:.1} overrun={} RTT p50={:?} p95={p95:?} p99={p99:?} max={:?} phases={stats:?}",
+        started.elapsed(),
+        received_chunks,
+        stats.tick_count.saturating_sub(initial_tick),
+        stats.tps,
+        stats.overrun_count,
+        percentile(&samples, 50),
+        samples.last().expect("ping samples"),
+    );
+    assert!(received_chunks > 0, "movement did not request fresh columns");
+    assert!(p95 < Duration::from_millis(250), "play RTT p95={p95:?}");
+    assert!(stats.tps >= 18.0, "world tick throughput dropped: {stats:?}");
 
     drop(client);
     server.shutdown().await;

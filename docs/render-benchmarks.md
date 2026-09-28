@@ -48,6 +48,12 @@ sections visited and chat lines) for offline analysis; a skipped phase writes an
 empty cell, never a fabricated `0`, which would read as "free" rather than "did not
 run".
 
+The window driver requests a redraw only when the pacer's scheduled deadline is
+due. Unfocused, occluded, capped, and detached sessions still advance simulation
+on short waits, but a skipped presentation cannot immediately queue another
+redraw and spin. A dump dominated by rows without an acquire/present phase is
+therefore a sign to inspect window state, not a high rendered frame rate.
+
 `just bench-frame` (`crates/lodestone-shell/benches/frame_profile.rs`) is this
 instrument's reproducible counterpart: a fixed camera path over a fixed demo world
 at four waypoints chosen to hit different regimes (level, yawed, looking down for

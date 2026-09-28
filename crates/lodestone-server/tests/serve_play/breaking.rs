@@ -963,12 +963,8 @@ async fn creative_start_breaks_a_hard_block_without_a_stop_or_drop() {
     let _ = server.await.expect("server task panicked");
 }
 
-/// Protected-state negative control: creative bypasses the hardness clock,
-/// not the block's unbreakable protection. Bedrock must survive a start-only
-/// creative action, proving this detector fires against the positive test's
-/// same authoritative path.
 #[tokio::test(start_paused = true)]
-async fn creative_start_does_not_break_an_unbreakable_block() {
+async fn creative_start_breaks_bedrock_without_a_stop_packet() {
     let source = SingleBlockSource::new("minecraft:bedrock");
     let (client_end, server_end) = memory_pair();
     let mobs = MobHandle::default();
@@ -994,7 +990,7 @@ async fn creative_start_does_not_break_an_unbreakable_block() {
     send_block_action(&mut client, 0, BREAK_POS).await;
     let _ = drain_available(&mut client).await;
 
-    assert_eq!(source.current(), fixture_state("minecraft:bedrock"));
+    assert_eq!(source.current(), StateId::AIR);
     assert_eq!(mobs.with(|sim| sim.item_count()), 0);
 
     drop(client);

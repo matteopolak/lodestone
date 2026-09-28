@@ -32,14 +32,22 @@ use std::future::Future;
 #[derive(Debug)]
 pub(crate) enum Task {
     Tokio(tokio::task::JoinHandle<()>),
+    WorldTick {
+        thread: Option<std::thread::JoinHandle<()>>,
+        cancel: tokio::sync::watch::Sender<bool>,
+    },
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Task {
     /// Aborts the task if it is still running.
     pub(crate) fn abort(&self) {
-        let Self::Tokio(task) = self;
-        task.abort();
+        match self {
+            Self::Tokio(task) => task.abort(),
+            Self::WorldTick { cancel, .. } => {
+                cancel.send_replace(true);
+            }
+        }
     }
 
     /// Awaits the task to completion. Takes `&mut self` so the owning handle,
@@ -48,6 +56,11 @@ impl Task {
         match self {
             Self::Tokio(task) => {
                 let _ = task.await;
+            }
+            Self::WorldTick { thread, .. } => {
+                if let Some(thread) = thread.take() {
+                    let _ = tokio::task::spawn_blocking(move || thread.join()).await;
+                }
             }
         }
     }
@@ -131,6 +144,7 @@ where
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     use super::spawn_worldgen;
 
@@ -150,5 +164,22 @@ mod tests {
 
         assert!(returned.load(Ordering::Acquire));
         assert_eq!(result, 7);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn long_world_tick_does_not_block_connection_runtime() {
+        let shutdown = crate::integrated::ShutdownSignal::new();
+        let (entered, observed) = tokio::sync::oneshot::channel();
+        let start = Instant::now();
+        let mut task = crate::integrated::spawn_world_tick_task(&shutdown, async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = entered.send(());
+            std::thread::sleep(Duration::from_millis(250));
+            std::future::pending::<()>().await;
+        });
+        observed.await.expect("world tick started");
+        assert!(start.elapsed() < Duration::from_millis(200));
+        task.abort();
+        task.join().await;
     }
 }

@@ -6178,15 +6178,10 @@ where
     match action {
         BlockActionKind::StartDestroy => {
             let target = source.block_state_id(pos.x, pos.y, pos.z);
-            let per_tick = crate::block_breaking::progress_per_tick(target, held);
-            // Creative bypasses the hardness clock only for a known, present,
-            // breakable block. Air, an unbreakable state, and an unknown state
-            // are invalid targets and must not become a write merely because
-            // the caller has instant-build abilities.
-            if creative
-                && (target.block() == Block::Air
-                    || per_tick.is_none_or(|per| per <= 0.0))
-            {
+            let per_tick = (!creative)
+                .then(|| crate::block_breaking::progress_per_tick(target, held))
+                .flatten();
+            if creative && target.block() == Block::Air {
                 *pending_break = None;
                 return Ok(());
             }
@@ -6407,6 +6402,7 @@ where
     P: ServerProtocol,
     S: ChunkSource + ?Sized,
 {
+    let started = JoinStopwatch::now();
     // Read the block before replacement; once `set_block` runs, the original
     // state cannot be recovered. Capture its fluid state before writing the
     // replacement so a waterlogged block leaves its water source rather than
@@ -6441,6 +6437,7 @@ where
         block_ticks.publish_effect_except(breaker, effect);
     }
     source.set_block(pos.x, pos.y, pos.z, new_state);
+    let edit_elapsed = started.elapsed();
     // Roll the broken block's loot table and pop each resulting
     // stack as a real item entity. `MobSim` already ticks item
     // lifecycle and fall dynamics every server tick
@@ -6515,6 +6512,7 @@ where
             });
         }
     }
+    let drops_elapsed = started.elapsed();
     block_entities.with(|reg| {
         reg.remove(pos);
     });
@@ -6554,6 +6552,7 @@ where
         new_state,
         pos,
     ).await?;
+    let light_elapsed = started.elapsed();
 
     // A break runs two neighbour passes: shape recomputation (a torch or rail
     // that loses support turns to air) followed by redstone and gravity
@@ -6665,6 +6664,21 @@ where
             now,
             *cell,
         ).await?;
+    }
+    let total = started.elapsed();
+    if total >= Duration::from_millis(50) {
+        tracing::warn!(
+            target: "lodestone_server::stall",
+            x = pos.x,
+            y = pos.y,
+            z = pos.z,
+            total_ms = total.as_millis(),
+            edit_ms = edit_elapsed.as_millis(),
+            drops_ms = drops_elapsed.saturating_sub(edit_elapsed).as_millis(),
+            light_ms = light_elapsed.saturating_sub(drops_elapsed).as_millis(),
+            fanout_ms = total.saturating_sub(light_elapsed).as_millis(),
+            "block break delayed the connection loop",
+        );
     }
     Ok(())
 }

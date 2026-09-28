@@ -32,6 +32,8 @@ pub const MOVE_PLAYER: i32 = 101;
 pub const CLIENT_ACTION: i32 = 102;
 pub const BLOCK_UPDATE: i32 = 103;
 pub const PLAYER_LOADED: i32 = 104;
+pub const PING_REQUEST: i32 = 105;
+pub const PONG_RESPONSE: i32 = 106;
 
 pub const BLOCKED_COLUMN: (i32, i32) = (8, 0);
 // Keep the button in chunk (2, 0). The liveness test later moves the player to
@@ -300,6 +302,12 @@ impl ServerProtocol for LivenessProtocol {
                 self.actions.record_client_action();
                 ServerBound::ClientTickEnded
             }
+            State::Play if packet_id == PING_REQUEST => {
+                let mut reader = Reader::new(payload);
+                ServerBound::PingRequest {
+                    time: reader.i64().expect("ping sequence"),
+                }
+            }
             State::Play if packet_id == PLAYER_LOADED => ServerBound::PlayerLoaded,
             _ => ServerBound::Ignored,
         }
@@ -354,6 +362,15 @@ impl ServerProtocol for LivenessProtocol {
         writer.string(&state.canonical_state());
         ServerDirective::Send {
             packet_id: BLOCK_UPDATE,
+            payload: writer.as_slice().to_vec(),
+        }
+    }
+
+    fn encode_pong_response(&self, time: i64) -> ServerDirective {
+        let mut writer = Writer::default();
+        writer.i64(time);
+        ServerDirective::Send {
+            packet_id: PONG_RESPONSE,
             payload: writer.as_slice().to_vec(),
         }
     }
