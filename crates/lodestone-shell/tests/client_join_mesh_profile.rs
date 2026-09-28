@@ -1049,6 +1049,7 @@ fn main() {
             "light_patch_calls": mesh_work.light_patch_calls,
             "light_patch_invalidations": mesh_work.light_patch_invalidations,
             "light_patch_boundary_skips": mesh_work.light_patch_boundary_skips,
+            "light_patch_absorbed_sections": mesh_work.light_patch_absorbed_sections,
             "light_section_snapshots": mesh_work.light_section_snapshots,
         },
         "uploaded_quads": quad_count,
