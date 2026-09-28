@@ -155,6 +155,13 @@ target; `LODESTONE_CLIENT_JOIN_RADIUS=8` selects the view radius when invoking
 the test directly. `LODESTONE_CLIENT_JOIN_MOVE_SECONDS=20` adds a bounded
 movement phase; unset or zero leaves the stationary join control unchanged.
 `LODESTONE_CLIENT_JOIN_EDIT=1` adds the block-edit phase.
+`LODESTONE_JOIN_TRACE=1` enables the per-column server stage trace in this
+fixture. Native traces distinguish initial queue entry, admission, worker start,
+generation, encoding, and delivery; a later full-stage request has a separate
+`upgrade_queued` entry. Queue-to-admission time measures scheduler backlog,
+while worker-start-to-generation includes all work within a generation cohort.
+This is diagnostic only: emitting lines per column perturbs timing, so compare
+performance with the trace disabled.
 The script discovers
 the test executable reported by Cargo and wraps that exact executable with
 `samply record --save-only`. If `LODESTONE_ASSETS` is unset, it uses the local
