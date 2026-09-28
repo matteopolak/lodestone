@@ -84,7 +84,26 @@ impl WindowApp {
         // matches the only existing production-shaped precedent
         // (`container.rs`'s own click-driving tests use `PlayerCtx::survival()`
         // /`::creative()` explicitly rather than reading one off anything).
-        let _ = handle.menu_click(click, ctx);
+        let trace_menu = tracing::enabled!(target: "menu_sync", tracing::Level::DEBUG);
+        let cursor = |menu: Option<Menu>| {
+            menu.and_then(|menu| {
+                menu.carried()
+                    .map(|stack| (stack.item().clone(), stack.count()))
+            })
+        };
+        let before = trace_menu.then(|| cursor(self.active_container_menu()));
+        let result = handle.menu_click(click, ctx);
+        if trace_menu {
+            let after = cursor(self.active_container_menu());
+            tracing::debug!(
+                target: "menu_sync",
+                ?click,
+                ?before,
+                ?after,
+                sent = result.is_ok(),
+                "inventory click"
+            );
+        }
     }
 
     /// Resolve a click at the current cursor against the recipe-book panel and

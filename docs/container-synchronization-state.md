@@ -29,7 +29,9 @@ from an empty subset of modeled components: a server can send components this cl
 
 ## Configuration
 
-There is no runtime configuration. The initial value is `ContainerStateId::INITIAL`.
+The initial value is `ContainerStateId::INITIAL`. Set `RUST_LOG=menu_sync=debug` when diagnosing
+an inventory cursor mismatch; click and server-update records include slot, state id, and the
+cursor's item identity and count, without component payloads.
 
 ## Dependencies
 

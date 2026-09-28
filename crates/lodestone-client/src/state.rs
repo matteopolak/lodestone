@@ -747,6 +747,50 @@ impl SharedState {
             let mut echo = self.inner.write().unwrap_or_else(|e| e.into_inner());
             echo.apply(event);
         }
+        if tracing::enabled!(target: "menu_sync", tracing::Level::DEBUG) {
+            let update = match event {
+                ClientEvent::ContainerSlot {
+                    window_id,
+                    state_id,
+                    slot,
+                    item,
+                } => Some(("slot", *window_id, Some(*state_id), Some(*slot), item.as_ref())),
+                ClientEvent::ContainerContent {
+                    window_id,
+                    state_id,
+                    carried_item,
+                    ..
+                } => Some((
+                    "content",
+                    *window_id,
+                    Some(*state_id),
+                    None,
+                    carried_item.as_ref(),
+                )),
+                ClientEvent::CursorItemChanged { item } => {
+                    Some(("cursor", -1, None, None, item.as_ref()))
+                }
+                _ => None,
+            };
+            if let Some((kind, window_id, state_id, slot, item)) = update {
+                let cursor = lodestone_ecs::hold_read(&self.ecs, |world| {
+                    let menus = &world.get::<SessionMenus>(self.session)?.0;
+                    let menu = menus.opened().cloned().unwrap_or_else(|| menus.player());
+                    menu.carried()
+                        .map(|stack| (stack.item().clone(), stack.count()))
+                });
+                tracing::debug!(
+                    target: "menu_sync",
+                    kind,
+                    window_id,
+                    ?state_id,
+                    ?slot,
+                    item = ?item.map(|stack| (&stack.item, stack.count)),
+                    ?cursor,
+                    "server inventory update"
+                );
+            }
+        }
         self.wake();
     }
 
