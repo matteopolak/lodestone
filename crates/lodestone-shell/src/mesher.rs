@@ -1261,6 +1261,7 @@ pub struct MeshWorkCounters {
     pub light_patch_calls: usize,
     pub light_patch_invalidations: usize,
     pub light_patch_boundary_skips: usize,
+    pub light_patch_absorbed_sections: usize,
     pub light_section_snapshots: usize,
 }
 
@@ -1961,6 +1962,19 @@ impl TerrainMesh {
                         };
                         if !section_touches_light_patch(section, dx, dy, dz) {
                             self.work_counters.light_patch_boundary_skips += 1;
+                            continue;
+                        }
+                        let key = SectionKey {
+                            cx: nx,
+                            cz: nz,
+                            si: si as usize,
+                            min_y: extent.min_y,
+                        };
+                        if !self.uploaded_sections.contains(&key)
+                            && (self.pending_arrivals.contains(&(nx, nz))
+                                || self.dirty_columns.contains((nx, nz)))
+                        {
+                            self.work_counters.light_patch_absorbed_sections += 1;
                             continue;
                         }
                         self.light_dirty_sections.insert((nx, nz, base_si + si));
@@ -3510,6 +3524,29 @@ mod tests {
         terrain.light_dirty_sections.clear();
         assert_eq!(terrain.queue_light_update(&store, -1, -1, &[0]), 1);
         assert_eq!(terrain.light_dirty_sections, BTreeSet::from([(0, 0, 0)]));
+
+        terrain.light_dirty_sections.clear();
+        terrain.pending_arrivals.insert((0, 0));
+        terrain.dirty_columns.insert((-1, 0));
+        assert_eq!(terrain.queue_light_update(&store, 0, 0, &[1]), 1);
+        assert_eq!(terrain.light_dirty_sections, BTreeSet::from([(1, 1, 1)]));
+        assert_eq!(terrain.work_counters.light_patch_absorbed_sections, 2);
+
+        terrain.light_dirty_sections.clear();
+        terrain.uploaded_sections.insert(SectionKey {
+            cx: 0,
+            cz: 0,
+            si: 0,
+            min_y: 0,
+        });
+        assert_eq!(terrain.queue_light_update(&store, 0, 0, &[1]), 2);
+        assert_eq!(terrain.light_dirty_sections, BTreeSet::from([(0, 0, 0), (1, 1, 1)]));
+        assert_eq!(terrain.work_counters.light_patch_absorbed_sections, 3);
+
+        terrain.light_dirty_sections.clear();
+        terrain.pending_arrivals.remove(&(0, 0));
+        terrain.dirty_columns.remove((-1, 0));
+        assert_eq!(terrain.queue_light_update(&store, 0, 0, &[1]), 3);
     }
 
     /// A small two-section fixture for the readiness controls below. One block

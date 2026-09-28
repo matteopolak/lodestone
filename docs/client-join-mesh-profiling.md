@@ -123,6 +123,9 @@ invalidations separately, so repeated uploads can be assigned to the path that
 submitted them. Light-patch invalidations count loaded sections whose blocks
 can sample the changed light; `light_patch_boundary_skips` counts non-air
 adjacent sections excluded because their blocks are wholly interior.
+`light_patch_absorbed_sections` counts non-air sections not yet uploaded whose
+pending full-column snapshot will read the patch without a separate light-only
+remesh.
 The movement timeline also samples each new column's 3×3 residency halo before
 draining mesh results, then records its first returned section mesh and full
 presentation. This distinguishes a column waiting for its outer dependency
