@@ -29,7 +29,7 @@ fn prediction_is_applied_locally_and_reports_changed_slots() {
 }
 
 #[test]
-fn patched_item_clicks_wait_for_server_slot_and_cursor_updates() {
+fn patched_item_pickup_and_place_clear_the_local_cursor_without_a_server_cursor_echo() {
     let mut model = lodestone_model::ItemStack::new("minecraft:paper".parse().unwrap(), 1);
     model.components.item_model = Some("server:ticket".parse().unwrap());
     model.components.wire_patch_nonempty = true;
@@ -41,10 +41,10 @@ fn patched_item_clicks_wait_for_server_slot_and_cursor_updates() {
     let mut client = ClientMenu::new(menu);
 
     let pickup = client.predict(Click::left(9), PlayerCtx::survival());
-    assert!(pickup.changed_slots.is_empty());
-    assert!(pickup.carried.is_none());
-    assert_eq!(client.menu().slot_item(9), Some(&ticket));
-    assert!(client.menu().carried().is_none());
+    assert_eq!(pickup.changed_slots, vec![(9, None)]);
+    assert_eq!(pickup.carried, Some(ticket.clone()));
+    assert!(client.menu().slot_item(9).is_none());
+    assert_eq!(client.menu().carried(), Some(&ticket));
 
     client.reconcile(ServerUpdate::SetSlot {
         state_id: ContainerStateId::new(1),
@@ -53,17 +53,16 @@ fn patched_item_clicks_wait_for_server_slot_and_cursor_updates() {
     });
     client.reconcile(ServerUpdate::SetCarried { item: Some(ticket.clone()) });
     let place = client.predict(Click::left(10), PlayerCtx::survival());
-    assert!(place.changed_slots.is_empty());
+    assert_eq!(place.changed_slots, vec![(10, Some(ticket.clone()))]);
     assert!(place.carried.is_none());
-    assert!(client.menu().slot_item(10).is_none());
-    assert_eq!(client.menu().carried(), Some(&ticket));
+    assert_eq!(client.menu().slot_item(10), Some(&ticket));
+    assert!(client.menu().carried().is_none());
 
     client.reconcile(ServerUpdate::SetSlot {
         state_id: ContainerStateId::new(2),
         slot: 10,
         item: Some(ticket.clone()),
     });
-    client.reconcile(ServerUpdate::SetCarried { item: None });
     assert_eq!(client.menu().slot_item(10), Some(&ticket));
     assert!(client.menu().carried().is_none());
 }

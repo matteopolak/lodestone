@@ -69,9 +69,8 @@ impl ClickIntent {
     /// it, which are that container's slots, not window 0's. Sending a crafting
     /// grid click to window 0 makes the server reject the slot index outright.
     ///
-    /// Only stacks with an empty component patch reach the optimistic path.
-    /// Patched stacks use server-owned reconciliation until adapters can encode
-    /// their component hashes.
+    /// Patched stacks are represented by an empty component patch on this wire
+    /// path. The server corrects any claimed stack whose components differ.
     #[must_use]
     pub fn to_action(&self, window_id: i32) -> ClientAction {
         ClientAction::ContainerClick {
@@ -235,7 +234,7 @@ impl ClientMenu {
                     .ok()
                     .and_then(|slot| self.predicted.player_native(slot))
                     .is_some_and(|stack| !stack.click_prediction_safe()));
-        if uncertain {
+        if uncertain && click.input != ContainerInput::Pickup {
             return ClickIntent {
                 slot: click.slot,
                 button: click.button,
