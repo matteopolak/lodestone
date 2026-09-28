@@ -12,9 +12,13 @@ Ticket residency is stronger than the cache capacity. A column covered by a load
 
 The client owns one decoded `World` for the active dimension. Dimension transitions and a new login epoch unload every decoded column before new packets are admitted. Terrain meshing retains copy-on-write section handles only for submitted jobs; the scheduler removes generation records and queued results when a column leaves the view. Persistence keeps edit and block-entity overlays longer than the cache when required for correctness.
 
+A player edit to a resident column first uses `ChunkStore::try_set_block`. That path commits the cached post-edit snapshot to the wrapped source's edit ledger before changing the cache, then invalidates retained light in the neighboring footprint. If the coordinate is busy, absent, or the source lacks the typed resident-edit hook, the ordinary blocking writer remains the fallback. This avoids regenerating a full column on its first player edit while preserving edits across eviction.
+
 ## How to change it
 
 Change cache policy in `lodestone_server::chunk_store`: update the capacity derivation and its measurements together. Keep ticket protection in the eviction predicate; a periodic ticket sweep is not an adequate substitute. If a future policy needs to shrink a high-water capacity, pass the current view window and preserve both visible coordinates and ticket-resident coordinates before unloading anything.
+
+Keep the resident-edit hook mutation-only. Using the full-column persistence hook for every light settlement would turn unedited generated terrain into permanent edits. A successful resident edit must update both the source ledger and cache before it reports completion; the blocking fallback must still handle cold or unsupported sources.
 
 When changing client unload behavior, keep the dimension/login clear before packet admission and preserve the copy-on-write contract used by `lodestone_shell::mesher`. Do not move persistence unload work under the cache mutex or add compression to the tick path.
 
@@ -38,6 +42,7 @@ remain the authoritative production-profile measurements.
 ## Configuration
 
 `DEFAULT_CAPACITY`, `CONCURRENT_SCAN_COLUMNS`, `MAX_CAPACITY`, and `FULLY_RESIDENT_VIEW_RADIUS` in `crates/lodestone-server/src/chunk_store.rs` control the server cache policy. The ticket graph controls which coordinates are protected. Client render distance controls the streamed view, while meshing worker count controls the number of in-flight snapshots.
+Set `RUST_LOG=lodestone_edit_trace=debug` to time successful resident edits. Fallback edits taking at least 50 ms emit `lodestone_server::stall` phase timings for gate, cache, invalidation, snapshot, source, and release work.
 
 ## Dependencies
 

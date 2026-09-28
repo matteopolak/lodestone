@@ -7520,6 +7520,17 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
     /// [`crate::chunk::OverworldChunkSource`] consults its `edits` map and so
     /// returns the edited column.
     fn set_block(&self, x: i32, y: i32, z: i32, state: lodestone_data::block_states::StateId) {
+        let started = lodestone_time::Instant::now();
+        if self.try_set_block(x, y, z, state) == TryBlockMutation::Applied {
+            tracing::debug!(
+                target: "lodestone_edit_trace",
+                cx = x.div_euclid(16),
+                cz = z.div_euclid(16),
+                elapsed_us = started.elapsed().as_micros(),
+                "resident edit committed",
+            );
+            return;
+        }
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
@@ -7529,6 +7540,7 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
         // the changed column. Holding the whole footprint prevents a settlement
         // on an adjacent centre from racing the invalidation.
         let lease = self.write_gates.acquire_many(&coordinates, true);
+        let gate_elapsed = started.elapsed();
         let retained = {
             let mut guard = self.lock();
             let cache = &mut *guard;
@@ -7552,7 +7564,9 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
                 None
             }
         };
+        let cache_elapsed = started.elapsed();
         self.invalidate_retained_light_neighbourhood_while_held(cx, cz, &coordinates);
+        let invalidate_elapsed = started.elapsed();
         let retained = retained.map(|mut column| {
             // The clone was taken immediately after the block write, before
             // the cache-wide invalidation. Do not forward the old retained
@@ -7561,17 +7575,34 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
             column.clear_retained_light();
             column
         });
+        let snapshot_elapsed = started.elapsed();
         if !retained
             .as_ref()
             .is_some_and(|column| self.source.store_resident_column(cx, cz, column))
         {
             self.source.set_block(x, y, z, state);
         }
+        let persist_elapsed = started.elapsed();
         lease.release_and_prune();
         for &coordinate in &coordinates {
             if !self.is_column_resident(coordinate.0, coordinate.1) {
                 self.write_gates.forget_if_idle(std::slice::from_ref(&coordinate));
             }
+        }
+        let total = started.elapsed();
+        if total >= std::time::Duration::from_millis(50) {
+            tracing::warn!(
+                target: "lodestone_server::stall",
+                cx,
+                cz,
+                gate_ms = gate_elapsed.as_millis(),
+                cache_ms = cache_elapsed.saturating_sub(gate_elapsed).as_millis(),
+                invalidate_ms = invalidate_elapsed.saturating_sub(cache_elapsed).as_millis(),
+                snapshot_ms = snapshot_elapsed.saturating_sub(invalidate_elapsed).as_millis(),
+                persist_ms = persist_elapsed.saturating_sub(snapshot_elapsed).as_millis(),
+                release_ms = total.saturating_sub(persist_elapsed).as_millis(),
+                "chunk edit delayed the connection loop",
+            );
         }
     }
 
@@ -8859,15 +8890,8 @@ mod tests {
                     .to_owned()
             }
 
-            fn set_block(&self, x: i32, y: i32, z: i32, state: lodestone_data::block_states::StateId) {
-                let mut edits = self
-                    .edits
-                    .lock()
-                    .expect("durable edit ledger lock poisoned");
-                edits
-                    .entry((x.div_euclid(16), z.div_euclid(16)))
-                    .or_insert_with(|| ChunkColumn::new(0, 16))
-                    .set_block_id(x.rem_euclid(16), y, z.rem_euclid(16), state);
+            fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: lodestone_data::block_states::StateId) {
+                panic!("a resident edit must not enter the regenerating source writer");
             }
 
             fn try_store_resident_edit(
@@ -8944,6 +8968,13 @@ mod tests {
             generated.load(Ordering::Relaxed),
             2,
             "the reload should generate only the untouched column; the edited column must come from the ledger"
+        );
+        store.set_block(0, 1, 0, Block::Dirt.default_state());
+        assert_eq!(store.block_state_id(0, 1, 0), Block::Dirt.default_state());
+        assert_eq!(
+            edits.lock().expect("durable edit ledger lock poisoned")[&(0, 0)]
+                .block_state_id(0, 1, 0),
+            Block::Dirt.default_state(),
         );
 
         let unsupported = ChunkStore::new(CountingSource::new());

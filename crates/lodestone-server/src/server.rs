@@ -1965,102 +1965,6 @@ fn join_view_rings(view_radius: i32) -> Vec<Vec<(i32, i32)>> {
 /// neighbouring columns remain in the deferred stream.
 const JOIN_PRESTREAM_RADIUS: i32 = 0;
 
-#[derive(Debug, Clone, Copy)]
-struct InitialTerrainGate {
-    center: (i32, i32),
-    radius: i32,
-    expected: u16,
-    delivered: u16,
-    columns: [u64; 3],
-}
-
-impl InitialTerrainGate {
-    const MAX_RADIUS: i32 = 6;
-    const SIDE: i32 = Self::MAX_RADIUS * 2 + 1;
-
-    fn new(center: (i32, i32), view_radius: i32) -> Self {
-        let radius = view_radius.clamp(0, Self::MAX_RADIUS);
-        let mut gate = Self {
-            center,
-            radius,
-            delivered: 0,
-            columns: [0; 3],
-            expected: u16::try_from((radius * 2 + 1).pow(2))
-                .expect("initial terrain column count fits u16"),
-        };
-        gate.mark_delivered(center);
-        gate
-    }
-
-    fn mark_delivered(&mut self, coord: (i32, i32)) {
-        if let (Some(dx), Some(dz)) = (
-            coord.0.checked_sub(self.center.0),
-            coord.1.checked_sub(self.center.1),
-        ) && (-self.radius..=self.radius).contains(&dx)
-            && (-self.radius..=self.radius).contains(&dz)
-        {
-            let index = usize::try_from((dz + Self::MAX_RADIUS) * Self::SIDE + dx + Self::MAX_RADIUS)
-                .expect("bounded initial terrain coordinate");
-            let word = index / u64::BITS as usize;
-            let bit = index % u64::BITS as usize;
-            let mask = 1_u64 << bit;
-            if self.columns[word] & mask == 0 {
-                self.columns[word] |= mask;
-                self.delivered += 1;
-            }
-        }
-    }
-
-    fn is_ready(self) -> bool {
-        self.delivered == self.expected
-    }
-}
-
-#[cfg(test)]
-mod initial_terrain_gate_tests {
-    use super::InitialTerrainGate;
-
-    #[test]
-    fn opens_after_the_spawn_neighborhood_is_delivered() {
-        let mut gate = InitialTerrainGate::new((12, -4), 8);
-        assert!(!gate.is_ready());
-
-        for dz in -6..=6 {
-            for dx in -6..=6 {
-                gate.mark_delivered((12 + dx, -4 + dz));
-            }
-        }
-
-        assert!(gate.is_ready());
-    }
-
-    #[test]
-    fn ignores_outside_and_duplicate_columns() {
-        let mut gate = InitialTerrainGate::new((0, 0), 6);
-        gate.mark_delivered((7, 0));
-        for _ in 0..2 {
-            gate.mark_delivered((-1, -1));
-        }
-        assert!(!gate.is_ready());
-    }
-
-    #[test]
-    fn zero_view_radius_only_waits_for_the_center_column() {
-        assert!(InitialTerrainGate::new((0, 0), 0).is_ready());
-    }
-
-    #[test]
-    fn smaller_view_radius_clamps_the_required_square() {
-        let mut gate = InitialTerrainGate::new((0, 0), 1);
-        for dz in -1..=1 {
-            for dx in -1..=1 {
-                gate.mark_delivered((dx, dz));
-            }
-        }
-        assert!(gate.is_ready());
-    }
-}
-
 /// How many columns of the deferred join stream `serve_play` puts in one chunk
 /// batch.
 ///
@@ -6169,6 +6073,17 @@ where
     P: ServerProtocol,
     S: ChunkSource + ?Sized,
 {
+    tracing::debug!(
+        target: "lodestone_block_trace",
+        ?action,
+        x = pos.x,
+        y = pos.y,
+        z = pos.z,
+        ?game_tick,
+        pending = ?pending_break.as_ref().map(|dig| dig.pos),
+        state = source.block_state_id(pos.x, pos.y, pos.z).raw(),
+        "block action received"
+    );
     // Vanilla's very first guard in `handleBlockBreakAction`, ahead of the
     // per-ordinal fork: a break out of reach is dropped whatever phase it is.
     if !crate::block_breaking::within_interaction_range(player_feet, pos) {
@@ -6317,10 +6232,13 @@ where
     let current = source.block_state_id(pos.x, pos.y, pos.z);
     let block_state = current;
     let Some(proposals) = world.proposal_handle() else {
+        tracing::debug!(target: "lodestone_block_trace", x = pos.x, y = pos.y, z = pos.z, "block break has no proposal owner");
         return Ok(true);
     };
+    let decision = proposals.block_break(pos, block_state, breaker).await;
+    tracing::debug!(target: "lodestone_block_trace", x = pos.x, y = pos.y, z = pos.z, ?decision, "block break proposal resolved");
     let allowed = matches!(
-        proposals.block_break(pos, block_state, breaker).await,
+        decision,
         Ok(crate::ecs::ServerProposalAction::BlockBreak {
             pos: resolved_pos,
             state: resolved_state,
@@ -12864,7 +12782,6 @@ async fn dispatch_play_packet<T, P, S>(
     // Set by the client's empty readiness marker; fall simulation waits for
     // this signal so the first placement movement cannot create a false fall.
     client_loaded: &mut bool,
-    initial_terrain_ready: bool,
     // This connection's composter roll source — seeded once in
     // `serve_play`, advanced once per right-click (see
     // [`apply_composter_use`]'s `roll` parameter).
@@ -13148,7 +13065,6 @@ where
             .await?;
 
             if *client_loaded
-                && initial_terrain_ready
                 && let Some(sample) = resident_fall_sample(source.get(), x, y, z, on_ground)
                 && let Some(raw) = fall.on_player_moved(sample)
                 && !Abilities::for_mode(*game_mode).invulnerable
@@ -13201,7 +13117,7 @@ where
                 effects,
                 username,
                 on_ground,
-                *client_loaded && initial_terrain_ready,
+                *client_loaded,
                 Abilities::for_mode(*game_mode).invulnerable,
                 advancements,
                 player_uuid,
@@ -13227,7 +13143,7 @@ where
                 effects,
                 username,
                 on_ground,
-                *client_loaded && initial_terrain_ready,
+                *client_loaded,
                 Abilities::for_mode(*game_mode).invulnerable,
                 advancements,
                 player_uuid,
@@ -15243,7 +15159,6 @@ where
     let mut player_pos: Option<(f64, f64, f64)> = None;
     let mut client_movement = ClientMovement::default();
     let mut client_loaded = false;
-    let mut initial_terrain = InitialTerrainGate::new(view.center, view.radius);
     let mut abilities = Abilities::for_mode(game_mode);
     // The rotation is stored alongside `player_pos` — see `dispatch_play_packet`'s own
     // parameter comment. Restore the native locator's bounded rotation when
@@ -15665,10 +15580,6 @@ where
                 }
                 apply(conn, &mut state, directive).await?;
                 view.mark_delivered((cx, cz));
-                initial_terrain.mark_delivered((cx, cz));
-                if client_loaded && initial_terrain.is_ready() {
-                    world.resume_initial_ticks();
-                }
                 if let Some(trace) = join_trace.as_ref() {
                     trace.mark("delivered", cx, cz);
                 }
@@ -15779,10 +15690,6 @@ where
                         }
                         apply(conn, &mut state, directive).await?;
                         view.mark_delivered((cx, cz));
-                        initial_terrain.mark_delivered((cx, cz));
-                        if client_loaded && initial_terrain.is_ready() {
-                            world.resume_initial_ticks();
-                        }
                         if let Some(trace) = join_trace.as_ref() {
                             trace.mark("delivered", cx, cz);
                         }
@@ -15881,7 +15788,6 @@ where
                     block_ticks,
                     resource_packs,
                     &mut client_loaded,
-                    initial_terrain.is_ready(),
                     &mut composter_rng,
                     &mut bone_meal_rng,
                     &mut experience,
@@ -15908,7 +15814,7 @@ where
                     &payload,
                 )
                 .await?;
-                if client_loaded && initial_terrain.is_ready() {
+                if client_loaded {
                     world.resume_initial_ticks();
                 }
                 if let Some(id) = pending_keep_alive_before_packet
@@ -16266,8 +16172,8 @@ where
 
             _ = vitals_tick.tick() => {
                 watch.enter();
-                if !initial_terrain.is_ready() {
-                    watch.pass("vitals_waiting_for_initial_terrain");
+                if !client_loaded {
+                    watch.pass("vitals_waiting_for_player_loaded");
                     continue;
                 }
                 // Count periodic saves in 50 ms vitals ticks rather than wall
@@ -18735,7 +18641,6 @@ where
                 block_ticks,
                 _resource_packs,
                 &mut client_loaded,
-                true,
                 &mut composter_rng,
                 &mut bone_meal_rng,
                 &mut experience,

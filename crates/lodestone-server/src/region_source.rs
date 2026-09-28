@@ -1664,13 +1664,28 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
         if column.generation_stage() != crate::chunk::ChunkGenerationStage::Full {
             return false;
         }
+        let started = lodestone_time::Instant::now();
         let mut edits = self.state.edits.lock().expect("world edit lock poisoned");
+        let lock_elapsed = started.elapsed();
         edits.insert((cx, cz), column.clone());
+        let clone_elapsed = started.elapsed();
         self.state
             .dirty
             .lock()
             .expect("world dirty lock poisoned")
             .insert((cx, cz));
+        let total = started.elapsed();
+        if total >= std::time::Duration::from_millis(50) {
+            tracing::warn!(
+                target: "lodestone_server::stall",
+                cx,
+                cz,
+                lock_ms = lock_elapsed.as_millis(),
+                clone_ms = clone_elapsed.saturating_sub(lock_elapsed).as_millis(),
+                dirty_ms = total.saturating_sub(clone_elapsed).as_millis(),
+                "resident column persistence delayed",
+            );
+        }
         true
     }
 
