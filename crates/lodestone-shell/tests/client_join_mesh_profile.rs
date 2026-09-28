@@ -8,7 +8,7 @@ use std::time::Duration;
 use lodestone::config::{Config, Mode};
 use lodestone::gpu::RenderState;
 use lodestone::menu::loading::ConnectPhase;
-use lodestone::mesher::Meshed;
+use lodestone::mesher::{MeshBacklog, Meshed};
 use lodestone::net::NetClient;
 use lodestone::sim::Sim;
 use lodestone_controller::Action;
@@ -233,6 +233,9 @@ fn main() {
     let mut movement_steps = Vec::new();
     let mut movement_start_tick = None;
     let mut movement_end_tick = None;
+    let mut movement_stop_view = None;
+    let mut movement_stop_backlog: Option<MeshBacklog> = None;
+    let mut movement_settlement_tail = Vec::new();
     let mut server_tick_at_ack = None;
     let mut server_tick_at_move_start = None;
     let mut server_tick_at_move_end = None;
@@ -257,6 +260,8 @@ fn main() {
             let position = sim.player().position;
             movement_end_position = Some((position.x, position.z));
             movement_end_tick = Some(sim.tick_count());
+            movement_stop_view = sim.view_settlement_at_radius(radius);
+            movement_stop_backlog = Some(sim.mesh_backlog());
             server_tick_at_move_end = sim
                 .net()
                 .and_then(NetClient::integrated_tick_monitor)
@@ -402,10 +407,22 @@ fn main() {
                         movement_first_settled_view.get_or_insert(start.elapsed());
                     }
                     if let Some(stop) = movement_stopped
-                        && resident == expected
-                        && settled == expected
                     {
-                        movement_post_stop_settled.get_or_insert(stop.elapsed());
+                        if movement_settlement_tail.len() < 64 {
+                            let backlog = sim.mesh_backlog();
+                            movement_settlement_tail.push(serde_json::json!({
+                                "elapsed_ms": stop.elapsed().as_secs_f64() * 1000.0,
+                                "resident": resident,
+                                "settled": settled,
+                                "ready_columns": backlog.ready_columns,
+                                "waiting_columns": backlog.waiting_columns,
+                                "forced_columns": backlog.forced_columns,
+                                "pending_sections": backlog.pending_sections,
+                            }));
+                        }
+                        if resident == expected && settled == expected {
+                            movement_post_stop_settled.get_or_insert(stop.elapsed());
+                        }
                     }
                 }
             }
@@ -520,6 +537,18 @@ fn main() {
         "first_chunk_change_ms": ms(movement_first_chunk_change),
         "first_shifted_view_settled_ms": ms(movement_first_settled_view),
         "post_stop_view_settle_ms": ms(movement_post_stop_settled),
+        "view_at_stop": movement_stop_view.map(|(resident, settled, expected)| serde_json::json!({
+            "resident": resident,
+            "settled": settled,
+            "expected": expected,
+        })),
+        "mesh_backlog_at_stop": movement_stop_backlog.map(|backlog| serde_json::json!({
+            "ready_columns": backlog.ready_columns,
+            "waiting_columns": backlog.waiting_columns,
+            "forced_columns": backlog.forced_columns,
+            "pending_sections": backlog.pending_sections,
+        })),
+        "settlement_tail": movement_settlement_tail,
         "chunk_changes": movement_chunk_changes,
         "min_settled_columns": movement_min_settled.min(expected_visible_columns),
         "last_settled_columns": movement_last_settled,
@@ -556,7 +585,7 @@ fn main() {
         "input_to_present_ms": ms(probe.presented),
     }));
     let report = serde_json::json!({
-        "schema": "lodestone-client-join-mesh-profile-v10",
+        "schema": "lodestone-client-join-mesh-profile-v11",
         "seed": SEED,
         "target_size": [target_width, target_height],
         "visible_radius": radius,

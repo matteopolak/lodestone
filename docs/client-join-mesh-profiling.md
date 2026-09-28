@@ -69,6 +69,10 @@ chunk boundary; an unmoving player is not a valid streaming workload. Movement
 can overlap delivery of the outer render-distance ring. The input is released
 at the requested duration; any remaining time for the then-current view to
 settle is reported separately rather than counted as extra movement.
+The `view_at_stop` record separates missing columns from resident but unsettled
+columns. A bounded 100 ms settlement tail records ready/waiting columns and
+pending mesh sections through `Sim::mesh_backlog`, so a slow tail can be
+assigned to delivery, admission, worker work, or upload without per-packet logs.
 The native record also samples the integrated server's own tick clock and
 world-tick witness at acknowledgement, movement start/stop, and completion.
 `movement_tick_delta`, `movement_overrun_delta`, and the largest frame-sampled

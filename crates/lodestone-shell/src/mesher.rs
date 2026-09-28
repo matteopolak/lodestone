@@ -1244,6 +1244,14 @@ pub(crate) struct RelightWorkload {
 ///
 /// The worker pool is still a worker pool ([`MeshScheduler`]'s docs say why that
 /// matters). Systems here only enqueue and drain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MeshBacklog {
+    pub ready_columns: usize,
+    pub waiting_columns: usize,
+    pub forced_columns: usize,
+    pub pending_sections: usize,
+}
+
 #[derive(Resource, Debug)]
 pub struct TerrainMesh {
     /// The off-thread worker pool.
@@ -2116,6 +2124,16 @@ impl TerrainMesh {
         let meshes = self.scheduler.drain_frame();
         self.uploaded_sections.extend(meshes.iter().map(|m| m.key));
         meshes
+    }
+
+    #[must_use]
+    pub fn backlog(&self) -> MeshBacklog {
+        MeshBacklog {
+            ready_columns: self.dirty_columns.len(),
+            waiting_columns: self.pending_arrivals.len(),
+            forced_columns: self.forced_columns.len(),
+            pending_sections: self.scheduler.pending(),
+        }
     }
 
     /// Record the renderer hand-off for one completed mesh.
