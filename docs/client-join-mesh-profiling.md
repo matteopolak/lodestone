@@ -40,6 +40,15 @@ upload, and render p99/max values expose hitches that aggregate CPU totals hide.
 The initial square must not be mistaken for the full selected distance: a new
 world caps the loading screen at radius six while the outer view keeps streaming.
 
+For a radius-six, seed-4242 join at 1280×720, the 169 visible columns were
+resident at 5.66 s, but their meshes settled at 7.72 s. A stage trace placed
+the last radius-six delivery at 5.28 s and the last radius-seven halo delivery
+at 7.31 s on the server clock; the client settled roughly 25 ms after the halo
+arrived. The 56-column halo, not the per-frame mesh admission budget, explains
+the gap. Generation dominated each later ring: encoding and delivery followed
+the final generated column within about 10 ms. Check halo delivery before
+attributing a resident-to-settled delay to client meshing.
+
 In a paired native seed-4242 run at radius eight, a 1280×720 target, and 45
 seconds of movement, the second padding ring changed newly visible columns
 already presented on entry from 0/221 to 204/221. Median entry-to-presentation
