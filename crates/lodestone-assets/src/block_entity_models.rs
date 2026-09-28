@@ -372,6 +372,8 @@ fn only_face(index: usize) -> [bool; 6] {
 /// `entity::FACE_ORDER` index of the `North` face — see the module doc on why
 /// this is not `Direction as usize`.
 const FACE_NORTH: usize = 3;
+const FACE_DOWN: usize = 0;
+const FACE_UP: usize = 1;
 
 #[cfg(test)]
 mod tests {
@@ -988,8 +990,9 @@ mod tests {
     /// model this module has not tested before.
     #[test]
     fn decorated_pot_base_has_the_three_named_parts_and_real_geometry() {
+        let model = decorated_pot_base_model();
         assert_eq!(
-            part_names(&decorated_pot_base_model()),
+            part_names(&model),
             vec![
                 String::new(),
                 "neck".to_string(),
@@ -997,7 +1000,12 @@ mod tests {
                 "bottom".to_string(),
             ]
         );
-        let quads = crate::entity::bake_entity(&decorated_pot_base_model());
+        let parts = crate::entity::bake_entity_parts(&model);
+        assert_eq!(parts[2].quads.len(), 1);
+        assert_eq!(parts[2].quads[0].direction, Direction::Up);
+        assert_eq!(parts[3].quads.len(), 1);
+        assert_eq!(parts[3].quads[0].direction, Direction::Down);
+        let quads = crate::entity::bake_entity(&model);
         assert!(!quads.is_empty(), "the base baked no quads");
     }
 

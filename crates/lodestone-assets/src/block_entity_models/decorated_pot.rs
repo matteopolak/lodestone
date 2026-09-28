@@ -1,29 +1,18 @@
-use super::{CubeDef, EntityModelDef, FACE_NORTH, PartDef, PartPose, only_face};
+use super::{CubeDef, EntityModelDef, FACE_DOWN, FACE_NORTH, FACE_UP, PartDef, PartPose, only_face};
 
-/// The decorated pot's base sheet, 32×32 —
-/// vanilla's own decorated-pot-renderer base-layer construction declares a
-/// 32×32 mesh definition.
 const DECORATED_POT_BASE_SHEET: (u32, u32) = (32, 32);
 
-/// The decorated pot's side sheet, 16×16 —
-/// vanilla's own decorated-pot-renderer sides-layer construction declares a
-/// 16×16 mesh definition.
-/// One quad per model, not a full box — see [`decorated_pot_side_part`].
 const DECORATED_POT_SIDE_SHEET: (u32, u32) = (16, 16);
 
-/// The decorated pot's base — vanilla's own decorated-pot-renderer base-layer construction: the
-/// neck (two nested boxes, deflated then inflated) plus flat top/bottom
-/// planes sharing one cube. All three parts draw with the single
-/// `decorated_pot_base` sheet regardless of which sherds (if any) are
-/// stored, which is why this is one model rather than four.
-///
-/// `top`/`bottom` share vanilla's own top-bottom-plane cube unchanged (`texOffs(-14, 13)`,
-/// `addBox(0, 0, 0, 14, 0, 14)`, no face restriction — a real, if
-/// degenerate, six-face box, exactly as the jar authors it) and differ only
-/// in the pivot's `y`.
+/// One neck mesh and two outward-facing planes sharing the base sheet.
+/// The GPU pass is double-sided, so emitting both sides of a zero-height
+/// plane would put two faces at the same depth.
 #[must_use]
 pub fn decorated_pot_base_model() -> EntityModelDef {
-    let top_bottom_cube = || CubeDef::new([0.0, 0.0, 0.0], [14.0, 0.0, 14.0], [-14.0, 13.0]);
+    let plane = |face| CubeDef {
+        visible_faces: only_face(face),
+        ..CubeDef::new([0.0, 0.0, 0.0], [14.0, 0.0, 14.0], [-14.0, 13.0])
+    };
     let root = PartDef::new(PartPose::ZERO)
         .with_child(
             "neck",
@@ -40,11 +29,11 @@ pub fn decorated_pot_base_model() -> EntityModelDef {
         )
         .with_child(
             "top",
-            PartDef::new(PartPose::offset(1.0, 16.0, 1.0)).with_cube(top_bottom_cube()),
+            PartDef::new(PartPose::offset(1.0, 16.0, 1.0)).with_cube(plane(FACE_UP)),
         )
         .with_child(
             "bottom",
-            PartDef::new(PartPose::offset(1.0, 0.0, 1.0)).with_cube(top_bottom_cube()),
+            PartDef::new(PartPose::offset(1.0, 0.0, 1.0)).with_cube(plane(FACE_DOWN)),
         );
     EntityModelDef {
         texture_width: DECORATED_POT_BASE_SHEET.0,
