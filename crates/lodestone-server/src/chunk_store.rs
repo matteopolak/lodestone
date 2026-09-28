@@ -6599,6 +6599,24 @@ impl<S: ChunkSource> ChunkStore<S> {
         }
     }
 
+    pub(crate) fn try_resident_column_presence(&self, cx: i32, cz: i32) -> TryResident<()> {
+        let Some(_lease) = self.write_gates.try_acquire_read((cx, cz)) else {
+            return TryResident::Busy;
+        };
+        let cache = match self.cache.try_lock() {
+            Ok(cache) => cache,
+            Err(std::sync::TryLockError::WouldBlock) => return TryResident::Busy,
+            Err(std::sync::TryLockError::Poisoned(_)) => panic!("chunk store lock poisoned"),
+        };
+        if cache.columns.contains_key(&(cx, cz)) {
+            return TryResident::Present(());
+        }
+        drop(cache);
+        self.source
+            .resident_column(cx, cz)
+            .map_or(TryResident::Absent, |_| TryResident::Present(()))
+    }
+
     /// Reads one resident block state without waiting or starting generation.
     ///
     /// This returns a state snapshot rather than a borrowed cell because the
@@ -7056,6 +7074,14 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
         cz: i32,
     ) -> Option<crate::chunk_store::TryResident<ChunkColumn>> {
         Some(ChunkStore::try_resident_column(self, cx, cz))
+    }
+
+    fn try_resident_column_presence(
+        &self,
+        cx: i32,
+        cz: i32,
+    ) -> Option<crate::chunk_store::TryResident<()>> {
+        Some(ChunkStore::try_resident_column_presence(self, cx, cz))
     }
 
     fn try_resident_block_state_id(
@@ -8727,6 +8753,7 @@ mod tests {
             !store.is_column_resident(0, 0),
             "a column nothing has touched must report not-resident"
         );
+        assert_eq!(store.try_resident_column_presence(0, 0), TryResident::Absent);
         assert_eq!(
             calls.load(Ordering::Relaxed),
             0,
@@ -8736,6 +8763,20 @@ mod tests {
         );
 
         let _ = store.column(0, 0);
+        let stamp_before = store
+            .cache
+            .lock()
+            .expect("chunk store lock poisoned")
+            .columns[&(0, 0)]
+            .last_used;
+        assert_eq!(store.try_resident_column_presence(0, 0), TryResident::Present(()));
+        let stamp_after = store
+            .cache
+            .lock()
+            .expect("chunk store lock poisoned")
+            .columns[&(0, 0)]
+            .last_used;
+        assert_eq!(stamp_after, stamp_before);
         assert!(
             store.is_column_resident(0, 0),
             "a column just generated and cached must report resident"
@@ -8810,6 +8851,7 @@ mod tests {
                 matches!(store.as_ref().try_resident_column(0, 0), TryResident::Busy),
                 "a resident snapshot must report the held generation gate instead of waiting"
             );
+            assert_eq!(store.as_ref().try_resident_column_presence(0, 0), TryResident::Busy);
             assert!(
                 matches!(
                     store.as_ref().try_resident_block_state_id(0, 0, 0),
@@ -8827,6 +8869,10 @@ mod tests {
                 erased.try_resident_column(0, 0),
                 Some(TryResident::Busy)
             ));
+            assert_eq!(
+                erased.try_resident_column_presence(0, 0),
+                Some(TryResident::Busy)
+            );
             assert!(matches!(
                 erased.try_resident_block_state_id(0, 0, 0),
                 Some(TryResident::Busy)

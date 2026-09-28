@@ -311,7 +311,13 @@ fn resident_tick_footprint<S: ChunkSource + ?Sized>(
     let min_cz = (z - horizontal_radius).div_euclid(16);
     let max_cz = (z + horizontal_radius).div_euclid(16);
     (min_cx..=max_cx).all(|cx| {
-        (min_cz..=max_cz).all(|cz| resident_tick_column(source, cx, cz).is_some())
+        (min_cz..=max_cz).all(|cz| match source.try_resident_column_presence(cx, cz) {
+            Some(crate::chunk_store::TryResident::Present(())) => true,
+            Some(crate::chunk_store::TryResident::Busy | crate::chunk_store::TryResident::Absent) => {
+                false
+            }
+            None => resident_tick_column(source, cx, cz).is_some(),
+        })
     })
 }
 
