@@ -1252,6 +1252,17 @@ pub struct MeshBacklog {
     pub pending_sections: usize,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct MeshWorkCounters {
+    pub column_arrivals: usize,
+    pub redecoded_column_arrivals: usize,
+    pub column_snapshot_sections: usize,
+    pub neighbor_dirty_admissions: usize,
+    pub light_patch_calls: usize,
+    pub light_patch_invalidations: usize,
+    pub light_section_snapshots: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MeshColumnStatus {
     pub chunk: (i32, i32),
@@ -1351,6 +1362,7 @@ pub struct TerrainMesh {
     /// [`lodestone_world::Relit::dirty_sections`] reports — converted to a
     /// [`SectionKey`] at drain time, when the store's extent is known.
     pub light_dirty_sections: BTreeSet<(i32, i32, i32)>,
+    work_counters: MeshWorkCounters,
     /// Work completed by [`relight_changed_blocks`] since the app sampled it.
     relight_workload: RelightWorkload,
     /// Sections whose geometry vanished (all-air after an edit, or a column that
@@ -1441,6 +1453,7 @@ impl TerrainMesh {
             forced_columns: BTreeSet::new(),
             departed: HashSet::new(),
             light_dirty_sections: BTreeSet::new(),
+            work_counters: MeshWorkCounters::default(),
             relight_workload: RelightWorkload::default(),
             pending_removals: Vec::new(),
             rendered_sections: HashSet::new(),
@@ -1550,6 +1563,12 @@ impl TerrainMesh {
     /// an arrival wait without taking the snapshot lock or allocating doomed
     /// section snapshots.
     pub fn queue_column_arrival(&mut self, cx: i32, cz: i32) {
+        self.work_counters.column_arrivals += 1;
+        self.work_counters.redecoded_column_arrivals += usize::from(
+            self.pending_arrivals.contains(&(cx, cz))
+                || self.provisional_columns.contains(&(cx, cz))
+                || self.built_columns.contains(&(cx, cz)),
+        );
         self.reset_column_readiness(cx, cz);
         // A re-decoded column may still have an older boundary-heal request.
         // Admission owns the readiness transition, so remove that stale ready
@@ -1830,6 +1849,7 @@ impl TerrainMesh {
 
         let mut meshed_any = false;
         let mut deferred_any = false;
+        self.work_counters.column_snapshot_sections += jobs.len();
         for (key, outcome) in jobs {
             deferred_any |= matches!(outcome, SnapshotOutcome::Deferred(_));
             meshed_any |= self.route(key, outcome, force);
@@ -1895,6 +1915,7 @@ impl TerrainMesh {
         }
         let base_si = extent.min_y.div_euclid(16);
         let before = self.light_dirty_sections.len();
+        self.work_counters.light_patch_calls += 1;
         for &light_si in light_sections {
             if light_si >= extent.section_count.saturating_add(2) {
                 continue;
@@ -1912,7 +1933,9 @@ impl TerrainMesh {
                 }
             }
         }
-        self.light_dirty_sections.len() - before
+        let queued = self.light_dirty_sections.len() - before;
+        self.work_counters.light_patch_invalidations += queued;
+        queued
     }
 
     #[cfg(test)]
@@ -1955,7 +1978,8 @@ impl TerrainMesh {
                     }
                     self.provisional_columns.remove(&(nx, nz));
                 }
-                self.dirty_columns.insert((nx, nz));
+                self.work_counters.neighbor_dirty_admissions +=
+                    usize::from(self.dirty_columns.insert((nx, nz)));
             }
         }
     }
@@ -2154,6 +2178,11 @@ impl TerrainMesh {
     }
 
     #[must_use]
+    pub fn work_counters(&self) -> MeshWorkCounters {
+        self.work_counters
+    }
+
+    #[must_use]
     pub fn column_status(&self, store: &ChunkWorld, cx: i32, cz: i32) -> Option<MeshColumnStatus> {
         let extent = store.extent()?;
         if !store.contains_column(cx, cz) {
@@ -2294,6 +2323,7 @@ impl TerrainMesh {
         self.provisional_columns.clear();
         self.departed.clear();
         self.light_dirty_sections.clear();
+        self.work_counters = MeshWorkCounters::default();
         self.drops = 0;
         self.non_air_empty_columns = 0;
         self.id_space_mismatch_columns = 0;
@@ -2621,6 +2651,7 @@ pub fn relight_changed_blocks(
             min_y: extent.min_y,
         };
         meshed += 1;
+        terrain.work_counters.light_section_snapshots += 1;
         if (-1..=1).any(|dx| {
             (-1..=1).any(|dz| !store.contains_column(cx + dx, cz + dz))
         }) {

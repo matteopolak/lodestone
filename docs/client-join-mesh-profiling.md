@@ -93,7 +93,10 @@ exclude the preloaded group. The 100 ms polling interval adds up to one sample
 of uncertainty. These timings separate stream delivery from client meshing
 without relying on a global pending-work count. Unique and repeat section
 upload counts show whether the renderer is receiving replacement meshes during
-the same join, not just first-time geometry.
+the same join, not just first-time geometry. `mesh_work` counts source-column
+admissions, full-column snapshots, neighbor-heal admissions, and light-patch
+invalidations separately, so repeated uploads can be assigned to the path that
+submitted them.
 The native record also samples the integrated server's own tick clock and
 world-tick witness at acknowledgement, movement start/stop, and completion.
 `movement_tick_delta`, `movement_overrun_delta`, and the largest frame-sampled
