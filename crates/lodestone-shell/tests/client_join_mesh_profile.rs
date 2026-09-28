@@ -50,9 +50,13 @@ impl EditProbe {
 struct ColumnTimeline {
     entered_at: Instant,
     loaded_at: Option<Instant>,
+    halo_ready_at: Option<Instant>,
+    first_mesh_at: Option<Instant>,
     presented_at: Option<Instant>,
     preloaded: bool,
     prepresented: bool,
+    waiting_for_halo_on_entry: bool,
+    missing_halo_on_entry: bool,
 }
 
 #[derive(Default)]
@@ -77,16 +81,38 @@ impl MovementColumnProbe {
                 }
                 let preloaded = loaded.contains(&(x, z));
                 let prepresented = preloaded && sim.resident_column_presented(x, z) == Some(true);
+                let status = preloaded.then(|| sim.mesh_column_status(x, z)).flatten();
+                let halo_ready = status.as_ref().is_some_and(|s| s.absent_halo.is_empty());
                 self.columns.entry((x, z)).or_insert(ColumnTimeline {
                     entered_at,
                     loaded_at: preloaded.then_some(entered_at),
+                    halo_ready_at: halo_ready.then_some(entered_at),
+                    first_mesh_at: None,
                     presented_at: prepresented.then_some(entered_at),
                     preloaded,
                     prepresented,
+                    waiting_for_halo_on_entry: status.as_ref().is_some_and(|s| s.waiting_for_halo),
+                    missing_halo_on_entry: status.as_ref().is_some_and(|s| !s.absent_halo.is_empty()),
                 });
             }
         }
         self.last_poll = None;
+    }
+
+    fn observe_halos(&mut self, sim: &Sim) {
+        for (&(x, z), timeline) in &mut self.columns {
+            if timeline.halo_ready_at.is_none()
+                && sim.mesh_column_status(x, z).is_some_and(|s| s.absent_halo.is_empty())
+            {
+                timeline.halo_ready_at = Some(Instant::now());
+            }
+        }
+    }
+
+    fn mesh_result(&mut self, cx: i32, cz: i32) {
+        if let Some(timeline) = self.columns.get_mut(&(cx, cz)) {
+            timeline.first_mesh_at.get_or_insert_with(Instant::now);
+        }
     }
 
     fn observe(&mut self, sim: &Sim) {
@@ -121,12 +147,19 @@ impl MovementColumnProbe {
         let mut enter_to_load = Vec::new();
         let mut load_to_present = Vec::new();
         let mut enter_to_present = Vec::new();
+        let mut enter_to_halo = Vec::new();
+        let mut halo_to_first_mesh = Vec::new();
+        let mut first_mesh_to_present = Vec::new();
         let mut visible = 0;
         let mut visible_loaded = 0;
         let mut visible_presented = 0;
         let mut presented_during_movement = 0;
         let mut preloaded = 0;
         let mut prepresented = 0;
+        let mut waiting_for_halo_on_entry = 0;
+        let mut missing_halo_on_entry = 0;
+        let mut halo_ready = 0;
+        let mut first_mesh_received = 0;
         for (&(x, z), timeline) in &self.columns {
             if (x - center.0).abs() > radius || (z - center.1).abs() > radius {
                 continue;
@@ -134,6 +167,18 @@ impl MovementColumnProbe {
             visible += 1;
             preloaded += usize::from(timeline.preloaded);
             prepresented += usize::from(timeline.prepresented);
+            waiting_for_halo_on_entry += usize::from(timeline.waiting_for_halo_on_entry);
+            missing_halo_on_entry += usize::from(timeline.missing_halo_on_entry);
+            if let Some(halo) = timeline.halo_ready_at {
+                halo_ready += 1;
+                enter_to_halo.push(halo.duration_since(timeline.entered_at));
+            }
+            if let Some(first_mesh) = timeline.first_mesh_at {
+                first_mesh_received += 1;
+                if let Some(halo) = timeline.halo_ready_at && first_mesh >= halo {
+                    halo_to_first_mesh.push(first_mesh.duration_since(halo));
+                }
+            }
             if let Some(loaded) = timeline.loaded_at {
                 visible_loaded += 1;
                 if !timeline.preloaded {
@@ -143,6 +188,9 @@ impl MovementColumnProbe {
             if let Some(presented) = timeline.presented_at {
                 visible_presented += 1;
                 enter_to_present.push(presented.duration_since(timeline.entered_at));
+                if let Some(first_mesh) = timeline.first_mesh_at {
+                    first_mesh_to_present.push(presented.duration_since(first_mesh));
+                }
                 if let Some(loaded) = timeline.loaded_at && !timeline.preloaded {
                     load_to_present.push(presented.duration_since(loaded));
                 }
@@ -161,7 +209,17 @@ impl MovementColumnProbe {
             "still_visible_presented": visible_presented,
             "preloaded_on_entry": preloaded,
             "prepresented_on_entry": prepresented,
+            "waiting_for_halo_on_entry": waiting_for_halo_on_entry,
+            "missing_halo_on_entry": missing_halo_on_entry,
+            "halo_ready": halo_ready,
+            "first_mesh_received": first_mesh_received,
             "presented_during_movement": presented_during_movement,
+            "enter_to_halo_p50_ms": p(&enter_to_halo, 50),
+            "enter_to_halo_p95_ms": p(&enter_to_halo, 95),
+            "halo_to_first_mesh_p50_ms": p(&halo_to_first_mesh, 50),
+            "halo_to_first_mesh_p95_ms": p(&halo_to_first_mesh, 95),
+            "first_mesh_to_present_p50_ms": p(&first_mesh_to_present, 50),
+            "first_mesh_to_present_p95_ms": p(&first_mesh_to_present, 95),
             "enter_to_load_p50_ms": p(&enter_to_load, 50),
             "enter_to_load_p95_ms": p(&enter_to_load, 95),
             "load_to_present_p50_ms": p(&load_to_present, 50),
@@ -493,12 +551,16 @@ fn main() {
             all_server_columns.get_or_insert(started.elapsed());
         }
         max_pending = max_pending.max(sim.pending_meshes());
+        if movement_started.is_some() {
+            movement_columns.observe_halos(&sim);
+        }
         let mesh_started = Instant::now();
         let meshes = sim.drain_meshes();
         mesh_drain_ns += mesh_started.elapsed().as_nanos();
         let upload_started = Instant::now();
         let mut upload_count = 0;
         for Meshed { key, mesh } in meshes {
+            movement_columns.mesh_result(key.cx, key.cz);
             first_mesh.get_or_insert(started.elapsed());
             quad_count += mesh.quad_count();
             mesh_count += 1;
@@ -781,7 +843,7 @@ fn main() {
         "input_to_present_ms": ms(probe.presented),
     }));
     let report = serde_json::json!({
-        "schema": "lodestone-client-join-mesh-profile-v16",
+        "schema": "lodestone-client-join-mesh-profile-v17",
         "seed": SEED,
         "target_size": [target_width, target_height],
         "visible_radius": radius,

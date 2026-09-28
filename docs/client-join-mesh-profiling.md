@@ -97,6 +97,11 @@ the same join, not just first-time geometry. `mesh_work` counts source-column
 admissions, full-column snapshots, neighbor-heal admissions, and light-patch
 invalidations separately, so repeated uploads can be assigned to the path that
 submitted them.
+The movement timeline also samples each new column's 3×3 residency halo before
+draining mesh results, then records its first returned section mesh and full
+presentation. This distinguishes a column waiting for its outer dependency
+ring from one queued behind worker or upload work. The halo sample is frame-
+resolution; loaded and presented state still use the bounded 100 ms poll.
 The native record also samples the integrated server's own tick clock and
 world-tick witness at acknowledgement, movement start/stop, and completion.
 `movement_tick_delta`, `movement_overrun_delta`, and the largest frame-sampled
