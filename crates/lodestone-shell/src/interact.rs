@@ -72,6 +72,7 @@ use lodestone_ecs::app::{App, Plugin};
 use lodestone_ecs::ecs::prelude::{Commands, Entity, Query, Res, ResMut, With};
 use lodestone_ecs::ecs::resource::Resource;
 use lodestone_ecs::ecs::schedule::IntoScheduleConfigs;
+use lodestone_ecs::ecs::system::SystemParam;
 use lodestone_client::{BlockPos, ClientAction, ClientHandle, Hand, Rotation};
 use lodestone_data::block_states::StateId;
 use lodestone_ecs::entity::Attributes;
@@ -86,8 +87,11 @@ use lodestone_ecs::{ChunkWorld, ChunkWorldWrite, FrameClock, GameTick, TickSet, 
 use lodestone_entity::attribute::attribute_value;
 use lodestone_game::mining::Mining;
 use lodestone_game::placement::{Placement, UseOnContext, UseOnDecision};
-use lodestone_model::{BlockFace, BlockStateRef, PlayerCommand};
+use lodestone_model::{
+    BlockActionKind, BlockFace, BlockStateRef, PlayerCommand, PredictionSequence,
+};
 use lodestone_physics::Vec3d;
+use lodestone_world::{BlockEntity, ChunkPos};
 
 use crate::blocks::id;
 use crate::mesher::TerrainMesh;
@@ -334,6 +338,57 @@ pub struct MiningPredictor(pub Mining);
 /// counter.
 #[derive(Resource, Debug, Default)]
 pub struct PlacementPredictor(pub Placement);
+
+#[derive(Debug, Clone)]
+pub struct PendingBreak {
+    pub sequence: PredictionSequence,
+    pub pos: BlockPos,
+    pub state: u32,
+    pub block_entity: Option<BlockEntity>,
+    pub server_state: Option<u32>,
+}
+
+#[derive(Resource, Debug, Default)]
+pub struct BreakPredictions(pub Vec<PendingBreak>);
+
+const MAX_PENDING_BREAKS: usize = 128;
+
+#[derive(Debug, SystemParam)]
+pub struct MiningPredictionState<'w> {
+    mining: ResMut<'w, MiningPredictor>,
+    placement: ResMut<'w, PlacementPredictor>,
+    breaks: ResMut<'w, BreakPredictions>,
+}
+
+impl BreakPredictions {
+    pub fn record(&mut self, prediction: PendingBreak) {
+        self.0.retain(|pending| pending.pos != prediction.pos);
+        if self.0.len() == MAX_PENDING_BREAKS {
+            self.0.remove(0);
+        }
+        self.0.push(prediction);
+    }
+
+    pub fn observe(&mut self, pos: BlockPos, state: u32) {
+        if let Some(pending) = self.0.iter_mut().find(|pending| pending.pos == pos) {
+            pending.server_state = Some(state);
+        }
+    }
+
+    pub fn acknowledge(&mut self, sequence: PredictionSequence) -> Vec<PendingBreak> {
+        let mut restore = Vec::new();
+        self.0.retain(|pending| {
+            if !pending.sequence.is_acknowledged_by(sequence) {
+                return true;
+            }
+            if pending.server_state.is_none_or(|state| state == pending.state) {
+                restore.push(pending.clone());
+            }
+            false
+        });
+        restore
+    }
+}
 
 /// The vanilla particle simulation.
 ///
@@ -693,6 +748,37 @@ mod mining_break_input_tests {
     use super::*;
 
     #[test]
+    fn acknowledged_break_restores_only_without_a_different_server_state() {
+        let pos = BlockPos::new(2, 70, -3);
+        let original = BlockEntity {
+            rel_x: 2,
+            rel_z: 13,
+            y: 70,
+            type_id: 4,
+            nbt: lodestone_core::Nbt::End,
+        };
+        let pending = PendingBreak {
+            sequence: PredictionSequence::new(2),
+            pos,
+            state: 17,
+            block_entity: Some(original.clone()),
+            server_state: None,
+        };
+        let mut predictions = BreakPredictions::default();
+        predictions.record(pending.clone());
+        assert!(predictions.acknowledge(PredictionSequence::new(1)).is_empty());
+        assert_eq!(predictions.acknowledge(pending.sequence)[0].block_entity, Some(original));
+
+        predictions.record(pending.clone());
+        predictions.observe(pos, id::AIR);
+        assert!(predictions.acknowledge(pending.sequence).is_empty());
+
+        predictions.record(pending);
+        predictions.observe(pos, 17);
+        assert_eq!(predictions.acknowledge(PredictionSequence::new(2)).len(), 1);
+    }
+
+    #[test]
     fn server_attributes_reach_break_timing_with_registry_defaults() {
         let key = |path: &str| {
             lodestone_model::Identifier::new("minecraft", path).expect("valid attribute id")
@@ -796,7 +882,7 @@ pub fn drive_mining(
     write: Res<ChunkWorldWrite>,
     clock: Res<FrameClock>,
     mut terrain: ResMut<TerrainMesh>,
-    mut mining: ResMut<MiningPredictor>,
+    prediction: MiningPredictionState,
     mut particles: ResMut<ParticleSim>,
     mut audio: ResMut<AudioEngine>,
     mut queue: ResMut<ActionQueue>,
@@ -819,6 +905,11 @@ pub fn drive_mining(
         With<LocalPlayer>,
     >,
 ) {
+    let MiningPredictionState {
+        mut mining,
+        mut placement,
+        breaks: mut break_predictions,
+    } = prediction;
     if !(egress.in_world && egress.live) {
         return;
     }
@@ -987,12 +1078,14 @@ pub fn drive_mining(
         }
     }
 
+    mining.0.set_sequence(placement.0.sequence());
     let was_mining = mining.0.target().is_some();
     let mut actions = if fresh_press {
         mining.0.start(pos, face, &inputs, None)
     } else {
         mining.0.continue_(pos, face, &inputs, None)
     };
+    placement.0.set_sequence(mining.0.sequence());
     let is_mining_now = mining.0.target().is_some();
     if (was_mining || is_mining_now)
         && actions
@@ -1009,83 +1102,6 @@ pub fn drive_mining(
             particle_face(face),
         );
     }
-    // The debris burst at the moment a block actually breaks.
-    // Keyed on **destruction**, not on the `StopDestroy` packet.
-    //
-    // This is the local **prediction** half of vanilla's own
-    // client-side destroy-block handling:
-    // it clears the block and throws the destroy-effect debris synchronously
-    // on the acting client, without waiting for a server round trip. The
-    // effect hangs off that method, not off any packet — destroy-block calls
-    // its own player-will-destroy hook → spawn-destroy-particles →
-    // its own level-event dispatch with id 2001, and on the client-side level that
-    // dispatches **locally** into the level-event handler's `case 2001`
-    // (its own add-destroy-block-effect + the break sound). The `player` argument is why
-    // the server's copy of the same call does not double it: the server-side
-    // level
-    // broadcasts a `levelEvent` to everyone *except* that player.
-    //
-    // The destruction result is the canonical trigger rather than a scan of
-    // `actions` for `BlockActionKind::StopDestroy`, which an **instant break
-    // never takes**.
-    // `Mining::start`'s `progress_per_tick() >= 1.0` branch emits
-    // `StartDestroy` and nothing more, because the block is already gone, so
-    // grass, saplings and flowers threw no debris at all while stone did
-    // `Mining::take_destroyed` is the funnel:
-    // both `start`'s instant-break branch and `continue_`'s progress-reached-1.0
-    // branch latch it, so keying on it removes the class instead of
-    // special-casing one-shot blocks.
-    //
-    // The server-driven `NetUpdate::BlockDestroyed` arm (`Sim::step`'s
-    // live-update match, fed by `ClientboundLevelEventPacket` id `2001`)
-    // structurally **never fires for our own break**:
-    // vanilla's own server-side player-game-mode destroy-block (the server's
-    // handler for a player's own break) calls
-    // `this.level.removeBlock(pos, false)` — a plain block-state write with no
-    // `levelEvent` call anywhere in it. The `2001` particle event instead lives
-    // in the *separate* server-side destroy-block method
-    // (its own level-event call with id 2001), which is what a
-    // cascading break (a torch losing support, fire, an explosion) goes through
-    // instead — and that call broadcasts to **every** nearby player
-    // unconditionally, our own client included, which is exactly the
-    // "cascaded breaks already showed particles, my own break never did"
-    // asymmetry. There is no player-exclusion filter to rely
-    // on; the two break paths are simply different methods, and only one of
-    // them ever touches `levelEvent` at all.
-    //
-    // No double-burst risk from adding this: our own break structurally cannot
-    // reach the `levelEvent`/`2001` path in the first place, so this predicted
-    // emit and a `NetUpdate::BlockDestroyed` for the *same* break can never
-    // both fire. A **mispredicted** break (the server rejects the dig) is a
-    // pre-existing, unrelated gap — nothing currently rolls back a
-    // wrongly-predicted client-side block edit either — and is no worse here
-    // than it already is for the progressive mining chips a few lines above,
-    // which predict exactly as eagerly.
-    //
-    // # The local block-edit prediction
-    //
-    // Vanilla's own client-side destroy-block does not just spawn debris — it
-    // first sets the
-    // block to air *locally, synchronously*
-    // (`level.setBlock(pos, fluidState.createLegacyBlock(), 11)`),
-    // before any server round trip. This shell
-    // The predictor writes the actual block state locally instead of waiting
-    // for the server's `BLOCK_UPDATE` ack. Writing the state here — through the same
-    // [`write_predicted_block`] + [`crate::mesher::TerrainMesh::remesh_around`]
-    // pair [`drive_placement`] uses for its own predicted edit — closes that
-    // gap: the cell reads as air, and the mesh reflects it, on the exact tick
-    // [`Mining::take_destroyed`] fires, with no wait for the server.
-    //
-    // A stray re-latch on the *same* target the very next tick cannot happen
-    // regardless of this write: both destroy paths in [`Mining`] arm its 5-tick
-    // `delay` immediately (`start`'s instant-break branch and `continue_`'s
-    // progress-reached-`1.0` branch both do), and `continue_` checks that
-    // cooldown **before** it ever reads the target's block state — see
-    // `Mining::continue_`'s own docs. This write's job is narrower: making the
-    // *visible* result agree with the server's eventual one immediately,
-    // rather than only once the ack round trip completes. A mispredicted break
-    // (the server rejects the dig) still has no rollback — the same accepted
-    // gap [`drive_placement`]'s predicted write carries, and no worse here.
     if let Some(destroyed) = mining.0.take_destroyed() {
         // `hit.block` rather than the latched `destroyed` position: they are
         // the same cell (`pos` is built from `hit.block` above and is what
@@ -1097,6 +1113,33 @@ pub fn drive_mining(
             "Mining::take_destroyed must name the cell drive_mining just aimed \
              at, or this write lands on the wrong block"
         );
+        if let Some(sequence) = actions.iter().rev().find_map(|action| match action {
+            ClientAction::BlockAction {
+                action: BlockActionKind::StartDestroy | BlockActionKind::StopDestroy,
+                sequence,
+                ..
+            } => Some(PredictionSequence::from_wire(*sequence)),
+            _ => None,
+        }) {
+            let block_entity = chunk_world
+                .read()
+                .get(ChunkPos::from_block(hit.block[0], hit.block[2]))
+                .and_then(|chunk| {
+                    chunk.block_entities.iter().find(|entity| {
+                        entity.rel_x == (hit.block[0] & 15) as u8
+                            && entity.rel_z == (hit.block[2] & 15) as u8
+                            && i32::from(entity.y) == hit.block[1]
+                    })
+                })
+                .cloned();
+            break_predictions.record(PendingBreak {
+                sequence,
+                pos,
+                state: id_value,
+                block_entity,
+                server_state: None,
+            });
+        }
         {
             let mut world = write.write();
             write_predicted_block(&mut *world, hit.block, id::AIR);
@@ -1474,6 +1517,7 @@ impl Plugin for InteractPlugin {
         app.init_resource::<UsingItem>();
         app.init_resource::<MiningPredictor>();
         app.init_resource::<PlacementPredictor>();
+        app.init_resource::<BreakPredictions>();
         app.init_resource::<NetHandle>();
         app.init_resource::<VersionData>();
         add_presentation_systems(app.world_mut());

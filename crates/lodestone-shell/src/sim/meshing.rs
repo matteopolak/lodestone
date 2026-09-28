@@ -426,6 +426,84 @@ impl Sim {
         });
     }
 
+    pub(crate) fn observe_break_updates(&mut self, sx: i32, sy: i32, sz: i32, blocks: &[[u8; 3]]) {
+        let pending: Vec<_> = self.read(|w| {
+            w.resource::<BreakPredictions>()
+                .0
+                .iter()
+                .filter(|prediction| {
+                    prediction.pos.x >> 4 == sx
+                        && prediction.pos.y >> 4 == sy
+                        && prediction.pos.z >> 4 == sz
+                })
+                .map(|prediction| prediction.pos)
+                .collect()
+        });
+        if pending.is_empty() {
+            return;
+        }
+        let store = self.read(|w| w.resource::<ChunkWorld>().clone());
+        let world = store.read();
+        let updates: Vec<_> = pending
+            .into_iter()
+            .filter(|pos| {
+                blocks.iter().any(|&[x, y, z]| {
+                    pos.x & 15 == i32::from(x)
+                        && pos.y & 15 == i32::from(y)
+                        && pos.z & 15 == i32::from(z)
+                })
+            })
+            .filter_map(|pos| {
+                world
+                    .block_state_at(pos.x, pos.y, pos.z)
+                    .map(|state| (pos, state))
+            })
+            .collect();
+        drop(world);
+        self.write(|w| {
+            let mut predictions = w.resource_mut::<BreakPredictions>();
+            for (pos, state) in updates {
+                predictions.observe(pos, state);
+            }
+        });
+    }
+
+    pub(crate) fn settle_break_predictions(
+        &mut self,
+        sequence: lodestone_model::PredictionSequence,
+    ) {
+        let restore = self.write(|w| w.resource_mut::<BreakPredictions>().acknowledge(sequence));
+        if restore.is_empty() {
+            return;
+        }
+        let store = self.read(|w| w.resource::<ChunkWorldWrite>().clone());
+        {
+            let mut world = store.write();
+            for prediction in &restore {
+                let pos = prediction.pos;
+                if world.block_state_at(pos.x, pos.y, pos.z) != Some(prediction.state) {
+                    write_predicted_block(
+                        &mut *world,
+                        [pos.x, pos.y, pos.z],
+                        prediction.state,
+                    );
+                }
+                if let Some(entity) = &prediction.block_entity {
+                    world.set_block_entity(
+                        pos.x,
+                        pos.y,
+                        pos.z,
+                        entity.type_id,
+                        entity.nbt.clone(),
+                    );
+                }
+            }
+        }
+        for prediction in restore {
+            self.remesh_around([prediction.pos.x, prediction.pos.y, prediction.pos.z]);
+        }
+    }
+
     /// Settle any placement prediction the server has just overwritten.
     ///
     /// [`NetUpdate::SectionBlocks`] is the shell's view of `BLOCK_UPDATE` /

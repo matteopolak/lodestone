@@ -56,7 +56,10 @@
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-use lodestone::interact::{AttackPresses, Attacking, MiningPredictor, NetHandle, ParticleSim, RayTarget};
+use lodestone::interact::{
+    AttackPresses, Attacking, BreakPredictions, MiningPredictor, NetHandle, ParticleSim,
+    PlacementPredictor, RayTarget,
+};
 use lodestone::mesher::{MeshScheduler, TerrainMesh};
 use lodestone::particles::Particles;
 use lodestone::raycast::RayHit;
@@ -402,6 +405,8 @@ fn build_resources(world: &mut EcsWorld, version: OneBlockVersion) {
     world.insert_resource(AttackPresses::default());
     world.insert_resource(RayTarget(Some(RayHit::face_center(TARGET, [0, 1, 0]))));
     world.insert_resource(MiningPredictor::default());
+    world.insert_resource(PlacementPredictor::default());
+    world.insert_resource(BreakPredictions::default());
     world.insert_resource(ParticleSim(Particles::new(None)));
     world.insert_resource(ActionQueue::default());
     world.insert_resource(VersionData(Some(Box::new(version))));

@@ -530,6 +530,15 @@ impl Placement {
         &self.pending
     }
 
+    #[must_use]
+    pub fn sequence(&self) -> PredictionSequence {
+        self.next_sequence
+    }
+
+    pub fn set_sequence(&mut self, sequence: PredictionSequence) {
+        self.next_sequence = sequence;
+    }
+
     fn take_sequence(&mut self) -> PredictionSequence {
         // Vanilla's `BlockStatePredictionHandler` pre-increments, so the first
         // prediction is sequence 1.
