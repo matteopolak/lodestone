@@ -492,6 +492,7 @@ impl RenderState {
         // through three different pipelines, matching vanilla's own
         // `TEXT_BACKGROUND`/`TEXT_POLYGON_OFFSET`/`TEXT_*_SEE_THROUGH` split.
         let display_text_counts = self.display_text.prepare(
+            device,
             queue,
             &view_proj,
             &self.display_draws,
@@ -1522,7 +1523,7 @@ impl RenderState {
                 multiview_mask: None,
             });
             self.sign_text.draw(&mut pass, sign_text_count);
-            self.display_text.draw(&mut pass, display_text_counts);
+            self.display_text.draw(&mut pass, &display_text_counts);
         }
 
         {

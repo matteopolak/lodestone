@@ -293,6 +293,8 @@ use lodestone_render::display::{
 use lodestone_render::display::{BillboardMode, DisplayTransformation};
 use lodestone_render::sign::TEXT_LINE_HEIGHT;
 use lodestone_render::{Camera, DEPTH_COMPARE_NEARER_OR_EQUAL, DEPTH_FORMAT};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::display_entities::{DisplayDraw, TEXT_DISPLAY_TYPE_PATH};
 
@@ -306,9 +308,12 @@ struct DisplayTextVertex {
     color: [f32; 4],
 }
 
-/// Fixed vertex capacity, same fixed-buffer idiom as
-/// [`super::nametag::MAX_NAME_TAG_VERTICES`]/[`super::sign_text::MAX_SIGN_TEXT_VERTICES`].
-const MAX_DISPLAY_TEXT_VERTICES: usize = 40_000;
+const INITIAL_DISPLAY_TEXT_VERTICES: usize = 40_000;
+static DIAGNOSTIC_FRAME: AtomicU32 = AtomicU32::new(0);
+
+fn capacity_for_demand(current: usize, demand: usize) -> usize {
+    if demand > current { demand.next_power_of_two() } else { current }
+}
 
 /// `Display.TextDisplay.FLAG_SHADOW` — draw each ink rect twice, the first
 /// copy offset by one font pixel and dimmed to a quarter, the way vanilla's
@@ -398,6 +403,12 @@ fn resolved_background_argb(draw: &DisplayDraw) -> i32 {
     }
 }
 
+#[derive(Debug)]
+struct DisplayTextStorage {
+    buffer: wgpu::Buffer,
+    capacity: usize,
+}
+
 /// Draws world-space `text_display` glyphs and background panels — see the
 /// module doc for why this is neither a pure billboard nor a fixed-orientation
 /// pass, unlike its two nearest relatives.
@@ -440,7 +451,7 @@ pub(super) struct DisplayTextRenderer {
     bind_layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
     uniform: wgpu::Buffer,
-    vertices: wgpu::Buffer,
+    vertices: Mutex<DisplayTextStorage>,
     /// Styled ink-run layouts, persisted across frames for the same reason
     /// `gpu/sign_text.rs::SignTextRenderer::ink` is. `Styled` (not
     /// `gpu/nametag.rs::InkLayoutCache`) so a coloured/bold/italic/underlined/
@@ -482,7 +493,7 @@ impl DisplayTextRenderer {
 
         let vertices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("lodestone-display-text-vertices"),
-            size: (MAX_DISPLAY_TEXT_VERTICES * std::mem::size_of::<DisplayTextVertex>()) as u64,
+            size: (INITIAL_DISPLAY_TEXT_VERTICES * std::mem::size_of::<DisplayTextVertex>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -497,7 +508,10 @@ impl DisplayTextRenderer {
             bind_layout,
             bind_group,
             uniform,
-            vertices,
+            vertices: Mutex::new(DisplayTextStorage {
+                buffer: vertices,
+                capacity: INITIAL_DISPLAY_TEXT_VERTICES,
+            }),
             ink: super::nametag::StyledInkLayoutCache::default(),
         }
     }
@@ -655,69 +669,93 @@ impl DisplayTextRenderer {
     /// Must run before the render pass opens, same buffer-creation
     /// constraint as every other pass in this crate.
     ///
-    /// Returns the four contiguous ranges of the one vertex buffer, one per
-    /// pipeline, in the order they are drawn. The counts are already clamped
-    /// so their **sum** fits [`MAX_DISPLAY_TEXT_VERTICES`]. Pass the value
-    /// straight to [`draw`](Self::draw).
+    /// Returns the four contiguous ranges and the retained buffer they occupy.
     pub(super) fn prepare(
         &self,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         view_proj: &[[f32; 4]; 4],
         draws: &[DisplayDraw],
         camera: &Camera,
         light: super::nametag::WorldTextLight,
         light_source: &super::EntityLightSource,
-    ) -> DisplayTextRanges {
+    ) -> PreparedDisplayText {
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(view_proj));
         // `VanillaFont::shared` is generation-keyed, unlike the former
         // jar-only `RasterFont` snapshot. This is what makes a server pack's
         // icon/nameplate fonts appear after it has been accepted and reloaded.
         let Some(world_font) = crate::hud::vanilla_font::VanillaFont::shared() else {
-            return DisplayTextRanges::default();
+            return PreparedDisplayText::default();
         };
 
-        let Partitioned { backgrounds, shadows, glyphs, see_through } =
-            partition_display_text(
-                world_font.default_raster(),
-                Some(&world_font),
-                &self.ink,
-                draws,
-                camera,
-                light,
-                light_source,
+        let partitioned = partition_display_text(
+            world_font.default_raster(),
+            Some(&world_font),
+            &self.ink,
+            draws,
+            camera,
+            light,
+            light_source,
+        );
+        let demand = partitioned.backgrounds.len()
+            + partitioned.shadows.len()
+            + partitioned.glyphs.len()
+            + partitioned.see_through.len();
+        let buffer = {
+            let mut storage = self.vertices.lock().expect("display text buffer lock");
+            let capacity = capacity_for_demand(storage.capacity, demand);
+            if capacity != storage.capacity {
+                storage.capacity = capacity;
+                storage.buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("lodestone-display-text-vertices"),
+                    size: (storage.capacity * std::mem::size_of::<DisplayTextVertex>()) as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+            }
+            (storage.buffer.clone(), storage.capacity)
+        };
+        if tracing::enabled!(target: "display_text", tracing::Level::DEBUG)
+            && DIAGNOSTIC_FRAME.fetch_add(1, Ordering::Relaxed) % 300 == 0
+        {
+            tracing::debug!(
+                target: "display_text",
+                displays = partitioned.displays,
+                panels_without_ink = partitioned.panels_without_ink,
+                first_empty_panel_id = ?partitioned.first_empty_panel_id,
+                transparent_ink_panels = partitioned.transparent_ink_panels,
+                backgrounds = partitioned.backgrounds.len(),
+                shadows = partitioned.shadows.len(),
+                glyphs = partitioned.glyphs.len(),
+                see_through = partitioned.see_through.len(),
+                demand,
+                capacity = buffer.1,
+                "text display geometry"
             );
-        // Panels first, then glyphs, so the two ranges are contiguous. The
-        // cap is applied to the panels first and to whatever room is left
-        // for the glyphs, which is the right way round: a truncated panel
-        // list still leaves readable text, a truncated glyph list does not.
-        // The cap is spent in draw order, which is also the right order of
-        // priority: a truncated panel list still leaves readable text, a
-        // truncated glyph list does not, and see-through ink is the range a
-        // player is most likely to be looking *for*.
-        let mut room = MAX_DISPLAY_TEXT_VERTICES;
+        }
+        let Partitioned { backgrounds, shadows, glyphs, see_through, .. } = partitioned;
         let mut offset = 0usize;
         let mut upload = |src: &[DisplayTextVertex]| {
-            let len = src.len().min(room);
+            let len = src.len();
             if len > 0 {
                 queue.write_buffer(
-                    &self.vertices,
+                    &buffer.0,
                     (offset * std::mem::size_of::<DisplayTextVertex>()) as u64,
                     bytemuck::cast_slice(&src[..len]),
                 );
             }
-            room -= len;
             offset += len;
             len as u32
         };
-        // Sequential `let`s rather than four struct-literal fields: `upload`
-        // is stateful (it walks `offset` and spends `room`), so these calls
-        // must happen in draw order and a reader must not have to know
-        // Rust's field-evaluation order to see that.
         let backgrounds = upload(&backgrounds);
         let shadows = upload(&shadows);
         let glyphs = upload(&glyphs);
         let see_through = upload(&see_through);
-        DisplayTextRanges { backgrounds, shadows, glyphs, see_through }
+        debug_assert_eq!(offset, demand);
+        PreparedDisplayText {
+            ranges: DisplayTextRanges { backgrounds, shadows, glyphs, see_through },
+            buffer: Some(buffer.0),
+        }
     }
 
     /// Records the three draws (a no-op for any range that is empty,
@@ -736,13 +774,13 @@ impl DisplayTextRenderer {
     /// uses: a later glyph's ink must sit on top of an earlier glyph's
     /// shadow. Unlike that pass, the two here also differ in pipeline — see
     /// the module doc's "The drop shadow needs its own polygon offset".
-    pub(super) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, counts: DisplayTextRanges) {
-        let DisplayTextRanges { backgrounds, shadows, glyphs, see_through } = counts;
+    pub(super) fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, prepared: &'a PreparedDisplayText) {
+        let DisplayTextRanges { backgrounds, shadows, glyphs, see_through } = prepared.ranges;
         if backgrounds == 0 && shadows == 0 && glyphs == 0 && see_through == 0 {
             return;
         }
         pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.set_vertex_buffer(0, self.vertices.slice(..));
+        pass.set_vertex_buffer(0, prepared.buffer.as_ref().expect("non-empty display text buffer").slice(..));
         let mut start = 0u32;
         for (count, pipeline) in [
             (backgrounds, &self.background_pipeline),
@@ -756,6 +794,18 @@ impl DisplayTextRenderer {
             }
             start += count;
         }
+    }
+}
+
+#[derive(Debug, Default)]
+pub(super) struct PreparedDisplayText {
+    ranges: DisplayTextRanges,
+    buffer: Option<wgpu::Buffer>,
+}
+
+impl PreparedDisplayText {
+    pub(super) fn is_empty(&self) -> bool {
+        self.ranges.is_empty()
     }
 }
 
@@ -802,6 +852,10 @@ struct Partitioned {
     shadows: Vec<DisplayTextVertex>,
     glyphs: Vec<DisplayTextVertex>,
     see_through: Vec<DisplayTextVertex>,
+    displays: usize,
+    panels_without_ink: usize,
+    first_empty_panel_id: Option<i32>,
+    transparent_ink_panels: usize,
 }
 
 /// One `Display`-family entity's packed light: its **brightness override**
@@ -839,6 +893,7 @@ fn partition_display_text(
             continue;
         }
         let Some(text) = &draw.text else { continue };
+        out.displays += 1;
         let see_through = draw.text_style_flags & FLAG_SEE_THROUGH != 0;
         // See the module doc's light section: `text.vsh`/`text_background.vsh`
         // sample the lightmap only in their non-`IS_SEE_THROUGH` branch, so
@@ -864,6 +919,13 @@ fn partition_display_text(
             &mut line_shadow,
             &mut line_ink,
         );
+        if !panel.is_empty() && line_ink.is_empty() {
+            out.panels_without_ink += 1;
+            out.first_empty_panel_id.get_or_insert(draw.id);
+        }
+        if !panel.is_empty() && !line_ink.is_empty() && draw.text_opacity == 0 {
+            out.transparent_ink_panels += 1;
+        }
         // A see-through display puts its panel, its shadows *and* its ink
         // into the one un-depth-tested range, in that order — vanilla submits
         // them through two see-through pipelines whose depth state is
@@ -1162,6 +1224,12 @@ fn push_background_quad(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_buffer_grows_past_the_panel_and_shadow_budget() {
+        assert_eq!(capacity_for_demand(40_000, 201_402), 262_144);
+        assert_eq!(capacity_for_demand(262_144, 187_224), 262_144);
+    }
 
     /// Every gate below wants "all the vertices this draw contributes", in
     /// submission order — panel, then shadows, then ink — which is exactly

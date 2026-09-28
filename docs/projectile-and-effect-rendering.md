@@ -155,6 +155,13 @@ falling-block entity's `-0.5` centering, which belongs to that entity's own spaw
 a real context meaning "identity pose", not "draw nothing" — treating it as `Fixed` silently applies a
 different slot's scale to every context-less hologram.
 
+The text-display pass packs panels, shadows, and glyphs into one vertex buffer. The buffer grows to
+the scene's demand and is reused; clipping it after panels and shadows would leave text panels with
+only dark shadows or no letters. For live diagnosis, set `RUST_LOG=info,display_text=debug`; the
+periodic geometry record reports demand, allocated capacity, and panels whose text generated no ink.
+Change partition and upload order together in `gpu/display_text.rs` so complete glyph ranges stay
+attached to the panels they describe.
+
 ## How to change it
 
 * **A new projectile type needs both a rig entry and an arm in `projectile_pitch_offset_deg`.** The rig
