@@ -364,6 +364,16 @@ impl SectionedBlocks {
         self.sections.len()
     }
 
+    pub(crate) fn air_ceiling_section(&self) -> usize {
+        self.sections
+            .iter()
+            .rposition(|section| match section {
+                Section::Uniform(id) => *id != 0,
+                Section::Packed { longs, .. } => longs.iter().any(|&word| word != 0),
+            })
+            .map_or(0, |index| index + 1)
+    }
+
     /// Returns the palette index when section `s` is represented by one value,
     /// or `None` for a packed section. Read-only consumers use this to reject
     /// uniform air/terrain sections before walking their cells.
@@ -558,6 +568,18 @@ mod tests {
         for y in 0..384 {
             assert_eq!(blocks.get(3, y, 9), 0, "row {y}");
         }
+    }
+
+    #[test]
+    fn air_ceiling_tracks_the_highest_occupied_section() {
+        let mut blocks = SectionedBlocks::new_air(48);
+        assert_eq!(blocks.air_ceiling_section(), 0);
+        blocks.set(2, 4, 3, 1);
+        assert_eq!(blocks.air_ceiling_section(), 1);
+        blocks.set(2, 40, 3, 2);
+        assert_eq!(blocks.air_ceiling_section(), 3);
+        blocks.set(2, 40, 3, 0);
+        assert_eq!(blocks.air_ceiling_section(), 1);
     }
 
     #[test]
