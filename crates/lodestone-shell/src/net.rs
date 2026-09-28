@@ -612,6 +612,8 @@ pub struct NetClient {
     /// Published by the net thread once login completes; lets the render/mesh
     /// thread read the client-owned world lock-free of tokio.
     handle: SharedHandle,
+    #[cfg(not(target_arch = "wasm32"))]
+    integrated_tick_monitor: Arc<OnceLock<lodestone_server::IntegratedTickMonitor>>,
     /// Local coarse-horizon estimate, if this session owns a supported
     /// Overworld generator. Remote and custom-source sessions leave it empty.
     horizon_surface: SharedHorizonSurface,
@@ -1289,6 +1291,10 @@ impl NetClient {
         let relay_drained_thread = Arc::clone(&relay_drained);
         let handle: SharedHandle = Arc::new(OnceLock::new());
         let handle_thread = Arc::clone(&handle);
+        #[cfg(not(target_arch = "wasm32"))]
+        let integrated_tick_monitor = Arc::new(OnceLock::new());
+        #[cfg(not(target_arch = "wasm32"))]
+        let integrated_tick_monitor_thread = Arc::clone(&integrated_tick_monitor);
         let horizon_surface: SharedHorizonSurface = Arc::new(OnceLock::new());
         let horizon_surface_thread = Arc::clone(&horizon_surface);
         let weather: SharedWeather = Arc::new(WeatherCell::default());
@@ -1328,6 +1334,7 @@ impl NetClient {
                     wasm_block_mutation_result_tx,
                     stop_thread,
                     handle_thread,
+                    integrated_tick_monitor_thread,
                     horizon_surface_thread,
                     weather_thread,
                     biome_climates_thread,
@@ -1393,6 +1400,8 @@ impl NetClient {
             #[cfg(not(target_arch = "wasm32"))]
             thread: Some(thread),
             handle,
+            #[cfg(not(target_arch = "wasm32"))]
+            integrated_tick_monitor,
             horizon_surface,
             weather,
             biome_climates,
@@ -1772,6 +1781,12 @@ impl NetClient {
     #[must_use]
     pub fn shared_handle(&self) -> SharedHandle {
         Arc::clone(&self.handle)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn integrated_tick_monitor(&self) -> Option<&lodestone_server::IntegratedTickMonitor> {
+        self.integrated_tick_monitor.get()
     }
 
     /// Whether this session has a worker or native source for horizon data.
@@ -2252,6 +2267,8 @@ async fn run_async(
     wasm_block_mutation_result_tx: Sender<WasmBlockMutationResult>,
     stop: Arc<AtomicBool>,
     shared_handle: SharedHandle,
+    #[cfg(not(target_arch = "wasm32"))]
+    integrated_tick_monitor: Arc<OnceLock<lodestone_server::IntegratedTickMonitor>>,
     horizon_surface: SharedHorizonSurface,
     weather: SharedWeather,
     biome_climates: SharedBiomeClimates,
@@ -2667,6 +2684,9 @@ async fn run_async(
                 };
                 #[cfg(not(target_arch = "wasm32"))]
                 {
+                    if let Some(monitor) = server.tick_monitor() {
+                        let _ = integrated_tick_monitor.set(monitor);
+                    }
                     integrated_server = Some(server);
                 }
                 match (client_io, lan_address) {
@@ -3514,6 +3534,7 @@ fn run(
     wasm_block_mutation_result_tx: Sender<WasmBlockMutationResult>,
     stop: Arc<AtomicBool>,
     shared_handle: SharedHandle,
+    integrated_tick_monitor: Arc<OnceLock<lodestone_server::IntegratedTickMonitor>>,
     horizon_surface: SharedHorizonSurface,
     weather: SharedWeather,
     biome_climates: SharedBiomeClimates,
@@ -3545,6 +3566,7 @@ fn run(
         wasm_block_mutation_result_tx,
         stop,
         shared_handle,
+        integrated_tick_monitor,
         horizon_surface,
         weather,
         biome_climates,

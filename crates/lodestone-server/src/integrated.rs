@@ -1309,6 +1309,24 @@ pub struct IntegratedServer {
     publish_task: Option<Task>,
 }
 
+#[derive(Debug, Clone)]
+pub struct IntegratedTickMonitor {
+    clock: Arc<TickClock>,
+    server_tick: crate::ecs::ServerTickWitness,
+}
+
+impl IntegratedTickMonitor {
+    #[must_use]
+    pub fn snapshot(&self) -> (TickStats, u64) {
+        (self.clock.stats(), self.server_tick.count())
+    }
+
+    #[must_use]
+    pub fn server_tick_count(&self) -> u64 {
+        self.server_tick.count()
+    }
+}
+
 impl IntegratedServer {
     /// Starts a single-client, in-memory integrated server (singleplayer) and
     /// returns the handle plus the **client** transport endpoint.
@@ -4913,6 +4931,14 @@ impl IntegratedServer {
     #[must_use]
     pub fn tick_stats(&self) -> Option<TickStats> {
         self.clock.as_deref().map(TickClock::stats)
+    }
+
+    #[must_use]
+    pub fn tick_monitor(&self) -> Option<IntegratedTickMonitor> {
+        Some(IntegratedTickMonitor {
+            clock: Arc::clone(self.clock.as_ref()?),
+            server_tick: self.server_tick.as_ref()?.clone(),
+        })
     }
 
     /// This server's outbound/inbound block-tick hub, `Some` for every

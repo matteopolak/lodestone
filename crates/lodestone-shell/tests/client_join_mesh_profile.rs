@@ -233,6 +233,11 @@ fn main() {
     let mut movement_steps = Vec::new();
     let mut movement_start_tick = None;
     let mut movement_end_tick = None;
+    let mut server_tick_at_ack = None;
+    let mut server_tick_at_move_start = None;
+    let mut server_tick_at_move_end = None;
+    let mut server_tick_last_change: Option<(u64, Instant)> = None;
+    let mut server_tick_max_gap = Duration::ZERO;
     let mut last_view_probe: Option<Instant> = None;
     let mut edit: Option<EditProbe> = None;
 
@@ -252,6 +257,10 @@ fn main() {
             let position = sim.player().position;
             movement_end_position = Some((position.x, position.z));
             movement_end_tick = Some(sim.tick_count());
+            server_tick_at_move_end = sim
+                .net()
+                .and_then(NetClient::integrated_tick_monitor)
+                .map(|monitor| monitor.snapshot());
             movement_stopped = Some(Instant::now());
         }
         let step_started = Instant::now();
@@ -421,6 +430,26 @@ fn main() {
         }
         if sim.acknowledge_presented_initial_world() {
             player_loaded_ack = Some(started.elapsed());
+            server_tick_at_ack = sim
+                .net()
+                .and_then(NetClient::integrated_tick_monitor)
+                .map(|monitor| monitor.snapshot());
+        }
+        if player_loaded_ack.is_some()
+            && let Some(monitor) = sim.net().and_then(NetClient::integrated_tick_monitor)
+        {
+            let count = monitor.server_tick_count();
+            let now = Instant::now();
+            match server_tick_last_change {
+                Some((previous, changed)) if count != previous => {
+                    server_tick_max_gap = server_tick_max_gap.max(now.duration_since(changed));
+                    server_tick_last_change = Some((count, now));
+                }
+                Some((_, changed)) => {
+                    server_tick_max_gap = server_tick_max_gap.max(now.duration_since(changed));
+                }
+                None => server_tick_last_change = Some((count, now)),
+            }
         }
         let render_elapsed = render_started.elapsed();
         render_ns += render_elapsed.as_nanos();
@@ -449,6 +478,10 @@ fn main() {
             movement_origin = Some((position.x, position.z));
             movement_last_chunk = Some(chunk_at(position.x, position.z));
             movement_start_tick = Some(sim.tick_count());
+            server_tick_at_move_start = sim
+                .net()
+                .and_then(NetClient::integrated_tick_monitor)
+                .map(|monitor| monitor.snapshot());
             sim.input_mut(|input| {
                 input.set(Action::Forward, true);
                 input.set(Action::Sprint, true);
@@ -499,6 +532,21 @@ fn main() {
         "frames_over_33ms": movement_frames.iter().filter(|elapsed| **elapsed > Duration::from_millis(33)).count(),
         "frames_over_100ms": movement_frames.iter().filter(|elapsed| **elapsed > Duration::from_millis(100)).count(),
     }));
+    let server_tick_at_end = sim
+        .net()
+        .and_then(NetClient::integrated_tick_monitor)
+        .map(|monitor| monitor.snapshot());
+    let server_tick = serde_json::json!({
+        "at_ack": server_tick_at_ack.map(|(_, count)| count),
+        "at_move_start": server_tick_at_move_start.map(|(_, count)| count),
+        "at_move_end": server_tick_at_move_end.map(|(_, count)| count),
+        "at_end": server_tick_at_end.map(|(_, count)| count),
+        "movement_tick_delta": server_tick_at_move_start.zip(server_tick_at_move_end).map(|((_, start), (_, end))| end.saturating_sub(start)),
+        "movement_overrun_delta": server_tick_at_move_start.zip(server_tick_at_move_end).map(|((start, _), (end, _))| end.overrun_count.saturating_sub(start.overrun_count)),
+        "tps_at_end": server_tick_at_end.map(|(stats, _)| stats.tps),
+        "mspt_avg_at_end": server_tick_at_end.map(|(stats, _)| stats.mspt_avg_ms),
+        "max_observed_tick_gap_ms": server_tick_max_gap.as_secs_f64() * 1000.0,
+    });
     let edit = edit.map(|probe| serde_json::json!({
         "target": probe.target,
         "initial_state": probe.initial_state,
@@ -508,7 +556,7 @@ fn main() {
         "input_to_present_ms": ms(probe.presented),
     }));
     let report = serde_json::json!({
-        "schema": "lodestone-client-join-mesh-profile-v9",
+        "schema": "lodestone-client-join-mesh-profile-v10",
         "seed": SEED,
         "target_size": [target_width, target_height],
         "visible_radius": radius,
@@ -559,12 +607,14 @@ fn main() {
         "frames_over_33ms": frame_samples.iter().filter(|elapsed| **elapsed > Duration::from_millis(33)).count(),
         "frames_over_100ms": frame_samples.iter().filter(|elapsed| **elapsed > Duration::from_millis(100)).count(),
         "movement": movement,
+        "server_tick": server_tick,
         "edit": edit,
     });
     println!("CLIENT_JOIN_MESH_PROFILE {report}");
     assert!(!report["timed_out"].as_bool().unwrap_or(true), "{report}");
     assert!(first_presented_terrain.is_some(), "no terrain reached a presented frame: {report}");
     assert!(player_loaded_ack.is_some(), "the new world was never acknowledged after presentation: {report}");
+    assert!(server_tick_at_ack.is_some(), "the integrated server tick monitor was unavailable: {report}");
     if move_for > Duration::ZERO {
         assert!(movement_chunk_changes > 0, "movement never entered a new chunk: {report}");
     }

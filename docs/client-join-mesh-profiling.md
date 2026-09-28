@@ -69,6 +69,11 @@ chunk boundary; an unmoving player is not a valid streaming workload. Movement
 can overlap delivery of the outer render-distance ring. The input is released
 at the requested duration; any remaining time for the then-current view to
 settle is reported separately rather than counted as extra movement.
+The native record also samples the integrated server's own tick clock and
+world-tick witness at acknowledgement, movement start/stop, and completion.
+`movement_tick_delta`, `movement_overrun_delta`, and the largest frame-sampled
+gap between world-tick advances distinguish a server stall from a client
+rendering hitch. These are server ticks, unlike the client's `sim_ticks` field.
 
 `LODESTONE_CLIENT_JOIN_EDIT=1` aims downward after the first playable frame and
 uses the normal attack path on a loaded block. The record separates the click
@@ -99,6 +104,10 @@ once as a control before attributing a hotspot to client work; a missing vanilla
 atlas or GPU adapter is an environmental failure, not a valid zero result. Keep
 the initial and selected-view settlement predicates separate when changing
 readiness or render-distance behavior.
+The native `NetClient` publishes a read-only `IntegratedTickMonitor` after it
+opens a local server; it is absent for remote connections and browser workers.
+Keep tick sampling out of the packet queue and avoid reading the tick-owned ECS
+world directly.
 Browser consumers should retain the transition events as one join record rather
 than sampling console output or treating the SDK's mount-level `first-frame`
 event as terrain readiness.

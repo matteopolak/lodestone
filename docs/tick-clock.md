@@ -17,6 +17,9 @@ while the tick task records work.
 The parent `tick` module re-exports the public types, so callers continue to
 use `lodestone_server::{TickClock, TickStats, TickPhase}`. The clock has no
 authority over when a phase runs and does not read or mutate world state.
+`IntegratedServer::tick_monitor` gives a cloneable read-only view of this clock
+and the world-tick witness. The native client profiling workload can retain it
+after server construction without locking the tick-owned ECS world.
 
 ## How to change it
 
