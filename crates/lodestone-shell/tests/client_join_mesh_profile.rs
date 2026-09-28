@@ -217,10 +217,13 @@ fn main() {
     let mut upload_samples = Vec::new();
     let mut render_samples = Vec::new();
     let mut movement_started: Option<Instant> = None;
+    let mut movement_stopped: Option<Instant> = None;
     let mut movement_origin: Option<(f64, f64)> = None;
+    let mut movement_end_position: Option<(f64, f64)> = None;
     let mut movement_first_effect = None;
     let mut movement_first_chunk_change = None;
     let mut movement_first_settled_view = None;
+    let mut movement_post_stop_settled = None;
     let mut movement_last_chunk = None;
     let mut movement_chunk_changes = 0usize;
     let mut movement_min_settled = usize::MAX;
@@ -229,6 +232,7 @@ fn main() {
     let mut movement_frames = Vec::new();
     let mut movement_steps = Vec::new();
     let mut movement_start_tick = None;
+    let mut movement_end_tick = None;
     let mut last_view_probe: Option<Instant> = None;
     let mut edit: Option<EditProbe> = None;
 
@@ -236,6 +240,20 @@ fn main() {
         let frame_started = Instant::now();
         let dt = previous_frame.elapsed().as_secs_f64();
         previous_frame = frame_started;
+        if let Some(start) = movement_started
+            && movement_stopped.is_none()
+            && start.elapsed() >= move_for
+        {
+            sim.input_mut(|input| {
+                input.set(Action::Forward, false);
+                input.set(Action::Sprint, false);
+                input.set(Action::Jump, false);
+            });
+            let position = sim.player().position;
+            movement_end_position = Some((position.x, position.z));
+            movement_end_tick = Some(sim.tick_count());
+            movement_stopped = Some(Instant::now());
+        }
         let step_started = Instant::now();
         sim.step(dt);
         sim.update_target(target_width as f32 / target_height as f32);
@@ -272,7 +290,9 @@ fn main() {
         let step_elapsed = step_started.elapsed();
         step_ns += step_elapsed.as_nanos();
         step_samples.push(step_elapsed);
-        if let Some((start, (origin_x, origin_z))) = movement_started.zip(movement_origin) {
+        if let Some((start, (origin_x, origin_z))) = movement_started.zip(movement_origin)
+            && movement_stopped.is_none()
+        {
             movement_steps.push(step_elapsed);
             let position = sim.player().position;
             let distance = (position.x - origin_x).hypot(position.z - origin_z);
@@ -362,13 +382,21 @@ fn main() {
                     all_visible_meshes_settled.get_or_insert(started.elapsed());
                 }
                 if let Some(start) = movement_started {
-                    movement_min_settled = movement_min_settled.min(settled);
+                    if movement_stopped.is_none() {
+                        movement_min_settled = movement_min_settled.min(settled);
+                    }
                     movement_last_settled = settled;
                     if movement_first_chunk_change.is_some()
                         && resident == expected
                         && settled == expected
                     {
                         movement_first_settled_view.get_or_insert(start.elapsed());
+                    }
+                    if let Some(stop) = movement_stopped
+                        && resident == expected
+                        && settled == expected
+                    {
+                        movement_post_stop_settled.get_or_insert(stop.elapsed());
                     }
                 }
             }
@@ -398,7 +426,7 @@ fn main() {
         render_ns += render_elapsed.as_nanos();
         render_samples.push(render_elapsed);
         frame_samples.push(frame_started.elapsed());
-        if movement_started.is_some() {
+        if movement_started.is_some() && movement_stopped.is_none() {
             movement_frames.push(frame_started.elapsed());
             movement_max_pending = movement_max_pending.max(sim.pending_meshes());
         }
@@ -434,8 +462,7 @@ fn main() {
             && all_visible_columns.is_some()
             && all_visible_meshes_settled.is_some()
             && first_presented_terrain.is_some()
-            && (move_for == Duration::ZERO
-                || movement_started.is_some_and(|start| start.elapsed() >= move_for))
+            && (move_for == Duration::ZERO || movement_post_stop_settled.is_some())
             && (!measure_edit || edit.as_ref().is_some_and(|probe| probe.presented.is_some()))
         {
             break;
@@ -446,21 +473,25 @@ fn main() {
     let elapsed = started.elapsed();
     let ms = |value: Option<Duration>| value.map(|d| d.as_secs_f64() * 1000.0);
     let movement_distance = movement_origin.map(|(x, z)| {
-        let position = sim.player().position;
-        (position.x - x).hypot(position.z - z)
+        let (end_x, end_z) = movement_end_position.unwrap_or_else(|| {
+            let position = sim.player().position;
+            (position.x, position.z)
+        });
+        (end_x - x).hypot(end_z - z)
     });
     let movement = movement_started.map(|start| serde_json::json!({
         "requested_seconds": move_for.as_secs(),
-        "elapsed_ms": start.elapsed().as_secs_f64() * 1000.0,
+        "elapsed_ms": movement_stopped.map_or_else(|| start.elapsed(), |stop| stop.duration_since(start)).as_secs_f64() * 1000.0,
         "horizontal_distance_blocks": movement_distance,
         "first_position_effect_ms": ms(movement_first_effect),
         "first_chunk_change_ms": ms(movement_first_chunk_change),
         "first_shifted_view_settled_ms": ms(movement_first_settled_view),
+        "post_stop_view_settle_ms": ms(movement_post_stop_settled),
         "chunk_changes": movement_chunk_changes,
         "min_settled_columns": movement_min_settled.min(expected_visible_columns),
         "last_settled_columns": movement_last_settled,
         "max_pending_meshes": movement_max_pending,
-        "sim_ticks": sim.tick_count().saturating_sub(movement_start_tick.unwrap_or(0)),
+        "sim_ticks": movement_end_tick.unwrap_or_else(|| sim.tick_count()).saturating_sub(movement_start_tick.unwrap_or(0)),
         "frame_p99_ms": percentile(&movement_frames, 99),
         "frame_max_ms": percentile(&movement_frames, 100),
         "step_p99_ms": percentile(&movement_steps, 99),

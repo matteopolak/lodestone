@@ -66,7 +66,9 @@ sprint, and jump, then records the delay to the first position change and chunk
 crossing, visible-view mesh settlement, simulation ticks, pending meshes, and
 frame/step tail latency during motion. The run fails if it never crosses a
 chunk boundary; an unmoving player is not a valid streaming workload. Movement
-can overlap delivery of the outer render-distance ring.
+can overlap delivery of the outer render-distance ring. The input is released
+at the requested duration; any remaining time for the then-current view to
+settle is reported separately rather than counted as extra movement.
 
 `LODESTONE_CLIENT_JOIN_EDIT=1` aims downward after the first playable frame and
 uses the normal attack path on a loaded block. The record separates the click
