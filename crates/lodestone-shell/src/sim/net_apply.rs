@@ -267,6 +267,7 @@ impl Sim {
                 }
                 NetUpdate::SectionBlocks { x, y, z, blocks } => {
                     section_block_updates += 1;
+                    self.observe_break_updates(x, y, z, &blocks);
                     // A server-authoritative edit inside one loaded section.
                     // Re-mesh at *section* granularity, not the whole column:
                     // the same signal carries every redstone tick, and a column
@@ -277,11 +278,7 @@ impl Sim {
                     self.remesh_changed_blocks(x, y, z, &blocks);
                 }
                 NetUpdate::BlockChangedAck { sequence } => {
-                    // The adapter has already installed the authoritative block
-                    // writes before this acknowledgement reaches the shell. The
-                    // sequence is therefore a ledger-retirement signal, not a
-                    // second world write: `Placement` clears every prediction the
-                    // server has processed through this value.
+                    self.settle_break_predictions(sequence);
                     self.settle_placement_predictions(sequence);
                 }
                 NetUpdate::PlayerRotationSet {
@@ -416,6 +413,7 @@ impl Sim {
                             ]);
                         }
                         for ((sx, sy, sz), blocks) in sections {
+                            self.observe_break_updates(sx, sy, sz, &blocks);
                             self.reconcile_predictions(sx, sy, sz, &blocks);
                             self.remesh_changed_blocks(sx, sy, sz, &blocks);
                         }

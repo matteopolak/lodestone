@@ -64,8 +64,8 @@ use crate::entities::EntityDraw;
 use crate::gpu::ThirdPersonBodyState;
 use crate::hud::{DebugStats, process_rss_bytes};
 use crate::interact::{
-    AttackPresses, Attacking, EntityRayTarget, InteractPlugin, MiningPredictor, NetHandle, ParticleSim,
-    PlacementPredictor, RayTarget, UsingItem,
+    AttackPresses, Attacking, BreakPredictions, EntityRayTarget, InteractPlugin, MiningPredictor,
+    NetHandle, ParticleSim, PlacementPredictor, RayTarget, UsingItem,
 };
 #[cfg(test)]
 pub(crate) use crate::interact::mining_break_attributes;

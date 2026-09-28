@@ -87,7 +87,11 @@ presses are consumed one per tick in arrival order. Holding the button therefore
 clears adjacent zero-hardness blocks on consecutive ticks while retaining the
 creative/progressive held-input cooldowns. The client writes an instant break into its local
 chunk store and requests a re-mesh before the server response. A later authoritative block update
-can correct a rejected prediction; there is not yet a general rollback ledger for mining.
+can correct a rejected prediction. The shell also retains the original state and block-entity
+record until the shared mining/placement sequence is acknowledged. If the server acknowledges
+without a replacement update, the local edit is rolled back and remeshed; an authoritative air
+update keeps the break. Keep this reconciliation in `BreakPredictions` and the network-update fold,
+not in a special case for block entities. The record is cleared on session and dimension changes.
 Breaks taking at least 50 ms emit a `lodestone_server::stall` warning with edit, drop,
 light-queue, and neighbour-fanout timings, so a delayed item can be distinguished from a
 late block write or a client-side mesh delay. The threshold is fixed in `destroy_block`.

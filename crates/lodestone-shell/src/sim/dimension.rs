@@ -385,6 +385,7 @@ impl Sim {
         self.write(|w| {
             crate::entities::reset_entity_tracks(w);
             lodestone_ecs::ingest::reset_ingest_entities(w);
+            w.resource_mut::<BreakPredictions>().0.clear();
             // A new dimension cannot display an old block-destruction stage,
             // even if the old-column notification arrived around the boundary.
             if let Some(mut overlays) = w

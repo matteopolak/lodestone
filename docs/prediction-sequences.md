@@ -11,7 +11,10 @@ with explicit serial ordering.
 
 The model stores the counter as `u32`; `from_wire` and `as_wire` reinterpret the
 same 32 bits as the protocol's `i32`. `next` wraps across the complete domain.
-Placement records the typed value for every optimistic placement, and the shell
+Mining and placement share one advancing counter in the shell, even though
+their game-level predictors are separate. Placement records the typed value
+for every optimistic placement; predicted breaks retain their original block
+state and block-entity data until the same acknowledgement boundary. The shell
 settles entries through `is_at_or_before`, which correctly handles a
 max-to-zero rollover. Serial distances of half the domain are intentionally
 ambiguous; the client cannot retain that many pending predictions.
@@ -19,14 +22,17 @@ ambiguous; the client cannot retain that many pending predictions.
 ## How to change it
 
 Keep integer conversion at protocol adapters and use the domain predicate for
-ledger comparisons. Do not restore signed `<=` comparisons or compare the raw
-wire values after rollover. Add controls in `lodestone-model` for any new
-boundary or ordering rule before changing the placement ledger.
+ledger comparisons. Keep `drive_mining`'s counter synchronization with
+`PlacementPredictor` when adding another predictive block action. Do not restore
+signed `<=` comparisons or compare the raw wire values after rollover. Add
+controls in `lodestone-model` for any new boundary or ordering rule before
+changing the placement ledger.
 
 ## Configuration
 
 There are no runtime flags. `PredictionSequence::INITIAL` is zero, and each
-predictive action allocates its next value before being emitted.
+predictive action allocates its next value before being emitted. The shell retains
+at most 128 pending break snapshots if a server does not acknowledge them.
 
 ## Dependencies
 

@@ -337,6 +337,15 @@ impl Mining {
         self.destroyed.take()
     }
 
+    #[must_use]
+    pub fn sequence(&self) -> PredictionSequence {
+        self.next_sequence
+    }
+
+    pub fn set_sequence(&mut self, sequence: PredictionSequence) {
+        self.next_sequence = sequence;
+    }
+
     fn take_sequence(&mut self) -> PredictionSequence {
         // Vanilla pre-increments, so the first prediction is sequence 1.
         self.next_sequence = self.next_sequence.next();

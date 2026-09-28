@@ -34,7 +34,10 @@
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-use lodestone::interact::{Attacking, MiningPredictor, NetHandle, ParticleSim, RayTarget};
+use lodestone::interact::{
+    Attacking, BreakPredictions, MiningPredictor, NetHandle, ParticleSim, PlacementPredictor,
+    RayTarget,
+};
 use lodestone::mesher::{MeshScheduler, TerrainMesh};
 use lodestone::particles::Particles;
 use lodestone::sim::AudioEngine;
@@ -306,6 +309,8 @@ fn build_resources(world: &mut EcsWorld) {
     world.insert_resource(Attacking(false));
     world.insert_resource(RayTarget(None));
     world.insert_resource(MiningPredictor::default());
+    world.insert_resource(PlacementPredictor::default());
+    world.insert_resource(BreakPredictions::default());
     world.insert_resource(ParticleSim(Particles::new(None)));
     world.insert_resource(ActionQueue::default());
     world.insert_resource(VersionData(Some(Box::new(OneBlockVersion))));
