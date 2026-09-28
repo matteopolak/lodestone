@@ -356,6 +356,13 @@ impl MenuInput {
         }
 
         let painted = drag.map(|(_, slots)| slots).unwrap_or_default();
+        if painted.len() == 1 && button != MenuButton::Pick {
+            return vec![Click {
+                slot: painted[0] as i32,
+                button: button.number(),
+                input: ContainerInput::Pickup,
+            }];
+        }
         if !painted.is_empty() {
             let kind = button.drag_kind();
             let mut clicks = Vec::with_capacity(painted.len() + 2);

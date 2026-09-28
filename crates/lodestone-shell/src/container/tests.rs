@@ -340,6 +340,46 @@ fn painting_slots_emits_the_full_quick_craft_sequence() {
     }
 }
 
+#[test]
+fn painting_one_slot_sends_one_place_click() {
+    for button in [MenuButton::Left, MenuButton::Right] {
+        let mut menu = Menu::crafting(3, 3);
+        menu.set_carried(Some(ItemStack::new(
+            "minecraft:oak_planks".parse().unwrap(),
+            8,
+        )));
+        let mut input = MenuInput::new();
+        input.press(MenuHit::Slot(1), button, false, loaded(), false, &menu);
+        input.dragged(MenuHit::Slot(1), &menu);
+        let clicks = input.release(MenuHit::Slot(1), button, false, loaded(), &menu);
+        assert_eq!(clicks.len(), 1);
+        assert_eq!(clicks[0].slot, 1);
+        assert_eq!(clicks[0].input, ContainerInput::Pickup);
+
+        let mut plain = menu.clone();
+        clicks[0].apply(&mut plain, lodestone_game::click::PlayerCtx::survival());
+        let mut drag = menu;
+        for header in [drag_header::START, drag_header::ADD, drag_header::END] {
+            let slot = if header == drag_header::ADD { 1 } else { OUTSIDE_SLOT };
+            Click {
+                slot,
+                button: lodestone_game::click::quick_craft_mask(
+                    header,
+                    if button == MenuButton::Left {
+                        drag_type::EVEN
+                    } else {
+                        drag_type::ONE
+                    },
+                ),
+                input: ContainerInput::QuickCraft,
+            }
+            .apply(&mut drag, lodestone_game::click::PlayerCtx::survival());
+        }
+        assert_eq!(plain.slot_item(1), drag.slot_item(1));
+        assert_eq!(plain.carried(), drag.carried());
+    }
+}
+
 /// The whole point of the sequence: driven into a real menu it distributes
 /// exactly as vanilla does, filling a 2×2 of the crafting grid one plank per
 /// cell. Nothing here fills the result slot — that is the server's.
@@ -755,10 +795,7 @@ fn control_dragging_across_a_placeable_cell_still_paints_it() {
         Some(vec![craft.first_input + 1])
     );
     let clicks = input.release(cell, MenuButton::Left, false, loaded(), &menu);
-    assert!(
-        clicks.iter().all(|c| c.input == ContainerInput::QuickCraft),
-        "a paintable cell must still produce the drag sequence: {clicks:?}"
-    );
+    assert_eq!(clicks, vec![Click::left(craft.first_input + 1)]);
 }
 
 /// The other two arms of `shouldAddSlotToQuickCraft`, each with the same

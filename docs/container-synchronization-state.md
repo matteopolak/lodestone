@@ -19,6 +19,10 @@ prevents a placed custom item from lingering on the cursor when the server omits
 update. The decoded patch presence stays separate from prototype-derived item properties such as
 maximum stack size.
 
+A left or right drag that paints just one slot sends one pickup/place click. The multi-packet
+distribution sequence is reserved for multiple slots; it has the same one-slot outcome but can
+deliver intermediate cursor updates after the local prediction has already placed the item.
+
 ## How to change it
 
 Keep the type in `lodestone-model`, because both packet adapters and the version-free game model need it. Add a conversion method only when a real protocol boundary requires one; internal menus, events, actions, and test fixtures should construct `ContainerStateId` directly. Preserve the round-trip and wrapping controls when changing its representation.
