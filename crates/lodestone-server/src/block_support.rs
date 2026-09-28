@@ -75,9 +75,9 @@
 //! family really has no survival check first; the five removals above were
 //! each grepped.
 //!
-//! Deliberately not covered: the kelp/weeping-and-twisting-vines head/body
-//! pair (its own growth direction, and a survival check that reads the
-//! *body* chain), climbing vines and multiface growths (any of five faces,
+//! Deliberately not covered: the weeping-and-twisting-vines head/body pair
+//! (its own growth direction, and a survival check that reads the *body*
+//! chain), climbing vines and multiface growths (any of five faces,
 //! not one named cell), scaffolding (a distance count), chorus plants,
 //! pointed dripstone, big dripleaf stems (reads above *and* below) and mossy
 //! carpet (a `bottom`/side-wall variant set). Each is a real family with a
@@ -507,6 +507,15 @@ pub(crate) fn survives<F>(pos: BlockPos, state: StateId, block_at: F) -> bool
 where
     F: Fn(BlockPos) -> WorldState,
 {
+    if matches!(state.block(), Block::Kelp | Block::KelpPlant) {
+        let below = block_at(BlockPos::new(pos.x, pos.y - 1, pos.z));
+        if matches!(below.block(), Block::Kelp | Block::KelpPlant) {
+            return true;
+        }
+        // The head may anchor to a solid seabed; a body may only attach to
+        // another link in the chain. Fluids never count as the seabed.
+        return state.block() == Block::Kelp && !is_air_or_fluid_id(below);
+    }
     let Some(requirement) = requirement(pos, state) else {
         return true;
     };
@@ -717,6 +726,25 @@ mod tests {
         );
         // And the un-modelled majority is unaffected in both worlds.
         assert!(survives(p, state("minecraft:stone"), with("minecraft:air")));
+    }
+
+    #[test]
+    fn kelp_body_requires_the_chain_below_it() {
+        let p = pos();
+        let below = BlockPos::new(p.x, p.y - 1, p.z);
+        let with = |fill: &'static str| {
+            move |cell: BlockPos| {
+                if cell == below {
+                    state(fill)
+                } else {
+                    state("minecraft:air")
+                }
+            }
+        };
+        assert!(survives(p, state("minecraft:kelp_plant"), with("minecraft:kelp_plant")));
+        assert!(survives(p, state("minecraft:kelp"), with("minecraft:sand")));
+        assert!(!survives(p, state("minecraft:kelp_plant"), with("minecraft:air")));
+        assert!(!survives(p, state("minecraft:kelp_plant"), with("minecraft:water")));
     }
 
     /// A bed's partner test is on identity, not on presence: a *different*

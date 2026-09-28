@@ -358,6 +358,25 @@ fn a_focused_capped_window_is_paced_by_a_wait_not_a_spin() {
 }
 
 #[test]
+fn scheduled_redraw_is_requested_only_when_its_deadline_arrives() {
+    let t0 = Instant::now();
+    let mut pacer = FramePacer::new(t0);
+    assert!(pacer.redraw_due(t0, None));
+    assert!(!pacer.redraw_due(t0 + Duration::from_millis(5), Some(30)));
+    assert!(pacer.redraw_due(t0 + UNFOCUSED_FRAME_INTERVAL, Some(30)));
+
+    pacer.set_focused(false);
+    assert!(!pacer.redraw_due(t0 + Duration::from_millis(7), None));
+    assert!(pacer.redraw_due(t0 + BACKGROUND_POLL, None));
+    match pacer.control_flow(t0 + Duration::from_millis(1), None) {
+        ControlFlow::WaitUntil(at) => assert_eq!(at, t0 + BACKGROUND_POLL),
+        other => panic!("unfocused event loop must wait for the next redraw: {other:?}"),
+    }
+    pacer.begin_frame(t0 + BACKGROUND_POLL, None);
+    assert!(!pacer.redraw_due(t0 + BACKGROUND_POLL + Duration::from_millis(1), None));
+}
+
+#[test]
 fn a_focused_cap_presents_at_the_capped_rate_not_every_iteration() {
     // Drive a 120 Hz loop (a display comfortably above the cap) with
     // `target_fps = Some(30)` and count presented frames over one simulated

@@ -843,6 +843,7 @@ pub fn drive_mining(
     let pressed_hit = attack_presses
         .as_mut()
         .and_then(|presses| presses.0.pop_front());
+    let fresh_press = pressed_hit.is_some();
     let human_attacking = attacking.0 && dead.is_none();
     // `via_intent` distinguishes "no hit, human idle" from "no hit, a plugin's
     // intent was rejected" — only the latter owes `outcome` a write below, and
@@ -987,9 +988,11 @@ pub fn drive_mining(
     }
 
     let was_mining = mining.0.target().is_some();
-    // `continue_` delegates to `start` when no dig is live yet, so this one entry
-    // point covers first-press, hold, and retarget uniformly.
-    let mut actions = mining.0.continue_(pos, face, &inputs, None);
+    let mut actions = if fresh_press {
+        mining.0.start(pos, face, &inputs, None)
+    } else {
+        mining.0.continue_(pos, face, &inputs, None)
+    };
     let is_mining_now = mining.0.target().is_some();
     if (was_mining || is_mining_now)
         && actions
@@ -1099,11 +1102,8 @@ pub fn drive_mining(
             write_predicted_block(&mut *world, hit.block, id::AIR);
         }
         terrain.remesh_around(&chunk_world, hit.block);
-        // Full-cube shape and untinted white, for the same reason as the
-        // mining-chip particle a few lines up: the shell does not carry a
-        // block's outline shape, and `destroy_block` itself resolves the
-        // real per-state tint (see its own docs) — `[1.0; 3]` is the
-        // multiplier, not a placeholder colour.
+        // The outline shape and untinted-white multiplier both come from the
+        // validated state in `destroy_block`; `[1.0; 3]` adds no colour change.
         //
         // `id_value`, not `id::AIR`: the burst must show the block that *was*
         // there, not the air it just became.

@@ -1125,8 +1125,12 @@ impl WindowApp {
 
     fn about_to_wait_impl(&mut self, event_loop: &ActiveEventLoop) {
         self.replay_pending_pick();
+        let now = Instant::now();
+        let target_fps = self.current_target_fps(now);
         if let Some(window) = &self.window {
-            window.request_redraw();
+            if self.pacer.redraw_due(now, target_fps) {
+                window.request_redraw();
+            }
         }
         // No window means no `RedrawRequested` will ever fire, so
         // without this a headless session (never attached, or just detached)
@@ -1140,7 +1144,7 @@ impl WindowApp {
         // needs, reusing the same pacing/catch-up logic a windowed frame
         // uses rather than a second, divergent tick loop.
         #[cfg(feature = "runtime-presentation")]
-        if self.window.is_none() {
+        if self.window.is_none() && now >= self.pacer.background_deadline() {
             self.redraw();
         }
         // Spin while focused and uncapped (vsync paces the loop); sleep until the
@@ -1150,10 +1154,12 @@ impl WindowApp {
         // short `BACKGROUND_POLL` slices so a backgrounded window stops burning
         // a core yet still wakes far more often than the 20 Hz tick needs.
         let now = Instant::now();
-        event_loop.set_control_flow(
-            self.pacer
-                .control_flow(now, self.current_target_fps(now)),
-        );
+        let control_flow = if self.window.is_some() {
+            self.pacer.control_flow(now, self.current_target_fps(now))
+        } else {
+            ControlFlow::WaitUntil(self.pacer.background_deadline())
+        };
+        event_loop.set_control_flow(control_flow);
     }
 }
 

@@ -1,6 +1,7 @@
 //! Bounded native profile for the client half of a singleplayer join.
 
 #![cfg(not(target_arch = "wasm32"))]
+#![recursion_limit = "256"]
 
 use std::time::Duration;
 
@@ -25,6 +26,27 @@ fn profile_radius() -> u32 {
         .ok()
         .map(|value| value.parse().expect("LODESTONE_CLIENT_JOIN_RADIUS must be an integer"))
         .unwrap_or(lodestone::config::DEFAULT_RENDER_DISTANCE)
+}
+
+fn target_size() -> (u32, u32) {
+    std::env::var("LODESTONE_CLIENT_JOIN_TARGET_SIZE")
+        .ok()
+        .map(|value| {
+            let (width, height) = value
+                .split_once('x')
+                .expect("LODESTONE_CLIENT_JOIN_TARGET_SIZE must be WIDTHxHEIGHT");
+            let width: u32 = width.parse().expect("invalid target width");
+            let height: u32 = height.parse().expect("invalid target height");
+            assert!(width > 0 && height > 0, "target dimensions must be positive");
+            (width, height)
+        })
+        .unwrap_or((64, 64))
+}
+
+fn percentile(samples: &[Duration], percent: usize) -> f64 {
+    let mut ordered = samples.to_vec();
+    ordered.sort_unstable();
+    ordered[(ordered.len() * percent).div_ceil(100) - 1].as_secs_f64() * 1000.0
 }
 
 fn profile_config(radius: u32) -> Config {
@@ -60,7 +82,8 @@ fn main() {
     let device = ctx.device();
     let queue = ctx.queue();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-    let mut target = HeadlessTarget::new(device, 64, 64, format);
+    let (target_width, target_height) = target_size();
+    let mut target = HeadlessTarget::new(device, target_width, target_height, format);
     let sim_started = Instant::now();
     let mut sim = Sim::new(profile_config(radius));
     let sim_setup_ns = sim_started.elapsed().as_nanos();
@@ -73,7 +96,14 @@ fn main() {
     let server_protocol = lodestone_registry::server_protocol_for_protocol(protocol)
         .expect("the default protocol must have an integrated server");
     let render_started = Instant::now();
-    let mut render = RenderState::new(device, queue, format, 64, 64, sim.vanilla_atlas());
+    let mut render = RenderState::new(
+        device,
+        queue,
+        format,
+        target_width,
+        target_height,
+        sim.vanilla_atlas(),
+    );
     let render_setup_ns = render_started.elapsed().as_nanos();
     let startup_ns = startup_started.elapsed().as_nanos();
     let started = Instant::now();
@@ -112,6 +142,10 @@ fn main() {
             particle_status: ParticleStatus::All,
         }));
     sim.arm_new_world_loading(radius);
+    let expected_initial_columns = sim
+        .terrain_progress()
+        .expect("the new-world loading view is declared")
+        .expected;
     let mut previous_frame = Instant::now();
     let mut first_column = None;
     let mut first_mesh = None;
@@ -119,10 +153,13 @@ fn main() {
     let mut joining = None;
     let mut loading_terrain = None;
     let mut overlay_ready = None;
+    let mut all_initial_columns = None;
+    let mut all_initial_meshes_settled = None;
     let mut all_visible_columns = None;
     let mut all_server_columns = None;
     let mut all_visible_meshes_settled = None;
     let mut max_columns = 0usize;
+    let mut max_settled_initial_columns = 0usize;
     let mut max_settled_visible_columns = 0usize;
     let mut max_pending = 0usize;
     let mut step_count = 0u64;
@@ -132,6 +169,10 @@ fn main() {
     let mut mesh_drain_ns = 0u128;
     let mut upload_ns = 0u128;
     let mut render_ns = 0u128;
+    let mut frame_samples = Vec::new();
+    let mut step_samples = Vec::new();
+    let mut upload_samples = Vec::new();
+    let mut render_samples = Vec::new();
 
     while started.elapsed() < DEADLINE {
         let frame_started = Instant::now();
@@ -139,7 +180,9 @@ fn main() {
         previous_frame = frame_started;
         let step_started = Instant::now();
         sim.step(dt);
-        step_ns += step_started.elapsed().as_nanos();
+        let step_elapsed = step_started.elapsed();
+        step_ns += step_elapsed.as_nanos();
+        step_samples.push(step_elapsed);
         step_count += 1;
 
         match sim.connect_phase() {
@@ -160,13 +203,6 @@ fn main() {
         if columns >= expected_server_columns {
             all_server_columns.get_or_insert(started.elapsed());
         }
-        if sim
-            .terrain_progress()
-            .is_some_and(|progress| progress.loaded >= expected_visible_columns)
-        {
-            all_visible_columns.get_or_insert(started.elapsed());
-        }
-
         max_pending = max_pending.max(sim.pending_meshes());
         let mesh_started = Instant::now();
         let meshes = sim.drain_meshes();
@@ -180,16 +216,29 @@ fn main() {
             sim.mark_mesh_uploaded(key);
         }
         sim.refresh_terrain_readiness();
-        upload_ns += upload_started.elapsed().as_nanos();
+        let upload_elapsed = upload_started.elapsed();
+        upload_ns += upload_elapsed.as_nanos();
+        upload_samples.push(upload_elapsed);
 
         if sim.world_wait().is_none() {
             overlay_ready.get_or_insert(started.elapsed());
         }
-        if all_visible_columns.is_some() && sim.pending_meshes() == 0 {
-            let (_, settled, expected) = sim
-                .visible_view_settlement()
-                .expect("the attached session has a visible view");
+        if let Some((resident, settled, expected)) = sim.visible_view_settlement() {
+            assert_eq!(expected, expected_initial_columns);
+            max_settled_initial_columns = max_settled_initial_columns.max(settled);
+            if resident == expected {
+                all_initial_columns.get_or_insert(started.elapsed());
+            }
+            if settled >= expected {
+                all_initial_meshes_settled.get_or_insert(started.elapsed());
+            }
+        }
+        if let Some((resident, settled, expected)) = sim.view_settlement_at_radius(radius) {
+            assert_eq!(expected, expected_visible_columns);
             max_settled_visible_columns = max_settled_visible_columns.max(settled);
+            if resident == expected {
+                all_visible_columns.get_or_insert(started.elapsed());
+            }
             if settled >= expected {
                 all_visible_meshes_settled.get_or_insert(started.elapsed());
             }
@@ -199,12 +248,16 @@ fn main() {
         let frame = target.acquire().expect("headless target acquire");
         let stats = render.render(device, queue, frame.view(), &camera(&sim, radius), None, &[]);
         frame.present(queue);
-        render_ns += render_started.elapsed().as_nanos();
+        let render_elapsed = render_started.elapsed();
+        render_ns += render_elapsed.as_nanos();
+        render_samples.push(render_elapsed);
+        frame_samples.push(frame_started.elapsed());
         if first_presented_terrain.is_none() && (stats.sections_drawn > 0 || stats.water_sections_drawn > 0) {
             first_presented_terrain = Some(started.elapsed());
         }
 
         if overlay_ready.is_some()
+            && all_server_columns.is_some()
             && all_visible_columns.is_some()
             && all_visible_meshes_settled.is_some()
             && first_presented_terrain.is_some()
@@ -217,10 +270,12 @@ fn main() {
     let elapsed = started.elapsed();
     let ms = |value: Option<Duration>| value.map(|d| d.as_secs_f64() * 1000.0);
     let report = serde_json::json!({
-        "schema": "lodestone-client-join-mesh-profile-v6",
+        "schema": "lodestone-client-join-mesh-profile-v7",
         "seed": SEED,
+        "target_size": [target_width, target_height],
         "visible_radius": radius,
         "requested_server_radius": server_radius,
+        "expected_initial_columns": expected_initial_columns,
         "expected_visible_columns": expected_visible_columns,
         "requested_server_columns": expected_server_columns,
         "startup_cpu_ms": startup_ns as f64 / 1_000_000.0,
@@ -235,10 +290,13 @@ fn main() {
         "joining_phase_ms": ms(joining),
         "loading_terrain_phase_ms": ms(loading_terrain),
         "overlay_ready_ms": ms(overlay_ready),
+        "all_initial_columns_ms": ms(all_initial_columns),
+        "all_initial_meshes_settled_ms": ms(all_initial_meshes_settled),
         "all_visible_columns_ms": ms(all_visible_columns),
         "all_requested_server_columns_ms": ms(all_server_columns),
         "all_visible_meshes_settled_ms": ms(all_visible_meshes_settled),
         "max_loaded_columns": max_columns,
+        "max_settled_initial_columns": max_settled_initial_columns,
         "max_settled_visible_columns": max_settled_visible_columns,
         "max_pending_meshes": max_pending,
         "steps": step_count,
@@ -250,6 +308,17 @@ fn main() {
         "mesh_upload_cpu_ms": upload_ns as f64 / 1_000_000.0,
         "render_cpu_ms": render_ns as f64 / 1_000_000.0,
         "average_step_ms": step_ns as f64 / step_count.max(1) as f64 / 1_000_000.0,
+        "frame_p95_ms": percentile(&frame_samples, 95),
+        "frame_p99_ms": percentile(&frame_samples, 99),
+        "frame_max_ms": percentile(&frame_samples, 100),
+        "step_p99_ms": percentile(&step_samples, 99),
+        "step_max_ms": percentile(&step_samples, 100),
+        "upload_p99_ms": percentile(&upload_samples, 99),
+        "upload_max_ms": percentile(&upload_samples, 100),
+        "render_p99_ms": percentile(&render_samples, 99),
+        "render_max_ms": percentile(&render_samples, 100),
+        "frames_over_33ms": frame_samples.iter().filter(|elapsed| **elapsed > Duration::from_millis(33)).count(),
+        "frames_over_100ms": frame_samples.iter().filter(|elapsed| **elapsed > Duration::from_millis(100)).count(),
     });
     println!("CLIENT_JOIN_MESH_PROFILE {report}");
     assert!(!report["timed_out"].as_bool().unwrap_or(true), "{report}");

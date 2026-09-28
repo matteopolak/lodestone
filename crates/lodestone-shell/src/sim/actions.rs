@@ -267,10 +267,9 @@ impl Sim {
             // exercise the swing at all, which is the one world structurally
             // guaranteed not to.
             self.swing_hand();
-            // Full-cube shape: vanilla derives the fragment grid from the
-            // block's outline shape, which the shell does not carry, so debris
-            // from a slab or fence fills the whole cell rather than hugging the
-            // model.
+            // `destroy_block` derives the fragment grid from the validated
+            // state's outline shape, so partial blocks shed debris within their
+            // visible bounds.
             self.particles_mut(|p| {
                 p.destroy_block(hit.block, BlockStateRef::canonical(broken), [1.0; 3]);
             });

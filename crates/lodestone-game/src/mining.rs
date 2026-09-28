@@ -1120,6 +1120,23 @@ mod tests {
         assert!(is_start(&held[0], p));
     }
 
+    #[test]
+    fn distinct_creative_clicks_break_without_waiting_for_hold_delay() {
+        let mut mining = Mining::new();
+        let inputs = BreakInputs {
+            hardness: -1.0,
+            creative: true,
+            ..BreakInputs::default()
+        };
+        let first = pos(0, 70, 0);
+        let second = pos(1, 70, 0);
+
+        assert!(is_start(&mining.start(first, BlockFace::Up, &inputs, None)[0], first));
+        assert_eq!(mining.take_destroyed(), Some(first));
+        assert!(is_start(&mining.start(second, BlockFace::Up, &inputs, None)[0], second));
+        assert_eq!(mining.take_destroyed(), Some(second));
+    }
+
     /// A held survival input can break another zero-hardness block on the very
     /// next tick. Using two positions models a row of grass or flowers without
     /// depending on the world-edit consumer; the second `continue_` must reach

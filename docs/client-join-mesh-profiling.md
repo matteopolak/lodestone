@@ -13,29 +13,27 @@ The fixture starts its clock immediately before the same singleplayer open call
 used by the interactive client. Resources and renderer state are created first,
 matching the already-present menu screen. It uses the real `NetClient`, `Sim`,
 terrain scheduler, `RenderState`, and `HeadlessTarget`, and emits one aggregate
-`CLIENT_JOIN_MESH_PROFILE` record
-for seed 4242 and the configured render distance. It distinguishes the visible
-view from the server's requested additional meshing halo, and records the connection,
-terrain-loading, overlay-ready, all-visible-columns, all-server-columns,
-all-visible-meshes-settled, and first-presented-terrain boundaries. Queue
-high-water marks, uploaded geometry, the synchronous open-call cost, and
-bounded phase totals identify work between those boundaries.
+`CLIENT_JOIN_MESH_PROFILE` record for seed 4242. The headless target receives
+every uploaded section and a presented frame on each loop; it excludes the
+window compositor and menu/HUD work. Its default target is 64×64, with a
+configurable size for realistic GPU fragment work.
 
-The September 15 default-distance control measured 2.02 seconds from the
-world-open request to the first presented terrain and 30.96 seconds under the
-original approximate completion gate. Delivered-column filtering for
-tick-driven lighting reduced that approximate result to 28.69 seconds without
-moving the first-presented boundary. After restoring the server's required
-one-column meshing halo and replacing the high-water gate with exact coordinate
-settlement, the same seed reached first terrain in 2.180 seconds, all 289 visible
-columns in 27.819 seconds, all 361 requested server columns in 32.872 seconds,
-and a submitted frame with every visible column meshed in 33.404 seconds. The
-earlier totals are useful optimization controls but are not directly comparable
-to the stricter final boundary. The matching Samply captures are
-`client-join-mesh-default-view-before.json.gz` and
-`client-join-mesh-default-view-delivered-light-after.json.gz` under
-`bench-results/profiles/`; the remaining native tail is dominated by dynamic
-cross-column lighting and world generation rather than client meshing.
+The report separates the capped initial loading square, the selected render
+distance, and the server's additional meshing halo. It records received and
+renderer-settled columns for each square, plus connection, overlay, first-terrain,
+and full-server boundaries. `Sim::view_settlement_at_radius` queries the selected
+distance without changing the initial loading gate. Frame, simulation-step,
+upload, and render p99/max values expose hitches that aggregate CPU totals hide.
+The initial square must not be mistaken for the full selected distance: a new
+world caps the loading screen at radius six while the outer view keeps streaming.
+
+On a quiet native seed-4242 run at selected radius eight and a 1280×720 target,
+first terrain was presented at 0.66 s, the initial 169-column view was settled
+at 9.16 s, all 289 selected-view columns at 14.48 s, and all 361 requested
+server columns at 14.08 s. Frame p99 was 4.63 ms with one 56 ms maximum; the
+remaining wall time was between chunk arrival and settled meshes, not sustained
+frame-thread or GPU submission saturation. These are local observations, not
+portable pass thresholds.
 Separate startup fields cover GPU-context creation, client/resource construction,
 and renderer construction without adding those costs to the world-open clock.
 `chunk_count` is sampled after each simulation step as the world-insertion
@@ -73,7 +71,9 @@ outer ring impossible to mesh.
 Keep the workload finite and aggregate-only. Add measurements at existing
 boundaries rather than logging packets or sections individually. Run the test
 once as a control before attributing a hotspot to client work; a missing vanilla
-atlas or GPU adapter is an environmental failure, not a valid zero result.
+atlas or GPU adapter is an environmental failure, not a valid zero result. Keep
+the initial and selected-view settlement predicates separate when changing
+readiness or render-distance behavior.
 Browser consumers should retain the transition events as one join record rather
 than sampling console output or treating the SDK's mount-level `first-frame`
 event as terrain readiness.
@@ -83,7 +83,9 @@ event as terrain readiness.
 Run `just samply-client-join-mesh` to build the release fixture and capture it.
 The default radius is the normal client render distance; pass `--radius 1` for
 the small control workload or `--dry-run` to print both commands without
-building. The script discovers
+building. `LODESTONE_CLIENT_JOIN_TARGET_SIZE=1280x720` selects a larger render
+target; `LODESTONE_CLIENT_JOIN_RADIUS=8` selects the view radius when invoking
+the test directly. The script discovers
 the test executable reported by Cargo and wraps that exact executable with
 `samply record --save-only`. If `LODESTONE_ASSETS` is unset, it uses the local
 `.cache/mc/26.2` bundle when present. The simulation uses the live window-mode

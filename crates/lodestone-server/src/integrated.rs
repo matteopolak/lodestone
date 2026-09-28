@@ -604,15 +604,36 @@ where
     })
 }
 
-/// Schedules the authoritative world loop through the same cancellation seam as
-/// the connection task. Native generation is dispatched separately, so the loop
-/// keeps the caller's clock domain and does not synchronously generate terrain.
+/// Runs the authoritative world loop on its own timer-capable thread. The tick
+/// performs synchronous simulation between timer waits, so sharing the
+/// connection runtime would delay packet service whenever a tick runs long.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn spawn_world_tick_task<F>(shutdown: &Arc<ShutdownSignal>, fut: F) -> Task
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    spawn_tick_task(shutdown, fut)
+    let signal = Arc::clone(shutdown);
+    let (cancel, mut cancelled) = tokio::sync::watch::channel(false);
+    let thread = std::thread::Builder::new()
+        .name("lodestone-world-tick".into())
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("world tick runtime must initialize");
+            runtime.block_on(async move {
+                tokio::select! {
+                    _ = signal.notified() => {}
+                    _ = cancelled.changed() => {}
+                    _ = fut => {}
+                }
+            });
+        })
+        .expect("world tick thread must start");
+    Task::WorldTick {
+        thread: Some(thread),
+        cancel,
+    }
 }
 
 #[cfg(target_arch = "wasm32")]

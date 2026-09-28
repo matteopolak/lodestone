@@ -363,6 +363,18 @@ impl FramePacer {
         self.reported_fps
     }
 
+    pub(crate) fn background_deadline(&self) -> Instant {
+        self.last_step + BACKGROUND_POLL
+    }
+
+    pub(crate) fn redraw_due(&self, now: Instant, target_fps: Option<u32>) -> bool {
+        if self.occluded || !self.focused {
+            now >= self.background_deadline()
+        } else {
+            target_fps.is_none() || now >= self.next_render
+        }
+    }
+
     /// How the event loop should wait after this iteration: spin while
     /// focused and uncapped (vsync paces us), sleep until the next scheduled
     /// deadline while capped, otherwise sleep briefly so a backgrounded
@@ -374,16 +386,16 @@ impl FramePacer {
     /// at 100% of a core calling `begin_frame` every iteration only to find
     /// `render == false` most of the time — a cap implemented as a spin loop
     /// checking a clock, which is the busy-wait this method exists to avoid.
-    pub(crate) fn control_flow(&self, now: Instant, target_fps: Option<u32>) -> ControlFlow {
+    pub(crate) fn control_flow(&self, _now: Instant, target_fps: Option<u32>) -> ControlFlow {
         if self.occluded {
-            ControlFlow::WaitUntil(now + BACKGROUND_POLL)
+            ControlFlow::WaitUntil(self.background_deadline())
         } else if self.focused {
             match target_fps {
                 None => ControlFlow::Poll,
                 Some(_) => ControlFlow::WaitUntil(self.next_render),
             }
         } else {
-            ControlFlow::WaitUntil(now + BACKGROUND_POLL)
+            ControlFlow::WaitUntil(self.background_deadline())
         }
     }
 }

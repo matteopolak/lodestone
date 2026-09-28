@@ -76,15 +76,21 @@ underwater state and on-ground state remain follow-up inputs; until they are
 available to that validator, its documented headroom preserves legitimate
 breaks while still rejecting implausible instant stops.
 
-Creative block breaking is instant and arms a five-tick client-side delay for
-held input. Progressive survival breaks use the same delay after their `STOP`
+Creative block breaking is instant, including blocks with negative hardness. It arms a five-tick
+client-side delay for held input, but each new press takes the direct start path and can break
+another block immediately. Progressive survival breaks use the same delay after their `STOP`
 action, while survival blocks whose break progress is already instant (grass,
 flowers and similar zero-hardness blocks) do not arm it. The window input path
 records each block ray hit when the attack press arrives, so a press followed by
 a release between fixed ticks is still delivered to `drive_mining`; queued
 presses are consumed one per tick in arrival order. Holding the button therefore
 clears adjacent zero-hardness blocks on consecutive ticks while retaining the
-creative/progressive cooldowns.
+creative/progressive held-input cooldowns. The client writes an instant break into its local
+chunk store and requests a re-mesh before the server response. A later authoritative block update
+can correct a rejected prediction; there is not yet a general rollback ledger for mining.
+Breaks taking at least 50 ms emit a `lodestone_server::stall` warning with edit, drop,
+light-queue, and neighbour-fanout timings, so a delayed item can be distinguished from a
+late block write or a client-side mesh delay. The threshold is fixed in `destroy_block`.
 
 `block_type_name`, the registry-id-to-name lookup used while decoding block
 events, reads `generated_block_registry::BLOCK_REGISTRY_NAMES`. This table is
