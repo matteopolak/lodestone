@@ -21,9 +21,11 @@ It reports observed mesh handoff cost to the same adaptive native frame budget
 used by interactive redraw, so the fixture does not stay at the startup limit.
 It uses the same eye camera and per-frame block/entity targeting step as the
 interactive redraw path; those are required for an attack to reach a real block.
-The new-world server pauses its initial ticks until the fixture sends the same
-post-present player-loaded acknowledgement as the interactive redraw path.
-The report includes that acknowledgement boundary.
+The fixture binds `NetClient` to the same ECS world the simulation renders,
+as the interactive launch does. The new-world server pauses its initial ticks
+until the fixture sends the post-present player-loaded acknowledgement. The
+report includes that acknowledgement boundary; the server keeps streaming
+padding columns afterward without holding the tick-owned action queue closed.
 An optional movement phase keeps the same client and renderer running while the
 player crosses into newly requested terrain.
 
@@ -117,8 +119,12 @@ uses the normal attack path on a loaded block. The record separates the click
 to local air-state change, replacement mesh upload, and first subsequent
 presented frame. In survival, the first interval includes intended mining time;
 it is not solely network latency. An absent ray target or unpresented edit
-fails the bounded run. When movement is also enabled, it begins after the edit
-has been presented.
+fails the bounded run. `LODESTONE_CLIENT_JOIN_DROP=1` then mines the exposed
+block beneath it through the same input path, and records the delay to local
+air, an authoritative item entity, its stack, and a frame with item geometry
+submitted. It requires the edit phase and fails if no item frame appears within
+12 seconds. When movement is also enabled, it begins after these effects have
+been presented.
 
 The browser SDK reports the same player-facing boundaries through `onProgress`.
 Its clock starts in the production create-world action and emits transition-only
@@ -159,6 +165,10 @@ target; `LODESTONE_CLIENT_JOIN_RADIUS=8` selects the view radius when invoking
 the test directly. `LODESTONE_CLIENT_JOIN_MOVE_SECONDS=20` adds a bounded
 movement phase; unset or zero leaves the stationary join control unchanged.
 `LODESTONE_CLIENT_JOIN_EDIT=1` adds the block-edit phase.
+`LODESTONE_CLIENT_JOIN_DROP=1` adds the item-drop phase and requires the edit
+phase. The JSON `drop` object reports input-to-air, input-to-entity,
+input-to-stack, and input-to-draw milliseconds separately; the first includes
+the block's intended mining time.
 `LODESTONE_JOIN_TRACE=1` enables the per-column server stage trace in this
 fixture. Native traces distinguish initial queue entry, admission, worker start,
 generation, encoding, and delivery; a later full-stage request has a separate

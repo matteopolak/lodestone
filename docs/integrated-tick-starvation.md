@@ -11,7 +11,7 @@ The tick loop's `resident_tick_terrain_snapshot` builds the natural-spawn terrai
 The coordinate-gate table uses a non-cryptographic hash for its private `(cx, cz)` lookups. No iteration order from that table affects mutations, packet bytes, or generation order; ordered multi-coordinate admission sorts its coordinates independently.
 Single-column and single-block resident reads hold one coordinate gate until the snapshot is complete. Their lease uses no coordinate vectors and releases and prunes the gate record under one table lock; multi-column writes keep the ordered lease path.
 
-Integrated worlds pause simulation until the client reports `PlayerLoaded` and the initial terrain neighborhood has been delivered. The connection's chunk stream and generation workers remain active while paused. The tick driver continues waiting at its normal cadence, so resuming does not replay loading time as a burst of world ticks. Other server entry points keep their normal tick behavior.
+Integrated worlds pause simulation until the client reports `PlayerLoaded` after presenting its initial terrain view. The server does not wait for the larger padded streaming radius: that can remain in flight after the client becomes interactive, and the tick-owned action adjudicator must already be running when the player breaks a block. The connection's chunk stream and generation workers remain active while paused. The tick driver continues waiting at its normal cadence, so resuming does not replay loading time as a burst of world ticks. Other server entry points keep their normal tick behavior.
 
 The connection drains tick-produced block changes into an ordered local queue,
 retaining only changes for columns already delivered when the feed is drained.
@@ -63,6 +63,7 @@ The resident-only natural-spawn view is deliberately all-or-nothing. This gives 
 ## Configuration
 
 Tracing is off by default. On native runs, set `LODESTONE_TICK_TRACE=1` and enable the `lodestone_tick_trace` target at `info` or above in the configured `tracing` subscriber. Healthy phases produce no trace output; only phases at least 50 ms are emitted.
+For an individual block-break path, enable `lodestone_block_trace=debug` to see the action, target, pending dig, and adjudication result. The `lodestone_server::stall` target warns when the authoritative break keeps the connection loop busy for at least 50 ms.
 
 ## Dependencies
 

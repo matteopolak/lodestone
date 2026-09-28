@@ -19,6 +19,7 @@ use lodestone_time::Instant;
 use lodestone_model::action::{
     ChatMode, ClientAction, ClientSettings, DisplayedSkinParts, MainHand, ParticleStatus,
 };
+use lodestone_model::Reported;
 
 const SEED: i64 = 4242;
 const DEADLINE: Duration = Duration::from_secs(120);
@@ -32,6 +33,106 @@ struct EditProbe {
     changed: Option<Duration>,
     mesh_uploaded: Option<Duration>,
     presented: Option<Duration>,
+}
+
+struct DropProbe {
+    previous_target: [i32; 3],
+    existing_items: HashSet<i32>,
+    target: Option<[i32; 3]>,
+    initial_state: Option<u32>,
+    clicked_at: Option<Instant>,
+    changed_at: Option<Instant>,
+    entity_at: Option<Instant>,
+    stack_at: Option<Instant>,
+    extracted_at: Option<Instant>,
+    extracted_item_at: Option<Instant>,
+    drawn_at: Option<Instant>,
+    max_item_drops_drawn: usize,
+    entity_id: Option<i32>,
+    item: Option<String>,
+}
+
+impl DropProbe {
+    fn new(sim: &Sim, previous_target: [i32; 3]) -> Self {
+        let existing_items = sim.net().into_iter().flat_map(NetClient::entities)
+            .filter(|entity| entity.entity_type.path() == "item")
+            .map(|entity| entity.entity_id)
+            .collect();
+        Self {
+            previous_target,
+            existing_items,
+            target: None,
+            initial_state: None,
+            clicked_at: None,
+            changed_at: None,
+            entity_at: None,
+            stack_at: None,
+            extracted_at: None,
+            extracted_item_at: None,
+            drawn_at: None,
+            max_item_drops_drawn: 0,
+            entity_id: None,
+            item: None,
+        }
+    }
+
+    fn observe(&mut self, sim: &mut Sim) {
+        if self.clicked_at.is_none() {
+            if let Some(hit) = sim.target()
+                && hit.block[0] == self.previous_target[0]
+                && hit.block[2] == self.previous_target[2]
+                && hit.block[1] < self.previous_target[1]
+            {
+                let state = sim.chunk_world().read().block_state_at(
+                    hit.block[0], hit.block[1], hit.block[2],
+                );
+                if state.is_some_and(|id| id != lodestone_data::block_states::StateId::AIR.raw()) {
+                    self.target = Some(hit.block);
+                    self.initial_state = state;
+                    self.clicked_at = Some(Instant::now());
+                    sim.begin_attack();
+                }
+            }
+        } else if self.changed_at.is_none()
+            && self.target.is_some_and(|block| {
+                sim.chunk_world().read().block_state_at(block[0], block[1], block[2])
+                    == Some(lodestone_data::block_states::StateId::AIR.raw())
+            })
+        {
+            self.changed_at = Some(Instant::now());
+            sim.end_attack();
+        }
+        let Some(target) = self.target else { return };
+        let Some(net) = sim.net() else { return };
+        for entity in net.entities() {
+            if entity.entity_type.path() != "item"
+                || self.existing_items.contains(&entity.entity_id)
+                || (entity.position.x - f64::from(target[0])).abs() > 2.0
+                || (entity.position.y - f64::from(target[1])).abs() > 2.0
+                || (entity.position.z - f64::from(target[2])).abs() > 2.0
+            {
+                continue;
+            }
+            self.entity_at.get_or_insert_with(Instant::now);
+            self.entity_id.get_or_insert(entity.entity_id);
+            if let Reported::Reported(Some(stack)) = &entity.item {
+                self.stack_at.get_or_insert_with(Instant::now);
+                self.item.get_or_insert_with(|| stack.item.to_string());
+            }
+        }
+        if self.clicked_at.is_some_and(|clicked| clicked.elapsed() >= Duration::from_secs(12))
+            && self.drawn_at.is_none()
+        {
+            let mining = sim.ecs().read().resource::<lodestone::interact::MiningPredictor>().0.target();
+            let net_state = self.target.and_then(|block| net.block_at(lodestone_model::BlockPos::new(block[0], block[1], block[2])));
+            let first_state = net.block_at(lodestone_model::BlockPos::new(self.previous_target[0], self.previous_target[1], self.previous_target[2]));
+            let first_client_state = sim.chunk_world().read().block_state_at(
+                self.previous_target[0], self.previous_target[1], self.previous_target[2],
+            );
+            panic!("dropped item did not reach a presented frame: target={:?} initial={:?} client_changed={} net_state={:?} first_server_view={:?} first_client_state={:?} mining={mining:?} entity_target={:?} entity={} stack={} extracted={} extracted_item={} max_item_drops_drawn={} item={:?}",
+                self.target, self.initial_state, self.changed_at.is_some(), net_state, first_state, first_client_state, sim.entity_target(), self.entity_at.is_some(), self.stack_at.is_some(), self.extracted_at.is_some(), self.extracted_item_at.is_some(), self.max_item_drops_drawn, self.item);
+        }
+    }
 }
 
 impl EditProbe {
@@ -242,6 +343,17 @@ fn edit_enabled() -> bool {
     }
 }
 
+fn drop_enabled() -> bool {
+    match std::env::var("LODESTONE_CLIENT_JOIN_DROP") {
+        Ok(value) => {
+            assert_eq!(value, "1", "LODESTONE_CLIENT_JOIN_DROP must be 1 when set");
+            true
+        }
+        Err(std::env::VarError::NotPresent) => false,
+        Err(error) => panic!("invalid LODESTONE_CLIENT_JOIN_DROP: {error}"),
+    }
+}
+
 fn movement_duration() -> Duration {
     let seconds = std::env::var("LODESTONE_CLIENT_JOIN_MOVE_SECONDS")
         .ok()
@@ -307,9 +419,12 @@ fn profile_config(radius: u32) -> Config {
 }
 
 fn main() {
-    if std::env::var_os("LODESTONE_JOIN_TRACE").is_some() {
+    if std::env::var_os("LODESTONE_JOIN_TRACE").is_some()
+        || std::env::var_os("LODESTONE_CLIENT_JOIN_DROP").is_some()
+    {
         tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::new("lodestone_join_trace=info"))
+            .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,lodestone_join_trace=info,lodestone_block_trace=debug")))
             .with_ansi(false)
             .try_init()
             .expect("join trace subscriber");
@@ -317,6 +432,8 @@ fn main() {
     let radius = profile_radius();
     let move_for = movement_duration();
     let measure_edit = edit_enabled();
+    let measure_drop = drop_enabled();
+    assert!(!measure_drop || measure_edit, "drop profiling requires the first block edit");
     let server_radius = integrated_stream_radius(radius);
     let expected_visible_columns = ((radius as usize) * 2 + 1).pow(2);
     let expected_server_columns = ((server_radius as usize) * 2 + 1).pow(2);
@@ -360,7 +477,7 @@ fn main() {
         lodestone::menu::create_world::WorldTypePreset::Normal,
         i32::try_from(server_radius).expect("profile radius fits i32"),
         true,
-        None,
+        Some((sim.ecs().clone(), sim.local_player())),
         None,
     );
     let open_ns = open_started.elapsed().as_nanos();
@@ -452,6 +569,7 @@ fn main() {
     let mut server_tick_max_gap = Duration::ZERO;
     let mut last_view_probe: Option<Instant> = None;
     let mut edit: Option<EditProbe> = None;
+    let mut drop_probe: Option<DropProbe> = None;
 
     while started.elapsed() < DEADLINE {
         let frame_started = Instant::now();
@@ -515,6 +633,9 @@ fn main() {
                 probe.changed,
                 probe.mesh_uploaded,
             );
+        }
+        if let Some(probe) = drop_probe.as_mut() {
+            probe.observe(&mut sim);
         }
         let step_elapsed = step_started.elapsed();
         step_ns += step_elapsed.as_nanos();
@@ -673,15 +794,28 @@ fn main() {
 
         let render_started = Instant::now();
         let frame = target.acquire().expect("headless target acquire");
+        let entity_draws = sim.entity_draws();
         let stats = render.render(
             device,
             queue,
             frame.view(),
             &sim.camera(target_width as f32 / target_height as f32),
             None,
-            &[],
+            &entity_draws,
         );
         frame.present(queue);
+        if let Some(probe) = drop_probe.as_mut() {
+            probe.max_item_drops_drawn = probe.max_item_drops_drawn.max(stats.item_drops_drawn);
+            if let Some(draw) = entity_draws.iter().find(|draw| Some(draw.id) == probe.entity_id) {
+                probe.extracted_at.get_or_insert_with(Instant::now);
+                if draw.item.is_some() {
+                    probe.extracted_item_at.get_or_insert_with(Instant::now);
+                    if stats.item_drops_drawn > 0 {
+                        probe.drawn_at.get_or_insert_with(Instant::now);
+                    }
+                }
+            }
+        }
         if movement_started.is_some() {
             movement_columns.observe(&sim);
         }
@@ -690,6 +824,13 @@ fn main() {
             && probe.presented.is_none()
         {
             probe.presented = probe.clicked_at.map(|clicked| clicked.elapsed());
+        }
+        if measure_drop && drop_probe.is_none()
+            && let Some(previous_target) = edit.as_ref()
+                .filter(|probe| probe.presented.is_some())
+                .and_then(|probe| probe.target)
+        {
+            drop_probe = Some(DropProbe::new(&sim, previous_target));
         }
         if sim.acknowledge_presented_initial_world() {
             player_loaded_ack = Some(started.elapsed());
@@ -736,6 +877,7 @@ fn main() {
             && overlay_ready.is_some()
             && first_presented_terrain.is_some()
             && (!measure_edit || edit.as_ref().is_some_and(|probe| probe.presented.is_some()))
+            && (!measure_drop || drop_probe.as_ref().is_some_and(|probe| probe.drawn_at.is_some()))
         {
             let position = sim.player().position;
             movement_origin = Some((position.x, position.z));
@@ -760,6 +902,7 @@ fn main() {
             && first_presented_terrain.is_some()
             && (move_for == Duration::ZERO || movement_post_stop_settled.is_some())
             && (!measure_edit || edit.as_ref().is_some_and(|probe| probe.presented.is_some()))
+            && (!measure_drop || drop_probe.as_ref().is_some_and(|probe| probe.drawn_at.is_some()))
         {
             break;
         }
@@ -852,8 +995,17 @@ fn main() {
         "input_to_mesh_upload_ms": ms(probe.mesh_uploaded),
         "input_to_present_ms": ms(probe.presented),
     }));
+    let drop_report = drop_probe.map(|probe| serde_json::json!({
+        "target": probe.target,
+        "initial_state": probe.initial_state,
+        "item": probe.item,
+        "input_to_air_ms": probe.clicked_at.zip(probe.changed_at).map(|(start, end)| end.duration_since(start).as_secs_f64() * 1000.0),
+        "input_to_entity_ms": probe.clicked_at.zip(probe.entity_at).map(|(start, end)| end.duration_since(start).as_secs_f64() * 1000.0),
+        "input_to_stack_ms": probe.clicked_at.zip(probe.stack_at).map(|(start, end)| end.duration_since(start).as_secs_f64() * 1000.0),
+        "input_to_draw_ms": probe.clicked_at.zip(probe.drawn_at).map(|(start, end)| end.duration_since(start).as_secs_f64() * 1000.0),
+    }));
     let report = serde_json::json!({
-        "schema": "lodestone-client-join-mesh-profile-v17",
+        "schema": "lodestone-client-join-mesh-profile-v18",
         "seed": SEED,
         "target_size": [target_width, target_height],
         "visible_radius": radius,
@@ -919,6 +1071,7 @@ fn main() {
         "movement": movement,
         "server_tick": server_tick,
         "edit": edit,
+        "drop": drop_report,
     });
     println!("CLIENT_JOIN_MESH_PROFILE {report}");
     assert!(!report["timed_out"].as_bool().unwrap_or(true), "{report}");
@@ -930,6 +1083,9 @@ fn main() {
     }
     if measure_edit {
         assert!(report["edit"]["input_to_present_ms"].is_number(), "block edit never reached a presented frame: {report}");
+    }
+    if measure_drop {
+        assert!(report["drop"]["input_to_draw_ms"].is_number(), "block drop never reached a presented frame: {report}");
     }
 }
 
