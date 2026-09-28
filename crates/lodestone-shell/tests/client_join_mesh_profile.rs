@@ -306,6 +306,13 @@ fn profile_config(radius: u32) -> Config {
 }
 
 fn main() {
+    if std::env::var_os("LODESTONE_JOIN_TRACE").is_some() {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new("lodestone_join_trace=info"))
+            .with_ansi(false)
+            .try_init()
+            .expect("join trace subscriber");
+    }
     let radius = profile_radius();
     let move_for = movement_duration();
     let measure_edit = edit_enabled();
@@ -779,6 +786,8 @@ fn main() {
         "requested_seconds": move_for.as_secs(),
         "elapsed_ms": movement_stopped.map_or_else(|| start.elapsed(), |stop| stop.duration_since(start)).as_secs_f64() * 1000.0,
         "horizontal_distance_blocks": movement_distance,
+        "start_chunk": movement_origin.map(|(x, z)| chunk_at(x, z)),
+        "end_chunk": movement_last_chunk,
         "first_position_effect_ms": ms(movement_first_effect),
         "first_chunk_change_ms": ms(movement_first_chunk_change),
         "first_shifted_view_settled_ms": ms(movement_first_settled_view),

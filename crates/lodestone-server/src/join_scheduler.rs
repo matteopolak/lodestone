@@ -263,6 +263,11 @@ fn spawn_cohort<S: ChunkSource + ?Sized + 'static>(
     let received = (0..requests.len()).map(|_| false).collect();
     let job_requests = requests.clone();
     let handle = crate::worldgen_dispatch::try_spawn(move || {
+        if let Some(trace) = trace.as_ref() {
+            for request in &job_requests {
+                trace.mark("worker_started", request.coordinate.0, request.coordinate.1);
+            }
+        }
         let mut sessions = job_requests
             .iter()
             .map(|request| {
@@ -974,6 +979,11 @@ impl<S: ChunkSource + ?Sized + 'static> ColumnPipeline<S> {
     /// `Arc` because workers own it while the connection task records delivery.
     #[must_use]
     pub(crate) fn with_trace(mut self, trace: Option<Arc<JoinTrace>>) -> Self {
+        if let Some(trace) = trace.as_ref() {
+            for (request, _) in &self.queue.pending {
+                trace.mark("queued", request.coord.0, request.coord.1);
+            }
+        }
         self.trace = trace;
         self
     }
@@ -1075,6 +1085,11 @@ impl<S: ChunkSource + ?Sized + 'static> ColumnPipeline<S> {
         if coords.is_empty() {
             return;
         }
+        if let Some(trace) = self.trace.as_ref() {
+            for &(cx, cz) in &coords {
+                trace.mark("queued", cx, cz);
+            }
+        }
         self.total += coords.len();
         self.queue.extend(coords);
     }
@@ -1084,6 +1099,11 @@ impl<S: ChunkSource + ?Sized + 'static> ColumnPipeline<S> {
     /// newly visible columns, but their job stage is pinned to `Full` even when
     /// the moving band changes again before the worker starts.
     pub(crate) fn enqueue_full(&mut self, coords: Vec<(i32, i32)>) {
+        if let Some(trace) = self.trace.as_ref() {
+            for &(cx, cz) in &coords {
+                trace.mark("upgrade_queued", cx, cz);
+            }
+        }
         let added = self.queue.extend_full(coords);
         self.total += added;
     }
@@ -1185,6 +1205,9 @@ impl<S: ChunkSource + ?Sized + 'static> ColumnPipeline<S> {
                     let Some((coordinate, force_full)) = self.queue.pop_request() else {
                         break;
                     };
+                    if let Some(trace) = self.trace.as_ref() {
+                        trace.mark("admitted", coordinate.0, coordinate.1);
+                    }
                     requests.push(self.batch_request_for(coordinate, force_full));
                 }
                 if requests.is_empty() {
@@ -1221,6 +1244,11 @@ impl<S: ChunkSource + ?Sized + 'static> ColumnPipeline<S> {
                     let trace = self.trace.clone();
                     let job_requests = requests.clone();
                     match crate::worldgen_dispatch::try_spawn(move || {
+                        if let Some(trace) = trace.as_ref() {
+                            for request in &job_requests {
+                                trace.mark("worker_started", request.coordinate.0, request.coordinate.1);
+                            }
+                        }
                         let mut sessions = job_requests
                             .iter()
                             .map(|request| {

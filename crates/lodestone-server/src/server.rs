@@ -84,7 +84,7 @@ impl JoinTrace {
             "generated" => self.generated_seen.swap(true, Ordering::Relaxed),
             "encoded" => self.encoded_seen.swap(true, Ordering::Relaxed),
             "delivered" => self.delivered_seen.swap(true, Ordering::Relaxed),
-            _ => false,
+            _ => true,
         };
         tracing::info!(
             target: "lodestone_join_trace",
