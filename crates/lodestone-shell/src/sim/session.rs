@@ -511,8 +511,20 @@ impl Sim {
         self.new_world_loading
     }
 
-    pub(crate) fn finish_new_world_loading(&mut self) {
+    /// Acknowledge a newly created world only after its first ready terrain frame
+    /// has been presented. Returns whether the acknowledgement was sent.
+    pub fn acknowledge_presented_initial_world(&mut self) -> bool {
+        if !self.new_world_loading
+            || self.dimension_transition_pending
+            || self.world_wait().is_some()
+            || !self
+                .net()
+                .is_some_and(crate::net::NetClient::try_send_player_loaded)
+        {
+            return false;
+        }
         self.new_world_loading = false;
+        true
     }
 
     /// Whether dimension travel currently needs an opaque destination cover.

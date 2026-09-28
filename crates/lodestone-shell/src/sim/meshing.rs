@@ -377,6 +377,9 @@ impl Sim {
     /// renderer-settled. Sessions without a declared view fall back to the local
     /// player's column.
     pub fn refresh_terrain_readiness(&mut self) {
+        if !self.new_world_loading && !self.dimension_transition_pending {
+            return;
+        }
         let position = self.player().position;
         let (cx, cz) = (
             (position.x.floor() as i32).div_euclid(16),

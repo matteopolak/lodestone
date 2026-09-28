@@ -17,6 +17,11 @@ terrain scheduler, `RenderState`, and `HeadlessTarget`, and emits one aggregate
 every uploaded section and a presented frame on each loop; it excludes the
 window compositor and menu/HUD work. Its default target is 64×64, with a
 configurable size for realistic GPU fragment work.
+The new-world server pauses its initial ticks until the fixture sends the same
+post-present player-loaded acknowledgement as the interactive redraw path.
+The report includes that acknowledgement boundary.
+An optional movement phase keeps the same client and renderer running while the
+player crosses into newly requested terrain.
 
 The report separates the capped initial loading square, the selected render
 distance, and the server's additional meshing halo. It records received and
@@ -53,6 +58,14 @@ The selected template must expose `Cycles Instructions` in that order; other
 counter layouts are reported as unavailable rather than interpreted as this
 pair.
 
+With `LODESTONE_CLIENT_JOIN_MOVE_SECONDS` set, the fixture starts moving after
+the loading overlay clears and terrain has been presented. It holds forward,
+sprint, and jump, then records the delay to the first position change and chunk
+crossing, visible-view mesh settlement, simulation ticks, pending meshes, and
+frame/step tail latency during motion. The run fails if it never crosses a
+chunk boundary; an unmoving player is not a valid streaming workload. Movement
+can overlap delivery of the outer render-distance ring.
+
 The browser SDK reports the same player-facing boundaries through `onProgress`.
 Its clock starts in the production create-world action and emits transition-only
 events for `joining`, `loading-terrain`, `loading-overlay-ready`,
@@ -85,13 +98,18 @@ The default radius is the normal client render distance; pass `--radius 1` for
 the small control workload or `--dry-run` to print both commands without
 building. `LODESTONE_CLIENT_JOIN_TARGET_SIZE=1280x720` selects a larger render
 target; `LODESTONE_CLIENT_JOIN_RADIUS=8` selects the view radius when invoking
-the test directly. The script discovers
+the test directly. `LODESTONE_CLIENT_JOIN_MOVE_SECONDS=20` adds a bounded
+movement phase; unset or zero leaves the stationary join control unchanged.
+The script discovers
 the test executable reported by Cargo and wraps that exact executable with
 `samply record --save-only`. If `LODESTONE_ASSETS` is unset, it uses the local
 `.cache/mc/26.2` bundle when present. The simulation uses the live window-mode
 resource path with a headless render target; headless simulation mode would
 deliberately substitute the offline demo world and is rejected by the atlas
 control.
+The fixture checks settlement every frame until the initial acknowledgement;
+afterward it samples the wider view at 100 ms intervals so observation does
+not dominate the frame being measured.
 
 ## Dependencies
 
