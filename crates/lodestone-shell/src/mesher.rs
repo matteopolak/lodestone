@@ -939,6 +939,7 @@ pub const DIRTY_COLUMN_BUDGET: usize = 64;
 /// one frame. Work is counted by the sections actually visited, not columns,
 /// so the bound remains stable across dimensions with different heights.
 pub const MESH_SNAPSHOT_SECTION_BUDGET: usize = 96;
+const PROVISIONAL_FIRST_MESH_RADIUS: i32 = 1;
 
 /// Half-angle, in degrees, of the horizontal cone [`DirtyColumns`] treats as
 /// "the player is looking at this column".
@@ -1316,13 +1317,11 @@ pub struct TerrainMesh {
     /// lexicographically — see [`DirtyColumns`] for what that fixed and why the
     /// container is no longer a `BTreeSet`.
     pub dirty_columns: DirtyColumns,
-    /// Newly arrived columns waiting for a complete horizontal neighbourhood.
-    /// Explicit remesh requests use the established immediate path. Waiting
-    /// arrivals are deliberately not members of [`Self::dirty_columns`]: that
-    /// queue is ready work, and a frontier column must not occupy it while its
-    /// zero-work admission attempt is waiting on another arrival.
+    /// Newly arrived columns waiting for a complete horizontal neighbourhood or
+    /// near-player provisional admission. Waiting arrivals are deliberately not
+    /// members of [`Self::dirty_columns`].
     pending_arrivals: HashSet<(i32, i32)>,
-    /// View-center columns painted early and awaiting one halo-complete rebuild.
+    /// Near-player columns painted early and awaiting one halo-complete rebuild.
     provisional_columns: HashSet<(i32, i32)>,
     /// Columns that must be meshed **even if a horizontal neighbour is missing**,
     /// because a neighbour is missing for a reason that will never resolve: it
@@ -1625,16 +1624,15 @@ impl TerrainMesh {
         true
     }
 
-    /// Admit one arrival from the coalesced heal queue. A first build in a
-    /// streaming world stays queued until all horizontal neighbours are
-    /// resident; a previously presented column may still be rebuilt against a
-    /// temporarily short halo.
+    /// Admit one arrival from the coalesced heal queue. Near-player arrivals
+    /// may build provisionally against an incomplete horizontal neighbourhood;
+    /// other first builds wait for the full halo.
     pub(crate) fn mesh_arriving_column(
         &mut self,
         store: &ChunkWorld,
         cx: i32,
         cz: i32,
-        _view_center: bool,
+        allow_provisional: bool,
     ) -> usize {
         if !self.pending_arrivals.contains(&(cx, cz)) {
             return self.mesh_column(store, cx, cz);
@@ -1643,16 +1641,14 @@ impl TerrainMesh {
             self.pending_arrivals.remove(&(cx, cz));
             return 0;
         }
-        self.pending_arrivals.remove(&(cx, cz));
-        // A first mesh is useful even when the surrounding stream is sparse:
-        // an absent neighbour is an exposed edge, so its side faces must be
-        // visible instead of leaving a hollow-looking wall. `route` submits
-        // the deferred snapshot against air and a later arrival re-drives the
-        // boundary through `mark_neighbours_dirty`.
-        if self.column_source == ColumnSource::Streaming
+        let provisional = self.column_source == ColumnSource::Streaming
             && !self.column_has_prior_result(cx, cz)
-            && !Self::horizontal_halo_ready(store, cx, cz)
-        {
+            && !Self::horizontal_halo_ready(store, cx, cz);
+        if provisional && !allow_provisional {
+            return 0;
+        }
+        self.pending_arrivals.remove(&(cx, cz));
+        if provisional {
             self.provisional_columns.insert((cx, cz));
             return self.mesh_column_inner(store, cx, cz, true);
         }
@@ -2445,15 +2441,24 @@ pub fn heal_dirty_columns(
         eligible_columns += 1;
         snapshot_sections += terrain.mesh_column_forced(&store, cx, cz);
     }
-    // The center is allowed one provisional first build even when its halo is
-    // incomplete. It is no longer in `dirty_columns`, so inspect this one
-    // admission waiter explicitly before draining ordinary ready work.
-    if snapshot_sections < MESH_SNAPSHOT_SECTION_BUDGET
-        && let Some((cx, cz)) = view_center
-        && terrain.pending_arrivals.contains(&(cx, cz))
-    {
-        eligible_columns += 1;
-        snapshot_sections += terrain.mesh_arriving_column(&store, cx, cz, true);
+    if let Some((center_x, center_z)) = view_center {
+        'near: for distance in 0..=PROVISIONAL_FIRST_MESH_RADIUS {
+            for dz in -distance..=distance {
+                for dx in -distance..=distance {
+                    if snapshot_sections >= MESH_SNAPSHOT_SECTION_BUDGET {
+                        break 'near;
+                    }
+                    if dx.abs().max(dz.abs()) != distance {
+                        continue;
+                    }
+                    let (cx, cz) = (center_x + dx, center_z + dz);
+                    if terrain.pending_arrivals.contains(&(cx, cz)) {
+                        eligible_columns += 1;
+                        snapshot_sections += terrain.mesh_arriving_column(&store, cx, cz, true);
+                    }
+                }
+            }
+        }
     }
     let dirty_attempts = terrain.dirty_columns.len();
     for _ in 0..dirty_attempts {
@@ -4609,6 +4614,37 @@ mod tests {
             TerrainMesh::new(MeshScheduler::new(2, ShellClassifier::Demo(DemoClassifier)));
         terrain.column_source = ColumnSource::Streaming;
         terrain
+    }
+
+    #[test]
+    fn nearby_arrivals_get_first_mesh_without_waiting_for_padding() {
+        let write = ChunkWorldWrite::new(World::new());
+        for cx in [1, 2] {
+            write
+                .write()
+                .load(ChunkPos::new(cx, 0), seam_column(&|_, _| true));
+        }
+        let store = write.read_handle();
+        let mut terrain = streaming_terrain();
+        terrain.queue_column_arrival(1, 0);
+        terrain.queue_column_arrival(2, 0);
+
+        let mut app = App::new();
+        app.insert_resource(store);
+        app.insert_resource(terrain);
+        app.world_mut().spawn((
+            LocalPlayer,
+            PhysicsState(lodestone_physics::PlayerState::at(
+                lodestone_physics::Vec3d::new(0.5, 4.0, 0.5),
+                0.0,
+            )),
+        ));
+        app.add_systems(Update, heal_dirty_columns);
+        app.update();
+
+        let terrain = app.world().resource::<TerrainMesh>();
+        assert!(terrain.provisional_columns.contains(&(1, 0)));
+        assert!(terrain.pending_arrivals.contains(&(2, 0)));
     }
 
     #[test]

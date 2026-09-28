@@ -318,10 +318,9 @@ impl Sim {
     /// re-meshes neighbours.
     ///
     /// The arriving column waits in `TerrainMesh::pending_arrivals` until its
-    /// horizontal 3×3 residency halo is present; only then is it promoted into
-    /// the ready `dirty_columns` queue. Loaded neighbours are coalesced into
-    /// that ready queue. The view center remains the one exception: the heal
-    /// system may paint it provisionally before the halo arrives.
+    /// horizontal 3×3 residency halo is present, unless it is within one
+    /// column of the player. The heal system paints those nearby arrivals
+    /// provisionally; loaded neighbours are coalesced into the ready queue.
     pub(crate) fn on_column_arrived(&mut self, cx: i32, cz: i32) {
         self.terrain_mut(|terrain| terrain.queue_column_arrival(cx, cz));
         self.terrain_and_world(|store, terrain| terrain.mark_neighbours_dirty(store, cx, cz));
