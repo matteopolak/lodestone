@@ -4,19 +4,23 @@
 
 The labelled `Loading terrain...` overlay is reserved for the first creation of a survival singleplayer world. It releases when the initial spawn view, capped at radius six, is resident and renderer-settled; the rest of the selected render distance streams after play begins. A non-empty section must be CPU-meshed and handed to `RenderState`; an all-air section must be explicitly classified as empty. Existing saves, creative/hardcore creations, and multiplayer joins do not get a fake chunk counter or grid.
 
-Dimension travel has a separate opaque transition cover. It hides the old dimension while the destination is installed, but deliberately has no initial-world label, progress bar, or chunk grid. This keeps a portal transition from looking like first-world generation and prevents a remote join from getting stuck behind a local progress denominator.
+Dimension travel has a separate opaque transition cover. It hides the old dimension until the player's destination column is renderer-settled, without reusing the first-world progress bar or chunk grid. A remote server need not fill the advertised view square before the player can enter it.
 
 ## How it works
 
 `TerrainMesh` keeps a per-section settlement ledger keyed by `SectionKey`. A ready mesh enters the renderer ledger only after `app/redraw.rs` calls `RenderState::upload_section`; a `SnapshotOutcome::Empty` enters the empty ledger without an upload. Deferred or queued sections remain absent from both ledgers. `TerrainMesh::column_mesh_settled` checks the decoded local column and every section in the active `ChunkWorld` extent, so scheduler-wide pending counts, visible-section counts, and unrelated uploaded columns cannot release the gate.
 
-After the frame drains removals and uploads, `Sim::refresh_terrain_readiness` evaluates every column in the declared view. The result is a one-way producer latch for the current dimension. `Sim::terrain_wait` still requires the player's decoded column while `TerrainProgressTracker` remains telemetry for the loading bar and never substitutes for section settlement. A session with no declared view retains the own-column fallback.
+After the frame drains removals and uploads, `Sim::refresh_terrain_readiness` evaluates every column in the declared first-world view. A dimension transition instead checks the player's destination column, including all sections in its current vertical extent. The result is a one-way producer latch for the current dimension. `Sim::terrain_wait` still requires the player's decoded column while `TerrainProgressTracker` remains telemetry for the loading bar and never substitutes for section settlement. A session with no declared view retains the own-column fallback.
 
 The server holds the new world's initial ticks until its bounded spawn square has been sent and the client acknowledges loading. The client defers that first acknowledgement until after a world frame has been presented with the initial terrain and assets ready. Later respawns acknowledge automatically. Packet delivery alone is not proof of renderer settlement, and a world-wide pause must not stop the chunk stream needed to reach readiness.
 
 `Sim` carries two presentation latches next to the producer readiness state: `new_world_loading` is armed only by the newly-created survival launch path, while `dimension_transition_pending` is armed by a cross-dimension respawn. The renderer checks the transition latch before the ordinary world wait and draws its opaque cover independently. After the first playable frame, `app/redraw.rs` sends the deferred acknowledgement and clears the initial latch. The producer readiness state itself remains with the mesh ledger rather than duplicating section state in the simulation struct.
 
+Both the full-frame connection screen and the in-world loading cover use the current menu canvas settings. Stamp the GUI scale on overlays too; otherwise the same label changes size at the handoff from connection to terrain loading.
+
 Focus loss does not turn either loading cover into the pause overlay. The window lifecycle checks initial-world ownership, `Sim::world_wait`, and `Sim::dimension_transition_pending` before applying pause-on-lost-focus, so only a presentable `Screen::Playing` state can become `Screen::Paused`; the full-frame `Screen::Connecting` state is guarded by the same state-machine transition.
+
+The same readiness predicate gates gameplay keys, pointer motion, clicks, and hotbar scrolling. The simulation and network continue processing while the cover is visible; the player cannot interact with an unseen world behind it.
 
 The initial-world grid covers the playable spawn square and is centred on the canvas. The server continues streaming the selected render distance and an extra neighbour ring for meshing after the gate releases. Cells use a typed status enum and the complete twelve-colour palette; network paths may currently expose only empty/full observations, but no status is collapsed through string comparisons or a uniform colour.
 

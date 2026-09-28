@@ -2691,9 +2691,10 @@ impl WindowApp {
             // Portal travel has a separate opaque cover. It deliberately has
             // no initial-world progress bar or chunk grid: the old dimension
             // is being replaced, not generated for the first time.
-            let loading_frame = crate::menu::render::loading_frame(
+            let mut loading_frame = crate::menu::render::loading_frame(
                 crate::menu::loading::ConnectPhase::Joining.label(),
             );
+            crate::menu::render::stamp_canvas_facts(&mut loading_frame, &self.ui, &self.nav);
             menu.render_overlay(device, queue, frame.view(), &loading_frame, w, h);
             menu_overlays_drawn += 1;
         } else if self.ui.is_playing()
@@ -2704,7 +2705,7 @@ impl WindowApp {
             // `has_terrain_progress` is false for the pack wait, which draws the
             // bare label: nothing here observes a download's byte count, so a bar
             // would be the synthesised progress `menu::loading`'s own doc forbids.
-            let loading_frame = match self
+            let mut loading_frame = match self
                 .sim
                 .terrain_progress()
                 .filter(|_| wait.has_terrain_progress())
@@ -2721,6 +2722,7 @@ impl WindowApp {
                 ),
                 None => crate::menu::render::loading_frame(label),
             };
+            crate::menu::render::stamp_canvas_facts(&mut loading_frame, &self.ui, &self.nav);
             menu.render_overlay(device, queue, frame.view(), &loading_frame, w, h);
             menu_overlays_drawn += 1;
         }

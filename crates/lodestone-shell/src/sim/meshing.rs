@@ -377,22 +377,21 @@ impl Sim {
     /// renderer-settled. Sessions without a declared view fall back to the local
     /// player's column.
     pub fn refresh_terrain_readiness(&mut self) {
-        let settled = self.visible_view_settlement().map_or_else(
-            || {
-                let position = self.player().position;
-                let (cx, cz) = (
-                    (position.x.floor() as i32).div_euclid(16),
-                    (position.z.floor() as i32).div_euclid(16),
-                );
-                self.column_mesh_settled(cx, cz)
-            },
-            |(resident, settled, expected)| resident == expected && settled == expected,
+        let position = self.player().position;
+        let (cx, cz) = (
+            (position.x.floor() as i32).div_euclid(16),
+            (position.z.floor() as i32).div_euclid(16),
         );
+        let settled = if self.dimension_transition_pending {
+            self.column_mesh_settled(cx, cz)
+        } else {
+            self.visible_view_settlement().map_or_else(
+                || self.column_mesh_settled(cx, cz),
+                |(resident, settled, expected)| resident == expected && settled == expected,
+            )
+        };
         if settled {
             if self.dimension_transition_pending {
-                // Destination geometry has crossed the renderer hand-off.
-                // Release the separate portal cover; it must never be
-                // represented as the initial-world progress screen.
                 self.dimension_transition_pending = false;
             }
             if self.new_world_loading {
