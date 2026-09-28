@@ -14,11 +14,12 @@ owner snapshots without holding their shared registry lock.
 
 ## How it works
 
-The caller snapshots each owner before dispatching it. The executor places jobs
-on a bounded number of native lanes, waits for every lane, and restores the
-submission order before returning results. A worker therefore produces only a
-private completion; the caller remains responsible for validating the owner
-and publishing effects centrally. The browser build keeps the same ordered
+The caller snapshots each owner before dispatching it. Empty, single-job, and
+single-lane batches run on the caller without creating a thread. Larger native
+batches use bounded lanes, wait for every lane, and restore submission order
+before returning results. A worker therefore produces only a private
+completion; the caller remains responsible for validating the owner and
+publishing effects centrally. The browser build keeps the same ordered
 contract with a serial implementation because native threads are unavailable.
 
 The cross-region executor gate uses two chunk owners on opposite sides of the
@@ -35,7 +36,7 @@ world-visible state, add a central merge step that validates a complete,
 duplicate-free owner set and restores the tick-start sequence.
 
 The lane count is a bound, not a promise that every call is parallel. A call
-with one job has one useful lane; callers should choose their worker count from
+with one job has no useful parallelism; callers should choose their worker count from
 the measured owner workload. The executor rejects a zero lane bound instead of
 silently converting an invalid production configuration into a serial pass.
 The block-entity production path also rejects entry while its registry lock is

@@ -31,7 +31,10 @@ where
 {
     crate::lock_order::assert_owner_work_without_block_entity_lock();
     assert!(worker_count > 0, "owner worker count must be positive");
-    let lane_count = worker_count.max(1).min(jobs.len().max(1));
+    if jobs.len() <= 1 || worker_count == 1 {
+        return jobs.into_iter().map(work).collect();
+    }
+    let lane_count = worker_count.min(jobs.len());
     let mut lanes: Vec<Vec<(usize, T)>> = (0..lane_count).map(|_| Vec::new()).collect();
     for (index, job) in jobs.into_iter().enumerate() {
         lanes[index % lane_count].push((index, job));
@@ -315,6 +318,29 @@ mod tests {
     #[should_panic(expected = "owner worker count must be positive")]
     fn bounded_owner_jobs_rejects_a_zero_lane_bound() {
         let _ = run_bounded_owner_jobs(vec![(-1_i32, 0_i32)], 0, &|job| job);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn empty_and_single_lane_owner_work_stays_on_the_caller() {
+        let caller = std::thread::current().id();
+        assert!(
+            run_bounded_owner_jobs(Vec::<u8>::new(), 4, &|_| -> u8 { unreachable!() }).is_empty()
+        );
+        assert_eq!(
+            run_bounded_owner_jobs(vec![7], 4, &|job| {
+                assert_eq!(std::thread::current().id(), caller);
+                job + 1
+            }),
+            [8]
+        );
+        assert_eq!(
+            run_bounded_owner_jobs(vec![3, 5], 1, &|job| {
+                assert_eq!(std::thread::current().id(), caller);
+                job + 1
+            }),
+            [4, 6]
+        );
     }
 
     #[test]
