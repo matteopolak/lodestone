@@ -1,36 +1,4 @@
-//! `Sim`'s camera cluster: the fog helpers (`fog_for_render_distance`,
-//! `water_fog`, `lava_fog`), `fog_settings`/`biome_sky_color`, and the
-//! eye/render camera derivation (`interpolated_player`, `camera`,
-//! `cycle_camera_type`, `set_view_bobbing`, `bob_frame`, `render_camera`,
-//! `spyglass_scoping`, `third_person_body_state`) plus the `NoCollision`
-//! stand-in `render_camera`'s third-person pullback falls back to — seam 6
-//! of the sim.rs decomposition sequence (seam 1 was the test module,
-//! `sim/tests.rs`; seam 2 was placement prediction, `sim/placement.rs`;
-//! seam 3 was the interaction/combat cluster, `sim/actions.rs`; seam 4 was
-//! the net-apply cluster, `sim/net_apply.rs`; seam 5 was the audio cluster,
-//! `sim/audio.rs`).
-//!
-//! `use super::*;` for the same reason every other seam file uses it:
-//! `sim::camera` is a descendant of `sim` and already has the same
-//! visibility into `Sim`'s private fields and `sim.rs`'s other private
-//! helpers that the earlier seams have.
-//!
-//! `fog_for_render_distance` is `pub(crate)` here, same as it was in
-//! `sim.rs`, but now needs a re-export: `app.rs` names it by its full path
-//! (`crate::sim::fog_for_render_distance`), and `app.rs` is neither `sim`
-//! nor a descendant of it, so the item has to be reachable *at* the `sim`
-//! module boundary. `sim.rs` picks it back up with a plain (non-`pub`)
-//! `use camera::fog_for_render_distance;` — sufficient for
-//! `crate::sim::fog_for_render_distance` to resolve, and it also re-enters
-//! `sim::tests`' `use super::*;` glob the same way `placement::is_air_state`
-//! already does. `water_fog`/`lava_fog` need no such treatment: both are
-//! called only from `fog_settings`, which moved here with them.
-//!
-//! Every other item here is an `impl Sim` method and needed no privacy
-//! change: all were already `pub` (called from `app.rs`) or stay private
-//! because their only callers moved into this same file (`biome_sky_color`
-//! from `fog_settings`, `interpolated_player` from `camera`/
-//! `third_person_body_state`, `spyglass_scoping` from `render_camera`).
+//! Camera position, third-person pullback, and view-dependent fog.
 
 use super::*;
 
@@ -82,38 +50,89 @@ fn lava_fog() -> lodestone_render::fog::FogSettings {
     lodestone_render::fog::FogSettings::for_view_distance([0.6, 0.1, 0.0], 3.0, 0.0)
 }
 
+fn camera_fluid_kind(
+    position: glam::Vec3,
+    mut fluid_at: impl FnMut(i32, i32, i32) -> Option<lodestone_render::FluidCell>,
+) -> Option<lodestone_render::FluidKind> {
+    let x = position.x.floor() as i32;
+    let y = position.y.floor() as i32;
+    let z = position.z.floor() as i32;
+    let fluid = fluid_at(x, y, z)?;
+    let height = if fluid_at(x, y + 1, z).is_some_and(|above| above.kind == fluid.kind) {
+        1.0
+    } else {
+        fluid.state.own_height()
+    };
+    (position.y < y as f32 + height).then_some(fluid.kind)
+}
+
+#[cfg(test)]
+mod camera_fluid_tests {
+    use super::*;
+
+    #[test]
+    fn camera_fluid_uses_the_view_position() {
+        let water = lodestone_render::FluidCell {
+            kind: lodestone_render::FluidKind::Water,
+            state: lodestone_assets::fluid::FluidState::source(),
+        };
+        let fluid_at = |_: i32, y: i32, _: i32| (y == 0).then_some(water);
+        assert_eq!(
+            camera_fluid_kind(glam::Vec3::new(0.5, 0.5, 0.5), fluid_at),
+            Some(lodestone_render::FluidKind::Water)
+        );
+        assert_eq!(
+            camera_fluid_kind(glam::Vec3::new(0.5, 0.95, 0.5), fluid_at),
+            None
+        );
+        assert_eq!(
+            camera_fluid_kind(glam::Vec3::new(0.5, 1.5, 0.5), fluid_at),
+            None
+        );
+    }
+}
+
 impl Sim {
     /// Distance fog for this frame: sized to the configured render distance
     /// normally (further specialised by the connected *dimension* — the
     /// Nether's fixed dense red haze, the End's near-black edge fade — when
     /// neither override below applies), and swapped for a short, dense
-    /// water/lava fog while the player's eye is submerged.
+    /// water/lava fog while the render camera is submerged. Player submersion
+    /// still controls swimming and air; a third-person camera may be dry while
+    /// the player is underwater, or submerged while the player is dry.
     ///
-    /// Selected from the bit-exact eye-in-fluid state (`FluidState`) the physics
-    /// producer computes each tick, so the fog matches vanilla's submerged view
-    /// rather than a locally-guessed boolean. Lava is checked before water,
-    /// matching vanilla's lava-first submersion order, and both take priority
-    /// over the dimension fog: standing in lava in the Nether still gets lava
-    /// fog, not Nether fog.
-    ///
-    /// The dimension comes from [`Sim::dimension`], the one accessor every
-    /// dimension-conditioned decision in this crate goes through — `None` before
-    /// login, and correct across a portal trip because
-    /// `lodestone_ecs::session::ServerDimension`'s fold handles `Respawned` as
-    /// well as `Login`. **This doc used to record that read as stale after a
-    /// portal trip**; it was, and the fix is described in
-    /// `docs/dimension-visuals.md`.
+    /// The dimension comes from [`Sim::dimension`] and follows portal changes.
     ///
     /// Fog colour is only half of "the Nether looks like the Nether": the sky
     /// *pass* is gated separately by [`Sim::sky_mode`], because a colour cannot
     /// express "draw no sun".
     #[must_use]
-    pub fn fog_settings(&self) -> lodestone_render::fog::FogSettings {
-        let fluid = self.fluid_state();
-        if fluid.under_lava() {
+    pub fn fog_settings(&self, camera_position: glam::Vec3) -> lodestone_render::fog::FogSettings {
+        let viewed_fluid = if self.net.is_some() {
+            self.net
+                .as_ref()
+                .zip(self.vanilla_atlas.as_ref().and_then(|atlas| atlas.models()))
+                .and_then(|(net, models)| {
+                    camera_fluid_kind(camera_position, |x, y, z| {
+                        net.block_at(BlockPos { x, y, z })
+                            .and_then(lodestone_data::block_states::StateId::new)
+                            .and_then(|state| models.fluid(state))
+                    })
+                })
+        } else {
+            let player = self.fluid_state();
+            if player.under_lava() {
+                Some(lodestone_render::FluidKind::Lava)
+            } else if player.under_water() {
+                Some(lodestone_render::FluidKind::Water)
+            } else {
+                None
+            }
+        };
+        if viewed_fluid == Some(lodestone_render::FluidKind::Lava) {
             return lava_fog();
         }
-        if fluid.under_water() {
+        if viewed_fluid == Some(lodestone_render::FluidKind::Water) {
             return water_fog(self.config.render_distance);
         }
         let mut settings = match self.dimension() {

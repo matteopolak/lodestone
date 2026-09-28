@@ -802,8 +802,9 @@ fn shoot(
     // these is a closure over a clock or a snapshot, so a stale install freezes
     // or drops whatever it feeds.
     install_frame_sources(render, sim);
-    render.set_fog(sim.fog_settings(), RENDER_DISTANCE);
-    render.set_clear_color_tracked(sim.fog_settings().color);
+    let fog = sim.fog_settings(sim.render_camera(1.0).position);
+    render.set_fog(fog, RENDER_DISTANCE);
+    render.set_clear_color_tracked(fog.color);
     render.set_sky_mode(sim.sky_mode());
     // Mirrored from `app/redraw.rs` in the same commit that added it there —
     // this harness is a second, silent implementation of that function's
