@@ -158,11 +158,26 @@ impl RenderState {
         // The walk itself, bounds included, is `lodestone_render`'s — deliberately
         // not re-derived here, so the angle-sweep gate over there exercises the
         // same function this frame does.
+        let trace_walk = tracing::enabled!(target: "occlusion_walk", tracing::Level::DEBUG);
+        let started = trace_walk.then(crate::platform::Instant::now);
         let reachable = lodestone_render::reachable_from_camera(
             &self.vis_graph,
             camera.position,
             self.render_distance_chunks,
-        )?;
+        );
+        if let Some(started) = started {
+            tracing::debug!(
+                target: "occlusion_walk",
+                elapsed_us = started.elapsed().as_micros() as u64,
+                graph_sections = self.vis_graph.len(),
+                reachable_sections = reachable.as_ref().map_or(0, HashSet::len),
+                render_distance_chunks = self.render_distance_chunks,
+                camera_cell = ?key.0,
+                graph_generation = key.1,
+                "occlusion walk"
+            );
+        }
+        let reachable = reachable?;
 
         cache.walks += 1;
         cache.key = Some(key);

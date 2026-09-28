@@ -117,6 +117,10 @@ count for exactly this reason. Three escalating levers exist for diagnosing a
 terrain-vanishing report: `TerrainOcclusion::Shadow` (walks and counts but culls
 nothing — the soak test), `Off` (frustum ∩ distance only), and
 `set_terrain_culling(false)` (the full `smartCull`-equivalent kill switch).
+Enable `occlusion_walk=debug` in the tracing filter to time cache misses separately
+from the rest of world-buffer preparation. A line includes the graph size, reachable
+count, camera cell, and graph generation; unchanged cells with a changing graph still
+require a walk while new meshes arrive.
 
 Every live section mesh is suballocated out of shared GPU arena blocks (32 MiB vertex
 + 8 MiB index) rather than owning its own buffer pair, so a draw is one dynamic-offset

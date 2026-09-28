@@ -50,7 +50,7 @@ impl JoinTrace {
         self.remeshed_count = 0;
     }
 
-    /// Record a client-side stage for one chunk. The first event in each stage
+    /// Record a client-side stream stage. The first event in each stage
     /// is marked with `first=true`, so the join's critical path is visible in a
     /// mixed server/client log without dumping packet bodies.
     pub(crate) fn mark(&mut self, stage: &'static str, cx: i32, cz: i32) {
@@ -72,12 +72,13 @@ impl JoinTrace {
         tracing::info!(
             target: "lodestone_join_trace",
             stage,
+            unit = if stage == "remeshed" { "section" } else { "column" },
             cx,
             cz,
             first,
             count = *count,
             elapsed_millis = self.started.elapsed().as_millis() as u64,
-            "join chunk stage"
+            "join stream stage"
         );
     }
 }
