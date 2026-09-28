@@ -26,6 +26,12 @@ flood-queue entry. `lodestone_world::lighting::compute_sky` owns this distinctio
 compare the resulting light arrays with a full-source flood across mixed roofs and partially opaque
 blocks, not only a flat open column.
 
+Live relighting reads canonical state IDs from resident server columns through a read-only block
+view. It does not build packet-format columns just to sample their blocks. Initial packet encoding
+still constructs its own packet representation, because that path also needs biome palettes and
+section storage. When changing the live view, compare its sky and block arrays with the buffered
+conversion for all three dimensions and include a cross-column source.
+
 **An absent light section on the wire means full daylight, not darkness.** A section present in
 neither the sky nor the block light data is resolved by a real client to that dimension's own
 default (maximum, for the overworld) rather than treated as zero — which is exactly why sending no
