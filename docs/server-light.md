@@ -32,6 +32,12 @@ still constructs its own packet representation, because that path also needs bio
 section storage. When changing the live view, compare its sky and block arrays with the buffered
 conversion for all three dimensions and include a cross-column source.
 
+Unseeded light scans can skip block lookup above a column's proven air ceiling. The server derives
+that ceiling from packed section indices, not the world-surface heightmap: air variants can exist
+above the heightmap and still affect the light section's wire shape. The world column uses its
+maintained non-air section counts. Other `BlockVolume` implementations default to the full height;
+an override must be a conservative upper bound, and should be checked against a full-scan volume.
+
 **An absent light section on the wire means full daylight, not darkness.** A section present in
 neither the sky nor the block light data is resolved by a real client to that dimension's own
 default (maximum, for the overworld) rather than treated as zero — which is exactly why sending no

@@ -295,6 +295,67 @@ mod conversion_tests {
             assert_eq!(direct, buffered, "{dimension:?}");
         }
     }
+
+    #[test]
+    fn served_light_keeps_air_variants_above_the_surface() {
+        struct FullScan<'a> {
+            column: &'a ServerChunkColumn,
+            shape: &'a ChunkShape,
+        }
+
+        impl BlockVolume for FullScan<'_> {
+            fn block(&self, x: usize, y: i32, z: usize) -> u32 {
+                self.column.block_state_id(x as i32, y, z as i32).raw()
+            }
+
+            fn air_state(&self) -> u32 {
+                self.shape.air_id
+            }
+
+            fn min_y(&self) -> i32 {
+                self.shape.min_y
+            }
+
+            fn section_count(&self) -> usize {
+                self.shape.section_count
+            }
+        }
+
+        let dimension = Dimension::Overworld;
+        let shape = shape_for_dimension(dimension);
+        let mut center = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
+        let mut east = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
+        let stone = StateId::from_state_str("minecraft:stone").expect("stone state");
+        let cave_air = StateId::from_state_str("minecraft:cave_air").expect("cave air state");
+        let glowstone = StateId::from_state_str("minecraft:glowstone").expect("glowstone state");
+        center.set_block_id(8, 68, 8, stone);
+        center.set_block_id(8, 120, 8, cave_air);
+        center.set_block_id(15, 77, 8, glowstone);
+        east.set_block_id(0, 80, 8, stone);
+        center.prime_client_heightmaps();
+        east.prime_client_heightmaps();
+        assert!(center.air_above_y() > 120);
+        assert_eq!(
+            center.client_heightmaps_raw().unwrap()[0][8 + 8 * 16],
+            (69 - shape.min_y) as u16
+        );
+
+        let props = V770LightProps { has_skylight: true };
+        let full_center = FullScan {
+            column: &center,
+            shape: &shape,
+        };
+        let full_east = FullScan {
+            column: &east,
+            shape: &shape,
+        };
+        let expected = compute_column_light_with_neighbours(
+            &Neighbourhood::new(&full_center).with(1, 0, &full_east),
+            &props,
+        );
+        let actual = compute_served_light_with_neighbours(&center, &[(1, 0, &east)], dimension);
+        assert_eq!(actual, expected);
+    }
 }
 
 #[cfg(test)]
@@ -1069,6 +1130,10 @@ impl BlockVolume for ServerLightVolume<'_> {
 
     fn section_count(&self) -> usize {
         self.shape.section_count
+    }
+
+    fn air_above_y(&self) -> i32 {
+        self.source.air_above_y()
     }
 }
 

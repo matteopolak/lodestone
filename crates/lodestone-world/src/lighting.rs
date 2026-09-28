@@ -96,6 +96,11 @@ pub trait BlockVolume {
     /// apron above and below).
     fn block(&self, x: usize, y: i32, z: usize) -> u32;
 
+    /// First world Y at and above which this volume contains only air.
+    fn air_above_y(&self) -> i32 {
+        self.min_y() + (self.section_count() * ChunkSection::EDGE) as i32
+    }
+
     /// State id treated as air by [`Self::block`]. The default preserves the
     /// long-standing zero-id test volumes; real palette-backed columns override
     /// it because the air id belongs to the column's registry, not this engine.
@@ -122,6 +127,13 @@ impl BlockVolume for crate::ChunkColumn {
     }
     fn section_count(&self) -> usize {
         crate::ChunkColumn::section_count(self)
+    }
+    fn air_above_y(&self) -> i32 {
+        self.min_y()
+            + (0..self.section_count())
+                .rev()
+                .find(|&index| self.section(index).is_some_and(|s| !s.is_air_only()))
+                .map_or(0, |index| (index + 1) * ChunkSection::EDGE) as i32
     }
 }
 
@@ -215,6 +227,7 @@ pub fn compute_column_light_for_initial_chunk(
         wz: EDGE,
         height: (section_count + 2) * EDGE,
     };
+    let air_ceiling = blocks.air_above_y();
     // Single column: every field cell is the centre chunk (offset 0,0), never a
     // barrier, so this reduces exactly to a 16×16 computation.
     compute_lit(
@@ -228,7 +241,13 @@ pub fn compute_column_light_for_initial_chunk(
         full_sky_sections,
         |_, _, _| 0,
         |_, _| true,
-        |x, world_y, z| Some(blocks.block(x, world_y, z)),
+        |x, world_y, z| {
+            Some(if world_y >= air_ceiling {
+                blocks.air_state()
+            } else {
+                blocks.block(x, world_y, z)
+            })
+        },
     )
 }
 
@@ -347,6 +366,11 @@ pub fn compute_column_light_with_neighbours_for_initial_chunk(
         wz: 3 * EDGE,
         height: (section_count + 2) * EDGE,
     };
+    let air_ceilings: [i32; 9] = std::array::from_fn(|slot| {
+        neighbourhood
+            .at(slot as i32 % 3 - 1, slot as i32 / 3 - 1)
+            .map_or(i32::MAX, BlockVolume::air_above_y)
+    });
     // Field x/z 0..48 map to chunk offset dx/dz in -1..=1; the centre chunk sits
     // at field offset (16, 16). A missing neighbour returns `None` → barrier.
     compute_lit(
@@ -363,9 +387,14 @@ pub fn compute_column_light_with_neighbours_for_initial_chunk(
         |fx, world_y, fz| {
             let dx = (fx / EDGE) as i32 - 1;
             let dz = (fz / EDGE) as i32 - 1;
-            neighbourhood
-                .at(dx, dz)
-                .map(|v| v.block(fx % EDGE, world_y, fz % EDGE))
+            let slot = (fz / EDGE) * 3 + fx / EDGE;
+            neighbourhood.at(dx, dz).map(|volume| {
+                if world_y >= air_ceilings[slot] {
+                    volume.air_state()
+                } else {
+                    volume.block(fx % EDGE, world_y, fz % EDGE)
+                }
+            })
         },
     )
 }
@@ -1178,6 +1207,56 @@ mod tests {
             AIR,
             0,
         )
+    }
+
+    struct FullScan<'a>(&'a ChunkColumn);
+
+    impl BlockVolume for FullScan<'_> {
+        fn block(&self, x: usize, y: i32, z: usize) -> u32 {
+            self.0.get_block(x, y, z)
+        }
+
+        fn air_state(&self) -> u32 {
+            self.0.air_id()
+        }
+
+        fn min_y(&self) -> i32 {
+            self.0.min_y()
+        }
+
+        fn section_count(&self) -> usize {
+            self.0.section_count()
+        }
+    }
+
+    #[test]
+    fn air_ceiling_matches_full_scan_for_single_and_neighbour_light() {
+        let props = FakeProps::new();
+        let mut center = column();
+        let mut east = column();
+        center.set_block(8, -62, 8, STONE);
+        center.set_block(15, -30, 8, TORCH);
+        east.set_block(0, -12, 8, STONE);
+        for remove_high_block in [false, true] {
+            if remove_high_block {
+                center.set_block(15, -30, 8, AIR);
+            }
+            assert_eq!(
+                compute_column_light(&center, &props),
+                compute_column_light(&FullScan(&center), &props),
+            );
+            assert_eq!(
+                compute_column_light_with_neighbours(
+                    &Neighbourhood::new(&center).with(1, 0, &east),
+                    &props,
+                ),
+                compute_column_light_with_neighbours(
+                    &Neighbourhood::new(&FullScan(&center))
+                        .with(1, 0, &FullScan(&east)),
+                    &props,
+                ),
+            );
+        }
     }
 
     /// Reads sky light at world `(x, y, z)` from a computed column.

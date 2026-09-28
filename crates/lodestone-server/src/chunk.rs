@@ -1784,6 +1784,11 @@ impl ChunkColumn {
         self.palette[self.blocks.get(x, y_local, z) as usize]
     }
 
+    /// First world Y at and above which block storage is all air.
+    #[must_use]
+    pub fn air_above_y(&self) -> i32 {
+        self.min_y + (self.blocks.air_ceiling_section() * SECTION_ROWS) as i32
+    }
 
     /// Which redstone family, if any, a neighbour notification landing at a
     /// local `(x, z)` in `0..16` and world `y` dispatches to. Out-of-range Y
