@@ -1260,7 +1260,31 @@ pub struct MeshWorkCounters {
     pub neighbor_dirty_admissions: usize,
     pub light_patch_calls: usize,
     pub light_patch_invalidations: usize,
+    pub light_patch_boundary_skips: usize,
     pub light_section_snapshots: usize,
+}
+
+fn section_touches_light_patch(section: &ChunkSection, dx: i32, dy: i32, dz: i32) -> bool {
+    if dx == 0 && dy == 0 && dz == 0 {
+        return true;
+    }
+    let edge = ChunkSection::EDGE;
+    let axis = |offset| match offset {
+        -1 => edge - 1..edge,
+        0 => 0..edge,
+        1 => 0..1,
+        _ => unreachable!(),
+    };
+    for y in axis(dy) {
+        for z in axis(dz) {
+            for x in axis(dx) {
+                if section.get_block(x, y, z) != section.air_id() {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1924,16 +1948,22 @@ impl TerrainMesh {
             let block_si = (light_si as i32 - 1).clamp(0, extent.section_count as i32 - 1);
             for si in (block_si - 1).max(0)..=(block_si + 1).min(extent.section_count as i32 - 1)
             {
+                let dy = si - block_si;
                 for dx in -1..=1 {
                     for dz in -1..=1 {
                         let (nx, nz) = (cx + dx, cz + dz);
-                        if world
+                        let Some(section) = world
                             .get(ChunkPos::new(nx, nz))
                             .and_then(|chunk| chunk.column.section(si as usize))
-                            .is_some_and(|section| !section.is_air_only())
-                        {
-                            self.light_dirty_sections.insert((nx, nz, base_si + si));
+                            .filter(|section| !section.is_air_only())
+                        else {
+                            continue;
+                        };
+                        if !section_touches_light_patch(section, dx, dy, dz) {
+                            self.work_counters.light_patch_boundary_skips += 1;
+                            continue;
                         }
+                        self.light_dirty_sections.insert((nx, nz, base_si + si));
                     }
                 }
             }
@@ -3451,6 +3481,10 @@ mod tests {
                 );
                 if (cx, cz) == (0, 0) {
                     column.set_block(0, 0, 0, id::STONE);
+                } else if (cx, cz) == (1, 0) {
+                    column.set_block(8, 8, 8, id::STONE);
+                } else if (cx, cz) == (-1, 0) {
+                    column.set_block(15, 8, 8, id::STONE);
                 } else if (cx, cz) == (1, 1) {
                     column.set_block(0, 16, 0, id::STONE);
                 }
@@ -3467,11 +3501,12 @@ mod tests {
             ShellClassifier::Demo(DemoClassifier),
         ));
 
-        assert_eq!(terrain.queue_light_update(&store, 0, 0, &[1]), 2);
+        assert_eq!(terrain.queue_light_update(&store, 0, 0, &[1]), 3);
         assert_eq!(
             terrain.light_dirty_sections,
-            BTreeSet::from([(0, 0, 0), (1, 1, 1)])
+            BTreeSet::from([(-1, 0, 0), (0, 0, 0), (1, 1, 1)])
         );
+        assert_eq!(terrain.work_counters.light_patch_boundary_skips, 1);
         terrain.light_dirty_sections.clear();
         assert_eq!(terrain.queue_light_update(&store, -1, -1, &[0]), 1);
         assert_eq!(terrain.light_dirty_sections, BTreeSet::from([(0, 0, 0)]));
