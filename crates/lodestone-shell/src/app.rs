@@ -216,6 +216,7 @@ struct BrowserJoinTrace {
     overlay_ready: bool,
     first_terrain_presented: bool,
     full_view_presented: bool,
+    last_full_view_probe: Option<Instant>,
     events: Rc<RefCell<VecDeque<BrowserJoinProgress>>>,
 }
 
@@ -230,6 +231,7 @@ impl BrowserJoinTrace {
             overlay_ready: false,
             first_terrain_presented: false,
             full_view_presented: false,
+            last_full_view_probe: None,
             events,
         }
     }
@@ -242,6 +244,7 @@ impl BrowserJoinTrace {
         self.overlay_ready = false;
         self.first_terrain_presented = false;
         self.full_view_presented = false;
+        self.last_full_view_probe = None;
         self.events.borrow_mut().clear();
         self.push(phase, 0, 0, 0);
     }
@@ -271,20 +274,37 @@ impl BrowserJoinTrace {
         &mut self,
         terrain_drawn: bool,
         loaded_columns: usize,
-        settled_columns: usize,
+        view_presentation: Option<(usize, usize, usize)>,
         pending_meshes: usize,
     ) {
         if !self.first_terrain_presented && terrain_drawn {
             self.first_terrain_presented = true;
-            self.push("first-terrain-presented", loaded_columns, settled_columns, pending_meshes);
+            self.push(
+                "first-terrain-presented",
+                loaded_columns,
+                view_presentation.map_or(0, |(_, presented, _)| presented),
+                pending_meshes,
+            );
         }
-        if !self.full_view_presented
-            && settled_columns >= self.expected_columns
-            && pending_meshes == 0
+        if let Some((resident, presented, expected)) = view_presentation {
+            self.expected_columns = expected;
+            if !self.full_view_presented && resident == expected && presented == expected {
+                self.full_view_presented = true;
+                self.push("full-view-presented", resident, presented, pending_meshes);
+            }
+        }
+    }
+
+    fn full_view_probe_due(&mut self) -> bool {
+        if self.full_view_presented
+            || self
+                .last_full_view_probe
+                .is_some_and(|last| last.elapsed() < Duration::from_millis(100))
         {
-            self.full_view_presented = true;
-            self.push("full-view-presented", loaded_columns, settled_columns, pending_meshes);
+            return false;
         }
+        self.last_full_view_probe = Some(Instant::now());
+        true
     }
 
     fn push(

@@ -1252,6 +1252,15 @@ pub struct MeshBacklog {
     pub pending_sections: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeshColumnStatus {
+    pub chunk: (i32, i32),
+    pub missing_sections: Vec<usize>,
+    pub prior_presentations: usize,
+    pub waiting_for_halo: bool,
+    pub absent_halo: Vec<(i32, i32)>,
+}
+
 #[derive(Resource, Debug)]
 pub struct TerrainMesh {
     /// The off-thread worker pool.
@@ -1354,6 +1363,8 @@ pub struct TerrainMesh {
     /// the result. The loading gate must use the latter boundary, or one frame
     /// can be presented with a CPU result that has not reached the GPU yet.
     rendered_sections: HashSet<SectionKey>,
+    /// Renderer-owned geometry remains present while its replacement is pending.
+    presented_sections: HashSet<SectionKey>,
     /// Sections whose latest snapshot explicitly returned [`SnapshotOutcome::Empty`].
     /// An all-air section is a settled result, but only after the snapshot path
     /// says so; deriving emptiness from a resident-column count would let a
@@ -1433,6 +1444,7 @@ impl TerrainMesh {
             relight_workload: RelightWorkload::default(),
             pending_removals: Vec::new(),
             rendered_sections: HashSet::new(),
+            presented_sections: HashSet::new(),
             empty_sections: HashSet::new(),
             built_columns: HashSet::new(),
             uploaded_sections: HashSet::new(),
@@ -1492,6 +1504,7 @@ impl TerrainMesh {
                 // `mark_mesh_uploaded`.
                 self.scheduler.forget_generation(&key);
                 self.rendered_sections.remove(&key);
+                self.presented_sections.remove(&key);
                 self.empty_sections.insert(key);
                 self.built_columns.insert((key.cx, key.cz));
                 self.pending_removals.push(key);
@@ -1523,6 +1536,8 @@ impl TerrainMesh {
     /// drain, but it cannot satisfy the new column's initial loading milestone.
     pub fn reset_column_readiness(&mut self, cx: i32, cz: i32) {
         self.rendered_sections
+            .retain(|key| key.cx != cx || key.cz != cz);
+        self.presented_sections
             .retain(|key| key.cx != cx || key.cz != cz);
         self.empty_sections
             .retain(|key| key.cx != cx || key.cz != cz);
@@ -1988,6 +2003,8 @@ impl TerrainMesh {
         self.provisional_columns.remove(&(cx, cz));
         self.rendered_sections
             .retain(|key| key.cx != cx || key.cz != cz);
+        self.presented_sections
+            .retain(|key| key.cx != cx || key.cz != cz);
         self.empty_sections
             .retain(|key| key.cx != cx || key.cz != cz);
         self.built_columns.remove(&(cx, cz));
@@ -2136,6 +2153,44 @@ impl TerrainMesh {
         }
     }
 
+    #[must_use]
+    pub fn column_status(&self, store: &ChunkWorld, cx: i32, cz: i32) -> Option<MeshColumnStatus> {
+        let extent = store.extent()?;
+        if !store.contains_column(cx, cz) {
+            return None;
+        }
+        let mut missing_sections = Vec::new();
+        let mut prior_presentations = 0;
+        for si in 0..extent.section_count {
+            let key = SectionKey {
+                cx,
+                cz,
+                si,
+                min_y: extent.min_y,
+            };
+            if self.rendered_sections.contains(&key) || self.empty_sections.contains(&key) {
+                continue;
+            }
+            missing_sections.push(si);
+            prior_presentations += usize::from(self.presented_sections.contains(&key));
+        }
+        let mut absent_halo = Vec::new();
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                if !store.contains_column(cx + dx, cz + dz) {
+                    absent_halo.push((cx + dx, cz + dz));
+                }
+            }
+        }
+        Some(MeshColumnStatus {
+            chunk: (cx, cz),
+            missing_sections,
+            prior_presentations,
+            waiting_for_halo: self.pending_arrivals.contains(&(cx, cz)),
+            absent_halo,
+        })
+    }
+
     /// Record the renderer hand-off for one completed mesh.
     ///
     /// `drain_meshes` intentionally records only the CPU-side scheduler result
@@ -2147,6 +2202,7 @@ impl TerrainMesh {
     pub fn mark_mesh_uploaded(&mut self, key: SectionKey) {
         self.empty_sections.remove(&key);
         self.rendered_sections.insert(key);
+        self.presented_sections.insert(key);
         self.built_columns.insert((key.cx, key.cz));
     }
 
@@ -2188,6 +2244,24 @@ impl TerrainMesh {
         })
     }
 
+    #[must_use]
+    pub fn resident_column_presented(
+        &self,
+        extent: lodestone_ecs::WorldExtent,
+        cx: i32,
+        cz: i32,
+    ) -> bool {
+        (0..extent.section_count).all(|si| {
+            let key = SectionKey {
+                cx,
+                cz,
+                si,
+                min_y: extent.min_y,
+            };
+            self.presented_sections.contains(&key) || self.empty_sections.contains(&key)
+        })
+    }
+
     /// Block until every scheduled mesh is ready. Headless runs and tests only —
     /// never the frame loop.
     pub fn drain_all_meshes(&mut self) -> Vec<Meshed> {
@@ -2226,6 +2300,7 @@ impl TerrainMesh {
         self.backlog_frames = 0;
         self.deferred = 0;
         self.rendered_sections.clear();
+        self.presented_sections.clear();
         self.empty_sections.clear();
         self.built_columns.clear();
         self.pending_removals.extend(self.uploaded_sections.drain());
@@ -3399,6 +3474,38 @@ mod tests {
             terrain.mark_mesh_uploaded(meshed.key);
         }
         assert!(terrain.column_mesh_settled(&store, 0, 0));
+    }
+
+    #[test]
+    fn presented_column_remains_visible_during_remesh_but_not_after_redecode() {
+        let mut world = World::new();
+        for cx in -1..=1 {
+            for cz in -1..=1 {
+                world.load(
+                    ChunkPos::new(cx, cz),
+                    readiness_column(cx == 0 && cz == 0),
+                );
+            }
+        }
+        let write = ChunkWorldWrite::new(world);
+        let store = write.read_handle();
+        let extent = store.extent().expect("readiness fixture has an extent");
+        let mut terrain = streaming_terrain();
+
+        terrain.mesh_column(&store, 0, 0);
+        let meshes = terrain.drain_all_meshes();
+        assert!(!terrain.resident_column_presented(extent, 0, 0));
+        for mesh in meshes {
+            terrain.mark_mesh_uploaded(mesh.key);
+        }
+        assert!(terrain.resident_column_presented(extent, 0, 0));
+
+        terrain.mesh_column(&store, 0, 0);
+        assert!(!terrain.resident_column_mesh_settled(extent, 0, 0));
+        assert!(terrain.resident_column_presented(extent, 0, 0));
+
+        terrain.queue_column_arrival(0, 0);
+        assert!(!terrain.resident_column_presented(extent, 0, 0));
     }
 
     /// **Readiness control: all-air is a real settled result.** Every section

@@ -73,6 +73,13 @@ The `view_at_stop` record separates missing columns from resident but unsettled
 columns. A bounded 100 ms settlement tail records ready/waiting columns and
 pending mesh sections through `Sim::mesh_backlog`, so a slow tail can be
 assigned to delivery, admission, worker work, or upload without per-packet logs.
+At most twelve one-second snapshots identify unsettled columns, their missing
+sections, prior renderer presentations, and absent halo
+coordinates. This distinguishes genuinely unseen terrain from a re-mesh that
+temporarily invalidated an already presented section.
+The record reports both strict latest-revision settlement and presented
+coverage at movement stop. A section already on the GPU remains presented while
+its replacement is built; a newly decoded column does not inherit that state.
 The native record also samples the integrated server's own tick clock and
 world-tick witness at acknowledgement, movement start/stop, and completion.
 `movement_tick_delta`, `movement_overrun_delta`, and the largest frame-sampled
@@ -92,10 +99,10 @@ Its clock starts in the production create-world action and emits transition-only
 events for `joining`, `loading-terrain`, `loading-overlay-ready`,
 `first-terrain-presented`, and `full-view-presented`. Each event includes
 `elapsedMs`, `loadedColumns`, `expectedColumns`, and `pendingMeshes`. The final
-event also includes `settledColumns` and is emitted only after every exact
-configured-view coordinate has arrived, meshing has
-settled, uploads have been accepted by the renderer, and that frame has been
-submitted for presentation. Integrated joins immediately advertise the requested
+event also includes `settledColumns`, meaning columns with an explicitly empty
+result or a section mesh handed to the renderer. It checks the exact configured
+view after presentation, without waiting for unrelated background remesh jobs
+to reach zero. Integrated joins immediately advertise the requested
 render distance plus the mesher's one-column dependency halo; this prevents the
 configuration-phase default from shrinking the stream and making the visible
 outer ring impossible to mesh.

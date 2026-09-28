@@ -102,6 +102,17 @@ fn percentile(samples: &[Duration], percent: usize) -> f64 {
     ordered[(ordered.len() * percent).div_ceil(100) - 1].as_secs_f64() * 1000.0
 }
 
+fn unsettled_columns(sim: &Sim, radius: u32) -> serde_json::Value {
+    let columns = sim.unsettled_view_columns_at_radius(radius).unwrap_or_default();
+    serde_json::json!(columns.iter().take(8).map(|status| serde_json::json!({
+        "chunk": status.chunk,
+        "missing_sections": status.missing_sections,
+        "prior_presentations": status.prior_presentations,
+        "waiting_for_halo": status.waiting_for_halo,
+        "absent_halo": status.absent_halo,
+    })).collect::<Vec<_>>())
+}
+
 fn profile_config(radius: u32) -> Config {
     Config {
         mode: Mode::Window,
@@ -234,8 +245,12 @@ fn main() {
     let mut movement_start_tick = None;
     let mut movement_end_tick = None;
     let mut movement_stop_view = None;
+    let mut movement_stop_presentation = None;
+    let mut movement_post_stop_presented = None;
     let mut movement_stop_backlog: Option<MeshBacklog> = None;
     let mut movement_settlement_tail = Vec::new();
+    let mut movement_gap_snapshots = Vec::new();
+    let mut last_gap_probe: Option<Instant> = None;
     let mut server_tick_at_ack = None;
     let mut server_tick_at_move_start = None;
     let mut server_tick_at_move_end = None;
@@ -261,6 +276,12 @@ fn main() {
             movement_end_position = Some((position.x, position.z));
             movement_end_tick = Some(sim.tick_count());
             movement_stop_view = sim.view_settlement_at_radius(radius);
+            movement_stop_presentation = sim.view_presentation_at_radius(radius);
+            if movement_stop_presentation.is_some_and(|(resident, presented, expected)| {
+                resident == expected && presented == expected
+            }) {
+                movement_post_stop_presented = Some(Duration::ZERO);
+            }
             movement_stop_backlog = Some(sim.mesh_backlog());
             server_tick_at_move_end = sim
                 .net()
@@ -406,8 +427,25 @@ fn main() {
                     {
                         movement_first_settled_view.get_or_insert(start.elapsed());
                     }
-                    if let Some(stop) = movement_stopped
-                    {
+                    if let Some(stop) = movement_stopped {
+                        if movement_post_stop_presented.is_none()
+                            && sim.view_presentation_at_radius(radius).is_some_and(
+                                |(resident, presented, expected)| {
+                                    resident == expected && presented == expected
+                                },
+                            )
+                        {
+                            movement_post_stop_presented = Some(stop.elapsed());
+                        }
+                        if movement_gap_snapshots.len() < 12
+                            && last_gap_probe.is_none_or(|last| last.elapsed() >= Duration::from_secs(1))
+                        {
+                            last_gap_probe = Some(Instant::now());
+                            movement_gap_snapshots.push(serde_json::json!({
+                                "elapsed_ms": stop.elapsed().as_secs_f64() * 1000.0,
+                                "columns": unsettled_columns(&sim, radius),
+                            }));
+                        }
                         if movement_settlement_tail.len() < 64 {
                             let backlog = sim.mesh_backlog();
                             movement_settlement_tail.push(serde_json::json!({
@@ -537,6 +575,12 @@ fn main() {
         "first_chunk_change_ms": ms(movement_first_chunk_change),
         "first_shifted_view_settled_ms": ms(movement_first_settled_view),
         "post_stop_view_settle_ms": ms(movement_post_stop_settled),
+        "post_stop_view_present_ms": ms(movement_post_stop_presented),
+        "presentation_at_stop": movement_stop_presentation.map(|(resident, presented, expected)| serde_json::json!({
+            "resident": resident,
+            "presented": presented,
+            "expected": expected,
+        })),
         "view_at_stop": movement_stop_view.map(|(resident, settled, expected)| serde_json::json!({
             "resident": resident,
             "settled": settled,
@@ -549,6 +593,7 @@ fn main() {
             "pending_sections": backlog.pending_sections,
         })),
         "settlement_tail": movement_settlement_tail,
+        "gap_snapshots": movement_gap_snapshots,
         "chunk_changes": movement_chunk_changes,
         "min_settled_columns": movement_min_settled.min(expected_visible_columns),
         "last_settled_columns": movement_last_settled,
@@ -585,7 +630,7 @@ fn main() {
         "input_to_present_ms": ms(probe.presented),
     }));
     let report = serde_json::json!({
-        "schema": "lodestone-client-join-mesh-profile-v11",
+        "schema": "lodestone-client-join-mesh-profile-v13",
         "seed": SEED,
         "target_size": [target_width, target_height],
         "visible_radius": radius,

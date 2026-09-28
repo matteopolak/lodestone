@@ -2946,20 +2946,23 @@ impl WindowApp {
         {
             let pending_meshes = self.sim.pending_meshes();
             let progress = self.sim.terrain_progress();
-            let loaded_columns = progress.map_or(0, |value| value.loaded);
-            let settled_columns = if progress.is_some_and(|value| value.loaded >= value.expected)
-                && pending_meshes == 0
-            {
-                self.sim.visible_view_settlement().map_or(0, |(_, settled, _)| settled)
+            let probe_full_view = self
+                .browser_join_trace
+                .as_mut()
+                .is_some_and(BrowserJoinTrace::full_view_probe_due);
+            let view_presentation = if probe_full_view {
+                self.sim
+                    .view_presentation_at_radius(self.config.render_distance)
             } else {
-                0
+                None
             };
+            let loaded_columns = progress.map_or(0, |value| value.loaded);
             let terrain_drawn = stats.sections_drawn > 0 || stats.water_sections_drawn > 0;
             if let Some(trace) = self.browser_join_trace.as_mut() {
                 trace.observe_presented(
                     terrain_drawn,
                     loaded_columns,
-                    settled_columns,
+                    view_presentation,
                     pending_meshes,
                 );
             }
