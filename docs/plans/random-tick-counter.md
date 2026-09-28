@@ -167,11 +167,10 @@ exist**: palette remap/compaction (append-only, verified), any direct field writ
 2. **A permanent parity gate** (Gate A below): incremental counters vs. an independent recount
    after a scripted mutation storm — any future in-file bypass (e.g. a hypothetical bulk-fill
    or palette compaction that forgets the counters) diverges there.
-3. **A debug tripwire in the consumer**: `tick_chunk` gains a `debug_assert!` comparing the
-   counter decision against the definitional index-scan per section (debug builds only — this
-   is the interim fix's 38.7 µs scan, affordable in every `cargo test` run, absent from
-   release). A desync introduced by any future path fails the nearest debug run at the point
-   of consumption, with the section named.
+3. **A focused consumer gate**: tests compare the counter decision against an
+   independent section recount after scripted and generated-world mutations.
+   The scan stays out of gameplay, including debug builds, where repeating it
+   for every section of every ticked column exceeded the tick budget.
 
 ## Cost of the initial count — counter, not duration
 
@@ -242,9 +241,8 @@ permanent, always-run second arm proving the detector discriminates, not a descr
 
 `tick_chunk` uses `column.has_randomly_ticking_block()` and
 `column.section_is_randomly_ticking(section_min_y)` for the production decisions. Its
-per-section `debug_assert!` compares each counter result with the definitional index scan. The
-scan helpers stay `#[cfg(test)]` and power that tripwire and Gate B; they are neither production
-hot-path code nor dead code.
+scan helpers stay `#[cfg(test)]` and power the focused counter gate and Gate B;
+they are not part of the production tick path, even in debug builds.
 
 **Parity spec: RNG draw order and count.** The per-(column, section, tick) boolean is the
 *only* input that decides whether `tick_speed` position draws happen; identical booleans ⇒

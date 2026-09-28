@@ -24,12 +24,11 @@
 //! grid is bit-packed per section, so a packing error that dropped or
 //! shifted cells would show up here as a counter disagreement too.
 //!
-//! # The three controls, and what each proves
+//! # Controls
 //!
 //! | control | proves |
 //! |---|---|
 //! | `corrupting_a_counter_makes_the_parity_comparison_fail` | the count comparison detects a wrong **production** counter (not the recount comparing itself) |
-//! | `corrupting_a_counter_trips_the_consumption_site_tripwire` | `tick_chunk`'s `debug_assert!` really fires, naming the section |
 //! | `a_wrong_draw_count_does_not_reproduce_the_lcg_stream` | the LCG-stream equality is not satisfiable by an arbitrary draw count |
 
 use lodestone_data::block_states::StateId;
@@ -663,84 +662,12 @@ fn a_wrong_draw_count_does_not_reproduce_the_lcg_stream() {
     );
 }
 
-/// **Control for the consumption-site tripwire.** With a counter corrupted,
-/// `tick_chunk`'s `debug_assert!` must fire and name the section.
-///
-/// This is the permanent evidence that the tripwire — the thing standing between
-/// a future in-file mutation path that forgets the counters and a silently
-/// non-ticking world — actually discriminates. `debug_assert!` is compiled out
-/// in a release build, so in that configuration the same corruption is asserted
-/// to change the *decision* instead, which the tripwire must catch.
-///
-/// # Why this uses `#[should_panic]` and not a nested `catch_unwind`
-///
-/// The workspace's default Cranelift debug backend does not reliably contain a
-/// panic across a nested `catch_unwind` boundary. The test therefore lets the
-/// panic reach the test harness, whose outer boundary is stable across the
-/// supported codegen backends; `#[should_panic(expected = ..)]` checks the
-/// section-specific message at that boundary.
-#[test]
-#[cfg_attr(
-    debug_assertions,
-    should_panic(
-        expected = "random-tick counter desync at chunk (0, 0) section_min_y 0: counters say true"
-    )
-)]
-fn corrupting_a_counter_trips_the_consumption_site_tripwire() {
-    let mut column = gate_b_fixture();
-    // Corrupt a *quiet* section upward: the counter now claims a section ticks
-    // that the definitional scan says does not.
-    let quiet_index = definitional_booleans(&column)
-        .iter()
-        .position(|&t| !t)
-        .expect("fixture must have a quiet section");
-    column.debug_corrupt_section_ticking_count(quiet_index, 1);
-    let section_min_y = column.min_y + quiet_index as i32 * SECTION_ROWS;
-
-    if cfg!(debug_assertions) {
-        // `gate_b_fixture` is deterministic, so the quiet section the corruption lands on
-        // is deterministic, not merely observed: section 0 (y 0..16) never holds
-        // ticking content there (see the fixture's own doc comment). The
-        // `should_panic` literal above hardcodes `section_min_y 0` for exactly
-        // that reason. If the fixture ever changes so the quiet section moves,
-        // this assertion fails loudly and names the mismatch, instead of
-        // `should_panic` silently failing on a substring that no longer appears.
-        assert_eq!(
-            (quiet_index, section_min_y),
-            (0, 0),
-            "the should_panic expectation above hardcodes section_min_y 0 for this fixture; \
-             update the literal if this assertion ever fires"
-        );
-        let mut scheduler = RandomTickScheduler::new(7, 7);
-        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
-        // Deliberately no `catch_unwind` here — see the function doc. The panic
-        // this triggers is expected to propagate out of the test function itself
-        // and be caught by libtest's own outer machinery, verified by
-        // `#[should_panic]`'s `expected` string above.
-        scheduler.tick_chunk(&mut column, 0, 0, 3, &mut block_ticks, 0, &NoNeighbors);
-    } else {
-        // Release: no `debug_assert!`. The corruption is then only observable as
-        // a wrong decision — which is exactly the failure mode being guarded.
-        assert!(
-            column.section_is_randomly_ticking(section_min_y),
-            "control failed: a corrupted counter did not even change the decision, so the \
-             corruption hook is not reaching the value production reads"
-        );
-        assert!(
-            !definitional_booleans(&column)[quiet_index],
-            "control premise false: the definitional scan agrees the section ticks, so nothing \
-             was corrupted"
-        );
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Production terrain, real mutations
 // ---------------------------------------------------------------------------
 
 /// The counters must survive real ticking over a real generator column — grass
-/// spreading, crops, leaves, whatever the surface actually holds — with the
-/// debug tripwire live inside `tick_chunk` the whole time.
+/// spreading, crops, leaves, whatever the surface actually holds.
 ///
 /// This is the arm the hand-built fixture above cannot be: its terrain comes
 /// from the production generator, so it exercises mutation shapes (spread into a

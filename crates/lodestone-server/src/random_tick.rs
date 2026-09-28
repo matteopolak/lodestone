@@ -70,9 +70,8 @@
 //!
 //! The interim fix classified the palette once per tick and scanned palette
 //! *indices*, 54× cheaper but still O(blocks) per column per tick. The counter
-//! removes the per-tick scan entirely. [`section_has_randomly_ticking_block`]
-//! survives as that definition, and the counters are checked against it by a
-//! `debug_assert!` inside `tick_chunk` on every debug run.
+//! removes the per-tick scan entirely. Test-only recounts check it against the
+//! independent definition after mutation sequences.
 //!
 //! # The block-random-position derivation, transcribed from the real driver
 //!
@@ -614,31 +613,9 @@ impl RandomTickScheduler {
         if !column.has_randomly_ticking_block() {
             return events;
         }
-        // The definitional scan, kept as the tripwire's reference arm below.
-        // Debug builds only, so every `cargo test` run in this repo pays for it
-        // and no release build does.
-        #[cfg(debug_assertions)]
-        let definitional_mask = randomly_ticking_palette_mask(column);
         let mut section_min_y = column.min_y;
         while section_min_y < column.min_y + column.height {
             let section_ticks = column.section_is_randomly_ticking(section_min_y);
-            // Permanent debug tripwire. The counters are maintained by
-            // `ChunkColumn::set_block`/`recalc_ticking_counts`; any future
-            // mutation path inside `chunk.rs` that reaches `blocks` without
-            // updating them desyncs silently in release, and this fails the
-            // nearest debug run at the point of *consumption*, naming the
-            // section. The reference is the same index scan that shipped as the
-            // interim fix, so this is the one comparison that keeps the O(1)
-            // decision bit-for-bit identical to the definition — and therefore
-            // keeps the `tick_speed` position draws on the same LCG sequence.
-            #[cfg(debug_assertions)]
-            debug_assert_eq!(
-                section_ticks,
-                section_has_randomly_ticking_block(column, section_min_y, &definitional_mask),
-                "random-tick counter desync at chunk ({cx}, {cz}) section_min_y {section_min_y}: \
-                 counters say {section_ticks}, the definitional index scan disagrees — some \
-                 mutation path bypassed `ChunkColumn`'s counter maintenance"
-            );
             if section_ticks {
                 for _ in 0..tick_speed {
                     let (x, y, z) =
@@ -832,16 +809,9 @@ impl RandomTickScheduler {
 /// Which of `column`'s palette entries are randomly ticking, indexed by
 /// palette id.
 ///
-/// **No longer the production path.** `ChunkColumn` now keeps this
-/// classification permanently (one entry pushed per palette append) and a
-/// per-section count derived from it, so [`RandomTickScheduler::tick_chunk`]
-/// reaches the decision with an integer compare. This function and
-/// [`section_has_randomly_ticking_block`] below are kept because they are the
-/// **validated definition** of that decision: they are the tripwire's reference
-/// arm in debug builds and the reference the unit test below compares against.
-/// Deleting them would throw away the spec; leaving them in release builds
-/// would be dead production code, so they are `cfg`-gated to exactly the
-/// configurations that use them.
+/// Test-only reference for the section counter. `ChunkColumn` classifies each
+/// palette entry once and maintains per-section counts during mutation; the
+/// scheduler reads those counts without rescanning cells.
 ///
 /// The prefilter that makes [`section_has_randomly_ticking_block`] affordable.
 /// The original text predicate performed several property scans and the old
@@ -851,7 +821,7 @@ impl RandomTickScheduler {
 /// decision for a small constant instead of a per-block one — the same argument
 /// [`ChunkColumn::raw_palette`](crate::chunk::ChunkColumn::raw_palette)
 /// already makes for the save path.
-#[cfg(any(test, debug_assertions))]
+#[cfg(test)]
 fn randomly_ticking_palette_mask(column: &crate::chunk::ChunkColumn) -> Vec<bool> {
     column
         .palette()
@@ -872,7 +842,7 @@ fn randomly_ticking_palette_mask(column: &crate::chunk::ChunkColumn) -> Vec<bool
 ///
 /// See [`randomly_ticking_palette_mask`] for why this is no longer the
 /// production path and why it is nonetheless kept.
-#[cfg(any(test, debug_assertions))]
+#[cfg(test)]
 fn section_has_randomly_ticking_block(
     column: &crate::chunk::ChunkColumn,
     section_min_y: i32,
@@ -2123,15 +2093,12 @@ mod tests {
         let (tall_count, tall_sections, _) = measure(384);
         assert_eq!((short_sections, tall_sections), (2, 24));
 
-        // The debug reference scan classifies each palette entry per tick.
-        let tripwire_per_tick = if cfg!(debug_assertions) { 2u64 } else { 0 };
-        let expected = TICKS * (u64::from(TICK_SPEED) + tripwire_per_tick);
+        let expected = TICKS * u64::from(TICK_SPEED);
 
         assert_eq!(
             short_count, expected,
             "2-section column: expected exactly {expected} predicate evaluations over {TICKS} \
-             ticks at tick_speed {TICK_SPEED} ({TICK_SPEED} position checks + \
-             {tripwire_per_tick} tripwire per tick)"
+             ticks at tick_speed {TICK_SPEED} ({TICK_SPEED} position checks per tick)"
         );
         assert_eq!(
             tall_count, expected,
@@ -2186,9 +2153,8 @@ mod tests {
 
     /// The counters' decision must equal the definitional index scan
     /// ([`section_has_randomly_ticking_block`]) for every section, at every step
-    /// of a mutation sequence — the same invariant `tick_chunk`'s debug tripwire
-    /// asserts, pinned here as a test so it is visible in the crate's own suite
-    /// and so the definition stays live in `--release` test builds too.
+    /// of a mutation sequence. This keeps the definition live in debug and
+    /// release test builds without rescanning sections during gameplay.
     ///
     /// The broad parity gate, over real generator columns and an NBT round trip,
     /// is `tests/random_tick_section_counters.rs`; this is the in-module version
