@@ -13,6 +13,12 @@ Single-column and single-block resident reads hold one coordinate gate until the
 
 Integrated worlds pause simulation until the client reports `PlayerLoaded` and the initial terrain neighborhood has been delivered. The connection's chunk stream and generation workers remain active while paused. The tick driver continues waiting at its normal cadence, so resuming does not replay loading time as a burst of world ticks. Other server entry points keep their normal tick behavior.
 
+The connection drains tick-produced block changes into an ordered local queue,
+retaining only changes for columns already delivered when the feed is drained.
+It sends at most 64 updates per select-loop pass on both native and browser
+builds. Socket input, keep-alives, and chunk publication can run between
+batches; relighting stays on its separate queued path.
+
 The shared `run_tick_loop_with_weather_impl` records the three phase durations for every tick as before. When tracing is enabled, it emits a structured event only for a phase lasting at least one 50 ms tick period, including the tick number, phase name, follow-area size, and resident-column count. Native and `wasm32` use the same tick-loop implementation; the environment-variable switch is intentionally native-only.
 
 Integrated mob seeding waits for the production connection task to become live,
@@ -35,6 +41,11 @@ generation handoff rather than the cost of a deliberately broad spawn view.
 ## How to change it
 
 New periodic tick work must use a resident-only accessor when it reads a bounded `ChunkSource`. Do not add a cold `ChunkSource::column` or blocking `set_block` call to the tick task: generation and cache writes hold per-coordinate gates, so the join stream and the world clock can block one another. Preserve the retry behavior when a column is absent or busy, and keep changes in the shared tick-loop body so native and browser scheduling remain behaviorally aligned.
+
+If the block-update batch size changes, preserve feed order and the
+delivery-time snapshot boundary. A queued update for a column that was not yet
+visible must not arrive after its newer initial snapshot. Keep each connection
+pass bounded even when a fluid cascade publishes many changes at once.
 
 The mob seed handoff must remain after the production connection task is live and
 must continue to use the bounded dispatcher. If the seed area is expanded, keep

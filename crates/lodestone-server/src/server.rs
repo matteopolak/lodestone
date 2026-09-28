@@ -7100,6 +7100,35 @@ where
     Ok(())
 }
 
+const TICK_BLOCK_UPDATE_BATCH: usize = 64;
+
+fn queue_tick_block_updates(
+    pending: &mut VecDeque<crate::tick::TickBlockChange>,
+    delivered: &HashSet<(i32, i32)>,
+    changes: Vec<crate::tick::TickBlockChange>,
+) {
+    pending.extend(changes.into_iter().filter(|change| {
+        delivered.contains(&(change.x.div_euclid(16), change.z.div_euclid(16)))
+    }));
+}
+
+async fn send_pending_tick_block_updates<T, P>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    state: &mut State,
+    delivered: &HashSet<(i32, i32)>,
+    pending_relights: &mut PendingRelights,
+    pending: &mut VecDeque<crate::tick::TickBlockChange>,
+) -> Result<(), ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+{
+    let count = pending.len().min(TICK_BLOCK_UPDATE_BATCH);
+    let changes = pending.drain(..count).collect();
+    send_tick_block_updates(conn, proto, state, delivered, pending_relights, changes).await
+}
+
 fn tick_relight_targets(
     changed_columns: impl IntoIterator<Item = (i32, i32)>,
     delivered: &HashSet<(i32, i32)>,
@@ -15195,6 +15224,7 @@ where
     let mut pending_keep_alive: Option<i64> = None;
     let mut pending_break: Option<PendingBreak> = None;
     let mut pending_relights = PendingRelights::default();
+    let mut pending_tick_updates = VecDeque::new();
     let mut detached_relight: Option<DetachedRelight> = None;
     let mut teleport_acknowledgements = initial_teleport_id.map(TeleportAcknowledgements::after_initial);
     let mut player_pos: Option<(f64, f64, f64)> = None;
@@ -15470,6 +15500,7 @@ where
         if let Some(next) = pending_travel.take() {
             travelled = next;
             pending_relights.clear();
+            pending_tick_updates.clear();
             detached_relight = None;
         }
         // Shadowing the `source` parameter is what makes a dimension change reach
@@ -15530,6 +15561,19 @@ where
             }
         }
         tokio::select! {
+            _ = std::future::ready(()), if !pending_tick_updates.is_empty() => {
+                watch.enter();
+                send_pending_tick_block_updates(
+                    conn,
+                    proto,
+                    &mut state,
+                    &view.delivered,
+                    &mut pending_relights,
+                    &mut pending_tick_updates,
+                )
+                .await?;
+                watch.pass("tick_block_updates");
+            }
             _ = std::future::ready(()), if synchronous_relight && !pending_relights.is_empty() => {
                 watch.enter();
                 send_next_relight(
@@ -17512,33 +17556,13 @@ where
                         apply(conn, &mut state, directive).await?;
                     }
                 }
-                // World random ticks (for example grass-to-dirt changes) mutate
-                // the shared `ChunkSource` independently of this connection.
-                // Drain their block updates on this timer; the feed has one
-                // consumer for each `open_in_memory_with_mobs` world.
-                // Include light for each changed column. `encode_block_update`
-                // carries no light, so a tick-driven change must be followed by
-                // a column-light resend. For example, a fluid tick can remove an
-                // underwater torch after placement; this drain updates both the
-                // block and its light. Fire, grass, crops, redstone torches, and
-                // landing falling blocks use this update flow.
-                //
-                // A join snapshot arriving after this update remains
-                // authoritative for a not-yet-visible column. It cannot repair
-                // a column that was sent before the rest of the stream, so
-                // every drained block mutation still needs its cheap update.
-                // `send_tick_block_updates` keeps the expensive light portion
-                // resident-only, avoiding cold generation while the stream is
-                // in flight.
-                send_tick_block_updates(
-                    conn,
-                    proto,
-                    &mut state,
+                // Keep tick updates for visible columns ordered, but send them
+                // outside this timer arm so a burst cannot block socket reads.
+                queue_tick_block_updates(
+                    &mut pending_tick_updates,
                     &view.delivered,
-                    &mut pending_relights,
                     block_ticks.drain_all(),
-                )
-                .await?;
+                );
                 // Drain the feed's effect lane: world-tick sounds, particles,
                 // and level events. These effects share the feed's single
                 // consumer, as described by `BlockTickFeed`.
@@ -18413,6 +18437,7 @@ where
     let mut pending_keep_alive: Option<i64> = None;
     let mut pending_break: Option<PendingBreak> = None;
     let mut pending_relights = PendingRelights::default();
+    let mut pending_tick_updates = VecDeque::new();
     let mut teleport_acknowledgements = initial_teleport_id.map(TeleportAcknowledgements::after_initial);
     let mut sprinting = false;
     let mut sneaking = false;
@@ -18498,6 +18523,18 @@ where
     let mut browser_vitals_ticks = 0_u64;
     loop {
         let packet = tokio::select! {
+            _ = std::future::ready(()), if !pending_tick_updates.is_empty() => {
+                send_pending_tick_block_updates(
+                    conn,
+                    proto,
+                    &mut state,
+                    &view.delivered,
+                    &mut pending_relights,
+                    &mut pending_tick_updates,
+                )
+                .await?;
+                None
+            }
             // A queued relight is always ready, but competes with packet and
             // timer work so large batches cannot monopolize the browser loop.
             _ = std::future::ready(()), if !pending_relights.is_empty() => {
@@ -18559,21 +18596,12 @@ where
                     );
                 }
                 republish_inventory(entities.players(), player_uuid, &inventory);
-                // The world tick runs in a separate future and can mutate the
-                // shared source while this connection is completely idle.
-                // Drain the block lane here rather than waiting for the next
-                // inbound packet; otherwise scheduled fluids and random block
-                // updates remain authoritative in memory but invisible to the
-                // browser client.
-                send_tick_block_updates(
-                    conn,
-                    proto,
-                    &mut state,
+                // The world tick can publish changes without inbound packets.
+                queue_tick_block_updates(
+                    &mut pending_tick_updates,
                     &view.delivered,
-                    &mut pending_relights,
                     block_ticks.drain_all(),
-                )
-                .await?;
+                );
                 // Explosions have the same producer/consumer shape as block
                 // changes: the shared world tick publishes them independently
                 // of client input, so the timer must forward them as well.
@@ -20213,6 +20241,77 @@ mod tests {
         let mut peer = Connection::new(client_end);
         assert_eq!(
             peer.read_packet().await.expect("block update decodes"),
+            Some((43, vec![1, 64, 1]))
+        );
+        assert!(pending_relights.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tick_block_update_burst_yields_after_one_ordered_batch() {
+        let (client_end, server_end) = lodestone_net::memory_pair();
+        let mut conn = Connection::new(server_end);
+        let mut peer = Connection::new(client_end);
+        let mut state = State::Play;
+        let mut pending_relights = PendingRelights::default();
+        let mut pending = VecDeque::new();
+        let mut delivered = HashSet::from([(0, 0)]);
+        let changes = (0..65)
+            .map(|y| crate::tick::TickBlockChange {
+                x: 1,
+                y,
+                z: 1,
+                state: default_block_state(Block::Stone),
+                needs_relight: false,
+            })
+            .chain(std::iter::once(crate::tick::TickBlockChange {
+                x: 17,
+                y: 0,
+                z: 1,
+                state: default_block_state(Block::Stone),
+                needs_relight: false,
+            }))
+            .collect();
+        queue_tick_block_updates(&mut pending, &delivered, changes);
+        assert_eq!(pending.len(), 65);
+        delivered.insert((1, 0));
+
+        send_pending_tick_block_updates(
+            &mut conn,
+            &RefusingChunkProtocol,
+            &mut state,
+            &delivered,
+            &mut pending_relights,
+            &mut pending,
+        )
+        .await
+        .expect("first bounded update batch");
+        assert_eq!(pending.len(), 1);
+        for y in 0..64 {
+            assert_eq!(
+                peer.read_packet().await.expect("ordered block update"),
+                Some((43, vec![1, y, 1]))
+            );
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), peer.read_packet())
+                .await
+                .is_err(),
+            "the next update waits for a separate connection pass"
+        );
+
+        send_pending_tick_block_updates(
+            &mut conn,
+            &RefusingChunkProtocol,
+            &mut state,
+            &delivered,
+            &mut pending_relights,
+            &mut pending,
+        )
+        .await
+        .expect("second bounded update batch");
+        assert_eq!(pending.len(), 0);
+        assert_eq!(
+            peer.read_packet().await.expect("final block update"),
             Some((43, vec![1, 64, 1]))
         );
         assert!(pending_relights.is_empty());
