@@ -43,12 +43,8 @@ const SEARCH_BOTTOM: i32 = -64;
 /// thing that fails on a loaded machine.
 const DEADLINE: Duration = Duration::from_secs(240);
 
-/// The configured render distance under test, plus the
-/// mesher's buffer ring — the exact arithmetic
-/// `app::session::tick_render_distance` and the launch path both apply
-/// (`render_distance + 1`), so this is the radius a real session at
-/// `"render_distance": 32` asks the server for.
-const OWNER_VIEW_RADIUS: i32 = 33;
+/// The streamed radius of a real singleplayer session at render distance 32.
+const OWNER_VIEW_RADIUS: i32 = lodestone::app::integrated_stream_radius(32) as i32;
 
 /// The small radius shared by the other singleplayer gates. It is the control:
 /// if both arms fail the defect is not radius-dependent, and if only the large
@@ -492,7 +488,7 @@ fn a_sim_at_the_owners_render_distance_drains_real_terrain_meshes() {
         mode: Mode::Window,
         protocol,
         // The configured persisted `"render_distance": 32`. The streamed radius is
-        // this + 1, the same arithmetic `app/session.rs` applies.
+        // this plus the integrated stream padding.
         render_distance: 32,
         ..Config::default()
     };

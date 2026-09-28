@@ -1340,7 +1340,7 @@ pub struct TerrainMesh {
     /// every loaded neighbour of a departing column also drags in the
     /// **outermost** ring of the view, whose missing neighbour is missing because
     /// it is beyond the view entirely. That ring is exactly the buffer
-    /// singleplayer streams `render_distance + 1` to keep *off* screen
+    /// singleplayer streams beyond `render_distance` to keep *off* screen
     /// (`app/session.rs`), because a section meshed without its outer neighbour
     /// bakes its seam against air — the "blocky water far away" report. So a
     /// forced column is only really forced when **every** neighbour it still

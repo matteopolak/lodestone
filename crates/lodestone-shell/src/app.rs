@@ -87,6 +87,14 @@ use lodestone_game::click::{Click, PlayerCtx};
 use lodestone_game::menu::Menu;
 use lodestone_game::recipe::RecipeBook;
 
+const INTEGRATED_STREAM_RADIUS_PADDING: u32 = 2;
+
+/// Add the mesh dependency ring and one movement lookahead ring.
+#[must_use]
+pub const fn integrated_stream_radius(render_distance: u32) -> u32 {
+    render_distance.saturating_add(INTEGRATED_STREAM_RADIUS_PADDING)
+}
+
 mod advancements_screen;
 mod benchmark;
 mod container_input;

@@ -1566,29 +1566,14 @@ impl WindowApp {
         // the "the slider appears to do nothing" report with one symptom fixed.
         self.config.render_distance = wanted;
         self.sim.config.render_distance = wanted;
-        // The server side. Vanilla's own client-options broadcast sends
-        // a client-information packet whenever an option in it changes,
-        // and view distance is in it — without this the server keeps streaming
-        // the square we asked for at join and the extra rings simply never
-        // arrive, so fog and the far plane would open onto empty space.
-        //
-        // `+ 1` for the mesher's buffer ring, the same reason
-        // `start_singleplayer`'s `view_radius` adds one: the outermost streamed
-        // ring can never be meshed, so asking for exactly `render_distance`
-        // loses the last visible ring.
-        //
-        // Raising it mid-session is supported.
-        //
-        // This used to be capped: `dispatch_play_packet`'s
-        // `ClientInformationChanged` arm clamped against *this connection's own*
-        // `serve_connection` radius — the `render_distance + 1` the shell asked
-        // for at join — so a decrease took effect and an increase past the launch
-        // value was silently clamped back. `0c09f576` separated the join view
-        // radius from the permitted maximum, so the clamp is now against the
-        // server's configured ceiling and the chunk store's capacity follows a
-        // live raise (grow-only, a session high-water mark). Both directions
-        // reach the stream now, and nothing on this side needs to compensate.
-        let radius = wanted.saturating_add(1);
+        // The server must receive the live distance change as well as the
+        // renderer. Singleplayer keeps a movement lookahead beyond the mesh
+        // dependency ring; remote servers receive only the dependency ring.
+        let radius = if self.ui.kind() == Some(crate::menu::SessionKind::Singleplayer) {
+            integrated_stream_radius(wanted)
+        } else {
+            wanted.saturating_add(1)
+        };
         if let Some(net) = self.sim.net() {
             net.send_action(lodestone_model::action::ClientAction::SetClientSettings(
                 self.client_settings(radius),
@@ -1732,7 +1717,7 @@ impl WindowApp {
         ClientSettings {
             locale: "en_us".to_string(),
             // The client-information payload carries a signed byte. The initial
-            // join's VarInt view radius can reach 257, but a live settings update
+            // join's VarInt view radius can reach 258, but a live settings update
             // can advertise only 127; saturating rather than wrapping prevents
             // a large render-distance choice from becoming a negative request.
             view_distance: i8::try_from(radius.clamp(2, i8::MAX as u32)).unwrap_or(i8::MAX),
@@ -1864,21 +1849,13 @@ impl WindowApp {
         // already use, so the server never sends a column the renderer would
         // discard and never withholds one it wants.
         //
-        // **Plus one, and the `+ 1` is not slack — it is the buffer ring the
-        // mesher's invariant requires.** The server tracks
-        // the view distance plus one ring around the center, and it has
-        // to: a section is only meshed once all its neighbours are resident, so the
-        // outermost ring of a radius-`n` stream permanently lacks a neighbour and
-        // **never draws**. Streaming exactly `render_distance` made singleplayer
-        // silently lose its last ring of chunks — reported as "some water far away
-        // is blocky", because a large flat surface is where a missing outer ring
-        // reads as a hard step rather than as absent scenery.
+        // One ring supplies the mesher's 3×3 neighborhood; the second is
+        // streamed ahead of movement so the next visible strip has that halo.
         //
         // This does not widen the view: fog and the far plane read
         // `config.render_distance` directly, not this value.
-        let view_radius = i32::try_from(self.config.render_distance)
-            .unwrap_or(i32::MAX)
-            .saturating_add(1);
+        let view_radius = i32::try_from(integrated_stream_radius(self.config.render_distance))
+            .unwrap_or(i32::MAX);
         #[cfg(all(feature = "multiplayer", not(target_arch = "wasm32")))]
         let launch_result = if online_mode {
             launch_open_to_lan_online(
@@ -1930,10 +1907,7 @@ impl WindowApp {
                     ));
                 }
                 if show_new_world_loading {
-                    // The server receives one extra ring for neighbour-aware
-                    // meshing, but the loading square is the player's chosen
-                    // render distance. Do not make that implementation ring
-                    // inflate the visible box.
+                    // Stream padding does not enlarge the loading square.
                     self.sim
                         .arm_new_world_loading(self.config.render_distance);
                 } else {

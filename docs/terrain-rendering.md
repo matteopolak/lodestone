@@ -41,11 +41,16 @@ from the unload signal, not the store (both look identical there). `TerrainMesh:
 forget_column`/`force_neighbours_of_departed` push a departing column's still-loaded
 neighbours into a forced re-mesh queue, gated on `all_absent_neighbours_departed` —
 without that predicate, forcing every neighbour of a departure also drags in the
-outermost buffer ring the server streams one column past the view, and a section
+outermost buffer ring the integrated server streams beyond the view, and a section
 meshed against that ring's absence bakes its seam against air (the "blocky water
 along chunk boundaries" report). `mark_neighbours_dirty` (on arrival) and this
 departure path are the two invalidation mechanisms; between them an interior seam
 heals within a frame or two of its neighbour changing, in either direction.
+
+The integrated client requests two rings beyond its visible radius. The first
+supplies the 3×3 mesh dependency; the second keeps that dependency resident for
+the next chunk crossing. Multiplayer requests only the dependency ring. The
+loading-screen square still uses the selected visible radius.
 
 The heal queue is priority-ordered, not FIFO: `(Chebyshev distance from the player's
 column, in-frustum penalty, cx, cz)`, re-keyed once a frame only when the player's
