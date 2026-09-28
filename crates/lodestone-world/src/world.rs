@@ -956,6 +956,19 @@ impl World {
     /// and pushes `light_update`; the client applies it here. See the crate-level
     /// note on why no lighting engine lives in this version-free storage crate.
     pub fn merge_light(&mut self, pos: ChunkPos, patch: LightPatch) {
+        self.apply_light_patch::<false>(pos, patch);
+    }
+
+    /// Applies a light patch and returns only indices whose stored values changed.
+    pub fn merge_light_changed(&mut self, pos: ChunkPos, patch: LightPatch) -> Vec<usize> {
+        self.apply_light_patch::<true>(pos, patch)
+    }
+
+    fn apply_light_patch<const REPORT_CHANGES: bool>(
+        &mut self,
+        pos: ChunkPos,
+        patch: LightPatch,
+    ) -> Vec<usize> {
         // The server wins, in both orders. A patch that lands *after* our own
         // relight overwrites it below; one that lands *before* would otherwise be
         // overwritten by a queued recomputation of ours — which is the divergence
@@ -968,20 +981,32 @@ impl World {
             self.relights_cancelled += (before - self.pending_relight.len()) as u64;
         }
         let Some(chunk) = self.chunks.get_mut(&pos) else {
-            return;
+            return Vec::new();
         };
         self.light_merges += 1;
         let count = chunk.light.light_section_count();
+        let mut changed = Vec::new();
         for (i, data) in patch.sky {
-            if i < count {
+            if i < count && (!REPORT_CHANGES || chunk.light.sky(i) != &data) {
                 *chunk.light.sky_mut(i) = data;
+                if REPORT_CHANGES {
+                    changed.push(i);
+                }
             }
         }
         for (i, data) in patch.block {
-            if i < count {
+            if i < count && (!REPORT_CHANGES || chunk.light.block(i) != &data) {
                 *chunk.light.block_mut(i) = data;
+                if REPORT_CHANGES {
+                    changed.push(i);
+                }
             }
         }
+        if REPORT_CHANGES {
+            changed.sort_unstable();
+            changed.dedup();
+        }
+        changed
     }
 
     /// Whether any block change is still waiting for
@@ -1225,6 +1250,14 @@ pub trait WorldSink {
     /// trap this seam exists to close.
     fn merge_light(&mut self, pos: ChunkPos, patch: LightPatch);
 
+    /// Applies a light patch and reports changed light-section indices.
+    /// Sinks without stored-light readback conservatively report every named section.
+    fn merge_light_changed(&mut self, pos: ChunkPos, patch: LightPatch) -> Vec<usize> {
+        let sections = patch.affected_sections();
+        self.merge_light(pos, patch);
+        sections
+    }
+
     /// Applies a sparse [`BiomePatch`] to the chunk at `pos`, overwriting only
     /// the sections it names and leaving block state untouched.
     ///
@@ -1278,6 +1311,10 @@ impl WorldSink for World {
 
     fn merge_light(&mut self, pos: ChunkPos, patch: LightPatch) {
         World::merge_light(self, pos, patch);
+    }
+
+    fn merge_light_changed(&mut self, pos: ChunkPos, patch: LightPatch) -> Vec<usize> {
+        World::merge_light_changed(self, pos, patch)
     }
 
     fn merge_biomes(&mut self, pos: ChunkPos, patch: BiomePatch) {
@@ -2528,6 +2565,28 @@ mod tests {
             vec![NibbleArray::filled(7)],
         );
         assert_eq!(patch.affected_sections(), [2, 4, 6]);
+    }
+
+    #[test]
+    fn light_merge_reports_only_changed_stored_sections() {
+        let mut world = World::new();
+        let pos = ChunkPos::new(0, 0);
+        world.load(pos, sample_chunk());
+
+        let mut first = LightPatch::new();
+        first.set_sky(2, LightData::Uniform(15));
+        first.set_block(2, LightData::Uniform(7));
+        assert_eq!(world.merge_light_changed(pos, first.clone()), [2]);
+        assert!(world.merge_light_changed(pos, first).is_empty());
+
+        let mut mixed = LightPatch::new();
+        mixed.set_sky(2, LightData::Uniform(15));
+        mixed.set_block(3, LightData::Uniform(1));
+        assert_eq!(world.merge_light_changed(pos, mixed), [3]);
+
+        let mut missing = LightPatch::new();
+        missing.set_sky(2, LightData::Uniform(4));
+        assert!(world.merge_light_changed(ChunkPos::new(1, 0), missing).is_empty());
     }
 
     #[test]

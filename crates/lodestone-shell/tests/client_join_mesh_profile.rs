@@ -697,6 +697,7 @@ fn main() {
     }
 
     let elapsed = started.elapsed();
+    let mesh_work = sim.mesh_work_counters();
     let mut uploads_per_section: Vec<_> = section_uploads.values().copied().collect();
     uploads_per_section.sort_unstable();
     let max_uploads_per_section = uploads_per_section.last().copied().unwrap_or(0);
@@ -780,7 +781,7 @@ fn main() {
         "input_to_present_ms": ms(probe.presented),
     }));
     let report = serde_json::json!({
-        "schema": "lodestone-client-join-mesh-profile-v15",
+        "schema": "lodestone-client-join-mesh-profile-v16",
         "seed": SEED,
         "target_size": [target_width, target_height],
         "visible_radius": radius,
@@ -816,6 +817,15 @@ fn main() {
         "repeat_section_uploads": mesh_count.saturating_sub(section_uploads.len()),
         "uploads_per_section_p95": p95_uploads_per_section,
         "uploads_per_section_max": max_uploads_per_section,
+        "mesh_work": {
+            "column_arrivals": mesh_work.column_arrivals,
+            "redecoded_column_arrivals": mesh_work.redecoded_column_arrivals,
+            "column_snapshot_sections": mesh_work.column_snapshot_sections,
+            "neighbor_dirty_admissions": mesh_work.neighbor_dirty_admissions,
+            "light_patch_calls": mesh_work.light_patch_calls,
+            "light_patch_invalidations": mesh_work.light_patch_invalidations,
+            "light_section_snapshots": mesh_work.light_section_snapshots,
+        },
         "uploaded_quads": quad_count,
         "open_singleplayer_cpu_ms": open_ns as f64 / 1_000_000.0,
         "step_cpu_ms": step_ns as f64 / 1_000_000.0,

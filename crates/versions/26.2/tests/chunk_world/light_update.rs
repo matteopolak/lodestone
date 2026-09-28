@@ -136,14 +136,23 @@ fn light_update_merges_sky_array_and_empty_block_then_notifies() {
         "sky section 2 was not in the update — a mask/empty swap would fill it"
     );
 
-    // The dispatch emits a ChunkLoaded notification ("region at pos is dirty;
-    // re-mesh it") for the light change.
     match directives.as_slice() {
-        [Directive::Emit(ClientEvent::ChunkLoaded { pos: p })] => {
+        [Directive::Emit(ClientEvent::ChunkLightChanged { pos: p, sections })] => {
             assert_eq!((p.x, p.z), (0, 0));
+            assert_eq!(sections, &[1, 2]);
         }
-        other => panic!("expected a single ChunkLoaded emit, got {other:?}"),
+        other => panic!("expected a changed-light notification, got {other:?}"),
     }
+
+    let duplicate = adapter
+        .handle_packet(
+            &mut world,
+            ConnectionState::Play,
+            play::clientbound::LIGHT_UPDATE,
+            &payload,
+        )
+        .expect("repeated light update decodes");
+    assert!(duplicate.is_empty(), "identical stored light must not invalidate meshes");
 }
 
 #[test]
@@ -198,10 +207,7 @@ fn light_update_rejects_wrong_array_length() {
 }
 
 #[test]
-fn light_update_for_unloaded_chunk_is_a_safe_noop_notification() {
-    // Servers send light for chunks the client has not loaded yet; merge_light
-    // is a documented no-op there, and the arm must still decode cleanly and
-    // notify (idempotent "dirty" signal) rather than error.
+fn light_update_for_unloaded_chunk_is_a_safe_noop() {
     let adapter = V770Adapter::new();
     let mut world = World::new(); // nothing loaded
     let payload = golden_light_update();
@@ -214,13 +220,7 @@ fn light_update_for_unloaded_chunk_is_a_safe_noop_notification() {
             &payload,
         )
         .expect("light_update for an unloaded chunk still decodes");
-    assert!(
-        matches!(
-            directives.as_slice(),
-            [Directive::Emit(ClientEvent::ChunkLoaded { .. })]
-        ),
-        "should still emit a ChunkLoaded notification, got {directives:?}"
-    );
+    assert!(directives.is_empty(), "unloaded light has no mesh to invalidate");
     // Sanity: the reader is fully consumed by the arm (no panic, no leftover).
     let _ = Reader::new(&payload);
 }
@@ -327,7 +327,8 @@ fn the_encoder_and_the_decode_arm_are_wired_to_each_other() {
     assert!(
         matches!(
             directives.as_slice(),
-            [Directive::Emit(ClientEvent::ChunkLoaded { .. })]
+            [Directive::Emit(ClientEvent::ChunkLightChanged { pos: p, sections })]
+                if (p.x, p.z) == (3, -5) && sections == &[1, 2]
         ),
         "and the re-mesh signal must fire, or the light arrives and nothing redraws"
     );

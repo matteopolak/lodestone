@@ -246,12 +246,15 @@ impl V770Adapter {
                 &empty_block_mask,
                 block_arrays,
             );
-            let sections = patch.affected_sections();
-            world.merge_light(WorldChunkPos::new(x, z), patch);
-            return Ok(vec![Directive::Emit(ClientEvent::ChunkLightChanged {
-                pos: ChunkPos::new(x, z),
-                sections,
-            })]);
+            let sections = world.merge_light_changed(WorldChunkPos::new(x, z), patch);
+            return Ok(if sections.is_empty() {
+                Vec::new()
+            } else {
+                vec![Directive::Emit(ClientEvent::ChunkLightChanged {
+                    pos: ChunkPos::new(x, z),
+                    sections,
+                })]
+            });
         }
         if packet_id == play::clientbound::FORGET_LEVEL_CHUNK {
             // A single packed long: x in the low 32 bits, z in the high 32

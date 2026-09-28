@@ -282,6 +282,15 @@ counted rather than allowed to stall a frame, and a cap on how many pending
 positions can queue at once), so a large `/fill` spreads its relight cost across
 frames instead of stalling one.
 
+Standalone light packets are sparse overwrites. The world store compares each
+named light section with its current value and returns only changed section
+indices to the 26.2 client adapter. An identical packet still cancels pending
+client relight for that column, but emits no mesh invalidation. Custom
+`WorldSink` implementations that cannot compare stored light retain the
+conservative named-section behavior through the trait default. To change this
+filter, update `World::merge_light_changed` and the adapter together; do not
+drop explicit-zero sections or treat an absent section as zero.
+
 ## How to change it, and the gotchas
 
 - **The AO occluder census and the smooth-light occlusion census are different

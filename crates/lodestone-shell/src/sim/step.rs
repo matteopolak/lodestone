@@ -125,6 +125,11 @@ impl Sim {
         self.terrain(TerrainMesh::backlog)
     }
 
+    #[must_use]
+    pub fn mesh_work_counters(&self) -> crate::mesher::MeshWorkCounters {
+        self.terrain(TerrainMesh::work_counters)
+    }
+
     /// Collect finished meshes for the caller to upload to the GPU.
     ///
     /// Also records each key into `TerrainMesh::uploaded_sections`, which is how
