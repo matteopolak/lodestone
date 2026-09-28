@@ -64,6 +64,12 @@ landed a chest was a hole in the world no terrain-drawn metric could see. Signs 
 their board **is** a real block model and the renderer is a **text-only** pass — porting sign geometry
 here would draw a second board inside the one the mesher already produces.
 
+The sign-text pass caches finished vertices by position, content, light, and outline state. After
+each frame it retains only signs that were drawn and discards empty geometry, so a dense area does
+not repeatedly clear a fixed-size cache while a sparse area does not retain signs left behind. The
+vertex budget in `gpu::sign_text::MAX_SIGN_TEXT_VERTICES` bounds retained nonempty geometry; change
+that budget and the near-first selection together if a scene needs more text coverage.
+
 The renderer source is split by responsibility behind the unchanged
 `lodestone_render::block_entity` API. `model_families` owns family constants, placement and animation
 math, and mesh baking helpers; `model_set` owns the baked corpus, typed spawn inputs, and resolver
