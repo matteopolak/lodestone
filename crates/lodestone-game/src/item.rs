@@ -412,6 +412,7 @@ pub struct ItemStack {
     item: Identifier,
     count: i32,
     components: ItemComponents,
+    click_prediction_safe: bool,
 }
 
 impl ItemStack {
@@ -424,17 +425,26 @@ impl ItemStack {
             item,
             count: count.max(0),
             components: ItemComponents::new(),
+            click_prediction_safe: true,
         }
     }
 
     /// Creates a stack with an explicit component set.
     #[must_use]
     pub fn with_components(item: Identifier, count: i32, components: ItemComponents) -> Self {
+        let click_prediction_safe = components.is_empty();
         Self {
             item,
             count: count.max(0),
             components,
+            click_prediction_safe,
         }
+    }
+
+    /// Whether a click can describe this stack with an empty hashed component patch.
+    #[must_use]
+    pub fn click_prediction_safe(&self) -> bool {
+        self.click_prediction_safe
     }
 
     /// Returns whether this stack is empty (`count <= 0`).
@@ -463,6 +473,7 @@ impl ItemStack {
 
     /// Returns a mutable reference to the component set.
     pub fn components_mut(&mut self) -> &mut ItemComponents {
+        self.click_prediction_safe = false;
         &mut self.components
     }
 
@@ -472,6 +483,7 @@ impl ItemStack {
         if let Ok(key) = MAX_STACK_SIZE_COMPONENT.parse() {
             self.components
                 .insert(key, ComponentValue::Int(i64::from(size)));
+            self.click_prediction_safe = false;
         }
         self
     }
@@ -1025,6 +1037,7 @@ impl ItemStack {
         let Ok(key) = key.parse::<Identifier>() else {
             return;
         };
+        self.click_prediction_safe = false;
         match value {
             Some(value) => {
                 self.components.insert(key, value);
@@ -1295,11 +1308,24 @@ impl From<&lodestone_model::ItemStack> for ItemStack {
             components.insert(key, ComponentValue::BaseColor(color));
         }
 
-        Self::with_components(
+        let prototype_component_count = [
+            MAX_STACK_SIZE_COMPONENT,
+            MAX_DAMAGE_COMPONENT,
+            EQUIPPABLE_COMPONENT,
+        ]
+        .into_iter()
+        .filter(|key| components.get_str(key).is_some())
+        .count();
+        let click_prediction_safe = !stack.components.wire_patch_nonempty
+            && !stack.components.has_unmodeled
+            && components.len() == prototype_component_count;
+        let mut result = Self::with_components(
             stack.item.clone(),
             i32::try_from(stack.count).unwrap_or(i32::MAX),
             components,
-        )
+        );
+        result.click_prediction_safe = click_prediction_safe;
+        result
     }
 }
 
@@ -1438,6 +1464,7 @@ impl From<&ItemStack> for lodestone_model::ItemStack {
             death_protection_effects: Vec::new(),
             // See the doc above: not lossy, out of scope.
             has_unmodeled: false,
+            wire_patch_nonempty: !stack.click_prediction_safe,
         };
         Self {
             item: stack.item.clone(),

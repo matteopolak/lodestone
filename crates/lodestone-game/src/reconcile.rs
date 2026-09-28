@@ -69,13 +69,9 @@ impl ClickIntent {
     /// it, which are that container's slots, not window 0's. Sending a crafting
     /// grid click to window 0 makes the server reject the slot index outright.
     ///
-    /// Component fidelity: the model's stack carries no component patch and
-    /// every adapter that ships writes an empty patch for a predicted stack
-    /// anyway (26.2's `HashedStack` hashes the patch, and an empty one is what
-    /// the server compares against for plain items), so the lowering keeps item
-    /// and count only. A stack whose components the server does track will
-    /// simply hash-mismatch and be corrected, which is the reconcile seam doing
-    /// its job rather than a silent desync.
+    /// Only stacks with an empty component patch reach the optimistic path.
+    /// Patched stacks use server-owned reconciliation until adapters can encode
+    /// their component hashes.
     #[must_use]
     pub fn to_action(&self, window_id: i32) -> ClientAction {
         ClientAction::ContainerClick {
@@ -229,6 +225,27 @@ impl ClientMenu {
     /// [`ClickIntent`] carries the diff and state id the server needs to
     /// reconcile.
     pub fn predict(&mut self, click: Click, ctx: PlayerCtx) -> ClickIntent {
+        let uncertain = self.predicted.carried().is_some_and(|stack| !stack.click_prediction_safe())
+            || usize::try_from(click.slot)
+                .ok()
+                .and_then(|slot| self.predicted.slot_item(slot))
+                .is_some_and(|stack| !stack.click_prediction_safe())
+            || (click.input == ContainerInput::Swap
+                && usize::try_from(click.button)
+                    .ok()
+                    .and_then(|slot| self.predicted.player_native(slot))
+                    .is_some_and(|stack| !stack.click_prediction_safe()));
+        if uncertain {
+            return ClickIntent {
+                slot: click.slot,
+                button: click.button,
+                input: click.input,
+                state_id: self.confirmed.state_id(),
+                changed_slots: Vec::new(),
+                carried: None,
+                outcome: ClickOutcome::default(),
+            };
+        }
         let before = self.predicted.snapshot();
         let outcome = click.apply(&mut self.predicted, ctx);
         let after = self.predicted.snapshot();

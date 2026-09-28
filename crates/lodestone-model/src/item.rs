@@ -108,6 +108,9 @@ impl ItemStack {
 /// see each field's docs for why guessing is the trap.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ItemComponents {
+    /// Whether the source stack's component patch had added or removed entries.
+    /// Prototype-derived values below do not set this flag.
+    pub wire_patch_nonempty: bool,
     /// `minecraft:item_model`'s item-definition id. When present, this replaces
     /// the stack's base item id for client-side `assets/<namespace>/items/*.json`
     /// lookup; it does not change the item used for gameplay.
