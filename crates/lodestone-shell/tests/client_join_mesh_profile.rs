@@ -14,6 +14,7 @@ use lodestone::mesher::{MeshBacklog, Meshed, record_native_mesh_upload_cost};
 use lodestone::net::NetClient;
 use lodestone::sim::Sim;
 use lodestone_controller::Action;
+use lodestone_ecs::Abilities;
 use lodestone_render::{GpuContext, HeadlessTarget, RenderTarget};
 use lodestone_time::Instant;
 use lodestone_model::action::{
@@ -22,6 +23,7 @@ use lodestone_model::action::{
 use lodestone_model::Reported;
 
 const SEED: i64 = 4242;
+const FLIGHT_TRAVEL_Y: f64 = 200.0;
 const DEADLINE: Duration = Duration::from_secs(120);
 const FRAME_INTERVAL: Duration = Duration::from_nanos(16_666_667);
 
@@ -452,6 +454,70 @@ fn movement_duration() -> Duration {
     Duration::from_secs(seconds)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MovementMode {
+    Walking,
+    CreativeFlight,
+}
+
+fn movement_mode() -> MovementMode {
+    match std::env::var("LODESTONE_CLIENT_JOIN_MOVE_MODE").as_deref() {
+        Ok("flight") => MovementMode::CreativeFlight,
+        Ok("walk") | Err(std::env::VarError::NotPresent) => MovementMode::Walking,
+        other => panic!("LODESTONE_CLIENT_JOIN_MOVE_MODE must be walk or flight: {other:?}"),
+    }
+}
+
+#[derive(Default)]
+struct FlightStartup {
+    requested_at: Option<Instant>,
+    first_jump_tick: Option<u64>,
+    first_jump_released: bool,
+    second_jump_pressed: bool,
+}
+
+impl FlightStartup {
+    fn advance(&mut self, sim: &mut Sim) -> bool {
+        if self.requested_at.is_none() {
+            sim.net().expect("connected flight profile").send_action(ClientAction::SendCommand {
+                command: "gamemode creative".to_string(),
+            });
+            self.requested_at = Some(Instant::now());
+            return false;
+        }
+        let abilities = sim.ecs().read().get::<Abilities>(sim.local_player()).copied();
+        if abilities.is_some_and(|abilities| abilities.flying) {
+            if sim.player().position.y < FLIGHT_TRAVEL_Y {
+                sim.input_mut(|input| input.set(Action::Jump, true));
+                return false;
+            }
+            sim.input_mut(|input| input.set(Action::Jump, false));
+            return true;
+        }
+        assert!(self.requested_at.is_some_and(|at| at.elapsed() < Duration::from_secs(15)),
+            "creative flight did not engage: abilities={abilities:?}");
+        if !abilities.is_some_and(|abilities| abilities.may_fly) {
+            return false;
+        }
+        match self.first_jump_tick {
+            None => {
+                self.first_jump_tick = Some(sim.tick_count());
+                sim.input_mut(|input| input.set(Action::Jump, true));
+            }
+            Some(first) if sim.tick_count() > first && !self.first_jump_released => {
+                self.first_jump_released = true;
+                sim.input_mut(|input| input.set(Action::Jump, false));
+            }
+            Some(first) if sim.tick_count() > first + 1 && !self.second_jump_pressed => {
+                self.second_jump_pressed = true;
+                sim.input_mut(|input| input.set(Action::Jump, true));
+            }
+            _ => {}
+        }
+        false
+    }
+}
+
 fn chunk_at(x: f64, z: f64) -> (i32, i32) {
     ((x / 16.0).floor() as i32, (z / 16.0).floor() as i32)
 }
@@ -516,6 +582,7 @@ fn main() {
     }
     let radius = profile_radius();
     let move_for = movement_duration();
+    let movement_mode = movement_mode();
     let measure_edit = edit_enabled();
     let measure_drop = drop_enabled();
     assert!(!measure_drop || measure_edit, "drop profiling requires the first block edit");
@@ -623,8 +690,15 @@ fn main() {
     let mut upload_samples = Vec::new();
     let mut render_samples = Vec::new();
     let mut movement_started: Option<Instant> = None;
+    let mut flight_startup = FlightStartup::default();
+    let mut flight_lost_at = None;
+    let mut flight_lost_state = None;
     let mut movement_stopped: Option<Instant> = None;
     let mut movement_origin: Option<(f64, f64)> = None;
+    let mut movement_start_y = None;
+    let mut movement_end_y = None;
+    let mut movement_start_teleports = None;
+    let mut movement_end_teleports = None;
     let mut movement_end_position: Option<(f64, f64)> = None;
     let mut movement_first_effect = None;
     let mut movement_first_chunk_change = None;
@@ -671,6 +745,8 @@ fn main() {
             });
             let position = sim.player().position;
             movement_end_position = Some((position.x, position.z));
+            movement_end_y = Some(position.y);
+            movement_end_teleports = Some(sim.teleport_count);
             movement_end_tick = Some(sim.tick_count());
             movement_stop_view = sim.view_settlement_at_radius(radius);
             movement_stop_presentation = sim.view_presentation_at_radius(radius);
@@ -688,6 +764,27 @@ fn main() {
         }
         let step_started = Instant::now();
         sim.step(dt);
+        if movement_mode == MovementMode::CreativeFlight
+            && let Some(start) = movement_started
+            && movement_stopped.is_none()
+            && flight_lost_at.is_none()
+            && !sim.ecs().read().get::<Abilities>(sim.local_player()).is_some_and(|abilities| abilities.flying)
+        {
+            flight_lost_at = Some(start.elapsed());
+            let player = sim.player();
+            let position = player.position;
+            let block_below = sim.chunk_world().read().block_state_at(
+                position.x.floor() as i32,
+                position.y.floor() as i32 - 1,
+                position.z.floor() as i32,
+            );
+            flight_lost_state = Some(serde_json::json!({
+                "position": [position.x, position.y, position.z],
+                "on_ground": player.on_ground,
+                "block_below": block_below,
+                "teleport_count": sim.teleport_count,
+            }));
+        }
         sim.update_target(target_width as f32 / target_height as f32);
         if let Some(probe) = edit.as_mut() {
             if probe.clicked_at.is_none() {
@@ -963,9 +1060,12 @@ fn main() {
             && first_presented_terrain.is_some()
             && (!measure_edit || edit.as_ref().is_some_and(|probe| probe.presented.is_some()))
             && (!measure_drop || drop_probe.as_ref().is_some_and(|probe| probe.drawn_at.is_some()))
+            && (movement_mode == MovementMode::Walking || flight_startup.advance(&mut sim))
         {
             let position = sim.player().position;
             movement_origin = Some((position.x, position.z));
+            movement_start_y = Some(position.y);
+            movement_start_teleports = Some(sim.teleport_count);
             movement_last_chunk = Some(chunk_at(position.x, position.z));
             movement_start_tick = Some(sim.tick_count());
             server_tick_at_move_start = sim
@@ -975,7 +1075,7 @@ fn main() {
             sim.input_mut(|input| {
                 input.set(Action::Forward, true);
                 input.set(Action::Sprint, true);
-                input.set(Action::Jump, true);
+                input.set(Action::Jump, movement_mode == MovementMode::Walking);
             });
             movement_started = Some(Instant::now());
         }
@@ -1013,8 +1113,17 @@ fn main() {
     });
     let movement = movement_started.map(|start| serde_json::json!({
         "requested_seconds": move_for.as_secs(),
+        "mode": match movement_mode {
+            MovementMode::Walking => "walk",
+            MovementMode::CreativeFlight => "flight",
+        },
         "elapsed_ms": movement_stopped.map_or_else(|| start.elapsed(), |stop| stop.duration_since(start)).as_secs_f64() * 1000.0,
         "horizontal_distance_blocks": movement_distance,
+        "start_y": movement_start_y,
+        "end_y": movement_end_y,
+        "flight_lost_after_ms": flight_lost_at.map(|elapsed: Duration| elapsed.as_secs_f64() * 1000.0),
+        "flight_lost_state": flight_lost_state,
+        "teleport_count_delta": movement_start_teleports.zip(movement_end_teleports).map(|(start, end)| end.saturating_sub(start)),
         "start_chunk": movement_origin.map(|(x, z)| chunk_at(x, z)),
         "end_chunk": movement_last_chunk,
         "first_position_effect_ms": ms(movement_first_effect),
@@ -1167,6 +1276,9 @@ fn main() {
     assert!(server_tick_at_ack.is_some(), "the integrated server tick monitor was unavailable: {report}");
     if move_for > Duration::ZERO {
         assert!(movement_chunk_changes > 0, "movement never entered a new chunk: {report}");
+    }
+    if movement_mode == MovementMode::CreativeFlight {
+        assert!(flight_lost_at.is_none(), "flight ended during streamed movement: {report}");
     }
     if measure_edit {
         assert!(report["edit"]["input_to_present_ms"].is_number(), "block edit never reached a presented frame: {report}");

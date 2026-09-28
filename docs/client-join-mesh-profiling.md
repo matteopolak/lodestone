@@ -28,6 +28,16 @@ report includes that acknowledgement boundary; the server keeps streaming
 padding columns afterward without holding the tick-owned action queue closed.
 An optional movement phase keeps the same client and renderer running while the
 player crosses into newly requested terrain.
+The default walking path holds forward, sprint, and jump. The optional flight
+path requests creative mode through the integrated connection, waits for the
+server's flight grant, then uses two jump presses to engage the normal flight
+and movement packet path. It ascends to Y=200 through normal flight input
+before flying forward and sprinting, keeping terrain out of the travel lane.
+It starts the movement clock after the ascent, so command and takeoff time are
+not confused with streaming latency. The report records
+start/end height, position-correction count, and the first loss of flight,
+if any, so an obstructed or canceled flight cannot be mistaken for streaming
+throughput.
 
 The report separates the capped initial loading square, the selected render
 distance, and the integrated server's two padding rings. The first supplies the
@@ -195,6 +205,9 @@ building. `LODESTONE_CLIENT_JOIN_TARGET_SIZE=1280x720` selects a larger render
 target; `LODESTONE_CLIENT_JOIN_RADIUS=8` selects the view radius when invoking
 the test directly. `LODESTONE_CLIENT_JOIN_MOVE_SECONDS=20` adds a bounded
 movement phase; unset or zero leaves the stationary join control unchanged.
+`LODESTONE_CLIENT_JOIN_MOVE_MODE=flight` uses creative flight; `walk` is the
+default. The flight profile requires the local integrated player to have game
+mode permission.
 `LODESTONE_CLIENT_JOIN_EDIT=1` adds the block-edit phase.
 `LODESTONE_CLIENT_JOIN_DROP=1` adds the item-drop phase and requires the edit
 phase. The JSON `drop` object reports input-to-air, input-to-entity,

@@ -240,6 +240,10 @@ flight cancelling on landing). The toggle is a double-press-space edge in a
 7-tick window gated on server `mayfly`; the vertical impulse on toggling up
 is `inputYa * flyingSpeed * 3.0`, the raw non-sprint-doubled speed.
 Spectator noclip, vehicles and the one-tick takeoff hop are not modelled.
+When the player's current column is still streaming, physics holds position and
+velocity without reporting a landing. An unloaded column has no collision
+surface, and marking it as ground would cancel creative flight before terrain
+arrives.
 
 ### Local movement tracing
 
