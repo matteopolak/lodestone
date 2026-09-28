@@ -150,7 +150,9 @@ impl EditProbe {
 }
 
 struct ColumnTimeline {
+    position: (i32, i32),
     entered_at: Instant,
+    left_view_at: Option<Instant>,
     loaded_at: Option<Instant>,
     halo_ready_at: Option<Instant>,
     first_mesh_at: Option<Instant>,
@@ -163,13 +165,24 @@ struct ColumnTimeline {
 
 #[derive(Default)]
 struct MovementColumnProbe {
-    columns: HashMap<(i32, i32), ColumnTimeline>,
+    columns: Vec<ColumnTimeline>,
     last_poll: Option<Instant>,
 }
 
 impl MovementColumnProbe {
     fn enter_view(&mut self, sim: &Sim, old: (i32, i32), new: (i32, i32), radius: i32) {
+        self.last_poll = None;
+        self.observe(sim);
+        self.observe_halos(sim);
         let entered_at = Instant::now();
+        for timeline in &mut self.columns {
+            let (x, z) = timeline.position;
+            if timeline.left_view_at.is_none()
+                && ((x - new.0).abs() > radius || (z - new.1).abs() > radius)
+            {
+                timeline.left_view_at = Some(entered_at);
+            }
+        }
         let loaded: HashSet<_> = sim
             .net()
             .map_or_else(Vec::new, NetClient::loaded_chunks)
@@ -185,8 +198,10 @@ impl MovementColumnProbe {
                 let prepresented = preloaded && sim.resident_column_presented(x, z) == Some(true);
                 let status = preloaded.then(|| sim.mesh_column_status(x, z)).flatten();
                 let halo_ready = status.as_ref().is_some_and(|s| s.absent_halo.is_empty());
-                self.columns.entry((x, z)).or_insert(ColumnTimeline {
+                self.columns.push(ColumnTimeline {
+                    position: (x, z),
                     entered_at,
+                    left_view_at: None,
                     loaded_at: preloaded.then_some(entered_at),
                     halo_ready_at: halo_ready.then_some(entered_at),
                     first_mesh_at: None,
@@ -202,8 +217,10 @@ impl MovementColumnProbe {
     }
 
     fn observe_halos(&mut self, sim: &Sim) {
-        for (&(x, z), timeline) in &mut self.columns {
-            if timeline.halo_ready_at.is_none()
+        for timeline in &mut self.columns {
+            let (x, z) = timeline.position;
+            if timeline.left_view_at.is_none()
+                && timeline.halo_ready_at.is_none()
                 && sim.mesh_column_status(x, z).is_some_and(|s| s.absent_halo.is_empty())
             {
                 timeline.halo_ready_at = Some(Instant::now());
@@ -212,7 +229,9 @@ impl MovementColumnProbe {
     }
 
     fn mesh_result(&mut self, cx: i32, cz: i32) {
-        if let Some(timeline) = self.columns.get_mut(&(cx, cz)) {
+        if let Some(timeline) = self.columns.iter_mut().rev().find(|timeline| {
+            timeline.position == (cx, cz) && timeline.left_view_at.is_none()
+        }) {
             timeline.first_mesh_at.get_or_insert_with(Instant::now);
         }
     }
@@ -226,18 +245,79 @@ impl MovementColumnProbe {
             return;
         };
         let loaded: HashSet<_> = net.loaded_chunks().into_iter().map(|pos| (pos.x, pos.z)).collect();
-        for (position, timeline) in &mut self.columns {
-            if !loaded.contains(position) {
+        for timeline in &mut self.columns {
+            if timeline.left_view_at.is_some() || !loaded.contains(&timeline.position) {
                 continue;
             }
             let now = Instant::now();
             timeline.loaded_at.get_or_insert(now);
             if timeline.presented_at.is_none()
-                && sim.resident_column_presented(position.0, position.1) == Some(true)
+                && sim.resident_column_presented(timeline.position.0, timeline.position.1) == Some(true)
             {
                 timeline.presented_at = Some(now);
             }
         }
+    }
+
+    fn all_entered_report(&self, movement_stop: Option<Instant>) -> serde_json::Value {
+        let stop = movement_stop.unwrap_or_else(Instant::now);
+        let mut preloaded = 0;
+        let mut prepresented = 0;
+        let mut loaded_by_exit_or_stop = 0;
+        let mut halo_ready_by_exit_or_stop = 0;
+        let mut presented_by_exit_or_stop = 0;
+        let mut left_unpresented = 0;
+        let mut visible_unpresented_at_stop = 0;
+        let mut enter_to_halo = Vec::new();
+        let mut halo_to_first_mesh = Vec::new();
+        let mut first_mesh_to_present = Vec::new();
+        let mut enter_to_present = Vec::new();
+        for timeline in &self.columns {
+            let deadline = timeline.left_view_at.unwrap_or(stop);
+            preloaded += usize::from(timeline.preloaded);
+            prepresented += usize::from(timeline.prepresented);
+            loaded_by_exit_or_stop += usize::from(timeline.loaded_at.is_some_and(|at| at <= deadline));
+            if let Some(halo) = timeline.halo_ready_at.filter(|at| *at <= deadline) {
+                halo_ready_by_exit_or_stop += 1;
+                enter_to_halo.push(halo.duration_since(timeline.entered_at));
+                if let Some(mesh) = timeline.first_mesh_at.filter(|at| *at >= halo && *at <= deadline)
+                {
+                    halo_to_first_mesh.push(mesh.duration_since(halo));
+                }
+            }
+            if let Some(presented) = timeline.presented_at.filter(|at| *at <= deadline) {
+                presented_by_exit_or_stop += 1;
+                enter_to_present.push(presented.duration_since(timeline.entered_at));
+                if let Some(mesh) = timeline.first_mesh_at.filter(|at| *at <= presented) {
+                    first_mesh_to_present.push(presented.duration_since(mesh));
+                }
+            } else if timeline.left_view_at.is_some() {
+                left_unpresented += 1;
+            } else {
+                visible_unpresented_at_stop += 1;
+            }
+        }
+        let p = |samples: &[Duration], percent| {
+            (!samples.is_empty()).then(|| percentile(samples, percent))
+        };
+        serde_json::json!({
+            "entered": self.columns.len(),
+            "preloaded_on_entry": preloaded,
+            "prepresented_on_entry": prepresented,
+            "loaded_by_exit_or_stop": loaded_by_exit_or_stop,
+            "halo_ready_by_exit_or_stop": halo_ready_by_exit_or_stop,
+            "presented_by_exit_or_stop": presented_by_exit_or_stop,
+            "left_unpresented": left_unpresented,
+            "visible_unpresented_at_stop": visible_unpresented_at_stop,
+            "enter_to_halo_p50_ms": p(&enter_to_halo, 50),
+            "enter_to_halo_p95_ms": p(&enter_to_halo, 95),
+            "halo_to_first_mesh_p50_ms": p(&halo_to_first_mesh, 50),
+            "halo_to_first_mesh_p95_ms": p(&halo_to_first_mesh, 95),
+            "first_mesh_to_present_p50_ms": p(&first_mesh_to_present, 50),
+            "first_mesh_to_present_p95_ms": p(&first_mesh_to_present, 95),
+            "enter_to_present_p50_ms": p(&enter_to_present, 50),
+            "enter_to_present_p95_ms": p(&enter_to_present, 95),
+        })
     }
 
     fn report(
@@ -262,8 +342,12 @@ impl MovementColumnProbe {
         let mut missing_halo_on_entry = 0;
         let mut halo_ready = 0;
         let mut first_mesh_received = 0;
-        for (&(x, z), timeline) in &self.columns {
-            if (x - center.0).abs() > radius || (z - center.1).abs() > radius {
+        for timeline in &self.columns {
+            let (x, z) = timeline.position;
+            if timeline.left_view_at.is_some()
+                || (x - center.0).abs() > radius
+                || (z - center.1).abs() > radius
+            {
                 continue;
             }
             visible += 1;
@@ -306,6 +390,7 @@ impl MovementColumnProbe {
         };
         serde_json::json!({
             "new_columns_entered": self.columns.len(),
+            "all_entered": self.all_entered_report(movement_stop),
             "still_visible_at_end": visible,
             "still_visible_loaded": visible_loaded,
             "still_visible_presented": visible_presented,
@@ -1089,6 +1174,36 @@ fn main() {
     if measure_drop {
         assert!(report["drop"]["input_to_draw_ms"].is_number(), "block drop never reached a presented frame: {report}");
     }
+}
+
+#[test]
+fn exited_columns_remain_in_movement_latency_census() {
+    let entered = Instant::now() - Duration::from_secs(1);
+    let exit = entered + Duration::from_millis(200);
+    let mut probe = MovementColumnProbe::default();
+    for (position, presented_at) in [
+        ((0, 0), Some(entered + Duration::from_millis(50))),
+        ((1, 0), None),
+    ] {
+        probe.columns.push(ColumnTimeline {
+            position,
+            entered_at: entered,
+            left_view_at: Some(exit),
+            loaded_at: Some(entered),
+            halo_ready_at: Some(entered),
+            first_mesh_at: presented_at,
+            presented_at,
+            preloaded: true,
+            prepresented: false,
+            waiting_for_halo_on_entry: false,
+            missing_halo_on_entry: false,
+        });
+    }
+    let report = probe.all_entered_report(Some(exit));
+    assert_eq!(report["entered"], 2);
+    assert_eq!(report["presented_by_exit_or_stop"], 1);
+    assert_eq!(report["left_unpresented"], 1);
+    assert_eq!(report["enter_to_present_p95_ms"], 50.0);
 }
 
 #[test]
