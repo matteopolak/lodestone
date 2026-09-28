@@ -88,6 +88,8 @@ ordinary `(model, texture)` batcher (translucent + depth-write-off draws are ord
 cannot ride that batcher). A decorated pot's four sides are the opposite shape — distinct diffuse
 textures on distinct quads, never blended — so despite the surface-level similarity ("multiple
 textures on one instance") it needs no new mechanism at all, just four ordinary instances.
+The pot's top and bottom are zero-height planes in a double-sided GPU pass. Each emits only its
+outward face; emitting both faces at the same depth makes the rim flicker.
 
 A shield reuses the same pattern-stack function with a different mesh/orientation: one mesh
 (`plate`+`handle`), always an item (no shield block entity, no world-placement transform), and the
