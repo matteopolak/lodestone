@@ -106,7 +106,7 @@ temporarily invalidated an already presented section.
 The record reports both strict latest-revision settlement and presented
 coverage at movement stop. A section already on the GPU remains presented while
 its replacement is built; a newly decoded column does not inherit that state.
-For each chunk crossing, `new_view_columns` follows the unique columns newly
+For each chunk crossing, `new_view_columns` follows columns newly
 exposed by the selected view square. It samples when each enters the view,
 appears in the client world, and has all sections presented or known empty.
 The load and presentation latency percentiles use only columns still visible at
@@ -117,8 +117,16 @@ exclude the preloaded group. The 100 ms polling interval adds up to one sample
 of uncertainty. These timings separate stream delivery from client meshing
 without relying on a global pending-work count. Unique and repeat section
 upload counts show whether the renderer is receiving replacement meshes during
-the same join, not just first-time geometry. `mesh_work` counts source-column
-admissions, full-column snapshots, neighbor-heal admissions, and light-patch
+the same join, not just first-time geometry. `all_entered` retains every view-entry
+episode, including columns that left the view before movement stopped. It counts
+columns painted before exit and columns that left unpainted separately, and
+reports entry-to-presentation latency only for completed episodes. This keeps a
+long walk from hiding slow chunks that fell out of the final view. Each chunk
+crossing samples the departing view once more; unresolved timings still have up
+to one frame of observation uncertainty.
+
+`mesh_work` counts source-column admissions, full-column snapshots,
+neighbor-heal admissions, and light-patch
 invalidations separately, so repeated uploads can be assigned to the path that
 submitted them. Light-patch invalidations count loaded sections whose blocks
 can sample the changed light; `light_patch_boundary_skips` counts non-air
