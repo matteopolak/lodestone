@@ -3,12 +3,13 @@
 #![cfg(not(target_arch = "wasm32"))]
 #![recursion_limit = "256"]
 
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use lodestone::config::{Config, Mode};
 use lodestone::gpu::RenderState;
 use lodestone::menu::loading::ConnectPhase;
-use lodestone::mesher::{MeshBacklog, Meshed};
+use lodestone::mesher::{MeshBacklog, Meshed, record_native_mesh_upload_cost};
 use lodestone::net::NetClient;
 use lodestone::sim::Sim;
 use lodestone_controller::Action;
@@ -43,6 +44,131 @@ impl EditProbe {
             mesh_uploaded: None,
             presented: None,
         }
+    }
+}
+
+struct ColumnTimeline {
+    entered_at: Instant,
+    loaded_at: Option<Instant>,
+    presented_at: Option<Instant>,
+    preloaded: bool,
+    prepresented: bool,
+}
+
+#[derive(Default)]
+struct MovementColumnProbe {
+    columns: HashMap<(i32, i32), ColumnTimeline>,
+    last_poll: Option<Instant>,
+}
+
+impl MovementColumnProbe {
+    fn enter_view(&mut self, sim: &Sim, old: (i32, i32), new: (i32, i32), radius: i32) {
+        let entered_at = Instant::now();
+        let loaded: HashSet<_> = sim
+            .net()
+            .map_or_else(Vec::new, NetClient::loaded_chunks)
+            .into_iter()
+            .map(|pos| (pos.x, pos.z))
+            .collect();
+        for z in new.1 - radius..=new.1 + radius {
+            for x in new.0 - radius..=new.0 + radius {
+                if (x - old.0).abs() <= radius && (z - old.1).abs() <= radius {
+                    continue;
+                }
+                let preloaded = loaded.contains(&(x, z));
+                let prepresented = preloaded && sim.resident_column_presented(x, z) == Some(true);
+                self.columns.entry((x, z)).or_insert(ColumnTimeline {
+                    entered_at,
+                    loaded_at: preloaded.then_some(entered_at),
+                    presented_at: prepresented.then_some(entered_at),
+                    preloaded,
+                    prepresented,
+                });
+            }
+        }
+        self.last_poll = None;
+    }
+
+    fn observe(&mut self, sim: &Sim) {
+        if self.last_poll.is_some_and(|last| last.elapsed() < Duration::from_millis(100)) {
+            return;
+        }
+        self.last_poll = Some(Instant::now());
+        let Some(net) = sim.net() else {
+            return;
+        };
+        let loaded: HashSet<_> = net.loaded_chunks().into_iter().map(|pos| (pos.x, pos.z)).collect();
+        for (position, timeline) in &mut self.columns {
+            if !loaded.contains(position) {
+                continue;
+            }
+            let now = Instant::now();
+            timeline.loaded_at.get_or_insert(now);
+            if timeline.presented_at.is_none()
+                && sim.resident_column_presented(position.0, position.1) == Some(true)
+            {
+                timeline.presented_at = Some(now);
+            }
+        }
+    }
+
+    fn report(
+        &self,
+        center: (i32, i32),
+        radius: i32,
+        movement_stop: Option<Instant>,
+    ) -> serde_json::Value {
+        let mut enter_to_load = Vec::new();
+        let mut load_to_present = Vec::new();
+        let mut enter_to_present = Vec::new();
+        let mut visible = 0;
+        let mut visible_loaded = 0;
+        let mut visible_presented = 0;
+        let mut presented_during_movement = 0;
+        let mut preloaded = 0;
+        let mut prepresented = 0;
+        for (&(x, z), timeline) in &self.columns {
+            if (x - center.0).abs() > radius || (z - center.1).abs() > radius {
+                continue;
+            }
+            visible += 1;
+            preloaded += usize::from(timeline.preloaded);
+            prepresented += usize::from(timeline.prepresented);
+            if let Some(loaded) = timeline.loaded_at {
+                visible_loaded += 1;
+                if !timeline.preloaded {
+                    enter_to_load.push(loaded.duration_since(timeline.entered_at));
+                }
+            }
+            if let Some(presented) = timeline.presented_at {
+                visible_presented += 1;
+                enter_to_present.push(presented.duration_since(timeline.entered_at));
+                if let Some(loaded) = timeline.loaded_at && !timeline.preloaded {
+                    load_to_present.push(presented.duration_since(loaded));
+                }
+                if movement_stop.is_some_and(|stop| presented <= stop) {
+                    presented_during_movement += 1;
+                }
+            }
+        }
+        let p = |samples: &[Duration], percent| {
+            (!samples.is_empty()).then(|| percentile(samples, percent))
+        };
+        serde_json::json!({
+            "new_columns_entered": self.columns.len(),
+            "still_visible_at_end": visible,
+            "still_visible_loaded": visible_loaded,
+            "still_visible_presented": visible_presented,
+            "preloaded_on_entry": preloaded,
+            "prepresented_on_entry": prepresented,
+            "presented_during_movement": presented_during_movement,
+            "enter_to_load_p50_ms": p(&enter_to_load, 50),
+            "enter_to_load_p95_ms": p(&enter_to_load, 95),
+            "load_to_present_p50_ms": p(&load_to_present, 50),
+            "load_to_present_p95_ms": p(&load_to_present, 95),
+            "enter_to_present_p50_ms": p(&enter_to_present, 50),
+            "enter_to_present_p95_ms": p(&enter_to_present, 95),
+        })
     }
 }
 
@@ -218,6 +344,7 @@ fn main() {
     let mut max_pending = 0usize;
     let mut step_count = 0u64;
     let mut mesh_count = 0usize;
+    let mut section_uploads = HashMap::<_, usize>::new();
     let mut quad_count = 0usize;
     let mut step_ns = 0u128;
     let mut mesh_drain_ns = 0u128;
@@ -237,6 +364,7 @@ fn main() {
     let mut movement_post_stop_settled = None;
     let mut movement_last_chunk = None;
     let mut movement_chunk_changes = 0usize;
+    let mut movement_columns = MovementColumnProbe::default();
     let mut movement_min_settled = usize::MAX;
     let mut movement_last_settled = 0usize;
     let mut movement_max_pending = 0usize;
@@ -336,6 +464,9 @@ fn main() {
             }
             let chunk = chunk_at(position.x, position.z);
             if movement_last_chunk != Some(chunk) {
+                if let Some(previous) = movement_last_chunk {
+                    movement_columns.enter_view(&sim, previous, chunk, radius as i32);
+                }
                 movement_chunk_changes += 1;
                 movement_last_chunk = Some(chunk);
                 movement_first_chunk_change.get_or_insert(start.elapsed());
@@ -366,12 +497,15 @@ fn main() {
         let meshes = sim.drain_meshes();
         mesh_drain_ns += mesh_started.elapsed().as_nanos();
         let upload_started = Instant::now();
+        let mut upload_count = 0;
         for Meshed { key, mesh } in meshes {
             first_mesh.get_or_insert(started.elapsed());
             quad_count += mesh.quad_count();
             mesh_count += 1;
+            *section_uploads.entry(key).or_default() += 1;
             render.upload_section(device, queue, key, &mesh);
             sim.mark_mesh_uploaded(key);
+            upload_count += 1;
             if let Some(probe) = edit.as_mut()
                 && probe.changed.is_some()
                 && probe.mesh_uploaded.is_none()
@@ -383,8 +517,9 @@ fn main() {
                 probe.mesh_uploaded = probe.clicked_at.map(|clicked| clicked.elapsed());
             }
         }
-        sim.refresh_terrain_readiness();
         let upload_elapsed = upload_started.elapsed();
+        record_native_mesh_upload_cost(mesh_started.elapsed(), upload_count);
+        sim.refresh_terrain_readiness();
         upload_ns += upload_elapsed.as_nanos();
         upload_samples.push(upload_elapsed);
 
@@ -477,6 +612,9 @@ fn main() {
             &[],
         );
         frame.present(queue);
+        if movement_started.is_some() {
+            movement_columns.observe(&sim);
+        }
         if let Some(probe) = edit.as_mut()
             && probe.mesh_uploaded.is_some()
             && probe.presented.is_none()
@@ -559,6 +697,13 @@ fn main() {
     }
 
     let elapsed = started.elapsed();
+    let mut uploads_per_section: Vec<_> = section_uploads.values().copied().collect();
+    uploads_per_section.sort_unstable();
+    let max_uploads_per_section = uploads_per_section.last().copied().unwrap_or(0);
+    let p95_uploads_per_section = uploads_per_section
+        .get((uploads_per_section.len() * 95).div_ceil(100).saturating_sub(1))
+        .copied()
+        .unwrap_or(0);
     let ms = |value: Option<Duration>| value.map(|d| d.as_secs_f64() * 1000.0);
     let movement_distance = movement_origin.map(|(x, z)| {
         let (end_x, end_z) = movement_end_position.unwrap_or_else(|| {
@@ -595,6 +740,11 @@ fn main() {
         "settlement_tail": movement_settlement_tail,
         "gap_snapshots": movement_gap_snapshots,
         "chunk_changes": movement_chunk_changes,
+        "new_view_columns": movement_columns.report(
+            movement_last_chunk.expect("moving player has a chunk"),
+            radius as i32,
+            movement_stopped,
+        ),
         "min_settled_columns": movement_min_settled.min(expected_visible_columns),
         "last_settled_columns": movement_last_settled,
         "max_pending_meshes": movement_max_pending,
@@ -630,7 +780,7 @@ fn main() {
         "input_to_present_ms": ms(probe.presented),
     }));
     let report = serde_json::json!({
-        "schema": "lodestone-client-join-mesh-profile-v13",
+        "schema": "lodestone-client-join-mesh-profile-v15",
         "seed": SEED,
         "target_size": [target_width, target_height],
         "visible_radius": radius,
@@ -662,6 +812,10 @@ fn main() {
         "max_pending_meshes": max_pending,
         "steps": step_count,
         "meshes_uploaded": mesh_count,
+        "unique_sections_uploaded": section_uploads.len(),
+        "repeat_section_uploads": mesh_count.saturating_sub(section_uploads.len()),
+        "uploads_per_section_p95": p95_uploads_per_section,
+        "uploads_per_section_max": max_uploads_per_section,
         "uploaded_quads": quad_count,
         "open_singleplayer_cpu_ms": open_ns as f64 / 1_000_000.0,
         "step_cpu_ms": step_ns as f64 / 1_000_000.0,

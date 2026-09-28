@@ -17,6 +17,8 @@ terrain scheduler, `RenderState`, and `HeadlessTarget`, and emits one aggregate
 every uploaded section and a presented frame on each loop; it excludes the
 window compositor and menu/HUD work. Its default target is 64×64, with a
 configurable size for realistic GPU fragment work.
+It reports observed mesh handoff cost to the same adaptive native frame budget
+used by interactive redraw, so the fixture does not stay at the startup limit.
 It uses the same eye camera and per-frame block/entity targeting step as the
 interactive redraw path; those are required for an attack to reach a real block.
 The new-world server pauses its initial ticks until the fixture sends the same
@@ -80,6 +82,18 @@ temporarily invalidated an already presented section.
 The record reports both strict latest-revision settlement and presented
 coverage at movement stop. A section already on the GPU remains presented while
 its replacement is built; a newly decoded column does not inherit that state.
+For each chunk crossing, `new_view_columns` follows the unique columns newly
+exposed by the selected view square. It samples when each enters the view,
+appears in the client world, and has all sections presented or known empty.
+The load and presentation latency percentiles use only columns still visible at
+the end of movement and report their completed counts alongside them; incomplete
+columns are not silently treated as zero latency. Columns already loaded or
+presented when they enter the view are counted separately; delivery percentiles
+exclude the preloaded group. The 100 ms polling interval adds up to one sample
+of uncertainty. These timings separate stream delivery from client meshing
+without relying on a global pending-work count. Unique and repeat section
+upload counts show whether the renderer is receiving replacement meshes during
+the same join, not just first-time geometry.
 The native record also samples the integrated server's own tick clock and
 world-tick witness at acknowledgement, movement start/stop, and completion.
 `movement_tick_delta`, `movement_overrun_delta`, and the largest frame-sampled

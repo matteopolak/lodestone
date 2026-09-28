@@ -89,7 +89,7 @@ fn mesh_handoff_count_budget(ns_per_result: u64) -> usize {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn record_native_mesh_upload_cost(elapsed: Duration, result_count: usize) {
+pub fn record_native_mesh_upload_cost(elapsed: Duration, result_count: usize) {
     if result_count == 0 {
         return;
     }

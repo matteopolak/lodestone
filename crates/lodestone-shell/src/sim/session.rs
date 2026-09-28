@@ -653,6 +653,12 @@ impl Sim {
         )
     }
 
+    #[must_use]
+    pub fn resident_column_presented(&self, cx: i32, cz: i32) -> Option<bool> {
+        let extent = self.chunk_world().extent()?;
+        Some(self.terrain(|terrain| terrain.resident_column_presented(extent, cx, cz)))
+    }
+
     fn view_coverage_at_radius(
         &self,
         radius: u32,
