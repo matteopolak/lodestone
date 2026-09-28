@@ -120,8 +120,9 @@ upload counts show whether the renderer is receiving replacement meshes during
 the same join, not just first-time geometry. `mesh_work` counts source-column
 admissions, full-column snapshots, neighbor-heal admissions, and light-patch
 invalidations separately, so repeated uploads can be assigned to the path that
-submitted them. Light-patch invalidations count loaded sections containing
-blocks; air-only sections are excluded before joining the remesh queue.
+submitted them. Light-patch invalidations count loaded sections whose blocks
+can sample the changed light; `light_patch_boundary_skips` counts non-air
+adjacent sections excluded because their blocks are wholly interior.
 The movement timeline also samples each new column's 3×3 residency halo before
 draining mesh results, then records its first returned section mesh and full
 presentation. This distinguishes a column waiting for its outer dependency
