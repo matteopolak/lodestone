@@ -1795,7 +1795,7 @@ impl Sim {
             (using, ticks, held, food, game_mode)
         });
         // `!crate::hud::can_hurt_player`, not a second creative/spectator check —
-        // see `consume.rs`'s `emit_consume_particles`, which reads the same pair.
+        // see `consume.rs`'s `emit_consume_effects`, which reads the same pair.
         let invulnerable = !crate::hud::can_hurt_player(game_mode);
         crate::consume::ConsumeState::resolve(using, ticks, held.as_deref(), food, invulnerable)
     }

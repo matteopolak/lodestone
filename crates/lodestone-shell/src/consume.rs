@@ -1,5 +1,4 @@
-//! Eating and drinking, client side: the crumbs and the state the first-person
-//! bob reads.
+//! Local eating and drinking effects and first-person pose.
 //!
 //! # What it is
 //!
@@ -12,23 +11,9 @@
 //!
 //! | half | where |
 //! |---|---|
-//! | the `ITEM` crumbs, on vanilla's cadence | [`emit_consume_particles`], a `GameTick` system |
+//! | the `ITEM` crumbs and periodic sound | [`emit_consume_effects`], a `GameTick` system |
 //! | the first-person dip/jitter | [`ConsumeState`] → `RenderState::set_item_use_source` → `lodestone_render::entity::first_person_eat_matrix` |
 //! | the third-person raised arm | nothing here — it is the *remote* entity path, `entities::arm_pose_for`'s `ArmPose::Item` |
-//! | the sound | nothing here — the **server** broadcasts it; see below |
-//!
-//! # Why the sound is not on this side
-//!
-//! Vanilla runs its own consumable particles/sounds routine on both sides and each drops
-//! the half it cannot do: the server-side add-particle call is a no-op, and
-//! the client-side seeded-sound player skips a sound whose excluded player is not the
-//! local one — which vanilla's own entity sound-play call with a null excluded
-//! player always satisfies. So
-//! particles are *always* predicted and the eating sound is *always* the server's
-//! broadcast. Emitting the sound here too would double it against a real 26.2
-//! server, which is the same trap `docs/sound-playback.md` records for block
-//! breaking pointing the other way. The integrated server's half is
-//! `lodestone_server`'s `WorldEffect::Sound` publisher.
 //!
 //! # How it works
 //!
@@ -78,13 +63,18 @@
 //! * **Do not reach for a clock.** Every duration here is in ticks;
 //!   `SystemTime::now`/`Instant::now` trap on wasm32.
 
+use glam::Vec3;
 use lodestone_ecs::ecs::prelude::{Query, Res, ResMut, With};
 use lodestone_ecs::player::{ItemUseTicks, LocalPlayer, PhysicsState, SelectedSlot};
 use lodestone_ecs::session::{ServerGameMode, SessionMenus, Vitals};
+use lodestone_ecs::FrameClock;
 use lodestone_game::consumable::{self, ConsumeAnimation, Consumable};
 use lodestone_data::item::Item;
+use lodestone_javarandom::JavaRandom;
+use lodestone_model::SoundCategory;
 
 use crate::interact::{ParticleSim, UsingItem};
+use crate::sim::AudioEngine;
 
 /// An in-progress eat or drink by the **local** player.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -175,11 +165,15 @@ impl ConsumeState {
     /// ends up throwing crumbs.
     #[must_use]
     pub fn emits_particles_this_tick(&self) -> bool {
-        self.consumable.has_consume_particles
-            && consumable::should_emit_consume_effects(
-                self.consumable.consume_ticks,
-                self.remaining_ticks(),
-            )
+        self.consumable.has_consume_particles && self.emits_effects_this_tick()
+    }
+
+    #[must_use]
+    pub fn emits_effects_this_tick(&self) -> bool {
+        consumable::should_emit_consume_effects(
+            self.consumable.consume_ticks,
+            self.remaining_ticks(),
+        )
     }
 
     /// `true` for vanilla's own drink use-animation. Kept as an accessor because the
@@ -192,25 +186,14 @@ impl ConsumeState {
     }
 }
 
-/// Vanilla's own per-tick item-use hook → its own emit-particles-and-sounds
-/// routine → its own spawn-item-particles routine (5 particles), for the
-/// local player.
-///
-/// Runs in `TickSet::Send`'s chain next to `drive_mining` because it shares
-/// [`ParticleSim`] with it and this app runs with
-/// `ambiguity_detection: LogLevel::Error`; the position within the chain is not
-/// otherwise meaningful.
-///
-/// # Ticks, not frames
-///
-/// The cadence is `remaining % 4 == 0`, so it must be evaluated exactly once per
-/// 20 Hz tick. Driving it from the render loop instead would emit at the frame rate
-/// and turn six crumb bursts into hundreds — a difference that reads as "the
-/// particle count is wrong" rather than as a scheduling error.
-pub fn emit_consume_particles(
+/// Predict periodic consume effects on the fixed tick, including sound for drinks
+/// that have no particles.
+pub fn emit_consume_effects(
     using: Res<UsingItem>,
     ticks: Res<ItemUseTicks>,
+    clock: Res<FrameClock>,
     mut particles: ResMut<ParticleSim>,
+    mut audio: ResMut<AudioEngine>,
     players: Query<
         (&PhysicsState, &SelectedSlot, &SessionMenus, &Vitals, &ServerGameMode),
         With<LocalPlayer>,
@@ -233,22 +216,39 @@ pub fn emit_consume_particles(
     else {
         return;
     };
-    if !consume.emits_particles_this_tick() {
+    if !consume.emits_effects_this_tick() {
         return;
     }
     let pos = state.0.position;
-    lodestone_particle::emit::spawn_item_particles(
-        particles.0.engine_mut(),
-        pos.x,
-        // `getEyeY()`, which is what `spawnItemParticles` offsets from; the crumbs
-        // then spawn 0.3..0.9 blocks *below* it, where a mouth is.
-        pos.y + f64::from(state.0.eye_height),
-        pos.z,
-        state.0.pitch,
-        state.0.yaw,
-        consume.item,
-        consumable::PERIODIC_PARTICLE_COUNT,
-    );
+    if consume.emits_particles_this_tick() {
+        lodestone_particle::emit::spawn_item_particles(
+            particles.0.engine_mut(),
+            pos.x,
+            pos.y + f64::from(state.0.eye_height),
+            pos.z,
+            state.0.pitch,
+            state.0.yaw,
+            consume.item,
+            consumable::PERIODIC_PARTICLE_COUNT,
+        );
+    }
+    if let Some(engine) = &mut audio.0 {
+        let mut rng = JavaRandom::new(clock.ticks as i64);
+        let (volume, pitch) = if consume.is_drink() {
+            (0.5, 0.9 + rng.next_f32() * 0.1)
+        } else {
+            let volume = if rng.next_bool() { 0.5 } else { 1.0 };
+            (volume, 1.0 + (rng.next_f32() - rng.next_f32()) * 0.2)
+        };
+        engine.play_sound(
+            consume.consumable.sound,
+            SoundCategory::Player,
+            Vec3::new(pos.x as f32, pos.y as f32, pos.z as f32),
+            volume,
+            pitch,
+            rng.next_i64(),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -321,6 +321,13 @@ mod tests {
         assert_eq!(bursts("minecraft:potion", 32), 0);
         assert_eq!(bursts("minecraft:milk_bucket", 32), 0);
         assert_eq!(bursts("minecraft:honey_bottle", 40), 0);
+        let drink_sounds = (0..32)
+            .filter(|&t| {
+                resolve(true, Some(t), Some("minecraft:potion"))
+                    .is_some_and(|c| c.emits_effects_this_tick())
+            })
+            .count();
+        assert_eq!(drink_sounds, 6);
     }
 
     /// The crumbs must carry the *eaten* item, not a generic one. Two foods with

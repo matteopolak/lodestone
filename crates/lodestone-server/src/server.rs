@@ -16393,10 +16393,7 @@ where
                                 roll,
                                 seed,
                             ) {
-                                // No exclusion: vanilla's own entity play-sound routine passes
-                                // `null`, so the eater hears it too — and *only*
-                                // through this broadcast.
-                                block_ticks.publish_effect(effect);
+                                block_ticks.publish_effect_except(player_uuid, effect);
                             }
                         }
                         // Latched whether or not this tick emitted, so the guard
@@ -17901,7 +17898,7 @@ where
                     roll,
                     seed,
                 ) {
-                    block_ticks.publish_effect(effect);
+                    block_ticks.publish_effect_except(player_uuid, effect);
                 }
             }
             if let Some(live) = item_in_use.as_mut() {
