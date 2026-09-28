@@ -1581,7 +1581,7 @@ impl TerrainMesh {
                 true
             }
             // A single empty section is routine (sky/void sections have no
-            // geometry): drop it from the GPU, no alarm.
+            // geometry): remove prior GPU geometry, if any.
             SnapshotOutcome::Empty => {
                 // An older non-empty result must not arrive after this explicit
                 // empty result and re-settle the section through
@@ -1589,9 +1589,11 @@ impl TerrainMesh {
                 self.scheduler.forget_generation(&key);
                 self.rendered_sections.remove(&key);
                 self.presented_sections.remove(&key);
-                self.empty_sections.insert(key);
+                let newly_empty = self.empty_sections.insert(key);
                 self.built_columns.insert((key.cx, key.cz));
-                self.pending_removals.push(key);
+                if newly_empty && self.uploaded_sections.contains(&key) {
+                    self.pending_removals.push(key);
+                }
                 false
             }
             SnapshotOutcome::Deferred(snap) => {
@@ -3541,12 +3543,21 @@ mod tests {
             1,
             ShellClassifier::Demo(DemoClassifier),
         ));
+        let previously_uploaded = SectionKey {
+            cx: 0,
+            cz: 0,
+            si: 0,
+            min_y: 0,
+        };
+        terrain.uploaded_sections.insert(previously_uploaded);
 
         terrain.mesh_column(&store, 0, 0);
 
         assert_eq!(terrain.drops, 0);
         assert_eq!(terrain.non_air_empty_columns, 0);
-        assert_eq!(terrain.pending_removals.len(), 2);
+        assert_eq!(terrain.pending_removals, vec![previously_uploaded]);
+        terrain.mesh_column(&store, 0, 0);
+        assert_eq!(terrain.pending_removals, vec![previously_uploaded]);
     }
 
     #[test]
