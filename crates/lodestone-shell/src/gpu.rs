@@ -65,6 +65,7 @@ mod pack_trace;
 mod plugin_billboards;
 mod screen_effects;
 mod sections;
+pub use sections::SectionUploadOutcome;
 mod sign_text;
 mod sources;
 use first_person::ViewLagSource;
@@ -290,6 +291,7 @@ pub struct RenderState {
     distant_terrain: Option<distant_terrain::DistantTerrainRenderer>,
     distant_terrain_failed: bool,
     sections: HashMap<SectionKey, SectionGpu>,
+    section_fingerprints: HashMap<SectionKey, u128>,
     /// The packed path's group-0 binding 0: this frame's view-projection (and,
     /// from that fix on, its fog), shared by every packed section and written
     /// **once** per frame. See `docs/section-camera-uniform.md`.

@@ -99,7 +99,7 @@ pub(crate) fn run_headless(_owned: lodestone_auth::Entitlement, config: Config) 
     let mut meshed_quads = 0usize;
     for m in &meshes {
         meshed_quads += m.mesh.quad_count();
-        render.upload_section(device, queue, m.key, &m.mesh);
+        render.upload_meshed(device, queue, m);
     }
 
     // Let the player settle onto the ground so the camera sits at a sane height.

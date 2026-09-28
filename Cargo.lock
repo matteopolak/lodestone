@@ -3596,6 +3596,7 @@ dependencies = [
  "web-sys",
  "wgpu",
  "winit",
+ "xxhash-rust",
  "zip",
 ]
 

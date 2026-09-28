@@ -149,6 +149,13 @@ draining mesh results, then records its first returned section mesh and full
 presentation. This distinguishes a column waiting for its outer dependency
 ring from one queued behind worker or upload work. The halo sample is frame-
 resolution; loaded and presented state still use the bounded 100 ms poll.
+The fixture drains section removals before mesh results, matching the playable
+renderer. `gpu_uploads_applied`, `gpu_uploads_unchanged`, and
+`gpu_uploads_failed` report the production renderer's result for each mesh.
+An unchanged result still settles the mesh queue, but does not rewrite GPU
+buffers. `gpu_upload_cpu_ms` times only renderer handoff calls;
+`mesh_upload_cpu_ms` also includes result accounting and readiness updates.
+`removed_sections` counts unloads observed during the profile.
 The native record also samples the integrated server's own tick clock and
 world-tick witness at acknowledgement, movement start/stop, and completion.
 `movement_tick_delta`, `movement_overrun_delta`, and the largest frame-sampled
