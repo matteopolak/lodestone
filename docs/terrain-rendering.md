@@ -47,6 +47,12 @@ along chunk boundaries" report). `mark_neighbours_dirty` (on arrival) and this
 departure path are the two invalidation mechanisms; between them an interior seam
 heals within a frame or two of its neighbour changing, in either direction.
 
+Column eviction also invalidates every submitted section key for that coordinate,
+including sections that were never uploaded. Native workers may finish an invalidated
+job, but its generation is no longer current and its result is discarded. The browser
+removes queued snapshots and ready results directly. Browser session teardown clears
+those collections without meshing them; native teardown keeps its blocking flush.
+
 The integrated client requests two rings beyond its visible radius. The first
 supplies the 3×3 mesh dependency; the second keeps that dependency resident for
 the next chunk crossing. Multiplayer requests only the dependency ring. The
