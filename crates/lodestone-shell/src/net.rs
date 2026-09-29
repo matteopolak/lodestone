@@ -2667,6 +2667,7 @@ async fn run_async(
                     protocol,
                     seed,
                     world_type,
+                    view_radius,
                     Arc::clone(&horizon_surface),
                 )
                 .await
@@ -3762,7 +3763,9 @@ pub fn start_browser_integrated_worker(
     seed: i64,
     preset: u8,
     epoch: u32,
+    view_radius: Option<i32>,
 ) -> Result<Option<lodestone_server::IntegratedTickMonitor>, String> {
+    let view_radius = browser::browser_worker_view_radius(view_radius)?;
     let preset = world_preset_from_wire_id(preset)
         .ok_or_else(|| format!("unknown browser worker world preset {preset}"))?;
     let server_protocol = lodestone_registry::server_protocol_for_protocol(protocol)
@@ -3788,7 +3791,7 @@ pub fn start_browser_integrated_worker(
     let monitor = lodestone_server::IntegratedServer::serve_with_transport(
         server_protocol,
         source,
-        8,
+        view_radius,
         commands,
         worker_io,
     );

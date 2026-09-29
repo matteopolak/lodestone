@@ -10,7 +10,9 @@ The browser world-generation worker keeps the authoritative integrated server in
 
 If the capability probe is negative, the bootstrap selects the serial artifact. A rejection after threaded initialization begins is terminal and reports an error; it never mixes a partially initialized threaded module with a fresh serial module. The immutable executor is the only parallel boundary; mutable feature, top-layer, overlay, and packet commits remain in canonical server order and retain their cancellation, memory-budget, and fingerprint checks.
 
-The serial production request uses an async adapter rather than the synchronous compatibility entry point. It yields to the browser macrotask queue after each shaped admission and ordered mutable source, then before packet encoding and after light settlement. This keeps the worker responsive between bounded generation operations without changing source order or allowing partial mutable commits. The threaded artifact uses the same session and commit path; only immutable admission is dispatched to Rayon.
+The serial production request uses an async adapter rather than the synchronous compatibility entry point. It yields to the browser macrotask queue after each shaped admission and ordered mutable source, then before packet encoding and after light settlement. This keeps the worker responsive between bounded generation operations without changing source order or allowing partial mutable commits. The threaded artifact uses the same session and commit path. Its immutable executor supports Rayon, but the preferred pristine-world shaped batch currently uses a serial map on Wasm; selecting a threaded artifact does not prove that batch ran in parallel.
+
+The shell sends its already-computed integrated stream radius in the launch envelope's `viewRadius`, and the worker passes it to the authoritative server unchanged. This uses the same `integrated_stream_radius` policy as native singleplayer: configured render distance plus the mesh-dependency and movement-lookahead padding. The initial playable loading gate remains capped at radius six. The server still primes one column and streams the remaining desired view through its bounded deferred generation window; the larger halo is not an eager startup barrier.
 
 The launch epoch is registered by the worker's Rust entry point. `cancel_worker` sets shared request cancellation only for the active epoch, and each session checkpoint observes it before admitting later work or settling the packet. Already-running synchronous work finishes cooperatively; its uncommitted transaction is discarded and committed prefixes remain reusable.
 
@@ -35,6 +37,8 @@ The server-side executor must continue to use the persistent pool only for immut
 The threaded build is selected by the `wasm-threads` Cargo feature in `web/worker/Cargo.toml` and is compiled with `-C target-feature=+atomics,+bulk-memory` plus `-Z build-std=panic_abort,std` in `stage_worker.sh`. The runtime pool cap is four workers. Health sampling runs at a one-second interval after ready. `runtimeMs` controls only how long the measurement harness observes the ready worker; it does not alter game scheduling.
 
 The worker's optional Rayon dependency enables `web_spin_lock` for Wasm synchronization.
+
+`viewRadius` is a nonnegative signed 32-bit integer. Normal shell launches always supply the shared integrated stream radius; for example, render distance nine launches a server radius of eleven. Older control callers may omit `viewRadius`, retaining the worker's compatibility default of eight. The Wasm `start_worker` export accepts the optional radius after its existing log-level argument, preserving earlier argument positions.
 
 Cancellation is scoped to the active worker epoch and is cooperative at session stage boundaries.
 

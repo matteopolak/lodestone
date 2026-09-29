@@ -113,6 +113,11 @@
     if (!Number.isInteger(request.preset) || request.preset < 0 || request.preset > 6) {
       return "invalid server worker world preset";
     }
+    if (request.viewRadius !== undefined &&
+        (!Number.isInteger(request.viewRadius) || request.viewRadius < 0 ||
+         request.viewRadius > 2_147_483_647)) {
+      return "invalid server worker view radius";
+    }
     if (!Number.isSafeInteger(request.epoch) || request.epoch < 1) {
       return "invalid server worker cancellation epoch";
     }
@@ -209,6 +214,7 @@
         request.preset,
         request.epoch,
         request.logLevel ?? "warn",
+        request.viewRadius,
       );
       if (activeLaunch !== launchState || launchState.epoch !== request.epoch) return;
       postMessage({ kind: "ready" });

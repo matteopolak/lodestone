@@ -332,13 +332,24 @@ impl BrowserWorkerStartupState {
     }
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
+pub(super) fn browser_worker_view_radius(requested: Option<i32>) -> Result<i32, String> {
+    let radius = requested.unwrap_or(8);
+    if radius < 0 {
+        return Err("invalid browser worker view radius".to_string());
+    }
+    Ok(radius)
+}
+
 #[cfg(target_arch = "wasm32")]
 pub(super) async fn launch_browser_worker(
     protocol: i32,
     seed: i64,
     preset: crate::menu::create_world::WorldTypePreset,
+    view_radius: i32,
     horizon_surface: super::SharedHorizonSurface,
 ) -> Result<BrowserIntegratedTransport, String> {
+    let view_radius = browser_worker_view_radius(Some(view_radius))?;
     let channel = MessageChannel::new()
         .map_err(|e| e.as_string().unwrap_or_else(|| "cannot create worker channel".to_string()))?;
     let page_port = channel.port1();
@@ -564,6 +575,12 @@ pub(super) async fn launch_browser_worker(
     .expect("plain launch object accepts preset");
     js_sys::Reflect::set(
         &launch,
+        &JsValue::from_str("viewRadius"),
+        &JsValue::from_f64(f64::from(view_radius)),
+    )
+    .expect("plain launch object accepts view radius");
+    js_sys::Reflect::set(
+        &launch,
         &JsValue::from_str("epoch"),
         &JsValue::from_f64(f64::from(epoch)),
     )
@@ -645,8 +662,22 @@ pub(super) async fn launch_browser_worker(
 mod tests {
     use super::{
         BrowserWorkerErrorAction, BrowserWorkerStartupAction, BrowserWorkerStartupState,
-        browser_worker_error_action,
+        browser_worker_error_action, browser_worker_view_radius,
     };
+
+    #[test]
+    fn worker_view_radius_keeps_legacy_default_and_rejects_negative_values() {
+        assert_eq!(browser_worker_view_radius(None), Ok(8));
+        assert_eq!(browser_worker_view_radius(Some(0)), Ok(0));
+        assert!(browser_worker_view_radius(Some(-1)).is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "window")]
+    fn worker_view_radius_preserves_the_shared_non_round_stream_radius() {
+        let requested = i32::try_from(crate::app::integrated_stream_radius(9)).unwrap();
+        assert_eq!(browser_worker_view_radius(Some(requested)), Ok(11));
+    }
 
     #[test]
     fn startup_accepts_progress_until_ready() {

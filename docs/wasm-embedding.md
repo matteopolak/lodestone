@@ -71,6 +71,8 @@ create a fresh transferred canvas for a new worker session.
 
 The host must serve the page with WebGPU support and the same cross-origin isolation headers required by the optional compute-worker pool. The standalone page marks its canvas with `data-lodestone-standalone`; embedded hosts omit that marker so importing the module does not auto-start a second session.
 
+The integrated-server worker receives the shell's shared `integrated_stream_radius` for the configured render distance, including its mesh-neighbour and movement-lookahead halo. Render distance nine therefore requests server radius eleven, as it does natively. Initial playable loading remains capped at radius six; the additional desired columns stream incrementally rather than becoming an eager startup barrier. This is shell configuration, not another `mount` option. Direct legacy server-worker control callers that omit `viewRadius` retain radius eight.
+
 The standalone page accepts `?log=debug` (or another `logLevel` value) for a diagnostic run. At debug level it forwards sampled server worldgen stage counters and server tick health from the render worker to the page console, alongside the transition-only join timings. Worker progress includes session and target coordinates, so repeated generation can be distinguished from slow client delivery. Verbose levels are opt-in because world generation and render-loop traces can materially increase console and scheduling overhead.
 
 One wasm module instance owns one installed asset bundle. A different bundle requires a fresh module instance after `destroy`; the shell intentionally keeps its immutable resource caches for the lifetime of the module.

@@ -39,6 +39,10 @@ test("validates the complete worker launch envelope before importing wasm", () =
   assert.equal(invalidLaunch({ ...launchRequest, protocol: 0 }, [{}, {}, {}]), "invalid server worker protocol");
   assert.equal(invalidLaunch({ ...launchRequest, seed: "42.5" }, [{}, {}, {}]), "invalid server worker seed");
   assert.equal(invalidLaunch({ ...launchRequest, preset: 7 }, [{}, {}, {}]), "invalid server worker world preset");
+  assert.equal(invalidLaunch({ ...launchRequest, viewRadius: 11 }, [{}, {}, {}]), null);
+  for (const viewRadius of [-1, 11.5, null, "11", 2_147_483_648]) {
+    assert.equal(invalidLaunch({ ...launchRequest, viewRadius }, [{}, {}, {}]), "invalid server worker view radius");
+  }
   assert.equal(invalidLaunch({ ...launchRequest, logLevel: "verbose" }, [{}, {}, {}]), "invalid server worker log level");
   assert.equal(invalidLaunch(launchRequest, [{}, {}]), "invalid server worker launch");
   assert.equal(invalidLaunch(launchRequest, []), "invalid server worker launch");
@@ -111,7 +115,18 @@ test("reports ordered startup milestones and passes all three supplied ports", a
     { kind: "progress", stage: "preparing-world", executor: "serial", workers: 1 },
     { kind: "ready" },
   ]);
-  assert.deepEqual(started, [[serverPort, progressPort, horizonPort, 776, -42n, 0, 1, "debug"]]);
+  assert.deepEqual(started, [[serverPort, progressPort, horizonPort, 776, -42n, 0, 1, "debug", undefined]]);
+});
+
+test("forwards the configured non-round stream radius without enlarging it again", async () => {
+  const { launch } = bootstrap().LodestoneWorkerBootstrap;
+  let started;
+  await launch(
+    { data: { ...launchRequest, viewRadius: 11 }, ports: [{}, {}, {}] },
+    async () => ({ default: async () => {}, start_worker: (...args) => { started = args; } }),
+    () => {},
+  );
+  assert.equal(started[8], 11);
 });
 
 test("does not import wasm after a malformed launch and makes failure observable", async () => {
