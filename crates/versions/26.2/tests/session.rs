@@ -5,6 +5,8 @@
 
 #[path = "session/join_flow.rs"]
 mod join_flow;
+#[path = "session/dialect.rs"]
+mod dialect;
 #[path = "session/login_compression.rs"]
 mod login_compression;
 #[path = "session/online_mode.rs"]

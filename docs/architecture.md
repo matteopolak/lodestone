@@ -73,12 +73,15 @@ The split rule is **"is it generated data, or is it hand-written logic?"**
 | Novel per-version physics logic | per-version crate (hook impl) | yes |
 | Worldgen, renderer, UI, netcode | shared, version-free | n/a |
 
-**Isolation rule: a version crate may depend only on version-free shared crates, never on another
-version crate.** `cargo xtask check-isolation` derives "is a version crate" structurally from
-`crates/versions/` membership rather than from an allowlist. The one intended aggregation point is
-`lodestone-registry`, which opts in via `[package.metadata.lodestone-isolation] role =
-"version-registry"` — a structural marker, not a name match, and one that can only downgrade an
-*already-optional* edge, so a required registry→version edge or any version→version edge still fails.
+**Isolation rule: a version crate may depend on version-free shared crates.** A version-to-version
+edge is rejected unless the dependent explicitly declares that exact required dependency as its
+compatibility base with `[package.metadata.lodestone-isolation] compatibility-base = "<package>"`.
+This keeps the relationship reviewable and narrow; every other version edge remains a violation.
+`cargo xtask check-isolation` derives version-crate membership structurally from `crates/versions/`.
+The version registry remains the single aggregation point and opts in with
+`[package.metadata.lodestone-isolation] role = "version-registry"`, which only downgrades an
+already-optional edge. `cargo xtask check-deletable <base-family>` still reports a dependent family
+as a blocker, because deleting the declared base would break that dependent.
 
 **Deletability is measured, not asserted**: `cargo xtask check-deletable <family>` simulates removal and
 reports the true fallout in manifest and source lines.

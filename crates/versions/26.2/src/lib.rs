@@ -43,6 +43,7 @@ pub mod stat_debug_registries;
 
 pub mod adapter;
 pub mod chunk_batch;
+pub mod dialect;
 pub mod entity_variants;
 pub mod packets;
 /// The 27 synchronized `registry_data` payloads (of 29) this

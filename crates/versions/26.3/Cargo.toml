@@ -1,0 +1,17 @@
+[package]
+name = "lodestone-v26-3"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[package.metadata.lodestone-isolation]
+compatibility-base = "lodestone-v26-2"
+
+[lints]
+workspace = true
+
+[dependencies]
+lodestone-v26-2 = { path = "../26.2" }
+
+[dev-dependencies]
+serde_json = { workspace = true }

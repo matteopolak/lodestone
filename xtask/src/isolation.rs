@@ -9,8 +9,9 @@ use super::*;
 /// an allowlist of "blessed" shared crates (which rots every time a new
 /// version-free crate such as `lodestone-world` is added):
 ///
-/// 1. A version crate depending on **another version crate** — deleting either
-///    folder would break the other. Always fatal ([`Severity::Violation`]).
+/// 1. A version crate depending on **another version crate** — deleting the
+///    dependency would break the dependent. Fatal unless the dependent declares
+///    that exact crate as its compatibility base.
 /// 2. A **shared (non-version) crate** depending on a version crate — deleting
 ///    the version folder would stop the shared crate from building. Fatal when
 ///    the dependency is required, but only a surfaced [`Severity::Warning`] when
@@ -25,8 +26,8 @@ use super::*;
 /// informational aggregation ([`Severity::Info`]) rather than warnings. This
 /// exemption is safe by construction: it only ever reclassifies an edge that was
 /// already non-fatal (an optional shared -> version warning). A *required*
-/// registry -> version edge, and any version -> version edge, remain fatal, so
-/// the role can never be abused to silence a build-breaking violation.
+/// registry -> version edge, and any undeclared version -> version edge, remain
+/// fatal, so the role can never be abused to silence a build-breaking violation.
 ///
 /// Whether a crate *is* a version crate is derived structurally from its
 /// location under `crates/versions/`, so a brand-new version family is covered
@@ -167,7 +168,8 @@ pub enum Severity {
 /// The deletability invariant a finding relates to.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IsolationRule {
-    /// A version crate depends on another version crate.
+    /// A version crate depends on another version crate without declaring it as
+    /// its required compatibility base.
     VersionDependsOnVersion,
     /// A shared (non-version) crate depends on a version crate.
     SharedDependsOnVersion,
@@ -183,7 +185,7 @@ impl IsolationRule {
     fn explanation(self) -> &'static str {
         match self {
             IsolationRule::VersionDependsOnVersion => {
-                "version crates must never depend on another version crate, or deleting one version's folder would break the other"
+                "a version crate may depend on another only through its declared required compatibility base; other edges break isolation"
             }
             IsolationRule::SharedDependsOnVersion => {
                 "a shared crate must not depend on a version crate, or deleting that version's folder would stop the shared crate from building"
@@ -310,9 +312,20 @@ pub fn check_workspace_isolation(workspace_root: &Path) -> Result<IsolationRepor
                 .unwrap_or(false);
 
             if crate_is_version {
-                // Rule 1: version -> version is always fatal, regardless of
-                // whether the edge is optional or dev-only, because either
-                // folder's deletion would break the other.
+                let declared_base = package
+                    .get("metadata")
+                    .and_then(|metadata| metadata.get("lodestone-isolation"))
+                    .and_then(|metadata| metadata.get("compatibility-base"))
+                    .and_then(Value::as_str);
+                let is_declared_base = declared_base == Some(dependency_name)
+                    && !optional
+                    && dependency_table == "dependencies";
+                if is_declared_base {
+                    continue;
+                }
+
+                // A version-to-version edge is permitted only when its
+                // dependent declares this exact required edge as its base.
                 findings.push(IsolationFinding {
                     crate_name: crate_name.to_owned(),
                     dependency_name: dependency_name.to_owned(),

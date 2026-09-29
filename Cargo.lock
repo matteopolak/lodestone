@@ -3928,6 +3928,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lodestone-v26-3"
+version = "0.1.0"
+dependencies = [
+ "lodestone-v26-2",
+ "serde_json",
+]
+
+[[package]]
 name = "lodestone-void-world"
 version = "0.1.0"
 dependencies = [

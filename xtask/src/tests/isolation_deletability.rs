@@ -69,6 +69,89 @@ lodestone-v1 = { path = "../v1" }
     }
 
     #[test]
+    fn declared_compatibility_base_passes_isolation() -> Result<()> {
+        let workspace = isolation_fixture(
+            "declared-compatibility-base-passes",
+            &[
+                ("crates/versions/v2", "lodestone-v2", ""),
+                (
+                    "crates/versions/v3",
+                    "lodestone-v3",
+                    r#"
+[package.metadata.lodestone-isolation]
+compatibility-base = "lodestone-v2"
+
+[dependencies]
+lodestone-v2 = { path = "../v2" }
+"#,
+                ),
+            ],
+        )?;
+
+        let report = check_workspace_isolation(&workspace)?;
+        assert!(report.findings.is_empty());
+        assert!(!report.has_violations());
+        Ok(())
+    }
+
+    #[test]
+    fn declared_compatibility_base_does_not_allow_other_version_edges() -> Result<()> {
+        let workspace = isolation_fixture(
+            "declared-compatibility-base",
+            &[
+                ("crates/versions/v1", "lodestone-v1", ""),
+                ("crates/versions/v2", "lodestone-v2", ""),
+                (
+                    "crates/versions/v3",
+                    "lodestone-v3",
+                    r#"
+[package.metadata.lodestone-isolation]
+compatibility-base = "lodestone-v2"
+
+[dependencies]
+lodestone-v1 = { path = "../v1" }
+lodestone-v2 = { path = "../v2" }
+"#,
+                ),
+            ],
+        )?;
+
+        let report = check_workspace_isolation(&workspace)?;
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].crate_name, "lodestone-v3");
+        assert_eq!(report.findings[0].dependency_name, "lodestone-v1");
+        assert_eq!(report.findings[0].severity, Severity::Violation);
+        assert!(report.has_violations());
+        Ok(())
+    }
+
+    #[test]
+    fn compatibility_base_must_be_a_required_normal_dependency() -> Result<()> {
+        let workspace = isolation_fixture(
+            "optional-compatibility-base",
+            &[
+                ("crates/versions/v1", "lodestone-v1", ""),
+                (
+                    "crates/versions/v2",
+                    "lodestone-v2",
+                    r#"
+[package.metadata.lodestone-isolation]
+compatibility-base = "lodestone-v1"
+
+[dependencies]
+lodestone-v1 = { path = "../v1", optional = true }
+"#,
+                ),
+            ],
+        )?;
+
+        let report = check_workspace_isolation(&workspace)?;
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].severity, Severity::Violation);
+        Ok(())
+    }
+
+    #[test]
     fn required_shared_to_version_dependency_is_a_violation() -> Result<()> {
         // A shared crate with a *required* dependency on a version crate makes
         // that version undeletable, so it is fatal.
@@ -983,6 +1066,39 @@ compat = ["dep:lodestone-v1"]
         assert!(!report.is_cleanly_deletable());
         assert_eq!(report.blockers.len(), 1);
         assert!(report.blockers[0].dependent_is_version_crate);
+        Ok(())
+    }
+
+    #[test]
+    fn check_deletable_reports_compatibility_base_dependent_as_blocker() -> Result<()> {
+        let workspace = isolation_fixture(
+            "deletable-compatibility-base",
+            &[
+                ("crates/versions/26.2", "lodestone-v26-2", ""),
+                (
+                    "crates/versions/26.3",
+                    "lodestone-v26-3",
+                    r#"
+[package.metadata.lodestone-isolation]
+compatibility-base = "lodestone-v26-2"
+
+[dependencies]
+lodestone-v26-2 = { path = "../26.2" }
+"#,
+                ),
+            ],
+        )?;
+
+        let isolation = check_workspace_isolation(&workspace)?;
+        assert!(!isolation.has_violations());
+
+        let report = check_workspace_deletable(&workspace, "26.2")?;
+        assert!(!report.is_cleanly_deletable());
+        assert_eq!(report.blockers.len(), 1);
+        assert_eq!(report.blockers[0].crate_name, "lodestone-v26-3");
+        assert!(report.render().contains(
+            "another version crate depends on it; deleting this folder breaks that family"
+        ));
         Ok(())
     }
 
