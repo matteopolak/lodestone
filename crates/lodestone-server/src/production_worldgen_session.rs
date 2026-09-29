@@ -1397,6 +1397,7 @@ where
                 }
                 crate::worldgen_progress::emit(crate::worldgen_progress::WorldgenProgress {
                     session: self.session.id().value(),
+                    target: self.session.request().target(),
                     admitted: self.admissions.len() as u32,
                     completed: 0,
                     committed: 0,
@@ -1477,6 +1478,7 @@ where
                 }
                 crate::worldgen_progress::emit(crate::worldgen_progress::WorldgenProgress {
                     session: self.session.id().value(),
+                    target: self.session.request().target(),
                     admitted: self.admissions.len() as u32,
                     completed: 1,
                     committed: 0,
@@ -1505,6 +1507,7 @@ where
                     self.feature_spills.extend(spills);
                     crate::worldgen_progress::emit(crate::worldgen_progress::WorldgenProgress {
                         session: self.session.id().value(),
+                        target: self.session.request().target(),
                         admitted: self.admissions.len() as u32,
                         completed: (sequence + 1) as u32,
                         committed: 0,
@@ -1579,6 +1582,7 @@ where
                 }
                 crate::worldgen_progress::emit(crate::worldgen_progress::WorldgenProgress {
                     session: self.session.id().value(),
+                    target: self.session.request().target(),
                     admitted: self.admissions.len() as u32,
                     completed: self.commit_sources.len() as u32,
                     committed: 1,
@@ -1831,6 +1835,7 @@ where
                     .finalize_packet_snapshot_with_packet_neighbours(output, neighbours)?;
                 crate::worldgen_progress::emit(crate::worldgen_progress::WorldgenProgress {
                     session: self.session.id().value(),
+                    target: self.session.request().target(),
                     admitted: self.admissions.len() as u32,
                     completed: self.sources.len() as u32,
                     committed: 2,

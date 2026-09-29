@@ -87,10 +87,21 @@ This bounds dispatch-side CPU and queue pressure; it does not make a shared
 world-store coordinate lease nonblocking. Tick-side wiring must keep its lease
 handoff separate rather than synchronously waiting on a generation-held lease.
 
-The browser path is unchanged: it has no native pool or semaphore and generates
-one column at a time with a browser task yield between columns. The borrowed
-source arm uses the same yielding wrapper, so a target-neutral caller cannot
-accidentally reach the native-only Rayon helper.
+The browser uses the same production generation session and ordered target
+queue. A threaded build runs immutable work on its initialized worker pool;
+the serial build uses the yielding path. The server worker currently encodes
+the resulting columns before sending them over a byte-credit-limited
+`MessagePort`, while the client worker decodes and meshes them. The block-update sender shares the
+same connection loop as chunk streaming, so a write awaiting transport credit
+also postpones new chunks. Measure generation, light settlement, wire delivery,
+client receipt, and mesh presentation separately; generation throughput alone
+does not predict when terrain becomes visible.
+
+The worker progress port carries `targetX` and `targetZ` for generation stages
+and sampled `wire-delivered` events. Wire events use session zero for the
+connection-wide stream: `admitted` is delivered plus outstanding targets,
+`completed` is cumulative delivered targets, and `queued` is the outstanding
+count. They measure transport completion, not client mesh presentation.
 
 ## How to change it
 

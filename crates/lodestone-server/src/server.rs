@@ -18578,6 +18578,13 @@ where
                 }
                 chunks_sent += 1;
                 if chunks_sent == 1 || chunks_sent.is_multiple_of(16) {
+                    crate::worldgen_progress::emit(
+                        crate::worldgen_progress::WorldgenProgress::wire_delivered(
+                            (cx, cz),
+                            chunks_sent,
+                            join_stream.remaining(),
+                        ),
+                    );
                     tracing::debug!(
                         elapsed_ms = browser_play_started.elapsed().as_millis(),
                         chunks_sent,
