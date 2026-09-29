@@ -20,8 +20,8 @@ After the server reports ready, the bootstrap calls the optional `sample_worker(
 
 At debug or trace level, the worker also installs a timing sink for production operations. A fixed phase array accumulates call count, requested item count, elapsed sum, and longest call. The health callback drains nonempty phases into one `worldgen-timing` message, and the render worker forwards them to the page console. Normal logging levels do not install the sink, so generation performs no timing clock reads. Collection uses the existing console-log level rather than requiring a tracing subscriber.
 
-An independent optional `lodestone_server::connection_progress` sink samples
-the browser Play connection once per second while its loop advances. It reports
+An optional `lodestone_server::connection_progress` sink samples
+the browser Play connection state at most once per second. It reports
 the current center/radius, owed and uniquely delivered columns, send operations,
 remaining generation work, loop passes, and client loading state. A stopped
 record is emitted when the observed loop scope exits or its future is dropped;
@@ -29,6 +29,25 @@ it does not distinguish transport EOF, error, and cancellation. A panic that
 aborts the worker cannot emit that final record. These messages use the existing
 progress port and appear as `connection` diagnostics in the standalone console.
 World tick health alone does not prove that this connection is advancing.
+
+An independent diagnostic timer also reports the Play loop's selected operation,
+its elapsed time, and the current target or input packet. It continues while an
+operation is awaiting generation or outbound credit; pass and delivery counts
+still advance only in the actual connection loop. The timer holds only a weak
+probe reference and stops after connection scope exit. `transport` diagnostics
+report both endpoint byte counters, credit windows, and pending-write age using
+the transport's existing heartbeat. Endpoint numbers are local to each worker,
+so compare the `side=client` and `side=server` labels rather than IDs alone.
+Snapshots are opt-in at Debug level and are not SDK readiness events. A normal
+transport close cancels its timer; an absent final transport sample alone does
+not prove a live wait or a disconnect.
+
+Shared block-update timing uses `lodestone_time::Instant`, which reads the host
+monotonic clock in the browser. Native runtime deadline types are compile-time
+confined to native targets; they must not be used for shared elapsed-time
+measurements. A clock trap can abandon one browser async task while independent
+world ticks and host callbacks continue, so healthy tick telemetry alone cannot
+establish Play-loop liveness.
 
 The renderer reports configured-view resident/presented deficits once per second
 until the full-view presentation milestone. The loading overlay uses its smaller

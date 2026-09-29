@@ -262,6 +262,14 @@ resumes every deferred target through the same stage machine. A committed
 feature frontier skips source completion and restores transient feature state
 before output, including for dimensions without neighbor settlement.
 
+Region reservations own their pending ticket and transfer that ownership into
+the active lease on admission. Rejected nonblocking attempts, cancellation, and
+dropped waiting futures remove the reservation; lease drop removes active
+ownership. Older overlapping reservations retain priority while disjoint work
+can advance. Native condition-variable waits and browser yielding waits use
+the same promotion rule. Returning from a failed browser batch claim must not
+leave a pending ticket that blocks every later overlapping request.
+
 Native Overworld cohorts admit a bounded group of requested targets into one
 ordered source region. Immutable prerequisites may run concurrently; mutable
 owners complete in canonical order. Every target-owned execution path restores
