@@ -163,8 +163,8 @@ def main() -> int:
 
     output_dir.mkdir(parents=True, exist_ok=True)
     subprocess.run(profiler, cwd=ROOT, env=env, check=True)
-    if not trace.is_file() or trace.stat().st_size == 0:
-        raise RuntimeError(f"xctrace did not produce a nonempty capture: {trace}")
+    if not trace.exists():
+        raise RuntimeError(f"xctrace did not produce a capture: {trace}")
     subprocess.run(["xcrun", "xctrace", "export", "--input", str(trace), "--toc", "--output", str(toc)], check=True)
     toc_text = toc.read_text(encoding="utf-8", errors="replace")
     has_counters = 'schema="counters-profile"' in toc_text

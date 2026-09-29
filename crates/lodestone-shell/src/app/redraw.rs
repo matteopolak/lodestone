@@ -52,6 +52,7 @@ impl WasmMeshProfile {
                 waiting_columns: 0,
                 forced_columns: 0,
                 pending_sections: 0,
+                browser_queue: None,
             },
         }
     }
@@ -122,12 +123,27 @@ impl WasmMeshProfile {
             self.backlog_max.forced_columns,
             self.backlog_max.pending_sections,
         );
+        if let Some(queue) = backlog.browser_queue {
+            log::debug!(
+                target: "frame_profile",
+                "wasm mesh queue: totals_insert/replace/cancel/pop={}/{}/{}/{} queued_keys={} high_water_keys_lifetime={} oldest_wait_ms={:.2} max_pop_wait_lifetime_ms={:.2}",
+                queue.insertions,
+                queue.replacements,
+                queue.cancellations,
+                queue.pops,
+                queue.queued_keys,
+                queue.high_water_keys,
+                queue.oldest_wait.as_secs_f64() * 1000.0,
+                queue.max_pop_wait.as_secs_f64() * 1000.0,
+            );
+        }
         self.interval_meshes = 0;
         self.backlog_max = crate::mesher::MeshBacklog {
             ready_columns: 0,
             waiting_columns: 0,
             forced_columns: 0,
             pending_sections: 0,
+            browser_queue: None,
         };
     }
 }

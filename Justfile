@@ -107,72 +107,8 @@ run *args: stage-resources
 stage-resources:
     python3 web/scripts/stage_resource_pack.py --jar .cache/mc/26.2/client.jar --visual-pack assets/resource-packs/whimscape-26.1-26.3-r2.zip --out .cache/mc/26.2
 
-# scripts/run-wasm.sh — keep the browser build rebuilding on change (`trunk
-# watch`) AND serve it, page plus the /relay WebSocket->TCP bridge, from ONE
-# port (`lodestone-web-server`, web/server/src/main.rs) on http://127.0.0.1:8080/
-# by default. Address, port and the two COOP/COEP headers are baked into that
-# binary's own defaults (LODESTONE_WEB_LISTEN overrides), not read from
-# web/Trunk.toml — trunk itself no longer serves anything for this recipe.
-#
-# Named `run-wasm` rather than `run:wasm` or `run --surface wasm` for two
-# reasons. `:` is just's module-path separator, so it is not available in a
-# recipe name at all. And a `--surface` flag on `run` would mean parsing an
-# argument and branching on it inside this file — the one thing the header
-# forbids; two recipes is the shape that keeps "one name per raw invocation"
-# true. It sits beside `run` so `just --list` shows both ways to launch the game
-# together, while the `wasm-*` recipes below stay grouped as what they are:
-# guards, not launchers.
-#
-# --release is NOT a preference here, the same way it is not for `run`, but for a
-# different reason: a debug build makes single-threaded worldgen ~10x slower,
-# which blows the singleplayer probe's own 30 s deadline and therefore *presents
-# as a failure* rather than as slowness. See web/README.md → "Run it". Applies to
-# BOTH halves now — `trunk watch --release` for the wasm bundle, and a --release
-# build of `lodestone-web-server` itself.
-#
-# No explicit job or target flags; Cargo's resolved configuration owns both.
-# rather than an oversight, for BOTH the wasm build and lodestone-web-server's own
-# build: trunk drives cargo itself and exposes neither flag (its output knob is
-# --dist), and both `web/` and `web/server` are members of web/'s own workspace
-# root, with its own Cargo.lock and its own web/target/, so neither ever contends
-# for the shared target/ lock that {{tdir}} exists to avoid.
-#
-# It links the relay in rather than starting a separate one, which is why there
-# is no LODESTONE_NO_RELAY any more: `/relay` is just a route on the one listener,
-# idle until something dials it, so there is no second process whose absence needs
-# a flag. Without a real server behind --target, the multiplayer server-list ping
-# still fails *visibly* (a row reads `Failed`, naming the reason) rather than
-# hanging or looking broken — same guarantee the old two-process shape gave.
-#
-# **A real multiplayer join is not wired to the relay yet.** Only the
-# server-list ping is, as of this recipe's current doc. `net.rs`'s browser join
-# path still refuses outright ("a browser cannot open a TCP socket … must go
-# through the WebSocket relay") rather than actually dialling one — that
-# refusal names the right fix but nothing currently performs it. Do not extend
-# this comment to claim joining works; check `net.rs`'s `run_async` before
-# trusting any future version of this line that does.
-#
-# Two long-lived processes in one command is why the body is a script and not
-# inline here: it needs a trap, so neither process can outlive the run and keep
-# its port bound (or its watch running) for the *next* one. Per this file's
-# header that body belongs in scripts/, exactly as `wasm-size` delegates.
-# LODESTONE_WEB_LISTEN / LODESTONE_RELAY_TARGET are LODESTONE_* names, not
-# CARGO_* ones, for the sccache reason at the top of this file, and are meant to
-# be set inline on the command rather than via `set export`.
-#
-# Port 0 (`LODESTONE_WEB_LISTEN=127.0.0.1:0`) asks the OS for a free port
-# instead of the fixed default, for exactly the conflict case a fixed port
-# risks; the script reads the port lodestone-web-server actually bound back
-# from a file it writes (--port-file), never from a pipeline.
-#
-# Prerequisites are trunk 0.21.x and the wasm32-unknown-unknown target; the
-# script verifies both up front and fails with the install command, rather than
-# letting a missing one surface as a confusing build error.
-#
-# The [doc] attribute is here because `just --list` otherwise shows the LAST
-# comment line before a recipe, which for any recipe carrying real rationale is a
-# mid-sentence fragment. Prefer it over reordering the prose so the summary lands
-# last — the rationale should read top-to-bottom for someone in the file.
+# The launcher owns the release watcher, one page/relay listener, and cleanup.
+# Cargo configuration owns the shared target directory and build job limits.
 [doc("watch + serve (page + /relay, one port) the browser build; :8080 by default")]
 run-wasm *args:
     ./scripts/run-wasm.sh {{args}}

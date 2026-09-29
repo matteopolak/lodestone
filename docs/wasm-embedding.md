@@ -30,16 +30,15 @@ credential-bearing option. A supplied `assetProvider` must resolve any required 
 
 ## Configuration
 
-Example:
+Inside the caller's render worker, after receiving the transferred canvas:
 
 ```js
-const offscreen = canvas.transferControlToOffscreen();
 const assetPaths = {
   resourcePack: "./lodestone-resources.zip",
   blocksJson: "./blocks.json",
 };
 const game = await lodestone.mount({
-  canvas: offscreen,
+  canvas: receivedOffscreenCanvas,
   assetProvider: name => fetch(assetPaths[name]).then(response => {
     if (!response.ok) throw new Error(`Asset download failed: ${response.status}`);
     return response.arrayBuffer();
