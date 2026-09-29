@@ -16,7 +16,7 @@
 //!    no stderr) and `console_error_panic_hook` so a panic names its Rust location
 //!    instead of `unreachable`.
 //! 2. **Assets, as bytes.** Native scans for a pack root and `std::fs::read`s
-//!    `client.jar`; a browser has no filesystem, so the bytes are `fetch`ed once and
+//!    `lodestone-resources.zip`; a browser has no filesystem, so the bytes are `fetch`ed once and
 //!    handed to the shared embedding/session boundary. Everything downstream — the
 //!    zip parser, the atlas builder, the model baker, the font loader — is the same
 //!    synchronous code the native client runs. **The filesystem wall is crossed
@@ -52,7 +52,7 @@ thread_local! {
 #[cfg(target_arch = "wasm32")]
 use std::{cell::Cell, rc::Rc};
 
-use lodestone_web::client_jar;
+use lodestone_web::resource_pack;
 use futures_util::future::{join, join_all};
 use wasm_bindgen::{JsCast, JsValue, closure::Closure};
 use wasm_bindgen_futures::{JsFuture, spawn_local};
@@ -62,7 +62,7 @@ use web_sys::{
 };
 
 /// The deterministic browser resource pack staged from the local archive.
-const CLIENT_JAR_URL: &str = "client.jar";
+const RESOURCE_PACK_URL: &str = "lodestone-resources.zip";
 
 /// The block-state id table the atlas and the model baker are built against. Mojang's
 /// own generator output; `BlocksJsonRegistry::from_slice` parses these bytes.
@@ -135,46 +135,46 @@ fn buffer_bytes(buffer: &js_sys::ArrayBuffer) -> Vec<u8> {
 }
 
 /// Fetches a deployment's split jar when its manifest is present, preserving
-/// the one-file `client.jar` fallback for local `trunk`/`just run-wasm` work.
+/// the one-file `lodestone-resources.zip` fallback for local `trunk`/`just run-wasm` work.
 ///
 /// A manifest is authoritative once served: corruption must fail visibly rather
 /// than quietly falling back to a potentially stale direct jar. Only a 404 means
 /// the deployment deliberately has no multipart asset. All paths remain plain
 /// relative URLs, so a page served as `/lodestone/` fetches
-/// `/lodestone/client.jar.parts.json` and its sibling parts.
-async fn fetch_client_jar() -> Result<js_sys::ArrayBuffer, String> {
-    let manifest_bytes = match fetch_bytes_no_store(client_jar::PARTS_MANIFEST_URL).await {
+/// `/lodestone/lodestone-resources.zip.parts.json` and its sibling parts.
+async fn fetch_resource_pack() -> Result<js_sys::ArrayBuffer, String> {
+    let manifest_bytes = match fetch_bytes_no_store(resource_pack::PARTS_MANIFEST_URL).await {
         Ok(bytes) => bytes,
         Err(error) if error.starts_with("HTTP 404 ") => {
             log::info!(
                 "[boot] {} is absent; checking direct archive manifest",
-                client_jar::PARTS_MANIFEST_URL
+                resource_pack::PARTS_MANIFEST_URL
             );
-            let direct_manifest = match fetch_bytes_no_store(client_jar::DIRECT_MANIFEST_URL).await {
+            let direct_manifest = match fetch_bytes_no_store(resource_pack::DIRECT_MANIFEST_URL).await {
                 Ok(bytes) => bytes,
                 Err(error) if error.starts_with("HTTP 404 ") => {
                     log::info!(
-                        "[boot] {} is absent; using direct {CLIENT_JAR_URL}",
-                        client_jar::DIRECT_MANIFEST_URL
+                        "[boot] {} is absent; using direct {RESOURCE_PACK_URL}",
+                        resource_pack::DIRECT_MANIFEST_URL
                     );
-                    let jar = fetch_buffer(CLIENT_JAR_URL, false).await?;
+                    let jar = fetch_buffer(RESOURCE_PACK_URL, false).await?;
                     return Ok(jar);
                 }
                 Err(error) => {
                     return Err(format!(
                         "fetch {} failed: {error}",
-                        client_jar::DIRECT_MANIFEST_URL
+                        resource_pack::DIRECT_MANIFEST_URL
                     ));
                 }
             };
-            let manifest = client_jar::ClientJarManifest::parse(&direct_manifest)?;
-            let jar = fetch_buffer(CLIENT_JAR_URL, false).await?;
+            let manifest = resource_pack::ResourcePackManifest::parse(&direct_manifest)?;
+            let jar = fetch_buffer(RESOURCE_PACK_URL, false).await?;
             manifest.verify_download(&buffer_bytes(&jar))?;
             return Ok(jar);
         }
-        Err(error) => return Err(format!("fetch {} failed: {error}", client_jar::PARTS_MANIFEST_URL)),
+        Err(error) => return Err(format!("fetch {} failed: {error}", resource_pack::PARTS_MANIFEST_URL)),
     };
-    let manifest = client_jar::ClientJarParts::parse(&manifest_bytes)?;
+    let manifest = resource_pack::ResourcePackParts::parse(&manifest_bytes)?;
     let parts = join_all(manifest.parts().iter().map(|part| async move {
         let bytes = fetch_buffer(&part.name, false).await?;
         let bytes_for_hash = buffer_bytes(&bytes);
@@ -197,27 +197,27 @@ async fn fetch_client_jar() -> Result<js_sys::ArrayBuffer, String> {
 /// Fetches the two required blobs for transfer to the render worker.
 #[cfg(target_arch = "wasm32")]
 struct WorkerAssets {
-    client_jar: js_sys::ArrayBuffer,
+    resource_pack: js_sys::ArrayBuffer,
     blocks_report: js_sys::ArrayBuffer,
 }
 
 #[cfg(target_arch = "wasm32")]
 async fn install_assets() -> Result<WorkerAssets, String> {
-    status("fetching client.jar and blocks.json …");
-    let (client_jar_result, blocks_report_result) = join(
-        fetch_client_jar(),
+    status("fetching resource pack and blocks.json …");
+    let (resource_pack_result, blocks_report_result) = join(
+        fetch_resource_pack(),
         fetch_buffer(BLOCKS_REPORT_URL, false),
     )
     .await;
-    let client_jar = client_jar_result?;
+    let resource_pack = resource_pack_result?;
     let blocks_report = blocks_report_result?;
     status(&format!(
-        "required assets ready: client.jar {:.1} MiB, blocks.json {:.1} MiB — starting worker …",
-        client_jar.byte_length() as f64 / (1024.0 * 1024.0),
+        "required assets ready: resource pack {:.1} MiB, blocks.json {:.1} MiB — starting worker …",
+        resource_pack.byte_length() as f64 / (1024.0 * 1024.0),
         blocks_report.byte_length() as f64 / (1024.0 * 1024.0),
     ));
     Ok(WorkerAssets {
-        client_jar,
+        resource_pack,
         blocks_report,
     })
 }
@@ -229,7 +229,7 @@ async fn boot(canvas: web_sys::HtmlCanvasElement) {
         Ok(bundle) => bundle,
         Err(e) => {
             status(&format!(
-                "ASSET LOAD FAILED — {e}. The browser build needs client.jar and \
+                "ASSET LOAD FAILED — {e}. The browser build needs lodestone-resources.zip and \
                  blocks.json served beside the page; see web/README.md. Nothing is drawn \
                  on purpose, so this cannot be mistaken for a working session."
             ));
@@ -326,6 +326,14 @@ fn launch_render_worker(
                 }
             }
             Some("ready") => status("renderer worker ready"),
+            Some("diagnostic") => {
+                if let Some(message) = js_sys::Reflect::get(&value, &JsValue::from_str("message"))
+                    .ok()
+                    .and_then(|value| value.as_string())
+                {
+                    web_sys::console::debug_1(&format!("lodestone {message}").into());
+                }
+            }
             Some("error") => {
                 let message = js_sys::Reflect::get(&value, &JsValue::from_str("message"))
                     .ok()
@@ -346,10 +354,10 @@ fn launch_render_worker(
         .map_err(|error| format!("cannot build render-worker canvas request: {error:?}"))?;
     js_sys::Reflect::set(
         &launch,
-        &JsValue::from_str("clientJar"),
-        &assets.client_jar,
+        &JsValue::from_str("resourcePack"),
+        &assets.resource_pack,
     )
-    .map_err(|error| format!("cannot build render-worker jar request: {error:?}"))?;
+    .map_err(|error| format!("cannot build render-worker resource-pack request: {error:?}"))?;
     js_sys::Reflect::set(
         &launch,
         &JsValue::from_str("blocksJson"),
@@ -364,7 +372,7 @@ fn launch_render_worker(
     .map_err(|error| format!("cannot build render-worker log request: {error:?}"))?;
     let transfer = js_sys::Array::new();
     transfer.push(&offscreen);
-    transfer.push(&assets.client_jar);
+    transfer.push(&assets.resource_pack);
     transfer.push(&assets.blocks_report);
     worker
         .post_message_with_transfer(&launch, &transfer)
@@ -445,12 +453,13 @@ fn install_input_bridge(
         let Ok(event) = event.dyn_into::<MouseEvent>() else {
             return;
         };
+        let dpr = window().map_or(1.0, |window| window.device_pixel_ratio());
         send_input(
             &worker_for_pointer,
             "pointerMove",
             &[
-                ("x", JsValue::from_f64(f64::from(event.offset_x()))),
-                ("y", JsValue::from_f64(f64::from(event.offset_y()))),
+                ("x", JsValue::from_f64(f64::from(event.offset_x()) * dpr)),
+                ("y", JsValue::from_f64(f64::from(event.offset_y()) * dpr)),
             ],
         );
         if event.movement_x() != 0 || event.movement_y() != 0 {

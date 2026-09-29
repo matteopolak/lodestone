@@ -4,4 +4,4 @@
 //! exists so manifest validation can run as ordinary native unit tests without
 //! trying to link the browser-only asset installation path.
 
-pub mod client_jar;
+pub mod resource_pack;

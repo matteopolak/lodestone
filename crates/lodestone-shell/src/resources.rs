@@ -106,7 +106,7 @@ impl BlockResources {
     }
 
     /// Load the real vanilla assets: the block registry from
-    /// `generated/reports/blocks.json` and every model/texture from `client.jar`,
+    /// `generated/reports/blocks.json` and every model/texture from `lodestone-resources.zip`,
     /// stitched into a [`BlockAtlas`]. The `en_us.json` language table rides along
     /// from the same jar (absent is not an error — it just disables translation).
     /// Errors are stringified with the offending path so the fallback banner
@@ -118,7 +118,7 @@ impl BlockResources {
         let registry = {
             let bundle = crate::platform::assets::bundle().ok_or_else(|| {
                 "no asset bundle installed — a browser has no filesystem to scan, so \
-                 web/ must fetch client.jar + generated/reports/blocks.json and call \
+                 web/ must fetch lodestone-resources.zip + generated/reports/blocks.json and call \
                  lodestone::platform::assets::install() before app::run (live world \
                  uses the demo palette until then)"
                     .to_string()
@@ -133,7 +133,7 @@ impl BlockResources {
         let registry = {
             let root = asset_root().ok_or_else(|| {
                 "no vanilla resource pack found — set LODESTONE_ASSETS to a pack root \
-                 containing client.jar + generated/reports/blocks.json (live world uses \
+                 containing lodestone-resources.zip + generated/reports/blocks.json (live world uses \
                  the demo palette until then)"
                     .to_string()
             })?;
@@ -142,7 +142,7 @@ impl BlockResources {
         };
 
         let manager = open_vanilla_pack_stack()
-            .ok_or_else(|| "open client.jar: no readable vanilla resource pack".to_string())?;
+            .ok_or_else(|| "open lodestone-resources.zip: no readable vanilla resource pack".to_string())?;
         // The live `mipmapLevels` video setting's actual consumer: `mipmap_levels()`
         // returns the shipped default until a player drags the slider, at which
         // point `set_mipmap_levels` has already bumped `PACK_GENERATION`, so the
@@ -230,7 +230,7 @@ impl BlockResources {
     }
 }
 
-/// Opens `<root>/client.jar` **plus every selected user resource pack** as a
+/// Opens `<root>/lodestone-resources.zip` **plus every selected user resource pack** as a
 /// [`ResourceManager`], warning and returning `None` on a jar failure — the
 /// fail-open pack discovery every loader in this module shares below
 /// [`BlockResources::try_vanilla`], whose own errors must propagate as a
@@ -249,7 +249,7 @@ impl BlockResources {
 /// between proving the wire and proving a copy of it.
 #[must_use]
 pub fn open_pack_stack(root: &Path) -> Option<ResourceManager> {
-    let jar = root.join("client.jar");
+    let jar = root.join("lodestone-resources.zip");
     let bytes = match std::fs::read(&jar) {
         Ok(b) => b,
         Err(e) => {
@@ -334,7 +334,7 @@ fn vanilla_zip_source() -> Option<ZipSource> {
         return Some(cached.source.clone());
     }
     #[cfg(target_arch = "wasm32")]
-    let bytes = crate::platform::assets::bundle()?.client_jar.clone();
+    let bytes = crate::platform::assets::bundle()?.resource_pack.clone();
     #[cfg(not(target_arch = "wasm32"))]
     let bytes = std::fs::read(identity_path(&identity)?).ok()?;
     cached_zip_source(&mut cache, identity, bytes, &VANILLA_ZIP_PARSES)
@@ -345,13 +345,13 @@ fn vanilla_zip_identity() -> Option<VanillaZipIdentity> {
     {
         let bundle = crate::platform::assets::bundle()?;
         return Some(VanillaZipIdentity::Browser {
-            address: bundle.client_jar.as_ptr() as usize,
-            len: bundle.client_jar.len(),
+            address: bundle.resource_pack.as_ptr() as usize,
+            len: bundle.resource_pack.len(),
         });
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let path = asset_root()?.join("client.jar");
+        let path = asset_root()?.join("lodestone-resources.zip");
         let metadata = std::fs::metadata(&path).ok()?;
         Some(VanillaZipIdentity::Native {
             path,
@@ -928,7 +928,7 @@ fn selected_pack_sources() -> Vec<Box<dyn ResourceSource>> {
     out
 }
 
-/// Load real per-mob entity textures from `client.jar`, keyed by the render
+/// Load real per-mob entity textures from `lodestone-resources.zip`, keyed by the render
 /// crate's model name (`"pig"`, `"zombie"`, …). Version-free and **fail-open**:
 /// returns an empty map when no pack is found or the jar can't be opened, so the
 /// entity renderer keeps its synthetic-colour placeholder per model rather than
@@ -1174,7 +1174,7 @@ pub fn load_block_entity_textures()
 }
 
 /// Load the vanilla GUI sprite atlas (`assets/<ns>/textures/gui/sprites/**`) from
-/// `client.jar`, for the HUD. Version-free and fail-open: returns `None` when no
+/// `lodestone-resources.zip`, for the HUD. Version-free and fail-open: returns `None` when no
 /// pack is found or the jar can't be opened/stitched, so the HUD keeps its
 /// procedural fallback rather than the whole run failing. Only the jar is needed
 /// (no `blocks.json`), so this succeeds even on a pack that can't build the block
@@ -1230,7 +1230,7 @@ pub fn load_gui_atlas() -> Option<Arc<GuiAtlas>> {
 }
 
 /// Load and build the sky pass (celestial atlas + cloud texture, from
-/// `client.jar`) via [`SkyRenderer::new`]. Version-free and fail-open like
+/// `lodestone-resources.zip`) via [`SkyRenderer::new`]. Version-free and fail-open like
 /// [`load_gui_atlas`]: `None` on a jar-less run, or on a pack missing the
 /// sun/moon/cloud textures, leaves [`crate::gpu::RenderState`] with no sky
 /// installed — the pre-existing "clear straight to the fog colour" behaviour,
@@ -1238,7 +1238,7 @@ pub fn load_gui_atlas() -> Option<Arc<GuiAtlas>> {
 ///
 /// Unlike the other `load_*` helpers here, this one needs GPU handles
 /// (`SkyRenderer::new` uploads the atlas/cloud textures immediately rather than
-/// deferring to a later `attach_*` call): it does the `client.jar` IO this
+/// deferring to a later `attach_*` call): it does the `lodestone-resources.zip` IO this
 /// crate's `gpu.rs` deliberately has none of, then hands `RenderState::install_sky`
 /// an already-built renderer, mirroring how `RenderState::new` itself is handed
 /// an already-built [`BlockAtlas`] rather than opening its own jar.
@@ -1576,113 +1576,19 @@ pub fn load_menu_gui_atlas() -> Option<Arc<GuiAtlas>> {
     }
 }
 
-/// An in-memory [`ObjectBytesSource`](crate::asset_objects::ObjectBytesSource)
-/// over whatever jar-shadowed asset-object bytes `web/` managed to fetch and
-/// install — see [`crate::platform::assets::Bundle::panorama`].
-///
-/// The wasm32 counterpart to [`crate::asset_objects::AssetObjectStore`]: there is
-/// no filesystem to open a real store over in a browser, so this wraps a flat
-/// `HashMap` built from whatever `(key, bytes)` pairs the bundle carries instead.
-/// An absent key (bundle empty, or that particular face didn't stage) reads as
-/// `None`, exactly as an unresolved store entry does — the caller,
-/// `crate::menu::panorama::load`, already treats that as "fall back to the jar
-/// stub for this face" with no wasm-specific branch of its own.
-#[cfg(target_arch = "wasm32")]
-struct WasmObjectBytes(std::collections::HashMap<String, Vec<u8>>);
-
-#[cfg(target_arch = "wasm32")]
-impl crate::asset_objects::ObjectBytesSource for WasmObjectBytes {
-    fn object_bytes(&self, key: &str) -> Option<Vec<u8>> {
-        self.0.get(key).cloned()
-    }
-}
-
 /// Load the title screen's panorama cubemap —
 /// `textures/gui/title/background/panorama_{0..5}.png`, decoded and stacked into
 /// cubemap layer order by [`crate::menu::panorama::load`].
 ///
-/// **This is the one loader here that must not read `client.jar` first.** The jar
-/// ships 69-byte 1×1 grey stubs for all six faces and the real 1024×1024 art
-/// comes from the launcher's asset-object store. Native opens an
-/// [`AssetObjectStore`](crate::asset_objects::AssetObjectStore) over the on-disk
-/// root and hands it to `panorama::load`, which prefers it per face; wasm32 has
-/// no filesystem to open one over, so it hands in a [`WasmObjectBytes`] built
-/// from whatever `web/` fetched instead (see
-/// [`crate::platform::assets::Bundle::panorama`]) — `web/Trunk.toml`'s
-/// `post_build` hook is what populates *that*, resolved from the very same
-/// `.cache/mc/<version>` store a native run reads directly. Either way, a root
-/// (or bundle) with no populated store still loads — from the stubs, with a
-/// warning that says so — because a flat title screen beats a failed startup.
-/// `cargo run -p xtask -- fetch-assets --version <v>` is what populates the
-/// on-disk store both routes ultimately read from.
-///
-/// Same fail-open contract as every other loader here otherwise: `None` on a
-/// jar-less run, a missing face, or faces that disagree in size, which leaves the
-/// menu screens on their flat backdrop rather than failing startup. The six faces
-/// are *not* added to [`MENU_TEXTURES`] because they are not atlas sprites: a
-/// cubemap has to be six equal layers of one texture, and stitching them into a
-/// sheet is the one thing that would make them unusable.
+/// The built-in resource archive carries all six faces. A missing or invalid
+/// face leaves the menu on its flat backdrop rather than blocking startup.
+/// They are not atlas sprites: the cubemap needs six equal-sized layers.
 #[must_use]
 pub fn load_panorama() -> Option<Arc<crate::menu::panorama::PanoramaFaces>> {
     let manager = open_vanilla_pack_stack()?;
-    // Absent or unreadable is not fatal: `panorama::load` falls back to the jar
-    // per face and reports how many faces it actually got from the store.
-    #[cfg(not(target_arch = "wasm32"))]
-    let objects: Option<Box<dyn crate::asset_objects::ObjectBytesSource>> = asset_root()
-        .and_then(|root| match crate::asset_objects::AssetObjectStore::open(&root) {
-            Ok(store) => {
-                Some(Box::new(store) as Box<dyn crate::asset_objects::ObjectBytesSource>)
-            }
-            Err(e) => {
-                tracing::warn!(
-                    target: "assets",
-                    "no asset-object store at {}: {e} — the panorama will fall back to \
-                     client.jar's 1x1 stub faces, which render a flat grey sky",
-                    root.display()
-                );
-                None
-            }
-        });
-    // `asset_root` is plain `std::fs` and always `None` in a browser (there is
-    // no on-disk store there) — `WasmObjectBytes` is the wasm32 substitute,
-    // built from whatever `web/`'s fetch actually landed.
-    #[cfg(target_arch = "wasm32")]
-    let objects: Option<Box<dyn crate::asset_objects::ObjectBytesSource>> =
-        crate::platform::assets::bundle().and_then(|bundle| {
-            if bundle.panorama.is_empty() {
-                tracing::warn!(
-                    target: "assets",
-                    "no panorama faces staged for the browser build — the panorama will \
-                     fall back to client.jar's 1x1 stub faces, which render a flat grey \
-                     sky. Run: cargo run -p xtask -- fetch-assets --version <version>, \
-                     then rebuild with `just run-wasm` so web/Trunk.toml's post_build \
-                     hook can stage them"
-                );
-                None
-            } else {
-                Some(Box::new(WasmObjectBytes(bundle.panorama.iter().cloned().collect()))
-                    as Box<dyn crate::asset_objects::ObjectBytesSource>)
-            }
-        });
-    match crate::menu::panorama::load(&manager, objects.as_deref()) {
+    match crate::menu::panorama::load(&manager, None) {
         Ok(faces) => {
-            if faces.is_real_art() {
-                tracing::info!(
-                    target: "assets",
-                    face = faces.size,
-                    "loaded the title-screen panorama cubemap from the asset-object store"
-                );
-            } else {
-                tracing::warn!(
-                    target: "assets",
-                    face = faces.size,
-                    from_object_store = faces.from_object_store,
-                    "the title-screen panorama fell back to client.jar stubs for {} of \
-                     6 faces; the sky will be flat. Run: cargo run -p xtask -- \
-                     fetch-assets --version <version>",
-                    6 - faces.from_object_store
-                );
-            }
+            tracing::info!(target: "assets", face = faces.size, "loaded title-screen panorama");
             Some(Arc::new(faces))
         }
         Err(e) => {
@@ -1713,7 +1619,7 @@ pub fn load_container_background() -> Option<Arc<crate::container::ContainerBack
     }
 }
 
-/// Stitch the vanilla particle atlas from `client.jar`.
+/// Stitch the vanilla particle atlas from `lodestone-resources.zip`.
 ///
 /// Mirrors [`load_item_atlas`] exactly, including its fail-open contract:
 /// every failure path returns `None` and warns rather than propagating, because
@@ -1770,7 +1676,7 @@ fn build_particle_atlas() -> Option<Arc<ParticleAtlas>> {
     Some(Arc::new(atlas))
 }
 
-/// Builds the flat item-sprite [`ItemAtlas`] from the vanilla `client.jar`,
+/// Builds the flat item-sprite [`ItemAtlas`] from the vanilla `lodestone-resources.zip`,
 /// version-free, using the same pack discovery as [`load_gui_atlas`]. The atlas
 /// turns each item id into a flat GUI sprite (the `item/generated` case, the
 /// overwhelming majority); block-model and code-driven `special` items resolve
@@ -1849,7 +1755,7 @@ pub fn load_item_atlas() -> Option<Arc<ItemAtlas>> {
     Some(Arc::new(atlas))
 }
 
-/// Loads the real crafting-recipe and item-tag corpus from `client.jar`'s
+/// Loads the real crafting-recipe and item-tag corpus from `lodestone-resources.zip`'s
 /// `data/minecraft/{recipe,tags/item}/**` entries, version-free and fail-open
 /// like every other loader in this module: `None` when no pack is found or the
 /// jar can't be opened, so a jar-less/headless run simply has no recipe-book
@@ -1860,7 +1766,7 @@ pub fn load_item_atlas() -> Option<Arc<ItemAtlas>> {
 ///
 /// Deliberately does **not** call [`lodestone_game::recipe_json::load_data_root`]:
 /// that walks a real filesystem directory, and the corpus here lives inside a
-/// **zip** (`client.jar`). [`ResourceManager::list`] already returns every
+/// **zip** (`lodestone-resources.zip`). [`ResourceManager::list`] already returns every
 /// entry under a prefix regardless of nesting depth, so the "flat `read_dir`
 /// drops nested tags" trap that function's own docs warn about (33 of 224 tags
 /// live under `tags/item/enchantable/*`) does not apply here — a prefix filter
@@ -1965,7 +1871,7 @@ fn merged_tag_json(manager: &ResourceManager, path: &str) -> Option<String> {
     Some(serde_json::json!({ "values": values }).to_string())
 }
 
-/// Open the vanilla `client.jar` as a [`ResourceManager`], version-free, using
+/// Open the vanilla `lodestone-resources.zip` as a [`ResourceManager`], version-free, using
 /// the same discovery as the atlas loaders. Returns `None` when no pack is found,
 /// so a caller fails *closed and loud* rather than silently substituting
 /// something.
@@ -1995,7 +1901,7 @@ pub(crate) fn vanilla_manager() -> Option<ResourceManager> {
 
 /// Locate a vanilla resource-pack root, version-free: honour `LODESTONE_ASSETS`
 /// if set, else search upward from the current directory for a `.cache/mc/<any>`
-/// entry that holds **both** a `client.jar` and a `generated/reports/blocks.json`
+/// entry that holds **both** a `lodestone-resources.zip` and a `generated/reports/blocks.json`
 /// (both are required to stitch the atlas), picking the highest-sorting such
 /// directory. Naming no version in code is deliberate — the shell must not name a
 /// protocol version; the cache directory's own name carries it.
@@ -2019,7 +1925,8 @@ fn asset_root() -> Option<PathBuf> {
 
 /// True when `dir` holds both files needed to stitch the vanilla atlas.
 fn is_pack_root(dir: &Path) -> bool {
-    dir.join("client.jar").is_file() && dir.join("generated/reports/blocks.json").is_file()
+    dir.join("lodestone-resources.zip").is_file()
+        && dir.join("generated/reports/blocks.json").is_file()
 }
 
 /// The highest-sorting complete pack directly under `cache_dir`, or `None`.
@@ -2244,7 +2151,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires the vanilla pack (client.jar) under .cache/mc/<ver>"]
+    #[ignore = "requires the vanilla pack (lodestone-resources.zip) under .cache/mc/<ver>"]
     fn production_resource_consumers_parse_the_vanilla_zip_once() {
         let before = VANILLA_ZIP_PARSES.load(std::sync::atomic::Ordering::Relaxed);
         let _ = open_vanilla_pack_stack().expect("vanilla pack must be available");
@@ -2342,11 +2249,11 @@ mod tests {
     /// post-install equality would prove nothing.
     ///
     /// `#[ignore]`d for the reason every vanilla gate here is: it needs a real
-    /// `client.jar`, which is not repo state, and a missing one must fail loud
+    /// `lodestone-resources.zip`, which is not repo state, and a missing one must fail loud
     /// rather than pass vacuously. It also mutates the process-global
     /// `SERVER_PACK`, so run it single-threaded alongside its siblings.
     #[test]
-    #[ignore = "requires the vanilla pack (client.jar) under .cache/mc/<ver>"]
+    #[ignore = "requires the vanilla pack (lodestone-resources.zip) under .cache/mc/<ver>"]
     fn a_server_pushed_pack_retextures_the_item_atlas() {
         const DIAMOND_PNG: &str = "assets/minecraft/textures/item/diamond.png";
         const STICK_PNG: &str = "assets/minecraft/textures/item/stick.png";
@@ -2355,7 +2262,7 @@ mod tests {
         set_selected_packs(Vec::new());
 
         let manager = open_vanilla_pack_stack().expect(
-            "no vanilla pack found; set LODESTONE_ASSETS to a root with client.jar",
+            "no vanilla pack found; set LODESTONE_ASSETS to a root with lodestone-resources.zip",
         );
         let stick_bytes = manager
             .read(STICK_PNG)
@@ -2363,7 +2270,7 @@ mod tests {
 
         // Control: without a pack the two are different art, so the equality
         // asserted below is a real observation rather than a tautology.
-        let plain = load_item_atlas().expect("the item atlas must build from client.jar");
+        let plain = load_item_atlas().expect("the item atlas must build from lodestone-resources.zip");
         let plain_diamond = sprite_pixels(&plain, "minecraft:item/diamond");
         let plain_stick = sprite_pixels(&plain, "minecraft:item/stick");
         assert_ne!(
@@ -2404,7 +2311,7 @@ mod tests {
     /// permanent (always zero) or silently vacuous (never zero) and the log line
     /// would be worse than none.
     #[test]
-    #[ignore = "requires the vanilla pack (client.jar) under .cache/mc/<ver>"]
+    #[ignore = "requires the vanilla pack (lodestone-resources.zip) under .cache/mc/<ver>"]
     fn the_item_atlas_reports_how_many_sprites_a_pack_layer_served() {
         const DIAMOND_PNG: &str = "assets/minecraft/textures/item/diamond.png";
 
@@ -2488,13 +2395,13 @@ mod tests {
     /// same pack. Ignored without assets so a missing pack fails loud rather than
     /// masquerading as a pass.
     #[test]
-    #[ignore = "requires the vanilla pack (client.jar) under .cache/mc/<ver>"]
+    #[ignore = "requires the vanilla pack (lodestone-resources.zip) under .cache/mc/<ver>"]
     fn vanilla_load_carries_a_resolving_language_table() {
         let resources = BlockResources::load(true);
         assert!(
             resources.vanilla_atlas.is_some(),
             "vanilla assets did not load; set LODESTONE_ASSETS to a pack root with \
-             client.jar + generated/reports/blocks.json. Banner: {:?}",
+             lodestone-resources.zip + generated/reports/blocks.json. Banner: {:?}",
             resources.banner
         );
         let lang = resources
@@ -2513,18 +2420,26 @@ mod tests {
         );
     }
 
+    #[test]
+    #[ignore = "requires the staged resource archive under .cache/mc/<ver>"]
+    fn built_in_panorama_comes_from_the_resource_archive() {
+        let faces = load_panorama().expect("the built-in resource archive has six panorama faces");
+        assert_eq!(faces.size, 1024);
+        assert_eq!(faces.from_object_store, 0);
+    }
+
     /// The real entity sheets must load from the jar with vanilla dimensions and
     /// carry actual art — not a uniform colour that a placeholder would produce.
     /// Ignored without a pack so a missing jar fails loud rather than passing
     /// vacuously. This is the plumbing gate; the on-screen gate is the live
     /// screenshot.
     #[test]
-    #[ignore = "requires the vanilla pack (client.jar) under .cache/mc/<ver>"]
+    #[ignore = "requires the vanilla pack (lodestone-resources.zip) under .cache/mc/<ver>"]
     fn entity_textures_load_real_art_from_the_jar() {
         let textures = load_entity_textures();
         assert!(
             !textures.is_empty(),
-            "no entity textures loaded; set LODESTONE_ASSETS to a pack root with client.jar"
+            "no entity textures loaded; set LODESTONE_ASSETS to a pack root with lodestone-resources.zip"
         );
 
         // The humanoid zombie sheet is 64×64 in modern packs; the pig sheet too.

@@ -3,7 +3,7 @@
 ## What it is
 
 The wasm32 target: `web/` runs the real `lodestone-shell` — the same menu, `Sim`, and renderer
-the native binary uses — fetching `client.jar` and `blocks.json` at startup instead of reading
+the native binary uses — fetching `lodestone-resources.zip` and `blocks.json` at startup instead of reading
 them off a filesystem. This document is the hazard census the port is driven from: for each way
 the shell depends on an operating system, what was measured about the hazard and the chosen
 disposition (**gate**, **replace with a seam**, or **delete the need**), plus the confinement
@@ -17,21 +17,21 @@ wrong" below).
 
 ### Large browser assets
 
-The browser boot loader normally fetches a direct, page-relative `client.jar` and
+The browser boot loader normally fetches a direct, page-relative `lodestone-resources.zip` and
 passes its bytes through `lodestone::platform::assets::install`. Static hosts with
-a per-file cap instead serve `client.jar.parts.json` alongside ordered,
-content-addressed `client.jar.part-NNN-<sha256>` files.
-`web::client_jar::ClientJarParts` validates the manifest's version, exact
+a per-file cap instead serve `lodestone-resources.zip.parts.json` alongside ordered,
+content-addressed `lodestone-resources.zip.part-NNN-<sha256>` files.
+`web::resource_pack::ResourcePackParts` validates the manifest's version, exact
 names/order/digests, total and per-part size bounds, and every SHA-256 digest before
 reconstructing the archive. The mutable manifest is fetched with `cache: "no-store"`;
 part names change with their content, so a deploy cannot combine a fresh manifest
 with a stale cached part. A malformed present manifest is fatal; only a 404 falls
-back to the direct jar, which keeps local development simple without making a broken
+back to the direct archive, which keeps local development simple without making a broken
 production deployment look healthy.
 
-`web/scripts/stage_client_jar_parts.py` emits the deterministic 20 MiB parts and
+`web/scripts/stage_resource_pack_parts.py` emits the deterministic 20 MiB parts and
 manifest. `web/Trunk.toml` runs it when `LODESTONE_WEB_CLIENT_JAR_PARTS=1`; package
-workflows must omit the direct jar afterward for hosts that reject it. URLs are
+workflows must omit the direct archive afterward for hosts that reject it. URLs are
 intentionally relative, so the same output works below a deployment subpath.
 
 ### Dedicated integrated-server Worker

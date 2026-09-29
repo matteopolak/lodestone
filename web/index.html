@@ -10,9 +10,9 @@
     <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=2" />
     <link data-trunk rel="rust" data-wasm-opt="0" />
 
-    <!-- The renderable corpus (`client.jar`) and the block-state id table
+    <!-- The renderable corpus (`lodestone-resources.zip`) and the block-state id table
          (`blocks.json`) are NOT referenced here, on purpose. They are copied out of
-         the local `.cache/mc/26.2` by the `post_build` hook in `Trunk.toml`, which
+         the local source assets by the `post_build` hook in `Trunk.toml`, which
          stages them only IF THEY EXIST; `src/main.rs` then `fetch`es them by
          basename beside the page and hands the bytes to
          `lodestone::platform::assets::install`.

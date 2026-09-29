@@ -1,6 +1,5 @@
-//! That fix's acceptance condition, end to end: real packs on disk reach the
-//! **production** [`lodestone_assets::ResourceManager`] stack, in the right
-//! priority direction.
+//! Resource packs on disk reach the production
+//! [`lodestone_assets::ResourceManager`] stack in the right priority direction.
 //!
 //! ## What it is
 //!
@@ -14,23 +13,23 @@
 //!
 //! ## Why it is `#[ignore]`d
 //!
-//! `open_pack_stack` needs a real `client.jar` at the bottom of the stack, which
-//! is not repo state. Same convention as `resources.rs`'s own vanilla gates: a
+//! `open_pack_stack` needs the staged built-in archive at the bottom of the stack,
+//! which is not repo state. Same convention as the other resource gates: a
 //! missing pack must fail *loud* rather than pass vacuously, so the assertion
-//! that the jar loaded is inside the test and the test is opt-in.
+//! that the archive loaded is inside the test and the test is opt-in.
 //!
 //! ```text
 //! LODESTONE_PACKS_FIXTURE=/private/tmp/lt-packs-spot \
-//!   cargo test -p lodestone-shell --test resource_pack_stack -- --ignored --nocapture
+//!   cargo test -p lodestone-shell --test session resource_pack_stack -- --ignored --nocapture --test-threads=1
 //! ```
 //!
 //! `LODESTONE_PACKS_FIXTURE` points at a directory holding a `resourcepacks/`
-//! folder with two packs that override the **same** in-jar path with different
+//! folder with two packs that override the same built-in path with different
 //! bytes — one a directory tree, one a `.zip`. The fixture is built by hand
 //! rather than by this test because `lodestone-shell` has no zip *writer* (the
 //! `zip` crate is `lodestone-assets`' dependency, not a dev dependency here),
 //! and adding one for a fixture would be a production dependency paid for by a
-//! test. `docs/resource-packs-screen.md` carries the recipe.
+//! test.
 
 use std::path::{Path, PathBuf};
 
@@ -38,12 +37,11 @@ use lodestone::resources::{
     PackKind, open_pack_stack, scan_resource_packs_in, set_selected_packs,
 };
 
-/// The in-jar path both fixture packs override.
+/// The built-in path both fixture packs override.
 const OVERRIDDEN: &str = "assets/minecraft/textures/block/stone.png";
-/// A path **neither** fixture pack carries, so it can only come from the jar —
-/// the control that says the built-in pack is still underneath rather than
-/// having been replaced.
-const JAR_ONLY: &str = "assets/minecraft/textures/block/dirt.png";
+/// A path neither fixture pack carries, so it comes from the built-in archive.
+/// This proves the base layer is still underneath the selected packs.
+const BUILT_IN_ONLY: &str = "assets/minecraft/textures/block/dirt.png";
 
 fn fixture_dir() -> PathBuf {
     PathBuf::from(
@@ -56,9 +54,10 @@ fn fixture_dir() -> PathBuf {
 /// The same discovery `resources::asset_root` performs, restated here because it
 /// is private: honour `LODESTONE_ASSETS`, else the highest-sorting complete pack
 /// under `.cache/mc`.
-fn jar_root() -> Option<PathBuf> {
+fn pack_root() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("LODESTONE_ASSETS") {
-        return Some(PathBuf::from(dir));
+        let root = PathBuf::from(dir);
+        return complete_pack(&root).then_some(root);
     }
     let cwd = std::env::current_dir().ok()?;
     for base in cwd.ancestors() {
@@ -79,11 +78,12 @@ fn jar_root() -> Option<PathBuf> {
 }
 
 fn complete_pack(dir: &Path) -> bool {
-    dir.join("client.jar").is_file() && dir.join("generated/reports/blocks.json").is_file()
+    dir.join("lodestone-resources.zip").is_file()
+        && dir.join("generated/reports/blocks.json").is_file()
 }
 
 #[test]
-#[ignore = "needs LODESTONE_PACKS_FIXTURE and a real client.jar under .cache/mc/<ver>"]
+#[ignore = "needs LODESTONE_PACKS_FIXTURE and the staged built-in resource archive"]
 fn a_folder_and_a_zip_are_both_discovered_and_the_top_of_the_order_wins() {
     let dir = fixture_dir();
     let packs = scan_resource_packs_in(&dir);
@@ -129,18 +129,18 @@ fn a_folder_and_a_zip_are_both_discovered_and_the_top_of_the_order_wins() {
         );
     }
 
-    let root = jar_root().expect("no vanilla pack root; set LODESTONE_ASSETS");
+    let root = pack_root().expect("no staged pack root; set LODESTONE_ASSETS");
 
-    // Baseline: with nothing selected, the overridden path is the jar's.
+    // With nothing selected, the overridden path comes from the built-in archive.
     set_selected_packs(Vec::new());
-    let vanilla = open_pack_stack(&root)
-        .expect("client.jar must open")
+    let built_in = open_pack_stack(&root)
+        .expect("the built-in resource archive must open")
         .read(OVERRIDDEN)
-        .expect("the jar has a stone texture");
-    let jar_only = open_pack_stack(&root)
-        .expect("client.jar must open")
-        .read(JAR_ONLY)
-        .expect("the jar has a dirt texture");
+        .expect("the built-in archive has a stone texture");
+    let built_in_only = open_pack_stack(&root)
+        .expect("the built-in resource archive must open")
+        .read(BUILT_IN_ONLY)
+        .expect("the built-in archive has a dirt texture");
 
     // `scan_resource_packs_in` took an explicit path, but the stack goes through
     // `scan_resource_packs()`, which reads the real data dir — so the fixture has
@@ -171,13 +171,13 @@ fn a_folder_and_a_zip_are_both_discovered_and_the_top_of_the_order_wins() {
         };
 
         set_selected_packs(vec![top.id.clone(), other.id.clone()]);
-        let manager = open_pack_stack(&root).expect("client.jar must open");
-        assert_eq!(manager.len(), 3, "jar + two packs");
+        let manager = open_pack_stack(&root).expect("the built-in resource archive must open");
+        assert_eq!(manager.len(), 3, "built-in archive + two packs");
 
         let winner = manager.read(OVERRIDDEN).expect("something must serve it");
         assert_ne!(
-            winner, vanilla,
-            "{}: the override resolved to the jar's own texture, so the pack \
+            winner, built_in,
+            "{}: the override resolved to the built-in texture, so the pack \
              reached nothing",
             top.id
         );
@@ -194,9 +194,9 @@ fn a_folder_and_a_zip_are_both_discovered_and_the_top_of_the_order_wins() {
 
         // The built-in pack is still underneath.
         assert_eq!(
-            manager.read(JAR_ONLY).as_ref(),
-            Some(&jar_only),
-            "a path neither pack carries must still come from client.jar"
+            manager.read(BUILT_IN_ONLY).as_ref(),
+            Some(&built_in_only),
+            "a path neither selected pack carries must still come from the built-in archive"
         );
         println!("{} on top -> {OVERRIDDEN} is rgb{px:?}", top.id);
     }
@@ -215,7 +215,7 @@ fn a_folder_and_a_zip_are_both_discovered_and_the_top_of_the_order_wins() {
 /// Separate from the gate above so the two failure modes are distinguishable: a
 /// reversed stack fails there, a stack that never reaches the atlas fails here.
 #[test]
-#[ignore = "needs LODESTONE_PACKS_FIXTURE and a real client.jar + blocks.json under .cache/mc/<ver>"]
+#[ignore = "needs LODESTONE_PACKS_FIXTURE and the staged resource archive + blocks.json"]
 fn the_selected_packs_pixels_reach_the_stitched_block_atlas() {
     use lodestone::resources::BlockResources;
     use lodestone_assets::ResourceLocation;

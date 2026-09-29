@@ -12,18 +12,15 @@
 //!
 //! ## Why a synthetic cubemap and not the real one
 //!
-//! 26.2's `client.jar` ships the panorama as six **1×1 solid grey**
-//! `(98, 111, 113)` PNGs and a 1×1 fully transparent overlay (measured, 69 bytes
-//! each). Against the real faces every face-order and orientation bug is
-//! invisible by construction — the frame is uniform whatever you do. So the gate
+//! The built-in artwork has no byte-exact face-colour expectations. The gate
 //! attaches six faces of six distinguishable colours through the same
-//! `attach_panorama` entry point and asserts *which layer lands where*.
+//! `attach_panorama` entry point and asserts which layer lands where.
 //!
 //! ## What the expected values come from
 //!
 //! Not from this repo. A cubemap's layers are `+X, -X, +Y, -Y, +Z, -Z` (identical
-//! in the GL, Vulkan and WebGPU face-selection tables), and vanilla's
-//! `CubeMapTexture.SUFFIXES` fills them in the order `_1, _3, _5, _4, _0, _2`.
+//! in the GL, Vulkan and WebGPU face-selection tables), and the resource suffix
+//! table fills them in the order `_1, _3, _5, _4, _0, _2`.
 //! Compose the two and `panorama_0` is the **+Z** face, `panorama_1` is **+X**,
 //! `panorama_3` is **-X**. At spin 0 the model-view is `rotationX(190°)`, which
 //! puts object-space +Z in front of the camera — so the middle of the screen must
@@ -42,7 +39,7 @@
 //! which is what lets this gate compare exact colours rather than ratios.
 //!
 //! ```text
-//! cargo test -p lodestone-shell --test menu_panorama_pixels -- --ignored --nocapture
+//! cargo test -p lodestone-shell --test hud menu_panorama_pixels -- --ignored --nocapture
 //! ```
 
 use lodestone::menu::nav::{MainButton, MenuNav};
@@ -128,7 +125,7 @@ fn synthetic_cubemap() -> PanoramaFaces {
 /// plus the bounding box of the darkest and brightest pixels found.
 ///
 /// Standard deviation is the discriminator the real cubemap makes available and
-/// the jar's stubs do not: vanilla's faces measure a luminance stdev of 3.7–13.6
+/// a uniform placeholder does not: Whimscape's faces measure a stdev of 15.8–50.5
 /// each, while a stub face — and the flat `BG` backdrop — is *exactly* 0.
 fn luminance_spread(texels: &[u8], rect: (u32, u32, u32, u32)) -> (f32, f32, (u32, u32, u32, u32)) {
     let (x0, y0, x1, y1) = rect;
@@ -693,20 +690,14 @@ fn the_loading_screen_draws_the_panorama_under_the_menu_background_wash() {
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
 
-/// The loaded cubemap is vanilla's **real** art out of the asset-object store,
-/// 1024×1024 and richly non-uniform — not `client.jar`'s 1×1 grey stubs.
-///
-/// No GPU: this measures the decoded, stacked RGBA that `attach_panorama` would
-/// upload. It is the cheapest possible check that the object-store preference in
-/// `panorama::load` is working, and it fails loudly rather than skipping when the
-/// store is unpopulated, because a skip here would leave the flat-sky regression
-/// completely undetected.
+/// The staged archive supplies six non-uniform faces without object-store art.
+/// This checks the decoded RGBA that `attach_panorama` uploads without a GPU.
 #[test]
-#[ignore = "requires the vanilla pack with a populated asset-object store"]
-fn the_panorama_loads_vanillas_real_faces_from_the_asset_object_store() {
+#[ignore = "requires the staged built-in resource archive"]
+fn the_panorama_loads_non_uniform_faces_from_the_built_in_archive() {
     let faces = lodestone::resources::load_panorama().expect(
         "no panorama could be loaded at all; set LODESTONE_ASSETS to a pack root \
-         holding client.jar + generated/reports/blocks.json",
+         holding lodestone-resources.zip + generated/reports/blocks.json",
     );
 
     eprintln!("=== panorama source gate ===");
@@ -715,18 +706,11 @@ fn the_panorama_loads_vanillas_real_faces_from_the_asset_object_store() {
     eprintln!("assembled RGBA bytes = {}", faces.rgba.len());
 
     assert_eq!(
-        faces.from_object_store, 6,
-        "only {} of 6 panorama faces came from the asset-object store; the rest \
-         are client.jar's 69-byte 1x1 grey stubs, which render a flat sky that \
-         looks like a working panorama. Run: \
-         cargo run -p xtask -- fetch-assets --version 26.2",
-        faces.from_object_store
+        faces.from_object_store, 0,
+        "the built-in panorama must come from the staged resource archive"
     );
-    assert!(faces.is_real_art());
 
-    // Vanilla 26.2's faces are 1024x1024. Asserted as a floor plus squareness
-    // rather than an equality, since a resource pack may legitimately differ —
-    // but the stub's 1 must fail, and that is the case this exists for.
+    // A pack may change the resolution; a one-pixel placeholder must fail.
     assert!(
         faces.size >= 64,
         "a {}x{} panorama face is a stub, not art",
@@ -739,11 +723,7 @@ fn the_panorama_loads_vanillas_real_faces_from_the_asset_object_store() {
         "the stacked buffer is not six whole layers"
     );
 
-    // Non-uniformity, per layer. Predicted from the real files, measured with PIL
-    // before this gate was written: luminance stdev per face is 3.7 (panorama_5,
-    // the up face, the flattest) through 13.6 (panorama_4). A stub face is
-    // *exactly* 0.0, so the floor below separates the two hypotheses by a wide
-    // margin rather than testing the sign of a difference.
+    // Whimscape's faces measure 15.8..50.5 stdev; a uniform face measures zero.
     const STDEV_FLOOR: f32 = 1.0;
     let layer = faces.layer_bytes();
     let mut flattest = f32::INFINITY;
@@ -765,11 +745,11 @@ fn the_panorama_loads_vanillas_real_faces_from_the_asset_object_store() {
             stdev > STDEV_FLOOR,
             "layer {index} (panorama{}) has luminance stdev {stdev:.3}, at or below \
              the {STDEV_FLOOR} floor — a uniform face means the stub was loaded \
-             (a stub reads exactly 0.0; vanilla's flattest real face reads 3.7)",
+             (a stub reads exactly 0.0; the built-in pack's flattest face reads 15.8)",
             panorama::FACE_SUFFIXES[index]
         );
     }
-    eprintln!("flattest layer stdev = {flattest:.2} (vanilla's is ~3.7)");
+    eprintln!("flattest layer stdev = {flattest:.2} (built-in pack: ~15.8)");
 
     // The detector's control: the same computation over a deliberately flat
     // buffer must report 0, which is what proves the assertions above are
@@ -797,7 +777,7 @@ fn the_panorama_loads_vanillas_real_faces_from_the_asset_object_store() {
 /// distinguishes *bound* from *unbound*: the backdrop `MenuRenderer` falls back to
 /// is a single flat quad, so its luminance stdev is 0 by construction.
 #[test]
-#[ignore = "requires a GPU adapter and the vanilla pack with a populated object store"]
+#[ignore = "requires a GPU adapter and the staged built-in resource archive"]
 fn the_real_panorama_paints_a_non_uniform_sky_where_the_backdrop_is_flat() {
     let ctx = GpuContext::new_headless_blocking().expect(
         "headless GPU gate opted in via --ignored but no wgpu adapter is available; \
@@ -809,14 +789,16 @@ fn the_real_panorama_paints_a_non_uniform_sky_where_the_backdrop_is_flat() {
     let mut target = HeadlessTarget::new(device, W, H, format);
     let mut menu = MenuRenderer::new(device, format);
 
-    let faces = lodestone::resources::load_panorama().expect("the vanilla panorama loads");
+    let faces = lodestone::resources::load_panorama().expect("the built-in panorama loads");
+    assert!(
+        faces.size >= 64,
+        "the built-in panorama must contain full-sized faces"
+    );
     menu.attach_panorama(device, queue, &faces);
     assert_eq!(
         menu.panorama_faces_from_object_store(),
-        6,
-        "this gate measures the real art; with client.jar's flat stubs bound the \
-         sky is uniform and the assertion below would fail for the wrong reason. \
-         Run: cargo run -p xtask -- fetch-assets --version 26.2"
+        0,
+        "the renderer must bind faces from the staged resource archive"
     );
 
     let nav = MenuNav::with_path(std::env::temp_dir().join(format!(
@@ -864,8 +846,8 @@ fn the_real_panorama_paints_a_non_uniform_sky_where_the_backdrop_is_flat() {
     );
     assert!(
         stdev > 1.0,
-        "stdev {stdev:.3} in {band:?} (extremes at {bbox:?}) is stub-flat; vanilla's \
-         flattest face measures 3.7 over the whole face"
+        "stdev {stdev:.3} in {band:?} (extremes at {bbox:?}) is stub-flat; the built-in pack's \
+         flattest face measures 15.8 over the whole face"
     );
 }
 

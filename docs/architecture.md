@@ -331,10 +331,11 @@ shape of concave-corner darkening right and the values wrong. Translucency sorti
 
 ## Assets and resource packs
 
-**Requirement: full compatibility with vanilla resource packs.** The asset layer speaks Mojang's on-disk
-format natively, and vanilla's own assets are simply the bottom-most pack in the stack — so "use the
-real textures" and "use a custom pack" are one code path. Assets are **downloaded, never vendored**:
-`xtask fetch-assets` pulls `client.jar` plus the asset index into `.cache/`, exactly as a launcher does.
+**Requirement: full compatibility with resource packs.** The asset layer speaks the game's on-disk
+format natively. Lodestone's built-in archive is the bottom-most pack in the stack, with user and
+server packs layered above it. [Built-in resource pack](./built-in-resource-pack.md) describes how
+Whimscape artwork is combined with non-image definitions. The source client archive and generated
+block report are fetched into `.cache/`; the Whimscape release is vendored.
 
 Per the version-split rule the **loader is version-free** and the **conventions come from the version
 crate** as an asset profile: `textures/blocks/` (≤1.12) vs `textures/block/` (1.13+), `pack.mcmeta`

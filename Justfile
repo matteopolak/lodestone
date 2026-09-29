@@ -100,8 +100,12 @@ health: check check-all check-seam test check-comment-voice
 # else) is ON by default now, so there is no --features flag: use
 # `cargo run --no-default-features` to reproduce a version-family-free build.
 # cargo run --release -p lodestone-shell --bin lodestone — launch the game
-run *args:
+run *args: stage-resources
     cargo run --release -p lodestone-shell --bin lodestone -- {{args}}
+
+[doc("stage the built-in Whimscape resources over non-image game definitions")]
+stage-resources:
+    python3 web/scripts/stage_resource_pack.py --jar .cache/mc/26.2/client.jar --visual-pack assets/resource-packs/whimscape-26.1-26.3-r2.zip --out .cache/mc/26.2
 
 # scripts/run-wasm.sh — keep the browser build rebuilding on change (`trunk
 # watch`) AND serve it, page plus the /relay WebSocket->TCP bridge, from ONE
@@ -369,7 +373,7 @@ wasm-size:
 
 # The fetch is content-addressed and verifies existing files before skipping,
 # so calling this after an explicit fetch-assets-ci does not redownload them.
-[doc("fetch verified browser assets, including the six SDK panorama faces")]
+[doc("fetch verified game definitions and sound objects for browser staging")]
 fetch-assets-ci:
     cargo run -q -p xtask -- fetch-assets --version 26.2
 
@@ -377,7 +381,7 @@ fetch-assets-ci:
 wasm-sdk output="target/wasm-sdk": fetch-assets-ci
     python3 web/scripts/package_wasm_sdk.py --output-dir {{output}}
 
-[doc("focused SDK packaging checks, including a missing-panorama negative control")]
+[doc("focused SDK packaging checks, including a missing-resource-archive control")]
 test-wasm-sdk:
     python3 web/scripts/test_package_wasm_sdk.py
 

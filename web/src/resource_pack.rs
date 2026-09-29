@@ -1,7 +1,7 @@
 //! Loading and validating browser resource-pack assets.
 //!
-//! A deployment may place `client.jar.parts.json` beside the page to work around
-//! static-host file-size limits, or `client.jar.manifest.json` beside a direct
+//! A deployment may place `lodestone-resources.zip.parts.json` beside the page to work around
+//! static-host file-size limits, or `lodestone-resources.zip.manifest.json` beside a direct
 //! filtered archive. All names in those manifests are plain relative filenames,
 //! so `fetch` resolves them below the page's own base path rather than from the
 //! site's root.
@@ -11,12 +11,12 @@ use serde::Deserialize;
 
 /// Relative manifest URL. It deliberately has no leading slash: Pages may
 /// serve Lodestone below a project subpath.
-pub const PARTS_MANIFEST_URL: &str = "client.jar.parts.json";
+pub const PARTS_MANIFEST_URL: &str = "lodestone-resources.zip.parts.json";
 /// Digest manifest emitted beside the direct filtered archive.
-pub const DIRECT_MANIFEST_URL: &str = "client.jar.manifest.json";
+pub const DIRECT_MANIFEST_URL: &str = "lodestone-resources.zip.manifest.json";
 
 const MANIFEST_VERSION: u32 = 1;
-const PART_PREFIX: &str = "client.jar.part-";
+const PART_PREFIX: &str = "lodestone-resources.zip.part-";
 /// Kept well below Cloudflare Pages' 25 MiB per-file limit so deployment
 /// packaging has room for representation and tooling overhead.
 const MAX_PART_BYTES: u64 = 20 * 1024 * 1024;
@@ -25,7 +25,7 @@ const MAX_PARTS: usize = 128;
 
 /// The digest manifest emitted by `stage_resource_pack.py`.
 #[derive(Debug, Deserialize)]
-pub struct ClientJarManifest {
+pub struct ResourcePackManifest {
     version: u32,
     asset: String,
     bytes: u64,
@@ -33,11 +33,11 @@ pub struct ClientJarManifest {
     entries: usize,
 }
 
-impl ClientJarManifest {
+impl ResourcePackManifest {
     /// Parses and validates an untrusted direct-archive manifest.
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
         let manifest: Self = serde_json::from_slice(bytes)
-            .map_err(|error| format!("client.jar manifest is not valid JSON: {error}"))?;
+            .map_err(|error| format!("lodestone-resources.zip manifest is not valid JSON: {error}"))?;
         manifest.validate()?;
         Ok(manifest)
     }
@@ -45,60 +45,60 @@ impl ClientJarManifest {
     fn validate(&self) -> Result<(), String> {
         if self.version != MANIFEST_VERSION {
             return Err(format!(
-                "client.jar manifest has unsupported version {}",
+                "lodestone-resources.zip manifest has unsupported version {}",
                 self.version
             ));
         }
-        if self.asset != "client.jar" {
-            return Err("client.jar manifest names a different asset".to_string());
+        if self.asset != "lodestone-resources.zip" {
+            return Err("lodestone-resources.zip manifest names a different asset".to_string());
         }
         if self.bytes == 0 || self.bytes > MAX_TOTAL_BYTES {
             return Err(format!(
-                "client.jar manifest total must be 1..={MAX_TOTAL_BYTES} bytes"
+                "lodestone-resources.zip manifest total must be 1..={MAX_TOTAL_BYTES} bytes"
             ));
         }
         if self.entries == 0 || self.entries > 250_000 {
-            return Err("client.jar manifest entry count is outside its bounds".to_string());
+            return Err("lodestone-resources.zip manifest entry count is outside its bounds".to_string());
         }
-        validate_sha256("client.jar manifest", &self.sha256)
+        validate_sha256("lodestone-resources.zip manifest", &self.sha256)
     }
 
     /// Verifies a fetched direct archive before it is installed.
     pub fn verify_download(&self, bytes: &[u8]) -> Result<(), String> {
         if bytes.len() as u64 != self.bytes {
             return Err(format!(
-                "client.jar has {} bytes, expected {}",
+                "lodestone-resources.zip has {} bytes, expected {}",
                 bytes.len(),
                 self.bytes
             ));
         }
-        verify_hash("client.jar", bytes, &self.sha256)
+        verify_hash("lodestone-resources.zip", bytes, &self.sha256)
     }
 }
 
-/// The checked shape produced by `web/scripts/stage_client_jar_parts.py`.
+/// The checked shape produced by `web/scripts/stage_resource_pack_parts.py`.
 #[derive(Debug, Deserialize)]
-pub struct ClientJarParts {
+pub struct ResourcePackParts {
     version: u32,
     asset: String,
     total_bytes: u64,
     sha256: String,
-    parts: Vec<ClientJarPart>,
+    parts: Vec<ResourcePackPart>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ClientJarPart {
+pub struct ResourcePackPart {
     pub name: String,
     pub bytes: u64,
     pub sha256: String,
 }
 
-impl ClientJarParts {
+impl ResourcePackParts {
     /// Parses an untrusted JSON manifest and checks its static invariants
     /// before any part URL is fetched.
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
         let manifest: Self = serde_json::from_slice(bytes)
-            .map_err(|error| format!("client.jar parts manifest is not valid JSON: {error}"))?;
+            .map_err(|error| format!("lodestone-resources.zip parts manifest is not valid JSON: {error}"))?;
         manifest.validate()?;
         Ok(manifest)
     }
@@ -106,24 +106,24 @@ impl ClientJarParts {
     fn validate(&self) -> Result<(), String> {
         if self.version != MANIFEST_VERSION {
             return Err(format!(
-                "client.jar parts manifest has unsupported version {}",
+                "lodestone-resources.zip parts manifest has unsupported version {}",
                 self.version
             ));
         }
-        if self.asset != "client.jar" {
-            return Err("client.jar parts manifest names a different asset".to_string());
+        if self.asset != "lodestone-resources.zip" {
+            return Err("lodestone-resources.zip parts manifest names a different asset".to_string());
         }
         if self.parts.is_empty() || self.parts.len() > MAX_PARTS {
             return Err(format!(
-                "client.jar parts manifest must contain 1..={MAX_PARTS} parts"
+                "lodestone-resources.zip parts manifest must contain 1..={MAX_PARTS} parts"
             ));
         }
         if self.total_bytes == 0 || self.total_bytes > MAX_TOTAL_BYTES {
             return Err(format!(
-                "client.jar parts manifest total must be 1..={MAX_TOTAL_BYTES} bytes"
+                "lodestone-resources.zip parts manifest total must be 1..={MAX_TOTAL_BYTES} bytes"
             ));
         }
-        validate_sha256("client.jar parts manifest", &self.sha256)?;
+        validate_sha256("lodestone-resources.zip parts manifest", &self.sha256)?;
 
         let mut total = 0_u64;
         for (index, part) in self.parts.iter().enumerate() {
@@ -131,24 +131,24 @@ impl ClientJarParts {
             let expected_name = format!("{expected_prefix}{}", part.sha256.to_ascii_lowercase());
             if part.name != expected_name {
                 return Err(format!(
-                    "client.jar parts manifest part {index} must be named {expected_name}, got {}",
+                    "lodestone-resources.zip parts manifest part {index} must be named {expected_name}, got {}",
                     part.name
                 ));
             }
             if part.bytes == 0 || part.bytes > MAX_PART_BYTES {
                 return Err(format!(
-                    "client.jar part {} must be 1..={MAX_PART_BYTES} bytes",
+                    "lodestone-resources.zip part {} must be 1..={MAX_PART_BYTES} bytes",
                     part.name
                 ));
             }
-            validate_sha256(&format!("client.jar part {index}"), &part.sha256)?;
+            validate_sha256(&format!("lodestone-resources.zip part {index}"), &part.sha256)?;
             total = total
                 .checked_add(part.bytes)
-                .ok_or("client.jar parts manifest byte total overflow")?;
+                .ok_or("lodestone-resources.zip parts manifest byte total overflow")?;
         }
         if total != self.total_bytes {
             return Err(format!(
-                "client.jar parts manifest declares {} bytes but parts total {total}",
+                "lodestone-resources.zip parts manifest declares {} bytes but parts total {total}",
                 self.total_bytes
             ));
         }
@@ -162,7 +162,7 @@ impl ClientJarParts {
     }
 
     /// The ordered parts. Callers must fetch these in this exact order.
-    pub fn parts(&self) -> &[ClientJarPart] {
+    pub fn parts(&self) -> &[ResourcePackPart] {
         &self.parts
     }
 
@@ -170,27 +170,27 @@ impl ClientJarParts {
     pub fn verify_complete(&self, bytes: &[u8]) -> Result<(), String> {
         if bytes.len() != self.total_len() {
             return Err(format!(
-                "client.jar reconstruction has {} bytes, expected {}",
+                "lodestone-resources.zip reconstruction has {} bytes, expected {}",
                 bytes.len(),
                 self.total_bytes
             ));
         }
-        verify_hash("reconstructed client.jar", bytes, &self.sha256)
+        verify_hash("reconstructed lodestone-resources.zip", bytes, &self.sha256)
     }
 }
 
-impl ClientJarPart {
+impl ResourcePackPart {
     /// Verifies one downloaded part before it is appended to the jar buffer.
     pub fn verify_download(&self, bytes: &[u8]) -> Result<(), String> {
         if bytes.len() as u64 != self.bytes {
             return Err(format!(
-                "client.jar part {} has {} bytes, expected {}",
+                "lodestone-resources.zip part {} has {} bytes, expected {}",
                 self.name,
                 bytes.len(),
                 self.bytes
             ));
         }
-        verify_hash(&format!("client.jar part {}", self.name), bytes, &self.sha256)
+        verify_hash(&format!("lodestone-resources.zip part {}", self.name), bytes, &self.sha256)
     }
 }
 
@@ -219,25 +219,25 @@ mod tests {
     const AB_SHA256: &str = "fb8e20fc2e4c3f248c60c39bd652f3c1347298bb977b8b4d5903b85055620603";
 
     fn part_name(index: usize, digest: &str) -> String {
-        format!("client.jar.part-{index:03}-{digest}")
+        format!("lodestone-resources.zip.part-{index:03}-{digest}")
     }
 
     fn manifest(part_name: &str, part_bytes: u64, total_bytes: u64) -> String {
         format!(
-            r#"{{"version":1,"asset":"client.jar","total_bytes":{total_bytes},"sha256":"{A_SHA256}","parts":[{{"name":"{part_name}","bytes":{part_bytes},"sha256":"{A_SHA256}"}}]}}"#
+            r#"{{"version":1,"asset":"lodestone-resources.zip","total_bytes":{total_bytes},"sha256":"{A_SHA256}","parts":[{{"name":"{part_name}","bytes":{part_bytes},"sha256":"{A_SHA256}"}}]}}"#
         )
     }
 
     fn two_part_manifest() -> String {
         format!(
-            r#"{{"version":1,"asset":"client.jar","total_bytes":2,"sha256":"{AB_SHA256}","parts":[{{"name":"client.jar.part-000-{A_SHA256}","bytes":1,"sha256":"{A_SHA256}"}},{{"name":"client.jar.part-001-{B_SHA256}","bytes":1,"sha256":"{B_SHA256}"}}]}}"#
+            r#"{{"version":1,"asset":"lodestone-resources.zip","total_bytes":2,"sha256":"{AB_SHA256}","parts":[{{"name":"lodestone-resources.zip.part-000-{A_SHA256}","bytes":1,"sha256":"{A_SHA256}"}},{{"name":"lodestone-resources.zip.part-001-{B_SHA256}","bytes":1,"sha256":"{B_SHA256}"}}]}}"#
         )
     }
 
     #[test]
     fn accepts_an_ordered_bounded_manifest() {
         let name = part_name(0, A_SHA256);
-        let parsed = ClientJarParts::parse(manifest(&name, 1, 1).as_bytes())
+        let parsed = ResourcePackParts::parse(manifest(&name, 1, 1).as_bytes())
             .expect("valid manifest");
         assert_eq!(parsed.parts()[0].name, name);
         assert_eq!(parsed.total_len(), 1);
@@ -245,7 +245,7 @@ mod tests {
 
     #[test]
     fn verifies_downloaded_parts_and_their_reconstructed_order() {
-        let parsed = ClientJarParts::parse(two_part_manifest().as_bytes())
+        let parsed = ResourcePackParts::parse(two_part_manifest().as_bytes())
             .expect("ordered two-part manifest");
         parsed.parts()[0].verify_download(b"a").expect("first part");
         parsed.parts()[1].verify_download(b"b").expect("second part");
@@ -255,14 +255,14 @@ mod tests {
 
     #[test]
     fn rejects_out_of_order_part_names() {
-        let error = ClientJarParts::parse(manifest(&part_name(1, A_SHA256), 1, 1).as_bytes())
+        let error = ResourcePackParts::parse(manifest(&part_name(1, A_SHA256), 1, 1).as_bytes())
             .expect_err("the sequence is part of the integrity contract");
-        assert!(error.contains("must be named client.jar.part-000"));
+        assert!(error.contains("must be named lodestone-resources.zip.part-000"));
     }
 
     #[test]
     fn rejects_parts_over_the_hosting_limit() {
-        let error = ClientJarParts::parse(
+        let error = ResourcePackParts::parse(
             manifest(&part_name(0, A_SHA256), MAX_PART_BYTES + 1, MAX_PART_BYTES + 1).as_bytes(),
         )
         .expect_err("oversized part");
@@ -271,14 +271,14 @@ mod tests {
 
     #[test]
     fn rejects_manifest_size_mismatches() {
-        let error = ClientJarParts::parse(manifest(&part_name(0, A_SHA256), 1, 2).as_bytes())
+        let error = ResourcePackParts::parse(manifest(&part_name(0, A_SHA256), 1, 2).as_bytes())
             .expect_err("declared total must be exact");
         assert!(error.contains("parts total"));
     }
 
     #[test]
     fn rejects_a_truncated_or_tampered_download() {
-        let parsed = ClientJarParts::parse(manifest(&part_name(0, A_SHA256), 1, 1).as_bytes())
+        let parsed = ResourcePackParts::parse(manifest(&part_name(0, A_SHA256), 1, 1).as_bytes())
             .expect("valid manifest");
         assert!(parsed.parts()[0].verify_download(b"").is_err());
         assert!(parsed.verify_complete(b"b").is_err());
@@ -286,8 +286,8 @@ mod tests {
 
     #[test]
     fn rejects_arbitrary_or_traversing_part_names() {
-        for name in ["../client.jar", "client.jar.part-000", "client.jar.part-000-not-a-digest"] {
-            let error = ClientJarParts::parse(manifest(name, 1, 1).as_bytes())
+        for name in ["../lodestone-resources.zip", "lodestone-resources.zip.part-000", "lodestone-resources.zip.part-000-not-a-digest"] {
+            let error = ResourcePackParts::parse(manifest(name, 1, 1).as_bytes())
                 .expect_err("only content-addressed sibling names are safe to fetch");
             assert!(error.contains("must be named"), "unexpected error for {name}: {error}");
         }
@@ -296,21 +296,21 @@ mod tests {
     #[test]
     fn accepts_and_verifies_a_direct_archive_manifest() {
         let manifest = format!(
-            r#"{{"version":1,"asset":"client.jar","bytes":1,"sha256":"{A_SHA256}","entries":1}}"#
+            r#"{{"version":1,"asset":"lodestone-resources.zip","bytes":1,"sha256":"{A_SHA256}","entries":1}}"#
         );
-        let parsed = ClientJarManifest::parse(manifest.as_bytes()).expect("valid direct manifest");
+        let parsed = ResourcePackManifest::parse(manifest.as_bytes()).expect("valid direct manifest");
         parsed.verify_download(b"a").expect("matching archive");
     }
 
     #[test]
     fn rejects_a_direct_manifest_for_a_corrupt_archive() {
         let manifest = format!(
-            r#"{{"version":1,"asset":"client.jar","bytes":1,"sha256":"{A_SHA256}","entries":1}}"#
+            r#"{{"version":1,"asset":"lodestone-resources.zip","bytes":1,"sha256":"{A_SHA256}","entries":1}}"#
         );
-        let parsed = ClientJarManifest::parse(manifest.as_bytes()).expect("valid direct manifest");
+        let parsed = ResourcePackManifest::parse(manifest.as_bytes()).expect("valid direct manifest");
         assert!(parsed.verify_download(b"b").is_err());
-        assert!(ClientJarManifest::parse(
-            br#"{"version":1,"asset":"client.jar","bytes":1,"sha256":"bad","entries":1}"#
+        assert!(ResourcePackManifest::parse(
+            br#"{"version":1,"asset":"lodestone-resources.zip","bytes":1,"sha256":"bad","entries":1}"#
         )
         .is_err());
     }

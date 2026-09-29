@@ -119,12 +119,11 @@ deadline and *look* like a failure.
 
 ### Assets: the build succeeds without them, the page does not
 
-The page needs two files served beside it — the deterministic filtered `client.jar`
-(about 5.7 MiB raw, containing every `assets/` entry plus the recipe and item-tag
-data consumed by the browser) and `blocks.json` (6.5 MiB, the block-state id table).
-The archive is built from `.cache/mc/26.2/client.jar` by the `post_build` hook in
-`Trunk.toml`; JVM classes, signatures, and unused data are excluded after the
-source archive passes a CRC check. A digest manifest is staged beside the archive
+The page needs two files served beside it — `lodestone-resources.zip` (Whimscape
+art over non-image game definitions) and `blocks.json` (the block-state id table).
+The archive is built from `.cache/mc/26.2/client.jar` and the vendored Whimscape
+pack by the `post_build` hook in `Trunk.toml`; base images and unused data are
+excluded after both source archives pass CRC checks. A digest manifest is staged beside the archive
 and the browser verifies it before installing the pack. Both files are staged
 **only if their sources exist**. They arrive by two different routes:
 
@@ -159,13 +158,12 @@ Pass `logLevel: "debug"` to the embedding API, or open the standalone page with
 console. Supported levels are `off`, `error`, `warn`, `info`, `debug`, and `trace`;
 the default is `warn` so diagnostics do not affect ordinary play.
 
-The standalone adapter fetches `client.jar` and `blocks.json` concurrently. When a
+The standalone adapter fetches `lodestone-resources.zip` and `blocks.json` concurrently. When a
 multipart jar manifest is present, all authenticated parts are fetched concurrently,
 then copied into their declared order before the whole-archive digest is checked. The
 completed required blobs stay as transferable `ArrayBuffer`s across the page-to-render-
 worker boundary; the worker's mount boundary performs the single Wasm-owned byte copy.
-Optional panorama assets are fetched by that worker only when the title screen requests
-them, avoiding a discarded page-side prefetch.
+The panorama is part of the same resource archive.
 
 ```sh
 cargo xtask fetch-assets --version 26.2   # -> .cache/mc/26.2/client.jar
@@ -188,24 +186,24 @@ siblings of the filtered archive instead of the direct jar:
 
 ```sh
 python3 web/scripts/stage_resource_pack.py \
-  --jar .cache/mc/26.2/client.jar --out web/dist
-python3 web/scripts/stage_client_jar_parts.py \
-  --jar web/dist/client.jar --out web/dist
-rm web/dist/client.jar  # do not package the over-limit development fallback
+  --jar .cache/mc/26.2/client.jar \
+  --visual-pack assets/resource-packs/whimscape-26.1-26.3-r2.zip --out web/dist
+python3 web/scripts/stage_resource_pack_parts.py \
+  --jar web/dist/lodestone-resources.zip --out web/dist
+rm web/dist/lodestone-resources.zip  # package only the parts for capped hosts
 ```
 
-The output is `client.jar.parts.json` plus content-addressed names such as
-`client.jar.part-000-<sha256>`. The manifest records exact byte sizes and SHA-256
+The output is `lodestone-resources.zip.parts.json` plus content-addressed names such as
+`lodestone-resources.zip.part-000-<sha256>`. The manifest records exact byte sizes and SHA-256
 digests for every part and the reconstructed archive; the browser rejects bad
 order, path, size, or hash rather than starting with corrupt assets. Part names
 change with their content and the browser fetches the mutable manifest with
 `cache: "no-store"`, so a new deployment cannot combine a fresh manifest with a
 previous deployment's cached part. Names are plain relative URLs, so a deployment
-under `/lodestone/` fetches its own sibling assets, not `/client.jar` at the domain
-root. `just run-wasm` and ordinary `trunk` work continue to use the direct filtered
-`client.jar`: when the parts manifest returns 404, the browser validates the direct
-archive manifest instead. A manually staged unfiltered archive remains supported
-when both manifests return 404. To make Trunk emit parts directly, run
+under `/lodestone/` fetches its own sibling assets, not a domain-root archive.
+`just run-wasm` and ordinary `trunk` use the direct merged archive: when the parts
+manifest returns 404, the browser validates the direct archive manifest instead.
+To make Trunk emit parts directly, run
 `LODESTONE_WEB_CLIENT_JAR_PARTS=1 trunk build --release`.
 
 They used to be `data-trunk rel="copy-file"` links in `index.html`, i.e. a
@@ -213,15 +211,10 @@ build-time hard dependency on 46 MB of gitignored files. That made `trunk build`
 fail outright on every CI runner and on every contributor's first build, with the
 real cause buried (see `docs/ci.md`).
 
-**The panorama faces and the sound corpus are optional for development**:
-unpopulated caches do not stop `trunk serve` or `just run-wasm`, only from
-looking/sounding as intended — a missing panorama face falls back to
-`client.jar`'s flat grey stub, and a missing sound corpus leaves the browser's
-`ShellAudio` disabled with a logged reason, exactly as a native checkout with
-no `.ogg` corpus fetched degrades. Both are staged by conditional `post_build`
-hooks — see `scripts/stage_panorama.py`/`scripts/stage_sounds.py`. The release
-SDK path is stricter: `just wasm-sdk` runs `just fetch-assets-ci` first and
-requires all six staged panorama faces, recording them in the archive manifest.
+The sound corpus is optional for development. A missing sound corpus leaves
+`ShellAudio` disabled with a logged reason, just as a native checkout with no
+`.ogg` corpus fetched degrades. The panorama is required artwork inside the
+built-in resource archive. Sound staging is in `scripts/stage_sounds.py`.
 
 ### Relay tooling (optional)
 
@@ -243,8 +236,8 @@ rather than running it as a spawned child. It serves the built page out of
 answers `/relay` as a WebSocket upgrade bridged to `--target` — one listener,
 one process, so there is no second port and nothing to keep in sync by hand.
 Static misses return HTTP 404 rather than the page shell. This is part of the
-asset-loader contract: `client.jar.parts.json` is optional, and its 404 selects
-the direct `client.jar`; serving `index.html` with status 200 at that path makes
+asset-loader contract: `lodestone-resources.zip.parts.json` is optional, and its 404 selects
+the direct archive; serving `index.html` with status 200 at that path makes
 the missing manifest look present and fail later as invalid JSON.
 
 This relay exists only with the server's default `multiplayer` feature. A
@@ -596,15 +589,13 @@ error into a runtime crash, which is strictly worse and invisible to `cargo chec
 
 ```
 web/
-  index.html          data-trunk links: rust app; client.jar/blocks.json are
+  index.html          data-trunk links: rust app; resource pack/blocks.json are
                        fetched at runtime, not linked here — see "Assets" above
   Trunk.toml           dev-server config for standalone `trunk serve` (page-only,
                        no relay) — COOP/COEP headers, post_build asset hooks
   scripts/
-    stage_resource_pack.py stages the complete browser resource surface as a
-                        deterministic, digest-verified filtered archive
+    stage_resource_pack.py stages Whimscape art over non-image game definitions
     test_stage_resource_pack.py controls the staging filter and corruption paths
-    stage_panorama.py post_build hook: stages real panorama faces if present
     stage_sounds.py    post_build hook: stages a curated .ogg sound subset
                         plus the full sounds.json registry, if present — see
                         its own module doc for the curated event list and the

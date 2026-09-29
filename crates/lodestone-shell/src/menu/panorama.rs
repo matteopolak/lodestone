@@ -1,103 +1,30 @@
-//! The title screen's spinning cubemap panorama.
+//! The menu's spinning cubemap background.
 //!
-//! ## What it is
+//! [`load`] decodes six resource images into [`PanoramaFaces`]; [`assemble`]
+//! stacks them in [`FACE_SUFFIXES`] order and flips their rows vertically.
+//! An optional object source overrides the resource manager per face. The
+//! source count records provenance only; image dimensions and content depend
+//! on the selected resources.
 //!
-//! Vanilla's title screen background is **not** a world render and not a scrolling
-//! image: it is a unit cube, textured with a six-face cubemap, viewed from the
-//! inside through an 85° perspective, tilted 10° down and yawed slowly. The whole
-//! thing is vanilla's own cube-map type + its own panorama type + `panorama.{vsh,fsh}`, all four of
-//! which are short, and this module is their port.
+//! [`PanoramaRenderer`] samples the cube by direction with linear filtering and
+//! draws before the menu quads in the same render pass. [`view_projection`]
+//! supplies an 85° vertical perspective, a 180° X rotation, a 10° downward tilt,
+//! and the negated spin accumulator. Spin uses real time at [`TICKS_PER_SECOND`]
+//! and [`SPIN_DEGREES_PER_TICK`], giving 2°/s at [`DEFAULT_SPIN_SPEED`].
 //!
-//! [`PanoramaFaces`] is the CPU half (decode + stack the six PNGs) and
-//! [`PanoramaRenderer`] the GPU half (cube texture, pipeline, 36-vertex buffer,
-//! spin state). `menu/render.rs` owns exactly three lines of it: a field, a lazy
-//! attach, and a draw before the menu's own quads.
-//!
-//! ## How it works
-//!
-//! Six things fix the image, and five of them are easy to get plausibly wrong —
-//! a scrambled sky still looks like a sky. Each is a named constant below with
-//! its source line:
-//!
-//! 1. **Face order.** `CubeMapTexture.SUFFIXES` is `_1, _3, _5, _4, _0, _2`
-//!    ([`FACE_SUFFIXES`]) — **not** `0..5`. Layer `n` of a cubemap is
-//!    `+X, -X, +Y, -Y, +Z, -Z`, so `panorama_1` is +X and `panorama_0` is +Z.
-//! 2. **Each face is flipped vertically** as it is stacked
-//!    (`copyRect(…, swapX = false, swapY = true)`, vanilla's own cube-map-texture type;
-//!    `swapY` writes source row `y` to target row `h-1-y`).
-//! 3. **The sampler is Linear**, from `TextureMetadataSection(blur = true, …)`
-//!   . Almost every other menu texture in this repo is
-//!    Nearest; this one is deliberately not.
-//! 4. **The geometry carries no UVs** — `DefaultVertexFormat.POSITION`, 24
-//!    vertices, 6 quads ([`CUBE_QUADS`]). The fragment stage samples by
-//!    *direction*, using the object-space position verbatim.
-//! 5. **The projection is perspective**, FOV 85° vertical, near 0.05, far 10.0
-//!    (vanilla's own cube-map type; `Projection` feeds `fov` to JOML's `setPerspective`,
-//!    whose first argument is `fovy`).
-//! 6. **The model-view is `rotationX(PI)` then `rotateX(10°)` then
-//!    `rotateY(spin)`**, where the 10° comes from
-//!    vanilla's own gui-renderer's `cubeMap.render(10.0F, spin)` call and `spin` is the
-//!    **negated** accumulator (vanilla's own panorama type passes `-this.spin`).
-//!
-//! Spin accumulates as `wrapDegrees(spin + realtimeDeltaTicks * panoramaSpeed *
-//! 0.1)`. Note *realtime* delta ticks: the title screen
-//! has no world clock, so [`PanoramaRenderer::advance`] measures wall time and
-//! converts at [`TICKS_PER_SECOND`]. At the default `panoramaSpeed` of 1.0
-//! that is 2°/s — a three-minute revolution, which is
-//! slow enough that "it looks static" is not evidence of a bug. (It *was* also
-//! genuinely invisible for one commit, for a different reason: the faces were
-//! being read from the jar's 1×1 stubs, and a solid-coloured cube looks identical
-//! at every yaw. Both explanations are live; check
-//! [`PanoramaFaces::from_object_store`] before believing either.)
-//!
-//! ## Where the faces come from — not the jar
-//!
-//! **`client.jar` ships a 69-byte 1×1 grey stub for all six faces.** The real
-//! 1024×1024 art is delivered through the launcher's asset-object store, and
-//! [`load`] prefers that store per face, falling back to the stub so a checkout
-//! with an unpopulated store still runs. [`crate::asset_objects`] holds the
-//! measurement and the reason this is only eight names in the whole game;
-//! [`PanoramaFaces::from_object_store`] is how a caller tells the two apart,
-//! because a flat-grey cubemap renders perfectly and is not the game.
-//!
-//! ## What this deliberately does not do
-//!
-//! **`panorama_overlay.png` is not drawn — and this is now measured on the real
-//! object, not on the jar's copy.** Vanilla blits it over the panorama at texture
-//! size 16×128, tiled to the full screen. The asset-store
-//! object (hash `9dd32387…`, 86 bytes) decodes to **1×1 RGBA, one distinct value,
-//! `(255, 255, 255, 0)`, alpha extrema `(0, 0)`** — confirmed by hexdump: the
-//! IHDR is `1×1`, colour type 6, and the whole IDAT is `ff ff ff 00`. The 86 vs
-//! the jar stub's 68 bytes is a `gAMA` chunk, not content. Blitting a fully
-//! transparent texture cannot change a pixel, so drawing it would be provable
-//! dead code. Adding it if a future pack makes it real means one more textured
-//! quad on the existing menu-sprite pipeline, not another pass.
-//!
-//! **There is no blur.** `Screen.extractBlurredBackground` blurs whatever is
-//! behind a menu when `menuBackgroundBlurriness >= 1`; at the option's 0 this is
-//! exactly vanilla, above it vanilla reads calmer. Same gap `OVERLAY_BG` already
-//! documents in `menu/render.rs`.
-//!
-//! ## How to change it
-//!
-//! Every vanilla number is a `pub const` here with its source line, and the
-//! matrices are built by [`view_projection`], which is a free function precisely
-//! so a test can assert against it without a GPU. The riskiest edit is
-//! [`FACE_SUFFIXES`]: reorder it and the sky still renders, just wrong.
-//! [`assemble`]'s test pins both the order and the flip against synthetic faces
-//! whose rows encode their own index.
+//! Preserve the face order, vertical flip, and rotation signs when changing the
+//! geometry or image loader; their tests use row markers and projected face
+//! centres to distinguish orientation errors.
 
 use crate::platform::Instant;
 
 use glam::Mat4;
 use lodestone_assets::Image;
 
-/// In-pack path prefix of the cubemap — vanilla's own gui-renderer builds
-/// this default-namespaced path,
-/// which `CubeMapTexture` then suffixes.
+/// Resource-pack path prefix, completed with [`FACE_SUFFIXES`] and `.png`.
 pub const PANORAMA_BASE: &str = "assets/minecraft/textures/gui/title/background/panorama";
 
-/// The per-face suffixes **in cubemap layer order** — `CubeMapTexture.SUFFIXES`.
+/// Per-face suffixes in cubemap layer order.
 ///
 /// Layer order for a cubemap is `+X, -X, +Y, -Y, +Z, -Z`, so this reads: `+X` is
 /// `panorama_1`, `-X` is `panorama_3`, `+Y` (up) is `panorama_5`, `-Y` (down) is
@@ -106,58 +33,37 @@ pub const PANORAMA_BASE: &str = "assets/minecraft/textures/gui/title/background/
 /// obvious failure.
 pub const FACE_SUFFIXES: [&str; 6] = ["_1", "_3", "_5", "_4", "_0", "_2"];
 
-/// The overlay vanilla blits over the panorama. Not drawn — see the module docs
-/// for the measurement that makes it a provable no-op in 26.2.
+/// Resource-pack path for the panorama overlay image.
 pub const PANORAMA_OVERLAY_PATH: &str =
     "assets/minecraft/textures/gui/title/background/panorama_overlay.png";
 
-/// Vertical field of view, in degrees — `CubeMap.PROJECTION_FOV`.
+/// Vertical field of view, in degrees.
 pub const FOV_DEGREES: f32 = 85.0;
-/// Near plane — `CubeMap.PROJECTION_Z_NEAR`.
+/// Near clipping plane.
 pub const Z_NEAR: f32 = 0.05;
-/// Far plane — `CubeMap.PROJECTION_Z_FAR`.
+/// Far clipping plane.
 pub const Z_FAR: f32 = 10.0;
-/// Downward tilt applied before the yaw — vanilla's own gui-renderer passes `10.0F`
-/// as `CubeMap.render`'s `rotXInDegrees`.
+/// Downward tilt applied before the yaw, in degrees.
 pub const TILT_DEGREES: f32 = 10.0;
-/// Degrees of yaw per tick at speed 1.0 — vanilla's own panorama type's `delta * 0.1F`.
+/// Degrees of yaw per tick at speed 1.0.
 pub const SPIN_DEGREES_PER_TICK: f32 = 0.1;
-/// `panoramaSpeed`'s default — vanilla's `Options::panoramaSpeed` field, a
-/// `UnitDouble` constructed with `1.0`.
-///
-/// This is the seed [`PanoramaRenderer::new`] starts at, **not** the value the
-/// title screen runs at: the option is live now, and
-/// `MenuRenderer::render_inner` pushes it through
-/// [`PanoramaRenderer::set_speed`] on every frame. This doc used to end *"The
-/// option itself is not wired into this repo's settings screen yet"* — true when
-/// written, and the reason `set_speed` sat there with zero callers.
+/// Initial speed multiplier, replaced by the current menu setting each frame.
 pub const DEFAULT_SPIN_SPEED: f32 = 1.0;
-/// Ticks per real second, for turning `Instant` deltas into vanilla's
-/// `getRealtimeDeltaTicks()`.
+/// Ticks per real second for converting [`Instant`] deltas.
 pub const TICKS_PER_SECOND: f32 = 20.0;
 
 /// How much `textures/gui/menu_background.png` darkens whatever is behind it.
 ///
 /// The file is 16×16 and **every pixel is grey 0, alpha 64** (measured out of
 /// 26.2's `client.jar`; `inworld_menu_background.png` is byte-identical), so
-/// vanilla's tiled 32 px blit is a flat 25 %-black wash and compositing it is a
-/// multiply by `1 - 64/255`. Vanilla applies it to every out-of-world screen
-/// **except** the title screen, whose `extractBackground` override is empty.
+/// the tiled image is a flat black wash: compositing multiplies by
+/// `1 - 64/255`. It applies to out-of-world menus except the title screen.
 pub const MENU_BACKGROUND_DIM: f32 = 64.0 / 255.0;
 
 /// How much to darken the panorama on a given screen.
 ///
-/// Vanilla's `Screen.extractBackground` draws, out of world: the panorama, then
-/// the blur, then `menu_background.png` — so every out-of-world screen wears the
-/// [`MENU_BACKGROUND_DIM`] wash. `TitleScreen` is the exception, and it is an
-/// *override* rather than a special case in the base class: `TitleScreen`'s
-/// `extractBackground` is empty and it draws the
-/// panorama itself from `extractRenderState` (`:307`), so the title screen gets
-/// the raw cubemap with nothing over it.
-///
-/// This is the constant most likely to be "corrected" by someone comparing the
-/// title screen to a screenshot of the server list and concluding they should
-/// match. They should not.
+/// The title screen uses the raw cubemap; other out-of-world menus apply
+/// [`MENU_BACKGROUND_DIM`], matching the black wash from `menu_background.png`.
 #[must_use]
 pub fn dim_for_screen(is_title_screen: bool) -> f32 {
     if is_title_screen {
@@ -167,12 +73,8 @@ pub fn dim_for_screen(is_title_screen: bool) -> f32 {
     }
 }
 
-/// The unit cube, as vanilla lists it: six quads of four corners, verbatim from
-/// `CubeMap.initializeVertices`, in that order.
-///
-/// Quads rather than triangles so the transcription can be diffed against the
-/// Java line-for-line; [`cube_vertices`] expands each into vanilla's own two
-/// triangles.
+/// Six unit-cube faces, each with four corners; [`cube_vertices`] expands them
+/// into triangles.
 pub const CUBE_QUADS: [[[f32; 3]; 4]; 6] = [
     // +Z: the face you are looking at when spin = 0.
     [
@@ -221,12 +123,8 @@ pub const CUBE_QUADS: [[[f32; 3]; 4]; 6] = [
 /// Number of vertices [`cube_vertices`] emits: 6 quads × 2 triangles × 3.
 pub const CUBE_VERTEX_COUNT: usize = 36;
 
-/// The cube as a triangle list, using vanilla's own quad→triangle split.
-///
-/// Vanilla's own sequential-buffer helper for the quads primitive topology emits
-/// `0, 1, 2, 2, 3, 0` per quad, and `CubeMap.render` draws 36 indices over the 24
-/// vertices. Expanding to 36 vertices here costs 144 bytes and removes the index
-/// buffer entirely.
+/// The cube as a triangle list, splitting each quad at `0, 1, 2, 2, 3, 0`.
+/// Expanding to 36 vertices avoids an index buffer.
 #[must_use]
 pub fn cube_vertices() -> Vec<f32> {
     let mut out = Vec::with_capacity(CUBE_VERTEX_COUNT * 3);
@@ -238,13 +136,8 @@ pub fn cube_vertices() -> Vec<f32> {
     out
 }
 
-/// Vanilla's `Mth.wrapDegrees(float)`: reduce to
-/// `[-180, 180)`.
-///
-/// Ported rather than replaced with a `rem_euclid` because the accumulator is
-/// *observable* — [`PanoramaRenderer::spin_degrees`] is what a test asserts on,
-/// and a different-but-equivalent range would make those numbers disagree with
-/// vanilla's for no reason.
+/// Reduce an angle to `[-180, 180)`, the range exposed by
+/// [`PanoramaRenderer::spin_degrees`].
 #[must_use]
 pub fn wrap_degrees(angle: f32) -> f32 {
     let mut normalized = angle % 360.0;
@@ -259,14 +152,11 @@ pub fn wrap_degrees(angle: f32) -> f32 {
 
 /// The combined projection × model-view for a given canvas and spin.
 ///
-/// `CubeMap.render` sets the model-view stack to `rotationX(PI)`, then
-/// `rotateX(10°)`, then `rotateY(rotY)`. JOML's `rotationX` *sets* the matrix
-/// (it is not a multiply) and `rotateX`/`rotateY` post-multiply, in the same
-/// column-major, column-vector convention `glam` uses — so this is a direct
-/// transcription, not a re-derivation.
+/// The model-view uses a 180° X rotation, then [`TILT_DEGREES`] around X,
+/// then yaw around Y, with `glam`'s column-vector convention.
 ///
-/// `spin_degrees` is the value handed to `CubeMap.render`, i.e. already negated
-/// relative to [`PanoramaRenderer::spin_degrees`].
+/// `spin_degrees` is already negated relative to
+/// [`PanoramaRenderer::spin_degrees`].
 #[must_use]
 pub fn view_projection(width: u32, height: u32, spin_degrees: f32) -> Mat4 {
     let aspect = if height == 0 {
@@ -297,21 +187,10 @@ pub struct PanoramaFaces {
     /// `size * size * 6 * 4` bytes: layer 0 first, each layer a top-down RGBA8
     /// image of the (already vertically flipped) source face.
     ///
-    /// At vanilla's real 1024×1024 this is **25 MB**, held only until
-    /// [`PanoramaRenderer::new`] has uploaded it (`ensure_panorama` drops the
-    /// `Arc` at the end of its block). Do not cache it.
+    /// Six 1024×1024 faces occupy 24 MiB. Release the CPU copy after upload.
     pub rgba: Vec<u8>,
-    /// How many of the six faces came from the launcher's asset-object store
-    /// rather than from `client.jar`.
-    ///
-    /// **6 is the real art; 0 means every face is a jar stub.** This is not
-    /// diagnostic decoration — the jar ships 1×1 grey stubs for all six faces
-    /// (see [`crate::asset_objects`]), so a panorama built entirely from the jar
-    /// renders a flat colour and *looks* like a working-but-boring sky. A gate
-    /// that means to measure the real cubemap must assert this is 6.
-    ///
-    /// [`assemble`] leaves this 0 because it does not know where its `Image`s came
-    /// from; [`load`] sets it.
+    /// Faces supplied by the optional object store instead of the resource pack.
+    /// This records provenance, not whether the images contain useful artwork.
     pub from_object_store: usize,
 }
 
@@ -322,19 +201,12 @@ impl PanoramaFaces {
         (self.size as usize) * (self.size as usize) * 4
     }
 
-    /// Whether all six faces came from the object store, i.e. whether this is
-    /// vanilla's real panorama rather than the jar's stubs.
-    #[must_use]
-    pub fn is_real_art(&self) -> bool {
-        self.from_object_store == 6
-    }
 }
 
 /// Stack six already-decoded faces into [`PanoramaFaces`].
 ///
 /// `faces` must already be in [`FACE_SUFFIXES`] order — that is, `faces[0]` is
-/// `panorama_1`. Each is flipped vertically on the way in, mirroring
-/// `CubeMapTexture.loadContents`'s `copyRect(…, swapY = true)`.
+/// `panorama_1`. Source row `y` becomes target row `size - 1 - y`.
 ///
 /// # Errors
 ///
@@ -376,7 +248,6 @@ pub fn assemble(faces: &[Image; 6]) -> Result<PanoramaFaces, String> {
         }
         let base = index * layer;
         for y in 0..size as usize {
-            // `swapY`: source row `y` lands in target row `size - 1 - y`.
             let dst_row = size as usize - 1 - y;
             let src = &face.rgba[y * stride..y * stride + stride];
             rgba[base + dst_row * stride..base + dst_row * stride + stride].copy_from_slice(src);
@@ -406,25 +277,13 @@ pub fn face_jar_path(layer: usize) -> String {
     format!("{PANORAMA_BASE}{}.png", FACE_SUFFIXES[layer % 6])
 }
 
-/// Read and assemble the cubemap, **preferring the asset-object store over the
-/// jar** for every face.
+/// Read and assemble six faces from an optional object source and resource packs.
 ///
-/// That preference is the whole point of this function rather than a detail.
-/// `client.jar` ships a 69-byte 1×1 grey stub for all six faces and the real
-/// 1024×1024 art is delivered through the asset index; reading the jar gives you
-/// a flat colour that renders perfectly and is not the game. See
-/// [`crate::asset_objects`] for the measurement and the eight-name scope.
-///
-/// The jar is still the fallback, per face, so a checkout with no populated
-/// object store keeps a working (if flat) title screen instead of failing. What
-/// came from where is reported in [`PanoramaFaces::from_object_store`] — a caller
-/// that cares must read it, because the two are visually indistinguishable from
-/// "it drew something".
-///
-/// `objects` is a trait object rather than a concrete
-/// [`AssetObjectStore`](crate::asset_objects::AssetObjectStore) so a caller with
-/// no filesystem (wasm32) can hand in a pre-fetched, in-memory source instead —
-/// see [`crate::asset_objects::ObjectBytesSource`].
+/// A supplied [`ObjectBytesSource`](crate::asset_objects::ObjectBytesSource)
+/// overrides the resource manager per face and can be backed by memory on wasm.
+/// Missing object bytes fall back to the manager's resource-pack stack.
+/// [`PanoramaFaces::from_object_store`] counts the faces supplied by `objects`;
+/// it does not classify their artwork.
 ///
 /// # Errors
 ///
@@ -439,18 +298,18 @@ pub fn load(
     for layer in 0..6 {
         let jar_path = face_jar_path(layer);
         let key = face_index_key(layer);
-        // Object store first; the jar entry is a stub whenever both exist.
+        // An explicitly supplied object store overrides the pack for this face.
         let (bytes, whence) = match objects.and_then(|store| store.object_bytes(&key)) {
             Some(bytes) => {
                 from_store += 1;
                 (bytes, "object store")
             }
             None => match manager.read(&jar_path) {
-                Some(bytes) => (bytes, "client.jar (stub)"),
+                Some(bytes) => (bytes, "resource pack"),
                 None => {
                     return Err(format!(
                         "panorama face {} is in neither the asset-object store \
-                         (key {key}) nor client.jar ({jar_path})",
+                         (key {key}) nor resource pack ({jar_path})",
                         FACE_SUFFIXES[layer]
                     ));
                 }
@@ -471,16 +330,9 @@ pub fn load(
 /// GPU renderer for the panorama: cube texture, its own pipeline and bind group,
 /// a static 36-vertex buffer, and the spin accumulator.
 ///
-/// Drawn **into the menu's existing render pass**, first, before any menu quad —
-/// so it needs no pass of its own and no change to `app.rs`'s frame loop. It has
-/// no depth attachment and `cull_mode: None`: from a point inside a convex box
-/// every ray exits through exactly one face, and everything on the near side of
-/// the camera is removed by the near plane, so no pixel is covered twice and
-/// there is nothing for a depth test or a winding rule to arbitrate. That is a
-/// deliberate divergence from vanilla's `RenderPipelines.PANORAMA`, which leaves
-/// the builder's `withCull(true)` default on — it produces the same image without
-/// depending on a screen-space winding polarity, which this repo has got backwards
-/// before (see `CLAUDE.md`, "the GUI winding invariant is negative").
+/// Draws before menu quads in their existing render pass. Depth and culling are
+/// unnecessary: each ray from inside the cube exits through one face, while
+/// geometry behind the camera is clipped.
 #[derive(Debug)]
 pub struct PanoramaRenderer {
     pipeline: wgpu::RenderPipeline,
@@ -490,12 +342,11 @@ pub struct PanoramaRenderer {
     /// Kept alive because the bind group's view is derived from it.
     #[allow(dead_code)]
     texture: wgpu::Texture,
-    /// [`PanoramaFaces::from_object_store`], carried through so a gate can assert
-    /// it is bound to the real art rather than the jar's flat stubs.
+    /// [`PanoramaFaces::from_object_store`], carried through for provenance.
     from_object_store: usize,
-    /// The accumulator, in vanilla's sign. Negated on the way to the matrix.
+    /// Yaw accumulator, negated on the way to the matrix.
     spin: f32,
-    /// `panoramaSpeed`.
+    /// Speed multiplier from the current menu setting.
     speed: f32,
     /// When [`Self::advance`] last ran. `None` until the first frame, whose delta
     /// is therefore zero rather than "however long the process has been up".
@@ -580,11 +431,7 @@ impl PanoramaRenderer {
             array_layer_count: Some(6),
             ..Default::default()
         });
-        // blur = true -> Linear, unlike the Nearest every other menu texture
-        // uses. Address modes are irrelevant for a cubemap (the coordinate is a
-        // direction, and face selection is not an address wrap), so vanilla's
-        // clamp = false is not reproduced as Repeat: ClampToEdge is what keeps
-        // the filter from reaching past a face edge.
+        // Direction sampling uses linear filtering; clamp at face edges.
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("menu-panorama-sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -727,30 +574,22 @@ impl PanoramaRenderer {
 
     /// How many of the six bound faces came from the asset-object store —
     /// [`PanoramaFaces::from_object_store`], carried through.
-    ///
-    /// A gate measuring the real sky must assert this is 6: with the jar's stubs
-    /// the cubemap is a single flat colour, and every "the panorama drew" test
-    /// still passes.
     #[must_use]
     pub fn faces_from_object_store(&self) -> usize {
         self.from_object_store
     }
 
-    /// The spin accumulator, in vanilla's sign and range (`[-180, 180)`).
+    /// The yaw accumulator, in degrees within `[-180, 180)`.
     #[must_use]
     pub fn spin_degrees(&self) -> f32 {
         self.spin
     }
 
-    /// Override `panoramaSpeed` (1.0 is vanilla's default; 0.0 holds the spin,
-    /// which is what `Panorama.holdSpin` achieves).
+    /// Set the speed multiplier; 1.0 is the default and 0.0 holds the spin.
     ///
     /// Called from `MenuRenderer::render_inner` immediately before
-    /// [`Self::advance`], off `MenuFrame::panorama_speed` — every frame rather than
-    /// once at attach, because the option is editable while the panorama is on
-    /// screen (the settings tree draws over it). **Zero callers until then**, which
-    /// is why the title screen used to spin at [`DEFAULT_SPIN_SPEED`] whatever the
-    /// player set.
+    /// [`Self::advance`], using `MenuFrame::panorama_speed` so edits to the option
+    /// take effect while the panorama remains on screen.
     pub fn set_speed(&mut self, speed: f32) {
         self.speed = speed;
     }
@@ -777,12 +616,9 @@ impl PanoramaRenderer {
     /// Write the uniform for this frame. Must run before the pass begins, since
     /// a queue write cannot be recorded into an open render pass.
     ///
-    /// `dim` is [`MENU_BACKGROUND_DIM`] on the out-of-world screens vanilla
-    /// composites `menu_background.png` over, and `0.0` on the title screen,
-    /// whose `extractBackground` override is empty.
+    /// `dim` is [`MENU_BACKGROUND_DIM`] on other out-of-world menus and `0.0`
+    /// on the title screen.
     pub fn prepare(&self, queue: &wgpu::Queue, width: u32, height: u32, dim: f32) {
-        // `-self.spin`: vanilla's own panorama type hands `CubeMap.render` the negated
-        // accumulator, and `view_projection` takes the value at that call site.
         let vp = view_projection(width, height, -self.spin);
         let data = PanoramaUniform {
             view_proj: vp.to_cols_array(),
@@ -836,21 +672,14 @@ mod tests {
 
     #[test]
     fn the_face_order_is_vanillas_suffix_table_not_zero_through_five() {
-        // `CubeMapTexture.SUFFIXES`, transcribed. The point of the assertion is
-        // that a "tidying" edit to `FACE_SUFFIXES` fails here rather than
-        // shipping a scrambled sky.
+        // Cube layers follow axis order, not numbered image order.
         assert_eq!(FACE_SUFFIXES, ["_1", "_3", "_5", "_4", "_0", "_2"]);
-        // And the naive order a reader would guess must *not* be what we ship.
         assert_ne!(FACE_SUFFIXES, ["_0", "_1", "_2", "_3", "_4", "_5"]);
     }
 
     #[test]
     fn the_index_key_drops_the_assets_prefix_the_jar_path_keeps() {
-        // The asset index names objects *without* the leading `assets/`; the jar
-        // names entries *with* it. Using the jar path as an index key resolves
-        // nothing, silently, and you get the stub — which is the exact mistake
-        // that made the panorama a flat grey for a commit. `audio.rs` documents
-        // the same trap for sounds.
+        // Asset-index keys omit the `assets/` prefix used by resource packs.
         let jar = face_jar_path(4);
         let key = face_index_key(4);
         assert!(
@@ -862,7 +691,7 @@ mod tests {
             "an asset-index key must not carry the assets/ prefix, got {key}"
         );
         assert_eq!(key, jar.strip_prefix("assets/").expect("checked above"));
-        // Layer 4 is +Z, which vanilla's suffix table fills from `panorama_0`.
+        // Layer 4 is +Z, supplied by `panorama_0`.
         assert_eq!(
             key,
             "minecraft/textures/gui/title/background/panorama_0.png",
@@ -883,12 +712,8 @@ mod tests {
 
     #[test]
     fn assemble_reports_no_object_store_faces_because_it_cannot_know() {
-        // `assemble` takes decoded images and has no idea where they came from;
-        // `load` is what sets the count. If this ever reported 6 by default, a
-        // gate asserting "real art" would pass against the jar's stubs.
         let stacked = assemble(&six_marked_faces(2)).expect("assemble");
         assert_eq!(stacked.from_object_store, 0);
-        assert!(!stacked.is_real_art());
     }
 
     #[test]
@@ -902,20 +727,17 @@ mod tests {
         let stride = (size * 4) as usize;
         for layer in 0..6usize {
             let base = layer * stacked.layer_bytes();
-            // Green carries the *source* face index, so layer n must hold face n:
-            // this is the stacking order.
+            // Green identifies the source face.
             assert_eq!(
                 stacked.rgba[base + 1], layer as u8,
                 "layer {layer} does not hold source face {layer}"
             );
-            // Red carries the source row. `swapY` puts source row `size-1` at
-            // target row 0, so the first row of the layer must be `size - 1`.
+            // Red identifies the source row; the last source row lands first.
             assert_eq!(
                 stacked.rgba[base], (size - 1) as u8,
                 "layer {layer} row 0 is source row {} — the vertical flip is missing",
                 stacked.rgba[base]
             );
-            // And the last row must be source row 0.
             let last = base + stride * (size as usize - 1);
             assert_eq!(
                 stacked.rgba[last], 0,
@@ -925,14 +747,11 @@ mod tests {
         }
     }
 
-    /// Control for the test above: without the flip, row 0 would be source row 0.
-    /// This asserts the detector can tell the two apart, so a green
-    /// `assemble_stacks_faces_in_order_and_flips_each_vertically` means something.
+    /// Control proving the row marker distinguishes flipped and unflipped data.
     #[test]
     fn an_unflipped_stack_would_fail_the_flip_assertion() {
         let size = 4;
         let face = marked_face(0, size);
-        // The unflipped copy the port could easily have written instead.
         let unflipped_first_row_red = face.rgba[0];
         let stacked = assemble(&six_marked_faces(size)).expect("assemble");
         assert_eq!(unflipped_first_row_red, 0, "source row 0 is marked 0");
@@ -969,7 +788,7 @@ mod tests {
     fn the_cube_is_thirty_six_vertices_of_vanillas_twenty_four_corners() {
         let verts = cube_vertices();
         assert_eq!(verts.len(), CUBE_VERTEX_COUNT * 3);
-        // Vanilla's first quad, expanded as `0,1,2, 2,3,0`.
+        // The +Z quad, expanded as `0,1,2, 2,3,0`.
         let first = &verts[0..18];
         assert_eq!(
             first,
@@ -995,7 +814,7 @@ mod tests {
     fn wrap_degrees_matches_vanillas_range() {
         assert!((wrap_degrees(0.0) - 0.0).abs() < 1e-6);
         assert!((wrap_degrees(179.0) - 179.0).abs() < 1e-6);
-        // 180 is *not* in range: vanilla's `>= 180` subtracts a turn.
+        // The upper endpoint is exclusive: 180 maps to -180.
         assert!((wrap_degrees(180.0) - -180.0).abs() < 1e-6);
         assert!((wrap_degrees(370.0) - 10.0).abs() < 1e-6);
         assert!((wrap_degrees(-190.0) - 170.0).abs() < 1e-6);
@@ -1003,9 +822,7 @@ mod tests {
 
     #[test]
     fn the_spin_rate_is_two_degrees_per_second_at_vanillas_default_speed() {
-        // 0.1 deg/tick x 20 ticks/s x speed 1.0. Predicted from the constants,
-        // not read off the implementation: a full revolution takes three minutes,
-        // so "it looks static" is expected, not a bug.
+        // 0.1 deg/tick x 20 ticks/s x speed 1.0 gives a three-minute revolution.
         let expected_per_second = SPIN_DEGREES_PER_TICK * TICKS_PER_SECOND * DEFAULT_SPIN_SPEED;
         assert!((expected_per_second - 2.0).abs() < 1e-6);
 
@@ -1021,11 +838,8 @@ mod tests {
 
     #[test]
     fn the_projection_puts_the_plus_z_face_in_front_of_the_camera() {
-        // The one geometric claim worth pinning: `rotationX(PI)` is what turns
-        // the cube's +Z face (vanilla's first quad) into the thing you see, by
-        // mapping it to negative view-space z, which is where a right-handed
-        // camera looks. Checked through the real matrix rather than asserted as
-        // a polarity.
+        // A 180° X rotation maps +Z to negative view-space z, the direction
+        // a right-handed camera looks.
         let vp = view_projection(1920, 1080, 0.0);
         let centre_of_plus_z = vp * glam::Vec4::new(0.0, 0.0, 1.0, 1.0);
         assert!(
@@ -1034,7 +848,7 @@ mod tests {
              X rotation is missing or doubled",
             centre_of_plus_z.w
         );
-        // And it lands at the middle of the screen.
+        // At zero yaw the face centre stays on the horizontal axis.
         let ndc_x = centre_of_plus_z.x / centre_of_plus_z.w;
         let ndc_y = centre_of_plus_z.y / centre_of_plus_z.w;
         assert!(
@@ -1047,8 +861,7 @@ mod tests {
             "the +Z face centre is {ndc_y} off vertical centre; 10 degrees of \
              tilt cannot account for that"
         );
-        // The -Z face centre must be behind the camera, which is the other half
-        // of the same claim.
+        // The opposite face centre must be behind the camera.
         let centre_of_minus_z = vp * glam::Vec4::new(0.0, 0.0, -1.0, 1.0);
         assert!(
             centre_of_minus_z.w < 0.0,
@@ -1062,8 +875,7 @@ mod tests {
     fn only_the_title_screen_escapes_the_menu_background_wash() {
         assert!(
             (dim_for_screen(true) - 0.0).abs() < 1e-9,
-            "the title screen's `extractBackground` override is empty, so nothing \
-             may be composited over its panorama"
+            "the title screen must not darken its panorama"
         );
         assert!(
             (dim_for_screen(false) - MENU_BACKGROUND_DIM).abs() < 1e-9,

@@ -3023,6 +3023,7 @@ dependencies = [
  "lodestone-core",
  "lodestone-model",
  "lodestone-time",
+ "log",
  "rand 0.8.7",
  "rsa",
  "serde",
@@ -3226,6 +3227,7 @@ dependencies = [
  "web-sys",
  "wgpu",
  "winit",
+ "xxhash-rust",
 ]
 
 [[package]]
