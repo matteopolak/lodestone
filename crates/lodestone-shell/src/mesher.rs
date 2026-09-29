@@ -642,6 +642,18 @@ impl MeshScheduler {
         self.pending -= before - self.ready.len();
     }
 
+    pub fn forget_column(&mut self, cx: i32, cz: i32) {
+        let keys: Vec<_> = self
+            .latest_generation
+            .keys()
+            .filter(|key| key.cx == cx && key.cz == cz)
+            .copied()
+            .collect();
+        for key in keys {
+            self.forget_generation(&key);
+        }
+    }
+
     /// Collect any finished meshes without blocking. A completion whose
     /// generation is not this key's *latest* submitted one is a stale mesh a
     /// later `submit` has already superseded — dropped here rather than
@@ -917,6 +929,17 @@ impl MeshScheduler {
         self.ready.retain(|meshed| meshed.key != *key);
     }
 
+    pub fn forget_column(&mut self, cx: i32, cz: i32) {
+        self.queue
+            .retain(|snapshot| snapshot.key.cx != cx || snapshot.key.cz != cz);
+        self.ready
+            .retain(|meshed| meshed.key.cx != cx || meshed.key.cz != cz);
+    }
+
+    pub fn discard_pending(&mut self) {
+        discard_browser_mesh_backlog(&mut self.queue, &mut self.ready);
+    }
+
     /// Mesh for at most [`BROWSER_MESH_BUDGET`] and return what got finished.
     ///
     /// **Meshes at least one section whenever the queue is non-empty, even if the
@@ -950,12 +973,8 @@ impl MeshScheduler {
     /// Mesh until at least `n` results exist (or the queue empties), ignoring the
     /// budget.
     ///
-    /// The budget is deliberately *not* applied: this method's native counterpart
-    /// blocks the caller, its two callers are both outside the frame loop (the
-    /// headless one-shot path and `Sim::end_session`'s flush), and a caller that
-    /// asked for `n` meshes and got fewer because a clock ran out would have no way
-    /// to make progress. Honouring the request is the same contract the native arm
-    /// has.
+    /// The budget is not applied: headless one-shot work needs all requested
+    /// meshes, and a partial result would leave no way to make progress.
     pub fn drain_blocking(&mut self, n: usize) -> Vec<Meshed> {
         while self.ready.len() < n {
             let Some(snap) = self.queue.pop_front() else {
@@ -971,6 +990,15 @@ impl MeshScheduler {
         }
         std::mem::take(&mut self.ready)
     }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn discard_browser_mesh_backlog(
+    queue: &mut std::collections::VecDeque<SectionSnapshot>,
+    ready: &mut Vec<Meshed>,
+) {
+    queue.clear();
+    ready.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -2126,6 +2154,7 @@ impl TerrainMesh {
         self.empty_sections
             .retain(|key| key.cx != cx || key.cz != cz);
         self.built_columns.remove(&(cx, cz));
+        self.scheduler.forget_column(cx, cz);
         let gone: Vec<SectionKey> = self
             .uploaded_sections
             .iter()
@@ -2135,11 +2164,6 @@ impl TerrainMesh {
         for key in gone {
             self.uploaded_sections.remove(&key);
             self.pending_removals.push(key);
-            // Otherwise a section this column never returns to leaves a
-            // permanent entry in the staleness map — harmless (a generation
-            // number that will never be compared against again), but there is
-            // no reason to keep it.
-            self.scheduler.forget_generation(&key);
         }
     }
 
@@ -2407,10 +2431,15 @@ impl TerrainMesh {
     /// whatever session comes next, and queue every section this session uploaded
     /// for removal through the app's ordinary drain path.
     pub fn end_session(&mut self) {
-        let pending = self.scheduler.pending();
-        if pending > 0 {
-            let _ = self.scheduler.drain_blocking(pending);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let pending = self.scheduler.pending();
+            if pending > 0 {
+                let _ = self.scheduler.drain_blocking(pending);
+            }
         }
+        #[cfg(target_arch = "wasm32")]
+        self.scheduler.discard_pending();
         self.dirty_columns.clear();
         self.forced_columns.clear();
         self.pending_arrivals.clear();
@@ -3920,6 +3949,60 @@ mod tests {
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].key, keys[1]);
         assert_eq!(scheduler.pending(), 0);
+    }
+
+    #[test]
+    fn forgetting_a_column_discards_never_uploaded_sections_too() {
+        let mut terrain = TerrainMesh::new(MeshScheduler::new(
+            1,
+            ShellClassifier::Demo(DemoClassifier),
+        ));
+        let keys = [
+            SectionKey {
+                cx: 2,
+                cz: -3,
+                si: 0,
+                min_y: 0,
+            },
+            SectionKey {
+                cx: 2,
+                cz: -3,
+                si: 1,
+                min_y: 0,
+            },
+            SectionKey {
+                cx: 3,
+                cz: -3,
+                si: 0,
+                min_y: 0,
+            },
+        ];
+        for (index, key) in keys.iter().copied().enumerate() {
+            let generation = index as u64 + 1;
+            terrain.scheduler.latest_generation.insert(key, generation);
+            terrain.scheduler.pending += 1;
+            terrain.scheduler.ready.push_back((
+                Meshed::new(key, SectionGeometry::Packed(Mesh::default())),
+                generation,
+            ));
+        }
+        terrain.uploaded_sections.insert(keys[0]);
+
+        terrain.forget_column(2, -3);
+
+        assert_eq!(terrain.scheduler.pending(), 1);
+        let remaining = terrain.scheduler.drain_frame_with_limit(2);
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].key, keys[2]);
+        let queued = platform_snapshot(None);
+        let ready = Meshed::new(queued.key, SectionGeometry::Packed(Mesh::default()));
+        let mut queue = std::collections::VecDeque::from([queued]);
+        let mut ready = vec![ready];
+
+        discard_browser_mesh_backlog(&mut queue, &mut ready);
+
+        assert!(queue.is_empty(), "session teardown drops queued snapshots");
+        assert!(ready.is_empty(), "session teardown drops completed meshes");
     }
 
     /// **The bug 1 (grief-protection) reproduction.** Two jobs submitted for
