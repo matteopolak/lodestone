@@ -191,14 +191,11 @@ ordering without making a second 1,196-name rodata copy. Air (registry 0, alphab
 and stone (registry 1, alphabetical 975) are the standing controls that distinguish those
 orders; an unknown report name, mismatched canonical name, or incomplete 1,196-entry join
 fails generation rather than choosing a plausible wrong block.
-`block_states::state_id` is the reverse map (a canonical state string → its global state id)
-and is deliberately **derived at first use from the already-committed tables**, behind a
-`OnceLock`, rather than itself generated — generating it would add a second drift surface
-that must stay in lockstep with the tables it derives from, and a stale one fails in the
-worst possible way (a plausible-looking wrong id). Its resolver has three tiers — exact
-match, default-plus-named-overrides, default alone — and the default is deliberately not
-simply "the lowest id"; do not hand-roll a copy of this fallback, which has silently drifted
-from the real one before.
+`block_states::state_id` resolves a canonical state string using the generated name
+permutation and canonical `(start, count)` spans shared with typed property lookup. It
+requires no first-use index construction. Its three tiers are exact match,
+default-plus-named-overrides, and default alone. The default comes from the owning block's
+canonical identity data, not the lowest state ID; keep that policy in the identity generator.
 
 The sound-event registry keeps one canonical id-indexed name column rather than duplicating
 those names beside entry metadata. Optional fixed audible ranges are a sparse `(u32, f32)`

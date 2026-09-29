@@ -58,10 +58,16 @@ jq -cs '.[0] as $blocks | [.[1]["minecraft:block"].entries | to_entries | sort_b
 
 The official controls deliberately replace oak log's default with another valid state in
 the same span, and shorten its span while retaining valid numeric bounds. Both must fail.
-The hermetic controls also exercise different defaults between releases and unsupported-block
-defaults represented by `null`.
+The hermetic JSON controls also exercise different defaults between releases and unsupported-block
+defaults represented by `null`. The [Rust identity emitter](./data-identity-codegen.md) preserves
+these versioned facts but requires shared semantic defaults to agree before emitting a total
+canonical default column. A control gives oak log a different, valid latest-release default
+and observes Rust emission fail in both scopes.
 
-Runtime adoption remains a separate atomic change. Before increasing a runtime census,
+The runtime consumes the emitter's three base block identity modules, with unchanged 26.2
+counts and IDs. Canonical defaults feed `Block::default_state` and `StateId::is_default`;
+numeric half-open spans feed text resolution and typed property lookup. JSON staging and
+private union emission do not increase the runtime census. Before increasing that census,
 populate every total identity-indexed behavior table from authoritative versioned input,
 resolve semantic joins completely, wire generated numeric columns into consumers, and update
 adapter ingress/egress, persistence compatibility, palette width assumptions, and assets.

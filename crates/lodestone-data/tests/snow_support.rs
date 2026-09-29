@@ -7,15 +7,12 @@
 //!
 //! # What is being anchored
 //!
-//! Vanilla's own snow-and-freeze feature's place step — vanilla's
-//! whole `TOP_LAYER_MODIFICATION` step — reads exactly four per-state facts, and
-//! the world generator cannot answer any of them from `blocks.json`:
-//! vanilla's own "is face full" check against the collision shape and up (column `U`),
-//! `!getFluidState().isEmpty()` (`L`), `getFluidState().is(Fluids.WATER) &&
-//! block instanceof LiquidBlock` (`W`), and
-//! `hasProperty(BlockStateProperties.SNOWY)` (`Y`). A fifth column, `D`
-//! (`state == block.defaultBlockState()`), is not a predicate but the key the
-//! consumer needs — see [`exactly_one_default_state_per_block`].
+//! The snow-and-freeze placement step reads four per-state facts that the world
+//! generator cannot answer from `blocks.json`: collision shape's full up face
+//! (column `U`), a non-empty fluid state (`L`), source water in a liquid block
+//! (`W`), and the presence of the snowy property (`Y`). A fifth dump column,
+//! `D`, independently checks the canonical report-authored default column; it
+//! is not emitted as another bitset. See [`exactly_one_default_state_per_block`].
 //!
 //! # Data provenance
 //!
@@ -29,7 +26,7 @@
 //! Three columns exist purely so this test's claims are non-vacuous:
 //!
 //! * `K <col> <count>` — the JVM's own popcount per column. Compared against a
-//!   popcount of the committed bitset, so a decode bug in the generator cannot
+//!   popcount of each runtime predicate, so a decode bug in the generator cannot
 //!   ship a silently-shifted table
 //!   ([`committed_bits_match_the_dump`]).
 //! * `B <firstStateId> <block>` — the block ranges, so
@@ -88,7 +85,7 @@ fn committed_path() -> PathBuf {
 /// The committed JVM dump — an external anchor, not gitignored.
 const DUMP: &str = include_str!("support/snow_support_jvm.txt");
 
-/// The dump columns, in the order the generated file emits them.
+/// Four behavior columns plus an independent canonical-default witness.
 const COLUMNS: [(char, &str); 5] = [
     ('U', "FACE_FULL_UP"),
     ('L', "HAS_FLUID_STATE"),
@@ -247,16 +244,15 @@ fn generate(dump: &Dump) -> String {
     let _ = writeln!(out, "/// Number of block states (ids are `0..STATE_COUNT`).");
     let _ = writeln!(out, "pub const STATE_COUNT: u32 = {};\n", dump.state_count);
 
-    for (kind, name) in COLUMNS {
+    for (kind, name) in COLUMNS.into_iter().filter(|(kind, _)| *kind != 'D') {
         let bits = dump.column(kind);
         let packed = pack(bits);
         let set = bits.iter().filter(|&&b| b).count();
         let expression = match kind {
-            'U' => "vanilla's own is-face-full check against the collision shape and up",
-            'L' => "`!state.getFluidState().isEmpty()`",
-            'W' => "`state.getFluidState().is(Fluids.WATER) && block instanceof LiquidBlock`",
-            'Y' => "`state.hasProperty(BlockStateProperties.SNOWY)`",
-            'D' => "`state == state.getBlock().defaultBlockState()`",
+            'U' => "collision shape's full up face",
+            'L' => "non-empty fluid state",
+            'W' => "source water in a liquid block",
+            'Y' => "presence of the snowy property",
             other => panic!("unknown column {other}"),
         };
         let _ = writeln!(
@@ -342,10 +338,49 @@ fn committed_table_matches_dump() {
         return;
     }
     let committed = std::fs::read_to_string(&path).expect("read committed table");
-    assert_eq!(
-        committed, generated,
-        "src/generated/snow_support.rs is stale; rerun with LODESTONE_REGEN=1"
+    if let Some(diagnostic) = source_difference(&committed, &generated) {
+        panic!("{diagnostic}");
+    }
+}
+
+fn source_difference(committed: &str, generated: &str) -> Option<String> {
+    let offset = committed
+        .bytes()
+        .zip(generated.bytes())
+        .position(|(left, right)| left != right)
+        .or_else(|| {
+            (committed.len() != generated.len()).then_some(committed.len().min(generated.len()))
+        });
+    if let Some(offset) = offset {
+        let line = committed.as_bytes()[..offset]
+            .iter()
+            .filter(|&&byte| byte == b'\n')
+            .count() + 1;
+        Some(format!(
+            "src/generated/snow_support.rs is stale at byte {offset}, line {line}; \
+             committed {} bytes, generated {} bytes; rerun with LODESTONE_REGEN=1",
+            committed.len(),
+            generated.len()
+        ))
+    } else {
+        None
+    }
+}
+
+#[test]
+fn source_drift_diagnostic_is_bounded() {
+    assert_eq!(source_difference("first\nsecond\n", "first\nsecond\n"), None);
+    let message = source_difference("first\nsecond\n", "first\nsxcond\n")
+        .expect("a changed source byte must fail the drift guard");
+    assert!(message.contains("byte 7, line 2"), "{message}");
+    assert!(
+        message.contains("committed 13 bytes, generated 13 bytes"),
+        "{message}"
     );
+    assert!(message.len() < 200, "diagnostic must not print source tables");
+    let longer = source_difference("first\nsecond\n", "first\nsecond\nextra\n")
+        .expect("a changed source length must fail the drift guard");
+    assert!(longer.contains("byte 13, line 3"), "{longer}");
 }
 
 // ---------------------------------------------------------------------------

@@ -79,8 +79,7 @@ fn collect_report(
     Vec<String>,
     Vec<(String, String)>,
     Vec<Vec<(String, String)>>,
-    Vec<(u16, u16)>,
-    Vec<(u32, u32)>,
+    Vec<u16>,
     usize,
     usize,
 ) {
@@ -130,34 +129,21 @@ fn collect_report(
         .map(|(id, properties)| (properties.clone(), id))
         .collect();
     let mut state_sets = vec![None; states];
-    let mut first = vec![u32::MAX; Block::COUNT as usize];
-    let mut last = vec![0u32; Block::COUNT as usize];
-    let mut counts = vec![0u32; Block::COUNT as usize];
     for (state_id, block_id, properties) in rows {
         let set_id = set_ids[&properties];
-        state_sets[state_id] = Some((set_id as u16, block_id));
-        let block_index = block_id as usize;
-        first[block_index] = first[block_index].min(state_id as u32);
-        last[block_index] = last[block_index].max(state_id as u32);
-        counts[block_index] += 1;
+        state_sets[state_id] = Some(set_id as u16);
+        assert_eq!(
+            StateId::new(state_id as u32)
+                .expect("report state is in the canonical census")
+                .block()
+                .registry_id(),
+            block_id,
+            "report state owner differs from the canonical identity table"
+        );
     }
-    let state_sets: Vec<(u16, u16)> = state_sets
+    let state_sets: Vec<u16> = state_sets
         .into_iter()
         .map(|row| row.expect("every state id has a generated row"))
-        .collect();
-    let spans: Vec<(u32, u32)> = first
-        .into_iter()
-        .zip(last)
-        .zip(counts)
-        .map(|((first, last), count)| {
-            assert_ne!(first, u32::MAX, "every generated block has a state span");
-            assert_eq!(
-                last - first + 1,
-                count,
-                "generated state ids for a block must form one contiguous span"
-            );
-            (first, last)
-        })
         .collect();
     (
         keys.into_iter().collect(),
@@ -165,7 +151,6 @@ fn collect_report(
         pairs.into_iter().collect(),
         property_sets,
         state_sets,
-        spans,
         states,
         max_properties,
     )
@@ -178,7 +163,6 @@ fn generate(doc: &serde_json::Value) -> String {
         pairs,
         property_sets,
         state_sets,
-        spans,
         states,
         max_properties,
     ) = collect_report(doc);
@@ -386,7 +370,7 @@ fn generate(doc: &serde_json::Value) -> String {
     let _ = writeln!(output, "{}] = [", state_sets.len());
     for chunk in state_sets.chunks(24) {
         output.push_str("    ");
-        for (index, &(set_id, _)) in chunk.iter().enumerate() {
+        for (index, &set_id) in chunk.iter().enumerate() {
             if index != 0 {
                 output.push_str(", ");
             }
@@ -396,26 +380,9 @@ fn generate(doc: &serde_json::Value) -> String {
         output.push('\n');
     }
     output.push_str("];\n\n");
-    output.push_str("pub static BLOCK_STATE_SPANS: [(u32, u32); ");
-    let _ = writeln!(output, "{}] = [", spans.len());
-    for chunk in spans.chunks(8) {
-        output.push_str("    ");
-        for (index, &(first, last)) in chunk.iter().enumerate() {
-            if index != 0 {
-                output.push_str(", ");
-            }
-            let _ = write!(output, "({first}, {last})");
-        }
-        output.push(',');
-        output.push('\n');
-    }
     output.push_str(
-        "];\n\n\
-         pub(super) fn property_set_for_state(raw: u32) -> &'static [(u8, u8)] {\n\
+        "pub(super) fn property_set_for_state(raw: u32) -> &'static [(u8, u8)] {\n\
          &PROPERTY_SETS[STATE_PROPERTY_SET_IDS[raw as usize] as usize]\n\
-         }\n\n\
-         pub(super) fn block_state_span(block_id: u16) -> Option<(u32, u32)> {\n\
-         BLOCK_STATE_SPANS.get(block_id as usize).copied()\n\
          }\n",
     );
     output
@@ -551,6 +518,18 @@ fn properties_validate_domains_and_duplicates() {
         Properties::state_for_block(Block::Stone, &snowy),
         None,
         "a pair valid for grass blocks must not resolve as a stone state"
+    );
+}
+
+#[test]
+fn grass_property_lookup_stops_before_the_neighboring_dirt_state() {
+    let dirt = StateId::new(10).expect("official dirt state ID");
+    assert!(Properties::from_state_id(dirt).is_empty());
+    assert_eq!(dirt.block(), Block::Dirt);
+    assert_eq!(
+        Properties::state_for_block(Block::GrassBlock, &Properties::empty()),
+        None,
+        "grass owns states 8 and 9; treating its old inclusive end as a count includes dirt at 10"
     );
 }
 

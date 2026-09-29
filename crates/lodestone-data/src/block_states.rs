@@ -180,7 +180,7 @@ impl StateId {
     /// Whether this is its block's own default-block-state. Total, O(1).
     #[must_use]
     pub fn is_default(self) -> bool {
-        crate::snow_support::is_default_state(self)
+        self == self.block().default_state()
     }
 
     /// Resolves one canonical block-state string into this build's state table.
@@ -376,137 +376,13 @@ pub fn properties(id: u32) -> Option<&'static [(&'static str, &'static str)]> {
     Some(table::PROPERTY_SETS[set as usize])
 }
 
-/// One block's contiguous span of state ids plus its jar-marked default state —
-/// the whole of the reverse map's index, 1,196 entries of 12 bytes.
-///
-/// `first..=last` is a *contiguous* range because vanilla builds
-/// its own block-state registry block by block; `block_state_index` asserts that
-/// when it builds this, so a table that ever stopped being block-major fails
-/// loudly at first use rather than silently resolving into a neighbouring
-/// block's states.
-#[derive(Debug, Clone, Copy)]
-struct BlockSpan {
-    first: u32,
-    last: u32,
-    /// The id `is_default_state` marks, i.e. vanilla's
-    /// own default-block-state. `first` only when the default column has somehow
-    /// lost this block — see [`state_id`]'s tier 3.
-    default: u32,
+/// The canonical states belonging to one validated block, as a half-open range.
+pub(crate) fn state_span(block: Block) -> std::ops::Range<u32> {
+    let (start, count) = crate::generated_block_registry::BLOCK_STATE_SPANS[block.registry_id() as usize];
+    start..start + count
 }
 
-/// The reverse map's index: one [`BlockSpan`] per state-table alphabetical
-/// block index, plus those names sorted for binary search.
-struct BlockStateIndex {
-    spans: Box<[BlockSpan]>,
-    /// State-table block indices sorted by canonical name. Built rather than
-    /// assumed: the raw `STATES` column carries no names, and a silently
-    /// unsorted permutation would make `binary_search` return wrong answers
-    /// rather than fail.
-    by_name: Box<[u16]>,
-}
-
-/// Builds [`BlockStateIndex`] once per process by walking the 32,366-row static
-/// table. ~32k iterations and two small allocations (14 KB + 2.4 KB), amortised
-/// over the whole process.
-fn block_state_index() -> &'static BlockStateIndex {
-    static INDEX: std::sync::OnceLock<BlockStateIndex> = std::sync::OnceLock::new();
-    INDEX.get_or_init(|| {
-        let block_count = BLOCK_COUNT as usize;
-        let mut spans: Vec<Option<BlockSpan>> = vec![None; block_count];
-        let mut counts: Vec<u32> = vec![0; block_count];
-        for id in 0..table::STATE_COUNT {
-            let (block, _) = table::STATES[id as usize];
-            let block = block as usize;
-            counts[block] += 1;
-            let state = StateId::new(id).expect("generated state-table index is valid");
-            let is_default = crate::snow_support::is_default_state(state);
-            match &mut spans[block] {
-                Some(span) => {
-                    span.last = id;
-                    if is_default {
-                        span.default = id;
-                    }
-                }
-                slot @ None => {
-                    *slot = Some(BlockSpan {
-                        first: id,
-                        last: id,
-                        default: id,
-                    });
-                }
-            }
-        }
-        let spans: Box<[BlockSpan]> = spans
-            .into_iter()
-            .enumerate()
-            .map(|(block, span)| {
-                let span = span.unwrap_or_else(|| {
-                    panic!(
-                        "generated block-state table has no state for block `{}` — regenerate or \
-                         fix the table",
-                        block_name_at_alphabetical_index(block as u16)
-                    )
-                });
-                assert_eq!(
-                    span.last - span.first + 1,
-                    counts[block],
-                    "block `{}`'s states are not contiguous in the generated table \
-                     ({}..={} spans {} ids but the block owns {}); `state_id` scans the span, so \
-                     a non-block-major table would resolve into a neighbour's states",
-                    block_name_at_alphabetical_index(block as u16),
-                    span.first,
-                    span.last,
-                    span.last - span.first + 1,
-                    counts[block]
-                );
-                span
-            })
-            .collect();
-        // Licenses `state_id`'s allocation-free property comparison: every
-        // generated set is already sorted by key, so a candidate's static slice
-        // can be compared directly against the caller's sorted `wanted` instead
-        // of being copied into a `Vec` and sorted per candidate row. Keys are
-        // unique within a set, so key order and `(key, value)` tuple order are
-        // the same order. 6,454 sets checked once per process; without this the
-        // comparison would silently compare unequal orderings the day the
-        // generator's output order changed.
-        for (set_index, set) in table::PROPERTY_SETS.iter().enumerate() {
-            assert!(
-                set.windows(2).all(|w| w[0].0 < w[1].0),
-                "generated PROPERTY_SETS[{set_index}] is not strictly sorted by property name \
-                 ({set:?}); `state_id` compares these slices directly and would stop matching"
-            );
-        }
-        let mut by_name: Vec<u16> = (0..block_count as u16).collect();
-        by_name.sort_unstable_by_key(|&b| block_name_at_alphabetical_index(b));
-        BlockStateIndex {
-            spans,
-            by_name: by_name.into_boxed_slice(),
-        }
-    })
-}
-
-/// The state table's alphabetical block index whose identifier is `name`, or
-/// `None`. `O(log 1196)`.
-fn block_index(name: &str) -> Option<u16> {
-    let index = block_state_index();
-    index
-        .by_name
-        .binary_search_by_key(&name, |&b| block_name_at_alphabetical_index(b))
-        .ok()
-        .map(|slot| index.by_name[slot])
-}
-
-/// The block-state id for `minecraft:air`, resolved by name rather than
-/// hardcoded as registry id `0`, and cached.
-///
-/// Every caller that needs a "nothing here" / unresolvable-state fallback wants
-/// this. It used to be a 32,366-row scan per call in
-/// `lodestone-v26-2`'s `server_protocol.rs`.
-///
-/// # Panics
-/// Panics if the generated table has no `minecraft:air` state (a corrupt table,
-/// not a runtime condition).
+/// The canonical `minecraft:air` state ID, for numeric boundaries.
 #[must_use]
 pub fn air_state_id() -> u32 {
     air_state().raw()
@@ -518,58 +394,16 @@ pub fn air_state_id() -> u32 {
 /// [`StateId::raw`] at their wire boundary.
 #[must_use]
 pub fn air_state() -> StateId {
-    static AIR: std::sync::OnceLock<StateId> = std::sync::OnceLock::new();
-    *AIR.get_or_init(|| {
-        StateId::from_state_str("minecraft:air").expect(
-            "generated block-state table has no `minecraft:air` entry — regenerate or fix the table",
-        )
-    })
+    StateId::AIR
 }
 
-/// The **reverse** of [`block_name`]/[`properties`]: resolves a canonical
-/// block-state string — `"minecraft:stone"`, `"minecraft:water[level=0]"`,
-/// `"minecraft:oak_stairs[facing=east,half=bottom,shape=straight,waterlogged=false]"`
-/// — to its protocol-776 global state id, or `None` if the block name is not in
-/// the table at all.
+/// Resolves a fully namespaced block-state spelling to its canonical state ID.
 ///
-/// `O(log 1196)` for the name plus at most one scan of *that block's* states
-/// (27 on average, 1,296 at the worst) — never the 32,366-row scan with a string
-/// compare per row this replaced. See `docs/lodestone-data-crate.md` for the
-/// index and `docs/chunk-column-encoding.md` for the measurement that motivated
-/// it.
-///
-/// # Three-tier fallback: exact, default-plus-overrides, then the default state
-///
-/// 1. **Exact match** — name and every property value agree. The common case for
-///    anything decoded off a real edit or a fully-qualified generator state.
-/// 2. **The block's default state with the named properties written over it** —
-///    vanilla's own `defaultBlockState().setValue(k, v)…`. Every property the
-///    caller did *not* name keeps its vanilla default, and any property no real
-///    state of this block carries (a *synthetic* one, e.g. this server's
-///    `minecraft:comparator[…,output=N]`, which vanilla keeps in a block entity)
-///    is dropped rather than sinking the whole lookup. Since a block's state set
-///    is the full cross product of its properties' domains, the merged set always
-///    names a real state unless a value is outside its domain.
-/// 3. **The default state alone** — a bare name, or a named value outside its
-///    property's domain.
-///
-/// # The default state is *not* the lowest id, and assuming it was caused three bugs
-///
-/// This logic used to live in `lodestone-v26-2`'s `server_protocol.rs` and, before
-/// `43a6e030`, fell back to the **lowest** id sharing the name — right for water
-/// (`86`, `level=0`) and lava (`102`), wrong for 661 of the 797 multi-state
-/// blocks. Three shipped consequences: bare `minecraft:grass_block` resolved to
-/// id `8`, `snowy=true`, so every blade of spread grass rendered snowy;
-/// bare directional blocks came out at whatever the lowest id's `facing` happened
-/// to be; and redstone dust's four connection properties came out `up`
-/// rather than `none`, so wire rendered climbing rather than flat. The default is
-/// read from [`crate::snow_support::is_default_state`] — `state ==
-/// state.getBlock().defaultBlockState()` dumped from the real 26.2 server,
-/// exactly one id per block.
-///
-/// # Panics
-/// Panics if the generated table is not block-major (see [`BlockSpan`]) or has a
-/// block with no states — both generation-time invariants.
+/// Lookup searches the generated block-name permutation and only that block's
+/// half-open state span. Exact property sets are preferred. For an abbreviated
+/// spelling, omitted properties retain the block's canonical default; unknown
+/// properties are ignored, and an invalid value falls back to that default.
+/// Bare paths and unknown resource names return `None`.
 #[must_use]
 pub fn state_id(state: &str) -> Option<u32> {
     let (name, raw_props) = match state.split_once('[') {
@@ -586,28 +420,22 @@ pub fn state_id(state: &str) -> Option<u32> {
     };
     wanted.sort_unstable();
 
-    let index = block_state_index();
-    let span = index.spans[block_index(name)? as usize];
-
-    // Tier 1. Compares the candidate's *static* slice against `wanted` with no
-    // copy and no per-row sort — licensed by the sortedness assertion in
-    // `block_state_index`, which is why that assertion is not decoration. This
-    // used to `to_vec()` and sort per candidate row: one small allocation per row
-    // scanned, so ~750 per column at `ChunkColumn::from_generated` time.
-    for id in span.first..=span.last {
+    let block = Block::from_name(name)?;
+    if block.name() != name {
+        return None;
+    }
+    let span = state_span(block);
+    for id in span.clone() {
         if properties(id).unwrap_or(&[]) == wanted.as_slice() {
             return Some(id);
         }
     }
 
-    // Tier 3's value, and tier 2's base.
-    let base = span.default;
+    let base = block.default_state().raw();
     if wanted.is_empty() {
         return Some(base);
     }
 
-    // Tier 2: `defaultBlockState().setValue(k, v)…` for every property the block
-    // really has, dropping any synthetic one.
     let mut merged: Vec<(&str, &str)> = properties(base).unwrap_or(&[]).to_vec();
     let mut overridden = false;
     for &(key, value) in &wanted {
@@ -621,13 +449,8 @@ pub fn state_id(state: &str) -> Option<u32> {
     if !overridden {
         return Some(base);
     }
-    // `merged` started as a (sorted) static set and only had *values* written
-    // over it, so it is still sorted by key; the sort is kept because it is
-    // free at this point (one call per unresolved state, not per row) and
-    // because it makes the direct slice comparison below true by construction
-    // rather than by an argument about `overridden`.
     merged.sort_unstable();
-    for id in span.first..=span.last {
+    for id in span {
         if properties(id).unwrap_or(&[]) == merged.as_slice() {
             return Some(id);
         }
@@ -717,6 +540,47 @@ impl Default for BlockStateTable {
 mod tests {
     use super::*;
     use crate::block_properties::{ParseError, PropertiesError, PropertyError};
+
+    #[test]
+    fn canonical_spans_have_half_open_official_boundaries() {
+        assert_eq!(state_span(Block::Air), 0..1);
+        assert_eq!(state_span(Block::GrassBlock), 8..10);
+        assert_eq!(state_span(Block::Water), 86..102);
+        assert_eq!(state_span(Block::OakLog), 136..139);
+        assert_eq!(StateId::new(10).unwrap().block(), Block::Dirt);
+        assert!(!state_span(Block::GrassBlock).contains(&10));
+    }
+
+    #[test]
+    fn canonical_spans_partition_every_state_and_contain_each_default() {
+        let mut covered = vec![false; STATE_COUNT as usize];
+        for block in Block::all() {
+            let span = state_span(block);
+            assert!(!span.is_empty(), "{} has no states", block.name());
+            assert!(
+                span.contains(&block.default_state().raw()),
+                "{} default lies outside its span",
+                block.name()
+            );
+            for raw in span {
+                let state = StateId::new(raw).expect("span holds a valid canonical state");
+                assert_eq!(state.block(), block, "state {raw} has the wrong span owner");
+                assert!(!covered[raw as usize], "state {raw} appears in two spans");
+                covered[raw as usize] = true;
+            }
+        }
+        assert!(covered.into_iter().all(|present| present));
+    }
+
+    #[test]
+    fn generated_property_sets_have_unique_sorted_keys() {
+        for (index, set) in table::PROPERTY_SETS.iter().enumerate() {
+            assert!(
+                set.windows(2).all(|pair| pair[0].0 < pair[1].0),
+                "property set {index} is not strictly sorted: {set:?}"
+            );
+        }
+    }
 
     #[test]
     fn canonical_state_round_trips_a_non_default_property_set() {

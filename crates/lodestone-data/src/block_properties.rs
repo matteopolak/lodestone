@@ -270,8 +270,7 @@ impl Properties {
     /// state of this block.
     #[must_use]
     pub fn state_for_block(block: Block, properties: &Self) -> Option<StateId> {
-        let (first, last) = generated::block_state_span(block.registry_id())?;
-        (first..=last).find_map(|raw| {
+        crate::block_states::state_span(block).find_map(|raw| {
             properties.matches_generated_pairs(generated::property_set_for_state(raw))
                 .then(|| StateId::new(raw).expect("generated state id is valid"))
         })
