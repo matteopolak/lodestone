@@ -114,6 +114,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   sand, piston heads, primed TNT) and flat "ground-plate" blocks (carpets, pressure
   plates, leaf litter, rails) whose flicker problems turned out to be a
   mipmap/sampling issue rather than a geometry one.
+- [Block light inputs](./block-light-inputs.md) — `lodestone_data::light_props`
+  supplies exact raw dampening and emission for the 32,366 canonical Minecraft 26.2
+  block states. The values come from a complete server-registry capture rather than
+  defaults inferred from a block's name or properties.
 - [Exact block membership](./block-membership.md) —
   `lodestone_data::block::BlockMask` is an exact membership representation for hot,
   repeatedly queried sets in the built-in block registry. It replaces hash tables only
@@ -268,6 +272,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   two world-space overlays (F3+B entity hitboxes, F3+G chunk borders). The
   presentation — plate geometry, text metrics, column layout — is a faithful port
   of vanilla's `DebugScreenOverlay`; the *content* is curated rather than faked: lines
+- [Block light-properties oracle](./data-light-oracle.md) — `LightPropertiesOracle`
+  queries every built-in block state's raw light dampening and emission from an actual
+  bootstrapped server registry. The harness contains no release-specific state count,
+  protocol number, or block-property corrections.
   that describe the JVM (heap stats, Java/CPU info, GPU-utilization percentage) are
   dropped outright instead of being filled with fabricated numbers, and this engine's
   own diagnostics take the slots vanilla's JVM-only lines leave empty.
