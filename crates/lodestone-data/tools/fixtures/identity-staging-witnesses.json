@@ -1,0 +1,33 @@
+{
+  "provenance": "Captured independently with jq from official 26.2 blocks.json and registries.json, without importing either Python generator or reading Rust tables. Column hashes cover compact JSON arrays followed by one newline; keys follow numeric report IDs, spans are [minimum state ID, state count], defaults select default:true, and owners join block names to block registry IDs.",
+  "version": "26.2",
+  "source_sha256": {
+    "blocks.json": "dec22eb9547b0bbea396cbf35569f7ec81b7be662775ce03dc2236227473af7b",
+    "registries.json": "9f34d4deb0b494627f6a1a1590e7fb21c11a3949d84bacb59a304e6315287b24"
+  },
+  "counts": {"blocks": 1196, "block_states": 32366, "items": 1537},
+  "column_sha256": {
+    "block_keys": "a74269a8901af755621e55e1163d1ab86bae0d5cd314a018647d9d820413bf50",
+    "item_keys": "3ac8ce7cf9f6175dd8dad5fb8356920d1adf994805cd119fafbd6ea1ac43e71f",
+    "state_keys": "ae9af858f2706ee656a3d54c10ee83c4027edc2d4c1c4236b747acbf10e21ebb",
+    "state_spans": "10055d02bdf74c7cb63c9c2e82c7bdc64e024edee63089fd0cf6bb69a39ce539",
+    "default_states": "e83ee771015e5ba81424490f51ab0c35c5d39a5114f8d89f1ec762327a80d109",
+    "block_ids": "d18386a3c1ea3d86e82149e5143a63743076e11aebb1179092ed142b2c59bc3e"
+  },
+  "blocks": [
+    {"key": "minecraft:air", "id": 0, "state_start": 0, "state_count": 1, "default_state": 0, "default_key": "minecraft:air"},
+    {"key": "minecraft:water", "id": 35, "state_start": 86, "state_count": 16, "default_state": 86, "default_key": "minecraft:water[level=0]"},
+    {"key": "minecraft:suspicious_gravel", "id": 41, "state_start": 125, "state_count": 4, "default_state": 125, "default_key": "minecraft:suspicious_gravel[dusted=0]"},
+    {"key": "minecraft:oak_log", "id": 49, "state_start": 136, "state_count": 3, "default_state": 137, "default_key": "minecraft:oak_log[axis=y]"},
+    {"key": "minecraft:acacia_button", "id": 447, "state_start": 10771, "state_count": 24, "default_state": 10780, "default_key": "minecraft:acacia_button[face=wall,facing=north,powered=false]"},
+    {"key": "minecraft:decorated_pot", "id": 1183, "state_start": 32086, "state_count": 16, "default_state": 32095, "default_key": "minecraft:decorated_pot[cracked=false,facing=north,waterlogged=false]"}
+  ],
+  "items": [
+    {"key": "minecraft:air", "id": 0},
+    {"key": "minecraft:suspicious_gravel", "id": 88},
+    {"key": "minecraft:oak_log", "id": 161},
+    {"key": "minecraft:decorated_pot", "id": 347},
+    {"key": "minecraft:acacia_button", "id": 783},
+    {"key": "minecraft:diamond", "id": 926}
+  ]
+}
