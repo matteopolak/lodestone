@@ -211,8 +211,12 @@ off the server's own registry-carried biome colours (never a hardcoded jar-deriv
 table, so a data pack's renamed or recoloured biome is correct automatically),
 resolved by scanning *downward* for the nearest non-empty section from the player's
 eye, since the section actually at eye height is very often air over open ground.
-Clouds remain vanilla's flat "fast" mesh; the true voxel-extruded "fancy" mode and
-its settings-menu toggle are unbuilt.
+Clouds use a flat sampled plane in Fast mode and a cached voxel-cell face list in
+Fancy mode. `SkyRenderer` owns these texture-dependent pipelines, buffers and cell
+cache together as optional `CloudResources`, built once when `clouds.png` decodes.
+Without that image, both cloud modes skip geometry generation and submission;
+the disc, sunrise band, sun, moon and stars remain available. Required celestial
+art still fails construction rather than sampling unrelated atlas content.
 
 Air bubbles (the underwater breath meter) are a straightforward six-hop chain from
 the entity metadata field to the HUD, with vanilla's own visibility rule: shown

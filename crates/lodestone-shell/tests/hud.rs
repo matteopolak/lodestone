@@ -11,6 +11,8 @@ mod air_bubble_pixels;
 mod attack_indicator_pixels;
 #[path = "hud/block_outline_thickness_pixels.rs"]
 mod block_outline_thickness_pixels;
+#[path = "hud/builtin_optional_texture_pixels.rs"]
+mod builtin_optional_texture_pixels;
 #[path = "hud/chat_input_gap.rs"]
 mod chat_input_gap;
 #[path = "hud/chat_scrollbar_paint.rs"]

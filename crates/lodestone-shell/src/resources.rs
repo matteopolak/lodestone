@@ -1229,19 +1229,9 @@ pub fn load_gui_atlas() -> Option<Arc<GuiAtlas>> {
     }
 }
 
-/// Load and build the sky pass (celestial atlas + cloud texture, from
-/// `lodestone-resources.zip`) via [`SkyRenderer::new`]. Version-free and fail-open like
-/// [`load_gui_atlas`]: `None` on a jar-less run, or on a pack missing the
-/// sun/moon/cloud textures, leaves [`crate::gpu::RenderState`] with no sky
-/// installed — the pre-existing "clear straight to the fog colour" behaviour,
-/// not a startup failure.
-///
-/// Unlike the other `load_*` helpers here, this one needs GPU handles
-/// (`SkyRenderer::new` uploads the atlas/cloud textures immediately rather than
-/// deferring to a later `attach_*` call): it does the `lodestone-resources.zip` IO this
-/// crate's `gpu.rs` deliberately has none of, then hands `RenderState::install_sky`
-/// an already-built renderer, mirroring how `RenderState::new` itself is handed
-/// an already-built [`BlockAtlas`] rather than opening its own jar.
+/// Build the sky from the resource-pack stack and upload its GPU resources.
+/// Missing required celestial art leaves no sky installed; an unavailable cloud
+/// map omits only clouds. Asset I/O stays outside [`crate::gpu::RenderState`].
 #[must_use]
 pub fn load_sky(
     device: &wgpu::Device,
@@ -1251,7 +1241,7 @@ pub fn load_sky(
     let manager = open_vanilla_pack_stack()?;
     match SkyRenderer::new(device, queue, color_format, &manager) {
         Ok(sky) => {
-            tracing::info!(target: "assets", "loaded vanilla sky (sun/moon/stars/clouds)");
+            tracing::info!(target: "assets", clouds = sky.has_clouds(), "loaded sky renderer");
             Some(sky)
         }
         Err(e) => {
@@ -1263,9 +1253,9 @@ pub fn load_sky(
 
 /// Load and build the required screen-effect textures and pipelines via
 /// [`ScreenEffectRenderer::new`]. Same shape as [`load_sky`]: fail-open,
-/// `None` on a jar-less run or a pack missing any required texture, leaving
+/// `None` without a pack or a required texture, leaving
 /// [`crate::gpu::RenderState`] with no overlay pass installed rather than
-/// failing startup.
+/// failing startup. An unavailable nausea image omits only confusion.
 #[must_use]
 pub fn load_screen_effects(
     device: &wgpu::Device,
@@ -1275,7 +1265,7 @@ pub fn load_screen_effects(
     let manager = open_vanilla_pack_stack()?;
     match ScreenEffectRenderer::new(device, queue, color_format, &manager) {
         Ok(fx) => {
-            tracing::info!(target: "assets", "loaded screen-effect overlays");
+            tracing::info!(target: "assets", confusion = fx.has_confusion_overlay(), "loaded screen-effect overlays");
             Some(fx)
         }
         Err(e) => {

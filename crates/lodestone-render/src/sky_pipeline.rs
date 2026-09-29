@@ -668,12 +668,12 @@ impl FancyCloudPipeline {
 }
 
 // ---------------------------------------------------------------------------
-// SkyRenderer: owns GPU resources for all four passes and drives them from a
+// SkyRenderer: owns GPU resources for the sky passes and drives them from a
 // frame's (camera, time_of_day, sky colour).
 // ---------------------------------------------------------------------------
 
-/// Everything needed to draw the sky each frame: the four pipelines above, the
-/// celestial atlas and cloud textures, and small dynamic vertex buffers
+/// Everything needed to draw the sky each frame: the pipelines above, the
+/// celestial atlas, optional cloud resources, and small dynamic vertex buffers
 /// rewritten every call (see the module docs on why CPU-side rebuilding is the
 /// right tradeoff at this vertex count).
 #[derive(Debug)]
@@ -685,31 +685,13 @@ pub struct SkyRenderer {
     disc: SkyDiscPipeline,
     celestial: CelestialPipeline,
     star: StarPipeline,
-    cloud: CloudPipeline,
-    fancy_cloud: FancyCloudPipeline,
+    clouds: Option<CloudResources>,
     sunrise: SunrisePipeline,
 
     celestial_bind_group: wgpu::BindGroup,
-    cloud_bind_group: wgpu::BindGroup,
 
     sun_uv: [f32; 4],
     moon_uv: [[f32; 4]; 8],
-    cloud_size: (u32, u32),
-    /// The FANCY cell grid, voxelized once from `clouds.png` at construction
-    /// (`crate::cloud_mesh::CloudCells::from_rgba`) — the texture never
-    /// changes at runtime, so there is nothing to rebuild here across frames.
-    cloud_cells: CloudCells,
-    /// The face list walked over [`Self::cloud_cells`], memoised on the camera's
-    /// cloud cell and its position relative to the layer — see
-    /// [`CloudFaceCache`], which also explains why the *vertex* expansion stays
-    /// per frame.
-    ///
-    /// `Mutex` because [`Self::render`] takes `&self`: every caller in the tree
-    /// (including `lodestone_shell::gpu`) holds a shared `SkyRenderer`, and
-    /// widening that to `&mut self` would touch every one of them for a lock
-    /// that is uncontended and taken once a frame. It owns the cells the cache is
-    /// keyed against, which is what lets the key omit the texture.
-    cloud_faces: std::sync::Mutex<CloudFaceCache>,
 
     disc_vbuf: wgpu::Buffer,
     disc_ibuf: wgpu::Buffer,
@@ -733,20 +715,67 @@ pub struct SkyRenderer {
     /// is now `star_base.len()` at both.
     star_base: Vec<[[f32; 3]; 4]>,
 
-    cloud_vbuf: wgpu::Buffer,
-    cloud_ibuf: wgpu::Buffer,
-
-    /// Sized for [`CLOUD_FANCY_RADIUS_CELLS`] via
-    /// [`crate::sky::cloud_fancy_max_faces`] — the real per-frame face count
-    /// (`fancy_cloud_geometry`'s output) is always `<=` this, so the buffer
-    /// never needs to grow; [`SkyRenderer::render`] draws only the real count.
-    fancy_cloud_vbuf: wgpu::Buffer,
-    fancy_cloud_ibuf: wgpu::Buffer,
-    fancy_cloud_max_faces: u32,
-
     sunrise_vbuf: wgpu::Buffer,
     sunrise_ibuf: wgpu::Buffer,
     sunrise_index_count: u32,
+}
+
+/// Texture-dependent cloud passes, allocated only when the cloud map decodes.
+#[derive(Debug)]
+struct CloudResources {
+    flat: CloudPipeline,
+    fancy: FancyCloudPipeline,
+    bind_group: wgpu::BindGroup,
+    size: (u32, u32),
+    cells: CloudCells,
+    faces: std::sync::Mutex<CloudFaceCache>,
+    flat_vbuf: wgpu::Buffer,
+    flat_ibuf: wgpu::Buffer,
+    fancy_vbuf: wgpu::Buffer,
+    fancy_ibuf: wgpu::Buffer,
+    max_faces: u32,
+}
+
+impl CloudResources {
+    fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color_format: wgpu::TextureFormat,
+        camera_layout: &wgpu::BindGroupLayout,
+        image: &lodestone_assets::Image,
+    ) -> Self {
+        let flat = CloudPipeline::new(device, color_format, camera_layout);
+        let fancy = FancyCloudPipeline::new(device, color_format, camera_layout);
+        // Nearest preserves the cloud map's binary cell mask at its edges.
+        let (_, view, sampler) = upload_plain_texture(
+            device, queue, "lodestone-sky-cloud-texture",
+            image.width, image.height, &image.rgba,
+            wgpu::AddressMode::Repeat, wgpu::FilterMode::Nearest,
+        );
+        let bind_group = texture_bind_group(
+            device, &flat.texture_layout, "lodestone-sky-cloud-texture-bg", &view, &sampler,
+        );
+        let max_faces = cloud_fancy_max_faces(CLOUD_FANCY_RADIUS_CELLS);
+        Self {
+            flat,
+            fancy,
+            bind_group,
+            size: (image.width, image.height),
+            cells: CloudCells::from_rgba(image.width, image.height, &image.rgba),
+            // The immutable cell grid owns its per-camera-cell enumeration cache.
+            faces: std::sync::Mutex::new(CloudFaceCache::default()),
+            flat_vbuf: vertex_buffer(
+                device, "lodestone-sky-cloud-vbuf", (4 * std::mem::size_of::<CloudVertex>()) as u64,
+            ),
+            flat_ibuf: quad_index_buffer(device, "lodestone-sky-cloud-ibuf", 1),
+            fancy_vbuf: vertex_buffer(
+                device, "lodestone-sky-fancy-cloud-vbuf",
+                (max_faces as u64) * 4 * std::mem::size_of::<SkyVertex>() as u64,
+            ),
+            fancy_ibuf: quad_index_buffer(device, "lodestone-sky-fancy-cloud-ibuf", max_faces),
+            max_faces,
+        }
+    }
 }
 
 /// Half-extent in blocks of the (flat, alpha-tested) cloud plane — see
@@ -1126,8 +1155,8 @@ impl SkyRenderer {
     ///
     /// # Errors
     ///
-    /// Returns [`SkyAssetError`] if the sun, a moon phase, or the cloud
-    /// texture is missing/undecodable in `manager`.
+    /// Returns [`SkyAssetError`] if the sun or a moon phase is missing or
+    /// undecodable. An unavailable cloud map omits only the cloud passes.
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -1135,7 +1164,6 @@ impl SkyRenderer {
         manager: &ResourceManager,
     ) -> Result<Self, SkyAssetError> {
         let celestial_atlas = CelestialAtlas::build(manager)?;
-        let cloud_image = lodestone_assets::load_cloud_texture(manager)?;
 
         let camera_layout = camera_bind_group_layout(device, "lodestone-sky-camera-bgl");
         let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1156,8 +1184,9 @@ impl SkyRenderer {
         let disc = SkyDiscPipeline::new(device, color_format, &camera_layout);
         let celestial = CelestialPipeline::new(device, color_format, &camera_layout);
         let star = StarPipeline::new(device, color_format, &camera_layout);
-        let cloud = CloudPipeline::new(device, color_format, &camera_layout);
-        let fancy_cloud = FancyCloudPipeline::new(device, color_format, &camera_layout);
+        let clouds = lodestone_assets::load_cloud_texture(manager).ok().map(|image| {
+            CloudResources::new(device, queue, color_format, &camera_layout, &image)
+        });
         let sunrise = SunrisePipeline::new(device, color_format, &camera_layout);
 
         let atlas = celestial_atlas.atlas();
@@ -1202,40 +1231,6 @@ impl SkyRenderer {
             &atlas_sampler,
         );
 
-        // `Nearest`, not `Linear`: `clouds.png` is a hard binary mask (every
-        // texel is either fully transparent or fully opaque white — see
-        // `load_cloud_texture`'s doc — vanilla's own cloud-renderer empty-cell check
-        // is a per-*cell* boolean, never a partial-coverage float). Linear
-        // filtering interpolates transparent-black and opaque-white texels
-        // across every cell boundary; `CLOUD_WGSL`'s alpha-test threshold lets
-        // the low-but-nonzero-alpha fringe of that interpolation through, and
-        // its near-black *colour* (the same fraction of the way from black to
-        // white) renders as-is because this pipeline is opaque
-        // (`CloudPipeline` has no blend state) — producing exactly the
-        // reported "rounded black outline with a gradient drop-off inside".
-        // Nearest sampling never produces a partial-coverage texel: every
-        // pixel is either the discarded fully-transparent texel or the solid
-        // white one, which also reads closer to vanilla's actual per-cell
-        // (not per-pixel-sampled) cloud mesh — see `cloud_plane_geometry`'s
-        // module docs on that simplification.
-        let (_cloud_tex, cloud_view, cloud_sampler) = upload_plain_texture(
-            device,
-            queue,
-            "lodestone-sky-cloud-texture",
-            cloud_image.width,
-            cloud_image.height,
-            &cloud_image.rgba,
-            wgpu::AddressMode::Repeat,
-            wgpu::FilterMode::Nearest,
-        );
-        let cloud_bind_group = texture_bind_group(
-            device,
-            &cloud.texture_layout,
-            "lodestone-sky-cloud-texture-bg",
-            &cloud_view,
-            &cloud_sampler,
-        );
-
         let sun_uv = celestial_atlas
             .sun_sprite()
             .map(sprite_uv)
@@ -1277,25 +1272,6 @@ impl SkyRenderer {
         );
         let star_ibuf = quad_index_buffer(device, "lodestone-sky-star-ibuf", star_quad_count);
 
-        let cloud_vbuf = vertex_buffer(
-            device,
-            "lodestone-sky-cloud-vbuf",
-            (4 * std::mem::size_of::<CloudVertex>()) as u64,
-        );
-        let cloud_ibuf = quad_index_buffer(device, "lodestone-sky-cloud-ibuf", 1);
-
-        // Voxelized once here (the texture is static for the session); the face
-        // list over it is memoised per camera cell by `cloud_faces` — see both
-        // fields' docs.
-        let cloud_cells = CloudCells::from_rgba(cloud_image.width, cloud_image.height, &cloud_image.rgba);
-        let fancy_cloud_max_faces = cloud_fancy_max_faces(CLOUD_FANCY_RADIUS_CELLS);
-        let fancy_cloud_vbuf = vertex_buffer(
-            device,
-            "lodestone-sky-fancy-cloud-vbuf",
-            (fancy_cloud_max_faces as u64) * 4 * std::mem::size_of::<SkyVertex>() as u64,
-        );
-        let fancy_cloud_ibuf = quad_index_buffer(device, "lodestone-sky-fancy-cloud-ibuf", fancy_cloud_max_faces);
-
         let sunrise_indices = sunrise_fan_indices();
         let sunrise_index_count = sunrise_indices.len() as u32;
         let sunrise_vbuf = vertex_buffer(
@@ -1316,16 +1292,11 @@ impl SkyRenderer {
             disc,
             celestial,
             star,
-            cloud,
-            fancy_cloud,
+            clouds,
             sunrise,
             celestial_bind_group,
-            cloud_bind_group,
             sun_uv,
             moon_uv,
-            cloud_size: (cloud_image.width, cloud_image.height),
-            cloud_cells,
-            cloud_faces: std::sync::Mutex::new(CloudFaceCache::default()),
             disc_vbuf,
             disc_ibuf,
             disc_index_count,
@@ -1334,11 +1305,6 @@ impl SkyRenderer {
             star_vbuf,
             star_ibuf,
             star_base,
-            cloud_vbuf,
-            cloud_ibuf,
-            fancy_cloud_vbuf,
-            fancy_cloud_ibuf,
-            fancy_cloud_max_faces,
             sunrise_vbuf,
             sunrise_ibuf,
             sunrise_index_count,
@@ -1350,6 +1316,12 @@ impl SkyRenderer {
     #[must_use]
     pub fn camera_bind_group_layout(&self) -> &wgpu::BindGroupLayout {
         &self.camera_layout
+    }
+
+    /// Whether this pack supplies a decodable cloud map for either cloud mode.
+    #[must_use]
+    pub fn has_clouds(&self) -> bool {
+        self.clouds.is_some()
     }
 
     /// Draws the whole sky (disc, sun, moon, stars, clouds) for one frame.
@@ -1565,14 +1537,14 @@ impl SkyRenderer {
         // draw: FANCY walks a 16-cell radius and expands every visible face every
         // frame, which is the most expensive thing in this pass. A player who turned
         // clouds off to reclaim that cost must actually reclaim it.
-        let draw_clouds = frame.draws_clouds();
-        let draw_fast_clouds = draw_clouds && frame.cloud_status.draws_flat_quad();
-        let fancy_face_count = if draw_fast_clouds {
+        let clouds = self.clouds.as_ref().filter(|_| frame.draws_clouds());
+        let draw_fast_clouds = clouds.is_some() && frame.cloud_status.draws_flat_quad();
+        let fancy_face_count = if let Some(clouds) = clouds.filter(|_| draw_fast_clouds) {
             let (cloud_pos, cloud_uv) = cloud_plane_geometry(
                 camera.position.to_array(),
                 time_of_day,
-                self.cloud_size.0,
-                self.cloud_size.1,
+                clouds.size.0,
+                clouds.size.1,
                 CLOUD_PLANE_HALF_EXTENT,
             );
             let cloud_verts: Vec<CloudVertex> = (0..4)
@@ -1582,33 +1554,33 @@ impl SkyRenderer {
                     color: cloud_tint,
                 })
                 .collect();
-            queue.write_buffer(&self.cloud_vbuf, 0, bytemuck::cast_slice(&cloud_verts));
+            queue.write_buffer(&clouds.flat_vbuf, 0, bytemuck::cast_slice(&cloud_verts));
             0
-        } else if frame.cloud_status.draws_extruded_cells() {
+        } else if let Some(clouds) = clouds.filter(|_| frame.cloud_status.draws_extruded_cells()) {
             let verts = {
                 // Only the face *enumeration* is cached; the vertices are
                 // expanded every frame because the sub-cell scroll moves every
                 // tick. See `CloudFaceCache`.
-                let mut cache = self
-                    .cloud_faces
+                let mut cache = clouds
+                    .faces
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 fancy_cloud_geometry_cached(
                     &mut cache,
-                    &self.cloud_cells,
+                    &clouds.cells,
                     camera.position.to_array(),
                     time_of_day,
                     cloud_tint,
                 )
             };
             debug_assert!(
-                verts.len() as u32 <= self.fancy_cloud_max_faces * 4,
+                verts.len() as u32 <= clouds.max_faces * 4,
                 "fancy_cloud_geometry produced {} verts, over the {}-face buffer capacity — \
                  CLOUD_FANCY_RADIUS_CELLS and cloud_fancy_max_faces have drifted apart",
                 verts.len(),
-                self.fancy_cloud_max_faces
+                clouds.max_faces
             );
-            let face_count = (verts.len() / 4).min(self.fancy_cloud_max_faces as usize) as u32;
+            let face_count = (verts.len() / 4).min(clouds.max_faces as usize) as u32;
             if face_count > 0 {
                 let gpu_verts: Vec<SkyVertex> = verts[..(face_count as usize * 4)]
                     .iter()
@@ -1617,13 +1589,11 @@ impl SkyRenderer {
                         color: *color,
                     })
                     .collect();
-                queue.write_buffer(&self.fancy_cloud_vbuf, 0, bytemuck::cast_slice(&gpu_verts));
+                queue.write_buffer(&clouds.fancy_vbuf, 0, bytemuck::cast_slice(&gpu_verts));
             }
             face_count
         } else {
-            // `CloudStatus::Off`. Neither branch above ran, so neither vertex
-            // buffer was written and neither pipeline is bound below — a zero face
-            // count with `draw_fast_clouds` false is what "no clouds" *is* here.
+            // No enabled cloud pass or no decodable cloud map.
             0
         };
 
@@ -1678,18 +1648,18 @@ impl SkyRenderer {
         pass.set_index_buffer(self.celestial_ibuf.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(0..12, 0, 0..1);
 
-        if draw_fast_clouds {
-            pass.set_pipeline(&self.cloud.pipeline);
+        if let Some(clouds) = clouds.filter(|_| draw_fast_clouds) {
+            pass.set_pipeline(&clouds.flat.pipeline);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            pass.set_bind_group(1, &self.cloud_bind_group, &[]);
-            pass.set_vertex_buffer(0, self.cloud_vbuf.slice(..));
-            pass.set_index_buffer(self.cloud_ibuf.slice(..), wgpu::IndexFormat::Uint32);
+            pass.set_bind_group(1, &clouds.bind_group, &[]);
+            pass.set_vertex_buffer(0, clouds.flat_vbuf.slice(..));
+            pass.set_index_buffer(clouds.flat_ibuf.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..6, 0, 0..1);
-        } else if fancy_face_count > 0 {
-            pass.set_pipeline(&self.fancy_cloud.pipeline);
+        } else if let Some(clouds) = clouds.filter(|_| fancy_face_count > 0) {
+            pass.set_pipeline(&clouds.fancy.pipeline);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            pass.set_vertex_buffer(0, self.fancy_cloud_vbuf.slice(..));
-            pass.set_index_buffer(self.fancy_cloud_ibuf.slice(..), wgpu::IndexFormat::Uint32);
+            pass.set_vertex_buffer(0, clouds.fancy_vbuf.slice(..));
+            pass.set_index_buffer(clouds.fancy_ibuf.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..fancy_face_count * 6, 0, 0..1);
         }
     }

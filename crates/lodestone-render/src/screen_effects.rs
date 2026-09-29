@@ -776,7 +776,13 @@ fn vertex_buffer(device: &wgpu::Device, label: &str, verts: &[ScreenOverlayVerte
     })
 }
 
-/// Owns the GPU resources for both overlays and drives them per frame.
+#[derive(Debug)]
+struct TexturedOverlay {
+    bind_group: wgpu::BindGroup,
+    vertices: wgpu::Buffer,
+}
+
+/// Owns the screen-overlay GPU resources and drives each available pass.
 #[derive(Debug)]
 pub struct ScreenEffectRenderer {
     pipeline: wgpu::RenderPipeline,
@@ -793,7 +799,7 @@ pub struct ScreenEffectRenderer {
     /// — a flat colour fill needs no real texture content, only opacity.
     white_bind_group: wgpu::BindGroup,
     /// The confusion overlay — `nausea.png`.
-    nausea_bind_group: wgpu::BindGroup,
+    nausea: Option<TexturedOverlay>,
     /// The portal overlay — `nether_portal.png`.
     portal_bind_group: wgpu::BindGroup,
     /// The world-border warning mask — `vignette.png`.
@@ -809,7 +815,6 @@ pub struct ScreenEffectRenderer {
     freeze_vbuf: wgpu::Buffer,
     spyglass_lens_vbuf: wgpu::Buffer,
     spyglass_bars_vbuf: wgpu::Buffer,
-    nausea_vbuf: wgpu::Buffer,
     portal_vbuf: wgpu::Buffer,
     obscuration_vbuf: wgpu::Buffer,
     border_warning_vbuf: wgpu::Buffer,
@@ -820,8 +825,8 @@ impl ScreenEffectRenderer {
     ///
     /// # Errors
     ///
-    /// Returns [`ScreenEffectAssetError`] if any texture is missing or fails
-    /// to decode.
+    /// Returns [`ScreenEffectAssetError`] if a required texture is missing or
+    /// fails to decode. An unavailable nausea texture omits only confusion.
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -833,7 +838,6 @@ impl ScreenEffectRenderer {
         let pumpkin_image = load_pumpkin_overlay_texture(manager)?;
         let freeze_image = load_freeze_overlay_texture(manager)?;
         let spyglass_image = load_spyglass_scope_texture(manager)?;
-        let nausea_image = load_nausea_overlay_texture(manager)?;
         let portal_image = load_portal_overlay_texture(manager)?;
         let border_warning_image = load_vignette_texture(manager)?;
         let portal_frame_count = fire_frame_count(&portal_image);
@@ -982,23 +986,21 @@ impl ScreenEffectRenderer {
             &white_sampler,
         );
 
-        let (nausea_view, nausea_sampler) = upload_plain_texture(
-            device,
-            queue,
-            "lodestone-nausea-overlay-texture",
-            nausea_image.width,
-            nausea_image.height,
-            &nausea_image.rgba,
-            wgpu::AddressMode::ClampToEdge,
-            wgpu::FilterMode::Linear,
-        );
-        let nausea_bind_group = texture_bind_group(
-            device,
-            &layout,
-            "lodestone-nausea-overlay-texture-bg",
-            &nausea_view,
-            &nausea_sampler,
-        );
+        let nausea = load_nausea_overlay_texture(manager).ok().map(|image| {
+            let (view, sampler) = upload_plain_texture(
+                device, queue, "lodestone-nausea-overlay-texture",
+                image.width, image.height, &image.rgba,
+                wgpu::AddressMode::ClampToEdge, wgpu::FilterMode::Linear,
+            );
+            TexturedOverlay {
+                bind_group: texture_bind_group(
+                    device, &layout, "lodestone-nausea-overlay-texture-bg", &view, &sampler,
+                ),
+                vertices: vertex_buffer(
+                    device, "lodestone-nausea-vbuf", &confusion_overlay_triangles(0.0),
+                ),
+            }
+        });
 
         // Nearest, clamp: an animation strip like fire's, same reasoning.
         let (portal_view, portal_sampler) = upload_plain_texture(
@@ -1052,7 +1054,6 @@ impl ScreenEffectRenderer {
             "lodestone-spyglass-bars-vbuf",
             &spyglass_letterbox_triangles(1.0),
         );
-        let nausea_vbuf = vertex_buffer(device, "lodestone-nausea-vbuf", &confusion_overlay_triangles(0.0));
         let portal_vbuf = vertex_buffer(
             device,
             "lodestone-portal-vbuf",
@@ -1078,7 +1079,7 @@ impl ScreenEffectRenderer {
             freeze_bind_group,
             spyglass_bind_group,
             white_bind_group,
-            nausea_bind_group,
+            nausea,
             portal_bind_group,
             border_warning_bind_group,
             fire_frame_count,
@@ -1089,7 +1090,6 @@ impl ScreenEffectRenderer {
             freeze_vbuf,
             spyglass_lens_vbuf,
             spyglass_bars_vbuf,
-            nausea_vbuf,
             portal_vbuf,
             obscuration_vbuf,
             border_warning_vbuf,
@@ -1101,6 +1101,12 @@ impl ScreenEffectRenderer {
     #[must_use]
     pub fn fire_frame_count(&self) -> u32 {
         self.fire_frame_count
+    }
+
+    /// Whether this pack supplies a decodable screen-space confusion texture.
+    #[must_use]
+    pub fn has_confusion_overlay(&self) -> bool {
+        self.nausea.is_some()
     }
 
     /// Draws the underwater overlay (screen tint + scrolling texture) as its
@@ -1332,9 +1338,13 @@ impl ScreenEffectRenderer {
     /// already applied the mutual-exclusion-with-portal and
     /// `screenEffectScale < 1.0` checks (vanilla's HUD update logic), matching every
     /// other `draw_*` method's "gating happens one layer up" convention.
-    pub fn draw_confusion(&self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, strength: f32) {
+    /// Returns whether the optional textured pass was submitted.
+    pub fn draw_confusion(&self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, strength: f32) -> bool {
+        let Some(nausea) = &self.nausea else {
+            return false;
+        };
         let verts = confusion_overlay_triangles(strength);
-        queue.write_buffer(&self.nausea_vbuf, 0, bytemuck::cast_slice(&verts));
+        queue.write_buffer(&nausea.vertices, 0, bytemuck::cast_slice(&verts));
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("lodestone-confusion-overlay-pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1352,9 +1362,10 @@ impl ScreenEffectRenderer {
             multiview_mask: None,
         });
         pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.nausea_bind_group, &[]);
-        pass.set_vertex_buffer(0, self.nausea_vbuf.slice(..));
+        pass.set_bind_group(0, &nausea.bind_group, &[]);
+        pass.set_vertex_buffer(0, nausea.vertices.slice(..));
         pass.draw(0..verts.len() as u32, 0..1);
+        true
     }
 
     /// Draws the portal overlay's screen-space half as its own
