@@ -423,13 +423,10 @@ mod tests {
         // identically. The test, not `MAIN_BUTTONS`, was wrong.
         let (mut nav, _) = nav("buttons");
         let mut ui = UiState::new();
-        // Singleplayer opens the world list through the menu's world-list route —
-        // where it used to return `MenuAction::Singleplayer` and launch directly.
-        // There is no action for the app to take at *this* button; the launch is
-        // Play Selected World, one screen in.
+        // With no saved worlds, Singleplayer opens world creation directly.
         assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::None);
-        assert_eq!(ui.screen(), Screen::WorldSelect);
-        ui.on_escape();
+        assert_eq!(ui.screen(), Screen::CreateWorld);
+        nav.key(&mut ui, MenuKey::Escape);
         assert_eq!(ui.screen(), Screen::MainMenu, "escape unwinds to the title");
         assert_eq!(
             nav.main_button(),
@@ -2805,6 +2802,7 @@ mod tests {
     fn the_world_select_rows_are_in_the_order_click_assumes() {
         use crate::menu::world_select::{SEARCH_FIELD, WORLD_SELECT_BUTTONS};
         let (mut nav, _) = self::nav("world-select-row-order");
+        plant_world(&nav, "existing");
         let mut ui = UiState::new();
         assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::None);
         assert_eq!(ui.screen(), Screen::WorldSelect, "Singleplayer opens it");
@@ -2816,7 +2814,7 @@ mod tests {
             &mut favicons,
         )
         .expect("the world list owns its frame");
-        assert_eq!(frame.rows.len(), 1 + WORLD_SELECT_BUTTONS.len());
+        assert_eq!(frame.rows.len(), 1 + nav.world_select().shown_len() + WORLD_SELECT_BUTTONS.len());
         assert!(
             frame.rows[SEARCH_FIELD].edit.is_some(),
             "row {SEARCH_FIELD} must be the search box"
@@ -2837,13 +2835,14 @@ mod tests {
     fn clicking_back_leaves_the_world_list_and_clicking_create_does_nothing() {
         use crate::menu::world_select::WorldSelectButton as B;
         let (mut nav, _) = self::nav("world-select-click");
+        plant_world(&nav, "existing");
         let mut ui = UiState::new();
         nav.key(&mut ui, MenuKey::Enter);
         assert_eq!(ui.screen(), Screen::WorldSelect);
 
         // The disabled buttons first, so a stray activation would be visible as a
         // screen change before Back is ever pressed.
-        for button in [B::Edit, B::Delete, B::ReCreate] {
+        for button in [B::Edit, B::ReCreate] {
             assert_eq!(nav.click(&mut ui, button.row()), MenuAction::None);
             assert_eq!(
                 ui.screen(),
@@ -2885,13 +2884,10 @@ mod tests {
     #[test]
     fn creating_a_world_asks_the_app_to_start_singleplayer_with_the_typed_seed() {
         use crate::menu::create_world::{CREATE_ROW, SEED_FIELD, WORLD_TAB};
-        use crate::menu::world_select::WorldSelectButton as B;
 
         let (mut nav, _) = self::nav("create-world-seed");
         let mut ui = UiState::new();
         nav.key(&mut ui, MenuKey::Enter);
-        assert_eq!(ui.screen(), Screen::WorldSelect, "premise");
-        assert_eq!(nav.click(&mut ui, B::Create.row()), MenuAction::None);
         assert_eq!(ui.screen(), Screen::CreateWorld, "premise: World Creation is open");
 
         // Seed lives on the World tab — click the tab first, the
@@ -2965,13 +2961,10 @@ mod tests {
     #[test]
     fn toggling_an_experiment_and_creating_writes_enabled_features_to_level_dat() {
         use crate::menu::create_world::{CREATE_ROW, EXPERIMENTS_ROW, MORE_TAB};
-        use crate::menu::world_select::WorldSelectButton as B;
 
         let (mut nav, _) = self::nav("create-world-experiments");
         let mut ui = UiState::new();
         nav.key(&mut ui, MenuKey::Enter);
-        assert_eq!(ui.screen(), Screen::WorldSelect, "premise");
-        assert_eq!(nav.click(&mut ui, B::Create.row()), MenuAction::None);
         assert_eq!(ui.screen(), Screen::CreateWorld, "premise: World Creation is open");
 
         // Experiments lives on the More tab (tab layout).
@@ -3041,13 +3034,10 @@ mod tests {
     #[test]
     fn customizing_a_flat_world_and_creating_writes_the_layers_to_world_gen_settings_dat() {
         use crate::menu::create_world::{CREATE_ROW, CUSTOMIZE_ROW, WORLD_TAB, WORLD_TYPE_ROW};
-        use crate::menu::world_select::WorldSelectButton as B;
 
         let (mut nav, _) = self::nav("create-world-customize");
         let mut ui = UiState::new();
         nav.key(&mut ui, MenuKey::Enter);
-        assert_eq!(ui.screen(), Screen::WorldSelect, "premise");
-        assert_eq!(nav.click(&mut ui, B::Create.row()), MenuAction::None);
         assert_eq!(ui.screen(), Screen::CreateWorld, "premise: World Creation is open");
 
         assert_eq!(nav.click(&mut ui, WORLD_TAB), MenuAction::None);
@@ -3323,6 +3313,7 @@ mod tests {
         let (mut nav, _) = self::nav("delete-refused");
         let root = nav.saves_root().to_path_buf();
         plant_world(&nav, "vanishing");
+        plant_world(&nav, "zzz-remaining");
         let mut ui = UiState::new();
         nav.key(&mut ui, MenuKey::Enter);
         nav.click(&mut ui, B::Delete.row());
@@ -3364,8 +3355,9 @@ mod tests {
         let mut created: Vec<std::path::PathBuf> = Vec::new();
         for name in ["First", "Second"] {
             nav.key(&mut ui, MenuKey::Enter);
-            assert_eq!(ui.screen(), Screen::WorldSelect, "premise: the list is open");
-            assert_eq!(nav.click(&mut ui, B::Create.row()), MenuAction::None);
+            if ui.screen() == Screen::WorldSelect {
+                assert_eq!(nav.click(&mut ui, B::Create.row()), MenuAction::None);
+            }
             assert_eq!(ui.screen(), Screen::CreateWorld);
             // Clear the `New World` default and type a real name. Name lives
             // on the Game tab, which is where a fresh screen already starts.
@@ -3579,6 +3571,7 @@ mod tests {
     #[test]
     fn the_world_list_search_field_takes_text_and_escape_returns_to_the_title() {
         let (mut nav, _) = self::nav("world-select-keys");
+        plant_world(&nav, "existing");
         let mut ui = UiState::new();
         nav.key(&mut ui, MenuKey::Enter);
         type_str(&mut nav, &mut ui, "flat");

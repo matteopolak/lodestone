@@ -3762,7 +3762,7 @@ pub fn start_browser_integrated_worker(
     seed: i64,
     preset: u8,
     epoch: u32,
-) -> Result<(), String> {
+) -> Result<Option<lodestone_server::IntegratedTickMonitor>, String> {
     let preset = world_preset_from_wire_id(preset)
         .ok_or_else(|| format!("unknown browser worker world preset {preset}"))?;
     let server_protocol = lodestone_registry::server_protocol_for_protocol(protocol)
@@ -3785,14 +3785,14 @@ pub fn start_browser_integrated_worker(
     }
     let commands = lodestone_server::CommandDispatch::installed(Arc::new(WorkerCommandSink));
     let worker_io = lodestone_net::MessagePortTransport::new(port);
-    lodestone_server::IntegratedServer::serve_with_transport(
+    let monitor = lodestone_server::IntegratedServer::serve_with_transport(
         server_protocol,
         source,
         8,
         commands,
         worker_io,
     );
-    Ok(())
+    Ok(monitor)
 }
 
 /// The world name a LAN ping advertises — the world directory's own final

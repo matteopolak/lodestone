@@ -260,6 +260,83 @@ test("routes cancellation and worldgen counters through the progress port", asyn
   assert.equal(progress.at(-1).epoch, 1);
 });
 
+test("samples worker health on a bounded host timer and stops when sampling ends", async () => {
+  const context = bootstrap();
+  const { launch, reset } = context.LodestoneWorkerBootstrap;
+  const timers = new Map();
+  const delays = [];
+  const samples = [];
+  let nextTimer = 1;
+  let time = 25;
+  const host = {
+    performance: { now: () => time },
+    setTimeout: (callback, delay) => {
+      const id = nextTimer++;
+      timers.set(id, callback);
+      delays.push(delay);
+      return id;
+    },
+    clearTimeout: (id) => timers.delete(id),
+  };
+  await launch(
+    { data: launchRequest, ports: [{}, { postMessage() {} }, {}] },
+    async () => ({
+      default: async () => {},
+      start_worker: () => {},
+      sample_worker: (epoch, gap) => {
+        samples.push([epoch, gap]);
+        return samples.length < 2;
+      },
+    }),
+    () => {},
+    host,
+  );
+
+  assert.deepEqual(delays, [1_000]);
+  assert.equal(samples.length, 0);
+  time = 1_033;
+  const first = timers.entries().next().value;
+  timers.delete(first[0]);
+  first[1]();
+  assert.deepEqual(samples, [[1, 1_008]]);
+  assert.deepEqual(delays, [1_000, 1_000]);
+  time = 2_045;
+  const second = timers.entries().next().value;
+  timers.delete(second[0]);
+  second[1]();
+  assert.deepEqual(samples, [[1, 1_008], [1, 1_012]]);
+  assert.equal(timers.size, 0);
+  reset();
+});
+
+test("reset clears the pending worker health timer", async () => {
+  const context = bootstrap();
+  const { launch, reset } = context.LodestoneWorkerBootstrap;
+  const timers = new Map();
+  let nextTimer = 1;
+  await launch(
+    { data: launchRequest, ports: [{}, { postMessage() {} }, {}] },
+    async () => ({
+      default: async () => {},
+      start_worker: () => {},
+      sample_worker: () => true,
+    }),
+    () => {},
+    {
+      performance: { now: () => 0 },
+      setTimeout: (callback) => {
+        const id = nextTimer++;
+        timers.set(id, callback);
+        return id;
+      },
+      clearTimeout: (id) => timers.delete(id),
+    },
+  );
+  assert.equal(timers.size, 1);
+  reset();
+  assert.equal(timers.size, 0);
+});
+
 test("staging keeps serial and threaded artifacts separate", () => {
   const staging = fs.readFileSync(new URL("../scripts/stage_worker.sh", import.meta.url), "utf8");
   assert.match(staging, /lodestone-server-worker-wasm-serial/);

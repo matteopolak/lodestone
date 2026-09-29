@@ -10,7 +10,41 @@
     0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
     0x05, 0x04, 0x01, 0x03, 0x01, 0x01,
   ]);
+  const HEALTH_SAMPLE_INTERVAL_MS = 1_000;
   let activeLaunch = null;
+
+  function stopHealthSampling(launch) {
+    if (launch?.healthTimer !== undefined) {
+      launch.host.clearTimeout?.(launch.healthTimer);
+      launch.healthTimer = undefined;
+    }
+  }
+
+  function startHealthSampling(launch) {
+    const sample = launch.wasm?.sample_worker;
+    if (typeof sample !== "function" || typeof launch.host?.setTimeout !== "function" ||
+        typeof launch.host?.performance?.now !== "function") {
+      return;
+    }
+    let previousAt = launch.host.performance.now();
+    const schedule = () => {
+      if (activeLaunch !== launch || launch.epoch !== launch.request.epoch) return;
+      launch.healthTimer = launch.host.setTimeout(() => {
+        launch.healthTimer = undefined;
+        if (activeLaunch !== launch || launch.epoch !== launch.request.epoch) return;
+        const sampledAt = launch.host.performance.now();
+        const callbackGapMs = Math.max(0, sampledAt - previousAt);
+        previousAt = sampledAt;
+        try {
+          if (sample.call(launch.wasm, launch.epoch, callbackGapMs) === false) return;
+        } catch (_error) {
+          return;
+        }
+        schedule();
+      }, HEALTH_SAMPLE_INTERVAL_MS);
+    };
+    schedule();
+  }
 
   function threadSupport(host = global) {
     if (host?.crossOriginIsolated !== true) {
@@ -101,12 +135,16 @@
       return;
     }
 
-    activeLaunch = {
+    const launchState = {
       epoch: request.epoch,
       progress: ports[1],
       horizon: ports[2],
       wasm: null,
+      host,
+      request,
+      healthTimer: undefined,
     };
+    activeLaunch = launchState;
     postMessage({ kind: "progress", stage: "loading-module" });
     const support = threadSupport(host);
     const threaded = support.available;
@@ -129,8 +167,10 @@
     try {
       const mode = threaded ? "threaded" : "serial";
       let wasm = await loadWasm(mode);
-      activeLaunch.wasm = wasm;
+      if (activeLaunch !== launchState || launchState.epoch !== request.epoch) return;
+      launchState.wasm = wasm;
       await wasm.default();
+      if (activeLaunch !== launchState || launchState.epoch !== request.epoch) return;
       if (threaded) {
         postMessage({ kind: "progress", stage: "starting-compute-pool", workers: width });
         try {
@@ -138,6 +178,7 @@
             throw new Error("threaded server worker has no initThreadPool export");
           }
           await wasm.initThreadPool(width);
+          if (activeLaunch !== launchState || launchState.epoch !== request.epoch) return;
           postMessage({ kind: "progress", stage: "compute-pool-ready", workers: width });
           postWorldgenProgress(ports[1], request.epoch, "compute-ready", { queue: 0 });
         } catch (caught) {
@@ -169,12 +210,16 @@
         request.epoch,
         request.logLevel ?? "warn",
       );
+      if (activeLaunch !== launchState || launchState.epoch !== request.epoch) return;
       postMessage({ kind: "ready" });
       postWorldgenProgress(ports[1], request.epoch, "server-ready", { queue: 0 });
+      startHealthSampling(launchState);
     } catch (caught) {
+      stopHealthSampling(launchState);
+      if (activeLaunch !== launchState) return;
       postMessage({ kind: "error", message: String(caught) });
       postWorldgenProgress(ports[1], request.epoch, "startup-error", { queue: 0 });
-      activeLaunch.horizon.close?.();
+      launchState.horizon.close?.();
     }
   }
 
@@ -210,10 +255,12 @@
       postMessage({ kind: "error", message: "server worker rejected cancellation epoch" });
       return;
     }
+    stopHealthSampling(activeLaunch);
     postWorldgenProgress(activeLaunch.progress, request.epoch, "cancelled");
   }
 
   function reset() {
+    stopHealthSampling(activeLaunch);
     activeLaunch?.horizon?.close?.();
     activeLaunch = null;
   }

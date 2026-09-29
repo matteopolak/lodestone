@@ -8,7 +8,22 @@ const source = fs.readFileSync(new URL("./worldgen_long_task_harness.js", import
 class FakePort {
   constructor() {
     this.closed = false;
+    this.listeners = new Map();
   }
+
+  addEventListener(kind, callback) {
+    this.listeners.set(kind, callback);
+  }
+
+  removeEventListener(kind) {
+    this.listeners.delete(kind);
+  }
+
+  dispatchMessage(data) {
+    this.listeners.get("message")?.({ data });
+  }
+
+  start() {}
 
   close() {
     this.closed = true;
@@ -26,6 +41,8 @@ class FakeMessageChannel {
 }
 
 class FakeWorker {
+  static healthEvents = [];
+
   constructor() {
     this.listeners = new Map();
     this.terminated = false;
@@ -46,6 +63,9 @@ class FakeWorker {
       this.listeners.get("message")?.({ data: { kind: "progress", stage: "compute-pool-ready", workers: 3 } });
       this.listeners.get("message")?.({ data: { kind: "progress", stage: "preparing-world", executor: "threaded", workers: 3 } });
       this.listeners.get("message")?.({ data: { kind: "ready" } });
+      for (const event of FakeWorker.healthEvents) {
+        FakeMessageChannel.channels[1].port1.dispatchMessage(event);
+      }
     });
   }
 
@@ -95,6 +115,11 @@ test("closes every local channel when launch transfer fails", async () => {
 
 test("records worker milestones and reports page long-task evidence", async () => {
   resetChannels();
+  FakeWorker.healthEvents = [
+    { kind: "worker-health", epoch: 0, tickCount: 2, callbackGapMs: 4 },
+    { kind: "worker-health", epoch: 1, tickCount: 10, callbackGapMs: 1_108 },
+    { kind: "worker-health", epoch: 1, tickCount: 17, callbackGapMs: 1_003 },
+  ];
   const observed = [];
   class FakePerformanceObserver {
     static supportedEntryTypes = ["longtask"];
@@ -134,12 +159,18 @@ test("records worker milestones and reports page long-task evidence", async () =
   assert.equal(report.under100ms, true);
   assert.equal(report.memoryApi, false);
   assert.equal(report.startupMemoryBytes, null);
+  assert.equal(report.workerHealthSampleCount, 2);
+  assert.equal(report.maxCallbackGapMs, 1_108);
+  assert.equal(report.tickAdvancement, 7);
+  assert.deepEqual(JSON.parse(JSON.stringify(report.workerHealth.map((event) => event.epoch))), [1, 1]);
   assert.equal(report.finishReason, "runtime-complete");
   assertAllLocalPortsClosed();
+  FakeWorker.healthEvents = [];
 });
 
 test("does not call an empty long-task log a passing result", async () => {
   resetChannels();
+  FakeWorker.healthEvents = [];
   class NoLongTaskObserver {
     static supportedEntryTypes = [];
   }
@@ -159,6 +190,9 @@ test("does not call an empty long-task log a passing result", async () => {
   assert.equal(report.memoryApi, false);
   assert.equal(report.startupMemoryBytes, null);
   assert.deepEqual(JSON.parse(JSON.stringify(report.longTasks)), []);
+  assert.equal(report.workerHealthSampleCount, 0);
+  assert.equal(report.maxCallbackGapMs, null);
+  assert.equal(report.tickAdvancement, null);
   assertAllLocalPortsClosed();
 });
 

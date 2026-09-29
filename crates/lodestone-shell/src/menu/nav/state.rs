@@ -14,21 +14,18 @@ impl MenuNav {
         &self.saves_root
     }
 
-    /// Open [`Screen::WorldSelect`], re-reading `saves/` first.
-    ///
-    /// **The re-read is the point**, and it is vanilla's own behaviour rather than
-    /// a cache invalidation bolted on: `TitleScreen` constructs a brand-new
-    /// `SelectWorldScreen` on every press, whose `WorldSelectionList` calls
-    /// `loadLevels()` in its constructor. Without it, a world created a moment ago
-    /// would be absent from the list the player is returned to — which is exactly
-    /// the "Create New World did nothing" report all over again, one layer up.
-    ///
-    /// Every entry point to the screen goes through here for that reason: the
-    /// title-screen button, and the return from `CreateWorld`'s Cancel.
+    /// Re-read saved worlds and open creation directly when none exist.
     pub fn open_world_list(&mut self, ui: &mut UiState) {
-        self.world_select = crate::menu::world_select::WorldSelectNav::with_worlds(
-            crate::saves::list_worlds_in(&self.saves_root),
-        );
+        self.refresh_world_list(ui);
+        if self.world_select.worlds().is_empty() {
+            self.create_world = crate::menu::create_world::CreateWorldNav::new();
+            ui.open_create_world();
+        }
+    }
+
+    pub(super) fn refresh_world_list(&mut self, ui: &mut UiState) {
+        let worlds = crate::saves::list_worlds_in(&self.saves_root);
+        self.world_select = crate::menu::world_select::WorldSelectNav::with_worlds(worlds);
         ui.open_world_select();
     }
 

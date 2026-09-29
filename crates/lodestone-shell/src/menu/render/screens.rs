@@ -136,13 +136,9 @@ pub fn death_frame(
     use super::nav::DEATH_BUTTONS;
 
     let mut labels = vec![
-        // `output.defaultParameters(normalParameters.withScale(2.0F))` then
-        // drawn at `(middleLine / 2, 30)` — see
-        // `Origin::DeathTitle`'s doc for why that x is `width / 4`, not the
-        // screen centre.
         MenuLabel {
             text: "You Died!".to_string(),
-            origin: Origin::DeathTitle,
+            origin: Origin::ScreenTop,
             dx: 0.0,
             dy: 30.0,
             align: Align::Centre,

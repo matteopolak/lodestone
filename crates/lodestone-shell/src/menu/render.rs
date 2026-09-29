@@ -135,7 +135,7 @@ pub use title_pause::{death_slot, pause_grid_size, pause_slot, title_slot};
 pub use world_list::{
     WORLD_LIST_ITEM_H, WORLD_LIST_LINE_DY, WORLD_LIST_TEXT_DX, world_list_icon_rect,
     world_list_row_content_rect,
-    world_list_row_label, world_list_row_left, world_list_row_rect, world_list_row_top,
+    world_list_row_left, world_list_row_rect, world_list_row_top,
     world_list_row_visible, world_list_scroll_for, world_list_spec, world_list_text_width,
     world_list_visible_rows,
     world_list_window_rows, world_scroll_model, world_select_search_slot, world_select_slot,

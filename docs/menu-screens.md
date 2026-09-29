@@ -146,13 +146,17 @@ all (no data-pack loader in this crate yet).
 
 ### World select
 
-`Screen::WorldSelect` — vanilla's `SelectWorldScreen`, reached from the title screen's Singleplayer
-button: a title, a search field, a scrolling list with one row per world under `saves/`, and six
+`Screen::WorldSelect` is reached from Singleplayer when saved worlds exist. It has a title,
+a search field, a scrolling list with one row per world under `saves/`, and six
 footer buttons (Play Selected World, Create New World, Edit, Delete, Re-Create, Back). Edit and
 Re-Create are present-and-disabled (no screen exists for either yet); Delete is live and opens the
 [confirmation screen](#confirmation). This was the first consumer of the shared
 `HeaderAndFooterLayout` container. `crates/lodestone-shell/src/saves.rs` is the on-disk save
 enumeration this screen reads from — read its module doc before touching world discovery or naming.
+When no saved worlds exist, `MenuNav::open_world_list` opens world creation directly; cancelling
+that first creation returns to the title screen. A search with no matches keeps the world list
+open with an empty content band. The browser has no persistent save list, so Singleplayer opens
+creation on every visit.
 
 ### Server list
 
@@ -231,13 +235,15 @@ deletion).
 
 ### Death
 
-`Screen::Death` — vanilla's `DeathScreen`: "You Died!", the server's death message, a score line, and
+`Screen::Death` shows a centred, double-size "You Died!" title, the server's death message, a score line, and
 Respawn / Title Screen buttons. Draws as an overlay over the still-rendering, still-ticking world, the
 same way the pause menu does. Reachable from any live gameplay screen the instant a death packet
 lands, matching vanilla's behavior of replacing whatever screen is open. The real behavior change
 underneath this screen is that the client now uses a manual respawn policy instead of automatic: before
 this, a death packet triggered an unconditional respawn request with no screen and no player choice in
 between; now nothing sends a respawn until the Respawn button is pressed.
+The menu renderer scales glyphs in place, not their anchor coordinates. Keep the title on
+`Origin::ScreenTop` when changing its scale or it will shift left of centre.
 
 The death message carries the server's component through unresolved as far as the point where the
 session applies the update (`NetUpdate::Death::message` is a `Text`, not a pre-flattened string), which

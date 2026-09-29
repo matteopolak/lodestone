@@ -751,27 +751,13 @@ fn solid_rgba_png(w: u32, h: u32, rgba: [u8; 4]) -> Vec<u8> {
 // -- world select --------------------------------------------
 
 /// A nav and a `UiState` sitting on the world-select screen, reached the way
-/// a player reaches it: by activating the title screen's Singleplayer button.
+/// a player reaches it: by activating Singleplayer with an existing save.
 ///
 /// That is the anti-island premise for this whole screen — if the button no
 /// longer opens it, every test below fails at this assertion rather than
 /// quietly testing a screen nothing can reach.
 fn world_select_nav(tag: &str) -> (MenuNav, UiState) {
-    let mut nav = test_nav(tag);
-    let mut ui = UiState::new();
-    assert_eq!(
-        nav.main_button(),
-        crate::menu::nav::MainButton::Singleplayer,
-        "premise: Singleplayer is the initially selected title-screen button"
-    );
-    let action = nav.key(&mut ui, MenuKey::Enter);
-    assert_eq!(action, crate::menu::nav::MenuAction::None);
-    assert_eq!(
-        ui.screen(),
-        Screen::WorldSelect,
-        "the title screen's Singleplayer button must open the world list"
-    );
-    (nav, ui)
+    world_select_nav_with_worlds(tag, &["existing"])
 }
 
 /// The same, with `names` planted in this nav's own (temp) saves root first —

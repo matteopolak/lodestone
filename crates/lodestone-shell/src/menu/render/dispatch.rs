@@ -408,17 +408,7 @@ pub fn frame_for<'a>(
                 selected: ws.focused_row().unwrap_or(usize::MAX),
                 hovered: ws.hovered(),
                 vanilla: true,
-                labels: {
-                    let mut labels = vec![world_select_title_label()];
-                    // `NoWorldsEntry` — the empty-list row, and **only** when the
-                    // list really is empty. This is what keeps "no worlds" apart
-                    // from "the list failed to draw": with no label at all the two
-                    // are the same picture.
-                    if let Some(text) = ws.empty_label() {
-                        labels.push(world_list_row_label(text));
-                    }
-                    labels
-                },
+                labels: vec![world_select_title_label()],
                 message: ws.error().map(str::to_string),
                 ..Default::default()
             })

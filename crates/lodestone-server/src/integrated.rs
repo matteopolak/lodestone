@@ -1738,7 +1738,8 @@ impl IntegratedServer {
         view_radius: i32,
         commands: CommandDispatch,
         mut transport: T,
-    ) where
+    ) -> Option<IntegratedTickMonitor>
+    where
         P: ServerProtocol + 'static,
         S: ChunkSource + 'static,
         T: Transport + 'static,
@@ -1749,6 +1750,7 @@ impl IntegratedServer {
             view_radius,
             commands,
         );
+        let monitor = server.tick_monitor();
         spawn(async move {
             if let Err(error) = tokio::io::copy_bidirectional(&mut server_io, &mut transport).await {
                 tracing::warn!("browser supplied server transport ended: {error}");
@@ -1758,6 +1760,7 @@ impl IntegratedServer {
             // connection and tick tasks that own this world.
             drop(server);
         });
+        monitor
     }
 
     /// Like [`open_in_memory`](Self::open_in_memory) but also streams entities:

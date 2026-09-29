@@ -176,7 +176,11 @@ fn the_world_select_slots_do_not_depend_on_the_reference_canvas() {
 #[test]
 fn the_world_select_frame_is_the_screen_vanilla_draws() {
     use crate::menu::world_select::{SEARCH_FIELD, WORLD_SELECT_BUTTONS, WorldSelectButton};
-    let (nav, ui) = world_select_nav("ws-frame");
+    let (mut nav, mut ui) = world_select_nav("ws-frame");
+    for ch in "no match".chars() {
+        nav.key(&mut ui, MenuKey::Char(ch));
+    }
+    assert_eq!(nav.world_select().shown_len(), 0);
     let f = world_select_frame(&nav, &ui);
 
     assert!(f.vanilla, "it reproduces one of vanilla's own screens");
@@ -209,10 +213,7 @@ fn the_world_select_frame_is_the_screen_vanilla_draws() {
             "Back",
         ]
     );
-    // **Four** disabled here, not three, and that is the empty-list state rather
-    // than a regression: `test_nav` points this nav at a temp data directory whose
-    // `saves/` does not exist, so there is nothing selected and
-    // vanilla's own update-button-status call, given no selection, greys Play as well as Edit/Delete/Re-Create.
+    // An unmatched search greys Play as well as Edit/Delete/Re-Create.
     // Create and Back stay live, which is what keeps a fresh install off a dead
     // end. `the_world_select_frame_with_worlds_lists_them_all` is the populated
     // arm, and between them they are also each other's control: the same frame
@@ -246,17 +247,8 @@ fn the_world_select_frame_is_the_screen_vanilla_draws() {
         );
     }
 
-    // The two free-standing strings: the title, and vanilla's own
-    // no-worlds-entry's notice —
-    // which is what keeps "no worlds" apart from "the list failed to draw".
     let texts: Vec<&str> = f.labels.iter().map(|l| l.text.as_str()).collect();
-    assert_eq!(
-        texts,
-        vec![
-            crate::menu::world_select::WORLD_SELECT_TITLE,
-            crate::menu::world_select::NO_WORLDS_LABEL,
-        ]
-    );
+    assert_eq!(texts, vec![crate::menu::world_select::WORLD_SELECT_TITLE]);
 }
 
 /// **The populated arm of the frame gate**: N worlds on disk become N rows, at
@@ -485,82 +477,6 @@ fn a_disabled_world_select_label_lands_on_vanillas_grey() {
     }
 }
 
-/// The list draws its one row, inside row 0's own content rect.
-///
-/// This is the assertion that keeps "the list has a world" distinguishable
-/// from "the list failed to draw" — without it the two are the same picture,
-/// which is exactly the absence-needs-a-control rule. It is also the pixel
-/// pixel half of the world list: the button that launches is only honest if the
-/// world it launches is on screen. The band is the row's content rect from
-/// `world_list_row_content_rect`, the same expression the label's position is
-/// derived from, and the failure output is a bounding box rather than a
-/// fraction.
-///
-/// Two controls, both executed: the band *below* the row must be empty (so
-/// this is not measuring a frame that paints everywhere), and the same band
-/// on the **title screen** must be empty too (so it is not measuring
-/// something every menu draws there).
-#[test]
-fn the_empty_world_list_draws_its_notice_inside_row_zeros_content_rect() {
-    let (nav, ui) = world_select_nav("ws-row");
-    assert_eq!(
-        nav.world_select().shown_len(),
-        0,
-        "premise: this nav's temp saves root is empty, so the notice is what draws"
-    );
-    let frame = world_select_frame(&nav, &ui);
-    let colour = geometry(&frame, V_W, V_H);
-
-    let band = world_list_row_content_rect(0, V_W, 0.0);
-    let inside = band_coverage(&colour, V_W, V_H, band);
-    assert!(
-        inside.count > 0,
-        "the empty-list notice reached no pixels inside {band:?}"
-    );
-    let bounds = inside.bounds.expect("a non-empty band has bounds");
-    // It is a line of text, not a full-height fill: the notice is 9 px of
-    // glyphs centred in a 32 px box, so its vertical extent must be well
-    // short of the band's.
-    assert!(
-        bounds.3 - bounds.1 < band.3 * 0.75,
-        "what drew in {band:?} spans {:?} vertically — that is a fill, not a line of text",
-        (bounds.1, bounds.3)
-    );
-    // And it is centred, so it must straddle the screen's own centre line.
-    assert!(
-        bounds.0 < V_W * 0.5 && bounds.2 > V_W * 0.5,
-        "the notice is not centred: bounds {bounds:?}"
-    );
-
-    // -- control 1: the row below it is empty ----------------------------
-    let empty_band = world_list_row_content_rect(1, V_W, 0.0);
-    assert_eq!(
-        band_coverage(&colour, V_W, V_H, empty_band).count,
-        0,
-        "something drew in row 1 as well, so the band is not a discriminator: {:?}",
-        band_coverage(&colour, V_W, V_H, empty_band).bounds
-    );
-
-    // -- control 2: the same band on the title screen is empty -----------
-    // What else already paints here? On the title screen, nothing: the logo
-    // ends at y 94 and the button column starts at 168, and row 0's content
-    // rect is y 53..85. If that ever stops being true this fires, which is
-    // the point.
-    let title_nav = test_nav("ws-empty-control");
-    let title_ui = UiState::new();
-    assert_eq!(title_ui.screen(), Screen::MainMenu, "the control is the title");
-    let statuses = StatusCache::with_probe(unavailable_probe());
-    let mut fav = FaviconCache::new();
-    let title = frame_for(&title_ui, &title_nav, &statuses, &mut fav).expect("title frame");
-    let title_colour = geometry(&title, V_W, V_H);
-    assert_eq!(
-        band_coverage(&title_colour, V_W, V_H, band).count,
-        0,
-        "the title screen already paints in {band:?}, so control 1 measures nothing: {:?}",
-        band_coverage(&title_colour, V_W, V_H, band).bounds
-    );
-}
-
 /// **The save list reaches pixels, one band per world.**
 ///
 /// This is the re-derivation of `the_world_list_draws_its_one_row_…` for N rows,
@@ -674,39 +590,6 @@ fn every_world_in_the_list_draws_inside_its_own_row_band() {
             "the title screen already paints in row {row}'s band {band:?}, so this \
              test's assertion for that row measures nothing: {:?}",
             painted.bounds
-        );
-    }
-}
-
-/// The empty-list notice fits the row it is centred in.
-///
-/// Vanilla's own no-worlds-entry type gives its own string-label widget no max-width
-/// clamp, so nothing clips it and a longer
-/// string would overhang the row. Measured with [`text_px`], the same
-/// fixed-advance measure the jar-less draw uses — the real vanilla font is
-/// narrower, so this is the conservative direction.
-///
-/// `BUNDLED_WORLD.label` is measured too even though nothing draws it any more:
-/// its length was the reason that constant was written the way it was, and the
-/// measurement is the only place that fact survives.
-#[test]
-fn the_world_list_row_label_fits_the_row_it_is_centred_in() {
-    let (.., content_w, _) = world_list_row_content_rect(0, V_W, 0.0);
-    // **Both** empty-list strings, not just this target's. The label is
-    // `cfg`-selected (a browser says the list is never saved, not "not yet"), and this
-    // test runs on the host — so measuring `NO_WORLDS_LABEL` alone would leave the
-    // browser string unmeasured on every machine that runs the suite. The first draft
-    // of it was 53 characters against a 44-character row and nothing would have
-    // caught it. A guard only covers what it names.
-    for label in [
-        crate::menu::world_select::NO_WORLDS_LABEL_NATIVE,
-        crate::menu::world_select::NO_WORLDS_LABEL_BROWSER,
-        crate::menu::world_select::BUNDLED_WORLD.label,
-    ] {
-        let measured = text_px(label, 1.0);
-        assert!(
-            measured <= content_w,
-            "{label:?} measures {measured} px in a {content_w} px row"
         );
     }
 }
