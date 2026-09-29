@@ -94,6 +94,12 @@ ordinary `(model, texture)` batcher (translucent + depth-write-off draws are ord
 cannot ride that batcher). A decorated pot's four sides are the opposite shape — distinct diffuse
 textures on distinct quads, never blended — so despite the surface-level similarity ("multiple
 textures on one instance") it needs no new mechanism at all, just four ordinary instances.
+`block_entities::decorated_pot_sherds` reads current `sherds` NBT as a compound of optional
+`back`, `left`, `right`, and `front` item stacks. Each stack's `id` selects the side pattern;
+`count` and `components` do not change the texture. It also accepts older four-string lists in
+`[back, left, right, front]` order. Missing or invalid sides and `minecraft:brick` use the plain
+side. Keep both forms mapped to the same order when extending this parser; the frame gather passes
+its output directly to `DecoratedPotSpawn`.
 The pot's top and bottom are zero-height planes in a double-sided GPU pass. Each emits only its
 outward face; emitting both faces at the same depth makes the rim flicker.
 

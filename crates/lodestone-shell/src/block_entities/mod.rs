@@ -2768,36 +2768,55 @@ pub fn banner_spawns(
 
 // --- decorated pot ---------------------------------------------------------
 
-/// The decorated pot's stored sherds, parsed out of its NBT —
-/// vanilla's own pot-decorations codec (its own sherds tag, key
-/// `"sherds"`): a plain 4-element list of item ids in **`[back, left, right,
-/// front]`** order (vanilla's own record field order, and
-/// its own ordered stream of back, left, right, front), with
-/// `minecraft:brick` the empty sentinel (vanilla's own pot-decorations item
-/// lookup treats a brick as the empty case). A side whose id fails to parse, or is the sentinel,
-/// is `None` — the same "drop rather than default" rule [`banner_patterns`]
-/// documents, and the namespace is stripped for the same reason
-/// [`banner_patterns`] strips one: [`decorated_pot_pattern_texture_stem`]
-/// keys on the **bare** sherd path.
+/// Reads the named item stacks used by current pot NBT, or the older ordered
+/// list of item ids. Both forms return `[back, left, right, front]`; absent or
+/// invalid sides and the brick sentinel have no pattern.
 #[must_use]
 fn decorated_pot_sherds(nbt: &lodestone_core::Nbt) -> [Option<String>; 4] {
     use lodestone_core::Nbt;
+
+    fn sherd_path(value: &Nbt) -> Option<String> {
+        let id = match value {
+            Nbt::String(id) => id,
+            Nbt::Compound(fields) => {
+                if fields.iter().any(|(name, value)| {
+                    (name == "count" && !matches!(value, Nbt::Int(1..=99)))
+                        || (name == "components" && !matches!(value, Nbt::Compound(_)))
+                }) {
+                    return None;
+                }
+                let (_, Nbt::String(id)) = fields.iter().find(|(name, _)| name == "id")? else {
+                    return None;
+                };
+                id
+            }
+            _ => return None,
+        };
+        let path = id.strip_prefix("minecraft:").unwrap_or(id);
+        (!path.is_empty() && path != "brick").then(|| path.to_string())
+    }
 
     let mut out: [Option<String>; 4] = [None, None, None, None];
     let Nbt::Compound(fields) = nbt else {
         return out;
     };
-    let Some(Nbt::List { elements, .. }) =
-        fields.iter().find(|(name, _)| name == "sherds").map(|(_, v)| v)
-    else {
-        return out;
-    };
-    for (slot, elem) in out.iter_mut().zip(elements.iter()) {
-        let Nbt::String(id) = elem else { continue };
-        let path = id.strip_prefix("minecraft:").unwrap_or(id);
-        if path != "brick" {
-            *slot = Some(path.to_string());
+    match fields.iter().find(|(name, _)| name == "sherds").map(|(_, v)| v) {
+        Some(Nbt::Compound(sides)) => {
+            for (slot, name) in out.iter_mut().zip(["back", "left", "right", "front"]) {
+                *slot = sides
+                    .iter()
+                    .find(|(side, _)| side == name)
+                    .and_then(|(_, value)| sherd_path(value));
+            }
         }
+        Some(Nbt::List { elements, .. }) => {
+            for (slot, value) in out.iter_mut().zip(elements) {
+                if matches!(value, Nbt::String(_)) {
+                    *slot = sherd_path(value);
+                }
+            }
+        }
+        _ => {}
     }
     out
 }
@@ -2870,6 +2889,84 @@ fn decorated_pot_spawn(
         right,
         light,
     })
+}
+
+#[cfg(test)]
+mod decorated_pot_tests {
+    use super::*;
+
+    fn compound(fields: Vec<(&str, Nbt)>) -> Nbt {
+        Nbt::Compound(fields.into_iter().map(|(key, value)| (key.into(), value)).collect())
+    }
+
+    fn stack(id: &str) -> Nbt {
+        compound(vec![
+            ("id", Nbt::String(id.into())),
+            ("count", Nbt::Int(1)),
+            ("components", compound(vec![])),
+        ])
+    }
+
+    #[test]
+    fn named_stacks_reach_all_four_spawn_faces() {
+        let nbt = compound(vec![("sherds", compound(vec![
+            ("front", stack("minecraft:archer_pottery_sherd")),
+            ("right", stack("minecraft:angler_pottery_sherd")),
+            ("back", stack("minecraft:miner_pottery_sherd")),
+            ("left", stack("minecraft:prize_pottery_sherd")),
+        ]))]);
+        let state_id = (0..lodestone_data::block_states::STATE_COUNT)
+            .find(|id| lodestone_data::block_states::block_name(*id) == Some("minecraft:decorated_pot"))
+            .expect("decorated pot state in the block census");
+        let spawn = decorated_pot_spawn([3, 70, -4], state_id, decorated_pot_sherds(&nbt), 12)
+            .expect("pot state produces a render spawn");
+        assert_eq!(spawn.pos, [3, 70, -4]);
+        assert_eq!(spawn.back.as_deref(), Some("miner_pottery_sherd"));
+        assert_eq!(spawn.left.as_deref(), Some("prize_pottery_sherd"));
+        assert_eq!(spawn.right.as_deref(), Some("angler_pottery_sherd"));
+        assert_eq!(spawn.front.as_deref(), Some("archer_pottery_sherd"));
+        assert_eq!(spawn.light, 12);
+    }
+
+    #[test]
+    fn absent_and_malformed_named_sides_are_empty() {
+        let nbt = compound(vec![("sherds", compound(vec![
+            ("back", stack("minecraft:brick")),
+            ("left", compound(vec![("count", Nbt::Int(1))])),
+            ("right", compound(vec![("id", Nbt::Int(7))])),
+        ]))]);
+        assert_eq!(decorated_pot_sherds(&nbt), [None, None, None, None]);
+        assert_eq!(decorated_pot_sherds(&compound(vec![])), [None, None, None, None]);
+        let bad_count = compound(vec![("sherds", compound(vec![
+            ("front", compound(vec![
+                ("id", Nbt::String("minecraft:archer_pottery_sherd".into())),
+                ("count", Nbt::Int(0)),
+            ])),
+        ]))]);
+        assert_eq!(decorated_pot_sherds(&bad_count), [None, None, None, None]);
+    }
+
+    #[test]
+    fn ordered_id_list_still_maps_to_the_same_faces() {
+        let nbt = compound(vec![("sherds", Nbt::List {
+            element_type: NbtTag::String,
+            elements: [
+                "minecraft:miner_pottery_sherd",
+                "minecraft:prize_pottery_sherd",
+                "minecraft:angler_pottery_sherd",
+                "minecraft:archer_pottery_sherd",
+            ]
+            .into_iter()
+            .map(|id| Nbt::String(id.into()))
+            .collect(),
+        })]);
+        assert_eq!(decorated_pot_sherds(&nbt), [
+            Some("miner_pottery_sherd".into()),
+            Some("prize_pottery_sherd".into()),
+            Some("angler_pottery_sherd".into()),
+            Some("archer_pottery_sherd".into()),
+        ]);
+    }
 }
 
 /// Every decorated pot to draw this frame — the pot sibling of
