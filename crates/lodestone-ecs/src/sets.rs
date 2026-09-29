@@ -83,14 +83,9 @@ pub enum EventPriority {
 /// scratch `World` is exactly as informative as the real one and needs no
 /// schedule at all.
 ///
-/// # What this does not catch, named rather than silently accepted
-///
-/// `Commands` reserves no component/resource access up front — its
-/// mutations are deferred and applied later via `System::apply_deferred`, out
-/// of band from the access set `System::initialize` returns. A `Monitor`
-/// system that takes `Commands` and queues a mutation passes this check
-/// today and still breaks the guarantee. Tracked as a known gap rather than
-/// worked around here; see `docs/plugin-api.md`.
+/// Deferred parameters, including `Commands`, are rejected through
+/// `System::has_deferred` because their mutations do not appear in the access
+/// set returned by `System::initialize`.
 ///
 /// # Why this checks the system directly rather than walking a built schedule
 ///
@@ -133,6 +128,12 @@ pub fn assert_monitor_system_is_read_only<M>(system: impl bevy_ecs::system::Into
         !access.combined_access().has_any_write(),
         "system `{}` was registered for EventPriority::Monitor but has \
          mutable World access — Monitor must be read-only",
+        system.name()
+    );
+    assert!(
+        !system.has_deferred(),
+        "system `{}` was registered for EventPriority::Monitor but has \
+         deferred World access — Monitor must be read-only",
         system.name()
     );
 }
@@ -245,7 +246,7 @@ mod tests {
     use bevy_app::App;
     use bevy_ecs::resource::Resource;
     use bevy_ecs::schedule::IntoScheduleConfigs;
-    use bevy_ecs::system::{Local, ResMut};
+    use bevy_ecs::system::{Commands, Local, ResMut};
 
     use super::{EventPriority, assert_monitor_system_is_read_only};
     use crate::plugin::CorePlugin;
@@ -268,6 +269,10 @@ mod tests {
         probe.0 += 1;
     }
 
+    fn deferred_writer(mut commands: Commands) {
+        commands.insert_resource(Probe(1));
+    }
+
     /// The positive case: a real read-only observer passes the check with no
     /// panic.
     #[test]
@@ -284,6 +289,21 @@ mod tests {
     #[should_panic(expected = "must be read-only")]
     fn a_mutable_writer_fails_the_monitor_check() {
         assert_monitor_system_is_read_only(mutable_writer);
+    }
+
+    #[test]
+    #[should_panic(expected = "deferred World access")]
+    fn a_deferred_commands_writer_fails_the_monitor_check() {
+        assert_monitor_system_is_read_only(deferred_writer);
+    }
+
+    #[test]
+    fn an_unchecked_deferred_writer_mutates_the_real_schedule() {
+        let mut app = App::new();
+        app.add_plugins(CorePlugin);
+        app.add_systems(GameTick, deferred_writer.in_set(EventPriority::Monitor));
+        app.world_mut().run_schedule(GameTick);
+        assert_eq!(app.world().resource::<Probe>().0, 1);
     }
 
     /// End-to-end proof that a system cleared by
