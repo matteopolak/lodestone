@@ -212,23 +212,13 @@ impl RenderState {
                 let water_gpu = upload_resident(&mut model.mesh_arena, device, queue, water);
                 let translucent_gpu =
                     upload_resident(&mut model.mesh_arena, device, queue, translucent_blocks);
-                // A remesh of an already-resident coord (the dirty-propagation
-                // case) reuses that coord's origin slot rather than leaking it —
-                // the origin is a pure function of `key`, so it never actually
-                // changes. Its **arena spans** are not reusable, though — a
-                // remesh changes the quad count — so the old spans are returned
-                // to the free pool below, or the arena leaks one section's
-                // geometry per remesh and fills up while walking around.
+                // Replacements reuse the origin slot but release the old geometry spans.
                 let existing = model.sections.remove(&key);
                 if let Some(old) = &existing {
                     free_resident(&mut model.mesh_arena, old.mesh.as_ref());
                     free_resident(&mut model.mesh_arena, old.water.as_ref());
                     free_resident(&mut model.mesh_arena, old.translucent.as_ref());
                 }
-                // A section may carry only opaque terrain, only water (an ocean
-                // surface section with no solid blocks), only translucent blocks
-                // (a lone nether portal frame), or any combination. Drop it only
-                // when none has geometry.
                 if opaque_gpu.is_none() && water_gpu.is_none() && translucent_gpu.is_none() {
                     if let Some(old) = existing {
                         model.origin_arena.free(old.origin_alloc);
@@ -238,23 +228,8 @@ impl RenderState {
                 let origin_alloc = match existing {
                     Some(old) => old.origin_alloc,
                     None => {
-                        // A fresh arrival: fade in, unless this coord has
-                        // already carried real geometry earlier in its
-                        // current loaded lifetime (an all-air section that
-                        // just got its first block, or one hollowed out and
-                        // refilled) — see `ModelRenderer::seen`'s doc for why
-                        // that must not re-trigger the fade — **or** unless
-                        // it is within vanilla's own `isNearby` radius
-                        // (`LevelRenderer.compileSections`'s `distSqr <
-                        // 768.0`, `≈27.7` blocks from the section's centre):
-                        // vanilla never fades a section appearing right next
-                        // to the camera, whatever its `wasPreviouslyEmpty`
-                        // state, and only the far, edge-of-render-distance
-                        // case fades. `last_camera_block_pos` is one frame
-                        // stale by construction (see that field's doc);
-                        // `None` (nothing has rendered yet) falls back to the
-                        // pre-fix always-fade behaviour for that startup
-                        // window rather than guessing a position.
+                        // Only unseen, distant sections fade; before the first camera
+                        // sample, distance is unknown and fresh sections also fade.
                         let is_nearby = self
                             .last_camera_block_pos
                             .get()
@@ -269,10 +244,9 @@ impl RenderState {
                         match model.origin_arena.alloc(queue, origin_f, build_time) {
                             Some((alloc, _offset)) => alloc,
                             None => {
-                                // Should not happen — see `SectionOriginArena`'s
-                                // doc for the capacity margin — but degrade to a
-                                // dropped (missing) section rather than a panic if
-                                // it ever does.
+                                free_resident(&mut model.mesh_arena, opaque_gpu.as_ref());
+                                free_resident(&mut model.mesh_arena, water_gpu.as_ref());
+                                free_resident(&mut model.mesh_arena, translucent_gpu.as_ref());
                                 tracing::warn!(
                                     "section-origin arena exhausted at {key:?}; \
                                      dropping this section's geometry"
@@ -565,6 +539,126 @@ mod tests {
     use lodestone_render::vertex::{BYTES_PER_INDEX, BYTES_PER_VERTEX, vram_bytes};
 
     use super::*;
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn model_origin_exhaustion_releases_all_new_mesh_spans() {
+        use lodestone_render::{BlockAtlas, BlockModels, BlocksJsonRegistry, ModelMesh, ModelVertex};
+        use super::super::terrain::SectionOriginArena;
+
+        let ctx = lodestone_render::GpuContext::new_headless_blocking()
+            .expect("GPU regression opted in but no adapter is available");
+        let device = ctx.device();
+        let queue = ctx.queue();
+        let mut texture = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut texture, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.write_header().unwrap()
+                .write_image_data(&[255; 4]).unwrap();
+        }
+        let mut source = lodestone_assets::MemorySource::new("origin-exhaustion");
+        source.insert("assets/minecraft/textures/block/water_still.png", texture);
+        let manager = lodestone_assets::ResourceManager::new(vec![Box::new(source)]);
+        let registry = BlocksJsonRegistry::from_slice(
+            br#"{"test:empty":{"states":[{"id":0,"default":true}]}}"#,
+        )
+        .unwrap();
+        let models = BlockModels::build_with_mip_levels(&manager, &registry, 0).unwrap();
+        let atlas = BlockAtlas::build_with_mip_levels(&manager, &registry, 0)
+            .unwrap()
+            .with_models(models);
+        let mut state = RenderState::new(
+            device, queue, wgpu::TextureFormat::Rgba8Unorm, 32, 32, Some(&atlas),
+        );
+        let model = state.model.as_mut().expect("fixture has a model renderer");
+        model.origin_arena = SectionOriginArena::new(device, queue, "two-origin-slots", 2);
+        model.mesh_arena = lodestone_render::ModelMeshArena::with_block_sizes(4_096, 4_096);
+
+        let quad = ModelMesh {
+            vertices: [
+                [0.0, 0.0, 0.0], [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0], [0.0, 1.0, 0.0],
+            ]
+                .into_iter()
+                .map(|position| ModelVertex {
+                    position,
+                    uv: [0.0, 0.0],
+                    ao: 1.0,
+                    light: 0xf0,
+                    tint: 255,
+                    anim: 0,
+                    cutout_bypass: 0,
+                    tint_rgb_override: [0; 4],
+                })
+                .collect(),
+            indices: vec![0, 1, 2, 0, 2, 3],
+        };
+        let layer = |quads| {
+            let mut mesh = ModelMesh::default();
+            for _ in 0..quads {
+                mesh.merge(&quad);
+            }
+            mesh
+        };
+        let mut geometry = SectionGeometry::Model {
+            opaque: layer(1),
+            water: layer(2),
+            translucent_blocks: layer(3),
+            visibility: lodestone_render::SectionVisibility::all(),
+        };
+        let key = |cx| SectionKey { cx, cz: 0, si: 0, min_y: 0 };
+        assert_eq!(std::mem::size_of::<ModelVertex>(), 32);
+        assert_eq!(std::mem::size_of::<u32>(), 4);
+        let expected_bytes = 24 * 32 + 36 * 4;
+        assert_eq!(expected_bytes, 912);
+        assert_eq!(
+            state.upload_section(device, queue, key(0), &geometry),
+            SectionUploadOutcome::Applied,
+        );
+        assert_eq!(
+            state.upload_section(device, queue, key(0), &geometry),
+            SectionUploadOutcome::Unchanged,
+        );
+        assert_eq!(state.model.as_ref().unwrap().mesh_arena.live_bytes(), expected_bytes);
+        let first_origin = state.model.as_ref().unwrap().sections[&key(0)].origin_alloc;
+        for cx in [1, 1, 2, 3] {
+            assert_eq!(
+                state.upload_section(device, queue, key(cx), &geometry),
+                SectionUploadOutcome::Failed,
+            );
+            let model = state.model.as_ref().unwrap();
+            assert_eq!(model.mesh_arena.live_bytes(), expected_bytes);
+            assert_eq!(model.sections.len(), 1);
+            assert_eq!(model.sections[&key(0)].origin_alloc, first_origin);
+            assert!(!model.sections.contains_key(&key(cx)));
+            assert!(!state.section_fingerprints.contains_key(&key(cx)));
+        }
+        let SectionGeometry::Model { visibility, .. } = &mut geometry else {
+            unreachable!()
+        };
+        *visibility = lodestone_render::SectionVisibility::solid();
+        assert_eq!(
+            state.upload_section(device, queue, key(0), &geometry),
+            SectionUploadOutcome::Applied,
+        );
+        assert_eq!(state.model.as_ref().unwrap().mesh_arena.live_bytes(), expected_bytes);
+        assert_eq!(state.model.as_ref().unwrap().sections[&key(0)].origin_alloc, first_origin);
+        state.remove_section(&key(0));
+        assert_eq!(state.model.as_ref().unwrap().mesh_arena.live_bytes(), 0);
+        assert_eq!(
+            state.upload_section(device, queue, key(1), &geometry),
+            SectionUploadOutcome::Applied,
+        );
+        assert_eq!(
+            state.upload_section(device, queue, key(1), &geometry),
+            SectionUploadOutcome::Unchanged,
+        );
+        assert_eq!(state.model.as_ref().unwrap().mesh_arena.live_bytes(), expected_bytes);
+        state.remove_section(&key(1));
+        assert_eq!(state.model.as_ref().unwrap().mesh_arena.live_bytes(), 0);
+    }
 
     /// **Rotating the camera must not move the reported mesh VRAM, and the
     /// pre-fix formula must move.** Both hypotheses are computed in the same run,
