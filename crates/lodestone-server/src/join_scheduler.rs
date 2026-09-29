@@ -193,7 +193,6 @@ fn map_batch_result<S: ChunkSource + ?Sized>(
     result: Result<Option<GenerationRequestResult>, GenerationRequestError>,
     encoder: Option<Arc<dyn ChunkEncoder>>,
     trace: Option<Arc<JoinTrace>>,
-    _batch_size: usize,
 ) -> PipelineResult {
     let dimension = source
         .dimension()
@@ -221,29 +220,26 @@ fn map_batch_result<S: ChunkSource + ?Sized>(
         trace.mark(outcome, request.coordinate.0, request.coordinate.1);
         trace.mark("generated", request.coordinate.0, request.coordinate.1);
     }
-    #[cfg(target_arch = "wasm32")]
-    let encoding_started = encoder
-        .as_ref()
-        .and_then(|_| worldgen_timing_start());
     let payload = match encoder {
         Some(encoder) => match payload {
-            ColumnPayload::Column(column) => encoder
-                .try_encode_chunk_in_dimension(
+            ColumnPayload::Column(column) => {
+                let _timing = crate::worldgen_progress::PhaseTimer::start(
+                    crate::worldgen_progress::WorldgenTimingPhase::PacketEncoding,
+                    1,
+                );
+                encoder.try_encode_chunk_in_dimension(
                     request.coordinate.0,
                     request.coordinate.1,
                     &column,
                     dimension,
                 )
-                .map(ColumnPayload::Encoded),
+                .map(ColumnPayload::Encoded)
+            }
             snapshot @ ColumnPayload::Snapshot(_) => Ok(snapshot),
             ColumnPayload::Encoded(_) => unreachable!("batch payload is not encoded"),
         },
         None => Ok(payload),
     }?;
-    #[cfg(target_arch = "wasm32")]
-    if let Some(started) = encoding_started {
-        worldgen_timing_emit(request.coordinate, _batch_size, "encoding", started);
-    }
     if matches!(&payload, ColumnPayload::Encoded(_)) {
         if let Some(trace) = trace.as_ref() {
             trace.mark("encoded", request.coordinate.0, request.coordinate.1);
@@ -379,7 +375,6 @@ fn spawn_cohort<S: ChunkSource + ?Sized + 'static>(
                 Ok(Some(result)),
                 encoder.clone(),
                 trace.clone(),
-                job_requests.len(),
             );
             send_cohort_result(&sender, index, mapped)
         };
@@ -410,7 +405,6 @@ fn spawn_cohort<S: ChunkSource + ?Sized + 'static>(
                     Ok(None),
                     encoder.clone(),
                     trace.clone(),
-                    job_requests.len(),
                 ),
                 Err(error) => Err(ChunkEncodeError::new(error.to_string())),
             };
@@ -432,33 +426,6 @@ fn spawn_cohort<S: ChunkSource + ?Sized + 'static>(
         )),
         Err(_job) => Err(requests),
     }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn worldgen_timing_start() -> Option<lodestone_time::Instant> {
-    tracing::enabled!(target: "lodestone_worldgen_timing", tracing::Level::DEBUG)
-        .then(lodestone_time::Instant::now)
-}
-
-#[cfg(target_arch = "wasm32")]
-fn worldgen_timing_emit(
-    coordinate: (i32, i32),
-    batch_size: usize,
-    phase: &'static str,
-    started: lodestone_time::Instant,
-) {
-    let elapsed_ms = lodestone_time::Instant::now()
-        .duration_since(started)
-        .as_millis();
-    tracing::debug!(
-        target: "lodestone_worldgen_timing",
-        target_x = coordinate.0,
-        target_z = coordinate.1,
-        batch_size,
-        phase,
-        phase_ms = elapsed_ms,
-        "worldgen pipeline phase"
-    );
 }
 
 /// Half-angle, in degrees, of the horizontal cone counted as "the player is
@@ -1368,7 +1335,6 @@ impl<S: ChunkSource + ?Sized + 'static> ColumnPipeline<S> {
                                     result,
                                     encoder.clone(),
                                     trace.clone(),
-                                    job_requests.len(),
                                 )
                             })
                             .collect()
@@ -1521,7 +1487,6 @@ impl<S: ChunkSource + ?Sized + 'static> ColumnPipeline<S> {
                                 result,
                                 encoder.clone(),
                                 trace.clone(),
-                                job_requests.len(),
                             )
                         })
                         .collect()
