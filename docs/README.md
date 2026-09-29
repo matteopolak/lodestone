@@ -147,7 +147,8 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
 - [Blockstate JSON models](./blockstate-json.md) — `lodestone-assets::BlockStates`
   reads blockstate resource-pack files into the typed `BlockStateDefinition` model
   used by model selection and baking. The loader covers both property-keyed `variants`
-  and conditional `multipart` definitions.
+  and conditional `multipart` definitions. Runtime model baking also maps report
+  identities into this build's fixed canonical state census.
 - [Books](./books.md) — Reading and writing in-game books: the writable-book editor
   and its signing flow, and the read-only screen for a signed book (plus a lectern's
   book display). All three share one texture, one word-wrap model, and one overlay
