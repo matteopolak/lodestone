@@ -143,6 +143,8 @@ fn post_worldgen_event(progress: lodestone_server::worldgen_progress::WorldgenPr
             set("kind", JsValue::from_str("worldgen-progress"));
             set("epoch", JsValue::from_f64(f64::from(*epoch)));
             set("session", JsValue::from_f64(progress.session as f64));
+            set("targetX", JsValue::from_f64(f64::from(progress.target.0)));
+            set("targetZ", JsValue::from_f64(f64::from(progress.target.1)));
             set("admitted", JsValue::from_f64(progress.admitted as f64));
             set("completed", JsValue::from_f64(progress.completed as f64));
             set("committed", JsValue::from_f64(progress.committed as f64));
