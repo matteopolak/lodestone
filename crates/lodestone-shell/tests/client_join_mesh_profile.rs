@@ -233,7 +233,7 @@ impl MovementColumnProbe {
     fn mesh_result(&mut self, cx: i32, cz: i32) {
         if let Some(timeline) = self.columns.iter_mut().rev().find(|timeline| {
             timeline.position == (cx, cz) && timeline.left_view_at.is_none()
-        }) {
+        }) && !timeline.prepresented {
             timeline.first_mesh_at.get_or_insert_with(Instant::now);
         }
     }
@@ -1220,7 +1220,7 @@ fn main() {
         "input_to_draw_ms": probe.clicked_at.zip(probe.drawn_at).map(|(start, end)| end.duration_since(start).as_secs_f64() * 1000.0),
     }));
     let report = serde_json::json!({
-        "schema": "lodestone-client-join-mesh-profile-v18",
+        "schema": "lodestone-client-join-mesh-profile-v19",
         "seed": SEED,
         "target_size": [target_width, target_height],
         "visible_radius": radius,
@@ -1264,6 +1264,7 @@ fn main() {
             "column_arrivals": mesh_work.column_arrivals,
             "redecoded_column_arrivals": mesh_work.redecoded_column_arrivals,
             "column_snapshot_sections": mesh_work.column_snapshot_sections,
+            "column_absorbed_light_sections": mesh_work.column_absorbed_light_sections,
             "neighbor_dirty_admissions": mesh_work.neighbor_dirty_admissions,
             "light_patch_calls": mesh_work.light_patch_calls,
             "light_patch_invalidations": mesh_work.light_patch_invalidations,
@@ -1312,6 +1313,39 @@ fn main() {
     }
     if measure_drop {
         assert!(report["drop"]["input_to_draw_ms"].is_number(), "block drop never reached a presented frame: {report}");
+    }
+}
+
+#[test]
+fn already_presented_columns_exclude_replacement_mesh_latency() {
+    let entered = Instant::now() - Duration::from_secs(1);
+    let stop = entered + Duration::from_secs(2);
+    let mut probe = MovementColumnProbe::default();
+    for (position, prepresented) in [((0, 0), true), ((1, 0), false)] {
+        probe.columns.push(ColumnTimeline {
+            position,
+            entered_at: entered,
+            left_view_at: None,
+            loaded_at: Some(entered),
+            halo_ready_at: Some(entered),
+            first_mesh_at: None,
+            presented_at: prepresented.then_some(entered),
+            preloaded: true,
+            prepresented,
+            waiting_for_halo_on_entry: false,
+            missing_halo_on_entry: false,
+        });
+    }
+    probe.mesh_result(0, 0);
+    probe.mesh_result(1, 0);
+    assert!(probe.columns[0].first_mesh_at.is_none());
+    assert!(probe.columns[1].first_mesh_at.is_some());
+    probe.columns.pop();
+    for report in [probe.report((0, 0), 1, Some(stop)), probe.all_entered_report(Some(stop))] {
+        assert_eq!(report["prepresented_on_entry"], 1);
+        assert_eq!(report["enter_to_present_p95_ms"], 0.0);
+        assert!(report["halo_to_first_mesh_p95_ms"].is_null());
+        assert!(report["first_mesh_to_present_p95_ms"].is_null());
     }
 }
 

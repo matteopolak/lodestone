@@ -2,8 +2,8 @@
 """Capture a bounded integrated or client join with macOS CPU counters.
 
 The workload writes its normal aggregate phase report to the target stdout log;
-the Instruments capture supplies retired instructions, cycles, and IPC for the
-same process.  Keeping those two records together makes phase wall markers and
+the Instruments capture supplies whichever named counters its mode exposes for
+the same process. Keeping those records together makes phase wall markers and
 counter totals comparable without adding logging to the join loop.
 """
 
@@ -17,10 +17,89 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT = ROOT / "bench-results/profiles/hardware"
+
+
+def guided_counter_lines(xml: Path, target_pid: int) -> list[str]:
+    """Sum named active-cycle buckets at one resolution, never bandwidth ratios."""
+    root = ET.parse(xml).getroot()
+    nodes = root.findall("node")
+    if len(nodes) != 1:
+        raise ValueError("expected exactly one process metric table")
+    schema = nodes[0].find("schema")
+    expected = {
+        "timestamp": "start-time", "duration": "duration", "process": "process",
+        "metric-value-int": "uint64", "metric-value-double": "fixed-decimal",
+        "metric-name": "string", "is-precise": "boolean",
+    }
+    if schema is None or schema.get("name") != "MetricAggregationForProcess":
+        raise ValueError("expected MetricAggregationForProcess schema")
+    columns = [col.findtext("mnemonic") for col in schema.findall("col")]
+    types = [col.findtext("engineering-type") for col in schema.findall("col")]
+    if len(columns) != len(expected) or dict(zip(columns, types)) != expected:
+        raise ValueError("unexpected process metric columns or engineering types")
+    by_id = {}
+    for element in root.iter():
+        identity = element.get("id")
+        if identity:
+            if identity in by_id:
+                raise ValueError("duplicate XML identity")
+            by_id[identity] = element
+
+    def resolve(element):
+        seen = set()
+        while element.get("ref"):
+            reference = element.get("ref")
+            if reference in seen or reference not in by_id:
+                raise ValueError("invalid XML reference")
+            seen.add(reference)
+            element = by_id[reference]
+        return element
+
+    buckets = {"0": [], "1": []}
+    for row in nodes[0].findall("row"):
+        if len(row) != len(columns):
+            raise ValueError("unexpected process metric row width")
+        fields = {name: resolve(value) for name, value in zip(columns, row)}
+        if any(value.tag != expected[name] for name, value in fields.items()):
+            raise ValueError("unexpected process metric row types")
+        pid = fields["process"].find("pid")
+        if pid is None or int(resolve(pid).text or "") != target_pid:
+            continue
+        if fields["metric-name"].text != "cycle":
+            continue
+        if float(fields["metric-value-double"].text or "") != 0:
+            raise ValueError("cycle bucket contains a ratio")
+        precise = fields["is-precise"].text
+        if precise not in buckets:
+            raise ValueError("invalid cycle bucket resolution")
+        start = int(fields["timestamp"].text or "")
+        duration = int(fields["duration"].text or "")
+        cycles = int(fields["metric-value-int"].text or "")
+        if start < 0 or duration <= 0 or cycles < 0:
+            raise ValueError("invalid cycle bucket values")
+        buckets[precise].append((start, start + duration, cycles))
+    for intervals in buckets.values():
+        intervals.sort()
+        if any(right[0] < left[1] for left, right in zip(intervals, intervals[1:])):
+            raise ValueError("duplicate or overlapping cycle buckets")
+    precise = buckets["1"]
+    if not precise:
+        raise ValueError("no precise cycle buckets for the target PID")
+    cycles = sum(value for _, _, value in precise)
+    coarse = buckets["0"]
+    if coarse and sum(value for _, _, value in coarse) != cycles:
+        raise ValueError("precise and coarse cycle totals disagree")
+    return [
+        f"process_pid={target_pid} samples={len(precise)} cycles={cycles} instructions=unavailable ipc=unavailable",
+        "counter_source=MetricAggregationForProcess metric=cycle resolution=precise scope=EL0",
+        f"observed_interval_ns={precise[0][0]}..{precise[-1][1]}",
+        "Instructions and IPC are unavailable: Useful is normalized retired micro-operation bandwidth, not an instruction count.",
+    ]
 
 
 def target_directory() -> Path:
@@ -157,7 +236,7 @@ def main() -> int:
     print("build=" + " ".join(build))
     print("command=" + " ".join(profiler))
     print(f"process={process}")
-    print("evidence=retired instructions, cycles, and IPC from the CPU counter samples; phase wall markers from the workload report")
+    print("evidence=named counters supported by the capture mode; phase wall markers from the workload report")
     if args.dry_run:
         return 0
 
@@ -169,9 +248,17 @@ def main() -> int:
     toc_text = toc.read_text(encoding="utf-8", errors="replace")
     has_counters = 'schema="counters-profile"' in toc_text
     has_instruction_counters = 'pmc-events="Cycles Instructions"' in toc_text
+    toc_root = ET.fromstring(toc_text)
+    has_guided_cycles = any(
+        table.get("schema") == "MetricAggregationForProcess"
+        for table in toc_root.iter("table")
+    ) and any(
+        table.get("counting-mode") == "bottleneck bottlenecks EL0"
+        for table in toc_root.iter("table")
+    )
     with summary.open("w", encoding="utf-8") as handle:
         handle.write(f"workload={args.workload}\nprocess={process}\ntemplate={args.template}\n")
-        handle.write("counter_table=" + ("present\n" if has_counters else "missing\n"))
+        handle.write("counter_table=" + ("present\n" if has_counters or has_guided_cycles else "missing\n"))
         handle.write("\n".join(phase_lines(args.workload, stdout)) + "\n\n")
         if has_counters and has_instruction_counters:
             subprocess.run([
@@ -185,6 +272,20 @@ def main() -> int:
                 stdout=subprocess.PIPE, check=True,
             )
             handle.write(result.stdout)
+        elif has_guided_cycles:
+            subprocess.run([
+                "xcrun", "xctrace", "export", "--input", str(trace),
+                "--xpath", "/trace-toc/run[@number=\"1\"]/data/table[@schema=\"MetricAggregationForProcess\"]",
+                "--output", str(counters),
+            ], check=True)
+            target_process = toc_root.find("run/info/target/process")
+            try:
+                if target_process is None:
+                    raise ValueError("capture target PID is missing")
+                lines = guided_counter_lines(counters, int(target_process.get("pid", "")))
+                handle.write("\n".join(lines) + "\n")
+            except (ValueError, ET.ParseError) as error:
+                handle.write(f"cycles=unavailable instructions=unavailable ipc=unavailable\n{error}\n")
         elif not has_counters:
             handle.write("No counters-profile table was emitted by the selected Instruments template.\n")
         else:
