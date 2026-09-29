@@ -399,10 +399,13 @@ impl Sim {
         // and nothing here would say so; see `SectionGrid`'s own doc.
         let mut requests: Vec<(lodestone_client::ChunkPos, usize)> =
             Vec::with_capacity(9 * section_count);
+        let mut loaded_columns = Vec::with_capacity(9);
         for cx in (pcx - 1)..=(pcx + 1) {
             for cz in (pcz - 1)..=(pcz + 1) {
+                let position = lodestone_client::ChunkPos { x: cx, z: cz };
+                loaded_columns.push(net.is_chunk_loaded(position));
                 for si in 0..section_count {
-                    requests.push((lodestone_client::ChunkPos { x: cx, z: cz }, si));
+                    requests.push((position, si));
                 }
             }
         }
@@ -422,7 +425,7 @@ impl Sim {
             section_count,
             atlas,
             crate::collision::inferred_version_data(),
-        ))
+        ).with_loaded_columns(loaded_columns))
     }
 
     /// Whether this session is rendering a live server world (as opposed to the

@@ -49,6 +49,17 @@ player when the crouching box fits, and releasing shift keeps that slowdown unde
 standing box does not fit. The split lives in `lodestone_physics::player::should_move_slowly` and
 `set_sprint_and_modify_input`; change them only alongside tests for both shift edges and the fit gate.
 
+### Streamed-world edge
+
+`Sim::live_collision` takes a 3×3 section snapshot and a separate loaded-column
+mask. An absent section in a loaded column is air; an unloaded neighboring
+column supplies collision boxes at its boundary. This keeps the player inside
+known terrain while allowing movement away from the edge. If the player's own
+column disappears, physics remains pending until it arrives again. Change the
+mask and section footprint together; neither a missing section nor an empty
+palette proves a column is unloaded. This has no user setting and depends on
+`NetClient::is_chunk_loaded` and `LiveCollision`.
+
 ### Collision shapes and block-physics constants
 
 Per-state collision geometry comes from a **census** (`lodestone-data`'s generated `collision_shapes`
