@@ -193,6 +193,28 @@ impl StateId {
     pub fn from_state_str(state: &str) -> Option<Self> {
         state_id(state).and_then(Self::new)
     }
+
+    /// Finds an exact namespaced identity in the generated canonical census.
+    ///
+    /// Every property must be present with its generated value. Missing, extra,
+    /// or invalid properties return `None`; no default-state fallback applies.
+    /// This cold import lookup searches only the named block's generated span.
+    #[must_use]
+    pub fn from_exact_parts(name: &str, properties: &BTreeMap<String, String>) -> Option<Self> {
+        let block = Block::from_name(name)?;
+        if block.name() != name {
+            return None;
+        }
+        state_span(block).find_map(|raw| {
+            let state = Self(raw);
+            let generated = state.properties();
+            (generated.len() == properties.len()
+                && generated.iter().zip(properties).all(|(&(key, value), (have_key, have_value))| {
+                    key == have_key && value == have_value
+                }))
+            .then_some(state)
+        })
+    }
 }
 
 /// A block-state value that has crossed the text boundary without losing its

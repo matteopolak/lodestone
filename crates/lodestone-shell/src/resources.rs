@@ -141,6 +141,16 @@ impl BlockResources {
             blocks_json_registry(&report).map_err(|e| format!("load {}: {e}", report.display()))?
         };
 
+        let (registry, census) = registry.into_canonical();
+        tracing::info!(
+            target: "assets",
+            input_states = census.input_states,
+            matched_states = census.matched_states,
+            unsupported_states = census.unsupported_states,
+            unsupported_examples = ?census.unsupported_examples,
+            "canonicalized block-model report identities"
+        );
+
         let manager = open_vanilla_pack_stack()
             .ok_or_else(|| "open lodestone-resources.zip: no readable vanilla resource pack".to_string())?;
         // The live `mipmapLevels` video setting's actual consumer: `mipmap_levels()`

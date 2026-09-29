@@ -75,6 +75,52 @@ fn canonical_defaults_match_official_numeric_witnesses() {
 }
 
 #[test]
+fn exact_parts_require_namespaced_names_and_complete_property_sets() {
+    use std::collections::BTreeMap;
+    use block_states::StateId;
+
+    let pairs = |values: &[(&str, &str)]| -> BTreeMap<String, String> {
+        values.iter().map(|&(key, value)| (key.into(), value.into())).collect()
+    };
+    // Numeric witnesses come from the official 26.2 generated blocks report.
+    assert_eq!(
+        StateId::from_exact_parts("minecraft:water", &pairs(&[("level", "0")])).map(StateId::raw),
+        Some(86)
+    );
+    assert_eq!(
+        StateId::from_exact_parts("minecraft:oak_log", &pairs(&[("axis", "y")])).map(StateId::raw),
+        Some(137)
+    );
+    let button = pairs(&[("powered", "true"), ("facing", "north"), ("face", "floor")]);
+    assert_eq!(
+        StateId::from_exact_parts("minecraft:acacia_button", &button).map(StateId::raw),
+        Some(10771)
+    );
+    assert_eq!(
+        StateId::from_exact_parts("minecraft:acacia_button", &pairs(&[
+            ("face", "floor"), ("facing", "north"), ("powered", "true")
+        ])),
+        StateId::from_exact_parts("minecraft:acacia_button", &button)
+    );
+
+    for name in ["oak_log", "other:oak_log", "minecraft:poplar_planks"] {
+        assert_eq!(StateId::from_exact_parts(name, &pairs(&[("axis", "y")])), None, "{name}");
+    }
+    for properties in [
+        pairs(&[]),
+        pairs(&[("axis", "invalid")]),
+        pairs(&[("axis", "y"), ("snowy", "false")]),
+    ] {
+        assert_eq!(StateId::from_exact_parts("minecraft:oak_log", &properties), None);
+    }
+    assert_eq!(
+        StateId::from_exact_parts("minecraft:bamboo_planks", &pairs(&[])).map(StateId::raw),
+        Some(27)
+    );
+    assert_eq!(StateId::from_exact_parts("minecraft:poplar_planks", &pairs(&[])), None);
+}
+
+#[test]
 fn typed_state_identity_is_total_and_extension_names_stay_at_the_parse_boundary() {
     let air = block_states::air_state();
     assert_eq!(air.name(), "minecraft:air");
