@@ -57,6 +57,7 @@ use lodestone_game::chat_ack::{MessageSignature, MessageSignatureCache};
 use lodestone_data::block_entity_types::block_entity_type;
 use lodestone_data::item::Item;
 use crate::chunk_batch::ChunkBatchSizeCalculator;
+use crate::dialect::ProtocolDialect;
 use lodestone_data::data_component_types::{DataComponentTypeId, component_type_name};
 use lodestone_data::entity_types::entity_type_name;
 use lodestone_data::menus::{MenuId, menu_name};
@@ -146,6 +147,7 @@ const NEXT_STATE_LOGIN: i32 = 2;
 /// is guarded by a [`Mutex`] purely to satisfy `Sync`; there is no contention.
 #[derive(Debug, Clone)]
 pub struct V770Adapter {
+    dialect: ProtocolDialect,
     shape: Arc<Mutex<ChunkShape>>,
     batch: Arc<Mutex<ChunkBatchState>>,
     movement: Arc<Mutex<MovementSendState>>,
@@ -331,7 +333,15 @@ impl V770Adapter {
     /// Creates a new adapter with the overworld chunk shape as its default.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_connection_dialect(ProtocolDialect::v26_2())
+    }
+
+    /// Reuses reviewed connection bodies with a selected protocol's identifiers.
+    /// Custom dialects refuse registry ingestion and entry into Play.
+    #[must_use]
+    pub fn with_connection_dialect(dialect: ProtocolDialect) -> Self {
         Self {
+            dialect,
             shape: Arc::new(Mutex::new(ChunkShape::overworld_1_21())),
             batch: Arc::new(Mutex::new(ChunkBatchState {
                 calculator: ChunkBatchSizeCalculator::new(),
@@ -757,15 +767,15 @@ impl V770Adapter {
 
 impl VersionAdapter for V770Adapter {
     fn protocol_version(&self) -> i32 {
-        PROTOCOL
+        self.dialect.protocol_version()
     }
 
     fn minecraft_versions(&self) -> &'static [&'static str] {
-        &["26.2"]
+        self.dialect.minecraft_versions()
     }
 
     fn supports(&self, protocol: i32) -> bool {
-        protocol == PROTOCOL
+        protocol == self.dialect.protocol_version()
     }
 
     fn begin_login(
@@ -774,7 +784,7 @@ impl VersionAdapter for V770Adapter {
         server: &ServerAddress,
     ) -> Result<Vec<Directive>, AdapterError> {
         let intention = Intention {
-            protocol_version: PROTOCOL,
+            protocol_version: self.dialect.protocol_version(),
             host: server.host.clone(),
             port: server.port,
             next_state: NEXT_STATE_LOGIN,
@@ -783,11 +793,14 @@ impl VersionAdapter for V770Adapter {
             name: profile.username.clone(),
             profile_id: profile.uuid,
         };
-        Ok(vec![
-            send(handshaking::serverbound::INTENTION, &intention)?,
-            Directive::SetState(ConnectionState::Login),
-            send(login::serverbound::HELLO, &hello)?,
-        ])
+        self.dialect.directives(
+            ConnectionState::Handshaking,
+            vec![
+                send(handshaking::serverbound::INTENTION, &intention)?,
+                Directive::SetState(ConnectionState::Login),
+                send(login::serverbound::HELLO, &hello)?,
+            ],
+        )
     }
 
     fn handle_packet(
@@ -797,14 +810,16 @@ impl VersionAdapter for V770Adapter {
         packet_id: i32,
         payload: &[u8],
     ) -> Result<Vec<Directive>, AdapterError> {
-        match state {
+        let packet_id = self.dialect.inbound(state, packet_id)?;
+        let directives = match state {
             ConnectionState::Login => self.handle_login(packet_id, payload),
             ConnectionState::Configuration => self.handle_configuration(packet_id, payload),
             ConnectionState::Play => self.handle_play(world, packet_id, payload),
             ConnectionState::Handshaking | ConnectionState::Status => {
                 Err(AdapterError::UnsupportedPacketState { state })
             }
-        }
+        }?;
+        self.dialect.directives(state, directives)
     }
 
     fn decode_chunk_packet(
@@ -813,6 +828,7 @@ impl VersionAdapter for V770Adapter {
         packet_id: i32,
         payload: &[u8],
     ) -> Result<Option<DeferredChunkLoad>, AdapterError> {
+        self.dialect.check_state(state)?;
         if state == ConnectionState::Play
             && packet_id == play::clientbound::LEVEL_CHUNK_WITH_LIGHT
         {
@@ -826,7 +842,10 @@ impl VersionAdapter for V770Adapter {
         state: ConnectionState,
         action: &ClientAction,
     ) -> Result<Option<(i32, Vec<u8>)>, AdapterError> {
-        self.encode_client_action(state, action)
+        self.dialect.check_state(state)?;
+        self.encode_client_action(state, action)?
+            .map(|(id, payload)| Ok((self.dialect.outbound(state, id)?, payload)))
+            .transpose()
     }
 
     fn encode_correction_echo(
@@ -834,6 +853,7 @@ impl VersionAdapter for V770Adapter {
         state: ConnectionState,
         action: &ClientAction,
     ) -> Result<Option<(i32, Vec<u8>)>, AdapterError> {
+        self.dialect.check_state(state)?;
         if state != ConnectionState::Play {
             return Ok(None);
         }
@@ -859,7 +879,7 @@ impl VersionAdapter for V770Adapter {
         movement.last_horizontal_collision = false;
         movement.position_reminder = 0;
         Ok(Some((
-            play::serverbound::MOVE_PLAYER_POS_ROT,
+            self.dialect.outbound(state, play::serverbound::MOVE_PLAYER_POS_ROT)?,
             encode_body(&body)?,
         )))
     }
@@ -871,7 +891,7 @@ impl VersionAdapter for V770Adapter {
         // Both inputs are already RSA ciphertext from the driver; we only frame
         // them as the version's two-byte-array `key` packet.
         send(
-            login::serverbound::KEY,
+            self.dialect.outbound(ConnectionState::Login, login::serverbound::KEY)?,
             &EncryptionResponse {
                 shared_secret: encrypted_secret.to_vec(),
                 verify_token: encrypted_token.to_vec(),

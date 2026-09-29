@@ -756,6 +756,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   protocol 776. Its `level_chunk_with_light` encoder turns a server `ChunkColumn` into
   a complete 26.2 chunk body: state and biome sections, client heightmaps, block
   entities, and light.
+- [The 26.3 protocol era](./protocol-26-3-era.md) — `lodestone-v26-3` records
+  release metadata and packet IDs for Minecraft 26.3 (protocol 777). It declares
+  `lodestone-v26-2` as a compatibility base, while client joining and hosting remain
+  unavailable until wire and registry changes are independently verified.
 - [Protocol Block Updates](./protocol-block-updates.md) — The server protocol seam
   encodes one block edit confirmation for each hosted protocol family. Runtime callers
   provide the canonical `lodestone_data::block_states::StateId`; the selected protocol

@@ -9,6 +9,20 @@ client heightmaps, block entities, and light.
 
 ## How it works
 
+`V770Adapter` selects protocol identity and packet identifiers through
+`dialect::ProtocolDialect`. The normal constructor retains the complete 26.2
+behavior. `ProtocolDialect::connection_only` accepts separately generated
+tables for reviewed connection bodies; `with_connection_dialect` shares the
+existing codecs. Input identifiers map by packet name before dispatch, and
+outgoing directives map in order, following each state transition. Duplicate
+names or identifiers within one state and direction are rejected.
+
+An alternate identifier table does not establish payload or registry
+compatibility. Connection-only dialects reject registry/tag ingestion, entry
+into Play, deferred chunk decode, and Play actions. Their shared body codecs
+still use the 26.2 shape context. They are a connection-codec integration seam,
+not a registered client or host family.
+
 The packet starts with chunk coordinates, then a typed list of the three
 client-visible heightmaps: world surface, motion blocking, and motion blocking
 without leaves. Their registry ids are 1, 4, and 5. Each value is the first
@@ -78,6 +92,13 @@ The public type and source-based wiring tools therefore keep their historical
 path while the large implementation is navigable by protocol direction.
 
 ## How to change it
+
+Add protocol-specific packet tables through `dialect::PacketTables`; never
+reuse numeric identifiers across states or directions. Before extending the
+connection-only boundary, provide independent payload fixtures and route every
+affected registry lookup, nested item codec, and deferred chunk consumer.
+`tests/session/dialect.rs` uses synthetic shifted identifiers and literal
+payloads to distinguish routing from accidental numeric compatibility.
 
 Keep `encode_column_body` and `LevelChunkWithLight::decode` in matching wire
 order. A changed section prefix must be covered by a test that reads the raw

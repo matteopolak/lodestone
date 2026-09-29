@@ -97,7 +97,7 @@ impl DeletabilityReport {
             );
             for edge in &self.blockers {
                 let why = if edge.dependent_is_version_crate {
-                    "another version crate depends on it (isolation break)"
+                    "another version crate depends on it; deleting this folder breaks that family"
                 } else {
                     "required (non-optional) dependency from a shared crate"
                 };
