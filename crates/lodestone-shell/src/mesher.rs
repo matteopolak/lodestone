@@ -283,14 +283,54 @@ impl Meshed {
 
 #[cfg(not(target_arch = "wasm32"))]
 enum Job {
-    /// A snapshot plus the two `Options` values it was submitted under —
-    /// `options.cutoutLeaves` and `options.biomeBlendRadius`. See
-    /// [`MeshScheduler::submit`]'s doc for why they travel with the job rather
-    /// than being read by the worker from shared state. The trailing `u64` is
-    /// the generation [`MeshScheduler::submit`] stamped it with, echoed back on
-    /// the result channel so a stale completion can be told from the current
-    /// one — see [`MeshScheduler::latest_generation`]'s doc.
-    Mesh(SectionSnapshot, bool, i32, u64),
+    /// Immutable inputs, submission generation, and its cancellation token.
+    Mesh(SectionSnapshot, bool, i32, u64, Arc<AtomicBool>),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+struct NativeGeneration {
+    number: u64,
+    cancelled: Arc<AtomicBool>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativeGeneration {
+    fn new(number: u64) -> Self {
+        Self { number, cancelled: Arc::new(AtomicBool::new(false)) }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+enum NativeMeshCompletion {
+    Built(Meshed, u64),
+    Skipped,
+}
+
+/// Native scheduler lifetime work; skipped jobs never enter geometry computation.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct NativeMeshWorkCounters {
+    pub submitted: u64,
+    pub started: u64,
+    pub skipped_before_mesh: u64,
+    pub stale_results_discarded: u64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Default)]
+struct NativeWorkerCounters {
+    started: AtomicU64,
+    skipped_before_mesh: AtomicU64,
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[derive(Clone)]
+struct NativeWorkerGate {
+    entered: crossbeam_channel::Sender<()>,
+    release: crossbeam_channel::Receiver<()>,
+    ignore_cancellation: bool,
 }
 
 /// Shared meshing implementation for native workers and browser frame drains.
@@ -442,15 +482,15 @@ pub struct MeshScheduler {
     /// channel distributes by actual work completion. Benchmarked 20.4ms vs
     /// 25.4ms round-robin at 10 workers; dead-even at 4 workers (31.3ms).
     job_tx: crossbeam_channel::Sender<Job>,
-    /// Paired with the generation [`Self::submit`] stamped the job with, so
-    /// [`Self::drain`]/[`Self::drain_blocking`] can tell a stale completion
-    /// from the current one — see [`Self::latest_generation`]'s doc for why
-    /// that pairing exists at all.
-    result_rx: Mutex<Receiver<(Meshed, u64)>>,
+    /// Built results and cancellation acknowledgements, each settling one job.
+    result_rx: Mutex<Receiver<NativeMeshCompletion>>,
     /// Completed results held until a frame has capacity to upload them.
     ready: std::collections::VecDeque<(Meshed, u64)>,
     workers: Vec<JoinHandle<()>>,
     pending: usize,
+    submitted: u64,
+    worker_counters: Arc<NativeWorkerCounters>,
+    stale_results_discarded: u64,
     column_source: ColumnSource,
     /// The live `options.cutoutLeaves` value, stamped onto each [`Job::Mesh`]
     /// at [`Self::submit`] time (a plain field, not shared state: `submit`
@@ -460,28 +500,10 @@ pub struct MeshScheduler {
     /// The live `options.biomeBlendRadius` value, stamped onto each
     /// [`Job::Mesh`] beside [`Self::cutout_leaves`] and for the same reason.
     blend_radius: i32,
-    /// The generation number [`Self::submit`] most recently stamped a job
-    /// for this key with — the defence against a **stale mesh silently
-    /// overwriting a fresher one**, which the pool's own doc already admits
-    /// is possible: *"the channel distributes by actual work completion"*
-    /// and *"two concurrent drains... would interleave meshes arbitrarily"*.
-    /// With `worker_count > 1` (the production default), two jobs for the
-    /// *same* section — a client-predicted break's own remesh, then the
-    /// server's correction moments later when the prediction is denied —
-    /// can finish in either order. Without this, a slower worker finishing
-    /// the *older* (predicted) job after a faster one finishes the *newer*
-    /// (corrected) job hands the caller the stale geometry last, and nothing
-    /// ever re-derives it again because no further dirty signal is coming —
-    /// the section is uploaded and never marked dirty again, exactly the
-    /// "block came back (hitbox and all) but the mesh didn't render" report:
-    /// collision reads `ChunkWorld` directly and shows the corrected block,
-    /// while the GPU section map is stuck on the superseded snapshot.
-    ///
-    /// [`Self::drain`]/[`Self::drain_blocking`] drop any completion whose
-    /// generation does not match this map's entry for its key — only the
-    /// *most recently submitted* job for a section is ever allowed through,
-    /// regardless of completion order.
-    latest_generation: HashMap<SectionKey, u64>,
+    /// Latest submission per section, owned by the scheduling thread.
+    /// Its token prevents superseded queued work from starting. Drain-time
+    /// generation checks also reject work superseded after computation starts.
+    latest_generation: HashMap<SectionKey, NativeGeneration>,
     /// Monotonic counter [`Self::submit`] draws from to stamp each job.
     next_generation: u64,
 }
@@ -512,13 +534,27 @@ impl MeshScheduler {
     /// [`TerrainMesh::mesh_column`] meshes nothing at all.
     #[must_use]
     pub fn new(worker_count: usize, classifier: ShellClassifier) -> Self {
+        Self::new_inner(
+            worker_count,
+            classifier,
+            #[cfg(test)]
+            None,
+        )
+    }
+
+    fn new_inner(
+        worker_count: usize,
+        classifier: ShellClassifier,
+        #[cfg(test)] worker_gate: Option<NativeWorkerGate>,
+    ) -> Self {
         let column_source = if classifier.is_vanilla() {
             ColumnSource::Streaming
         } else {
             ColumnSource::Complete
         };
         let worker_count = worker_count.max(1);
-        let (result_tx, result_rx) = mpsc::channel::<(Meshed, u64)>();
+        let (result_tx, result_rx) = mpsc::channel::<NativeMeshCompletion>();
+        let worker_counters = Arc::new(NativeWorkerCounters::default());
 
         // Lock-free MPMC: one channel, every worker clones the consumer.
         let (job_tx, job_rx) = crossbeam_channel::unbounded::<Job>();
@@ -528,21 +564,39 @@ impl MeshScheduler {
             let rx = job_rx.clone();
             let result_tx = result_tx.clone();
             let classifier = classifier.clone();
+            let counters = Arc::clone(&worker_counters);
+            #[cfg(test)]
+            let gate = worker_gate.clone();
             workers.push(thread::spawn(move || {
+                #[cfg(test)]
+                let ignore_cancellation = if let Some(gate) = gate {
+                    gate.entered.send(()).expect("worker gate listener closed");
+                    gate.release.recv().expect("worker gate release closed");
+                    gate.ignore_cancellation
+                } else {
+                    false
+                };
                 loop {
-                    let (snap, cutout_leaves, blend_radius, generation) = match rx.recv() {
-                        Ok(Job::Mesh(snap, cutout_leaves, blend_radius, generation)) => {
-                            (snap, cutout_leaves, blend_radius, generation)
+                    let (snap, cutout_leaves, blend_radius, generation, token) = match rx.recv() {
+                        Ok(Job::Mesh(snap, cutout_leaves, blend_radius, generation, token)) => {
+                            (snap, cutout_leaves, blend_radius, generation, token)
                         }
                         Err(_) => break,
                     };
-                    if result_tx
-                        .send((
+                    let cancelled = token.load(Ordering::Acquire);
+                    #[cfg(test)]
+                    let cancelled = cancelled && !ignore_cancellation;
+                    let completion = if cancelled {
+                        counters.skipped_before_mesh.fetch_add(1, Ordering::Relaxed);
+                        NativeMeshCompletion::Skipped
+                    } else {
+                        counters.started.fetch_add(1, Ordering::Relaxed);
+                        NativeMeshCompletion::Built(
                             mesh_one(snap, &classifier, cutout_leaves, blend_radius),
                             generation,
-                        ))
-                        .is_err()
-                    {
+                        )
+                    };
+                    if result_tx.send(completion).is_err() {
                         break;
                     }
                 }
@@ -555,6 +609,9 @@ impl MeshScheduler {
             ready: std::collections::VecDeque::new(),
             workers,
             pending: 0,
+            submitted: 0,
+            worker_counters,
+            stale_results_discarded: 0,
             column_source,
             cutout_leaves: true,
             blend_radius: BLEND_RADIUS,
@@ -599,12 +656,16 @@ impl MeshScheduler {
         self.column_source
     }
 
-    /// Queue a snapshot with a new authoritative generation.
+    /// Queue a snapshot with a new submission generation, cancelling its predecessor.
     pub fn submit(&mut self, snapshot: SectionSnapshot) {
         self.pending += 1;
         self.next_generation += 1;
         let generation = self.next_generation;
-        self.latest_generation.insert(snapshot.key, generation);
+        let current = NativeGeneration::new(generation);
+        let token = Arc::clone(&current.cancelled);
+        if let Some(previous) = self.latest_generation.insert(snapshot.key, current) {
+            previous.cancelled.store(true, Ordering::Release);
+        }
         if self
             .job_tx
             .send(Job::Mesh(
@@ -612,10 +673,13 @@ impl MeshScheduler {
                 self.cutout_leaves,
                 self.blend_radius,
                 generation,
+                token,
             ))
             .is_err()
         {
             self.pending -= 1;
+        } else {
+            self.submitted += 1;
         }
     }
 
@@ -630,15 +694,29 @@ impl MeshScheduler {
         self.pending
     }
 
+    /// Sample worker atomics and owner-thread counters without inspecting queues.
+    #[must_use]
+    pub fn native_work_counters(&self) -> NativeMeshWorkCounters {
+        NativeMeshWorkCounters {
+            submitted: self.submitted,
+            started: self.worker_counters.started.load(Ordering::Relaxed),
+            skipped_before_mesh: self.worker_counters.skipped_before_mesh.load(Ordering::Relaxed),
+            stale_results_discarded: self.stale_results_discarded,
+        }
+    }
+
     /// Drop `key`'s current generation. Any completion already in flight is no
     /// longer authoritative until a later [`Self::submit`] records a new
     /// generation. This is used both when a newer snapshot supersedes an older
     /// one and when a column leaves the view.
     pub fn forget_generation(&mut self, key: &SectionKey) {
-        self.latest_generation.remove(key);
+        if let Some(previous) = self.latest_generation.remove(key) {
+            previous.cancelled.store(true, Ordering::Release);
+        }
         let before = self.ready.len();
         self.ready.retain(|(meshed, _)| meshed.key != *key);
         self.pending -= before - self.ready.len();
+        self.stale_results_discarded += (before - self.ready.len()) as u64;
     }
 
     pub fn forget_column(&mut self, cx: i32, cz: i32) {
@@ -662,14 +740,24 @@ impl MeshScheduler {
         let rx = self.result_rx.get_mut().expect("mesh result queue poisoned");
         while let Some((meshed, generation)) = self.ready.pop_front() {
             self.pending -= 1;
-            if self.latest_generation.get(&meshed.key) == Some(&generation) {
+            if self.latest_generation.get(&meshed.key)
+                .is_some_and(|current| current.number == generation)
+            {
                 out.push(meshed);
+            } else {
+                self.stale_results_discarded += 1;
             }
         }
-        while let Ok((meshed, generation)) = rx.try_recv() {
+        while let Ok(completion) = rx.try_recv() {
             self.pending -= 1;
-            if self.latest_generation.get(&meshed.key) == Some(&generation) {
-                out.push(meshed);
+            if let NativeMeshCompletion::Built(meshed, generation) = completion {
+                if self.latest_generation.get(&meshed.key)
+                    .is_some_and(|current| current.number == generation)
+                {
+                    out.push(meshed);
+                } else {
+                    self.stale_results_discarded += 1;
+                }
             }
         }
         out
@@ -692,13 +780,21 @@ impl MeshScheduler {
             let next = self
                 .ready
                 .pop_front()
+                .map(|(meshed, generation)| NativeMeshCompletion::Built(meshed, generation))
                 .or_else(|| rx.try_recv().ok());
-            let Some((meshed, generation)) = next else {
+            let Some(completion) = next else {
                 break;
             };
             examined += 1;
-            if self.latest_generation.get(&meshed.key) != Some(&generation) {
+            let NativeMeshCompletion::Built(meshed, generation) = completion else {
                 self.pending -= 1;
+                continue;
+            };
+            if !self.latest_generation.get(&meshed.key)
+                .is_some_and(|current| current.number == generation)
+            {
+                self.pending -= 1;
+                self.stale_results_discarded += 1;
                 continue;
             }
             let mesh_bytes = meshed.mesh.upload_bytes();
@@ -719,21 +815,27 @@ impl MeshScheduler {
     /// currently-pending job — stale or not — has completed), returning
     /// everything collected. Used by tests and headless runs.
     ///
-    /// A stale completion (superseded by a later `submit` for the same key,
-    /// see [`Self::latest_generation`]) still counts against the "every
-    /// pending job has completed" bound — it consumed a pool slot and its
-    /// raw arrival is what this loop is waiting on — but is not pushed into
-    /// `out` and does not count toward `n`, so the caller never receives it.
+    /// Skipped jobs and stale built results settle pending work without counting
+    /// toward `n`, so cancellation cannot strand a headless drain.
     pub fn drain_blocking(&mut self, n: usize) -> Vec<Meshed> {
         let mut out = Vec::new();
         let rx = self.result_rx.get_mut().expect("mesh result queue poisoned");
         while out.len() < n && self.pending > 0 {
-            let next = self.ready.pop_front().map(Ok).unwrap_or_else(|| rx.recv());
+            let next = self.ready
+                .pop_front()
+                .map(|(meshed, generation)| Ok(NativeMeshCompletion::Built(meshed, generation)))
+                .unwrap_or_else(|| rx.recv());
             match next {
-                Ok((meshed, generation)) => {
+                Ok(completion) => {
                     self.pending -= 1;
-                    if self.latest_generation.get(&meshed.key) == Some(&generation) {
-                        out.push(meshed);
+                    if let NativeMeshCompletion::Built(meshed, generation) = completion {
+                        if self.latest_generation.get(&meshed.key)
+                            .is_some_and(|current| current.number == generation)
+                        {
+                            out.push(meshed);
+                        } else {
+                            self.stale_results_discarded += 1;
+                        }
                     }
                 }
                 Err(_) => break,
@@ -746,9 +848,10 @@ impl MeshScheduler {
 #[cfg(not(target_arch = "wasm32"))]
 impl Drop for MeshScheduler {
     fn drop(&mut self) {
-        // Drop the sender — closes the channel. Each worker's cloned Receiver
-        // gets Err and exits its loop. Crossbeam drops cleanly, unlike
-        // std::mpsc which can deadlock if the channel is full.
+        for generation in self.latest_generation.values() {
+            generation.cancelled.store(true, Ordering::Release);
+        }
+        // Closing the job channel lets workers exit after their queued work.
         drop(self.job_tx.clone());
         self.job_tx = crossbeam_channel::unbounded().0;
         for w in self.workers.drain(..) {
@@ -1326,6 +1429,8 @@ pub struct BrowserMeshQueueStats {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct MeshWorkCounters {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub native_scheduler: NativeMeshWorkCounters,
     pub column_arrivals: usize,
     pub redecoded_column_arrivals: usize,
     pub column_snapshot_sections: usize,
@@ -2298,7 +2403,11 @@ impl TerrainMesh {
 
     #[must_use]
     pub fn work_counters(&self) -> MeshWorkCounters {
-        self.work_counters
+        MeshWorkCounters {
+            #[cfg(not(target_arch = "wasm32"))]
+            native_scheduler: self.scheduler.native_work_counters(),
+            ..self.work_counters
+        }
     }
 
     #[must_use]
@@ -2794,6 +2903,9 @@ pub(crate) fn add_presentation_systems(world: &mut bevy_ecs::world::World) {
             .in_set(crate::sim::presentation::PresentationSet),
     );
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod native_scheduler_tests;
 
 #[cfg(test)]
 mod tests {
@@ -3933,7 +4045,7 @@ mod tests {
                 min_y: 0,
             };
             let generation = index as u64 + 1;
-            scheduler.latest_generation.insert(key, generation);
+            scheduler.latest_generation.insert(key, NativeGeneration::new(generation));
             scheduler.pending += 1;
             scheduler.ready.push_back((
                 Meshed::new(
@@ -3968,7 +4080,7 @@ mod tests {
                 min_y: 0,
             };
             let generation = index as u64 + 1;
-            scheduler.latest_generation.insert(key, generation);
+            scheduler.latest_generation.insert(key, NativeGeneration::new(generation));
             scheduler.pending += 1;
             scheduler.ready.push_back((
                 Meshed::new(key, SectionGeometry::Packed(Mesh::default())),
@@ -4003,7 +4115,7 @@ mod tests {
         });
         for (index, key) in keys.iter().copied().enumerate() {
             let generation = index as u64 + 1;
-            scheduler.latest_generation.insert(key, generation);
+            scheduler.latest_generation.insert(key, NativeGeneration::new(generation));
             scheduler.pending += 1;
             scheduler.ready.push_back((
                 Meshed::new(key, SectionGeometry::Packed(Mesh::default())),
@@ -4047,7 +4159,7 @@ mod tests {
         ];
         for (index, key) in keys.iter().copied().enumerate() {
             let generation = index as u64 + 1;
-            terrain.scheduler.latest_generation.insert(key, generation);
+            terrain.scheduler.latest_generation.insert(key, NativeGeneration::new(generation));
             terrain.scheduler.pending += 1;
             terrain.scheduler.ready.push_back((
                 Meshed::new(key, SectionGeometry::Packed(Mesh::default())),
@@ -4073,7 +4185,7 @@ mod tests {
         let snapshot = platform_snapshot(None);
         let key = snapshot.key;
         for outcome in [SnapshotOutcome::Empty, SnapshotOutcome::Deferred(snapshot)] {
-            terrain.scheduler.latest_generation.insert(key, 1);
+            terrain.scheduler.latest_generation.insert(key, NativeGeneration::new(1));
             terrain.scheduler.pending += 1;
             terrain.scheduler.ready.push_back((
                 Meshed::new(key, SectionGeometry::Packed(Mesh::default())),
