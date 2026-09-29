@@ -84,9 +84,34 @@ use std::time::Instant;
 use criterion::{Criterion, criterion_group, criterion_main};
 use lodestone_testsupport::bench_fixtures::synthetic_overworld_column;
 use lodestone_world::{
-    LightProperties, Neighbourhood, compute_column_light, compute_column_light_with_neighbours,
-    compute_column_lights_with_neighbours_and_storage, light_exercises_propagation,
+    BlockVolume, ChunkColumn, LightProperties, Neighbourhood, compute_column_light,
+    compute_column_light_with_neighbours, compute_column_lights_with_neighbours_and_storage,
+    light_exercises_propagation,
 };
+
+struct FullScan<'a>(&'a ChunkColumn);
+
+impl BlockVolume for FullScan<'_> {
+    fn block(&self, x: usize, y: i32, z: usize) -> u32 {
+        self.0.get_block(x, y, z)
+    }
+
+    fn air_state(&self) -> u32 {
+        self.0.air_id()
+    }
+
+    fn min_y(&self) -> i32 {
+        self.0.min_y()
+    }
+
+    fn section_count(&self) -> usize {
+        self.0.section_count()
+    }
+
+    fn air_above_y(&self) -> i32 {
+        i32::MAX
+    }
+}
 
 /// Same opacity/emission table as `tests/memory.rs`'s `TimingProps`: anything
 /// non-air is opaque, one id is glass-like transparent, one id emits like a
@@ -277,11 +302,45 @@ fn bench_shared_initial_light(c: &mut Criterion) {
     let stored = [None; 9];
     let probe = compute_column_lights_with_neighbours_and_storage(&hood, &props, &stored, 1);
     assert!(light_exercises_propagation(&probe[4]));
+    let full_columns = [
+        FullScan(&center),
+        FullScan(&northwest),
+        FullScan(&west),
+        FullScan(&southwest),
+        FullScan(&north),
+        FullScan(&northeast),
+        FullScan(&east),
+        FullScan(&southeast),
+        FullScan(&south),
+    ];
+    let full_hood = Neighbourhood::new(&full_columns[0])
+        .with(-1, -1, &full_columns[1])
+        .with(-1, 0, &full_columns[2])
+        .with(-1, 1, &full_columns[3])
+        .with(0, -1, &full_columns[4])
+        .with(1, -1, &full_columns[5])
+        .with(1, 0, &full_columns[6])
+        .with(1, 1, &full_columns[7])
+        .with(0, 1, &full_columns[8]);
+    assert_eq!(
+        probe,
+        compute_column_lights_with_neighbours_and_storage(&full_hood, &props, &stored, 1)
+    );
 
     c.bench_function("world/light_shared_initial_3x3", |b| {
         b.iter(|| {
             black_box(compute_column_lights_with_neighbours_and_storage(
                 black_box(&hood),
+                black_box(&props),
+                black_box(&stored),
+                1,
+            ))
+        })
+    });
+    c.bench_function("world/light_shared_initial_3x3_full_height", |b| {
+        b.iter(|| {
+            black_box(compute_column_lights_with_neighbours_and_storage(
+                black_box(&full_hood),
                 black_box(&props),
                 black_box(&stored),
                 1,
