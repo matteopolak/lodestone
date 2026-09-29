@@ -29,8 +29,11 @@ keeps its single-threaded path inline. The blocking work never occupies the
 network runtime workers.
 
 The 26.2 protocol can encode both generated packet snapshots and existing source-backed columns,
-and settle tick or direct-edit lighting on this pool. Packet bytes still return to the connection
-in admission order. Light
+and settle tick or direct-edit lighting on this pool. Native joins admit up to four independent
+packet-snapshot encodes at once and emit their results in stream order. An existing source-backed
+column fences the window because its lighting can update retained world state; it settles only
+after earlier snapshots and before later admissions. The window also bounds retained snapshot
+halos. Light
 settlement admits one destination per connection; tick changes use resident terrain only, while
 direct edits may complete a cold footprint on the worker. Before sending a light result, the
 connection checks that its destination is still delivered and its retained snapshot is current.
@@ -91,7 +94,9 @@ Change the handoff in `crates/lodestone-server/src/worldgen_dispatch.rs` or the
 target-aware wrapper in `crates/lodestone-server/src/spawn.rs`, and keep the
 result channel tied to the worker closure. Update
 `join_scheduler::ColumnPipeline` only if the ordering or cancellation contract
-changes. Native bounded producers use `try_spawn`; retain an `Err(job)` and
+changes. The join encode window lives in `join_scheduler::OrderedJoinEncodes`; keep
+its serial fence if changing the window size or adding another payload kind.
+Native bounded producers use `try_spawn`; retain an `Err(job)` and
 await `wait_for_capacity` before retrying. `spawn` remains only for callers
 that explicitly choose asynchronous admission. Keep `map_columns_parallel` on
 the same dispatcher/pool; replacing it
@@ -143,7 +148,9 @@ Native worker count defaults to `max(available_parallelism - 1, 1)`;
 saturation is backpressure rather than queue growth. The Rayon budget does not
 include blocking cohort coordinators or the shell's two network workers, so
 measure total CPU contention before increasing the override. WASM has no native
-pool and keeps the serial platform-specific path.
+pool and keeps the serial platform-specific path. The native join encode window
+is `clamp(worker_count - 1, 1, 4)`; it reserves capacity for generation and
+limits retained snapshots independently of render distance.
 
 ## Dependencies
 
