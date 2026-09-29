@@ -157,6 +157,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   server at 20 ticks per second. A browser-compatible timer supplies the scheduling
   boundary while the world source, scheduled queues, block-entity registry, and entity
   source remain shared with the connection.
+- [Browser mesh queue](./browser-mesh-queue.md) — The browser terrain mesher retains
+  one pending snapshot per section in an indexed FIFO. Repeated updates replace that
+  snapshot without moving the section behind newer submissions, so a busy section
+  keeps its turn in the mesh backlog.
 - [Browser shell port](./browser-shell-port.md) — The wasm32 target: `web/` runs the
   real `lodestone-shell` — the same menu, `Sim`, and renderer the native binary uses
   — fetching `client.jar` and `blocks.json` at startup instead of reading them off a
@@ -267,15 +271,15 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   defaults, and item IDs from the official reports and the append-only canonical
   census. It produces a reviewable JSON artifact without compiling Rust or changing
   runtime tables, storage, adapters, or protocol support.
+- [Block light-properties oracle](./data-light-oracle.md) — `LightPropertiesOracle`
+  queries every built-in block state's raw light dampening and emission from an actual
+  bootstrapped server registry. The harness contains no release-specific state count,
+  protocol number, or block-property corrections.
 - [F3 debug overlay](./debug-overlay.md) — The F3 instrument: two columns of engine
   and world stats drawn over the world in vanilla's own plate, pitch and font, plus
   two world-space overlays (F3+B entity hitboxes, F3+G chunk borders). The
   presentation — plate geometry, text metrics, column layout — is a faithful port
   of vanilla's `DebugScreenOverlay`; the *content* is curated rather than faked: lines
-- [Block light-properties oracle](./data-light-oracle.md) — `LightPropertiesOracle`
-  queries every built-in block state's raw light dampening and emission from an actual
-  bootstrapped server registry. The harness contains no release-specific state count,
-  protocol number, or block-property corrections.
   that describe the JVM (heap stats, Java/CPU info, GPU-utilization percentage) are
   dropped outright instead of being filled with fabricated numbers, and this engine's
   own diagnostics take the slots vanilla's JVM-only lines leave empty.
