@@ -1,7 +1,7 @@
 //! Light-propagation throughput for `lodestone-world`'s local/singleplayer
-//! per-chunk consumer: [`compute_column_light`] and
-//! [`compute_column_light_with_neighbours`] — the functions
-//! `lodestone-shell/src/worldgen.rs` calls for every locally generated column.
+//! per-chunk consumer: [`compute_column_light`],
+//! [`compute_column_light_with_neighbours`], and the shared 3x3 initial-light
+//! computation used when settling server-side source neighbourhoods.
 //! `lodestone-shell/src/net.rs`'s own module doc states the split explicitly:
 //! "MP consumes server light; SP computes it. Do not run `compute_column_light`
 //! on live columns." This bench is the SP half; `chunk_load.rs` in this same
@@ -85,7 +85,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use lodestone_testsupport::bench_fixtures::synthetic_overworld_column;
 use lodestone_world::{
     LightProperties, Neighbourhood, compute_column_light, compute_column_light_with_neighbours,
-    light_exercises_propagation,
+    compute_column_lights_with_neighbours_and_storage, light_exercises_propagation,
 };
 
 /// Same opacity/emission table as `tests/memory.rs`'s `TimingProps`: anything
@@ -254,5 +254,41 @@ fn bench_neighbourhood(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_single_column, bench_neighbourhood);
+fn bench_shared_initial_light(c: &mut Criterion) {
+    let center = synthetic_overworld_column(0);
+    let north = synthetic_overworld_column(1);
+    let south = synthetic_overworld_column(2);
+    let east = synthetic_overworld_column(3);
+    let west = synthetic_overworld_column(4);
+    let northwest = synthetic_overworld_column(5);
+    let northeast = synthetic_overworld_column(6);
+    let southwest = synthetic_overworld_column(7);
+    let southeast = synthetic_overworld_column(8);
+    let hood = Neighbourhood::new(&center)
+        .with(0, -1, &north)
+        .with(0, 1, &south)
+        .with(1, 0, &east)
+        .with(-1, 0, &west)
+        .with(-1, -1, &northwest)
+        .with(1, -1, &northeast)
+        .with(-1, 1, &southwest)
+        .with(1, 1, &southeast);
+    let props = TimingProps;
+    let stored = [None; 9];
+    let probe = compute_column_lights_with_neighbours_and_storage(&hood, &props, &stored, 1);
+    assert!(light_exercises_propagation(&probe[4]));
+
+    c.bench_function("world/light_shared_initial_3x3", |b| {
+        b.iter(|| {
+            black_box(compute_column_lights_with_neighbours_and_storage(
+                black_box(&hood),
+                black_box(&props),
+                black_box(&stored),
+                1,
+            ))
+        })
+    });
+}
+
+criterion_group!(benches, bench_single_column, bench_neighbourhood, bench_shared_initial_light);
 criterion_main!(benches);

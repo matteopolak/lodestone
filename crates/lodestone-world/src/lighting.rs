@@ -517,6 +517,22 @@ pub fn compute_column_lights_with_neighbours_and_storage(
     let mut block = vec![0u8; field.len()];
     let mut block_buckets = Buckets::new();
     let mut highest_non_air_light_section = [None; 9];
+    let columns: [Option<_>; 9] = std::array::from_fn(|slot| {
+        neighbourhood.at(slot as i32 % 3 - 1, slot as i32 / 3 - 1)
+    });
+    let air_ceilings = columns.map(|column| column.map_or(i32::MAX, BlockVolume::air_above_y));
+    let center_air_state = center.air_state();
+    let air_states = columns.map(|column| column.map_or(center_air_state, BlockVolume::air_state));
+    let air_props: [(u8, u8); 9] = std::array::from_fn(|slot| {
+        if columns[slot].is_some() {
+            (
+                props.opacity(air_states[slot]).min(MAX_LIGHT),
+                props.emission(air_states[slot]).min(MAX_LIGHT),
+            )
+        } else {
+            (0, 0)
+        }
+    });
     let has_retained_sky = stored.iter().flatten().any(|light| {
         (0..light.light_section_count()).any(|section| {
             !light_data_is_zero(light.sky(section))
@@ -525,28 +541,56 @@ pub fn compute_column_lights_with_neighbours_and_storage(
 
     for y_rel in 0..field.height {
         let world_y = field_bottom_y + y_rel as i32;
-        for fz in 0..field.wz {
-            for fx in 0..field.wx {
-                let idx = field.cell(fx, y_rel, fz);
-                let dx = (fx / EDGE) as i32 - 1;
-                let dz = (fz / EDGE) as i32 - 1;
-                match neighbourhood
-                    .at(dx, dz)
-                    .map(|column| column.block(fx % EDGE, world_y, fz % EDGE))
-                {
-                    Some(state) => {
-                        let slot = (fz / EDGE) * 3 + (fx / EDGE);
-                        if state != center.air_state() {
-                            highest_non_air_light_section[slot] = Some(y_rel / EDGE);
-                        }
-                        opacity[idx] = props.opacity(state).min(MAX_LIGHT);
-                        let emission = props.emission(state).min(MAX_LIGHT);
-                        if emission > 0 {
-                            block[idx] = emission;
-                            block_buckets.push(emission, idx as u32);
+        for chunk_z in 0..3 {
+            for chunk_x in 0..3 {
+                let slot = chunk_z * 3 + chunk_x;
+                let ox = chunk_x * EDGE;
+                let oz = chunk_z * EDGE;
+                match columns[slot] {
+                    None => {
+                        for fz in oz..oz + EDGE {
+                            let row = field.cell(ox, y_rel, fz);
+                            opacity[row..row + EDGE].fill(MAX_LIGHT);
                         }
                     }
-                    None => opacity[idx] = MAX_LIGHT,
+                    Some(_) if world_y < min_y || world_y >= air_ceilings[slot] => {
+                        if air_states[slot] != center_air_state {
+                            highest_non_air_light_section[slot] = Some(y_rel / EDGE);
+                        }
+                        let (air_opacity, air_emission) = air_props[slot];
+                        if air_opacity != 0 {
+                            for fz in oz..oz + EDGE {
+                                let row = field.cell(ox, y_rel, fz);
+                                opacity[row..row + EDGE].fill(air_opacity);
+                            }
+                        }
+                        if air_emission != 0 {
+                            for fz in oz..oz + EDGE {
+                                for fx in ox..ox + EDGE {
+                                    let idx = field.cell(fx, y_rel, fz);
+                                    block[idx] = air_emission;
+                                    block_buckets.push(air_emission, idx as u32);
+                                }
+                            }
+                        }
+                    }
+                    Some(column) => {
+                        for fz in oz..oz + EDGE {
+                            for fx in ox..ox + EDGE {
+                                let idx = field.cell(fx, y_rel, fz);
+                                let state = column.block(fx - ox, world_y, fz - oz);
+                                if state != center_air_state {
+                                    highest_non_air_light_section[slot] = Some(y_rel / EDGE);
+                                }
+                                opacity[idx] = props.opacity(state).min(MAX_LIGHT);
+                                let emission = props.emission(state).min(MAX_LIGHT);
+                                if emission > 0 {
+                                    block[idx] = emission;
+                                    block_buckets.push(emission, idx as u32);
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1097,6 +1141,7 @@ fn section_has_gradient(data: &LightData) -> bool {
 mod tests {
     use super::*;
     use crate::{ChunkColumn, PaletteKind};
+    use std::cell::Cell;
     use std::collections::HashMap;
 
     // Fixed test block ids and their properties.
@@ -1227,6 +1272,10 @@ mod tests {
         fn section_count(&self) -> usize {
             self.0.section_count()
         }
+
+        fn air_above_y(&self) -> i32 {
+            i32::MAX
+        }
     }
 
     #[test]
@@ -1257,6 +1306,202 @@ mod tests {
                 ),
             );
         }
+    }
+
+    struct CountedColumn<'a> {
+        column: &'a ChunkColumn,
+        reads: Cell<usize>,
+        ceiling: i32,
+    }
+
+    impl BlockVolume for CountedColumn<'_> {
+        fn block(&self, x: usize, y: i32, z: usize) -> u32 {
+            self.reads.set(self.reads.get() + 1);
+            self.column.get_block(x, y, z)
+        }
+
+        fn air_state(&self) -> u32 {
+            self.column.air_id()
+        }
+
+        fn min_y(&self) -> i32 {
+            self.column.min_y()
+        }
+
+        fn section_count(&self) -> usize {
+            self.column.section_count()
+        }
+
+        fn air_above_y(&self) -> i32 {
+            self.ceiling
+        }
+    }
+
+    #[test]
+    fn shared_initial_light_air_ceiling_matches_full_scan() {
+        let make_column = || {
+            ChunkColumn::new(
+                -64,
+                24,
+                PaletteKind::block_states(),
+                PaletteKind::biomes(),
+                AIR,
+                0,
+            )
+        };
+        let mut center = make_column();
+        let mut east = make_column();
+        center.set_block(15, -48, 8, STONE);
+        center.set_block(15, -47, 8, TORCH);
+        east.set_block(0, -32, 8, GLASS);
+        east.set_block(1, -31, 8, STONE);
+        let fast_center = CountedColumn {
+            column: &center,
+            reads: Cell::new(0),
+            ceiling: center.air_above_y(),
+        };
+        let fast_east = CountedColumn {
+            column: &east,
+            reads: Cell::new(0),
+            ceiling: east.air_above_y(),
+        };
+        let full_center = CountedColumn {
+            column: &center,
+            reads: Cell::new(0),
+            ceiling: center.max_y(),
+        };
+        let full_east = CountedColumn {
+            column: &east,
+            reads: Cell::new(0),
+            ceiling: east.max_y(),
+        };
+        let wrong_center = CountedColumn {
+            column: &center,
+            reads: Cell::new(0),
+            ceiling: center.min_y(),
+        };
+        let fast = Neighbourhood::new(&fast_center).with(1, 0, &fast_east);
+        let full = Neighbourhood::new(&full_center).with(1, 0, &full_east);
+        let empty_storage = [None; 9];
+        let props = FakeProps::new();
+        let expected = compute_column_lights_with_neighbours_and_storage(
+            &full, &props, &empty_storage, 1,
+        );
+        let actual = compute_column_lights_with_neighbours_and_storage(
+            &fast, &props, &empty_storage, 1,
+        );
+        assert_eq!(actual, expected);
+        assert!(light_exercises_propagation(&actual[4]));
+        assert!(
+            fast_center.reads.get() + fast_east.reads.get()
+                < (full_center.reads.get() + full_east.reads.get()) / 2,
+            "the fast path should avoid most volume reads above terrain"
+        );
+
+        let mut retained = ColumnLight::new(center.section_count());
+        *retained.sky_mut(1) = LightData::Uniform(9);
+        *retained.block_mut(1) = LightData::Uniform(5);
+        let mut stored = [None; 9];
+        stored[5] = Some(&retained);
+        assert_eq!(
+            compute_column_lights_with_neighbours_and_storage(&fast, &props, &stored, 1),
+            compute_column_lights_with_neighbours_and_storage(&full, &props, &stored, 1),
+        );
+        assert_eq!(
+            compute_column_lights_with_neighbours_and_storage(
+                &fast, &NoSkyProps(FakeProps::new()), &empty_storage, 1,
+            ),
+            compute_column_lights_with_neighbours_and_storage(
+                &full, &NoSkyProps(FakeProps::new()), &empty_storage, 1,
+            ),
+        );
+        let mut unusual_air = FakeProps::new();
+        unusual_air.opacity.insert(AIR, 1);
+        unusual_air.emission.insert(AIR, 2);
+        assert_eq!(
+            compute_column_lights_with_neighbours_and_storage(
+                &fast, &unusual_air, &empty_storage, 1,
+            ),
+            compute_column_lights_with_neighbours_and_storage(
+                &full, &unusual_air, &empty_storage, 1,
+            ),
+        );
+        assert_ne!(
+            compute_column_lights_with_neighbours_and_storage(
+                &Neighbourhood::new(&wrong_center).with(1, 0, &fast_east),
+                &props,
+                &empty_storage,
+                1,
+            )[4],
+            expected[4],
+            "an invalid ceiling must be detected by the fixture"
+        );
+    }
+
+    #[test]
+    #[ignore = "manual shared-light timing comparison"]
+    fn shared_initial_light_air_ceiling_timing() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        let mut column = ChunkColumn::new(
+            -64,
+            24,
+            PaletteKind::block_states(),
+            PaletteKind::biomes(),
+            AIR,
+            0,
+        );
+        for z in 0..EDGE {
+            for x in 0..EDGE {
+                let surface = 40 + ((x + z) % 8) as i32;
+                for y in -64..surface {
+                    column.set_block(x, y, z, STONE);
+                }
+                if (x + z) % 17 == 0 {
+                    column.set_block(x, surface, z, TORCH);
+                }
+            }
+        }
+        let full_column = FullScan(&column);
+        let mut fast = Neighbourhood::new(&column);
+        let mut full = Neighbourhood::new(&full_column);
+        for slot in 0..9 {
+            if slot == 4 {
+                continue;
+            }
+            let dx = slot as i32 % 3 - 1;
+            let dz = slot as i32 / 3 - 1;
+            fast = fast.with(dx, dz, &column);
+            full = full.with(dx, dz, &full_column);
+        }
+        let props = FakeProps::new();
+        let stored = [None; 9];
+        assert_eq!(
+            compute_column_lights_with_neighbours_and_storage(&fast, &props, &stored, 1),
+            compute_column_lights_with_neighbours_and_storage(&full, &props, &stored, 1),
+        );
+        let mut full_times = Vec::new();
+        let mut fast_times = Vec::new();
+        for _ in 0..9 {
+            let start = Instant::now();
+            black_box(compute_column_lights_with_neighbours_and_storage(
+                black_box(&full), black_box(&props), &stored, 1,
+            ));
+            full_times.push(start.elapsed());
+            let start = Instant::now();
+            black_box(compute_column_lights_with_neighbours_and_storage(
+                black_box(&fast), black_box(&props), &stored, 1,
+            ));
+            fast_times.push(start.elapsed());
+        }
+        full_times.sort_unstable();
+        fast_times.sort_unstable();
+        eprintln!(
+            "shared initial light, 9 filled 24-section slots, debug median: full {:.3} ms; air ceiling {:.3} ms",
+            full_times[4].as_secs_f64() * 1e3,
+            fast_times[4].as_secs_f64() * 1e3,
+        );
     }
 
     /// Reads sky light at world `(x, y, z)` from a computed column.
