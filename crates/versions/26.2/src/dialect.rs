@@ -87,14 +87,15 @@ pub static V26_2_PACKET_TABLES: PacketTables = PacketTables {
 
 /// Selected wire identity, independent of the shared packet-body codecs.
 ///
-/// Custom dialects support connection traffic only. Registry/tag ingestion and
-/// Play require separate data and payload compatibility work and fail explicitly.
+/// Custom dialects support connection traffic only unless a reviewed registry
+/// body opts into the shared decoder. Tags and Play remain gated separately.
 #[derive(Debug, Clone, Copy)]
 pub struct ProtocolDialect {
     protocol: i32,
     versions: &'static [&'static str],
     packets: PacketTables,
     canonical: bool,
+    registry_data: bool,
 }
 
 impl ProtocolDialect {
@@ -106,6 +107,7 @@ impl ProtocolDialect {
             versions: &["26.2"],
             packets: V26_2_PACKET_TABLES,
             canonical: true,
+            registry_data: true,
         }
     }
 
@@ -127,7 +129,17 @@ impl ProtocolDialect {
             versions,
             packets,
             canonical: false,
+            registry_data: false,
         })
+    }
+
+    /// Allows Configuration registry bodies through the shared decoder after
+    /// their framing has been checked against independent wire bytes. This does
+    /// not permit tags or Play, whose numeric game-data IDs need separate work.
+    #[must_use]
+    pub fn with_reviewed_registry_data(mut self) -> Self {
+        self.registry_data = true;
+        self
     }
 
     #[must_use]
@@ -163,9 +175,9 @@ impl ProtocolDialect {
             id,
         )?;
         if state == State::Configuration
-            && matches!(id,
-                packet_ids::configuration::clientbound::REGISTRY_DATA
-                | packet_ids::configuration::clientbound::UPDATE_TAGS)
+            && ((id == packet_ids::configuration::clientbound::REGISTRY_DATA
+                && !self.registry_data)
+                || id == packet_ids::configuration::clientbound::UPDATE_TAGS)
         {
             return Err(AdapterError::Unsupported(format!(
                 "protocol {} has no reviewed registry mappings",

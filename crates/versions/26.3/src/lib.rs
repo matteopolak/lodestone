@@ -1,10 +1,9 @@
 //! Minecraft 26.3 protocol facts verified against the release jar.
 //!
 //! This crate records protocol metadata and packet IDs for the next client
-//! dialect. The 26.2 crate is its declared compatibility base, but packet IDs
-//! alone do not establish compatible packet bodies, registries, or game data.
-//! No client adapter or server protocol is exported until those differences
-//! have independent wire evidence.
+//! dialect. The 26.2 crate is its declared compatibility base. Captured 26.3
+//! Configuration registry bodies use the shared decoder; tags and Play still
+//! need numeric game-data translation before a client adapter can be exported.
 
 #![forbid(unsafe_code)]
 
@@ -23,9 +22,9 @@ pub const RESOURCE_PACK_VERSION: (u32, u32) = (97, 1);
 
 /// The reviewed connection boundary of the 26.3 dialect.
 ///
-/// The shared core translates packet IDs by canonical names. It rejects Play
-/// and configuration registry/tag payloads because their bodies and registry
-/// mappings have not yet been reviewed for 26.3.
+/// The shared core translates packet IDs by canonical names and consumes
+/// captured Configuration registry bodies. Tags and Play remain gated because
+/// their numeric game-data IDs differ from the 26.2 canonical IDs.
 #[must_use]
 pub fn connection_dialect() -> lodestone_v26_2::dialect::ProtocolDialect {
     use lodestone_v26_2::dialect::{PacketTables, ProtocolDialect, StatePackets};
@@ -48,4 +47,5 @@ pub fn connection_dialect() -> lodestone_v26_2::dialect::ProtocolDialect {
     };
     ProtocolDialect::connection_only(PROTOCOL, &[MINECRAFT_VERSION], tables)
         .expect("generated 26.3 packet IDs must be unique within each state and direction")
+        .with_reviewed_registry_data()
 }

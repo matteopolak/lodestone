@@ -3,9 +3,9 @@
 ## What it is
 
 `lodestone-v26-3` records release metadata and packet IDs for Minecraft 26.3
-(protocol 777). It declares `lodestone-v26-2` as a compatibility base, while
-client joining and hosting remain unavailable until wire and registry changes
-are independently verified.
+(protocol 777). Its connection dialect also decodes Configuration registry
+bodies through the 26.2 compatibility base. Client joining and hosting remain
+unavailable until the remaining wire and game-data changes are verified.
 
 ## How it works
 
@@ -16,8 +16,16 @@ and directions, including IDs for packets that the client does not yet decode.
 The 26.3 report adds configuration and play packets and shifts existing play
 IDs. An ID match says nothing about a packet body's shape.
 `connection_dialect()` supplies these tables to the reusable 26.2 connection
-core. That dialect rejects Play and configuration registry/tag payloads until
-their 26.3 bodies and registry mappings are verified.
+core. It opts into the shared Configuration `registry_data` decoder: the
+captured 26.3 body has one registry name, an entry count, and ordered entries
+with optional network NBT, matching that decoder's strict framing. The adapter
+folds these into its per-connection registry store. The complete captured
+`minecraft:world_clock` body in `tests/configuration_registry.rs` exercises the
+production adapter path; an extra byte and a wrong entry count both fail.
+`update_tags` and transition to Play still fail explicitly. The official
+registry reports have 1,196 block IDs in 26.2 and 1,286 in 26.3; for example,
+`minecraft:oak_log` moves from 49 to 51. Passing 26.3 tag member IDs to the
+26.2 process-wide block-tag override would name the wrong blocks.
 The release server jar used for these tables has SHA-1
 `33680f5f2ac32864d6d7cf5e56a705fdb3e05f4c`; its generated
 `packets.json` has SHA-1 `57d738152562d40d7ba3fc4f106431ec4858de40`.
@@ -71,12 +79,14 @@ the release jar and update the compact version fixture if a later release is
 added. Before registering an adapter, verify changed packet bodies and registry
 payloads against a real server capture; the 26.2 decoder cannot safely resolve
 26.3 IDs by changing the handshake number alone.
+To extend the Configuration boundary, translate tag member IDs into canonical
+block IDs before installing them, then verify against captured membership.
 
 ## Configuration
 
 The crate has no runtime flags or environment variables. Its protocol and pack
-constants are fixed to the release jar. The optional registry feature that
-would expose an adapter is intentionally absent at this stage.
+constants are fixed to the release jar. No registry feature exposes a complete
+26.3 adapter yet.
 
 ## Dependencies
 
