@@ -247,7 +247,7 @@ the baseline's commit and the one being gated.
 ### The `wasm` job
 
 Two things run under `just wasm-check`: 20 per-crate `cargo check --target
-wasm32-unknown-unknown` builds and 34 grep-based confinement rules (asserting that crates with
+wasm32-unknown-unknown` builds and 38 grep-based confinement rules (asserting that crates with
 no business touching a filesystem, a socket, or wall-clock time on wasm32 do not), then a real
 `(cd web && trunk build)` of `web/` — its own separate Cargo workspace with its own lockfile,
 outside the root `members` glob, so nothing in `check`/`check-all` has ever covered it. `trunk`

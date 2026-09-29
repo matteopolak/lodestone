@@ -461,6 +461,9 @@ fn collect_cargo_manifests(directory: &Path, manifests: &mut Vec<PathBuf>) -> Re
         let entry = entry.with_context(|| format!("read entry under {}", directory.display()))?;
         let path = entry.path();
         if path.is_dir() {
+            if matches!(path.file_name().and_then(|name| name.to_str()), Some("target" | "build")) {
+                continue;
+            }
             collect_cargo_manifests(&path, manifests)?;
         } else if path.file_name().is_some_and(|name| name == "Cargo.toml") {
             manifests.push(path);
