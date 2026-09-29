@@ -761,9 +761,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   a complete 26.2 chunk body: state and biome sections, client heightmaps, block
   entities, and light.
 - [The 26.3 protocol era](./protocol-26-3-era.md) — `lodestone-v26-3` records
-  release metadata and packet IDs for Minecraft 26.3 (protocol 777). It declares
-  `lodestone-v26-2` as a compatibility base, while client joining and hosting remain
-  unavailable until wire and registry changes are independently verified.
+  release metadata and packet IDs for Minecraft 26.3 (protocol 777). Its connection
+  dialect also decodes Configuration registry bodies through the 26.2 compatibility
+  base. Client joining and hosting remain unavailable until the remaining wire and
+  game-data changes are verified.
 - [26.3 game-data ID translation](./protocol-26-3-id-translation.md) —
   `lodestone-v26-3::id_translation` maps the canonical 26.2 block-state and item IDs
   to their 26.3 wire IDs. It lets a future 26.3 adapter reuse internal game data
@@ -1308,6 +1309,12 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   materialisation path builds a bounded, request-local product for large copper and
   iron veins. It avoids retaining a full three-channel volume while reducing expensive
   ridged/gap work to stone cells that already pass the toggle, Y-band, and edge gates.
+- [Versioned worldgen inputs](./worldgen-versioned-inputs.md) —
+  `crates/lodestone-worldgen/tools/worldgen_asset_inventory.py` builds a compact
+  inventory from each version's server jar and generated registry report. The
+  committed JSON result is
+  `crates/lodestone-worldgen/tools/worldgen-26.2-26.3-inventory.json`; it is
+  provenance and migration input, not a runtime asset bundle or a parity claim.
 - [Worldgen engine overview](./worldgen.md) — `crates/lodestone-worldgen` (engine)
   and `crates/lodestone-worldgen-core` (numeric leaf crate) are a version-free port of
   vanilla Minecraft 26.2's world generator: a density-function/noise-router
