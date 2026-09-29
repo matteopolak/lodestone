@@ -4,6 +4,17 @@
 
 use super::*;
 
+fn frame_profile_debug_enabled() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        log::log_enabled!(target: "frame_profile", log::Level::Debug)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        tracing::enabled!(target: "frame_profile", tracing::Level::DEBUG)
+    }
+}
+
 #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
 const WASM_MESH_PROFILE_WINDOW: usize = 120;
 
@@ -95,21 +106,21 @@ impl WasmMeshProfile {
         let (frame_gap_p95, frame_gap_max) = percentile_and_max(&mut frame_gap[..self.len]);
         let (drain_p95, drain_max) = percentile_and_max(&mut drain[..self.len]);
         let (upload_p95, upload_max) = percentile_and_max(&mut upload[..self.len]);
-        tracing::debug!(
+        log::debug!(
             target: "frame_profile",
-            frames = self.len,
-            upload_calls = self.interval_meshes,
-            frame_gap_p95_ms = frame_gap_p95,
-            frame_gap_max_ms = frame_gap_max,
-            drain_p95_ms = drain_p95,
-            drain_max_ms = drain_max,
-            upload_p95_ms = upload_p95,
-            upload_max_ms = upload_max,
-            backlog_ready_columns_max = self.backlog_max.ready_columns,
-            backlog_waiting_columns_max = self.backlog_max.waiting_columns,
-            backlog_forced_columns_max = self.backlog_max.forced_columns,
-            backlog_pending_sections_max = self.backlog_max.pending_sections,
-            "wasm mesh drain and upload profile"
+            "wasm mesh drain and upload profile: frames={} uploads={} frame_gap_p95/max_ms={:.2}/{:.2} drain_p95/max_ms={:.2}/{:.2} upload_p95/max_ms={:.2}/{:.2} backlog_ready/waiting/forced/sections_max={}/{}/{}/{}",
+            self.len,
+            self.interval_meshes,
+            frame_gap_p95,
+            frame_gap_max,
+            drain_p95,
+            drain_max,
+            upload_p95,
+            upload_max,
+            self.backlog_max.ready_columns,
+            self.backlog_max.waiting_columns,
+            self.backlog_max.forced_columns,
+            self.backlog_max.pending_sections,
         );
         self.interval_meshes = 0;
         self.backlog_max = crate::mesher::MeshBacklog {
@@ -623,7 +634,7 @@ impl WindowApp {
         #[cfg(not(target_arch = "wasm32"))]
         let mut mesh_upload_count = 0;
         #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
-        let profile_mesh_work = tracing::enabled!(target: "frame_profile", tracing::Level::DEBUG);
+        let profile_mesh_work = frame_profile_debug_enabled();
         #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
         let mesh_drain_started = profile_mesh_work.then(Instant::now);
         let meshed_results = self.sim.drain_meshes();
@@ -3135,7 +3146,7 @@ impl WindowApp {
         // no interest in this target pays no `summary()`/percentile-sort cost
         // for a line nothing will read.
         if self.frame_profile.report_due(Instant::now(), Duration::from_secs(1))
-            && tracing::enabled!(target: "frame_profile", tracing::Level::DEBUG)
+            && frame_profile_debug_enabled()
         {
             // `render` (not `self.render`): see the identical note above,
             // near `self.sim.stats.frame_profile`'s own assignment — the
@@ -3156,15 +3167,15 @@ impl WindowApp {
             } else {
                 "unavailable (device lacks Features::TIMESTAMP_QUERY)".to_string()
             };
-            tracing::debug!(
-                target: "frame_profile",
-                "cpu: {} | gpu: {gpu_line}",
-                self.frame_profile
-                    .summary()
-                    .map(|s| s.line())
-                    .collect::<Vec<_>>()
-                    .join(" | ")
-            );
+            let cpu_line = self.frame_profile
+                .summary()
+                .map(|s| s.line())
+                .collect::<Vec<_>>()
+                .join(" | ");
+            #[cfg(target_arch = "wasm32")]
+            log::debug!(target: "frame_profile", "cpu: {cpu_line} | gpu: {gpu_line}");
+            #[cfg(not(target_arch = "wasm32"))]
+            tracing::debug!(target: "frame_profile", "cpu: {cpu_line} | gpu: {gpu_line}");
         }
     }
 
