@@ -20,6 +20,8 @@
 //! introduced.
 
 use lodestone_core::{Reader, Writer};
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::net::{TcpStream, ToSocketAddrs};
@@ -61,6 +63,9 @@ fn netbuf_seq() -> u64 {
 /// Size of the scratch buffer used per read from the transport.
 const READ_CHUNK: usize = 8 * 1024;
 
+/// Maximum raw read-ahead retained while the application is sending packets.
+const MAX_WRITE_READ_AHEAD: usize = 8 * 1024 * 1024;
+
 /// An async, framed packet connection over a [`Transport`].
 ///
 /// Generic over the transport so dispatch stays static; both TCP and in-memory
@@ -70,6 +75,9 @@ pub struct Connection<T: Transport> {
     transport: T,
     codec: Codec,
     scratch: Box<[u8]>,
+    read_ahead: Vec<u8>,
+    read_eof: bool,
+    write_failure: Option<String>,
 }
 
 impl<T: Transport> Connection<T> {
@@ -80,6 +88,9 @@ impl<T: Transport> Connection<T> {
             transport,
             codec: Codec::new(),
             scratch: vec![0u8; READ_CHUNK].into_boxed_slice(),
+            read_ahead: Vec::new(),
+            read_eof: false,
+            write_failure: None,
         }
     }
 
@@ -130,6 +141,7 @@ impl<T: Transport> Connection<T> {
     /// The id is prepended as a VarInt inside the compressed region, then the
     /// whole body is framed by the codec.
     pub async fn write_packet(&mut self, packet_id: i32, fields: &[u8]) -> Result<()> {
+        self.check_write_failure()?;
         let mut body = Writer::default();
         body.var_i32(packet_id);
         body.bytes(fields);
@@ -140,11 +152,71 @@ impl<T: Transport> Connection<T> {
         let (seq, len) = (netbuf_seq(), frame.len());
         #[cfg(target_arch = "wasm32")]
         tracing::trace!(target: "netbuf", seq, len, "write:start");
-        self.transport.write_all(&frame).await?;
+        let mut offset = 0;
+        if let Err(error) = std::future::poll_fn(|cx| self.poll_frame(cx, &frame, &mut offset)).await {
+            self.write_failure = Some(error.to_string());
+            return Err(error.into());
+        }
         #[cfg(target_arch = "wasm32")]
         tracing::trace!(target: "netbuf", seq, done_seq = netbuf_seq(), len, "write:done");
-        self.transport.flush().await?;
         Ok(())
+    }
+
+    fn check_write_failure(&self) -> std::io::Result<()> {
+        match &self.write_failure {
+            Some(message) => Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, message.clone())),
+            None => Ok(()),
+        }
+    }
+
+    fn poll_frame(
+        &mut self,
+        cx: &mut Context<'_>,
+        frame: &[u8],
+        offset: &mut usize,
+    ) -> Poll<std::io::Result<()>> {
+        while *offset < frame.len() {
+            match Pin::new(&mut self.transport).poll_write(cx, &frame[*offset..]) {
+                Poll::Ready(Ok(0)) => return Poll::Ready(Err(std::io::ErrorKind::WriteZero.into())),
+                Poll::Ready(Ok(written)) => *offset += written,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Pending => break,
+            }
+        }
+        if *offset == frame.len() {
+            match Pin::new(&mut self.transport).poll_flush(cx) {
+                Poll::Ready(result) => return Poll::Ready(result),
+                Poll::Pending => {}
+            }
+        }
+        if self.read_eof {
+            return Poll::Pending;
+        }
+        let remaining = MAX_WRITE_READ_AHEAD - self.read_ahead.len();
+        let capacity = self.scratch.len().min(remaining + 1);
+        let mut buf = tokio::io::ReadBuf::new(&mut self.scratch[..capacity]);
+        match Pin::new(&mut self.transport).poll_read(cx, &mut buf) {
+            Poll::Ready(Ok(())) => {
+                let received = buf.filled();
+                if received.is_empty() {
+                    self.read_eof = true;
+                } else if received.len() > remaining {
+                    return Poll::Ready(Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "connection write read-ahead exceeded its byte limit",
+                    )));
+                } else {
+                    // Decode only after the caller applies any handshake state transition.
+                    self.read_ahead.extend_from_slice(received);
+                    tracing::trace!(target: "netbuf", bytes = received.len(),
+                        buffered = self.read_ahead.len(), "write:read-ahead");
+                    cx.waker().wake_by_ref();
+                }
+                Poll::Pending
+            }
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Pending => Poll::Pending,
+        }
     }
 
     /// Reads the next packet's raw body (`[VarInt id][fields...]`) without
@@ -153,9 +225,22 @@ impl<T: Transport> Connection<T> {
     /// Returns `Ok(None)` on a clean EOF at a frame boundary. This is the lever
     /// the client uses to skip unknown packets wholesale.
     pub async fn read_packet_raw(&mut self) -> Result<Option<Vec<u8>>> {
+        self.check_write_failure()?;
         loop {
             if let Some(body) = self.codec.next_packet()? {
                 return Ok(Some(body));
+            }
+
+            if !self.read_ahead.is_empty() {
+                self.codec.feed(&self.read_ahead);
+                self.read_ahead.clear();
+                continue;
+            }
+            if self.read_eof {
+                return match self.codec.buffered_len() {
+                    0 => Ok(None),
+                    buffered => Err(NetError::UnexpectedClose(buffered)),
+                };
             }
 
             #[cfg(target_arch = "wasm32")]
@@ -322,6 +407,138 @@ impl Connection<TcpStream> {
 mod tests {
     use super::*;
     use crate::transport::{DEFAULT_MEMORY_BUFFER, memory_pair};
+
+    #[tokio::test(start_paused = true)]
+    async fn write_only_control_deadlocks_before_resuming_reads() {
+        let (a, b) = tokio::io::duplex(31);
+        let mut left = Connection::new(a);
+        let mut right = Connection::new(b);
+        let left_wire = [&[0xfc, 0x01, 17][..], &[0x35; 251]].concat();
+        let right_wire = [&[0x86, 0x03, 29][..], &[0xa7; 389]].concat();
+        let exchange = async {
+            tokio::join!(
+                async {
+                    left.transport.write_all(&left_wire).await.unwrap();
+                    left.read_packet().await.unwrap()
+                },
+                async {
+                    right.transport.write_all(&right_wire).await.unwrap();
+                    right.read_packet().await.unwrap()
+                },
+            )
+        };
+        assert!(tokio::time::timeout(std::time::Duration::from_secs(1), exchange).await.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn simultaneous_writes_drain_both_directions() {
+        let (a, b) = tokio::io::duplex(31);
+        let mut left = Connection::new(a);
+        let mut right = Connection::new(b);
+        let exchange = async {
+            let (a, b) = tokio::join!(
+                async {
+                    left.write_packet(17, &[0x35; 251]).await.unwrap();
+                    left.read_packet().await.unwrap()
+                },
+                async {
+                    right.write_packet(29, &[0xa7; 389]).await.unwrap();
+                    right.read_packet().await.unwrap()
+                },
+            );
+            assert_eq!(a, Some((29, vec![0xa7; 389])));
+            assert_eq!(b, Some((17, vec![0x35; 251])));
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(1), exchange)
+            .await
+            .expect("both writers must drain inbound bytes while waiting for capacity");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn read_ahead_preserves_encrypted_compressed_packet_order() {
+        let (a, b) = tokio::io::duplex(3);
+        let mut left = Connection::new(a);
+        let mut right = Connection::new(b);
+        for conn in [&mut left, &mut right] {
+            conn.set_compression(16);
+            conn.enable_encryption(&[0x93; 16]).unwrap();
+        }
+        let exchange = async {
+            for index in 0..3_u8 {
+                let (a, b) = tokio::join!(
+                    async {
+                        left.write_packet(17, &[index; 251]).await.unwrap();
+                        left.read_packet().await.unwrap()
+                    },
+                    async {
+                        right.write_packet(29, &[index + 7; 389]).await.unwrap();
+                        right.read_packet().await.unwrap()
+                    },
+                );
+                assert_eq!(a, Some((29, vec![index + 7; 389])));
+                assert_eq!(b, Some((17, vec![index; 251])));
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(1), exchange).await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn read_ahead_waits_for_handshake_codec_transition() {
+        let (a, mut peer) = tokio::io::duplex(1);
+        let mut conn = Connection::new(a);
+        let mut encrypted = [3, 0, 41, 0x9e];
+        crate::crypto::Cfb8Cipher::new(&[0x73; 16]).unwrap().encrypt(&mut encrypted);
+        let exchange = async {
+            let (sent, ()) = tokio::join!(conn.write_packet(17, &[0x35; 251]), async {
+                peer.write_all(&encrypted).await.unwrap();
+                let mut wire = [0; 254];
+                peer.read_exact(&mut wire).await.unwrap();
+                assert_eq!(&wire[..3], &[0xfc, 0x01, 17]);
+                assert_eq!(&wire[3..], &[0x35; 251]);
+            });
+            sent.unwrap();
+            assert_eq!(conn.read_ahead, encrypted);
+            conn.set_compression(16);
+            conn.enable_encryption(&[0x73; 16]).unwrap();
+            assert_eq!(conn.read_packet().await.unwrap(), Some((41, vec![0x9e])));
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(1), exchange).await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn read_ahead_preserves_buffered_frames_and_half_close() {
+        let (a, mut peer) = tokio::io::duplex(1);
+        let mut conn = Connection::new(a);
+        conn.codec.feed(&[2, 7, 0x23]);
+        let exchange = async {
+            let (sent, ()) = tokio::join!(conn.write_packet(17, &[0x35; 251]), async {
+                peer.write_all(&[2, 9, 0x35]).await.unwrap();
+                peer.shutdown().await.unwrap();
+                tokio::task::yield_now().await;
+                let mut wire = [0; 254];
+                peer.read_exact(&mut wire).await.unwrap();
+            });
+            sent.unwrap();
+            assert!(conn.read_eof, "the blocked writer must observe the half close");
+            assert_eq!(conn.read_packet().await.unwrap(), Some((7, vec![0x23])));
+            assert_eq!(conn.read_packet().await.unwrap(), Some((9, vec![0x35])));
+            assert!(conn.read_packet().await.unwrap().is_none());
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(1), exchange).await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn read_ahead_overflow_poisoning_prevents_partial_frame_reuse() {
+        let (a, mut peer) = tokio::io::duplex(31);
+        let mut conn = Connection::new(a);
+        conn.read_ahead.resize(MAX_WRITE_READ_AHEAD, 0);
+        peer.write_all(&[0x61]).await.unwrap();
+        let error = conn.write_packet(17, &[0x35; 251]).await.unwrap_err();
+        assert!(matches!(error, NetError::Io(ref error) if error.kind() == std::io::ErrorKind::InvalidData));
+        assert_eq!(conn.read_ahead.len(), MAX_WRITE_READ_AHEAD);
+        assert!(matches!(conn.read_packet().await, Err(NetError::Io(_))));
+        assert!(matches!(conn.write_packet(29, &[0x71]).await, Err(NetError::Io(_))));
+    }
 
     #[tokio::test]
     async fn write_then_read_uncompressed() {

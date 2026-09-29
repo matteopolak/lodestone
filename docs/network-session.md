@@ -25,6 +25,18 @@ Browser singleplayer starts its integrated server in a Worker. `net/browser.rs` 
 `MessagePort` into the client transport and waits for an explicit startup-ready response; startup errors
 and post-start crashes remain distinct so a failed launch cannot create a second world owner.
 
+`lodestone_net::Connection` drains incoming transport bytes whenever a packet write or flush waits for
+capacity. Both session drivers execute responses inside their selected packet/action branch, so their
+ordinary read branch cannot run during that response. Reading ahead returns MessagePort byte credits
+and drains bounded in-memory streams, allowing simultaneous sends to finish. The caller must resume
+its normal read loop after sending; the connection does not run an independent background reader.
+
+Read-ahead keeps raw wire bytes until the next packet read, after any login compression or encryption
+transition. Bytes already buffered by the codec remain ahead of that raw queue. The queue is limited to 8 MiB;
+overflow or transport failure poisons the connection so a partially sent frame cannot be followed by a
+new packet. A peer's read-side EOF is remembered while the pending write finishes. Trace target `netbuf`
+records `write:read-ahead` byte counts and queue occupancy alongside browser write/read traces.
+
 Native integrated sessions use a separate 120-second per-packet read watchdog during the initial join.
 The in-memory server resolves and admits a fresh world's spawn before it sends the first Play packet;
 that legitimate work can exceed the 30-second watchdog used for remote sockets. Once Play begins, the
@@ -41,11 +53,17 @@ messages and transport shutdown belong in `net/browser.rs`. Preserve the bounded
 native/wasm transport seam when changing session setup. Do not replace the asynchronous full-relay
 wait with a blocking send: the browser frame loop must be able to drain the queue.
 
+Keep write-side read-ahead protocol-blind and defer codec input until packet reads. The networking tests
+exercise simultaneous sends over tiny duplex buffers, a write-only deadlock control, codec transitions,
+half-close ordering, and overflow. Changes to framing or backpressure must preserve these cases.
+
 ## Configuration
 
 Protocol selection is supplied as a protocol number and resolved by `lodestone-registry`. The browser
 Worker uses the bundled `lodestone-server-worker.js` endpoint. Relay capacities and native LAN/persistence
 options remain constants or fields in `lodestone_shell::net`.
+The raw write-side read-ahead bound is `MAX_WRITE_READ_AHEAD` in `lodestone_net::connection`; MessagePort
+credit capacity remains independently bounded by `DEFAULT_MESSAGE_PORT_CREDIT_BYTES`.
 
 ## Dependencies
 
