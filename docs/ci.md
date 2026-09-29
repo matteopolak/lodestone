@@ -252,19 +252,11 @@ no business touching a filesystem, a socket, or wall-clock time on wasm32 do not
 `(cd web && trunk build)` of `web/` — its own separate Cargo workspace with its own lockfile,
 outside the root `members` glob, so nothing in `check`/`check-all` has ever covered it. `trunk`
 is installed from a pinned prebuilt release tarball rather than built from source. `web/`'s own
-`Trunk.toml` stages the gitignored vanilla `client.jar`/`blocks.json` through a conditional
+`Trunk.toml` stages the Whimscape-based resource archive and cached `blocks.json` through a conditional
 `post_build` hook rather than a mandatory `data-trunk rel="copy-file"` link, so the build
 itself does not require `.cache/` to be populated on a fresh runner — see `web/Trunk.toml` for
 the mechanism. The atomics-enabled worker rebuilds the standard library, so the pinned toolchain
 declares `rust-src` and the staging hook reports its absence before starting either worker build.
-
-**As of this writing, the job is red, and the cause is a real compile error rather than a
-tooling or caching problem**: `lodestone-shell` (and, downstream, the `trunk build` of
-`lodestone-web`) fails with `E0425` against names on the worldgen-override surface
-(`world_dir`, `overworld_chunk_source_override`, `GeneratorOverride`) that do not currently
-resolve — the shape of an in-flight edit elsewhere in the tree rather than a wasm-specific
-defect, and it is being fixed outside this doc. Do not read a future green run as evidence this
-was already fixed by anything described here; check the job's own log.
 
 `wasm-check` is deliberately **not** part of `just health`. `health` is four (now five, with
 `check-comment-voice`) full or near-full workspace builds already, run many times a session by

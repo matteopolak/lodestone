@@ -150,7 +150,7 @@ pub mod store {
 /// # What it is
 ///
 /// Native resolves assets by *path*: `resources.rs` walks for a pack root and
-/// `std::fs::read`s `client.jar` and `generated/reports/blocks.json` out of it. A
+/// `std::fs::read`s `lodestone-resources.zip` and `generated/reports/blocks.json` out of it. A
 /// browser has no filesystem — measured: `std::fs::read` there returns
 /// `Err(Unsupported)`, so the native path does not crash, it just reports "no
 /// vanilla pack found" and falls back to the demo palette. That fallback is
@@ -196,30 +196,11 @@ pub mod assets {
     /// the model baker are built against.
     #[derive(Debug, Default)]
     pub struct Bundle {
-        /// `client.jar` — the renderable corpus, consumed by `ZipSource::from_bytes`.
-        pub client_jar: Vec<u8>,
+        /// `lodestone-resources.zip` — the renderable corpus, consumed by `ZipSource::from_bytes`.
+        pub resource_pack: Vec<u8>,
         /// `generated/reports/blocks.json`, consumed by
         /// `BlocksJsonRegistry::from_slice`.
         pub blocks_report: Vec<u8>,
-        /// The handful of `client.jar`-shadowed asset-object bytes `web/` could
-        /// fetch and stage — today just whichever of the six real title-screen
-        /// panorama faces `web/Trunk.toml`'s `post_build` hook resolved out of a
-        /// local `.cache/mc/<version>` asset-object store, if any.
-        ///
-        /// Keyed by the same asset-index name
-        /// `crate::menu::panorama::face_index_key` produces (no `assets/`
-        /// prefix), so `crate::resources`'s wasm32 `load_panorama` arm can hand
-        /// this straight to `crate::menu::panorama::load` as an
-        /// [`crate::asset_objects::ObjectBytesSource`] with no translation.
-        ///
-        /// **Empty, not missing, is the expected default.** Native has a real
-        /// `AssetObjectStore` to fall back to; a browser has neither that nor a
-        /// filesystem, so an empty vec here is not an error — `panorama::load`
-        /// already falls back to `client.jar`'s 1×1 grey stub per face, exactly
-        /// as a native run with no populated store does. Any subset (not just
-        /// all-six-or-nothing) is honoured: `web/Trunk.toml`'s hook stages
-        /// per-face and reports which resolved.
-        pub panorama: Vec<(String, Vec<u8>)>,
         /// `minecraft/sounds.json` — the event registry `crate::audio`'s wasm32
         /// `ShellAudio` parses with [`lodestone_assets::sound::SoundRegistry::parse`],
         /// the same file native's `AssetObjectStore` reads off disk. Small (~626 KB)
@@ -259,14 +240,14 @@ pub mod assets {
     /// reported rather than swallowed, because the symptom of swallowing it is a
     /// world rendered from the wrong pack with nothing in the log.
     pub fn install(bundle: Bundle) -> Result<(), String> {
-        let jar = bundle.client_jar.len();
+        let jar = bundle.resource_pack.len();
         let report = bundle.blocks_report.len();
         BUNDLE.set(bundle).map_err(|_| {
             let live = BUNDLE.get().expect("set failed, so one is installed");
             format!(
                 "asset bundle already installed ({} B jar, {} B report); \
                  refused to replace it with {jar} B / {report} B",
-                live.client_jar.len(),
+                live.resource_pack.len(),
                 live.blocks_report.len(),
             )
         })

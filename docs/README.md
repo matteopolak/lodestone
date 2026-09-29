@@ -163,17 +163,23 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   keeps its turn in the mesh backlog.
 - [Browser shell port](./browser-shell-port.md) — The wasm32 target: `web/` runs the
   real `lodestone-shell` — the same menu, `Sim`, and renderer the native binary uses
-  — fetching `client.jar` and `blocks.json` at startup instead of reading them off a
-  filesystem. This document is the hazard census the port is driven from: for each way
-  the shell depends on an operating system, what was measured about the hazard and the
-  chosen disposition (**gate**, **replace with a seam**, or **delete the need**), plus
-  the confinement guards that keep a fixed hazard from creeping back in.
+  — fetching `lodestone-resources.zip` and `blocks.json` at startup instead of
+  reading them off a filesystem. This document is the hazard census the port is driven
+  from: for each way the shell depends on an operating system, what was measured about
+  the hazard and the chosen disposition (**gate**, **replace with a seam**, or
+  **delete the need**), plus the confinement guards that keep a fixed hazard from
+  creeping back in.
 - [Browser world-generation worker](./browser-worldgen-worker.md) — The browser
   world-generation worker keeps the authoritative integrated server in a dedicated Web
   Worker and optionally runs its immutable shaped-admission work through a bounded
   WebAssembly thread pool. The page receives protocol bytes through one transferred
   `MessagePort`; startup, pool selection, and world-generation progress use a separate
   control/progress channel.
+- [Built-in resource pack](./built-in-resource-pack.md) — Lodestone uses Whimscape
+  by kavast for its built-in visual assets. A generated archive combines that pack
+  with the game definitions needed by the renderer and recipe UI. Default player skins
+  are the only images retained from the game archive; the original client archive is
+  an input to staging, not a runtime asset.
 - [Camera, view bobbing and frame pacing](./camera-and-view.md) — How the render
   camera's orientation is built and why (`lodestone-render`'s `Camera`), the three
   tick-driven effects layered onto it before it reaches a uniform — the walking bob,

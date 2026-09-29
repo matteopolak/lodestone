@@ -145,6 +145,7 @@ impl LodestoneHandle {
 
 #[wasm_bindgen]
 pub async fn mount(options: JsValue) -> Result<LodestoneHandle, JsValue> {
+    let _ = console_log::init_with_level(log::Level::Trace);
     let log_level = browser_log_level(property(&options, "logLevel"))?;
     log::set_max_level(log_level);
     log::info!("browser diagnostics enabled at {log_level}");
@@ -176,15 +177,13 @@ pub async fn mount(options: JsValue) -> Result<LodestoneHandle, JsValue> {
         )),
         None => None,
     };
-    let client_jar = required_asset(&options, provider.as_ref(), progress.as_ref(), "clientJar").await?;
+    let resource_pack = required_asset(&options, provider.as_ref(), progress.as_ref(), "resourcePack").await?;
     let blocks_report = required_asset(&options, provider.as_ref(), progress.as_ref(), "blocksJson").await?;
-    let panorama = panorama_assets(&options, provider.as_ref(), progress.as_ref()).await?;
     mount_bundle(
         canvas,
         lodestone::platform::assets::Bundle {
-            client_jar,
+            resource_pack,
             blocks_report,
-            panorama,
             sounds_json: Vec::new(),
             sound_objects: Vec::new(),
         },
@@ -206,26 +205,6 @@ fn browser_log_level(value: Option<JsValue>) -> Result<log::LevelFilter, JsValue
             "options.logLevel must be off, error, warn, info, debug, or trace",
         )),
     }
-}
-
-async fn panorama_assets(
-    options: &JsValue,
-    provider: Option<&Function>,
-    progress: Option<&Rc<Function>>,
-) -> Result<Vec<(String, Vec<u8>)>, JsValue> {
-    let Some(provider) = provider else {
-        return Ok(Vec::new());
-    };
-    let mut panorama = Vec::with_capacity(6);
-    for index in 0..6 {
-        let name = format!("panorama_{index}.png");
-        let bytes = required_asset(options, Some(provider), progress, &name).await?;
-        panorama.push((
-            format!("minecraft/textures/gui/title/background/{name}"),
-            bytes,
-        ));
-    }
-    Ok(panorama)
 }
 
 pub(crate) async fn mount_bundle(
@@ -308,9 +287,8 @@ fn bundles_match(
     installed: &lodestone::platform::assets::Bundle,
     requested: &lodestone::platform::assets::Bundle,
 ) -> bool {
-    installed.client_jar == requested.client_jar
+    installed.resource_pack == requested.resource_pack
         && installed.blocks_report == requested.blocks_report
-        && installed.panorama == requested.panorama
         && installed.sounds_json == requested.sounds_json
         && installed.sound_objects == requested.sound_objects
 }

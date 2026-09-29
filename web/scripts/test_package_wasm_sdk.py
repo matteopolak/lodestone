@@ -31,6 +31,9 @@ def make_stage(packager, root: Path, marker: bytes = b"first") -> Path:
         "lodestone-web-entry_bg.wasm": b"wasm",
         f"lodestone-web-{release_name}.js": b"export {}\n" + marker,
         f"lodestone-web-{release_name}_bg.wasm": b"wasm" + marker,
+        "client.jar": b"source archive excluded from SDK",
+        "panorama_0.png": b"separate panorama excluded from SDK",
+        "lodestone-resources.zip.manifest.json": b'{"asset":"lodestone-resources.zip"}\n',
     }
     for relative in packager.REQUIRED_FILES:
         files.setdefault(relative, b"asset")
@@ -53,22 +56,23 @@ def main() -> int:
         package = root / "package"
         package.mkdir()
         files, entrypoint, worker_entrypoint = packager.collect_package(stage, package)
-        assert all(face in files for face in packager.PANORAMA_FILES)
         assert worker_entrypoint in files
         assert "lodestone-render-worker.js" not in files
         assert "lodestone-web-entry.js" not in files
         assert "lodestone-web-entry_bg.wasm" not in files
+        assert "client.jar" not in files
+        assert "panorama_0.png" not in files
+        assert "lodestone-resources.zip.manifest.json" in files
         worker = (package / worker_entrypoint).read_text(encoding="utf-8")
         assert "assetProvider: packageAsset" in worker
-        assert 'clientJar: "client.jar"' in worker
+        assert 'resourcePack: "lodestone-resources.zip"' in worker
         assert 'blocksJson: "blocks.json"' in worker
         assert "PACKAGE_ASSET_PATHS[name] ?? name" in worker
         assert "fetch(new URL(path, self.location.href))" in worker
         mapping = dict(re.findall(r'^  ([A-Za-z][A-Za-z0-9]*): "([^"]+)",$', worker, re.MULTILINE))
         for logical_name, packaged_path in {
-            "clientJar": "client.jar",
+            "resourcePack": "lodestone-resources.zip",
             "blocksJson": "blocks.json",
-            **{face: face for face in packager.PANORAMA_FILES},
         }.items():
             resolved = mapping.get(logical_name, logical_name)
             assert resolved == packaged_path
@@ -84,15 +88,15 @@ def main() -> int:
         assert second_entrypoint != entrypoint
         assert second_worker != worker_entrypoint
 
-        (stage / "panorama_5.png").unlink()
+        (stage / "lodestone-resources.zip").unlink()
         missing_package = root / "missing-package"
         missing_package.mkdir()
         try:
             packager.collect_package(stage, missing_package)
         except SystemExit as error:
-            assert "panorama_5.png" in str(error)
+            assert "lodestone-resources.zip" in str(error)
         else:
-            raise AssertionError("SDK packaging accepted a missing panorama face")
+            raise AssertionError("SDK packaging accepted a missing resource archive")
     print("wasm SDK packaging checks: PASS (versioned worker; asset mapping; release swap)")
     return 0
 

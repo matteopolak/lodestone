@@ -20,7 +20,6 @@ WEB = ROOT / "web"
 DEFAULT_OUTPUT = ROOT / "target" / "wasm-sdk"
 ARCHIVE_NAME = "lodestone-web-sdk.tar.gz"
 MANIFEST_NAME = "lodestone-web-sdk.manifest.json"
-PANORAMA_FILES = tuple(f"panorama_{index}.png" for index in range(6))
 REQUIRED_FILES = (
     "lodestone-server-worker.js",
     "lodestone-server-worker-bootstrap.js",
@@ -28,9 +27,8 @@ REQUIRED_FILES = (
     "lodestone-server-worker-wasm-serial_bg.wasm",
     "lodestone-server-worker-wasm-threaded.js",
     "lodestone-server-worker-wasm-threaded_bg.wasm",
-    "client.jar",
+    "lodestone-resources.zip",
     "blocks.json",
-    *PANORAMA_FILES,
 )
 
 
@@ -113,7 +111,7 @@ def collect_package(stage: Path, package: Path) -> tuple[list[str], str, str]:
         "lodestone-server-worker-wasm-serial_bg.wasm.d.ts",
         "lodestone-server-worker-wasm-threaded.d.ts",
         "lodestone-server-worker-wasm-threaded_bg.wasm.d.ts",
-        "client.jar.manifest.json",
+        "lodestone-resources.zip.manifest.json",
     ):
         if (stage / relative).is_file():
             copy_file(stage, package, relative)

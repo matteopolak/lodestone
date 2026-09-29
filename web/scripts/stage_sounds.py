@@ -10,9 +10,8 @@ neither `client.jar` nor a browser's filesystem-less runtime can give it:
 samples it indexes. Both live in the launcher's content-addressed
 asset-object store (`objects/<hash[0:2]>/<hash>`, mapped from a logical name
 by a local `asset-index-*.json`) -- the exact same store
-`stage_panorama.py` already resolves the title-screen faces out of. See that
-script's module doc and `crates/lodestone-shell/src/asset_objects.rs` for why
-`client.jar` is not the whole pack.
+the native sound loader reads. See `crates/lodestone-shell/src/asset_objects.rs`
+for how logical names resolve to content-addressed objects.
 
 **Never the full corpus.** `sounds.json` indexes 4871 `.ogg` objects / ~375 MB
 (`docs/sound-playback.md`'s `xtask fetch-sounds` table) -- an unconditional
@@ -43,10 +42,10 @@ The curation (measured on 26.2, this script's own resolution):
 across events) -- measured 411,904 B raw / 375,502 B gzip -- plus the full
 `sounds.json` (626,160 B raw / 44,671 B gzip, small enough relative to what it
 indexes that `platform::assets::Bundle`'s own field doc already treats
-shipping it whole as reasonable, same as `client.jar`/`blocks.json`). Total
+shipping it whole as reasonable, same as the resource archive/`blocks.json`). Total
 measured: 1,038,064 B raw / 420,173 B gzip. This is fetched at *runtime*
-(`web/src/main.rs`'s `fetch_sound_bundle`), the same seam `client.jar` and the
-panorama faces already use -- it is not linked into the `.wasm` binary and so
+(`web/src/main.rs`'s `fetch_sound_bundle`), the same seam the resource archive
+uses -- it is not linked into the `.wasm` binary and so
 does not count against `just wasm-size`'s enforced ceiling on the compiled
 artifact, but the number is reported here because a real page load still pays
 for it over the wire.
@@ -55,7 +54,7 @@ Extending the curation: add an event name to `CURATED_EVENTS` below. No other
 file needs to change -- `web/src/main.rs` fetches whatever this script's
 manifest lists, by name, and never hardcodes the set.
 
-Fail-open, exactly like `stage_panorama.py`: a missing index, a missing
+Fail-open: a missing index, a missing
 `objects/` tree, or an individual sample not yet downloaded is reported by a
 named line on stdout and is NOT a build failure. `ShellAudio::from_env`
 already degrades an empty/partial bundle to "audio disabled" or "audio
@@ -146,7 +145,7 @@ def resolve_event(events: dict, event: str, seen: set[str], depth: int) -> list[
 
 
 def find_asset_index(cache_dir: Path) -> Optional[Path]:
-    """Identical discipline to `stage_panorama.py`'s own -- refuse to guess
+    """Refuse to guess
     between several `asset-index-*.json` files rather than silently picking
     one, so this script and the native reader never disagree about which
     index is authoritative."""

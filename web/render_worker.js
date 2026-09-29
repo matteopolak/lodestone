@@ -4,7 +4,7 @@
 let session = null;
 let loading = false;
 const PACKAGE_ASSET_PATHS = Object.freeze({
-  clientJar: "client.jar",
+  resourcePack: "lodestone-resources.zip",
   blocksJson: "blocks.json",
 });
 
@@ -41,7 +41,7 @@ async function mount(request) {
     });
     session = await sdk.mount({
       canvas: request.canvas,
-      clientJar: request.clientJar,
+      resourcePack: request.resourcePack,
       blocksJson: request.blocksJson,
       logLevel: request.logLevel,
       assetProvider: packageAsset,

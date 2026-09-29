@@ -52,6 +52,7 @@ static NEXT_WORKER_EPOCH: AtomicU32 = AtomicU32::new(1);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct BrowserWorkerProgress {
     epoch: u32,
+    session: u64,
     admitted: u64,
     completed: u64,
     committed: u64,
@@ -76,12 +77,13 @@ fn worker_progress(value: &JsValue) -> Option<(BrowserWorkerProgress, String)> {
             && number <= MAX_SAFE_PROGRESS
     };
     let epoch = get("epoch")?;
+    let session = get("session").unwrap_or(0.0);
     let admitted = get("admitted")?;
     let completed = get("completed")?;
     let committed = get("committed")?;
     let queue = get("queue")?;
     let bytes = get("bytes")?;
-    if ![epoch, admitted, completed, committed, queue, bytes]
+    if ![epoch, session, admitted, completed, committed, queue, bytes]
         .into_iter()
         .all(integer)
         || epoch > u32::MAX as f64
@@ -95,6 +97,7 @@ fn worker_progress(value: &JsValue) -> Option<(BrowserWorkerProgress, String)> {
     Some((
         BrowserWorkerProgress {
             epoch: epoch as u32,
+            session: session as u64,
             admitted: admitted as u64,
             completed: completed as u64,
             committed: committed as u64,
@@ -103,6 +106,25 @@ fn worker_progress(value: &JsValue) -> Option<(BrowserWorkerProgress, String)> {
         },
         stage,
     ))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn browser_diagnostic(message: std::fmt::Arguments<'_>) {
+    if log::max_level() < log::LevelFilter::Debug {
+        return;
+    }
+    let global = js_sys::global();
+    let Ok(post) = js_sys::Reflect::get(&global, &JsValue::from_str("postMessage")) else {
+        return;
+    };
+    let Ok(post) = post.dyn_into::<js_sys::Function>() else {
+        return;
+    };
+    let message = message.to_string();
+    let event = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&event, &JsValue::from_str("kind"), &JsValue::from_str("diagnostic"));
+    let _ = js_sys::Reflect::set(&event, &JsValue::from_str("message"), &JsValue::from_str(&message));
+    let _ = post.call1(&global, &event);
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -385,14 +407,22 @@ pub(super) async fn launch_browser_worker(
                 .ok()
                 .and_then(|value| value.as_f64());
             if number("epoch") == Some(f64::from(epoch)) {
-                tracing::debug!(
-                    ticks = ?number("tickCount"),
-                    witness = ?number("tickWitness"),
-                    overruns = ?number("overruns"),
-                    mspt_ms = ?number("msptMs"),
-                    tps = ?number("tps"),
-                    callback_gap_ms = ?number("callbackGapMs"),
-                    "browser server worker health",
+                browser_diagnostic(format_args!(
+                    "server health: ticks={:.0} overruns={:.0} mspt_ms={:.2} tps={:.1} callback_gap_ms={:.1}",
+                    number("tickCount").unwrap_or(0.0),
+                    number("overruns").unwrap_or(0.0),
+                    number("msptMs").unwrap_or(0.0),
+                    number("tps").unwrap_or(0.0),
+                    number("callbackGapMs").unwrap_or(0.0),
+                ));
+                log::debug!(
+                    "browser server worker health: ticks={:?} witness={:?} overruns={:?} mspt_ms={:?} tps={:?} callback_gap_ms={:?}",
+                    number("tickCount"),
+                    number("tickWitness"),
+                    number("overruns"),
+                    number("msptMs"),
+                    number("tps"),
+                    number("callbackGapMs"),
                 );
             }
             return;
@@ -402,15 +432,34 @@ pub(super) async fn launch_browser_worker(
         }
         match worker_progress(&value) {
             Some((progress, stage)) if progress.epoch == epoch => {
-                tracing::debug!(
-                    stage = %stage,
-                    admitted = progress.admitted,
-                    completed = progress.completed,
-                    committed = progress.committed,
-                    queue = progress.queue,
-                    bytes = progress.bytes,
-                    elapsed_ms = progress_started.elapsed().as_secs_f64() * 1000.0,
-                    "browser worldgen progress",
+                if progress.session < 4 || progress.session % 16 == 0 {
+                    let target_x = js_sys::Reflect::get(&value, &JsValue::from_str("targetX"))
+                        .ok()
+                        .and_then(|value| value.as_f64());
+                    let target_z = js_sys::Reflect::get(&value, &JsValue::from_str("targetZ"))
+                        .ok()
+                        .and_then(|value| value.as_f64());
+                    browser_diagnostic(format_args!(
+                        "worldgen: session={} target={:?},{:?} stage={stage} admitted={} completed={} committed={} queue={} bytes={} elapsed_ms={:.1}",
+                        progress.session,
+                        target_x,
+                        target_z,
+                        progress.admitted,
+                        progress.completed,
+                        progress.committed,
+                        progress.queue,
+                        progress.bytes,
+                        progress_started.elapsed().as_secs_f64() * 1000.0,
+                    ));
+                }
+                log::debug!(
+                    "browser worldgen progress: stage={stage} admitted={} completed={} committed={} queue={} bytes={} elapsed_ms={:.3}",
+                    progress.admitted,
+                    progress.completed,
+                    progress.committed,
+                    progress.queue,
+                    progress.bytes,
+                    progress_started.elapsed().as_secs_f64() * 1000.0,
                 );
             }
             Some(_) => tracing::warn!("ignoring stale browser worldgen progress"),
@@ -452,6 +501,7 @@ pub(super) async fn launch_browser_worker(
                 .and_then(|v| v.as_string());
             match startup_state.receive(kind.as_deref(), stage, message) {
                 BrowserWorkerStartupAction::Progress(stage) => {
+                    browser_diagnostic(format_args!("server startup: {stage}"));
                     tracing::debug!(%stage, "browser server worker startup progress");
                 }
                 BrowserWorkerStartupAction::Ready => {
