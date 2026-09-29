@@ -1,11 +1,13 @@
 //! Priority-ordered join column generation. The first column is admitted alone;
-//! later requests use a bounded worker window. Pending columns can be
-//! reprioritised, but admitted work keeps its order. Completion order never
-//! changes the packet order, and dropping the pipeline cancels its requests.
+//! later requests form bounded cohorts. Pending columns can be reprioritised,
+//! but admitted work keeps its order. Completion order never changes packet
+//! order, and dropping the pipeline cancels its requests.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::{future::Future, pin::Pin, task::{Context, Poll}};
 
 use crate::chunk::{ChunkColumn, ChunkGenerationStage, ChunkSource};
 use crate::protocol::{ChunkEncodeError, ChunkEncoder, ServerDirective};
@@ -59,6 +61,80 @@ impl ColumnPayload {
 }
 
 type PipelineResult = Result<((i32, i32), ColumnPayload), ChunkEncodeError>;
+
+#[cfg(not(target_arch = "wasm32"))]
+type JoinEncodeResult = Result<((i32, i32), ServerDirective), ChunkEncodeError>;
+
+#[cfg(not(target_arch = "wasm32"))]
+struct JoinEncodeSlot<'a> {
+    future: Option<Pin<Box<dyn Future<Output = JoinEncodeResult> + Send + 'a>>>,
+    ready: Option<JoinEncodeResult>,
+    serial: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct OrderedJoinEncodes<'a> {
+    slots: VecDeque<JoinEncodeSlot<'a>>,
+    window: usize,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<'a> OrderedJoinEncodes<'a> {
+    pub(crate) fn new() -> Self {
+        Self::with_window(crate::worldgen_dispatch::worker_count().saturating_sub(1).clamp(1, 4))
+    }
+
+    fn with_window(window: usize) -> Self {
+        Self { slots: VecDeque::new(), window: window.max(1) }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.slots.is_empty()
+    }
+
+    pub(crate) fn can_admit(&self) -> bool {
+        self.slots.len() < self.window && self.slots.iter().all(|slot| !slot.serial)
+    }
+
+    pub(crate) fn push<F>(&mut self, serial: bool, future: F)
+    where
+        F: Future<Output = JoinEncodeResult> + Send + 'a,
+    {
+        assert!(self.can_admit(), "join encode window is full or fenced");
+        self.slots.push_back(JoinEncodeSlot {
+            future: Some(Box::pin(future)),
+            ready: None,
+            serial,
+        });
+    }
+
+    pub(crate) fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<JoinEncodeResult> {
+        for (index, slot) in self.slots.iter_mut().enumerate() {
+            if slot.serial && index != 0 {
+                break;
+            }
+            if let Some(future) = slot.future.as_mut()
+                && let Poll::Ready(result) = future.as_mut().poll(cx)
+            {
+                slot.ready = Some(result);
+                slot.future = None;
+            }
+            if slot.serial {
+                break;
+            }
+        }
+        if let Some(result) = self.slots.front_mut().and_then(|slot| slot.ready.take()) {
+            self.slots.pop_front();
+            Poll::Ready(result)
+        } else {
+            Poll::Pending
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.slots.clear();
+    }
+}
 
 #[derive(Clone)]
 struct BatchRequest {
@@ -1765,6 +1841,44 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
     use std::time::Duration;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn ordered_join_encodes_poll_independent_snapshots_and_fence_source_work() {
+        let started = Arc::new(AtomicUsize::new(0));
+        let mut encodes = OrderedJoinEncodes::with_window(2);
+        let mut releases = Vec::new();
+        for cx in 0..2 {
+            let (release, wait) = tokio::sync::oneshot::channel();
+            releases.push(release);
+            let started = Arc::clone(&started);
+            encodes.push(false, async move {
+                started.fetch_add(1, Ordering::SeqCst);
+                wait.await.unwrap();
+                Ok(((cx, 0), ServerDirective::None))
+            });
+        }
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        assert!(encodes.poll_next(&mut cx).is_pending());
+        assert_eq!(started.load(Ordering::SeqCst), 2);
+        assert!(!encodes.can_admit());
+        releases.pop().unwrap().send(()).unwrap();
+        assert!(encodes.poll_next(&mut cx).is_pending());
+        releases.pop().unwrap().send(()).unwrap();
+        assert!(matches!(encodes.poll_next(&mut cx), Poll::Ready(Ok(((0, 0), _)))));
+        assert!(matches!(encodes.poll_next(&mut cx), Poll::Ready(Ok(((1, 0), _)))));
+
+        let (release, wait) = tokio::sync::oneshot::channel();
+        encodes.push(true, async move {
+            wait.await.unwrap();
+            Ok(((2, 0), ServerDirective::None))
+        });
+        assert!(!encodes.can_admit());
+        assert!(encodes.poll_next(&mut cx).is_pending());
+        release.send(()).unwrap();
+        assert!(matches!(encodes.poll_next(&mut cx), Poll::Ready(Ok(((2, 0), _)))));
+        assert!(encodes.is_empty());
+    }
 
     /// A source whose column cost is a function of its position in a known list,
     /// so completion order is a *chosen* permutation rather than whatever the pool

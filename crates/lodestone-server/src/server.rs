@@ -15407,25 +15407,10 @@ where
     // `apply_client_command`'s `dimension_reset` doc. Read and cleared
     // immediately after every `dispatch_play_packet` call in this loop.
     let mut dimension_reset: Option<Vec3> = None;
-    // Source-aware encoding can admit a cold three-by-three light footprint.
-    // Keep that future in the select loop rather than awaiting it in the join
-    // branch, so socket packets and keep-alive timers remain serviceable while
-    // the generation dispatcher prepares the next frame.
-    let mut pending_join_encode: Option<
-        std::pin::Pin<
-            Box<
-                dyn std::future::Future<
-                        Output = Result<
-                            ((i32, i32), ServerDirective),
-                            ChunkEncodeError,
-                        >,
-                    > + Send + '_
-                >,
-        >,
-    > = None;
+    let mut pending_join_encodes = crate::join_scheduler::OrderedJoinEncodes::new();
 
     loop {
-        if join_stream.is_done() && pending_join_encode.is_none() {
+        if join_stream.is_done() && pending_join_encodes.is_empty() {
             world.mark_initial_view_drained();
         }
         if let Some(next) = pending_travel.take() {
@@ -15554,15 +15539,8 @@ where
             // race. Keeping this as a separate branch is what prevents a cold
             // neighbour admission from becoming an unserviceable connection
             // pass.
-            encoded = std::future::poll_fn(|cx| match pending_join_encode.as_mut() {
-                Some(future) => std::future::Future::poll(future.as_mut(), cx),
-                None => std::task::Poll::Pending,
-            }), if pending_join_encode.is_some() => {
+            encoded = std::future::poll_fn(|cx| pending_join_encodes.poll_next(cx)), if !pending_join_encodes.is_empty() => {
                 watch.enter();
-                // Remove the completed future before handling its result. The
-                // select branch has already polled it to readiness, so polling
-                // it a second time would violate the Future contract.
-                let _ = pending_join_encode.take();
                 let ((cx, cz), directive) = match encoded {
                     Ok(encoded) => encoded,
                     Err(error) => {
@@ -15589,7 +15567,7 @@ where
                 chunks_sent += 1;
                 join_batch_size += 1;
                 if join_batch_size as usize >= JOIN_STREAM_BATCH_COLUMNS
-                    || join_stream.is_done()
+                    || (join_stream.is_done() && pending_join_encodes.is_empty())
                 {
                     apply(conn, &mut state, proto.end_chunk_batch(join_batch_size)).await?;
                     join_batch_open = false;
@@ -15608,7 +15586,7 @@ where
             chunk = tokio::time::timeout(
                 crate::join_scheduler::JOIN_STREAM_SERVICE_BUDGET,
                 join_stream.next(source),
-            ), if pending_join_encode.is_none() && !join_stream.is_done() => {
+            ), if pending_join_encodes.can_admit() && !join_stream.is_done() => {
                 watch.enter();
                 let chunk = match chunk {
                     // A worker can legitimately take hundreds of milliseconds
@@ -15648,7 +15626,8 @@ where
                         // passes, while this loop continues accepting packets and
                         // timers.
                         let trace = join_trace.clone();
-                        pending_join_encode = Some(Box::pin(async move {
+                        let serial = !matches!(payload, crate::join_scheduler::ColumnPayload::Snapshot(_));
+                        pending_join_encodes.push(serial, async move {
                             encode_column_owned(
                                 proto,
                                 owned_source,
@@ -15659,7 +15638,7 @@ where
                             )
                             .await
                             .map(|directive| ((cx, cz), directive))
-                        }));
+                        });
                     } else {
                         // Borrowed sources exist for protocol-level controls and
                         // cannot outlive this loop iteration. They retain the
@@ -15865,7 +15844,7 @@ where
                     // A pending frame belongs to the old dimension's stream;
                     // cancel it before replacing that stream and promoting the
                     // return trip on the next loop pass.
-                    pending_join_encode = None;
+                    pending_join_encodes.clear();
                     join_stream = crate::join_scheduler::JoinChunkStream::ringed(rings);
                     if join_batch_open {
                         apply(conn, &mut state, proto.end_chunk_batch(join_batch_size)).await?;
@@ -17440,7 +17419,7 @@ where
                             // dimension. Drop it before the destination stream
                             // starts so an old chunk cannot be emitted after
                             // the dimension-change packet.
-                            pending_join_encode = None;
+                            pending_join_encodes.clear();
                             // The deferred join stream uses a fresh batch, so close
                             // any batch left open by the outgoing dimension.
                             if join_batch_open {
