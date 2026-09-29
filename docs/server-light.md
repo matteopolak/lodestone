@@ -37,6 +37,14 @@ that ceiling from packed section indices, not the world-surface heightmap: air v
 above the heightmap and still affect the light section's wire shape. The world column uses its
 maintained non-air section counts. Other `BlockVolume` implementations default to the full height;
 an override must be a conservative upper bound, and should be checked against a full-scan volume.
+The shared nine-column initial-light pass reads each column's ceiling once and scans one 16×16
+tile at a time. A tile above that ceiling (or below the column's minimum Y) uses the volume's
+air state without block reads; if that state has zero opacity and emission, the already-zero
+opacity and block buffers need no per-cell writes. Missing neighbours still fill an opaque tile.
+When changing this path, compare every returned light column against a full-height volume,
+including retained sky and a dimension without skylight; a falsely low ceiling can silently
+erase a light source. The ignored `shared_initial_light_air_ceiling_timing` test and the
+`light_shared_initial_3x3` benchmark provide repeatable, non-flat timing inputs.
 
 **An absent light section on the wire means full daylight, not darkness.** A section present in
 neither the sky nor the block light data is resolved by a real client to that dimension's own
