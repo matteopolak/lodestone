@@ -11,6 +11,7 @@ compatibility-base = "lodestone-v26-2"
 workspace = true
 
 [dependencies]
+lodestone-data = { path = "../../lodestone-data" }
 lodestone-v26-2 = { path = "../26.2" }
 
 [dev-dependencies]

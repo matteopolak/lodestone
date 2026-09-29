@@ -1,0 +1,7 @@
+block_state	minecraft:stone	1	1
+block_state	minecraft:oak_planks	15	15
+block_state	minecraft:water[level=0]	86	89
+block_state	minecraft:acacia_button[face=floor,facing=north,powered=true]	10771	12514
+item	minecraft:stone	1	1
+item	minecraft:diamond	926	1012
+item	minecraft:acacia_button	783	862
