@@ -1329,6 +1329,7 @@ pub struct MeshWorkCounters {
     pub column_arrivals: usize,
     pub redecoded_column_arrivals: usize,
     pub column_snapshot_sections: usize,
+    pub column_absorbed_light_sections: usize,
     pub neighbor_dirty_admissions: usize,
     pub light_patch_calls: usize,
     pub light_patch_invalidations: usize,
@@ -1444,8 +1445,8 @@ pub struct TerrainMesh {
     /// Bounded, not a second leak: an entry is dropped as soon as it has no
     /// loaded neighbour left, at which point it cannot affect any decision.
     pub departed: HashSet<(i32, i32)>,
-    /// Sections whose **light** the client's own relight just changed, coalesced
-    /// and drained on a budget by [`relight_changed_blocks`].
+    /// Sections whose light changed, coalesced and drained on a budget by
+    /// [`remesh_light_dirty_sections`].
     ///
     /// Separate from [`Self::dirty_columns`] because the granularity is the point.
     /// A relight around one broken block touches a handful of sections; expressing
@@ -1458,7 +1459,7 @@ pub struct TerrainMesh {
     /// [`SectionKey`] at drain time, when the store's extent is known.
     pub light_dirty_sections: BTreeSet<(i32, i32, i32)>,
     work_counters: MeshWorkCounters,
-    /// Work completed by [`relight_changed_blocks`] since the app sampled it.
+    /// Light computation and section-capture work since the app sampled it.
     relight_workload: RelightWorkload,
     /// Sections whose geometry vanished (all-air after an edit, or a column that
     /// unloaded) and must be dropped from the GPU. Drained by the app each frame.
@@ -1930,6 +1931,13 @@ impl TerrainMesh {
                     )
                     .with_biome_names(Arc::clone(&self.biome_names)),
                 ));
+                if self.light_dirty_sections.remove(&(
+                    cx,
+                    cz,
+                    extent.min_y.div_euclid(16) + si as i32,
+                )) {
+                    self.work_counters.column_absorbed_light_sections += 1;
+                }
             }
             (summary, column_section_count)
         };
@@ -2026,15 +2034,9 @@ impl TerrainMesh {
                             self.work_counters.light_patch_boundary_skips += 1;
                             continue;
                         }
-                        let key = SectionKey {
-                            cx: nx,
-                            cz: nz,
-                            si: si as usize,
-                            min_y: extent.min_y,
-                        };
-                        if !self.uploaded_sections.contains(&key)
-                            && (self.pending_arrivals.contains(&(nx, nz))
-                                || self.dirty_columns.contains((nx, nz)))
+                        if self.pending_arrivals.contains(&(nx, nz))
+                            || self.dirty_columns.contains((nx, nz))
+                            || self.forced_columns.contains(&(nx, nz))
                         {
                             self.work_counters.light_patch_absorbed_sections += 1;
                             continue;
@@ -2575,8 +2577,7 @@ pub fn heal_dirty_columns(
     }
 }
 
-/// Budget for [`relight_changed_blocks`]: max sections to re-mesh per frame after a
-/// relight.
+/// Maximum section captures per frame in [`remesh_light_dirty_sections`].
 ///
 /// Independent of [`MESH_SNAPSHOT_SECTION_BUDGET`] because the unit is smaller —
 /// a *section*, not a whole column — and because the latency matters more: a black hole where a block
@@ -2608,57 +2609,31 @@ impl lodestone_world::LightProperties for VanillaLightProps {
     }
 }
 
-/// `Update` / [`FrameSet::Terrain`]: run the client's own light engine over the block
-/// changes applied since last frame, then re-mesh what that changed.
+/// `Update` / [`FrameSet::Terrain`]: compute local light changes before snapshots.
 ///
-/// **This is vanilla's own client-level tick calling its own poll-light-updates and
-/// run-light-updates routines**, and without it a block broken on a real
-/// vanilla server leaves a pitch-black hole — permanently, because
-/// vanilla's own broadcast-changes routine sends its own light-update packet only to
-/// `getPlayers(pos, true)`, the players for whom that chunk is on the *outer ring* of
-/// their loaded area. The breaker is never on their own chunk's border, so no light
-/// packet is coming. See [`lodestone_world::relight`] for the full argument.
+/// Block updates need local relighting because a server may send light patches
+/// only to players tracking that column at their outer view boundary.
 ///
-/// # Why the re-mesh half is not optional
+/// Relighting can reach beyond the edited block's geometry neighbourhood, up to
+/// [`lodestone_world::relight::AFFECTED_RADIUS`]. Queue those changed sections for
+/// capture after full-column admission, so computed light reaches geometry.
 ///
-/// A relight that changes light and dirties no mesh changes nothing on screen — the
-/// dominant defect class in this repo. The block-update path already dirties the 3×3×3
-/// around the changed cell, but a relight reaches further (up to
-/// [`lodestone_world::relight::AFFECTED_RADIUS`]) and, more importantly, runs a frame
-/// *after* that dirty signal was serviced. So the sections the relight itself reports
-/// are re-meshed here, budgeted, which is vanilla's own
-/// set-section-dirty-with-neighbors routine on the light path.
-///
-/// # Why `Option<Res<ChunkWorldWrite>>`
-///
-/// [`TerrainPlugin`] inserts only the read handle, because the write side belongs to
-/// the session owner. A harness that installs the plugin and nothing else has no world
-/// to write, and that is a legitimate configuration meaning exactly "nothing is
-/// applying block changes" — not a panic.
+/// The optional write handle belongs to the session owner; read-only harnesses
+/// still drain server light intents through [`remesh_light_dirty_sections`].
 pub fn relight_changed_blocks(
     write: Option<Res<ChunkWorldWrite>>,
-    store: Res<ChunkWorld>,
     mut terrain: ResMut<TerrainMesh>,
     mut last_corrections: bevy_ecs::system::Local<(u64, u64)>,
 ) {
     let Some(write) = write else {
         return;
     };
-    // The relight's block-state ids must be the store's. `ColumnSource::Streaming` is
-    // the live-vanilla session — the same fact `MeshScheduler::new` derives from
-    // `classifier.is_vanilla()` — so it is also the discriminator for which props
-    // table applies. Running the 26.2 census against the demo palette would not fail,
-    // it would light the demo world from an unrelated table.
+    // Use the same block-id space and sky policy as the mesh classifier.
     let vanilla_ids = terrain.column_source == ColumnSource::Streaming;
-    // The dimension's own `has_skylight`, arrived at the same way the mesher resolves
-    // an absent sky sample. The two must agree: the relight reads stored light through
-    // this rule and the mesher renders it through the same one.
     let has_skylight = matches!(terrain.policy.sky_default, SkyDefault::Full);
 
     let (relit, corrections) = {
-        // The write guard is held for the relight and dropped before anything
-        // reaches for the read handle — `mesh_section` takes a read lock, and the
-        // store is one `RwLock`.
+        // Release the world write guard before snapshot capture takes a read lock.
         let mut world = write.write();
         let relit = if vanilla_ids {
             world.run_pending_relight(&VanillaLightProps, has_skylight)
@@ -2693,13 +2668,7 @@ pub fn relight_changed_blocks(
             // table, which is a whole-world wrong answer rather than a small one.
             vanilla_ids,
             has_skylight,
-            // Server light corrections applied since the previous drain, and queued
-            // relights they cancelled. Vanilla sends the breaker no light packet for
-            // their own break (vanilla's own broadcast-changes routine restricts it to players
-            // for whom the chunk is on the outer ring of their loaded area), so
-            // `merged = 0` beside a relight is the expected reading — and a non-zero
-            // one means the server *did* correct us and the result is still wrong,
-            // which is a different defect.
+            // Authoritative patches and local jobs they cancelled since the last drain.
             merged,
             cancelled,
             "client relight"
@@ -2745,7 +2714,10 @@ pub fn relight_changed_blocks(
     workload.remesh_invalidations_enqueued += remesh_invalidations_enqueued;
     workload.remesh_invalidations_coalesced += dirty_sections - remesh_invalidations_enqueued;
     terrain.light_dirty_sections.extend(relit.dirty_sections);
+}
 
+/// Capture light-dirty sections not covered by this frame's column snapshots.
+pub fn remesh_light_dirty_sections(store: Res<ChunkWorld>, mut terrain: ResMut<TerrainMesh>) {
     if terrain.light_dirty_sections.is_empty() {
         return;
     }
@@ -2756,15 +2728,8 @@ pub fn relight_changed_blocks(
         return;
     };
     let base_si = extent.min_y.div_euclid(16);
-    // Re-meshes whose neighbourhood is short a column. `snapshot_section_in` leaves
-    // such a slot's light `None` and `mesh_snapshot` then reads it through
-    // `UniformLight::pre_light_bridge` — **full sky, no block light** — so every
-    // face opening that way is lit at daylight regardless of what the light engine
-    // computed. `route` submits it anyway once the section has been on screen, which
-    // is vanilla's own rule, so this is not by itself a defect; it is the one way a
-    // *correct* relight still reaches bright pixels, and it is invisible from the
-    // relight's own counters. Counted here so a "breaking a block made everything
-    // bright" report can be attributed to the mesh side or ruled out.
+    // Missing-column snapshots use the light bridge. Count those rebuilds
+    // separately from computed light changes to diagnose bright frontier faces.
     let mut bridged = 0usize;
     let mut meshed = 0usize;
     for _ in 0..LIGHT_DIRTY_SECTION_BUDGET {
@@ -2802,49 +2767,29 @@ pub fn relight_changed_blocks(
     }
 }
 
-/// Registers Stage 4's terrain state and its `Update` systems.
-///
-/// Deliberately does **not** insert [`TerrainMesh`] itself: the worker pool has
-/// to be built with the classifier for whichever id space this session meshes,
-/// and that is the session owner's decision — the same rule
-/// `lodestone_ecs::CorePlugin` follows for `WorldTime` and
-/// `LocalPlayerPlugin` for the local-player entity. It does insert a default
-/// [`ChunkWorld`], so a harness that installs only this plugin has a store to
-/// read.
+/// Registers the terrain presentation systems and a default chunk read handle.
+/// The session owner inserts [`TerrainMesh`] with its block classifier.
 #[derive(Debug, Default)]
 pub struct TerrainPlugin;
 
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ChunkWorld>();
-        // The client's own light engine, and the re-mesh that makes its result
-        // visible. Registered here rather than in the session builder for the same
-        // reason `heal_dirty_columns` is: it reads and writes only the terrain
-        // resources this plugin owns.
         add_presentation_systems(app.world_mut());
     }
 }
 
-/// This plugin's two `Update` systems, tagged into
-/// [`crate::sim::presentation::PresentationSet`] — see
-/// [`crate::entities::add_presentation_systems`]'s doc for why this is a free
-/// `&mut World` function rather than a second call through `Plugin::build`.
-///
-/// Takes `bevy_ecs::world::World` by its full path rather than the bare
-/// `World` this file's own `use` binds to [`lodestone_world::World`] (the
-/// chunk-storage type) — the two are unrelated types that happen to share a
-/// name.
+/// Adds ordered terrain systems to the owning ECS world's presentation schedule.
 pub(crate) fn add_presentation_systems(world: &mut bevy_ecs::world::World) {
     let mut schedules = world.resource_mut::<bevy_ecs::schedule::Schedules>();
     schedules.add_systems(
         Update,
-        relight_changed_blocks
-            .in_set(FrameSet::Terrain)
-            .in_set(crate::sim::presentation::PresentationSet),
-    );
-    schedules.add_systems(
-        Update,
-        heal_dirty_columns
+        (
+            relight_changed_blocks,
+            heal_dirty_columns,
+            remesh_light_dirty_sections,
+        )
+            .chain()
             .in_set(FrameSet::Terrain)
             .in_set(crate::sim::presentation::PresentationSet),
     );
@@ -3649,9 +3594,9 @@ mod tests {
             si: 0,
             min_y: 0,
         });
-        assert_eq!(terrain.queue_light_update(&store, 0, 0, &[1]), 2);
-        assert_eq!(terrain.light_dirty_sections, BTreeSet::from([(0, 0, 0), (1, 1, 1)]));
-        assert_eq!(terrain.work_counters.light_patch_absorbed_sections, 3);
+        assert_eq!(terrain.queue_light_update(&store, 0, 0, &[1]), 1);
+        assert_eq!(terrain.light_dirty_sections, BTreeSet::from([(1, 1, 1)]));
+        assert_eq!(terrain.work_counters.light_patch_absorbed_sections, 4);
 
         terrain.light_dirty_sections.clear();
         terrain.pending_arrivals.remove(&(0, 0));
@@ -3682,6 +3627,130 @@ mod tests {
             Heightmaps::new(),
             Vec::new(),
         )
+    }
+
+    fn set_readiness_sky(world: &mut World, sky: u8) {
+        for cx in -1..=1 {
+            for cz in -1..=1 {
+                let mut patch = lodestone_world::LightPatch::new();
+                for si in 0..4 {
+                    patch.set_sky(si, lodestone_world::LightData::Uniform(sky));
+                    patch.set_block(si, lodestone_world::LightData::Uniform(0));
+                }
+                world.merge_light(ChunkPos::new(cx, cz), patch);
+            }
+        }
+    }
+
+    #[test]
+    fn column_capture_absorbs_light_intent_and_later_patch_still_rebuilds() {
+        let mut world = World::new();
+        for cx in -1..=1 {
+            for cz in -1..=1 {
+                world.load(
+                    ChunkPos::new(cx, cz),
+                    readiness_column(cx == 0 && cz == 0),
+                );
+            }
+        }
+        set_readiness_sky(&mut world, 3);
+        let write = ChunkWorldWrite::new(world);
+        let store = write.read_handle();
+        let extent = store.extent().unwrap();
+        let mut terrain = streaming_terrain();
+        terrain.mesh_column(&store, 0, 0);
+        let initial = terrain.drain_all_meshes();
+        assert_eq!(initial.len(), 1);
+        terrain.mark_mesh_uploaded(initial[0].key);
+        terrain.work_counters = MeshWorkCounters::default();
+        assert_eq!(terrain.queue_light_update(&store, 0, 0, &[1]), 1);
+        terrain.dirty_columns.insert((0, 0));
+
+        let mut app = App::new();
+        app.insert_resource(store.clone());
+        app.insert_resource(write.clone());
+        app.insert_resource(terrain);
+        add_presentation_systems(app.world_mut());
+        app.update();
+
+        let terrain = app.world_mut().resource_mut::<TerrainMesh>().into_inner();
+        assert_eq!(terrain.work_counters.column_snapshot_sections, 2);
+        assert_eq!(terrain.work_counters.column_absorbed_light_sections, 1);
+        assert_eq!(terrain.work_counters.light_section_snapshots, 0);
+        assert_eq!(terrain.scheduler.pending(), 1);
+        assert!(terrain.resident_column_presented(extent, 0, 0));
+        assert!(!terrain.resident_column_mesh_settled(extent, 0, 0));
+        let captured = terrain.drain_all_meshes();
+        assert_eq!(captured.len(), 1);
+        let SectionGeometry::Packed(mesh) = &captured[0].mesh else {
+            panic!("the demo fixture must use packed geometry");
+        };
+        // Uniform light expands from 0..=15 to byte brightness: 255 / 15 = 17.
+        assert_eq!(max_vertex_sky(mesh), 3 * 17);
+        terrain.mark_mesh_uploaded(captured[0].key);
+
+        set_readiness_sky(&mut write.write(), 11);
+        assert_eq!(terrain.queue_light_update(&store, 0, 0, &[1]), 1);
+        app.update();
+
+        let terrain = app.world_mut().resource_mut::<TerrainMesh>().into_inner();
+        assert_eq!(terrain.work_counters.column_snapshot_sections, 2);
+        assert_eq!(terrain.work_counters.column_absorbed_light_sections, 1);
+        assert_eq!(terrain.work_counters.light_section_snapshots, 1);
+        assert_eq!(terrain.scheduler.pending(), 1);
+        let corrected = terrain.drain_all_meshes();
+        assert_eq!(corrected.len(), 1);
+        let SectionGeometry::Packed(mesh) = &corrected[0].mesh else {
+            panic!("the demo fixture must use packed geometry");
+        };
+        assert_eq!(max_vertex_sky(mesh), 11 * 17);
+        terrain.mark_mesh_uploaded(corrected[0].key);
+        assert!(terrain.resident_column_mesh_settled(extent, 0, 0));
+    }
+
+    #[test]
+    fn deferred_column_capture_keeps_the_arrival_retry_and_uploaded_rebuild() {
+        for previously_uploaded in [false, true] {
+            let mut world = World::new();
+            for cx in -1..=1 {
+                for cz in -1..=1 {
+                    if (cx, cz) != (1, 0) {
+                        world.load(
+                            ChunkPos::new(cx, cz),
+                            readiness_column(cx == 0 && cz == 0),
+                        );
+                    }
+                }
+            }
+            let write = ChunkWorldWrite::new(world);
+            let store = write.read_handle();
+            let mut terrain = streaming_terrain();
+            if previously_uploaded {
+                terrain.mesh_column_inner(&store, 0, 0, true);
+                let initial = terrain.drain_all_meshes();
+                assert_eq!(initial.len(), 1);
+                terrain.mark_mesh_uploaded(initial[0].key);
+            }
+            terrain.work_counters = MeshWorkCounters::default();
+            terrain.light_dirty_sections.insert((0, 0, 0));
+            terrain.mesh_column(&store, 0, 0);
+
+            assert_eq!(terrain.work_counters.column_absorbed_light_sections, 1);
+            assert!(terrain.light_dirty_sections.is_empty());
+            let deferred = terrain.drain_all_meshes();
+            assert_eq!(deferred.len(), usize::from(previously_uploaded));
+            assert!(!terrain.column_mesh_settled(&store, 0, 0));
+
+            write.write().load(ChunkPos::new(1, 0), readiness_column(false));
+            terrain.queue_column_arrival(1, 0);
+            terrain.mark_neighbours_dirty(&store, 1, 0);
+            assert!(terrain.dirty_columns.remove((0, 0)));
+            terrain.mesh_arriving_column(&store, 0, 0, false);
+            let completed = terrain.drain_all_meshes();
+            assert_eq!(completed.len(), 1);
+            terrain.mark_mesh_uploaded(completed[0].key);
+            assert!(terrain.column_mesh_settled(&store, 0, 0));
+        }
     }
 
     /// **Readiness control: absent neighbours with no queued jobs still hold.**

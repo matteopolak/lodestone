@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<!-- Three actual rows from client-join-hardware-resume-20260929-r1.trace,
+     Instruments 27.0 MetricAggregationForProcess. References are expanded and
+     presentation attributes removed; timestamps and metric values are unchanged.
+     This is an excerpt, not the capture's complete cycle total. -->
+<trace-query-result><node>
+<schema name="MetricAggregationForProcess">
+<col><mnemonic>timestamp</mnemonic><name>Timestamp</name><engineering-type>start-time</engineering-type></col>
+<col><mnemonic>duration</mnemonic><name>Duration</name><engineering-type>duration</engineering-type></col>
+<col><mnemonic>process</mnemonic><name>Process</name><engineering-type>process</engineering-type></col>
+<col><mnemonic>metric-value-int</mnemonic><name>Metric Value Int</name><engineering-type>uint64</engineering-type></col>
+<col><mnemonic>metric-value-double</mnemonic><name>Metric Value Double</name><engineering-type>fixed-decimal</engineering-type></col>
+<col><mnemonic>metric-name</mnemonic><name>Metric Name</name><engineering-type>string</engineering-type></col>
+<col><mnemonic>is-precise</mnemonic><name>Is Precise</name><engineering-type>boolean</engineering-type></col>
+</schema>
+<row><start-time>912000000</start-time><duration>1000000</duration><process><pid>25150</pid><device-session>TODO</device-session></process><uint64>0</uint64><fixed-decimal>0.252786220</fixed-decimal><string>useful</string><boolean>1</boolean></row>
+<row><start-time>912000000</start-time><duration>1000000</duration><process><pid>25150</pid><device-session>TODO</device-session></process><uint64>126430</uint64><fixed-decimal>0.000000000</fixed-decimal><string>cycle</string><boolean>1</boolean></row>
+<row><start-time>913000000</start-time><duration>1000000</duration><process><pid>25150</pid><device-session>TODO</device-session></process><uint64>1516708</uint64><fixed-decimal>0.000000000</fixed-decimal><string>cycle</string><boolean>1</boolean></row>
+</node></trace-query-result>

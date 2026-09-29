@@ -86,15 +86,30 @@ profile the same test binary without changing the workload.
 
 For CPU-counter evidence, run `just profile-join-hardware client --radius 1`.
 This launches the exact release test executable under macOS Instruments and
-writes retired instructions, cycles, IPC, process identity, and the aggregate
-phase markers to one summary. The hardware wrapper defaults to radius 1 so a
-counter capture remains bounded; use `--run-id` for repeatable comparisons and
+writes the counters supported by the selected mode, process identity, and the
+aggregate phase markers to one summary. The hardware wrapper defaults to radius
+1 so a counter capture remains bounded; use `--run-id` for repeatable comparisons and
 `--template` (or `LODESTONE_JOIN_XCTRACE_TEMPLATE`) for a local counter
 template. Instruments reports these counters at process scope, so phase
 durations remain wall-time markers rather than invented per-phase counters.
-The selected template must expose `Cycles Instructions` in that order; other
-counter layouts are reported as unavailable rather than interpreted as this
-pair.
+Legacy `counters-profile` tables must expose `Cycles Instructions` in that order
+to report retired instructions and IPC. Instruments 27's Guided CPU Bottlenecks
+mode instead exports named `cycle` metrics through `MetricAggregationForProcess`.
+`profile-join-hardware.py::guided_counter_lines` selects the capture's exact target
+PID and sums only precise buckets, validating column types and XML references.
+Coarse buckets overlap the precise buckets: their totals are checked separately,
+never added. Duplicate or overlapping buckets and disagreeing resolution totals
+make the counters unavailable.
+
+Guided mode reports captured active user-space cycles and the observed bucket
+interval, with instructions and IPC explicitly unavailable. Its `Useful` metric
+is a fraction of sustainable retired micro-operation bandwidth, normalized by
+the core's maximum bandwidth. It is not a retired-instruction count and cannot
+be converted into IPC. The installed Instruments analysis definitions specify
+`sum` aggregation for cycles and `time-weighted-average` for bottleneck fractions.
+Observed bucket intervals need not cover the entire process lifetime or any
+individual workload phase. `scripts/fixtures/xctrace-guided-cycles.xml` preserves
+an actual export excerpt for the focused parser tests; it is not a complete run.
 The wrapper accepts Instruments' directory-backed trace bundles; the subsequent
 table-of-contents export validates that the capture can actually be read.
 
@@ -126,7 +141,8 @@ the end of movement and report their completed counts alongside them; incomplete
 columns are not silently treated as zero latency. Columns already loaded or
 presented when they enter the view are counted separately; delivery percentiles
 exclude the preloaded group. The 100 ms polling interval adds up to one sample
-of uncertainty. These timings separate stream delivery from client meshing
+of uncertainty. First-mesh latency excludes columns already presented on entry:
+a later replacement is not a first presentation. These timings separate stream delivery from client meshing
 without relying on a global pending-work count. Unique and repeat section
 upload counts show whether the renderer is receiving replacement meshes during
 the same join, not just first-time geometry. `all_entered` retains every view-entry
@@ -143,9 +159,10 @@ invalidations separately, so repeated uploads can be assigned to the path that
 submitted them. Light-patch invalidations count loaded sections whose blocks
 can sample the changed light; `light_patch_boundary_skips` counts non-air
 adjacent sections excluded because their blocks are wholly interior.
-`light_patch_absorbed_sections` counts non-air sections not yet uploaded whose
-pending full-column snapshot will read the patch without a separate light-only
-remesh.
+`light_patch_absorbed_sections` counts non-air sections whose pending full-column
+snapshot will read the patch without a separate light-only remesh, including
+already presented sections. `column_absorbed_light_sections` counts previously
+queued light intents consumed by a full-column capture of those same sections.
 The movement timeline also samples each new column's 3×3 residency halo before
 draining mesh results, then records its first returned section mesh and full
 presentation. This distinguishes a column waiting for its outer dependency
