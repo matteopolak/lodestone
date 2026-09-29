@@ -191,6 +191,18 @@ render distance plus the mesher's one-column dependency halo; this prevents the
 configuration-phase default from shrinking the stream and making the visible
 outer ring impossible to mesh.
 
+On the browser build, `?log=debug` also emits a bounded `wasm mesh drain and
+upload profile` line once per second. It reports the rolling 120-frame p95 and
+maximum frame-start gap, time spent in `Sim::drain_meshes` (CPU meshing), and
+the renderer upload loop, the number of mesh results handed off during the
+latest reporting interval, and peak ready-column, waiting-column,
+forced-column, and pending-section backlog over that interval. The upload
+duration is CPU wall time around the renderer handoff and readiness
+acknowledgements; it does not measure when the GPU completes the work. The
+browser's existing `frame_profile` summary still provides whole-frame phase
+tails, with its `mesh_upload` phase combining CPU meshing and renderer handoff.
+No frame or section records are emitted when debug logging is off.
+
 ## How to change it
 
 Keep the workload finite and aggregate-only. Add measurements at existing
