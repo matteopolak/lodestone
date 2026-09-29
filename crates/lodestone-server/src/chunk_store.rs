@@ -763,10 +763,19 @@ impl GenerationRegionCoordinator {
         coordinates: &[(i32, i32)],
         cancellation: &crate::worldgen_session::RequestCancellation,
     ) -> Result<GenerationRegionLease<'_>, ()> {
+        self.acquire_until_cancelled(coordinates, || cancellation.is_cancelled())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn acquire_until_cancelled(
+        &self,
+        coordinates: &[(i32, i32)],
+        is_cancelled: impl Fn() -> bool,
+    ) -> Result<GenerationRegionLease<'_>, ()> {
         let ticket = self.enqueue(coordinates);
         let mut state = self.state.lock().expect("generation region lock poisoned");
         while !Self::ready(&state, ticket) {
-            if cancellation.is_cancelled() {
+            if is_cancelled() {
                 state.pending.remove(&ticket);
                 self.wake.notify_all();
                 return Err(());
@@ -4737,11 +4746,10 @@ impl<S: ChunkSource> ChunkStore<S> {
                     .collect());
             }
         };
-        let Some(cancellation) = sessions
+        if sessions
             .iter()
-            .find(|session| !session.cancellation().is_cancelled())
-            .map(GenerationSession::cancellation)
-        else {
+            .all(|session| session.cancellation().is_cancelled())
+        {
             return Err(sessions
                 .iter()
                 .map(|_| {
@@ -4750,11 +4758,13 @@ impl<S: ChunkSource> ChunkStore<S> {
                     ))
                 })
                 .collect());
-        };
-        #[cfg(target_arch = "wasm32")]
-        let _ = &cancellation;
+        }
         #[cfg(not(target_arch = "wasm32"))]
-        let region_lease = match self.generation_regions.acquire(&coordinates, &cancellation) {
+        let region_lease = match self.generation_regions.acquire_until_cancelled(&coordinates, || {
+            sessions
+                .iter()
+                .all(|session| session.cancellation().is_cancelled())
+        }) {
             Ok(lease) => lease,
             Err(_) => {
                 return Err(sessions
@@ -13635,6 +13645,132 @@ mod tests {
         drop(first);
         let next = coordinator.acquire(&[(0, 0)], &first_cancel);
         assert!(next.is_ok());
+    }
+
+    #[test]
+    fn cancelled_cohort_wait_clears_its_region_ticket() {
+        use crate::worldgen_session::RequestCancellation;
+
+        let coordinator = Arc::new(GenerationRegionCoordinator::default());
+        let held = coordinator
+            .acquire(&[(0, 0)], &RequestCancellation::new())
+            .unwrap();
+        let first = RequestCancellation::new();
+        let second = RequestCancellation::new();
+        let waiter = Arc::clone(&coordinator);
+        let first_for_waiter = first.clone();
+        let second_for_waiter = second.clone();
+        let thread = std::thread::spawn(move || {
+            waiter
+                .acquire_until_cancelled(&[(0, 0)], || {
+                    first_for_waiter.is_cancelled() && second_for_waiter.is_cancelled()
+                })
+                .is_err()
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while coordinator
+            .state
+            .lock()
+            .expect("generation region lock poisoned")
+            .pending
+            .is_empty()
+        {
+            assert!(std::time::Instant::now() < deadline, "cohort did not queue");
+            std::thread::yield_now();
+        }
+        first.cancel();
+        assert_eq!(
+            coordinator
+                .state
+                .lock()
+                .expect("generation region lock poisoned")
+                .pending
+                .len(),
+            1,
+        );
+        second.cancel();
+        assert!(thread.join().expect("cancelled cohort waiter did not panic"));
+        assert!(
+            coordinator
+                .state
+                .lock()
+                .expect("generation region lock poisoned")
+                .pending
+                .is_empty()
+        );
+        drop(held);
+        assert!(coordinator
+            .acquire(&[(0, 0)], &RequestCancellation::new())
+            .is_ok());
+    }
+
+    #[test]
+    fn cancelling_one_queued_cohort_target_preserves_its_sibling() {
+        use crate::worldgen_session::{GenerationRequest, RequestCancellation};
+        use lodestone_worldgen::stage_schedule::{Dimension, GenerationTarget};
+
+        let store = Arc::new(ChunkStore::with_capacity(CountingSource::new(), 4));
+        let held = store
+            .generation_regions
+            .acquire(&[(0, 0)], &RequestCancellation::new())
+            .unwrap();
+        let first = RequestCancellation::new();
+        let second = RequestCancellation::new();
+        let (finished, finished_rx) = std::sync::mpsc::channel();
+        let waiter = Arc::clone(&store);
+        let first_for_waiter = first.clone();
+        let second_for_waiter = second.clone();
+        let thread = std::thread::spawn(move || {
+            let mut sessions = [
+                GenerationSession::with_cancellation(
+                    GenerationRequest::new(Dimension::End, (0, 0), GenerationTarget::Full, 0),
+                    first_for_waiter,
+                ),
+                GenerationSession::with_cancellation(
+                    GenerationRequest::new(Dimension::End, (1, 0), GenerationTarget::Full, 0),
+                    second_for_waiter,
+                ),
+            ];
+            let outcome = waiter.prepare_generation_batch(&mut sessions).map(|prepared| {
+                prepared
+                    .entries
+                    .iter()
+                    .map(|entry| entry.index)
+                    .collect::<Vec<_>>()
+            });
+            finished.send(outcome).expect("test receiver remains open");
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while store
+            .generation_regions
+            .state
+            .lock()
+            .expect("generation region lock poisoned")
+            .pending
+            .is_empty()
+        {
+            assert!(std::time::Instant::now() < deadline, "cohort did not queue");
+            std::thread::yield_now();
+        }
+        first.cancel();
+        let completed_while_held = finished_rx.recv_timeout(std::time::Duration::from_millis(50));
+        let ended_while_held = completed_while_held.is_ok();
+        drop(held);
+        let result = match completed_while_held {
+            Ok(result) => result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => finished_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("surviving target should acquire the released region"),
+            Err(error) => panic!("cohort waiter disconnected: {error}"),
+        };
+        thread.join().expect("cohort waiter did not panic");
+        assert!(!ended_while_held, "cohort wait ended while region was held");
+        assert_eq!(
+            result.expect("surviving target should remain active"),
+            vec![1]
+        );
+        assert!(!second.is_cancelled());
     }
 
     #[test]

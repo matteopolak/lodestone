@@ -22,6 +22,10 @@ before entering Rayon; if an unrelated async producer already owns any permit,
 it runs the batch serially. A nested batch from an admitted request reuses
 Rayon without acquiring a second permit. Indexed collection preserves the
 request's result order. The join path retains backpressure and ordered emission.
+The region wait belongs to the cohort, not its first target: cancelling one
+target leaves the reservation active for surviving siblings. When every target
+is cancelled, the pending reservation is removed so later overlapping work can
+proceed.
 
 The initial-spawn search uses the same handoff through the server runtime seam:
 native joins submit the synchronous probe to this dispatcher, while the browser
