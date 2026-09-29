@@ -45,6 +45,7 @@ pub fn start_worker(
     if log::max_level() >= log::LevelFilter::Debug {
         PHASE_TIMINGS.with(|slot| slot.borrow_mut().fill(WorldgenTimingTotals::default()));
         let _ = lodestone_server::worldgen_progress::install_timing_sink(record_phase_timing);
+        let _ = lodestone_server::connection_progress::install_sink(post_connection_progress);
     }
     post_progress(&progress_port, epoch, "server-starting");
     let result = lodestone::net::start_browser_integrated_worker(
@@ -129,6 +130,32 @@ pub fn sample_worker(epoch: u32, callback_gap_ms: f64) -> bool {
             posted
         })
     })
+}
+
+fn post_connection_progress(progress: lodestone_server::connection_progress::ConnectionProgress) {
+    PROGRESS_PORT.with(|slot| {
+        if let Some((port, epoch)) = slot.borrow().as_ref() {
+            let message = js_sys::Object::new();
+            for (key, value) in [
+                ("kind", JsValue::from_str("connection-progress")),
+                ("epoch", JsValue::from_f64(f64::from(*epoch))),
+                ("running", JsValue::from_bool(progress.running)),
+                ("elapsedMs", JsValue::from_f64(progress.elapsed.as_secs_f64() * 1000.0)),
+                ("passes", JsValue::from_f64(progress.passes as f64)),
+                ("clientLoaded", JsValue::from_bool(progress.client_loaded)),
+                ("centerX", JsValue::from_f64(f64::from(progress.center.0))),
+                ("centerZ", JsValue::from_f64(f64::from(progress.center.1))),
+                ("radius", JsValue::from_f64(f64::from(progress.radius))),
+                ("owedColumns", JsValue::from_f64(progress.owed_columns as f64)),
+                ("deliveredColumns", JsValue::from_f64(progress.delivered_columns as f64)),
+                ("chunksSent", JsValue::from_f64(progress.chunks_sent as f64)),
+                ("remaining", JsValue::from_f64(progress.remaining as f64)),
+            ] {
+                let _ = js_sys::Reflect::set(&message, &JsValue::from_str(key), &value);
+            }
+            let _ = port.post_message(&message);
+        }
+    });
 }
 
 fn record_phase_timing(sample: WorldgenTimingSample) {

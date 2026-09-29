@@ -18446,7 +18446,22 @@ where
         crate::browser_timer::BrowserInterval::new(WASM_VITALS_TICK_INTERVAL);
     let browser_play_started = lodestone_time::Instant::now();
     let mut browser_vitals_ticks = 0_u64;
+    let mut connection_probe = crate::connection_progress::ConnectionProbe::start();
     loop {
+        if let Some(probe) = connection_probe.as_mut() {
+            probe.observe(crate::connection_progress::ConnectionProgress {
+                running: true,
+                elapsed: std::time::Duration::ZERO,
+                passes: 0,
+                client_loaded,
+                center: view.center,
+                radius: view.radius,
+                owed_columns: view.loaded.len(),
+                delivered_columns: view.delivered.len(),
+                chunks_sent,
+                remaining: join_stream.remaining(),
+            });
+        }
         let packet = tokio::select! {
             _ = std::future::ready(()), if !pending_tick_updates.is_empty() => {
                 send_pending_tick_block_updates(

@@ -211,7 +211,7 @@ event also includes `settledColumns`, meaning columns with an explicitly empty
 result or a section mesh handed to the renderer. It checks the exact configured
 view after presentation, without waiting for unrelated background remesh jobs
 to reach zero. Integrated joins immediately advertise the requested
-render distance plus the mesher's one-column dependency halo; this prevents the
+render distance plus the shared two-column stream padding; this prevents the
 configuration-phase default from shrinking the stream and making the visible
 outer ring impossible to mesh.
 
@@ -226,6 +226,10 @@ acknowledgements; it does not measure when the GPU completes the work. The
 browser's existing `frame_profile` summary still provides whole-frame phase
 tails, with its `mesh_upload` phase combining CPU meshing and renderer handoff.
 No frame or section records are emitted when debug logging is off.
+The mesh profile, queue aggregates, and CPU/GPU phase summary are forwarded to
+the standalone page console, not just written to the render worker's console.
+Periodic configured-view deficits and the independent Play-loop diagnostic
+separate delivery gaps from resident geometry awaiting presentation.
 
 The companion `wasm mesh queue` line reports cumulative insert, replacement,
 cancellation, and pop counts plus current queued keys. Its high-water key count

@@ -225,6 +225,7 @@ struct BrowserJoinTrace {
     first_terrain_presented: bool,
     full_view_presented: bool,
     last_full_view_probe: Option<Instant>,
+    last_view_report: Option<Instant>,
     events: Rc<RefCell<VecDeque<BrowserJoinProgress>>>,
 }
 
@@ -240,6 +241,7 @@ impl BrowserJoinTrace {
             first_terrain_presented: false,
             full_view_presented: false,
             last_full_view_probe: None,
+            last_view_report: None,
             events,
         }
     }
@@ -253,6 +255,7 @@ impl BrowserJoinTrace {
         self.first_terrain_presented = false;
         self.full_view_presented = false;
         self.last_full_view_probe = None;
+        self.last_view_report = None;
         self.events.borrow_mut().clear();
         self.push(phase, 0, 0, 0);
     }
@@ -296,6 +299,16 @@ impl BrowserJoinTrace {
         }
         if let Some((resident, presented, expected)) = view_presentation {
             self.expected_columns = expected;
+            if log::max_level() >= log::LevelFilter::Debug
+                && self.last_view_report.is_none_or(|last| last.elapsed() >= Duration::from_secs(1))
+            {
+                self.last_view_report = Some(Instant::now());
+                crate::net::browser_diagnostic(format_args!(
+                    "view presentation: resident={resident} presented={presented} expected={expected} missing_resident={} resident_unpresented={} submitted_meshes={pending_meshes}",
+                    expected.saturating_sub(resident),
+                    resident.saturating_sub(presented),
+                ));
+            }
             if !self.full_view_presented && resident == expected && presented == expected {
                 self.full_view_presented = true;
                 self.push("full-view-presented", resident, presented, pending_meshes);

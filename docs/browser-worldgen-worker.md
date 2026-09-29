@@ -20,6 +20,23 @@ After the server reports ready, the bootstrap calls the optional `sample_worker(
 
 At debug or trace level, the worker also installs a timing sink for production operations. A fixed phase array accumulates call count, requested item count, elapsed sum, and longest call. The health callback drains nonempty phases into one `worldgen-timing` message, and the render worker forwards them to the page console. Normal logging levels do not install the sink, so generation performs no timing clock reads. Collection uses the existing console-log level rather than requiring a tracing subscriber.
 
+An independent optional `lodestone_server::connection_progress` sink samples
+the browser Play connection once per second while its loop advances. It reports
+the current center/radius, owed and uniquely delivered columns, send operations,
+remaining generation work, loop passes, and client loading state. A stopped
+record is emitted when the observed loop scope exits or its future is dropped;
+it does not distinguish transport EOF, error, and cancellation. A panic that
+aborts the worker cannot emit that final record. These messages use the existing
+progress port and appear as `connection` diagnostics in the standalone console.
+World tick health alone does not prove that this connection is advancing.
+
+The renderer reports configured-view resident/presented deficits once per second
+until the full-view presentation milestone. The loading overlay uses its smaller
+initial window, so its received count is not the configured-view count. Compare
+view deficits with connection delivery and mesh queue age before attributing a
+delay to generation. These sampled console diagnostics are debug-only and do not
+extend the SDK progress-event contract.
+
 Lease acquisition, pre-ore preparation, structure context, and shaped-product construction are measured separately. Prefix import, mutable settlement, and snapshot assembly cover synchronous session work, excluding browser yields. `packet-lighting` times the actual light computation, not its session completion marker; `packet-encoding` times the actual protocol encoder, not a snapshot pass-through. `wire-send` includes framing, compression, and awaiting transport credit, so it is wall time rather than CPU time and can overlap other work. Item counts describe operation inputs, not unique generated columns or cache misses. Phase totals are diagnostics, not retired instructions or a complete partition of join time.
 
 `lodestone-worldgen-long-task-harness.js` is staged as a diagnostic asset. Load it from a browser test page or DevTools, then call `LodestoneWorldgenMeasurement.measure({ seed: "42", runtimeMs: 5000 })`. Its report includes worker startup milestones, executor mode, startup/runtime duration, page `longtask` entries, and same-epoch worker-health samples. `maxCallbackGapMs` and `tickAdvancement` are `null` when there are no usable health samples; missing samples are unknown, not evidence of healthy ticks. `under100ms` is false when the browser does not expose the Long Tasks API, so an empty sample cannot be mistaken for proof of the target.
@@ -33,6 +50,12 @@ Keep the serial and threaded artifact names in sync between `stage_worker.sh` an
 If changing worker-health sampling, keep the export's epoch and callback-gap arguments aligned with the Rust implementation. The harness filters on its launch epoch, and its tick advancement is the last sampled `tickCount` minus the first; keep absent or insufficient samples represented as `null`.
 
 Timing phases and accumulation live in `lodestone_server::worldgen_progress`; operation guards belong at the actual production call sites. Keep guards outside parallel item loops and end synchronous guards before yielding. Update the worker serializer and shell diagnostic forwarding together when changing the `worldgen-timing` message. An idle sample sends no phase rows; a callback delayed by generation reports its accumulated work on the next callback, not at the nominal one-second boundary.
+
+Change `ConnectionProbe` and its production loop call for connection sampling;
+update the worker serializer and shell forwarding together if fields change.
+The disabled probe allocates no state and reads no clock. Its latest observation
+is retained even between reports, so the stopped record contains the most recent
+loop state rather than only the last one-second sample.
 
 If the Rayon helper's generated call shape changes, update `patch_threaded_worker_helper.mjs` and its staging assertion together. The patcher is intentionally narrow: it fails rather than silently rewriting an unrecognized helper.
 
