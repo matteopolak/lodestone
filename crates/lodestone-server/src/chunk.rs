@@ -4232,9 +4232,33 @@ impl OverworldChunkSource {
         admitted.extend(lease_coords.iter().copied());
         admitted.extend(prefix_targets.iter().copied());
         let admitted = admitted.into_iter().collect::<Vec<_>>();
-        let lease = self.generator.lease_batch(&admitted);
-        lease.prepare_pre_ore_targets_with_radius(prefix_targets, prefix_radius);
-        self.prepare_lifecycle_structure_cache(&lease, prefix_targets);
+        use crate::worldgen_progress::{PhaseTimer, WorldgenTimingPhase};
+
+        let lease = {
+            let _timing = PhaseTimer::start(
+                WorldgenTimingPhase::Lease,
+                admitted.len().min(u32::MAX as usize) as u32,
+            );
+            self.generator.lease_batch(&admitted)
+        };
+        {
+            let _timing = PhaseTimer::start(
+                WorldgenTimingPhase::PreOre,
+                prefix_targets.len().min(u32::MAX as usize) as u32,
+            );
+            lease.prepare_pre_ore_targets_with_radius(prefix_targets, prefix_radius);
+        }
+        {
+            let _timing = PhaseTimer::start(
+                WorldgenTimingPhase::StructureContext,
+                prefix_targets.len().min(u32::MAX as usize) as u32,
+            );
+            self.prepare_lifecycle_structure_cache(&lease, prefix_targets);
+        }
+        let shaped_timing = PhaseTimer::start(
+            WorldgenTimingPhase::ShapedProducts,
+            coords.len().min(u32::MAX as usize) as u32,
+        );
         #[cfg(not(target_arch = "wasm32"))]
         let columns = crate::run_worldgen_jobs(coords.to_vec(), |(cx, cz)| {
             lease.column_shaped(cx, cz)
@@ -4244,6 +4268,14 @@ impl OverworldChunkSource {
             .iter()
             .map(|&(cx, cz)| lease.column_shaped(cx, cz))
             .collect();
+        drop(shaped_timing);
+        {
+            let _timing = PhaseTimer::start(
+                WorldgenTimingPhase::Lease,
+                admitted.len().min(u32::MAX as usize) as u32,
+            );
+            drop(lease);
+        }
         Some(columns)
     }
 

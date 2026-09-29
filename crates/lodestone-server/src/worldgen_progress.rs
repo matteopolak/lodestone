@@ -1,4 +1,115 @@
 use std::sync::OnceLock;
+use std::time::Duration;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum WorldgenTimingPhase {
+    Lease,
+    PreOre,
+    StructureContext,
+    ShapedProducts,
+    PrefixImport,
+    MutableSettlement,
+    SnapshotAssembly,
+    PacketLighting,
+    PacketEncoding,
+    WireSend,
+}
+
+impl WorldgenTimingPhase {
+    pub const ALL: [Self; 10] = [
+        Self::Lease,
+        Self::PreOre,
+        Self::StructureContext,
+        Self::ShapedProducts,
+        Self::PrefixImport,
+        Self::MutableSettlement,
+        Self::SnapshotAssembly,
+        Self::PacketLighting,
+        Self::PacketEncoding,
+        Self::WireSend,
+    ];
+
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Lease => "lease",
+            Self::PreOre => "pre-ore",
+            Self::StructureContext => "structure-context",
+            Self::ShapedProducts => "shaped-products",
+            Self::PrefixImport => "prefix-import",
+            Self::MutableSettlement => "mutable-settlement",
+            Self::SnapshotAssembly => "snapshot-assembly",
+            Self::PacketLighting => "packet-lighting",
+            Self::PacketEncoding => "packet-encoding",
+            Self::WireSend => "wire-send",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct WorldgenTimingSample {
+    pub phase: WorldgenTimingPhase,
+    pub elapsed: Duration,
+    pub items: u32,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct WorldgenTimingTotals {
+    pub calls: u64,
+    pub items: u64,
+    pub elapsed: Duration,
+    pub maximum: Duration,
+}
+
+impl WorldgenTimingTotals {
+    pub fn record(&mut self, sample: WorldgenTimingSample) {
+        self.calls = self.calls.saturating_add(1);
+        self.items = self.items.saturating_add(u64::from(sample.items));
+        self.elapsed = self.elapsed.saturating_add(sample.elapsed);
+        self.maximum = self.maximum.max(sample.elapsed);
+    }
+}
+
+pub type WorldgenTimingSink = fn(WorldgenTimingSample);
+
+static TIMING_SINK: OnceLock<WorldgenTimingSink> = OnceLock::new();
+
+pub fn install_timing_sink(sink: WorldgenTimingSink) -> Result<(), WorldgenTimingSink> {
+    TIMING_SINK.set(sink)
+}
+
+pub(crate) struct PhaseTimer {
+    sink: WorldgenTimingSink,
+    phase: WorldgenTimingPhase,
+    started: lodestone_time::Instant,
+    items: u32,
+}
+
+impl PhaseTimer {
+    pub(crate) fn start(phase: WorldgenTimingPhase, items: u32) -> Option<Self> {
+        let sink = *TIMING_SINK.get()?;
+        Some(Self {
+            sink,
+            phase,
+            started: lodestone_time::Instant::now(),
+            items,
+        })
+    }
+}
+
+impl Drop for PhaseTimer {
+    fn drop(&mut self) {
+        (self.sink)(WorldgenTimingSample {
+            phase: self.phase,
+            elapsed: self.started.elapsed(),
+            items: self.items,
+        });
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorldgenProgress {
@@ -45,7 +156,49 @@ pub(crate) fn emit(progress: WorldgenProgress) {
 
 #[cfg(test)]
 mod tests {
-    use super::WorldgenProgress;
+    use super::{
+        WorldgenProgress, WorldgenTimingPhase, WorldgenTimingSample, WorldgenTimingTotals,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn phase_samples_keep_operation_counts_separate_from_elapsed_totals() {
+        let mut totals = [WorldgenTimingTotals::default(); WorldgenTimingPhase::ALL.len()];
+        for (phase, items, micros) in [
+            (WorldgenTimingPhase::PreOre, 9, 2_300),
+            (WorldgenTimingPhase::PreOre, 1, 700),
+            (WorldgenTimingPhase::PacketLighting, 1, 1_200),
+        ] {
+            totals[phase.index()].record(WorldgenTimingSample {
+                phase,
+                items,
+                elapsed: Duration::from_micros(micros),
+            });
+        }
+        assert_eq!(
+            totals[WorldgenTimingPhase::PreOre.index()],
+            WorldgenTimingTotals {
+                calls: 2,
+                items: 10,
+                elapsed: Duration::from_micros(3_000),
+                maximum: Duration::from_micros(2_300),
+            },
+        );
+        assert_eq!(totals[WorldgenTimingPhase::PacketLighting.index()].calls, 1);
+        assert_eq!(
+            totals[WorldgenTimingPhase::PacketEncoding.index()],
+            WorldgenTimingTotals::default(),
+        );
+        let drained = std::mem::take(&mut totals);
+        assert_eq!(drained[WorldgenTimingPhase::PreOre.index()].calls, 2);
+        assert_eq!(
+            totals,
+            [WorldgenTimingTotals::default(); WorldgenTimingPhase::ALL.len()],
+        );
+        for (index, phase) in WorldgenTimingPhase::ALL.into_iter().enumerate() {
+            assert_eq!(phase.index(), index);
+        }
+    }
 
     #[test]
     fn wire_progress_counts_delivered_and_outstanding_targets_separately() {

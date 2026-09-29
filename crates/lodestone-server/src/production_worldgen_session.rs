@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use lodestone_data::block_states::StateId;
 
 use crate::chunk::{ChunkColumn, ChunkGenerationStage, ChunkSource};
+use crate::worldgen_progress::{PhaseTimer, WorldgenTimingPhase};
 use crate::worldgen_lifecycle::{
     ImmutableComputeExecutor, LifecycleCompletion, LifecycleCompletionMode,
     LifecycleFeatureDispatch, LifecycleMaterializer, LifecycleSpill,
@@ -604,6 +605,10 @@ where
     S: LifecycleWorldgenSource + Sync,
     P: DimensionPolicy<S>,
 {
+    let _timing = PhaseTimer::start(
+        WorldgenTimingPhase::PrefixImport,
+        session.admission_order().len().min(u32::MAX as usize) as u32,
+    );
     let boundary = session
         .pipeline()
         .schedule()
@@ -692,6 +697,10 @@ where
     S: LifecycleWorldgenSource + Sync,
     P: DimensionPolicy<S>,
 {
+    let _timing = PhaseTimer::start(
+        WorldgenTimingPhase::PrefixImport,
+        coordinates.len().min(u32::MAX as usize) as u32,
+    );
     for &coordinate in coordinates {
         let key = (coordinate, boundary);
         if shared_prefixes.contains_key(&key) {
@@ -957,6 +966,10 @@ fn preseed_retained_mutations<S: LifecycleWorldgenSource>(
     materializer: &mut LifecycleMaterializer<&S>,
     sessions: &[GenerationSession],
 ) -> Result<(), SessionError> {
+    let _timing = PhaseTimer::start(
+        WorldgenTimingPhase::MutableSettlement,
+        sessions.len().min(u32::MAX as usize) as u32,
+    );
     let mut retained = BTreeMap::new();
     for session in sessions {
         for mutation in session.committed_mutations() {
@@ -1076,86 +1089,6 @@ enum GenerationPhase {
     PacketDeferred,
 }
 
-#[cfg(target_arch = "wasm32")]
-struct GenerationTiming {
-    started: lodestone_time::Instant,
-    phase_started: lodestone_time::Instant,
-    phase: &'static str,
-    session: u64,
-    target: ChunkCoordinate,
-    batch_size: usize,
-}
-
-#[cfg(target_arch = "wasm32")]
-impl GenerationTiming {
-    fn new(session: &GenerationSession, batch_size: usize) -> Option<Self> {
-        tracing::enabled!(target: "lodestone_worldgen_timing", tracing::Level::DEBUG).then(|| {
-            let now = lodestone_time::Instant::now();
-            Self {
-                started: now,
-                phase_started: now,
-                phase: "admission",
-                session: session.id().value(),
-                target: session.request().target(),
-                batch_size,
-            }
-        })
-    }
-
-    fn mark(&mut self, phase: &'static str) {
-        let now = lodestone_time::Instant::now();
-        let phase_ms = now.duration_since(self.phase_started).as_millis();
-        tracing::debug!(
-            target: "lodestone_worldgen_timing",
-            session = self.session,
-            target_x = self.target.0,
-            target_z = self.target.1,
-            batch_size = self.batch_size,
-            phase = self.phase,
-            phase_ms,
-            "worldgen phase"
-        );
-        self.phase = phase;
-        self.phase_started = now;
-    }
-
-    fn finish(&mut self) {
-        self.mark("batch");
-        let total_ms = lodestone_time::Instant::now()
-            .duration_since(self.started)
-            .as_millis();
-        tracing::debug!(
-            target: "lodestone_worldgen_timing",
-            session = self.session,
-            target_x = self.target.0,
-            target_z = self.target.1,
-            batch_size = self.batch_size,
-            phase = "batch",
-            total_ms,
-            "worldgen batch complete"
-        );
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-impl GenerationPhase {
-    fn timing_name(self) -> &'static str {
-        match self {
-            Self::Admission | Self::ImportShaped | Self::ResumeOutput => "admission",
-            Self::TargetFeatures
-            | Self::FeatureSource(_)
-            | Self::FinishFeatures
-            | Self::SettlementPending
-            | Self::CommitFeatures
-            | Self::TopLayer
-            | Self::CommitTopLayer => "mutable",
-            Self::Output | Self::PacketNeighbours | Self::Finalize => "snapshot",
-            Self::SettleLight => "lighting",
-            Self::PacketDeferred => "mutable",
-        }
-    }
-}
-
 struct GenerationStateMachine<'a, 'm, S, P>
 where
     S: LifecycleWorldgenSource + Sync,
@@ -1182,8 +1115,6 @@ where
     padding_targets: Option<&'m BTreeSet<ChunkCoordinate>>,
     settlement_targets: Option<&'m BTreeSet<ChunkCoordinate>>,
     policy: PhantomData<P>,
-    #[cfg(target_arch = "wasm32")]
-    timing: Option<GenerationTiming>,
 }
 
 impl<'a, 'm, S, P> GenerationStateMachine<'a, 'm, S, P>
@@ -1197,7 +1128,6 @@ where
         materializer: &'m mut LifecycleMaterializer<&'a S>,
         shared_prefixes: &'m mut SharedPrefixCache,
         defer_packet_finalization: bool,
-        _batch_size: usize,
     ) -> Result<Self, SessionError> {
         if session.cancellation().is_cancelled() {
             return Err(SessionError::Cancelled);
@@ -1221,8 +1151,6 @@ where
             LifecycleFeatureDispatch::TargetOwned => vec![session.request().target()],
             LifecycleFeatureDispatch::SourceOrdered => sources.clone(),
         };
-        #[cfg(target_arch = "wasm32")]
-        let timing = GenerationTiming::new(session, _batch_size);
         Ok(Self {
             source,
             session,
@@ -1245,8 +1173,6 @@ where
             padding_targets: None,
             settlement_targets: None,
             policy: PhantomData,
-            #[cfg(target_arch = "wasm32")]
-            timing,
         })
     }
 
@@ -1334,10 +1260,23 @@ where
         &mut self,
         executor: &dyn ImmutableComputeExecutor,
     ) -> Result<Option<PacketSnapshot>, SessionError> {
-        #[cfg(target_arch = "wasm32")]
-        if let Some(timing) = self.timing.as_mut() {
-            timing.mark(self.phase.timing_name());
-        }
+        let _timing = match self.phase {
+            GenerationPhase::ResumeOutput
+            | GenerationPhase::TargetFeatures
+            | GenerationPhase::FeatureSource(_)
+            | GenerationPhase::FinishFeatures
+            | GenerationPhase::CommitFeatures
+            | GenerationPhase::TopLayer
+            | GenerationPhase::CommitTopLayer => {
+                PhaseTimer::start(WorldgenTimingPhase::MutableSettlement, 1)
+            }
+            GenerationPhase::Output
+            | GenerationPhase::PacketNeighbours
+            | GenerationPhase::Finalize => {
+                PhaseTimer::start(WorldgenTimingPhase::SnapshotAssembly, 1)
+            }
+            _ => None,
+        };
         match self.phase {
             GenerationPhase::Admission => {
                 for &coordinate in &self.admissions {
@@ -1843,10 +1782,6 @@ where
                     retained_bytes: self.session.usage().retained_bytes(),
                     stage: "packet-snapshot",
                 });
-                #[cfg(target_arch = "wasm32")]
-                if let Some(timing) = self.timing.as_mut() {
-                    timing.finish();
-                }
                 return Ok(Some(snapshot));
             }
             GenerationPhase::PacketDeferred => {
@@ -2009,7 +1944,6 @@ where
         materializer,
         &mut shared_prefixes,
         false,
-        1,
     )?;
     loop {
         if let Some(snapshot) = machine.step(executor)? {
@@ -2177,8 +2111,14 @@ where
             preseed_retained_mutations(&mut self.materializer, std::slice::from_ref(session))?;
             #[cfg(feature = "worldgen-stage-pmu")]
             let _replay_context = RegionGuard::enter(RegionPhase::ReplayContext);
-            self.materializer
-                .prepare_lifecycle_replay_contexts_prepared(&plan.targets);
+            {
+                let _timing = PhaseTimer::start(
+                    WorldgenTimingPhase::MutableSettlement,
+                    plan.targets.len().min(u32::MAX as usize) as u32,
+                );
+                self.materializer
+                    .prepare_lifecycle_replay_contexts_prepared(&plan.targets);
+            }
             #[cfg(feature = "worldgen-stage-pmu")]
             drop(_replay_context);
             self.settlement_padding = plan.padding.clone();
@@ -2199,13 +2139,13 @@ where
                         &mut self.materializer,
                         &mut self.shared_prefixes,
                         true,
-                        1,
                     )?;
                     machine.padding_targets = Some(&self.settlement_padding);
                     machine.settlement_targets = Some(&self.settlement_targets);
                     machine.advance_mutable(executor)?;
                 } else {
                     if !self.materializer.target_features_completed(coordinate) {
+                        let _timing = PhaseTimer::start(WorldgenTimingPhase::MutableSettlement, 1);
                         self.materializer.complete_target_features_with_mode_observing(
                             coordinate,
                             sequence as u64,
@@ -2222,7 +2162,6 @@ where
                 &mut self.materializer,
                 &mut self.shared_prefixes,
                 true,
-                1,
             )?;
             machine.padding_targets = Some(&self.settlement_padding);
             machine.settlement_targets = Some(&self.settlement_targets);
@@ -2294,8 +2233,14 @@ where
                 &mut self.shared_prefixes,
             )?;
             preseed_retained_mutations(&mut self.materializer, std::slice::from_ref(session))?;
-            self.materializer
-                .prepare_lifecycle_replay_contexts_prepared(&plan.targets);
+            {
+                let _timing = PhaseTimer::start(
+                    WorldgenTimingPhase::MutableSettlement,
+                    plan.targets.len().min(u32::MAX as usize) as u32,
+                );
+                self.materializer
+                    .prepare_lifecycle_replay_contexts_prepared(&plan.targets);
+            }
             self.settlement_padding = plan.padding.clone();
             self.settlement_targets = plan.targets.iter().copied().collect();
             self.materializer
@@ -2314,7 +2259,6 @@ where
                         &mut self.materializer,
                         &mut self.shared_prefixes,
                         true,
-                        1,
                     )?;
                     machine.padding_targets = Some(&self.settlement_padding);
                     machine.settlement_targets = Some(&self.settlement_targets);
@@ -2323,6 +2267,7 @@ where
                         .await?;
                 } else {
                     if !self.materializer.target_features_completed(coordinate) {
+                        let _timing = PhaseTimer::start(WorldgenTimingPhase::MutableSettlement, 1);
                         self.materializer.complete_target_features_with_mode_observing(
                             coordinate,
                             sequence as u64,
@@ -2340,7 +2285,6 @@ where
                 &mut self.materializer,
                 &mut self.shared_prefixes,
                 true,
-                1,
             )?;
             machine.padding_targets = Some(&self.settlement_padding);
             machine.settlement_targets = Some(&self.settlement_targets);
@@ -2389,7 +2333,6 @@ where
             crate::worldgen_session::GenerationRequestResult,
             ) -> Result<(), crate::worldgen_session::GenerationRequestError>,
     {
-        let batch_size = sessions.len();
         if let Some(&coordinate) = plan
             .context
             .iter()
@@ -2431,8 +2374,14 @@ where
         preseed_retained_mutations(&mut self.materializer, sessions)?;
         #[cfg(feature = "worldgen-stage-pmu")]
         let _replay_context = RegionGuard::enter(RegionPhase::ReplayContext);
-        self.materializer
-            .prepare_lifecycle_replay_contexts_prepared(&plan.targets);
+        {
+            let _timing = PhaseTimer::start(
+                WorldgenTimingPhase::MutableSettlement,
+                plan.targets.len().min(u32::MAX as usize) as u32,
+            );
+            self.materializer
+                .prepare_lifecycle_replay_contexts_prepared(&plan.targets);
+        }
         #[cfg(feature = "worldgen-stage-pmu")]
         drop(_replay_context);
 
@@ -2482,7 +2431,6 @@ where
                         &mut self.materializer,
                         &mut self.shared_prefixes,
                         true,
-                        batch_size,
                     )?;
                     machine.padding_targets = Some(&self.settlement_padding);
                     machine.settlement_targets = Some(&self.settlement_targets);
@@ -2514,6 +2462,7 @@ where
             {
                 #[cfg(feature = "worldgen-stage-pmu")]
                 let _mutable_padding = RegionGuard::enter(RegionPhase::MutablePadding);
+                let _timing = PhaseTimer::start(WorldgenTimingPhase::MutableSettlement, 1);
                 self.materializer
                     .complete_target_features_with_mode_observing(
                         target,
@@ -2548,7 +2497,6 @@ where
                             &mut self.materializer,
                             &mut self.shared_prefixes,
                             true,
-                            batch_size,
                         )?;
                         #[cfg(feature = "worldgen-stage-pmu")]
                         drop(_machine_rebuild);
@@ -2611,7 +2559,6 @@ where
             crate::worldgen_session::GenerationRequestError,
         >,
     > {
-        let batch_size = sessions.len();
         let targets = sessions
             .iter()
             .map(|session| session.request().target())
@@ -2685,7 +2632,6 @@ where
                         &mut self.materializer,
                         &mut self.shared_prefixes,
                         true,
-                        batch_size,
                     ) {
                         Ok(machine) => machine,
                         Err(error) => return batch_session_error(sessions.len(), error),
@@ -2728,7 +2674,6 @@ where
                     &mut self.materializer,
                     &mut self.shared_prefixes,
                     true,
-                    batch_size,
                 ) {
                     Ok(machine) => machine,
                     Err(error) => return batch_session_error(sessions.len(), error),
@@ -2763,7 +2708,6 @@ where
             crate::worldgen_session::GenerationRequestError,
         >,
     > {
-        let batch_size = sessions.len();
         let targets = sessions
             .iter()
             .map(|session| session.request().target())
@@ -2817,8 +2761,14 @@ where
             if let Err(error) = preseed_retained_mutations(&mut self.materializer, sessions) {
                 return batch_session_error(sessions.len(), error);
             }
-            self.materializer
-                .prepare_lifecycle_replay_contexts_prepared(&plan.targets);
+            {
+                let _timing = PhaseTimer::start(
+                    WorldgenTimingPhase::MutableSettlement,
+                    plan.targets.len().min(u32::MAX as usize) as u32,
+                );
+                self.materializer
+                    .prepare_lifecycle_replay_contexts_prepared(&plan.targets);
+            }
             self.settlement_padding = plan.padding.clone();
             self.settlement_targets = plan.targets.iter().copied().collect();
             self.materializer
@@ -2864,7 +2814,6 @@ where
                         &mut self.materializer,
                         &mut self.shared_prefixes,
                         true,
-                        batch_size,
                     ) {
                         Ok(machine) => machine,
                         Err(error) => return batch_session_error(sessions.len(), error),
@@ -2882,6 +2831,7 @@ where
                 && settlement_padding_needed_by_live_target(target, sessions)
             {
                 if !self.materializer.target_features_completed(target) {
+                    let _timing = PhaseTimer::start(WorldgenTimingPhase::MutableSettlement, 1);
                     self.materializer
                         .complete_target_features_with_mode_observing(
                             target,
@@ -2933,7 +2883,6 @@ where
                     &mut self.materializer,
                     &mut self.shared_prefixes,
                     true,
-                    batch_size,
                 ) {
                     Ok(machine) => machine,
                     Err(error) => return batch_session_error(sessions.len(), error),
@@ -3065,7 +3014,6 @@ where
         materializer,
         &mut shared_prefixes,
         false,
-        1,
     )?;
     let executor = PersistentWorldgenExecutor;
     loop {
@@ -4760,7 +4708,6 @@ mod tests {
                 &mut materializer,
                 &mut prefixes,
                 false,
-                1,
             )
             .expect("fresh machine");
             while machine.phase != GenerationPhase::PacketNeighbours {
@@ -4776,7 +4723,6 @@ mod tests {
             &mut resumed_materializer,
             &mut resumed_prefixes,
             true,
-            2,
         )
         .expect("resumed machine");
         resumed

@@ -7,10 +7,15 @@
 use wasm_bindgen::prelude::*;
 use web_sys::MessagePort;
 use std::cell::RefCell;
+use lodestone_server::worldgen_progress::{
+    WorldgenTimingPhase, WorldgenTimingSample, WorldgenTimingTotals,
+};
 
 thread_local! {
     static PROGRESS_PORT: RefCell<Option<(MessagePort, u32)>> = const { RefCell::new(None) };
     static TICK_MONITOR: RefCell<Option<lodestone_server::IntegratedTickMonitor>> = const { RefCell::new(None) };
+    static PHASE_TIMINGS: RefCell<[WorldgenTimingTotals; WorldgenTimingPhase::ALL.len()]> =
+        RefCell::new([WorldgenTimingTotals::default(); WorldgenTimingPhase::ALL.len()]);
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
@@ -37,6 +42,10 @@ pub fn start_worker(
     PROGRESS_PORT.with(|slot| *slot.borrow_mut() = Some((progress_port.clone(), epoch)));
     TICK_MONITOR.with(|slot| slot.borrow_mut().take());
     let _ = lodestone_server::worldgen_progress::install_sink(post_worldgen_event);
+    if log::max_level() >= log::LevelFilter::Debug {
+        PHASE_TIMINGS.with(|slot| slot.borrow_mut().fill(WorldgenTimingTotals::default()));
+        let _ = lodestone_server::worldgen_progress::install_timing_sink(record_phase_timing);
+    }
     post_progress(&progress_port, epoch, "server-starting");
     let result = lodestone::net::start_browser_integrated_worker(
         port,
@@ -113,9 +122,55 @@ pub fn sample_worker(epoch: u32, callback_gap_ms: f64) -> bool {
             ] {
                 let _ = js_sys::Reflect::set(&message, &JsValue::from_str(key), &value);
             }
-            port.post_message(&message).is_ok()
+            let posted = port.post_message(&message).is_ok();
+            if posted {
+                post_phase_timings(port, epoch);
+            }
+            posted
         })
     })
+}
+
+fn record_phase_timing(sample: WorldgenTimingSample) {
+    PHASE_TIMINGS.with(|slot| slot.borrow_mut()[sample.phase.index()].record(sample));
+}
+
+fn post_phase_timings(port: &MessagePort, epoch: u32) {
+    PHASE_TIMINGS.with(|slot| {
+        let mut timings = slot.borrow_mut();
+        if timings.iter().all(|totals| totals.calls == 0) {
+            return;
+        }
+        let message = js_sys::Object::new();
+        let phases = js_sys::Array::new();
+        for phase in WorldgenTimingPhase::ALL {
+            let totals = timings[phase.index()];
+            if totals.calls == 0 {
+                continue;
+            }
+            let row = js_sys::Object::new();
+            for (key, value) in [
+                ("phase", JsValue::from_str(phase.name())),
+                ("calls", JsValue::from_f64(totals.calls as f64)),
+                ("items", JsValue::from_f64(totals.items as f64)),
+                ("elapsedMs", JsValue::from_f64(totals.elapsed.as_secs_f64() * 1000.0)),
+                ("maximumMs", JsValue::from_f64(totals.maximum.as_secs_f64() * 1000.0)),
+            ] {
+                let _ = js_sys::Reflect::set(&row, &JsValue::from_str(key), &value);
+            }
+            phases.push(&row);
+        }
+        for (key, value) in [
+            ("kind", JsValue::from_str("worldgen-timing")),
+            ("epoch", JsValue::from_f64(f64::from(epoch))),
+            ("phases", phases.into()),
+        ] {
+            let _ = js_sys::Reflect::set(&message, &JsValue::from_str(key), &value);
+        }
+        if port.post_message(&message).is_ok() {
+            timings.fill(WorldgenTimingTotals::default());
+        }
+    });
 }
 
 fn post_progress(port: &MessagePort, epoch: u32, stage: &str) {

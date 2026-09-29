@@ -15,6 +15,7 @@ use std::sync::{
 };
 use std::time::Duration;
 use lodestone_time::Instant;
+use crate::worldgen_progress::{PhaseTimer, WorldgenTimingPhase};
 
 /// Portable monotonic clock for join-path measurements.
 #[derive(Clone, Copy)]
@@ -2905,6 +2906,7 @@ pub fn encode_chunk_with_source<P: ServerProtocol>(
         .unwrap_or(crate::dimension::Dimension::Overworld);
     if !proto.retains_initial_column_light() {
         let packet_column = column_for_initial_encode(column);
+        let _timing = PhaseTimer::start(WorldgenTimingPhase::PacketEncoding, 1);
         return proto.try_encode_chunk_in_dimension(cx, cz, &packet_column, dimension);
     }
     // The initial packet must be based on a complete, settled 3×3 footprint.
@@ -2919,10 +2921,14 @@ pub fn encode_chunk_with_source<P: ServerProtocol>(
         let mut captured_neighbours = Vec::new();
         let exclusive = attempt == LIGHT_SETTLEMENT_OPTIMISTIC_RETRIES;
         let mut compute = |centre: &ChunkColumn, neighbours: &[(i32, i32, &ChunkColumn)]| {
-            captured_neighbours = neighbours
-                .iter()
-                .map(|(dx, dz, neighbour)| (*dx, *dz, (*neighbour).clone()))
-                .collect();
+            {
+                let _timing = PhaseTimer::start(WorldgenTimingPhase::SnapshotAssembly, 1);
+                captured_neighbours = neighbours
+                    .iter()
+                    .map(|(dx, dz, neighbour)| (*dx, *dz, (*neighbour).clone()))
+                    .collect();
+            }
+            let _timing = PhaseTimer::start(WorldgenTimingPhase::PacketLighting, 1);
             proto.compute_initial_column_lights_with_neighbours_in_dimension(
                 centre,
                 neighbours,
@@ -2953,6 +2959,7 @@ pub fn encode_chunk_with_source<P: ServerProtocol>(
                 }
                 let packet_column = column_for_initial_encode(&centre);
                 let neighbour_refs = borrowed_neighbours(&captured_neighbours);
+                let _timing = PhaseTimer::start(WorldgenTimingPhase::PacketEncoding, 1);
                 return proto.try_encode_chunk_with_neighbours_in_dimension(
                     cx,
                     cz,
@@ -2970,6 +2977,7 @@ pub fn encode_chunk_with_source<P: ServerProtocol>(
                 }
                 let packet_column = column_for_initial_encode(&fallback);
                 let neighbour_refs = borrowed_neighbours(&captured_neighbours);
+                let _timing = PhaseTimer::start(WorldgenTimingPhase::PacketEncoding, 1);
                 return proto.try_encode_chunk_with_neighbours_in_dimension(
                     cx,
                     cz,
@@ -3004,6 +3012,7 @@ pub fn encode_chunk_with_source<P: ServerProtocol>(
 /// dependency-initialized column; a `NoLight` result must not let a direct
 /// encoder mistake that intermediate storage for the final centre answer.
 fn column_for_initial_encode(column: &ChunkColumn) -> ChunkColumn {
+    let _timing = PhaseTimer::start(WorldgenTimingPhase::SnapshotAssembly, 1);
     let mut column = column.clone();
     if column.retained_light().is_some() && column.centre_settled_light().is_none() {
         column.clear_retained_light();
@@ -3039,16 +3048,22 @@ fn detached_initial_packet_snapshot_columns<P: ServerProtocol>(
     dimension: crate::dimension::Dimension,
 ) -> ChunkColumn {
     let settlement = if let Some(settlement) = snapshot.light_settlement() {
+        let _timing = PhaseTimer::start(WorldgenTimingPhase::SnapshotAssembly, 1);
         settlement.clone()
     } else {
         let column = column_for_initial_encode(snapshot.column());
-        let Some(settlement) = proto.compute_initial_column_lights_with_neighbours_in_dimension(
-            &column,
-            neighbours,
-            dimension,
-        ) else {
+        let settlement = {
+            let _timing = PhaseTimer::start(WorldgenTimingPhase::PacketLighting, 1);
+            proto.compute_initial_column_lights_with_neighbours_in_dimension(
+                &column,
+                neighbours,
+                dimension,
+            )
+        };
+        let Some(settlement) = settlement else {
             return column_for_initial_encode(snapshot.column());
         };
+        let _timing = PhaseTimer::start(WorldgenTimingPhase::SnapshotAssembly, 1);
         match snapshot.install_light_settlement(settlement) {
             Ok(()) => snapshot
                 .light_settlement()
@@ -3058,6 +3073,7 @@ fn detached_initial_packet_snapshot_columns<P: ServerProtocol>(
         }
     };
     let mut column = column_for_initial_encode(snapshot.column());
+    let _timing = PhaseTimer::start(WorldgenTimingPhase::SnapshotAssembly, 1);
     column.set_retained_light_with_status(
         settlement.centre_light().clone(),
         crate::chunk::RetainedLightStatus::CentreSettled,
@@ -3073,22 +3089,28 @@ pub fn encode_packet_snapshot_with_protocol<P: ServerProtocol>(
     dimension: crate::dimension::Dimension,
 ) -> Result<ServerDirective, ChunkEncodeError> {
     if !proto.retains_initial_column_light() {
+        let column = column_for_initial_encode(snapshot.column());
+        let _timing = PhaseTimer::start(WorldgenTimingPhase::PacketEncoding, 1);
         return proto.try_encode_chunk_in_dimension(
             cx,
             cz,
-            &column_for_initial_encode(snapshot.column()),
+            &column,
             dimension,
         );
     }
-    let neighbours = snapshot
-        .neighbours()
-        .iter()
-        .map(|neighbour| {
-            let coordinate = neighbour.coordinate();
-            (coordinate.0 - cx, coordinate.1 - cz, neighbour.column())
-        })
-        .collect::<Vec<_>>();
+    let neighbours = {
+        let _timing = PhaseTimer::start(WorldgenTimingPhase::SnapshotAssembly, 1);
+        snapshot
+            .neighbours()
+            .iter()
+            .map(|neighbour| {
+                let coordinate = neighbour.coordinate();
+                (coordinate.0 - cx, coordinate.1 - cz, neighbour.column())
+            })
+            .collect::<Vec<_>>()
+    };
     let column = detached_initial_packet_snapshot_columns(proto, snapshot, &neighbours, dimension);
+    let _timing = PhaseTimer::start(WorldgenTimingPhase::PacketEncoding, 1);
     proto.try_encode_chunk_with_neighbours_in_dimension(
         cx,
         cz,
@@ -18569,15 +18591,18 @@ where
                             .await;
                     }
                 };
-                apply(conn, &mut state, proto.begin_chunk_batch()).await?;
-                apply(conn, &mut state, directive).await?;
-                view.mark_delivered((cx, cz));
-                apply(conn, &mut state, proto.end_chunk_batch(1)).await?;
+                {
+                    let _timing = PhaseTimer::start(WorldgenTimingPhase::WireSend, 1);
+                    apply(conn, &mut state, proto.begin_chunk_batch()).await?;
+                    apply(conn, &mut state, directive).await?;
+                    view.mark_delivered((cx, cz));
+                    apply(conn, &mut state, proto.end_chunk_batch(1)).await?;
+                }
                 if let Some(trace) = join_trace.as_ref() {
                     trace.mark("delivered", cx, cz);
                 }
                 chunks_sent += 1;
-                if chunks_sent == 1 || chunks_sent.is_multiple_of(16) {
+                if chunks_sent == 1 || chunks_sent.is_multiple_of(16) || join_stream.is_done() {
                     crate::worldgen_progress::emit(
                         crate::worldgen_progress::WorldgenProgress::wire_delivered(
                             (cx, cz),

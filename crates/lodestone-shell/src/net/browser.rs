@@ -128,6 +128,38 @@ fn browser_diagnostic(message: std::fmt::Arguments<'_>) {
 }
 
 #[cfg(target_arch = "wasm32")]
+fn forward_phase_timings(value: &JsValue, epoch: u32) {
+    let received_epoch = js_sys::Reflect::get(value, &JsValue::from_str("epoch"))
+        .ok()
+        .and_then(|value| value.as_f64());
+    if received_epoch != Some(f64::from(epoch)) {
+        return;
+    }
+    let Ok(phases) = js_sys::Reflect::get(value, &JsValue::from_str("phases"))
+        .and_then(|value| value.dyn_into::<js_sys::Array>())
+    else {
+        return;
+    };
+    for row in phases.iter() {
+        let phase = js_sys::Reflect::get(&row, &JsValue::from_str("phase"))
+            .ok()
+            .and_then(|value| value.as_string());
+        let number = |key| js_sys::Reflect::get(&row, &JsValue::from_str(key))
+            .ok()
+            .and_then(|value| value.as_f64())
+            .filter(|value| value.is_finite() && *value >= 0.0);
+        let (Some(phase), Some(calls), Some(items), Some(elapsed), Some(maximum)) =
+            (phase, number("calls"), number("items"), number("elapsedMs"), number("maximumMs"))
+        else {
+            continue;
+        };
+        browser_diagnostic(format_args!(
+            "worldgen timing: phase={phase} calls={calls:.0} items={items:.0} sum_ms={elapsed:.3} max_ms={maximum:.3}",
+        ));
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
 impl tokio::io::AsyncRead for BrowserIntegratedTransport {
     fn poll_read(
         mut self: Pin<&mut Self>,
@@ -413,6 +445,10 @@ pub(super) async fn launch_browser_worker(
         let kind = js_sys::Reflect::get(&value, &JsValue::from_str("kind"))
             .ok()
             .and_then(|kind| kind.as_string());
+        if kind.as_deref() == Some("worldgen-timing") {
+            forward_phase_timings(&value, epoch);
+            return;
+        }
         if kind.as_deref() == Some("worker-health") {
             let number = |key| js_sys::Reflect::get(&value, &JsValue::from_str(key))
                 .ok()
