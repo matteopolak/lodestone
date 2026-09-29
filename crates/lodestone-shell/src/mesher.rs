@@ -27,12 +27,13 @@
 
 use std::cell::RefCell;
 use std::cmp::Reverse;
-use std::collections::{BTreeSet, BinaryHeap, HashMap, HashSet};
+use std::collections::{BTreeSet, BinaryHeap, HashSet};
+#[cfg(not(target_arch = "wasm32"))]
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::AtomicU64;
-#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 // The worker pool's plumbing. Native-only: `MeshScheduler`'s browser arm has no
 // threads and no channels — it meshes in-frame under a time budget. See that type.
@@ -935,15 +936,17 @@ impl MeshScheduler {
     /// gives the floor for free.
     pub fn drain(&mut self) -> Vec<Meshed> {
         let mut out = std::mem::take(&mut self.backlog.ready);
-        let deadline = crate::platform::Instant::now() + BROWSER_MESH_BUDGET;
-        while let Some(snap) = self.backlog.queue.pop_front() {
+        let mut now = crate::platform::Instant::now();
+        let deadline = now + BROWSER_MESH_BUDGET;
+        while let Some(snap) = self.backlog.queue.pop_front(now) {
             out.push(mesh_one(
                 snap,
                 &self.classifier,
                 self.cutout_leaves,
                 self.blend_radius,
             ));
-            if crate::platform::Instant::now() >= deadline {
+            now = crate::platform::Instant::now();
+            if now >= deadline {
                 break;
             }
         }
@@ -962,7 +965,7 @@ impl MeshScheduler {
     /// meshes, and a partial result would leave no way to make progress.
     pub fn drain_blocking(&mut self, n: usize) -> Vec<Meshed> {
         while self.backlog.ready.len() < n {
-            let Some(snap) = self.backlog.queue.pop_front() else {
+            let Some(snap) = self.backlog.queue.pop_front(crate::platform::Instant::now()) else {
                 break;
             };
             let meshed = mesh_one(
@@ -1302,6 +1305,23 @@ pub struct MeshBacklog {
     pub waiting_columns: usize,
     pub forced_columns: usize,
     pub pending_sections: usize,
+    pub browser_queue: Option<BrowserMeshQueueStats>,
+}
+
+/// Browser queue lifetime totals and waiting time, sampled without walking its
+/// entries.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct BrowserMeshQueueStats {
+    pub insertions: u64,
+    pub replacements: u64,
+    pub cancellations: u64,
+    pub pops: u64,
+    pub queued_keys: usize,
+    /// Maximum live queued-key count since this scheduler was created.
+    pub high_water_keys: usize,
+    /// Time since the front key's first submission; replacements preserve it.
+    pub oldest_wait: Duration,
+    pub max_pop_wait: Duration,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -2261,6 +2281,16 @@ impl TerrainMesh {
             waiting_columns: self.pending_arrivals.len(),
             forced_columns: self.forced_columns.len(),
             pending_sections: self.scheduler.pending(),
+            browser_queue: {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    Some(self.scheduler.backlog.stats())
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    None
+                }
+            },
         }
     }
 

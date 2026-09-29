@@ -95,6 +95,8 @@ durations remain wall-time markers rather than invented per-phase counters.
 The selected template must expose `Cycles Instructions` in that order; other
 counter layouts are reported as unavailable rather than interpreted as this
 pair.
+The wrapper accepts Instruments' directory-backed trace bundles; the subsequent
+table-of-contents export validates that the capture can actually be read.
 
 With `LODESTONE_CLIENT_JOIN_MOVE_SECONDS` set, the fixture starts moving after
 the loading overlay clears and terrain has been presented. It holds forward,
@@ -202,6 +204,19 @@ acknowledgements; it does not measure when the GPU completes the work. The
 browser's existing `frame_profile` summary still provides whole-frame phase
 tails, with its `mesh_upload` phase combining CPU meshing and renderer handoff.
 No frame or section records are emitted when debug logging is off.
+
+The companion `wasm mesh queue` line reports cumulative insert, replacement,
+cancellation, and pop counts plus current queued keys. Its high-water key count
+captures admission peaks before the drain; high-water and maximum pop wait are
+scheduler-lifetime values, not reporting-interval maxima. Oldest wait measures
+the first admission of the front key, which replacements do not reset. These
+counts exclude completed geometry and do not measure unique retained heap bytes.
+
+The renderer runs in its own worker, so page Long Tasks do not measure its stalls.
+The worker's timer adds a nominal 16 ms after each redraw. Compare frame gaps
+against an idle control rather than interpreting every gap above 16.7 ms as
+blocked work; generation-worker health and renderer queue waits describe
+different scheduling domains.
 
 ## How to change it
 
