@@ -188,10 +188,10 @@ pays nothing beyond one cached boolean per event.
 
 Two plugins that have never heard of each other still need a shared order — the schedule anchors above
 only order a plugin against *our* systems. `EventPriority::{Lowest, Low, Normal, High, Highest, Monitor}`
-mirrors Bukkit's tiers, `.chain()`ed into all four public schedules. `Monitor` is enforced structurally:
-a system with any mutable `World` access fails to register in that tier, checked against bevy's
-per-system access metadata before scheduling (a `Monitor` system queuing a deferred `Commands` mutation
-is the one known gap this check cannot see). WASM manifests apply the same read-only boundary at
+mirrors Bukkit's tiers, `.chain()`ed into all four public schedules. A native Monitor registration
+should call `assert_monitor_system_is_read_only` before adding its system. It rejects both mutable
+`World` access reported by bevy's system access metadata and deferred parameters such as `Commands`,
+whose queued mutations are invisible to that metadata. WASM manifests apply the same read-only boundary at
 admission: a `monitor` guest may observe, but cannot request `act:*`, `world:write`, `veto:actions`,
 or `commands:register` capabilities. A malformed monitor manifest is rejected before its module is
 compiled, while an observation-only monitor remains loadable.
