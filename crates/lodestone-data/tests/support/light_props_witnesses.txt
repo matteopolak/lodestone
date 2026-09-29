@@ -1,0 +1,44 @@
+# Bounded exact rows from LightPropertiesOracle 26.2 protocol=776
+# capture-sha256 6ec5b31daeab2cbdab643ba2f696ebd042aca0683a6e10b92c219ae12e9f8d2b
+# Full census: 32366 states / 1196 blocks; see docs/block-light-inputs.md.
+# id block-resource-name raw-dampening emission sorted-properties-or-dash
+0 minecraft:air 0 0 -
+1 minecraft:stone 15 0 -
+562 minecraft:glass 0 0 -
+86 minecraft:water 1 0 level=0
+252 minecraft:oak_leaves 1 0 distance=1,persistent=true,waterlogged=true
+27161 minecraft:tinted_glass 15 0 -
+5328 minecraft:furnace 15 0 facing=north,lit=false
+5327 minecraft:furnace 15 13 facing=north,lit=true
+9480 minecraft:redstone_lamp 15 0 lit=false
+9479 minecraft:redstone_lamp 15 15 lit=true
+6882 minecraft:redstone_ore 15 0 lit=false
+6881 minecraft:redstone_ore 15 9 lit=true
+6886 minecraft:redstone_torch 0 0 lit=false
+6885 minecraft:redstone_torch 0 7 lit=true
+12536 minecraft:light 0 0 level=0,waterlogged=false
+12535 minecraft:light 1 0 level=0,waterlogged=true
+12550 minecraft:light 0 7 level=7,waterlogged=false
+12549 minecraft:light 1 7 level=7,waterlogged=true
+12566 minecraft:light 0 15 level=15,waterlogged=false
+12565 minecraft:light 1 15 level=15,waterlogged=true
+30250 minecraft:cave_vines 0 0 age=0,berries=false
+30249 minecraft:cave_vines 0 14 age=0,berries=true
+30302 minecraft:cave_vines_plant 0 0 berries=false
+30301 minecraft:cave_vines_plant 0 14 berries=true
+8517 minecraft:glow_lichen 0 0 down=false,east=false,north=false,south=false,up=false,waterlogged=false,west=false
+8501 minecraft:glow_lichen 0 7 down=false,east=false,north=true,south=false,up=false,waterlogged=false,west=false
+8515 minecraft:glow_lichen 1 0 down=false,east=false,north=false,south=false,up=false,waterlogged=true,west=false
+8499 minecraft:glow_lichen 1 7 down=false,east=false,north=true,south=false,up=false,waterlogged=true,west=false
+13333 minecraft:oak_slab 0 0 type=bottom,waterlogged=false
+13332 minecraft:oak_slab 1 0 type=bottom,waterlogged=true
+13335 minecraft:oak_slab 15 0 type=double,waterlogged=false
+13399 minecraft:stone_slab 0 0 type=bottom,waterlogged=false
+13398 minecraft:stone_slab 1 0 type=bottom,waterlogged=true
+13401 minecraft:stone_slab 15 0 type=double,waterlogged=false
+23099 minecraft:candle 0 0 candles=1,lit=false,waterlogged=false
+23097 minecraft:candle 0 3 candles=1,lit=true,waterlogged=false
+23111 minecraft:candle 0 0 candles=4,lit=false,waterlogged=false
+23109 minecraft:candle 0 12 candles=4,lit=true,waterlogged=false
+2241 minecraft:sticky_piston 15 0 extended=false,facing=north
+2235 minecraft:sticky_piston 0 0 extended=true,facing=north
