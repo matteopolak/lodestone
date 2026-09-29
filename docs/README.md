@@ -760,6 +760,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   release metadata and packet IDs for Minecraft 26.3 (protocol 777). It declares
   `lodestone-v26-2` as a compatibility base, while client joining and hosting remain
   unavailable until wire and registry changes are independently verified.
+- [26.3 game-data ID translation](./protocol-26-3-id-translation.md) —
+  `lodestone-v26-3::id_translation` maps the canonical 26.2 block-state and item IDs
+  to their 26.3 wire IDs. It lets a future 26.3 adapter reuse internal game data
+  without sending 26.2 registry numbers to a 26.3 peer.
 - [Protocol Block Updates](./protocol-block-updates.md) — The server protocol seam
   encodes one block edit confirmation for each hosted protocol family. Runtime callers
   provide the canonical `lodestone_data::block_states::StateId`; the selected protocol

@@ -12,6 +12,9 @@
 #[path = "generated/packet_ids.rs"]
 pub mod packet_ids;
 
+/// Translation between canonical 26.2 game-data IDs and 26.3 wire IDs.
+pub mod id_translation;
+
 pub const PROTOCOL: i32 = packet_ids::PROTOCOL_VERSION;
 pub const MINECRAFT_VERSION: &str = packet_ids::MINECRAFT_VERSION;
 pub const DATA_VERSION: u32 = 5023;

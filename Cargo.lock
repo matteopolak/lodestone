@@ -3931,6 +3931,7 @@ dependencies = [
 name = "lodestone-v26-3"
 version = "0.1.0"
 dependencies = [
+ "lodestone-data",
  "lodestone-v26-2",
  "serde_json",
 ]
