@@ -1220,7 +1220,7 @@ fn main() {
         "input_to_draw_ms": probe.clicked_at.zip(probe.drawn_at).map(|(start, end)| end.duration_since(start).as_secs_f64() * 1000.0),
     }));
     let report = serde_json::json!({
-        "schema": "lodestone-client-join-mesh-profile-v19",
+        "schema": "lodestone-client-join-mesh-profile-v20",
         "seed": SEED,
         "target_size": [target_width, target_height],
         "visible_radius": radius,
@@ -1261,6 +1261,12 @@ fn main() {
         "uploads_per_section_p95": p95_uploads_per_section,
         "uploads_per_section_max": max_uploads_per_section,
         "mesh_work": {
+            "native_scheduler": {
+                "submitted": mesh_work.native_scheduler.submitted,
+                "started": mesh_work.native_scheduler.started,
+                "skipped_before_mesh": mesh_work.native_scheduler.skipped_before_mesh,
+                "stale_results_discarded": mesh_work.native_scheduler.stale_results_discarded,
+            },
             "column_arrivals": mesh_work.column_arrivals,
             "redecoded_column_arrivals": mesh_work.redecoded_column_arrivals,
             "column_snapshot_sections": mesh_work.column_snapshot_sections,

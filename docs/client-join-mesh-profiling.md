@@ -163,6 +163,11 @@ adjacent sections excluded because their blocks are wholly interior.
 snapshot will read the patch without a separate light-only remesh, including
 already presented sections. `column_absorbed_light_sections` counts previously
 queued light intents consumed by a full-column capture of those same sections.
+The native `mesh_work.native_scheduler` counters record submitted jobs, actual
+geometry starts, jobs skipped before computation, and stale built results
+discarded at handoff. They distinguish cancelled work from accepted geometry
+that later produces an unchanged GPU upload; worker counters are independently
+sampled atomics, not a transactional snapshot.
 The movement timeline also samples each new column's 3×3 residency halo before
 draining mesh results, then records its first returned section mesh and full
 presentation. This distinguishes a column waiting for its outer dependency
