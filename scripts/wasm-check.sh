@@ -440,9 +440,9 @@ fi
 # (lodestone-client confines its runtime-timer hazard — tokio::time::timeout/sleep,
 # which compiles to wasm and panics for want of a timer-enabled runtime — to the
 # single cfg(not(wasm32))-gated src/native_time.rs, and additionally bans the
-# whole Instant::now()/std::fs/std::thread family across the crate with empty
-# allowlists: the driver is event-driven and never reads a wall clock, so those
-# are checked invariants. tokio::spawn is confined to the spawn.rs seam, whose
+# direct std::time::Instant/std::fs/std::thread family across the crate with empty
+# allowlists: the driver uses a portable clock, so direct std time is forbidden.
+# tokio::spawn is confined to the spawn.rs seam, whose
 # wasm arm uses wasm_bindgen_futures::spawn_local instead.)
 CONFINEMENT_RULES=(
   "lodestone-assets fs-confinement|crates/lodestone-assets/src|std::fs::|source_native.rs"
@@ -450,7 +450,7 @@ CONFINEMENT_RULES=(
   "lodestone-audio time-confinement|crates/lodestone-audio/src|Instant::now(|"
   "lodestone-sound time-confinement|crates/lodestone-sound/src|Instant::now(|"
   "lodestone-client time-confinement|crates/lodestone-client/src|tokio::time::|native_time.rs"
-  "lodestone-client instant-ban|crates/lodestone-client/src|Instant::now(|"
+  "lodestone-client instant-ban|crates/lodestone-client/src|std::time::Instant|"
   "lodestone-client fs-ban|crates/lodestone-client/src|std::fs::|"
   "lodestone-client thread-ban|crates/lodestone-client/src|std::thread|"
   "lodestone-client spawn-confinement|crates/lodestone-client/src|tokio::spawn|spawn.rs"

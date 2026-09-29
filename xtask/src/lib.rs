@@ -4860,8 +4860,6 @@ pub fn confinement_rules() -> Vec<ConfinementRule> {
             banned: "Instant::now(",
             allowlist: &[],
         },
-        // The driver's opt-in lock trace uses the portable clock; direct std
-        // instants remain forbidden on every client path.
         ConfinementRule {
             label: "lodestone-client time-confinement",
             src_dir: "crates/lodestone-client/src",
@@ -4870,12 +4868,6 @@ pub fn confinement_rules() -> Vec<ConfinementRule> {
         },
         ConfinementRule {
             label: "lodestone-client instant-ban",
-            src_dir: "crates/lodestone-client/src",
-            banned: "Instant::now(",
-            allowlist: &["driver.rs"],
-        },
-        ConfinementRule {
-            label: "lodestone-client std-instant-ban",
             src_dir: "crates/lodestone-client/src",
             banned: "std::time::Instant",
             allowlist: &[],

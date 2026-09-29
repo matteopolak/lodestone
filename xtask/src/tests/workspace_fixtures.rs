@@ -408,6 +408,14 @@ license = { package = "third-party", version = "1" }
 name = "lodestone-missing-license"
 "#,
         )?;
+        for generated in ["xtask/target/test-workspaces", "web/build"] {
+            let generated = workspace.join(generated);
+            std::fs::create_dir_all(&generated)?;
+            std::fs::write(
+                generated.join("Cargo.toml"),
+                "[package]\nname = \"lodestone-generated\"\nlicense = \"MIT\"\n",
+            )?;
+        }
 
         let violations = first_party_manifest_license_violations(workspace.deref())?;
         assert_eq!(
@@ -426,9 +434,10 @@ name = "lodestone-missing-license"
             .join("..")
             .canonicalize()
             .context("canonicalize workspace root")?;
+        let violations = first_party_manifest_license_violations(&workspace_root)?;
         assert!(
-            first_party_manifest_license_violations(&workspace_root)?.is_empty(),
-            "first-party Cargo.toml license declarations must be GPL-3.0-or-later"
+            violations.is_empty(),
+            "first-party Cargo.toml license declarations must be GPL-3.0-or-later: {violations:#?}"
         );
         Ok(())
     }

@@ -894,7 +894,7 @@ const PARTICLE_RENDERERS: &[RendererClaim] = &[
     RendererClaim {
         name: "local item crumbs",
         file: "crates/lodestone-shell/src/consume.rs",
-        symbol: "emit_consume_particles",
+        symbol: "emit_consume_effects",
         rule: ClaimRule::Explicit(&["item"]),
     },
 ];
