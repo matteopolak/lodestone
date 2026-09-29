@@ -4,6 +4,139 @@
 
 use super::*;
 
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+const WASM_MESH_PROFILE_WINDOW: usize = 120;
+
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+#[derive(Clone, Copy)]
+struct WasmMeshSample {
+    frame_gap_ms: f32,
+    drain_ms: f32,
+    upload_ms: f32,
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+struct WasmMeshProfile {
+    samples: [Option<WasmMeshSample>; WASM_MESH_PROFILE_WINDOW],
+    next: usize,
+    len: usize,
+    last_report: Option<Instant>,
+    last_frame_start: Option<Instant>,
+    interval_meshes: usize,
+    backlog_max: crate::mesher::MeshBacklog,
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+impl WasmMeshProfile {
+    const fn new() -> Self {
+        Self {
+            samples: [None; WASM_MESH_PROFILE_WINDOW],
+            next: 0,
+            len: 0,
+            last_report: None,
+            last_frame_start: None,
+            interval_meshes: 0,
+            backlog_max: crate::mesher::MeshBacklog {
+                ready_columns: 0,
+                waiting_columns: 0,
+                forced_columns: 0,
+                pending_sections: 0,
+            },
+        }
+    }
+
+    fn record(
+        &mut self,
+        frame_start: Instant,
+        now: Instant,
+        drain_ms: f32,
+        upload_ms: f32,
+        mesh_count: usize,
+        backlog: crate::mesher::MeshBacklog,
+    ) {
+        let frame_gap_ms = self
+            .last_frame_start
+            .map_or(0.0, |last| frame_start.duration_since(last).as_secs_f32() * 1000.0);
+        self.last_frame_start = Some(frame_start);
+        self.samples[self.next] = Some(WasmMeshSample {
+            frame_gap_ms,
+            drain_ms,
+            upload_ms,
+        });
+        self.next = (self.next + 1) % WASM_MESH_PROFILE_WINDOW;
+        self.len = (self.len + 1).min(WASM_MESH_PROFILE_WINDOW);
+        self.interval_meshes = self.interval_meshes.saturating_add(mesh_count);
+        self.backlog_max.ready_columns =
+            self.backlog_max.ready_columns.max(backlog.ready_columns);
+        self.backlog_max.waiting_columns =
+            self.backlog_max.waiting_columns.max(backlog.waiting_columns);
+        self.backlog_max.forced_columns =
+            self.backlog_max.forced_columns.max(backlog.forced_columns);
+        self.backlog_max.pending_sections =
+            self.backlog_max.pending_sections.max(backlog.pending_sections);
+
+        let Some(last_report) = self.last_report else {
+            self.last_report = Some(now);
+            return;
+        };
+        if now.duration_since(last_report) < Duration::from_secs(1) {
+            return;
+        }
+        self.last_report = Some(now);
+
+        let mut drain = [0.0_f32; WASM_MESH_PROFILE_WINDOW];
+        let mut upload = [0.0_f32; WASM_MESH_PROFILE_WINDOW];
+        let mut frame_gap = [0.0_f32; WASM_MESH_PROFILE_WINDOW];
+        for (index, sample) in self.samples.iter().flatten().enumerate() {
+            frame_gap[index] = sample.frame_gap_ms;
+            drain[index] = sample.drain_ms;
+            upload[index] = sample.upload_ms;
+        }
+        let (frame_gap_p95, frame_gap_max) = percentile_and_max(&mut frame_gap[..self.len]);
+        let (drain_p95, drain_max) = percentile_and_max(&mut drain[..self.len]);
+        let (upload_p95, upload_max) = percentile_and_max(&mut upload[..self.len]);
+        tracing::debug!(
+            target: "frame_profile",
+            frames = self.len,
+            upload_calls = self.interval_meshes,
+            frame_gap_p95_ms = frame_gap_p95,
+            frame_gap_max_ms = frame_gap_max,
+            drain_p95_ms = drain_p95,
+            drain_max_ms = drain_max,
+            upload_p95_ms = upload_p95,
+            upload_max_ms = upload_max,
+            backlog_ready_columns_max = self.backlog_max.ready_columns,
+            backlog_waiting_columns_max = self.backlog_max.waiting_columns,
+            backlog_forced_columns_max = self.backlog_max.forced_columns,
+            backlog_pending_sections_max = self.backlog_max.pending_sections,
+            "wasm mesh drain and upload profile"
+        );
+        self.interval_meshes = 0;
+        self.backlog_max = crate::mesher::MeshBacklog {
+            ready_columns: 0,
+            waiting_columns: 0,
+            forced_columns: 0,
+            pending_sections: 0,
+        };
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+fn percentile_and_max(samples: &mut [f32]) -> (f32, f32) {
+    if samples.is_empty() {
+        return (0.0, 0.0);
+    }
+    samples.sort_unstable_by(f32::total_cmp);
+    let p95_index = ((samples.len() - 1) as f32 * 0.95).round() as usize;
+    (samples[p95_index], samples[samples.len() - 1])
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+std::thread_local! {
+    static WASM_MESH_PROFILE: std::cell::RefCell<WasmMeshProfile> =
+        std::cell::RefCell::new(WasmMeshProfile::new());
+}
+
 impl WindowApp {
 
 
@@ -489,18 +622,34 @@ impl WindowApp {
         let mesh_upload_started = Instant::now();
         #[cfg(not(target_arch = "wasm32"))]
         let mut mesh_upload_count = 0;
-        for meshed in self.sim.drain_meshes() {
+        #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+        let profile_mesh_work = tracing::enabled!(target: "frame_profile", tracing::Level::DEBUG);
+        #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+        let mesh_drain_started = profile_mesh_work.then(Instant::now);
+        let meshed_results = self.sim.drain_meshes();
+        #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+        let mesh_drain_ms = mesh_drain_started
+            .map(|started| started.elapsed().as_secs_f32() * 1000.0);
+        #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+        let mesh_count = meshed_results.len();
+        #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+        let mesh_upload_started = profile_mesh_work.then(Instant::now);
+        for meshed in meshed_results {
             render.upload_meshed(device, queue, &meshed);
-            // `Sim::drain_meshes` has only crossed the CPU scheduler boundary.
-            // A loading gate may advance after the renderer has received this
-            // section, so acknowledge the hand-off after the upload call rather
-            // than treating a worker result or a global pending count as ready.
+            // On native, `Sim::drain_meshes` has only crossed the CPU scheduler
+            // boundary; on Wasm it also performs the bounded synchronous mesh
+            // drain. A loading gate may advance after the renderer has received
+            // this section, so acknowledge the hand-off after upload rather than
+            // treating a worker result or a global pending count as ready.
             self.sim.mark_mesh_uploaded(meshed.key);
             #[cfg(not(target_arch = "wasm32"))]
             {
                 mesh_upload_count += 1;
             }
         }
+        #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+        let mesh_upload_ms = mesh_upload_started
+            .map(|started| started.elapsed().as_secs_f32() * 1000.0);
         #[cfg(not(target_arch = "wasm32"))]
         crate::mesher::record_native_mesh_upload_cost(
             mesh_upload_started.elapsed(),
@@ -513,6 +662,19 @@ impl WindowApp {
         self.sim.refresh_terrain_readiness();
         #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
         {
+            if let (Some(mesh_drain_ms), Some(mesh_upload_ms)) = (mesh_drain_ms, mesh_upload_ms) {
+                WASM_MESH_PROFILE.with(|profile| {
+                    let mut profile = profile.borrow_mut();
+                    profile.record(
+                        frame_start,
+                        Instant::now(),
+                        mesh_drain_ms,
+                        mesh_upload_ms,
+                        mesh_count,
+                        self.sim.mesh_backlog(),
+                    );
+                });
+            }
             let loaded_columns = self.sim.terrain_progress().map_or(0, |progress| progress.loaded);
             let pending_meshes = self.sim.pending_meshes();
             let overlay_ready = self.sim.shows_new_world_loading() && self.sim.world_wait().is_none();
