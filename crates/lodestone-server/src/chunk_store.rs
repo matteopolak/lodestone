@@ -695,9 +695,17 @@ struct GenerationRegionCoordinator {
     wake: std::sync::Condvar,
 }
 
-struct GenerationRegionLease<'a> {
+struct GenerationRegionClaim<'a> {
     coordinator: &'a GenerationRegionCoordinator,
     ticket: u64,
+}
+
+struct GenerationRegionReservation<'a> {
+    claim: GenerationRegionClaim<'a>,
+}
+
+struct GenerationRegionLease<'a> {
+    _claim: GenerationRegionClaim<'a>,
 }
 
 impl Default for GenerationRegionCoordinator {
@@ -715,7 +723,7 @@ impl Default for GenerationRegionCoordinator {
 }
 
 impl GenerationRegionCoordinator {
-    fn enqueue(&self, coordinates: &[(i32, i32)]) -> u64 {
+    fn enqueue(&self, coordinates: &[(i32, i32)]) -> GenerationRegionReservation<'_> {
         let mut state = self.state.lock().expect("generation region lock poisoned");
         state.next_ticket = state.next_ticket.wrapping_add(1);
         let ticket = state.next_ticket;
@@ -723,7 +731,12 @@ impl GenerationRegionCoordinator {
         coordinates.sort_unstable();
         coordinates.dedup();
         state.pending.insert(ticket, coordinates);
-        ticket
+        GenerationRegionReservation {
+            claim: GenerationRegionClaim {
+                coordinator: self,
+                ticket,
+            },
+        }
     }
 
     fn ready(state: &GenerationRegionState, ticket: u64) -> bool {
@@ -743,18 +756,9 @@ impl GenerationRegionCoordinator {
                 .any(|(_, pending)| overlaps(pending))
     }
 
-    #[cfg(target_arch = "wasm32")]
-    fn try_activate(&self, ticket: u64) -> bool {
-        let mut state = self.state.lock().expect("generation region lock poisoned");
-        if !Self::ready(&state, ticket) {
-            return false;
-        }
-        let coordinates = state
-            .pending
-            .remove(&ticket)
-            .expect("ready ticket must remain pending");
-        state.active.insert(ticket, coordinates);
-        true
+    #[cfg(any(target_arch = "wasm32", test))]
+    fn try_acquire(&self, coordinates: &[(i32, i32)]) -> Option<GenerationRegionLease<'_>> {
+        self.enqueue(coordinates).try_activate().ok()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -772,12 +776,14 @@ impl GenerationRegionCoordinator {
         coordinates: &[(i32, i32)],
         is_cancelled: impl Fn() -> bool,
     ) -> Result<GenerationRegionLease<'_>, ()> {
-        let ticket = self.enqueue(coordinates);
+        let mut reservation = self.enqueue(coordinates);
         let mut state = self.state.lock().expect("generation region lock poisoned");
-        while !Self::ready(&state, ticket) {
+        loop {
+            reservation = match reservation.activate(&mut state) {
+                Ok(lease) => return Ok(lease),
+                Err(reservation) => reservation,
+            };
             if is_cancelled() {
-                state.pending.remove(&ticket);
-                self.wake.notify_all();
                 return Err(());
             }
             let (next_state, _) = self
@@ -786,15 +792,6 @@ impl GenerationRegionCoordinator {
                 .expect("generation region lock poisoned");
             state = next_state;
         }
-        let coordinates = state
-            .pending
-            .remove(&ticket)
-            .expect("ready ticket must remain pending");
-        state.active.insert(ticket, coordinates);
-        Ok(GenerationRegionLease {
-            coordinator: self,
-            ticket,
-        })
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -803,29 +800,61 @@ impl GenerationRegionCoordinator {
         coordinates: &[(i32, i32)],
         cancellation: &crate::worldgen_session::RequestCancellation,
     ) -> Result<GenerationRegionLease<'_>, ()> {
-        let ticket = self.enqueue(coordinates);
-        while !self.try_activate(ticket) {
+        self.acquire_yielding_with(coordinates, cancellation, crate::chunk::yield_to_browser)
+            .await
+    }
+
+    #[cfg(any(target_arch = "wasm32", test))]
+    async fn acquire_yielding_with<Wait: std::future::Future<Output = ()>>(
+        &self,
+        coordinates: &[(i32, i32)],
+        cancellation: &crate::worldgen_session::RequestCancellation,
+        mut wait: impl FnMut() -> Wait,
+    ) -> Result<GenerationRegionLease<'_>, ()> {
+        let mut reservation = self.enqueue(coordinates);
+        loop {
+            reservation = match reservation.try_activate() {
+                Ok(lease) => return Ok(lease),
+                Err(reservation) => reservation,
+            };
             if cancellation.is_cancelled() {
-                let mut state = self.state.lock().expect("generation region lock poisoned");
-                state.pending.remove(&ticket);
                 return Err(());
             }
-            crate::chunk::yield_to_browser().await;
+            wait().await;
         }
-        Ok(GenerationRegionLease {
-            coordinator: self,
-            ticket,
-        })
     }
 }
 
-impl Drop for GenerationRegionLease<'_> {
+impl<'a> GenerationRegionReservation<'a> {
+    fn activate(self, state: &mut GenerationRegionState) -> Result<GenerationRegionLease<'a>, Self> {
+        let ticket = self.claim.ticket;
+        if !GenerationRegionCoordinator::ready(state, ticket) {
+            return Err(self);
+        }
+        let coordinates = state
+            .pending
+            .remove(&ticket)
+            .expect("ready ticket must remain pending");
+        state.active.insert(ticket, coordinates);
+        Ok(GenerationRegionLease { _claim: self.claim })
+    }
+
+    #[cfg(any(target_arch = "wasm32", test))]
+    fn try_activate(self) -> Result<GenerationRegionLease<'a>, Self> {
+        let coordinator = self.claim.coordinator;
+        let mut state = coordinator.state.lock().expect("generation region lock poisoned");
+        self.activate(&mut state)
+    }
+}
+
+impl Drop for GenerationRegionClaim<'_> {
     fn drop(&mut self) {
         let mut state = self
             .coordinator
             .state
             .lock()
             .expect("generation region lock poisoned");
+        state.pending.remove(&self.ticket);
         state.active.remove(&self.ticket);
         #[cfg(not(target_arch = "wasm32"))]
         self.coordinator.wake.notify_all();
@@ -4778,9 +4807,9 @@ impl<S: ChunkSource> ChunkStore<S> {
             }
         };
         #[cfg(target_arch = "wasm32")]
-        let region_lease = {
-            let ticket = self.generation_regions.enqueue(&coordinates);
-            if !self.generation_regions.try_activate(ticket) {
+        let region_lease = match self.generation_regions.try_acquire(&coordinates) {
+            Some(lease) => lease,
+            None => {
                 return Err(sessions
                     .iter()
                     .map(|_| {
@@ -4789,10 +4818,6 @@ impl<S: ChunkSource> ChunkStore<S> {
                         ))
                     })
                     .collect());
-            }
-            GenerationRegionLease {
-                coordinator: &self.generation_regions,
-                ticket,
             }
         };
         let halo = match self.lease_halo(&coordinates) {
@@ -13580,6 +13605,117 @@ mod tests {
         assert_eq!(after_checkpoint.committed_mutation_order(), before_checkpoint.committed_mutation_order());
         assert_eq!(after_checkpoint.current_revision(), before_checkpoint.current_revision());
         assert_eq!(ledger.frontier(identity, (0, 0)).unwrap().records(), before_checkpoint.frontiers()[0].1);
+    }
+
+    #[test]
+    fn generation_regions_failed_nonblocking_acquire_releases_its_ticket() {
+        let coordinator = GenerationRegionCoordinator::default();
+        let first = coordinator.try_acquire(&[(3, -2)]).unwrap();
+        assert!(coordinator.try_acquire(&[(3, -2), (4, -2)]).is_none());
+        let disjoint = coordinator.try_acquire(&[(17, 9)]).unwrap();
+        {
+            let state = coordinator.state.lock().unwrap();
+            assert_eq!(state.pending.len(), 0);
+            assert_eq!(state.active.len(), 2);
+        }
+        assert!(coordinator.try_acquire(&[(3, -2)]).is_none());
+        drop(first);
+        let later = coordinator.try_acquire(&[(3, -2), (4, -2)]).unwrap();
+        assert_eq!(coordinator.state.lock().unwrap().active.len(), 2);
+        drop(later);
+        drop(disjoint);
+        let state = coordinator.state.lock().unwrap();
+        assert_eq!(state.pending.len(), 0);
+        assert_eq!(state.active.len(), 0);
+    }
+
+    #[test]
+    fn generation_regions_pending_reservations_preserve_overlap_order() {
+        let coordinator = GenerationRegionCoordinator::default();
+        let first = coordinator.try_acquire(&[(3, -2)]).unwrap();
+        let pending = coordinator.enqueue(&[(3, -2), (4, -2)]);
+        let pending = pending.try_activate().err().unwrap();
+        assert!(coordinator.try_acquire(&[(4, -2)]).is_none());
+        let disjoint = coordinator.try_acquire(&[(17, 9)]).unwrap();
+        drop(first);
+        assert!(coordinator.try_acquire(&[(4, -2)]).is_none());
+        let second = pending.try_activate().ok().unwrap();
+        assert!(coordinator.try_acquire(&[(4, -2)]).is_none());
+        drop(second);
+        let later = coordinator.try_acquire(&[(4, -2)]).unwrap();
+        drop(later);
+        drop(disjoint);
+        let state = coordinator.state.lock().unwrap();
+        assert_eq!(state.pending.len(), 0);
+        assert_eq!(state.active.len(), 0);
+    }
+
+    #[test]
+    fn generation_regions_dropped_yielding_wait_releases_its_ticket() {
+        let coordinator = GenerationRegionCoordinator::default();
+        let first = coordinator.try_acquire(&[(3, -2)]).unwrap();
+        let cancellation = crate::worldgen_session::RequestCancellation::new();
+        let mut wait = Box::pin(coordinator.acquire_yielding_with(
+            &[(3, -2), (4, -2)],
+            &cancellation,
+            std::future::pending,
+        ));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(std::future::Future::poll(wait.as_mut(), &mut context).is_pending());
+        assert_eq!(coordinator.state.lock().unwrap().pending.len(), 1);
+        drop(wait);
+        {
+            let state = coordinator.state.lock().unwrap();
+            assert_eq!(state.pending.len(), 0);
+            assert_eq!(state.active.len(), 1);
+        }
+        assert!(coordinator.try_acquire(&[(3, -2)]).is_none());
+        let disjoint = coordinator.try_acquire(&[(17, 9)]).unwrap();
+        drop(first);
+        let later = coordinator.try_acquire(&[(3, -2), (4, -2)]).unwrap();
+        drop(later);
+        drop(disjoint);
+        let state = coordinator.state.lock().unwrap();
+        assert_eq!(state.pending.len(), 0);
+        assert_eq!(state.active.len(), 0);
+    }
+
+    #[test]
+    fn generation_regions_cancelled_yielding_wait_releases_its_ticket() {
+        let coordinator = GenerationRegionCoordinator::default();
+        let first = coordinator.try_acquire(&[(3, -2)]).unwrap();
+        let cancellation = crate::worldgen_session::RequestCancellation::new();
+        cancellation.cancel();
+        let mut wait = Box::pin(coordinator.acquire_yielding_with(
+            &[(3, -2), (4, -2)],
+            &cancellation,
+            std::future::pending,
+        ));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(matches!(
+            std::future::Future::poll(wait.as_mut(), &mut context),
+            std::task::Poll::Ready(Err(())),
+        ));
+        drop(wait);
+        assert_eq!(coordinator.state.lock().unwrap().pending.len(), 0);
+        drop(first);
+        assert!(coordinator.try_acquire(&[(3, -2), (4, -2)]).is_some());
+    }
+
+    #[test]
+    #[should_panic(expected = "abandoned ticket blocks later overlapping region")]
+    fn generation_regions_abandoned_ticket_negative_control() {
+        let coordinator = GenerationRegionCoordinator::default();
+        let first = coordinator.try_acquire(&[(3, -2)]).unwrap();
+        let pending = coordinator.enqueue(&[(3, -2), (4, -2)]);
+        let pending = pending.try_activate().err().unwrap();
+        std::mem::forget(pending);
+        let _disjoint = coordinator.try_acquire(&[(17, 9)]).unwrap();
+        drop(first);
+        assert!(
+            coordinator.try_acquire(&[(3, -2), (4, -2)]).is_some(),
+            "abandoned ticket blocks later overlapping region",
+        );
     }
 
     #[test]

@@ -7022,7 +7022,7 @@ where
     if changes.is_empty() {
         return Ok(());
     }
-    let started = crate::tick::PlayTimerInstant::now();
+    let started = lodestone_time::Instant::now();
     let change_count = changes.len();
     let radius = i32::from(proto.uses_cross_column_light());
     for change in &changes {
@@ -18447,6 +18447,7 @@ where
     let browser_play_started = lodestone_time::Instant::now();
     let mut browser_vitals_ticks = 0_u64;
     let mut connection_probe = crate::connection_progress::ConnectionProbe::start();
+    use crate::connection_progress::ConnectionActivity;
     loop {
         if let Some(probe) = connection_probe.as_mut() {
             probe.observe(crate::connection_progress::ConnectionProgress {
@@ -18460,10 +18461,20 @@ where
                 delivered_columns: view.delivered.len(),
                 chunks_sent,
                 remaining: join_stream.remaining(),
+                activity: ConnectionActivity::Select,
+                activity_elapsed: std::time::Duration::ZERO,
+                target: None,
+                packet_id: None,
             });
         }
+        let activity = |phase, target, packet_id| {
+            if let Some(probe) = connection_probe.as_ref() {
+                probe.activity(phase, target, packet_id);
+            }
+        };
         let packet = tokio::select! {
             _ = std::future::ready(()), if !pending_tick_updates.is_empty() => {
+                activity(ConnectionActivity::TickUpdates, None, None);
                 send_pending_tick_block_updates(
                     conn,
                     proto,
@@ -18478,6 +18489,7 @@ where
             // A queued relight is always ready, but competes with packet and
             // timer work so large batches cannot monopolize the browser loop.
             _ = std::future::ready(()), if !pending_relights.is_empty() => {
+                activity(ConnectionActivity::Relight, None, None);
                 send_next_relight(
                     conn,
                     proto,
@@ -18500,6 +18512,7 @@ where
             // Cancel-safe timer polling: a ready packet leaves the interval's
             // deadline untouched, so no timer event is lost.
             _ = vitals_interval.tick() => {
+                activity(ConnectionActivity::Vitals, None, None);
                 if player_tick_ready(world, client_loaded) {
                     wasm_vitals_tick(
                         conn,
@@ -18591,6 +18604,7 @@ where
                 }) else {
                     continue;
                 };
+                activity(ConnectionActivity::JoinAdmission, Some((cx, cz)), None);
                 let directive = match encode_column(
                     proto,
                     source,
@@ -18608,9 +18622,12 @@ where
                 };
                 {
                     let _timing = PhaseTimer::start(WorldgenTimingPhase::WireSend, 1);
+                    activity(ConnectionActivity::JoinBegin, Some((cx, cz)), None);
                     apply(conn, &mut state, proto.begin_chunk_batch()).await?;
+                    activity(ConnectionActivity::JoinColumn, Some((cx, cz)), None);
                     apply(conn, &mut state, directive).await?;
                     view.mark_delivered((cx, cz));
+                    activity(ConnectionActivity::JoinEnd, Some((cx, cz)), None);
                     apply(conn, &mut state, proto.end_chunk_batch(1)).await?;
                 }
                 if let Some(trace) = join_trace.as_ref() {
@@ -18637,6 +18654,7 @@ where
             }
         };
         if let Some((packet_id, payload)) = packet {
+            activity(ConnectionActivity::Dispatch, None, Some(packet_id));
             dispatch_play_packet(
                 conn,
                 proto,
@@ -18705,6 +18723,7 @@ where
                 &payload,
             )
             .await?;
+            activity(ConnectionActivity::Publication, None, Some(packet_id));
             player_tick_ready(world, client_loaded);
             republish_inventory(entities.players(), player_uuid, &inventory);
             // Flush advancement changes caused by the packet just dispatched.

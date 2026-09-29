@@ -3767,6 +3767,7 @@ pub fn start_browser_integrated_worker(
     preset: u8,
     epoch: u32,
     view_radius: Option<i32>,
+    transport_diagnostics: Option<fn(lodestone_net::MessagePortProgress)>,
 ) -> Result<Option<lodestone_server::IntegratedTickMonitor>, String> {
     let view_radius = browser::browser_worker_view_radius(view_radius)?;
     let preset = world_preset_from_wire_id(preset)
@@ -3790,7 +3791,10 @@ pub fn start_browser_integrated_worker(
         horizon_port.close();
     }
     let commands = lodestone_server::CommandDispatch::installed(Arc::new(WorkerCommandSink));
-    let worker_io = lodestone_net::MessagePortTransport::new(port);
+    let mut worker_io = lodestone_net::MessagePortTransport::new(port);
+    if let Some(sink) = transport_diagnostics {
+        worker_io.set_diagnostics_sink(sink);
+    }
     let monitor = lodestone_server::IntegratedServer::serve_with_transport(
         server_protocol,
         source,

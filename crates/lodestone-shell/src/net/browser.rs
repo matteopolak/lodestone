@@ -437,7 +437,23 @@ pub(super) async fn launch_browser_worker(
     let horizon_cache = horizon_client.cache();
     // Build this before waiting for `ready` so the worker error callback can
     // wake a client read after startup. A MessagePort itself has no close event.
-    let transport = lodestone_net::MessagePortTransport::new(page_port);
+    let mut transport = lodestone_net::MessagePortTransport::new(page_port);
+    if log::max_level() >= log::LevelFilter::Debug {
+        transport.set_diagnostics_sink(|progress| {
+            browser_diagnostic(format_args!(
+                "transport: side=client endpoint={} posted={} received={} drained={} send_credit={} receive_credit={} longest_pending_ms={:.3} current_pending_ms={:.3} closed={}",
+                progress.endpoint_id,
+                progress.posted_bytes,
+                progress.received_bytes,
+                progress.drained_bytes,
+                progress.send_credit,
+                progress.receive_credit,
+                progress.longest_write_pending.as_secs_f64() * 1000.0,
+                progress.current_write_pending.as_secs_f64() * 1000.0,
+                progress.closed,
+            ));
+        });
+    }
     let port_shutdown = transport.shutdown_handle();
     let progress_started = crate::platform::Instant::now();
     let on_progress = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
@@ -458,7 +474,7 @@ pub(super) async fn launch_browser_worker(
                 .and_then(|value| value.as_bool());
             if number("epoch") == Some(f64::from(epoch)) {
                 browser_diagnostic(format_args!(
-                    "connection: running={:?} elapsed_ms={:.1} passes={:.0} client_loaded={:?} center={:.0},{:.0} radius={:.0} owed={:.0} delivered={:.0} sends={:.0} remaining={:.0}",
+                    "connection: running={:?} elapsed_ms={:.1} passes={:.0} client_loaded={:?} center={:.0},{:.0} radius={:.0} owed={:.0} delivered={:.0} sends={:.0} remaining={:.0} activity={} activity_ms={:.1} target={:?},{:?} packet={:?}",
                     boolean("running"),
                     number("elapsedMs").unwrap_or(0.0),
                     number("passes").unwrap_or(0.0),
@@ -470,6 +486,32 @@ pub(super) async fn launch_browser_worker(
                     number("deliveredColumns").unwrap_or(0.0),
                     number("chunksSent").unwrap_or(0.0),
                     number("remaining").unwrap_or(0.0),
+                    js_sys::Reflect::get(&value, &JsValue::from_str("activity"))
+                        .ok().and_then(|value| value.as_string()).unwrap_or_default(),
+                    number("activityMs").unwrap_or(0.0),
+                    number("targetX"),
+                    number("targetZ"),
+                    number("packetId"),
+                ));
+            }
+            return;
+        }
+        if kind.as_deref() == Some("transport-progress") {
+            let number = |key| js_sys::Reflect::get(&value, &JsValue::from_str(key))
+                .ok().and_then(|value| value.as_f64());
+            if number("epoch") == Some(f64::from(epoch)) {
+                browser_diagnostic(format_args!(
+                    "transport: side=server endpoint={:.0} posted={:.0} received={:.0} drained={:.0} send_credit={:.0} receive_credit={:.0} longest_pending_ms={:.3} current_pending_ms={:.3} closed={:?}",
+                    number("endpoint").unwrap_or(0.0),
+                    number("postedBytes").unwrap_or(0.0),
+                    number("receivedBytes").unwrap_or(0.0),
+                    number("drainedBytes").unwrap_or(0.0),
+                    number("sendCredit").unwrap_or(0.0),
+                    number("receiveCredit").unwrap_or(0.0),
+                    number("longestPendingMs").unwrap_or(0.0),
+                    number("currentPendingMs").unwrap_or(0.0),
+                    js_sys::Reflect::get(&value, &JsValue::from_str("closed"))
+                        .ok().and_then(|value| value.as_bool()),
                 ));
             }
             return;

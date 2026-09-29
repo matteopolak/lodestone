@@ -9,6 +9,7 @@ use std::io;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
+use std::time::Duration;
 
 use js_sys::{Array, ArrayBuffer, Object, Reflect, Uint8Array};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -37,6 +38,20 @@ fn next_endpoint_id() -> u32 {
 /// returning partial writes.
 pub const DEFAULT_MESSAGE_PORT_CREDIT_BYTES: usize = 64 * 1024;
 
+/// Byte counters and flow-control state for one browser transport endpoint.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MessagePortProgress {
+    pub endpoint_id: u32,
+    pub posted_bytes: u64,
+    pub received_bytes: u64,
+    pub drained_bytes: u64,
+    pub send_credit: usize,
+    pub receive_credit: usize,
+    pub longest_write_pending: Duration,
+    pub current_write_pending: Duration,
+    pub closed: bool,
+}
+
 #[derive(Debug)]
 struct Shared {
     endpoint_id: u32,
@@ -46,6 +61,7 @@ struct Shared {
     send_credit: ByteCreditWindow,
     receive_credit: ByteCreditWindow,
     diagnostics: Option<ByteTransportDiagnostics>,
+    diagnostics_sink: Option<fn(MessagePortProgress)>,
     closed: bool,
     error: Option<String>,
 }
@@ -96,6 +112,7 @@ impl Shared {
             send_credit: ByteCreditWindow::empty(capacity),
             receive_credit: ByteCreditWindow::full(capacity),
             diagnostics: diagnostics_enabled.then(ByteTransportDiagnostics::default),
+            diagnostics_sink: None,
             closed: false,
             error: None,
         }
@@ -126,18 +143,33 @@ impl Shared {
         if !diagnostics.report_due(now) {
             return;
         }
+        let progress = MessagePortProgress {
+            endpoint_id: self.endpoint_id,
+            posted_bytes: diagnostics.posted_bytes(),
+            received_bytes: diagnostics.received_bytes(),
+            drained_bytes: diagnostics.drained_bytes(),
+            send_credit: self.send_credit.available(),
+            receive_credit: self.receive_credit.available(),
+            longest_write_pending: diagnostics.longest_write_pending(),
+            current_write_pending: diagnostics.current_write_pending(now),
+            closed: self.closed,
+        };
         log::debug!(
             target: "message_port",
-            "browser byte transport diagnostics: endpoint={} posted_bytes={} received_bytes={} drained_bytes={} send_credit={} receive_credit={} longest_write_pending_ms={:.3} current_write_pending_ms={:.3}",
-            self.endpoint_id,
-            diagnostics.posted_bytes(),
-            diagnostics.received_bytes(),
-            diagnostics.drained_bytes(),
-            self.send_credit.available(),
-            self.receive_credit.available(),
-            diagnostics.longest_write_pending().as_secs_f64() * 1000.0,
-            diagnostics.current_write_pending(now).as_secs_f64() * 1000.0,
+            "browser byte transport diagnostics: endpoint={} posted_bytes={} received_bytes={} drained_bytes={} send_credit={} receive_credit={} longest_write_pending_ms={:.3} current_write_pending_ms={:.3} closed={}",
+            progress.endpoint_id,
+            progress.posted_bytes,
+            progress.received_bytes,
+            progress.drained_bytes,
+            progress.send_credit,
+            progress.receive_credit,
+            progress.longest_write_pending.as_secs_f64() * 1000.0,
+            progress.current_write_pending.as_secs_f64() * 1000.0,
+            progress.closed,
         );
+        if let Some(sink) = self.diagnostics_sink {
+            sink(progress);
+        }
     }
 
     fn fail(&mut self, message: impl Into<String>) {
@@ -277,6 +309,14 @@ impl MessagePortTransport {
     #[must_use]
     pub fn shutdown_handle(&self) -> MessagePortShutdown {
         MessagePortShutdown(Rc::clone(&self.shared))
+    }
+
+    /// Receives admitted activity and heartbeat snapshots synchronously.
+    ///
+    /// Debug logging for `message_port` must be enabled when constructing the
+    /// transport. The sink must not reenter this transport or its shutdown handle.
+    pub fn set_diagnostics_sink(&mut self, sink: fn(MessagePortProgress)) {
+        self.shared.borrow_mut().diagnostics_sink = Some(sink);
     }
 
     fn close(&mut self) {

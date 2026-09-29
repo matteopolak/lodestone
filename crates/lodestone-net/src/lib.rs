@@ -58,5 +58,5 @@ pub use ws_native::WsTransport;
 pub use ws_web::WsWebTransport;
 #[cfg(all(feature = "worker-web", target_arch = "wasm32"))]
 pub use worker_web::{
-    DEFAULT_MESSAGE_PORT_CREDIT_BYTES, MessagePortShutdown, MessagePortTransport,
+    DEFAULT_MESSAGE_PORT_CREDIT_BYTES, MessagePortProgress, MessagePortShutdown, MessagePortTransport,
 };

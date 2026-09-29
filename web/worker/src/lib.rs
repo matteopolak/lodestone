@@ -56,6 +56,7 @@ pub fn start_worker(
         preset,
         epoch,
         view_radius,
+        (log::max_level() >= log::LevelFilter::Debug).then_some(post_transport_progress),
     )
         .map_err(|error| JsValue::from_str(&error));
     let monitor = result?;
@@ -150,6 +151,35 @@ fn post_connection_progress(progress: lodestone_server::connection_progress::Con
                 ("deliveredColumns", JsValue::from_f64(progress.delivered_columns as f64)),
                 ("chunksSent", JsValue::from_f64(progress.chunks_sent as f64)),
                 ("remaining", JsValue::from_f64(progress.remaining as f64)),
+                ("activity", JsValue::from_str(progress.activity.as_str())),
+                ("activityMs", JsValue::from_f64(progress.activity_elapsed.as_secs_f64() * 1000.0)),
+                ("targetX", progress.target.map_or(JsValue::NULL, |pos| JsValue::from_f64(f64::from(pos.0)))),
+                ("targetZ", progress.target.map_or(JsValue::NULL, |pos| JsValue::from_f64(f64::from(pos.1)))),
+                ("packetId", progress.packet_id.map_or(JsValue::NULL, |id| JsValue::from_f64(f64::from(id)))),
+            ] {
+                let _ = js_sys::Reflect::set(&message, &JsValue::from_str(key), &value);
+            }
+            let _ = port.post_message(&message);
+        }
+    });
+}
+
+fn post_transport_progress(progress: lodestone_net::MessagePortProgress) {
+    PROGRESS_PORT.with(|slot| {
+        if let Some((port, epoch)) = slot.borrow().as_ref() {
+            let message = js_sys::Object::new();
+            for (key, value) in [
+                ("kind", JsValue::from_str("transport-progress")),
+                ("epoch", JsValue::from_f64(f64::from(*epoch))),
+                ("endpoint", JsValue::from_f64(f64::from(progress.endpoint_id))),
+                ("postedBytes", JsValue::from_f64(progress.posted_bytes as f64)),
+                ("receivedBytes", JsValue::from_f64(progress.received_bytes as f64)),
+                ("drainedBytes", JsValue::from_f64(progress.drained_bytes as f64)),
+                ("sendCredit", JsValue::from_f64(progress.send_credit as f64)),
+                ("receiveCredit", JsValue::from_f64(progress.receive_credit as f64)),
+                ("longestPendingMs", JsValue::from_f64(progress.longest_write_pending.as_secs_f64() * 1000.0)),
+                ("currentPendingMs", JsValue::from_f64(progress.current_write_pending.as_secs_f64() * 1000.0)),
+                ("closed", JsValue::from_bool(progress.closed)),
             ] {
                 let _ = js_sys::Reflect::set(&message, &JsValue::from_str(key), &value);
             }
