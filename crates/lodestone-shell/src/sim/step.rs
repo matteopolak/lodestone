@@ -136,7 +136,7 @@ impl Sim {
     /// [`Sim::end_session`] later knows every section the GPU is holding for
     /// this session and can queue every one of them for removal.
     pub fn drain_meshes(&mut self) -> Vec<Meshed> {
-        let meshes = self.terrain_mut(TerrainMesh::drain_meshes);
+        let meshes = self.terrain_and_world(|store, terrain| terrain.drain_meshes_with_world(store));
         for mesh in &meshes {
             self.join_trace.mark("remeshed", mesh.key.cx, mesh.key.cz);
         }
@@ -150,7 +150,7 @@ impl Sim {
 
     /// Block until every scheduled mesh is ready (used by headless runs/tests).
     pub fn drain_all_meshes(&mut self) -> Vec<Meshed> {
-        self.terrain_mut(TerrainMesh::drain_all_meshes)
+        self.terrain_and_world(|store, terrain| terrain.drain_all_meshes_with_world(store))
     }
 
     /// Sections that became empty (drained by the app to remove GPU meshes).

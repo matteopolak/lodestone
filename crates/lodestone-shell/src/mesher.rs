@@ -112,7 +112,7 @@ mod snapshot;
 mod browser_queue;
 
 #[cfg(target_arch = "wasm32")]
-use browser_queue::BrowserMeshBacklog;
+use browser_queue::{BrowserMeshBacklog, CaptureSource, SectionIntent};
 
 pub use face::mesh_snapshot;
 pub use fluid::{mesh_snapshot_fluids, mesh_snapshot_fluids_at, snapshot_visibility};
@@ -864,90 +864,30 @@ impl Drop for MeshScheduler {
 // The browser scheduler (`wasm32`)
 // ---------------------------------------------------------------------------
 
-/// How long [`MeshScheduler::drain`] may spend meshing in one call, in the browser.
-///
-/// **The whole design rests on this being a deadline rather than a job count**, and
-/// on it being well under a frame. A section's mesh cost varies by orders of
-/// magnitude — an all-air section is nearly free, a section of foliage with baked
-/// models and fluids is not — so "mesh N sections per frame" is a budget in the wrong
-/// unit: it is either far too small for air or far too large for leaves, and the
-/// backlog after a teleport is thousands of sections either way.
-///
-/// 4 ms of a 16.7 ms frame leaves room for the render pass and, more importantly, for
-/// the event loop to run at all. See [`MeshScheduler`]'s browser docs for why that
-/// second point is the load-bearing one.
+/// Browser capture and meshing share this deadline, checked after each section
+/// so even a section exceeding the budget makes progress.
 #[cfg(target_arch = "wasm32")]
 const BROWSER_MESH_BUDGET: std::time::Duration = std::time::Duration::from_millis(4);
 
-/// The browser's `MeshScheduler`: **the same interface, meshing in the frame under a
-/// time budget.**
-///
-/// # Why there is no pool, and why that is the right answer rather than a stopgap
-///
-/// `std::thread::spawn` does not degrade on `wasm32-unknown-unknown` — it **traps**
-/// (measured, executed in a wasm VM: `RuntimeError: unreachable`), and with
-/// `panic = "abort"` in the browser profile that is the tab dying. So the native pool
-/// cannot be ported as-is.
-///
-/// Threads are *available* — `web/Trunk.toml` already sets COOP/COEP, so the page is
-/// cross-origin isolated and `SharedArrayBuffer` works — and this deliberately does
-/// **not** use them. `wasm-bindgen-rayon` is a large lift and a large bundle against a
-/// 1.6 MB gzip ceiling, and every other thread in the shell turned out to be
-/// removable rather than portable. This one is too: meshing is pure compute over an
-/// owned [`SectionSnapshot`], with no shared state and no ordering requirement, so
-/// spreading it over frames is behaviourally equivalent to spreading it over cores —
-/// only slower.
-///
-/// # What this DOES change, stated plainly
-///
-/// The native pool's docs make a promise this arm cannot keep: *"a slow frame delays
-/// the upload of finished geometry, never the meshing and never the simulation"*, so
-/// that presentation never gates simulation. In a browser there is one thread, so
-/// **meshing is on the frame thread and that invariant is structurally broken.** It is
-/// not papered over; it is bounded. [`BROWSER_MESH_BUDGET`] caps the work per drain,
-/// so the event loop keeps turning, keep-alives keep being sent, and the session does
-/// not look stalled to the server — which is the actual hazard the native invariant
-/// exists to prevent (a client the server considers stalled is sent no chunks at
-/// all). The cost is that a large backlog takes more frames to appear, which is
-/// visible as terrain filling in progressively rather than as a stall.
-///
-/// If that ever proves too slow to be pleasant, the next move is a Web Worker holding
-/// the classifier and meshing off-thread — a real answer, and a bigger one than a
-/// budget. It is not `rayon`.
-///
-/// # How to change it
-///
-/// Keep meshing inside the drains and keep [`submit`](Self::submit) free of pending
-/// snapshot scans. The enqueue system can submit a whole column's sections in one
-/// frame; meshing or scanning its backlog there would consume the caller's budget.
+/// Browser meshing on the owning render thread. Production terrain requests hold
+/// section intents; [`TerrainMesh::drain_meshes_with_world`] captures each current
+/// neighbourhood immediately before meshing. Explicit [`Self::submit`] callers
+/// can still provide owned snapshots and drain without a world handle.
 #[cfg(target_arch = "wasm32")]
 #[derive(Debug, Resource)]
 pub struct MeshScheduler {
-    /// Pending snapshots keep their first FIFO position when replaced; completed
-    /// meshes are invalidated separately when a new snapshot supersedes them.
+    /// Replacements keep their first FIFO position and invalidate ready results.
     backlog: BrowserMeshBacklog,
     classifier: ShellClassifier,
     column_source: ColumnSource,
-    /// The live `options.cutoutLeaves` value. Read at **mesh** time (inside
-    /// [`Self::drain`]/[`Self::drain_blocking`]) rather than stamped at
-    /// submit time like the native scheduler's `Job` — there is only one
-    /// thread here, so nothing can race a queued snapshot's meshing against a
-    /// toggle the way the native pool's workers could.
+    /// Live render options, read when the queued section is meshed.
     cutout_leaves: bool,
-    /// The live `options.biomeBlendRadius` value, read at mesh time beside
-    /// [`Self::cutout_leaves`] and for the same reason.
     blend_radius: i32,
 }
 
 #[cfg(target_arch = "wasm32")]
 impl MeshScheduler {
-    /// Build the browser scheduler. `worker_count` is accepted and **ignored**.
-    ///
-    /// Ignored rather than removed from the signature: the caller
-    /// (`Sim::build`) derives it from `available_parallelism`, which on wasm32
-    /// returns `Err` and so already falls back to 1, and keeping one signature means
-    /// no `cfg` at the construction site. The count is logged so a browser session
-    /// says out loud that it is meshing in-frame.
+    /// Build the browser scheduler; `worker_count` is retained for API compatibility.
     #[must_use]
     pub fn new(worker_count: usize, classifier: ShellClassifier) -> Self {
         let column_source = if classifier.is_vanilla() {
@@ -1003,10 +943,6 @@ impl MeshScheduler {
         self.backlog.submit(snapshot);
     }
 
-    fn submit_current(&mut self, snapshot: SectionSnapshot) {
-        self.submit(snapshot);
-    }
-
     /// Number of submitted jobs not yet drained.
     #[must_use]
     pub fn pending(&self) -> usize {
@@ -1029,19 +965,13 @@ impl MeshScheduler {
         self.backlog.discard_pending();
     }
 
-    /// Mesh for at most [`BROWSER_MESH_BUDGET`] and return what got finished.
-    ///
-    /// **Meshes at least one section whenever the queue is non-empty, even if the
-    /// budget is already spent.** Without that floor a machine slow enough to blow
-    /// the budget on a single section would return an empty `Vec` forever and the
-    /// world would never appear — a livelock that looks exactly like "meshing is
-    /// broken". Checking the deadline *after* each section rather than before is what
-    /// gives the floor for free.
+    /// Drain explicit snapshots under the browser deadline. A capture intent
+    /// requires [`TerrainMesh::drain_meshes_with_world`] and remains queued here.
     pub fn drain(&mut self) -> Vec<Meshed> {
         let mut out = std::mem::take(&mut self.backlog.ready);
         let mut now = crate::platform::Instant::now();
         let deadline = now + BROWSER_MESH_BUDGET;
-        while let Some(snap) = self.backlog.queue.pop_front(now) {
+        while let Some(snap) = self.backlog.pop_snapshot(now) {
             out.push(mesh_one(
                 snap,
                 &self.classifier,
@@ -1068,7 +998,7 @@ impl MeshScheduler {
     /// meshes, and a partial result would leave no way to make progress.
     pub fn drain_blocking(&mut self, n: usize) -> Vec<Meshed> {
         while self.backlog.ready.len() < n {
-            let Some(snap) = self.backlog.queue.pop_front(crate::platform::Instant::now()) else {
+            let Some(snap) = self.backlog.pop_snapshot(crate::platform::Instant::now()) else {
                 break;
             };
             let meshed = mesh_one(
@@ -1092,9 +1022,8 @@ impl MeshScheduler {
 /// more sections than another.
 pub const DIRTY_COLUMN_BUDGET: usize = 64;
 
-/// Maximum number of section snapshots admitted by [`heal_dirty_columns`] in
-/// one frame. Work is counted by the sections actually visited, not columns,
-/// so the bound remains stable across dimensions with different heights.
+/// Maximum section visits admitted by [`heal_dirty_columns`] in one frame.
+/// Native visits capture snapshots; browser visits enqueue capture intents.
 pub const MESH_SNAPSHOT_SECTION_BUDGET: usize = 96;
 const PROVISIONAL_FIRST_MESH_RADIUS: i32 = 1;
 
@@ -1506,7 +1435,7 @@ pub struct TerrainMesh {
     ///
     /// This is the permanent-missing-neighbour case, unlike
     /// [`SnapshotOutcome::Deferred`], which means "a neighbour column has not arrived
-    /// *yet*", and [`Self::route`] drops a deferred section that has never
+    /// *yet*", and [`Self::accept_snapshot`] drops a deferred section that has never
     /// reached the GPU, relying on [`Self::mark_neighbours_dirty`] to re-drive it
     /// when the missing column lands. For a column on the **trailing** edge of the
     /// view the missing column never lands — it already came and went — so the
@@ -1677,34 +1606,28 @@ impl TerrainMesh {
         std::mem::take(&mut self.relight_workload)
     }
 
-    /// Route one section's snapshot outcome: submit it, drop its stale geometry,
-    /// or hold it back. Returns whether anything was submitted.
-    ///
-    /// **Vanilla's rule, and the reason it has two halves.**
-    /// Vanilla's own level-extractor extract routine compiles a dirty section when
-    /// it already has a compiled mesh, or its section-update tracker reports
-    /// every neighbour present. The first clause is
-    /// what stops the deferral from being a *regression*: a section already on
-    /// screen rebuilds unconditionally, so a chunk unloading at the far edge of
-    /// the view does not blink out the ring beside it, and a block edit next to
-    /// the frontier still shows. Only a section that has never reached the screen
-    /// waits — and it cannot wait forever, because [`Self::mark_neighbours_dirty`]
-    /// re-drives it the moment the missing column lands.
-    /// [`Self::uploaded_sections`] is our `!= UNCOMPILED`.
-    ///
-    /// `force` is the third way out, added with [`Self::forced_columns`]: the
-    /// caller knows a missing neighbour is missing because it *left the view*, so
-    /// waiting for it is waiting forever. Vanilla does not need this clause
-    /// because its client tracks the view rectangle and can tell "outside the
-    /// view" from "inside it and not here yet"; we learn the same fact from the
-    /// unload signal instead.
+    /// Submit an accepted snapshot; unseen sections wait for their halo unless
+    /// forced, while prior geometry can rebuild across a missing neighbour.
+    #[cfg(not(target_arch = "wasm32"))]
     fn route(&mut self, key: SectionKey, outcome: SnapshotOutcome, force: bool) -> bool {
+        let Some(snapshot) = self.accept_snapshot(key, outcome, force) else {
+            return false;
+        };
+        self.scheduler.submit_current(snapshot);
+        true
+    }
+
+    fn accept_snapshot(
+        &mut self,
+        key: SectionKey,
+        outcome: SnapshotOutcome,
+        force: bool,
+    ) -> Option<SectionSnapshot> {
         match outcome {
             SnapshotOutcome::Ready(snap) => {
                 self.rendered_sections.remove(&key);
                 self.empty_sections.remove(&key);
-                self.scheduler.submit_current(snap);
-                true
+                Some(snap)
             }
             // A single empty section is routine (sky/void sections have no
             // geometry): remove prior GPU geometry, if any.
@@ -1720,21 +1643,20 @@ impl TerrainMesh {
                 if newly_empty && self.uploaded_sections.contains(&key) {
                     self.pending_removals.push(key);
                 }
-                false
+                None
             }
             SnapshotOutcome::Deferred(snap) => {
                 self.rendered_sections.remove(&key);
                 self.empty_sections.remove(&key);
                 if force || self.uploaded_sections.contains(&key) {
-                    self.scheduler.submit_current(snap);
-                    true
+                    Some(snap)
                 } else {
                     self.scheduler.forget_generation(&key);
                     // Deliberately *not* a removal: there is nothing on the GPU
                     // for this key, and queueing one would make the deferral
                     // look like an unload to the app's drain.
                     self.deferred = self.deferred.saturating_add(1);
-                    false
+                    None
                 }
             }
         }
@@ -1766,6 +1688,8 @@ impl TerrainMesh {
                 || self.built_columns.contains(&(cx, cz)),
         );
         self.reset_column_readiness(cx, cz);
+        #[cfg(target_arch = "wasm32")]
+        self.scheduler.forget_column(cx, cz);
         // A re-decoded column may still have an older boundary-heal request.
         // Admission owns the readiness transition, so remove that stale ready
         // entry before putting the column in the waiting set.
@@ -2003,6 +1927,52 @@ impl TerrainMesh {
             return 0;
         };
 
+        #[cfg(target_arch = "wasm32")]
+        {
+            let (summary, column_section_count, in_range_non_air) = {
+                let world = store.read();
+                let Some(chunk) = world.get(ChunkPos::new(cx, cz)) else {
+                    return 0;
+                };
+                (
+                    ColumnBlockSummary::from_column(&chunk.column),
+                    chunk.column.section_count(),
+                    (0..extent.section_count).any(|si| {
+                        chunk.column.section(si).is_some_and(|section| section.non_air_count() > 0)
+                    }),
+                )
+            };
+            if should_report_empty_column(summary, in_range_non_air, false) {
+                self.report_empty_column(cx, cz, summary, column_section_count, extent.section_count);
+            }
+            for si in 0..extent.section_count {
+                let key = SectionKey { cx, cz, si, min_y: extent.min_y };
+                self.enqueue_browser_section(
+                    key, extent.section_count, force, CaptureSource::Column,
+                );
+                if self.light_dirty_sections.remove(&(
+                    cx, cz, extent.min_y.div_euclid(16) + si as i32,
+                )) {
+                    self.work_counters.column_absorbed_light_sections += 1;
+                }
+            }
+            extent.section_count
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.capture_column(store, cx, cz, force, extent)
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn capture_column(
+        &mut self,
+        store: &ChunkWorld,
+        cx: i32,
+        cz: i32,
+        force: bool,
+        extent: lodestone_ecs::WorldExtent,
+    ) -> usize {
         // One lock for the whole column — the snapshots are owned and `Send`, so
         // the guard is dropped before anything is submitted and the world is
         // never locked while meshing.
@@ -2054,49 +2024,106 @@ impl TerrainMesh {
             deferred_any |= matches!(outcome, SnapshotOutcome::Deferred(_));
             meshed_any |= self.route(key, outcome, force);
         }
-        // A column held back for its neighbourhood is not a drop: it is the
-        // frontier of a streaming load doing exactly what it should, and counting
-        // it would drown the "invisible blocks" alarm in noise on every join.
-        // All-air storage is the other expected no-geometry result. A non-air
-        // column with no eligible snapshot is the actionable case.
         if should_report_empty_column(summary, meshed_any, deferred_any) {
-            self.non_air_empty_columns += 1;
-            self.drops += 1;
-            if self.non_air_empty_columns.is_power_of_two() {
-                tracing::warn!(
-                    cx,
-                    cz,
-                    branch = "non-air-loaded-column",
-                    occurrences = self.non_air_empty_columns,
-                    allocated_sections = summary.allocated_sections,
-                    non_air_sections = summary.non_air_sections,
-                    non_air_blocks = summary.non_air_blocks,
-                    column_section_count,
-                    mesh_section_count = extent.section_count,
-                    "loaded column contains non-air blocks but produced no eligible mesh section"
-                );
-            }
+            self.report_empty_column(cx, cz, summary, column_section_count, extent.section_count);
         }
         extent.section_count
     }
 
-    /// Re-snapshot and re-schedule exactly one section. A section that snapshots
-    /// to nothing is queued for GPU removal rather than left showing stale
-    /// geometry; one whose neighbourhood is incomplete is handled by
-    /// [`Self::route`] (rebuilt if it is already on screen, held back if not).
+    fn report_empty_column(
+        &mut self,
+        cx: i32,
+        cz: i32,
+        summary: ColumnBlockSummary,
+        column_section_count: usize,
+        mesh_section_count: usize,
+    ) {
+        self.non_air_empty_columns += 1;
+        self.drops += 1;
+        if self.non_air_empty_columns.is_power_of_two() {
+            tracing::warn!(
+                cx,
+                cz,
+                branch = "non-air-loaded-column",
+                occurrences = self.non_air_empty_columns,
+                allocated_sections = summary.allocated_sections,
+                non_air_sections = summary.non_air_sections,
+                non_air_blocks = summary.non_air_blocks,
+                column_section_count,
+                mesh_section_count,
+                "loaded column contains non-air blocks but produced no eligible mesh section"
+            );
+        }
+    }
+
+    /// Invalidate one section. Native capture is immediate; browser capture is
+    /// deferred until [`Self::drain_meshes_with_world`]. Empty outcomes remove
+    /// prior geometry; unseen incomplete neighbourhoods wait for their halo.
     pub fn mesh_section(&mut self, store: &ChunkWorld, key: SectionKey, section_count: usize) {
-        let outcome = {
-            let world = store.read();
-            snapshot_section_in(
-                &world,
-                key,
-                Some(section_count),
-                self.policy.sky_default,
-                self.column_source,
-            )
-            .with_biome_names(Arc::clone(&self.biome_names))
-        };
-        self.route(key, outcome, false);
+        self.request_section(store, key, section_count, false);
+    }
+
+    fn request_section(
+        &mut self,
+        store: &ChunkWorld,
+        key: SectionKey,
+        section_count: usize,
+        force: bool,
+    ) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = store;
+            self.enqueue_browser_section(key, section_count, force, CaptureSource::Section);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let outcome = {
+                let world = store.read();
+                snapshot_section_in(
+                    &world,
+                    key,
+                    Some(section_count),
+                    self.policy.sky_default,
+                    self.column_source,
+                )
+                .with_biome_names(Arc::clone(&self.biome_names))
+            };
+            self.route(key, outcome, force);
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn enqueue_browser_section(
+        &mut self,
+        key: SectionKey,
+        section_count: usize,
+        force: bool,
+        source: CaptureSource,
+    ) {
+        self.rendered_sections.remove(&key);
+        self.empty_sections.remove(&key);
+        self.scheduler.backlog.submit_intent(SectionIntent { key, section_count, force, source });
+    }
+
+    /// Retry through normal invalidation; residency comes from the renderer,
+    /// since readiness can reset while prior GPU geometry remains resident.
+    pub fn retry_mesh_upload(&mut self, store: &ChunkWorld, key: SectionKey, had_resident: bool) {
+        if had_resident {
+            self.uploaded_sections.insert(key);
+        } else {
+            self.uploaded_sections.remove(&key);
+        }
+        self.rendered_sections.remove(&key);
+        self.empty_sections.remove(&key);
+        if let Some(extent) = store.extent()
+            && extent.min_y == key.min_y
+            && key.si < extent.section_count
+            && store.contains_column(key.cx, key.cz)
+        {
+            let force = self.provisional_columns.contains(&(key.cx, key.cz))
+                || self.all_absent_neighbours_departed(store, key.cx, key.cz);
+            self.request_section(store, key, extent.section_count, force);
+        }
     }
 
     /// Queue meshes that can sample light sections overwritten by a server patch.
@@ -2381,6 +2408,57 @@ impl TerrainMesh {
         meshes
     }
 
+    /// Drain native completions or capture current browser section intents.
+    pub fn drain_meshes_with_world(&mut self, store: &ChunkWorld) -> Vec<Meshed> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = store;
+            self.drain_meshes()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.drain_browser_requests(store, Some(BROWSER_MESH_BUDGET))
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn drain_browser_requests(&mut self, store: &ChunkWorld, budget: Option<Duration>) -> Vec<Meshed> {
+        let mut out = std::mem::take(&mut self.scheduler.backlog.ready);
+        let mut now = crate::platform::Instant::now();
+        let deadline = budget.map(|budget| now + budget);
+        while let Some(request) = self.scheduler.backlog.queue.pop_front(now) {
+            let key = request.key();
+            let (outcome, force, source) = {
+                let world = store.read();
+                request.capture(
+                    &world,
+                    self.policy.sky_default,
+                    self.column_source,
+                    Arc::clone(&self.biome_names),
+                )
+            };
+            match source {
+                Some(CaptureSource::Column) => self.work_counters.column_snapshot_sections += 1,
+                Some(CaptureSource::Light) => self.work_counters.light_section_snapshots += 1,
+                _ => {}
+            }
+            if let Some(snapshot) = self.accept_snapshot(key, outcome, force) {
+                out.push(mesh_one(
+                    snapshot,
+                    &self.scheduler.classifier,
+                    self.scheduler.cutout_leaves,
+                    self.scheduler.blend_radius,
+                ));
+            }
+            now = crate::platform::Instant::now();
+            if deadline.is_some_and(|deadline| now >= deadline) {
+                break;
+            }
+        }
+        self.uploaded_sections.extend(out.iter().map(|mesh| mesh.key));
+        out
+    }
+
     #[must_use]
     pub fn backlog(&self) -> MeshBacklog {
         MeshBacklog {
@@ -2528,6 +2606,19 @@ impl TerrainMesh {
         meshes
     }
 
+    /// Resolve all browser intents for headless callers; native behavior is unchanged.
+    pub fn drain_all_meshes_with_world(&mut self, store: &ChunkWorld) -> Vec<Meshed> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = store;
+            self.drain_all_meshes()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.drain_browser_requests(store, None)
+        }
+    }
+
     /// Sections the app should remove from the GPU.
     pub fn drain_removals(&mut self) -> Vec<SectionKey> {
         let removed = std::mem::take(&mut self.pending_removals);
@@ -2571,11 +2662,8 @@ impl TerrainMesh {
 }
 
 /// `Update` / [`FrameSet::Terrain`]: re-mesh queued columns whose boundary went
-/// stale, bounded by [`MESH_SNAPSHOT_SECTION_BUDGET`] section snapshots.
-///
-/// This is the coalescing drain — the thing that stops water growing a falling
-/// wall at every chunk border. It enqueues snapshots onto the worker pool and
-/// returns; it never meshes anything itself.
+/// stale, bounded by [`MESH_SNAPSHOT_SECTION_BUDGET`] section visits. Native
+/// visits capture worker snapshots; browser visits enqueue late-capture intents.
 /// [`TerrainMesh::forced_columns`] is drained first so a departure cannot leave
 /// an invisible trailing column behind.
 /// Those columns are waiting on a neighbour that has already left the view, so
@@ -2856,13 +2944,19 @@ pub fn remesh_light_dirty_sections(store: Res<ChunkWorld>, mut terrain: ResMut<T
             min_y: extent.min_y,
         };
         meshed += 1;
-        terrain.work_counters.light_section_snapshots += 1;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            terrain.work_counters.light_section_snapshots += 1;
+        }
         if (-1..=1).any(|dx| {
             (-1..=1).any(|dz| !store.contains_column(cx + dx, cz + dz))
         }) {
             bridged += 1;
         }
+        #[cfg(not(target_arch = "wasm32"))]
         terrain.mesh_section(&store, key, extent.section_count);
+        #[cfg(target_arch = "wasm32")]
+        terrain.enqueue_browser_section(key, extent.section_count, false, CaptureSource::Light);
     }
     terrain.relight_workload.remesh_sections_submitted += meshed;
     if bridged > 0 {

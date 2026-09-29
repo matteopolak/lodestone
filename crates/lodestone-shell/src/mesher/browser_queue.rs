@@ -1,8 +1,65 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use super::{BrowserMeshQueueStats, Meshed, SectionKey, SectionSnapshot};
+use super::{
+    BrowserMeshQueueStats, ColumnSource, Meshed, SectionKey, SectionSnapshot,
+    SkyDefault, SnapshotOutcome, snapshot_section_in,
+};
 use crate::platform::Instant;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CaptureSource {
+    Column,
+    Section,
+    Light,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct SectionIntent {
+    pub(super) key: SectionKey,
+    pub(super) section_count: usize,
+    pub(super) force: bool,
+    pub(super) source: CaptureSource,
+}
+
+#[derive(Debug)]
+pub(super) enum BrowserMeshRequest {
+    Snapshot(SectionSnapshot),
+    Capture(SectionIntent),
+}
+
+impl BrowserMeshRequest {
+    pub(super) fn key(&self) -> SectionKey {
+        match self {
+            Self::Snapshot(snapshot) => snapshot.key,
+            Self::Capture(intent) => intent.key,
+        }
+    }
+
+    pub(super) fn capture(
+        self,
+        world: &lodestone_world::World,
+        sky_default: SkyDefault,
+        columns: ColumnSource,
+        biome_names: std::sync::Arc<[&'static str]>,
+    ) -> (SnapshotOutcome, bool, Option<CaptureSource>) {
+        match self {
+            Self::Snapshot(snapshot) => (SnapshotOutcome::Ready(snapshot), false, None),
+            Self::Capture(intent) => (
+                snapshot_section_in(
+                    world,
+                    intent.key,
+                    Some(intent.section_count),
+                    sky_default,
+                    columns,
+                )
+                .with_biome_names(biome_names),
+                intent.force,
+                Some(intent.source),
+            ),
+        }
+    }
+}
 
 #[derive(Debug)]
 struct Entry<T> {
@@ -44,6 +101,13 @@ impl<T> Default for SectionQueue<T> {
 }
 
 impl<T> SectionQueue<T> {
+    fn front(&self) -> Option<&T> {
+        let Slot::Occupied(entry) = &self.slots[self.first?] else {
+            unreachable!("queued section slot is vacant");
+        };
+        Some(&entry.value)
+    }
+
     fn len(&self) -> usize {
         self.positions.len()
     }
@@ -166,14 +230,39 @@ impl<T> SectionQueue<T> {
 
 #[derive(Debug, Default)]
 pub(super) struct BrowserMeshBacklog {
-    pub(super) queue: SectionQueue<SectionSnapshot>,
+    pub(super) queue: SectionQueue<BrowserMeshRequest>,
     pub(super) ready: Vec<Meshed>,
 }
 
 impl BrowserMeshBacklog {
     pub(super) fn submit(&mut self, snapshot: SectionSnapshot) {
         self.ready.retain(|meshed| meshed.key != snapshot.key);
-        self.queue.push_back(snapshot.key, snapshot, Instant::now);
+        self.queue.push_back(
+            snapshot.key, BrowserMeshRequest::Snapshot(snapshot), Instant::now,
+        );
+    }
+
+    pub(super) fn submit_intent(&mut self, mut intent: SectionIntent) {
+        if let Some(&index) = self.queue.positions.get(&intent.key)
+            && let BrowserMeshRequest::Capture(previous) = &self.queue.entry_mut(index).value
+        {
+            intent.force |= previous.force;
+            if previous.source == CaptureSource::Column {
+                intent.source = CaptureSource::Column;
+            }
+        }
+        self.ready.retain(|meshed| meshed.key != intent.key);
+        self.queue.push_back(intent.key, BrowserMeshRequest::Capture(intent), Instant::now);
+    }
+
+    pub(super) fn pop_snapshot(&mut self, now: Instant) -> Option<SectionSnapshot> {
+        if !matches!(self.queue.front(), Some(BrowserMeshRequest::Snapshot(_))) {
+            return None;
+        }
+        let BrowserMeshRequest::Snapshot(snapshot) = self.queue.pop_front(now)? else {
+            unreachable!("front request changed while popping");
+        };
+        Some(snapshot)
     }
 
     pub(super) fn pending(&self) -> usize {
@@ -203,8 +292,12 @@ impl BrowserMeshBacklog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mesher::{Neighbour, SectionGeometry, SkyDefault};
+    use crate::blocks::{DemoClassifier, ShellClassifier, id};
+    use crate::mesher::{MeshScheduler, Neighbour, SectionGeometry, SkyDefault, TerrainMesh};
     use lodestone_render::Mesh;
+    use lodestone_world::{
+        ChunkColumn, ChunkPos, ColumnLight, Heightmaps, LoadedChunk, PaletteKind, World,
+    };
     use std::sync::Arc;
 
     fn key(cx: i32, si: usize) -> SectionKey {
@@ -382,6 +475,148 @@ mod tests {
         assert_eq!(backlog.pending(), 0);
         assert!(backlog.queue.pop_front(Instant::now()).is_none());
         backlog.submit(snapshot(survivor));
-        assert_eq!(backlog.queue.pop_front(Instant::now()).unwrap().key, survivor);
+        assert_eq!(backlog.pop_snapshot(Instant::now()).unwrap().key, survivor);
+    }
+
+    fn intent_fixture() -> (World, SectionIntent) {
+        let mut world = World::new();
+        let mut column = ChunkColumn::new(
+            0, 1, PaletteKind::block_states(), PaletteKind::biomes(), id::AIR, 0,
+        );
+        column.set_block(2, 7, 8, id::STONE);
+        world.load(
+            ChunkPos::new(0, 0),
+            LoadedChunk::new(column, ColumnLight::new(1), Heightmaps::new(), Vec::new()),
+        );
+        let intent = SectionIntent {
+            key: SectionKey { cx: 0, cz: 0, si: 0, min_y: 0 },
+            section_count: 1,
+            force: false,
+            source: CaptureSource::Column,
+        };
+        (world, intent)
+    }
+
+    #[test]
+    fn coalesced_intents_capture_latest_world_once_instead_of_retaining_old_sections() {
+        let (mut world, intent) = intent_fixture();
+        let old = snapshot_section_in(
+            &world, intent.key, Some(1), SkyDefault::Full, ColumnSource::Complete,
+        ).ready().unwrap();
+        let mut backlog = BrowserMeshBacklog::default();
+        backlog.submit_intent(intent);
+        world.set_block(5, 7, 8, id::STONE);
+        backlog.submit_intent(SectionIntent { source: CaptureSource::Section, ..intent });
+        world.set_block(8, 7, 8, id::STONE);
+        backlog.submit_intent(SectionIntent { source: CaptureSource::Light, ..intent });
+
+        assert_eq!(old.quad_count(&DemoClassifier), 6);
+        assert_eq!(backlog.pending(), 1);
+        assert_eq!(backlog.queue.slots.len(), 1);
+        assert!(backlog.pop_snapshot(Instant::now()).is_none());
+        assert_eq!(backlog.stats().pops, 0);
+        let request = backlog.queue.pop_front(Instant::now()).unwrap();
+        assert_eq!(request.key(), intent.key);
+        let (outcome, force, source) = request.capture(
+            &world, SkyDefault::Full, ColumnSource::Complete, Arc::from([]),
+        );
+        assert!(!force);
+        assert_eq!(source, Some(CaptureSource::Column));
+        assert_eq!(outcome.ready().unwrap().quad_count(&DemoClassifier), 18);
+        assert_eq!(backlog.stats().insertions, 1);
+        assert_eq!(backlog.stats().replacements, 2);
+        assert_eq!(backlog.stats().pops, 1);
+        assert_eq!(backlog.pending(), 0);
+    }
+
+    #[test]
+    fn failed_upload_retry_uses_gpu_residency_not_reset_readiness() {
+        use lodestone_ecs::ChunkWorldWrite;
+
+        for had_resident in [false, true] {
+            let (world, intent) = intent_fixture();
+            let write = ChunkWorldWrite::new(world);
+            let store = write.read_handle();
+            let mut terrain = TerrainMesh::new(MeshScheduler::new(
+                1, ShellClassifier::Demo(DemoClassifier),
+            ));
+            terrain.column_source = ColumnSource::Streaming;
+            terrain.mark_mesh_uploaded(intent.key);
+            terrain.uploaded_sections.insert(intent.key);
+            terrain.reset_column_readiness(0, 0);
+            assert!(!terrain.presented_sections.contains(&intent.key));
+
+            terrain.retry_mesh_upload(&store, intent.key, had_resident);
+            assert_eq!(terrain.uploaded_sections.contains(&intent.key), had_resident);
+            assert!(!terrain.column_mesh_settled(&store, 0, 0));
+            let meshes = terrain.drain_all_meshes_with_world(&store);
+            assert_eq!(meshes.len(), usize::from(had_resident));
+            if had_resident {
+                assert_eq!(meshes[0].mesh.quad_count(), 6);
+                assert!(!terrain.column_mesh_settled(&store, 0, 0));
+                terrain.mark_mesh_uploaded(meshes[0].key);
+                assert!(terrain.column_mesh_settled(&store, 0, 0));
+            }
+        }
+    }
+
+    #[test]
+    fn late_capture_preserves_deferred_admission_and_cancels_unloaded_or_rearriving_work() {
+        let (mut world, intent) = intent_fixture();
+        let mut terrain = TerrainMesh::new(MeshScheduler::new(
+            1, ShellClassifier::Demo(DemoClassifier),
+        ));
+        let mut backlog = BrowserMeshBacklog::default();
+        let capture = |request: BrowserMeshRequest, world: &World| {
+            request.capture(world, SkyDefault::Full, ColumnSource::Streaming, Arc::from([]))
+        };
+        backlog.submit_intent(intent);
+        let (outcome, force, _) = capture(backlog.queue.pop_front(Instant::now()).unwrap(), &world);
+        assert!(matches!(
+            &outcome,
+            SnapshotOutcome::Deferred(snapshot) if snapshot.unloaded_neighbours() == 24,
+        ));
+        assert!(terrain.accept_snapshot(intent.key, outcome, force).is_none());
+        assert_eq!(terrain.deferred, 1);
+
+        backlog.submit_intent(SectionIntent { force: true, ..intent });
+        backlog.submit_intent(intent);
+        let (outcome, force, _) = capture(backlog.queue.pop_front(Instant::now()).unwrap(), &world);
+        assert!(force);
+        assert_eq!(
+            terrain.accept_snapshot(intent.key, outcome, force).unwrap().quad_count(&DemoClassifier),
+            6,
+        );
+
+        terrain.uploaded_sections.insert(intent.key);
+        backlog.submit_intent(intent);
+        let (outcome, force, _) = capture(backlog.queue.pop_front(Instant::now()).unwrap(), &world);
+        assert!(!force);
+        assert!(terrain.accept_snapshot(intent.key, outcome, force).is_some());
+
+        backlog.submit_intent(intent);
+        backlog.ready.push(meshed(intent.key));
+        let survivor = SectionIntent { key: SectionKey { cx: 3, ..intent.key }, ..intent };
+        backlog.submit_intent(survivor);
+        world.unload(ChunkPos::new(0, 0));
+        backlog.forget_column(0, 0);
+        assert_eq!(backlog.pending(), 1);
+        assert!(backlog.ready.is_empty());
+        assert_eq!(backlog.queue.pop_front(Instant::now()).unwrap().key(), survivor.key);
+
+        backlog.submit_intent(intent);
+        let (outcome, force, _) = capture(backlog.queue.pop_front(Instant::now()).unwrap(), &world);
+        assert!(matches!(&outcome, SnapshotOutcome::Empty));
+        assert!(terrain.accept_snapshot(intent.key, outcome, force).is_none());
+        assert_eq!(terrain.pending_removals, [intent.key]);
+        backlog.submit_intent(intent);
+        backlog.ready.push(meshed(intent.key));
+        backlog.forget_column(0, 0);
+        let (new_world, _) = intent_fixture();
+        world = new_world;
+        assert_eq!(backlog.pending(), 0);
+        backlog.submit_intent(intent);
+        let (outcome, _, _) = capture(backlog.queue.pop_front(Instant::now()).unwrap(), &world);
+        assert!(matches!(outcome, SnapshotOutcome::Deferred(_)));
     }
 }

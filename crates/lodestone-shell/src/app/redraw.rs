@@ -654,6 +654,9 @@ impl WindowApp {
         #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
         let mesh_drain_started = profile_mesh_work.then(Instant::now);
         let meshed_results = self.sim.drain_meshes();
+        for key in self.sim.drain_removals() {
+            render.remove_section(&key);
+        }
         #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
         let mesh_drain_ms = mesh_drain_started
             .map(|started| started.elapsed().as_secs_f32() * 1000.0);
@@ -662,13 +665,15 @@ impl WindowApp {
         #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
         let mesh_upload_started = profile_mesh_work.then(Instant::now);
         for meshed in meshed_results {
-            render.upload_meshed(device, queue, &meshed);
-            // On native, `Sim::drain_meshes` has only crossed the CPU scheduler
-            // boundary; on Wasm it also performs the bounded synchronous mesh
-            // drain. A loading gate may advance after the renderer has received
-            // this section, so acknowledge the hand-off after upload rather than
-            // treating a worker result or a global pending count as ready.
-            self.sim.mark_mesh_uploaded(meshed.key);
+            match render.upload_meshed(device, queue, &meshed) {
+                crate::gpu::SectionUploadOutcome::Applied
+                | crate::gpu::SectionUploadOutcome::Unchanged => {
+                    self.sim.mark_mesh_uploaded(meshed.key);
+                }
+                crate::gpu::SectionUploadOutcome::Failed => {
+                    self.sim.retry_mesh_upload(meshed.key, render.has_section(&meshed.key));
+                }
+            }
             #[cfg(not(target_arch = "wasm32"))]
             {
                 mesh_upload_count += 1;

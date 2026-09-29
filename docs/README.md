@@ -159,9 +159,9 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   boundary while the world source, scheduled queues, block-entity registry, and entity
   source remain shared with the connection.
 - [Browser mesh queue](./browser-mesh-queue.md) — The browser terrain mesher retains
-  one pending snapshot per section in an indexed FIFO. Repeated updates replace that
-  snapshot without moving the section behind newer submissions, so a busy section
-  keeps its turn in the mesh backlog.
+  one pending capture intent per section in an indexed FIFO. Repeated updates coalesce
+  before capturing blocks and light, without moving the section behind newer
+  submissions.
 - [Browser shell port](./browser-shell-port.md) — The wasm32 target: `web/` runs the
   real `lodestone-shell` — the same menu, `Sim`, and renderer the native binary uses
   — fetching `lodestone-resources.zip` and `blocks.json` at startup instead of
