@@ -11,15 +11,18 @@ the current fixed-capacity representation.
 
 The ignored block_properties drift test reads the authoritative 26.2
 block-state report, collects the 93 keys, 153 values, and 435 valid key/value
-pairs, and emits generated enums plus compact property-set, state, and
-per-block-span tables. The generator asserts that all 32,366 state rows are
-present and that the largest state has seven properties.
+pairs, and emits generated enums plus compact property-set and state tables.
+The generator asserts that all 32,366 state rows are present, that their owners
+match the canonical identity table, and that the largest state has seven properties.
 
 Properties::from_state_id uses those generated numeric tables directly. It
 does not parse state or property text. Properties::parse is strict and is
 intended for configuration or other text boundaries only. state_for_block
-matches a typed property set only inside the generated span for the supplied
-block, so a key/value pair valid for one block cannot resolve to another.
+matches a typed property set only inside the canonical span for the supplied
+block, so a key/value pair valid for one block cannot resolve to another. This
+uses `block_states::state_span`, shared with text resolution: the report-only
+identity emitter stores `(start, count)` and both consumers search the half-open
+range `start..start + count`. The property table does not store duplicate spans.
 with_builtin replaces or inserts one generated key/value pair without leaving
 the typed representation; this is the operation used by moving block render
 state synthesis.
@@ -43,7 +46,8 @@ crates/lodestone-data/tests/block_properties.rs. Run the ignored drift test
 with LODESTONE_REGEN=1; it writes a temporary file, syncs it, and renames it
 into place atomically. Run the ordinary focused test afterward: it
 round-trips every generated state and exercises malformed input, duplicate
-keys, compact-layout assertions, and wrong-block-schema rejection.
+keys, compact-layout assertions, wrong-block-schema rejection, and a neighboring
+dirt-state control that catches treating an inclusive last ID as a count.
 
 Keep the generated file present while changing the generator. Do not hand-edit
 src/generated/block_property_tables.rs, and do not migrate worldgen call sites
@@ -59,6 +63,8 @@ preview, set LODESTONE_TYPED_PROPERTIES_OUTPUT to a new temporary path.
 
 ## Dependencies
 
-The module depends on lodestone-data block_states and its generated state
-table. The generator uses the existing serde_json development dependency;
+The module depends on lodestone-data block_states and its generated state and
+canonical block identity tables. Span generation belongs to the
+[Rust identity emitter](./data-identity-codegen.md), not the property generator.
+The property generator uses the existing serde_json development dependency;
 runtime code has no additional dependencies.

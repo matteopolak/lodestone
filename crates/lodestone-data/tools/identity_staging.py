@@ -12,6 +12,7 @@ import canonical_census as census
 
 
 SCOPES = ("base", "union")
+RUNTIME_BLOCK_FILES = ("block_registry.rs", "block_enum.rs", "block_states.rs")
 
 
 def digest(value):
@@ -187,12 +188,25 @@ def rust_enum(name, variants, keys):
     return "\n".join([*lines, by_id, by_name])
 
 
+def canonical_default_states(bundle, sources):
+    state_ids = {key: index for index, key in enumerate(bundle["domains"]["block_states"]["keys"])}
+    defaults = []
+    for key in bundle["domains"]["blocks"]["keys"]:
+        identities = [sources[version]["block_identities"].get(key) for version in census.VERSIONS]
+        marked = [identity["default_state"] for identity in identities if identity is not None]
+        if len(set(marked)) != 1:
+            raise ValueError(f"Rust identities: {key} has conflicting semantic defaults; explicit policy required")
+        defaults.append(state_ids[marked[0]])
+    return defaults
+
+
 def build_rust_files(bundle, manifest, sources):
     """Render validated identity columns; no behavior data or runtime activation."""
     validate_bundle(bundle, manifest, sources)
     blocks = bundle["domains"]["blocks"]
     states = bundle["domains"]["block_states"]
     items = bundle["domains"]["items"]
+    canonical_defaults = canonical_default_states(bundle, sources)
     require_width(len(blocks["keys"]), 65535, "blocks (u16 count)")
     require_width(len(items["keys"]), 65535, "items (u16 count)")
     require_width(len(states["keys"]), 4294967295, "states (u32 count)")
@@ -217,7 +231,8 @@ def build_rust_files(bundle, manifest, sources):
             rust_array("BLOCK_STATE_SPANS", "(u32, u32)",
                        [f"({start}, {count})" for start, count in blocks["state_spans"]], 8),
         ]),
-        "block_enum.rs": rust_enum("Block", block_variants, blocks["keys"]),
+        "block_enum.rs": rust_enum("Block", block_variants, blocks["keys"]) + "\n" +
+                         rust_array("DEFAULT_STATE", "u32", [str(value) for value in canonical_defaults]),
         "block_states.rs": "\n".join([
             f"pub const STATE_COUNT: u32 = {len(states['keys'])};\n",
             rust_array("PROPERTY_SETS", "&[(&str, &str)]",
@@ -284,6 +299,14 @@ def check_rust_files(directory, files):
             raise ValueError(f"Rust identities: staged file differs: {directory / name}")
 
 
+def check_runtime_files(directory, files, scope):
+    if scope != "base":
+        raise ValueError("Rust identities: runtime block identity check requires base scope")
+    for name in RUNTIME_BLOCK_FILES:
+        if (directory / name).read_bytes() != files[name].encode():
+            raise ValueError(f"Rust identities: runtime block file differs: {directory / name}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-reports", type=Path, default=census.ROOT / ".cache/mc/26.2/generated/reports")
@@ -296,6 +319,9 @@ def main():
     destination.add_argument("--check", type=Path, help="validate an existing staging bundle byte for byte")
     destination.add_argument("--rust-output", type=Path, help="create a private Rust staging directory; refuses to overwrite")
     destination.add_argument("--rust-check", type=Path, help="check a Rust staging directory byte for byte")
+    destination.add_argument("--runtime-check", type=Path, nargs="?",
+                             const=census.ROOT / "crates/lodestone-data/src/generated",
+                             help="check only the three adopted base block identity files")
     args = parser.parse_args()
     sources = {
         census.VERSIONS[0]: census.load_source(args.base_reports),
@@ -314,12 +340,14 @@ def main():
     if args.output:
         with args.output.open("x", encoding="utf-8") as output:
             output.write(encoded)
-    if args.rust_output or args.rust_check:
+    if args.rust_output or args.rust_check or args.runtime_check:
         files = build_rust_files(bundle, manifest, sources)
         if args.rust_output:
             write_rust_files(args.rust_output, files)
-        else:
+        elif args.rust_check:
             check_rust_files(args.rust_check, files)
+        else:
+            check_runtime_files(args.runtime_check, files, args.scope)
         print(f"Rust files: {len(files) - 1}; manifest_sha256: {hashlib.sha256(files['manifest.json'].encode()).hexdigest()}")
     for name in census.DOMAINS:
         print(f"{name}: {len(bundle['domains'][name]['keys'])}")

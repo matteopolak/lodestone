@@ -45,10 +45,9 @@
 //!
 //! # How to change it
 //!
-//! [`Block`]'s variants and the three index tables are generated — see
-//! `src/generated/block_enum.rs` and the `LODESTONE_REGEN=1` command in
-//! `tests/tools.rs`. Do not hand-edit either. Everything in *this* file is
-//! hand-written accessor code over those tables and is free to change.
+//! Generate block identities with `tools/identity_staging.py`; see
+//! `docs/data-identity-codegen.md`. Keep generated tables out of manual edits.
+//! This module owns their hand-written accessors.
 
 use crate::block_states::StateId;
 use crate::generated_block_enum as table;

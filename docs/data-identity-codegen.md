@@ -1,11 +1,11 @@
-# Staged Rust Identity Generation
+# Rust Identity Generation
 
 ## What it is
 
-The Rust identity emitter converts the validated offline identity bundle into private,
-deterministic Rust tables without compiling the existing registry. It prepares canonical
-block, state, and item identities plus explicit per-version defaults and wire mappings;
-runtime adoption remains a separate change.
+The Rust identity emitter converts the validated offline identity bundle into deterministic
+Rust tables without compiling the existing registry. The runtime consumes its 26.2 block
+identities, defaults, and state spans; union identities, item output, and per-version mapping
+arrays remain private staging products.
 
 ## How it works
 
@@ -16,29 +16,43 @@ wire joins come directly from that bundle; the emitter never builds a second map
 
 Each staging directory contains six Rust files and `manifest.json`:
 
-| File | Identity columns | Intended consumers at adoption |
+| File | Identity columns | Consumers |
 | --- | --- | --- |
 | `block_registry.rs` | `BLOCK_COUNT`, `BLOCK_REGISTRY_NAMES`, `STATE_BLOCK`, `BLOCK_STATE_SPANS` | `Block::name`, `StateId::block`, numeric block property lookup |
-| `block_enum.rs` | `Block`, `BLOCKS_BY_REGISTRY_ID`, `REGISTRY_IDS_BY_NAME` | `Block::from_registry_id`, `Block::from_name`, exhaustive block matches |
+| `block_enum.rs` | `Block`, `BLOCKS_BY_REGISTRY_ID`, `REGISTRY_IDS_BY_NAME`, `DEFAULT_STATE` | `Block::from_registry_id`, `Block::from_name`, `Block::default_state`, exhaustive block matches |
 | `block_states.rs` | `STATE_COUNT`, `PROPERTY_SETS`, `STATES` | `StateId::properties`, `block_states::block_name`, `BlockStateTable` and asset baking |
-| `items.rs` | `ITEM_COUNT`, `ITEM_NAMES` | `Item::name`, item registry lookup |
-| `item_enum.rs` | `Item`, `ITEMS_BY_REGISTRY_ID`, `REGISTRY_IDS_BY_NAME` | `Item::from_registry_id`, `Item::from_name`, exhaustive item matches |
-| `identity_versions.rs` | Per-version defaults, wire counts, ingress and egress arrays | Version-aware default selection and adapter translation |
+| `items.rs` | `ITEM_COUNT`, `ITEM_NAMES` | Staged only; existing item generation remains active |
+| `item_enum.rs` | `Item`, `ITEMS_BY_REGISTRY_ID`, `REGISTRY_IDS_BY_NAME` | Staged only; existing item generation remains active |
+| `identity_versions.rs` | Per-version defaults, wire counts, ingress and egress arrays | Staged only; existing adapter mapping generation remains active |
 
 `STATES` retains the existing `(alphabetical block-name index, property-set index)`
 representation. The first index resolves through `block_enum.rs::REGISTRY_IDS_BY_NAME`
 to the canonical block-name column. Property pairs and the distinct property-set table are
-sorted explicitly. `STATE_BLOCK` and spans use canonical IDs directly.
+sorted explicitly. `STATE_BLOCK` and spans use canonical IDs directly. Each span is
+`(start, count)`, consumed as the half-open range `start..start + count` by
+`block_states::state_span`. Text state lookup and `Properties::state_for_block` share that
+range; neither reconstructs a resident reverse index or stores a second span table.
+
+`DEFAULT_STATE` is total in canonical block space. Existing blocks retain the original
+report-marked semantic default; an appended block takes its introducing release's mark.
+Every report containing a shared block must agree on that semantic default, even when wire
+IDs shift. A conflict fails Rust emission in both scopes pending a deliberate policy change.
+The current reports agree for all 1,196 shared blocks. `StateId::is_default` compares against
+its owning block's default, and `snow_support::is_default_state` delegates to it. The snow
+behavior dump's default column remains an independent all-state test witness, not a fifth
+runtime bitset. No default is selected by taking the lowest state ID.
 
 In `identity_versions.rs`, `v26_2` and, for union scope, `v26_3` each contain
 `BLOCK_DEFAULT_STATES: [Option<u32>; ...]`. Ingress columns use `u32`; outgoing mappings
 use `Option<u32>`. Unsupported blocks, states, items, and defaults retain `None`, including
-identities added after 26.2. No default is selected by taking the lowest state ID.
+identities added after 26.2. These versioned facts remain distinct from the total canonical
+default policy.
 
 The provenance manifest records the bundle and census digests, exact input report hashes,
 domain counts, and SHA-256 for every Rust file. No timestamp or machine-specific path is
 serialized. `--rust-check` requires the complete expected file set and exact bytes, including
-the provenance manifest.
+the provenance manifest. `--scope base --runtime-check` checks only the three adopted block
+identity modules byte-for-byte; it never writes them and refuses union scope.
 
 ## How to change it
 
@@ -55,14 +69,18 @@ count interfaces, while property-set indices must fit `u16` and state counts fit
 Changing these limits requires reviewing the consuming types rather than silently narrowing
 an index.
 
-The files are not drop-in replacements for the active runtime. In particular, the emitter
-does not supply the existing unversioned `block_enum.rs::DEFAULT_STATE`, behavior columns,
-or default-state marks in the snow-support table. Adoption must choose explicit version
-semantics for `Block::default_state` and `StateId::is_default`, populate total authoritative
-behavior tables, and integrate state spans with the property tables. The 26.3 adapter's
-existing compact-run mapping generator remains independent and active; these staged arrays
-do not replace or activate it. All protocol boundaries must translate canonical IDs before
-the union can be enabled.
+Only `block_registry.rs`, `block_enum.rs`, and `block_states.rs` from base scope are adopted.
+Stage a fresh private directory, review the generated differences, and apply those three
+block files together. `tests/block_states.rs::committed_table_matches_report` delegates its
+read-only drift check to the emitter; it no longer regenerates identities from compiled
+tables. The tool-table generator in `tests/tools.rs` does not write block identities.
+Typed property and snow-support generators own their remaining behavior/property columns,
+not canonical spans or defaults.
+
+The runtime counts and IDs remain the 26.2 census. Before adopting the union, populate every
+total identity-indexed behavior table from authoritative versioned input and review all
+protocol and persistence boundaries. The 26.3 adapter's compact-run mapping generator remains
+independent and active; the staged arrays do not replace or activate it.
 
 ## Configuration
 
@@ -79,14 +97,17 @@ python3 crates/lodestone-data/tools/identity_staging.py --scope union \
   --bundle /tmp/lodestone-identities.json --rust-check .cache/identity-rust-union
 python3 crates/lodestone-data/tools/identity_staging.py --scope base \
   --rust-output .cache/identity-rust-base
+python3 crates/lodestone-data/tools/identity_staging.py --scope base --runtime-check
 python3 crates/lodestone-data/tools/test_identity_staging.py --official-reports
 ```
 
 `--rust-output` exclusively creates a new directory under the repository's `.cache/` or
 `/tmp` (`/private/tmp` on macOS). It rejects existing directories, runtime-source paths,
-and symlink escapes. It writes nothing unless explicitly requested. JSON output/check and
-Rust output/check destinations are mutually exclusive; no environment variable changes
-generation. Interrupted writes may leave an incomplete private directory, which fails the
+and symlink escapes. It writes nothing unless explicitly requested. JSON output/check,
+Rust output/check, and runtime-check destinations are mutually exclusive; no environment
+variable changes generation. `--runtime-check` defaults to `crates/lodestone-data/src/generated`
+and accepts an alternate directory for read-only checks. Interrupted writes may leave an
+incomplete private directory, which fails the
 exact file-set check.
 
 ## Dependencies

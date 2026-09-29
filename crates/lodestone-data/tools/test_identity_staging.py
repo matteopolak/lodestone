@@ -41,6 +41,7 @@ def rust_values(source, name):
 class RustEmitterTests(unittest.TestCase):
     def setUp(self):
         self.sources = identity_sources()
+        self.sources["26.3"]["block_identities"]["minecraft:stone"]["default_state"] = "minecraft:stone[wet=true]"
         self.manifest = census.build_manifest(self.sources)
         self.bundle = staging.build_bundle(self.manifest, self.sources)
         self.files = staging.build_rust_files(self.bundle, self.manifest, self.sources)
@@ -51,7 +52,7 @@ class RustEmitterTests(unittest.TestCase):
             self.assertEqual(re.findall(r"^    ([A-Z]\w*) = (\d+),$", source, re.MULTILINE),
                              [("Air", "0"), ("Stone", "1"), ("New", "2")])
             self.assertEqual(rust_values(source, "REGISTRY_IDS_BY_NAME"), [0, 2, 1])
-        self.assertNotIn("DEFAULT_STATE", self.files["block_enum.rs"])
+        self.assertEqual(rust_values(self.files["block_enum.rs"], "DEFAULT_STATE"), [0, 2, 3])
         self.assertEqual(rust_values(self.files["block_registry.rs"], "STATE_BLOCK"), [0, 1, 1, 2])
         self.assertEqual(rust_values(self.files["block_registry.rs"], "BLOCK_STATE_SPANS"), [(0, 1), (1, 2), (3, 1)])
 
@@ -64,7 +65,7 @@ class RustEmitterTests(unittest.TestCase):
         source = self.files["identity_versions.rs"]
         base, latest = source.split("pub mod v26_3 {")
         self.assertEqual(rust_values(base, "BLOCK_DEFAULT_STATES"), [0, 2, None])
-        self.assertEqual(rust_values(latest, "BLOCK_DEFAULT_STATES"), [0, 1, 3])
+        self.assertEqual(rust_values(latest, "BLOCK_DEFAULT_STATES"), [0, 2, 3])
         self.assertEqual(rust_values(base, "BLOCK_STATE_CANONICAL_TO_WIRE"), [0, 1, 2, None])
         self.assertEqual(rust_values(latest, "BLOCK_STATE_CANONICAL_TO_WIRE"), [0, 2, 3, 1])
         self.assertEqual(rust_values(latest, "BLOCK_STATE_WIRE_TO_CANONICAL"), [0, 3, 1, 2])
@@ -80,6 +81,30 @@ class RustEmitterTests(unittest.TestCase):
             broken["domains"][domain]["versions"]["26.2"][column][index] = value
             with self.subTest(column=column), self.assertRaisesRegex(ValueError, message):
                 staging.build_rust_files(broken, self.manifest, self.sources)
+
+    def test_shared_default_conflicts_are_rejected_in_both_scopes(self):
+        self.sources["26.3"]["block_identities"]["minecraft:stone"]["default_state"] = "minecraft:stone[wet=false]"
+        for scope in staging.SCOPES:
+            bundle = staging.build_bundle(self.manifest, self.sources, scope)
+            with self.subTest(scope=scope), self.assertRaisesRegex(ValueError, "minecraft:stone.*conflicting semantic defaults"):
+                staging.build_rust_files(bundle, self.manifest, self.sources)
+
+    def test_runtime_check_accepts_only_base_block_files_and_detects_mutation(self):
+        base = staging.build_bundle(self.manifest, self.sources, "base")
+        files = staging.build_rust_files(base, self.manifest, self.sources)
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            directory = Path(temporary) / "runtime"
+            staging.write_rust_files(directory, files)
+            staging.check_runtime_files(directory, files, "base")
+            with self.assertRaisesRegex(ValueError, "requires base scope"):
+                staging.check_runtime_files(directory, self.files, "union")
+            path = directory / "block_enum.rs"
+            original = path.read_bytes()
+            changed = original.replace(b"    0, 2,", b"    0, 1,", 1)
+            self.assertNotEqual(original, changed)
+            path.write_bytes(changed)
+            with self.assertRaisesRegex(ValueError, "runtime block file differs.*block_enum.rs"):
+                staging.check_runtime_files(directory, files, "base")
 
     def test_variant_spelling_controls_reject_collision_reserved_and_invalid_names(self):
         self.assertEqual(staging.enum_variants(["minecraft:oak_log", "minecraft:cut_copper"]), ["OakLog", "CutCopper"])
@@ -124,6 +149,7 @@ class RustEmitterTests(unittest.TestCase):
         self.assertNotIn("pub mod v26_3", files["identity_versions.rs"])
         self.assertNotIn("New =", files["block_enum.rs"])
         self.assertEqual(rust_values(files["identity_versions.rs"], "BLOCK_DEFAULT_STATES"), [0, 2])
+        self.assertEqual(rust_values(files["block_enum.rs"], "DEFAULT_STATE"), [0, 2])
 
     def test_private_write_refuses_overwrite_and_check_detects_modified_column(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
@@ -263,7 +289,7 @@ class OfficialReportTests(unittest.TestCase):
             "item_keys": rust_values(files["items.rs"], "ITEM_NAMES"),
             "state_keys": state_keys,
             "state_spans": [list(row) for row in rust_values(files["block_registry.rs"], "BLOCK_STATE_SPANS")],
-            "default_states": rust_values(files["identity_versions.rs"], "BLOCK_DEFAULT_STATES"),
+            "default_states": rust_values(files["block_enum.rs"], "DEFAULT_STATE"),
             "block_ids": rust_values(files["block_registry.rs"], "STATE_BLOCK"),
         }
         self.assertEqual({name: staging.digest(values) for name, values in columns.items()}, self.fixture["column_sha256"])
@@ -282,6 +308,38 @@ class OfficialReportTests(unittest.TestCase):
         self.assertIsNone(rust_values(base, "BLOCK_DEFAULT_STATES")[1196])
         self.assertEqual(rust_values(latest, "BLOCK_DEFAULT_STATES")[1196], 32366)
         self.assertEqual(rust_values(latest, "BLOCK_STATE_CANONICAL_TO_WIRE")[32366], 27)
+
+    def test_canonical_defaults_preserve_base_and_use_the_introducing_release(self):
+        base = rust_values(self.base_rust["block_enum.rs"], "DEFAULT_STATE")
+        union = rust_values(self.union_rust["block_enum.rs"], "DEFAULT_STATE")
+        self.assertEqual(union[:1196], base)
+        self.assertEqual(staging.digest(base), self.fixture["column_sha256"]["default_states"])
+        self.assertEqual(union[1196], 32366)
+        for row in self.fixture["blocks"]:
+            with self.subTest(block=row["key"]):
+                self.assertEqual(base[row["id"]], row["default_state"])
+
+    def test_adopted_base_block_files_match_the_report_only_emitter(self):
+        directory = census.ROOT / "crates/lodestone-data/src/generated"
+        staging.check_runtime_files(directory, self.base_rust, "base")
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            destination = Path(temporary) / "control"
+            staging.write_rust_files(destination, self.base_rust)
+            path = destination / "block_enum.rs"
+            original = path.read_bytes()
+            changed = original.replace(b"    0, 1, 2, 3, 4, 5, 6, 7, 9,", b"    0, 1, 2, 3, 4, 5, 6, 7, 8,", 1)
+            self.assertNotEqual(original, changed)
+            path.write_bytes(changed)
+            with self.assertRaisesRegex(ValueError, "runtime block file differs.*block_enum.rs"):
+                staging.check_runtime_files(destination, self.base_rust, "base")
+
+    def test_shared_official_default_conflict_fails_both_rust_scopes(self):
+        sources = copy.deepcopy(self.sources)
+        sources["26.3"]["block_identities"]["minecraft:oak_log"]["default_state"] = "minecraft:oak_log[axis=x]"
+        for scope in staging.SCOPES:
+            bundle = staging.build_bundle(self.manifest, sources, scope)
+            with self.subTest(scope=scope), self.assertRaisesRegex(ValueError, "minecraft:oak_log.*conflicting semantic defaults"):
+                staging.build_rust_files(bundle, self.manifest, sources)
 
     def test_emitted_mapping_columns_match_independent_wire_witnesses(self):
         base, latest = self.union_rust["identity_versions.rs"].split("pub mod v26_3 {")

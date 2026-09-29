@@ -1,22 +1,21 @@
 //! The four per-block-state facts vanilla's own "freeze top layer" worldgen
 //! feature (a snow-and-freeze feature) needs and that no other
-//! census in this crate carries, plus the default-state key its consumer needs to
-//! look them up, for protocol 776 (Minecraft 26.2).
+//! census in this crate carries, for protocol 776 (Minecraft 26.2).
 //!
 //! # Why this table has to exist
 //!
 //! Vanilla's own snow-and-freeze feature's place step asks four
 //! questions of the block field, none of them answerable from `blocks.json`:
 //!
-//! | fn | vanilla expression | used for |
+//! | fn | measured fact | used for |
 //! |---|---|---|
 //! | [`face_full_up`] | is the collision shape's up-face full | the snow-layer block's own "can survive" check |
-//! | [`has_fluid_state`] | `!state.getFluidState().isEmpty()` | the second half of the motion-blocking heightmap predicate |
+//! | [`has_fluid_state`] | non-empty fluid state | the second half of the motion-blocking heightmap predicate |
 //! | [`is_water_source_liquid_block`] | the fluid state is water **and** the block is a liquid block | which blocks turn to ice (vanilla's own biome "should freeze" check) |
 //! | [`has_snowy_property`] | the state carries the "snowy" property | the `snowy` flip under a placed snow layer, also in the place step above |
 //!
 //! [`crate::block_solidity::blocks_motion`] already carries the *first* half of
-//! the `MOTION_BLOCKING` predicate, and [`crate::collision_shapes`] carries the
+//! the motion-blocking predicate, and [`crate::collision_shapes`] carries the
 //! collision *geometry* — but neither answers the questions above, for reasons
 //! the dump makes measurable rather than assertable:
 //!
@@ -70,8 +69,8 @@
 //!
 //! # Memory design
 //!
-//! Five bitsets, 4,046 bytes each — pure rodata, no heap, O(1) by id. The fifth,
-//! [`is_default_state`], is not a "freeze top layer" predicate; see its own doc.
+//! Four bitsets, 4,046 bytes each — pure rodata, no heap, O(1) by id.
+//! [`is_default_state`] delegates to the canonical block identity table.
 
 use crate::block_states::StateId;
 use crate::generated_snow_support as table;
@@ -97,12 +96,12 @@ pub fn face_full_up(id: StateId) -> bool {
     bit(&table::FACE_FULL_UP, id)
 }
 
-/// Vanilla `!state.getFluidState().isEmpty()` for validated block-state `id`.
+/// Non-empty fluid state for validated block-state `id`.
 ///
 /// The second half of the motion-blocking heightmap predicate
-/// (`input.blocksMotion() || !input.getFluidState()
-/// .isEmpty()`); combine with [`crate::block_solidity::blocks_motion`] for the
-/// whole thing. True for still and flowing water and lava **and** every
+/// combines solid motion blocking with fluid presence; combine with
+/// [`crate::block_solidity::blocks_motion`] for the whole thing. True for still
+/// and flowing water and lava **and** every
 /// waterlogged state, which is why it is broader than
 /// [`is_water_source_liquid_block`].
 #[must_use]
@@ -133,21 +132,13 @@ pub fn has_snowy_property(id: StateId) -> bool {
     bit(&table::HAS_SNOWY_PROPERTY, id)
 }
 
-/// Vanilla `state == state.getBlock().defaultBlockState()` for validated
-/// block-state `id`. Exactly one state per block is set, so a single walk of
-/// `0..STATE_COUNT` recovers every block's default with no name lookup.
+/// Whether `id` is its block's canonical default state.
 ///
-/// This is not a `freeze_top_layer` predicate — it is the key its consumer needs.
-/// `lodestone-worldgen` emits fluids without their `level` property
-/// (`docs/worldgen-parity.md`'s "Known representation gap"), so a generated
-/// column's water reads as `minecraft:water`; since
-/// [`is_water_source_liquid_block`] is true for exactly one water state, a
-/// property-less lookup must resolve to the block's **default** state or no ocean
-/// ever freezes. `blocks.json` does carry a `"default": true` flag per block, but
-/// [`crate::block_states`]' extraction did not retain it.
+/// Identity comes from the official report's default mark. The independent
+/// behavior dump retains its own default column so tests can compare every state.
 #[must_use]
 pub fn is_default_state(id: StateId) -> bool {
-    bit(&table::IS_DEFAULT_STATE, id)
+    id.is_default()
 }
 
 #[cfg(test)]

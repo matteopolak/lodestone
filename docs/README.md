@@ -277,11 +277,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   defaults, and item IDs from the official reports and the append-only canonical
   census. It produces a reviewable JSON artifact without compiling Rust or changing
   runtime tables, storage, adapters, or protocol support.
-- [Staged Rust Identity Generation](./data-identity-codegen.md) — The Rust identity
-  emitter converts the validated offline identity bundle into private, deterministic
-  Rust tables without compiling the existing registry. It prepares canonical block,
-  state, and item identities plus explicit per-version defaults and wire mappings;
-  runtime adoption remains a separate change.
+- [Rust Identity Generation](./data-identity-codegen.md) — The Rust identity emitter
+  converts the validated offline identity bundle into deterministic Rust tables
+  without compiling the existing registry. The runtime consumes its 26.2 block
+  identities, defaults, and state spans; union identities, item output, and
+  per-version mapping arrays remain private staging products.
 - [Block light-properties oracle](./data-light-oracle.md) — `LightPropertiesOracle`
   queries every built-in block state's raw light dampening and emission from an actual
   bootstrapped server registry. The harness contains no release-specific state count,
