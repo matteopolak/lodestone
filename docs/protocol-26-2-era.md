@@ -19,9 +19,12 @@ names or identifiers within one state and direction are rejected.
 
 An alternate identifier table does not establish payload or registry
 compatibility. Connection-only dialects reject registry/tag ingestion, entry
-into Play, deferred chunk decode, and Play actions. Their shared body codecs
-still use the 26.2 shape context. They are a connection-codec integration seam,
-not a registered client or host family.
+into Play, deferred chunk decode, and Play actions. A dialect with independently
+captured registry bodies can call `with_reviewed_registry_data` to route only
+Configuration `registry_data` through the existing strict decoder and
+per-connection store. `update_tags` remains gated because its block IDs feed a
+process-wide 26.2 table. These dialects are connection-codec integration seams,
+not registered client or host families.
 
 The packet starts with chunk coordinates, then a typed list of the three
 client-visible heightmaps: world surface, motion blocking, and motion blocking
@@ -97,6 +100,9 @@ Add protocol-specific packet tables through `dialect::PacketTables`; never
 reuse numeric identifiers across states or directions. Before extending the
 connection-only boundary, provide independent payload fixtures and route every
 affected registry lookup, nested item codec, and deferred chunk consumer.
+Only opt into registry decoding when the captured body uses the shared framing;
+tag ingestion additionally needs a block-registry ID translation before it can
+install an override.
 `tests/session/dialect.rs` uses synthetic shifted identifiers and literal
 payloads to distinguish routing from accidental numeric compatibility.
 

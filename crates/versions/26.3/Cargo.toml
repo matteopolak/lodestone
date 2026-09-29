@@ -15,4 +15,6 @@ lodestone-data = { path = "../../lodestone-data" }
 lodestone-v26-2 = { path = "../26.2" }
 
 [dev-dependencies]
+lodestone-model = { path = "../../lodestone-model" }
+lodestone-world = { path = "../../lodestone-world" }
 serde_json = { workspace = true }
