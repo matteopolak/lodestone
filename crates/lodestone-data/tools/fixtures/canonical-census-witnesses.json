@@ -1,0 +1,17 @@
+{
+  "provenance": "Numeric wire witnesses read separately from the cached official 26.2 and 26.3 blocks.json and registries.json reports. Appended canonical IDs are policy expectations, not wire IDs.",
+  "counts": {
+    "blocks": [1196, 1286],
+    "block_states": [32366, 35723],
+    "items": [1537, 1658]
+  },
+  "witnesses": [
+    {"domain": "block_states", "key": "minecraft:stone", "base_wire": 1, "latest_wire": 1, "canonical": 1},
+    {"domain": "block_states", "key": "minecraft:water[level=0]", "base_wire": 86, "latest_wire": 89, "canonical": 86},
+    {"domain": "block_states", "key": "minecraft:acacia_button[face=floor,facing=north,powered=true]", "base_wire": 10771, "latest_wire": 12514, "canonical": 10771},
+    {"domain": "block_states", "key": "minecraft:poplar_planks", "base_wire": null, "latest_wire": 27, "canonical": 32366},
+    {"domain": "blocks", "key": "minecraft:poplar_planks", "base_wire": null, "latest_wire": 23, "canonical": 1196},
+    {"domain": "items", "key": "minecraft:diamond", "base_wire": 926, "latest_wire": 1012, "canonical": 926},
+    {"domain": "items", "key": "minecraft:poplar_planks", "base_wire": null, "latest_wire": 72, "canonical": 1537}
+  ]
+}
