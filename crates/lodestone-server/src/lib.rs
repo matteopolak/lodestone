@@ -529,6 +529,7 @@ pub mod worldgen_lifecycle;
 /// Request-scoped world-generation state for the production session seam.
 pub mod worldgen_session;
 pub mod worldgen_progress;
+pub mod connection_progress;
 pub(crate) mod production_worldgen_session;
 /// Lightning: per-chunk strike-target selection during a thunderstorm, the
 /// `LightningBolt` life-cycle and its entity-facing effects (`docs/lightning.md`).

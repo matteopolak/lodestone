@@ -57,7 +57,10 @@ its effect on frame time or visible loading latency.
 consumer is `Sim::mesh_backlog` feeding `WasmMeshProfile::record` during redraw.
 With debug logging enabled, the existing once-per-second profile emits an
 additional aggregate `wasm mesh queue` line; it emits no individual section
-records.
+records. Both the drain/upload profile and queue aggregate travel through the
+existing render-worker diagnostic message to the standalone page console.
+The existing CPU/GPU frame-phase summary uses the same forwarding path. These
+diagnostics are not SDK `onProgress` events.
 
 Insertion, replacement, cancellation and pop counts are cumulative for the
 scheduler's lifetime. An insertion adds a distinct pending key; replacement

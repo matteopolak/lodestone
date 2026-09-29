@@ -109,7 +109,7 @@ fn worker_progress(value: &JsValue) -> Option<(BrowserWorkerProgress, String)> {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn browser_diagnostic(message: std::fmt::Arguments<'_>) {
+pub(crate) fn browser_diagnostic(message: std::fmt::Arguments<'_>) {
     if log::max_level() < log::LevelFilter::Debug {
         return;
     }
@@ -447,6 +447,31 @@ pub(super) async fn launch_browser_worker(
             .and_then(|kind| kind.as_string());
         if kind.as_deref() == Some("worldgen-timing") {
             forward_phase_timings(&value, epoch);
+            return;
+        }
+        if kind.as_deref() == Some("connection-progress") {
+            let number = |key| js_sys::Reflect::get(&value, &JsValue::from_str(key))
+                .ok()
+                .and_then(|value| value.as_f64());
+            let boolean = |key| js_sys::Reflect::get(&value, &JsValue::from_str(key))
+                .ok()
+                .and_then(|value| value.as_bool());
+            if number("epoch") == Some(f64::from(epoch)) {
+                browser_diagnostic(format_args!(
+                    "connection: running={:?} elapsed_ms={:.1} passes={:.0} client_loaded={:?} center={:.0},{:.0} radius={:.0} owed={:.0} delivered={:.0} sends={:.0} remaining={:.0}",
+                    boolean("running"),
+                    number("elapsedMs").unwrap_or(0.0),
+                    number("passes").unwrap_or(0.0),
+                    boolean("clientLoaded"),
+                    number("centerX").unwrap_or(0.0),
+                    number("centerZ").unwrap_or(0.0),
+                    number("radius").unwrap_or(0.0),
+                    number("owedColumns").unwrap_or(0.0),
+                    number("deliveredColumns").unwrap_or(0.0),
+                    number("chunksSent").unwrap_or(0.0),
+                    number("remaining").unwrap_or(0.0),
+                ));
+            }
             return;
         }
         if kind.as_deref() == Some("worker-health") {

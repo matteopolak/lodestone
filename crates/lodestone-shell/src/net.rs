@@ -143,6 +143,9 @@ pub(super) use uuid::Uuid;
 
 #[cfg(any(target_arch = "wasm32", test))]
 mod browser;
+
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+pub(crate) use browser::browser_diagnostic;
 mod events;
 mod state;
 

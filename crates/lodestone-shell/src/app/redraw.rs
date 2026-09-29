@@ -107,8 +107,7 @@ impl WasmMeshProfile {
         let (frame_gap_p95, frame_gap_max) = percentile_and_max(&mut frame_gap[..self.len]);
         let (drain_p95, drain_max) = percentile_and_max(&mut drain[..self.len]);
         let (upload_p95, upload_max) = percentile_and_max(&mut upload[..self.len]);
-        log::debug!(
-            target: "frame_profile",
+        crate::net::browser_diagnostic(format_args!(
             "wasm mesh drain and upload profile: frames={} uploads={} frame_gap_p95/max_ms={:.2}/{:.2} drain_p95/max_ms={:.2}/{:.2} upload_p95/max_ms={:.2}/{:.2} backlog_ready/waiting/forced/sections_max={}/{}/{}/{}",
             self.len,
             self.interval_meshes,
@@ -122,10 +121,9 @@ impl WasmMeshProfile {
             self.backlog_max.waiting_columns,
             self.backlog_max.forced_columns,
             self.backlog_max.pending_sections,
-        );
+        ));
         if let Some(queue) = backlog.browser_queue {
-            log::debug!(
-                target: "frame_profile",
+            crate::net::browser_diagnostic(format_args!(
                 "wasm mesh queue: totals_insert/replace/cancel/pop={}/{}/{}/{} queued_keys={} high_water_keys_lifetime={} oldest_wait_ms={:.2} max_pop_wait_lifetime_ms={:.2}",
                 queue.insertions,
                 queue.replacements,
@@ -135,7 +133,7 @@ impl WasmMeshProfile {
                 queue.high_water_keys,
                 queue.oldest_wait.as_secs_f64() * 1000.0,
                 queue.max_pop_wait.as_secs_f64() * 1000.0,
-            );
+            ));
         }
         self.interval_meshes = 0;
         self.backlog_max = crate::mesher::MeshBacklog {
@@ -3194,7 +3192,7 @@ impl WindowApp {
                 .collect::<Vec<_>>()
                 .join(" | ");
             #[cfg(target_arch = "wasm32")]
-            log::debug!(target: "frame_profile", "cpu: {cpu_line} | gpu: {gpu_line}");
+            crate::net::browser_diagnostic(format_args!("cpu: {cpu_line} | gpu: {gpu_line}"));
             #[cfg(not(target_arch = "wasm32"))]
             tracing::debug!(target: "frame_profile", "cpu: {cpu_line} | gpu: {gpu_line}");
         }
