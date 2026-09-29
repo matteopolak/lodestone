@@ -258,6 +258,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   recipe-registration API, and the recipe-book UI (browsing, auto-fill, unlock toast)
   layered on top. Our own server now computes crafting results too — see
   [Server-authoritative gameplay](./server-gameplay.md).
+- [Offline Identity Staging](./data-generation-identities.md) — The offline identity
+  staging tool emits canonical block names, state spans, state owners, per-version
+  defaults, and item IDs from the official reports and the append-only canonical
+  census. It produces a reviewable JSON artifact without compiling Rust or changing
+  runtime tables, storage, adapters, or protocol support.
 - [F3 debug overlay](./debug-overlay.md) — The F3 instrument: two columns of engine
   and world stats drawn over the world in vanilla's own plate, pitch and font, plus
   two world-space overlays (F3+B entity hitboxes, F3+G chunk borders). The

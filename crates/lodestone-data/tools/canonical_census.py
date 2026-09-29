@@ -49,6 +49,22 @@ def state_key(name, properties):
     return f"{name}[{suffix}]" if suffix else name
 
 
+def block_identities(blocks):
+    identities = {}
+    for name, block in blocks.items():
+        states = block["states"]
+        if not states or any(type(state.get("default", False)) is not bool for state in states):
+            raise ValueError(f"{name}: states must be nonempty with boolean default flags")
+        defaults = [state for state in states if state.get("default", False)]
+        if len(defaults) != 1:
+            raise ValueError(f"{name}: expected exactly one default state")
+        identities[name] = {
+            "states": [state_key(name, state.get("properties", {})) for state in states],
+            "default_state": state_key(name, defaults[0].get("properties", {})),
+        }
+    return identities
+
+
 def load_source(directory):
     blocks, block_digest = read_report(directory / "blocks.json")
     registries, registry_digest = read_report(directory / "registries.json")
@@ -68,6 +84,7 @@ def load_source(directory):
         ),
         "block states",
     )
+    result["block_identities"] = block_identities(blocks)
     result["source_sha256"] = {
         "blocks.json": block_digest,
         "registries.json": registry_digest,
