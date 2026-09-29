@@ -324,6 +324,16 @@ impl ContainerGeometry {
         // every existing caller. `hit_test_with_book` adds the same delta.
         let x = x + super::layout::recipe_book_panel_shift(w, layout.width, frame.book_open);
         let mut b = Builder::new(w, h, font);
+        let player_avatar = matches!(menu.kind(), MenuKind::Player).then(|| {
+            let scale = crate::config::calculate_gui_scale(gui_scale, width, height).max(1) as f32;
+            PlayerAvatar::new(
+                x,
+                y,
+                frame.cursor.map(|[cx, cy]| [cx / scale, cy / scale]),
+            )
+            .with_pose(frame.avatar_pose)
+            .with_uuid(frame.avatar_uuid)
+        });
 
         // Vanilla's own dim behind an open container screen (that fix's
         // leftover). `AbstractContainerScreen::isInGameUi()` overrides `true`
@@ -387,6 +397,39 @@ impl ContainerGeometry {
         // replaces had neither, and drew a hash-derived colour swatch, a flat
         // grey rect and a 5x7 bitmap font at 2x scale in their place.
         draw_effect_column(&mut b, frame, background, &layout, x, y, w);
+
+        if frame.book_open && super::layout::recipe_book_width_too_narrow(w) {
+            let count = b.verts.len() / FLOATS_PER_VERTEX;
+            let bg_count = b.bg_verts.len() / BG_FLOATS_PER_VERTEX;
+            return Self {
+                verts: b.verts,
+                item_verts: Vec::new(),
+                glint_verts: Vec::new(),
+                model_verts: Vec::new(),
+                special: Vec::new(),
+                bg_verts: b.bg_verts,
+                mid_bg_verts: Vec::new(),
+                mid_verts: Vec::new(),
+                mid_item_verts: Vec::new(),
+                mid_glint_verts: Vec::new(),
+                dim2_verts: Vec::new(),
+                bg_slot_vertex_count: bg_count,
+                dim_vertex_count: dim_floats / FLOATS_PER_VERTEX,
+                chrome_vertex_count: count,
+                slot_vertex_count: count,
+                slot_item_vertex_count: 0,
+                slot_glint_vertex_count: 0,
+                slot_model_vertex_count: 0,
+                slot_special_count: 0,
+                widget_rect: Some(Rect {
+                    x,
+                    y,
+                    w: layout.width,
+                    h: layout.height,
+                }),
+                player_avatar,
+            };
+        }
 
         // The furnace family's lit-flame and burn-progress bars, and the
         // brewing stand's fuel/brew/bubble bars. Vanilla draws
@@ -658,17 +701,14 @@ impl ContainerGeometry {
         // Everything appended to the background stream past here draws **after**
         // the slot item passes.
         let bg_slot_floats = b.bg_verts.len();
-        if let Some(bg) = background
-            && let Some((hx, hy)) = hovered.and_then(slot_rect)
-            && let Some(q) = bg.sprite_quad(
-                SLOT_HIGHLIGHT_FRONT,
-                hx - HIGHLIGHT_INSET,
-                hy - HIGHLIGHT_INSET,
-                HIGHLIGHT,
-                HIGHLIGHT,
-            )
-        {
-            b.bg_sprite(q);
+        if let Some((hx, hy)) = hovered.and_then(slot_rect) {
+            let left = hx - HIGHLIGHT_INSET;
+            let top = hy - HIGHLIGHT_INSET;
+            if let Some(q) = background.and_then(|bg| {
+                bg.sprite_quad(SLOT_HIGHLIGHT_FRONT, left, top, HIGHLIGHT, HIGHLIGHT)
+            }) {
+                b.bg_sprite(q);
+            }
         }
 
         // Both labels, exactly as `AbstractContainerScreen::extractLabels` draws
@@ -799,6 +839,25 @@ impl ContainerGeometry {
             }
         }
         let chrome_floats = b.verts.len();
+
+        if let Some((hx, hy)) = hovered.and_then(slot_rect)
+            && background.and_then(|bg| {
+                bg.sprite_quad(
+                    SLOT_HIGHLIGHT_FRONT,
+                    hx - HIGHLIGHT_INSET,
+                    hy - HIGHLIGHT_INSET,
+                    HIGHLIGHT,
+                    HIGHLIGHT,
+                )
+            }).is_none()
+        {
+            b.rect_px(hx, hy, CELL, CELL, [1.0, 1.0, 1.0, 0.28]);
+            let edge = [1.0, 1.0, 1.0, 0.68];
+            b.rect_px(hx, hy, CELL, 1.0, edge);
+            b.rect_px(hx, hy + CELL - 1.0, CELL, 1.0, edge);
+            b.rect_px(hx, hy, 1.0, CELL, edge);
+            b.rect_px(hx + CELL - 1.0, hy, 1.0, CELL, edge);
+        }
 
         for slot in &layout.slots {
             let sx = x + slot.x;
@@ -1014,25 +1073,7 @@ impl ContainerGeometry {
             // `hit_test_with_book` divides by, so the head aims at where the
             // pointer visually is rather than at a physical-pixel coordinate
             // several times too far out.
-            player_avatar: matches!(menu.kind(), MenuKind::Player).then(|| {
-                let scale =
-                    crate::config::calculate_gui_scale(gui_scale, width, height).max(1) as f32;
-                // `with_pose` carries the **live** animation state through
-                // (`ContainerFrame::avatar_pose`, `AnimInput::REST` for a caller
-                // with no `Sim`). Dropping it here is the whole difference between
-                // the pose reaching the draw and the field existing unread.
-                PlayerAvatar::new(
-                    x,
-                    y,
-                    frame.cursor.map(|[cx, cy]| [cx / scale, cy / scale]),
-                )
-                .with_pose(frame.avatar_pose)
-                // The local player's own uuid, so the *default*
-                // skin — when nothing local or fetched has claimed the
-                // avatar — resolves through the same `default_skin_for_uuid`
-                // call the world side uses. See `PlayerAvatar::uuid`'s doc.
-                .with_uuid(frame.avatar_uuid)
-            }),
+            player_avatar,
         }
     }
 }

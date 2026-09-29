@@ -2178,6 +2178,84 @@ fn hovering_a_slot_blits_both_highlight_sprites_at_vanillas_own_offsets() {
     );
 }
 
+#[test]
+fn hovering_a_slot_without_a_front_sprite_still_draws_a_highlight() {
+    let menu = Menu::player();
+    let build = |cursor| {
+        ContainerGeometry::build_inner(
+            &ContainerFrame::new(Some(&menu), "Inventory").with_cursor(cursor),
+            VIEW.0,
+            VIEW.1,
+            crate::config::AUTO_GUI_SCALE,
+            &IconAssets {
+                items: None,
+                models: None,
+            },
+            None,
+            None,
+        )
+    };
+    let idle = build(None);
+    let (cx, cy) = slot_point(&menu, 9);
+    let hovered = build(Some([cx, cy]));
+    assert_eq!(
+        hovered.verts.len() - idle.verts.len(),
+        5 * 6 * FLOATS_PER_VERTEX,
+    );
+    assert_eq!(hovered.chrome_vertex_count, idle.chrome_vertex_count);
+    assert_eq!(hovered.slot_vertex_count - idle.slot_vertex_count, 5 * 6);
+}
+
+#[test]
+fn narrow_recipe_book_replaces_inventory_contents() {
+    let menu = Menu::player();
+    let bg = synthetic_background();
+    let build = |book_open, background| {
+        ContainerGeometry::build_inner(
+            &ContainerFrame::new(Some(&menu), "Inventory").with_book_open(book_open),
+            700,
+            600,
+            2,
+            &IconAssets {
+                items: None,
+                models: None,
+            },
+            None,
+            background,
+        )
+    };
+    for (background, colour_quads, background_quads) in [(None, 3, 0), (Some(&bg), 1, 1)] {
+        let closed = build(false, background);
+        let open = build(true, background);
+        assert_eq!(
+            open.widget_rect,
+            Some(Rect { x: 87.0, y: 67.0, w: 176.0, h: 166.0 }),
+        );
+        assert!(open.player_avatar.is_some());
+        assert!(open.verts.len() < closed.verts.len());
+        assert_eq!(open.verts.len(), colour_quads * 6 * FLOATS_PER_VERTEX);
+        assert_eq!(open.dim_vertex_count, 6);
+        assert_eq!(open.chrome_vertex_count, colour_quads * 6);
+        assert_eq!(open.slot_vertex_count, colour_quads * 6);
+        assert_eq!(
+            open.bg_verts.len(),
+            background_quads * 6 * BG_FLOATS_PER_VERTEX,
+        );
+        assert_eq!(open.bg_slot_vertex_count, background_quads * 6);
+        assert!(open.item_verts.is_empty());
+    }
+
+    // Scale 2 centres the 176x166 panel at (87, 67) on a 350x300 canvas.
+    let hit = |x, y, book_open| hit_test_with_book(&menu, 2, 700, 600, x, y, book_open);
+    assert_eq!(hit(206.0, 318.0, false), MenuHit::Slot(9));
+    assert_eq!(hit(206.0, 318.0, true), MenuHit::Panel);
+    assert_eq!(hit(174.0, 134.0, true), MenuHit::Panel);
+    for (x, y) in [(173.0, 300.0), (350.0, 133.0), (526.0, 300.0), (350.0, 466.0)] {
+        assert_eq!(hit(x, y, false), MenuHit::Outside);
+        assert_eq!(hit(x, y, true), MenuHit::Outside);
+    }
+}
+
 /// The control for the above: with no pointer over a slot, neither sprite is
 /// emitted and the whole stream is under-items. Two arms, because a
 /// highlight keyed on "a background is attached" rather than on the hover
