@@ -1,61 +1,17 @@
 #!/usr/bin/env bash
 #
-# run-wasm.sh — keep the browser (wasm) build rebuilding on change, AND serve
-# it (page + the WebSocket->TCP relay it needs to reach a real server) from
-# ONE port, in ONE process.
+# Rebuild the browser bundle with trunk watch and serve it with the native
+# page server. Its default build includes /relay; the browser is singleplayer-only.
 #
-# WHY THIS IS TWO PROCESSES, NOT ONE, EVEN THOUGH THERE IS ONE PORT
-#   `trunk serve` used to be both halves at once: it rebuilt `dist/` on change
-#   AND served it, with a `[[proxies]]` entry in web/Trunk.toml forwarding
-#   `/relay` to a separately-run `lodestone-relay` process (a SECOND port,
-#   hand-kept in sync with this script's own --listen literal — see git
-#   history on this file and on web/Trunk.toml for that arrangement). Serving
-#   was a `trunk serve`-only feature, so a deployed, non-`trunk serve` build
-#   had no relay path at all — an accepted, documented gap.
+# LODESTONE_WEB_LISTEN defaults to 127.0.0.1:8080. Use 127.0.0.1:0 for an
+# OS-assigned port, read back from the server's --port-file after binding.
+# LODESTONE_RELAY_TARGET defaults to 127.0.0.1:25565 for the relay destination.
+# Additional arguments go to trunk watch, not to the page server.
 #
-#   That gap is closed now: `web/server` (crate `lodestone-web-server`) links
-#   `lodestone-relay` in as a library and serves both the built page and
-#   `/relay` from one listener. It is a plain native binary — a deployable
-#   artifact, which `trunk serve`'s proxy could never be — so it is also what
-#   a real deployment runs. But it does not rebuild anything, so pairing it
-#   with `trunk watch` (rebuilds `dist/` on change, serves nothing) is what
-#   reproduces `trunk serve`'s "one command, keeps rebuilding" convenience.
-#   `web/Trunk.toml`'s `[[proxies]]` entry is gone; nothing forwards to a
-#   second port any more because there is no second port.
-#
-# WHY THIS IS A SCRIPT AND NOT AN INLINE JUSTFILE RECIPE
-#   Running two long-lived processes from one command needs real process
-#   management: start one in the background, trap its cleanup so it cannot
-#   outlive the run and keep its port bound, verify it actually came up, then
-#   hand the terminal to the other. The Justfile's own header forbids a body
-#   like that ("No script body moves into this file"), so this follows the
-#   established `wasm-size` precedent — the script keeps the body, the recipe
-#   is a one-line delegation.
-#
-# PORT SELECTION
-#   LODESTONE_WEB_LISTEN defaults to a fixed, documented 127.0.0.1:8080, so
-#   the URL is predictable. Set it to 127.0.0.1:0 to ask the OS for a free
-#   port instead (the conflict case the owner raised) — the ACTUALLY bound
-#   port is read back from a file lodestone-web-server writes after binding
-#   (--port-file), never from this script's own stdout/a pipeline: a shell
-#   pipeline is not a reliable way to recover a value like this (this repo has
-#   measured `| head` reading as absence and `| grep | tail` reporting exit 0
-#   because that is tail's status). That file is also how a fixed, already-
-#   bound port is told apart from a real bind failure below.
-#
-# USAGE
-#   scripts/run-wasm.sh                                # page + relay on :8080
+# Examples:
+#   scripts/run-wasm.sh                                # page server on :8080
 #   LODESTONE_WEB_LISTEN=127.0.0.1:0 scripts/run-wasm.sh  # OS-assigned port
 #   LODESTONE_RELAY_TARGET=127.0.0.1:25570 scripts/run-wasm.sh  # different server
-#   scripts/run-wasm.sh --port 9000                    # extra args go to trunk watch
-#
-# ENVIRONMENT
-#   LODESTONE_WEB_LISTEN  address lodestone-web-server binds for the page AND
-#                         /relay; default 127.0.0.1:8080. Use :0 for an
-#                         OS-assigned port.
-#   LODESTONE_RELAY_TARGET the real Minecraft server /relay bridges to;
-#                         default 127.0.0.1:25565, matching web/README.md and
-#                         the standalone `lodestone-relay`/`just run-relay`.
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
@@ -69,10 +25,7 @@ if [[ ! -f "$ROOT/web/Cargo.toml" ]]; then
   exit 2
 fi
 
-# Cargo's machine-wide configuration owns the output location. Resolve it from
-# the web workspace instead of assuming a repository-local `web/target`; this
-# keeps the launcher aligned with the same target directory used by every other
-# workspace build.
+# Resolve Cargo's configured output directory rather than assuming web/target.
 WEB_TARGET_DIR="$(cd "$ROOT/web" && cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
 
 for tool in trunk cargo; do
@@ -96,21 +49,9 @@ WEB_PID=""
 TRUNK_PID=""
 PORT_FILE="$(mktemp "${TMPDIR:-/tmp}/lodestone-web-server-port.XXXXXX")"
 
-# Kill both children however we leave — including Ctrl-C, which is the normal
-# way to stop a dev loop. Without this, whichever process is backgrounded
-# survives, keeps its port (or its watch) alive, and the NEXT run fails or
-# doubles up for a reason that looks nothing like the cause.
-#
-# MEASURED (from this script's earlier two-process shape, same mechanism):
-# this trap does NOT fire if the script blocks on a foreground child. bash
-# defers a caught signal until the current foreground command finishes, and a
-# long-lived server never finishes on its own — so a SIGTERM to this script
-# would leave both children running. Ctrl-C in a terminal happens to work,
-# because SIGINT goes to the whole foreground process GROUP and reaches the
-# children directly, which is exactly why the bug survives casual testing.
-# The fix is at the bottom of this file: the foreground child runs in the
-# BACKGROUND too and the script blocks in `wait`, which bash interrupts to run
-# the handler. Do not "simplify" that back into a bare foreground call.
+# Reap both children and remove the port file on exit. Both children run in the
+# background so Bash can interrupt wait to handle signals; a foreground child
+# would defer the trap until that command finishes.
 cleanup() {
   for pid in "$WEB_PID" "$TRUNK_PID"; do
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
@@ -124,10 +65,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Pre-flight the port when it is a fixed one (not OS-assigned :0), so a stale
-# process from a previous run — or an unrelated `trunk serve` — reports as a
-# named holder rather than as lodestone-web-server's own "Address already in
-# use", which describes the symptom and not the cause.
+# Identify the holder of a fixed port before starting; :0 needs no preflight.
 FIXED_PORT="${WEB_LISTEN##*:}"
 if [[ "$FIXED_PORT" != "0" ]] && command -v lsof >/dev/null 2>&1; then
   HOLDER="$(lsof -nP -iTCP:"$FIXED_PORT" -sTCP:LISTEN -t 2>/dev/null | head -1)"
@@ -156,9 +94,7 @@ echo "== starting lodestone-web-server: --listen $WEB_LISTEN --target $RELAY_TAR
 "$WEB_BIN" --listen "$WEB_LISTEN" --dist "$ROOT/web/dist" --target "$RELAY_TARGET" --port-file "$PORT_FILE" &
 WEB_PID=$!
 
-# Confirm it survived startup and read back the port it actually bound — read
-# with a program (a bounded poll loop over a file), never by parsing this
-# script's own backgrounded stdout.
+# Confirm startup and read the actual bound port from the server's port file.
 BOUND_PORT=""
 for _ in $(seq 1 50); do
   if ! kill -0 "$WEB_PID" 2>/dev/null; then
@@ -182,33 +118,22 @@ if [[ -z "$BOUND_PORT" ]]; then
 fi
 echo "== lodestone-web-server up (pid $WEB_PID) — http://${WEB_LISTEN%%:*}:${BOUND_PORT}/ =="
 
-# --release is mandatory for the WASM build, and for a reason unlike the
-# native build's: a debug wasm build makes single-threaded worldgen ~10x
-# slower, which blows the singleplayer probe's own 30 s deadline and so
-# presents as a FAILURE rather than as slowness. See web/README.md.
-#
-# `trunk watch` — unlike `trunk serve` — only rebuilds dist/, never serves;
-# lodestone-web-server (already running) is what a browser actually talks to.
+# Release matches the server-Worker staging profile. trunk watch only rebuilds
+# dist/; lodestone-web-server owns the listener.
 echo "== watching web (release, rebuilds dist/ on change) =="
 cd "$ROOT/web" || exit 1
 
-# Backgrounded deliberately — see the `cleanup` comment above. A foreground
-# `trunk watch` blocks bash from running the EXIT/TERM handler at all, which
-# would leave lodestone-web-server alive holding its port.
+# Keep wait interruptible so cleanup can stop both children.
 env -u NO_COLOR trunk watch --release "$@" &
 TRUNK_PID=$!
 
-# Foreground: wait on lodestone-web-server (the user-facing process — its
-# stdout is the request/relay log) rather than on trunk watch's rebuild log,
-# so the trap still catches Ctrl-C via `wait` the same way the old shape did.
+# Track the page server's lifetime while keeping signal traps responsive.
 wait "$WEB_PID"
 STATUS=$?
 WEB_PID=""   # already reaped; keep cleanup from waiting on a dead pid
 
-# A signal-terminated `wait` reports 128+signo. Report the real status when
-# the process exited on its own (a bind or build error is the common case and
-# should propagate), and treat a signal as the ordinary way a dev loop is
-# stopped rather than a failure.
+# Propagate ordinary server exit status; a signal-terminated wait (128+signo)
+# is treated as a normal stop of the development loop.
 if (( STATUS > 128 )); then
   exit 0
 fi

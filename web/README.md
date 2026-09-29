@@ -1,11 +1,9 @@
 # lodestone-web — browser (WebAssembly) build
 
-The browser build of Lodestone — the real shell, not a spike; see
-`src/main.rs` for the standalone adapter and `src/embed.rs` for the host API.
-It is its **own** Cargo
-workspace (empty `[workspace]` in `Cargo.toml`), deliberately outside the
-parent `crates/lodestone-*` glob, so it never affects other crates' `cargo
-build --workspace`.
+The browser build uses the same Lodestone shell as native. `src/main.rs` is
+the standalone adapter; `src/embed.rs` provides the host API. `web/Cargo.toml`
+defines a separate workspace containing the page, native page server, and
+server Worker. Parent-workspace commands do not build these packages.
 
 ## Browser identity and capabilities
 
@@ -19,41 +17,42 @@ The separate native page server may still be built with its optional relay
 feature, but the browser client does not expose that transport or a remote
 multiplayer screen.
 
-## Singleplayer-only deployment
+## Page-server relay configuration
 
 Both the browser package and its native page server expose a `multiplayer`
-feature, enabled by default. To build a page that cannot join or probe public
-servers, disable defaults on **both** packages:
+feature, enabled by default. The Wasm shell disables remote multiplayer
+regardless of that feature (`MULTIPLAYER_ENABLED` also requires a native
+target). The title button remains visible but disabled with an explanation.
+
+The native server's feature independently controls whether it links
+`lodestone-relay` and registers `/relay`. Build a static-only page server with:
 
 ```sh
 cd web
-cargo check --no-default-features --target wasm32-unknown-unknown
-cargo check -p lodestone-web-server --no-default-features
+cargo build -p lodestone-web-server --release --no-default-features
 ```
 
-The shell leaves the Multiplayer title button visible but disabled with an
-explanation. More importantly, the server build neither links
-`lodestone-relay` nor registers `/relay`; it is static-only, so it cannot be
-used as a WebSocket-to-TCP proxy even if a client bypasses the button.
+Run that binary with `--listen` and `--dist`, without `--target`; the static-only
+build rejects `--target`. `just run-wasm` instead builds the default server
+with its relay enabled. Neither choice enables browser remote joins.
 
 The standalone page and embedding adapter share the same shell, asset contract,
 and browser event-loop lifetime. The embedding API is described in
-`docs/wasm-embedding.md`; the historical measurements below remain useful for
-the browser worker and rendering paths but are not a second application.
+`docs/wasm-embedding.md`. Historical experiments below are not current API
+instructions or performance baselines.
 
-## What it demonstrates
+## What it runs
 
-- **Rendering:** real `level_chunk_with_light` fixture bytes → `lodestone-world`
-  → greedy mesh → wgpu, drawn under **WebGPU**. Verified by pixel measurement,
-  not by the HUD — see "Verifying that it actually draws" below, and read it
-  before trusting a frame-rate number here. This line used to claim "~120 fps",
-  which was **false**: no terrain pixel had ever reached the canvas.
+- **Rendering:** integrated-server protocol bytes → client-owned world → mesh
+  → wgpu under **WebGPU**. Compilation and HUD counters alone do not prove
+  terrain reaches the canvas; the historical pixel control below illustrates
+  that distinction.
 - **Assets:** the sync, byte-based `lodestone-assets` `ResourceSource` pipeline
   runs unchanged once bytes are `fetch`ed (zip + PNG decoded in-browser).
-- **Singleplayer:** the page owns client/render/input while a dedicated Worker
-  owns the real server and world generator. A `MessageChannel` carries raw
-  framed protocol bytes between them — no relay, no socket, and no duplicate
-  world state.
+- **Singleplayer:** the page owns DOM and the input bridge; a render Worker
+  owns client/render state, and a separate server Worker owns the real server
+  and world generator. A `MessageChannel` carries raw framed protocol bytes
+  between the Workers — no relay, no socket, and no duplicate world state.
 - **Relay tooling:** the native page server can still expose an optional relay
   for diagnostics, but the Wasm client does not expose server-list ping or
   remote joins.
@@ -65,16 +64,19 @@ the browser worker and rendering paths but are not a second application.
   gate (`Sim::resume_audio_on_gesture`, wired from every real mouse/key press
   in `app/lifecycle.rs`).
 
-## Toolchain (verified versions)
+## Toolchain
 
 | tool | version | notes |
 |---|---|---|
-| `trunk` | **0.21.14** | current stable. `0.22.0-beta.2` needs Rust 1.96.1 (> our 1.95.0). |
-| `wasm-bindgen-cli` | 0.2.126 | Required on `PATH` by the server-worker staging hook; Trunk's private copy is not enough. |
+| `trunk` | 0.21.14 | The version named by the launcher's install hint; not a claim about the latest release. |
+| `wasm-bindgen-cli` | 0.2.126 | Matches `web/Cargo.lock`; required on `PATH` by the server-worker staging hook. |
 | target | `wasm32-unknown-unknown` | `rustup target add wasm32-unknown-unknown` |
 | component | `rust-src` | `rustup component add rust-src` (required by the threaded worker's `-Z build-std`) |
 
-Install trunk (prebuilt binary, fastest):
+The threaded Worker build also requires a nightly toolchain for `-Z build-std`.
+These are repository requirements, not a check of locally installed tools.
+
+Example Trunk installation for macOS arm64:
 
 ```sh
 curl -sSL https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-aarch64-apple-darwin.tar.gz \
@@ -95,27 +97,23 @@ just run-wasm
 # open http://127.0.0.1:8080/
 ```
 
-This is `scripts/run-wasm.sh`: `trunk watch --release` keeps rebuilding
-`web/dist/` on every source change, paired with `lodestone-web-server`
-(`web/server/`, a plain native binary) which serves that directory **and**
-the `/relay` WebSocket→TCP bridge from the same listener — one port, one
-process for the browser to talk to, and Ctrl-C stops both. See "Live
-multiplayer transport" below for what `/relay` needs, and "Serving the page
-and the relay from one process" for why this replaced two separate ones.
+This runs `scripts/run-wasm.sh`: `trunk watch --release` rebuilds `web/dist/`
+on source changes, while the native `lodestone-web-server` serves that directory
+and its default `/relay` route from one listener. The script manages both
+processes and cleans them up on exit. The browser singleplayer session does
+not use `/relay`.
 
-Prefer bare `trunk` for quick, page-only visual iteration with no relay or
-multiplayer ping (same restriction it always had before the relay existed):
+For page-only serving and rebuilding, without the native page server:
 
 ```sh
 cd web && trunk serve --release --address 127.0.0.1 --port 8080
 # open http://127.0.0.1:8080/
 ```
 
-**Use `--release`** for both the wasm bundle and `lodestone-web-server`
-itself. For the wasm bundle specifically: a debug build makes single-threaded
-worldgen ~10× slower; in release, one column is ~1 s (see below), which the
-singleplayer probe's 30 s deadline tolerates. A debug build can blow that
-deadline and *look* like a failure.
+The launcher and server-Worker staging use release builds. Use the same build
+profile when comparing timings. Older single-threaded probe speed ratios,
+per-column timings, and deadlines are not measurements of the current Worker
+path; this README makes no current throughput or startup-time guarantee.
 
 ### Assets: the build succeeds without them, the page does not
 
@@ -242,8 +240,9 @@ the missing manifest look present and fail later as invalid JSON.
 
 This relay exists only with the server's default `multiplayer` feature. A
 `--no-default-features` server is intentionally static-only and has no `/relay`
-route or `lodestone-relay` dependency; use that build with the matching
-singleplayer-only WASM bundle above.
+route or `lodestone-relay` dependency. It can serve the same singleplayer-only
+Wasm bundle; no matching browser feature change is needed. The command below
+is for the default relay-enabled server.
 
 ```sh
 target_dir="$(cargo metadata --manifest-path web/Cargo.toml --format-version 1 --no-deps \
@@ -298,13 +297,11 @@ shared-memory WebAssembly compute pool used by browser world generation. The
 integrated server always remains in its dedicated Worker; only immutable shaped
 admissions may fan out to child Web Workers through `wasm-bindgen-rayon`.
 
-**The trap:** a plain static file server (`python -m http.server`, most CDNs by
-default, etc.) does **not** send these headers. The build renders fine without
-them today, so serving `dist/` statically *appears* to work — but anything that
-later depends on cross-origin isolation will **silently fail** with
-`crossOriginIsolated === false` and no error under a server that omits them.
-`lodestone-web-server` sets both unconditionally (`tower_http::set_header`);
-if you serve `dist/` with something else entirely, replicate both headers.
+A host that omits these headers does not provide cross-origin isolation, so
+the Worker capability probe selects the serial artifact rather than the shared-
+memory variant. `lodestone-web-server` sets both unconditionally
+(`tower_http::set_header`); replicate them when serving `dist/` elsewhere if
+the threaded Worker is required.
 
 ## Integrated-server Worker
 
@@ -315,7 +312,7 @@ shared-memory construction, Atomics, and Wasm validation before choosing the
 threaded artifact. Its launch envelope transfers one protocol port and one
 structured worldgen-progress port, builds the world and server before reporting
 ready, then bridges framed protocol bytes with a bounded private credit
-envelope. The page keeps the protocol endpoint as `MessagePortTransport` for
+envelope. The client/render Worker keeps the protocol endpoint as `MessagePortTransport` for
 the normal client driver; writes wait or complete partially when the peer's
 receive window is full. A negative capability probe selects the serial module;
 threaded initialization failures are reported as startup errors. After ready, a
@@ -334,17 +331,18 @@ both worker variants.
 Page-side plugin commands are explicitly refused in worker singleplayer until
 there is a request/reply command bridge with an authorization policy.
 
-## Guarding the browser build — `scripts/wasm-check.sh`
+## Guarding the browser build — `just wasm-check`
 
 `cargo test --workspace` is **structurally blind** to wasm breakage: it builds
 for the host, so any crate that gains a native-only dependency (threads, filesystem,
 OS sockets, OS audio like `cpal`) still passes there while the browser build is
-broken, and nothing tells the author. `scripts/wasm-check.sh` closes that gap.
+broken, and nothing tells the author. `just wasm-check` closes that gap through
+the tested `xtask` implementation; `scripts/wasm-check.sh` remains its reference.
 
 Run it whenever a dependency is added or bumped **anywhere** in the workspace:
 
 ```sh
-scripts/wasm-check.sh
+just wasm-check
 ```
 
 It does two things a host build cannot:
@@ -362,23 +360,23 @@ The final step builds the browser app **through trunk** (cargo → wasm →
 wasm-bindgen), so a wasm-bindgen-level break is caught too.
 
 **Prerequisites are verified, not assumed.** If `wasm32-unknown-unknown` or `trunk`
-is missing, the script exits non-zero with the install command rather than passing
+is missing, the check exits non-zero with the install command rather than passing
 quietly — a check that cannot run must fail, not skip.
 
-> Note on cost: the check is CPU-cheap (~20 s of actual work), but wall-time is
-> dominated by contention on the shared `target/` build lock when many agents
-> build at once. Uncontended it is ~1–2 min; warm and cached it is seconds.
+Build duration depends on cache state and the shared Cargo queue. No current
+timing baseline is recorded here.
 
-## Verifying that it actually draws
+## Historical browser rendering evidence
 
-**`wasm-check` passing does not mean the browser renders, and neither does the
-HUD.** Both were green while the canvas showed nothing but sky, for a long time.
-The failure is worth understanding because it is the repo's dominant defect class
-wearing browser clothes:
+The following measurements came from a retired fixture launcher, not the current
+shell or embedding API. Its frame-driving export is no longer available. They
+illustrate why a compile check and HUD counters need an independent pixel control,
+not a current frame-rate or terrain-readiness baseline.
 
 `lodestone-camera-bgl` binding 1 (the section origin) is declared
 `has_dynamic_offset: true` in the group-0 split, so `set_bind_group` must
-supply exactly one dynamic offset. `src/main.rs` passed `&[]`. WebGPU's response:
+supply exactly one dynamic offset. The former fixture launcher passed `&[]`.
+WebGPU's response:
 
 ```
 The number of dynamic offsets (0) does not match the number of dynamic buffers (1)
@@ -391,22 +389,17 @@ discarded**. The page therefore showed a clean sky, the HUD reported
 `250 greedy quads`, and wgpu logged it as a **warning** — not a panic, not an
 error, nothing a `cargo` command can observe. Fixed by passing `&[0]`.
 
-Two lessons encoded in the code:
+The fixture's controls were:
 
-- **Drive frames explicitly; do not rely on `requestAnimationFrame`.** A hidden
-  or backgrounded tab does not run rAF at all — measured in a headless pane,
-  `document.visibilityState == "hidden"` gave **0** rAF callbacks in 600 ms. A
-  harness that waits for rAF sees a transparent canvas and no error.
-  `lodestone_render_frames(frames, draw_geometry)` (exported via `wasm_bindgen`)
-  renders synchronously and returns the frame count, or `u32::MAX` if init has
-  not finished — never a silent `0`.
-- **`draw_geometry = false` is the negative control.** It runs the identical pass,
-  clear and depth attachment and submits no draws, so the canvas must come back
-  as *exactly* the clear colour. Without it, "the canvas is sky blue" is
-  ambiguous between "nothing drew" and "the sky drew".
+- **Explicit frames:** in one hidden headless pane,
+  `document.visibilityState == "hidden"` gave **0** `requestAnimationFrame`
+  callbacks in 600 ms. The fixture used a synchronous frame-driving export
+  rather than waiting for those callbacks.
+- **Withheld geometry:** `draw_geometry = false` ran the identical pass, clear,
+  and depth attachment without submitting draws. The result had to be exactly
+  the clear colour, distinguishing a clear from actual scene rendering.
 
-Measured with this harness (900×640, 16 sections, 250 quads), and the numbers a
-regression should be compared against:
+Recorded with that fixture (900×640, 16 sections, 250 quads):
 
 | arm | distinct colours | non-clear pixels | bbox |
 |---|---|---|---|
@@ -414,69 +407,52 @@ regression should be compared against:
 | subject (`draw_geometry=true`) | **2299** | **41588** (7.22%) | `[298,263,634,483]` |
 
 `140,173,217` is exactly `round(255 × {0.55, 0.68, 0.85})`, the `LoadOp::Clear`
-colour in `main.rs` — so the surface is a **non-sRGB** format and the clear value
-is written raw. The bbox being a strict sub-rectangle of 900×640 is the
+colour in the fixture — its surface was a **non-sRGB** format and the clear value
+was written raw. The bbox being a strict sub-rectangle of 900×640 is the
 load-bearing part: a full-canvas result would mean something is painting
 everything, which is what a premise-false control looks like.
 
-Drive it from the devtools console:
-
-```js
-const B = window.wasmBindings;          // trunk exposes the module here
-B.lodestone_render_frames(2, false);    // control: expect a uniform clear
-B.lodestone_render_frames(2, true);     // subject: expect terrain
-```
-
-Use `window.wasmBindings`, **not** a fresh `import()` — a second import is a
-second wasm instance with its own empty `RENDER_STATE`, and the hook will
-correctly report `u32::MAX` for it.
+For the current SDK, use the singleplayer progress events documented above to
+select the observation boundary, then verify terrain pixels independently.
+`first-frame` alone is not terrain evidence.
 
 ## Browser bind-group and adapter limits
 
-The browser is where the low-limit adapter actually lives, so limits matter more
-here than natively. Measured in Chrome on this M5 (`navigator.gpu` →
-`requestAdapter().limits`):
+The following is a historical Chrome/M5 adapter sample (`navigator.gpu` →
+`requestAdapter().limits`), not a guarantee about the current browser or GPU:
 
 | limit | browser | note |
 |---|---|---|
-| `maxBindGroups` | **4** | the native Metal path reports **8** |
+| `maxBindGroups` | **4** | the sampled native Metal path reported **8** |
 | `maxStorageBuffersPerShaderStage` | 10 | |
 | `maxStorageBuffersInVertexStage` | 10 | WebGL2 has none — see below |
 | `maxUniformBufferBindingSize` | 65536 | |
 | `maxUniformBuffersPerShaderStage` | 12 | |
 
-**`maxBindGroups == 4` in the browser confirms CLAUDE.md's rule empirically.** The
-model shader already spends all four groups (camera / atlas / palette / anim), so a
-fifth group validates on this Mac natively (8) and **fails in every browser**.
-`BlockPipeline`, which this spike draws with, uses only groups 0 and 1, so it was
-not the cause of the blank canvas — but a five-group shader would be, and the
-symptom would look identical.
+The renderer's four-bind-group budget avoids depending on the higher native
+limit in this sample. A fifth group would exceed the sampled browser limit.
 
-WebGPU is required; there is no WebGL2 fallback. It was measured and removed: it
-cost 537 KB brotli *and* never rendered a frame, because the atlas bind group
-layout needs a vertex-stage storage buffer WebGL2 categorically lacks.
+WebGPU is required; there is no WebGL2 fallback. The retired WebGL2 experiment
+added 537 KB Brotli and rendered no frame: the atlas layout required a
+vertex-stage storage buffer unavailable on that path.
 
-## Multiplayer: a real browser join, and what it needs
+## Historical multiplayer transport experiments
 
-Stated precisely, because "the relay has tests" is not the same claim as "the
-browser joins a server":
+These results belong to the retired browser-join probe, not the current page.
+The Wasm shell is always singleplayer-only; the old join boxes and `?join=1`
+controls are no longer available.
 
-| leg | state |
+| leg | historical evidence |
 |---|---|
-| `WsWebTransport` (browser `WebSocket` as a `Transport`) | **green**, exercised in-browser |
-| browser → `lodestone-relay` → live TCP server | **green** — verified in-browser against a real vanilla 26.2 server, which returned its own status JSON (`version.name = "26.2"`, protocol 776) |
-| a browser **play join**, rendered | **green** — `src/multiplayer.rs`, measured below. **Needs two brokered clock patches**; see "The clock wall" |
+| `WsWebTransport` (browser `WebSocket` as a `Transport`) | exercised in-browser |
+| browser → `lodestone-relay` → live TCP server | returned status JSON with `version.name = "26.2"` and protocol 776 |
+| browser play join, rendered | reached Play and rendered streamed terrain in the retired probe |
 
-`wasm32` cannot open a raw TCP socket (`lodestone-net/src/connection.rs` documents
-this), so a browser must go through the relay. `src/multiplayer.rs` is the producer
-that had been missing: it opens `WsWebTransport`, hands it to
-`ClientBuilder::connect_with` with the real `lodestone_v26_2::adapter()`, and then
-rebuilds the drawn scene by **querying** the client-owned chunk store
-(`ClientHandle::sections_at`) rather than folding `ChunkLoaded` events — which is
-idempotent, so it converges no matter when the loop starts relative to the stream.
+The probe opened `WsWebTransport` through a local relay and used the real client
+adapter. It rebuilt its drawn scene by querying the client-owned chunk store
+rather than depending on when its event loop began relative to the chunk stream.
 
-Measured in Chrome against the live survival oracle (normal terrain, offline mode)
-through a local relay:
+Recorded in Chrome against the survival oracle (normal terrain, offline mode):
 
 ```
 join: Play reached (entity id 2101) — streaming world…
@@ -485,62 +461,18 @@ LIVE world from 127.0.0.1:25565 — 81 of 150 columns, 584 sections,
   256×1024 px | 69 block(s) skipped — no assets in the trimmed pack
 ```
 
-**This has only been driven against a relay and a server on `localhost`.** Nothing
-about the path is loopback-specific — the relay takes any `--target` and the page
-takes any `?relay=` — but a remote deployment additionally needs a `wss://` relay
-(an `https` page cannot open `ws://`) and a relay reachable from the browser, and
-neither has been tried.
+Only localhost was exercised; this record does not validate a remote deployment
+and has no current browser-join reproduction recipe.
 
-### Running it
+The probe exposed two native clock calls that compiled for Wasm but aborted at
+runtime. A stand-in singleplayer protocol did not exercise the same ingestion
+path, so its success could not validate the real adapter. These are test-design
+lessons, not a list of current unpatched call sites.
 
-**Note:** these commands predate this pass's serving-architecture change (see
-"Serving the page and the relay from one process" above) and are unverified
-against the current `src/main.rs` per this file's own top-of-file disclaimer
-— kept here only so a reader attempting to reproduce the join measurement
-above starts from the current run command, not a doubly-stale one naming a
-separately-run `lodestone-relay` process.
-
-```sh
-just run-wasm
-# then: fill in the relay/host/port/name boxes and press Join,
-# or load http://127.0.0.1:8080/?join=1 to join on page load.
-```
-
-`host`/`port` are only what the **handshake advertises**; where the bytes go is the
-relay's `--target`. `?join=1` selects the remote-join path on page load; local
-singleplayer world generation runs in its dedicated Worker and does not starve
-the page's relay socket.
-
-### The clock wall
-
-Two `std::time::Instant::now()` calls sit on the join path. Both compile for wasm
-and **panic at runtime** ("time not implemented on this platform"), and because
-the release profile is `panic = "abort"` they kill the session with no unwind:
-
-| site | when it fires | fix |
-|---|---|---|
-| `lodestone-ecs`'s `hold_read`/`hold_write` | the first ingested event, just after `Login` | **landed** — `hold_clock()` returns `None` on wasm and the hold goes unmeasured |
-| `V770Adapter::new`'s `batch_start` | adapter construction, before the first byte | **brokered** (`crates/versions/` is owned elsewhere) — make `batch_start` an `Option<Instant>` |
-
-Neither is findable by any `cargo` command, and the *first* is why
-`src/singleplayer.rs` was never evidence of anything here: it reaches `Play`
-against a **`StandInProtocol`** whose only event is `ChunkLoaded`, which routes to
-the echo branch and never reaches `hold_write`. That is CLAUDE.md's *world*
-species of vacuous test exactly — the source reads as a real integration test and
-the flaw is in which implementation its transport resolves to.
-
-The breadcrumb `log::info!`s in `multiplayer.rs` are deliberate: with `abort` and
-no unwind, the last line logged is the only evidence of where it stopped.
-
-### The trimmed pack is why a live world has holes
-
-`assets/blocks_pack.zip` (88 KB, 73 blockstates) is a **subset** of vanilla's block
-corpus — the full set is ~21 MB uncompressed. A live server sends whatever it
-likes, so the live path builds its atlas with `skip_missing = true`: a block with no
-assets becomes a non-occluding hole and is **counted and named on the HUD**, so
-"patchy terrain" is never mistaken for a decode or transport fault. Regenerate with
-a wider list via `scripts/wasm-blocks-pack.sh`. The *fixture* path stays strict —
-a block in `fixtures/chunks.bin` that the pack lacks is a real defect.
+Its 88 KB, 73-blockstate `assets/blocks_pack.zip` deliberately omitted assets
+from a corpus measured at roughly 21 MB uncompressed. The old atlas skipped
+missing blocks, explaining the holes reported above. That pack and its coverage
+numbers do not describe the current staged `lodestone-resources.zip` archive.
 
 ## Saving worlds in the browser — the storage options, unbuilt
 
@@ -602,15 +534,13 @@ web/
                         measured byte counts, and docs/sound-playback.md
     stage_worker.sh     builds/stages serial + atomics server-worker artifacts
     measure_worker_size.sh reports post-bindgen worker Wasm/glue sizes
-  assets/               post_build-hook staging target; empty in the repo
+  dist/                 Trunk output, including post_build-hook staged assets
   src/
     main.rs             standalone boot adapter and asset fetch
     embed.rs            host-facing mount/destroy API — see
                          docs/wasm-embedding.md
-  server/               NATIVE crate `lodestone-web-server` — links
-                         lodestone-relay as a library, serves dist/ and /relay
-                         from one listener; see "Serving the page and the
-                         relay from one process" above. A workspace member of
-                         web/'s own Cargo.toml (own web/Cargo.lock), never
-                         built by trunk (which builds only the root package).
+  server/               native `lodestone-web-server` — serves dist/; the default
+                         multiplayer feature also exposes /relay. Shares the
+                         web workspace lockfile; built by scripts/run-wasm.sh,
+                         not by Trunk's root-package build.
 ```
