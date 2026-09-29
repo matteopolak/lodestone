@@ -167,7 +167,11 @@ uses the normal attack path on a loaded block. The record separates the click
 to local air-state change, replacement mesh upload, and first subsequent
 presented frame. In survival, the first interval includes intended mining time;
 it is not solely network latency. An absent ray target or unpresented edit
-fails the bounded run. `LODESTONE_CLIENT_JOIN_DROP=1` then mines the exposed
+fails the bounded run. `LODESTONE_CLIENT_JOIN_CREATIVE_EDIT=1` waits for the
+integrated server's creative ability grant before clicking, so the same
+interval measures instant-break latency without block hardness. It requires
+the edit phase and cannot be combined with item-drop profiling.
+`LODESTONE_CLIENT_JOIN_DROP=1` then mines the exposed
 block beneath it through the same input path, and records the delay to local
 air, an authoritative item entity, its stack, and a frame with item geometry
 submitted. It requires the edit phase and fails if no item frame appears within
@@ -216,6 +220,8 @@ movement phase; unset or zero leaves the stationary join control unchanged.
 default. The flight profile requires the local integrated player to have game
 mode permission.
 `LODESTONE_CLIENT_JOIN_EDIT=1` adds the block-edit phase.
+`LODESTONE_CLIENT_JOIN_CREATIVE_EDIT=1` makes that edit creative and instant;
+it requires `LODESTONE_CLIENT_JOIN_EDIT=1` and excludes item-drop profiling.
 `LODESTONE_CLIENT_JOIN_DROP=1` adds the item-drop phase and requires the edit
 phase. The JSON `drop` object reports input-to-air, input-to-entity,
 input-to-stack, and input-to-draw milliseconds separately; the first includes

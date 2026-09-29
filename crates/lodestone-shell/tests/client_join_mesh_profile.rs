@@ -419,25 +419,14 @@ impl MovementColumnProbe {
     }
 }
 
-fn edit_enabled() -> bool {
-    match std::env::var("LODESTONE_CLIENT_JOIN_EDIT") {
+fn enabled(name: &str) -> bool {
+    match std::env::var(name) {
         Ok(value) => {
-            assert_eq!(value, "1", "LODESTONE_CLIENT_JOIN_EDIT must be 1 when set");
+            assert_eq!(value, "1", "{name} must be 1 when set");
             true
         }
         Err(std::env::VarError::NotPresent) => false,
-        Err(error) => panic!("invalid LODESTONE_CLIENT_JOIN_EDIT: {error}"),
-    }
-}
-
-fn drop_enabled() -> bool {
-    match std::env::var("LODESTONE_CLIENT_JOIN_DROP") {
-        Ok(value) => {
-            assert_eq!(value, "1", "LODESTONE_CLIENT_JOIN_DROP must be 1 when set");
-            true
-        }
-        Err(std::env::VarError::NotPresent) => false,
-        Err(error) => panic!("invalid LODESTONE_CLIENT_JOIN_DROP: {error}"),
+        Err(error) => panic!("invalid {name}: {error}"),
     }
 }
 
@@ -583,9 +572,12 @@ fn main() {
     let radius = profile_radius();
     let move_for = movement_duration();
     let movement_mode = movement_mode();
-    let measure_edit = edit_enabled();
-    let measure_drop = drop_enabled();
+    let measure_edit = enabled("LODESTONE_CLIENT_JOIN_EDIT");
+    let measure_drop = enabled("LODESTONE_CLIENT_JOIN_DROP");
+    let creative_edit = enabled("LODESTONE_CLIENT_JOIN_CREATIVE_EDIT");
     assert!(!measure_drop || measure_edit, "drop profiling requires the first block edit");
+    assert!(!creative_edit || measure_edit, "creative edit profiling requires the block edit");
+    assert!(!creative_edit || !measure_drop, "creative block edits do not produce item drops");
     let server_radius = integrated_stream_radius(radius);
     let expected_visible_columns = ((radius as usize) * 2 + 1).pow(2);
     let expected_server_columns = ((server_radius as usize) * 2 + 1).pow(2);
@@ -1069,7 +1061,15 @@ fn main() {
             first_presented_terrain = Some(started.elapsed());
         }
 
-        if measure_edit && edit.is_none() && player_loaded_ack.is_some() {
+        if creative_edit && player_loaded_ack.is_some() && flight_startup.requested_at.is_none() {
+            sim.net().expect("connected creative edit profile").send_action(ClientAction::SendCommand {
+                command: "gamemode creative".to_string(),
+            });
+            flight_startup.requested_at = Some(Instant::now());
+        }
+        let creative_ready = !creative_edit || sim.ecs().read().get::<Abilities>(sim.local_player())
+            .is_some_and(|abilities| abilities.instabuild);
+        if measure_edit && edit.is_none() && player_loaded_ack.is_some() && creative_ready {
             sim.player_mut(|player| player.pitch = 80.0);
             edit = Some(EditProbe::new());
         }
@@ -1202,6 +1202,7 @@ fn main() {
         "max_observed_tick_gap_ms": server_tick_max_gap.as_secs_f64() * 1000.0,
     });
     let edit = edit.map(|probe| serde_json::json!({
+        "mode": if creative_edit { "creative" } else { "survival" },
         "target": probe.target,
         "initial_state": probe.initial_state,
         "aim_ms": probe.clicked_at.map(|clicked| clicked.duration_since(probe.aiming_since).as_secs_f64() * 1000.0),
