@@ -796,6 +796,7 @@ pub struct LiveCollision {
     /// this grid's order, so the aligned response **is** the grid and there is
     /// no intermediate table to fill and consume. See [`SectionGrid`].
     grid: Vec<Option<Arc<ChunkSection>>>,
+    loaded_columns: Vec<bool>,
     /// Chunk-x of `grid`'s `(0, 0, _)` slot.
     origin_cx: i32,
     /// Chunk-z of `grid`'s `(0, 0, _)` slot.
@@ -1060,6 +1061,7 @@ impl LiveCollision {
             .collect();
         Self {
             grid: sections.cells,
+            loaded_columns: vec![true; (sections.width_x * sections.width_z) as usize],
             origin_cx: sections.origin_cx,
             origin_cz: sections.origin_cz,
             width_x: sections.width_x,
@@ -1070,6 +1072,22 @@ impl LiveCollision {
             version,
             air_states,
         }
+    }
+
+    #[must_use]
+    pub fn with_loaded_columns(mut self, loaded_columns: Vec<bool>) -> Self {
+        assert_eq!(loaded_columns.len(), self.loaded_columns.len());
+        self.loaded_columns = loaded_columns;
+        self
+    }
+
+    fn column_loaded(&self, x: i32, z: i32) -> bool {
+        let dx = x.div_euclid(16) - self.origin_cx;
+        let dz = z.div_euclid(16) - self.origin_cz;
+        if dx < 0 || dx >= self.width_x || dz < 0 || dz >= self.width_z {
+            return true;
+        }
+        self.loaded_columns[(dx * self.width_z + dz) as usize]
     }
 
     /// Override the version data [`new`](Self::new) was built with, after
@@ -1411,7 +1429,18 @@ impl BlockView for LiveCollision {
 
 impl CollisionView for LiveCollision {
     fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<Aabb>) {
-        boxes_at(self, x, y, z, out);
+        if self.column_loaded(x, z) {
+            boxes_at(self, x, y, z, out);
+        } else {
+            out.push(Aabb::new(
+                x as f64,
+                y as f64,
+                z as f64,
+                x as f64 + 1.0,
+                y as f64 + 1.0,
+                z as f64 + 1.0,
+            ));
+        }
     }
 
     fn collision_top(&self, x: i32, y: i32, z: i32) -> f64 {
@@ -3216,5 +3245,28 @@ mod tests {
              transposition being detected"
         );
         assert!(z.div_euclid(16) >= GRID_ORIGIN.1 && z.div_euclid(16) <= GRID_ORIGIN.1 + 2);
+    }
+
+    #[test]
+    #[ignore = "requires the staged client resource archive"]
+    fn unloaded_neighbor_blocks_entry_without_blocking_retreat() {
+        let mut loaded = vec![true; 9];
+        loaded[7] = false;
+        let view = LiveCollision::new(
+            SectionGrid::from_aligned(vec![None; 9], -1, -1, 3, 3, 1),
+            0,
+            1,
+            vanilla_atlas(),
+            None,
+        )
+        .with_loaded_columns(loaded);
+        let mut boxes = Vec::new();
+        view.collision_boxes(16, 64, 0, &mut boxes);
+        assert_eq!(boxes, vec![Aabb::new(16.0, 64.0, 0.0, 17.0, 65.0, 1.0)]);
+        boxes.clear();
+        view.collision_boxes(15, 64, 0, &mut boxes);
+        assert!(boxes.is_empty());
+        view.collision_boxes(-1, 64, 0, &mut boxes);
+        assert!(boxes.is_empty());
     }
 }
