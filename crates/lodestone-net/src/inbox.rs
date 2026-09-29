@@ -15,8 +15,88 @@
 //! the browser path gets it for free.
 
 use std::collections::VecDeque;
+#[cfg(any(test, all(feature = "worker-web", target_arch = "wasm32")))]
+use std::time::Duration;
 
 use tokio::io::ReadBuf;
+
+#[cfg(any(test, all(feature = "worker-web", target_arch = "wasm32")))]
+use lodestone_time::Instant;
+
+/// Counters for an optionally observed byte-stream endpoint.
+///
+/// The browser transport stores this only when debug diagnostics are enabled,
+/// keeping the normal byte path free of counter and clock work.
+#[derive(Debug, Default)]
+#[cfg(any(test, all(feature = "worker-web", target_arch = "wasm32")))]
+pub(crate) struct ByteTransportDiagnostics {
+    posted_bytes: u64,
+    received_bytes: u64,
+    drained_bytes: u64,
+    longest_write_pending: Duration,
+    write_pending_since: Option<Instant>,
+    last_report: Option<Instant>,
+}
+
+#[cfg(any(test, all(feature = "worker-web", target_arch = "wasm32")))]
+impl ByteTransportDiagnostics {
+    pub(crate) fn record_posted(&mut self, bytes: usize) {
+        self.posted_bytes = self.posted_bytes.saturating_add(bytes as u64);
+    }
+
+    pub(crate) fn record_received(&mut self, bytes: usize) {
+        self.received_bytes = self.received_bytes.saturating_add(bytes as u64);
+    }
+
+    pub(crate) fn record_drained(&mut self, bytes: usize) {
+        self.drained_bytes = self.drained_bytes.saturating_add(bytes as u64);
+    }
+
+    pub(crate) fn write_pending(&mut self, now: Instant) {
+        self.write_pending_since.get_or_insert(now);
+    }
+
+    pub(crate) fn write_resumed(&mut self, now: Instant) {
+        if let Some(started) = self.write_pending_since.take() {
+            self.longest_write_pending = self.longest_write_pending.max(now.duration_since(started));
+        }
+    }
+
+    /// Admit one diagnostic line at most once per second. The first observed
+    /// activity reports immediately so a sustained zero-credit wait is visible.
+    pub(crate) fn report_due(&mut self, now: Instant) -> bool {
+        if self
+            .last_report
+            .is_some_and(|last| now.duration_since(last) < Duration::from_secs(1))
+        {
+            return false;
+        }
+        self.last_report = Some(now);
+        true
+    }
+
+    pub(crate) const fn posted_bytes(&self) -> u64 {
+        self.posted_bytes
+    }
+
+    pub(crate) const fn received_bytes(&self) -> u64 {
+        self.received_bytes
+    }
+
+    pub(crate) const fn drained_bytes(&self) -> u64 {
+        self.drained_bytes
+    }
+
+    pub(crate) const fn longest_write_pending(&self) -> Duration {
+        self.longest_write_pending
+    }
+
+    #[cfg(all(feature = "worker-web", target_arch = "wasm32"))]
+    pub(crate) fn current_write_pending(&self, now: Instant) -> Duration {
+        self.write_pending_since
+            .map_or(Duration::ZERO, |started| now.duration_since(started))
+    }
+}
 
 /// A bounded byte window used by transports that need explicit flow control.
 ///
@@ -365,5 +445,41 @@ mod tests {
             receiver.release(2),
             Err(CreditError::Overflow { available: 4, returned: 2, limit: 4 })
         );
+    }
+
+    #[test]
+    fn transport_diagnostics_distinguish_credit_saturation_from_drain() {
+        let started = Instant::now();
+        let resumed = started + Duration::from_millis(1250);
+        let mut sender = ByteCreditWindow::empty(4);
+        let mut receiver = ByteCreditWindow::full(4);
+        let mut diagnostics = ByteTransportDiagnostics::default();
+
+        sender.release(4).unwrap();
+        let posted = sender.take(4);
+        diagnostics.record_posted(posted);
+        assert_eq!(sender.available(), 0, "the write exhausted sender credit");
+        diagnostics.write_pending(started);
+
+        receiver.consume_exact(posted).unwrap();
+        diagnostics.record_received(posted);
+        assert_eq!(receiver.available(), 0, "the inbox exhausted receiver credit");
+        receiver.release(posted).unwrap();
+        diagnostics.record_drained(posted);
+        sender.release(posted).unwrap();
+        diagnostics.write_resumed(resumed);
+
+        assert_eq!(diagnostics.posted_bytes(), 4);
+        assert_eq!(diagnostics.received_bytes(), 4);
+        assert_eq!(diagnostics.drained_bytes(), 4);
+        assert_eq!(sender.available(), 4, "draining restores sender credit");
+        assert_eq!(receiver.available(), 4, "draining restores receiver credit");
+        assert_eq!(
+            diagnostics.longest_write_pending(),
+            Duration::from_millis(1250)
+        );
+        assert!(diagnostics.report_due(started));
+        assert!(!diagnostics.report_due(started + Duration::from_millis(999)));
+        assert!(diagnostics.report_due(started + Duration::from_secs(1)));
     }
 }
