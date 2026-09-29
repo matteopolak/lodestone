@@ -27,12 +27,13 @@ impl MenuNav {
         use crate::menu::create_world::CreateWorldOutcome;
         match outcome {
             CreateWorldOutcome::Handled => MenuAction::None,
-            // Back to the world list, **re-read**: the player may have cancelled
-            // after a create that failed, and the list they return to must be
-            // what is on disk rather than what was there when they left.
             CreateWorldOutcome::Cancel => {
                 ui.close_create_world();
-                self.open_world_list(ui);
+                if crate::saves::list_worlds_in(&self.saves_root).is_empty() {
+                    ui.close_world_select();
+                } else {
+                    self.refresh_world_list(ui);
+                }
                 MenuAction::None
             }
             // **This is where a world is actually created** (reading
@@ -127,7 +128,7 @@ impl MenuNav {
                     // the worst possible answer.
                     Err(e) => {
                         ui.close_create_world();
-                        self.open_world_list(ui);
+                        self.refresh_world_list(ui);
                         self.world_select
                             .set_error(format!("Could not create the world: {e}"));
                         MenuAction::None

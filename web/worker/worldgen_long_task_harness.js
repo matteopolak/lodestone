@@ -50,6 +50,7 @@
     const progressChannel = new MessageChannelCtor();
     const horizonChannel = new MessageChannelCtor();
     const progress = [];
+    const workerHealth = [];
     const longTasks = [];
     let observer;
     let timer;
@@ -103,6 +104,14 @@
         executor: progress.find((event) => event.executor)?.executor ?? null,
         workers: progress.findLast?.((event) => Number.isInteger(event.workers))?.workers ?? null,
         progress,
+        workerHealth,
+        workerHealthSampleCount: workerHealth.length,
+        maxCallbackGapMs: workerHealth.length === 0
+          ? null
+          : workerHealth.reduce((maximum, event) => Math.max(maximum, event.callbackGapMs), 0),
+        tickAdvancement: workerHealth.length < 2
+          ? null
+          : workerHealth.at(-1).tickCount - workerHealth[0].tickCount,
         longTaskApi: supported,
         longTasks,
         maxLongTaskMs,
@@ -131,6 +140,11 @@
       const value = event.data;
       if (value?.kind === "worldgen-progress") {
         progress.push({
+          ...value,
+          elapsedMs: now(host) - startedAt,
+        });
+      } else if (value?.kind === "worker-health" && value.epoch === 1) {
+        workerHealth.push({
           ...value,
           elapsedMs: now(host) - startedAt,
         });

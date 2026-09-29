@@ -60,19 +60,10 @@
 //! - the search box filters, by `WorldSelectionList.filterAccepts` (`:233-235`):
 //!   a case-insensitive substring of the **display name or the folder name**.
 //!
-//! ## Three deliberate deviations, each with its reason
+//! ## Deliberate deviations
 //!
-//! - **The empty list does not leave the screen.** `handleNewLevels`
-//!   switches on the list type, and for
-//!   `SINGLEPLAYER` an empty result calls `CreateWorldScreen.openFresh` — real
-//!   vanilla *replaces* the world list with the creation screen when you have no
-//!   worlds. This shell instead draws `NoWorldsEntry` (`:379-397`, which vanilla
-//!   only reaches from the Realms `UPLOAD_WORLD` branch) with
-//!   [`NO_WORLDS_LABEL`]. Two reasons: opening a different screen from a screen's
-//!   *first frame* makes the world list unreachable for a fresh install, and
-//!   Escape from that creation screen would return the player to a screen they
-//!   never saw. An empty list with a live Create button says the same thing and
-//!   is reversible.
+//! - An empty save list opens world creation directly. Cancel returns to the
+//!   title screen; a filter with no matches leaves the world list visible.
 //! - **The first row is selected on open.** Vanilla starts with
 //!   `updateButtonStatus(null)` and needs a click. `AbstractSelectionList`'s
 //!   keyboard selection is not ported (see the next point), so requiring a click
@@ -131,56 +122,6 @@ pub const SEARCH_HINT: &str = "Search...";
 /// the title through as the narration message). Never drawn.
 pub const SEARCH_NARRATION: &str = "Select World";
 
-/// `selectWorld.load_folder_access` is a *failure* string; the one this needs is
-/// `mco.upload.select.world.none`, which is what vanilla's `NoWorldsEntry`
-/// carries in the only branch that reaches it.
-///
-/// Reworded rather than transcribed, because vanilla's own string names the
-/// Realms upload flow this client does not have ("No worlds available to
-/// upload!"). What survives is the *shape*: one centred line in row 0's content
-/// box saying the list is empty. See the module docs on why this screen shows it
-/// at all rather than opening `CreateWorldScreen` the way vanilla does.
-/// The native empty-list line. See [`NO_WORLDS_LABEL`].
-///
-/// Named separately from the `cfg`-selected alias so the length gate can measure
-/// **both** strings on one target — see [`NO_WORLDS_LABEL_BROWSER`].
-pub const NO_WORLDS_LABEL_NATIVE: &str = "No worlds yet — press Create New World";
-
-/// The browser's empty-list line.
-///
-/// **The list is empty here permanently, not yet**, and saying so is the whole
-/// difference. A browser has no `saves/` — `read_dir` returns `Err(Unsupported)` — so
-/// [`crate::saves::list_worlds_in`] can only ever be empty, and a player who creates a
-/// world, plays it, and comes back to an empty list would reasonably read that as a
-/// broken save. It is not broken: the world was in memory, and the tab closing ended it.
-///
-/// The **flow is deliberately unchanged**, and this label is what makes that
-/// defensible. Vanilla's `handleNewLevels` opens `CreateWorldScreen.openFresh` on an
-/// empty singleplayer list, and this module's docs record why this shell does not follow
-/// it: opening another screen from a screen's *first frame* makes the world list
-/// unreachable, and Escape would return the player somewhere they never saw. That
-/// argument is **stronger** in a browser, not weaker — the list is empty on every visit,
-/// so auto-opening creation would make this screen unreachable *forever* rather than
-/// merely on a fresh install. So the screen stays, the Create button stays live, and the
-/// line explains itself.
-///
-/// It is a **separate named constant rather than only the `cfg` alias below**, and that
-/// is the point: the 44-character ceiling on this row is pinned by
-/// `the_world_list_row_label_fits_the_row_it_is_centred_in`, which runs on the host and
-/// would therefore have measured only the native string. The first draft of this line was
-/// 53 characters — it would have overhung the row in a browser and no gate would have
-/// said so. A guard only covers what it names.
-pub const NO_WORLDS_LABEL_BROWSER: &str = "Not saved — press Create New World";
-
-/// The empty-list line for this target: [`NO_WORLDS_LABEL_NATIVE`] or
-/// [`NO_WORLDS_LABEL_BROWSER`].
-#[cfg(not(target_arch = "wasm32"))]
-pub const NO_WORLDS_LABEL: &str = NO_WORLDS_LABEL_NATIVE;
-
-/// The empty-list line for this target. See [`NO_WORLDS_LABEL_BROWSER`].
-#[cfg(target_arch = "wasm32")]
-pub const NO_WORLDS_LABEL: &str = NO_WORLDS_LABEL_BROWSER;
-
 /// A world seed and a label, kept from that fix's one-hardcoded-row era.
 ///
 /// **Not a list row any more.** The list is [`crate::saves::list_worlds_in`]; this
@@ -209,12 +150,6 @@ pub struct WorldEntry {
 /// `lodestone_server::region_source::resolve_world_seed`'s own doc describes as
 /// worse than either failure alone.
 pub const BUNDLED_WORLD: WorldEntry = WorldEntry {
-    // Its **length** is a constraint, not a preference: `NoWorldsEntry` wraps a
-    // `StringWidget` with no `maxWidth`, so nothing clips it, and a longer string
-    // would visibly overhang the 266 px row it is centred in — the ceiling is 44
-    // characters at the jar-less fixed advance.
-    // `the_world_list_row_label_fits_the_row_it_is_centred_in` pins that, and now
-    // measures [`NO_WORLDS_LABEL`], the string that really is drawn there.
     label: "New World (generated, not saved)",
     seed: 20_260_731,
 };
@@ -1210,16 +1145,6 @@ impl WorldSelectNav {
         self.scroll = self.scroll.clamp(0.0, max);
     }
 
-    /// What the empty-list row says, or `None` when the list is not empty.
-    ///
-    /// `Some` is vanilla's `NoWorldsEntry` (see the module docs on the deviation
-    /// this represents), and it is what keeps "no worlds" distinguishable from "a
-    /// list that failed to draw" — the two are otherwise the same picture, which
-    /// is the absence-needs-a-control rule applied to a screen.
-    #[must_use]
-    pub fn empty_label(&self) -> Option<&'static str> {
-        self.shown.is_empty().then_some(NO_WORLDS_LABEL)
-    }
 }
 
 #[cfg(test)]
@@ -1360,18 +1285,13 @@ mod tests {
         assert_eq!(empty.delete_selected(), WorldSelectOutcome::Handled);
     }
 
-    /// The empty list — a fresh install, which is the state the owner hits first.
-    ///
-    /// It must be a list with a message, not a crash and not a blank band: Create
-    /// stays live, Play does not, and [`WorldSelectNav::empty_label`] is `Some` so
-    /// the draw has something to distinguish "no worlds" from "the list failed".
+    /// The empty list keeps only Create and Back active.
     #[test]
     fn an_empty_saves_directory_is_a_usable_screen_and_not_a_dead_one() {
         let nav = WorldSelectNav::new();
         assert_eq!(nav.shown_len(), 0);
         assert!(nav.selected().is_none(), "nothing to select");
         assert_eq!(nav.selected_row(), None);
-        assert_eq!(nav.empty_label(), Some(NO_WORLDS_LABEL));
         assert!(
             !nav.is_active(WorldSelectButton::Play.row()),
             "Play must be greyed with nothing to play — `updateButtonStatus(null)`"
@@ -1394,7 +1314,6 @@ mod tests {
         // worlds answers differently. Otherwise they would pass for a screen that
         // never activates Play at all.
         let with_worlds = populated();
-        assert_eq!(with_worlds.empty_label(), None, "a populated list has no notice");
         assert!(
             with_worlds.is_active(WorldSelectButton::Play.row()),
             "Play must be live with a playable selection, or the empty-list \
@@ -1684,7 +1603,6 @@ mod tests {
         assert_eq!(nav.shown_len(), 0);
         assert_eq!(nav.selected_row(), None);
         assert!(!nav.is_active(WorldSelectButton::Play.row()));
-        assert_eq!(nav.empty_label(), Some(NO_WORLDS_LABEL));
         assert_eq!(
             nav.worlds().len(),
             3,

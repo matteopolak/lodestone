@@ -377,12 +377,27 @@ pub(super) async fn launch_browser_worker(
     let progress_started = crate::platform::Instant::now();
     let on_progress = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
         let value = event.data();
-        if js_sys::Reflect::get(&value, &JsValue::from_str("kind"))
+        let kind = js_sys::Reflect::get(&value, &JsValue::from_str("kind"))
             .ok()
-            .and_then(|kind| kind.as_string())
-            .as_deref()
-            != Some("worldgen-progress")
-        {
+            .and_then(|kind| kind.as_string());
+        if kind.as_deref() == Some("worker-health") {
+            let number = |key| js_sys::Reflect::get(&value, &JsValue::from_str(key))
+                .ok()
+                .and_then(|value| value.as_f64());
+            if number("epoch") == Some(f64::from(epoch)) {
+                tracing::debug!(
+                    ticks = ?number("tickCount"),
+                    witness = ?number("tickWitness"),
+                    overruns = ?number("overruns"),
+                    mspt_ms = ?number("msptMs"),
+                    tps = ?number("tps"),
+                    callback_gap_ms = ?number("callbackGapMs"),
+                    "browser server worker health",
+                );
+            }
+            return;
+        }
+        if kind.as_deref() != Some("worldgen-progress") {
             return;
         }
         match worker_progress(&value) {

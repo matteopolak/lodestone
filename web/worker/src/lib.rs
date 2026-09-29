@@ -10,6 +10,7 @@ use std::cell::RefCell;
 
 thread_local! {
     static PROGRESS_PORT: RefCell<Option<(MessagePort, u32)>> = const { RefCell::new(None) };
+    static TICK_MONITOR: RefCell<Option<lodestone_server::IntegratedTickMonitor>> = const { RefCell::new(None) };
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
@@ -33,6 +34,7 @@ pub fn start_worker(
     tracing::info!(%log_level, protocol, seed, preset, epoch, "browser server worker starting");
     lodestone_server::worldgen_session::register_browser_worker_epoch(epoch);
     PROGRESS_PORT.with(|slot| *slot.borrow_mut() = Some((progress_port.clone(), epoch)));
+    TICK_MONITOR.with(|slot| slot.borrow_mut().take());
     let _ = lodestone_server::worldgen_progress::install_sink(post_worldgen_event);
     post_progress(&progress_port, epoch, "server-starting");
     let result = lodestone::net::start_browser_integrated_worker(
@@ -44,10 +46,10 @@ pub fn start_worker(
         epoch,
     )
         .map_err(|error| JsValue::from_str(&error));
-    if result.is_ok() {
-        post_progress(&progress_port, epoch, "server-started");
-    }
-    result
+    let monitor = result?;
+    TICK_MONITOR.with(|slot| *slot.borrow_mut() = monitor);
+    post_progress(&progress_port, epoch, "server-started");
+    Ok(())
 }
 
 fn install_logger(value: &str) -> Result<(), JsValue> {
@@ -69,7 +71,49 @@ fn install_logger(value: &str) -> Result<(), JsValue> {
 
 #[wasm_bindgen]
 pub fn cancel_worker(epoch: u32) -> bool {
-    lodestone_server::worldgen_session::cancel_browser_worker_epoch(epoch)
+    let cancelled = lodestone_server::worldgen_session::cancel_browser_worker_epoch(epoch);
+    if cancelled {
+        TICK_MONITOR.with(|slot| slot.borrow_mut().take());
+    }
+    cancelled
+}
+
+#[wasm_bindgen]
+pub fn sample_worker(epoch: u32, callback_gap_ms: f64) -> bool {
+    if !callback_gap_ms.is_finite() || callback_gap_ms < 0.0 {
+        return false;
+    }
+    PROGRESS_PORT.with(|slot| {
+        let slot = slot.borrow();
+        let Some((port, active_epoch)) = slot.as_ref() else {
+            return false;
+        };
+        if *active_epoch != epoch {
+            return false;
+        }
+        TICK_MONITOR.with(|slot| {
+            let slot = slot.borrow();
+            let Some(monitor) = slot.as_ref() else {
+                return false;
+            };
+            let (stats, witness) = monitor.snapshot();
+            let message = js_sys::Object::new();
+            for (key, value) in [
+                ("kind", JsValue::from_str("worker-health")),
+                ("epoch", JsValue::from_f64(f64::from(epoch))),
+                ("tickCount", JsValue::from_f64(stats.tick_count as f64)),
+                ("tickWitness", JsValue::from_f64(witness as f64)),
+                ("overruns", JsValue::from_f64(stats.overrun_count as f64)),
+                ("msptMs", JsValue::from_f64(stats.mspt_ms)),
+                ("msptAvgMs", JsValue::from_f64(stats.mspt_avg_ms)),
+                ("tps", JsValue::from_f64(stats.tps)),
+                ("callbackGapMs", JsValue::from_f64(callback_gap_ms)),
+            ] {
+                let _ = js_sys::Reflect::set(&message, &JsValue::from_str(key), &value);
+            }
+            port.post_message(&message).is_ok()
+        })
+    })
 }
 
 fn post_progress(port: &MessagePort, epoch: u32, stage: &str) {

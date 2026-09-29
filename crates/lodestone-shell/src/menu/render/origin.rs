@@ -79,18 +79,6 @@ pub enum Origin {
     /// window is, which no fixed-dy origin can express. Both terms `floor`ed
     /// for the same reason as [`Origin::ScreenTop`].
     Centre,
-    /// `(floor(w / 4), 0)` — the death screen's title anchor.
-    /// `DeathScreen.visitText` draws it at `middleLine / 2` where
-    /// `middleLine = this.width / 2`, i.e.
-    /// **centred on the screen's left quarter, not the middle** — this is
-    /// vanilla's own layout (seemingly an oversight nobody ever fixed, not a
-    /// deliberate design), reproduced faithfully rather than "corrected" to
-    /// [`Origin::ScreenTop`]. Both are Java integer division —
-    /// `floor(floor(w/2)/2) == floor(w/4)` for a non-negative `w`, so the two
-    /// chained truncations collapse to the one `floor` here — and that fix's audit
-    /// of every unfloored `Origin::anchor` term caught this arm too, alongside
-    /// [`Origin::ScreenTop`]/[`Origin::TitleTop`]/[`Origin::ScreenBottom`].
-    DeathTitle,
     /// A widget of the settings tree, resolved by
     /// [`super::options::placement_anchor`].
     ///
@@ -326,7 +314,6 @@ impl Origin {
             | Origin::TopRight
             | Origin::ScreenBottom
             | Origin::Centre
-            | Origin::DeathTitle
             | Origin::CommandBlockFooter
             | Origin::CommandBlockSuggestion { .. } => false,
         }
@@ -350,7 +337,6 @@ impl Origin {
             Origin::TopRight => (width, 0.0),
             Origin::ScreenBottom => ((width * 0.5).floor(), height),
             Origin::Centre => ((width * 0.5).floor(), (height * 0.5).floor()),
-            Origin::DeathTitle => ((width * 0.25).floor(), 0.0),
             // Unlike every arm above, this one *runs a layout* rather than
             // evaluating an expression — `OptionsScreen`'s tree cannot be
             // arranged once per process the way `pause_block` is, because
@@ -434,4 +420,3 @@ impl Slot {
         (ax + self.dx, ay + self.dy, self.w, self.h)
     }
 }
-

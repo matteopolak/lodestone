@@ -785,31 +785,16 @@ fn the_death_screen_rects_are_vanillas_own() {
 }
 
 #[test]
-fn the_death_screens_title_is_anchored_on_the_left_quarter_not_the_centre() {
-    // The trap named in `Origin::DeathTitle`'s docs: vanilla's own death-screen
-    // text-visiting draws the title at `middleLine / 2` where `middleLine ==
-    // width / 2`, i.e. `width / 4` — not `width / 2` like every other
-    // centred heading in this file (`Origin::ScreenTop`). A layout
-    // "corrected" to the screen centre would fail this by a wide margin.
-    //
-    // `.floor()`ed: `854.0 / 4.0` is `213.5`, not a whole
-    // pixel, where vanilla's `this.width / 2 / 2` is two Java integer
-    // divisions and can only ever land on a whole pixel.
-    assert_eq!(Origin::DeathTitle.anchor(V_W, V_H), ((V_W / 4.0).floor(), 0.0));
-    assert_ne!(
-        Origin::DeathTitle.anchor(V_W, V_H).0,
-        Origin::ScreenTop.anchor(V_W, V_H).0,
-        "the death title and the score/message lines are not on the same x"
-    );
+fn the_death_screens_title_is_centred_after_scaling() {
+    let f = death_frame(&test_nav("centred-death-title"), None);
+    assert_eq!(f.labels[0].origin, Origin::ScreenTop);
+    assert_eq!(f.labels[0].align, Align::Centre);
+    assert_eq!(f.labels[0].scale, 2.0);
 }
 
 /// Every width-derived [`Origin`] anchor uses the canvas width
-/// (always `int`) divided by a constant — Java integer division — so the x
-/// term must be `floor`ed. At an *even* width that is invisible, because
-/// `width * 0.5` (or `* 0.25`) is already a whole pixel; **no test before
-/// this one used an odd width**, which is exactly how the bug shipped. 855
-/// is odd and not a multiple of 4 either, so it exercises every one of the
-/// affected arms at once.
+/// (always `int`) divided by a constant — integer division — so the x
+/// term must be `floor`ed. An odd width exposes a missing floor.
 ///
 /// Each assertion predicts *both* hypotheses from `width` alone — floored
 /// (right) and unfloored (the bug) — and requires landing on the floored
@@ -841,15 +826,6 @@ fn odd_width_anchors_are_floored_like_javas_integer_division() {
         "ScreenBottom must not land on the unfloored {unfloored_half}"
     );
 
-    let floored_quarter = (width * 0.25).floor();
-    let unfloored_quarter = width * 0.25;
-    assert_eq!(floored_quarter, 213.0, "sanity: floor(855/4) is 213, not 213.75");
-    assert_ne!(floored_quarter, unfloored_quarter, "sanity: 855/4 is not a whole pixel");
-    assert_eq!(
-        Origin::DeathTitle.anchor(width, height),
-        (floored_quarter, 0.0),
-        "DeathTitle must not land on the unfloored {unfloored_quarter}"
-    );
 }
 
 #[test]

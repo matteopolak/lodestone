@@ -14,6 +14,8 @@ The timer must work in both browser contexts used by the shell. The page context
 
 Simulation publication is separate from simulation mutation. After a world tick changes a block, scheduled queue, or entity snapshot, the connection loop must drain the corresponding feed and run its streaming diff even when the client has sent no packet. Otherwise an idle client can retain stale water, item entities, or mob positions until its next input packet.
 
+The browser connection timer continues publishing world changes during an initial join, but does not advance that player's vitals until the client sends `PlayerLoaded` after a ready frame is presented. The shared `player_tick_ready` gate also releases the world simulation's initial tick hold. Both connection loops use that gate, preventing air supply or health from changing while the terrain screen covers the new world. A late timer callback never replays skipped vitals ticks.
+
 Portable acceptance uses `browser_timer` deadline tests, integrated-server fluid
 progression tests in `integrated.rs`, and `integrated_item_tick.rs` (item motion
 and lifecycle counters). The real-browser harness at `web/tests/browser-tick`

@@ -23,6 +23,8 @@ Once neither loading latch is active, frame redraw skips the view scan; ongoing 
 
 The server holds the new world's initial ticks until the client acknowledges a presented world frame. The client defers that first acknowledgement until the declared spawn view and assets are renderer-ready. Later respawns acknowledge automatically. The server's streaming radius includes padding beyond the client's initial view; waiting for that padding after the loading cover disappears would leave gameplay visible while the tick-owned action queue remains paused. Chunk streaming continues during the pause and after the acknowledgement.
 
+Both native and browser connections release the initial world-tick hold when `PlayerLoaded` arrives. Player vitals are gated on the same acknowledgement; the browser timer still publishes chunk and world-change feeds while the player waits. Keep these two releases paired when changing a connection loop.
+
 `Sim` carries two presentation latches next to the producer readiness state: `new_world_loading` is armed only by the newly-created survival launch path, while `dimension_transition_pending` is armed by a cross-dimension respawn. The renderer checks the transition latch before the ordinary world wait and draws its opaque cover independently. After the first playable frame, `app/redraw.rs` sends the deferred acknowledgement and clears the initial latch. The producer readiness state itself remains with the mesh ledger rather than duplicating section state in the simulation struct.
 
 Both the full-frame connection screen and the in-world loading cover use the current menu canvas settings. Stamp the GUI scale on overlays too; otherwise the same label changes size at the handoff from connection to terrain loading.

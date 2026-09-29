@@ -15032,6 +15032,13 @@ impl LoopStallWatch {
 /// Returns [`ServerError::Net`] on a transport/codec failure, or
 /// [`ServerError::KeepAliveTimeout`] if the client does not echo a challenge
 /// in time (native only — see above).
+fn player_tick_ready(world: &crate::world_state::WorldStateHandle, client_loaded: bool) -> bool {
+    if client_loaded {
+        world.resume_initial_ticks();
+    }
+    client_loaded
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::too_many_arguments)]
 async fn serve_play<T, P, S, E>(
@@ -15796,9 +15803,7 @@ where
                     &payload,
                 )
                 .await?;
-                if client_loaded {
-                    world.resume_initial_ticks();
-                }
+                player_tick_ready(world, client_loaded);
                 if let Some(id) = pending_keep_alive_before_packet
                     && pending_keep_alive.is_none()
                 {
@@ -16154,7 +16159,7 @@ where
 
             _ = vitals_tick.tick() => {
                 watch.enter();
-                if !client_loaded {
+                if !player_tick_ready(world, client_loaded) {
                     watch.pass("vitals_waiting_for_player_loaded");
                     continue;
                 }
@@ -18458,40 +18463,42 @@ where
             // Cancel-safe timer polling: a ready packet leaves the interval's
             // deadline untouched, so no timer event is lost.
             _ = vitals_interval.tick() => {
-                wasm_vitals_tick(
-                    conn,
-                    proto,
-                    source,
-                    &mut state,
-                    world,
-                    border,
-                    game_mode,
-                    player_uuid,
-                    &username,
-                    player_pos,
-                    &mut vitals,
-                    &mut inventory,
-                    &mut advancements,
-                    &mut drops_rng,
-                    &mut burn,
-                    &mut burn_rng,
-                    &mut effects,
-                    &mut item_in_use,
-                    mobs,
-                    block_ticks,
-                    block_entities,
-                )
-                .await?;
-                browser_vitals_ticks = browser_vitals_ticks.saturating_add(1);
-                if browser_vitals_ticks == 1 || browser_vitals_ticks.is_multiple_of(20) {
-                    tracing::debug!(
-                        elapsed_ms = browser_play_started.elapsed().as_millis(),
-                        vitals_ticks = browser_vitals_ticks,
-                        world_tick = world.time().game_time,
-                        chunks_sent,
-                        join_remaining = join_stream.remaining(),
-                        "browser play-loop heartbeat",
-                    );
+                if player_tick_ready(world, client_loaded) {
+                    wasm_vitals_tick(
+                        conn,
+                        proto,
+                        source,
+                        &mut state,
+                        world,
+                        border,
+                        game_mode,
+                        player_uuid,
+                        &username,
+                        player_pos,
+                        &mut vitals,
+                        &mut inventory,
+                        &mut advancements,
+                        &mut drops_rng,
+                        &mut burn,
+                        &mut burn_rng,
+                        &mut effects,
+                        &mut item_in_use,
+                        mobs,
+                        block_ticks,
+                        block_entities,
+                    )
+                    .await?;
+                    browser_vitals_ticks = browser_vitals_ticks.saturating_add(1);
+                    if browser_vitals_ticks == 1 || browser_vitals_ticks.is_multiple_of(20) {
+                        tracing::debug!(
+                            elapsed_ms = browser_play_started.elapsed().as_millis(),
+                            vitals_ticks = browser_vitals_ticks,
+                            world_tick = world.time().game_time,
+                            chunks_sent,
+                            join_remaining = join_stream.remaining(),
+                            "browser play-loop heartbeat",
+                        );
+                    }
                 }
                 republish_inventory(entities.players(), player_uuid, &inventory);
                 // The world tick can publish changes without inbound packets.
@@ -18651,6 +18658,7 @@ where
                 &payload,
             )
             .await?;
+            player_tick_ready(world, client_loaded);
             republish_inventory(entities.players(), player_uuid, &inventory);
             // Flush advancement changes caused by the packet just dispatched.
             if let Some(update) = advancements.flush_dirty(player_uuid, true) {
@@ -18776,6 +18784,16 @@ mod tests {
     use lodestone_model::{Rotation, Vec3};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use uuid::Uuid;
+
+    #[test]
+    fn player_tick_gate_releases_world_and_vitals_together() {
+        let world = crate::world_state::WorldStateHandle::new();
+        world.pause_initial_ticks();
+        assert!(!player_tick_ready(&world, false));
+        assert!(world.initial_ticks_paused());
+        assert!(player_tick_ready(&world, true));
+        assert!(!world.initial_ticks_paused());
+    }
 
     #[test]
     fn streamed_centre_admission_requests_only_its_missing_neighbours() {

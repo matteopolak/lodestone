@@ -972,7 +972,7 @@ impl MenuNav {
             ConfirmOutcome::Handled => MenuAction::None,
             ConfirmOutcome::No => {
                 ui.close_confirm();
-                self.open_world_list(ui);
+                self.refresh_world_list(ui);
                 MenuAction::None
             }
             ConfirmOutcome::Yes => {
@@ -983,7 +983,7 @@ impl MenuNav {
                 let ConfirmRequest::DeleteWorld { dir_name, .. } = self.confirm.request().clone();
                 let result = crate::saves::delete_world_in(&self.saves_root, &dir_name);
                 ui.close_confirm();
-                self.open_world_list(ui);
+                self.refresh_world_list(ui);
                 // Reported over a screen the player recognises rather than
                 // swallowed — vanilla logs it and raises `SystemToast
                 // .onWorldDeleteFailure`, and
