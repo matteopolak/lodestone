@@ -1,4 +1,4 @@
-//! Off-main-thread section meshing over **copy-on-write snapshots**.
+//! Section meshing over **copy-on-write snapshots**.
 //!
 //! The rule from the design plan is absolute: *the world is never locked while
 //! meshing*. So the pipeline is split in two:
@@ -13,17 +13,17 @@
 //!    [`SnapshotOutcome`] for the typed distinction between "air, and air is the
 //!    truth" and "air, and air is a guess", and why the second one defers the
 //!    build instead of baking it.
-//! 2. On worker threads, [`mesh_snapshot`] turns a snapshot into a
-//!    [`lodestone_render::Mesh`] with no access to the live world at all.
+//! 2. [`mesh_snapshot`] turns a snapshot into a [`lodestone_render::Mesh`]
+//!    with no access to the live world at all.
 //!
-//! [`MeshScheduler`] is a tiny fixed worker pool wrapping that split.
+//! [`MeshScheduler`] uses native workers or a browser frame budget for that split.
 //!
 //! Meshing uses [`lodestone_render::mesh_simple`] (one quad per visible face)
 //! rather than the greedy mesher: the shell's atlas packs many sprites into one
 //! 2-D texture, and greedy-merged quads tile UVs past a single sprite's cell,
 //! which would bleed neighbouring sprites. Per-face quads keep every tile
 //! coordinate in `{0,1}`, mapping exactly onto each sprite rect. (A texture-array
-//! atlas would let greedy back in — noted in the report.)
+//! atlas would allow greedy meshing again.)
 
 use std::cell::RefCell;
 use std::cmp::Reverse;
@@ -107,6 +107,11 @@ mod face;
 mod fluid;
 mod model;
 mod snapshot;
+#[cfg(any(target_arch = "wasm32", test))]
+mod browser_queue;
+
+#[cfg(target_arch = "wasm32")]
+use browser_queue::BrowserMeshBacklog;
 
 pub use face::mesh_snapshot;
 pub use fluid::{mesh_snapshot_fluids, mesh_snapshot_fluids_at, snapshot_visibility};
@@ -593,24 +598,12 @@ impl MeshScheduler {
         self.column_source
     }
 
-    /// Queue a snapshot for meshing.
-    ///
-    /// Round-robins across per-worker channels so no two workers contend on a
-    /// mutex to dequeue — each worker owns its own `Receiver`, and the sender side
-    /// distributes jobs with zero locking.
+    /// Queue a snapshot with a new authoritative generation.
     pub fn submit(&mut self, snapshot: SectionSnapshot) {
         self.pending += 1;
-        // Stamped *before* the send, and recorded as this key's current
-        // generation immediately — not when the job completes — so a second
-        // `submit` for the same key (the corrected-block case
-        // `latest_generation`'s doc describes) always wins the race no matter
-        // which of the two workers finishes first.
         self.next_generation += 1;
         let generation = self.next_generation;
         self.latest_generation.insert(snapshot.key, generation);
-        // Crossbeam MPMC — lock-free send, workers compete on the shared
-        // receiver. No round-robin: the channel distributes by which worker
-        // finishes its current job first (true work-stealing).
         if self
             .job_tx
             .send(Job::Mesh(
@@ -623,6 +616,11 @@ impl MeshScheduler {
         {
             self.pending -= 1;
         }
+    }
+
+    fn submit_current(&mut self, snapshot: SectionSnapshot) {
+        self.forget_generation(&snapshot.key);
+        self.submit(snapshot);
     }
 
     /// Number of submitted jobs not yet drained.
@@ -815,27 +813,15 @@ const BROWSER_MESH_BUDGET: std::time::Duration = std::time::Duration::from_milli
 ///
 /// # How to change it
 ///
-/// Keep the two `drain` methods the only place work happens. [`submit`](Self::submit)
-/// must stay O(1): it is called from the enqueue system, which can submit a whole
-/// column's sections in one frame, and meshing there would put the cost back on the
-/// caller that the budget exists to protect.
+/// Keep meshing inside the drains and keep [`submit`](Self::submit) free of pending
+/// snapshot scans. The enqueue system can submit a whole column's sections in one
+/// frame; meshing or scanning its backlog there would consume the caller's budget.
 #[cfg(target_arch = "wasm32")]
 #[derive(Debug, Resource)]
 pub struct MeshScheduler {
-    /// Submitted-but-unmeshed snapshots, oldest first.
-    ///
-    /// A `VecDeque` used strictly FIFO, so submission order is meshing order. That
-    /// matters more here than on native: the pool completes jobs in whatever order
-    /// its workers finish, but with one thread the queue order *is* the order the
-    /// world appears in, and `DirtyColumns` has already sorted its submissions by
-    /// ring distance and view cone. Draining LIFO would show the player the far
-    /// edge of the backlog first.
-    queue: std::collections::VecDeque<SectionSnapshot>,
-    /// Meshed but not yet handed to the caller.
-    ///
-    /// Completed meshes retained when a frame handoff reaches its count or byte
-    /// budget, plus any surplus produced while satisfying `drain_blocking(n)`.
-    ready: Vec<Meshed>,
+    /// Pending snapshots keep their first FIFO position when replaced; completed
+    /// meshes are invalidated separately when a new snapshot supersedes them.
+    backlog: BrowserMeshBacklog,
     classifier: ShellClassifier,
     column_source: ColumnSource,
     /// The live `options.cutoutLeaves` value. Read at **mesh** time (inside
@@ -872,8 +858,7 @@ impl MeshScheduler {
             "browser mesh scheduler: no worker threads (thread::spawn traps on wasm32);              meshing in-frame under a time budget"
         );
         Self {
-            queue: std::collections::VecDeque::new(),
-            ready: Vec::new(),
+            backlog: BrowserMeshBacklog::default(),
             classifier,
             column_source,
             cutout_leaves: true,
@@ -909,15 +894,19 @@ impl MeshScheduler {
         self.blend_radius
     }
 
-    /// Queue a snapshot for meshing. O(1) — no meshing happens here.
+    /// Queue or replace a snapshot without changing its first FIFO position.
     pub fn submit(&mut self, snapshot: SectionSnapshot) {
-        self.queue.push_back(snapshot);
+        self.backlog.submit(snapshot);
+    }
+
+    fn submit_current(&mut self, snapshot: SectionSnapshot) {
+        self.submit(snapshot);
     }
 
     /// Number of submitted jobs not yet drained.
     #[must_use]
     pub fn pending(&self) -> usize {
-        self.queue.len() + self.ready.len()
+        self.backlog.pending()
     }
 
     /// Remove queued or completed-but-undrained work for a section that has
@@ -925,19 +914,15 @@ impl MeshScheduler {
     /// does not prevent an older entry from being returned after a newer empty
     /// or deferred snapshot has made it obsolete.
     pub fn forget_generation(&mut self, key: &SectionKey) {
-        self.queue.retain(|snapshot| snapshot.key != *key);
-        self.ready.retain(|meshed| meshed.key != *key);
+        self.backlog.forget_generation(key);
     }
 
     pub fn forget_column(&mut self, cx: i32, cz: i32) {
-        self.queue
-            .retain(|snapshot| snapshot.key.cx != cx || snapshot.key.cz != cz);
-        self.ready
-            .retain(|meshed| meshed.key.cx != cx || meshed.key.cz != cz);
+        self.backlog.forget_column(cx, cz);
     }
 
     pub fn discard_pending(&mut self) {
-        discard_browser_mesh_backlog(&mut self.queue, &mut self.ready);
+        self.backlog.discard_pending();
     }
 
     /// Mesh for at most [`BROWSER_MESH_BUDGET`] and return what got finished.
@@ -949,9 +934,9 @@ impl MeshScheduler {
     /// broken". Checking the deadline *after* each section rather than before is what
     /// gives the floor for free.
     pub fn drain(&mut self) -> Vec<Meshed> {
-        let mut out = std::mem::take(&mut self.ready);
+        let mut out = std::mem::take(&mut self.backlog.ready);
         let deadline = crate::platform::Instant::now() + BROWSER_MESH_BUDGET;
-        while let Some(snap) = self.queue.pop_front() {
+        while let Some(snap) = self.backlog.queue.pop_front() {
             out.push(mesh_one(
                 snap,
                 &self.classifier,
@@ -976,8 +961,8 @@ impl MeshScheduler {
     /// The budget is not applied: headless one-shot work needs all requested
     /// meshes, and a partial result would leave no way to make progress.
     pub fn drain_blocking(&mut self, n: usize) -> Vec<Meshed> {
-        while self.ready.len() < n {
-            let Some(snap) = self.queue.pop_front() else {
+        while self.backlog.ready.len() < n {
+            let Some(snap) = self.backlog.queue.pop_front() else {
                 break;
             };
             let meshed = mesh_one(
@@ -986,19 +971,10 @@ impl MeshScheduler {
                 self.cutout_leaves,
                 self.blend_radius,
             );
-            self.ready.push(meshed);
+            self.backlog.ready.push(meshed);
         }
-        std::mem::take(&mut self.ready)
+        std::mem::take(&mut self.backlog.ready)
     }
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn discard_browser_mesh_backlog(
-    queue: &mut std::collections::VecDeque<SectionSnapshot>,
-    ready: &mut Vec<Meshed>,
-) {
-    queue.clear();
-    ready.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -1599,13 +1575,9 @@ impl TerrainMesh {
     fn route(&mut self, key: SectionKey, outcome: SnapshotOutcome, force: bool) -> bool {
         match outcome {
             SnapshotOutcome::Ready(snap) => {
-                // Supersede an older snapshot before queueing this one. Native
-                // workers use the generation map to discard the old completion;
-                // the browser scheduler removes the old FIFO entry here.
-                self.scheduler.forget_generation(&key);
                 self.rendered_sections.remove(&key);
                 self.empty_sections.remove(&key);
-                self.scheduler.submit(snap);
+                self.scheduler.submit_current(snap);
                 true
             }
             // A single empty section is routine (sky/void sections have no
@@ -1625,16 +1597,13 @@ impl TerrainMesh {
                 false
             }
             SnapshotOutcome::Deferred(snap) => {
-                // The current snapshot is either queued again (when existing
-                // GPU geometry makes that useful) or remains unresolved. In
-                // both cases an older queued result is no longer authoritative.
-                self.scheduler.forget_generation(&key);
                 self.rendered_sections.remove(&key);
                 self.empty_sections.remove(&key);
                 if force || self.uploaded_sections.contains(&key) {
-                    self.scheduler.submit(snap);
+                    self.scheduler.submit_current(snap);
                     true
                 } else {
+                    self.scheduler.forget_generation(&key);
                     // Deliberately *not* a removal: there is nothing on the GPU
                     // for this key, and queueing one would make the deferral
                     // look like an unload to the app's drain.
@@ -3994,15 +3963,29 @@ mod tests {
         let remaining = terrain.scheduler.drain_frame_with_limit(2);
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].key, keys[2]);
-        let queued = platform_snapshot(None);
-        let ready = Meshed::new(queued.key, SectionGeometry::Packed(Mesh::default()));
-        let mut queue = std::collections::VecDeque::from([queued]);
-        let mut ready = vec![ready];
+    }
 
-        discard_browser_mesh_backlog(&mut queue, &mut ready);
+    #[test]
+    fn empty_or_unuploaded_deferred_outcomes_invalidate_older_meshes() {
+        let mut terrain = TerrainMesh::new(MeshScheduler::new(
+            1,
+            ShellClassifier::Demo(DemoClassifier),
+        ));
+        let snapshot = platform_snapshot(None);
+        let key = snapshot.key;
+        for outcome in [SnapshotOutcome::Empty, SnapshotOutcome::Deferred(snapshot)] {
+            terrain.scheduler.latest_generation.insert(key, 1);
+            terrain.scheduler.pending += 1;
+            terrain.scheduler.ready.push_back((
+                Meshed::new(key, SectionGeometry::Packed(Mesh::default())),
+                1,
+            ));
+            assert_eq!(terrain.scheduler.pending(), 1);
 
-        assert!(queue.is_empty(), "session teardown drops queued snapshots");
-        assert!(ready.is_empty(), "session teardown drops completed meshes");
+            assert!(!terrain.route(key, outcome, false));
+            assert_eq!(terrain.scheduler.pending(), 0);
+            assert!(terrain.scheduler.drain_frame_with_limit(2).is_empty());
+        }
     }
 
     /// **The bug 1 (grief-protection) reproduction.** Two jobs submitted for
