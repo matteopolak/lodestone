@@ -1023,7 +1023,7 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   observation carries the negotiated protocol number, connection phase, packet id, and
   packet body without transport framing.
 - [Wasm MessagePort transport diagnostics](./wasm-transport-diagnostics.md) —
-  \`lodestone_net::MessagePortTransport\` moves the protocol byte stream between the
+  `lodestone_net::MessagePortTransport` moves the protocol byte stream between the
   page-side client and the integrated-server worker. Opt-in debug diagnostics expose
   endpoint byte flow and credit stalls so a join that stops progressing can be
   separated into transport backpressure, peer-read delay, or work elsewhere in the
