@@ -27,6 +27,7 @@ lodestone-model = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 flate2 = { workspace = true }
+log = "0.4"
 tracing = { workspace = true }
 # Status-ping responses are JSON. `status.rs` decodes only the handful of fields
 # a server list renders, and does so here (rather than in each caller) so the

@@ -172,6 +172,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   the damage tilt, and the decaying held-item view lag — and the shell's frame
   clock, which decides how much simulated time a frame gets and whether it presents at
   all.
+- [Canonical State Census](./canonical-state-census.md) — The generator-side
+  canonical census defines stable numeric identities across the official 26.2 and 26.3
+  block, block-state, and item reports. It produces a candidate append-only manifest
+  without modifying runtime tables or enabling new protocol support.
 - [Chat](./chat.md) — The chat box: the outbound input line, the received
   scrollback, and the HUD draw that renders both, including in-line editing (caret,
   selection, history, word motion) and interactive text (clickable links, hover
@@ -1018,6 +1022,12 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   receive bounded, read-only copies of inbound and outbound protocol packets. Each
   observation carries the negotiated protocol number, connection phase, packet id, and
   packet body without transport framing.
+- [Wasm MessagePort transport diagnostics](./wasm-transport-diagnostics.md) —
+  \`lodestone_net::MessagePortTransport\` moves the protocol byte stream between the
+  page-side client and the integrated-server worker. Opt-in debug diagnostics expose
+  endpoint byte flow and credit stalls so a join that stops progressing can be
+  separated into transport backpressure, peer-read delay, or work elsewhere in the
+  join path.
 - [WASM world snapshots and authoritative mutations](./wasm-world-snapshots.md) —
   The `world:read` WASM capability gives a runtime-loaded plugin a bounded, copied
   view of block-state ids in the current client chunk store. `world:write` adds a
