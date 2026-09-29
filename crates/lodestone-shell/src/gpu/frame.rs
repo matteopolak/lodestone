@@ -2220,8 +2220,9 @@ impl RenderState {
                         fx.draw_portal(queue, &mut encoder, view, frame, screen_effects.portal_intensity);
                         stats.portal_overlay_drawn = true;
                     } else if screen_effects.nausea_intensity > 0.0 {
-                        fx.draw_confusion(queue, &mut encoder, view, screen_effects.nausea_intensity);
-                        stats.confusion_overlay_drawn = true;
+                        stats.confusion_overlay_drawn = fx.draw_confusion(
+                            queue, &mut encoder, view, screen_effects.nausea_intensity,
+                        );
                     }
                     if screen_effects.vision_obscuration > 0.0 {
                         fx.draw_vision_obscuration(

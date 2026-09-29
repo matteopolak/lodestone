@@ -128,15 +128,27 @@ ambient-light vignette contribution remains out of scope.
 - **The letterbox bars' texture is procedural** — a 1x1 opaque-white texture built once at
   construction, with no backing asset. Reuse it for any future flat-colour fill rather than adding a
   second procedural texture.
+- **Optional art owns an optional pass** — nausea's bind group and vertex buffer are one
+  `TexturedOverlay`, allocated only when its image decodes. `draw_confusion` returns whether it
+  submitted; the shell uses that result for its draw statistics. Missing art must not create a
+  substitute texture or disable unrelated effects.
 
 ## Configuration
 
-Every texture loads from whichever `client.jar`/resource pack the renderer's asset root already
-resolves, the same as the sky pass. The vignette asset is required by `ScreenEffectRenderer::new`, as
-are the other overlay assets; the shell's resource installation remains fail-open and leaves the
-whole optional pass uninstalled if any required texture is absent. There is no env var or live flag
+Textures load from the resource-pack stack, whose built-in source is `lodestone-resources.zip`.
+Nausea art is optional: a missing or undecodable image skips confusion without disabling water,
+fire, pumpkin, freezing, spyglass, portal or border-warning draws. The other overlay images remain
+required by `ScreenEffectRenderer::new`; the shell leaves the renderer uninstalled if one is
+unavailable. There is no env var or live flag
 specific to this pass. The existing inactive Show Vignette menu row is not wired into
 `ScreenEffects` and does not control the warning draw.
+
+The ignored shell `hud` gate `builtin_optional_texture_pixels` uses the staged archive with
+cloud/nausea reads withheld. It drives the production render path, checks a projected sun region,
+the fullbright water blend and fire's arithmetic extent, and verifies no confusion submission.
+Withholding required fire art exercises the same pixel detector's negative control. Set
+`LODESTONE_ASSETS` to the staged archive's directory and run
+`cargo test -p lodestone-shell --test hud builtin_optional_texture_pixels -- --ignored --nocapture`.
 
 ## Dependencies
 
