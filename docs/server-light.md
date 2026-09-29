@@ -41,6 +41,16 @@ The shared nine-column initial-light pass reads each column's ceiling once and s
 tile at a time. A tile above that ceiling (or below the column's minimum Y) uses the volume's
 air state without block reads; if that state has zero opacity and emission, the already-zero
 opacity and block buffers need no per-cell writes. Missing neighbours still fill an opaque tile.
+When every loaded tile uses the same zero-opacity, non-emitting air and no retained sky values
+need replay, the shared pass stops at a section boundary at least 15 cells above the highest air
+ceiling. No block source below can reach beyond that boundary, and its last computed sky layer is
+already open daylight. Upper sections are emitted directly as full sky for loaded columns (zero
+sky for missing columns or a dimension without skylight) and zero block light. This also avoids
+allocating the omitted portion of the flood fields. Retained sky, unusual air, or a ceiling beyond
+the field height keeps the full-height path. The cutoff has no setting; it follows each volume's
+`air_above_y` and the fixed maximum light level. The mixed-height nine-column test compares every
+returned layer and retained full-sky budget with full-height sampling, and checks that a falsely
+low neighbour ceiling produces a mismatch.
 When changing this path, compare every returned light column against a full-height volume,
 including retained sky and a dimension without skylight; a falsely low ceiling can silently
 erase a light source. The ignored `shared_initial_light_air_ceiling_timing` test and the
