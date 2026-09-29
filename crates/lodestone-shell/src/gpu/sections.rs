@@ -369,6 +369,12 @@ impl RenderState {
         self.sections.len() + self.model.as_ref().map_or(0, |m| m.sections.len())
     }
 
+    #[must_use]
+    pub fn has_section(&self, key: &SectionKey) -> bool {
+        self.sections.contains_key(key)
+            || self.model.as_ref().is_some_and(|model| model.sections.contains_key(key))
+    }
+
     /// The stitched **model** atlas's texture view — the atlas whose UVs every
     /// [`BakedQuad`](lodestone_assets::BakedQuad) indexes, terrain and 3-D item
     /// icons alike. `None` on the demo path, which has no baked models.
@@ -622,6 +628,7 @@ mod tests {
             SectionUploadOutcome::Unchanged,
         );
         assert_eq!(state.model.as_ref().unwrap().mesh_arena.live_bytes(), expected_bytes);
+        assert!(state.has_section(&key(0)));
         let first_origin = state.model.as_ref().unwrap().sections[&key(0)].origin_alloc;
         for cx in [1, 1, 2, 3] {
             assert_eq!(
@@ -634,6 +641,7 @@ mod tests {
             assert_eq!(model.sections[&key(0)].origin_alloc, first_origin);
             assert!(!model.sections.contains_key(&key(cx)));
             assert!(!state.section_fingerprints.contains_key(&key(cx)));
+            assert!(!state.has_section(&key(cx)));
         }
         let SectionGeometry::Model { visibility, .. } = &mut geometry else {
             unreachable!()
@@ -646,6 +654,7 @@ mod tests {
         assert_eq!(state.model.as_ref().unwrap().mesh_arena.live_bytes(), expected_bytes);
         assert_eq!(state.model.as_ref().unwrap().sections[&key(0)].origin_alloc, first_origin);
         state.remove_section(&key(0));
+        assert!(!state.has_section(&key(0)));
         assert_eq!(state.model.as_ref().unwrap().mesh_arena.live_bytes(), 0);
         assert_eq!(
             state.upload_section(device, queue, key(1), &geometry),

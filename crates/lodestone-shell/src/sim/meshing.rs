@@ -369,6 +369,10 @@ impl Sim {
         self.terrain_mut(|terrain| terrain.mark_mesh_uploaded(key));
     }
 
+    pub fn retry_mesh_upload(&mut self, key: SectionKey, had_resident: bool) {
+        self.terrain_and_world(|store, terrain| terrain.retry_mesh_upload(store, key, had_resident));
+    }
+
     /// Re-evaluate the initial terrain gate after this frame has drained mesh
     /// removals and handed every finished mesh to the renderer.
     ///
