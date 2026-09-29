@@ -232,6 +232,21 @@ get backwards: the head yaw is relative to the body yaw, not a second absolute a
 genuinely rotates twice as far as the body for the "eyes follow you" effect, and treating both as
 absolute yaws draws a player permanently looking over their own shoulder. The pass records after the
 panel background and before slot items, matching vanilla's own draw order.
+It loads default player-skin sheets from the staged resource archive when no
+account skin is available. Keep those sheets in both native and browser staging;
+without them the preview cannot attach before a world is opened.
+
+The hover highlight uses the selected pack's front sprite when present. Packs
+may omit it, so the geometry path draws a 16-pixel translucent fill and border
+inside the slot, above its item. The fallback does not depend on a loaded
+background atlas.
+
+When the recipe book is open on a canvas narrower than 379 logical pixels, its
+page replaces the inventory contents. The inventory background and player
+preview remain behind it, but slots, labels, and slot interactions are hidden.
+Hit testing still distinguishes the panel from the surrounding canvas so an
+outside click retains its normal meaning. The geometry's draw-range markers
+remain vertex counts, including the dim and background ranges in this mode.
 
 ## Potion effects (inventory)
 

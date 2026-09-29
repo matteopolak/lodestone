@@ -445,9 +445,8 @@ pub fn panel_origin_with_scale(
 /// origin is `(379 - 147) / 2 - 86 = 30`, its category tabs sit 30 px further
 /// left at exactly `0`, its right edge is `30 + 147 = 177`, and the shifted
 /// container panel starts at `177 + (379 - 176 - 200) / 2 = 178`. Every one of
-/// `147`, `86`, `30` and `177` locks into that single pixel. Below it, nothing
-/// fits and vanilla stops offsetting at all (`xOffset = 0`) and accepts the
-/// overlap.
+/// `147`, `86`, `30` and `177` locks into that single pixel. Below it, the
+/// panel no longer shifts and the recipe book replaces the inventory contents.
 pub const RECIPE_BOOK_MIN_WIDTH: f32 = 379.0;
 
 /// Vanilla's own recipe-book-panel wide-screen offset, `86` — how far left
@@ -478,9 +477,8 @@ pub fn recipe_book_width_too_narrow(canvas_w: f32) -> bool {
 /// is the whole reason this is a separate function instead of two more parameters
 /// on `panel_origin_with_scale`, which has 24 call sites across 14 files.
 ///
-/// Zero when the book is closed **or** the canvas is too narrow, which is exactly
-/// vanilla's `else` branch — the narrow case accepts the overlap rather than
-/// shifting, and that is a decision vanilla makes, not a gap here.
+/// Zero when the book is closed **or** the canvas is too narrow. The narrow
+/// case hides inventory contents while the book is visible.
 ///
 /// # Why the book was overlapping before
 ///
@@ -577,15 +575,18 @@ pub fn hit_test_with_book(
     y: f32,
     book_open: bool,
 ) -> MenuHit {
+    let (cw, _) = crate::menu::render::logical_canvas(gui_scale, width, height);
     let layout = slot_layout(menu);
     let (px, py) = panel_origin_with_scale(&layout, gui_scale, width, height);
-    let (cw, _) = crate::menu::render::logical_canvas(gui_scale, width, height);
     let px = px + recipe_book_panel_shift(cw, layout.width, book_open);
     let scale = crate::config::calculate_gui_scale(gui_scale, width, height).max(1) as f32;
     let local_x = x / scale - px;
     let local_y = y / scale - py;
     if local_x < 0.0 || local_y < 0.0 || local_x >= layout.width || local_y >= layout.height {
         return MenuHit::Outside;
+    }
+    if book_open && recipe_book_width_too_narrow(cw) {
+        return MenuHit::Panel;
     }
     for rect in &layout.slots {
         if local_x >= rect.x - 1.0
