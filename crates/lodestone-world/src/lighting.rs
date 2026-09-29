@@ -507,16 +507,8 @@ pub fn compute_column_lights_with_neighbours_and_storage(
     let center = neighbourhood.center;
     let section_count = center.section_count();
     let min_y = center.min_y();
-    let field = Field {
-        wx: 3 * EDGE,
-        wz: 3 * EDGE,
-        height: (section_count + 2) * EDGE,
-    };
     let field_bottom_y = min_y - EDGE as i32;
-    let mut opacity = vec![0u8; field.len()];
-    let mut block = vec![0u8; field.len()];
-    let mut block_buckets = Buckets::new();
-    let mut highest_non_air_light_section = [None; 9];
+    let light_sections = section_count + 2;
     let columns: [Option<_>; 9] = std::array::from_fn(|slot| {
         neighbourhood.at(slot as i32 % 3 - 1, slot as i32 / 3 - 1)
     });
@@ -538,6 +530,42 @@ pub fn compute_column_lights_with_neighbours_and_storage(
             !light_data_is_zero(light.sky(section))
         })
     });
+    // Beyond the highest air ceiling, every loaded tile is open sky. Fifteen
+    // further cells leave no block-light source within reach of the omitted
+    // sections, and the last computed layer remains a full-strength sky source
+    // for everything below it. Retained sky and nonstandard air need the full
+    // field because neither has that uniform upper-layer guarantee.
+    let uniform_upper_air = !has_retained_sky
+        && columns.iter().enumerate().all(|(slot, column)| {
+            column.is_none()
+                || (air_states[slot] == center_air_state
+                    && air_props[slot] == (0, 0)
+                    && i64::from(air_ceilings[slot])
+                        <= i64::from(field_bottom_y) + (light_sections * EDGE) as i64)
+        });
+    let computed_sections = if uniform_upper_air {
+        let highest_ceiling = air_ceilings
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, &ceiling)| columns[slot].map(|_| ceiling))
+            .max()
+            .expect("the centre column is loaded");
+        let needed_height = (i64::from(highest_ceiling) + i64::from(MAX_LIGHT)
+            - i64::from(field_bottom_y))
+        .max(0) as usize;
+        needed_height.div_ceil(EDGE).clamp(1, light_sections)
+    } else {
+        light_sections
+    };
+    let field = Field {
+        wx: 3 * EDGE,
+        wz: 3 * EDGE,
+        height: computed_sections * EDGE,
+    };
+    let mut opacity = vec![0u8; field.len()];
+    let mut block = vec![0u8; field.len()];
+    let mut block_buckets = Buckets::new();
+    let mut highest_non_air_light_section = [None; 9];
 
     for y_rel in 0..field.height {
         let world_y = field_bottom_y + y_rel as i32;
@@ -596,7 +624,8 @@ pub fn compute_column_lights_with_neighbours_and_storage(
         }
     }
 
-    let sky = if props.has_skylight() {
+    let has_skylight = props.has_skylight();
+    let sky = if has_skylight {
         if has_retained_sky {
             compute_sky_from_storage(
                 &field,
@@ -621,13 +650,22 @@ pub fn compute_column_lights_with_neighbours_and_storage(
         let oz = (slot / 3) * EDGE;
         let mut packed = pack(
             section_count,
-            section_count + 2,
+            computed_sections,
             &field,
             ox,
             oz,
             &sky,
             &block,
         );
+        for section in computed_sections..light_sections {
+            let upper_sky = if has_skylight && columns[slot].is_some() {
+                MAX_LIGHT
+            } else {
+                0
+            };
+            *packed.sky_mut(section) = LightData::Uniform(upper_sky);
+            *packed.block_mut(section) = LightData::Uniform(0);
+        }
         trim_sky_after_full_sections(
             &mut packed,
             highest_non_air_light_section[slot],
@@ -1435,6 +1473,97 @@ mod tests {
             )[4],
             expected[4],
             "an invalid ceiling must be detected by the fixture"
+        );
+    }
+
+    #[test]
+    fn shared_initial_light_upper_air_matches_full_height_across_mixed_neighbours() {
+        let mut columns: [ChunkColumn; 9] = std::array::from_fn(|_| {
+            ChunkColumn::new(
+                -64,
+                12,
+                PaletteKind::block_states(),
+                PaletteKind::biomes(),
+                AIR,
+                0,
+            )
+        });
+        for (slot, column) in columns.iter_mut().enumerate() {
+            let base = -48 + slot as i32 * 8;
+            for z in 0..EDGE {
+                for x in 0..EDGE {
+                    let roof = base + ((x + 2 * z) % 5) as i32;
+                    if (x + z + slot) % 7 != 0 {
+                        column.set_block(x, roof, z, STONE);
+                    }
+                    if (x + 3 * z + slot) % 19 == 0 {
+                        column.set_block(x, roof + 1, z, LEAVES);
+                    }
+                }
+            }
+            column.set_block(0, base - 2, 8, TORCH);
+            column.set_block(15, base - 3, 7, TORCH);
+        }
+        let full_scans: [FullScan<'_>; 9] = std::array::from_fn(|slot| FullScan(&columns[slot]));
+        let mut fast = Neighbourhood::new(&columns[4]);
+        let mut full = Neighbourhood::new(&full_scans[4]);
+        for slot in 0..9 {
+            if slot == 4 {
+                continue;
+            }
+            let dx = slot as i32 % 3 - 1;
+            let dz = slot as i32 / 3 - 1;
+            fast = fast.with(dx, dz, &columns[slot]);
+            full = full.with(dx, dz, &full_scans[slot]);
+        }
+        let props = FakeProps::new();
+        let stored = [None; 9];
+        for retained_full_sections in [1, 3] {
+            let expected = compute_column_lights_with_neighbours_and_storage(
+                &full,
+                &props,
+                &stored,
+                retained_full_sections,
+            );
+            let actual = compute_column_lights_with_neighbours_and_storage(
+                &fast,
+                &props,
+                &stored,
+                retained_full_sections,
+            );
+            assert_eq!(
+                actual, expected,
+                "full-sky budget {retained_full_sections}"
+            );
+            assert!(light_exercises_propagation(&actual[4]));
+        }
+
+        let wrong_ceiling: [CountedColumn<'_>; 9] = std::array::from_fn(|slot| CountedColumn {
+            column: &columns[slot],
+            reads: Cell::new(0),
+            ceiling: if slot == 8 {
+                columns[slot].min_y()
+            } else {
+                columns[slot].air_above_y()
+            },
+        });
+        let mut wrong = Neighbourhood::new(&wrong_ceiling[4]);
+        for slot in 0..9 {
+            if slot != 4 {
+                wrong = wrong.with(
+                    slot as i32 % 3 - 1,
+                    slot as i32 / 3 - 1,
+                    &wrong_ceiling[slot],
+                );
+            }
+        }
+        let expected =
+            compute_column_lights_with_neighbours_and_storage(&full, &props, &stored, 1);
+        let broken =
+            compute_column_lights_with_neighbours_and_storage(&wrong, &props, &stored, 1);
+        assert_ne!(
+            broken[8], expected[8],
+            "the mixed-height comparison must detect a falsely low neighbour ceiling"
         );
     }
 
