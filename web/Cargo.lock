@@ -3103,6 +3103,7 @@ dependencies = [
  "lodestone-world",
  "pollster",
  "rayon",
+ "serde",
  "serde_json",
  "thiserror 2.0.19",
  "web-sys",

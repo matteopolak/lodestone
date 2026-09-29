@@ -28,6 +28,7 @@ pub fn start_worker(
     preset: u8,
     epoch: u32,
     log_level: String,
+    view_radius: Option<i32>,
 ) -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
     install_logger(&log_level)?;
@@ -44,6 +45,7 @@ pub fn start_worker(
         seed,
         preset,
         epoch,
+        view_radius,
     )
         .map_err(|error| JsValue::from_str(&error));
     let monitor = result?;
