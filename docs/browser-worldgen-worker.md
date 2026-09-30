@@ -49,12 +49,31 @@ measurements. A clock trap can abandon one browser async task while independent
 world ticks and host callbacks continue, so healthy tick telemetry alone cannot
 establish Play-loop liveness.
 
-The renderer reports configured-view resident/presented deficits once per second
-until the full-view presentation milestone. The loading overlay uses its smaller
+At Debug level the renderer reports configured-view resident/presented deficits
+once per second, including movement after the full-view presentation milestone.
+The loading overlay uses its smaller
 initial window, so its received count is not the configured-view count. Compare
 view deficits with connection delivery and mesh queue age before attributing a
 delay to generation. These sampled console diagnostics are debug-only and do not
 extend the SDK progress-event contract.
+
+The standalone page's optional `?log=debug&probe=1` panel holds the public host
+input bridge for a 20-second sprint/jump walk or a three-second mining action.
+Join through the normal menus and aim at a block before mining. This exercises
+the ordinary controller, server, protocol, meshing, and surface renderer; it
+does not create terrain or edit a world directly. The panel uses virtual host
+focus/pointer-lock state, not hardware input latency. It releases held inputs
+on completion, Stop, page exit, or a worker error.
+The controls wait for both first presented terrain and loading-overlay readiness;
+terrain drawn behind the loading overlay is not a playable-world signal.
+
+The final report is printed to the console and stored as JSON text in
+`#lodestone-responsiveness-report`. It includes timestamped baseline diagnostics
+and at most 256 samples; exact sample counts and truncation remain explicit.
+These are sampled diagnostics, not per-action acknowledgements. Server-center
+changes prove chunk-boundary travel; a Walk command by itself does not. A mining
+input does not prove a block was broken, confirmed, or drawn. Check the visible
+result and packet/render evidence before reporting those outcomes.
 
 Lease acquisition, pre-ore preparation, structure context, and shaped-product construction are measured separately. Prefix import, mutable settlement, and snapshot assembly cover synchronous session work, excluding browser yields. `packet-lighting` times the actual light computation, not its session completion marker; `packet-encoding` times the actual protocol encoder, not a snapshot pass-through. `wire-send` includes framing, compression, and awaiting transport credit, so it is wall time rather than CPU time and can overlap other work. Item counts describe operation inputs, not unique generated columns or cache misses. Phase totals are diagnostics, not retired instructions or a complete partition of join time.
 
@@ -63,6 +82,13 @@ Lease acquisition, pre-ore preparation, structure context, and shaped-product co
 `web/scripts/measure_worker_size.sh` builds both worker variants and reports each post-bindgen Wasm file's raw/gzip/Brotli size, generated JavaScript glue raw/gzip size, and bindgen helper snippets. It is intentionally independent from the page-only `scripts/wasm-size.sh` gate.
 
 ## How to change it
+
+The standalone probe lives in `web/responsiveness_probe.js` and is attached to
+the page's existing render Worker by `web/src/main.rs`. Its inputs go through
+the same `kind: "input"` messages as real canvas events. Run
+`node --test web/responsiveness_probe.test.mjs` when changing held-input lifetime
+or report bounds. The panel is disabled without `probe=1`; it does not change
+the SDK API or readiness milestones.
 
 Keep the serial and threaded artifact names in sync between `stage_worker.sh` and `worker.js`; bindgen's output directory is shared by both builds, so the second invocation must continue to use the same staging directory. Any change to the launch envelope must update the bootstrap tests and the shell's worker launcher together. Do not move protocol bytes onto the progress channel, and do not send mutable lifecycle state to child workers. Re-run the worker control tests and the foreground Wasm builds after changing the atomics flags, bindgen invocation, or pool cap.
 

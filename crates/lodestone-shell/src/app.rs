@@ -317,10 +317,17 @@ impl BrowserJoinTrace {
     }
 
     fn full_view_probe_due(&mut self) -> bool {
-        if self.full_view_presented
-            || self
-                .last_full_view_probe
-                .is_some_and(|last| last.elapsed() < Duration::from_millis(100))
+        let interval = if self.full_view_presented {
+            if log::max_level() < log::LevelFilter::Debug {
+                return false;
+            }
+            Duration::from_secs(1)
+        } else {
+            Duration::from_millis(100)
+        };
+        if self
+            .last_full_view_probe
+            .is_some_and(|last| last.elapsed() < interval)
         {
             return false;
         }
