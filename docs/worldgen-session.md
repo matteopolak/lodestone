@@ -50,7 +50,14 @@ overlay. The epoch already retains its own completed writes, so they do not
 re-enter the materializer's override maps or revision streams. Revisions from
 outside the authenticated epoch still enter through the append-only stream;
 the epoch consumes only entries newer than its cursor. The map-based
-compatibility path is not used for production Overworld epochs.
+compatibility path is not used for production Overworld epochs. Successful
+authenticated sparse completions use the same epoch-owned read plane as full
+completions: `direct_epoch_can_skip_local_carvers_mirror` suppresses their
+general and CARVERS read mirrors, not their packet-neighbour overlay, canonical
+winners, owner receipts, or pending block entities. Unauthenticated sparse
+completions, other dimensions, and restored external mutations retain the
+independent override/revision lane. Keep that distinction when changing epoch
+write ownership; a packet-neighbour projection is not a redundant read mirror.
 Padding runs FEATURES and TOP_LAYER directly against that overlay and
 its immutable sources, without constructing a disposable dense working column.
 Only sparse writes and entities needed by requested targets are retained.

@@ -70,10 +70,8 @@ a system exists, not just that it was asked for.
 
 ### The island count
 
-**0 of 138** variants are currently `Route::NOWHERE`. Most of those are simply decoded ahead
-of a consumer, a normal state for a from-scratch client, not a defect in itself — but a handful
-have been genuine islands where a fold already existed (or was cheap to add) and nothing fed
-it, found by walking the list variant by variant and asking what a real consumer would need.
+**0 of 139** variants are currently `Route::NOWHERE`. Routing establishes a consumer boundary;
+the connectedness checks and schedule tests verify that the boundary reaches a real consumer.
 `lodestone_model::event::event_tests::the_island_count_in_the_docs_matches_this_source` derives
 both numbers mechanically from `route`'s own source (the denominator from the variant count the
 exhaustive match itself proves complete, the numerator from arms whose right-hand side is

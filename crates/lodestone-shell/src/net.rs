@@ -4705,6 +4705,11 @@ fn forward(
         // §12.24: decoded chunk data lives in the client-owned world; this event
         // signals a chunk or biome-region change. Light patches route separately.
         ClientEvent::ChunkLoaded { pos, .. } => NetUpdate::Chunk { x: pos.x, z: pos.z },
+        ClientEvent::ChunkReplaced { pos, terrain_changed } => NetUpdate::ChunkReplaced {
+            x: pos.x,
+            z: pos.z,
+            terrain_changed,
+        },
         ClientEvent::ChunkLightChanged { pos, sections } => NetUpdate::ChunkLightChanged {
             x: pos.x,
             z: pos.z,
@@ -5691,6 +5696,26 @@ mod tests {
         {
             NetUpdate::ChunkCacheRadiusChanged { radius } => assert_eq!(radius, 13),
             other => panic!("expected ChunkCacheRadiusChanged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forward_preserves_the_authoritative_chunk_replacement_classification() {
+        let (tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
+        for terrain_changed in [false, true] {
+            forward(
+                &tx,
+                &WeatherCell::default(),
+                &BiomeClimateCell::default(),
+                &BiomeNameCell::default(),
+                &CommandTreeCell::default(),
+                ClientEvent::ChunkReplaced {
+                    pos: lodestone_model::ChunkPos::new(-3, 7), terrain_changed,
+                },
+            ).expect("a replacement does not end the session");
+            assert!(matches!(rx.try_recv().unwrap(), NetUpdate::ChunkReplaced {
+                x: -3, z: 7, terrain_changed: forwarded,
+            } if forwarded == terrain_changed));
         }
     }
 

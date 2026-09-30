@@ -1734,6 +1734,44 @@ async fn deferred_chunk_decode_releases_the_world_lock_until_apply() {
     drop(handle);
 }
 
+#[tokio::test]
+async fn deferred_chunk_replacement_remains_observable_and_counts_authoritative_ingress() {
+    const PACKET: i32 = 0x53;
+    let at = (2, -3);
+    let adapter = FakeAdapter::new()
+        .begin(vec![Directive::SetState(ConnectionState::Play)])
+        .deferred_chunk_on(ConnectionState::Play, PACKET, at);
+    let (handle, mut events, mut peer) = start(adapter, KeepAlivePolicy::Automatic);
+    let pos = lodestone_model::ChunkPos::new(at.0, at.1);
+
+    peer.write_packet(PACKET, &[]).await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), events.recv()).await.unwrap(),
+        Some(ClientEvent::ChunkLoaded { pos }),
+    );
+    peer.write_packet(PACKET, &[]).await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), events.recv()).await.unwrap(),
+        Some(ClientEvent::ChunkReplaced { pos, terrain_changed: false }),
+    );
+    handle.wait_for_chunk(pos, Duration::from_secs(1)).await.unwrap();
+    assert_eq!(handle.loaded_chunk_count(), 1);
+    let stats = handle.chunk_ingress_stats();
+    assert_eq!((stats.first_loads, stats.replacements), (1, 1));
+    assert_eq!((stats.terrain_unchanged, stats.terrain_changed), (1, 0));
+    assert!(stats.comparison_ns >= stats.comparison_max_ns);
+
+    handle.chunk_world_write().write().unload(lodestone_world::ChunkPos::new(at.0, at.1));
+    peer.write_packet(PACKET, &[]).await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), events.recv()).await.unwrap(),
+        Some(ClientEvent::ChunkLoaded { pos }),
+    );
+    let stats = handle.chunk_ingress_stats();
+    assert_eq!((stats.first_loads, stats.replacements), (2, 1));
+    drop(handle);
+}
+
 /// A teleport before any `Login` must not trigger `player_loaded`: the latch is
 /// disarmed until we actually enter the world, so a stray pre-Play teleport
 /// cannot make us announce readiness prematurely.

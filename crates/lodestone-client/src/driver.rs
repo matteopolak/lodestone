@@ -362,6 +362,32 @@ fn with_world_write<T>(
     )
 }
 
+fn apply_deferred_chunk(
+    world: &mut lodestone_world::World,
+    deferred: DeferredChunkLoad,
+) -> (Vec<Directive>, Option<bool>, u64) {
+    let DeferredChunkLoad { position, chunk, mut directives } = deferred;
+    let started = Instant::now();
+    let replacement = world.get(position).map(|previous| {
+        previous.column != chunk.column || previous.light != chunk.light
+    });
+    let comparison_ns = started.elapsed().as_nanos() as u64;
+    world.load(position, chunk);
+    if let Some(terrain_changed) = replacement {
+        for directive in &mut directives {
+            if let Directive::Emit(ClientEvent::ChunkLoaded { pos }) = directive
+                && pos.x == position.x && pos.z == position.z
+            {
+                *directive = Directive::Emit(ClientEvent::ChunkReplaced {
+                    pos: *pos,
+                    terrain_changed,
+                });
+            }
+        }
+    }
+    (directives, replacement, comparison_ns)
+}
+
 fn handle_inbound_packet(
     adapter: &dyn VersionAdapter,
     read_model: &SharedState,
@@ -375,29 +401,18 @@ fn handle_inbound_packet(
     let deferred_decode_us = decode_started.map_or(0, |started| started.elapsed().as_micros());
 
     let (result, lock_wait_us, lock_hold_us, route) = match (deferred, trace_world_lock) {
-        (
-            Some(DeferredChunkLoad {
-                position,
-                chunk,
-                directives,
-            }),
-            true,
-        ) => {
-            let ((), wait_us, hold_us) = with_world_write(read_model, |world| {
-                world.load(position, chunk);
-            });
+        (Some(deferred), true) => {
+            let ((directives, replacement, comparison_ns), wait_us, hold_us) =
+                with_world_write(read_model, |world| apply_deferred_chunk(world, deferred));
+            read_model.chunk_ingress.record(replacement, comparison_ns);
             (Ok(directives), wait_us, hold_us, "deferred_chunk")
         }
-        (
-            Some(DeferredChunkLoad {
-                position,
-                chunk,
-                directives,
-            }),
-            false,
-        ) => {
-            let mut world = read_model.world_write();
-            world.load(position, chunk);
+        (Some(deferred), false) => {
+            let (directives, replacement, comparison_ns) = {
+                let mut world = read_model.world_write();
+                apply_deferred_chunk(&mut world, deferred)
+            };
+            read_model.chunk_ingress.record(replacement, comparison_ns);
             (Ok(directives), 0, 0, "deferred_chunk")
         }
         (None, true) => {
@@ -1184,7 +1199,7 @@ impl<T: Transport> Driver<T> {
     /// holds the state lock — so waiters observe the new state the moment the
     /// event is processed, without stalling packet handling.
     ///
-    /// [`ClientEvent::ChunkLoaded`] and [`ClientEvent::ChunkUnloaded`] are
+    /// [`ClientEvent::ChunkLoaded`], [`ClientEvent::ChunkReplaced`] and [`ClientEvent::ChunkUnloaded`] are
     /// lightweight position-only notifications: the decoded chunk data has
     /// already been applied to the client-owned world by the adapter through the
     /// [`lodestone_world::WorldSink`], so the heavy payload never travels the
@@ -2045,6 +2060,98 @@ mod tests {
     use rsa::{RsaPrivateKey, RsaPublicKey};
 
     use super::*;
+
+    fn ingress_column(min_y: i32, section_count: usize) -> lodestone_world::LoadedChunk {
+        use lodestone_world::{ChunkColumn, ColumnLight, Heightmaps, PaletteKind};
+        let mut column = ChunkColumn::new(
+            min_y, section_count, PaletteKind::block_states(), PaletteKind::biomes(), 0, 0,
+        );
+        column.set_block(0, min_y, 0, 1);
+        lodestone_world::LoadedChunk::new(
+            column, ColumnLight::new(section_count), Heightmaps::new(), Vec::new(),
+        )
+    }
+
+    fn ingress_load(
+        world: &mut lodestone_world::World,
+        chunk: lodestone_world::LoadedChunk,
+    ) -> (Vec<Directive>, Option<bool>, u64) {
+        apply_deferred_chunk(world, DeferredChunkLoad {
+            position: lodestone_world::ChunkPos::new(2, -3),
+            chunk,
+            directives: vec![Directive::Emit(ClientEvent::ChunkLoaded {
+                pos: lodestone_model::ChunkPos::new(2, -3),
+            })],
+        })
+    }
+
+    #[test]
+    fn deferred_ingress_equal_terrain_installs_new_independent_metadata() {
+        let mut world = lodestone_world::World::new();
+        let (first, replacement, _) = ingress_load(&mut world, ingress_column(0, 1));
+        assert_eq!(replacement, None);
+        assert!(matches!(first.as_slice(), [Directive::Emit(ClientEvent::ChunkLoaded { .. })]));
+        let mut next = ingress_column(0, 1);
+        next.heightmaps.insert(4, lodestone_world::Heightmap::new(16));
+        next.block_entities.push(lodestone_world::BlockEntity {
+            rel_x: 0, rel_z: 0, y: 0, type_id: 3, nbt: lodestone_core::Nbt::End,
+        });
+        let (events, replacement, _) = ingress_load(&mut world, next);
+        assert_eq!(replacement, Some(false));
+        assert!(matches!(events.as_slice(), [Directive::Emit(ClientEvent::ChunkReplaced {
+            pos, terrain_changed: false,
+        })] if *pos == lodestone_model::ChunkPos::new(2, -3)));
+        let installed = world.get(lodestone_world::ChunkPos::new(2, -3)).unwrap();
+        assert!(installed.heightmaps.get(4).is_some());
+        assert_eq!(installed.block_entities.len(), 1);
+        assert_eq!(installed.block_entities[0].type_id, 3);
+    }
+
+    #[test]
+    fn deferred_ingress_block_to_air_is_a_terrain_change() {
+        let mut world = lodestone_world::World::new();
+        ingress_load(&mut world, ingress_column(0, 1));
+        let mut next = ingress_column(0, 1);
+        next.column.set_block(0, 0, 0, 0);
+        let (events, replacement, _) = ingress_load(&mut world, next);
+        assert_eq!(replacement, Some(true));
+        assert!(matches!(events.as_slice(), [Directive::Emit(ClientEvent::ChunkReplaced {
+            terrain_changed: true, ..
+        })]));
+        assert_eq!(world.get(lodestone_world::ChunkPos::new(2, -3)).unwrap()
+            .column.get_block(0, 0, 0), 0);
+    }
+
+    #[test]
+    fn deferred_ingress_biome_and_boundary_light_changes_are_not_noops() {
+        for change in 0..3 {
+            let mut world = lodestone_world::World::new();
+            ingress_load(&mut world, ingress_column(0, 1));
+            let mut next = ingress_column(0, 1);
+            match change {
+                0 => next.column.set_biome(0, 0, 0, 2),
+                1 => *next.light.sky_mut(0) = lodestone_world::LightData::Uniform(15),
+                2 => *next.light.block_mut(2) = lodestone_world::LightData::Uniform(7),
+                _ => unreachable!(),
+            }
+            let (_, replacement, _) = ingress_load(&mut world, next);
+            assert_eq!(replacement, Some(true), "changed input {change}");
+        }
+    }
+
+    #[test]
+    fn deferred_ingress_layout_and_unload_reload_keep_full_arrival_semantics() {
+        for (min_y, count) in [(-16, 1), (0, 2)] {
+            let mut world = lodestone_world::World::new();
+            ingress_load(&mut world, ingress_column(0, 1));
+            let (_, replacement, _) = ingress_load(&mut world, ingress_column(min_y, count));
+            assert_eq!(replacement, Some(true));
+            world.unload(lodestone_world::ChunkPos::new(2, -3));
+            let (events, replacement, _) = ingress_load(&mut world, ingress_column(min_y, count));
+            assert_eq!(replacement, None);
+            assert!(matches!(events.as_slice(), [Directive::Emit(ClientEvent::ChunkLoaded { .. })]));
+        }
+    }
 
     #[test]
     fn correction_generation_discards_only_prior_movement() {

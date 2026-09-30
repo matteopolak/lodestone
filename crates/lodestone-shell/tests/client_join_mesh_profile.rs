@@ -55,6 +55,25 @@ fn generation_timings_report(start: GenerationTimings, end: GenerationTimings) -
     }))
 }
 
+fn chunk_ingress_stats(sim: &Sim) -> Option<lodestone_client::ChunkIngressStats> {
+    let shared = sim.net()?.shared_handle();
+    Some(shared.get()?.chunk_ingress_stats())
+}
+
+fn chunk_ingress_report(
+    start: lodestone_client::ChunkIngressStats,
+    end: lodestone_client::ChunkIngressStats,
+) -> serde_json::Value {
+    serde_json::json!({
+        "first_loads": end.first_loads.saturating_sub(start.first_loads),
+        "replacements": end.replacements.saturating_sub(start.replacements),
+        "terrain_unchanged": end.terrain_unchanged.saturating_sub(start.terrain_unchanged),
+        "terrain_changed": end.terrain_changed.saturating_sub(start.terrain_changed),
+        "comparison_elapsed_ms": end.comparison_ns.saturating_sub(start.comparison_ns) as f64 / 1_000_000.0,
+        "comparison_max_lifetime_ms": end.comparison_max_ns as f64 / 1_000_000.0,
+    })
+}
+
 struct EditProbe {
     aiming_since: Instant,
     target: Option<[i32; 3]>,
@@ -744,6 +763,8 @@ fn main() {
     let mut movement_end_tick = None;
     let mut movement_start_generation = None;
     let mut movement_end_generation = None;
+    let mut movement_start_ingress = None;
+    let mut movement_end_ingress = None;
     let mut movement_stop_view = None;
     let mut movement_stop_presentation = None;
     let mut movement_post_stop_presented = None;
@@ -779,6 +800,7 @@ fn main() {
             movement_end_teleports = Some(sim.teleport_count);
             movement_end_tick = Some(sim.tick_count());
             movement_end_generation = Some(*GENERATION_TIMINGS.lock().unwrap());
+            movement_end_ingress = chunk_ingress_stats(&sim);
             movement_stop_view = sim.view_settlement_at_radius(radius);
             movement_stop_presentation = sim.view_presentation_at_radius(radius);
             if movement_stop_presentation.is_some_and(|(resident, presented, expected)| {
@@ -1122,6 +1144,7 @@ fn main() {
             movement_last_chunk = Some(chunk_at(position.x, position.z));
             movement_start_tick = Some(sim.tick_count());
             movement_start_generation = Some(*GENERATION_TIMINGS.lock().unwrap());
+            movement_start_ingress = chunk_ingress_stats(&sim);
             server_tick_at_move_start = sim
                 .net()
                 .and_then(NetClient::integrated_tick_monitor)
@@ -1217,6 +1240,8 @@ fn main() {
             start,
             movement_end_generation.unwrap_or_else(|| *GENERATION_TIMINGS.lock().unwrap()),
         )),
+        "chunk_ingress": movement_start_ingress.zip(movement_end_ingress)
+            .map(|(start, end)| chunk_ingress_report(start, end)),
         "frame_p99_ms": percentile(&movement_frames, 99),
         "frame_max_ms": percentile(&movement_frames, 100),
         "step_p99_ms": percentile(&movement_steps, 99),
@@ -1258,7 +1283,7 @@ fn main() {
         "input_to_draw_ms": probe.clicked_at.zip(probe.drawn_at).map(|(start, end)| end.duration_since(start).as_secs_f64() * 1000.0),
     }));
     let report = serde_json::json!({
-        "schema": "lodestone-client-join-mesh-profile-v21",
+        "schema": "lodestone-client-join-mesh-profile-v22",
         "seed": SEED,
         "target_size": [target_width, target_height],
         "visible_radius": radius,
@@ -1275,6 +1300,9 @@ fn main() {
         "generation_phase_work": generation_timings_report(
             GenerationTimings::default(), *GENERATION_TIMINGS.lock().unwrap(),
         ),
+        "chunk_ingress": chunk_ingress_stats(&sim).map(|end| chunk_ingress_report(
+            lodestone_client::ChunkIngressStats::default(), end,
+        )),
         "first_column_ms": ms(first_column),
         "first_mesh_ms": ms(first_mesh),
         "first_presented_terrain_ms": ms(first_presented_terrain),

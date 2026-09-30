@@ -327,6 +327,12 @@ impl Sim {
         self.join_trace.mark("remesh_queued", cx, cz);
     }
 
+    pub(crate) fn on_column_replaced(&mut self, cx: i32, cz: i32, terrain_changed: bool) {
+        if terrain_changed {
+            self.on_column_arrived(cx, cz);
+        }
+    }
+
     /// Invalidate meshes affected by a light-only update without resetting arrival state.
     pub(crate) fn on_column_light_changed(&mut self, cx: i32, cz: i32, sections: &[usize]) {
         let queued = self.terrain_and_world(|store, terrain| {

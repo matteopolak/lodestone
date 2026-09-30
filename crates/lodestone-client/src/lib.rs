@@ -79,6 +79,7 @@
 
 mod builder;
 mod channel;
+mod chunk_ingress;
 mod config;
 mod driver;
 mod error;
@@ -92,6 +93,7 @@ pub use builder::ClientBuilder;
 #[cfg(not(target_arch = "wasm32"))]
 pub use builder::AuthenticationIntent;
 pub use channel::ChannelRegistry;
+pub use chunk_ingress::ChunkIngressStats;
 pub use config::{KeepAlivePolicy, PlayerLoadedPolicy, RespawnPolicy};
 pub use error::{BotError, ClientClosed, ClientError, SessionOutcome, WaitError};
 pub use handle::{ClientHandle, EventStream, WalkOutcome};

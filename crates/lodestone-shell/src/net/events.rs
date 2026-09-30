@@ -78,6 +78,15 @@ pub enum NetUpdate {
         /// Chunk Z.
         z: i32,
     },
+    /// A full resident-column replacement with an authoritative terrain comparison.
+    ChunkReplaced {
+        /// Chunk X.
+        x: i32,
+        /// Chunk Z.
+        z: i32,
+        /// False only when the driver compared equal column and light storage.
+        terrain_changed: bool,
+    },
     /// Light changed in an already-loaded column; sections are light-section indices.
     ChunkLightChanged {
         /// Chunk X.
