@@ -32,6 +32,27 @@ still constructs its own packet representation, because that path also needs bio
 section storage. When changing the live view, compare its sky and block arrays with the buffered
 conversion for all three dimensions and include a cross-column source.
 
+The shared Overworld initial-light pass also borrows its eight server neighbours through
+`InitialLightVolume`, while keeping the caller's packet-format centre. It avoids rebuilding neighbour
+block and biome palettes for each overlapping packet footprint. The shared solver still computes all
+nine layers and the centre retains the same initial-packet normalization; retained sky does not seed
+this fresh Overworld pass. The borrowed view clips reads and its air ceiling to the served dimension
+window, including when a source column extends beyond it. Other dimensions keep their allocation and
+retained-light preparation. Change `compute_overworld_initial_lights_borrowed` when extending this
+boundary, and compare every returned layer with the buffered control in `initial_light_view_tests`.
+This path has no cache or additional configuration and uses the existing shared lighting engine.
+
+Set `LODESTONE_LIGHT_VIEW_PERF_ITERATIONS` to an integer in `1..=128` when running
+`borrowed_overworld_initial_light_matches_buffered_roof_seam_and_air` in release mode with
+`--nocapture` to compare both paths in the same binary. Each iteration runs both paths, alternates
+their order, and retains the output through `black_box`. `LIGHT_VIEW_PERF` reports call counts and
+elapsed sums, without a timing assertion; ordinary runs skip this measurement. The centre is already
+converted, and returned-light destruction is outside the measured interval. This synthetic roof and
+seam fixture has little terrain or biome variety. Its extended-height neighbour deliberately contains
+an emitter outside the served window, which makes the borrowed air ceiling conservative and scans a
+taller field than the buffered control. It tests clipping as well as representation cost; its sums
+do not predict natural-terrain throughput or browser join latency.
+
 Unseeded light scans can skip block lookup above a column's proven air ceiling. The server derives
 that ceiling from packed section indices, not the world-surface heightmap: air variants can exist
 above the heightmap and still affect the light section's wire shape. The world column uses its
