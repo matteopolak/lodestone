@@ -239,10 +239,12 @@ the first admission of the front key, which replacements do not reset. These
 counts exclude completed geometry and do not measure unique retained heap bytes.
 
 The renderer runs in its own worker, so page Long Tasks do not measure its stalls.
-The worker's timer adds a nominal 16 ms after each redraw. Compare frame gaps
-against an idle control rather than interpreting every gap above 16.7 ms as
-blocked work; generation-worker health and renderer queue waits describe
-different scheduling domains.
+The worker targets 60 Hz frame starts and subtracts input/redraw work before
+waiting. A late frame still yields through a zero-delay timer; it never adds a
+fresh full interval after heavy redraw work. Compare frame gaps against an idle
+control rather than interpreting every gap above 16.7 ms as blocked work;
+generation-worker health and renderer queue waits describe different scheduling
+domains. The existing frame pacer still applies configured render limits.
 
 ## How to change it
 

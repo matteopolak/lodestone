@@ -46,6 +46,7 @@ pub(super) fn run_offscreen_with_control(
                 );
                 let mut pending_input = Vec::new();
                 while !task_lifecycle.get() && !task_shutdown.get() {
+                    let frame_started = Instant::now();
                     task_input.borrow_mut().drain_into(&mut pending_input);
                     for input in pending_input.drain(..) {
                         let input = match input {
@@ -75,7 +76,7 @@ pub(super) fn run_offscreen_with_control(
                         task_shutdown.set(true);
                         break;
                     }
-                    if browser_delay(16).await.is_err() {
+                    if browser_delay(browser_frame_delay(frame_started.elapsed())).await.is_err() {
                         task_shutdown.set(true);
                         break;
                     }
@@ -100,6 +101,25 @@ pub(super) fn run_offscreen_with_control(
         actions,
         join_progress,
     })
+}
+
+#[cfg(any(test, all(target_arch = "wasm32", feature = "runtime-presentation")))]
+fn browser_frame_delay(elapsed: std::time::Duration) -> i32 {
+    std::time::Duration::from_nanos(1_000_000_000 / 60)
+        .saturating_sub(elapsed)
+        .as_nanos()
+        .div_ceil(1_000_000) as i32
+}
+
+#[cfg(test)]
+#[test]
+fn browser_frame_delay_subtracts_work_without_catching_up() {
+    use std::time::Duration;
+
+    assert_eq!(browser_frame_delay(Duration::ZERO), 17);
+    assert_eq!(browser_frame_delay(Duration::from_millis(10)), 7);
+    assert_eq!(browser_frame_delay(Duration::from_millis(17)), 0);
+    assert_eq!(browser_frame_delay(Duration::from_secs(2)), 0);
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]

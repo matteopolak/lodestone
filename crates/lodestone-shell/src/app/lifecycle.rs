@@ -62,6 +62,7 @@ impl WindowApp {
                 text,
                 modifiers,
             } => {
+                self.pacer.record_input(Instant::now());
                 self.modifiers = browser_modifiers(modifiers);
                 self.shift_held = self.modifiers.shift_key();
                 self.ctrl_held = self.modifiers.control_key();
@@ -293,11 +294,6 @@ impl WindowApp {
 
     pub(super) fn dispatch_window_event(&mut self, _window_id: WindowId, event: WindowEvent) -> bool {
         let mut should_exit = false;
-        // Vanilla's own framerate-limit tracker resets its AFK clock on input,
-        // called from the keyboard and mouse handlers
-        // (key press, mouse press, scroll) — deliberately **not**
-        // `CursorMoved`, which vanilla never routes through it. Resets the AFK
-        // clock the inactivity FPS limit reads (`app::pacing::effective_target_fps`).
         if matches!(
             event,
             WindowEvent::KeyboardInput { .. }

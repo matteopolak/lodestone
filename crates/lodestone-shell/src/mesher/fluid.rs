@@ -45,14 +45,8 @@ impl FluidSectionView for SnapshotFluidView<'_> {
     /// `PalettedContainer::get` bit-unpack, after which all three answers are
     /// `Vec` lookups on the same state id.
     ///
-    /// This is [`lodestone_render::FluidGrid`]'s fill primitive and it runs at
-    /// least 4,096 times per section, so the sharing is what makes the grid pay
-    /// for itself. Without this override the default composition triples the
-    /// fill's coordinate work and a **fluid-free** section costs 2.9× what it
-    /// did before the grid existed — measured, not predicted (`DESIGN.md`
-    /// §12.124). The out-of-neighbourhood answer is
-    /// `FluidNeighborCell::default()`, which is exactly the `None`/`false`/
-    /// `false` the three methods below return there.
+    /// The grid reads each interior cell when the centre palette cannot prove
+    /// it is dry. Out-of-neighbourhood probes return the typed default.
     fn cell_at(&self, x: i32, y: i32, z: i32) -> FluidNeighborCell {
         let (dx, lx) = split16(x);
         let (dy, ly) = split16(y);
@@ -249,6 +243,25 @@ pub fn mesh_snapshot_fluids_at(
     models: &BlockModels,
     blend_radius: i32,
 ) -> FluidMeshes {
+    if center_is_dry(snapshot, models) {
+        return FluidMeshes::default();
+    }
+    mesh_snapshot_fluids_with_grid(snapshot, models, blend_radius)
+}
+
+fn center_is_dry(snapshot: &SectionSnapshot, models: &BlockModels) -> bool {
+    snapshot.at(0, 0, 0).block_states().palette_values().is_some_and(|palette| {
+        palette.iter().all(|&raw| {
+            StateId::new(raw).is_some_and(|state| models.fluid(state).is_none())
+        })
+    })
+}
+
+fn mesh_snapshot_fluids_with_grid(
+    snapshot: &SectionSnapshot,
+    models: &BlockModels,
+    blend_radius: i32,
+) -> FluidMeshes {
     let view = SnapshotFluidView {
         snapshot,
         models,
@@ -257,3 +270,7 @@ pub fn mesh_snapshot_fluids_at(
     };
     mesh_fluids(&view)
 }
+
+#[cfg(test)]
+#[path = "fluid_tests.rs"]
+mod tests;

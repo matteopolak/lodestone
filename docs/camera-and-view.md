@@ -132,8 +132,9 @@ Three real player-facing options now drive the same schedule, composing with eac
 other rather than gating one another: VSync (present-mode switch, changed only on
 the frame it actually flips, to avoid rebuilding the swapchain every frame),
 Max Framerate (a raw cap, `10..=260` with `260` meaning unlimited), and Reduce FPS
-When (drops to a lower cap after periods with no keyboard/mouse input, matching
-vanilla's own AFK clock — deliberately not reset by mouse movement alone). Any
+When (drops to a lower cap after periods with no keyboard/mouse input).
+Native and browser key events reset the same `FramePacer` clock; mouse movement
+alone does not reset it. Any
 active cap on a **focused** window schedules `ControlFlow::WaitUntil` rather than
 busy-polling; the tick rate itself is never touched by any of these, only
 presentation.

@@ -92,9 +92,10 @@ deadline-check timestamps for popped wait ages. No backlog walk, snapshot clone 
 additional allocation is needed for telemetry. These fields measure queue work
 and wait, not heap bytes or visible input latency.
 
-The standalone browser renders inside its render worker, whose loop waits sixteen
-milliseconds after redraw. Its frame-start gap therefore includes that pacing and
-render work; page-main-thread long-task records do not measure render-worker mesh
+The standalone browser renders inside its render worker. Its loop targets a
+60 Hz frame-start cadence, subtracts input and redraw work from the delay, and
+yields even when work exceeds the interval. Timer scheduling can still lengthen
+the gap; page-main-thread long-task records do not measure render-worker mesh
 stalls. Compare the queue ages with the existing worker drain/upload profile and
 renderer presentation witnesses rather than treating a queued result as visible.
 
