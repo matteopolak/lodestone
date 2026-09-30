@@ -1222,6 +1222,9 @@ pub(super) fn compute_served_initial_lights_with_neighbours_and_storage(
     statuses: &[Option<RetainedLightStatus>; 9],
     dimension: Dimension,
 ) -> [ColumnLight; 9] {
+    if dimension == Dimension::Overworld {
+        return compute_overworld_initial_lights_borrowed(center, shape, neighbours);
+    }
     let neighbour_columns = neighbours
         .iter()
         .map(|(_, _, neighbour)| build_world_column(shape, neighbour))
@@ -1393,6 +1396,215 @@ pub(super) fn compute_served_initial_lights_with_neighbours_and_storage(
         lights[4] = merge_retained_nether_block_values(&lights[4], &retained);
     }
     lights
+}
+
+enum InitialLightVolume<'a> {
+    Buffered(&'a WorldChunkColumn),
+    Borrowed(ServerLightVolume<'a>),
+}
+
+impl BlockVolume for InitialLightVolume<'_> {
+    fn block(&self, x: usize, y: i32, z: usize) -> u32 {
+        match self {
+            Self::Buffered(column) => column.block(x, y, z),
+            Self::Borrowed(volume) => {
+                if y < volume.shape.min_y
+                    || y >= volume.shape.min_y + volume.shape.world_height as i32
+                {
+                    volume.air_state()
+                } else {
+                    volume.block(x, y, z)
+                }
+            }
+        }
+    }
+
+    fn air_state(&self) -> u32 {
+        match self {
+            Self::Buffered(column) => column.air_state(),
+            Self::Borrowed(volume) => volume.air_state(),
+        }
+    }
+
+    fn min_y(&self) -> i32 {
+        match self {
+            Self::Buffered(column) => column.min_y(),
+            Self::Borrowed(volume) => volume.min_y(),
+        }
+    }
+
+    fn section_count(&self) -> usize {
+        match self {
+            Self::Buffered(column) => column.section_count(),
+            Self::Borrowed(volume) => volume.section_count(),
+        }
+    }
+
+    fn air_above_y(&self) -> i32 {
+        match self {
+            Self::Buffered(column) => column.air_above_y(),
+            Self::Borrowed(volume) => volume.air_above_y().clamp(
+                volume.shape.min_y,
+                volume.shape.min_y + volume.shape.world_height as i32,
+            ),
+        }
+    }
+}
+
+fn compute_overworld_initial_lights_borrowed(
+    center: &WorldChunkColumn,
+    shape: &ChunkShape,
+    neighbours: &[(i32, i32, &ServerChunkColumn)],
+) -> [ColumnLight; 9] {
+    let center = InitialLightVolume::Buffered(center);
+    let neighbour_volumes = neighbours
+        .iter()
+        .map(|(_, _, source)| InitialLightVolume::Borrowed(ServerLightVolume {
+            source: *source,
+            shape,
+        }))
+        .collect::<Vec<_>>();
+    let mut neighbourhood = Neighbourhood::new(&center);
+    for ((dx, dz, _), neighbour) in neighbours.iter().zip(&neighbour_volumes) {
+        if (*dx, *dz) != (0, 0) {
+            neighbourhood = neighbourhood.with(*dx, *dz, neighbour);
+        }
+    }
+    let mut lights = compute_column_lights_with_neighbours_and_storage(
+        &neighbourhood,
+        &V770LightProps { has_skylight: true },
+        &[None; 9],
+        initial_full_sky_sections(Dimension::Overworld),
+    );
+    normalize_initial_chunk_light(&mut lights[4], Dimension::Overworld, None);
+    lights
+}
+
+#[cfg(test)]
+mod initial_light_view_tests {
+    use super::*;
+
+    fn buffered_lights(
+        center: &WorldChunkColumn,
+        shape: &ChunkShape,
+        neighbours: &[(i32, i32, &ServerChunkColumn)],
+    ) -> [ColumnLight; 9] {
+        let columns = neighbours
+            .iter()
+            .map(|(_, _, column)| build_world_column(shape, column))
+            .collect::<Vec<_>>();
+        let mut neighbourhood = Neighbourhood::new(center);
+        for ((dx, dz, _), column) in neighbours.iter().zip(&columns) {
+            if (*dx, *dz) != (0, 0) {
+                neighbourhood = neighbourhood.with(*dx, *dz, column);
+            }
+        }
+        let mut lights = compute_column_lights_with_neighbours_and_storage(
+            &neighbourhood,
+            &V770LightProps { has_skylight: true },
+            &[None; 9],
+            initial_full_sky_sections(Dimension::Overworld),
+        );
+        normalize_initial_chunk_light(&mut lights[4], Dimension::Overworld, None);
+        lights
+    }
+
+    #[test]
+    fn borrowed_overworld_initial_light_matches_buffered_roof_seam_and_air() {
+        let shape = shape_for_dimension(Dimension::Overworld);
+        let stone = StateId::from_state_str("minecraft:stone").expect("stone state");
+        let glowstone = StateId::from_state_str("minecraft:glowstone").expect("glowstone state");
+        let cave_air = StateId::from_state_str("minecraft:cave_air").expect("cave air state");
+        let air = StateId::from_state_str("minecraft:air").expect("air state");
+        let mut columns: [ServerChunkColumn; 9] = std::array::from_fn(|slot| {
+            let mut column = if slot == 5 {
+                ServerChunkColumn::new(shape.min_y - 16, shape.world_height as i32 + 32)
+            } else {
+                ServerChunkColumn::new(shape.min_y, shape.world_height as i32)
+            };
+            for z in 0..16 {
+                for x in 0..16 {
+                    column.set_block_id(x, 0, z, stone);
+                    column.set_block_id(x, 4, z, stone);
+                }
+            }
+            column
+        });
+        columns[4].set_block_id(5, 4, 8, air);
+        columns[5].set_block_id(0, 1, 8, glowstone);
+        columns[2].set_block_id(13, 158, 9, cave_air);
+        columns[5].set_block_id(1, shape.min_y - 1, 8, glowstone);
+        columns[5].set_block_id(1, shape.min_y + shape.world_height as i32, 8, glowstone);
+        let center = build_world_column(&shape, &columns[4]);
+        let neighbours = columns
+            .iter()
+            .enumerate()
+            .filter(|(slot, _)| *slot != 4)
+            .map(|(slot, column)| (slot as i32 % 3 - 1, slot as i32 / 3 - 1, column))
+            .collect::<Vec<_>>();
+        let expected = buffered_lights(&center, &shape, &neighbours);
+        let mut retained = ColumnLight::new(shape.section_count);
+        for section in 0..retained.light_section_count() {
+            *retained.sky_mut(section) = LightData::Uniform(15);
+        }
+        let mut stored = [None; 9];
+        stored[5] = Some(&retained);
+        let mut statuses = [None; 9];
+        statuses[5] = Some(RetainedLightStatus::DependencyInitialized);
+        let actual = compute_served_initial_lights_with_neighbours_and_storage(
+            &center,
+            &shape,
+            &neighbours,
+            &stored,
+            &statuses,
+            Dimension::Overworld,
+        );
+        for slot in 0..9 {
+            assert_eq!(actual[slot], expected[slot], "light footprint slot {slot}");
+        }
+        let section = ((1 - shape.min_y).div_euclid(16) + 1) as usize;
+        let cell = NibbleArray::index(15, 1, 8);
+        assert_eq!(actual[4].block(section).get(cell), Some(14));
+        if let Ok(value) = std::env::var("LODESTONE_LIGHT_VIEW_PERF_ITERATIONS") {
+            let iterations = value.parse::<usize>()
+                .expect("LODESTONE_LIGHT_VIEW_PERF_ITERATIONS must be an integer in 1..=128");
+            assert!((1..=128).contains(&iterations),
+                "LODESTONE_LIGHT_VIEW_PERF_ITERATIONS must be in 1..=128");
+            let mut calls = [0_usize; 2];
+            let mut sums = [std::time::Duration::ZERO; 2];
+            for iteration in 0..iterations {
+                let order = if iteration % 2 == 0 { [0, 1] } else { [1, 0] };
+                for arm in order {
+                    let started = std::time::Instant::now();
+                    let output = std::hint::black_box(if arm == 0 {
+                        buffered_lights(&center, &shape, &neighbours)
+                    } else {
+                        compute_overworld_initial_lights_borrowed(&center, &shape, &neighbours)
+                    });
+                    sums[arm] += started.elapsed();
+                    calls[arm] += 1;
+                    drop(output);
+                }
+            }
+            eprintln!(
+                "LIGHT_VIEW_PERF iterations={iterations} buffered_calls={} borrowed_calls={} \
+                 buffered_sum_ms={:.3} borrowed_sum_ms={:.3}",
+                calls[0], calls[1], sums[0].as_secs_f64() * 1000.0,
+                sums[1].as_secs_f64() * 1000.0,
+            );
+        }
+        drop(neighbours);
+        columns[5].set_block_id(0, 1, 8, air);
+        let neighbours = columns
+            .iter()
+            .enumerate()
+            .filter(|(slot, _)| *slot != 4)
+            .map(|(slot, column)| (slot as i32 % 3 - 1, slot as i32 / 3 - 1, column))
+            .collect::<Vec<_>>();
+        let unlit = compute_overworld_initial_lights_borrowed(&center, &shape, &neighbours);
+        assert_eq!(unlit[4].block(section), &LightData::Missing);
+        assert_ne!(actual[4], unlit[4], "seam emitter must affect the detector");
+    }
 }
 
 pub(super) fn retained_light_is_initialized(status: RetainedLightStatus) -> bool {
