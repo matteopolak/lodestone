@@ -103,9 +103,12 @@ handoff separate rather than synchronously waiting on a generation-held lease.
 The browser uses the same production generation session, cohort publication,
 and ordered target queue. Its Overworld source admits at most 16 nearby targets
 after the singleton center and publishes stable outputs incrementally. A
-threaded build can run immutable work on its initialized worker pool, though
-the pristine shaped batch still uses a serial map; both artifacts use the
-cooperative stage driver. The server worker currently encodes
+threaded build splits pristine prefix preparation into disjoint four-chunk-wide
+jobs on its initialized worker pool. Native retains eight-chunk-wide prefix
+sharing, and the serial browser uses the same job boundary without parallelism.
+All three collect shaped carriers in request order; both browser artifacts use
+the cooperative mutable stage driver. Prefix preparation remains a synchronous
+join and must be included in non-yield-span measurements. The server worker currently encodes
 the resulting columns before sending them over a byte-credit-limited
 `MessagePort`, while the client worker decodes and meshes them. The block-update sender shares the
 same connection loop as chunk streaming, so a write awaiting transport credit

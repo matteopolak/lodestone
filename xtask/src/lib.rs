@@ -5491,7 +5491,7 @@ pub fn run_wasm_check(workspace_root: &Path) -> Result<()> {
             failures.push("lodestone-server-worker threads".to_string());
             report_build_failure(&failure);
             println!(
-                "      └─ reproduce: CARGO_PROFILE_RELEASE_CODEGEN_BACKEND=llvm RUSTFLAGS='{WASM_THREADS_RUSTFLAGS}' cargo build --manifest-path web/worker/Cargo.toml --target {WASM_TARGET} --release --features wasm-threads -Z build-std=panic_abort,std"
+                "      └─ reproduce: CARGO_PROFILE_WORKER_RELEASE_CODEGEN_BACKEND=llvm RUSTFLAGS='{WASM_THREADS_RUSTFLAGS}' cargo build --manifest-path web/worker/Cargo.toml --target {WASM_TARGET} --profile worker-release --features wasm-threads -Z build-std=panic_abort,std"
             );
         }
     }
@@ -5920,7 +5920,7 @@ fn report_build_failure(failure: &CapturedBuild) {
 /// instead — the same reasoning `docs/compile-times.md` already gives for
 /// `RUSTFLAGS` clobbering `build.rustflags`, just one level further out.
 const WASM_CODEGEN_BACKEND_ENV: (&str, &str) = ("CARGO_PROFILE_DEV_CODEGEN_BACKEND", "llvm");
-const WASM_RELEASE_CODEGEN_BACKEND_ENV: (&str, &str) = ("CARGO_PROFILE_RELEASE_CODEGEN_BACKEND", "llvm");
+const WASM_WORKER_CODEGEN_BACKEND_ENV: (&str, &str) = ("CARGO_PROFILE_WORKER_RELEASE_CODEGEN_BACKEND", "llvm");
 const WASM_THREADS_RUSTFLAGS: &str = "-C target-feature=+atomics,+bulk-memory -C link-arg=--shared-memory -C link-arg=--max-memory=1073741824 -C link-arg=--import-memory -C link-arg=--export=__heap_base -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base";
 
 /// Runs `cargo build -p <name> --target wasm32-unknown-unknown [extra]` from
@@ -5973,10 +5973,10 @@ fn compile_server_worker_threads_for_wasm(workspace_root: &Path) -> Result<(), C
         .arg(&manifest)
         .arg("--target")
         .arg(WASM_TARGET)
-        .arg("--release")
+        .args(["--profile", "worker-release"])
         .args(["--features", "wasm-threads"])
         .args(["-Z", "build-std=panic_abort,std"])
-        .env(WASM_RELEASE_CODEGEN_BACKEND_ENV.0, WASM_RELEASE_CODEGEN_BACKEND_ENV.1)
+        .env(WASM_WORKER_CODEGEN_BACKEND_ENV.0, WASM_WORKER_CODEGEN_BACKEND_ENV.1)
         .env("RUSTFLAGS", WASM_THREADS_RUSTFLAGS)
         .current_dir(workspace_root);
     run_captured_build(&mut command, workspace_root, "lodestone-server-worker-threads")

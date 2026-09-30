@@ -8,9 +8,9 @@ worker_manifest="$root/web/worker/Cargo.toml"
 worker_target="$(cargo metadata --manifest-path "$root/web/Cargo.toml" --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
 
 wasm_target="wasm32-unknown-unknown"
-wasm_binary="$worker_target/$wasm_target/release/lodestone_server_worker.wasm"
+wasm_binary="$worker_target/$wasm_target/worker-release/lodestone_server_worker.wasm"
 
-export CARGO_PROFILE_RELEASE_CODEGEN_BACKEND=llvm
+export CARGO_PROFILE_WORKER_RELEASE_CODEGEN_BACKEND=llvm
 
 if ! rustup component list --installed 2>/dev/null | grep -q '^rust-src'; then
   echo "error: rust-src is not installed for the active Rust toolchain" >&2
@@ -20,7 +20,7 @@ if ! rustup component list --installed 2>/dev/null | grep -q '^rust-src'; then
 fi
 
 # Build serial and shared-memory artifacts; atomics are module-level.
-cargo build --manifest-path "$worker_manifest" --target "$wasm_target" --release
+cargo build --manifest-path "$worker_manifest" --target "$wasm_target" --profile worker-release
 wasm-bindgen --target web --out-dir "$out_dir" --out-name lodestone-server-worker-wasm-serial \
   "$wasm_binary"
 
@@ -35,7 +35,7 @@ RUSTFLAGS="-C target-feature=+atomics,+bulk-memory \
   -C link-arg=--export=__tls_size \
   -C link-arg=--export=__tls_align \
   -C link-arg=--export=__tls_base" \
-  cargo build --manifest-path "$worker_manifest" --target "$wasm_target" --release \
+  cargo build --manifest-path "$worker_manifest" --target "$wasm_target" --profile worker-release \
   --features wasm-threads -Z build-std=panic_abort,std
 wasm-bindgen --target web --out-dir "$out_dir" --out-name lodestone-server-worker-wasm-threaded \
   "$wasm_binary"

@@ -40,6 +40,8 @@ test("held normal inputs are released and diagnostics are bounded", () => {
   assert.equal(report.samplesSeen, 260);
   assert.equal(report.samples.length, 256);
   assert.equal(report.samplesTruncated, true);
+  assert.equal(report.final.at(-1).message, "server health: ticks=259");
+  assert.equal(report.final.length, 2);
   assert.deepEqual(sent.slice(-5), [
     { type: "key", code: "KeyW", pressed: false, modifiers: 0 },
     { type: "key", code: "ControlLeft", pressed: false, modifiers: 0 },

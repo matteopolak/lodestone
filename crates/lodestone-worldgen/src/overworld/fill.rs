@@ -383,6 +383,21 @@ pub(super) struct AquiferTrees {
     pub(super) cell_height: i32,
 }
 
+/// One bounded immutable prefix job. Jobs from a single plan have disjoint
+/// destinations and retain first-seen coordinate order within each region.
+#[derive(Debug)]
+pub struct PreOreRegionWork {
+    pub(super) positions: Vec<(i32, i32)>,
+}
+
+impl PreOreRegionWork {
+    /// Coordinates whose memoised prefix products this job prepares.
+    #[must_use]
+    pub fn positions(&self) -> &[(i32, i32)] {
+        &self.positions
+    }
+}
+
 impl OverworldGenerator {
     /// Maximum chunk side for one request-scoped density region. Larger unions
     /// are split into bounded eight-by-eight chunk tiles so the dense sampler remains
@@ -413,21 +428,6 @@ impl OverworldGenerator {
         self.prepare_pre_ore_position_union_with_lease(&positions, None, &preliminary)
     }
 
-    /// Prepares target-local terrain while an enclosing production batch lease
-    /// is live. Each target keeps its own bounded density sampler and exact
-    /// traversal order; only the store's repeated pin/unpin work is removed.
-    pub(super) fn prepare_pre_ore_targets_with_lease(
-        &self,
-        targets: &[(i32, i32)],
-        radius: i32,
-        lease: &super::OverworldBatchLease<'_>,
-    ) -> usize {
-        assert!(radius >= 0, "pre-ore radius must be non-negative");
-        let preliminary = Arc::clone(&lease.preliminary);
-        let positions = pre_ore_target_union(targets, radius);
-        self.prepare_pre_ore_position_union_with_lease(&positions, Some(&lease.view), &preliminary)
-    }
-
     /// Prepares exactly the supplied chunk-position union before callers fetch
     /// its memoised `pre_ore_stage` products. Positions are deduplicated in
     /// first-seen order and large unions are split into deterministic bounded
@@ -443,21 +443,54 @@ impl OverworldGenerator {
         existing_lease: Option<&crate::overworld::store::ViewScope<'_, super::ChunkStages>>,
         preliminary: &Arc<crate::aquifer::PreliminarySurfaceCache>,
     ) -> usize {
-        let positions = canonical_pre_ore_positions(positions.iter().copied());
-        if positions.is_empty() {
-            return 0;
-        }
-        split_pre_ore_regions(
-            positions,
-            Self::PRE_ORE_REGION_MAX_SIDE,
-            Self::PRE_ORE_REGION_TILE_SIDE,
-        )
-        .into_iter()
-        .map(|region| self.prepare_pre_ore_region(region, existing_lease, preliminary))
-        .sum()
+        self.pre_ore_region_work_for_positions(positions, None)
+            .into_iter()
+            .map(|region| self.prepare_pre_ore_region(region.positions, existing_lease, preliminary))
+            .sum()
     }
 
-    fn prepare_pre_ore_region(
+    pub(super) fn pre_ore_region_work_for_targets(
+        &self,
+        targets: &[(i32, i32)],
+        radius: i32,
+        max_region_side: Option<i32>,
+    ) -> Vec<PreOreRegionWork> {
+        assert!(radius >= 0, "pre-ore radius must be non-negative");
+        self.pre_ore_region_work_for_positions(
+            &pre_ore_target_union(targets, radius),
+            max_region_side,
+        )
+    }
+
+    fn pre_ore_region_work_for_positions(
+        &self,
+        positions: &[(i32, i32)],
+        max_region_side: Option<i32>,
+    ) -> Vec<PreOreRegionWork> {
+        let side = max_region_side.unwrap_or(Self::PRE_ORE_REGION_MAX_SIDE);
+        assert!(
+            (1..=Self::PRE_ORE_REGION_MAX_SIDE).contains(&side),
+            "pre-ore region side must be between 1 and 8 chunks",
+        );
+        let positions = canonical_pre_ore_positions(positions.iter().copied());
+        if positions.is_empty() {
+            return Vec::new();
+        }
+        let regions = match max_region_side {
+            Some(_) => split_pre_ore_regions_with_alignment(positions, side, side, true),
+            None => split_pre_ore_regions(
+                positions,
+                Self::PRE_ORE_REGION_MAX_SIDE,
+                Self::PRE_ORE_REGION_TILE_SIDE,
+            ),
+        };
+        regions
+            .into_iter()
+            .map(|positions| PreOreRegionWork { positions })
+            .collect()
+    }
+
+    pub(super) fn prepare_pre_ore_region(
         &self,
         positions: Vec<(i32, i32)>,
         existing_lease: Option<&crate::overworld::store::ViewScope<'_, super::ChunkStages>>,
@@ -486,7 +519,6 @@ impl OverworldGenerator {
                 &local_lease
             }
         };
-        let region_positions = positions.clone();
         let missing_positions = positions
             .iter()
             .copied()
@@ -498,8 +530,8 @@ impl OverworldGenerator {
                 .get_or_insert_with(|| {
                     super::region_prefix::RegionPrefixBatch::execute(
                         self,
-                        &region_positions,
                         &missing_positions,
+                        (low_x, max_x, low_z, max_z),
                         preliminary,
                     )
                 })
@@ -1727,6 +1759,15 @@ fn split_pre_ore_regions(
     max_side: i32,
     tile_side: i32,
 ) -> Vec<Vec<(i32, i32)>> {
+    split_pre_ore_regions_with_alignment(positions, max_side, tile_side, false)
+}
+
+fn split_pre_ore_regions_with_alignment(
+    positions: Vec<(i32, i32)>,
+    max_side: i32,
+    tile_side: i32,
+    request_aligned: bool,
+) -> Vec<Vec<(i32, i32)>> {
     debug_assert!(max_side > 0 && tile_side > 0 && tile_side <= max_side);
     let (mut low_x, mut low_z) = positions[0];
     let (mut max_x, mut max_z) = positions[0];
@@ -1744,8 +1785,12 @@ fn split_pre_ore_regions(
 
     let mut tile_indices = FastMap::default();
     let mut regions = Vec::new();
+    let (origin_x, origin_z) = if request_aligned { (low_x, low_z) } else { (0, 0) };
     for position @ (x, z) in positions {
-        let tile = (x.div_euclid(tile_side), z.div_euclid(tile_side));
+        let tile = (
+            (i64::from(x) - i64::from(origin_x)).div_euclid(i64::from(tile_side)),
+            (i64::from(z) - i64::from(origin_z)).div_euclid(i64::from(tile_side)),
+        );
         let index = match tile_indices.get(&tile).copied() {
             Some(index) => index,
             None => {
@@ -2020,6 +2065,58 @@ mod tests {
         }
 
         #[test]
+        fn leased_region_tiles_preserve_products_and_compute_only_missing_coordinates() {
+            let targets = (-1..=2)
+                .flat_map(|z| (-1..=2).map(move |x| (x, z)))
+                .collect::<Vec<_>>();
+            let positions = super::super::pre_ore_target_union(&targets, 2);
+            let control = generator();
+            crate::counters::reset();
+            {
+                let lease = control.lease_batch(&targets);
+                let work = lease.pre_ore_region_work(&targets, 2, None);
+                assert_eq!(work.len(), 1);
+                assert_eq!(
+                    lease.prepare_pre_ore_region(work.into_iter().next().unwrap()),
+                    64,
+                );
+            }
+            let counts = crate::counters::snapshot();
+            assert_eq!(counts.pre_ore_computed, 64);
+            assert_eq!(counts.stage_entered[Stage::Shape as usize], 64);
+            let expected = prefix_digest(&control, &positions);
+
+            let tiled = generator();
+            let lease = tiled.lease_batch(&targets);
+            let mut work = lease.pre_ore_region_work(&targets, 2, Some(4));
+            assert_eq!(work.len(), 4);
+            assert!(work.iter().all(|region| region.positions().len() == 16));
+            assert_eq!(lease.prepare_pre_ore_region(work.pop().unwrap()), 16);
+            crate::counters::reset();
+            let prepared = work
+                .into_iter()
+                .rev()
+                .map(|region| lease.prepare_pre_ore_region(region))
+                .sum::<usize>();
+            assert_eq!(prepared, 48);
+            let counts = crate::counters::snapshot();
+            assert_eq!(counts.pre_ore_computed, 48);
+            assert_eq!(counts.stage_entered[Stage::Shape as usize], 48);
+            assert_eq!(prefix_digest(&tiled, &positions), expected);
+
+            crate::counters::reset();
+            let prepared = lease
+                .pre_ore_region_work(&targets, 2, Some(4))
+                .into_iter()
+                .map(|region| lease.prepare_pre_ore_region(region))
+                .sum::<usize>();
+            assert_eq!(prepared, 64);
+            let counts = crate::counters::snapshot();
+            assert_eq!(counts.pre_ore_computed, 0);
+            assert_eq!(counts.stage_entered[Stage::Shape as usize], 0);
+        }
+
+        #[test]
         fn leased_prefix_warms_before_shaped_columns_and_radius_one_is_incomplete() {
             let targets = [(-1, -1), (0, -1), (1, -1), (-1, 0), (0, 0), (1, 0),
                 (-1, 1), (0, 1), (1, 1)];
@@ -2209,6 +2306,32 @@ mod tests {
         let regions = split_pre_ore_regions(large, 8, 4);
         assert!(regions.len() > 1);
         assert!(regions.iter().all(|region| !region.is_empty()));
+    }
+
+    #[test]
+    fn explicit_region_tiles_cover_translated_union_without_overlap_or_reordering() {
+        for (offset_x, offset_z) in [(-11, 3), (0, 0), (7, -13)] {
+            let positions = (offset_z..offset_z + 8)
+                .flat_map(|z| (offset_x..offset_x + 8).map(move |x| (x, z)))
+                .collect::<Vec<_>>();
+            let regions = super::split_pre_ore_regions_with_alignment(
+                positions.clone(), 4, 4, true,
+            );
+            assert_eq!(regions.len(), 4);
+            let mut seen = std::collections::BTreeSet::new();
+            for (index, region) in regions.iter().enumerate() {
+                let x = offset_x + (index as i32 % 2) * 4;
+                let z = offset_z + (index as i32 / 2) * 4;
+                let expected = (z..z + 4)
+                    .flat_map(|z| (x..x + 4).map(move |x| (x, z)))
+                    .collect::<Vec<_>>();
+                assert_eq!(*region, expected);
+                for &position in region {
+                    assert!(seen.insert(position), "duplicate destination {position:?}");
+                }
+            }
+            assert_eq!(seen, positions.into_iter().collect::<std::collections::BTreeSet<_>>());
+        }
     }
 
     #[test]

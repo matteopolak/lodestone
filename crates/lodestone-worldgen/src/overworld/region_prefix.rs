@@ -18,7 +18,7 @@ use super::fill::PackedStateCarrier;
 use super::structures::REFS_RADIUS;
 use super::{OverworldGenerator, PreOreResult};
 
-/// Biome cells for the admitted rectangle plus the one-chunk surface border.
+/// Biome cells for the sampled rectangle plus the one-chunk surface border.
 #[derive(Debug)]
 struct RegionBiomeSidecar {
     min_x: i32,
@@ -39,10 +39,10 @@ impl RegionBiomeSidecar {
         max_x: i32,
         min_z: i32,
         max_z: i32,
+        admitted_bounds: (i32, i32, i32, i32),
         climate: Option<&PreparedClimateGrid>,
     ) -> Self {
-        let product_min_x = min_x;
-        let product_min_z = min_z;
+        let (product_min_x, product_max_x, product_min_z, product_max_z) = admitted_bounds;
         let side_min_x = min_x - 1;
         let side_min_z = min_z - 1;
         let width = (max_x - side_min_x + 2) as usize;
@@ -64,9 +64,9 @@ impl RegionBiomeSidecar {
             for cx in side_min_x..=max_x + 1 {
                 let biome_cells = (generator.dynamic_biome.is_none()
                     || (cx >= product_min_x
-                        && cx <= max_x
+                        && cx <= product_max_x
                         && cz >= product_min_z
-                        && cz <= max_z))
+                        && cz <= product_max_z))
                     .then(|| Arc::new(region_biome_cells(generator, cx, cz, climate)));
                 no_sulfur.push(biome_cells.as_ref().is_some_and(|biome_cells| {
                     biome_cells
@@ -193,12 +193,28 @@ pub(super) struct RegionPrefixBatch {
 }
 
 impl RegionPrefixBatch {
-    /// Executes `missing_positions` using the bounded density sampler and
-    /// climate/biome sidecar for the complete admitted `positions` geometry.
+    /// Samples only missing outputs and their halos. Admitted biome bounds
+    /// retain the distinction between materialized cells and cursor searches.
     pub(super) fn execute(
+        generator: &OverworldGenerator,
+        missing_positions: &[(i32, i32)],
+        admitted_bounds: (i32, i32, i32, i32),
+        preliminary: &Arc<PreliminarySurfaceCache>,
+    ) -> Self {
+        Self::execute_with_geometry(
+            generator,
+            missing_positions,
+            missing_positions,
+            admitted_bounds,
+            preliminary,
+        )
+    }
+
+    fn execute_with_geometry(
         generator: &OverworldGenerator,
         positions: &[(i32, i32)],
         missing_positions: &[(i32, i32)],
+        admitted_bounds: (i32, i32, i32, i32),
         preliminary: &Arc<PreliminarySurfaceCache>,
     ) -> Self {
         assert!(!positions.is_empty(), "region prefix requires at least one position");
@@ -249,6 +265,7 @@ impl RegionPrefixBatch {
             max_x,
             min_z,
             max_z,
+            admitted_bounds,
             climate.as_deref(),
         );
         let mut aquifer_cache = AquiferRegionCache::new();
@@ -494,12 +511,17 @@ mod prefix_comparison_tests {
 
     use serde_json::Value;
 
-    use super::{OverworldGenerator, RegionPrefixBatch};
+    use super::{
+        OverworldGenerator, RegionBiomeSidecar, RegionPrefixBatch, build_xz_products,
+        position_bounds,
+    };
+    use crate::counters::Stage;
     use crate::density::{NoiseParams, Resolver};
     use crate::overworld::structures::StartSampler;
 
     struct FsResolver {
         root: PathBuf,
+        dynamic_biomes: bool,
     }
 
     impl FsResolver {
@@ -535,6 +557,22 @@ mod prefix_comparison_tests {
             vec!["test:region_probe_set".to_owned()]
         }
 
+        fn biome_parameters(&self) -> Value {
+            if self.dynamic_biomes {
+                self.read_production_biome_data("overworld")
+            } else {
+                Value::Array(Vec::new())
+            }
+        }
+
+        fn biome_temperatures(&self) -> Value {
+            if self.dynamic_biomes {
+                self.read_production_biome_data("overworld_temperature")
+            } else {
+                Value::Object(serde_json::Map::new())
+            }
+        }
+
         fn structure_set(&self, id: &str) -> Value {
             if id != "test:region_probe_set" {
                 return Value::Null;
@@ -546,14 +584,42 @@ mod prefix_comparison_tests {
                     "separation": 4,
                     "salt": 165745295
                 },
-                "structures": []
+                "structures": [{ "structure": "test:region_probe", "weight": 1 }]
+            })
+        }
+
+        fn structure(&self, id: &str) -> Value {
+            if id != "test:region_probe" {
+                return Value::Null;
+            }
+            serde_json::json!({
+                "type": "test:placement_probe",
+                "biomes": ["minecraft:plains"],
+                "step": "surface_structures"
             })
         }
     }
 
+    impl FsResolver {
+        fn read_production_biome_data(&self, name: &str) -> Value {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../lodestone-server/assets/worldgen/biome_parameters")
+                .join(format!("{name}.json"));
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read biome data"))
+                .expect("parse biome data")
+        }
+    }
+
     fn generator() -> OverworldGenerator {
+        generator_with_biomes(false)
+    }
+
+    fn generator_with_biomes(dynamic_biomes: bool) -> OverworldGenerator {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/worldgen_data");
-        let resolver = FsResolver { root: root.clone() };
+        let resolver = FsResolver {
+            root: root.clone(),
+            dynamic_biomes,
+        };
         let settings: Value = serde_json::from_str(
             &std::fs::read_to_string(root.join("noise_settings/overworld.json"))
                 .expect("read overworld settings"),
@@ -622,7 +688,9 @@ mod prefix_comparison_tests {
 
         let region = generator();
         let preliminary = region.preliminary_cache(crate::aquifer::PRELIMINARY_CACHE_BATCH_CAPACITY);
-        let batch = RegionPrefixBatch::execute(&region, &positions, &positions, &preliminary);
+        let batch = RegionPrefixBatch::execute(
+            &region, &positions, position_bounds(&positions), &preliminary,
+        );
         let actual = positions
             .iter()
             .map(|&position| digest(&batch.result(position)))
@@ -633,6 +701,118 @@ mod prefix_comparison_tests {
         // product. The position-sensitive digest must make this detector fail
         // if a future lookup aliases a neighbour.
         assert_ne!(actual[0], expected[1], "negative coordinate-alias control passed");
+    }
+
+    #[test]
+    fn mostly_warm_dynamic_region_matches_full_geometry_and_halves_biome_work() {
+        let admitted = (-4..0)
+            .flat_map(|z| (-4..0).map(move |x| (x, z)))
+            .collect::<Vec<_>>();
+        let missing = (-4..0).map(|z| (-1, z)).collect::<Vec<_>>();
+        let admitted_bounds = position_bounds(&admitted);
+
+        let control = generator_with_biomes(true);
+        assert!(
+            control.dynamic_biome.as_ref().expect("dynamic biome fixture").table.len() > 100,
+        );
+        let preliminary = control.preliminary_cache(crate::aquifer::PRELIMINARY_CACHE_BATCH_CAPACITY);
+        crate::counters::reset();
+        let full = RegionPrefixBatch::execute_with_geometry(
+            &control, &admitted, &missing, admitted_bounds, &preliminary,
+        );
+        let full_counts = crate::counters::snapshot();
+
+        let narrowed = generator_with_biomes(true);
+        let preliminary = narrowed.preliminary_cache(crate::aquifer::PRELIMINARY_CACHE_BATCH_CAPACITY);
+        crate::counters::reset();
+        let cold = RegionPrefixBatch::execute(
+            &narrowed, &missing, admitted_bounds, &preliminary,
+        );
+        let cold_counts = crate::counters::snapshot();
+        for &position in &missing {
+            assert_eq!(
+                digest(&cold.result(position)),
+                digest(&full.result(position)),
+                "{position:?}",
+            );
+        }
+        assert_ne!(digest(&full.result(missing[0])), digest(&full.result(missing[1])));
+        assert_eq!(full_counts.stage_entered[Stage::Biome as usize], 16);
+        assert_eq!(cold_counts.stage_entered[Stage::Biome as usize], 8);
+        assert_eq!(full_counts.stage_entered[Stage::Shape as usize], 4);
+        assert_eq!(cold_counts.stage_entered[Stage::Shape as usize], 4);
+
+        let full_xz = build_xz_products(&control, &admitted).expect("fixture X/Z products");
+        let cold_xz = build_xz_products(&narrowed, &missing).expect("fixture X/Z products");
+        assert_eq!(full_xz.computes(), 529);
+        assert_eq!(cold_xz.computes(), 253);
+        let rect = cold_xz.rect();
+        for z in 0..rect.depth {
+            for x in 0..rect.width {
+                let block_x = (rect.min_qx + x as i32) * 4;
+                let block_z = (rect.min_qz + z as i32) * 4;
+                let expected = full_xz.get_pair(block_x, block_z).expect("full X/Z pair");
+                let actual = cold_xz.get_pair(block_x, block_z).expect("cold X/Z pair");
+                assert_eq!(
+                    (actual.0.to_bits(), actual.1.to_bits()),
+                    (expected.0.to_bits(), expected.1.to_bits()),
+                    "({block_x}, {block_z})",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cold_negative_region_across_zero_matches_scalar_prefixes() {
+        let positions = [(-2, -1), (-1, -1), (-2, 0), (-1, 0)];
+        let scalar = generator();
+        let region = generator();
+        let preliminary = region.preliminary_cache(crate::aquifer::PRELIMINARY_CACHE_BATCH_CAPACITY);
+        let batch = RegionPrefixBatch::execute(
+            &region, &positions, position_bounds(&positions), &preliminary,
+        );
+        for &(x, z) in &positions {
+            assert_eq!(
+                digest(&batch.result((x, z))),
+                digest(&scalar.pre_ore_stage(x, z)),
+                "({x}, {z})",
+            );
+        }
+    }
+
+    #[test]
+    fn cold_sidecar_retains_warm_neighbour_cells_and_true_exterior_searches() {
+        let generator = generator_with_biomes(true);
+        let full = RegionBiomeSidecar::new(
+            &generator, -4, -1, -4, -1, (-4, -1, -4, -1), None,
+        );
+        let cold = RegionBiomeSidecar::new(
+            &generator, -1, -1, -4, -1, (-4, -1, -4, -1), None,
+        );
+        let misclassified = RegionBiomeSidecar::new(
+            &generator, -1, -1, -4, -1, (-1, -1, -4, -1), None,
+        );
+        assert!(cold.cells_at(-2, -3).is_some());
+        assert!(misclassified.cells_at(-2, -3).is_none());
+        assert!(cold.cells_at(0, -3).is_none());
+        assert_eq!(full.cells.len(), 36);
+        assert_eq!(cold.cells.len(), 18);
+        for z in -4..0 {
+            let base_x = -16;
+            let base_z = z * 16;
+            assert_eq!(
+                cold.deep_biome_absent_mask(base_x, base_z),
+                full.deep_biome_absent_mask(base_x, base_z),
+            );
+            for (x, z) in [(0, 0), (15, 0), (0, 15), (15, 15), (1, 14)] {
+                for y in [-64, -1, 63, 318] {
+                    assert_eq!(
+                        cold.biome_at_typed(&generator, None, base_x + x, y, base_z + z),
+                        full.biome_at_typed(&generator, None, base_x + x, y, base_z + z),
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -676,21 +856,70 @@ mod prefix_comparison_tests {
 
         let scalar = generator();
         crate::overworld::structures::reset_structure_cache_stats();
-        for &(cx, cz) in &positions {
-            let _ = scalar.structure_refs_stage(cx, cz);
-        }
+        let expected = positions.map(|(cx, cz)| digest(&scalar.pre_ore_stage(cx, cz)));
         let scalar_samplers =
             crate::overworld::structures::structure_cache_stats().sampler_constructions;
 
         let batched = generator();
         let preliminary = batched.preliminary_cache(crate::aquifer::PRELIMINARY_CACHE_BATCH_CAPACITY);
         crate::overworld::structures::reset_structure_cache_stats();
-        let _ = RegionPrefixBatch::execute(&batched, &positions, &positions, &preliminary);
+        let batch = RegionPrefixBatch::execute(
+            &batched, &positions, position_bounds(&positions), &preliminary,
+        );
         let batched_samplers =
             crate::overworld::structures::structure_cache_stats().sampler_constructions;
 
-        assert_eq!(scalar_samplers, positions.len() as u64);
-        assert_eq!(batched_samplers, 1);
+        assert_eq!(positions.map(|position| digest(&batch.result(position))), expected);
+        assert_eq!(scalar_samplers, 6);
+        assert_eq!(batched_samplers, 5);
         assert!(batched_samplers < scalar_samplers);
+    }
+
+    #[test]
+    fn translated_dynamic_eight_by_eight_prefix_matches_four_admitted_tiles() {
+        let positions = (-3..5)
+            .flat_map(|z| (-5..3).map(move |x| (x, z)))
+            .collect::<Vec<_>>();
+        let expected = {
+            let full = generator_with_biomes(true);
+            assert!(full.dynamic_biome.as_ref().expect("dynamic biome fixture").table.len() > 100);
+            let preliminary = full.preliminary_cache(crate::aquifer::PRELIMINARY_CACHE_BATCH_CAPACITY);
+            let batch = RegionPrefixBatch::execute(
+                &full, &positions, position_bounds(&positions), &preliminary,
+            );
+            positions.iter()
+                .map(|&position| (position, digest(&batch.result(position))))
+                .collect::<Vec<_>>()
+        };
+
+        let tiled = generator_with_biomes(true);
+        let preliminary = tiled.preliminary_cache(crate::aquifer::PRELIMINARY_CACHE_BATCH_CAPACITY);
+        let mut actual = Vec::with_capacity(positions.len());
+        for (min_x, min_z) in [(-5, -3), (-1, -3), (-5, 1), (-1, 1)] {
+            let tile = (min_z..min_z + 4)
+                .flat_map(|z| (min_x..min_x + 4).map(move |x| (x, z)))
+                .collect::<Vec<_>>();
+            let batch = RegionPrefixBatch::execute(
+                &tiled, &tile, position_bounds(&tile), &preliminary,
+            );
+            actual.extend(tile.iter().map(|&position| (position, digest(&batch.result(position)))));
+        }
+        actual.sort_unstable_by_key(|(position, _)| *position);
+        assert_eq!(actual.len(), 64);
+        assert_ne!(expected[0].1, expected[1].1);
+        let mut mismatches = Vec::new();
+        for &(position, full_digest) in &expected {
+            let index = actual.binary_search_by_key(&position, |(position, _)| *position)
+                .expect("tile omitted an admitted coordinate");
+            let tiled_digest = actual[index].1;
+            eprintln!("dynamic prefix {position:?}: full={full_digest:016x} tiled={tiled_digest:016x}");
+            if full_digest != tiled_digest {
+                mismatches.push((position, full_digest, tiled_digest));
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "admitted tile borders changed prefixes within chunk bounds (-5, -3)..=(2, 4): {mismatches:?}",
+        );
     }
 }

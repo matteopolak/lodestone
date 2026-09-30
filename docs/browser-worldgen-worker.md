@@ -6,11 +6,11 @@ The browser world-generation worker keeps the authoritative integrated server in
 
 ## How it works
 
-`web/scripts/stage_worker.sh` produces two bindgen outputs from the same worker crate: a portable serial module and an atomics-enabled module built with the pinned nightly and `wasm-bindgen-rayon`. Staging patches the generated no-bundler Rayon helper to call the bindgen initialization export with its current object-shaped API, avoiding one deprecation warning per child worker. `worker_bootstrap.js` checks `crossOriginIsolated`, shared-memory construction, Atomics wait/notify, and a shared-memory Wasm validation module before selecting the threaded artifact. The pool is capped at four workers and leaves one reported hardware lane for the server connection and tick tasks.
+`web/scripts/stage_worker.sh` produces two bindgen outputs from the same worker crate: a portable serial module and an atomics-enabled module built with the pinned nightly and `wasm-bindgen-rayon`. Both use the web workspace's `worker-release` profile, which retains compact release settings while optimizing generation and server crates for speed without expanding the page profile. Staging patches the generated no-bundler Rayon helper to call the bindgen initialization export with its current object-shaped API, avoiding one deprecation warning per child worker. `worker_bootstrap.js` checks `crossOriginIsolated`, shared-memory construction, Atomics wait/notify, and a shared-memory Wasm validation module before selecting the threaded artifact. The pool is capped at four workers and leaves one reported hardware lane for the server connection and tick tasks.
 
 If the capability probe is negative, the bootstrap selects the serial artifact. A rejection after threaded initialization begins is terminal and reports an error; it never mixes a partially initialized threaded module with a fresh serial module. The immutable executor is the only parallel boundary; mutable feature, top-layer, overlay, and packet commits remain in canonical server order and retain their cancellation, memory-budget, and fingerprint checks.
 
-The serial production request uses an async adapter rather than the synchronous compatibility entry point. It yields to the browser macrotask queue after each shaped admission and ordered mutable source, then before packet encoding and after light settlement. This keeps the worker responsive between bounded generation operations without changing source order or allowing partial mutable commits. The threaded artifact uses the same session and commit path. Its immutable executor supports Rayon, but the preferred pristine-world shaped batch currently uses a serial map on Wasm; selecting a threaded artifact does not prove that batch ran in parallel.
+The serial production request uses an async adapter rather than the synchronous compatibility entry point. It yields to the browser macrotask queue after each shaped admission and ordered mutable source, then before packet encoding and after light settlement. This keeps the worker responsive between bounded generation operations without changing source order or allowing partial mutable commits. The threaded artifact uses the same session and commit path. With more than one generation worker, immutable prefix preparation is split into disjoint four-by-four regions under the existing dependency lease. Prefix jobs and shaped-product collection use the shared executor; mutable commits remain ordered. Worker selection alone is not evidence of parallel execution: inspect job counts and pool diagnostics as well.
 
 The shell sends its already-computed integrated stream radius in the launch envelope's `viewRadius`, and the worker passes it to the authoritative server unchanged. This uses the same `integrated_stream_radius` policy as native singleplayer: configured render distance plus the mesh-dependency and movement-lookahead padding. The initial playable loading gate remains capped at radius six. The server still primes one column and streams the remaining desired view through its bounded deferred generation window; the larger halo is not an eager startup barrier.
 
@@ -87,8 +87,10 @@ The controls wait for both first presented terrain and loading-overlay readiness
 terrain drawn behind the loading overlay is not a playable-world signal.
 
 The final report is printed to the console and stored as JSON text in
-`#lodestone-responsiveness-report`. It includes timestamped baseline diagnostics
-and at most 256 samples; exact sample counts and truncation remain explicit.
+`#lodestone-responsiveness-report`. It includes timestamped baseline and final
+diagnostics and at most 256 intervening samples; exact sample counts and
+truncation remain explicit. The final snapshots survive sample truncation, so
+end-of-walk delivery and presentation deficits remain observable.
 These are sampled diagnostics, not per-action acknowledgements. Server-center
 changes prove chunk-boundary travel; a Walk command by itself does not. A mining
 input does not prove a block was broken, confirmed, or drawn. Check the visible
