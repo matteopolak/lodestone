@@ -1,5 +1,8 @@
 //! Shared production execution for request-scoped world generation.
 
+#[path = "production_worldgen_cohort.rs"]
+mod cohort;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::marker::PhantomData;
 use std::mem::size_of;
@@ -1889,7 +1892,7 @@ where
     )?
     .ok_or(crate::worldgen_session::GenerationRequestError::Unsupported)?;
     let mut region = ProductionGenerationRegion::for_halo(source, &plan.context);
-    region.generate_target_owned_cohort_with_executor(sessions, &plan, executor, on_stable)
+    region.generate_target_owned_cohort_with_executor(sessions, plan, executor, on_stable)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2319,235 +2322,6 @@ where
         .await
     }
 
-    fn generate_target_owned_cohort_with_executor<F>(
-        &mut self,
-        sessions: &mut [GenerationSession],
-        plan: &TargetSettlementPlan,
-        executor: &dyn ImmutableComputeExecutor,
-        mut on_stable: F,
-    ) -> Result<Vec<Result<(), crate::worldgen_session::GenerationRequestError>>, crate::worldgen_session::GenerationRequestError>
-    where
-        F: FnMut(
-            usize,
-            &GenerationSession,
-            crate::worldgen_session::GenerationRequestResult,
-            ) -> Result<(), crate::worldgen_session::GenerationRequestError>,
-    {
-        if let Some(&coordinate) = plan
-            .context
-            .iter()
-            .find(|coordinate| !self.declared_halo.contains(coordinate))
-        {
-            return Err(SessionError::OutsideHalo(coordinate).into());
-        }
-
-        #[cfg(feature = "worldgen-stage-pmu")]
-        let _admission = RegionGuard::enter(RegionPhase::Admission);
-        self.admit_chunks_with_context_executor(
-            &plan.targets,
-            &plan.context,
-            &plan.targets,
-            TARGET_FEATURE_RADIUS,
-            executor,
-        )?;
-        #[cfg(feature = "worldgen-stage-pmu")]
-        drop(_admission);
-        self.admission_counts = RegionAdmissionCounts {
-            requested: sessions.len(),
-            mutable: plan.targets.len(),
-            read_only: plan.context.len().saturating_sub(plan.targets.len()),
-            ..RegionAdmissionCounts::default()
-        };
-        self.refresh_admission_counts();
-
-        let boundary = sessions[0]
-            .pipeline()
-            .schedule()
-            .target_stage(GenerationTarget::Shaped);
-        prime_shared_prefixes::<S, S::Policy>(
-            self.source,
-            &plan.targets,
-            boundary,
-            &mut self.materializer,
-            &mut self.shared_prefixes,
-        )?;
-        preseed_retained_mutations(&mut self.materializer, sessions)?;
-        #[cfg(feature = "worldgen-stage-pmu")]
-        let _replay_context = RegionGuard::enter(RegionPhase::ReplayContext);
-        {
-            let _timing = PhaseTimer::start(
-                WorldgenTimingPhase::MutableSettlement,
-                plan.targets.len().min(u32::MAX as usize) as u32,
-            );
-            self.materializer
-                .prepare_lifecycle_replay_contexts_prepared(&plan.targets);
-        }
-        #[cfg(feature = "worldgen-stage-pmu")]
-        drop(_replay_context);
-
-        self.settlement_padding = plan.padding.clone();
-        self.settlement_targets = plan.targets.iter().copied().collect();
-        self.materializer
-            .declare_mutable_targets(plan.targets.iter().copied());
-        self.materializer
-            .declare_sparse_padding_targets(plan.padding.iter().copied());
-
-        use crate::worldgen_session::{GenerationRequestError, GenerationRequestResult};
-
-        let mut outcomes = (0..sessions.len())
-            .map(|_| None)
-            .collect::<Vec<Option<Result<(), GenerationRequestError>>>>();
-        for (index, session) in sessions.iter().enumerate() {
-            if session.cancellation().is_cancelled() {
-                outcomes[index] = Some(Err(SessionError::Cancelled.into()));
-            }
-        }
-
-        let mut requested_sessions = BTreeMap::<ChunkCoordinate, Vec<usize>>::new();
-        for (index, session) in sessions.iter().enumerate() {
-            requested_sessions
-                .entry(session.request().target())
-                .or_default()
-                .push(index);
-        }
-
-        let mut next_output = 0;
-        let mut packet_columns = BTreeMap::new();
-        let mut generated_packet_columns = BTreeMap::new();
-        for (sequence, target) in plan.targets.iter().copied().enumerate() {
-            let active_index = requested_sessions.get(&target).and_then(|indices| {
-                indices.iter().copied().find(|&index| {
-                    outcomes[index].is_none() && !sessions[index].cancellation().is_cancelled()
-                })
-            });
-
-            if let Some(index) = active_index {
-                #[cfg(feature = "worldgen-stage-pmu")]
-                let _mutable_target = RegionGuard::enter(RegionPhase::MutableTarget);
-                let result = {
-                    let mut machine = GenerationStateMachine::<S, S::Policy>::new(
-                        self.source,
-                        &mut sessions[index],
-                        &mut self.materializer,
-                        &mut self.shared_prefixes,
-                        true,
-                    )?;
-                    machine.padding_targets = Some(&self.settlement_padding);
-                    machine.settlement_targets = Some(&self.settlement_targets);
-                    machine.advance_mutable(executor)
-                };
-                #[cfg(feature = "worldgen-stage-pmu")]
-                drop(_mutable_target);
-
-                if let Err(error) = result {
-                    self.materializer.abort_target(target);
-                    if sessions[index].cancellation().is_cancelled() {
-                        outcomes[index] = Some(Err(SessionError::Cancelled.into()));
-                    } else {
-                        return Err(error.into());
-                    }
-                }
-            }
-
-            let needs_sparse_completion = active_index.is_none()
-                || requested_sessions.get(&target).is_some_and(|indices| {
-                    indices.iter().all(|&index| {
-                        outcomes[index].is_some()
-                            || sessions[index].cancellation().is_cancelled()
-                    })
-                });
-            if needs_sparse_completion
-                && settlement_padding_needed_by_live_target(target, sessions)
-                && !self.materializer.target_features_completed(target)
-            {
-                #[cfg(feature = "worldgen-stage-pmu")]
-                let _mutable_padding = RegionGuard::enter(RegionPhase::MutablePadding);
-                let _timing = PhaseTimer::start(WorldgenTimingPhase::MutableSettlement, 1);
-                self.materializer
-                    .complete_target_features_with_mode_observing(
-                        target,
-                        sequence as u64,
-                        LifecycleCompletionMode::SparsePadding,
-                        |_| {},
-                    );
-                self.materializer.finish_target(target);
-            }
-
-            while plan
-                .outputs
-                .get(next_output)
-                .is_some_and(|output| output.last_packet_owner_index <= sequence)
-            {
-                let output = &plan.outputs[next_output];
-                for &index in &output.session_indices {
-                    if outcomes[index].is_some() {
-                        continue;
-                    }
-                    if sessions[index].cancellation().is_cancelled() {
-                        outcomes[index] = Some(Err(SessionError::Cancelled.into()));
-                        continue;
-                    }
-
-                    let result = {
-                        #[cfg(feature = "worldgen-stage-pmu")]
-                        let _machine_rebuild = RegionGuard::enter(RegionPhase::MachineRebuild);
-                        let mut machine = GenerationStateMachine::<S, S::Policy>::new(
-                            self.source,
-                            &mut sessions[index],
-                            &mut self.materializer,
-                            &mut self.shared_prefixes,
-                            true,
-                        )?;
-                        #[cfg(feature = "worldgen-stage-pmu")]
-                        drop(_machine_rebuild);
-                        machine.padding_targets = Some(&self.settlement_padding);
-                        machine.settlement_targets = Some(&self.settlement_targets);
-                        #[cfg(feature = "worldgen-stage-pmu")]
-                        let _snapshot_finalization =
-                            RegionGuard::enter(RegionPhase::SnapshotFinalization);
-                        machine.advance_mutable(executor).and_then(|()| {
-                            machine.packet_columns = Some(&mut packet_columns);
-                            machine.generated_packet_columns =
-                                Some(&mut generated_packet_columns);
-                            machine.finalize_batch_target(executor)
-                        })
-                    };
-
-                    match result {
-                        Ok(snapshot) => {
-                            if snapshot.coordinate() != output.coordinate {
-                                return Err(SessionError::InvalidCheckpointAt(
-                                    "cohort snapshot coordinate differed from its output fence",
-                                )
-                                .into());
-                            }
-                            on_stable(
-                                index,
-                                &sessions[index],
-                                GenerationRequestResult::Generated(snapshot),
-                            )?;
-                            outcomes[index] = Some(Ok(()));
-                        }
-                        Err(error) => {
-                            outcomes[index] = Some(Err(error.into()));
-                        }
-                    }
-                }
-                next_output += 1;
-            }
-        }
-
-        if next_output != plan.outputs.len() || outcomes.iter().any(Option::is_none) {
-            return Err(SessionError::InvalidCheckpointAt(
-                "cohort ended before every output fence settled",
-            )
-            .into());
-        }
-        Ok(outcomes
-            .into_iter()
-            .map(|outcome| outcome.expect("all cohort outputs have passed their writer fence"))
-            .collect())
-    }
 
     pub(crate) fn generate_batch_with_executor(
         &mut self,
@@ -2570,7 +2344,7 @@ where
             Ok(settlement) => settlement,
             Err(error) => return batch_session_error(sessions.len(), error),
         };
-        if let Some(plan) = settlement.as_ref() {
+        if let Some(plan) = settlement {
             if let Some(&coordinate) = plan
                 .context
                 .iter()
@@ -2719,89 +2493,47 @@ where
             Ok(settlement) => settlement,
             Err(error) => return batch_session_error(sessions.len(), error),
         };
-        if let Some(plan) = settlement.as_ref() {
-            if let Some(&coordinate) = plan
-                .context
-                .iter()
-                .find(|coordinate| !self.declared_halo.contains(coordinate))
-            {
-                return batch_session_error(sessions.len(), SessionError::OutsideHalo(coordinate));
-            }
-        }
-        if let Some(plan) = settlement.as_ref() {
-            if let Err(error) = self.admit_chunks_with_context_executor(
-                &plan.targets,
-                &plan.context,
-                &plan.targets,
-                TARGET_FEATURE_RADIUS,
+        if let Some(plan) = settlement {
+            let mut outputs = (0..sessions.len())
+                .map(|_| None)
+                .collect::<Vec<Option<crate::worldgen_session::GenerationRequestResult>>>();
+            let outcomes = match self.generate_target_owned_cohort_with_cooperation(
+                sessions,
+                plan,
                 &PersistentWorldgenExecutor,
-            ) {
-                return batch_session_error(sessions.len(), error);
-            }
-            self.admission_counts = RegionAdmissionCounts {
-                requested: targets.len(),
-                mutable: plan.targets.len(),
-                read_only: plan.context.len().saturating_sub(plan.targets.len()),
-                ..RegionAdmissionCounts::default()
+                |index, _, output| {
+                    outputs[index] = Some(output);
+                    Ok(())
+                },
+                crate::chunk::yield_to_browser,
+            ).await {
+                Ok(outcomes) => outcomes,
+                Err(error) => return batch_generation_request_error(sessions.len(), error),
             };
-            self.refresh_admission_counts();
-            let boundary = sessions[0]
-                .pipeline()
-                .schedule()
-                .target_stage(GenerationTarget::Shaped);
-            if let Err(error) = prime_shared_prefixes::<S, S::Policy>(
-                self.source,
-                &plan.targets,
-                boundary,
-                &mut self.materializer,
-                &mut self.shared_prefixes,
-            ) {
-                return batch_session_error(sessions.len(), error);
-            }
-            if let Err(error) = preseed_retained_mutations(&mut self.materializer, sessions) {
-                return batch_session_error(sessions.len(), error);
-            }
-            {
-                let _timing = PhaseTimer::start(
-                    WorldgenTimingPhase::MutableSettlement,
-                    plan.targets.len().min(u32::MAX as usize) as u32,
-                );
-                self.materializer
-                    .prepare_lifecycle_replay_contexts_prepared(&plan.targets);
-            }
-            self.settlement_padding = plan.padding.clone();
-            self.settlement_targets = plan.targets.iter().copied().collect();
-            self.materializer
-                .declare_mutable_targets(plan.targets.iter().copied());
-            self.materializer
-                .declare_sparse_padding_targets(plan.padding.iter().copied());
-        } else {
-            let halo = self.declared_halo.iter().copied().collect::<Vec<_>>();
-            if let Err(error) = self.admit_chunks_with_executor(
-                &halo,
-                &halo,
-                0,
-                &PersistentWorldgenExecutor,
-            ) {
-                return batch_session_error(sessions.len(), error);
-            }
-            self.admission_counts = RegionAdmissionCounts {
-                requested: targets.len(),
-                mutable: targets.len(),
-                read_only: halo.len().saturating_sub(targets.len()),
-                ..RegionAdmissionCounts::default()
-            };
-            self.refresh_admission_counts();
-            self.settlement_padding.clear();
-            self.settlement_targets.clear();
-            self.materializer.declare_mutable_targets(targets.iter().copied());
+            return collect_cohort_outputs(outcomes, outputs);
         }
+        let halo = self.declared_halo.iter().copied().collect::<Vec<_>>();
+        if let Err(error) = self.admit_chunks_with_executor(
+            &halo,
+            &halo,
+            0,
+            &PersistentWorldgenExecutor,
+        ) {
+            return batch_session_error(sessions.len(), error);
+        }
+        self.admission_counts = RegionAdmissionCounts {
+            requested: targets.len(),
+            mutable: targets.len(),
+            read_only: halo.len().saturating_sub(targets.len()),
+            ..RegionAdmissionCounts::default()
+        };
+        self.refresh_admission_counts();
+        self.settlement_padding.clear();
+        self.settlement_targets.clear();
+        self.materializer.declare_mutable_targets(targets.iter().copied());
         let mut cancelled = vec![false; sessions.len()];
 
-        let execution_targets = settlement
-            .as_ref()
-            .map_or_else(|| targets.clone(), |plan| plan.targets.clone());
-        for (sequence, target) in execution_targets.iter().copied().enumerate() {
+        for target in targets.iter().copied() {
             let result = if let Some(index) = targets.iter().position(|candidate| *candidate == target) {
                 if sessions[index].cancellation().is_cancelled() {
                     cancelled[index] = true;
@@ -2818,30 +2550,11 @@ where
                         Ok(machine) => machine,
                         Err(error) => return batch_session_error(sessions.len(), error),
                     };
-                    if settlement.is_some() {
-                        machine.padding_targets = Some(&self.settlement_padding);
-                        machine.settlement_targets = Some(&self.settlement_targets);
-                    }
                     machine
                         .advance_mutable_yielding(&PersistentWorldgenExecutor)
                         .await
                 };
                 Some(result)
-            } else if settlement.is_some()
-                && settlement_padding_needed_by_live_target(target, sessions)
-            {
-                if !self.materializer.target_features_completed(target) {
-                    let _timing = PhaseTimer::start(WorldgenTimingPhase::MutableSettlement, 1);
-                    self.materializer
-                        .complete_target_features_with_mode_observing(
-                            target,
-                            sequence as u64,
-                            LifecycleCompletionMode::SparsePadding,
-                            |_| {},
-                        );
-                    self.materializer.finish_target(target);
-                }
-                None
             } else {
                 None
             };
@@ -2887,10 +2600,6 @@ where
                     Ok(machine) => machine,
                     Err(error) => return batch_session_error(sessions.len(), error),
                 };
-                if settlement.is_some() {
-                    machine.padding_targets = Some(&self.settlement_padding);
-                    machine.settlement_targets = Some(&self.settlement_targets);
-                }
                 let advance = machine
                     .advance_mutable_yielding(&PersistentWorldgenExecutor)
                     .await;
@@ -3951,6 +3660,157 @@ mod tests {
         }
         assert_eq!(invocations.load(Ordering::Relaxed), 9);
         assert!(sessions.iter().all(session_output_complete));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn target_owned_cohort_cooperation_preserves_fences_content_and_revisions() {
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let source = SettlementSource {
+            invocations: Arc::clone(&invocations),
+            source_invocations: None,
+            include_local: true,
+            include_east: true,
+        };
+        let targets = [(3, 0), (2, 0), (1, 0), (0, 0), (0, 0)];
+        let make_sessions = || targets.map(|target| {
+            GenerationSession::new(GenerationRequest::new(
+                Dimension::Overworld,
+                target,
+                GenerationTarget::Full,
+                1,
+            ))
+        });
+        let executor = CountingExecutor {
+            dispatches: AtomicUsize::new(0),
+            jobs: AtomicUsize::new(0),
+        };
+        let mut native_sessions = make_sessions();
+        let mut native_outputs = BTreeMap::new();
+        let mut native_emissions = Vec::new();
+        let native_outcomes = generate_cohort_with_executor(
+            &source,
+            &mut native_sessions,
+            &executor,
+            |index, _, output| {
+                native_emissions.push((index, invocations.load(Ordering::Relaxed)));
+                native_outputs.insert(index, output);
+                Ok(())
+            },
+        ).expect("native cohort succeeds");
+        assert!(native_outcomes.iter().all(Result::is_ok));
+        assert_eq!(invocations.load(Ordering::Relaxed), 18);
+        assert_eq!(native_emissions.iter().map(|&(index, _)| index).collect::<Vec<_>>(),
+            [3, 4, 2, 1, 0]);
+        assert!(native_emissions[0].1 < 18);
+
+        invocations.store(0, Ordering::Relaxed);
+        let mut sessions = make_sessions();
+        let plan = target_settlement_plan(&sessions, true).unwrap().unwrap();
+        let mut region = ProductionGenerationRegion::for_halo(&source, &plan.context);
+        let mut outputs = (0..targets.len()).map(|_| None).collect::<Vec<_>>();
+        let mut emissions = Vec::new();
+        let mut yields = 0;
+        let outcomes = region.generate_target_owned_cohort_with_cooperation(
+            &mut sessions,
+            plan,
+            &executor,
+            |index, session, output| {
+                assert!(session_output_complete(session));
+                emissions.push((index, invocations.load(Ordering::Relaxed)));
+                outputs[index] = Some(output);
+                Ok(())
+            },
+            || {
+                yields += 1;
+                tokio::task::yield_now()
+            },
+        ).await.expect("cooperative cohort succeeds");
+        assert_eq!(invocations.load(Ordering::Relaxed), 18);
+        assert_eq!(emissions, native_emissions);
+        assert!(yields > 18, "session phases must cooperate as well as owner boundaries");
+        let collected = collect_cohort_outputs(outcomes, outputs);
+        for (index, result) in collected.into_iter().enumerate() {
+            let crate::worldgen_session::GenerationRequestResult::Generated(snapshot) =
+                result.unwrap().unwrap()
+            else {
+                panic!("fresh output must be generated");
+            };
+            let crate::worldgen_session::GenerationRequestResult::Generated(native) =
+                &native_outputs[&index]
+            else {
+                panic!("fresh native output must be generated");
+            };
+            assert_eq!(snapshot.coordinate(), targets[index]);
+            assert_eq!(snapshot.revision(), native.revision());
+            assert_eq!(snapshot.column().block_state_id(15, 0, 0), sid("minecraft:diorite"));
+            assert_eq!(snapshot.column().block_state_id(1, 0, 0), sid("minecraft:gold_block"));
+            assert_eq!(column_content_fingerprint(snapshot.column()),
+                column_content_fingerprint(native.column()));
+            assert_eq!(snapshot.neighbours().len(), native.neighbours().len());
+            for (neighbour, native_neighbour) in snapshot.neighbours().iter().zip(native.neighbours()) {
+                assert_eq!(neighbour.coordinate(), native_neighbour.coordinate());
+                assert_eq!(column_content_fingerprint(neighbour.column()),
+                    column_content_fingerprint(native_neighbour.column()));
+            }
+            assert_eq!(sessions[index].current_revision(), native_sessions[index].current_revision());
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn target_owned_cohort_cooperation_keeps_live_duplicate_after_cancellation() {
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let source = SettlementSource {
+            invocations: Arc::clone(&invocations),
+            source_invocations: None,
+            include_local: false,
+            include_east: false,
+        };
+        let mut sessions = [(0, 0), (0, 0), (1, 0)].map(|target| {
+            GenerationSession::new(GenerationRequest::new(
+                Dimension::Overworld,
+                target,
+                GenerationTarget::Full,
+                1,
+            ))
+        });
+        sessions[0].cancellation().cancel();
+        let cancel_during_yield = sessions[2].cancellation();
+        let plan = target_settlement_plan(&sessions, true).unwrap().unwrap();
+        let mut region = ProductionGenerationRegion::for_halo(&source, &plan.context);
+        let mut emitted = Vec::new();
+        let outcomes = region.generate_target_owned_cohort_with_cooperation(
+            &mut sessions,
+            plan,
+            &CountingExecutor {
+                dispatches: AtomicUsize::new(0),
+                jobs: AtomicUsize::new(0),
+            },
+            |index, _, output| {
+                let crate::worldgen_session::GenerationRequestResult::Generated(snapshot) = output else {
+                    panic!("fresh output must be generated");
+                };
+                assert_eq!(snapshot.coordinate(), (0, 0));
+                assert_eq!(snapshot.column().block_state_id(15, 0, 0), sid("minecraft:diorite"));
+                emitted.push(index);
+                Ok(())
+            },
+            || {
+                cancel_during_yield.cancel();
+                tokio::task::yield_now()
+            },
+        ).await.expect("a live sibling keeps the cohort usable");
+        assert_eq!(emitted, [1]);
+        assert!(matches!(outcomes[0], Err(crate::worldgen_session::GenerationRequestError::Session(
+            SessionError::Cancelled,
+        ))));
+        assert!(outcomes[1].is_ok());
+        assert!(matches!(outcomes[2], Err(crate::worldgen_session::GenerationRequestError::Session(
+            SessionError::Cancelled,
+        ))));
+        assert_eq!(invocations.load(Ordering::Relaxed), 9);
+        assert!(session_output_complete(&sessions[1]));
+        assert!(!session_output_complete(&sessions[0]));
+        assert!(!session_output_complete(&sessions[2]));
     }
 
     #[test]

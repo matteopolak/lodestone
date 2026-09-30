@@ -294,7 +294,7 @@ when no delivery remains to drive another poll. Native running jobs observe
 their cancellation tokens and finish cooperatively. A partially emitted cohort
 remains owned only while it has another live request to deliver.
 
-Native Overworld cohorts admit a bounded group of requested targets into one
+Overworld cohorts admit a bounded group of requested targets into one
 ordered source region. Immutable prerequisites may run concurrently; mutable
 owners complete in canonical order. Every target-owned execution path restores
 retained feature writes before any owner runs; a cohort deduplicates the union
@@ -303,12 +303,22 @@ computed value under the same write identity before the checkpoint is restored.
 Conflicting retained values fail rather than choosing an arbitrary request.
 A target's detached packet snapshot becomes
 available only after admitted owners that can write either the target or its
-packet-neighbor ring have completed. The store commits each stable output and
+packet-neighbor ring have completed. Native store execution commits each stable output and
 its mutation destinations under a pinned halo lease before exposing it to the
 join stream. The dimension and region-persistence wrappers forward the cohort
 boundary; persisted or edited targets still take precedence over generation.
-The browser keeps the yielding batch path until it has an equivalent
-non-blocking cohort driver.
+Native and browser execution use the same value-owned `TargetOwnedCohortCursor`
+in `production_worldgen_cohort.rs`. It advances mutable owners, sparse padding,
+and fence-ready outputs in canonical order; cancelled duplicate slots do not
+prevent a live slot from owning the target. Scoped stage machines borrow the
+region and cursor's packet products only for the current action.
+
+The synchronous adapter advances immediately. The browser adapter cooperates
+between stage-machine steps and completed actions, but still collects results
+in original request-slot order and publishes through the existing batch boundary.
+Admission, immutable prefix priming, and replay preparation are synchronous;
+this cursor does not yet make those operations interruptible or enable a wider
+browser delivery window. Nether and End retain their dimension-specific paths.
 
 After that revision-validated commit, the store consumes the gathered columns.
 It captures only mutation destinations for source persistence, so persistence
@@ -365,6 +375,10 @@ drained. Keep worker submission and `ChunkSource` adaptation outside this
 module: the session is a state machine, not another executor. Production
 callers that need a different immutable executor use the driver helper's
 executor parameter while retaining the same policy and commit boundaries.
+Change Overworld owner and output-fence traversal in `production_worldgen_cohort.rs`,
+keeping both adapters on the same cursor and stage advancement rules. Compare
+ordered outputs, target and neighbour contents, revisions, duplicate slots,
+and cancellation across the synchronous and cooperating drivers.
 Changes to the
 commit order, budgets, checkpoint validation, or revision rules need controls
 for out-of-order completion, duplicate writes, rollback, incomplete sources,
