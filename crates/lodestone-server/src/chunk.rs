@@ -2323,7 +2323,6 @@ pub trait ChunkSource: Send + Sync {
             .collect()
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     fn generation_cohort_width_hint(&self) -> Option<usize> {
         None
     }
@@ -2361,6 +2360,46 @@ pub trait ChunkSource: Send + Sync {
             }
         }
         Ok(statuses)
+    }
+
+    #[cfg(any(target_arch = "wasm32", test))]
+    fn request_generation_cohort_yielding<'a>(
+        &'a self,
+        sessions: &'a mut [crate::worldgen_session::GenerationSession],
+        emit: &'a mut dyn FnMut(
+            usize,
+            &crate::worldgen_session::GenerationSession,
+            crate::worldgen_session::GenerationRequestResult,
+        ) -> Result<(), crate::worldgen_session::GenerationRequestError>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<
+        Vec<Result<(), crate::worldgen_session::GenerationRequestError>>,
+        crate::worldgen_session::GenerationRequestError,
+    >> + 'a>> {
+        Box::pin(async move {
+            #[cfg(target_arch = "wasm32")]
+            let generated = self.request_generation_batch_yielding(sessions).await;
+            #[cfg(not(target_arch = "wasm32"))]
+            let generated = self.request_generation_batch(sessions);
+            if generated.len() != sessions.len() {
+                return Err(crate::worldgen_session::GenerationRequestError::Boundary(
+                    "generation cohort returned the wrong result count".to_owned(),
+                ));
+            }
+            let mut statuses = Vec::with_capacity(sessions.len());
+            for (index, result) in generated.into_iter().enumerate() {
+                match result {
+                    Ok(Some(value)) => {
+                        emit(index, &sessions[index], value)?;
+                        statuses.push(Ok(()));
+                    }
+                    Ok(None) => statuses.push(Err(
+                        crate::worldgen_session::GenerationRequestError::Unsupported,
+                    )),
+                    Err(error) => statuses.push(Err(error)),
+                }
+            }
+            Ok(statuses)
+        })
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -3161,7 +3200,6 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
         (**self).request_generation_batch(sessions)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     fn generation_cohort_width_hint(&self) -> Option<usize> {
         (**self).generation_cohort_width_hint()
     }
@@ -3180,6 +3218,22 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
         crate::worldgen_session::GenerationRequestError,
     > {
         (**self).request_generation_cohort(sessions, emit)
+    }
+
+    #[cfg(any(target_arch = "wasm32", test))]
+    fn request_generation_cohort_yielding<'a>(
+        &'a self,
+        sessions: &'a mut [crate::worldgen_session::GenerationSession],
+        emit: &'a mut dyn FnMut(
+            usize,
+            &crate::worldgen_session::GenerationSession,
+            crate::worldgen_session::GenerationRequestResult,
+        ) -> Result<(), crate::worldgen_session::GenerationRequestError>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<
+        Vec<Result<(), crate::worldgen_session::GenerationRequestError>>,
+        crate::worldgen_session::GenerationRequestError,
+    >> + 'a>> {
+        (**self).request_generation_cohort_yielding(sessions, emit)
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -3491,7 +3545,6 @@ impl<S: ChunkSource + ?Sized> ChunkSource for &S {
         (**self).request_generation_batch(sessions)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     fn generation_cohort_width_hint(&self) -> Option<usize> {
         (**self).generation_cohort_width_hint()
     }
@@ -3510,6 +3563,22 @@ impl<S: ChunkSource + ?Sized> ChunkSource for &S {
         crate::worldgen_session::GenerationRequestError,
     > {
         (**self).request_generation_cohort(sessions, emit)
+    }
+
+    #[cfg(any(target_arch = "wasm32", test))]
+    fn request_generation_cohort_yielding<'a>(
+        &'a self,
+        sessions: &'a mut [crate::worldgen_session::GenerationSession],
+        emit: &'a mut dyn FnMut(
+            usize,
+            &crate::worldgen_session::GenerationSession,
+            crate::worldgen_session::GenerationRequestResult,
+        ) -> Result<(), crate::worldgen_session::GenerationRequestError>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<
+        Vec<Result<(), crate::worldgen_session::GenerationRequestError>>,
+        crate::worldgen_session::GenerationRequestError,
+    >> + 'a>> {
+        (**self).request_generation_cohort_yielding(sessions, emit)
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -3902,6 +3971,11 @@ pub(crate) async fn yield_to_browser() {
             .expect("global.setTimeout");
     });
     let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+}
+
+#[cfg(all(not(target_arch = "wasm32"), test))]
+pub(crate) async fn yield_to_browser() {
+    tokio::task::yield_now().await;
 }
 
 /// Generates columns off the async runtime's core thread.
@@ -4576,7 +4650,6 @@ impl ChunkSource for OverworldChunkSource {
         )
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     fn generation_cohort_width_hint(&self) -> Option<usize> {
         Some(64)
     }
@@ -4600,6 +4673,24 @@ impl ChunkSource for OverworldChunkSource {
             &crate::worldgen_lifecycle::PersistentWorldgenExecutor,
             emit,
         )
+    }
+
+    #[cfg(any(target_arch = "wasm32", test))]
+    fn request_generation_cohort_yielding<'a>(
+        &'a self,
+        sessions: &'a mut [crate::worldgen_session::GenerationSession],
+        emit: &'a mut dyn FnMut(
+            usize,
+            &crate::worldgen_session::GenerationSession,
+            crate::worldgen_session::GenerationRequestResult,
+        ) -> Result<(), crate::worldgen_session::GenerationRequestError>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<
+        Vec<Result<(), crate::worldgen_session::GenerationRequestError>>,
+        crate::worldgen_session::GenerationRequestError,
+    >> + 'a>> {
+        Box::pin(crate::production_worldgen_session::generate_cohort_yielding(
+            self, sessions, emit,
+        ))
     }
 
     #[cfg(target_arch = "wasm32")]

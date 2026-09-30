@@ -3,7 +3,8 @@
 //! The walk stays recursive because multiplication and selectors can skip
 //! subtrees, while interpolation mode is specialized at compile time.
 
-use std::simd::prelude::*;
+use fearless_simd::{Level, dispatch, f64x8, prelude::*};
+use fearless_simd_macros::simd;
 
 use super::graph::{Graph, NodeId, Op, OpKind, OverworldFinalDensityPlan, TilePlan};
 use super::scratch::Scratch;
@@ -1841,8 +1842,18 @@ fn write_interpolated_corners_simd(
     n: [f64; 8],
     output: &mut [f64; 128],
 ) {
+    dispatch!(Level::new(), simd => write_interpolated_corners_kernel(simd, mask, n, output));
+}
+
+#[simd]
+fn write_interpolated_corners_kernel<S: Simd>(
+    simd: S,
+    mask: [u64; 2],
+    n: [f64; 8],
+    output: &mut [f64; 128],
+) {
     for index in (0..128).step_by(8) {
-        let values = interpolate_canonical_chunk(index, &n).to_array();
+        let values = interpolate_canonical_chunk(simd, index, &n).to_array();
         for lane in 0..8 {
             if mask_contains(mask, index + lane) {
                 output[index + lane] = values[lane];
@@ -1892,19 +1903,29 @@ fn write_shared_noodle_output_simd(
     channels: &[[f64; 8]; 4],
     output: &mut [f64; 128],
 ) {
+    dispatch!(Level::new(), simd => write_shared_noodle_output_kernel(simd, mask, channels, output));
+}
+
+#[simd]
+fn write_shared_noodle_output_kernel<S: Simd>(
+    simd: S,
+    mask: [u64; 2],
+    channels: &[[f64; 8]; 4],
+    output: &mut [f64; 128],
+) {
     for index in (0..128).step_by(8) {
         let mut clamped = [0.0; 8];
         for lane in 0..8 {
             clamped[lane] = output[index + lane].clamp(-1.0, 1.0);
         }
-        let clamped = Simd::<f64, 8>::from_array(clamped);
+        let clamped = f64x8::simd_from(simd, clamped);
         let squared = clamped * clamped;
         let cubed = squared * clamped;
-        let squeezed = clamped / Simd::splat(2.0) - cubed / Simd::splat(24.0);
+        let squeezed = clamped / f64x8::splat(simd, 2.0) - cubed / f64x8::splat(simd, 24.0);
         let squeezed = squeezed.to_array();
 
-        let ridge_a = interpolate_canonical_chunk(index, &channels[1]).to_array();
-        let ridge_b = interpolate_canonical_chunk(index, &channels[2]).to_array();
+        let ridge_a = interpolate_canonical_chunk(simd, index, &channels[1]).to_array();
+        let ridge_b = interpolate_canonical_chunk(simd, index, &channels[2]).to_array();
         let mut active = [false; 8];
         let mut max_abs = [0.0; 8];
         for lane in 0..8 {
@@ -1913,8 +1934,8 @@ fn write_shared_noodle_output_simd(
                 max_abs[lane] = ridge_a[lane].abs().max(ridge_b[lane].abs());
             }
         }
-        let thickness = interpolate_canonical_chunk(index, &channels[3]);
-        let noodle = (thickness + Simd::splat(1.5) * Simd::from_array(max_abs)).to_array();
+        let thickness = interpolate_canonical_chunk(simd, index, &channels[3]);
+        let noodle = (thickness + f64x8::splat(simd, 1.5) * f64x8::simd_from(simd, max_abs)).to_array();
         for lane in 0..8 {
             if active[lane] {
                 output[index + lane] = squeezed[lane].min(noodle[lane]);
@@ -1925,19 +1946,19 @@ fn write_shared_noodle_output_simd(
     }
 }
 
-#[inline]
-fn interpolate_canonical_chunk(start: usize, n: &[f64; 8]) -> Simd<f64, 8> {
+#[inline(always)]
+fn interpolate_canonical_chunk<S: Simd>(simd: S, start: usize, n: &[f64; 8]) -> f64x8<S> {
     const XZ_FACTORS: [f64; 4] = [0.0, 0.25, 0.5, 0.75];
     const Y_FACTORS: [f64; 8] = [0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875];
     debug_assert!(start < 128 && start % 8 == 0);
     let group = start / 8;
-    let x = Simd::splat(XZ_FACTORS[group % 4]);
-    let y = Simd::from_array(Y_FACTORS);
-    let z = Simd::splat(XZ_FACTORS[group / 4]);
-    let p0 = Simd::splat(n[0]) + x * (Simd::splat(n[1]) - Simd::splat(n[0]));
-    let p1 = Simd::splat(n[2]) + x * (Simd::splat(n[3]) - Simd::splat(n[2]));
-    let p2 = Simd::splat(n[4]) + x * (Simd::splat(n[5]) - Simd::splat(n[4]));
-    let p3 = Simd::splat(n[6]) + x * (Simd::splat(n[7]) - Simd::splat(n[6]));
+    let x = f64x8::splat(simd, XZ_FACTORS[group % 4]);
+    let y = f64x8::simd_from(simd, Y_FACTORS);
+    let z = f64x8::splat(simd, XZ_FACTORS[group / 4]);
+    let p0 = f64x8::splat(simd, n[0]) + x * (f64x8::splat(simd, n[1]) - f64x8::splat(simd, n[0]));
+    let p1 = f64x8::splat(simd, n[2]) + x * (f64x8::splat(simd, n[3]) - f64x8::splat(simd, n[2]));
+    let p2 = f64x8::splat(simd, n[4]) + x * (f64x8::splat(simd, n[5]) - f64x8::splat(simd, n[4]));
+    let p3 = f64x8::splat(simd, n[6]) + x * (f64x8::splat(simd, n[7]) - f64x8::splat(simd, n[6]));
     let q0 = p0 + y * (p1 - p0);
     let q1 = p2 + y * (p3 - p2);
     q0 + z * (q1 - q0)
@@ -2083,7 +2104,8 @@ fn shift(noise: &crate::noise::NormalNoise, x: f64, y: f64, z: f64) -> f64 {
 mod tests {
     use super::{
         terrain_subcell_is_strictly_nonpositive, write_interpolated_corners,
-        write_interpolated_corners_scalar, write_shared_noodle_output,
+        write_interpolated_corners_kernel, write_interpolated_corners_scalar,
+        write_shared_noodle_output, write_shared_noodle_output_kernel,
         write_shared_noodle_output_scalar,
     };
     use super::Field;
@@ -2342,6 +2364,11 @@ mod tests {
         let corner_sets = [
             [-3.25, 0.125, 7.5, -11.75, 19.0, -0.0, 2.5, -4.0],
             [f64::NAN, 0.125, 7.5, -11.75, 19.0, -0.0, 2.5, -4.0],
+            [
+                f64::from_bits(0xfff8_0000_0000_1234), 0.125, 7.5, -11.75,
+                19.0, -0.0, 2.5, -4.0,
+            ],
+            [-0.0; 8],
         ];
         let masks = [
             [0, 0],
@@ -2356,15 +2383,24 @@ mod tests {
                 for mask in masks {
                     let mut actual = [f64::from_bits(0x8000_0000_0000_0000); 128];
                     let mut expected = actual;
+                    let mut fallback = actual;
                     write_interpolated_corners(
                         4, 8, x0, y0, z0, mask, corners, &mut actual,
                     );
                     write_interpolated_corners_scalar(4, 8, mask, corners, &mut expected);
+                    write_interpolated_corners_kernel(
+                        fearless_simd::Fallback::new(), mask, corners, &mut fallback,
+                    );
                     for (index, (&got, &want)) in actual.iter().zip(expected.iter()).enumerate() {
                         assert_eq!(
                             got.to_bits(),
                             want.to_bits(),
                             "corner lane {index}, origin ({x0},{y0},{z0}), mask {mask:?}",
+                        );
+                        assert_eq!(
+                            fallback[index].to_bits(),
+                            want.to_bits(),
+                            "fallback corner lane {index}, origin ({x0},{y0},{z0}), mask {mask:?}",
                         );
                     }
                 }
@@ -2403,13 +2439,22 @@ mod tests {
                 };
             }
             let mut expected = actual;
+            let mut fallback = actual;
             write_shared_noodle_output(4, 8, mask, &channels, &mut actual);
             write_shared_noodle_output_scalar(4, 8, mask, &channels, &mut expected);
+            write_shared_noodle_output_kernel(
+                fearless_simd::Fallback::new(), mask, &channels, &mut fallback,
+            );
             for (index, (&got, &want)) in actual.iter().zip(expected.iter()).enumerate() {
                 assert_eq!(
                     got.to_bits(),
                     want.to_bits(),
                     "noodle lane {index}, mask {mask:?}",
+                );
+                assert_eq!(
+                    fallback[index].to_bits(),
+                    want.to_bits(),
+                    "fallback noodle lane {index}, mask {mask:?}",
                 );
             }
         }

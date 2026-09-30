@@ -87,9 +87,12 @@ This bounds dispatch-side CPU and queue pressure; it does not make a shared
 world-store coordinate lease nonblocking. Tick-side wiring must keep its lease
 handoff separate rather than synchronously waiting on a generation-held lease.
 
-The browser uses the same production generation session and ordered target
-queue. A threaded build runs immutable work on its initialized worker pool;
-the serial build uses the yielding path. The server worker currently encodes
+The browser uses the same production generation session, cohort publication,
+and ordered target queue. Its Overworld source admits at most 16 nearby targets
+after the singleton center and publishes stable outputs incrementally. A
+threaded build can run immutable work on its initialized worker pool, though
+the pristine shaped batch still uses a serial map; both artifacts use the
+cooperative stage driver. The server worker currently encodes
 the resulting columns before sending them over a byte-credit-limited
 `MessagePort`, while the client worker decodes and meshes them. The block-update sender shares the
 same connection loop as chunk streaming, so a write awaiting transport credit

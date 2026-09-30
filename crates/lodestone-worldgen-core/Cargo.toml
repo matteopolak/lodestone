@@ -38,7 +38,11 @@ stage-pmu = []
 
 [dependencies]
 # `density`'s data layer parses noise settings, spline tables and biome/climate
-# documents straight from the version crate's JSON. The only non-`std` dependency
-# in the whole crate, deliberately: this is a leaf, and every unit scheduled
-# against it (U4's engine, U5's SIMD kernels) wants it to stay one.
+# documents straight from the version crate's JSON.
 serde_json = { workspace = true }
+# Canonical field-cell arithmetic uses one token-generic kernel on every backend.
+fearless_simd = { workspace = true }
+fearless_simd_macros = { workspace = true }
+
+[dev-dependencies]
+fearless_simd = { workspace = true, features = ["force_support_fallback"] }

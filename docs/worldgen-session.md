@@ -303,7 +303,7 @@ computed value under the same write identity before the checkpoint is restored.
 Conflicting retained values fail rather than choosing an arbitrary request.
 A target's detached packet snapshot becomes
 available only after admitted owners that can write either the target or its
-packet-neighbor ring have completed. Native store execution commits each stable output and
+packet-neighbor ring have completed. Store execution commits each stable output and
 its mutation destinations under a pinned halo lease before exposing it to the
 join stream. The dimension and region-persistence wrappers forward the cohort
 boundary; persisted or edited targets still take precedence over generation.
@@ -314,11 +314,22 @@ prevent a live slot from owning the target. Scoped stage machines borrow the
 region and cursor's packet products only for the current action.
 
 The synchronous adapter advances immediately. The browser adapter cooperates
-between stage-machine steps and completed actions, but still collects results
-in original request-slot order and publishes through the existing batch boundary.
-Admission, immutable prefix priming, and replay preparation are synchronous;
-this cursor does not yet make those operations interruptible or enable a wider
-browser delivery window. Nether and End retain their dimension-specific paths.
+between stage-machine steps and completed actions. Both expose indexed, fallible
+stable-output callbacks through `ChunkSource` and share the store's publication
+bookkeeping. Batch APIs collect those callbacks for compatibility; production
+joins receive committed snapshots while the remaining owners continue.
+The result channel is bounded to one output per requested slot. Its reorder
+buffer preserves admission order regardless of callback order. Dropping its
+receiver cancels the local task; region, halo, and pipeline claims release,
+empty admissions are pruned, and already committed outputs remain reusable.
+Revision retries release the old region and retry only live, uncommitted slots.
+
+The initial target remains a singleton. Later browser cohorts admit at most
+16 targets within a four-by-four coordinate extent, independently of the compute
+pool width. Native cohorts retain their 64-target, eight-by-eight limits.
+Admission, immutable prefix priming, and replay preparation are still synchronous;
+streaming does not make those operations interruptible. Nether and End retain
+their dimension-specific generation paths.
 
 After that revision-validated commit, the store consumes the gathered columns.
 It captures only mutation destinations for source persistence, so persistence

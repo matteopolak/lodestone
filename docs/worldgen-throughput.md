@@ -214,12 +214,21 @@ for every block; the scalar block path remains available to carvers and other
 point consumers.
 
 The production 4×8×4 final-density cell path evaluates its contiguous eight-lane
-interpolation and shared-noodle output chunks with the crate's nightly portable
-SIMD. The scalar helpers remain the exact reference and fallback for other cell
-geometries. The vector lanes retain the existing lerp nesting and only commit
-active mask lanes; focused field controls compare all 128 output bits across
-full, partial, and empty masks, including signed zero, NaN, and cell-boundary
-origins.
+interpolation and shared-noodle output chunks with `fearless_simd` 1.0. Each
+128-value cell dispatches once to a token-generic `#[simd]` kernel; its sixteen
+eight-lane groups share that token. Native instruction sets and the scalar
+fallback use the same arithmetic body. WebAssembly uses its compilation target's
+SIMD baseline when enabled, otherwise the scalar backend. The scalar helpers
+remain the exact reference and the path for other cell geometries.
+
+The vector lanes retain the existing lerp nesting and separate multiplies and
+adds. Clamp, absolute maximum, and final minimum remain scalar to preserve their
+NaN and signed-zero behavior. Focused field controls compare all 128 output bits
+for both native dispatch and a forced scalar token across full, partial, and
+empty masks, including signed zero, NaN payloads, and cell-boundary origins.
+When changing these kernels, run `cargo test -p lodestone-worldgen-core
+simd_matches_scalar --no-fail-fast` and the Wasm check; native debug builds must
+also work with the repository's Cranelift backend.
 
 Each enabled aquifer instance likewise takes its per-chunk fluid-status,
 aquifer-location, and preliminary-surface caches from a bounded worker-local
@@ -306,6 +315,21 @@ The executable is intentionally not a server benchmark: do not add region-file I
 
 The positional arguments are `seed`, `grid-side`, `all|overworld|nether|end`, and `all|shaped|decorated`; defaults are `42`, `16`, `all`, and `all`. Release mode is required for representative throughput. The sample allocation count is capped at 16 chunks per mode so a full-grid run remains practical.
 
+Field SIMD uses the library's default `std` feature for instruction-set
+detection. `force_support_fallback` is enabled only by the core crate's test
+dependency so its controls can exercise the scalar token on SIMD hosts.
+The web workspace overrides this crate to release optimization level `3` while
+keeping its other packages size-optimized. The current browser artifacts do not
+enable `simd128`, so their token-generic field kernels select scalar fallback.
+Changing that feature requires an explicit browser capability and parity gate;
+it must not silently remove the serial artifact's compatibility baseline.
+
 ## Dependencies
 
 The example uses the production constructors in `lodestone-server::worldgen_data`, the three generators in `lodestone-worldgen`, `memory-stats` for resident-set sampling, and `libc`'s process resource counter on Unix. It does not depend on persistence, lighting, packet, or transport modules.
+
+The field kernels use `fearless_simd` 1.0 and the separate
+`fearless_simd_macros` 0.1 crate. Both are distributed under MIT or Apache-2.0;
+the macro expands token-aware target-feature dispatch and requires Rust 1.89 or
+later. Improved-noise kernels still use the standard library's nightly portable
+SIMD independently of the field kernels.

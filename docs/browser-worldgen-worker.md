@@ -64,6 +64,13 @@ This prevents an action awaiting an overlapping region from also stopping the
 only task capable of releasing that region. Generation admission errors are
 returned through the normal chunk error boundary, not promoted to a panic.
 
+After the singleton first target, Overworld streaming can share one region for
+up to 16 targets within a four-by-four extent. Stable target snapshots cross the
+same store commit boundary as native cohorts and enter a bounded indexed channel
+before the cohort finishes. The client-facing queue retains admission order;
+compute pool width is not the region size. Preparation remains synchronous, so
+measure its longest span and worker-health gaps as well as total cohort time.
+
 The `browser-yield` timing phase records actual host scheduling wait around
 cooperative generation yields. Its totals are elapsed wait, not CPU work, and
 can overlap other task timings. Compare yield maxima with worker-health gaps

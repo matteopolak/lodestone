@@ -64,3 +64,6 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[profile.release.package.lodestone-worldgen-core]
+opt-level = 3
