@@ -38,7 +38,8 @@
 //! # The vocabulary is deliberately version-free and ECS-free
 //!
 //! [`CommandCaller`] carries a `Uuid`, a `String`, and the already-resolved
-//! command level; [`CommandResponse`] carries `String`s. Nothing here names a
+//! command level; [`CommandResponse`] carries plain strings and styled `Text`.
+//! Nothing here names a
 //! protocol number, a packet id, a `World`, or a `Resource`. That is what lets
 //! the host implement [`CommandSink`] over `lodestone-ecs` without this crate
 //! ever seeing it.
@@ -91,6 +92,8 @@
 use std::fmt;
 use std::sync::Arc;
 
+use lodestone_command::{ParseError, ParseErrorKind};
+use lodestone_model::text::{ClickAction, ClickEvent, Text, TextColor};
 use lodestone_model::{ResourceKey, Rotation, Vec3};
 use uuid::Uuid;
 
@@ -217,8 +220,8 @@ impl ContextualCommandResponse {
 ///
 /// Deliberately not a `Result`: a refusal is an ordinary, expected outcome
 /// (unknown command, bad argument, missing permission) that the player must be
-/// *told about*, not an error the connection layer should react to. Both
-/// variants produce system chat and neither ends the connection.
+/// *told about*, not an error the connection layer should react to. All
+/// variants produce system chat without ending the connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandResponse {
     /// The command ran. `feedback` is whatever should be shown to the caller,
@@ -230,12 +233,15 @@ pub enum CommandResponse {
     },
     /// The command did not run, and this is why.
     ///
-    /// Covers unknown command, parse failure, **and permission denial** — the
-    /// wire layer deliberately cannot tell those apart, because distinguishing
-    /// them here would mean this crate knowing what a permission is.
+    /// Execution and host-policy refusals without a parser cursor.
     Refused {
         /// The single line explaining the refusal.
         message: String,
+    },
+    /// A positioned parse refusal, retaining both console text and chat styling.
+    SyntaxError {
+        feedback: [String; 2],
+        components: [Text; 2],
     },
 }
 
@@ -246,6 +252,39 @@ impl CommandResponse {
         Self::Refused {
             message: message.into(),
         }
+    }
+
+    /// Build the error and pointer lines from the parser's character cursor.
+    #[must_use]
+    pub fn refused_syntax(input: &str, error: &ParseError) -> Self {
+        let message = error.kind.player_message();
+        let (prefix, remaining) = error.context(input);
+        let feedback = [message.clone(), format!("{prefix}{remaining}<--[HERE]")];
+        let mut explanation = Text::literal(message);
+        explanation.style.color = Some(TextColor::Red);
+        let mut context = Text::literal(prefix);
+        context.style.color = Some(TextColor::Gray);
+        context.click = Some(ClickEvent {
+            action: ClickAction::SuggestCommand,
+            value: format!("/{}", input.strip_prefix('/').unwrap_or(input)),
+        });
+        if !remaining.is_empty() {
+            let mut invalid = Text::literal(remaining);
+            invalid.style.color = Some(TextColor::Red);
+            invalid.style.underlined = Some(true);
+            context.extra.push(invalid);
+        }
+        let mut pointer = Text::literal("<--[HERE]");
+        pointer.style.color = Some(TextColor::Red);
+        pointer.style.italic = Some(true);
+        context.extra.push(pointer);
+        Self::SyntaxError { feedback, components: [explanation, context] }
+    }
+
+    /// An unrecognized command root still needs a pointer at its first character.
+    #[must_use]
+    pub fn unknown_command(input: &str) -> Self {
+        Self::refused_syntax(input, &ParseError::new(0, ParseErrorKind::UnknownCommand))
     }
 
     /// A silent success.
@@ -268,6 +307,21 @@ impl CommandResponse {
         match self {
             Self::Ran { feedback } => feedback,
             Self::Refused { message } => std::slice::from_ref(message),
+            Self::SyntaxError { feedback, .. } => feedback,
+        }
+    }
+
+    /// Styled player feedback; console callers retain [`Self::lines`].
+    #[must_use]
+    pub fn chat_lines(&self) -> Vec<Text> {
+        match self {
+            Self::SyntaxError { components, .. } => components.to_vec(),
+            Self::Ran { feedback } => feedback.iter().map(Text::literal).collect(),
+            Self::Refused { message } => {
+                let mut text = Text::literal(message);
+                text.style.color = Some(TextColor::Red);
+                vec![text]
+            }
         }
     }
 }
@@ -278,7 +332,7 @@ impl CommandResponse {
 /// Kept as one constant so the "no sink" path and a host that wants to match
 /// it cannot drift apart, and so a test can assert the exact string rather
 /// than that *some* refusal happened.
-pub const UNKNOWN_COMMAND: &str = "Unknown or incomplete command, see below for error";
+pub const UNKNOWN_COMMAND: &str = "Unknown or incomplete command. See below for error";
 
 /// The host-installed command dispatcher.
 ///
@@ -374,7 +428,7 @@ impl CommandDispatch {
     pub fn run(&self, caller: &CommandCaller, command: &str) -> CommandResponse {
         match &self.sink {
             Some(sink) => sink.run(caller, command),
-            None => CommandResponse::refused(UNKNOWN_COMMAND),
+            None => CommandResponse::unknown_command(command),
         }
     }
 
@@ -469,6 +523,50 @@ mod tests {
     }
 
     #[test]
+    fn syntax_feedback_retains_the_error_pointer_and_chat_styles() {
+        let error = ParseError::new(9, ParseErrorKind::InvalidArgument("Unknown game mode: wizard".to_owned()));
+        let response = CommandResponse::refused_syntax("gamemode wizard", &error);
+        assert!(!response.is_ran());
+        assert_eq!(response.lines(), ["Unknown game mode: wizard", "gamemode wizard<--[HERE]"]);
+        let lines = response.chat_lines();
+        assert_eq!(lines[0].style.color, Some(TextColor::Red));
+        assert_eq!(lines[1].style.color, Some(TextColor::Gray));
+        assert_eq!(lines[1].to_plain_string(), "gamemode wizard<--[HERE]");
+        assert_eq!(lines[1].extra[0].to_plain_string(), "wizard");
+        assert_eq!(lines[1].extra[0].style.color, Some(TextColor::Red));
+        assert_eq!(lines[1].extra[0].style.underlined, Some(true));
+        assert_eq!(lines[1].extra[1].style.italic, Some(true));
+        assert_eq!(lines[1].click, Some(ClickEvent {
+            action: ClickAction::SuggestCommand,
+            value: "/gamemode wizard".to_owned(),
+        }));
+    }
+
+    #[test]
+    fn syntax_context_is_clipped_by_characters_and_handles_the_end_of_input() {
+        let input = "say é日🌍abcdefXYZ nope";
+        let error = ParseError::new(17, ParseErrorKind::UnknownArgument);
+        let response = CommandResponse::refused_syntax(input, &error);
+        assert_eq!(response.lines(), ["Incorrect argument for command", "...abcdefXYZ nope<--[HERE]"]);
+        let short = CommandResponse::refused_syntax("é日🌍", &ParseError::new(2, ParseErrorKind::UnknownArgument));
+        assert_eq!(short.chat_lines()[1].extra[0].to_plain_string(), "🌍");
+        assert_eq!(short.lines()[1], "é日🌍<--[HERE]");
+        let end = CommandResponse::refused_syntax("gamemode", &ParseError::new(8, ParseErrorKind::NotExecutable));
+        assert_eq!(end.chat_lines()[1].extra.len(), 1);
+        assert_eq!(end.lines()[1], "gamemode<--[HERE]");
+    }
+
+    #[test]
+    fn execution_refusals_are_red_and_success_feedback_has_no_error_style() {
+        let refused = CommandResponse::refused("No player was found");
+        assert_eq!(refused.chat_lines()[0].style.color, Some(TextColor::Red));
+        assert_eq!(refused.lines(), ["No player was found"]);
+        let ran = CommandResponse::Ran { feedback: vec!["Set own game mode to Creative Mode".to_owned()] };
+        assert_eq!(ran.chat_lines()[0].style.color, None);
+        assert!(ran.is_ran());
+    }
+
+    #[test]
     fn caller_level_is_explicit_and_invalid_input_fails_closed() {
         assert_eq!(caller().permission_level, 0);
         assert_eq!(CommandCaller::with_permission_level(Uuid::nil(), "op", 3).permission_level, 3);
@@ -510,8 +608,9 @@ mod tests {
         assert!(!dispatch.is_installed());
         assert_eq!(
             dispatch.run(&caller(), "warp spawn"),
-            CommandResponse::refused(UNKNOWN_COMMAND)
+            CommandResponse::unknown_command("warp spawn")
         );
+        assert_eq!(dispatch.run(&caller(), "warp spawn").lines(), [UNKNOWN_COMMAND, "warp spawn<--[HERE]"]);
 
         // The control: install a sink that would have run, and the identical
         // call now runs — so the refusal above was about the missing sink and

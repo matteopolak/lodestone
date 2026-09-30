@@ -147,7 +147,7 @@ impl ArgumentType for OperationArg {
             Some((_, op)) => Ok(ParsedValue::dynamic(*op)),
             None => {
                 reader.set_cursor(start);
-                Err(ParseError::new(start, ParseErrorKind::InvalidBool(format!("invalid operation '{token}'"))))
+                Err(ParseError::new(start, ParseErrorKind::InvalidArgument(format!("Invalid operation '{token}'"))))
             }
         }
     }

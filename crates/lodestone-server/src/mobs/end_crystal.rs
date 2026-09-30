@@ -133,6 +133,7 @@ impl<'w> MobSim<'w> {
                 rotation: Rotation::new(0.0, 0.0),
                 head_yaw: 0.0,
                 velocity: Vec3::new(0.0, 0.0, 0.0),
+                on_ground: false,
                 // `CrystalShowBottom(true)` is real and unconditional — every
                 // crystal here draws its base, since a caged crystal is never
                 // spawned (no obsidian pillars anywhere, see this module's

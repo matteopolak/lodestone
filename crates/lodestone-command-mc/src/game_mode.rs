@@ -39,14 +39,9 @@ impl ArgumentType for GameModeArg {
             Some((_, mode)) => Ok(ParsedValue::dynamic(*mode)),
             None => {
                 reader.set_cursor(start);
-                // `argument.gamemode.invalid` is one of vanilla's own dynamic
-                // command-exception types, over the offending text;
-                // `InvalidBool` is the closest shape
-                // `lodestone-command`'s Brigadier-aligned `ParseErrorKind` has
-                // for "found this, expected one of a closed set" — the same
-                // reuse `ChoicesArgument` already makes, and deliberately not a
-                // new variant, so this crate cannot grow its own error dialect.
-                Err(ParseError::new(start, ParseErrorKind::InvalidBool(text)))
+                Err(ParseError::new(start, ParseErrorKind::InvalidArgument(
+                    format!("Unknown game mode: {text}"),
+                )))
             }
         }
     }
@@ -93,6 +88,16 @@ mod tests {
                 "26.2's game-mode name lookup rejects {rejected:?}; this accepted it"
             );
         }
+    }
+
+    #[test]
+    fn an_unknown_mode_reports_the_mode_and_preserves_its_cursor() {
+        let mut reader = StringReader::new("gamemode wizard");
+        reader.set_cursor(9);
+        let error = GameModeArg.parse(&mut reader).expect_err("wizard is not a game mode");
+        assert_eq!(error.position, 9);
+        assert_eq!(error.kind.player_message(), "Unknown game mode: wizard");
+        assert_eq!(reader.cursor(), 9);
     }
 
     /// A failed parse must leave the cursor where it started, or a sibling

@@ -339,6 +339,66 @@ fn nbt_colored_component(text: &str, color: &str) -> Vec<u8> {
 }
 
 #[test]
+fn command_syntax_feedback_keeps_its_pointer_and_styles_on_the_wire() {
+    use lodestone_command::{ArgumentType, StringReader};
+    use lodestone_core::{Nbt, Reader, read_network_nbt};
+    use lodestone_model::{ClickAction, TextColor};
+    use lodestone_server::{CommandResponse, ServerDirective, ServerProtocol};
+    use lodestone_v26_2::V770ServerProtocol;
+
+    fn field<'a>(component: &'a Nbt, key: &str) -> &'a Nbt {
+        let Nbt::Compound(fields) = component else { panic!("expected component") };
+        &fields.iter().find(|(name, _)| name == key).expect("component field").1
+    }
+
+    let input = "gamemode wizard";
+    let mut reader = StringReader::new(input);
+    reader.set_cursor(9);
+    let error = lodestone_command_mc::GameModeArg.parse(&mut reader).unwrap_err();
+    let lines = CommandResponse::refused_syntax(input, &error).chat_lines();
+    let protocol: Box<dyn ServerProtocol> = Box::new(V770ServerProtocol);
+    for (index, line) in lines.iter().enumerate() {
+        let ServerDirective::Send { packet_id, payload } =
+            protocol.encode_system_chat_component(line)
+        else { panic!("expected system chat") };
+        assert_eq!(packet_id, play::clientbound::SYSTEM_CHAT);
+        let mut reader = Reader::new(&payload);
+        let component = read_network_nbt(&mut reader).unwrap();
+        assert!(!reader.bool().unwrap());
+        reader.ensure_empty().unwrap();
+        if index == 0 {
+            assert_eq!(field(&component, "text"), &Nbt::String("Unknown game mode: wizard".to_owned()));
+            assert_eq!(field(&component, "color"), &Nbt::String("red".to_owned()));
+        } else {
+            assert_eq!(field(&component, "text"), &Nbt::String("gamemode ".to_owned()));
+            assert_eq!(field(&component, "color"), &Nbt::String("gray".to_owned()));
+            let click = field(&component, "click_event");
+            assert_eq!(field(click, "action"), &Nbt::String("suggest_command".to_owned()));
+            assert_eq!(field(click, "command"), &Nbt::String("/gamemode wizard".to_owned()));
+            let Nbt::List { elements, .. } = field(&component, "extra") else { panic!("expected context parts") };
+            assert_eq!(field(&elements[0], "text"), &Nbt::String("wizard".to_owned()));
+            assert_eq!(field(&elements[0], "color"), &Nbt::String("red".to_owned()));
+            assert_eq!(field(&elements[0], "underlined"), &Nbt::Byte(1));
+            assert_eq!(field(&elements[1], "text"), &Nbt::String("<--[HERE]".to_owned()));
+            assert_eq!(field(&elements[1], "italic"), &Nbt::Byte(1));
+        }
+        let directives = V770Adapter::new().handle_packet(
+            &mut World::new(), ConnectionState::Play, packet_id, &payload,
+        ).unwrap();
+        let [Directive::Emit(ClientEvent::Chat { text, .. })] = directives.as_slice() else {
+            panic!("expected decoded command feedback");
+        };
+        if index == 0 {
+            assert_eq!(text.style.color, Some(TextColor::Red));
+        } else {
+            assert_eq!(text.to_plain_string(), "gamemode wizard<--[HERE]");
+            assert_eq!(text.extra[0].style.underlined, Some(true));
+            assert_eq!(text.click.as_ref().unwrap().action, ClickAction::SuggestCommand);
+        }
+    }
+}
+
+#[test]
 fn system_chat_preserves_component_colour() {
     // Regression: the adapter used to flatten styled components to a bare
     // literal, dropping colour before it crossed `ClientEvent::Chat`.

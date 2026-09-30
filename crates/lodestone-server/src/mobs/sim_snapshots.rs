@@ -38,6 +38,7 @@ impl<'w> MobSim<'w> {
                     rotation: Rotation::new(0.0, 0.0),
                     head_yaw: 0.0,
                     velocity: t.projectile.velocity,
+                    on_ground: false,
                     metadata: Vec::new(),
                     // The base arrow entity and friends leave the add-entity
                     // packet's
@@ -71,6 +72,7 @@ impl<'w> MobSim<'w> {
                 rotation: Rotation::new(0.0, 0.0),
                 head_yaw: 0.0,
                 velocity: state.motion.velocity,
+                on_ground: state.motion.on_ground,
                 // **The field that makes a drop draw at all.** A
                 // client draws nothing for an item entity whose stack it has
                 // not been told: the renderer returns early on an empty stack,
@@ -124,6 +126,7 @@ impl<'w> MobSim<'w> {
                 rotation: Rotation::new(0.0, 0.0),
                 head_yaw: 0.0,
                 velocity: orb.motion.velocity,
+                on_ground: orb.motion.on_ground,
                 // **The field that decides which of the eleven sprite frames draws.**
                 // Vanilla's own icon-bucketing getter buckets the orb's own value getter — not `count`, and not
                 // linearly — so an orb whose value never reaches the client draws frame
@@ -169,6 +172,7 @@ impl<'w> MobSim<'w> {
                 rotation: Rotation::new(0.0, 0.0),
                 head_yaw: 0.0,
                 velocity: Vec3::new(0.0, tracked.motion.velocity_y, 0.0),
+                on_ground: false,
                 // Vanilla's own metadata registration registers its own
                 // start-position field alone, and that
                 // accessor's value is the entity's own spawn cell — which the
@@ -220,6 +224,7 @@ impl<'w> MobSim<'w> {
                     vehicle.motion.velocity.y,
                     vehicle.motion.velocity.z,
                 ),
+                on_ground: vehicle.motion.on_ground,
                 // Boat metadata contains paddle-left and paddle-right values,
                 // on top of the shared vehicle hurt state.
                 //
@@ -277,6 +282,7 @@ impl<'w> MobSim<'w> {
                 rotation: Rotation::new(0.0, 0.0),
                 head_yaw: 0.0,
                 velocity: Vec3::new(t.motion.velocity.x, t.motion.velocity.y, t.motion.velocity.z),
+                on_ground: t.motion.on_ground,
                 // The fuse metadata field — see `MetadataField::TntFuse`'s own
                 // doc for why this is index 8's fifth `INT` claimant and must be
                 // class-guarded on decode.
@@ -316,6 +322,7 @@ impl<'w> MobSim<'w> {
                 // rotation packet is ever sent for one.
                 head_yaw: 0.0,
                 velocity: Vec3::new(cart.motion.velocity.x, cart.motion.velocity.y, cart.motion.velocity.z),
+                on_ground: cart.motion.on_ground,
                 metadata,
                 // No additional spawn data is needed.
                 object_data: 0,
@@ -347,6 +354,7 @@ impl<'w> MobSim<'w> {
                 rotation: Rotation::new(0.0, 0.0),
                 head_yaw: 0.0,
                 velocity: Vec3::new(0.0, 0.0, 0.0),
+                on_ground: false,
                 metadata: Vec::new(),
                 // No additional spawn data is needed for this lightning entity.
                 object_data: 0,

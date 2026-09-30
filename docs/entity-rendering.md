@@ -35,6 +35,12 @@ original custom/data-pack path for resource-pack model lookup while declining
 all built-in-only behavior. Add a built-in behavior by matching the generated
 variant at this boundary; do not introduce another path-string match.
 
+Dropped items retain consecutive 20 Hz physics positions and render between
+them using the shared frame-clock residual. Authoritative corrections preserve
+velocity and ground state without restarting visual age or advancing physics
+twice. Grounded items retire their previous airborne endpoint. Other entity
+types retain their own network interpolation policy.
+
 The programmable client read-model follows the same ownership rule for entity
 instances: `ClientHandle::entity_by_network_id` accepts an `EntityNetworkId`
 classified as server-owned, while plugin-local ids remain at the ECS/plugin

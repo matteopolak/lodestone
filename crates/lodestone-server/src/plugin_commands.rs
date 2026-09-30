@@ -190,8 +190,10 @@ impl crate::CommandSink for ServerCommandSink {
             Ok(ServerCommandOutcome::Ran { feedback, .. }) => crate::CommandResponse::Ran { feedback },
             Ok(ServerCommandOutcome::Refused { message }) => crate::CommandResponse::refused(message),
             Err(ServerCommandDispatchError::Empty | ServerCommandDispatchError::UnknownCommand { .. }) => {
-                crate::CommandResponse::refused(crate::UNKNOWN_COMMAND)
+                crate::CommandResponse::unknown_command(command)
             }
+            Err(ServerCommandDispatchError::Parse(error)) =>
+                crate::CommandResponse::refused_syntax(command, &error),
             Err(error) => crate::CommandResponse::refused(error.to_string()),
         }
     }
@@ -569,7 +571,8 @@ impl ServerCommandRegistry {
         let command = self.get(head).ok_or_else(|| ServerCommandDispatchError::UnknownCommand { name: head.to_string() })?.clone();
         let canonical = rest.map_or_else(|| command.name.clone(), |tail| format!("{} {tail}", command.name));
         let filter = |node: &str| permissions.allows(&source.caller, node);
-        let parsed = command.tree.parse_filtered(&canonical, &filter).map_err(ServerCommandDispatchError::Parse)?;
+        let parsed = command.tree.parse_filtered(&canonical, &filter)
+            .map_err(|error| ServerCommandDispatchError::Parse(error.remap_root(input, &canonical)))?;
         let handler = parsed.nodes.iter().rev().find_map(|id| command.handlers.get(id)).cloned().ok_or_else(|| ServerCommandDispatchError::NoHandler { name: command.name.clone() })?;
         let invocation = ServerCommandInvocation { source: source.clone(), parsed, input: canonical };
         Ok(handler(&invocation))
@@ -780,6 +783,24 @@ mod tests {
         let mut permissions = ServerPermissions::default();
         permissions.declare("tools.use", ServerPermissionDefault::True);
         permissions.declare("tools.count", ServerPermissionDefault::True);
+        assert_eq!(registry.dispatch(&source(0), &permissions, "/t 4").unwrap(), ServerCommandOutcome::ran(1));
+    }
+
+    #[test]
+    fn alias_errors_point_into_the_input_the_caller_actually_sent() {
+        let mut registry = ServerCommandRegistry::default();
+        let mut registered = command();
+        registered.alias("long_tools_alias");
+        registry.register(registered).unwrap();
+        let mut permissions = ServerPermissions::default();
+        permissions.declare("tools.use", ServerPermissionDefault::True);
+        permissions.declare("tools.count", ServerPermissionDefault::True);
+        for (input, expected_cursor) in [("/t 99", 3), ("long_tools_alias 99", 17), ("tools 99", 6)] {
+            let error = registry.dispatch(&source(0), &permissions, input).unwrap_err();
+            let ServerCommandDispatchError::Parse(error) = error else { panic!("expected a bounds error") };
+            assert_eq!(error.position, expected_cursor, "{input}");
+            assert_eq!(error.kind.player_message(), "Integer must not be more than 9: found 99");
+        }
         assert_eq!(registry.dispatch(&source(0), &permissions, "/t 4").unwrap(), ServerCommandOutcome::ran(1));
     }
 

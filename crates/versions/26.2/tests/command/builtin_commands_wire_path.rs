@@ -168,22 +168,18 @@ async fn gamerule_typed_in_chat_reaches_the_builtin_tree_with_no_host_sink() {
 /// built-in tree matching and not about the arm answering everything.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unknown_root_still_falls_through_to_the_absent_host_sink() {
-    let observed = run(&["warp spawn"], 1).await;
+    let observed = run(&["warp spawn"], 2).await;
     assert_eq!(
         observed.chat,
-        [lodestone_server::UNKNOWN_COMMAND],
+        [lodestone_server::UNKNOWN_COMMAND, "warp spawn<--[HERE]"],
         "a root the built-ins do not own must reach the sink, which refuses"
     );
     // And the discriminating case: a *known* root with a bad argument must be
     // answered by the tree, not by the sink. Reporting `UNKNOWN_COMMAND` here
     // would tell the player the command does not exist when only their value was
     // wrong.
-    let observed = run(&["gamerule random_tick_speed banana"], 1).await;
-    assert_eq!(observed.chat.len(), 1);
-    assert_ne!(
-        observed.chat[0], lodestone_server::UNKNOWN_COMMAND,
-        "a bad argument to a known root must not read as an unknown command"
-    );
+    let observed = run(&["gamerule random_tick_speed banana"], 2).await;
+    assert_eq!(observed.chat, ["Expected integer", "...ick_speed banana<--[HERE]"]);
 }
 
 /// **`/gamemode` end to end**: the real command changes the real connection's
@@ -212,17 +208,12 @@ async fn gamemode_changes_the_mode_on_the_wire_and_confirms_it_in_chat() {
 /// test asserted that permissiveness, so nothing was red.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gamemode_rejects_the_abbreviations_the_hand_rolled_parser_accepted() {
-    let observed = run(&["gamemode c"], 1).await;
+    let observed = run(&["gamemode c"], 2).await;
     assert!(
         observed.game_modes.is_empty(),
         "`gamemode c` must not change the mode: {observed:?}"
     );
-    assert_eq!(observed.chat.len(), 1, "the player must be told why: {observed:?}");
-    assert_ne!(
-        observed.chat[0],
-        lodestone_server::UNKNOWN_COMMAND,
-        "a bad mode name is a parse error against a known root, not an unknown command"
-    );
+    assert_eq!(observed.chat, ["Unknown game mode: c", "gamemode c<--[HERE]"]);
 
     // The control on the same wire: the full name works, so the refusal above is
     // about the abbreviation and not about `/gamemode` being unreachable.

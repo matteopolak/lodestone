@@ -154,6 +154,7 @@ struct TrackedPlayer {
     username: String,
     /// World-space feet position, in blocks.
     position: Vec3,
+    on_ground: bool,
     /// Body/head rotation in degrees, as the client last reported it.
     ///
     /// Defaults to `(0, 0)` at join, which is what vanilla itself spawns a
@@ -494,6 +495,7 @@ impl PlayerRegistry {
                 uuid,
                 username: username.to_owned(),
                 position,
+                on_ground: false,
                 rotation: Rotation {
                     yaw: 0.0,
                     pitch: 0.0,
@@ -549,6 +551,15 @@ impl PlayerRegistry {
             .find(|p| p.entity_id == entity_id)
         {
             player.position = position;
+        }
+    }
+
+    pub fn set_on_ground(&self, entity_id: i32, on_ground: bool) {
+        let Some(entity_id) = server_entity_id(entity_id) else {
+            return;
+        };
+        if let Some(player) = self.lock().players.iter_mut().find(|p| p.entity_id == entity_id) {
+            player.on_ground = on_ground;
         }
     }
 
@@ -670,6 +681,7 @@ impl PlayerRegistry {
                         // per-tick delta to publish. An absolute position update
                         // is what the streamer sends anyway.
                         velocity: Vec3::new(0.0, 0.0, 0.0),
+                        on_ground: p.on_ground,
                         // Index zero's base-entity byte is unambiguous for a
                         // player. Keep it present even at zero: a remote viewer
                         // that previously received invisibility needs an explicit

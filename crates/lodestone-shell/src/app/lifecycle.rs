@@ -73,6 +73,10 @@ impl WindowApp {
     }
 
     fn handle_browser_key(&mut self, code: KeyCode, pressed: bool, text: Option<&str>) {
+        let text = text.filter(|text| {
+            let mut chars = text.chars();
+            chars.next().is_some_and(|ch| !ch.is_control()) && chars.next().is_none()
+        });
         if self.ui.is_playing() && !self.gameplay_input_ready() {
             return;
         }

@@ -362,13 +362,9 @@ impl ArgumentType for ChoicesArgument {
         let value = reader.read_unquoted_string();
         if self.strict && !self.provider.candidates().iter().any(|c| c == &value) {
             reader.set_cursor(start);
-            // `InvalidBool`-style "found this, expected one of" is the closest
-            // built-in shape; a dedicated variant would be nicer but this crate
-            // keeps `ParseErrorKind` aligned with Brigadier's own set plus the
-            // one addition permission gating forced (`NoPermission`).
             return Err(ParseError::new(
                 start,
-                ParseErrorKind::InvalidBool(value),
+                ParseErrorKind::InvalidArgument(format!("Invalid value \"{value}\"")),
             ));
         }
         Ok(ParsedValue::String(value))

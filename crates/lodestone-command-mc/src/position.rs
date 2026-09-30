@@ -315,7 +315,7 @@ fn has_value_here(reader: &StringReader) -> bool {
 fn mixed_type(position: usize) -> ParseError {
     ParseError::new(
         position,
-        ParseErrorKind::InvalidDouble("cannot mix world and local coordinates".to_string()),
+        ParseErrorKind::InvalidArgument("Cannot mix world & local coordinates (everything must either use ^ or not)".to_string()),
     )
 }
 

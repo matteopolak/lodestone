@@ -553,7 +553,10 @@ fn install_input_bridge(
                 modifiers |= 8;
             }
             let text = event.key();
-            let text = (!text.is_empty()).then_some(JsValue::from_str(&text));
+            let mut chars = text.chars();
+            let printable =
+                chars.next().is_some_and(|ch| !ch.is_control()) && chars.next().is_none();
+            let text = (printable && !event.is_composing()).then_some(JsValue::from_str(&text));
             let mut fields = vec![
                 ("code", JsValue::from_str(&event.code())),
                 ("pressed", JsValue::from_bool(event.type_() == "keydown")),

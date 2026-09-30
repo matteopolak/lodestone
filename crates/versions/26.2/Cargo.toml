@@ -72,6 +72,8 @@ lodestone-server = { path = "../../lodestone-server" }
 getrandom = { version = "0.2", features = ["js"] }
 
 [dev-dependencies]
+lodestone-command = { workspace = true }
+lodestone-command-mc = { workspace = true }
 lodestone-net = { workspace = true }
 lodestone-testsupport = { workspace = true, features = ["bench-record"] }
 # `test-util` for `#[tokio::test(start_paused = true)]` + time-auto-advance,

@@ -3924,6 +3924,8 @@ dependencies = [
  "criterion",
  "getrandom 0.2.17",
  "lodestone-client",
+ "lodestone-command",
+ "lodestone-command-mc",
  "lodestone-core",
  "lodestone-data",
  "lodestone-ecs",

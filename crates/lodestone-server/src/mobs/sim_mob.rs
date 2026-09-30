@@ -1180,6 +1180,7 @@ impl<'w> SimMob<'w> {
             rotation: self.rotation(),
             head_yaw: self.head_yaw(),
             velocity: self.velocity(),
+            on_ground: self.mob.is_on_ground(),
             metadata,
             // No mob supplies additional spawn data here.
             object_data: 0,

@@ -447,7 +447,7 @@ impl ServerCommands {
             // what actually went wrong.
             Err(e) => {
                 return Some(CommandOutcome {
-                    response: CommandResponse::refused(e.to_string()),
+                    response: CommandResponse::refused_syntax(command, &e),
                     effects: Vec::new(),
                 });
             }

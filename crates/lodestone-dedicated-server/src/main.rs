@@ -647,9 +647,7 @@ mod tests {
         assert_eq!(dispatch.run(&caller, "lodestone info"), lodestone_server::CommandResponse::Ran {
             feedback: vec!["Lodestone dedicated server".to_string()],
         });
-        assert_eq!(dispatch.run(&caller, "not-registered"), lodestone_server::CommandResponse::refused(
-            lodestone_server::UNKNOWN_COMMAND,
-        ));
+        assert_eq!(dispatch.run(&caller, "not-registered"), lodestone_server::CommandResponse::unknown_command("not-registered"));
     }
 
     #[test]
@@ -665,7 +663,7 @@ mod tests {
         assert_eq!(owner.suggest(&operator, "lodestone "), vec!["admin", "info"]);
         assert!(matches!(
             owner.dispatch().run(&player, "lodestone admin"),
-            lodestone_server::CommandResponse::Refused { .. }
+            lodestone_server::CommandResponse::SyntaxError { .. }
         ));
         assert_eq!(owner.dispatch().run(&operator, "lodestone admin"), lodestone_server::CommandResponse::Ran {
             feedback: vec!["Lodestone administration".to_string()],

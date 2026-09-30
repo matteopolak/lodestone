@@ -1145,27 +1145,9 @@ fn encode_custom_payload_body(channel: &ResourceKey, data: &[u8]) -> Vec<u8> {
     w.into_vec()
 }
 
-/// Lowers a [`Text`] to a network-NBT chat component, for the **disconnect
-/// reason** field.
-///
-/// # Scope, stated because a partial serializer is a trap
-///
-/// This is **not** a general `Text` → NBT serializer, and must not be reused as
-/// one. It writes exactly the three things a disconnect reason carries —
-/// `text`, `translate` (with `fallback` and `with`), and `extra` — and
-/// **deliberately drops style, click, hover and insertion**, because a
-/// disconnect reason renders on the "connection lost" screen, which has no
-/// interactivity and (in vanilla) applies its own styling. Passing a styled
-/// component through here would silently lose the styling, which is why the
-/// function is private and named for its one caller. A general serializer
-/// belongs in `lodestone-model` next to `Text::from_nbt`, as its inverse.
-///
-/// The shape is pinned by the *decoder* on the other side of the same wire:
-/// `V770Adapter`'s `nbt_reason_text` reads this with `read_network_nbt` +
-/// `Text::from_nbt`, and that decoder has been validated against real servers'
-/// disconnect packets. Field names follow vanilla's own component codecs —
-/// a string field named `"translate"` and the optional `"fallback"` beside it
-/// (confirmed against the decompiled translatable-contents source).
+/// Encodes the literal, translated, styled and clickable components used by
+/// command feedback and disconnect reasons. Item/entity hover payloads are not
+/// produced by either boundary.
 fn text_to_nbt(text: &Text) -> Nbt {
     let mut fields: Vec<(String, Nbt)> = Vec::new();
     match &text.content {
@@ -1188,6 +1170,47 @@ fn text_to_nbt(text: &Text) -> Nbt {
     }
     if !text.extra.is_empty() {
         fields.push(("extra".to_owned(), component_list(&text.extra)));
+    }
+    if let Some(color) = text.style.color {
+        fields.push(("color".to_owned(), Nbt::String(color.name())));
+    }
+    for (name, value) in [
+        ("bold", text.style.bold),
+        ("italic", text.style.italic),
+        ("underlined", text.style.underlined),
+        ("strikethrough", text.style.strikethrough),
+        ("obfuscated", text.style.obfuscated),
+    ] {
+        if let Some(value) = value {
+            fields.push((name.to_owned(), Nbt::Byte(i8::from(value))));
+        }
+    }
+    if let Some(font) = text.style.font {
+        fields.push(("font".to_owned(), Nbt::String(font.name().to_owned())));
+    }
+    if let Some(insertion) = &text.insertion {
+        fields.push(("insertion".to_owned(), Nbt::String(insertion.clone())));
+    }
+    if let Some(click) = &text.click {
+        use lodestone_model::ClickAction;
+        let (action, argument) = match &click.action {
+            ClickAction::OpenUrl => ("open_url", "url"),
+            ClickAction::OpenFile => ("open_file", "path"),
+            ClickAction::RunCommand => ("run_command", "command"),
+            ClickAction::SuggestCommand => ("suggest_command", "command"),
+            ClickAction::ChangePage => ("change_page", "page"),
+            ClickAction::CopyToClipboard => ("copy_to_clipboard", "value"),
+            ClickAction::Other(action) => (action.as_str(), "value"),
+        };
+        let value = if argument == "page" {
+            click.value.parse::<i32>().map(Nbt::Int).unwrap_or_else(|_| Nbt::String(click.value.clone()))
+        } else {
+            Nbt::String(click.value.clone())
+        };
+        fields.push(("click_event".to_owned(), Nbt::Compound(vec![
+            ("action".to_owned(), Nbt::String(action.to_owned())),
+            (argument.to_owned(), value),
+        ])));
     }
     Nbt::Compound(fields)
 }
@@ -1853,27 +1876,23 @@ fn encode_add_entity_body(entity: &EntitySnapshot) -> Vec<u8> {
 /// no existing struct because it is currently only ever *decoded* (see
 /// `V770Adapter::handle_entity_position`).
 ///
-/// Wire layout: VarInt id, position `f64`×3, delta-movement `f64`×3 (zero —
-/// an absolute update carries no velocity here; velocity travels separately
-/// via `set_entity_motion`), yaw/pitch as **`f32`** (unlike `add_entity`'s
+/// Wire layout: VarInt id, position `f64`×3, delta-movement `f64`×3,
+/// yaw/pitch as **`f32`** (unlike `add_entity`'s
 /// signed-byte angles), a trailing big-endian `i32` relative-flags bit set
-/// (`0` — every field is absolute), then a `bool` on-ground flag. All mobs
-/// the sim currently spawns are land-walkers (`MobShape::land`), so on-ground
-/// is hardcoded `true`; `EntitySnapshot` carries no on-ground field yet to
-/// derive this from.
+/// (`0` — every field is absolute), then the authoritative on-ground flag.
 fn encode_teleport_entity(entity: &EntitySnapshot) -> Vec<u8> {
     let mut w = Writer::default();
     w.var_i32(entity.id);
     w.f64(entity.position.x);
     w.f64(entity.position.y);
     w.f64(entity.position.z);
-    w.f64(0.0);
-    w.f64(0.0);
-    w.f64(0.0);
+    w.f64(entity.velocity.x);
+    w.f64(entity.velocity.y);
+    w.f64(entity.velocity.z);
     w.f32(entity.rotation.yaw);
     w.f32(entity.rotation.pitch);
     w.i32(0);
-    w.bool(true);
+    w.bool(entity.on_ground);
     w.into_vec()
 }
 
@@ -3773,6 +3792,15 @@ impl ServerProtocol for V770ServerProtocol {
         ServerDirective::Send {
             packet_id: play::clientbound::SYSTEM_CHAT,
             payload: encode_system_chat(message, false),
+        }
+    }
+
+    fn encode_system_chat_component(&self, message: &Text) -> ServerDirective {
+        let mut payload = encode_component_nbt(message);
+        payload.push(0);
+        ServerDirective::Send {
+            packet_id: play::clientbound::SYSTEM_CHAT,
+            payload,
         }
     }
 

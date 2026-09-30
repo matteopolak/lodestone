@@ -115,6 +115,7 @@ async fn a_real_client_observes_a_live_entity_spawn_then_move() {
         },
         head_yaw: 0.0,
         velocity: Vec3::new(0.0, 0.0, 0.0),
+        on_ground: false,
         metadata: Vec::new(),
         object_data: 0,
         leash_link: None,
