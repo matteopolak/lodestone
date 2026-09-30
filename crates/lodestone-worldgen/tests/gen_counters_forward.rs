@@ -62,6 +62,7 @@ fn check_column_pack_counter() {
         &predicate,
         &predicate,
         None,
+        [u16::MAX; 2],
     );
     assert!(packed.is_compact());
     let packed_counters = counters::snapshot();
