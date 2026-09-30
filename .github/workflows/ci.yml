@@ -298,7 +298,13 @@ jobs:
       - name: check-deletable (every version family)
         run: |
           set -eu
-          for family in v1-8 v1-9 v1-14 v26-2; do
+          families=$(cargo metadata --no-deps --format-version 1 | jq -r '
+            . as $workspace | .packages[]
+            | select(.id as $id | $workspace.workspace_members | index($id))
+            | select(.manifest_path | startswith($workspace.workspace_root + "/crates/versions/"))
+            | .name' | sort)
+          test -n "$families"
+          for family in $families; do
             echo "::group::check-deletable $family"
             cargo run -p xtask -- check-deletable "$family"
             echo "::endgroup::"

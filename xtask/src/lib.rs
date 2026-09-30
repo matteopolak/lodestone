@@ -347,7 +347,7 @@ pub fn run_cli_command(command: CliCommand) -> Result<()> {
             println!("{}", report.render());
             if !report.is_cleanly_deletable() {
                 bail!(
-                    "{} is not cleanly deletable: {} blocking dependency(ies) would break the build",
+                    "removal plan for {} has {} blocking dependency(ies) from retained crates",
                     report.target_crate,
                     report.blockers.len()
                 );
@@ -937,7 +937,7 @@ fn parse_check_deletable_args(args: &[String]) -> Result<CliCommand> {
 
     Ok(CliCommand::CheckDeletable {
         version: version.ok_or_else(|| {
-            anyhow!("check-deletable requires a version, e.g. `cargo xtask check-deletable v47`")
+            anyhow!("check-deletable requires a version, e.g. `cargo xtask check-deletable v26-3`")
         })?,
     })
 }
@@ -1911,7 +1911,7 @@ pub fn run_conformance(
     let deletability = check_workspace_deletable(workspace_root, &options.family)?;
     if !deletability.is_cleanly_deletable() {
         bail!(
-            "{} is not cleanly deletable: {} blocking dependency(ies) would break the build",
+            "removal plan for {} has {} blocking dependency(ies) from retained crates",
             deletability.target_crate,
             deletability.blockers.len()
         );
@@ -1920,6 +1920,7 @@ pub fn run_conformance(
         name: "check-deletable".to_owned(),
         outcome: ConformanceOutcome::Passed,
     });
+    println!("{}", deletability.render());
 
     check_shape_reviews(workspace_root)?;
     steps.push(ConformanceStep {
@@ -2044,8 +2045,8 @@ fn package_manifest_is_under_protocol(canonical_root: &Path, package: &Value) ->
 /// This is the single, deliberate hook that lets the isolation lint recognise
 /// the intended version-aggregation crate. It is safe by construction: the role
 /// only ever downgrades an *optional* shared -> version edge (already a
-/// non-fatal warning) to an informational note. Every fatal rule — version ->
-/// version, and a *required* shared -> version edge even on the registry itself
+/// non-fatal warning) to an informational note. Undeclared version edges and
+/// required shared normal/build edges, even on the registry itself,
 /// — is unaffected, so stamping this metadata on some other crate can at most
 /// silence a warning it was already entitled to have as an optional dependency,
 /// never a real, build-breaking violation.

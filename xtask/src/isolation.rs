@@ -1,11 +1,80 @@
 use super::*;
 
+pub(crate) struct CompatibilityBase {
+    pub(crate) crate_name: String,
+    dir: PathBuf,
+}
+
+impl CompatibilityBase {
+    pub(crate) fn matches(&self, dependency: &Value) -> bool {
+        dependency.get("name").and_then(Value::as_str) == Some(self.crate_name.as_str())
+            && dependency_table_name(dependency.get("kind")) == "dependencies"
+            && !dependency.get("optional").and_then(Value::as_bool).unwrap_or(false)
+            && dependency.get("path").and_then(Value::as_str)
+                .and_then(|path| Path::new(path).canonicalize().ok())
+                .is_some_and(|path| path == self.dir)
+    }
+}
+
+pub(crate) fn validated_compatibility_bases(
+    member_packages: &[&Value],
+    version_crate_names: &BTreeSet<String>,
+) -> Result<BTreeMap<String, CompatibilityBase>> {
+    let mut bases = BTreeMap::new();
+    for package in member_packages {
+        let Some(declaration) = package
+            .get("metadata")
+            .and_then(|metadata| metadata.get("lodestone-isolation"))
+            .and_then(|metadata| metadata.get("compatibility-base"))
+        else {
+            continue;
+        };
+        let crate_name = package
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("workspace package is missing a name"))?;
+        let invalid = || anyhow!(
+            "{crate_name}: compatibility-base must name another workspace version family with an exact required normal path dependency"
+        );
+        let base = declaration.as_str().ok_or_else(invalid)?;
+        if !version_crate_names.contains(crate_name)
+            || !version_crate_names.contains(base)
+            || crate_name == base
+        {
+            return Err(invalid());
+        }
+        let base_package = member_packages
+            .iter()
+            .find(|candidate| candidate.get("name").and_then(Value::as_str) == Some(base))
+            .ok_or_else(invalid)?;
+        let base = CompatibilityBase {
+            crate_name: base.to_owned(),
+            dir: base_package
+            .get("manifest_path")
+            .and_then(Value::as_str)
+            .and_then(|manifest| Path::new(manifest).parent())
+            .ok_or_else(invalid)?
+            .canonicalize()?,
+        };
+        let valid_edge = package
+            .get("dependencies")
+            .and_then(Value::as_array)
+            .is_some_and(|dependencies| dependencies.iter().any(|dependency| base.matches(dependency)));
+        if !valid_edge {
+            return Err(invalid());
+        }
+        bases.insert(crate_name.to_owned(), base);
+    }
+    Ok(bases)
+}
+
 /// The result of an isolation check.
 ///
 /// The lint exists to protect one concrete user requirement: **dropping support
-/// for a version must mean deleting a single `crates/versions/<version>` folder
-/// and having it be mostly all gone.** Two dependency shapes break that promise,
-/// and this report is expressed directly in those terms rather than in terms of
+/// for a version must mean deleting its `crates/versions/<version>` folder
+/// and declared compatibility dependents, with only surfaced cleanup.** Two
+/// dependency shapes break that promise, and this report is expressed directly
+/// in those terms rather than in terms of
 /// an allowlist of "blessed" shared crates (which rots every time a new
 /// version-free crate such as `lodestone-world` is added):
 ///
@@ -73,7 +142,7 @@ impl IsolationReport {
     #[must_use]
     pub fn violation_summary(&self) -> String {
         let mut summary = String::from(
-            "protocol version crate isolation violations found (a version must stay deletable as a single folder):",
+            "protocol version crate isolation violations found (version removal must stay confined to declared compatibility families):",
         );
         for finding in self.violations() {
             let _ = write!(summary, "\n- {}", finding.describe());
@@ -277,6 +346,8 @@ pub fn check_workspace_isolation(workspace_root: &Path) -> Result<IsolationRepor
         member_packages.push(package);
     }
 
+    let compatibility_bases =
+        validated_compatibility_bases(&member_packages, &version_crate_names)?;
     let mut findings = Vec::new();
     for package in member_packages {
         let crate_name = package
@@ -312,14 +383,8 @@ pub fn check_workspace_isolation(workspace_root: &Path) -> Result<IsolationRepor
                 .unwrap_or(false);
 
             if crate_is_version {
-                let declared_base = package
-                    .get("metadata")
-                    .and_then(|metadata| metadata.get("lodestone-isolation"))
-                    .and_then(|metadata| metadata.get("compatibility-base"))
-                    .and_then(Value::as_str);
-                let is_declared_base = declared_base == Some(dependency_name)
-                    && !optional
-                    && dependency_table == "dependencies";
+                let is_declared_base = compatibility_bases.get(crate_name)
+                    .is_some_and(|base| base.matches(dependency));
                 if is_declared_base {
                     continue;
                 }
@@ -340,7 +405,7 @@ pub fn check_workspace_isolation(workspace_root: &Path) -> Result<IsolationRepor
                 // undeletable (fatal); an optional or dev-only edge is a
                 // surfaced wart (warning) because the version can still be
                 // dropped by deleting its folder plus one feature-gated line.
-                let is_soft = optional || dependency_table != "dependencies";
+                let is_soft = optional || dependency_table == "dev-dependencies";
                 let detail = version_crate_shape_review_violations
                     .get(dependency_name)
                     .cloned();
