@@ -239,6 +239,11 @@ impl Sim {
                     self.join_trace.mark("received", x, z);
                     self.on_column_arrived(x, z);
                 }
+                NetUpdate::ChunkReplaced { x, z, terrain_changed } => {
+                    chunk_updates += 1;
+                    self.join_trace.mark("received", x, z);
+                    self.on_column_replaced(x, z, terrain_changed);
+                }
                 NetUpdate::ChunkLightChanged { x, z, sections } => {
                     self.on_column_light_changed(x, z, &sections);
                 }

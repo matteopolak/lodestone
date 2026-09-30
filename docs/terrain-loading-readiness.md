@@ -22,8 +22,10 @@ cache or index, and unloads need no lookup of an already removed world column.
 
 Ongoing streaming also tracks presented coverage separately from latest-revision
 settlement. Rebuilding a section invalidates the strict ledger but does not
-erase geometry already handed to the GPU. A fresh column decode or unload
-clears both ledgers. The browser's `full-view-presented` event checks presented
+erase geometry already handed to the GPU. A first arrival, differing or unclassified
+column replacement, or unload clears both ledgers. A driver-classified replacement
+with exactly equal column and light storage leaves both ledgers and pending work
+intact; the complete world payload is still installed. The browser's `full-view-presented` event checks presented
 coverage across the selected render distance after a frame is submitted;
 background replacement meshes do not hold that event indefinitely. The
 initial-world and dimension-transition covers retain the strict predicate.
@@ -53,7 +55,7 @@ The transition boundary depends on the wire event order: a changed-dimension res
 
 Change the section ledger and its column predicate in `crates/lodestone-shell/src/mesher.rs`; change grouped membership storage in `crates/lodestone-shell/src/mesher/readiness.rs`. Keep full section identity and remove empty groups when changing that storage. Change the `Sim` facade and post-drain readiness check in `crates/lodestone-shell/src/sim/meshing.rs`, and keep the renderer acknowledgement immediately after `RenderState::upload_section` in `crates/lodestone-shell/src/app/redraw.rs`. Session observations belong in `crates/lodestone-shell/src/sim/session.rs`; launch scope belongs in `crates/lodestone-shell/src/app/session.rs`; the remote phase clamp belongs in `crates/lodestone-shell/src/app/menus.rs`; transition reset behavior belongs in `crates/lodestone-shell/src/sim/dimension.rs`. Grid geometry and palette live in `crates/lodestone-shell/src/menu/render/`. If the event transport changes, preserve the transition boundary before old-column removal and keep ordinary unloads and same-dimension respawns as controls.
 
-Do not derive readiness from the progress numerator, the scheduler's global pending count, or the set of visible sections. A fresh decode of a column must clear that column's old ledger before it is remeshed. If the renderer hand-off boundary changes, update the deferred `PlayerLoaded` send and the negative controls together. Keep the send retryable when the outbound control relay is full.
+Do not derive readiness from the progress numerator, the scheduler's global pending count, or the set of visible sections. A changed or unclassified column decode must clear that column's old ledger before it is remeshed; only authoritative ingress comparison can preserve it for equal terrain. If the renderer hand-off boundary changes, update the deferred `PlayerLoaded` send and the negative controls together. Keep the send retryable when the outbound control relay is full.
 
 ## Configuration
 

@@ -21,6 +21,31 @@ consumer remains diagnosable without logging every update.
 The frame-side update pass logs calls over 32 ms with total updates, column arrivals, and
 section-block updates; compare those counts with backpressure waits when diagnosing stalls.
 
+Whole-column adapters may return `DeferredChunkLoad`: decoding runs outside the shared world lock,
+then `lodestone_client::driver::apply_deferred_chunk` compares the borrowed resident column and light
+with the decoded input under the existing write guard. It always installs the complete new
+`LoadedChunk`, without cloning columns or retaining a history cache. First arrivals keep
+`ClientEvent::ChunkLoaded`; known resident replacements become `ClientEvent::ChunkReplaced`, whose
+`terrain_changed` flag comes only from this exact comparison. Both reach the public event stream and
+the unconditional `GameEventBus` hook. Chunk observation consumers must handle both variants.
+
+The shell forwards replacements as `NetUpdate::ChunkReplaced`. Differing column layout, blocks,
+biomes or light retain full arrival invalidation and neighbor healing. Equal terrain leaves readiness,
+presented coverage and independently queued arrival, light, heal or resource work untouched. Unknown
+adapter paths and biome-only patches retain the conservative `ChunkLoaded` path. Structural storage
+equality may miss equivalent palette repacking; it never treats different stored terrain as equal.
+Heightmaps and block entities are always replaced but do not enter this terrain comparison:
+`ClientHandle::column_heightmap` feeds weather directly, and `Sim::block_entity_frame_snapshot` reads
+the current world for the rendered block-entity sources each frame.
+
+`ClientHandle::chunk_ingress_stats` exposes bounded per-session cumulative counters: first loads,
+resident replacements, terrain-equal and terrain-differing replacements, and comparison nanoseconds
+(sum and maximum). These cover only deferred whole-column ingress, not unknown adapter paths.
+Terrain equality is not whole-packet equality. The timing excludes decode, world-lock waiting,
+installation and old-payload destruction; snapshots of independent atomics are not transactional.
+Compare these observations with mesh-work and GPU-handoff counts rather than interpreting an unchanged
+GPU fingerprint as proof of an equal incoming column.
+
 Browser singleplayer starts its integrated server in a Worker. `net/browser.rs` translates the Worker
 `MessagePort` into the client transport and waits for an explicit startup-ready response; startup errors
 and post-start crashes remain distinct so a failed launch cannot create a second world owner.
@@ -52,6 +77,12 @@ and callers should continue to use `lodestone_shell::net` paths. Add replayable 
 messages and transport shutdown belong in `net/browser.rs`. Preserve the bounded relay behavior and the
 native/wasm transport seam when changing session setup. Do not replace the asynchronous full-relay
 wait with a blocking send: the browser frame loop must be able to drain the queue.
+
+Keep the terrain comparison at authoritative driver ingress: the shared world has already changed
+before simulation notifications run. Preserve the identical-replacement control alongside block-to-air,
+biome/light, layout, unload/reload, independent-metadata and pending-work controls when changing it.
+The clock is `lodestone_time::Instant` on both native and browser clients. Adding a terrain input requires
+including it in the conservative comparison; resource/option invalidation remains independent.
 
 Keep write-side read-ahead protocol-blind and defer codec input until packet reads. The networking tests
 exercise simultaneous sends over tiny duplex buffers, a write-only deadlock control, codec transitions,

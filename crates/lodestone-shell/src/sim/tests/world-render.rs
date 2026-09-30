@@ -109,6 +109,53 @@ fn light_update_queues_affected_sections_without_reopening_arrival() {
 }
 
 #[test]
+fn equal_column_replacement_preserves_settlement_while_changed_control_resets_it() {
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    let world = sim.chunk_world();
+    let pos = *world.read().iter().next().unwrap().0;
+    let extent = world.extent().unwrap();
+    for si in 0..extent.section_count {
+        sim.mark_mesh_uploaded(crate::mesher::SectionKey {
+            cx: pos.x, cz: pos.z, si, min_y: extent.min_y,
+        });
+    }
+    assert!(sim.terrain(|terrain| terrain.column_mesh_settled(&world, pos.x, pos.z)));
+    let arrivals = sim.terrain(|terrain| terrain.work_counters().column_arrivals);
+
+    sim.on_column_replaced(pos.x, pos.z, false);
+    assert!(sim.terrain(|terrain| terrain.column_mesh_settled(&world, pos.x, pos.z)));
+    assert!(sim.terrain(|terrain| terrain.resident_column_presented(extent, pos.x, pos.z)));
+    assert_eq!(sim.terrain(|terrain| terrain.work_counters().column_arrivals), arrivals);
+
+    sim.on_column_replaced(pos.x, pos.z, true);
+    assert!(!sim.terrain(|terrain| terrain.column_mesh_settled(&world, pos.x, pos.z)));
+    assert_eq!(sim.terrain(|terrain| terrain.work_counters().column_arrivals), arrivals + 1);
+}
+
+#[test]
+fn equal_column_replacement_does_not_withdraw_pending_arrival_or_other_mesh_work() {
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    let world = sim.chunk_world();
+    let pos = *world.read().iter().next().unwrap().0;
+    let sy = world.extent().unwrap().min_y.div_euclid(16);
+    sim.terrain_mut(|terrain| {
+        terrain.queue_column_arrival(pos.x, pos.z);
+        terrain.dirty_columns.insert((pos.x, pos.z));
+        terrain.light_dirty_sections.insert((pos.x, pos.z, sy));
+    });
+    let arrivals = sim.terrain(|terrain| terrain.work_counters().column_arrivals);
+
+    sim.on_column_replaced(pos.x, pos.z, false);
+
+    assert!(sim.terrain(|terrain| terrain.has_pending_arrival(pos.x, pos.z)));
+    assert!(sim.terrain(|terrain| terrain.dirty_columns.contains((pos.x, pos.z))));
+    assert!(sim.terrain(|terrain| terrain.light_dirty_sections.contains(&(pos.x, pos.z, sy))));
+    assert_eq!(sim.terrain(|terrain| terrain.work_counters().column_arrivals), arrivals);
+}
+
+#[test]
 fn neighbour_remesh_skips_columns_that_are_not_loaded() {
     // The control for the test above: queueing absent columns would mesh
     // nothing, log a drop, and let "every arrival dirties 8 neighbours" pass

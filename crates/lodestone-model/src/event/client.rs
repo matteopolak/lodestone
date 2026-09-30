@@ -551,9 +551,23 @@ pub enum ClientEvent {
     /// hole. As a bare signal it is idempotent and safe to coalesce — treat it
     /// as "the chunk region at `pos` is dirty". Light-only updates use
     /// [`ClientEvent::ChunkLightChanged`] for section-level invalidation.
+    /// Classified full-column replacements use [`ClientEvent::ChunkReplaced`].
     ChunkLoaded {
         /// Chunk position; look the data up in the world by this key.
         pos: ChunkPos,
+    },
+    /// A full decoded column replaced a resident column.
+    ///
+    /// The driver has installed all blocks, biomes, light, heightmaps and block
+    /// entities. Unlike an unclassified [`ClientEvent::ChunkLoaded`], this event
+    /// reports an exact comparison of the prior and new terrain inputs. Chunk
+    /// observation consumers should handle both variants.
+    ChunkReplaced {
+        /// Chunk position; query the complete new column from the world.
+        pos: ChunkPos,
+        /// Whether column layout, blocks, biomes or light storage differed.
+        /// Heightmaps and block entities are independently queried by consumers.
+        terrain_changed: bool,
     },
     /// Light changed in an already-loaded chunk column.
     ///

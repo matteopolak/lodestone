@@ -17,7 +17,7 @@
 //! decoded column straight into the client-owned [`World`] through the
 //! [`WorldSink`] the driver hands it (see [`SharedState::world_write`]), moving
 //! the payload exactly once and never cloning it, and emits only a lightweight
-//! [`ClientEvent::ChunkLoaded`] notification carrying the position. World
+//! [`ClientEvent::ChunkLoaded`] or [`ClientEvent::ChunkReplaced`] notification. World
 //! consumers query the store via [`SharedState::block_at`] /
 //! [`SharedState::is_chunk_loaded`], or take owned section snapshots via
 //! [`SharedState::section_at`] for meshing.
@@ -361,6 +361,7 @@ pub(crate) struct SharedState {
     inner: Arc<RwLock<LocalEcho>>,
     world: Arc<RwLock<World>>,
     notify: Arc<Notify>,
+    pub(crate) chunk_ingress: Arc<crate::chunk_ingress::ChunkIngressCounters>,
     /// The bevy_ecs `World` this state is authoritative over: [`WorldTime`], the
     /// entity component set, and (since Stage 3) the session read-model — the
     /// scoreboard, tab list, boss bars and menus — as components on
@@ -481,6 +482,7 @@ impl Default for SharedState {
             inner: Arc::new(RwLock::new(LocalEcho::default())),
             world,
             notify: Arc::new(Notify::new()),
+            chunk_ingress: Arc::default(),
             ecs,
             session,
             game_event_bus_enabled,
@@ -567,6 +569,7 @@ impl SharedState {
             inner: Arc::new(RwLock::new(LocalEcho::default())),
             world: Arc::new(RwLock::new(World::new())),
             notify: Arc::new(Notify::new()),
+            chunk_ingress: Arc::default(),
             ecs,
             session,
             game_event_bus_enabled,
@@ -2543,6 +2546,23 @@ mod tests {
             1,
             "the Ping must have reached the bus through the real SharedState::apply path"
         );
+    }
+
+    #[test]
+    fn chunk_replacement_reaches_the_same_game_event_bus() {
+        let state = state_with_game_event_bus();
+        let pos = ChunkPos::new(2, -3);
+        state.apply(&ClientEvent::ChunkLoaded { pos });
+        state.apply(&ClientEvent::ChunkReplaced { pos, terrain_changed: false });
+        let ecs = state.ecs.read();
+        let messages = ecs
+            .get_resource::<lodestone_ecs::ecs::message::Messages<lodestone_ecs::GameEvent>>()
+            .unwrap();
+        let observed: Vec<_> = messages.iter_current_update_messages().map(|event| &event.0).collect();
+        assert!(matches!(observed.as_slice(), [
+            ClientEvent::ChunkLoaded { .. },
+            ClientEvent::ChunkReplaced { terrain_changed: false, .. },
+        ]));
     }
 
     /// The generic bus check above is intentionally not enough: it can be green

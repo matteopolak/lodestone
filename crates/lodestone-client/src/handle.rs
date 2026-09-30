@@ -60,6 +60,12 @@ pub struct ClientHandle {
 }
 
 impl ClientHandle {
+    /// Cumulative observations of deferred whole-column loads in this session.
+    #[must_use]
+    pub fn chunk_ingress_stats(&self) -> crate::ChunkIngressStats {
+        self.state.chunk_ingress.snapshot()
+    }
+
     pub(crate) fn new(
         actions: mpsc::UnboundedSender<QueuedAction>,
         correction_applied: mpsc::UnboundedSender<(u64, Vec3, Rotation)>,

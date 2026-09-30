@@ -369,7 +369,7 @@ pub fn route(event: &ClientEvent) -> Route {
         },
         // A dirty-region signal to the shell; the payload was already written
         // through the `WorldSink` by the adapter.
-        ClientEvent::ChunkLoaded { .. } => Route {
+        ClientEvent::ChunkLoaded { .. } | ClientEvent::ChunkReplaced { .. } => Route {
             shell: true,
             client: true,
             ..Route::NOWHERE

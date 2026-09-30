@@ -839,7 +839,7 @@ pub trait LifecycleWorldgenSource {
         false
     }
 
-    /// Whether a full direct-epoch result can skip materializer CARVERS mirrors.
+    /// Whether authenticated direct-epoch results own their CARVERS read mirrors.
     fn direct_epoch_can_skip_local_carvers_mirror(&self) -> bool {
         false
     }
@@ -2219,6 +2219,8 @@ pub struct LifecycleMaterializer<S: LifecycleWorldgenSource> {
     /// these vectors prevent each target from rescanning those maps.
     override_revisions: Vec<(AbsoluteCell, StateId)>,
     carvers_override_revisions: Vec<(AbsoluteCell, StateId)>,
+    #[cfg(test)]
+    mirror_authenticated_sparse_epoch_writes: bool,
     direct_target_output: bool,
     direct_target_outputs: BTreeSet<ChunkPos>,
     /// Structure placement output accumulated from each source body without
@@ -2337,6 +2339,8 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             overrides: BTreeMap::new(),
             override_revisions: Vec::new(),
             carvers_override_revisions: Vec::new(),
+            #[cfg(test)]
+            mirror_authenticated_sparse_epoch_writes: false,
             direct_target_output: false,
             direct_target_outputs: BTreeSet::new(),
             feature_structure_blocks: StructureBlocks::default(),
@@ -3789,14 +3793,19 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         let skip_epoch_owned_override_mirror = direct_epoch_output
             && target_owned
             && stage == LifecycleCompletion::Features
-            && matches!(mode, LifecycleCompletionMode::Full)
+            && (matches!(mode, LifecycleCompletionMode::Full) || authenticated_target_output)
             && self.source.direct_epoch_can_skip_local_carvers_mirror();
+        #[cfg(test)]
+        let skip_epoch_owned_override_mirror = skip_epoch_owned_override_mirror
+            && !(matches!(mode, LifecycleCompletionMode::SparsePadding)
+                && self.mirror_authenticated_sparse_epoch_writes);
         #[cfg(feature = "worldgen-stage-pmu")]
         let _direct_transition_mirror = direct_epoch_output
             .then(|| RegionGuard::enter(RegionPhase::DirectTransitionMirror));
         let retain_general_override = !direct_epoch_output
             || !self.source.direct_epoch_local_writes_use_carvers_view()
-            || matches!(mode, LifecycleCompletionMode::SparsePadding);
+            || (matches!(mode, LifecycleCompletionMode::SparsePadding)
+                && !skip_epoch_owned_override_mirror);
         for (ordinal, local) in target_local_features.iter().enumerate() {
             if target_owned && stage == LifecycleCompletion::Features {
                 self.record_target_feature_winner(
@@ -6529,6 +6538,178 @@ mod tests {
             column_digest(&replay_column),
             "replaying the epoch's own outward writes must be observationally redundant",
         );
+    }
+
+    fn sparse_epoch_read_mirror_fixture(
+        mirror: bool,
+        interleaved: bool,
+        restore_external: bool,
+    ) -> LifecycleMaterializer<OverworldChunkSource> {
+        let padding = (0, 0);
+        let last = (1, 0);
+        let order = if interleaved {
+            vec![(-1, 0), padding, last]
+        } else {
+            vec![padding, last]
+        };
+        let source = OverworldChunkSource::new(crate::overworld_generator(42));
+        let top_y = source.generator().min_y() + source.generator().height() - 1;
+        let mut materializer = LifecycleMaterializer::new(source);
+        materializer.mirror_authenticated_sparse_epoch_writes = mirror;
+        for &target in &order {
+            materializer.admit(target);
+            materializer.mark_authenticated_prefix(target, [4; 32]);
+        }
+        materializer.prepare_lifecycle_replay_contexts(&order);
+        materializer.declare_mutable_targets(order.iter().copied().filter(|target| *target != padding));
+        materializer.declare_sparse_padding_targets([padding]);
+        for (sequence, &target) in order.iter().enumerate() {
+            if restore_external && target == padding {
+                let mutation = ProvenanceMutation::test_block_state(
+                    (-2, 0), (-2, 0),
+                    lodestone_worldgen::stage_schedule::StageKey::new(
+                        lodestone_worldgen::stage_schedule::Dimension::Overworld, ColumnStage::Features,
+                    ),
+                    0, BlockCoordinate::new(24, top_y, 8), 1, sid("minecraft:emerald_block"),
+                );
+                materializer.restore_committed_mutations([&mutation]);
+            }
+            if target == padding {
+                materializer.complete_target_features_sparse_observing(target, sequence as u64, |_| {});
+            } else {
+                materializer.complete_target_features_observing(target, sequence as u64, |_| {});
+            }
+            materializer.finish_target(target);
+        }
+        assert!(!materializer.sparse_padding_overlay_for_packet(padding).unwrap().is_empty());
+        assert!(materializer.region_feature_epoch.as_ref().unwrap().writes().iter().any(|write| {
+            write.source == padding
+                && (write.position.0.div_euclid(16), write.position.2.div_euclid(16)) == last
+        }), "the fixture must exercise a real sparse-to-full cross-target write");
+        materializer
+    }
+
+    fn assert_sparse_epoch_read_mirror_state_matches(
+        actual: &mut LifecycleMaterializer<OverworldChunkSource>,
+        control: &mut LifecycleMaterializer<OverworldChunkSource>,
+    ) {
+        let targets = actual.target_feature_receipts.keys().copied().collect::<Vec<_>>();
+        assert_eq!(targets, control.target_feature_receipts.keys().copied().collect::<Vec<_>>());
+        assert_eq!(actual.sparse_padding_overrides, control.sparse_padding_overrides);
+        for &target in &targets {
+            let receipt = &actual.target_feature_receipts[&target];
+            let expected = &control.target_feature_receipts[&target];
+            assert_eq!(receipt.spills, expected.spills, "owner receipt changed at {target:?}");
+            assert_eq!(receipt.structure_blocks, expected.structure_blocks);
+            assert_eq!(actual.authenticated_features_digest(target), control.authenticated_features_digest(target));
+        }
+        let winners = |materializer: &LifecycleMaterializer<OverworldChunkSource>| {
+            materializer.target_feature_winners.iter().flat_map(|(&destination, winners)| {
+                let mut winners = winners.iter().map(|(&position, winner)| {
+                    (position, winner.target, winner.source, winner.ordinal, winner.state)
+                }).collect::<Vec<_>>();
+                winners.sort_unstable_by_key(|winner| winner.0);
+                winners.into_iter().map(move |winner| (destination, winner))
+            }).collect::<Vec<_>>()
+        };
+        assert_eq!(winners(actual), winners(control));
+        let entities = |materializer: &LifecycleMaterializer<OverworldChunkSource>| {
+            materializer.pending_target_block_entities.iter().flat_map(|(&destination, entities)| {
+                entities.iter().map(move |entity| {
+                    (destination, entity.target, entity.source, entity.entity.clone())
+                })
+            }).collect::<Vec<_>>()
+        };
+        assert_eq!(entities(actual), entities(control));
+        for target in targets {
+            actual.apply_canonical_target_feature_winners(target);
+            control.apply_canonical_target_feature_winners(target);
+            let column = actual.snapshot_for_packet(target);
+            let expected = control.snapshot_for_packet(target);
+            assert_eq!(column.generation_stage(), expected.generation_stage());
+            if actual.sparse_padding_targets.contains(&target) {
+                assert_eq!(column_digest(&column), column_digest(&expected), "padding content changed at {target:?}");
+                assert_eq!(column.biome_quarts(), expected.biome_quarts());
+                assert_eq!(column.biome_cell_palette(), expected.biome_cell_palette());
+                assert_eq!(column.biome_y_quarts(), expected.biome_y_quarts());
+                for qy in 0..column.biome_y_quarts() {
+                    for qz in 0..4 {
+                        for qx in 0..4 {
+                            assert_eq!(column.biome_cell_index(qx, qy, qz), expected.biome_cell_index(qx, qy, qz));
+                        }
+                    }
+                }
+                assert_eq!(column.block_entities(), expected.block_entities());
+                assert_eq!(format!("{:?}", column.structure_starts()), format!("{:?}", expected.structure_starts()));
+                assert_eq!(column.structure_references(), expected.structure_references());
+            } else {
+                assert_eq!(column.generation_stage(), ChunkGenerationStage::Full);
+                assert_eq!(
+                    crate::chunk_nbt::column_to_nbt(target.0, target.1, &column).unwrap(),
+                    crate::chunk_nbt::column_to_nbt(target.0, target.1, &expected).unwrap(),
+                    "packet output changed at {target:?}",
+                );
+            }
+            assert_eq!(column.client_heightmaps_raw(), expected.client_heightmaps_raw());
+        }
+    }
+
+    #[test]
+    fn authenticated_sparse_epoch_skips_read_mirrors_before_full_output() {
+        let mut control = sparse_epoch_read_mirror_fixture(true, false, false);
+        let mut actual = sparse_epoch_read_mirror_fixture(false, false, false);
+        assert!(control.override_revisions.len() > 0 && control.carvers_override_revisions.len() > 0);
+        assert!(control.region_feature_override_counts().unwrap().0 > 0);
+        assert!(actual.overrides.is_empty() && actual.carvers_overrides.is_empty());
+        assert!(actual.override_revisions.is_empty() && actual.carvers_override_revisions.is_empty());
+        assert_eq!(actual.region_feature_override_counts(), Some((0, 2)));
+        assert_sparse_epoch_read_mirror_state_matches(&mut actual, &mut control);
+    }
+
+    #[test]
+    fn authenticated_sparse_epoch_preserves_interleaved_external_revision() {
+        let mut control = sparse_epoch_read_mirror_fixture(true, true, true);
+        let mut actual = sparse_epoch_read_mirror_fixture(false, true, true);
+        assert!(control.override_revisions.len() > 1 && control.carvers_override_revisions.len() > 1);
+        assert!(control.region_feature_override_counts().unwrap().0 > 1);
+        assert_eq!(actual.override_revisions.len(), 1);
+        assert_eq!(actual.carvers_override_revisions.len(), 1);
+        assert_eq!(actual.region_feature_override_counts(), Some((1, 3)));
+        assert_sparse_epoch_read_mirror_state_matches(&mut actual, &mut control);
+
+        let top_y = actual.source.generator().min_y() + actual.source.generator().height() - 1;
+        assert_eq!(actual.snapshot_for_packet((1, 0)).block_state_id(8, top_y, 8), sid("minecraft:emerald_block"));
+        drop(control);
+        let mut without_external = sparse_epoch_read_mirror_fixture(false, true, false);
+        without_external.apply_canonical_target_feature_winners((1, 0));
+        assert_ne!(without_external.snapshot_for_packet((1, 0)).block_state_id(8, top_y, 8), sid("minecraft:emerald_block"));
+    }
+
+    #[test]
+    fn authenticated_sparse_epoch_promotion_preserves_retained_output_without_replay() {
+        let padding = (0, 0);
+        let mut control = sparse_epoch_read_mirror_fixture(true, false, false);
+        let mut actual = sparse_epoch_read_mirror_fixture(false, false, false);
+        let overlay = actual.sparse_padding_overlay_for_packet(padding).unwrap();
+        assert!(!overlay.is_empty());
+        assert_eq!(overlay, control.sparse_padding_overlay_for_packet(padding).unwrap());
+        for materializer in [&mut actual, &mut control] {
+            assert!(!materializer.target_features_fully_completed(padding));
+            assert!(!materializer.has_direct_target_output_for(padding));
+            materializer.complete_target_features_observing(padding, 2, |_| {
+                panic!("promotion must not rerun a sparse feature body");
+            });
+            materializer.finish_target(padding);
+            assert!(materializer.target_features_fully_completed(padding));
+            assert!(materializer.has_direct_target_output_for(padding));
+            assert!(materializer.sparse_padding_overlay_for_packet(padding).unwrap().is_empty());
+            let column = materializer.resident_column(padding).unwrap();
+            for &(x, y, z, state) in &overlay {
+                assert_eq!(column.block_state_id(x, y, z), state);
+            }
+        }
+        assert_eq!(actual.region_feature_override_counts(), Some((0, 2)));
+        assert_sparse_epoch_read_mirror_state_matches(&mut actual, &mut control);
     }
 
     #[test]

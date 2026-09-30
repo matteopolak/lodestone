@@ -154,7 +154,7 @@ fn main() {
                 NetUpdate::LoggedIn { .. } => {
                     logged_in.get_or_insert(elapsed);
                 }
-                NetUpdate::Chunk { .. } => {
+                NetUpdate::Chunk { .. } | NetUpdate::ChunkReplaced { .. } => {
                     chunk_events += 1;
                     first_chunk_event.get_or_insert(elapsed);
                     latest_chunk_event = Some(elapsed);
