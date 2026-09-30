@@ -6,7 +6,6 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
-#[cfg(not(target_arch = "wasm32"))]
 use std::{future::Future, pin::Pin, task::{Context, Poll}};
 
 use crate::chunk::{ChunkColumn, ChunkGenerationStage, ChunkSource};
@@ -62,26 +61,56 @@ impl ColumnPayload {
 
 type PipelineResult = Result<((i32, i32), ColumnPayload), ChunkEncodeError>;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(target_arch = "wasm32", test))]
+fn spawn_local_batch(
+    future: impl Future<Output = Vec<PipelineResult>> + 'static,
+    count: usize,
+) -> Pin<Box<dyn Future<Output = Vec<PipelineResult>>>> {
+    let (mut sender, receiver) = tokio::sync::oneshot::channel();
+    let task = async move {
+        tokio::select! {
+            result = future => { let _ = sender.send(result); }
+            _ = sender.closed() => {}
+        }
+    };
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_futures::spawn_local(task);
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    tokio::task::spawn_local(task);
+    Box::pin(async move {
+        receiver.await.unwrap_or_else(|_| {
+            (0..count)
+                .map(|_| Err(ChunkEncodeError::new("generation task ended without a result")))
+                .collect()
+        })
+    })
+}
+
 type JoinEncodeResult = Result<((i32, i32), ServerDirective), ChunkEncodeError>;
 
 #[cfg(not(target_arch = "wasm32"))]
+type JoinEncodeFuture<'a> = Pin<Box<dyn Future<Output = JoinEncodeResult> + Send + 'a>>;
+#[cfg(target_arch = "wasm32")]
+type JoinEncodeFuture<'a> = Pin<Box<dyn Future<Output = JoinEncodeResult> + 'a>>;
+
 struct JoinEncodeSlot<'a> {
-    future: Option<Pin<Box<dyn Future<Output = JoinEncodeResult> + Send + 'a>>>,
+    future: Option<JoinEncodeFuture<'a>>,
     ready: Option<JoinEncodeResult>,
     serial: bool,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct OrderedJoinEncodes<'a> {
     slots: VecDeque<JoinEncodeSlot<'a>>,
     window: usize,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl<'a> OrderedJoinEncodes<'a> {
     pub(crate) fn new() -> Self {
-        Self::with_window(crate::worldgen_dispatch::worker_count().saturating_sub(1).clamp(1, 4))
+        #[cfg(not(target_arch = "wasm32"))]
+        let window = crate::worldgen_dispatch::worker_count().saturating_sub(1).clamp(1, 4);
+        #[cfg(target_arch = "wasm32")]
+        let window = 1;
+        Self::with_window(window)
     }
 
     fn with_window(window: usize) -> Self {
@@ -96,13 +125,10 @@ impl<'a> OrderedJoinEncodes<'a> {
         self.slots.len() < self.window && self.slots.iter().all(|slot| !slot.serial)
     }
 
-    pub(crate) fn push<F>(&mut self, serial: bool, future: F)
-    where
-        F: Future<Output = JoinEncodeResult> + Send + 'a,
-    {
+    pub(crate) fn push(&mut self, serial: bool, future: JoinEncodeFuture<'a>) {
         assert!(self.can_admit(), "join encode window is full or fenced");
         self.slots.push_back(JoinEncodeSlot {
-            future: Some(Box::pin(future)),
+            future: Some(future),
             ready: None,
             serial,
         });
@@ -131,6 +157,7 @@ impl<'a> OrderedJoinEncodes<'a> {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn clear(&mut self) {
         self.slots.clear();
     }
@@ -1484,6 +1511,7 @@ impl<S: ChunkSource + ?Sized + 'static> ColumnPipeline<S> {
                         })
                         .collect()
                 });
+                let future = spawn_local_batch(future, requests.len());
                 self.inflight.push_back(InflightBatch { requests, future });
             }
             let results = {
@@ -1514,26 +1542,22 @@ impl<S: ChunkSource + ?Sized + 'static> ColumnPipeline<S> {
 pub(crate) async fn generate_owned_columns(
     source: Arc<dyn ChunkSource>,
     coords: Vec<(i32, i32)>,
-) -> Vec<ChunkColumn> {
+) -> Result<Vec<ChunkColumn>, ChunkEncodeError> {
     let mut pipeline = ColumnPipeline::with_window(
         source,
         coords,
         generation_window(),
     );
     let mut columns = Vec::with_capacity(pipeline.remaining());
-    while let Some((_, payload)) = pipeline
-        .next()
-        .await
-        .expect("owned generation request must succeed")
-    {
+    while let Some((_coordinate, payload)) = pipeline.next().await? {
         columns.push(
             payload
                 .column()
-                .expect("owned generation request must return a column")
+                .ok_or_else(|| ChunkEncodeError::new("generation admission returned no column"))?
                 .clone(),
         );
     }
-    columns
+    Ok(columns)
 }
 
 /// The part of a join view that has **not** been sent by the time the play loop
@@ -1769,7 +1793,7 @@ impl<S: ChunkSource + 'static> JoinChunkStream<S> {
                         *self = Self::Drained;
                         return Ok(None);
                     };
-                    let columns = source.generate(ring.clone()).await;
+                    let columns = source.generate(ring.clone()).await?;
                     for (coord, column) in ring.into_iter().zip(columns) {
                         ready.push_back((coord, column));
                     }
@@ -1801,6 +1825,49 @@ mod tests {
     use std::time::Duration;
 
     #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_generation_runs_without_polling_its_receiver() {
+        tokio::task::LocalSet::new().run_until(async {
+            let (started, running) = tokio::sync::oneshot::channel();
+            let (release, wait) = tokio::sync::oneshot::channel();
+            let (finished, done) = tokio::sync::oneshot::channel();
+            let result = spawn_local_batch(async move {
+                started.send(()).unwrap();
+                wait.await.unwrap();
+                finished.send(()).unwrap();
+                vec![Ok(((13, -7), ColumnPayload::Encoded(ServerDirective::None)))]
+            }, 1);
+            running.await.unwrap();
+            release.send(()).unwrap();
+            done.await.unwrap();
+            assert!(matches!(result.await.as_slice(), [Ok(((13, -7), _))]));
+        }).await;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_generation_receiver_drop_releases_pending_work() {
+        struct Release(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                let _ = self.0.take().unwrap().send(());
+            }
+        }
+        tokio::task::LocalSet::new().run_until(async {
+            let (started, running) = tokio::sync::oneshot::channel();
+            let (released, done) = tokio::sync::oneshot::channel();
+            let result = spawn_local_batch(async move {
+                let _lease = Release(Some(released));
+                started.send(()).unwrap();
+                std::future::pending::<Vec<PipelineResult>>().await
+            }, 1);
+            running.await.unwrap();
+            drop(result);
+            done.await.unwrap();
+        }).await;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn ordered_join_encodes_poll_independent_snapshots_and_fence_source_work() {
         let started = Arc::new(AtomicUsize::new(0));
@@ -1810,11 +1877,11 @@ mod tests {
             let (release, wait) = tokio::sync::oneshot::channel();
             releases.push(release);
             let started = Arc::clone(&started);
-            encodes.push(false, async move {
+            encodes.push(false, Box::pin(async move {
                 started.fetch_add(1, Ordering::SeqCst);
                 wait.await.unwrap();
                 Ok(((cx, 0), ServerDirective::None))
-            });
+            }));
         }
         let mut cx = Context::from_waker(std::task::Waker::noop());
         assert!(encodes.poll_next(&mut cx).is_pending());
@@ -1827,10 +1894,10 @@ mod tests {
         assert!(matches!(encodes.poll_next(&mut cx), Poll::Ready(Ok(((1, 0), _)))));
 
         let (release, wait) = tokio::sync::oneshot::channel();
-        encodes.push(true, async move {
+        encodes.push(true, Box::pin(async move {
             wait.await.unwrap();
             Ok(((2, 0), ServerDirective::None))
-        });
+        }));
         assert!(!encodes.can_admit());
         assert!(encodes.poll_next(&mut cx).is_pending());
         release.send(()).unwrap();
@@ -1858,6 +1925,7 @@ mod tests {
     struct RequestPathSource {
         requests: Mutex<Vec<((i32, i32), lodestone_worldgen::stage_schedule::GenerationTarget, bool)>>,
         scalar_calls: AtomicUsize,
+        reject: bool,
     }
 
     struct BatchPathSource {
@@ -1896,6 +1964,9 @@ mod tests {
                 .lock()
                 .expect("request log lock poisoned")
                 .push((request.target(), request.generation_target(), session.is_some()));
+            if self.reject {
+                return Err(GenerationRequestError::Boundary("overlay capacity control".to_owned()));
+            }
             Ok(Some(GenerationRequestResult::Existing(ChunkColumn::new(0, 16))))
         }
 
@@ -2229,10 +2300,26 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn owned_admission_returns_generation_errors_without_scalar_fallback() {
+        let source = Arc::new(RequestPathSource {
+            requests: Mutex::new(Vec::new()),
+            scalar_calls: AtomicUsize::new(0),
+            reject: true,
+        });
+        let error = generate_owned_columns(source.clone(), vec![(-9, 16)])
+            .await
+            .unwrap_err();
+        assert!(error.message().contains("overlay capacity control"));
+        assert_eq!(source.scalar_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn supported_request_generation_precedes_scalar_fallback() {
         let source = Arc::new(RequestPathSource {
             requests: Mutex::new(Vec::new()),
             scalar_calls: AtomicUsize::new(0),
+            reject: false,
         });
         let coords = vec![(0, 0), (1, 0)];
         let mut pipeline = ColumnPipeline::with_window(Arc::clone(&source), coords.clone(), 1)
@@ -2406,6 +2493,7 @@ mod tests {
         let source = Arc::new(RequestPathSource {
             requests: Mutex::new(Vec::new()),
             scalar_calls: AtomicUsize::new(0),
+            reject: false,
         });
         let owned: Arc<dyn ChunkSource> = source.clone();
         let mut stream = JoinChunkStream::<RequestPathSource>::ringed(vec![vec![(0, 0)]]);

@@ -3884,6 +3884,9 @@ pub(crate) async fn generate_columns_borrowed(
 /// (and rendering) actually yields at.
 #[cfg(target_arch = "wasm32")]
 pub(crate) async fn yield_to_browser() {
+    let _timing = crate::worldgen_progress::PhaseTimer::start(
+        crate::worldgen_progress::WorldgenTimingPhase::BrowserYield, 1,
+    );
     let promise = js_sys::Promise::new(&mut |resolve, _reject| {
         // The normal browser singleplayer path generates columns in a
         // dedicated server worker. A worker has no `Window`, but its global

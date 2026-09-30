@@ -1336,17 +1336,17 @@ async fn mob_seed_columns<S: ChunkSource + 'static>(
     world: &crate::world_state::WorldStateHandle,
     join_center: (i32, i32),
     view_radius: i32,
-) -> (Vec<ChunkColumn>, usize) {
+) -> Result<(Vec<ChunkColumn>, usize), crate::protocol::ChunkEncodeError> {
     let covered_by_join = coordinates.iter().all(|&(x, z)| {
         (i64::from(x) - i64::from(join_center.0)).abs() <= i64::from(view_radius)
             && (i64::from(z) - i64::from(join_center.1)).abs() <= i64::from(view_radius)
     });
     if !covered_by_join {
         let source: Arc<dyn ChunkSource> = source;
-        return (
-            crate::join_scheduler::generate_owned_columns(source, coordinates.to_vec()).await,
+        return Ok((
+            crate::join_scheduler::generate_owned_columns(source, coordinates.to_vec()).await?,
             0,
-        );
+        ));
     }
 
     let mut columns = vec![None; coordinates.len()];
@@ -1384,18 +1384,18 @@ async fn mob_seed_columns<S: ChunkSource + 'static>(
             source,
             missing.iter().map(|&(_, coordinate)| coordinate).collect(),
         )
-        .await;
+        .await?;
         for ((index, _), column) in missing.into_iter().zip(generated) {
             columns[index] = Some(column);
         }
     }
-    (
+    Ok((
         columns
             .into_iter()
             .map(|column| column.expect("mob seed column was reused or generated"))
             .collect(),
         reused,
-    )
+    ))
 }
 
 impl IntegratedServer {
@@ -2456,14 +2456,20 @@ impl IntegratedServer {
                 tokio::time::sleep(crate::tick::TICK_PERIOD).await;
             };
             let t_seed = lodestone_time::Instant::now();
-            let (columns, reused) = mob_seed_columns(
+            let (columns, reused) = match mob_seed_columns(
                 seed_source,
                 &seed_coords,
                 &seed_world_state,
                 join_center,
                 view_radius,
             )
-            .await;
+            .await {
+                Ok(result) => result,
+                Err(error) => {
+                    tracing::error!(%error, "mob seed generation failed");
+                    return;
+                }
+            };
             let gen_ms = t_seed.elapsed().as_millis();
             let world = ChunkWorld::from_columns(seed_coords.iter().copied().zip(columns));
             seed_mobs.replace_world(world);
@@ -6289,7 +6295,7 @@ mod tests {
         }
         let before = total(&calls);
         let (columns, reused) =
-            mob_seed_columns(Arc::clone(&source), &coordinates, &world, (0, 0), 1).await;
+            mob_seed_columns(Arc::clone(&source), &coordinates, &world, (0, 0), 1).await.unwrap();
         assert_eq!(columns.len(), coordinates.len());
         assert_eq!(reused, coordinates.len());
         assert_eq!(total(&calls), before);
@@ -6306,7 +6312,7 @@ mod tests {
         assert!(!task.is_finished());
         assert_eq!(total(&calls), before);
         world.mark_initial_view_drained();
-        let (columns, reused) = task.await.unwrap();
+        let (columns, reused) = task.await.unwrap().unwrap();
         assert_eq!(columns.len(), 2);
         assert_eq!(reused, 1);
         assert!(total(&calls) > before);
@@ -6319,7 +6325,7 @@ mod tests {
             (50, 0),
             2,
         )
-        .await;
+        .await.unwrap();
         assert_eq!(columns.len(), 1);
         assert_eq!(reused, 0);
         assert!(total(&calls) > previous);

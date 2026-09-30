@@ -57,6 +57,18 @@ view deficits with connection delivery and mesh queue age before attributing a
 delay to generation. These sampled console diagnostics are debug-only and do not
 extend the SDK progress-event contract.
 
+Wasm generation batches run as independently driven local tasks. The connection
+polls a bounded ordered encode queue while continuing packet and tick service;
+dropping a batch receiver cancels its task and releases the generation claims.
+This prevents an action awaiting an overlapping region from also stopping the
+only task capable of releasing that region. Generation admission errors are
+returned through the normal chunk error boundary, not promoted to a panic.
+
+The `browser-yield` timing phase records actual host scheduling wait around
+cooperative generation yields. Its totals are elapsed wait, not CPU work, and
+can overlap other task timings. Compare yield maxima with worker-health gaps
+before attributing a slow join to timer scheduling.
+
 The standalone page's optional `?log=debug&probe=1` panel holds the public host
 input bridge for a 20-second sprint/jump walk or a three-second mining action.
 Join through the normal menus and aim at a block before mining. This exercises

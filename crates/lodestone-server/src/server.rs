@@ -784,7 +784,6 @@ impl<'a, S: ChunkSource + 'static> SourceRef<'a, S> {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     fn shared_arc(self) -> Option<Arc<dyn ChunkSource>> {
         match self {
             Self::Borrowed(_) => None,
@@ -820,16 +819,19 @@ impl<'a, S: ChunkSource + 'static> SourceRef<'a, S> {
     /// `JoinChunkStream` finishes a join from `serve_play`, and its borrowed arm
     /// generates through exactly this method — the alternative was duplicating the
     /// arm fork, which is the one thing that must not drift.
-    pub(crate) async fn generate(self, coords: Vec<(i32, i32)>) -> Vec<ChunkColumn> {
+    pub(crate) async fn generate(
+        self,
+        coords: Vec<(i32, i32)>,
+    ) -> Result<Vec<ChunkColumn>, ChunkEncodeError> {
         match self {
             Self::Shared(source) => {
                 let source: Arc<dyn ChunkSource> = source.clone();
                 crate::join_scheduler::generate_owned_columns(source, coords).await
             }
             #[cfg(not(target_arch = "wasm32"))]
-            Self::Borrowed(source) => generate_columns_parallel(source, &coords),
+            Self::Borrowed(source) => Ok(generate_columns_parallel(source, &coords)),
             #[cfg(target_arch = "wasm32")]
-            Self::Borrowed(source) => generate_columns_borrowed(source, &coords).await,
+            Self::Borrowed(source) => Ok(generate_columns_borrowed(source, &coords).await),
             Self::Dimension(source) => {
                 crate::join_scheduler::generate_owned_columns(Arc::clone(source), coords).await
             }
@@ -844,8 +846,8 @@ impl<'a, S: ChunkSource + 'static> SourceRef<'a, S> {
     /// the future does not resolve until every requested coordinate has had a
     /// chance to enter the source's resident cache, while an already-resident
     /// coordinate remains a cheap cache hit.
-    async fn admit_columns(self, coords: Vec<(i32, i32)>) {
-        let _ = self.generate(coords).await;
+    async fn admit_columns(self, coords: Vec<(i32, i32)>) -> Result<(), ChunkEncodeError> {
+        self.generate(coords).await.map(|_| ())
     }
 
     /// Resolves a fresh world's initial spawn without blocking the connection
@@ -980,13 +982,13 @@ async fn admit_end_gateway_arrival<S: ChunkSource + 'static>(
     source: SourceRef<'_, S>,
     block_entities: &BlockEntityHandle,
     pos: BlockPos,
-) {
+) -> Result<(), ChunkEncodeError> {
     let Some((exit, _exact)) = end_gateway_exit_resident(source.get(), block_entities, pos) else {
-        return;
+        return Ok(());
     };
     source
         .admit_columns(crate::portal::end_gateway_required_columns(exit))
-        .await;
+        .await
 }
 
 /// Resolves an already-admitted destination without reopening a cold portal
@@ -1195,7 +1197,7 @@ where
         Some(owned) => {
             let _ = generate_columns_offloaded(Arc::clone(owned), required).await;
         }
-        None => current.admit_columns(required).await,
+        None => current.admit_columns(required).await?,
     }
     // The exit portal axis comes from the block containing the player. Carry
     // `entry` here so the generated portal keeps that orientation.
@@ -2087,7 +2089,7 @@ where
             return return_chunk_encode_error(conn, proto, state, None, error).await;
         }
         None => {
-            let columns = source.generate(requested.clone()).await;
+            let columns = source.generate(requested.clone()).await?;
             for (&(x, z), column) in requested.iter().zip(columns.iter()) {
                 if proto.uses_cross_column_light() || proto.retains_initial_column_light() {
                     source
@@ -2096,7 +2098,7 @@ where
                             z,
                             i32::from(proto.uses_cross_column_light()),
                         ))
-                        .await;
+                        .await?;
                 }
                 match encode_chunk_with_source(proto, source.get(), x, z, column) {
                     Ok(directive) => batch.push(directive),
@@ -3188,9 +3190,9 @@ fn action_target(packet: &ServerBound) -> Option<BlockPos> {
 async fn admit_action_footprint<S: ChunkSource + 'static>(
     source: SourceRef<'_, S>,
     packet: &ServerBound,
-) {
+) -> Result<(), ChunkEncodeError> {
     let Some(pos) = action_target(packet) else {
-        return;
+        return Ok(());
     };
     source
         .admit_columns(column_admission_footprint(
@@ -3198,7 +3200,7 @@ async fn admit_action_footprint<S: ChunkSource + 'static>(
             pos.z.div_euclid(16),
             1,
         ))
-        .await;
+        .await
 }
 
 async fn encode_column<P: ServerProtocol, S: ChunkSource + 'static>(
@@ -3221,12 +3223,14 @@ async fn encode_column<P: ServerProtocol, S: ChunkSource + 'static>(
                 .get()
                 .packet_generation_stage(column.generation_stage())
             {
-                Some(required) if required > column.generation_stage() => source
-                    .generate(vec![(cx, cz)])
-                    .await
-                    .into_iter()
-                    .next()
-                    .expect("one packet admission coordinate yields one column"),
+                Some(required) if required > column.generation_stage() => {
+                    source
+                        .generate(vec![(cx, cz)])
+                        .await?
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| ChunkEncodeError::new("packet admission returned no column"))?
+                }
                 _ => column,
             };
             crate::join_scheduler::ColumnPayload::Column(column)
@@ -3241,7 +3245,7 @@ async fn encode_column<P: ServerProtocol, S: ChunkSource + 'static>(
                 cz,
                 i32::from(proto.uses_cross_column_light()),
             ))
-            .await;
+            .await?;
     }
     match payload {
         crate::join_scheduler::ColumnPayload::Encoded(directive) => Ok(directive),
@@ -3270,9 +3274,6 @@ async fn encode_column<P: ServerProtocol, S: ChunkSource + 'static>(
     }
 }
 
-/// Retains the shared source across deferred native join polls and dimension
-/// changes. Admission uses the same request boundary as inline encoding.
-#[cfg(not(target_arch = "wasm32"))]
 async fn encode_column_owned<P: ServerProtocol>(
     proto: &P,
     source: Arc<dyn ChunkSource>,
@@ -3294,10 +3295,10 @@ async fn encode_column_owned<P: ServerProtocol>(
                     Arc::clone(&source),
                     vec![(cx, cz)],
                 )
-                .await
+                .await?
                 .into_iter()
                 .next()
-                .expect("one packet admission coordinate yields one column"),
+                .ok_or_else(|| ChunkEncodeError::new("packet admission returned no column"))?,
                 _ => column,
             };
             crate::join_scheduler::ColumnPayload::Column(column)
@@ -3314,11 +3315,12 @@ async fn encode_column_owned<P: ServerProtocol>(
                 i32::from(proto.uses_cross_column_light()),
             ),
         )
-        .await;
+        .await?;
     }
     match payload {
         crate::join_scheduler::ColumnPayload::Encoded(directive) => Ok(directive),
         crate::join_scheduler::ColumnPayload::Column(column) => {
+            #[cfg(not(target_arch = "wasm32"))]
             let directive = if let Some(encode) = proto.detached_source_encode() {
                 let handle = crate::worldgen_dispatch::spawn(move || {
                     encode(&*source, cx, cz, &column)
@@ -3330,6 +3332,8 @@ async fn encode_column_owned<P: ServerProtocol>(
             } else {
                 encode_chunk_with_source(proto, &*source, cx, cz, &column)
             };
+            #[cfg(target_arch = "wasm32")]
+            let directive = encode_chunk_with_source(proto, &*source, cx, cz, &column);
             if directive.is_ok()
                 && let Some(trace) = trace.as_ref()
             {
@@ -3341,6 +3345,7 @@ async fn encode_column_owned<P: ServerProtocol>(
             let dimension = source
                 .dimension()
                 .unwrap_or(crate::dimension::Dimension::Overworld);
+            #[cfg(not(target_arch = "wasm32"))]
             let directive = if let Some(encode) = proto.detached_packet_encode() {
                 let handle = crate::worldgen_dispatch::spawn(move || {
                     encode(cx, cz, &snapshot, dimension)
@@ -3352,6 +3357,8 @@ async fn encode_column_owned<P: ServerProtocol>(
             } else {
                 encode_packet_snapshot_with_protocol(proto, cx, cz, &snapshot, dimension)
             }?;
+            #[cfg(target_arch = "wasm32")]
+            let directive = encode_packet_snapshot_with_protocol(proto, cx, cz, &snapshot, dimension)?;
             if let Some(trace) = trace.as_ref() {
                 trace.mark("encoded", cx, cz);
             }
@@ -4699,7 +4706,7 @@ where
                                 (candidate.z.floor() as i32).div_euclid(16),
                                 1,
                             ))
-                            .await;
+                            .await?;
                         if restored_dimension_source.is_none()
                             && !crate::world_spawn::is_spawn_position_clear(source.get(), candidate)
                         {
@@ -4990,7 +4997,7 @@ where
                             (JOIN_PRESTREAM_RADIUS as usize + 1).min(rings.len()),
                         );
                         for ring in &rings {
-                            let columns = source.generate(ring.clone()).await;
+                            let columns = source.generate(ring.clone()).await?;
                             for (&(cx, cz), column) in ring.iter().zip(columns.iter()) {
                                 if let Some(trace) = join_trace.as_ref() {
                                     trace.mark("generated", cx, cz);
@@ -12919,7 +12926,7 @@ where
     // keeps packets ordered and, for the integrated `Shared` source, moves
     // every cold `column()` call off this connection task. A cold admission is
     // never a reason to drop the packet.
-    admit_action_footprint(source, &packet).await;
+    admit_action_footprint(source, &packet).await?;
 
     match packet {
         ServerBound::KeepAlive { id } => {
@@ -13748,7 +13755,7 @@ where
                         pos.z.div_euclid(16),
                         1,
                     ))
-                    .await;
+                    .await?;
             }
             // Drawn unconditionally, whether or not the click succeeds — the
             // same "one draw per attempt" reasoning `apply_use_item_on`'s own
@@ -14504,7 +14511,7 @@ where
                     if !effect_columns.is_empty() {
                         chunk_source
                             .admit_columns(effect_columns.into_iter().collect())
-                            .await;
+                            .await?;
                     }
                     for directed in outcome.effects {
                         if directed.target != player_uuid {
@@ -15577,6 +15584,10 @@ where
                         .await;
                     }
                 };
+                if !view.loaded.contains(&(cx, cz)) {
+                    watch.pass("join_encode_obsolete");
+                    continue;
+                }
                 if !join_batch_open {
                     apply(conn, &mut state, proto.begin_chunk_batch()).await?;
                     join_batch_open = true;
@@ -15650,7 +15661,7 @@ where
                         // timers.
                         let trace = join_trace.clone();
                         let serial = !matches!(payload, crate::join_scheduler::ColumnPayload::Snapshot(_));
-                        pending_join_encodes.push(serial, async move {
+                        pending_join_encodes.push(serial, Box::pin(async move {
                             encode_column_owned(
                                 proto,
                                 owned_source,
@@ -15661,7 +15672,7 @@ where
                             )
                             .await
                             .map(|directive| ((cx, cz), directive))
-                        });
+                        }));
                     } else {
                         // Borrowed sources exist for protocol-level controls and
                         // cannot outlive this loop iteration. They retain the
@@ -17214,7 +17225,7 @@ where
                     )
                     .is_some()
                     {
-                        admit_end_gateway_arrival(source, block_entities, contact).await;
+                        admit_end_gateway_arrival(source, block_entities, contact).await?;
                     }
                     if resident_column(
                         source.get(),
@@ -17303,7 +17314,7 @@ where
                             // portal with no transition attempt.
                             source
                                 .admit_columns(vec![(feet.x.div_euclid(16), feet.z.div_euclid(16))])
-                                .await;
+                                .await?;
                             let Some(state) = resident_block_state(source.get(), feet.x, feet.y, feet.z) else {
                                 watch.pass("vitals_tick");
                                 continue;
@@ -18294,9 +18305,6 @@ async fn serve_play<T, P, S, E>(
     // usable per-player bed point exists.
     world_spawn: Vec3,
     mut chunks_sent: usize,
-    // The browser loop drains the finite join stream inline before packet
-    // dispatch. It has no second thread, so generation occupies this loop until
-    // the initial burst completes.
     mut join_stream: crate::join_scheduler::JoinChunkStream<S>,
     // Optional per-stage join timing. Browser builds normally leave this off.
     join_trace: Option<Arc<JoinTrace>>,
@@ -18442,7 +18450,11 @@ where
     let mut browser_vitals_ticks = 0_u64;
     let mut connection_probe = crate::connection_progress::ConnectionProbe::start();
     use crate::connection_progress::ConnectionActivity;
+    let mut pending_join_encodes = crate::join_scheduler::OrderedJoinEncodes::new();
     loop {
+        if join_stream.is_done() && pending_join_encodes.is_empty() {
+            world.mark_initial_view_drained();
+        }
         if let Some(probe) = connection_probe.as_mut() {
             probe.observe(crate::connection_progress::ConnectionProgress {
                 running: true,
@@ -18454,7 +18466,7 @@ where
                 owed_columns: view.loaded.len(),
                 delivered_columns: view.delivered.len(),
                 chunks_sent,
-                remaining: join_stream.remaining(),
+                remaining: join_stream.remaining() + usize::from(!pending_join_encodes.is_empty()),
                 activity: ConnectionActivity::Select,
                 activity_elapsed: std::time::Duration::ZERO,
                 target: None,
@@ -18578,6 +18590,51 @@ where
                 }
                 None
             }
+            encoded = std::future::poll_fn(|cx| pending_join_encodes.poll_next(cx)), if !pending_join_encodes.is_empty() => {
+                let ((cx, cz), directive) = match encoded {
+                    Ok(encoded) => encoded,
+                    Err(error) => {
+                        return return_chunk_encode_error(conn, proto, &mut state, Some(0), error)
+                            .await;
+                    }
+                };
+                if !view.loaded.contains(&(cx, cz)) {
+                    continue;
+                }
+                {
+                    let _timing = PhaseTimer::start(WorldgenTimingPhase::WireSend, 1);
+                    activity(ConnectionActivity::JoinBegin, Some((cx, cz)), None);
+                    apply(conn, &mut state, proto.begin_chunk_batch()).await?;
+                    activity(ConnectionActivity::JoinColumn, Some((cx, cz)), None);
+                    apply(conn, &mut state, directive).await?;
+                    view.mark_delivered((cx, cz));
+                    activity(ConnectionActivity::JoinEnd, Some((cx, cz)), None);
+                    apply(conn, &mut state, proto.end_chunk_batch(1)).await?;
+                }
+                if let Some(trace) = join_trace.as_ref() {
+                    trace.mark("delivered", cx, cz);
+                }
+                chunks_sent += 1;
+                if chunks_sent == 1 || chunks_sent.is_multiple_of(16)
+                    || (join_stream.is_done() && pending_join_encodes.is_empty())
+                {
+                    crate::worldgen_progress::emit(
+                        crate::worldgen_progress::WorldgenProgress::wire_delivered(
+                            (cx, cz),
+                            chunks_sent,
+                            join_stream.remaining(),
+                        ),
+                    );
+                    tracing::debug!(
+                        elapsed_ms = browser_play_started.elapsed().as_millis(),
+                        chunks_sent,
+                        join_remaining = join_stream.remaining(),
+                        world_tick = world.time().game_time,
+                        "browser join stream progress",
+                    );
+                }
+                continue;
+            }
             next = async {
                 tokio::select! {
                     next = join_stream.next(source) => Some(next),
@@ -18585,7 +18642,7 @@ where
                         crate::join_scheduler::JOIN_STREAM_SERVICE_BUDGET,
                     ) => None,
                 }
-            }, if !join_stream.is_done() => {
+            }, if pending_join_encodes.can_admit() && !join_stream.is_done() => {
                 let Some(next) = next else {
                     continue;
                 };
@@ -18599,6 +18656,15 @@ where
                     continue;
                 };
                 activity(ConnectionActivity::JoinAdmission, Some((cx, cz)), None);
+                if let Some(owned_source) = source.shared_arc() {
+                    let trace = join_trace.clone();
+                    pending_join_encodes.push(true, Box::pin(async move {
+                        encode_column_owned(proto, owned_source, cx, cz, trace, payload)
+                            .await
+                            .map(|directive| ((cx, cz), directive))
+                    }));
+                    continue;
+                }
                 let directive = match encode_column(
                     proto,
                     source,
@@ -19176,7 +19242,7 @@ mod tests {
             sequence: 0,
         };
 
-        admit_action_footprint(source_ref, &packet).await;
+        admit_action_footprint(source_ref, &packet).await.unwrap();
         assert!(
             source_ref.get().resident_column(1, -1).is_some(),
             "the target must be resident before the synchronous action read"

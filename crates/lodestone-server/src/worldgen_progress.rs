@@ -14,10 +14,11 @@ pub enum WorldgenTimingPhase {
     PacketLighting,
     PacketEncoding,
     WireSend,
+    BrowserYield,
 }
 
 impl WorldgenTimingPhase {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Lease,
         Self::PreOre,
         Self::StructureContext,
@@ -28,6 +29,7 @@ impl WorldgenTimingPhase {
         Self::PacketLighting,
         Self::PacketEncoding,
         Self::WireSend,
+        Self::BrowserYield,
     ];
 
     pub const fn index(self) -> usize {
@@ -46,6 +48,7 @@ impl WorldgenTimingPhase {
             Self::PacketLighting => "packet-lighting",
             Self::PacketEncoding => "packet-encoding",
             Self::WireSend => "wire-send",
+            Self::BrowserYield => "browser-yield",
         }
     }
 }
