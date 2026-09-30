@@ -625,6 +625,22 @@ impl DenseBlockGrid {
         }
     }
 
+    #[inline]
+    pub(crate) fn get_id_and_facts(&self, x: i32, y: i32, z: i32) -> (StateId, BaseStateFacts) {
+        crate::counters::bump_logical_read(crate::counters::MemoryBoundary::BlockGrid, 1, 2);
+        match self.index(x, y, z) {
+            Some(i) if self.raw_state_ids => {
+                let state = StateId::from_raw(self.blocks[i]);
+                (state, base_facts(state))
+            }
+            Some(i) => {
+                let entry = self.blocks[i] as usize;
+                (self.palette[entry], self.palette_base_facts[entry])
+            }
+            None => (air_state(), BaseStateFacts::air()),
+        }
+    }
+
     /// Base-state id at `(x, y, z)`, with air outside the box.
     /// This is the numeric counterpart of stripping a state string at `'['`.
     #[must_use]
@@ -1287,6 +1303,36 @@ mod tests {
 
     fn state(spec: &str) -> StateId {
         StateId::from_state_str(spec).expect("test state is in the generated table")
+    }
+
+    #[test]
+    fn combined_id_and_facts_preserve_raw_and_indexed_states_and_bounds() {
+        let coral = state("minecraft:brain_coral_fan[waterlogged=true]");
+        let stone = state("minecraft:stone");
+        for mut grid in [
+            DenseBlockGrid::with_default(-16, -3, -32, 2, 4, 2, stone),
+            DenseBlockGrid::with_default_raw(-16, -3, -32, 2, 4, 2, stone),
+        ] {
+            grid.set_id(-15, -1, -31, coral);
+            assert_eq!(
+                grid.get_id_and_facts(-15, -1, -31),
+                (coral, BaseStateFacts::Builtin {
+                    is_air: false, is_fluid: true, blocks_motion: false,
+                }),
+            );
+            assert_eq!(
+                grid.get_id_and_facts(-16, -3, -32),
+                (stone, BaseStateFacts::Builtin {
+                    is_air: false, is_fluid: false, blocks_motion: true,
+                }),
+            );
+            for (x, y, z) in [
+                (-17, -1, -31), (-14, -1, -31), (-15, -4, -31),
+                (-15, 1, -31), (-15, -1, -33), (-15, -1, -30),
+            ] {
+                assert_eq!(grid.get_id_and_facts(x, y, z), (StateId::AIR, BaseStateFacts::air()));
+            }
+        }
     }
 
     fn packed_result_digest(palette: &[String], blocks: &[u16]) -> u64 {

@@ -1262,6 +1262,16 @@ fn main() {
         "movement_overrun_delta": server_tick_at_move_start.zip(server_tick_at_move_end).map(|((start, _), (end, _))| end.overrun_count.saturating_sub(start.overrun_count)),
         "tps_at_end": server_tick_at_end.map(|(stats, _)| stats.tps),
         "mspt_avg_at_end": server_tick_at_end.map(|(stats, _)| stats.mspt_avg_ms),
+        "schedule_at_end": server_tick_at_end.map(|(stats, _)| serde_json::json!({
+            "wait_count": stats.schedule.wait_count,
+            "wake_p95_ms": stats.schedule.service_lateness_p95_ms,
+            "wake_max_ms": stats.schedule.service_lateness_max_ms,
+            "deadline_max_ms": stats.schedule.deadline_lateness_max_ms,
+            "catch_up_ticks": stats.schedule.catch_up_ticks,
+            "cooperative_yields": stats.schedule.cooperative_yields,
+            "cooperative_yield_max_ms": stats.schedule.cooperative_yield_max_ms,
+            "shed_ticks": stats.schedule.shed_ticks,
+        })),
         "max_observed_tick_gap_ms": server_tick_max_gap.as_secs_f64() * 1000.0,
     });
     let edit = edit.map(|probe| serde_json::json!({
@@ -1283,7 +1293,7 @@ fn main() {
         "input_to_draw_ms": probe.clicked_at.zip(probe.drawn_at).map(|(start, end)| end.duration_since(start).as_secs_f64() * 1000.0),
     }));
     let report = serde_json::json!({
-        "schema": "lodestone-client-join-mesh-profile-v22",
+        "schema": "lodestone-client-join-mesh-profile-v23",
         "seed": SEED,
         "target_size": [target_width, target_height],
         "visible_radius": radius,

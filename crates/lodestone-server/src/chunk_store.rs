@@ -14712,7 +14712,7 @@ mod tests {
                 })
                 .is_err()
         });
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let deadline = lodestone_time::Instant::now() + std::time::Duration::from_secs(1);
         while coordinator
             .state
             .lock()
@@ -14720,7 +14720,7 @@ mod tests {
             .pending
             .is_empty()
         {
-            assert!(std::time::Instant::now() < deadline, "cohort did not queue");
+            assert!(lodestone_time::Instant::now() < deadline, "cohort did not queue");
             std::thread::yield_now();
         }
         first.cancel();
@@ -14786,7 +14786,7 @@ mod tests {
             finished.send(outcome).expect("test receiver remains open");
         });
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let deadline = lodestone_time::Instant::now() + std::time::Duration::from_secs(1);
         while store
             .generation_regions
             .state
@@ -14795,7 +14795,7 @@ mod tests {
             .pending
             .is_empty()
         {
-            assert!(std::time::Instant::now() < deadline, "cohort did not queue");
+            assert!(lodestone_time::Instant::now() < deadline, "cohort did not queue");
             std::thread::yield_now();
         }
         first.cancel();

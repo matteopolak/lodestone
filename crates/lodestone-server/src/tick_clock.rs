@@ -76,6 +76,19 @@ pub struct OwnerTickStats {
     pub entity_effects: u64,
 }
 
+/// Timer service delay is separate from simulation work and deadline debt.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct TickScheduleStats {
+    pub wait_count: u64,
+    pub service_lateness_p95_ms: f64,
+    pub service_lateness_max_ms: f64,
+    pub deadline_lateness_max_ms: f64,
+    pub catch_up_ticks: u64,
+    pub cooperative_yields: u64,
+    pub cooperative_yield_max_ms: f64,
+    pub shed_ticks: u64,
+}
+
 /// MSPT/TPS, phase, owner-work, and overrun accounting for one tick loop.
 ///
 /// The loop writes through atomics and bounded mutex-protected histories while
@@ -85,6 +98,14 @@ pub struct TickClock {
     tick_count: AtomicU64,
     last_mspt_micros: AtomicU64,
     overrun_count: AtomicU64,
+    wait_count: AtomicU64,
+    service_lateness_history: Mutex<VecDeque<u64>>,
+    service_lateness_max_micros: AtomicU64,
+    deadline_lateness_max_micros: AtomicU64,
+    catch_up_ticks: AtomicU64,
+    cooperative_yields: AtomicU64,
+    cooperative_yield_max_micros: AtomicU64,
+    shed_ticks: AtomicU64,
     history: Mutex<VecDeque<u64>>,
     phase_history: [Mutex<VecDeque<u64>>; TICK_PHASE_COUNT],
     phase_sample_count: [AtomicU64; TICK_PHASE_COUNT],
@@ -107,6 +128,14 @@ impl TickClock {
             tick_count: AtomicU64::new(0),
             last_mspt_micros: AtomicU64::new(0),
             overrun_count: AtomicU64::new(0),
+            wait_count: AtomicU64::new(0),
+            service_lateness_history: Mutex::new(VecDeque::with_capacity(TICK_HISTORY_LEN)),
+            service_lateness_max_micros: AtomicU64::new(0),
+            deadline_lateness_max_micros: AtomicU64::new(0),
+            catch_up_ticks: AtomicU64::new(0),
+            cooperative_yields: AtomicU64::new(0),
+            cooperative_yield_max_micros: AtomicU64::new(0),
+            shed_ticks: AtomicU64::new(0),
             history: Mutex::new(VecDeque::with_capacity(TICK_HISTORY_LEN)),
             phase_history: std::array::from_fn(|_| Mutex::new(VecDeque::with_capacity(TICK_HISTORY_LEN))),
             phase_sample_count: [const { AtomicU64::new(0) }; TICK_PHASE_COUNT],
@@ -128,9 +157,55 @@ impl TickClock {
         history.push_back(micros);
     }
 
-    /// Records one rate-limited overload event.
+    /// Records one deadline-debt shedding event, independent of warning rate limits.
     pub(crate) fn record_overrun(&self) {
         self.overrun_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_tick_wait(
+        &self,
+        deadline: Duration,
+        requested: Duration,
+        resumed: Duration,
+        shed: u64,
+        yield_wait: Option<Duration>,
+    ) {
+        let micros = |duration: Duration| {
+            u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+        };
+        let service = micros(resumed.saturating_sub(deadline.max(requested)));
+        let late = micros(resumed.saturating_sub(deadline));
+        self.wait_count.fetch_add(1, Ordering::Relaxed);
+        self.service_lateness_max_micros.fetch_max(service, Ordering::Relaxed);
+        self.deadline_lateness_max_micros.fetch_max(late, Ordering::Relaxed);
+        self.catch_up_ticks.fetch_add(u64::from(requested > deadline), Ordering::Relaxed);
+        self.cooperative_yields.fetch_add(u64::from(yield_wait.is_some()), Ordering::Relaxed);
+        if let Some(elapsed) = yield_wait {
+            self.cooperative_yield_max_micros.fetch_max(micros(elapsed), Ordering::Relaxed);
+        }
+        self.shed_ticks.fetch_add(shed, Ordering::Relaxed);
+        let mut history = self.service_lateness_history.lock().expect("tick wait history lock poisoned");
+        if history.len() == TICK_HISTORY_LEN {
+            history.pop_front();
+        }
+        history.push_back(service);
+    }
+
+    fn schedule_stats(&self) -> TickScheduleStats {
+        let mut samples = self.service_lateness_history.lock()
+            .expect("tick wait history lock poisoned").iter().copied().collect::<Vec<_>>();
+        samples.sort_unstable();
+        let rank = (samples.len() * 95).div_ceil(100).saturating_sub(1);
+        TickScheduleStats {
+            wait_count: self.wait_count.load(Ordering::Relaxed),
+            service_lateness_p95_ms: samples.get(rank).copied().unwrap_or(0) as f64 / 1000.0,
+            service_lateness_max_ms: self.service_lateness_max_micros.load(Ordering::Relaxed) as f64 / 1000.0,
+            deadline_lateness_max_ms: self.deadline_lateness_max_micros.load(Ordering::Relaxed) as f64 / 1000.0,
+            catch_up_ticks: self.catch_up_ticks.load(Ordering::Relaxed),
+            cooperative_yields: self.cooperative_yields.load(Ordering::Relaxed),
+            cooperative_yield_max_ms: self.cooperative_yield_max_micros.load(Ordering::Relaxed) as f64 / 1000.0,
+            shed_ticks: self.shed_ticks.load(Ordering::Relaxed),
+        }
     }
 
     /// Records one phase duration.
@@ -264,6 +339,7 @@ impl TickClock {
             mspt_avg_ms,
             tps,
             overrun_count: self.overrun_count(),
+            schedule: self.schedule_stats(),
             mobs_and_items: self.phase_stats(TickPhase::MobsAndItems),
             weather_and_sleep: self.phase_stats(TickPhase::WeatherAndSleep),
             scheduled_and_physics: self.phase_stats(TickPhase::ScheduledAndPhysics),
@@ -281,9 +357,41 @@ pub struct TickStats {
     pub mspt_avg_ms: f64,
     pub tps: f64,
     pub overrun_count: u64,
+    pub schedule: TickScheduleStats,
     pub mobs_and_items: PhaseStats,
     pub weather_and_sleep: PhaseStats,
     pub scheduled_and_physics: PhaseStats,
     pub owner_work: OwnerTickStats,
     pub worst_phase_window: Option<WorstPhaseWindow>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tick_wait_separates_known_debt_from_timer_service_delay() {
+        let clock = TickClock::new();
+        let ms = Duration::from_millis;
+        clock.record_tick_wait(ms(50), ms(0), ms(130), 0, None);
+        clock.record_tick_wait(ms(100), ms(132), ms(135), 0, Some(ms(7)));
+        clock.record_tick(ms(2));
+        let stats = clock.stats();
+        assert_eq!(stats.mspt_ms, 2.0);
+        assert_eq!(stats.schedule.wait_count, 2);
+        assert_eq!(stats.schedule.service_lateness_p95_ms, 80.0);
+        assert_eq!(stats.schedule.service_lateness_max_ms, 80.0);
+        assert_eq!(stats.schedule.deadline_lateness_max_ms, 80.0);
+        assert_eq!(stats.schedule.catch_up_ticks, 1);
+        assert_eq!(stats.schedule.cooperative_yields, 1);
+        assert_eq!(stats.schedule.cooperative_yield_max_ms, 7.0);
+        assert_eq!(stats.schedule.shed_ticks, 0);
+        for _ in 0..TICK_HISTORY_LEN {
+            clock.record_tick_wait(ms(150), ms(135), ms(151), 40, None);
+        }
+        let stats = clock.stats();
+        assert_eq!(stats.schedule.service_lateness_p95_ms, 1.0);
+        assert_eq!(stats.schedule.service_lateness_max_ms, 80.0);
+        assert_eq!(stats.schedule.shed_ticks, 4000);
+    }
 }

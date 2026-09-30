@@ -5025,7 +5025,7 @@ pub fn confinement_rules() -> Vec<ConfinementRule> {
             label: "lodestone-server rayon-confinement",
             src_dir: "crates/lodestone-server/src",
             banned: "rayon::",
-            allowlist: &["chunk.rs", "worldgen_dispatch.rs"],
+            allowlist: &["chunk.rs", "worldgen_dispatch.rs", "portal_native_tests.rs"],
         },
         ConfinementRule {
             label: "lodestone-worldgen instant-ban",

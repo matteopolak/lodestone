@@ -13,6 +13,11 @@ Single-column and single-block resident reads hold one coordinate gate until the
 
 Integrated worlds pause simulation until both the client reports `PlayerLoaded` and the initial mob terrain has been installed. The client marker can arrive before the streamed view is complete, so it cannot by itself release the seed task or prove that terrain is presented. The connection's chunk stream and generation workers remain active while paused. The tick driver continues waiting at its normal cadence, so resuming does not replay loading time as a burst of world ticks. Other server entry points keep their normal tick behavior.
 
+Native world-tick task handles detach when dropped, matching the ordinary task
+boundary. A closed control channel is not an abort request. Explicit abort and
+the sticky shared shutdown signal still stop the loop. Sibling dimension loops
+use this detached lifetime and remain governed by world shutdown.
+
 The connection drains tick-produced block changes into an ordered local queue,
 retaining only changes for columns already delivered when the feed is drained.
 It sends at most 64 updates per select-loop pass on both native and browser

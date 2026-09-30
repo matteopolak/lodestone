@@ -676,7 +676,7 @@ mod tests {
 
         std::thread::scope(|scope| {
             let binder = scope.spawn(|| tags.bind());
-            let start = std::time::Instant::now();
+            let start = lodestone_time::Instant::now();
             while !tags.id_tags.bit(Tag::Logs, first.index()) {
                 assert!(start.elapsed().as_secs() < 5, "bind did not start");
                 std::hint::spin_loop();

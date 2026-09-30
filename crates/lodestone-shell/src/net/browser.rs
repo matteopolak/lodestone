@@ -522,13 +522,20 @@ pub(super) async fn launch_browser_worker(
                 .and_then(|value| value.as_f64());
             if number("epoch") == Some(f64::from(epoch)) {
                 browser_diagnostic(format_args!(
-                    "server health: ticks={:.0} overruns={:.0} mspt_ms={:.2} budget_tps={:.1} observed_tps={:?} callback_gap_ms={:.1}",
+                    "server health: ticks={:.0} overruns={:.0} mspt_ms={:.2} budget_tps={:.1} observed_tps={:?} callback_gap_ms={:.1} wake_p95_ms={:?} wake_max_ms={:?} deadline_max_ms={:?} catch_up_ticks={:?} recovery_yields={:?} yield_max_ms={:?} shed_ticks={:?}",
                     number("tickCount").unwrap_or(0.0),
                     number("overruns").unwrap_or(0.0),
                     number("msptMs").unwrap_or(0.0),
                     number("tps").unwrap_or(0.0),
                     number("observedTps"),
                     number("callbackGapMs").unwrap_or(0.0),
+                    number("tickWakeP95Ms"),
+                    number("tickWakeMaxMs"),
+                    number("tickDeadlineMaxMs"),
+                    number("tickCatchUpCount"),
+                    number("tickCooperativeYields"),
+                    number("tickYieldMaxMs"),
+                    number("tickShedCount"),
                 ));
                 log::debug!(
                     "browser server worker health: ticks={:?} witness={:?} overruns={:?} mspt_ms={:?} budget_tps={:?} observed_tps={:?} callback_gap_ms={:?}",

@@ -626,7 +626,13 @@ where
             runtime.block_on(async move {
                 tokio::select! {
                     _ = signal.notified() => {}
-                    _ = cancelled.changed() => {}
+                    _ = async {
+                        while !*cancelled.borrow_and_update() {
+                            if cancelled.changed().await.is_err() {
+                                std::future::pending::<()>().await;
+                            }
+                        }
+                    } => {}
                     _ = fut => {}
                 }
             });
