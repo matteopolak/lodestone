@@ -172,22 +172,15 @@ pub fn tick_item_physics(
     let profile = &profile.0;
     source.with_view(&mut |view| {
         for (mut physics, mut from, mut to, mut clock) in &mut items {
-            // Paused while the last *server* report says the item is resting;
-            // the floor within a tick is real collision, not a frozen flag.
+            from.feet = to_glam_vec3(physics.sim.position);
             if physics.grounded {
+                to.feet = from.feet;
                 continue;
             }
             step_item_physics(&mut physics.sim, view, profile);
-            let simulated = to_glam_vec3(physics.sim.position);
-
-            // Re-anchor exactly like a fresh authoritative snapshot would: ease
-            // from wherever this frame is currently drawn toward the freshly
-            // simulated point, so the simulation reads as continuous motion
-            // rather than a series of per-tick snaps.
-            let drawn = render_feet(&from, &to, &clock);
-            from.feet = drawn;
-            to.feet = simulated;
+            to.feet = to_glam_vec3(physics.sim.position);
             clock.t = 0.0;
+            clock.window = TICK;
         }
     });
 }
@@ -249,6 +242,7 @@ pub(super) fn new_item_physics(snap: &EntityFacts) -> ItemPhysics {
     ItemPhysics {
         sim,
         last_reported: snap.feet,
+        last_reported_velocity: snap.velocity,
         grounded: snap.on_ground,
     }
 }

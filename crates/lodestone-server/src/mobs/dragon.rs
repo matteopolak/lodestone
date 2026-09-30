@@ -803,6 +803,7 @@ impl<'w> MobSim<'w> {
                 rotation: Rotation::new(d.yaw, 0.0),
                 head_yaw: d.yaw,
                 velocity: Vec3::new(0.0, 0.0, 0.0),
+                on_ground: false,
                 metadata: vec![crate::protocol::MetadataField::DragonPhase(d.phase.current().id())],
                 object_data: 0,
                 leash_link: None,

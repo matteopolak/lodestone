@@ -405,14 +405,7 @@ pub enum LiveOption {
     GlintStrength,
     /// `options.renderClouds` → [`crate::config::Options::cloud_status`].
     ///
-    /// Three states, not a boolean: `CloudStatus` is `OFF, FAST, FANCY`
-    /// and the cycle visits them in that declaration order,
-    /// which is `CycleButton`'s own order.
-    ///
-    /// **The one live option in the tree whose label is the value alone** — see
-    /// [`Self::value_is_the_whole_label`]. Its stringifier is
-    /// `(caption, value) -> value.caption()`, which discards the caption it is
-    /// handed, so vanilla's button reads "Fancy" rather than "Clouds: Fancy".
+    /// Cycles through `Off`, `Fast`, and `Fancy`, in that order.
     CloudStatus,
     /// `options.framerateLimit` → [`crate::config::Options::framerate_limit`].
     /// An `IntRange(1, 26).xmap(*10)` like [`Self::RenderDistance`], through
@@ -423,15 +416,12 @@ pub enum LiveOption {
     /// [`Self::InactivityFpsLimit`]'s AFK clock.
     FramerateLimit,
     /// `options.vsync` → [`crate::config::Options::enable_vsync`]. A plain
-    /// boolean (composes with its caption, unlike [`Self::CloudStatus`]).
+    /// boolean.
     /// Reaches `WindowApp::sync_vsync_present_mode`.
     EnableVsync,
     /// `options.inactivityFpsLimit` →
     /// [`crate::config::Options::inactivity_fps_limit`]. Two states,
-    /// `Minimized`/`Afk`. **Discards its caption**, like [`Self::CloudStatus`]
-    /// — vanilla's stringifier is `(caption, value) -> value.caption()`
-    /// — so [`Self::value_is_the_whole_label`] covers it
-    /// too.
+    /// `Minimized`/`Afk`.
     InactivityFpsLimit,
     /// `options.graphics.preset` → [`crate::config::Options::graphics_preset`].
     /// A `SliderableEnum` over four values (`Fast, Fancy, Fabulous, Custom`),
@@ -459,8 +449,7 @@ pub enum LiveOption {
     /// does — one live-reload path, not two, for both triggers.
     MipmapLevels,
     /// `options.entityShadows` → [`crate::config::Options::entity_shadows`]. A
-    /// plain boolean (composes with its caption, unlike
-    /// [`Self::CloudStatus`]); see that field's doc for the render-side
+    /// plain boolean; see that field's doc for the render-side
     /// consumer — `RenderState::set_entity_shadows_enabled`, which gates
     /// `RenderState::prepare_shadows`.
     EntityShadows,
@@ -507,37 +496,16 @@ pub enum LiveOption {
     /// `options.attackIndicator` →
     /// [`crate::config::Options::attack_indicator`].
     ///
-    /// Three states, not a boolean: vanilla's own attack-indicator-status enum is
-    /// `OFF, CROSSHAIR, HOTBAR` and the cycle
-    /// visits them in that declaration order, `CloudStatus`'s shape.
-    ///
-    /// **Another whole-label option** — its stringifier is
-    /// vanilla's own attack-indicator-status enum's own caption call
-    ///, which discards the caption exactly as
-    /// `cloudStatus`' and `inactivityFpsLimit`' do. See
-    /// [`Self::value_is_the_whole_label`].
-    ///
-    /// The consumer existed and was pinned to `CROSSHAIR`: `hud.rs`'s crosshair
-    /// draw site drew the 16x4 strength bar unconditionally, above a comment
-    /// saying so and naming the missing toggle. `Off` now hides it and `Hotbar`
-    /// moves it to vanilla's 18x18 gauge beside the hotbar, which is a real new
-    /// draw rather than a re-anchoring of the same one — the two sprites, the
-    /// two sizes and the fill *direction* all differ.
+    /// Cycles through `Off`, `Crosshair`, and `Hotbar`, in that order.
+    /// `Off` hides the strength bar; `Crosshair` uses a 16x4 bar and `Hotbar`
+    /// uses an 18x18 gauge beside the hotbar, with its own fill direction.
     AttackIndicator,
     /// `options.particles` → [`crate::config::Options::particles`].
     ///
-    /// Three states, `CloudStatus`'s shape: vanilla's own particle-status enum is
-    /// `ALL, DECREASED, MINIMAL` and the cycle visits
-    /// them in that declaration order. **Another whole-label option** — its
-    /// stringifier is `(caption, value) -> value.caption()`,
-    /// which discards the caption. See [`Self::value_is_the_whole_label`].
-    ///
-    /// Its consumer is the `NetUpdate::Particles` arm in `crate::sim::net_apply`,
-    /// which is this client's `ClientLevel.doAddParticle` and had already
-    /// transcribed that function's *other* half — the 32-block cutoff and its
-    /// `overrideLimiter` bypass — leaving only the level test. The fold itself
-    /// lives in `crate::particles::Particles::particle_level_permits`, because
-    /// `calculateParticleLevel` is probabilistic and needs an RNG.
+    /// Cycles through `All`, `Decreased`, and `Minimal`, in that order.
+    /// The `NetUpdate::Particles` arm in `crate::sim::net_apply` applies both
+    /// the distance cutoff and the probabilistic level filter in
+    /// `crate::particles::Particles::particle_level_permits`.
     Particles,
     /// `options.biomeBlendRadius` →
     /// [`crate::config::Options::biome_blend_radius`].
@@ -728,44 +696,6 @@ impl LiveOption {
         }
     }
 
-    /// Whether this option's vanilla stringifier **discards the caption** it is
-    /// handed, so [`Cell::label`] must not compose one in front of the value.
-    ///
-    /// True for four options on the tree, and it is not a stylistic
-    /// choice: `cloudStatus`' stringifier is `(caption, value) ->
-    /// value.caption()` (the `cloudStatus` field in vanilla's own options class), which throws
-    /// its `caption` argument away and returns `CloudStatus.caption()` alone — so
-    /// vanilla's Clouds button reads "Fancy", never "Clouds: Fancy". Every other
-    /// live option here goes through `genericValueLabel`, `percentValueLabel` or
-    /// `pixelValueLabel`, all three of which compose, which is why
-    /// [`Cell::label`] composes by default.
-    ///
-    /// `InactivityFpsLimit`'s stringifier is the identical shape
-    /// (`(caption, value) -> value.caption()`, vanilla's own options class), so it joins
-    /// `CloudStatus` here — vanilla's "Reduce FPS when" button reads "AFK" or
-    /// "Minimized" alone. `attackIndicator`'s is the same again
-    /// (vanilla's own attack-indicator-status enum's own caption call), so
-    /// vanilla's Attack Indicator button reads "Crosshair", never
-    /// "Attack Indicator: Crosshair".
-    ///
-    /// `particles`' is the same shape again (vanilla's own particle-status enum's own caption call), so
-    /// vanilla's Particles button reads "Decreased" alone.
-    ///
-    /// These are the only four, and the sweep
-    /// `every_live_row_carries_both_its_name_and_its_value_or_is_a_named_exception`
-    /// asserts the **count** rather than merely tolerating them — a fifth row
-    /// falling into this branch has to be justified here first.
-    #[must_use]
-    fn value_is_the_whole_label(self) -> bool {
-        matches!(
-            self,
-            LiveOption::CloudStatus
-                | LiveOption::InactivityFpsLimit
-                | LiveOption::AttackIndicator
-                | LiveOption::Particles
-        )
-    }
-
     /// This option's `IntRange` bounds, for the ones built on one.
     ///
     /// Reads [`INT_RANGE_SLIDERS`] by accessor rather than restating the pair,
@@ -894,18 +824,11 @@ pub enum Cell {
 impl Cell {
     /// The label drawn on the widget.
     ///
-    /// An option shows `genericValueLabel(caption, value)` — vanilla's
-    /// `"%s: %s"` — when we hold a value for it, and
-    /// its **caption alone** when we do not. See the module docs' departure (1)
-    /// for why that is not an omission.
-    ///
-    /// The one exception is an option whose own vanilla stringifier discards the
-    /// caption; see [`LiveOption::value_is_the_whole_label`].
+    /// Live options show `name: value`; inactive options show their caption.
     #[must_use]
     pub fn label(self, options: &crate::config::Options) -> String {
         match self {
             Cell::Option(spec) => match spec.live {
-                Some(live) if live.value_is_the_whole_label() => live_value(live, options),
                 Some(live) => generic_value_label(spec.caption, &live_value(live, options)),
                 None => spec.caption.to_string(),
             },
@@ -1933,12 +1856,7 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
                 percent_value(options.glint_strength)
             }
         }
-        // `CloudStatus.caption()` — the enum's *own* component, keyed
-        // `options.off`/`options.clouds.fast`/`options.clouds.fancy`
-        //, i.e. "OFF"/"Fast"/"Fancy" in `en_us.json`.
-        //
-        // This is the whole label, not a value half: see
-        // [`LiveOption::value_is_the_whole_label`].
+        // Value captions from `en_us.json`; `Cell::label` supplies the option name.
         LiveOption::CloudStatus => match options.cloud_status {
             lodestone_render::CloudStatus::Off => "OFF".to_string(),
             lodestone_render::CloudStatus::Fast => "Fast".to_string(),
@@ -1957,10 +1875,6 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
         LiveOption::EnableVsync => {
             if options.enable_vsync { "ON" } else { "OFF" }.to_string()
         }
-        // `InactivityFpsLimit.caption()` — "AFK"/"Minimized"
-        // (`en_us.json`'s `options.inactivityFpsLimit.afk`/`.minimized`). The
-        // whole label, not a value half: see
-        // [`LiveOption::value_is_the_whole_label`].
         LiveOption::InactivityFpsLimit => match options.inactivity_fps_limit {
             crate::config::InactivityFpsLimit::Minimized => "Minimized".to_string(),
             crate::config::InactivityFpsLimit::Afk => "AFK".to_string(),
@@ -2001,27 +1915,12 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
                 options.menu_background_blurriness.to_string()
             }
         }
-        // vanilla's own attack-indicator-status enum's own caption call — the enum's own component, keyed
-        // `options.off`/`options.attack.crosshair`/`options.attack.hotbar`
-        //, i.e. "OFF"/"Crosshair"/"Hotbar" in
-        // `en_us.json`.
-        //
-        // The whole label, not a value half: see
-        // [`LiveOption::value_is_the_whole_label`].
         LiveOption::AttackIndicator => match options.attack_indicator {
             crate::config::AttackIndicator::Off => "OFF".to_string(),
             crate::config::AttackIndicator::Crosshair => "Crosshair".to_string(),
             crate::config::AttackIndicator::Hotbar => "Hotbar".to_string(),
         },
-        // vanilla's own particle-status enum's own caption call — the enum's own component, keyed
-        // `options.particles.all`/`.decreased`/`.minimal`
-        //, i.e. "All"/"Decreased"/"Minimal" in
-        // `en_us.json`. Note these are **not** OFF/ON-shaped: even `Minimal`
-        // is a level rather than an off state, which is why none of the three
-        // reads "OFF".
-        //
-        // The whole label, not a value half: see
-        // [`LiveOption::value_is_the_whole_label`].
+        // Even Minimal is a particle level, not an off state.
         LiveOption::Particles => match options.particles {
             crate::config::ParticleLevel::All => "All".to_string(),
             crate::config::ParticleLevel::Decreased => "Decreased".to_string(),
@@ -2252,14 +2151,9 @@ static VIDEO: &[Entry] = &[
     ),
     pair(
         cycle("ambientOcclusion", "Smooth Lighting"),
-        // Three states, and the row's label is the value **alone** — vanilla's
-        // stringifier here discards the caption. See `LiveOption::CloudStatus`.
         live_cycle("cloudStatus", "Clouds", LiveOption::CloudStatus),
     ),
     pair(
-        // Live: `sim::net_apply`'s `NetUpdate::Particles` arm already
-        // transcribed `ClientLevel.doAddParticle`'s distance half. See
-        // `LiveOption::Particles`.
         live_cycle("particles", "Particles", LiveOption::Particles),
         // Live: the block-atlas island `BLOCK_ATLAS_MIP_LEVELS`'s own doc used
         // to name. See `LiveOption::MipmapLevels`.
@@ -2305,8 +2199,6 @@ static VIDEO: &[Entry] = &[
         cycle("vignette", "Show Vignette"),
     ),
     pair(
-        // Live: the crosshair strength bar already drew, pinned to vanilla's
-        // CROSSHAIR. See `LiveOption::AttackIndicator`.
         live_cycle(
             "attackIndicator",
             "Attack Indicator",
@@ -4588,85 +4480,46 @@ mod tests {
         assert_eq!(visibility.label(&options), "Visibility: Hidden");
     }
 
-    /// Owner report: a settings row showing the value with no name at all —
-    /// "Fancy" where vanilla shows a composed "`<name>`: Fancy", "AFK" where
-    /// vanilla shows the full label. Swept over **every** live row on the
-    /// real tree rather than the two named examples, because the report
-    /// describes a *class* of bug (a value-only format string covering a
-    /// whole family of rows), and a fixture that only checks the two
-    /// examples named in the report cannot see a sibling instance.
-    ///
-    /// A fixture whose option name is empty or equals its own value cannot
-    /// see this bug either — `assert_ne!(spec.caption, value, ..)` below is
-    /// exactly that guard, checked on every row this sweep exercises rather
-    /// than trusted once.
     #[test]
-    fn every_live_row_carries_both_its_name_and_its_value_or_is_a_named_exception() {
-        let options = crate::config::Options::default();
+    fn every_live_row_carries_both_its_name_and_its_value() {
+        let options = crate::config::Options {
+            cloud_status: lodestone_render::CloudStatus::Fancy,
+            inactivity_fps_limit: crate::config::InactivityFpsLimit::Afk,
+            attack_indicator: crate::config::AttackIndicator::Crosshair,
+            particles: crate::config::ParticleLevel::Decreased,
+            ..crate::config::Options::default()
+        };
+        let video = all_controls(SettingsPage::Video, OUTSIDE_A_WORLD);
+        for (accessor, expected) in [
+            ("cloudStatus", "Clouds: Fancy"),
+            ("inactivityFpsLimit", "Reduce FPS when: AFK"),
+            ("attackIndicator", "Attack Indicator: Crosshair"),
+            ("particles", "Particles: Decreased"),
+        ] {
+            let cell = video
+                .iter()
+                .find(|cell| matches!(cell, Cell::Option(spec) if spec.accessor == accessor))
+                .expect("Video exposes the enum option");
+            assert_eq!(cell.label(&options), expected, "{accessor}");
+        }
         let mut composing_rows_checked = 0;
-        let mut bare_rows_checked = 0;
         for page in PAGES {
             for cell in all_controls(page, OUTSIDE_A_WORLD) {
                 let Cell::Option(spec) = cell else { continue };
                 let Some(live) = spec.live else { continue };
                 let label = cell.label(&options);
                 let value = live_value(live, &options);
-                if live.value_is_the_whole_label() {
-                    // The two named vanilla exceptions
-                    // (`LiveOption::value_is_the_whole_label`'s own doc):
-                    // the row's *entire* label is the value, and that is
-                    // vanilla's own stringifier, not a bug — but it must
-                    // still equal the real value, not a caption left over
-                    // from a composing code path.
-                    assert_eq!(
-                        label, value,
-                        "{live:?}: the whole-label exception must still show the real \
-                         value, not a stale caption"
-                    );
-                    bare_rows_checked += 1;
-                } else {
-                    // The guard the report's own two examples would have
-                    // passed without: a caption that is empty, or that
-                    // happens to equal its own value, cannot distinguish
-                    // "composed correctly" from "value only".
-                    assert!(
-                        !spec.caption.is_empty(),
-                        "{live:?}: empty caption — this row cannot prove anything about \
-                         name+value composition"
-                    );
-                    assert_ne!(
-                        spec.caption, value,
-                        "{live:?}: caption and value coincide ({value:?}) — this fixture \
-                         cannot see a value-only regression here; pick a state where they differ"
-                    );
-                    assert!(
-                        label.starts_with(spec.caption),
-                        "{live:?}: label {label:?} does not start with its own caption \
-                         {:?} — a value-only row, exactly the reported bug",
-                        spec.caption
-                    );
-                    assert!(
-                        label.ends_with(value.as_str()),
-                        "{live:?}: label {label:?} does not end with its own value {value:?}"
-                    );
-                    assert!(
-                        label.contains(": "),
-                        "{live:?}: label {label:?} does not compose \"name: value\" — \
-                         a value-only row, exactly the reported bug"
-                    );
-                    composing_rows_checked += 1;
-                }
+                // Distinct captions and values make a value-only label detectable.
+                assert!(!spec.caption.is_empty(), "{live:?}: empty caption");
+                assert_ne!(spec.caption, value, "{live:?}: caption equals value");
+                assert_eq!(
+                    label,
+                    format!("{}: {value}", spec.caption),
+                    "{live:?}: expected name: value"
+                );
+                composing_rows_checked += 1;
             }
         }
-        // The control this sweep's own coverage needs: it must actually have
-        // exercised rows of both shapes, or a change that made every row
-        // fall into one branch would pass vacuously.
-        assert_eq!(
-            bare_rows_checked, 4,
-            "expected exactly the four named whole-label exceptions (CloudStatus, \
-             InactivityFpsLimit, AttackIndicator, Particles), each placed once on the \
-             Video page; got {bare_rows_checked}"
-        );
         assert!(
             composing_rows_checked >= 40,
             "expected most live rows to compose name+value; only {composing_rows_checked} did, \
@@ -5136,30 +4989,18 @@ mod tests {
         assert_eq!(live_value(LiveOption::GlintStrength, &o), "OFF");
         assert_ne!(live_value(LiveOption::GlintSpeed, &o), "0%");
 
-        // -- cloudStatus. The **whole label is the value**: vanilla's stringifier
-        // is `(caption, value) -> value.caption()`, which discards the caption it
-        // is handed. The row is read off the real page, and the composed form is
-        // executed as the wrong hypothesis rather than described.
         let clouds = all_controls(SettingsPage::Video, OUTSIDE_A_WORLD)
             .into_iter()
             .find(|c| matches!(c, Cell::Option(s) if s.accessor == "cloudStatus"))
             .expect("the Video page carries a Clouds row");
         for (status, want) in [
-            (lodestone_render::CloudStatus::Off, "OFF"),
-            (lodestone_render::CloudStatus::Fast, "Fast"),
-            (lodestone_render::CloudStatus::Fancy, "Fancy"),
+            (lodestone_render::CloudStatus::Off, "Clouds: OFF"),
+            (lodestone_render::CloudStatus::Fast, "Clouds: Fast"),
+            (lodestone_render::CloudStatus::Fancy, "Clouds: Fancy"),
         ] {
             o.cloud_status = status;
             assert_eq!(clouds.label(&o), want, "{status:?}");
-            assert_ne!(
-                clouds.label(&o),
-                format!("Clouds: {want}"),
-                "`CloudStatus.caption()` throws the caption away"
-            );
         }
-        // The control for that fork: the *neighbouring* row on the same page does
-        // compose, so this is a property of the option and not of `Cell::label`
-        // having stopped composing altogether.
         let render_distance = all_controls(SettingsPage::Video, OUTSIDE_A_WORLD)
             .into_iter()
             .find(|c| matches!(c, Cell::Option(s) if s.accessor == "renderDistance"))
@@ -5168,8 +5009,6 @@ mod tests {
             render_distance.label(&o).starts_with("Render Distance: "),
             "every other live row still composes its caption"
         );
-        // And Clouds is a **cycle**, not a slider: `OptionInstance.Enum` builds a
-        // `CycleButton`. A slider track under it would be drawn but unusable.
         assert!(!clouds.is_slider());
     }
 

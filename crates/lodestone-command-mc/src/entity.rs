@@ -361,13 +361,10 @@ impl McArg for EntityArg {
 
 /// The error kind used for every selector-grammar refusal.
 ///
-/// `ParseErrorKind::InvalidBool` carries the offending text and renders as
-/// "invalid …, expected …". Reusing it keeps this crate from minting its own
-/// error dialect: `lodestone-command`'s `ParseErrorKind` is deliberately
-/// Brigadier's own set plus the one addition permissions forced, and a new
-/// variant per Minecraft argument type would end that.
+/// The selector supplies its own explanation; boolean errors describe only
+/// boolean arguments.
 fn refuse(position: usize, message: impl Into<String>) -> ParseError {
-    ParseError::new(position, ParseErrorKind::InvalidBool(message.into()))
+    ParseError::new(position, ParseErrorKind::InvalidArgument(message.into()))
 }
 
 pub(crate) fn parse_selector(reader: &mut StringReader, arg: EntityArg) -> Result<EntitySelector, ParseError> {

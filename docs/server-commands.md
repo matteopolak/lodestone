@@ -32,6 +32,23 @@ A `/command` typed by a player travels `ClientAction::SendCommand` → the wire 
 server state; a plugin command runs through the seam below. A response becomes system chat lines
 sent back to the caller.
 
+Syntax refusals retain the parser's character cursor through
+`CommandResponse::refused_syntax`. `CommandResponse::chat_lines` supplies two styled text
+components: a red explanation, then at most ten preceding characters in gray, the unparsed
+suffix in red with an underline, and the red italic `<--[HERE]` pointer. Longer prefixes start
+with `...`; clicking the context suggests the original command. The cursor uses characters
+rather than UTF-8 bytes, so non-ASCII arguments do not split text. Ordinary execution refusals
+also render red, while `CommandResponse::lines` remains plain text for RCON and console output.
+Argument-specific errors use `ParseErrorKind::InvalidArgument`; `InvalidBool` is reserved for
+actual boolean values. Player explanations use the English command messages independently of
+the diagnostic `Display` text, which retains numeric positions for logs.
+Plugin registries remap cursors back to the supplied root after canonicalizing an alias,
+including any stripped slash and leading whitespace, so a short or long alias points to
+the argument in the caller's input rather than a position in the rewritten command.
+The 26.2 hosted encoder preserves these components through the boxed protocol seam.
+Other hosted families may use the plain-text compatibility default until they implement
+`ServerProtocol::encode_system_chat_component`.
+
 The server's own tree is also projected to a real client over the wire (`COMMANDS`, clientbound),
 pruned per-connection by permission level exactly as vanilla prunes an unusable subtree — a denied
 node takes its whole subtree with it — so tab completion and highlighting only ever show what that
@@ -140,6 +157,10 @@ and waits for a matching reply, safely over-approximating rather than risking a 
   permission level; if it needs to reach state outside the current connection (another player, a
   world-wide store), route it through the existing effect-queue/shared-handle pattern rather than
   reaching into another connection directly.
+- **A new argument refusal**: supply its player-facing explanation through
+  `ParseErrorKind::InvalidArgument`, or reuse the scalar kind only when the input is that
+  scalar type. Preserve the reader's cursor and pass the original command to
+  `CommandResponse::refused_syntax`; do not stringify the parse error for player chat.
 - **Granting or revoking access at runtime**: the shared access handle is what admin commands
   mutate; nothing persists a runtime grant back to disk automatically, so a host that wants it
   durable must call the save path itself.

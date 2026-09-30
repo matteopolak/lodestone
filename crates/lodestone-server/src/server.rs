@@ -14584,8 +14584,8 @@ where
                             }
                         }
                     }
-                    for line in outcome.response.lines() {
-                        apply(conn, state, proto.encode_system_chat(line)).await?;
+                    for line in outcome.response.chat_lines() {
+                        apply(conn, state, proto.encode_system_chat_component(&line)).await?;
                     }
                 }
                 // No built-in root matched: delegate the command to the host
@@ -14597,8 +14597,8 @@ where
                     } else {
                         commands.dispatch.run(&commands.caller, &command)
                     };
-                    for line in response.lines() {
-                        apply(conn, state, proto.encode_system_chat(line)).await?;
+                    for line in response.chat_lines() {
+                        apply(conn, state, proto.encode_system_chat_component(&line)).await?;
                     }
                 }
             }
@@ -15923,6 +15923,7 @@ where
                     player_pos,
                 ) {
                     registry.set_position(ticket.entity_id(), Vec3::new(x, y, z));
+                    registry.set_on_ground(ticket.entity_id(), client_movement.on_ground);
                 }
                 // Re-key pending join columns after movement or facing changes:
                 // distance from the player's current column comes first, then
@@ -18809,6 +18810,7 @@ where
                 (player_ticket.as_ref(), entities.players(), player_pos)
             {
                 registry.set_position(ticket.entity_id(), Vec3::new(x, y, z));
+                registry.set_on_ground(ticket.entity_id(), client_movement.on_ground);
             }
             // The pickup sweep is packet-driven, so run it after each dispatched
             // packet while the player's position is available.
@@ -21210,6 +21212,7 @@ mod tests {
             rotation: Rotation::new(0.0, 0.0),
             head_yaw: 0.0,
             velocity: Vec3::new(0.0, 0.0, 0.0),
+            on_ground: false,
             metadata: Vec::new(),
             object_data: 0,
             leash_link: None,

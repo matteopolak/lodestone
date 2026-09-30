@@ -455,6 +455,7 @@ impl<'w> MobSim<'w> {
                 rotation: Rotation::new(0.0, 0.0),
                 head_yaw: 0.0,
                 velocity: b.velocity,
+                on_ground: b.on_ground,
                 metadata: Vec::new(),
                 // `FishingHook.getAddEntityPacket` sends the owner's own
                 // entity id as object data (`owner == null ? this.getId() :

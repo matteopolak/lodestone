@@ -85,7 +85,7 @@ fn read_identifier(reader: &mut StringReader) -> String {
 }
 
 fn refuse(position: usize, message: impl Into<String>) -> ParseError {
-    ParseError::new(position, ParseErrorKind::InvalidBool(message.into()))
+    ParseError::new(position, ParseErrorKind::InvalidArgument(message.into()))
 }
 
 #[cfg(test)]

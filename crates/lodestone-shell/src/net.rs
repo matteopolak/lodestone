@@ -244,7 +244,16 @@ impl lodestone_server::CommandSink for EcsCommandSink {
                 Ok(lodestone_ecs::commands::CommandOutcome::Failure(message)) => {
                     lodestone_server::CommandResponse::refused(message)
                 }
-                Err(error) => lodestone_server::CommandResponse::refused(error.message()),
+                Err(error) => match error {
+                    lodestone_ecs::commands::CommandDispatchError::Empty
+                    | lodestone_ecs::commands::CommandDispatchError::UnknownCommand { .. } => {
+                        lodestone_server::CommandResponse::unknown_command(command)
+                    }
+                    lodestone_ecs::commands::CommandDispatchError::Parse(error) => {
+                        lodestone_server::CommandResponse::refused_syntax(command, &error)
+                    }
+                    other => lodestone_server::CommandResponse::refused(other.message()),
+                },
             }
         })
     }
@@ -3716,11 +3725,9 @@ impl lodestone_server::CommandSink for WorkerCommandSink {
     fn run(
         &self,
         _caller: &lodestone_server::CommandCaller,
-        _command: &str,
+        command: &str,
     ) -> lodestone_server::CommandResponse {
-        lodestone_server::CommandResponse::refused(
-            "commands registered by page-side plugins are unavailable while browser singleplayer runs in its server worker",
-        )
+        lodestone_server::CommandResponse::unknown_command(command)
     }
 }
 
@@ -5067,7 +5074,7 @@ mod tests {
         let non_op = lodestone_server::CommandCaller::new(caller.uuid, "operator");
         assert!(matches!(
             lodestone_server::CommandSink::run(&sink, &non_op, "bridge"),
-            lodestone_server::CommandResponse::Refused { .. }
+            lodestone_server::CommandResponse::SyntaxError { .. }
         ));
         assert_eq!(
             calls.load(Ordering::SeqCst),

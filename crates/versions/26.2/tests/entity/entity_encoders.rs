@@ -81,6 +81,7 @@ fn zombie_snapshot(id: i32, uuid: Uuid) -> EntitySnapshot {
         rotation: Rotation::new(-90.0, 5.0),
         head_yaw: -60.0,
         velocity: Vec3::new(0.1, 0.0, -0.05),
+        on_ground: false,
         metadata: Vec::new(),
         object_data: 0,
         leash_link: None,
@@ -188,12 +189,12 @@ fn encode_entity_update_round_trips_an_absolute_teleport_and_head_rotation() {
     assert!(!flags.relative_z);
     assert!(!flags.relative_yaw);
     assert!(!flags.relative_pitch);
-    assert_eq!(velocity.delta, Vec3::new(0.0, 0.0, 0.0));
+    assert_eq!(velocity.delta, snapshot.velocity);
     assert!(!velocity.relative_x);
     assert!(!velocity.relative_y);
     assert!(!velocity.relative_z);
     assert!(!velocity.rotate_delta);
-    assert!(*on_ground);
+    assert_eq!(*on_ground, snapshot.on_ground);
 
     let ServerDirective::Send { packet_id, payload } = &directives[1] else {
         panic!("expected a Send directive");
@@ -205,6 +206,32 @@ fn encode_entity_update_round_trips_an_absolute_teleport_and_head_rotation() {
     };
     assert_eq!(*entity_id, 7);
     assert!((head_yaw - (-60.0)).abs() < 1.5, "head_yaw: {head_yaw}");
+}
+
+#[test]
+fn entity_corrections_preserve_velocity_and_ground_on_the_wire() {
+    let proto = V770ServerProtocol;
+    let mut snapshot = zombie_snapshot(7, Uuid::nil());
+    snapshot.velocity = Vec3::new(0.125, -0.25, 0.375);
+    for grounded in [false, true] {
+        snapshot.on_ground = grounded;
+        let directives = proto.encode_entity_update(None, &snapshot);
+        let ServerDirective::Send { packet_id, payload } = &directives[0] else {
+            panic!("expected entity correction");
+        };
+        assert_eq!(*packet_id, play::clientbound::TELEPORT_ENTITY);
+        assert_eq!(payload.len(), 62);
+        assert_eq!(&payload[25..33], &0.125_f64.to_be_bytes());
+        assert_eq!(&payload[33..41], &(-0.25_f64).to_be_bytes());
+        assert_eq!(&payload[41..49], &0.375_f64.to_be_bytes());
+        assert_eq!(payload[61], u8::from(grounded));
+        let events = decode_events(*packet_id, payload);
+        let ClientEvent::EntityTeleported { velocity, on_ground, .. } = &events[0] else {
+            panic!("expected decoded entity correction");
+        };
+        assert_eq!(velocity.delta, snapshot.velocity);
+        assert_eq!(*on_ground, grounded);
+    }
 }
 
 #[test]

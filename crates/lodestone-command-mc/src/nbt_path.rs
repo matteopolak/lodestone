@@ -43,7 +43,7 @@ impl ArgumentType for NbtPathArg {
                     reader.set_cursor(start);
                     return Err(ParseError::new(
                         segment_start,
-                        ParseErrorKind::InvalidBool(
+                        ParseErrorKind::InvalidArgument(
                             "array indices and filter compounds are not supported yet".to_string(),
                         ),
                     ));
@@ -84,7 +84,7 @@ impl ArgumentType for NbtPathArg {
             reader.set_cursor(start);
             return Err(ParseError::new(
                 reader.cursor(),
-                ParseErrorKind::InvalidBool(
+                ParseErrorKind::InvalidArgument(
                     "array indices and filter compounds are not supported yet".to_string(),
                 ),
             ));

@@ -544,6 +544,9 @@ impl<'a> Ctx<'a> {
                     Ok(())
                 }
                 crate::command::CommandResponse::Refused { message } => Err(message),
+                crate::command::CommandResponse::SyntaxError { feedback, .. } => {
+                    Err(feedback.join("\n"))
+                }
             }
         } else {
             self.run_contextual(command).map(|_| ())

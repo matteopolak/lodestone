@@ -69,6 +69,9 @@ fn feedback(outcome: &CommandOutcome) -> &[String] {
     match &outcome.response {
         CommandResponse::Ran { feedback } => feedback,
         CommandResponse::Refused { message } => panic!("expected the command to run, refused: {message}"),
+        CommandResponse::SyntaxError { feedback, .. } => {
+            panic!("expected the command to run, refused: {}", feedback.join("\n"))
+        }
     }
 }
 

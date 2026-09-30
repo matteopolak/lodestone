@@ -100,13 +100,12 @@
 //! [`ITEM_ENTITY_TYPE_PATH`]: an entity carrying an [`ItemPhysics`] component
 //! runs [`step_item_physics`] (gravity `0.04`, air drag `0.98` —
 //! [`lodestone_entity::item_entity`]'s vanilla constants, not reimplemented)
-//! once per real 20 Hz tick, and the render ease ([`InterpClock::t`] /
-//! [`INTERP_WINDOW`]) is re-anchored off *that* simulated position each tick
-//! rather than off the sparse network packet. A server correction (when one
-//! arrives) resets the simulated position/velocity to the authoritative value
-//! rather than fighting it. While the last-known snapshot reports the item at
-//! rest on the ground, the simulation is paused rather than resimulated
-//! needlessly — see [`EntityFacts::on_ground`].
+//! once per real 20 Hz tick. Rendering samples the previous and current tick
+//! positions with the shared [`lodestone_ecs::FrameClock`] residual. A server
+//! correction replaces the current position and velocity without advancing a
+//! second tick or restarting the item's age. While the last-known snapshot
+//! reports the item at rest on the ground, the simulation is paused rather
+//! than resimulated needlessly — see [`EntityFacts::on_ground`].
 //!
 //! # Collision: falling through the floor between corrections
 //!
@@ -689,11 +688,12 @@ pub struct InterpClock {
     pub t: f32,
     /// Continuous age in ticks (`ageInTicks`), driving idle bob.
     pub age: f32,
-    /// The real-time length of the current network ease. Always
-    /// [`INTERP_WINDOW`]: three ticks of slack absorbs jitter between one
+    /// The real-time length of the current network ease. For remote mobs,
+    /// [`INTERP_WINDOW`]'s three ticks of slack absorb jitter between one
     /// `MOVE_ENTITY` and the next. A locally controlled vehicle does not use
     /// this clock at draw time; [`controlled_vehicle_render_pose`] samples its
     /// explicit fixed-tick endpoints with the shared frame accumulator instead.
+    /// Dropped items also use the shared residual over their 50 ms endpoints.
     pub window: f32,
 }
 
@@ -737,6 +737,8 @@ pub struct ItemPhysics {
     /// so re-polling the same still-current server value doesn't look like a
     /// fresh "moved" event every frame.
     pub last_reported: Vec3,
+    /// The last wire velocity, separate from locally integrated gravity and drag.
+    pub last_reported_velocity: Option<Vec3>,
     /// Whether the last-reported snapshot said the item is resting. The
     /// simulation is paused while `true` — a resting item does not need
     /// resimulating every tick, and this avoids any drift between the local
@@ -1955,7 +1957,7 @@ fn spawn_track(world: &mut World, snap: &EntityFacts) {
     let is_item = snap.entity_type == Some(EntityType::Item);
     let is_projectile = is_locally_simulated_projectile(snap.entity_type);
     let is_creeper = snap.entity_type == Some(EntityType::Creeper);
-    let window = INTERP_WINDOW;
+    let window = if is_item { TICK } else { INTERP_WINDOW };
     let mut entity = world.spawn((
         MinecraftEntityId(snap.id),
         RenderKind {
@@ -2101,6 +2103,38 @@ fn update_track(world: &mut World, entity: Entity, snap: &EntityFacts) {
         return;
     };
     let physics = entity.get::<ItemPhysics>().copied();
+    if is_item && let Some(mut physics) = physics {
+        let position_corrected = (snap.feet - physics.last_reported).length() > POS_EPS
+            || snap.on_ground != physics.grounded;
+        let corrected = position_corrected
+            || snap.velocity.is_some_and(|velocity| {
+                physics
+                    .last_reported_velocity
+                    .is_none_or(|reported| (velocity - reported).length() > POS_EPS)
+            });
+        if corrected {
+            physics.last_reported = snap.feet;
+            physics.grounded = snap.on_ground;
+            if position_corrected {
+                physics.sim.position = to_model_vec3(snap.feet);
+            }
+            physics.sim.on_ground = snap.on_ground;
+            if let Some(velocity) = snap.velocity {
+                physics.last_reported_velocity = Some(velocity);
+                physics.sim.velocity = to_model_vec3(velocity);
+            }
+            if let Some(mut current) = entity.get_mut::<ItemPhysics>() {
+                *current = physics;
+            }
+            if let Some(mut target) = entity.get_mut::<InterpTo>() {
+                target.feet = to_glam_vec3(physics.sim.position);
+                target.yaw = snap.yaw;
+                target.head_yaw = snap.head_yaw;
+                target.pitch = snap.pitch;
+            }
+        }
+        return;
+    }
     let projectile_physics = entity.get::<ProjectilePhysics>().copied();
     let projectile_corrected = projectile_physics.is_some_and(|physics| {
         (snap.feet - physics.last_reported).length() > POS_EPS
@@ -2171,26 +2205,7 @@ fn update_track(world: &mut World, entity: Entity, snap: &EntityFacts) {
     }
 
     if is_item {
-        match physics {
-            Some(mut physics) => {
-                physics.last_reported = snap.feet;
-                physics.grounded = snap.on_ground;
-                // Correct the simulation to the authoritative truth rather than
-                // fight it — this is the "rare server correction" vanilla's own
-                // local simulation also just snaps onto.
-                physics.sim.position = to_model_vec3(snap.feet);
-                if let Some(v) = snap.velocity {
-                    physics.sim.velocity = to_model_vec3(v);
-                }
-                physics.sim.on_ground = snap.on_ground;
-                if let Some(mut current) = entity.get_mut::<ItemPhysics>() {
-                    *current = physics;
-                }
-            }
-            None => {
-                entity.insert(new_item_physics(snap));
-            }
-        }
+        entity.insert(new_item_physics(snap));
     }
     if is_projectile && projectile_corrected {
         match projectile_physics {
@@ -6382,6 +6397,121 @@ mod tests {
              prove the positive test's floor is load-bearing; got {final_y}"
         );
     }
+    const ITEM_POP_TRACE: [(f32, f32); 11] = [
+        (0.0, 0.2),
+        (0.160000003, 0.156800006),
+        (0.276800009, 0.114464008),
+        (0.351264017, 0.072974729),
+        (0.384238746, 0.032315235),
+        (0.376553982, -0.007531069),
+        (0.329022912, -0.046580449),
+        (0.242442463, -0.084848842),
+        (0.117593622, -0.122351867),
+        (-0.044758246, -0.159104833),
+        (-0.243863079, -0.195122740),
+    ];
+
+    #[test]
+    fn item_fixed_tick_endpoints_match_arithmetic_with_dense_or_sparse_corrections() {
+        // Independent arithmetic: displacement is v - 0.04; the next v is
+        // that displacement times the widened 0.98f32 drag.
+        for dense in [false, true] {
+            let mut interp = EntityInterpolator::new();
+            item_snap_moving(9, Vec3::ZERO, Some(Vec3::new(0.0, 0.2, 0.0)), false)
+                .apply(interp.world_mut());
+            interp.update(0.0);
+            let tracked = interp.world().resource::<TrackIndex>().0[&network_id(9)];
+            for tick in 1..ITEM_POP_TRACE.len() {
+                let (y, velocity) = ITEM_POP_TRACE[tick];
+                if dense {
+                    item_snap_moving(
+                        9,
+                        Vec3::new(0.0, y, 0.0),
+                        Some(Vec3::new(0.0, velocity, 0.0)),
+                        false,
+                    )
+                    .apply(interp.world_mut());
+                }
+                interp.update(TICK);
+                let from = interp.world().get::<InterpFrom>(tracked).unwrap();
+                let to = interp.world().get::<InterpTo>(tracked).unwrap();
+                let clock = interp.world().get::<InterpClock>(tracked).unwrap();
+                assert!(
+                    (to.feet.y - y).abs() < 1.0e-6,
+                    "dense={dense}, tick={tick}, current={}",
+                    to.feet.y
+                );
+                assert!(
+                    (from.feet.y - ITEM_POP_TRACE[tick - 1].0).abs() < 1.0e-6,
+                    "dense={dense}, tick={tick}, previous={}",
+                    from.feet.y
+                );
+                assert_eq!(clock.window, TICK);
+                assert!((clock.age - tick as f32).abs() < 1.0e-5);
+                assert!((interp.draws()[0].feet.y - from.feet.y).abs() < 1.0e-5);
+            }
+        }
+    }
+
+    #[test]
+    fn item_render_samples_the_shared_half_tick_without_chasing_the_drawn_pose() {
+        let mut interp = EntityInterpolator::new();
+        item_snap_moving(9, Vec3::ZERO, Some(Vec3::new(0.0, 0.2, 0.0)), false)
+            .apply(interp.world_mut());
+        interp.update(0.0);
+        interp.update(TICK);
+        interp.update(TICK * 0.5);
+        assert!((interp.draws()[0].feet.y - 0.0800000015).abs() < 1.0e-6);
+        interp.update(TICK * 0.5);
+        interp.update(TICK * 0.5);
+        assert!((interp.draws()[0].feet.y - 0.218400006).abs() < 1.0e-6);
+
+        let mut burst = EntityInterpolator::new();
+        item_snap_moving(9, Vec3::ZERO, Some(Vec3::new(0.0, 0.2, 0.0)), false)
+            .apply(burst.world_mut());
+        burst.update(0.0);
+        burst.update(TICK * 2.5);
+        assert!((burst.draws()[0].feet.y - 0.218400006).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn item_velocity_only_corrections_do_not_rewind_the_local_position() {
+        let mut interp = EntityInterpolator::new();
+        item_snap_moving(9, Vec3::ZERO, Some(Vec3::new(0.0, 0.2, 0.0)), false)
+            .apply(interp.world_mut());
+        interp.update(0.0);
+        interp.update(TICK);
+        interp.update(TICK);
+        let tracked = interp.world().resource::<TrackIndex>().0[&network_id(9)];
+        let before = interp.world().get::<ItemPhysics>(tracked).unwrap().sim.position;
+        item_snap_moving(9, Vec3::ZERO, Some(Vec3::new(0.07, -0.05, 0.03)), false)
+            .apply(interp.world_mut());
+        interp.update(0.0);
+        let physics = interp.world().get::<ItemPhysics>(tracked).unwrap();
+        assert_eq!(physics.sim.position, before);
+        assert_eq!(physics.sim.velocity, to_model_vec3(Vec3::new(0.07, -0.05, 0.03)));
+        assert_eq!(interp.world().get::<InterpClock>(tracked).unwrap().age, 2.0);
+    }
+
+    #[test]
+    fn item_ground_only_corrections_stop_motion_and_retire_the_airborne_endpoint() {
+        let mut interp = EntityInterpolator::new();
+        let resting = Vec3::new(0.0, 0.73, 0.0);
+        item_snap_moving(9, resting, Some(Vec3::ZERO), false).apply(interp.world_mut());
+        interp.update(0.0);
+        interp.update(TICK);
+        interp.update(TICK);
+        item_snap_moving(9, resting, Some(Vec3::ZERO), true).apply(interp.world_mut());
+        interp.update(0.0);
+        let tracked = interp.world().resource::<TrackIndex>().0[&network_id(9)];
+        assert!(interp.world().get::<ItemPhysics>(tracked).unwrap().grounded);
+        for _ in 0..4 {
+            interp.update(TICK * 0.5);
+            interp.update(TICK * 0.5);
+            assert_eq!(interp.draws()[0].feet, resting);
+        }
+    }
+
     // ---- the item-pickup fly-to-collector animation ----------
 
     /// The interpolant is **quadratic** in the age fraction, and the midpoint is

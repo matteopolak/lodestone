@@ -409,6 +409,7 @@ mod tests {
             rotation: Rotation { yaw: 0.0, pitch: 0.0 },
             head_yaw: 0.0,
             velocity: Vec3::new(0.0, 0.0, 0.0),
+            on_ground: false,
             metadata: Vec::new(),
             object_data: 0,
             leash_link: None,

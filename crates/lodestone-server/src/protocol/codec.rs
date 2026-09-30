@@ -321,6 +321,10 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
+    fn encode_system_chat_component(&self, message: &Text) -> ServerDirective {
+        self.encode_system_chat(&message.to_plain_string())
+    }
+
     /// Encodes a server→client plugin-message payload (vanilla
     /// `ClientboundCustomPayloadPacket`, wire id `custom_payload`).
     /// `channel` is the namespaced channel identifier; `data` is the
@@ -1894,6 +1898,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn encode_system_chat(&self, message: &str) -> ServerDirective {
         (**self).encode_system_chat(message)
+    }
+
+    fn encode_system_chat_component(&self, message: &Text) -> ServerDirective {
+        (**self).encode_system_chat_component(message)
     }
 
     fn begin_play(&self, view_radius: i32) -> Vec<ServerDirective> {

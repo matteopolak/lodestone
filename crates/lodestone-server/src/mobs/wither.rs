@@ -494,6 +494,7 @@ impl<'w> MobSim<'w> {
                 rotation: Rotation::new(w.yaw, 0.0),
                 head_yaw: w.yaw,
                 velocity: Vec3::new(0.0, 0.0, 0.0),
+                on_ground: false,
                 // `WitherBoss.DATA_ID_INV` — drives the client-side "still
                 // emerging" shield visual while the summon animation plays.
                 metadata: vec![crate::protocol::MetadataField::WitherInvulnerableTicks(

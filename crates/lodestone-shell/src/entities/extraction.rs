@@ -563,6 +563,7 @@ pub fn extract_entity_draws(
             // Bare too, same reason and the same unconditional
             // `spawn_track` insert — see [`CapeLag`]'s own doc.
             &CapeLag,
+            Option<&ItemPhysics>,
         ),
     )>,
     mut out: ResMut<ExtractedDraws>,
@@ -587,13 +588,19 @@ pub fn extract_entity_draws(
         wool,
         name_tag,
         player_skin,
-        (fuse, swim, cape_lag),
+        (fuse, swim, cape_lag, item_physics),
     ) in &tracks
     {
         let controlled_pose =
             controlled_vehicle_render_pose(controlled.as_deref(), id.0, partial_tick);
         let drawn_feet = controlled_pose.map_or_else(
-            || render_feet(from, to, clock),
+            || {
+                if item_physics.is_some() {
+                    from.feet.lerp(to.feet, partial_tick)
+                } else {
+                    render_feet(from, to, clock)
+                }
+            },
             |pose| {
                 Vec3::new(
                     pose.position.x as f32,

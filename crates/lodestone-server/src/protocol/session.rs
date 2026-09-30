@@ -102,6 +102,8 @@ pub struct EntitySnapshot {
     pub head_yaw: f32,
     /// Velocity in **blocks per tick**.
     pub velocity: Vec3,
+    /// Whether the authoritative movement step found support below the entity.
+    pub on_ground: bool,
     /// Per-species entity-metadata fields this entity currently wants a
     /// client to hold — empty for every entity kind that has
     /// none (projectiles, dropped items, and any mob whose fields are all

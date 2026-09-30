@@ -42,6 +42,12 @@ Several screens share infrastructure worth knowing about up front:
   block editor) use the same `EditBox`/focus machinery documented in `ui-framework.md`, not a
   screen-specific input hack.
 
+Browser key text is accepted only when it contains one non-control Unicode scalar. The launcher
+omits text during composition and sends physical keys separately, so `Shift`, `Dead`, and arrow-key
+names cannot enter fields. The shell validates that same text shape at its browser input boundary,
+including input supplied by an embedding page. Extend composition support through a committed-text
+input path rather than treating `KeyboardEvent.key` names or intermediate composition as text.
+
 ### Container-screen pointer focus
 
 The inventory and container family is an overlay over the live world. When any
@@ -118,6 +124,10 @@ sub-screens that use a different list widget entirely and aren't part of that co
 Language, Telemetry, and Resource Packs. Reached from both the title screen's and the pause menu's
 Options button; the root grid's "World Options" cell is a live link to online-play options outside a
 world and an inactive placeholder inside one, since a dedicated world-options screen doesn't exist yet.
+
+Every live option uses `Cell::label` to compose its caption and current value as `name: value`,
+including enum cycles such as `Clouds: Fancy` and `Reduce FPS when: AFK`. Value formatters return only
+the value portion; adding an enum formatter does not bypass the shared caption composition.
 
 ### World creation
 

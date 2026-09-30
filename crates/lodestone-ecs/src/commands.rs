@@ -785,7 +785,7 @@ pub fn dispatch(
         let parsed = command
             .tree
             .parse_filtered(&canonical, &filter)
-            .map_err(CommandDispatchError::Parse)?;
+            .map_err(|error| CommandDispatchError::Parse(error.remap_root(input, &canonical)))?;
 
         (command, canonical, parsed)
     };

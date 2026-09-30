@@ -62,7 +62,9 @@ impl ArgumentType for HeightmapArg {
             Some((_, kind)) => Ok(ParsedValue::dynamic(*kind)),
             None => {
                 reader.set_cursor(start);
-                Err(ParseError::new(start, ParseErrorKind::InvalidBool(text)))
+                Err(ParseError::new(start, ParseErrorKind::InvalidArgument(
+                    format!("Invalid value \"{text}\""),
+                )))
             }
         }
     }
