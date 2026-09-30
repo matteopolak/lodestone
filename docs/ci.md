@@ -318,8 +318,11 @@ just test-bench-gate && just bench-record && just bench-gate   # bench-gate
 `xtask-structural-checks` is not wrapped through `just` at all: the generic `xtask *args`
 Justfile passthrough always adds `-q`, which would not be byte-identical to this job's
 existing invocation, so reproduce it with the raw commands instead —
-`cargo run -p xtask -- check-isolation`, `cargo run -p xtask -- check-deletable <family>` for
-each of `v1-8`/`v1-9`/`v1-14`/`v26-2`, and `cargo run -p xtask -- check-comment-voice`.
+`cargo run -p xtask -- check-isolation`, `cargo run -p xtask -- check-deletable <package>` for
+every workspace package structurally under `crates/versions/`, and
+`cargo run -p xtask -- check-comment-voice`. The workflow discovers those packages through
+`cargo metadata` and `jq`, rather than maintaining a second family list. A deletion plan includes
+declared compatibility dependents; it does not imply that its base is independently removable.
 
 **If the red leg was `check-default (macos-latest)`, `just check` on an Apple Silicon dev
 machine already reproduces it** — same OS, same architecture, same pinned nightly. A red

@@ -80,23 +80,30 @@ This keeps the relationship reviewable and narrow; every other version edge rema
 `cargo xtask check-isolation` derives version-crate membership structurally from `crates/versions/`.
 The version registry remains the single aggregation point and opts in with
 `[package.metadata.lodestone-isolation] role = "version-registry"`, which only downgrades an
-already-optional edge. `cargo xtask check-deletable <base-family>` still reports a dependent family
-as a blocker, because deleting the declared base would break that dependent.
+already-optional edge. A compatibility base must be a required ordinary path dependency on another
+workspace version family. Malformed, self-referential, optional, development, build-only, stale, and
+shared-crate declarations are errors. Required normal and build dependencies from shared crates stay
+fatal; optional and development edges remain surfaced cleanup work.
 
-**Deletability is measured, not asserted**: `cargo xtask check-deletable <family>` simulates removal and
-reports the true fallout in manifest and source lines.
+**Deletability reports a removal plan**: `cargo xtask check-deletable <family>` includes the requested
+folder and all transitively declared compatibility dependents. Removing a dependent does not remove
+its base. For example, removing the 26.2 implementation also requires removing the 26.3 family that
+reuses it; removing only advertised 26.2 support instead retains that implementation and removes its
+registry exposure. The report names every included folder and inventories retained manifest and
+registry-source references. Required shared dependencies and undeclared version dependencies remain
+blockers. A successful structural scan is not a deletion-and-build experiment.
 
 One trap that a graph-plus-package-name check structurally cannot see: a feature forward such as
 `live-v1-8 = ["lodestone-registry/v1-8"]` names the package's feature *suffix*, not the package itself,
 so it is not a dependency edge at all. Cargo validates feature strings at resolve time, so deleting a
 family leaves a dangling feature forward that breaks the default build while the checker reports
 "unaffected". Token matching is bounded so `v1-8` never matches `v1-80`. That suffix is no longer the
-same string as the family's own directory: the four families live under an era-start Minecraft-version
-folder (`crates/versions/1.8`, not `crates/versions/v1-8`) while keeping a `vNNN`-style package/feature
+same string as the family's own directory: families live under an era-start Minecraft-version
+folder (`crates/versions/1.8`, not `crates/versions/v1-8`) while keeping a package/feature
 suffix, so a folder-name grep is not a safe stand-in for the feature token any more.
 
 **Canonical model direction.** The model is shaped by the *newest* protocol's concepts; older adapters
-translate **upward** (the ViaVersion insight). Deleting an old version removes only its adapter; adding
+translate **upward** (the ViaVersion insight). Removing an independent family removes its adapter; adding
 a new one that introduces a concept means extending the model once and letting older adapters supply a
 default. Client, UI and render code never see a version number.
 

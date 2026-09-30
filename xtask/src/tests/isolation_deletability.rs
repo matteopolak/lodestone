@@ -145,9 +145,10 @@ lodestone-v1 = { path = "../v1", optional = true }
             ],
         )?;
 
-        let report = check_workspace_isolation(&workspace)?;
-        assert_eq!(report.findings.len(), 1);
-        assert_eq!(report.findings[0].severity, Severity::Violation);
+        let error = check_workspace_isolation(&workspace).unwrap_err();
+        assert!(error.to_string().contains("required normal path dependency"));
+        let error = check_workspace_deletable(&workspace, "v1").unwrap_err();
+        assert!(error.to_string().contains("required normal path dependency"));
         Ok(())
     }
 
@@ -1070,7 +1071,7 @@ compat = ["dep:lodestone-v1"]
     }
 
     #[test]
-    fn check_deletable_reports_compatibility_base_dependent_as_blocker() -> Result<()> {
+    fn check_deletable_includes_declared_compatibility_dependents() -> Result<()> {
         let workspace = isolation_fixture(
             "deletable-compatibility-base",
             &[
@@ -1093,12 +1094,203 @@ lodestone-v26-2 = { path = "../26.2" }
         assert!(!isolation.has_violations());
 
         let report = check_workspace_deletable(&workspace, "26.2")?;
+        assert!(report.is_cleanly_deletable());
+        assert_eq!(report.removal_families.len(), 2);
+        assert_eq!(report.compatibility_edges.len(), 1);
+        assert_eq!(report.compatibility_edges[0].crate_name, "lodestone-v26-3");
+        assert_eq!(report.compatibility_edges[0].dependency_name, "lodestone-v26-2");
+        assert!(report.render().contains("folders to remove (2)"));
+        assert!(!report.render().contains("leaves every crate building"));
+        let leaf = check_workspace_deletable(&workspace, "26.3")?;
+        assert!(leaf.is_cleanly_deletable());
+        assert_eq!(leaf.removal_families.len(), 1);
+        assert!(leaf.compatibility_edges.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn compatibility_declarations_reject_stale_malformed_and_non_normal_bases() -> Result<()> {
+        for (name, declaration, dependency) in [
+            ("dev", "\"lodestone-v1\"", "[dev-dependencies]\nlodestone-v1 = { path = \"../v1\" }"),
+            ("build", "\"lodestone-v1\"", "[build-dependencies]\nlodestone-v1 = { path = \"../v1\" }"),
+            ("stale", "\"lodestone-v1\"", ""),
+            ("unknown", "\"lodestone-missing\"", ""),
+            ("malformed", "42", ""),
+            ("self", "\"lodestone-v2\"", ""),
+        ] {
+            let extra = format!("[package.metadata.lodestone-isolation]\ncompatibility-base = {declaration}\n{dependency}");
+            let workspace = isolation_fixture(name, &[
+                ("crates/versions/v1", "lodestone-v1", ""),
+                ("crates/versions/v2", "lodestone-v2", &extra),
+            ])?;
+            for error in [
+                check_workspace_isolation(&workspace).unwrap_err(),
+                check_workspace_deletable(&workspace, "v1").unwrap_err(),
+            ] {
+                assert!(error.to_string().contains("lodestone-v2: compatibility-base"), "{name}: {error}");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn compatibility_metadata_cannot_grant_permission_to_shared_crates() -> Result<()> {
+        let workspace = isolation_fixture("shared-base-spoof", &[
+            ("crates/versions/v1", "lodestone-v1", ""),
+            ("crates/shared", "shared", r#"
+[package.metadata.lodestone-isolation]
+compatibility-base = "lodestone-v1"
+[dependencies]
+lodestone-v1 = { path = "../versions/v1" }
+"#),
+        ])?;
+        assert!(check_workspace_isolation(&workspace).unwrap_err().to_string().contains("shared: compatibility-base"));
+        assert!(check_workspace_deletable(&workspace, "v1").is_err());
+
+        let workspace = isolation_fixture("shared-base-endpoint", &[
+            ("crates/shared", "shared", ""),
+            ("crates/versions/v1", "lodestone-v1", r#"
+[package.metadata.lodestone-isolation]
+compatibility-base = "shared"
+[dependencies]
+shared = { path = "../../shared" }
+"#),
+        ])?;
+        assert!(check_workspace_isolation(&workspace).unwrap_err().to_string().contains("lodestone-v1: compatibility-base"));
+        assert!(check_workspace_deletable(&workspace, "v1").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn deletion_closure_scans_all_families_and_deduplicates_cleanup() -> Result<()> {
+        let workspace = isolation_fixture("compatibility-chain", &[
+            ("crates/versions/v1", "lodestone-v1", ""),
+            ("crates/versions/v2", "lodestone-v2", r#"
+[package.metadata.lodestone-isolation]
+compatibility-base = "lodestone-v1"
+[dependencies]
+base = { package = "lodestone-v1", path = "../v1" }
+"#),
+            ("crates/versions/v3", "lodestone-v3", r#"
+[package.metadata.lodestone-isolation]
+compatibility-base = "lodestone-v2"
+[target.'cfg(unix)'.dependencies]
+base = { package = "lodestone-v2", path = "../v2" }
+"#),
+            ("crates/lodestone-registry", "lodestone-registry", r#"
+[package.metadata.lodestone-isolation]
+role = "version-registry"
+[dependencies]
+lodestone-v1 = { path = "../versions/v1", optional = true }
+lodestone-v2 = { path = "../versions/v2", optional = true }
+third = { package = "lodestone-v3", path = "../versions/v3", optional = true }
+[features]
+v1 = ["dep:lodestone-v1"]
+v2 = ["dep:lodestone-v2"]
+v3 = ["dep:third"]
+"#),
+            ("crates/versions/v10", "lodestone-v10", r#"
+[dependencies]
+lodestone-registry = { path = "../../lodestone-registry" }
+[features]
+forward = ["lodestone-registry/v1", "lodestone-registry/v2", "lodestone-registry/v3"]
+"#),
+        ])?;
+        std::fs::write(workspace.join("crates/lodestone-registry/src/lib.rs"),
+            "#[cfg(feature = \"v1\")]\nuse lodestone_v1 as first;\n#[cfg(feature = \"v3\")]\nuse third as last;\n")?;
+        assert!(!check_workspace_isolation(&workspace)?.has_violations());
+        let report = check_workspace_deletable(&workspace, "v1")?;
+        assert!(report.is_cleanly_deletable());
+        assert_eq!(report.removal_families.iter().map(|family| family.crate_name.as_str()).collect::<Vec<_>>(),
+            ["lodestone-v1", "lodestone-v2", "lodestone-v3"]);
+        assert_eq!(report.compatibility_edges.len(), 2);
+        assert_eq!(report.compatibility_edges[1].dependency_target.as_deref(), Some("cfg(unix)"));
+        assert_eq!(report.manual_edits.len(), 3);
+        assert_eq!(report.manifest_lines.iter().filter(|line| line.path == "Cargo.toml").count(), 1);
+        assert!(report.manifest_lines.iter().any(|line| line.path == "crates/versions/v10/Cargo.toml" && line.text.starts_with("forward")));
+        assert!(report.manifest_lines.iter().all(|line| !report.removal_families.iter()
+            .any(|family| Path::new(&line.path).starts_with(&family.dir))));
+        assert!(report.manifest_lines.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(report.registry_source_lines.iter().any(|line| line.text == "use third as last;"));
+        assert_eq!(report.registry_source_lines.len(), 4);
+        let middle = check_workspace_deletable(&workspace, "v2")?;
+        assert_eq!(middle.removal_families.len(), 2);
+        let leaf = check_workspace_deletable(&workspace, "v3")?;
+        assert_eq!(leaf.removal_families.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn deletion_closure_preserves_undeclared_and_shared_blockers() -> Result<()> {
+        let workspace = isolation_fixture("compatibility-blockers", &[
+            ("crates/versions/v1", "lodestone-v1", ""),
+            ("crates/versions/v2", "lodestone-v2", r#"
+[package.metadata.lodestone-isolation]
+compatibility-base = "lodestone-v1"
+[dependencies]
+lodestone-v1 = { path = "../v1" }
+"#),
+            ("crates/versions/v3", "lodestone-v3", r#"
+[dependencies]
+lodestone-v2 = { path = "../v2", optional = true }
+"#),
+            ("crates/shared", "shared", r#"
+[dependencies]
+alias = { package = "lodestone-v2", path = "../versions/v2" }
+[target.'cfg(unix)'.build-dependencies]
+lodestone-v2 = { path = "../versions/v2" }
+lodestone-v1 = { path = "../versions/v1", optional = true }
+[dev-dependencies]
+lodestone-v1 = { path = "../versions/v1" }
+"#),
+            ("crates/registry", "registry", r#"
+[package.metadata.lodestone-isolation]
+role = "version-registry"
+[dependencies]
+lodestone-v2 = { path = "../versions/v2" }
+"#),
+        ])?;
+        let isolation = check_workspace_isolation(&workspace)?;
+        assert_eq!(isolation.violations().count(), 4);
+        let report = check_workspace_deletable(&workspace, "v1")?;
+        assert!(!report.is_cleanly_deletable());
+        assert_eq!(report.removal_families.len(), 2);
+        assert_eq!(report.blockers.len(), 4);
+        assert!(report.blockers.iter().all(|edge| edge.dependency_name == "lodestone-v2"));
+        assert!(report.blockers.iter().any(|edge| edge.dependency_table == "build-dependencies"
+            && edge.dependency_target.as_deref() == Some("cfg(unix)")));
+        assert_eq!(report.manual_edits.len(), 2);
+        assert!(report.manual_edits.iter().any(|edge| edge.dependency_table == "build-dependencies" && edge.optional));
+        assert!(report.manifest_lines.iter().any(|line| line.text.starts_with("alias =")));
+        Ok(())
+    }
+
+    #[test]
+    fn deletion_closure_does_not_hide_internal_undeclared_edges() -> Result<()> {
+        let workspace = isolation_fixture("compatibility-internal-blocker", &[
+            ("crates/versions/v1", "lodestone-v1", ""),
+            ("crates/versions/v2", "lodestone-v2", r#"
+[package.metadata.lodestone-isolation]
+compatibility-base = "lodestone-v1"
+[dependencies]
+lodestone-v1 = { path = "../v1" }
+"#),
+            ("crates/versions/v3", "lodestone-v3", r#"
+[package.metadata.lodestone-isolation]
+compatibility-base = "lodestone-v2"
+[dependencies]
+lodestone-v2 = { path = "../v2" }
+lodestone-v1 = { path = "../v1" }
+"#),
+        ])?;
+        assert!(check_workspace_isolation(&workspace)?.has_violations());
+        let report = check_workspace_deletable(&workspace, "v1")?;
+        assert_eq!(report.removal_families.len(), 3);
+        assert_eq!(report.compatibility_edges.len(), 2);
         assert!(!report.is_cleanly_deletable());
         assert_eq!(report.blockers.len(), 1);
-        assert_eq!(report.blockers[0].crate_name, "lodestone-v26-3");
-        assert!(report.render().contains(
-            "another version crate depends on it; deleting this folder breaks that family"
-        ));
+        assert_eq!(report.blockers[0].crate_name, "lodestone-v3");
+        assert_eq!(report.blockers[0].dependency_name, "lodestone-v1");
         Ok(())
     }
 

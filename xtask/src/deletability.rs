@@ -1,46 +1,59 @@
 use super::*;
 
 /// One dependency edge that points at the version family being deleted.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct DeletabilityEdge {
     /// The crate that depends on the version family.
     pub crate_name: String,
+    /// The version package this edge points to.
+    pub dependency_name: String,
     /// Which manifest table declared the dependency.
     pub dependency_table: &'static str,
+    /// Target condition, when declared in a target-specific dependency table.
+    pub dependency_target: Option<String>,
     /// Whether the dependency is optional (feature-gated).
     pub optional: bool,
-    /// Whether the dependent is itself a version crate (a hard isolation break).
+    /// Whether the dependent is structurally a version crate.
     pub dependent_is_version_crate: bool,
 }
 
 impl DeletabilityEdge {
-    /// A required, non-optional dependency from a shared crate — or *any*
-    /// dependency from another version crate — makes the folder impossible to
-    /// delete without editing code that must keep compiling. Everything else is
-    /// a one-line manifest edit.
+    fn describe(&self) -> String {
+        let target = self.dependency_target.as_deref()
+            .map(|target| format!(", target {target}"))
+            .unwrap_or_default();
+        format!("{} -> {} [{}{target}]", self.crate_name, self.dependency_name, self.dependency_table)
+    }
+
+    /// Required shared normal/build edges and undeclared version edges block
+    /// removal. Valid compatibility edges are classified before this predicate.
     fn is_blocker(&self) -> bool {
         self.dependent_is_version_crate
-            || (!self.optional && self.dependency_table == "dependencies")
+            || (!self.optional && self.dependency_table != "dev-dependencies")
     }
 }
 
-/// The result of simulating the deletion of one version family's folder.
-///
-/// The user requirement this proves is concrete: **dropping support for a
-/// version must mean deleting a single `crates/versions/<version>` folder and
-/// having it be mostly all gone.** This report is the continuously-checkable
-/// form of the manual deletion drill — it enumerates every crate that depends on
-/// the target and classifies each edge as either a *blocker* (something that
-/// would fail to compile and therefore breaks the "just delete the folder"
-/// promise) or a *manual edit* (a one-line, feature-gated reference that is
-/// expected to be removed alongside the folder).
+/// A version family's folder included in a removal plan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemovalFamily {
+    pub crate_name: String,
+    pub dir: String,
+}
+
+/// The structural plan for removing a family and its declared compatibility
+/// dependents. Success means no blocking dependency remains after the listed
+/// cleanup; it does not claim a deletion followed by a build was executed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeletabilityReport {
     /// The resolved package name, e.g. `lodestone-v1-8`.
     pub target_crate: String,
     /// The folder that would be deleted, relative to the workspace root.
     pub target_dir: String,
-    /// Edges that would break compilation if the folder were simply deleted.
+    /// Requested family plus the reverse transitive compatibility closure.
+    pub removal_families: Vec<RemovalFamily>,
+    /// Declared required base edges explaining why dependent families join it.
+    pub compatibility_edges: Vec<DeletabilityEdge>,
+    /// Required shared edges and undeclared version edges blocking the plan.
     pub blockers: Vec<DeletabilityEdge>,
     /// Feature-gated / optional / dev edges that need a one-line manifest edit.
     pub manual_edits: Vec<DeletabilityEdge>,
@@ -67,7 +80,7 @@ pub struct ManifestLine {
 }
 
 impl DeletabilityReport {
-    /// Whether the folder can be dropped without breaking any crate's build.
+    /// Whether the removal plan has no structural blockers after cleanup.
     #[must_use]
     pub fn is_cleanly_deletable(&self) -> bool {
         self.blockers.is_empty()
@@ -79,39 +92,49 @@ impl DeletabilityReport {
         let mut out = String::new();
         let _ = write!(
             out,
-            "deletion drill for {} (folder {}):",
+            "removal plan for {} (folder {}):",
             self.target_crate, self.target_dir
         );
+        let _ = write!(out, "\n  folders to remove ({}):", self.removal_families.len());
+        for family in &self.removal_families {
+            let _ = write!(out, "\n    - {} ({})", family.dir, family.crate_name);
+        }
+        if !self.compatibility_edges.is_empty() {
+            let _ = write!(out, "\n  declared compatibility dependents included:");
+            for edge in &self.compatibility_edges {
+                let _ = write!(out, "\n    - {}", edge.describe());
+            }
+        }
 
         if self.blockers.is_empty() {
             let _ = write!(
                 out,
-                "\n  cleanly deletable: removing the folder plus the {} manifest line(s) below leaves every crate building (no code changes, nothing structurally undeletable)",
-                self.manifest_lines.len()
+                "\n  removal plan has no structural blockers after the listed cleanup ({} manifest line(s)); deletion and build were not executed",
+                self.manifest_lines.len(),
             );
         } else {
             let _ = write!(
                 out,
-                "\n  NOT cleanly deletable: {} crate(s) would fail to build:",
+                "\n  removal plan blocked by {} dependency edge(s):",
                 self.blockers.len()
             );
             for edge in &self.blockers {
                 let why = if edge.dependent_is_version_crate {
-                    "another version crate depends on it; deleting this folder breaks that family"
+                    "undeclared version dependency breaks isolation"
                 } else {
                     "required (non-optional) dependency from a shared crate"
                 };
                 let _ = write!(
                     out,
-                    "\n    - {} [{}]: {why}",
-                    edge.crate_name, edge.dependency_table
+                    "\n    - {}: {why}",
+                    edge.describe(),
                 );
             }
         }
 
         let _ = write!(
             out,
-            "\n  manifest edits to make when deleting the folder ({}):",
+            "\n  manifest cleanup outside removed folders ({}):",
             self.manifest_lines.len()
         );
         for line in &self.manifest_lines {
@@ -133,8 +156,8 @@ impl DeletabilityReport {
                 let optional = if edge.optional { ", optional" } else { "" };
                 let _ = write!(
                     out,
-                    "\n    - {} (feature-gated reference in [{}]{optional})",
-                    edge.crate_name, edge.dependency_table
+                    "\n    - {} (cleanup{optional})",
+                    edge.describe(),
                 );
             }
         }
@@ -142,7 +165,7 @@ impl DeletabilityReport {
     }
 }
 
-/// Simulates deleting a version family's folder and reports the fallout.
+/// Reports a family's structural removal plan and compatibility closure.
 ///
 /// `requested` may be the package name (`lodestone-v1-8`), the folder name
 /// (`v47`), or a path under `crates/versions/`. Dependency-graph edges catch
@@ -150,8 +173,9 @@ impl DeletabilityReport {
 /// `use lodestone_v1_8` if it declares a dependency on it). Cargo *feature*
 /// forwards such as `live-v47 = ["lodestone-registry/v47"]` are not edges but
 /// are validated by Cargo at resolve time, so they are caught separately by
-/// scanning manifests for the family's folder token; together the two cover
-/// every way deleting the folder can break a build.
+/// scanning manifests for the family's feature token, package, dependency
+/// aliases and directory. This reads metadata and files without deleting them
+/// or running a build.
 pub fn check_workspace_deletable(
     workspace_root: &Path,
     requested: &str,
@@ -176,6 +200,7 @@ pub fn check_workspace_deletable(
     })?;
 
     let mut version_crate_names = BTreeSet::new();
+    let mut version_dirs = BTreeMap::new();
     let mut member_packages = Vec::new();
     let mut target: Option<(String, String)> = None;
 
@@ -198,6 +223,7 @@ pub fn check_workspace_deletable(
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow!("version package is missing manifest_path"))?;
             let dir = version_crate_dir(&canonical_root, Path::new(manifest_path))?;
+            version_dirs.insert(package_name.to_owned(), dir.clone());
             let folder = Path::new(&dir)
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -222,32 +248,56 @@ pub fn check_workspace_deletable(
 
     let mut blockers = Vec::new();
     let mut manual_edits = Vec::new();
+    let mut compatibility_edges = Vec::new();
+    let compatibility_bases =
+        super::isolation::validated_compatibility_bases(&member_packages, &version_crate_names)?;
+    let mut removal_names = BTreeSet::from([target_crate.clone()]);
+    loop {
+        let before = removal_names.len();
+        for (dependent, base) in &compatibility_bases {
+            if removal_names.contains(&base.crate_name) {
+                removal_names.insert(dependent.clone());
+            }
+        }
+        if before == removal_names.len() {
+            break;
+        }
+    }
+    let removal_families = removal_names.iter().map(|name| RemovalFamily {
+        crate_name: name.clone(),
+        dir: version_dirs[name].clone(),
+    }).collect::<Vec<_>>();
     for package in &member_packages {
         let crate_name = package
             .get("name")
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("workspace package is missing a name"))?;
-        if crate_name == target_crate {
-            continue;
-        }
         let Some(dependencies) = package.get("dependencies").and_then(Value::as_array) else {
             continue;
         };
         for dependency in dependencies {
-            let dependency_name = dependency.get("name").and_then(Value::as_str);
-            if dependency_name != Some(target_crate.as_str()) {
+            let Some(dependency_name) = dependency.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            if !removal_names.contains(dependency_name) {
                 continue;
             }
             let edge = DeletabilityEdge {
                 crate_name: crate_name.to_owned(),
+                dependency_name: dependency_name.to_owned(),
                 dependency_table: dependency_table_name(dependency.get("kind")),
+                dependency_target: dependency.get("target").and_then(Value::as_str).map(str::to_owned),
                 optional: dependency
                     .get("optional")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
                 dependent_is_version_crate: version_crate_names.contains(crate_name),
             };
-            if edge.is_blocker() {
+            if removal_names.contains(crate_name)
+                && compatibility_bases.get(crate_name).is_some_and(|base| base.matches(dependency))
+            {
+                compatibility_edges.push(edge);
+            } else if edge.is_blocker() {
                 blockers.push(edge);
             } else {
                 manual_edits.push(edge);
@@ -255,18 +305,32 @@ pub fn check_workspace_deletable(
         }
     }
 
-    let manifest_lines =
-        manifest_lines_mentioning(workspace_root, &member_packages, &target_crate, &target_dir)?;
-    let registry_source_lines = registry_source_lines_mentioning(
-        &canonical_root,
-        &member_packages,
-        &target_crate,
-        &target_dir,
-    )?;
+    let mut manifest_lines = Vec::new();
+    let mut registry_source_lines = Vec::new();
+    for family in &removal_families {
+        manifest_lines.extend(manifest_lines_mentioning(
+            workspace_root, &member_packages, &family.crate_name, &family.dir,
+        )?);
+        registry_source_lines.extend(registry_source_lines_mentioning(
+            &canonical_root, &member_packages, &family.crate_name, &family.dir,
+        )?);
+    }
+    for lines in [&mut manifest_lines, &mut registry_source_lines] {
+        lines.retain(|line| !removal_families.iter()
+            .any(|family| Path::new(&line.path).starts_with(&family.dir)));
+        lines.sort();
+        lines.dedup();
+    }
+    for edges in [&mut blockers, &mut manual_edits, &mut compatibility_edges] {
+        edges.sort();
+        edges.dedup();
+    }
 
     Ok(DeletabilityReport {
         target_crate,
         target_dir,
+        removal_families,
+        compatibility_edges,
         blockers,
         manual_edits,
         manifest_lines,
@@ -298,7 +362,6 @@ fn registry_source_lines_mentioning(
     _target_dir: &str,
 ) -> Result<Vec<ManifestLine>> {
     let feature_token = feature_token_for(target_crate);
-    let snake_name = target_crate.replace('-', "_");
     let cfg_needle = format!("feature = \"{feature_token}\"");
 
     let mut lines = Vec::new();
@@ -306,6 +369,8 @@ fn registry_source_lines_mentioning(
         if !package_is_version_registry(package) {
             continue;
         }
+        let snake_names = dependency_names_for(package, target_crate).into_iter()
+            .map(|name| name.replace('-', "_")).collect::<BTreeSet<_>>();
         let Some(manifest_path) = package.get("manifest_path").and_then(Value::as_str) else {
             continue;
         };
@@ -328,7 +393,9 @@ fn registry_source_lines_mentioning(
                 })
                 .unwrap_or_else(|| file.to_string_lossy().into_owned());
             for (index, line) in contents.lines().enumerate() {
-                if line.contains(&cfg_needle) || line.contains(&snake_name) {
+                if line.contains(&cfg_needle)
+                    || snake_names.iter().any(|name| line_contains_cargo_token(line, name))
+                {
                     lines.push(ManifestLine {
                         path: display_path.clone(),
                         line: index + 1,
@@ -391,11 +458,17 @@ fn manifest_lines_mentioning(
 ) -> Result<Vec<ManifestLine>> {
     let mut manifests = BTreeSet::new();
     manifests.insert(workspace_root.join("Cargo.toml"));
+    let mut dependency_names = BTreeMap::new();
+    let mut workspace_dependency_names = BTreeSet::from([target_crate.to_owned()]);
     for package in member_packages {
         if let Some(manifest_path) = package.get("manifest_path").and_then(Value::as_str) {
             manifests.insert(PathBuf::from(manifest_path));
+            let names = dependency_names_for(package, target_crate);
+            workspace_dependency_names.extend(names.iter().cloned());
+            dependency_names.insert(PathBuf::from(manifest_path), names);
         }
     }
+    dependency_names.insert(workspace_root.join("Cargo.toml"), workspace_dependency_names);
 
     let canonical_root = workspace_root
         .canonicalize()
@@ -427,11 +500,16 @@ fn manifest_lines_mentioning(
             .unwrap_or_else(|| manifest.to_string_lossy().into_owned());
         // The target's own manifest is deleted with the folder, so its
         // references are not edits anyone has to make.
-        if display_path.starts_with(target_dir) {
+        if Path::new(&display_path).starts_with(target_dir) {
             continue;
         }
         for (index, line) in contents.lines().enumerate() {
-            if line.contains(target_crate) || line_forwards_to_family_feature(line, folder_token) {
+            if line_contains_cargo_token(line, target_crate)
+                || line_contains_cargo_token(line, target_dir)
+                || dependency_names.get(&manifest).is_some_and(|names| names.iter()
+                    .any(|name| line_contains_cargo_token(line, name)))
+                || line_forwards_to_family_feature(line, folder_token)
+            {
                 lines.push(ManifestLine {
                     path: display_path.clone(),
                     line: index + 1,
@@ -441,7 +519,24 @@ fn manifest_lines_mentioning(
         }
     }
     lines.sort();
+    lines.dedup();
     Ok(lines)
+}
+
+fn dependency_names_for(package: &Value, target_crate: &str) -> BTreeSet<String> {
+    package.get("dependencies").and_then(Value::as_array).into_iter().flatten()
+        .filter(|dependency| dependency.get("name").and_then(Value::as_str) == Some(target_crate))
+        .map(|dependency| dependency.get("rename").and_then(Value::as_str)
+            .unwrap_or(target_crate).to_owned())
+        .collect()
+}
+
+fn line_contains_cargo_token(line: &str, token: &str) -> bool {
+    let is_name_char = |ch: char| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.');
+    line.match_indices(token).any(|(start, _)| {
+        line[..start].chars().next_back().is_none_or(|ch| !is_name_char(ch))
+            && line[start + token.len()..].chars().next().is_none_or(|ch| !is_name_char(ch))
+    })
 }
 
 /// Whether a manifest line forwards a Cargo *feature* to the family being
