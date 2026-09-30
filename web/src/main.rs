@@ -61,6 +61,13 @@ use web_sys::{
     RequestInit, Response, WheelEvent, Worker, window,
 };
 
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(module = "/responsiveness_probe.js")]
+extern "C" {
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = install)]
+    fn install_responsiveness_probe(worker: &Worker, canvas: &HtmlCanvasElement);
+}
+
 /// The deterministic browser resource pack staged from the local archive.
 const RESOURCE_PACK_URL: &str = "lodestone-resources.zip";
 
@@ -377,6 +384,7 @@ fn launch_render_worker(
     worker
         .post_message_with_transfer(&launch, &transfer)
         .map_err(|error| format!("cannot start render worker: {error:?}"))?;
+    install_responsiveness_probe(&worker, &canvas);
     STANDALONE_WORKER.with_borrow_mut(|slot| *slot = Some(worker));
     Ok(())
 }
