@@ -90,6 +90,15 @@ answer a keep-alive. The focused
 before/after its automatic write, and at the server send/acknowledgement sites.
 Use `RUST_LOG=warn,lodestone_keepalive=debug` for this narrow trace.
 
+Every accepted or coalesced action also signals a shared `Notify`. The shell
+net loop enables its notification before draining the relay, then waits for
+either an inbound event or another outbound action. A readiness acknowledgment
+therefore reaches the driver even after the integrated server has finished
+streaming terrain and remains silent while its initial tick gate is closed.
+Browser waits need no runtime timer. Native waits retain their 15 ms poll for
+local control channels, and dropping `NetClient` signals the outbound waiter
+after setting the stop flag.
+
 An absolute correction snaps both the current and previous camera positions to
 its target. Relative axes apply their delta independently to the previous
 position. Interpolation belongs to predicted movement; treating absolute server
@@ -106,6 +115,14 @@ TCP establishment has a 10-second budget and reports `ClientError::ConnectTimeou
 Change address selection in `lodestone-net::resolve`; keep the saved entry's optional port intact until that function is called. Change socket-versus-handshake routing through `ClientBuilder::connect_target`, not by replacing `ServerAddress`. If the loading screen needs another phase, update `NetUpdate::ConnectPhase` and `menu::loading::ConnectPhase` together.
 
 The packet ID in a timeout diagnostic is state-relative: interpret it together with the logged `ConnectionState` and the selected protocol adapter. Do not treat the same numeric ID as one packet across protocol families or states.
+
+Change outbound admission in `ActionRelaySender::send` and net-loop waiting in
+`run_async` together. Keep the notification armed before the drain, signal
+replacement lanes as well as the reliable FIFO, and preserve native local
+control polling. The focused
+`outbound_relay_wakes_without_inbound_traffic_and_preserves_later_wakes` test
+covers an idle waiter, a retained notification followed by a later action,
+and both coalescing lanes.
 
 ## Configuration
 
