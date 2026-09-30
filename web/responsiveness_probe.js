@@ -66,6 +66,7 @@ export class ResponsivenessProbe {
     report.endedMs = this.now();
     report.durationMs = report.endedMs - report.startedMs;
     report.reason = reason;
+    report.final = [...this.latest.values()];
     report.samplesTruncated = report.samplesSeen > report.samples.length;
     return report;
   }

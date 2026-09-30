@@ -58,12 +58,25 @@ saturated dispatcher still falls back to ordered serial execution.
 Production sessions prepare immutable source products once per admitted batch,
 before shaped residents are dispatched. Reconstructing a target state machine
 for ordered mutation and packet finalization does not repeat preparation.
-Overworld preparation separates each bounded region's dependency geometry from
-its missing output products. Density, climate, and structure inputs retain the
-full region bounds, but already-ready terrain prefixes do not execute again
-when another coordinate in the same region is missing. Readiness is sampled
-under the same store lease used for publication, so eviction cannot invalidate
-that selection.
+Overworld preparation samples the bounding rectangle of missing prefix products,
+with the existing density, X/Z, climate, surface, and structure-reference halos.
+Admission, publication, and coordinate order still use the original region.
+The biome sidecar retains that region's interior/border distinction: cold-border
+cells that belonged to its interior remain materialized, while true exterior
+lookups retain their cursor and tie history. Scattered missing coordinates still
+use a dense bounded rectangle. Readiness is sampled under the same store lease
+used for publication, so eviction cannot invalidate that selection.
+
+`OverworldBatchLease::pre_ore_region_work` separates immutable job planning from
+execution. The default preserves eight-chunk-wide regions. The threaded browser
+requests four-chunk-wide tiles aligned to the union's bounds and submits them
+through `run_worldgen_jobs`; an 8×8 union becomes four disjoint 4×4 jobs under one
+lease. Each job owns its sampler and aquifer scratch. Publication coordinates
+never overlap, and shaped carriers are collected in request order through the
+same executor on native, threaded browser, and serial browser builds. Smaller
+tiles trade some density/climate sharing and scratch memory for parallel work;
+measure that tradeoff before changing the bound. This synchronous preparation
+still completes before the cooperative mutable driver can yield.
 
 The Overworld generator also exposes `OverworldBatchLease`. A production
 dispatcher passes its complete admitted coordinate set to `lease_batch`, then

@@ -3394,7 +3394,50 @@ fn sculk_can_spread_from(grid: &VegGrid, origin: BlockPos) -> bool {
     })
 }
 
+#[derive(Clone, Copy)]
+struct SculkVeinState(u8);
+
+impl SculkVeinState {
+    fn from_state(state: StateId) -> Option<Self> {
+        (state.block() == Block::SculkVein)
+            .then(|| Self((Block::SculkVein.default_state().raw() - state.raw()) as u8))
+    }
+
+    fn from_mask(mask: u8, waterlogged: bool) -> Self {
+        Self(
+            ((mask & 1) << 6)
+                | ((mask & 2) << 4)
+                | ((mask & 4) << 2)
+                | (mask & 8)
+                | ((mask & 16) >> 2)
+                | ((mask & 32) >> 5)
+                | (u8::from(waterlogged) << 1),
+        )
+    }
+
+    fn state_id(self) -> StateId {
+        StateId::new(Block::SculkVein.default_state().raw() - u32::from(self.0))
+            .expect("sculk vein has all 128 boolean states")
+    }
+
+    fn face_mask(self) -> u8 {
+        ((self.0 & 64) >> 6)
+            | ((self.0 & 4) >> 1)
+            | ((self.0 & 16) >> 2)
+            | (self.0 & 8)
+            | ((self.0 & 1) << 4)
+            | (self.0 & 32)
+    }
+
+    fn waterlogged(self) -> bool {
+        self.0 & 2 != 0
+    }
+}
+
 fn sculk_face_mask(grid: &VegGrid, state: StateId) -> u8 {
+    if let Some(vein) = SculkVeinState::from_state(state) {
+        return vein.face_mask();
+    }
     SCULK_DIRECTIONS.iter().enumerate().fold(0, |mask, (index, &offset)| {
         let face = face_property(offset.0, offset.1, offset.2);
         if has_face(grid, state, face) {
@@ -3414,36 +3457,18 @@ fn sculk_has_face(mask: u8, offset: (i32, i32, i32)) -> bool {
 }
 
 fn sculk_vein_state_id(_grid: &VegGrid, mask: u8, waterlogged: bool) -> StateId {
-    let base = Block::SculkVein.default_state();
-    let mut state = base;
-    for (index, face) in [
-        lodestone_data::block_properties::PropertyKey::Down,
-        lodestone_data::block_properties::PropertyKey::East,
-        lodestone_data::block_properties::PropertyKey::North,
-        lodestone_data::block_properties::PropertyKey::South,
-        lodestone_data::block_properties::PropertyKey::Up,
-        lodestone_data::block_properties::PropertyKey::West,
-    ].iter().enumerate() {
-        let mut properties = lodestone_data::block_properties::Properties::from_state_id(state);
-        properties = properties.with_builtin(*face, if mask & (1 << index) != 0 {
-            lodestone_data::block_properties::BuiltinPropertyValue::True
-        } else {
-            lodestone_data::block_properties::BuiltinPropertyValue::False
-        }).unwrap_or(properties);
-        state = lodestone_data::block_properties::Properties::state_for_block(state.block(), &properties)
-            .unwrap_or(state);
-    }
-    let mut properties = lodestone_data::block_properties::Properties::from_state_id(state);
-    properties = properties.with_builtin(
-        lodestone_data::block_properties::PropertyKey::Waterlogged,
-        if waterlogged {
-            lodestone_data::block_properties::BuiltinPropertyValue::True
-        } else {
-            lodestone_data::block_properties::BuiltinPropertyValue::False
-        },
-    ).unwrap_or(properties);
-    lodestone_data::block_properties::Properties::state_for_block(state.block(), &properties)
-        .unwrap_or(state)
+    SculkVeinState::from_mask(mask, waterlogged).state_id()
+}
+
+fn sculk_waterlogged(state: StateId) -> bool {
+    state.block() == Block::Water
+        || SculkVeinState::from_state(state).map_or_else(
+            || lodestone_data::block_properties::Properties::from_state_id(state)
+                .get(PropertyKey::Waterlogged)
+                .and_then(|value| value.builtin_value())
+                == Some(BuiltinPropertyValue::True),
+            SculkVeinState::waterlogged,
+        )
 }
 
 fn sculk_vein_state_with_face(grid: &VegGrid, old: StateId, face: (i32, i32, i32)) -> StateId {
@@ -3452,11 +3477,7 @@ fn sculk_vein_state_with_face(grid: &VegGrid, old: StateId, face: (i32, i32, i32
     sculk_vein_state_id(
         grid,
         mask,
-        old.block() == Block::Water
-            || lodestone_data::block_properties::Properties::from_state_id(old)
-                .get(lodestone_data::block_properties::PropertyKey::Waterlogged)
-                .and_then(|value| value.builtin_value())
-                == Some(lodestone_data::block_properties::BuiltinPropertyValue::True),
+        sculk_waterlogged(old),
     )
 }
 
@@ -3588,11 +3609,7 @@ fn sculk_regrow_vein(grid: &mut VegGrid, pos: BlockPos, source_state: StateId, f
     if mask == 0 {
         return false;
     }
-    let waterlogged = source_state.block() == Block::Water
-        || lodestone_data::block_properties::Properties::from_state_id(source_state)
-            .get(lodestone_data::block_properties::PropertyKey::Waterlogged)
-            .and_then(|value| value.builtin_value())
-            == Some(lodestone_data::block_properties::BuiltinPropertyValue::True);
+    let waterlogged = sculk_waterlogged(source_state);
     grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, sculk_vein_state_id(grid, mask, waterlogged))
 }
 
@@ -3688,10 +3705,7 @@ fn sculk_on_discharged(grid: &mut VegGrid, pos: BlockPos, state: StateId) {
             mask &= !(1 << index);
         }
     }
-    let waterlogged = lodestone_data::block_properties::Properties::from_state_id(state)
-        .get(lodestone_data::block_properties::PropertyKey::Waterlogged)
-        .and_then(|value| value.builtin_value())
-        == Some(lodestone_data::block_properties::BuiltinPropertyValue::True);
+    let waterlogged = sculk_waterlogged(state);
     let next = if mask == 0 {
         if waterlogged {
             builtin_default(grid, Block::Water)
@@ -4231,6 +4245,68 @@ mod tests {
         let expected = set.bucket_order();
         let actual: Vec<_> = set.into_iter().collect();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn sculk_numeric_states_match_registry_properties() {
+        let grid = VegGrid::new(-64, 384, 0, 0);
+        assert_eq!(Block::SculkVein.default_state().raw(), 27771);
+        for raw in 27644..27772 {
+            let state = StateId::new(raw).unwrap();
+            let properties = state.properties();
+            let enabled = |key: &str| properties.iter().any(|(name, value)| *name == key && *value == "true");
+            let mask_for = |keys: [&str; 6]| {
+                keys.iter().enumerate().fold(0, |mask, (index, key)| {
+                    mask | (u8::from(enabled(key)) << index)
+                })
+            };
+            let read_mask = mask_for(["down", "up", "north", "south", "west", "east"]);
+            let write_mask = mask_for(["down", "east", "north", "south", "up", "west"]);
+            assert_eq!(sculk_face_mask(&grid, state), read_mask, "state {raw}");
+            assert_eq!(sculk_waterlogged(state), enabled("waterlogged"), "state {raw}");
+            assert_eq!(
+                sculk_vein_state_id(&grid, write_mask, enabled("waterlogged")),
+                state,
+                "state {raw}",
+            );
+        }
+        for raw in [27643, 27772] {
+            assert!(SculkVeinState::from_state(StateId::new(raw).unwrap()).is_none());
+        }
+    }
+
+    #[test]
+    fn sculk_numeric_states_preserve_asymmetric_mask_orders() {
+        let grid = VegGrid::new(-64, 384, 0, 0);
+        let expected = fixture_state(
+            "minecraft:sculk_vein[down=false,east=true,north=false,south=false,up=true,waterlogged=true,west=false]",
+        );
+        assert_eq!(expected.raw(), 27733);
+        assert_eq!(sculk_vein_state_id(&grid, 0b010010, true), expected);
+        assert_eq!(sculk_face_mask(&grid, expected), 0b100010);
+        assert_ne!(sculk_face_mask(&grid, expected), 0b010010);
+        let dry = sculk_vein_state_id(&grid, 0b010010, false);
+        assert_eq!(dry.raw(), 27735);
+        assert_eq!(sculk_face_mask(&grid, dry), 0b100010);
+        assert!(!sculk_waterlogged(dry));
+    }
+
+    #[test]
+    fn sculk_numeric_states_keep_non_vein_water_and_face_properties() {
+        let grid = VegGrid::new(-64, 384, 0, 0);
+        let lichen = fixture_state(
+            "minecraft:glow_lichen[down=false,east=true,north=false,south=false,up=false,waterlogged=true,west=false]",
+        );
+        assert!(SculkVeinState::from_state(lichen).is_none());
+        assert_eq!(sculk_face_mask(&grid, lichen), 0b100000);
+        assert!(sculk_waterlogged(lichen));
+        assert!(sculk_waterlogged(Block::Water.default_state()));
+        assert!(!sculk_waterlogged(Block::Stone.default_state()));
+        assert_eq!(sculk_face_mask(&grid, Block::Stone.default_state()), 0);
+        assert_eq!(
+            sculk_vein_state_with_face(&grid, Block::Water.default_state(), (0, -1, 0)).raw(),
+            27705,
+        );
     }
 
     #[test]

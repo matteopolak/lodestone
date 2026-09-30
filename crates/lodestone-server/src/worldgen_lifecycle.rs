@@ -7,7 +7,7 @@
 //! server uses, then applies its absolute transitions to every resident column
 //! reached by the write. All lifecycle state transitions use canonical ids.
 
-use std::collections::{btree_map::Entry, hash_map::Entry as HashEntry, BTreeMap, BTreeSet};
+use std::collections::{btree_map::Entry, BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::{
@@ -2197,14 +2197,13 @@ pub struct LifecycleMaterializer<S: LifecycleWorldgenSource> {
     /// Temporary CARVERS-view entries for the same transaction. Sparse local
     /// padding writes are not entered here and therefore remain visible.
     temporary_carvers_overrides: BTreeMap<AbsoluteCell, Option<StateId>>,
-    /// Writes retained for sparse padding destinations, grouped by destination.
-    sparse_padding_overrides: BTreeMap<ChunkPos, BTreeMap<AbsoluteCell, StateId>>,
     sparse_completed_targets: BTreeSet<ChunkPos>,
-    /// Canonical FEATURES writes by destination column, then absolute cell.
+    /// FEATURES state by destination column, then absolute cell. Accepted
+    /// padding state and canonical provenance share membership, not precedence.
     /// Region traversal order can differ from the ledger's provenance order,
     /// so outputs apply each target's winners only after every requested and
     /// sparse writer has completed.
-    target_feature_winners: BTreeMap<ChunkPos, FastMap<AbsoluteCell, TargetFeatureWinner>>,
+    target_feature_cells: BTreeMap<ChunkPos, FastMap<AbsoluteCell, TargetFeatureCell>>,
     target_feature_receipts: BTreeMap<ChunkPos, TargetFeatureOwnerReceipt>,
     retained_mutations_preseeded: bool,
     pending_target_block_entities: BTreeMap<ChunkPos, Vec<PendingTargetBlockEntity>>,
@@ -2234,6 +2233,14 @@ struct TargetFeatureWinner {
     source: ChunkPos,
     ordinal: u32,
     state: StateId,
+}
+
+#[derive(Default)]
+struct TargetFeatureCell {
+    winner: Option<TargetFeatureWinner>,
+    /// Latest write accepted for padding projection. Rejected spill candidates
+    /// and imported mutations can have a winner without entering this view.
+    padding_last: Option<StateId>,
 }
 
 #[derive(Default)]
@@ -2329,9 +2336,8 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             sparse_padding_targets: BTreeSet::new(),
             temporary_spills: BTreeMap::new(),
             temporary_carvers_overrides: BTreeMap::new(),
-            sparse_padding_overrides: BTreeMap::new(),
             sparse_completed_targets: BTreeSet::new(),
-            target_feature_winners: BTreeMap::new(),
+            target_feature_cells: BTreeMap::new(),
             target_feature_receipts: BTreeMap::new(),
             retained_mutations_preseeded: false,
             pending_target_block_entities: BTreeMap::new(),
@@ -2406,9 +2412,8 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         self.sparse_padding_targets.clear();
         self.temporary_spills.clear();
         self.temporary_carvers_overrides.clear();
-        self.sparse_padding_overrides.clear();
         self.sparse_completed_targets.clear();
-        self.target_feature_winners.clear();
+        self.target_feature_cells.clear();
         self.target_feature_receipts.clear();
         self.retained_mutations_preseeded = false;
         self.pending_target_block_entities.clear();
@@ -2436,37 +2441,46 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             state,
         };
         let destination = (position.0.div_euclid(16), position.2.div_euclid(16));
-        let local_owner = destination == target;
-        match self
-            .target_feature_winners
+        self.record_target_feature_cell(destination, position, Some(candidate), None);
+    }
+
+    fn record_target_feature_cell(
+        &mut self,
+        destination: ChunkPos,
+        position: AbsoluteCell,
+        candidate: Option<TargetFeatureWinner>,
+        padding_last: Option<StateId>,
+    ) {
+        if candidate.is_none() && padding_last.is_none() {
+            return;
+        }
+        let cell = self
+            .target_feature_cells
             .entry(destination)
             .or_default()
             .entry(position)
-        {
-            HashEntry::Vacant(entry) => {
-                lodestone_worldgen::counters::bump_canonical_winner_attempt(
-                    local_owner,
-                    lodestone_worldgen::counters::CanonicalWinnerOutcome::Vacant,
-                );
-                entry.insert(candidate);
+            .or_default();
+        if let Some(candidate) = candidate {
+            use lodestone_worldgen::counters::CanonicalWinnerOutcome;
+
+            let outcome = match cell.winner {
+                None => CanonicalWinnerOutcome::Vacant,
+                Some(current) if target_feature_winner_precedes(candidate, current) => {
+                    CanonicalWinnerOutcome::Replaced
+                }
+                Some(_) => CanonicalWinnerOutcome::Lost,
+            };
+            lodestone_worldgen::counters::bump_canonical_winner_attempt(
+                destination == candidate.target,
+                outcome,
+            );
+            if !matches!(outcome, CanonicalWinnerOutcome::Lost) {
+                cell.winner = Some(candidate);
                 lodestone_worldgen::counters::bump_canonical_winner_update();
             }
-            HashEntry::Occupied(mut entry)
-                if target_feature_winner_precedes(candidate, *entry.get()) =>
-            {
-                lodestone_worldgen::counters::bump_canonical_winner_attempt(
-                    local_owner,
-                    lodestone_worldgen::counters::CanonicalWinnerOutcome::Replaced,
-                );
-                entry.insert(candidate);
-                lodestone_worldgen::counters::bump_canonical_winner_update();
-            }
-            HashEntry::Occupied(_) => {
-                lodestone_worldgen::counters::bump_canonical_winner_attempt(
-                    local_owner,
-                    lodestone_worldgen::counters::CanonicalWinnerOutcome::Lost,
-                );
-            }
+        }
+        if let Some(state) = padding_last {
+            cell.padding_last = Some(state);
         }
     }
 
@@ -2549,12 +2563,13 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             return None;
         }
         let owner = self.target_feature_receipts.get(&output)?;
-        let output_winners = self.target_feature_winners.get(&output);
+        let output_winners = self.target_feature_cells.get(&output);
         let mut foreign_winner_count = 0;
         let mut writes: Vec<TargetFeatureWrite> = output_winners
             .into_iter()
             .flat_map(|winners| winners.iter())
-            .filter_map(|(&(x, y, z), winner)| {
+            .filter_map(|(&(x, y, z), cell)| {
+                let winner = cell.winner?;
                 (winner.target != output).then(|| {
                     foreign_winner_count += 1;
                     TargetFeatureWrite::new(
@@ -2572,9 +2587,10 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             .iter()
             .filter_map(|&destination| {
                 let winner = self
-                    .target_feature_winners
+                    .target_feature_cells
                     .get(&output)?
-                    .get(&(destination.x(), destination.y(), destination.z()))?;
+                    .get(&(destination.x(), destination.y(), destination.z()))?
+                    .winner?;
                 Some(TargetFeatureWrite::new(
                     winner.target,
                     winner.source,
@@ -3091,23 +3107,6 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         if let Some(identity) = self.authenticated_stages.get_mut(&key) {
             identity.append(position, state);
         }
-    }
-
-    fn retain_sparse_padding_write(
-        &mut self,
-        _mode: LifecycleCompletionMode,
-        destination: ChunkPos,
-        position: AbsoluteCell,
-        state: StateId,
-    ) -> bool {
-        if self.sparse_padding_targets.contains(&destination) {
-            self.sparse_padding_overrides
-                .entry(destination)
-                .or_default()
-                .insert(position, state);
-            return self.resident.contains_key(&destination);
-        }
-        false
     }
 
     fn retain_temporary_carvers_override(
@@ -3806,16 +3805,9 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             || !self.source.direct_epoch_local_writes_use_carvers_view()
             || (matches!(mode, LifecycleCompletionMode::SparsePadding)
                 && !skip_epoch_owned_override_mirror);
+        let local_padding = self.sparse_padding_targets.contains(&target);
+        let local_padding_resident = local_padding && self.resident.contains_key(&target);
         for (ordinal, local) in target_local_features.iter().enumerate() {
-            if target_owned && stage == LifecycleCompletion::Features {
-                self.record_target_feature_winner(
-                    target,
-                    local.source,
-                    ordinal as u32,
-                    local.position,
-                    local.state,
-                );
-            }
             assert_eq!(
                 local.source, source,
                 "direct target local FEATURES write disagrees with completion source"
@@ -3840,14 +3832,22 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             if retain_general_override {
                 self.set_override(local.position, local.state);
             }
-            if self.retain_sparse_padding_write(
-                mode,
+            self.record_target_feature_cell(
                 destination,
                 local.position,
-                local.state,
-            ) {
-                dirty_sparse_residents.insert(destination);
-            }
+                (target_owned && stage == LifecycleCompletion::Features).then_some(
+                    TargetFeatureWinner {
+                        target,
+                        source: local.source,
+                        ordinal: ordinal as u32,
+                        state: local.state,
+                    },
+                ),
+                local_padding.then_some(local.state),
+            );
+        }
+        if local_padding_resident && !target_local_features.is_empty() {
+            dirty_sparse_residents.insert(target);
         }
         #[cfg(feature = "worldgen-stage-pmu")]
         drop(_direct_transition_mirror);
@@ -3945,35 +3945,34 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 spill.position.0.div_euclid(16),
                 spill.position.2.div_euclid(16),
             );
-            if target_owned
+            let mutable_destination = self.mutable_targets.contains(&destination);
+            let candidate = (target_owned
                 && stage == LifecycleCompletion::Features
-                && self.mutable_targets.contains(&destination)
-            {
-                self.record_target_feature_winner(
+                && mutable_destination)
+                .then_some(TargetFeatureWinner {
                     target,
-                    spill.source,
-                    spill_ordinal,
-                    spill.position,
-                    spill.state,
-                );
-            }
+                    source: spill.source,
+                    ordinal: spill_ordinal,
+                    state: spill.state,
+                });
             // Sparse padding writes stay deferred, except when they cross
             // into another requested target in this same settlement wave.
             let sparse_padding_destination = self.sparse_padding_targets.contains(&destination);
             let sparse_requested_destination = matches!(mode, LifecycleCompletionMode::SparsePadding)
                 && destination != target
-                && self.mutable_targets.contains(&destination)
+                && mutable_destination
                 && !sparse_padding_destination;
             if matches!(mode, LifecycleCompletionMode::SparsePadding)
                 && destination != target
                 && !sparse_requested_destination
             {
+                self.record_target_feature_cell(destination, spill.position, candidate, None);
                 observe(spill);
                 continue;
             }
             let transient = target_scoped
                 && !self.source.target_spills_persist()
-                && (!self.mutable_targets.contains(&destination)
+                && (!mutable_destination
                     || sparse_padding_destination
                     || (matches!(mode, LifecycleCompletionMode::SparsePadding)
                         && destination != target
@@ -4027,12 +4026,13 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 }
             }
             observe(spill);
-            if self.retain_sparse_padding_write(
-                mode,
+            self.record_target_feature_cell(
                 destination,
                 spill.position,
-                spill.state,
-            ) {
+                candidate,
+                sparse_padding_destination.then_some(spill.state),
+            );
+            if sparse_padding_destination && self.resident.contains_key(&destination) {
                 dirty_sparse_residents.insert(destination);
             }
             if target_scoped
@@ -4244,9 +4244,9 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
     /// FEATURES writer before its immutable output snapshot is captured.
     pub fn apply_canonical_target_feature_winners(&mut self, target: ChunkPos) {
         if !self
-            .target_feature_winners
+            .target_feature_cells
             .get(&target)
-            .is_some_and(|winners| !winners.is_empty())
+            .is_some_and(|cells| cells.values().any(|cell| cell.winner.is_some()))
         {
             return;
         }
@@ -4256,11 +4256,12 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 .resident
                 .get(&target)
                 .expect("canonical FEATURES target was admitted");
-            self.target_feature_winners
+            self.target_feature_cells
                 .get(&target)
                 .into_iter()
                 .flat_map(|winners| winners.iter())
-                .filter_map(|(&(x, y, z), winner)| {
+                .filter_map(|(&(x, y, z), cell)| {
+                    let winner = cell.winner?;
                     let local = (x.rem_euclid(16), y, z.rem_euclid(16));
                     (column.block_state_id(local.0, local.1, local.2) != winner.state)
                         .then_some((local.0, local.1, local.2, winner.state))
@@ -4275,7 +4276,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 .apply_ordered_block_id_batch(&writes);
         }
         let winners = self
-            .target_feature_winners
+            .target_feature_cells
             .get(&target)
             .expect("canonical FEATURES target winner set was checked above");
         let column = self
@@ -4287,6 +4288,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             entities.retain(|(position, _)| {
                 !winners
                     .get(&(position.x, position.y, position.z))
+                    .and_then(|cell| cell.winner)
                     .is_some_and(|winner| winner.target != target)
             });
             column.set_block_entities(entities);
@@ -4304,7 +4306,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         let mut accepted = BTreeMap::<AbsoluteCell, Option<GeneratedBlockEntity>>::new();
         for candidate in pending {
             let position = candidate.entity.position();
-            let Some(winner) = winners.get(&position) else {
+            let Some(winner) = winners.get(&position).and_then(|cell| cell.winner) else {
                 continue;
             };
             if (winner.target, winner.source) != (candidate.target, candidate.source) {
@@ -4412,8 +4414,8 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             })
     }
 
-    /// Return final canonical local writes retained for a sparse packet
-    /// neighbour. Transaction-local future-target spills are not included.
+    /// Return the latest accepted local states retained for a sparse packet
+    /// neighbour, in coordinate order. Rejected sparse spills are not included.
     pub fn sparse_padding_overlay_for_packet(
         &self,
         chunk: ChunkPos,
@@ -4421,16 +4423,22 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         if !self.sparse_padding_targets.contains(&chunk) {
             return None;
         }
-        Some(
-            self.sparse_padding_overrides
-                .get(&chunk)
-                .into_iter()
-                .flat_map(|writes| writes.iter())
-                .map(|(&(x, y, z), &state)| {
-                    (x.rem_euclid(16), y, z.rem_euclid(16), state)
-                })
-                .collect(),
-        )
+        Some(self.retained_padding_writes(chunk))
+    }
+
+    fn retained_padding_writes(&self, chunk: ChunkPos) -> Vec<(i32, i32, i32, StateId)> {
+        let mut writes = self
+            .target_feature_cells
+            .get(&chunk)
+            .into_iter()
+            .flat_map(|cells| cells.iter())
+            .filter_map(|(&(x, y, z), cell)| {
+                cell.padding_last
+                    .map(|state| (x.rem_euclid(16), y, z.rem_euclid(16), state))
+            })
+            .collect::<Vec<_>>();
+        writes.sort_unstable_by_key(|&(x, y, z, _)| (x, y, z));
+        writes
     }
 
     fn apply_sparse_padding_overrides(&mut self, chunk: ChunkPos) {
@@ -4445,13 +4453,13 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
 
     fn promote_sparse_target(&mut self, chunk: ChunkPos) {
         self.materialize_resident(chunk);
-        let writes = self
-            .sparse_padding_overrides
-            .remove(&chunk)
-            .into_iter()
-            .flat_map(|writes| writes.into_iter())
-            .map(|((x, y, z), state)| (x.rem_euclid(16), y, z.rem_euclid(16), state))
-            .collect::<Vec<_>>();
+        let writes = self.retained_padding_writes(chunk);
+        if let Some(cells) = self.target_feature_cells.get_mut(&chunk) {
+            cells.retain(|_, cell| {
+                cell.padding_last = None;
+                cell.winner.is_some()
+            });
+        }
         if !writes.is_empty() {
             self.resident
                 .get_mut(&chunk)
@@ -4626,6 +4634,8 @@ mod tests {
     struct DirectHeightmapSource;
 
     struct SparseBeforeDirectSource;
+
+    struct PaddingProjectionSource;
 
     struct TargetLocalReadSource {
         local_marker: bool,
@@ -4819,6 +4829,64 @@ mod tests {
         }
 
         fn direct_target_output_from_generated_prefix(&self) -> bool {
+            true
+        }
+    }
+
+    impl LifecycleWorldgenSource for PaddingProjectionSource {
+        type ReplayContext = ();
+
+        fn feature_dispatch(&self) -> LifecycleFeatureDispatch {
+            LifecycleFeatureDispatch::TargetOwned
+        }
+
+        fn lifecycle_replay_context(&self, _target: ChunkPos) -> Arc<Self::ReplayContext> {
+            Arc::new(())
+        }
+
+        fn shaped_column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            ChunkColumn::new(0, 16)
+        }
+
+        fn lifecycle_client_heightmaps(
+            &self,
+            _cx: i32,
+            _cz: i32,
+        ) -> Option<LifecycleClientHeightmaps> {
+            test_heightmaps()
+        }
+
+        fn feature_result(
+            &self,
+            target: ChunkPos,
+            _overrides: &BTreeMap<AbsoluteCell, StateId>,
+            _resident: &BTreeMap<ChunkPos, ChunkColumn>,
+        ) -> LifecycleFeatureResult {
+            let cells = match target {
+                (0, 0) => vec![((16, 2, 1), sid("minecraft:diamond_block"))],
+                (1, 0) => vec![
+                    ((17, 3, 2), sid("minecraft:dirt")),
+                    ((16, 2, 1), sid("minecraft:emerald_block")),
+                    ((16, 1, 3), sid("minecraft:stone")),
+                    ((16, 2, 1), sid("minecraft:gold_block")),
+                ],
+                _ => Vec::new(),
+            };
+            LifecycleFeatureResult {
+                spills: cells
+                    .into_iter()
+                    .map(|(position, state)| LifecycleSpill {
+                        source: target,
+                        position,
+                        state,
+                        transient: false,
+                    })
+                    .collect(),
+                ..LifecycleFeatureResult::default()
+            }
+        }
+
+        fn target_feature_reads_carvers(&self) -> bool {
             true
         }
     }
@@ -6428,9 +6496,11 @@ mod tests {
         );
         assert!(
             materializer
-                .target_feature_winners
+                .target_feature_cells
                 .get(&target)
-                .is_some_and(|winners| winners.values().any(|winner| winner.target == target)),
+                .is_some_and(|cells| cells.values().any(|cell| {
+                    cell.winner.is_some_and(|winner| winner.target == target)
+                })),
             "same-target local winners must still reach output canonicalization",
         );
         assert!(materializer.has_direct_target_output());
@@ -6540,6 +6610,200 @@ mod tests {
         );
     }
 
+    fn padding_projection_fixture() -> LifecycleMaterializer<PaddingProjectionSource> {
+        let mut materializer = LifecycleMaterializer::new(PaddingProjectionSource);
+        for target in [(0, 0), (1, 0)] {
+            materializer.admit(target);
+            materializer.install_lifecycle_replay_context(target, Arc::new(()));
+        }
+        materializer.declare_mutable_targets([(0, 0), (1, 0)]);
+        materializer.declare_sparse_padding_targets([(1, 0)]);
+        materializer
+    }
+
+    #[test]
+    fn padding_projection_retains_state_without_a_feature_winner() {
+        let padding = (0, 0);
+        let mut materializer = LifecycleMaterializer::new(DispatchCountingSource {
+            dispatch: LifecycleFeatureDispatch::SourceOrdered,
+            target_calls: Arc::new(AtomicUsize::new(0)),
+            source_calls: Arc::new(AtomicUsize::new(0)),
+        });
+        materializer.admit(padding);
+        materializer.declare_sparse_padding_targets([padding]);
+        materializer.complete(padding, LifecycleCompletion::Features, 0);
+        let overlay = materializer.sparse_padding_overlay_for_packet(padding).unwrap();
+        assert_eq!(
+            overlay,
+            [
+                (1, 0, 1, sid("minecraft:stone")),
+                (2, 0, 1, sid("minecraft:dirt")),
+            ],
+        );
+        materializer
+            .resident
+            .get_mut(&padding)
+            .unwrap()
+            .set_block_id(1, 0, 1, sid("minecraft:gold_block"));
+        materializer.apply_canonical_target_feature_winners(padding);
+        assert_eq!(
+            materializer.resident_block_state_id(padding, 1, 0, 1),
+            Some(sid("minecraft:gold_block")),
+        );
+        assert_eq!(materializer.sparse_padding_overlay_for_packet(padding).unwrap(), overlay);
+    }
+
+    #[test]
+    fn padding_projection_excludes_rejected_sparse_candidate() {
+        let padding = (1, 0);
+        let mut materializer = padding_projection_fixture();
+        materializer.complete_target_features_sparse_observing((0, 0), 0, |_| {});
+        materializer.finish_target((0, 0));
+        assert!(materializer.sparse_padding_overlay_for_packet(padding).unwrap().is_empty());
+        assert_eq!(
+            materializer.resident_block_state_id(padding, 0, 2, 1),
+            Some(sid("minecraft:air")),
+        );
+        assert_eq!(materializer.target_feature_receipts[&(0, 0)].spills.len(), 1);
+
+        materializer.apply_canonical_target_feature_winners(padding);
+        assert_eq!(
+            materializer.resident_block_state_id(padding, 0, 2, 1),
+            Some(sid("minecraft:diamond_block")),
+        );
+        assert!(materializer.sparse_padding_overlay_for_packet(padding).unwrap().is_empty());
+    }
+
+    #[test]
+    fn padding_projection_keeps_last_accepted_state_separate_from_winner() {
+        let padding = (1, 0);
+        let mut materializer = padding_projection_fixture();
+        materializer.complete_target_features_observing((0, 0), 0, |_| {});
+        materializer.finish_target((0, 0));
+        assert_eq!(
+            materializer.sparse_padding_overlay_for_packet(padding).unwrap(),
+            [(0, 2, 1, sid("minecraft:diamond_block"))],
+        );
+
+        materializer.complete_target_features_sparse_observing(padding, 1, |_| {});
+        materializer.finish_target(padding);
+        let overlay = materializer.sparse_padding_overlay_for_packet(padding).unwrap();
+        assert!(overlay.contains(&(0, 2, 1, sid("minecraft:gold_block"))));
+        materializer.apply_canonical_target_feature_winners(padding);
+        assert_eq!(
+            materializer.resident_block_state_id(padding, 0, 2, 1),
+            Some(sid("minecraft:diamond_block")),
+        );
+        assert_eq!(materializer.sparse_padding_overlay_for_packet(padding).unwrap(), overlay);
+    }
+
+    #[test]
+    fn padding_projection_does_not_import_external_mutations() {
+        use lodestone_worldgen::stage_schedule::{Dimension, StageKey};
+
+        let padding = (1, 0);
+        let mutation = ProvenanceMutation::test_block_state(
+            (-1, 0),
+            (-1, 0),
+            StageKey::new(Dimension::Overworld, ColumnStage::Features),
+            7,
+            BlockCoordinate::new(16, 5, 4),
+            1,
+            sid("minecraft:emerald_block"),
+        );
+        let mut materializer = padding_projection_fixture();
+        materializer.restore_committed_mutations([&mutation]);
+        assert!(materializer.sparse_padding_overlay_for_packet(padding).unwrap().is_empty());
+        assert_eq!(
+            materializer.override_revisions,
+            [((16, 5, 4), sid("minecraft:emerald_block"))],
+        );
+        assert_eq!(materializer.carvers_override_revisions, materializer.override_revisions);
+        assert_eq!(
+            materializer.resident_block_state_id(padding, 0, 5, 4),
+            Some(sid("minecraft:emerald_block")),
+        );
+
+        materializer.complete_target_features_sparse_observing(padding, 0, |_| {});
+        materializer.finish_target(padding);
+        assert!(!materializer
+            .sparse_padding_overlay_for_packet(padding)
+            .unwrap()
+            .iter()
+            .any(|&(x, y, z, _)| (x, y, z) == (0, 5, 4)));
+        materializer.apply_canonical_target_feature_winners(padding);
+        assert_eq!(
+            materializer.resident_block_state_id(padding, 0, 5, 4),
+            Some(sid("minecraft:emerald_block")),
+        );
+    }
+
+    #[test]
+    fn padding_projection_is_sorted_and_cleared_on_promotion() {
+        let padding = (1, 0);
+        let mut materializer = padding_projection_fixture();
+        materializer.complete_target_features_sparse_observing(padding, 0, |_| {});
+        materializer.finish_target(padding);
+        let overlay = materializer.sparse_padding_overlay_for_packet(padding).unwrap();
+        assert_eq!(
+            overlay,
+            [
+                (0, 1, 3, sid("minecraft:stone")),
+                (0, 2, 1, sid("minecraft:gold_block")),
+                (1, 3, 2, sid("minecraft:dirt")),
+            ],
+        );
+        assert_eq!(materializer.sparse_padding_overlay_for_packet(padding).unwrap(), overlay);
+
+        materializer.complete_target_features_observing(padding, 1, |_| {
+            panic!("promotion must reuse accepted writes");
+        });
+        materializer.finish_target(padding);
+        assert!(materializer.target_features_fully_completed(padding));
+        assert!(materializer.has_direct_target_output_for(padding));
+        assert!(materializer.sparse_padding_overlay_for_packet(padding).unwrap().is_empty());
+        for &(x, y, z, state) in &overlay {
+            assert_eq!(
+                materializer.resident_block_state_id(padding, x as usize, y, z as usize),
+                Some(state),
+            );
+        }
+        materializer.apply_canonical_target_feature_winners(padding);
+        assert_eq!(
+            materializer.resident_block_state_id(padding, 0, 2, 1),
+            Some(sid("minecraft:emerald_block")),
+        );
+    }
+
+    #[test]
+    fn padding_projection_promotion_survives_reclassification() {
+        let padding = (1, 0);
+        let mut materializer = padding_projection_fixture();
+        materializer.complete_target_features_sparse_observing(padding, 0, |_| {});
+        materializer.finish_target(padding);
+        let overlay = materializer.sparse_padding_overlay_for_packet(padding).unwrap();
+        materializer.declare_sparse_padding_targets([]);
+        assert!(materializer.sparse_padding_overlay_for_packet(padding).is_none());
+        // A promoted carrier must consume the retained write even when its
+        // old sparse classification is no longer part of the active plan.
+        materializer
+            .resident
+            .get_mut(&padding)
+            .unwrap()
+            .set_block_id(0, 2, 1, sid("minecraft:air"));
+        materializer.complete_target_features_observing(padding, 1, |_| {
+            panic!("reclassified promotion must not rerun the body");
+        });
+        materializer.finish_target(padding);
+        assert_eq!(
+            materializer.resident_block_state_id(padding, 0, 2, 1),
+            Some(sid("minecraft:gold_block")),
+        );
+        materializer.declare_sparse_padding_targets([padding]);
+        assert!(materializer.sparse_padding_overlay_for_packet(padding).unwrap().is_empty());
+        assert!(!overlay.is_empty());
+    }
+
     fn sparse_epoch_read_mirror_fixture(
         mirror: bool,
         interleaved: bool,
@@ -6595,7 +6859,12 @@ mod tests {
     ) {
         let targets = actual.target_feature_receipts.keys().copied().collect::<Vec<_>>();
         assert_eq!(targets, control.target_feature_receipts.keys().copied().collect::<Vec<_>>());
-        assert_eq!(actual.sparse_padding_overrides, control.sparse_padding_overrides);
+        for &padding in &actual.sparse_padding_targets {
+            assert_eq!(
+                actual.sparse_padding_overlay_for_packet(padding),
+                control.sparse_padding_overlay_for_packet(padding),
+            );
+        }
         for &target in &targets {
             let receipt = &actual.target_feature_receipts[&target];
             let expected = &control.target_feature_receipts[&target];
@@ -6604,9 +6873,11 @@ mod tests {
             assert_eq!(actual.authenticated_features_digest(target), control.authenticated_features_digest(target));
         }
         let winners = |materializer: &LifecycleMaterializer<OverworldChunkSource>| {
-            materializer.target_feature_winners.iter().flat_map(|(&destination, winners)| {
-                let mut winners = winners.iter().map(|(&position, winner)| {
-                    (position, winner.target, winner.source, winner.ordinal, winner.state)
+            materializer.target_feature_cells.iter().flat_map(|(&destination, cells)| {
+                let mut winners = cells.iter().filter_map(|(&position, cell)| {
+                    cell.winner.map(|winner| {
+                        (position, winner.target, winner.source, winner.ordinal, winner.state)
+                    })
                 }).collect::<Vec<_>>();
                 winners.sort_unstable_by_key(|winner| winner.0);
                 winners.into_iter().map(move |winner| (destination, winner))

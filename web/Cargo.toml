@@ -67,3 +67,15 @@ strip = true
 
 [profile.release.package.lodestone-worldgen-core]
 opt-level = 3
+
+[profile.worker-release]
+inherits = "release"
+
+[profile.worker-release.package.lodestone-worldgen-core]
+opt-level = 3
+
+[profile.worker-release.package.lodestone-worldgen]
+opt-level = 3
+
+[profile.worker-release.package.lodestone-server]
+opt-level = 3

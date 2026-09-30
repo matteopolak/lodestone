@@ -247,6 +247,7 @@ use self::fill::AquiferTrees;
 
 pub use self::biome_cells::BiomeCells;
 pub use self::block_entities::{BeeOccupant, GeneratedBlockEntity};
+pub use self::fill::PreOreRegionWork;
 pub(crate) use self::biome::{zoomed_biome_flat, zoomed_biome_ref};
 #[cfg(test)]
 pub(crate) use self::biome::biome_zoom_seed;
@@ -406,11 +407,41 @@ impl OverworldBatchLease<'_> {
         targets: &[(i32, i32)],
         radius: i32,
     ) -> usize {
+        self.pre_ore_region_work(targets, radius, None)
+            .into_iter()
+            .map(|work| self.prepare_pre_ore_region(work))
+            .sum()
+    }
+
+    /// Plans disjoint immutable prefix jobs for this lease. `None` retains
+    /// eight-chunk regions; an explicit side in `1..=8` aligns smaller tiles
+    /// to the request bounds. The caller chooses its existing worker executor.
+    #[must_use]
+    pub fn pre_ore_region_work(
+        &self,
+        targets: &[(i32, i32)],
+        radius: i32,
+        max_region_side: Option<i32>,
+    ) -> Vec<PreOreRegionWork> {
         for &(cx, cz) in targets {
             self.assert_covers_radius((cx, cz), radius);
         }
         self.generator
-            .prepare_pre_ore_targets_with_lease(targets, radius, self)
+            .pre_ore_region_work_for_targets(targets, radius, max_region_side)
+    }
+
+    /// Executes one job synchronously under the live union lease. The return
+    /// counts prepared coordinates, including hits; `gen-counters` records
+    /// actual prefix computations. Density and aquifer scratch stay job-local.
+    pub fn prepare_pre_ore_region(&self, work: PreOreRegionWork) -> usize {
+        for &position in &work.positions {
+            self.assert_covers_radius(position, 0);
+        }
+        self.generator.prepare_pre_ore_region(
+            work.positions,
+            Some(&self.view),
+            &self.preliminary,
+        )
     }
 
     /// Reads one chunk's persisted structure sidecars from the live lease.

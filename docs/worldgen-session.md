@@ -80,6 +80,15 @@ cross-target entities remain pending until the destination's canonical FEATURES
 winner is applied; the winner's source and final block-entity type must match
 before the generated sidecar is attached. Candidates remain bounded to admitted
 requested destinations until replay reset, making repeated settlement stable.
+
+`LifecycleMaterializer::target_feature_cells` keeps canonical provenance and
+the latest accepted padding state in one destination/cell table. These fields
+are independent: rejected sparse spills and imported mutations can supply a
+winner without supplying padding state. Packet-neighbour projection sorts the
+accepted states at the existing owner fence. Promotion applies retained padding
+state without replaying FEATURES, then clears it while preserving winners;
+retention survives changes to the active plan's padding classification.
+
 Unrequested destinations stay deferred. The local overlay is applied to the
 shaped prefix only if that padding column later becomes a packet neighbour or
 another mutable consumer; unrelated transaction overrides are not folded into

@@ -4342,7 +4342,12 @@ impl OverworldChunkSource {
                 WorldgenTimingPhase::PreOre,
                 prefix_targets.len().min(u32::MAX as usize) as u32,
             );
-            lease.prepare_pre_ore_targets_with_radius(prefix_targets, prefix_radius);
+            #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+            let tile_side = (browser_worldgen_parallelism() > 1).then_some(4);
+            #[cfg(not(all(target_arch = "wasm32", feature = "wasm-threads")))]
+            let tile_side = None;
+            let jobs = lease.pre_ore_region_work(prefix_targets, prefix_radius, tile_side);
+            let _prepared = crate::run_worldgen_jobs(jobs, |job| lease.prepare_pre_ore_region(job));
         }
         {
             let _timing = PhaseTimer::start(
@@ -4355,15 +4360,9 @@ impl OverworldChunkSource {
             WorldgenTimingPhase::ShapedProducts,
             coords.len().min(u32::MAX as usize) as u32,
         );
-        #[cfg(not(target_arch = "wasm32"))]
         let columns = crate::run_worldgen_jobs(coords.to_vec(), |(cx, cz)| {
             lease.column_shaped(cx, cz)
         });
-        #[cfg(target_arch = "wasm32")]
-        let columns = coords
-            .iter()
-            .map(|&(cx, cz)| lease.column_shaped(cx, cz))
-            .collect();
         drop(shaped_timing);
         {
             let _timing = PhaseTimer::start(
