@@ -2000,6 +2000,7 @@ mod tests {
             item: id("minecraft:diamond_pickaxe"),
             count: 3,
             components: ModelItemComponents {
+                wire_patch_nonempty: true,
                 item_model: Some(id("server:gun")),
                 custom_model_data: vec![4545.0_f32.to_bits()],
                 custom_name: Some(Text::literal("Excalibur")),
@@ -2066,6 +2067,7 @@ mod tests {
                     item: id("minecraft:torch"),
                     count: 7,
                     components: ModelItemComponents {
+                        wire_patch_nonempty: true,
                         custom_name: Some(Text::literal("A nested torch")),
                         ..ModelItemComponents::default()
                     },
@@ -2243,7 +2245,11 @@ mod tests {
             "left {:?}",
             stack.components().iter().collect::<Vec<_>>()
         );
-        assert_eq!(stack, ItemStack::new(id("minecraft:leather_boots"), 1));
+        let plain = ItemStack::new(id("minecraft:leather_boots"), 1);
+        assert!(ItemStack::is_same_item_same_components(&stack, &plain));
+        assert_eq!(stack.count(), plain.count());
+        assert!(!stack.click_prediction_safe());
+        assert!(plain.click_prediction_safe());
     }
 
     /// `Inherited` is not a value: setting it removes the component, and an
