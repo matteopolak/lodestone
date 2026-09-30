@@ -3270,14 +3270,8 @@ async fn encode_column<P: ServerProtocol, S: ChunkSource + 'static>(
     }
 }
 
-/// Owned-source counterpart used by the deferred native join branch.
-///
-/// `serve_play` recreates its `SourceRef` borrow on every loop iteration because
-/// portal travel can replace the active dimension. A future kept across a
-/// `select!` pass therefore cannot borrow that local reference: the next pass
-/// must be free to promote a pending travel. Cloning the already-shared source
-/// handle gives the admission future an independent lifetime while preserving
-/// the same generation and source-aware encoding semantics.
+/// Retains the shared source across deferred native join polls and dimension
+/// changes. Admission uses the same request boundary as inline encoding.
 #[cfg(not(target_arch = "wasm32"))]
 async fn encode_column_owned<P: ServerProtocol>(
     proto: &P,
@@ -3296,7 +3290,7 @@ async fn encode_column_owned<P: ServerProtocol>(
         }
         crate::join_scheduler::ColumnPayload::Column(column) => {
             let column = match source.packet_generation_stage(column.generation_stage()) {
-                Some(required) if required > column.generation_stage() => generate_columns_offloaded(
+                Some(required) if required > column.generation_stage() => crate::join_scheduler::generate_owned_columns(
                     Arc::clone(&source),
                     vec![(cx, cz)],
                 )
@@ -3312,7 +3306,7 @@ async fn encode_column_owned<P: ServerProtocol>(
     if matches!(&payload, crate::join_scheduler::ColumnPayload::Column(_))
         && (proto.uses_cross_column_light() || proto.retains_initial_column_light())
     {
-        let _ = generate_columns_offloaded(
+        let _ = crate::join_scheduler::generate_owned_columns(
             Arc::clone(&source),
             column_admission_neighbours(
                 cx,
@@ -18917,6 +18911,101 @@ mod tests {
         }
     }
 
+    struct RequestAdmissionProtocol;
+
+    impl ServerProtocol for RequestAdmissionProtocol {
+        fn decode(&self, state: State, packet_id: i32, payload: &[u8]) -> ServerBound {
+            NetherPacketAdmissionProtocol.decode(state, packet_id, payload)
+        }
+        fn login_success(&self, username: &str, uuid: Uuid) -> Vec<ServerDirective> {
+            NetherPacketAdmissionProtocol.login_success(username, uuid)
+        }
+        fn begin_configuration(&self) -> Vec<ServerDirective> {
+            Vec::new()
+        }
+        fn begin_play(&self, _view_radius: i32) -> Vec<ServerDirective> {
+            Vec::new()
+        }
+        fn begin_chunk_batch(&self) -> ServerDirective {
+            ServerDirective::None
+        }
+        fn encode_chunk(&self, cx: i32, cz: i32, column: &ChunkColumn) -> ServerDirective {
+            NetherPacketAdmissionProtocol.encode_chunk(cx, cz, column)
+        }
+        fn end_chunk_batch(&self, _batch_size: i32) -> ServerDirective {
+            ServerDirective::None
+        }
+        fn uses_cross_column_light(&self) -> bool {
+            true
+        }
+    }
+
+    #[derive(Default)]
+    struct RequestAdmissionSource {
+        requests: Mutex<Vec<(i32, i32)>>,
+        scalar_calls: AtomicUsize,
+    }
+
+    impl ChunkSource for RequestAdmissionSource {
+        fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            self.scalar_calls.fetch_add(1, Ordering::Relaxed);
+            ChunkColumn::new(0, 16)
+        }
+        fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
+            crate::chunk::air_state()
+        }
+        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+            crate::chunk::DEFAULT_BIOME.to_owned()
+        }
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
+        fn packet_generation_stage(&self, _stage: ChunkGenerationStage) -> Option<ChunkGenerationStage> {
+            Some(ChunkGenerationStage::Full)
+        }
+        fn request_generation(
+            &self,
+            request: crate::worldgen_session::GenerationRequest,
+            _session: Option<&mut crate::worldgen_session::GenerationSession>,
+        ) -> Result<Option<crate::worldgen_session::GenerationRequestResult>, crate::worldgen_session::GenerationRequestError> {
+            self.requests.lock().unwrap().push(request.target());
+            let mut column = ChunkColumn::new(0, 16);
+            column.set_block_id(0, 2, 12, Block::Gravel.default_state());
+            Ok(Some(crate::worldgen_session::GenerationRequestResult::Existing(column)))
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn owned_packet_admission_uses_the_request_boundary() {
+        let source = Arc::new(RequestAdmissionSource::default());
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_block_id(0, 2, 12, Block::Gravel.default_state());
+        let owned = encode_column_owned(
+            &RequestAdmissionProtocol,
+            source.clone(),
+            7,
+            -3,
+            None,
+            crate::join_scheduler::ColumnPayload::Column(column.clone()),
+        ).await.unwrap();
+        assert_eq!(source.scalar_calls.load(Ordering::Relaxed), 0);
+        let mut expected = column_admission_neighbours(7, -3, 1);
+        expected.sort_unstable();
+        let mut actual = source.requests.lock().unwrap().clone();
+        actual.sort_unstable();
+        assert_eq!(actual, expected);
+        let inline_source = Arc::new(RequestAdmissionSource::default());
+        let inline = encode_column(
+            &RequestAdmissionProtocol,
+            SourceRef::Shared(&inline_source),
+            7,
+            -3,
+            None,
+            crate::join_scheduler::ColumnPayload::Column(column),
+        ).await.unwrap();
+        assert_eq!(owned, inline);
+        assert!(matches!(owned, ServerDirective::Send { packet_id: 1, payload } if payload == [1]));
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test(flavor = "current_thread")]
     async fn shaped_nether_packet_admission_includes_the_source_ore_spill() {
@@ -18940,6 +19029,16 @@ mod tests {
             "the shaped target starts without the source's border ore"
         );
 
+        let owned_directive = encode_column_owned(
+            &NetherPacketAdmissionProtocol,
+            source.clone(),
+            2,
+            7,
+            None,
+            crate::join_scheduler::ColumnPayload::Column(shaped.clone()),
+        )
+        .await
+        .expect("owned packet admission must include the source spill");
         let directive = encode_column(
             &NetherPacketAdmissionProtocol,
             SourceRef::Shared(&source),
@@ -18950,6 +19049,7 @@ mod tests {
         )
         .await
         .expect("the shaped target should encode after full admission");
+        assert_eq!(owned_directive, directive);
         let payload = match directive {
             ServerDirective::Send { payload, .. } => payload,
             other => panic!("unexpected Nether packet directive: {other:?}"),
