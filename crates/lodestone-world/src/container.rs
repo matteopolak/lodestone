@@ -354,6 +354,17 @@ impl PalettedContainer {
         }
     }
 
+    /// Stored palette values, including any unused indirect entries. Direct
+    /// storage has no palette and returns `None` rather than scanning cells.
+    #[must_use]
+    pub fn palette_values(&self) -> Option<&[u32]> {
+        match &self.storage {
+            Storage::Single(value) => Some(std::slice::from_ref(value)),
+            Storage::Indirect { palette, .. } => Some(palette),
+            Storage::Direct(_) => None,
+        }
+    }
+
     /// Returns the single value if the whole container holds exactly one.
     #[must_use]
     pub fn single_value(&self) -> Option<u32> {
@@ -789,6 +800,21 @@ mod tests {
         let mut w = Writer::default();
         c.encode(&mut w);
         assert_eq!(w.as_slice(), &[0x00, 42]);
+    }
+
+    #[test]
+    fn palette_values_borrows_stored_entries() {
+        let kind = PaletteKind::block_states();
+        let mut container = PalettedContainer::new(kind, 7);
+        assert_eq!(container.palette_values(), Some([7].as_slice()));
+        container.set(100, 9);
+        container.set(100, 7);
+        assert_eq!(container.get(100), 7);
+        assert_eq!(container.palette_values(), Some([7, 9].as_slice()));
+        let values: Vec<u32> = (0..kind.entry_count()).map(|i| i as u32).collect();
+        let direct = PalettedContainer::from_values(kind, &values);
+        assert!(direct.bits_per_entry() > 8);
+        assert_eq!(direct.palette_values(), None);
     }
 
     #[test]

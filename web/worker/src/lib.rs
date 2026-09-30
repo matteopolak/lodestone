@@ -6,7 +6,7 @@
 
 use wasm_bindgen::prelude::*;
 use web_sys::MessagePort;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use lodestone_server::worldgen_progress::{
     WorldgenTimingPhase, WorldgenTimingSample, WorldgenTimingTotals,
 };
@@ -14,6 +14,7 @@ use lodestone_server::worldgen_progress::{
 thread_local! {
     static PROGRESS_PORT: RefCell<Option<(MessagePort, u32)>> = const { RefCell::new(None) };
     static TICK_MONITOR: RefCell<Option<lodestone_server::IntegratedTickMonitor>> = const { RefCell::new(None) };
+    static PREVIOUS_TICK_COUNT: Cell<Option<u64>> = const { Cell::new(None) };
     static PHASE_TIMINGS: RefCell<[WorldgenTimingTotals; WorldgenTimingPhase::ALL.len()]> =
         RefCell::new([WorldgenTimingTotals::default(); WorldgenTimingPhase::ALL.len()]);
 }
@@ -41,6 +42,7 @@ pub fn start_worker(
     lodestone_server::worldgen_session::register_browser_worker_epoch(epoch);
     PROGRESS_PORT.with(|slot| *slot.borrow_mut() = Some((progress_port.clone(), epoch)));
     TICK_MONITOR.with(|slot| slot.borrow_mut().take());
+    PREVIOUS_TICK_COUNT.with(|slot| slot.set(None));
     let _ = lodestone_server::worldgen_progress::install_sink(post_worldgen_event);
     if log::max_level() >= log::LevelFilter::Debug {
         PHASE_TIMINGS.with(|slot| slot.borrow_mut().fill(WorldgenTimingTotals::default()));
@@ -87,6 +89,7 @@ pub fn cancel_worker(epoch: u32) -> bool {
     let cancelled = lodestone_server::worldgen_session::cancel_browser_worker_epoch(epoch);
     if cancelled {
         TICK_MONITOR.with(|slot| slot.borrow_mut().take());
+        PREVIOUS_TICK_COUNT.with(|slot| slot.set(None));
     }
     cancelled
 }
@@ -110,6 +113,9 @@ pub fn sample_worker(epoch: u32, callback_gap_ms: f64) -> bool {
                 return false;
             };
             let (stats, witness) = monitor.snapshot();
+            let observed_tps = PREVIOUS_TICK_COUNT.with(|slot| {
+                tick_throughput(slot.replace(Some(stats.tick_count)), stats.tick_count, callback_gap_ms)
+            });
             let message = js_sys::Object::new();
             for (key, value) in [
                 ("kind", JsValue::from_str("worker-health")),
@@ -120,6 +126,7 @@ pub fn sample_worker(epoch: u32, callback_gap_ms: f64) -> bool {
                 ("msptMs", JsValue::from_f64(stats.mspt_ms)),
                 ("msptAvgMs", JsValue::from_f64(stats.mspt_avg_ms)),
                 ("tps", JsValue::from_f64(stats.tps)),
+                ("observedTps", observed_tps.map_or(JsValue::NULL, JsValue::from_f64)),
                 ("callbackGapMs", JsValue::from_f64(callback_gap_ms)),
             ] {
                 let _ = js_sys::Reflect::set(&message, &JsValue::from_str(key), &value);
@@ -131,6 +138,23 @@ pub fn sample_worker(epoch: u32, callback_gap_ms: f64) -> bool {
             posted
         })
     })
+}
+
+fn tick_throughput(previous: Option<u64>, current: u64, elapsed_ms: f64) -> Option<f64> {
+    if !elapsed_ms.is_finite() || elapsed_ms <= 0.0 {
+        return None;
+    }
+    Some(current.checked_sub(previous?)? as f64 * 1000.0 / elapsed_ms)
+}
+
+#[cfg(test)]
+#[test]
+fn tick_throughput_measures_callback_delay_instead_of_tick_cost() {
+    assert_eq!(tick_throughput(Some(100), 120, 1250.0), Some(16.0));
+    assert_eq!(tick_throughput(Some(100), 100, 1000.0), Some(0.0));
+    assert_eq!(tick_throughput(None, 120, 1000.0), None);
+    assert_eq!(tick_throughput(Some(120), 100, 1000.0), None);
+    assert_eq!(tick_throughput(Some(100), 120, 0.0), None);
 }
 
 fn post_connection_progress(progress: lodestone_server::connection_progress::ConnectionProgress) {

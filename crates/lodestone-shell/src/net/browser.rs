@@ -522,20 +522,22 @@ pub(super) async fn launch_browser_worker(
                 .and_then(|value| value.as_f64());
             if number("epoch") == Some(f64::from(epoch)) {
                 browser_diagnostic(format_args!(
-                    "server health: ticks={:.0} overruns={:.0} mspt_ms={:.2} tps={:.1} callback_gap_ms={:.1}",
+                    "server health: ticks={:.0} overruns={:.0} mspt_ms={:.2} budget_tps={:.1} observed_tps={:?} callback_gap_ms={:.1}",
                     number("tickCount").unwrap_or(0.0),
                     number("overruns").unwrap_or(0.0),
                     number("msptMs").unwrap_or(0.0),
                     number("tps").unwrap_or(0.0),
+                    number("observedTps"),
                     number("callbackGapMs").unwrap_or(0.0),
                 ));
                 log::debug!(
-                    "browser server worker health: ticks={:?} witness={:?} overruns={:?} mspt_ms={:?} tps={:?} callback_gap_ms={:?}",
+                    "browser server worker health: ticks={:?} witness={:?} overruns={:?} mspt_ms={:?} budget_tps={:?} observed_tps={:?} callback_gap_ms={:?}",
                     number("tickCount"),
                     number("tickWitness"),
                     number("overruns"),
                     number("msptMs"),
                     number("tps"),
+                    number("observedTps"),
                     number("callbackGapMs"),
                 );
             }

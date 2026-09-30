@@ -25,6 +25,14 @@ for the shared paletted-container thresholds, bit-packing rules, and index order
 client-facing container follows; this section is specifically about the server's own simpler,
 column-scoped representation.
 
+The client-facing `PalettedContainer::palette_values` borrows the single value or
+stored indirect palette without scanning cells or allocating. Indirect palettes
+can retain entries after their last cell is overwritten, so this slice is a
+conservative superset of live values, not a frequency census. Direct storage
+returns `None` because it has no palette; callers must treat that as unknown,
+not empty. The fluid mesher uses these semantics to prove a centre section is
+dry from its typed states, while unused wet entries keep the ordinary cell path.
+
 Loading a saved column reconstructs this representation directly from the region file's own
 per-section local palette and packed indices, rather than replaying one block-set call per cell —
 replaying per-cell would mean re-resolving each of a column's ~98,000 cells against the whole
@@ -136,8 +144,7 @@ chunk format and the game's own data, not independently tunable constants.
 ## Dependencies
 
 - The shared world-storage crate's paletted container and section types for the client-facing
-  representation and its already-generic bit-packing strategies (unmodified by anything described
-  here — the fix was entirely in what the encoder fed that container, not in the container itself).
+  representation, borrowed palette inspection, and generic bit-packing strategies.
 - The generated block-state table (`lodestone-data`) for the string-to-id resolution the encoder's
   fallback tiers use.
 - The world-generation crate for the real `MOTION_BLOCKING` computation, which the server only
