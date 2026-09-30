@@ -262,6 +262,17 @@ resumes every deferred target through the same stage machine. A committed
 feature frontier skips source completion and restores transient feature state
 before output, including for dimensions without neighbor settlement.
 
+Native persistence hydration holds a request-scoped halo-input lease. Cloned
+world handles share per-coordinate ownership counts; finishing one overlapping
+request releases only its claim, not the input still used by another request.
+The final owner removes the generator's input snapshot. This wrapper is native
+only; browser cancellation uses the session and region claims described below.
+
+Deferred native packet-stage upgrades and lighting-halo admission use the same
+request-owned pipeline as inline encoding. Existing resident and persisted
+columns retain their precedence; sources without request generation keep the
+scalar fallback inside that boundary rather than bypassing it at the encoder.
+
 Region reservations own their pending ticket and transfer that ownership into
 the active lease on admission. Rejected nonblocking attempts, cancellation, and
 dropped waiting futures remove the reservation; lease drop removes active
@@ -275,7 +286,7 @@ publishes a reusable result; dropping an unfinished leader publishes an empty
 completion and removes its exact slot, allowing another request to lead.
 Followers observe their own cancellation before waiting and before retrying.
 Native completion and condition-variable waits synchronize through the same
-gate; cancelled followers wake within the 10 ms wait interval.
+gate; native followers recheck cancellation on a 10 ms timed-wait interval.
 
 The delivery pipeline releases a batch when all of its un-emitted requests have
 been cancelled. Browser futures then drop their region and leader claims even

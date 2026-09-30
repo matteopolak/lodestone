@@ -901,6 +901,47 @@ fn chunk_of(pos: BlockPos) -> (i32, i32) {
 pub struct RegionChunkSource<S> {
     inner: Arc<S>,
     state: Arc<WorldState>,
+    /// Active halo leases; the last owner releases the inner snapshot.
+    generation_input_owners: Arc<Mutex<HashMap<(i32, i32), usize>>>,
+}
+
+struct GenerationHaloLease<'a, S: ChunkSource> {
+    source: &'a RegionChunkSource<S>,
+    coordinates: Vec<(i32, i32)>,
+}
+
+impl<S: ChunkSource> GenerationHaloLease<'_, S> {
+    fn retain(&mut self, cx: i32, cz: i32, column: &ChunkColumn) {
+        let mut owners = self
+            .source
+            .generation_input_owners
+            .lock()
+            .expect("generation input owner lock poisoned");
+        if self.source.inner.retain_generation_input(cx, cz, column) {
+            *owners.entry((cx, cz)).or_default() += 1;
+            self.coordinates.push((cx, cz));
+        }
+    }
+}
+
+impl<S: ChunkSource> Drop for GenerationHaloLease<'_, S> {
+    fn drop(&mut self) {
+        let mut owners = self
+            .source
+            .generation_input_owners
+            .lock()
+            .expect("generation input owner lock poisoned");
+        for &(cx, cz) in &self.coordinates {
+            let count = owners
+                .get_mut(&(cx, cz))
+                .expect("halo lease owns its input");
+            *count -= 1;
+            if *count == 0 {
+                owners.remove(&(cx, cz));
+                self.source.inner.release_generation_input(cx, cz);
+            }
+        }
+    }
 }
 
 /// Cloning yields another handle to the **same** world — same edit map, same
@@ -913,6 +954,7 @@ impl<S> Clone for RegionChunkSource<S> {
         Self {
             inner: Arc::clone(&self.inner),
             state: Arc::clone(&self.state),
+            generation_input_owners: Arc::clone(&self.generation_input_owners),
         }
     }
 }
@@ -954,6 +996,7 @@ impl<S: ChunkSource> RegionChunkSource<S> {
         };
         Ok(Self {
             inner: Arc::new(inner),
+            generation_input_owners: Arc::new(Mutex::new(HashMap::new())),
             state: Arc::new(WorldState {
                 region_dir,
                 dimension,
@@ -1220,10 +1263,13 @@ impl<S: ChunkSource> RegionChunkSource<S> {
     fn hydrate_generation_halos(
         &self,
         requests: &[crate::worldgen_session::GenerationRequest],
-    ) -> (Vec<(i32, i32)>, HashMap<(i32, i32), ChunkColumn>) {
+    ) -> (GenerationHaloLease<'_, S>, HashMap<(i32, i32), ChunkColumn>) {
         let targets: HashSet<_> = requests.iter().map(|request| request.target()).collect();
         let mut visited = HashSet::new();
-        let mut retained = Vec::new();
+        let mut retained = GenerationHaloLease {
+            source: self,
+            coordinates: Vec::new(),
+        };
         let mut terminal_targets = HashMap::new();
 
         for request in requests {
@@ -1244,18 +1290,10 @@ impl<S: ChunkSource> RegionChunkSource<S> {
                 if targets.contains(&(cx, cz)) {
                     terminal_targets.insert((cx, cz), column.clone());
                 }
-                if self.inner.retain_generation_input(cx, cz, &column) {
-                    retained.push((cx, cz));
-                }
+                retained.retain(cx, cz, &column);
             }
         }
         (retained, terminal_targets)
-    }
-
-    fn release_generation_halos(&self, retained: &[(i32, i32)]) {
-        for &(cx, cz) in retained {
-            self.inner.release_generation_input(cx, cz);
-        }
     }
 }
 
@@ -1429,7 +1467,7 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
                 })
                 .collect()
         };
-        self.release_generation_halos(&retained);
+        drop(retained);
         results
     }
 
@@ -1514,7 +1552,7 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
                 })
                 .collect())
         })();
-        self.release_generation_halos(&retained);
+        drop(retained);
         result
     }
 
@@ -1528,7 +1566,7 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
     > {
         let (hydrated, mut terminal_targets) = self.hydrate_generation_halos(&[request]);
         if let Some(column) = terminal_targets.remove(&request.target()) {
-            self.release_generation_halos(&hydrated);
+            drop(hydrated);
             return Ok(Some(
                 crate::worldgen_session::GenerationRequestResult::Existing(column),
             ));
@@ -1537,41 +1575,8 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
         // ledger hydration and publication around generation.
         self.state.stats.generated.fetch_add(1, Ordering::Relaxed);
         let result = self.inner.request_generation(request, session);
-        self.release_generation_halos(&hydrated);
+        drop(hydrated);
         result
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn request_generation_yielding<'a>(
-        &'a self,
-        request: crate::worldgen_session::GenerationRequest,
-        session: Option<&'a mut crate::worldgen_session::GenerationSession>,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<
-                        Option<crate::worldgen_session::GenerationRequestResult>,
-                        crate::worldgen_session::GenerationRequestError,
-                    >,
-                > + 'a,
-        >,
-    > {
-        let (hydrated, mut terminal_targets) = self.hydrate_generation_halos(&[request]);
-        if let Some(column) = terminal_targets.remove(&request.target()) {
-            self.release_generation_halos(&hydrated);
-            return Box::pin(async move {
-                Ok(Some(
-                    crate::worldgen_session::GenerationRequestResult::Existing(column),
-                ))
-            });
-        }
-        self.state.stats.generated.fetch_add(1, Ordering::Relaxed);
-        let inner = &self.inner;
-        Box::pin(async move {
-            let result = inner.request_generation_yielding(request, session).await;
-            self.release_generation_halos(&hydrated);
-            result
-        })
     }
 
     fn prepare_packet_replay(&self, targets: &[(i32, i32)]) -> Option<usize> {
@@ -2866,6 +2871,9 @@ mod tests {
         batches: AtomicU64,
         cohorts: AtomicU64,
         scalar_requests: AtomicU64,
+        generation_inputs: Mutex<HashMap<(i32, i32), ChunkColumn>>,
+        input_releases: AtomicU64,
+        request_gate: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
     }
 
     impl ChunkSource for CohortProbe {
@@ -2886,6 +2894,19 @@ mod tests {
 
         fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
 
+        fn retain_generation_input(&self, cx: i32, cz: i32, column: &ChunkColumn) -> bool {
+            self.generation_inputs
+                .lock()
+                .unwrap()
+                .insert((cx, cz), column.clone());
+            true
+        }
+
+        fn release_generation_input(&self, cx: i32, cz: i32) {
+            self.input_releases.fetch_add(1, Ordering::Relaxed);
+            self.generation_inputs.lock().unwrap().remove(&(cx, cz));
+        }
+
         fn request_generation(
             &self,
             request: crate::worldgen_session::GenerationRequest,
@@ -2895,9 +2916,17 @@ mod tests {
             crate::worldgen_session::GenerationRequestError,
         > {
             self.scalar_requests.fetch_add(1, Ordering::Relaxed);
+            if request.target() == (2, 0) {
+                let gate = self.request_gate.lock().unwrap().take();
+                if let Some((entered, resume)) = gate {
+                    entered.send(()).unwrap();
+                    resume
+                        .recv_timeout(std::time::Duration::from_secs(10))
+                        .unwrap();
+                }
+            }
             let mut column = self.column(0, 0);
             column.set_block_id(0, 70, 0, Block::Stone.default_state());
-            let _ = request;
             Ok(Some(
                 crate::worldgen_session::GenerationRequestResult::Existing(column),
             ))
@@ -2966,6 +2995,65 @@ mod tests {
             lodestone_worldgen::stage_schedule::GenerationTarget::Full,
             0,
         )
+    }
+
+    fn halo_request(cx: i32) -> crate::worldgen_session::GenerationRequest {
+        crate::worldgen_session::GenerationRequest::new(
+            lodestone_worldgen::stage_schedule::Dimension::Overworld,
+            (cx, 0),
+            lodestone_worldgen::stage_schedule::GenerationTarget::Full,
+            1,
+        )
+    }
+
+    #[test]
+    fn generation_halo_survives_an_overlapping_native_request() {
+        let dir = tempdir("overlapping-generation-halo");
+        let source = RegionChunkSource::new(
+            CohortProbe::default(),
+            &dir,
+            Dimension::Overworld,
+            MIN_Y,
+            HEIGHT,
+        )
+        .expect("open world");
+        source.set_block(17, 70, 1, marker());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        *source.inner.request_gate.lock().unwrap() = Some((entered_tx, resume_rx));
+
+        let retained = std::thread::scope(|scope| {
+            let pending_source = source.clone();
+            let pending = scope.spawn(move || {
+                pending_source.request_generation(halo_request(2), None)
+            });
+            entered_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            assert_eq!(source.inner.generation_inputs.lock().unwrap().len(), 1);
+            source
+                .request_generation(halo_request(0), None)
+                .expect("first request");
+            let retained = source
+                .inner
+                .generation_inputs
+                .lock()
+                .unwrap()
+                .get(&(1, 0))
+                .map(|column| column.block_state_id(1, 70, 1));
+            resume_tx.send(()).unwrap();
+            pending.join().unwrap().expect("overlapping request");
+            retained
+        });
+
+        assert_eq!(
+            retained,
+            Some(marker()),
+            "the unfinished request still owns the halo"
+        );
+        assert!(source.inner.generation_inputs.lock().unwrap().is_empty());
+        assert_eq!(source.inner.input_releases.load(Ordering::Relaxed), 1);
+        assert!(source.generation_input_owners.lock().unwrap().is_empty());
     }
 
     #[cfg(not(target_arch = "wasm32"))]
