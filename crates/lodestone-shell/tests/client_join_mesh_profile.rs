@@ -4,6 +4,7 @@
 #![recursion_limit = "256"]
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use lodestone::config::{Config, Mode};
@@ -21,11 +22,38 @@ use lodestone_model::action::{
     ChatMode, ClientAction, ClientSettings, DisplayedSkinParts, MainHand, ParticleStatus,
 };
 use lodestone_model::Reported;
+use lodestone_server::worldgen_progress::{WorldgenTimingPhase, WorldgenTimingSample, WorldgenTimingTotals};
 
 const SEED: i64 = 4242;
 const FLIGHT_TRAVEL_Y: f64 = 200.0;
 const DEADLINE: Duration = Duration::from_secs(120);
 const FRAME_INTERVAL: Duration = Duration::from_nanos(16_666_667);
+
+type GenerationTimings = [WorldgenTimingTotals; WorldgenTimingPhase::ALL.len()];
+
+static GENERATION_TIMINGS: Mutex<GenerationTimings> = Mutex::new([WorldgenTimingTotals {
+    calls: 0,
+    items: 0,
+    elapsed: Duration::ZERO,
+    maximum: Duration::ZERO,
+}; WorldgenTimingPhase::ALL.len()]);
+
+fn record_generation_timing(sample: WorldgenTimingSample) {
+    GENERATION_TIMINGS.lock().unwrap()[sample.phase.index()].record(sample);
+}
+
+fn generation_timings_report(start: GenerationTimings, end: GenerationTimings) -> serde_json::Value {
+    serde_json::json!(WorldgenTimingPhase::ALL.map(|phase| {
+        let before = start[phase.index()];
+        let after = end[phase.index()];
+        serde_json::json!({
+            "phase": phase.name(),
+            "calls": after.calls.saturating_sub(before.calls),
+            "items": after.items.saturating_sub(before.items),
+            "elapsed_sum_ms": after.elapsed.saturating_sub(before.elapsed).as_secs_f64() * 1000.0,
+        })
+    }))
+}
 
 struct EditProbe {
     aiming_since: Instant,
@@ -559,6 +587,8 @@ fn profile_config(radius: u32) -> Config {
 }
 
 fn main() {
+    lodestone_server::worldgen_progress::install_timing_sink(record_generation_timing)
+        .expect("the profile owns generation timing collection");
     if std::env::var_os("LODESTONE_JOIN_TRACE").is_some()
         || std::env::var_os("LODESTONE_CLIENT_JOIN_DROP").is_some()
     {
@@ -712,6 +742,8 @@ fn main() {
     let mut movement_steps = Vec::new();
     let mut movement_start_tick = None;
     let mut movement_end_tick = None;
+    let mut movement_start_generation = None;
+    let mut movement_end_generation = None;
     let mut movement_stop_view = None;
     let mut movement_stop_presentation = None;
     let mut movement_post_stop_presented = None;
@@ -746,6 +778,7 @@ fn main() {
             movement_end_y = Some(position.y);
             movement_end_teleports = Some(sim.teleport_count);
             movement_end_tick = Some(sim.tick_count());
+            movement_end_generation = Some(*GENERATION_TIMINGS.lock().unwrap());
             movement_stop_view = sim.view_settlement_at_radius(radius);
             movement_stop_presentation = sim.view_presentation_at_radius(radius);
             if movement_stop_presentation.is_some_and(|(resident, presented, expected)| {
@@ -1088,6 +1121,7 @@ fn main() {
             movement_start_teleports = Some(sim.teleport_count);
             movement_last_chunk = Some(chunk_at(position.x, position.z));
             movement_start_tick = Some(sim.tick_count());
+            movement_start_generation = Some(*GENERATION_TIMINGS.lock().unwrap());
             server_tick_at_move_start = sim
                 .net()
                 .and_then(NetClient::integrated_tick_monitor)
@@ -1179,6 +1213,10 @@ fn main() {
         "last_settled_columns": movement_last_settled,
         "max_pending_meshes": movement_max_pending,
         "sim_ticks": movement_end_tick.unwrap_or_else(|| sim.tick_count()).saturating_sub(movement_start_tick.unwrap_or(0)),
+        "generation_phase_work": movement_start_generation.map(|start| generation_timings_report(
+            start,
+            movement_end_generation.unwrap_or_else(|| *GENERATION_TIMINGS.lock().unwrap()),
+        )),
         "frame_p99_ms": percentile(&movement_frames, 99),
         "frame_max_ms": percentile(&movement_frames, 100),
         "step_p99_ms": percentile(&movement_steps, 99),
@@ -1220,7 +1258,7 @@ fn main() {
         "input_to_draw_ms": probe.clicked_at.zip(probe.drawn_at).map(|(start, end)| end.duration_since(start).as_secs_f64() * 1000.0),
     }));
     let report = serde_json::json!({
-        "schema": "lodestone-client-join-mesh-profile-v20",
+        "schema": "lodestone-client-join-mesh-profile-v21",
         "seed": SEED,
         "target_size": [target_width, target_height],
         "visible_radius": radius,
@@ -1234,6 +1272,9 @@ fn main() {
         "render_setup_cpu_ms": render_setup_ns as f64 / 1_000_000.0,
         "timed_out": elapsed >= DEADLINE,
         "elapsed_ms": elapsed.as_secs_f64() * 1000.0,
+        "generation_phase_work": generation_timings_report(
+            GenerationTimings::default(), *GENERATION_TIMINGS.lock().unwrap(),
+        ),
         "first_column_ms": ms(first_column),
         "first_mesh_ms": ms(first_mesh),
         "first_presented_terrain_ms": ms(first_presented_terrain),

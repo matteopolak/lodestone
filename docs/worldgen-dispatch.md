@@ -27,6 +27,19 @@ target leaves the reservation active for surviving siblings. When every target
 is cancelled, the pending reservation is removed so later overlapping work can
 proceed.
 
+Sources declaring `ResidentCohortDelivery::Terminal` can emit full resident
+columns without turning the remaining cold targets into a buffered batch.
+Overworld declares this policy because replayed feature spills are temporary,
+settlement projects durable writes into each requested target, and top-layer
+writes are target-local. The cold subset keeps the same dependency region and
+incremental writer fences; the join queue restores wire order from the original
+slot indices. The default `AfterSettlement` policy preserves batch publication
+for sources whose later writers can change a resident target, including End's
+persistent neighboring spills. Checkpoint-only reused outputs and mixed
+shaped/full requests also retain batch publication. Native and cooperative
+browser admission apply the same guard; changing a source's write ownership
+requires revisiting its delivery policy.
+
 The initial-spawn search uses the same handoff through the server runtime seam:
 native joins submit the synchronous probe to this dispatcher, while the browser
 keeps its single-threaded path inline. The blocking work never occupies the

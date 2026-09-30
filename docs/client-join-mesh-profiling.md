@@ -28,6 +28,12 @@ report includes that acknowledgement boundary; the server keeps streaming
 padding columns afterward without holding the tick-owned action queue closed.
 An optional movement phase keeps the same client and renderer running while the
 player crosses into newly requested terrain.
+`generation_phase_work` records calls, input-item counts, and elapsed sums for
+the shared generation, snapshot, lighting, encoding, and delivery timers. The
+movement record subtracts the counters at movement start from those at stop.
+These are completed-operation intervals, not exclusive CPU time: parallel work
+and nested timers can overlap, and an operation spanning the boundary is charged
+when it finishes. The collector retains eleven totals, not per-column events.
 The default walking path holds forward, sprint, and jump. The optional flight
 path requests creative mode through the integrated connection, waits for the
 server's flight grant, then uses two jump presses to engage the normal flight
@@ -122,6 +128,11 @@ chunk boundary; an unmoving player is not a valid streaming workload. Movement
 can overlap delivery of the outer render-distance ring. The input is released
 at the requested duration; any remaining time for the then-current view to
 settle is reported separately rather than counted as extra movement.
+Use a small-radius, longer flight to exhaust the initial buffer, and a larger
+radius to measure sustained demand. Check `all_entered.preloaded_on_entry` before
+calling a movement run a cold-stream test. The fixture's explicit radius does
+not read the interactive client's saved render-distance option; compare like
+settings, and do not treat radius-eight results as radius-32 performance.
 The `view_at_stop` record separates missing columns from resident but unsettled
 columns. A bounded 100 ms settlement tail records ready/waiting columns and
 pending mesh sections through `Sim::mesh_backlog`, so a slow tail can be
