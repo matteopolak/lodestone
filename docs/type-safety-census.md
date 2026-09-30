@@ -13,7 +13,7 @@ numeric: public functions with state_id, block_state, effect_id, item_id, entity
 text: public String fields whose names end in url, dimension, potion, effect, state, kind, mode, key, or id
 ```
 
-The snapshot contains **74 numeric APIs** and **62 text fields**, **136 sites total**. Every row is assigned either a migration family or an intentional boundary category. The scanner is a discovery guard, not a claim that every integer or string in the repository needs a wrapper.
+The retained ledger contains **74 numeric APIs** and **51 text fields**, **125 sites total**. Every row is assigned either a migration family or an intentional boundary category. These are ledger counts, not a fresh whole-workspace measurement; the scanner is a discovery guard, not a claim that every integer or string in the repository needs a wrapper.
 
 | disposition | sites |
 |---|---:|
@@ -27,12 +27,21 @@ The snapshot contains **74 numeric APIs** and **62 text fields**, **136 sites to
 | `intentional-user-or-format-text` | 2 |
 | `intentional-wire-boundary` | 36 |
 | `inventory-menu-slot` | 32 |
-| `potion-and-state-value` | 11 |
 | `typed-discriminator` | 5 |
 
-Migration families are `entity-network-id`, `inventory-menu-slot`, `potion-and-state-value`, `typed-discriminator`, and `dimension-resource-url`.
+Migration families are `entity-network-id`, `inventory-menu-slot`, `typed-discriminator`, and `dimension-resource-url`.
 
 Intentional categories retain primitives because the representation is the interface: bytes/integers at wire boundaries, strings in storage/import formats, external identity strings, cache or ring-buffer indices, observability labels, secrets, and user-authored or format-defined text.
+
+Potion and serialized-state consumers use typed domains. `Bottle::potion` and
+splash-potion effect lookup use `PotionId`; names are parsed at item/NBT boundaries.
+Worldgen `CodedBlock`, `OreTarget`, `SpringCfg`, `ReplaceBlobsCfg`, and `BlockBlobCfg`
+carry `CanonicalStateId`. The End podium, placement (including every extra cell),
+gravity settlement, target-block reactions, note-block reactions, and dispenser
+reactions carry `StateId`. Their former eleven string fields no longer belong in
+the primitive-site ledger. `BlockStateValue` retains unknown or invalid spellings
+as an explicit extension value at textual import/export boundaries instead of
+silently assigning a built-in state.
 
 ## Site ledger
 
@@ -100,19 +109,13 @@ Intentional categories retain primitives because the representation is the inter
 | `crates/lodestone-worldgen-core/src/engine/scratch.rs:     pub(crate) fn slot_put(&mut self, slot: usize, key: (i32, i32, i32), v: f64) {` | `intentional-cache-index` |
 | `crates/lodestone-worldgen-core/src/counters.rs:     pub fn bump_slot_miss(slot: usize) {` | `intentional-cache-index` |
 | `crates/lodestone-worldgen-core/src/counters.rs:     pub fn bump_slot_miss(_slot: usize) {}` | `intentional-cache-index` |
-| `crates/lodestone-worldgen/src/structure/mod.rs:     pub state: String,` | `potion-and-state-value` |
 | `crates/lodestone-worldgen/src/structure/mod.rs:     pub id: String,` | `dimension-resource-url` |
 | `crates/lodestone-worldgen/src/structure/mod.rs:     pub id: String,` | `dimension-resource-url` |
 | `crates/lodestone-worldgen/src/structure/mod.rs:     pub id: String,` | `dimension-resource-url` |
-| `crates/lodestone-worldgen/src/feature/vegetation/features.rs:     pub state: String,` | `potion-and-state-value` |
-| `crates/lodestone-worldgen/src/feature/vegetation/features.rs:     pub state: String,` | `potion-and-state-value` |
-| `crates/lodestone-worldgen/src/feature/vegetation/features.rs:     pub state: String,` | `potion-and-state-value` |
-| `crates/lodestone-worldgen/src/feature/mod.rs:     pub state: String,` | `potion-and-state-value` |
 | `crates/lodestone-auth/src/store.rs:     pub profile_id: String,` | `intentional-external-identity` |
 | `crates/lodestone-command/src/argument.rs:     pub kind: StringKind,` | `intentional-user-or-format-text` |
 | `crates/lodestone-render/src/banner_pattern.rs:     pub pattern_asset_id: String,` | `dimension-resource-url` |
 | `crates/lodestone-auth/src/flow.rs:     pub url: String,` | `dimension-resource-url` |
-| `crates/lodestone-server/src/redstone_target.rs:     pub new_state: String,` | `potion-and-state-value` |
 | `crates/lodestone-server/src/scheduled_tick.rs:     pub kind: String,` | `typed-discriminator` |
 | `crates/lodestone-server/src/scheduled_tick.rs:     pub kind: String,` | `typed-discriminator` |
 | `crates/lodestone-game/src/chat.rs:     pub translation_key: String,` | `intentional-user-or-format-text` |
@@ -120,16 +123,11 @@ Intentional categories retain primitives because the representation is the inter
 | `crates/lodestone-shell/src/remote_skins.rs:     pub url: String,` | `dimension-resource-url` |
 | `crates/lodestone-shell/src/resources.rs:     pub id: String,` | `dimension-resource-url` |
 | `crates/lodestone-shell/src/resources.rs:     pub id: String,` | `dimension-resource-url` |
-| `crates/lodestone-worldgen/src/end/podium.rs:     pub state: String,` | `potion-and-state-value` |
 | `crates/lodestone-render/src/block_models.rs:     pub kind: String,` | `typed-discriminator` |
 | `crates/lodestone-shell/src/menu/packs.rs:     pub id: String,` | `dimension-resource-url` |
 | `crates/lodestone-server/src/heavy_scene.rs:     pub run_id: String,` | `intentional-observability-label` |
 | `crates/lodestone-server/src/heavy_scene.rs:     pub executable_kind: String,` | `intentional-observability-label` |
-| `crates/lodestone-server/src/block_placement.rs:     pub state: String,` | `potion-and-state-value` |
-| `crates/lodestone-server/src/random_tick.rs:     pub state: String,` | `potion-and-state-value` |
-| `crates/lodestone-server/src/redstone_note_block.rs:     pub new_state: String,` | `potion-and-state-value` |
 | `crates/lodestone-assets/src/meta.rs:     pub id: String,` | `dimension-resource-url` |
-| `crates/lodestone-server/src/redstone_dispenser.rs:     pub new_state: String,` | `potion-and-state-value` |
 | `crates/lodestone-server/src/plugin_dimension.rs:     pub key: String,` | `dimension-resource-url` |
 | `crates/lodestone-assets/src/item_model.rs:     pub kind: String,` | `typed-discriminator` |
 | `crates/lodestone-server/src/protocol.rs:     pub url: String,` | `dimension-resource-url` |

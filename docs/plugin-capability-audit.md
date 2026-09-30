@@ -47,11 +47,11 @@ the WASM tier as well as the native one — and where the WASM tier structurally
 resumable off-thread search over an owned snapshot; anything needing a `World` borrow), that has to
 be a stated ceiling rather than an omission. The WASM ABI today (`wit/lodestone-plugin.wit`) exports
 `on-tick(list<event>) -> list<action>`, `on-task(task-id, token) -> list<action>`, and a synchronous
-`on-command(string) -> command-outcome` over four event
-kinds (`chat`, `health-changed`, `blocks-changed`, `place-outcome`) and six actions (`send-chat`,
-`send-command`, `swing-arm`, `set-look`, `set-movement`, `place-block`), plus `log`, `fs:read`, and
-capability-gated scheduler imports. Every "WASM" cell below
-is judged against that.
+`on-command` over capability-selected events and actions, plus `log`, filesystem,
+and scheduler imports. Events include copied inbound/outbound raw packets through
+`observe:packets` as well as curated decoded observations. The WIT declarations
+and their production conductor consumers, rather than a fixed event count, define
+the surface against which each "WASM" cell below is judged.
 
 **`EcsHandle` is `Arc<parking_lot::RwLock<World>>` and is not reentrant.** Of the four
 guard-nesting combinations, three deadlock always and the fourth whenever a writer is queued, with
@@ -107,7 +107,7 @@ piece named) · **gap** (nothing) · **ceiling** (will not exist by design; stat
 | per-entity / per-chunk key-value data | partial — `EntityDataStore`/`ChunkDataStore` are live in-memory stores; `durable_data::PluginDataStore` adds bounded, versioned records for plugin/world/player/entity-generation scopes with a storage-neutral snapshot boundary | partial — default-denied `data:persistent` provides bounded typed plugin/world/player/entity-generation records and reload-safe sidecar persistence when a filesystem root is configured; chunk scopes and automatic scope unload are not exposed | **gap** — `NbtStorageHandle` has no save path in `live_save`; nothing plugin-keyed is written to disk |
 | plugin config file / data dir | **done** — `lodestone-plugin-support::{paths, config}` | partial — read-only | **done** for an embedding crate (plain `std`) |
 | database access | **done**, trivially (unrestricted `std`) | **ceiling** — no network import exists, by design | **done**, trivially |
-| inbound/outbound packet observation | **done (native)** — decoded `GameEvent` plus opt-in `RawPacket` and bounded `OutboundRawPacket` observation; the inbound bus publishes exact owned bytes before decoding, and the outbound bus publishes exact adapter output after decorators and before transport framing, with per-tick packet/byte drop counters | **gap** — WASM receives curated decoded events only; no raw-packet event or capability | partial — a `ServerProtocol` decorator sees every `decode(state, id, payload)` call, version-locked |
+| inbound/outbound packet observation | **done (native)** — decoded `GameEvent` plus opt-in bounded `RawPacket` and `OutboundRawPacket` observation; the inbound bus publishes exact owned bytes before decoding, and the outbound bus publishes exact adapter output after decorators and before transport framing, with per-tick packet/byte drop counters | **done** — `observe:packets` receives copied raw inbound/outbound records through `WasmHostPlugin` and `drive_wasm_plugins`; protocol number, phase, packet id, and bounded payload remain explicit | partial — a `ServerProtocol` decorator sees every `decode(state, id, payload)` call, version-locked |
 | outbound packet mutation / cancel | partial — `EgressFilters` over `ClientAction` at the `ActionQueue` drain; five direct `send_action` paths bypass it (`egress_hook_coverage.rs`) | **gap** | partial — the same decorator sees every `Vec<ServerDirective>` it returns, so it can drop, rewrite, or **append** a `ServerDirective::Send`, version-locked |
 | raw byte injection | **ceiling** — decided observation-only, permanently | ceiling | reachable through the decorator, untested and unsandboxed |
 | the NMS-equivalent escape hatch | **done** — depend on a version crate (`packets`, `adapter` are `pub`), or on `lodestone-shell` for `Sim::ecs()` | **ceiling** — an import not in the WIT world is absent from the linker | **done** — embed `IntegratedServer` and hold the `ChunkSource`, `WorldStateHandle`, `PlayerRegistry`, `MobHandle`, `PluginChannelRegistry` it hands out |
@@ -341,9 +341,28 @@ and native outbound observation uses a bounded `OutboundRawPacket` message conta
 adapter/decorator output before transport framing. Inbound events apply inline under the world's write
 guard, so an interceptor wanting `&mut World` there is the reentrancy shape everything else makes
 unrepresentable. `EgressFilters` remains the outbound mutation ceiling — `ClientAction`, never bytes —
-and is bypassed by five direct `send_action` sites the coverage gate enumerates. The WASM tier likewise
-has no raw-packet event or capability. Two archetypes stay out of reach for good on the shared surface:
+and is bypassed by five direct `send_action` sites the coverage gate enumerates. The WASM tier receives
+owned raw observations through the separately granted `observe:packets` capability. Neither tier's
+observer can mutate, cancel, reorder, inject, or retain a transport buffer. Two archetypes stay out of reach for good on the shared surface:
 anti-cheat and a disguise visible to *other* players.
+
+`SharedState::record_raw_packet` and `SharedState::record_outbound_raw_packet`
+reserve each observer copy's budget before allocating its payload. Both buses default to 256
+packets and 1 MiB per game tick per direction; an exhausted budget drops only
+the copy and records the drop, leaving transport delivery intact. `WasmHostPlugin`
+installs both buses for the real conductor and selects zero admission limits
+when no loaded guest has the capability. `abi::lift_raw_packet` passes owned
+component-model values with the negotiated protocol number to identify the
+wire dialect; no protocol-family dependency crosses the shared API.
+
+The native `lodestone-client` driver tests cover actual inbound transport bytes
+and decorated outbound bytes, including a full observer-window control. The
+WASM `raw_packet_observation` test builds a separate guest and drives both
+directions through the production conductor from admitted ECS messages. These
+are distinct test scopes: the conductor fixture does not itself open a network
+connection, and test source alone does not establish an executed passing run.
+See [WASM raw packet observation](./wasm-raw-packets.md) for the limits and extension
+points.
 
 Two escape hatches change that picture at the cost of version-locking, and neither is documented as
 such. On the client, `lodestone_client::ClientBuilder::new` takes a `Box<dyn VersionAdapter>`, and
