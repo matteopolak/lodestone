@@ -270,6 +270,19 @@ can advance. Native condition-variable waits and browser yielding waits use
 the same promotion rule. Returning from a failed browser batch claim must not
 leave a pending ticket that blocks every later overlapping request.
 
+Single-request deduplication uses an owned leader claim. Normal completion
+publishes a reusable result; dropping an unfinished leader publishes an empty
+completion and removes its exact slot, allowing another request to lead.
+Followers observe their own cancellation before waiting and before retrying.
+Native completion and condition-variable waits synchronize through the same
+gate; cancelled followers wake within the 10 ms wait interval.
+
+The delivery pipeline releases a batch when all of its un-emitted requests have
+been cancelled. Browser futures then drop their region and leader claims even
+when no delivery remains to drive another poll. Native running jobs observe
+their cancellation tokens and finish cooperatively. A partially emitted cohort
+remains owned only while it has another live request to deliver.
+
 Native Overworld cohorts admit a bounded group of requested targets into one
 ordered source region. Immutable prerequisites may run concurrently; mutable
 owners complete in canonical order. Every target-owned execution path restores
