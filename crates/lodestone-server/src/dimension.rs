@@ -680,6 +680,10 @@ impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
         self.primary.generation_cohort_width_hint()
     }
 
+    fn resident_cohort_delivery(&self) -> crate::chunk::ResidentCohortDelivery {
+        self.primary.resident_cohort_delivery()
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     fn request_generation_cohort(
         &self,

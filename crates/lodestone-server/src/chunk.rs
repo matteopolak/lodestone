@@ -470,6 +470,12 @@ pub enum ChunkGenerationStage {
     Full,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResidentCohortDelivery {
+    AfterSettlement,
+    Terminal,
+}
+
 /// A decoded chunk column: the block state of every block in a 16×`height`×16
 /// prism whose bottom is at `min_y`.
 ///
@@ -2327,6 +2333,11 @@ pub trait ChunkSource: Send + Sync {
         None
     }
 
+    /// Whether later generation can persist mutations into a resident output.
+    fn resident_cohort_delivery(&self) -> ResidentCohortDelivery {
+        ResidentCohortDelivery::AfterSettlement
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     fn request_generation_cohort(
         &self,
@@ -3204,6 +3215,10 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
         (**self).generation_cohort_width_hint()
     }
 
+    fn resident_cohort_delivery(&self) -> ResidentCohortDelivery {
+        (**self).resident_cohort_delivery()
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     fn request_generation_cohort(
         &self,
@@ -3547,6 +3562,10 @@ impl<S: ChunkSource + ?Sized> ChunkSource for &S {
 
     fn generation_cohort_width_hint(&self) -> Option<usize> {
         (**self).generation_cohort_width_hint()
+    }
+
+    fn resident_cohort_delivery(&self) -> ResidentCohortDelivery {
+        (**self).resident_cohort_delivery()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -4652,6 +4671,10 @@ impl ChunkSource for OverworldChunkSource {
 
     fn generation_cohort_width_hint(&self) -> Option<usize> {
         Some(64)
+    }
+
+    fn resident_cohort_delivery(&self) -> ResidentCohortDelivery {
+        ResidentCohortDelivery::Terminal
     }
 
     #[cfg(not(target_arch = "wasm32"))]

@@ -1477,6 +1477,11 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    fn resident_cohort_delivery(&self) -> crate::chunk::ResidentCohortDelivery {
+        self.inner.resident_cohort_delivery()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     fn request_generation_cohort(
         &self,
         sessions: &mut [crate::worldgen_session::GenerationSession],

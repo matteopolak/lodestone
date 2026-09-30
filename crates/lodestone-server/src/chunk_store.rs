@@ -4401,24 +4401,47 @@ impl<S: ChunkSource> ChunkStore<S> {
     fn new_cohort_publication(
         &self,
         entries: Vec<GenerationBatchEntry>,
-        results: Vec<Option<Result<Option<crate::worldgen_session::GenerationRequestResult>, crate::worldgen_session::GenerationRequestError>>>,
+        target_count: usize,
     ) -> GenerationCohortPublication<'_> {
-        let statuses = results.into_iter().map(|result| {
-            result.map(|result| match result {
-                Ok(_) => Err(crate::worldgen_session::GenerationRequestError::Unsupported),
-                Err(error) => Err(error),
-            })
-        }).collect();
         let count = entries.len();
         GenerationCohortPublication {
             ledger: &self.generation_ledger,
             entries,
-            statuses,
+            statuses: (0..target_count).map(|_| None).collect(),
             committed: vec![false; count],
             committed_existing: vec![false; count],
             discard_uncommitted: vec![false; count],
             cleaned_up: false,
         }
+    }
+
+    fn emit_prepared_cohort_results(
+        &self,
+        publication: &mut GenerationCohortPublication<'_>,
+        sessions: &[GenerationSession],
+        results: Vec<Option<Result<Option<crate::worldgen_session::GenerationRequestResult>, crate::worldgen_session::GenerationRequestError>>>,
+        emit: &mut dyn FnMut(
+            usize,
+            &GenerationSession,
+            crate::worldgen_session::GenerationRequestResult,
+        ) -> Result<(), crate::worldgen_session::GenerationRequestError>,
+    ) -> Result<(), crate::worldgen_session::GenerationRequestError> {
+        for (index, result) in results.into_iter().enumerate() {
+            let Some(result) = result else { continue };
+            let status = match result {
+                Ok(Some(result)) if !sessions[index].cancellation().is_cancelled() => {
+                    emit(index, &sessions[index], result)?;
+                    Ok(())
+                }
+                Ok(Some(_)) => Err(
+                    crate::worldgen_session::GenerationRequestError::Session(SessionError::Cancelled),
+                ),
+                Ok(None) => Err(crate::worldgen_session::GenerationRequestError::Unsupported),
+                Err(error) => Err(error),
+            };
+            publication.statuses[index] = Some(status);
+        }
+        Ok(())
     }
 
     fn emit_cohort_output(
@@ -4529,11 +4552,17 @@ impl<S: ChunkSource> ChunkStore<S> {
 
     fn cohort_requires_batch(&self, sessions: &[GenerationSession]) -> bool {
         sessions.len() < 2 || sessions.iter().any(|session| {
+            if session.request().generation_target() != GenerationTarget::Full {
+                return true;
+            }
             let target = session.request().target();
-            session.request().generation_target() != GenerationTarget::Full
-                || self.resident_column(target.0, target.1)
-                    .is_some_and(|column| column.generation_stage() >= ChunkGenerationStage::Full)
-                || self.retained_output_column(session.pipeline(), target).is_some()
+            let resident_full = self.read(target.0, target.1, ChunkColumn::generation_stage)
+                .or_else(|| self.source.resident_column(target.0, target.1)
+                    .map(|column| column.generation_stage()))
+                .is_some_and(|stage| stage >= ChunkGenerationStage::Full);
+            (resident_full && self.source.resident_cohort_delivery()
+                    != crate::chunk::ResidentCohortDelivery::Terminal)
+                || (!resident_full && self.retained_output_column(session.pipeline(), target).is_some())
         })
     }
 
@@ -4543,7 +4572,15 @@ impl<S: ChunkSource> ChunkStore<S> {
         prepared: PreparedGenerationBatch<'a, S>,
     ) -> Result<PreparedGenerationBatch<'a, S>, ()> {
         if prepared.reused_columns.is_empty()
-            && !prepared.results.iter().any(|result| matches!(result, Some(Ok(Some(_)))))
+            && !prepared.results.iter().any(|result| matches!(
+                result,
+                Some(Ok(Some(crate::worldgen_session::GenerationRequestResult::Generated(_)))),
+            ))
+            && (self.source.resident_cohort_delivery() == crate::chunk::ResidentCohortDelivery::Terminal
+                || !prepared.results.iter().any(|result| matches!(
+                    result,
+                    Some(Ok(Some(crate::worldgen_session::GenerationRequestResult::Existing(_)))),
+                )))
         {
             return Ok(prepared);
         }
@@ -4612,15 +4649,17 @@ impl<S: ChunkSource> ChunkStore<S> {
             mut active_sessions,
             ..
         } = prepared;
-        let mut publication = self.new_cohort_publication(entries, results);
+        let mut publication = self.new_cohort_publication(entries, results.len());
+        let prepared_result =
+            self.emit_prepared_cohort_results(&mut publication, sessions, results, emit);
         let mut on_stable = |active_index: usize,
                              session: &GenerationSession,
                              result: crate::worldgen_session::GenerationRequestResult| {
             self.emit_cohort_output(&mut publication, &mut halo, active_index, session, result, emit)
         };
-        let cohort_result = self
-            .source
-            .request_generation_cohort(&mut active_sessions, &mut on_stable);
+        let cohort_result = prepared_result.and_then(|()| {
+            self.source.request_generation_cohort(&mut active_sessions, &mut on_stable)
+        });
         drop(on_stable);
         for (entry, active) in publication.entries.iter().zip(active_sessions) {
             sessions[entry.index] = active;
@@ -4707,12 +4746,17 @@ impl<S: ChunkSource> ChunkStore<S> {
             mut active_sessions,
             ..
         } = prepared;
-        let mut publication = self.new_cohort_publication(entries, results);
+        let mut publication = self.new_cohort_publication(entries, results.len());
+        let prepared_result =
+            self.emit_prepared_cohort_results(&mut publication, sessions, results, emit);
         let mut on_stable = |active_index, session: &GenerationSession, result| {
             self.emit_cohort_output(&mut publication, &mut halo, active_index, session, result, emit)
         };
-        let cohort_result = self.source
-            .request_generation_cohort_yielding(&mut active_sessions, &mut on_stable).await;
+        let cohort_result = match prepared_result {
+            Ok(()) => self.source
+                .request_generation_cohort_yielding(&mut active_sessions, &mut on_stable).await,
+            Err(error) => Err(error),
+        };
         drop(on_stable);
         for (entry, active) in publication.entries.iter().zip(active_sessions) {
             sessions[entry.index] = active;
@@ -7202,6 +7246,10 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
         self.source.generation_cohort_width_hint()
     }
 
+    fn resident_cohort_delivery(&self) -> crate::chunk::ResidentCohortDelivery {
+        self.source.resident_cohort_delivery()
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     fn request_generation_cohort(
         &self,
@@ -8707,6 +8755,64 @@ mod tests {
             &self,
         ) -> Option<&dyn crate::worldgen_session::RequestStageDriver> {
             Some(&self.driver)
+        }
+
+        fn resident_cohort_delivery(&self) -> crate::chunk::ResidentCohortDelivery {
+            if self.driver.feature_spill.is_some() {
+                crate::chunk::ResidentCohortDelivery::AfterSettlement
+            } else {
+                crate::chunk::ResidentCohortDelivery::Terminal
+            }
+        }
+
+        fn request_generation_batch(
+            &self,
+            sessions: &mut [GenerationSession],
+        ) -> Vec<Result<Option<crate::worldgen_session::GenerationRequestResult>, crate::worldgen_session::GenerationRequestError>> {
+            sessions.iter_mut().map(|session| {
+                let snapshot = crate::worldgen_session::RequestStageDriver::generate(&self.driver, session)?;
+                let Some((target, destination, _)) = self.driver.feature_spill else {
+                    return Ok(Some(crate::worldgen_session::GenerationRequestResult::Generated(snapshot)));
+                };
+                if session.request().target() != target {
+                    return Ok(Some(crate::worldgen_session::GenerationRequestResult::Generated(snapshot)));
+                }
+                let neighbour = (destination.x().div_euclid(16), destination.z().div_euclid(16));
+                let resident = session.resident_read(neighbour)?;
+                let column = resident
+                    .product::<ChunkColumn>(ResourceKey::OutputColumn)
+                    .or_else(|| resident.product::<ChunkColumn>(ResourceKey::MaterializedWorld))
+                    .expect("spill fixture has a retained neighbour prefix");
+                session.declare_packet_neighbours([neighbour])?;
+                session.complete_light_domain()?;
+                let snapshot = session.finalize_packet_snapshot_with_dependencies(
+                    snapshot.column().clone(), [(neighbour, (*column).clone())],
+                )?;
+                Ok(Some(crate::worldgen_session::GenerationRequestResult::Generated(snapshot)))
+            }).collect()
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        fn request_generation_cohort(
+            &self,
+            sessions: &mut [GenerationSession],
+            emit: &mut dyn FnMut(
+                usize,
+                &GenerationSession,
+                crate::worldgen_session::GenerationRequestResult,
+            ) -> Result<(), crate::worldgen_session::GenerationRequestError>,
+        ) -> Result<Vec<Result<(), crate::worldgen_session::GenerationRequestError>>, crate::worldgen_session::GenerationRequestError> {
+            let mut statuses = Vec::with_capacity(sessions.len());
+            for (index, session) in sessions.iter_mut().enumerate() {
+                if session.cancellation().is_cancelled() {
+                    statuses.push(Err(crate::worldgen_session::GenerationRequestError::Session(SessionError::Cancelled)));
+                    continue;
+                }
+                let snapshot = crate::worldgen_session::RequestStageDriver::generate(&self.driver, session)?;
+                emit(index, session, crate::worldgen_session::GenerationRequestResult::Generated(snapshot))?;
+                statuses.push(Ok(()));
+            }
+            Ok(statuses)
         }
 
         fn request_generation_cohort_yielding<'a>(
@@ -12190,6 +12296,217 @@ mod tests {
         )));
         assert!(store.generation_ledger().output_column(END_PIPELINE, (1, 0)).is_none());
         assert!(store.resident_column(1, 0).is_none());
+    }
+
+    fn resident_hit_cohort_fixture() -> (ChunkStore<ResumableSource>, Vec<GenerationSession>) {
+        let store = ChunkStore::with_capacity(
+            ResumableSource { driver: ResumableDriver::new(false) },
+            16,
+        );
+        let warm_request = crate::worldgen_session::GenerationRequest::new(
+            Dimension::End, (0, 1), GenerationTarget::Full, 0,
+        );
+        assert!(store.request_generation(warm_request, None).unwrap().is_some());
+        let mut warm = store.resident_column(0, 1).unwrap();
+        warm.set_block_id(3, 5, 7, Block::Dirt.default_state());
+        assert!(store.store_resident_column(0, 1, &warm));
+        store.source.driver.calls.store(0, Ordering::Relaxed);
+        let sessions = [(0, 0), (0, 1), (1, 0)].into_iter().map(|target| {
+            GenerationSession::new(crate::worldgen_session::GenerationRequest::new(
+                Dimension::End, target, GenerationTarget::Full, 0,
+            ))
+        }).collect();
+        (store, sessions)
+    }
+
+    fn assert_resident_hit_cohort_matches_batch(
+        store: &ChunkStore<ResumableSource>,
+        control: &ChunkStore<ResumableSource>,
+    ) {
+        use lodestone_worldgen::stage_schedule::END_PIPELINE;
+
+        for (x, z) in [(0, 0), (0, 1), (1, 0)] {
+            let column = store.resident_column(x, z).unwrap();
+            let expected = control.resident_column(x, z).unwrap();
+            assert_eq!(
+                crate::chunk_nbt::column_to_nbt(x, z, &column).unwrap(),
+                crate::chunk_nbt::column_to_nbt(x, z, &expected).unwrap(),
+                "resident output changed at ({x},{z})",
+            );
+            let ledger = store.generation_ledger();
+            let control_ledger = control.generation_ledger();
+            let output = ledger.output_column(END_PIPELINE, (x, z)).unwrap();
+            let expected_output = control_ledger.output_column(END_PIPELINE, (x, z)).unwrap();
+            assert_eq!(
+                crate::chunk_nbt::column_to_nbt(x, z, &output).unwrap(),
+                crate::chunk_nbt::column_to_nbt(x, z, &expected_output).unwrap(),
+                "published output changed at ({x},{z})",
+            );
+        }
+        assert_eq!(store.resident_column(0, 1).unwrap().block_state_id(3, 5, 7), Block::Dirt.default_state());
+        let actual = store.generation_ledger().stats();
+        let expected = control.generation_ledger().stats();
+        assert_eq!(
+            (actual.coordinates, actual.sources, actual.overlays, actual.products, actual.aggregates),
+            (expected.coordinates, expected.sources, expected.overlays, expected.products, expected.aggregates),
+        );
+        assert!(store.generation_ledger().pipeline_pins.is_empty());
+        assert!(store.cache.lock().unwrap().pins.is_empty());
+        let regions = store.generation_regions.state.lock().unwrap();
+        assert!(regions.pending.is_empty());
+        assert!(regions.active.is_empty());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn resident_hit_cohort_publishes_before_the_cold_suffix_finishes() {
+        use crate::worldgen_session::GenerationRequestResult;
+
+        let (control, mut control_sessions) = resident_hit_cohort_fixture();
+        let buffered = control.execute_generation_batch(&mut control_sessions);
+        assert!(buffered.iter().all(Result::is_ok), "{buffered:?}");
+        assert_eq!(control.source.driver.calls.load(Ordering::Relaxed), 2);
+        assert_ne!(control.source.driver.calls.load(Ordering::Relaxed), 1,
+            "the buffered control must fail the first-cold-output work count");
+
+        let (store, mut sessions) = resident_hit_cohort_fixture();
+        let mut observations = Vec::new();
+        let statuses = store.request_generation_cohort(&mut sessions, &mut |index, _, result| {
+            observations.push((index, store.source.driver.calls.load(Ordering::Relaxed)));
+            assert_eq!(matches!(result, GenerationRequestResult::Existing(_)), index == 1);
+            if index == 0 {
+                assert!(store.resident_column(0, 0).is_some());
+                assert!(store.resident_column(1, 0).is_none());
+            }
+            Ok(())
+        }).unwrap();
+
+        assert!(statuses.iter().all(Result::is_ok), "{statuses:?}");
+        assert_eq!(observations, [(1, 0), (0, 1), (2, 2)]);
+        assert_resident_hit_cohort_matches_batch(&store, &control);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cooperative_resident_hit_cohort_keeps_a_cold_tail_suspended() {
+        use lodestone_worldgen::stage_schedule::END_PIPELINE;
+
+        tokio::task::LocalSet::new().run_until(async {
+            let (control, mut control_sessions) = resident_hit_cohort_fixture();
+            let buffered = control.execute_generation_batch(&mut control_sessions);
+            assert!(buffered.iter().all(Result::is_ok), "{buffered:?}");
+            assert_eq!(control.source.driver.calls.load(Ordering::Relaxed), 2);
+
+            let (store, mut sessions) = resident_hit_cohort_fixture();
+            let emitted = std::cell::RefCell::new(Vec::new());
+            let mut emit = |index, _: &GenerationSession, _| {
+                emitted.borrow_mut().push(index);
+                Ok(())
+            };
+            let mut generation = store.request_generation_cohort_yielding(&mut sessions, &mut emit);
+            let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+            assert!(std::future::Future::poll(generation.as_mut(), &mut context).is_pending());
+            assert_eq!(*emitted.borrow(), [1, 0]);
+            assert_eq!(store.source.driver.calls.load(Ordering::Relaxed), 1);
+            assert!(store.generation_ledger().output_column(END_PIPELINE, (0, 0)).is_some());
+            assert!(store.generation_ledger().output_column(END_PIPELINE, (1, 0)).is_none());
+            assert!(store.resident_column(1, 0).is_none());
+            let statuses = generation.await.unwrap();
+            assert!(statuses.iter().all(Result::is_ok), "{statuses:?}");
+            assert_eq!(*emitted.borrow(), [1, 0, 2]);
+            assert_resident_hit_cohort_matches_batch(&store, &control);
+        }).await;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn rejected_resident_hit_cohort_releases_unstarted_cold_admissions() {
+        let (store, mut sessions) = resident_hit_cohort_fixture();
+        let error = store.request_generation_cohort(&mut sessions, &mut |index, _, _| {
+            assert_eq!(index, 1);
+            Err(crate::worldgen_session::GenerationRequestError::Boundary("consumer stopped".to_owned()))
+        }).unwrap_err();
+        assert!(matches!(error, crate::worldgen_session::GenerationRequestError::Boundary(message)
+            if message == "consumer stopped"));
+        assert_eq!(store.source.driver.calls.load(Ordering::Relaxed), 0);
+        assert_eq!(store.generation_ledger().stats().coordinates, 1);
+        assert!(store.generation_ledger().pipeline_pins.is_empty());
+        assert!(store.generation_regions.state.lock().unwrap().active.is_empty());
+        assert!(store.cache.lock().unwrap().pins.is_empty());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn resident_hit_cohort_waits_for_persistent_neighbor_spills() {
+        fn fixture() -> (ChunkStore<ResumableSource>, Vec<GenerationSession>) {
+            let store = ChunkStore::with_capacity(
+                ResumableSource {
+                    driver: ResumableDriver::with_feature_spill(
+                        (1, 0), BlockCoordinate::new(0, 4, 16), Block::Dirt.default_state(),
+                    ),
+                },
+                32,
+            );
+            let shaped = end_shaped_session_at((0, 1), 31, 0);
+            {
+                let mut ledger = store.generation_ledger();
+                ledger.admit(lodestone_worldgen::stage_schedule::END_PIPELINE, &[(0, 1)]).unwrap();
+                ledger.publish_session(lodestone_worldgen::stage_schedule::END_PIPELINE, &shaped).unwrap();
+            }
+            {
+                let halo = store.lease_halo(&[(0, 1)]).unwrap();
+                store.commit_generation(&halo, vec![((0, 1), ChunkColumn::new(0, 16))]).unwrap();
+            }
+            assert!(store.generation_ledger().output_column(
+                lodestone_worldgen::stage_schedule::END_PIPELINE, (0, 1),
+            ).is_none());
+            let sessions = [(0, 1), (0, 0), (1, 0)].into_iter().map(|target| {
+                GenerationSession::new(crate::worldgen_session::GenerationRequest::new(
+                    Dimension::End, target, GenerationTarget::Full, 1,
+                ))
+            }).collect();
+            (store, sessions)
+        }
+
+        let (control, mut control_sessions) = fixture();
+        let buffered = control.execute_generation_batch(&mut control_sessions);
+        assert!(buffered.iter().all(Result::is_ok), "{buffered:?}");
+        assert_eq!(control.resident_column(0, 1).unwrap().block_state_id(0, 4, 0), Block::Dirt.default_state());
+        let (store, mut sessions) = fixture();
+        assert_eq!(store.resident_cohort_delivery(), crate::chunk::ResidentCohortDelivery::AfterSettlement);
+        assert!(store.cohort_requires_batch(&sessions));
+        let mut emitted = Vec::new();
+        let statuses = store.request_generation_cohort(&mut sessions, &mut |index, _, _| {
+            assert_eq!(store.source.driver.calls.load(Ordering::Relaxed), 2);
+            assert_eq!(store.resident_column(0, 1).unwrap().block_state_id(0, 4, 0), Block::Dirt.default_state());
+            emitted.push(index);
+            Ok(())
+        }).unwrap();
+        assert!(statuses.iter().all(Result::is_ok), "{statuses:?}");
+        assert_eq!(emitted, [0, 1, 2]);
+        assert_eq!(control.source.driver.calls.load(Ordering::Relaxed), 2);
+        for (x, z) in [(0, 1), (0, 0), (1, 0)] {
+            assert_eq!(
+                crate::chunk_nbt::column_to_nbt(x, z, &store.resident_column(x, z).unwrap()).unwrap(),
+                crate::chunk_nbt::column_to_nbt(x, z, &control.resident_column(x, z).unwrap()).unwrap(),
+            );
+            let ledger = store.generation_ledger();
+            let control_ledger = control.generation_ledger();
+            let output = ledger.output_column(lodestone_worldgen::stage_schedule::END_PIPELINE, (x, z));
+            let expected = control_ledger.output_column(lodestone_worldgen::stage_schedule::END_PIPELINE, (x, z));
+            assert_eq!(
+                output.as_ref().map(|column| crate::chunk_nbt::column_to_nbt(x, z, column).unwrap()),
+                expected.as_ref().map(|column| crate::chunk_nbt::column_to_nbt(x, z, column).unwrap()),
+            );
+        }
+        let actual = store.generation_ledger().stats();
+        let expected = control.generation_ledger().stats();
+        assert_eq!(
+            (actual.coordinates, actual.sources, actual.overlays, actual.products, actual.aggregates),
+            (expected.coordinates, expected.sources, expected.overlays, expected.products, expected.aggregates),
+        );
+        assert!(store.generation_ledger().pipeline_pins.is_empty());
+        assert!(store.generation_regions.state.lock().unwrap().active.is_empty());
+        assert!(store.cache.lock().unwrap().pins.is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
