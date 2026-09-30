@@ -111,10 +111,11 @@ Everything the graph evaluates must preserve vanilla's IEEE-754 evaluation order
 short-circuits on an exact `0.0` first operand without evaluating the second (so the field walk must
 stay recursive descent, never a bottom-up sweep), no `mul_add`/FMA anywhere, no reassociation of an
 octave accumulation chain, and no folding a multiply until its first operand is proven constant
-and the exact short-circuit result is known (`-0.0` vs `0.0` diverge downstream). SIMD
-vectorization (`lodestone-worldgen-core`'s `noise/improved.rs`,
-nightly `#![feature(portable_simd)]`) lanes only independent lattice positions, never across an
-accumulation chain, for the same reason — it is the one place lanes are safe.
+and the exact short-circuit result is known (`-0.0` vs `0.0` diverge downstream).
+SIMD lanes evaluate independent gradient corners in `noise/improved.rs` and
+independent field-cell positions in `engine/field.rs`; neither vectorizes an
+accumulation chain. Improved noise uses nightly portable SIMD, while canonical
+field cells use `fearless_simd`'s token-generic kernels and scalar fallback.
 
 The geode distance field follows the same rule: each point's inverse-square-root term is added to
 the sampled noise offset first, then that rounded contribution is added to the running shell or
@@ -277,6 +278,9 @@ the materialization and mutation contract, not by physical cell layout.
 - `#![feature(portable_simd)]` (nightly, pinned in `rust-toolchain.toml`) — the noise kernel's only
   vectorised path; there is deliberately no scalar fallback, so as not to run two different
   implementations from one seed.
+- `fearless_simd` 1.0 and `fearless_simd_macros` 0.1 — canonical field cells
+  select a SIMD token once per cell and use one arithmetic body across native
+  and scalar backends. See [worldgen throughput](worldgen-throughput.md).
 - No other env vars or flags select engine behaviour; everything else is data through `Resolver`.
 
 ## Dependencies

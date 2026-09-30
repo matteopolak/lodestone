@@ -111,6 +111,8 @@ lodestone-nav = { path = "crates/plugins/lodestone-nav" }
 lodestone-autopilot = { path = "crates/plugins/lodestone-autopilot" }
 
 thiserror = "2"
+fearless_simd = "1.0"
+fearless_simd_macros = "0.1"
 zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 tempfile = "3"
 png = "0.18"

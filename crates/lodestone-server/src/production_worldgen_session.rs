@@ -1895,6 +1895,64 @@ where
     region.generate_target_owned_cohort_with_executor(sessions, plan, executor, on_stable)
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) async fn generate_cohort_yielding<S, F>(
+    source: &S,
+    sessions: &mut [GenerationSession],
+    on_stable: F,
+) -> Result<
+    Vec<Result<(), crate::worldgen_session::GenerationRequestError>>,
+    crate::worldgen_session::GenerationRequestError,
+>
+where
+    S: RegionGenerationSource,
+    F: FnMut(
+        usize,
+        &GenerationSession,
+        crate::worldgen_session::GenerationRequestResult,
+    ) -> Result<(), crate::worldgen_session::GenerationRequestError>,
+{
+    generate_cohort_with_cooperation(
+        source,
+        sessions,
+        &PersistentWorldgenExecutor,
+        on_stable,
+        crate::chunk::yield_to_browser,
+    ).await
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+async fn generate_cohort_with_cooperation<S, F, C, Y>(
+    source: &S,
+    sessions: &mut [GenerationSession],
+    executor: &dyn ImmutableComputeExecutor,
+    on_stable: F,
+    cooperate: C,
+) -> Result<
+    Vec<Result<(), crate::worldgen_session::GenerationRequestError>>,
+    crate::worldgen_session::GenerationRequestError,
+>
+where
+    S: RegionGenerationSource,
+    F: FnMut(
+        usize,
+        &GenerationSession,
+        crate::worldgen_session::GenerationRequestResult,
+    ) -> Result<(), crate::worldgen_session::GenerationRequestError>,
+    C: FnMut() -> Y,
+    Y: std::future::Future<Output = ()>,
+{
+    let plan = target_settlement_plan(
+        sessions,
+        S::Policy::target_owned_reverse_settlement(),
+    )?
+    .ok_or(crate::worldgen_session::GenerationRequestError::Unsupported)?;
+    let mut region = ProductionGenerationRegion::for_halo(source, &plan.context);
+    region.generate_target_owned_cohort_with_cooperation(
+        sessions, plan, executor, on_stable, cooperate,
+    ).await
+}
+
 #[cfg(target_arch = "wasm32")]
 pub(crate) async fn generate_batch_yielding<S>(
     source: &S,
@@ -1920,6 +1978,27 @@ where
             );
         }
         return results;
+    }
+
+    if S::Policy::target_owned_reverse_settlement()
+        && sessions.iter().all(|session| {
+            session.pipeline().dimension() == Dimension::Overworld
+                && session.request().generation_target() == GenerationTarget::Full
+        })
+    {
+        let mut outputs = (0..sessions.len()).map(|_| None).collect::<Vec<_>>();
+        let outcomes = match generate_cohort_yielding(
+            source,
+            sessions,
+            |index, _, output| {
+                outputs[index] = Some(output);
+                Ok(())
+            },
+        ).await {
+            Ok(outcomes) => outcomes,
+            Err(error) => return batch_generation_request_error(sessions.len(), error),
+        };
+        return collect_cohort_outputs(outcomes, outputs);
     }
 
     let halo = match required_generation_halo(sessions) {
@@ -3705,14 +3784,12 @@ mod tests {
 
         invocations.store(0, Ordering::Relaxed);
         let mut sessions = make_sessions();
-        let plan = target_settlement_plan(&sessions, true).unwrap().unwrap();
-        let mut region = ProductionGenerationRegion::for_halo(&source, &plan.context);
         let mut outputs = (0..targets.len()).map(|_| None).collect::<Vec<_>>();
         let mut emissions = Vec::new();
         let mut yields = 0;
-        let outcomes = region.generate_target_owned_cohort_with_cooperation(
+        let outcomes = generate_cohort_with_cooperation(
+            &source,
             &mut sessions,
-            plan,
             &executor,
             |index, session, output| {
                 assert!(session_output_complete(session));
@@ -3775,12 +3852,10 @@ mod tests {
         });
         sessions[0].cancellation().cancel();
         let cancel_during_yield = sessions[2].cancellation();
-        let plan = target_settlement_plan(&sessions, true).unwrap().unwrap();
-        let mut region = ProductionGenerationRegion::for_halo(&source, &plan.context);
         let mut emitted = Vec::new();
-        let outcomes = region.generate_target_owned_cohort_with_cooperation(
+        let outcomes = generate_cohort_with_cooperation(
+            &source,
             &mut sessions,
-            plan,
             &CountingExecutor {
                 dispatches: AtomicUsize::new(0),
                 jobs: AtomicUsize::new(0),
@@ -3811,6 +3886,89 @@ mod tests {
         assert!(session_output_complete(&sessions[1]));
         assert!(!session_output_complete(&sessions[0]));
         assert!(!session_output_complete(&sessions[2]));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn target_owned_cohort_cooperation_stops_on_publication_error() {
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let source = SettlementSource {
+            invocations: Arc::clone(&invocations),
+            source_invocations: None,
+            include_local: false,
+            include_east: false,
+        };
+        let mut sessions = (0..8).rev().map(|x| {
+            GenerationSession::new(GenerationRequest::new(
+                Dimension::Overworld,
+                (x, 0),
+                GenerationTarget::Full,
+                1,
+            ))
+        }).collect::<Vec<_>>();
+        let mut emitted = Vec::new();
+        let error = generate_cohort_with_cooperation(
+            &source,
+            &mut sessions,
+            &CountingExecutor {
+                dispatches: AtomicUsize::new(0),
+                jobs: AtomicUsize::new(0),
+            },
+            |index, _, _| {
+                emitted.push(index);
+                Err(crate::worldgen_session::GenerationRequestError::Boundary(
+                    "publication rejected".to_owned(),
+                ))
+            },
+            tokio::task::yield_now,
+        ).await.unwrap_err();
+        assert!(matches!(error, crate::worldgen_session::GenerationRequestError::Boundary(message)
+            if message == "publication rejected"));
+        assert_eq!(emitted, [7]);
+        assert!(invocations.load(Ordering::Relaxed) < 30);
+        assert!(!session_output_complete(&sessions[0]));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn target_owned_cohort_cooperation_propagates_machine_constructor_error() {
+        let source = SettlementSource {
+            invocations: Arc::new(AtomicUsize::new(0)),
+            source_invocations: None,
+            include_local: false,
+            include_east: false,
+        };
+        let mut sessions = [GenerationSession::new(GenerationRequest::new(
+            Dimension::Overworld,
+            (0, 0),
+            GenerationTarget::Full,
+            1,
+        ))];
+        let plan = target_settlement_plan(&sessions, true).unwrap().unwrap();
+        sessions[0] = GenerationSession::new(GenerationRequest::new(
+            Dimension::Overworld,
+            (0, 0),
+            GenerationTarget::Shaped,
+            1,
+        ));
+        let mut region = ProductionGenerationRegion::for_halo(&source, &plan.context);
+        let mut emitted = 0;
+        let error = region.generate_target_owned_cohort_with_cooperation(
+            &mut sessions,
+            plan,
+            &CountingExecutor {
+                dispatches: AtomicUsize::new(0),
+                jobs: AtomicUsize::new(0),
+            },
+            |_, _, _| {
+                emitted += 1;
+                Ok(())
+            },
+            tokio::task::yield_now,
+        ).await.unwrap_err();
+        assert!(matches!(error, crate::worldgen_session::GenerationRequestError::Session(
+            SessionError::CheckpointPipelineMismatch,
+        )));
+        assert_eq!(emitted, 0);
+        assert!(!session_output_complete(&sessions[0]));
     }
 
     #[test]

@@ -28,8 +28,9 @@
 //!
 //! # The boundary, and why `counters` is inside it
 //!
-//! This is a **leaf**: its only non-`std` dependency is `serde_json`, and it has
-//! zero code edges back into `lodestone-worldgen`. `counters` belongs here and
+//! This is a **leaf**: JSON parsing and portable SIMD are its external
+//! dependencies, and it has zero code edges back into `lodestone-worldgen`.
+//! `counters` belongs here and
 //! not in the parent for a measured reason — `density/chunk.rs` and `rng` call
 //! into it (8 call sites), and it depends back on
 //! [`density::Density::KIND_COUNT`] for two array sizes and a loop bound. That
@@ -48,12 +49,9 @@
 //! alongside their JVM dumps and drive these modules through the parent's
 //! re-exports, so they were not moved and their fixture paths are unchanged.
 
-// Unit 5: `std::simd` in the noise kernels. The workspace is pinned to nightly
-// (see `rust-toolchain.toml`) specifically so this needs **no** `#[cfg]`-selected
-// scalar fallback — a dual path is two worlds from one seed waiting to happen,
-// each arm individually "correct" and invisible to a single-arm test run. The one
-// vectorised kernel is `noise::improved::ImprovedNoise::sample_and_lerp`, gated
-// bit-exact against the JVM fixtures like everything else.
+// Improved noise uses one portable-SIMD implementation, gated bit-exact against
+// the JVM fixtures. Field-cell kernels use a separate token-generic SIMD API;
+// native and fallback tokens execute the same arithmetic body.
 #![feature(portable_simd)]
 
 pub mod counters;

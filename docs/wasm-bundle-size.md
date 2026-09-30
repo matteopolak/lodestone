@@ -6,9 +6,16 @@ The browser delivery consists of a page WebAssembly module, a dedicated server-w
 
 ## How it works
 
-`web/Trunk.toml` builds the page package and then stages the Whimscape-based resource archive, block report, curated sound files, and the worker bundle. The panorama art is inside the archive. `just wasm-sdk` verifies the source game assets first. `web/src/main.rs` fetches the page assets relative to the current page before installing them into the shared asset loader. Starting singleplayer loads `lodestone-server-worker-bootstrap.js`, which dynamically imports the worker glue and its sibling `lodestone-server-worker-wasm_bg.wasm`; the worker owns the integrated world and sends framed bytes over a `MessageChannel`.
+`web/Trunk.toml` builds the page package and then stages the Whimscape-based resource archive, block report, curated sound files, and the worker bundle. The panorama art is inside the archive. `just wasm-sdk` verifies the source game assets first. `web/src/main.rs` fetches the page assets relative to the current page before installing them into the shared asset loader. Starting singleplayer loads `lodestone-server-worker-bootstrap.js`, which selects the serial or threaded worker glue and its matching Wasm module; the worker owns the integrated world and sends framed bytes over a `MessageChannel`.
 
-The page and worker Cargo profiles use `opt-level = "z"`, `lto = "fat"`, one codegen unit, `panic = "abort"`, and `strip = true`. `opt-level = "z"` is intentional: measured compressed output is smaller than both `"s"` and `3`. The `strip` setting removes symbol and debug sections from the release artifact; the `wasm-bindgen` step adds only the exports and glue metadata needed by the browser.
+The page and worker Cargo profiles use `opt-level = "z"`, `lto = "fat"`, one codegen unit, `panic = "abort"`, and `strip = true`, with `lodestone-worldgen-core` overridden to optimization level `3`. Most code remains size-optimized; the field/noise core needs speed optimization even when the compilation target selects scalar SIMD fallback. The `strip` setting removes symbol and debug sections from the release artifact; the `wasm-bindgen` step adds only the exports and glue metadata needed by the browser.
+
+In the release browser seed-4242, render-distance-eight control, overriding only
+the core reduced full-view presentation from 44.403 to 35.440 seconds. Gzip cost
+rose by 11,631 bytes for the page and 19,149 bytes for the threaded worker;
+the final page remained below the existing ceiling at 5,745,662 bytes. These are
+single-run end-to-end samples, not isolated kernel CPU measurements. Compare
+both runtime and post-bindgen compressed size before changing this override.
 
 ## How to change it
 

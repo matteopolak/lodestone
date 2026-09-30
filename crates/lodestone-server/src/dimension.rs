@@ -676,7 +676,6 @@ impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
         self.primary.request_generation_batch(sessions)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     fn generation_cohort_width_hint(&self) -> Option<usize> {
         self.primary.generation_cohort_width_hint()
     }
@@ -692,6 +691,22 @@ impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
         ) -> Result<(), crate::worldgen_session::GenerationRequestError>,
     ) -> Result<Vec<Result<(), crate::worldgen_session::GenerationRequestError>>, crate::worldgen_session::GenerationRequestError> {
         self.primary.request_generation_cohort(sessions, emit)
+    }
+
+    #[cfg(any(target_arch = "wasm32", test))]
+    fn request_generation_cohort_yielding<'a>(
+        &'a self,
+        sessions: &'a mut [crate::worldgen_session::GenerationSession],
+        emit: &'a mut dyn FnMut(
+            usize,
+            &crate::worldgen_session::GenerationSession,
+            crate::worldgen_session::GenerationRequestResult,
+        ) -> Result<(), crate::worldgen_session::GenerationRequestError>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<
+        Vec<Result<(), crate::worldgen_session::GenerationRequestError>>,
+        crate::worldgen_session::GenerationRequestError,
+    >> + 'a>> {
+        self.primary.request_generation_cohort_yielding(sessions, emit)
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -868,7 +883,6 @@ mod tests {
                 .collect()
         }
 
-        #[cfg(not(target_arch = "wasm32"))]
         fn generation_cohort_width_hint(&self) -> Option<usize> {
             Some(7)
         }
@@ -892,6 +906,32 @@ mod tests {
                 )?;
             }
             Ok(sessions.iter().map(|_| Ok(())).collect())
+        }
+
+        fn request_generation_cohort_yielding<'a>(
+            &'a self,
+            sessions: &'a mut [crate::worldgen_session::GenerationSession],
+            emit: &'a mut dyn FnMut(
+                usize,
+                &crate::worldgen_session::GenerationSession,
+                crate::worldgen_session::GenerationRequestResult,
+            ) -> Result<(), crate::worldgen_session::GenerationRequestError>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<
+            Vec<Result<(), crate::worldgen_session::GenerationRequestError>>,
+            crate::worldgen_session::GenerationRequestError,
+        >> + 'a>> {
+            Box::pin(async move {
+                self.0.fetch_add(100, Ordering::Relaxed);
+                for (index, session) in sessions.iter().enumerate().rev() {
+                    emit(
+                        index,
+                        session,
+                        crate::worldgen_session::GenerationRequestResult::Existing(self.column(0, 0)),
+                    )?;
+                    tokio::task::yield_now().await;
+                }
+                Ok(sessions.iter().map(|_| Ok(())).collect())
+            })
         }
     }
 
@@ -937,6 +977,51 @@ mod tests {
             assert!(statuses.iter().all(Result::is_ok));
             assert_eq!(source.primary().0.load(Ordering::Relaxed), 11);
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dimensional_source_preserves_cooperative_cohort_through_arc_and_reference() {
+        let source = DimensionalSource::alone(
+            BatchSource(AtomicUsize::new(0)),
+            Dimension::Overworld,
+            crate::portal::PortalIndex::new(),
+        );
+        let forwarded = Arc::new(&source);
+        let boundary: &dyn ChunkSource = &forwarded;
+        let mut sessions = [(3, 0), (1, 0), (1, 0)].map(|target| {
+            crate::worldgen_session::GenerationSession::new(
+                crate::worldgen_session::GenerationRequest::new(
+                    lodestone_worldgen::stage_schedule::Dimension::Overworld,
+                    target,
+                    lodestone_worldgen::stage_schedule::GenerationTarget::Full,
+                    1,
+                ),
+            )
+        });
+        let mut emitted = Vec::new();
+        let statuses = boundary.request_generation_cohort_yielding(
+            &mut sessions,
+            &mut |index, session, output| {
+                assert_eq!(session.request().target(), [(3, 0), (1, 0), (1, 0)][index]);
+                assert!(matches!(output, crate::worldgen_session::GenerationRequestResult::Existing(_)));
+                emitted.push(index);
+                Ok(())
+            },
+        ).await.unwrap();
+        assert_eq!(boundary.generation_cohort_width_hint(), Some(7));
+        assert_eq!(emitted, [2, 1, 0]);
+        assert!(statuses.iter().all(Result::is_ok));
+        assert_eq!(source.primary().0.load(Ordering::Relaxed), 100);
+
+        let error = boundary.request_generation_cohort_yielding(
+            &mut sessions,
+            &mut |_, _, _| Err(crate::worldgen_session::GenerationRequestError::Boundary(
+                "publication rejected".to_owned(),
+            )),
+        ).await.unwrap_err();
+        assert!(matches!(error, crate::worldgen_session::GenerationRequestError::Boundary(message)
+            if message == "publication rejected"));
+        assert_eq!(source.primary().0.load(Ordering::Relaxed), 200);
     }
 
     /// The two arms of the scale, against inputs where they differ — and against
