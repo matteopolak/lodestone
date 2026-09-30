@@ -561,7 +561,7 @@ CONFINEMENT_RULES=(
   # Rayon is the native batch dispatcher only. The browser path uses the same
   # source algorithm through its yielding serial loop, so a new Rayon call
   # outside the target-confined chunk seam is a wasm trap risk.
-  "lodestone-server rayon-confinement|crates/lodestone-server/src|rayon::|chunk.rs,worldgen_dispatch.rs"
+  "lodestone-server rayon-confinement|crates/lodestone-server/src|rayon::|chunk.rs,worldgen_dispatch.rs,portal_native_tests.rs"
   "lodestone-worldgen instant-ban|crates/lodestone-worldgen/src|std::time::Instant|"
   "lodestone-worldgen systemtime-ban|crates/lodestone-worldgen/src|std::time::SystemTime|"
   "lodestone-particle instant-ban|crates/lodestone-particle/src|std::time::Instant|"

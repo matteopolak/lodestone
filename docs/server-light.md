@@ -74,8 +74,8 @@ returned layer and retained full-sky budget with full-height sampling, and check
 low neighbour ceiling produces a mismatch.
 When changing this path, compare every returned light column against a full-height volume,
 including retained sky and a dimension without skylight; a falsely low ceiling can silently
-erase a light source. The ignored `shared_initial_light_air_ceiling_timing` test and the
-`light_shared_initial_3x3` benchmark provide repeatable, non-flat timing inputs. The benchmark
+erase a light source. The `light_shared_initial_3x3` benchmark provides repeatable,
+non-flat timing inputs. The benchmark
 runs a full-scan control against the same nine columns in the same optimized binary; that
 control also forces block reads above the air ceiling, so it is not an exact pre-cutoff baseline.
 

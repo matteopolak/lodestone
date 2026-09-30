@@ -59,9 +59,9 @@ These post-bindgen artifacts use the worker-only speed profile above. Gzip is th
 
 | artifact | raw bytes | gzip -n -9 | JavaScript gzip |
 | --- | ---: | ---: | ---: |
-| page | 16,685,911 | 5,751,995 | 18,451 |
-| serial server worker | 18,524,925 | 5,873,575 | 5,808 |
-| threaded server worker | 18,448,290 | 5,834,858 | 7,084 |
+| page | 16,687,148 | 5,752,525 | 18,451 |
+| serial server worker | 18,534,786 | 5,878,659 | 5,807 |
+| threaded server worker | 18,457,288 | 5,836,979 | 7,085 |
 
 The page remains within the unchanged 5,800,000-byte gzip ceiling. Compared with the preceding core-only speed override, the worker modules cost approximately 18–20% more compressed bytes; that tradeoff must be checked against end-to-end generation and presentation latency. The merged resource archive, regenerated from the 26.2 definitions and Whimscape 26.1–26.3 r2, is 7,344,932 bytes with 16,166 entries and SHA-256 `faed8bee10b68692beae3d5bd51d4fecd88a3cce4a762f836178675fbff58163`. These are local staging measurements, not a compressed-transfer benchmark or a texture-coverage result.
 

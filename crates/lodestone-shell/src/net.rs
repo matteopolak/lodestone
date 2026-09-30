@@ -5001,7 +5001,7 @@ mod tests {
             });
             entered_rx.await.expect("slow tick started");
 
-            let started = std::time::Instant::now();
+            let started = crate::platform::Instant::now();
             let packet = tokio::spawn(async { 7_u8 });
             assert_eq!(packet.await.expect("packet task completed"), 7);
             let latency = started.elapsed();

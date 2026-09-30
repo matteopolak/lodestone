@@ -148,6 +148,61 @@ mod tests {
 
     use super::spawn_worldgen;
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropped_world_tick_handle_does_not_cancel_delayed_work() {
+        let shutdown = crate::integrated::ShutdownSignal::new();
+        let (sent, observed) = tokio::sync::oneshot::channel();
+        let task = crate::integrated::spawn_world_tick_task(&shutdown, async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = sent.send(37);
+        });
+        drop(task);
+        let result = tokio::time::timeout(Duration::from_secs(1), observed).await;
+        shutdown.trigger();
+        assert_eq!(result.expect("detached work was serviced").expect("work was not cancelled"), 37);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn explicit_world_tick_abort_and_shutdown_still_stop_work() {
+        for abort in [true, false] {
+            let shutdown = crate::integrated::ShutdownSignal::new();
+            let (entered, observed) = tokio::sync::oneshot::channel();
+            let mut task = crate::integrated::spawn_world_tick_task(&shutdown, async move {
+                let _ = entered.send(());
+                std::future::pending::<()>().await;
+            });
+            tokio::time::timeout(Duration::from_secs(1), observed).await.unwrap().unwrap();
+            if abort {
+                task.abort();
+            } else {
+                shutdown.trigger();
+            }
+            tokio::time::timeout(Duration::from_secs(1), task.join()).await.unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn detached_world_tick_still_observes_shutdown() {
+        struct ExitSignal(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for ExitSignal {
+            fn drop(&mut self) {
+                let _ = self.0.take().unwrap().send(());
+            }
+        }
+        let shutdown = crate::integrated::ShutdownSignal::new();
+        let (entered, observed) = tokio::sync::oneshot::channel();
+        let (exited, exit) = tokio::sync::oneshot::channel();
+        let task = crate::integrated::spawn_world_tick_task(&shutdown, async move {
+            let _exit = ExitSignal(Some(exited));
+            let _ = entered.send(());
+            std::future::pending::<()>().await;
+        });
+        drop(task);
+        tokio::time::timeout(Duration::from_secs(1), observed).await.unwrap().unwrap();
+        shutdown.trigger();
+        tokio::time::timeout(Duration::from_secs(1), exit).await.unwrap().unwrap();
+    }
+
     /// The result handoff must wake a current-thread runtime after the native
     /// worker has returned. A direct `spawn_blocking` call in this path is the
     /// failure shape this wrapper prevents from becoming a join stall.

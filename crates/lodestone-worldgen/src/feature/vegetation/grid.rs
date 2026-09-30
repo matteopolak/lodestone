@@ -1072,13 +1072,35 @@ impl VegGrid {
     }
 
     #[inline]
-    fn invalidate_height_caches(&self, lx: i32, lz: i32) {
+    fn update_live_heights(&self, lx: i32, y: i32, lz: i32, state: StateId) {
         let index = self.height_cache_index(lx, lz);
         let mut cache = self.height_cache[index].get();
-        cache[0] = HEIGHT_CACHE_UNSET;
-        cache[2] = HEIGHT_CACHE_UNSET;
-        cache[3] = HEIGHT_CACHE_UNSET;
-        self.height_cache[index].set(cache);
+        let mut facts = None;
+        let mut changed = false;
+        for lane in [0, 2, 3] {
+            let height = cache[lane];
+            if height == HEIGHT_CACHE_UNSET || y < height - 1 {
+                continue;
+            }
+            let occupied = match lane {
+                0 => !self.is_air_id(state),
+                2 => facts.get_or_insert_with(|| base_facts(state)).is_motion_blocking(),
+                3 => facts.get_or_insert_with(|| base_facts(state)).is_ocean_floor(),
+                _ => unreachable!(),
+            };
+            let next = if occupied {
+                height.max(y + 1)
+            } else if y == height - 1 {
+                HEIGHT_CACHE_UNSET
+            } else {
+                height
+            };
+            changed |= next != height;
+            cache[lane] = next;
+        }
+        if changed {
+            self.height_cache[index].set(cache);
+        }
     }
 
     #[inline]
@@ -1149,7 +1171,7 @@ impl VegGrid {
         if self.in_bounds_local(lx, lz) && y >= self.min_y && y < self.min_y + self.height {
             let key = self.overlay_key(lx, y, lz);
             self.blocks.insert_in_bounds(key, state);
-            self.invalidate_height_caches(lx, lz);
+            self.update_live_heights(lx, y, lz, state);
             if self.seeded_baseline.is_some() || self.sources.iter().all(Option::is_none) {
                 // Source-less fixtures store their immutable baseline in a
                 // separate sparse snapshot. Seeding after a prior probe must
@@ -1194,7 +1216,7 @@ impl VegGrid {
         }
         let (lx, lz) = self.to_local_exact(x, z);
         if self.in_bounds_local(lx, lz) {
-            self.invalidate_height_caches(lx, lz);
+            self.update_live_heights(lx, y, lz, state);
         }
         true
     }
@@ -1232,11 +1254,8 @@ impl VegGrid {
         }
         source.map_or((StateId::AIR, BaseStateFacts::air()), |source| {
             #[cfg(feature = "gen-counters")]
-            census::record_source_read(source, self.origin_x + lx, y, self.origin_z + lz, 2);
-            (
-                source.get_id(self.origin_x + lx, y, self.origin_z + lz),
-                source.get_base_facts(self.origin_x + lx, y, self.origin_z + lz),
-            )
+            census::record_source_read(source, self.origin_x + lx, y, self.origin_z + lz, 1);
+            source.get_id_and_facts(self.origin_x + lx, y, self.origin_z + lz)
         })
     }
 
@@ -1378,7 +1397,7 @@ impl VegGrid {
             let key = self.overlay_key(lx, y, lz);
             let previous = self.blocks.get_in_bounds(&key);
             self.blocks.insert_in_bounds(key, state);
-            self.invalidate_height_caches(lx, lz);
+            self.update_live_heights(lx, y, lz, state);
             if self.ore_entry_active {
                 if previous != Some(state) {
                     self.ore_writes.push((lx, y, lz));
@@ -2011,6 +2030,39 @@ mod heightmap_tests {
         assert_eq!(census::source_read_snapshot(), snapshot);
     }
 
+    #[cfg(feature = "gen-counters")]
+    #[test]
+    fn combined_height_read_visits_each_source_cell_once() {
+        let air = state("minecraft:air");
+        let stone = state("minecraft:stone");
+        for mut source in [
+            DenseBlockGrid::with_default(-16, 0, -32, 16, 16, 16, air),
+            DenseBlockGrid::with_default_raw(-16, 0, -32, 16, 16, 16, air),
+        ] {
+            source.set_id(-16, 2, -32, stone);
+            source.set_id(-16, 4, -32, stone);
+            let source = Arc::new(source);
+            let mut grid = VegGrid::with_sources(0, 16, -16, -32, 0, 16, move |dx, dz| {
+                ((dx, dz) == (0, 0)).then(|| Arc::clone(&source))
+            });
+            census::reset();
+            assert_eq!(grid.height_ocean_floor(-16, -32), 5);
+            assert_eq!(census::snapshot().height_scan_cells, 12);
+            let reads = census::source_read_snapshot();
+            assert!(reads.is_complete());
+            assert_eq!(reads.owner_count, 1);
+            assert_eq!(reads.owners().next().unwrap().reads, 12);
+
+            assert!(grid.set_id_if_in_bounds(-16, 4, -32, air));
+            census::reset();
+            assert_eq!(grid.height_ocean_floor(-16, -32), 3);
+            assert_eq!(census::snapshot().height_scan_cells, 14);
+            let reads = census::source_read_snapshot();
+            assert!(reads.is_complete());
+            assert_eq!(reads.owners().next().unwrap().reads, 13);
+        }
+    }
+
     #[test]
     fn p07_west_source_world_surface_wg_ignores_its_first_grass_write() {
         let (mut grid, air, grass, short_grass) = p07_source_grid();
@@ -2064,7 +2116,10 @@ mod heightmap_tests {
 
         // Seeding a changed baseline after a cached probe must invalidate the
         // fixture's WG lanes without making ordinary overlay writes do so.
+        census::reset();
         grid.seed_id(0, 10, 0, dirt);
+        assert_eq!(grid.height_world_surface(0, 0), 11);
+        assert_eq!(census::snapshot().height_scans, 0);
         assert_eq!(grid.height_world_surface_wg(0, 0), 11);
         assert_eq!(grid.height_ocean_floor_wg(0, 0), 11);
     }
@@ -2114,7 +2169,7 @@ mod heightmap_tests {
     }
 
     #[test]
-    fn all_heightmap_caches_invalidate_after_overlay_writes() {
+    fn all_heightmap_caches_observe_overlay_writes() {
         let mut grid = VegGrid::with_footprint(0, 16, 0, 0, 0, 1);
         let air = state("minecraft:air");
         let grass = state("minecraft:grass_block");
@@ -2273,6 +2328,69 @@ mod heightmap_tests {
     }
 
     #[test]
+    fn live_height_updates_preserve_below_top_writes_and_raise_known_lanes() {
+        let mut grid = feature_rich_grid();
+        let air = state("minecraft:air");
+        let dirt = state("minecraft:dirt");
+        let water = state("minecraft:water[level=0]");
+        for lane in [0, 2, 3] {
+            assert_eq!(grid.cached_height(0, 0, lane), None);
+        }
+        assert_eq!(grid.height_ocean_floor(0, 0), 5);
+        assert_eq!(grid.height_world_surface(0, 0), 9);
+        assert_eq!(grid.height_motion_blocking(0, 0), 7);
+        assert_eq!(grid.height_world_surface_wg(0, 0), 5);
+
+        census::reset();
+        for index in 0..100 {
+            assert!(grid.set_id_if_in_bounds(0, 0, 0, if index % 2 == 0 { air } else { dirt }));
+        }
+        assert_eq!(grid.height_ocean_floor(0, 0), 5);
+        assert_eq!(grid.height_world_surface(0, 0), 9);
+        assert_eq!(grid.height_motion_blocking(0, 0), 7);
+        assert!(grid.set_id_if_in_bounds(0, 10, 0, water));
+        assert_eq!(grid.height_ocean_floor(0, 0), 5);
+        assert_eq!(grid.height_world_surface(0, 0), 11);
+        assert_eq!(grid.height_motion_blocking(0, 0), 11);
+        assert_eq!(grid.height_world_surface_wg(0, 0), 5);
+        assert_eq!(census::snapshot().height_scans, 0);
+        assert_eq!(census::snapshot().height_scan_cells, 0);
+
+        assert!(grid.set_id_if_in_bounds(0, 10, 0, air));
+        assert_eq!(grid.cached_height(0, 0, 0), None);
+        assert_eq!(grid.cached_height(0, 0, 2), None);
+        assert_eq!(grid.cached_height(0, 0, 3), Some(5));
+        assert_eq!(grid.height_motion_blocking(0, 0), 7);
+        assert_eq!(grid.height_world_surface(0, 0), 9);
+        assert_eq!(census::snapshot().height_scans, 1);
+        assert_eq!(census::snapshot().height_scan_cells, 10);
+    }
+
+    #[test]
+    fn live_height_updates_follow_absolute_epoch_writes_and_target_switches() {
+        let mut grid = VegGrid::with_footprint(0, 16, -16, -16, 0, 1);
+        grid.install_epoch_overlay(crate::feature::region_view::Overlay::with_bounds(
+            -16, 1, 0, 16,
+        ));
+        let dirt = state("minecraft:dirt");
+        assert!(grid.seed_epoch_absolute_id(-16, 4, -16, dirt));
+        assert_eq!(grid.height_ocean_floor(-16, -16), 5);
+        census::reset();
+        assert!(grid.seed_epoch_absolute_id(-16, 1, -16, dirt));
+        assert!(grid.seed_epoch_absolute_id(-16, 7, -16, dirt));
+        assert!(grid.seed_epoch_absolute_id(0, 9, 0, dirt));
+        assert_eq!(grid.height_world_surface(-16, -16), 8);
+        assert_eq!(grid.height_motion_blocking(-16, -16), 8);
+        assert_eq!(grid.height_ocean_floor(-16, -16), 8);
+        assert_eq!(census::snapshot().height_scans, 0);
+        grid.begin_epoch_target(0, 0);
+        assert_eq!(grid.cached_height(0, 0, 0), None);
+        assert_eq!(grid.height_world_surface(0, 0), 10);
+        assert_eq!(census::snapshot().height_scans, 1);
+        assert_eq!(census::snapshot().height_scan_cells, 7);
+    }
+
+    #[test]
     fn removing_the_live_top_block_forces_a_fresh_live_walk() {
         let mut grid = feature_rich_grid();
         let air = state("minecraft:air");
@@ -2287,8 +2405,8 @@ mod heightmap_tests {
 
         let snapshot = census::snapshot();
         assert_eq!(snapshot.height_scans, 1);
-        assert_eq!(snapshot.height_scan_cells, 12);
-        assert_eq!(snapshot.height_primary_cells, 12);
+        assert_eq!(snapshot.height_scan_cells, 10);
+        assert_eq!(snapshot.height_primary_cells, 10);
         assert_eq!(snapshot.height_companion_tail_cells, 0);
         assert_eq!(grid.height_world_surface_wg(0, 0), 5);
     }

@@ -18,6 +18,13 @@ The launch epoch is registered by the worker's Rust entry point. `cancel_worker`
 
 After the server reports ready, the bootstrap calls the optional `sample_worker(epoch, callbackGapMs)` export on a one-second host timer. The gap comes from `performance.now()` between callbacks, so it includes time when the worker event loop could not run. Sampling ends when the export reports that the epoch is no longer active, or when cancellation, reset, or startup failure clears the timer. The Rust export posts `worker-health` records through the existing progress port; each includes tick count and witness, overrun count, MSPT, and callback gap. `observedTps` divides the tick-count delta by this measured callback interval; its first sample is null and paused intervals report zero. The existing `tps` field estimates capacity from tick work cost, not wall-time throughput: the console labels it `budget_tps` and reports `observed_tps` separately. Starting or cancelling a worker clears the delta baseline.
 
+Health samples also expose `tickWaitCount`, `tickWakeP95Ms`, `tickWakeMaxMs`,
+`tickDeadlineMaxMs`, `tickCatchUpCount`, `tickCooperativeYields`, `tickYieldMaxMs` and
+`tickShedCount`. Wake delay excludes deadline debt already present when a wait
+was requested. Low MSPT with high wake delay points to timer/executor service,
+not expensive simulation. The shared world deadline policy retains ordinary
+lateness and bounds recovery; it does not change connection timer semantics.
+
 At debug or trace level, the worker also installs a timing sink for production operations. A fixed phase array accumulates call count, requested item count, elapsed sum, and longest call. The health callback drains nonempty phases into one `worldgen-timing` message, and the render worker forwards them to the page console. Normal logging levels do not install the sink, so generation performs no timing clock reads. Collection uses the existing console-log level rather than requiring a tracing subscriber.
 
 An optional `lodestone_server::connection_progress` sink samples

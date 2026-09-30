@@ -172,10 +172,15 @@ three compatible live lanes. This demand-aware ordering avoids chasing a
 deeper companion that the caller did not request, while an ocean-first query
 still resolves all live lanes in one downward walk. The immutable
 `WORLD_SURFACE_WG` lane remains a separate source walk. Subsequent placement
-modifiers become constant-time `Cell` reads. Any overlay write invalidates
-only its own column for the three mutable predicates, including fixture
-seeding, so later probes observe the same read-after-write state as an
-uncached scan. The cache is private to a `VegGrid`; it is not shared across
+modifiers become constant-time `Cell` reads. Writes preserve known live lanes
+below their supporting top. A matching state at or above a known height raises
+it directly; removing its supporting top invalidates only that predicate for
+a later downward scan. Unknown lanes stay unknown. Ordinary writes leave WG
+lanes unchanged; source-less fixture seeding updates its immutable baseline and
+invalidates WG lanes, and target switches reset every lane. Live source-backed
+scans fetch the canonical state and physical facts together from one dense cell,
+while explicit overlay AIR still suppresses source fallback. The cache is
+private to a `VegGrid`; it is not shared across
 worker threads and does not change source-grid immutability. The vegetation
 census exposes total, primary, and companion-tail cell counts for bounded
 experiments.

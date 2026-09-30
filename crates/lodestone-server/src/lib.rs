@@ -698,7 +698,7 @@ pub use server::serve_connection_with_access_and_state;
 #[cfg(not(target_arch = "wasm32"))]
 pub use server::{OnlineModeConfig, serve_connection_with_online_mode};
 pub use tick::{
-    BlockTickFeed, ExplosionFeed, OwnerTickStats, PhaseStats, TickClock, TickPhase, TickStats, WorstPhaseWindow,
+    BlockTickFeed, ExplosionFeed, OwnerTickStats, PhaseStats, TickClock, TickPhase, TickScheduleStats, TickStats, WorstPhaseWindow,
     TICK_HISTORY_LEN,
 };
 pub use ticket::{

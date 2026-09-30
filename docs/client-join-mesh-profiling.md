@@ -40,6 +40,10 @@ is not inferred from unchanged GPU uploads. Movement counts and comparison
 elapsed sums subtract start from stop; the maximum comparison time remains a
 session-lifetime maximum. Unknown adapter routes are excluded, and concurrent
 counter reads need not describe one atomic packet application.
+The schema-23 `server_tick.schedule_at_end` snapshot reports rolling wake-delay
+p95 and session-lifetime wake/deadline maxima, catch-up admissions, recovery
+yields and shed ticks. These include the whole active session, not only movement;
+they separate executor service delay from the existing MSPT work measurement.
 The default walking path holds forward, sprint, and jump. The optional flight
 path requests creative mode through the integrated connection, waits for the
 server's flight grant, then uses two jump presses to engage the normal flight

@@ -128,6 +128,14 @@ pub fn sample_worker(epoch: u32, callback_gap_ms: f64) -> bool {
                 ("tps", JsValue::from_f64(stats.tps)),
                 ("observedTps", observed_tps.map_or(JsValue::NULL, JsValue::from_f64)),
                 ("callbackGapMs", JsValue::from_f64(callback_gap_ms)),
+                ("tickWaitCount", JsValue::from_f64(stats.schedule.wait_count as f64)),
+                ("tickWakeP95Ms", JsValue::from_f64(stats.schedule.service_lateness_p95_ms)),
+                ("tickWakeMaxMs", JsValue::from_f64(stats.schedule.service_lateness_max_ms)),
+                ("tickDeadlineMaxMs", JsValue::from_f64(stats.schedule.deadline_lateness_max_ms)),
+                ("tickCatchUpCount", JsValue::from_f64(stats.schedule.catch_up_ticks as f64)),
+                ("tickCooperativeYields", JsValue::from_f64(stats.schedule.cooperative_yields as f64)),
+                ("tickYieldMaxMs", JsValue::from_f64(stats.schedule.cooperative_yield_max_ms)),
+                ("tickShedCount", JsValue::from_f64(stats.schedule.shed_ticks as f64)),
             ] {
                 let _ = js_sys::Reflect::set(&message, &JsValue::from_str(key), &value);
             }

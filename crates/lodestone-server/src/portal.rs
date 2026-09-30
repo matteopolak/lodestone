@@ -3239,51 +3239,8 @@ mod tests {
         }
     }
 
-    /// **The fix, as a magnitude claim.** A cold dimension's site search must
-    /// warm more than one distinct chunk column — the geometric fact this
-    /// prefetch exists to exploit — and it must do so from more than one OS
-    /// thread, which is the difference between "parallel" and "still serial
-    /// but through a different function". Both numbers are predicted from the
-    /// search's own fixed 33 x 33 block footprint rather than merely asserted
-    /// non-zero: `origin = (0, _, 0)` spans chunk x/z each in `{-1, 0, 1}`
-    /// (`(-16).div_euclid(16) == -1`, `16.div_euclid(16) == 1`), so exactly
-    /// **9** distinct columns, never more and never fewer.
-    #[test]
-    fn a_cold_dimensions_site_search_warms_its_columns_in_parallel() {
-        let world = ParallelProbeWorld {
-            floor_top: 30,
-            resident: false,
-            columns_touched: Mutex::new(std::collections::HashSet::new()),
-            threads_seen: Mutex::new(std::collections::HashSet::new()),
-            first_columns: std::sync::Barrier::new(2),
-            first_columns_seen: AtomicUsize::new(0),
-        };
-        let origin = BlockPos::new(0, 40, 0);
-        // Run the production path inside a small private pool. The shared
-        // dispatcher is intentionally busy during the full crate suite, and
-        // its admission fallback is allowed to serialize a batch under load.
-        // A private pool isolates this gate from that legitimate contention;
-        // `create_portal` still reaches `generate_columns_parallel`, and the
-        // source hook still uses the production `run_worldgen_jobs` seam.
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(2)
-            .build()
-            .expect("portal parallelism probe pool must build");
-        pool.install(|| {
-            let _ = create_portal(&world, Dimension::Nether, origin, Axis::X);
-        });
-
-        assert_eq!(
-            world.columns_touched.lock().unwrap().len(),
-            9,
-            "the 33x33 footprint around a chunk-aligned-ish origin spans exactly 9 columns"
-        );
-        let threads = world.threads_seen.lock().unwrap().len();
-        assert!(
-            threads > 1,
-            "a 9-column prefetch used only {threads} thread(s) — the fan-out did not engage"
-        );
-    }
+    #[cfg(not(target_arch = "wasm32"))]
+    include!("portal_native_tests.rs");
 
     /// **The control.** A world where every chunk already reports resident
     /// must touch `.column()` **zero** times: `create_portal`'s own scan
