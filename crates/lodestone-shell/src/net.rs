@@ -365,6 +365,7 @@ struct ActionRelaySender {
     latest_tick_end: Arc<Mutex<Option<QueuedAction>>>,
     next_sequence: Arc<AtomicU64>,
     dropped_controls: Arc<AtomicU64>,
+    ready: Arc<Notify>,
 }
 
 /// Receiver counterpart to [`ActionRelaySender`]. The small local pending
@@ -377,6 +378,7 @@ pub(crate) struct ActionRelayReceiver {
     latest_tick_end: Arc<Mutex<Option<QueuedAction>>>,
     pending: Mutex<VecDeque<QueuedAction>>,
     control_closed: AtomicBool,
+    ready: Arc<Notify>,
 }
 
 fn action_relay() -> (ActionRelaySender, ActionRelayReceiver) {
@@ -384,6 +386,7 @@ fn action_relay() -> (ActionRelaySender, ActionRelayReceiver) {
     let latest_move = Arc::new(Mutex::new(None));
     let latest_tick_end = Arc::new(Mutex::new(None));
     let dropped_controls = Arc::new(AtomicU64::new(0));
+    let ready = Arc::new(Notify::new());
     (
         ActionRelaySender {
             control_tx,
@@ -391,6 +394,7 @@ fn action_relay() -> (ActionRelaySender, ActionRelayReceiver) {
             latest_tick_end: Arc::clone(&latest_tick_end),
             next_sequence: Arc::new(AtomicU64::new(0)),
             dropped_controls,
+            ready: Arc::clone(&ready),
         },
         ActionRelayReceiver {
             control_rx,
@@ -398,6 +402,7 @@ fn action_relay() -> (ActionRelaySender, ActionRelayReceiver) {
             latest_tick_end,
             pending: Mutex::new(VecDeque::new()),
             control_closed: AtomicBool::new(false),
+            ready,
         },
     )
 }
@@ -406,7 +411,7 @@ impl ActionRelaySender {
     fn send(&self, action: ClientAction) -> ActionAdmission {
         let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);
         let queued = QueuedAction { sequence, action };
-        if matches!(queued.action, ClientAction::Move { .. }) {
+        let admission = if matches!(queued.action, ClientAction::Move { .. }) {
             let mut latest = self
                 .latest_move
                 .lock()
@@ -437,7 +442,16 @@ impl ActionRelaySender {
                 }
                 Err(mpsc::TrySendError::Disconnected(_)) => ActionAdmission::Closed,
             }
+        };
+        if matches!(
+            admission,
+            ActionAdmission::Accepted
+                | ActionAdmission::MovementCoalesced
+                | ActionAdmission::TickEndCoalesced
+        ) {
+            self.ready.notify_one();
         }
+        admission
     }
 }
 
@@ -2013,8 +2027,7 @@ impl Drop for NetClient {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         self.relay_drained.notify_one();
-        // Browser: there is no handle to join — see the `thread` field. Setting `stop`
-        // above is the whole teardown.
+        self.action_tx.ready.notify_one();
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(t) = self.thread.take() {
             let _ = t.join();
@@ -3095,6 +3108,12 @@ async fn run_async(
         // generic "stream closed" every other disconnect also produces.
         let mut pending_transfer: Option<(String, i32)> = None;
         'session: loop {
+            let actions_ready = action_rx.ready.notified();
+            tokio::pin!(actions_ready);
+            actions_ready.as_mut().enable();
+            if stop.load(Ordering::SeqCst) {
+                break;
+            }
             // Flush queued outbound actions first so player movement (queued at
             // 20 Hz) reaches the client promptly rather than waiting on the next
             // inbound event. `send_action` is sync and cheap.
@@ -3295,60 +3314,20 @@ async fn run_async(
                     }
                 }
             }
-            // A short timeout keeps the outbound drain responsive even when the
-            // server is quiet (no inbound events to wake us).
-            //
-            // **Native only.** `tokio::time::timeout` needs a timer driver, which
-            // comes from the entered `current_thread` runtime this function's
-            // native caller builds (see this file's `run`) — but on `wasm32`
-            // there is no entered runtime at all (`spawn_local` is not
-            // `#[tokio::main]`), the same gap `read_packet_timed`'s own doc
-            // comment already names for the read side. The two symptoms are not
-            // the same, though, and the difference is worth recording: a naive
-            // guess would be that `timeout()` just never *fires* (the 15 ms
-            // never elapses, degrading gracefully to an untimed wait). Measured
-            // instead, with a one-shot `tracing::debug!` bracketing the call
-            // during the wasm32 join stall this diagnoses: the "enter" line logs
-            // exactly once per session and the "exit" line **never logs at
-            // all**, even though `events.recv()` already has a backlog of
-            // `ChunkLoaded` events queued and would resolve immediately on its
-            // own. That rules out "the sleep never elapses" — the call hangs on
-            // its *first* poll, before the inner future is ever reached, which
-            // is consistent with `tokio::time::timeout`'s own deadline
-            // computation reaching for a clock with no driver behind it on this
-            // target (the same `Instant`/`SystemTime` trap class `lodestone-time`
-            // exists to confine elsewhere in this crate — see `crate::spawn`'s
-            // doc comment for the sibling case in `lodestone-server`).
-            //
-            // Once this call stops returning, this loop stops looping: it never
-            // reaches `events.recv()` again, so the bounded `ClientEvent`
-            // channel (`DEFAULT_EVENT_BUFFER` deep) fills, `Driver::run`'s own
-            // `self.events.send(event).await` then blocks, and *that* task stops
-            // calling `read_packet` — which is what starves the reader half of
-            // the `memory_pair` duplex `CLAUDE.md` localised this stall to. The
-            // near-full buffer was a downstream symptom of this call never
-            // returning, not an undersized constant: `DEFAULT_MEMORY_BUFFER`
-            // stays untouched.
-            //
-            // The fix is not "a working wasm32 timer" — there is no timer driver
-            // to build one on top of without a new dependency — it is to stop
-            // asking for one. An untimed `events.recv()` gives up the "outbound
-            // actions flush even when the server is quiet" property this
-            // comment's first line describes, which matters least exactly when
-            // it is missing least: a live session's server keeps producing
-            // `ClientEvent`s (movement/entity sync, chunk churn) at well under
-            // 15 ms in practice, so the loop wakes on its own. A genuinely idle
-            // connection (nothing queued to send *and* nothing arriving) has
-            // nothing that needs flushing anyway. Same accepted, documented gap
-            // as `read_timeout` just above — not a silent one.
+            // Native polling also services stop and local control channels.
             #[cfg(target_arch = "wasm32")]
-            tracing::trace!(target: "netbuf", "events:recv (untimed on wasm32)");
+            tracing::trace!(target: "netbuf", "events:recv or outbound action");
             #[cfg(target_arch = "wasm32")]
             let netbuf_timeout_result: Result<Option<ClientEvent>, tokio::time::error::Elapsed> =
-                Ok(events.recv().await);
+                tokio::select! {
+                    _ = &mut actions_ready => continue 'session,
+                    event = events.recv() => Ok(event),
+                };
             #[cfg(not(target_arch = "wasm32"))]
-            let netbuf_timeout_result =
-                tokio::time::timeout(Duration::from_millis(15), events.recv()).await;
+            let netbuf_timeout_result = tokio::select! {
+                _ = &mut actions_ready => continue 'session,
+                result = tokio::time::timeout(Duration::from_millis(15), events.recv()) => result,
+            };
             match netbuf_timeout_result {
                 Ok(Some(event)) => {
                     // The policy decision is the *routing*
@@ -6754,6 +6733,74 @@ mod tests {
         assert_eq!(actions.try_recv().unwrap(), a);
         assert_eq!(actions.try_recv().unwrap(), b);
         assert!(actions.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn outbound_relay_wakes_without_inbound_traffic_and_preserves_later_wakes() {
+        let (sender, receiver) = action_relay();
+        let (_inbound_tx, mut inbound_rx) = tokio::sync::mpsc::channel::<ClientEvent>(1);
+        let budget = Duration::from_secs(1);
+
+        assert_eq!(sender.send(ClientAction::EndClientTick), ActionAdmission::Accepted);
+        let retained = receiver.ready.notified();
+        tokio::pin!(retained);
+        retained.as_mut().enable();
+        assert_eq!(receiver.try_recv().unwrap(), ClientAction::EndClientTick);
+        assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
+        assert_eq!(sender.send(ClientAction::PlayerLoaded), ActionAdmission::Accepted);
+        tokio::time::timeout(budget, retained)
+            .await
+            .expect("the notification retained before draining must complete");
+        tokio::time::timeout(budget, receiver.ready.notified())
+            .await
+            .expect("a later action must retain its own wake");
+        assert_eq!(receiver.try_recv().unwrap(), ClientAction::PlayerLoaded);
+
+        let idle = receiver.ready.notified();
+        tokio::pin!(idle);
+        idle.as_mut().enable();
+        assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
+        tokio::time::timeout(budget, async {
+            tokio::join!(
+                async {
+                    tokio::select! {
+                        _ = idle => {}
+                        event = inbound_rx.recv() => panic!("unexpected inbound event: {event:?}"),
+                    }
+                },
+                async {
+                    tokio::task::yield_now().await;
+                    assert_eq!(sender.send(ClientAction::PlayerLoaded), ActionAdmission::Accepted);
+                },
+            );
+        })
+        .await
+        .expect("an action queued after the idle drain must wake without inbound traffic");
+        assert_eq!(receiver.try_recv().unwrap(), ClientAction::PlayerLoaded);
+
+        let movement = ClientAction::Move {
+            pos: Vec3::new(1.0, 2.0, 3.0),
+            rotation: Rotation::new(10.0, 0.0),
+            on_ground: true,
+            horizontal_collision: false,
+        };
+        for (action, coalesced) in [
+            (movement, ActionAdmission::MovementCoalesced),
+            (ClientAction::EndClientTick, ActionAdmission::TickEndCoalesced),
+        ] {
+            assert_eq!(sender.send(action.clone()), ActionAdmission::Accepted);
+            tokio::time::timeout(budget, receiver.ready.notified())
+                .await
+                .expect("the first replaceable action must notify");
+            let replaced = receiver.ready.notified();
+            tokio::pin!(replaced);
+            replaced.as_mut().enable();
+            assert_eq!(sender.send(action.clone()), coalesced);
+            tokio::time::timeout(budget, replaced)
+                .await
+                .expect("a coalesced action must notify again");
+            assert_eq!(receiver.try_recv().unwrap(), action);
+        }
     }
 
     #[test]
