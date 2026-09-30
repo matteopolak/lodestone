@@ -795,7 +795,7 @@ where
     )?;
     let mut winners = HashMap::new();
     let mut settled_winners = HashMap::new();
-    if let Some(settlement) = settlement.as_ref() {
+    if let Some(settlement) = settlement.as_ref().filter(|_| persist_cross_target_spills) {
         for (spill, ordinal) in &settlement.owner_spills {
             let destination = BlockCoordinate::new(
                 spill.position.0,
@@ -837,7 +837,7 @@ where
             continue;
         }
         let mut transaction = session.begin_mutable_source(source, key, source_order as u64)?;
-        if let Some(settlement) = settlement.as_ref() {
+        if let Some(settlement) = settlement.as_ref().filter(|_| persist_cross_target_spills) {
             for (spill, ordinal) in settlement
                 .owner_spills
                 .iter()

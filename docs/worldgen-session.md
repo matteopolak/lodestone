@@ -332,10 +332,15 @@ The world-owned ledger indexes pending overlays by destination chunk, so a
 checkpoint visits only the buckets in the request halo rather than scanning all
 historical writes. After a destination `OUTPUT` product is available, its
 bucket is folded into that product in one ordered batch and the pending values
-are retired. Nonpersistent sources use the same product-backed path; sources
-that retain complete columns may retire a write as soon as the source accepts
-the snapshot. A destination output product is authoritative: an identical
-later write is a no-op and any conflicting write is rejected. Leading-edge
+are retired. Outgoing FEATURES writes enter this ledger only when the source's
+`target_spills_persist` policy requires cross-target persistence. Overworld and
+Nether retain temporary decoration evidence in their stage sidecars instead;
+their requested outputs are reconstructed from canonical target settlement,
+not historical neighbour writes. Target-local settlement state remains
+checkpointed. End retains outgoing mutations until their destination settles.
+Sources that retain complete columns may retire a persistent write as soon as
+the source accepts the snapshot. A destination output product is authoritative:
+an identical later write is a no-op and any conflicting write is rejected. Leading-edge
 writes remain overlays only until the destination output is published, then
 they are folded in one ordered batch. Admission evicts the least recently used
 closed coordinate bundles when the coordinate ceiling is reached; active
@@ -364,6 +369,13 @@ Changes to the
 commit order, budgets, checkpoint validation, or revision rules need controls
 for out-of-order completion, duplicate writes, rollback, incomplete sources,
 oversized values, and cancellation.
+
+The transient-spill regression uses seed 4242 and targets `(-11,16)` through
+`(-9,16)` with a zero-overlay ledger budget. Its StateId digests were captured
+from the production batch before changing spill retention, using 64-bit FNV
+in `(y,z,x)` order. They establish unchanged output for that boundary, not
+independent generation parity. Keep the separate End persistence and
+halo-visited-to-own-target controls when changing this policy.
 
 ## Configuration
 

@@ -13219,6 +13219,46 @@ mod tests {
     }
 
     #[test]
+    fn overworld_target_owned_batches_do_not_retain_transactional_spills() {
+        let store = ChunkStore::with_capacity(crate::overworld_chunk_source(4242), 512);
+        store.generation_ledger().limits.overlays_per_pipeline = 0;
+        let mut sessions = [(-11, 16), (-10, 16), (-9, 16)]
+            .into_iter()
+            .map(|target| {
+                GenerationSession::new(crate::worldgen_session::GenerationRequest::new(
+                    Dimension::Overworld,
+                    target,
+                    GenerationTarget::Full,
+                    1,
+                ))
+            })
+            .collect::<Vec<_>>();
+        let results = ChunkSource::request_generation_batch(&store, &mut sessions);
+        let captured = [0xf102cbb7fdab078b_u64, 0xf0f2af453b40ecef, 0xec7398d94f1a0b75];
+        for ((session, result), expected) in sessions.iter().zip(results).zip(captured) {
+            let output = result.unwrap().unwrap();
+            let column = match output {
+                crate::worldgen_session::GenerationRequestResult::Existing(column) => column,
+                crate::worldgen_session::GenerationRequestResult::Generated(snapshot) => {
+                    snapshot.column().clone()
+                }
+            };
+            let (cx, cz) = session.request().target();
+            let mut digest = 0xcbf29ce484222325_u64;
+            for y in column.min_y..column.min_y + column.height {
+                for z in 0..16 {
+                    for x in 0..16 {
+                        digest ^= u64::from(column.block_state_id(x, y, z).raw());
+                        digest = digest.wrapping_mul(0x100000001b3);
+                    }
+                }
+            }
+            assert_eq!(digest, expected, "target ({cx}, {cz}) changed from captured output");
+        }
+        assert_eq!(store.generation_ledger().stats().overlays, 0);
+    }
+
+    #[test]
     fn overworld_small_batches_resume_overlapping_frontiers() {
         let store = ChunkStore::new(crate::overworld_chunk_source(42));
         let mut first_row = (0..16)
@@ -13244,21 +13284,17 @@ mod tests {
 
         let target = (20_000, -19_999);
         let destination = BlockCoordinate::new(320_013, 50, -319_984);
-        let prior_spill = first_row[1]
-            .committed_mutations()
-            .find(|mutation| mutation.provenance().destination() == destination)
-            .expect("the east target must have committed the boundary spill");
-        assert_eq!(
-            (
-                prior_spill.provenance().target(),
-                prior_spill.provenance().source(),
-                prior_spill.provenance().ordinal(),
-            ),
-            ((20_001, -20_000), (20_001, -20_000), 973),
-        );
-        let prior_state = *prior_spill
-            .get::<StateId>()
-            .expect("feature spill is a block-state mutation");
+        let checkpoint = first_row[1].export_checkpoint();
+        let spills = checkpoint.sidecars().iter()
+            .find(|(key, _)| key.coordinate() == (20_001, -20_000)
+                && key.sidecar() == lodestone_worldgen::stage_schedule::SidecarKey::DecorationSpills)
+            .and_then(|(_, sidecar)| sidecar.get::<Vec<crate::worldgen_lifecycle::LifecycleSpill>>())
+            .expect("the east target retains its decoration sidecar");
+        let prior_spill = spills.iter()
+            .find(|spill| spill.position == (destination.x(), destination.y(), destination.z()))
+            .expect("the decoration sidecar preserves the boundary spill");
+        assert_eq!(prior_spill.source, (20_001, -20_000));
+        let prior_state = prior_spill.state;
         let direct = crate::overworld_chunk_source(42).column(target.0, target.1);
         let direct_state = direct.block_state_id(13, 50, 0);
         assert_ne!(
@@ -13280,13 +13316,6 @@ mod tests {
             "overlapping target {target:?} failed: {:?}",
             results[0],
         );
-        let receipt = next_row[0]
-            .feature_winner_receipts()
-            .copied()
-            .find(|receipt| receipt.destination() == destination)
-            .expect("the target-owned winner is retained through output commit");
-        assert_eq!(receipt.owner(), target);
-        assert_eq!(receipt.state(), direct_state);
         let output_state = match results[0].as_ref().unwrap().as_ref().unwrap() {
             crate::worldgen_session::GenerationRequestResult::Existing(column) => {
                 column.block_state_id(13, 50, 0)
@@ -13295,7 +13324,7 @@ mod tests {
                 snapshot.column().block_state_id(13, 50, 0)
             }
         };
-        assert_eq!(output_state, receipt.state());
+        assert_eq!(output_state, direct_state);
         let checkpoint = store
             .generation_ledger()
             .checkpoint(
