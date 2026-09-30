@@ -187,6 +187,14 @@ impl InflightBatch {
     }
 }
 
+impl InflightBatch {
+    fn has_live_requests(&self) -> bool {
+        self.requests.iter().enumerate().any(|(index, request)| {
+            !self.request_was_emitted(index) && !request.cancellation.is_cancelled()
+        })
+    }
+}
+
 fn map_batch_result<S: ChunkSource + ?Sized>(
     source: &S,
     request: &BatchRequest,
@@ -923,9 +931,6 @@ pub struct ColumnPipeline<S: ?Sized> {
     /// **emission order is the order columns were handed to the pool**, not the
     /// order they finish in. Pairing them here (rather than indexing a `coords`
     /// vector) is what lets the spawn order itself be dynamic.
-    #[cfg(not(target_arch = "wasm32"))]
-    inflight: VecDeque<InflightBatch>,
-    #[cfg(target_arch = "wasm32")]
     inflight: VecDeque<InflightBatch>,
 }
 
@@ -1157,21 +1162,8 @@ impl<S: ChunkSource + ?Sized + 'static> ColumnPipeline<S> {
         self.total += added;
     }
 
-    /// Withdraws still-pending columns the client has been told to forget,
-    /// returning how many were withdrawn.
-    ///
-    /// `ViewTracker` records a column as `loaded` the moment it decides to send it,
-    /// so its `loaded` set means *owed* rather than *delivered* — which is what lets
-    /// the join seed the whole square up front. A player who steps across a boundary
-    /// and straight back therefore forgets a column that is still sitting in this
-    /// queue, and without this it would be sent afterwards: the client loads a column
-    /// outside its own view and never forgets it again, and the next step re-adds the
-    /// same coordinate so it goes out twice. The pending-send contract drops
-    /// entries that became irrelevant for exactly this reason.
-    ///
-    /// In-flight columns are cancelled cooperatively. A running source call is
-    /// allowed to finish, but its result is suppressed and its request token is
-    /// visible to stage drivers.
+    /// Withdraw owed columns and release batches with no live requests.
+    /// Running native work cancels cooperatively; its results are suppressed.
     pub(crate) fn cancel(&mut self, dropped: &std::collections::HashSet<(i32, i32)>) -> usize {
         let removed = self.queue.cancel(dropped);
         let ready_before = self.ready.len();
@@ -1191,6 +1183,7 @@ impl<S: ChunkSource + ?Sized + 'static> ColumnPipeline<S> {
                 }
             }
         }
+        self.inflight.retain(InflightBatch::has_live_requests);
         // `remaining()` is `total - emitted`, and the `select!` branch is gated on
         // it: leaving `total` alone would keep the branch enabled with nothing to
         // hand back, and `next` would spin returning `None`.
@@ -2453,6 +2446,7 @@ mod tests {
 
         let dropped = [(0, 0)].into_iter().collect();
         assert_eq!(pipeline.cancel(&dropped), 1);
+        assert!(pipeline.inflight.is_empty(), "fully cancelled work must release pipeline ownership");
         tokio::time::timeout(Duration::from_secs(1), async {
             while source.cancelled.load(Ordering::SeqCst) == 0 {
                 tokio::task::yield_now().await;

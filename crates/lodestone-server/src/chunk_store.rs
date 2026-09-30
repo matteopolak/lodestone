@@ -312,20 +312,44 @@ impl GenerationInFlight {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn wait(&self) {
+    fn wait(&self, cancellation: &crate::worldgen_session::RequestCancellation) -> Result<(), ()> {
         let mut guard = self.gate.lock().expect("generation waiter lock poisoned");
-        while !self.completed.load(Ordering::Acquire) {
-            guard = self
+        loop {
+            if cancellation.is_cancelled() {
+                return Err(());
+            }
+            if self.completed.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            (guard, _) = self
                 .wake
-                .wait(guard)
+                .wait_timeout(guard, std::time::Duration::from_millis(10))
                 .expect("generation waiter lock poisoned");
         }
     }
 
     #[cfg(target_arch = "wasm32")]
-    async fn wait_yielding(&self) {
-        while !self.completed.load(Ordering::Acquire) {
-            crate::chunk::yield_to_browser().await;
+    async fn wait_yielding(
+        &self,
+        cancellation: &crate::worldgen_session::RequestCancellation,
+    ) -> Result<(), ()> {
+        self.wait_yielding_with(cancellation, crate::chunk::yield_to_browser).await
+    }
+
+    #[cfg(any(target_arch = "wasm32", test))]
+    async fn wait_yielding_with<Wait: std::future::Future<Output = ()>>(
+        &self,
+        cancellation: &crate::worldgen_session::RequestCancellation,
+        mut wait: impl FnMut() -> Wait,
+    ) -> Result<(), ()> {
+        loop {
+            if cancellation.is_cancelled() {
+                return Err(());
+            }
+            if self.completed.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            wait().await;
         }
     }
 
@@ -336,6 +360,8 @@ impl GenerationInFlight {
                 snapshot.column().clone()
             }
         });
+        #[cfg(not(target_arch = "wasm32"))]
+        let _guard = self.gate.lock().expect("generation waiter lock poisoned");
         *self.result.lock().expect("generation result lock poisoned") = column;
         self.completed.store(true, Ordering::Release);
         self.wake.notify_all();
@@ -346,6 +372,46 @@ impl GenerationInFlight {
             .lock()
             .expect("generation result lock poisoned")
             .clone()
+    }
+}
+
+enum GenerationAdmission<'a> {
+    Leader(GenerationLeader<'a>),
+    Follower(Arc<GenerationInFlight>),
+}
+
+struct GenerationLeader<'a> {
+    in_flight: &'a Mutex<HashMap<GenerationRequestKey, Arc<GenerationInFlight>>>,
+    key: GenerationRequestKey,
+    slot: Arc<GenerationInFlight>,
+    completed: bool,
+}
+
+impl GenerationLeader<'_> {
+    fn finish(
+        mut self,
+        result: &Result<
+            crate::worldgen_session::GenerationRequestResult,
+            GenerationSessionExecutionError,
+        >,
+    ) {
+        self.slot.complete(result.as_ref().ok());
+        self.completed = true;
+    }
+}
+
+impl Drop for GenerationLeader<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.slot.complete(None);
+        }
+        let mut in_flight = self.in_flight.lock().expect("generation in-flight lock poisoned");
+        if in_flight
+            .get(&self.key)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.slot))
+        {
+            in_flight.remove(&self.key);
+        }
     }
 }
 
@@ -3670,41 +3736,22 @@ impl<S> ChunkStore<S> {
     fn begin_generation(
         &self,
         key: GenerationRequestKey,
-    ) -> (Arc<GenerationInFlight>, bool) {
+    ) -> GenerationAdmission<'_> {
         let mut in_flight = self
             .generation_in_flight
             .lock()
             .expect("generation in-flight lock poisoned");
         if let Some(slot) = in_flight.get(&key) {
-            return (Arc::clone(slot), false);
+            return GenerationAdmission::Follower(Arc::clone(slot));
         }
         let slot = Arc::new(GenerationInFlight::new());
         in_flight.insert(key, Arc::clone(&slot));
-        (slot, true)
-    }
-
-    fn finish_generation(
-        &self,
-        key: GenerationRequestKey,
-        slot: &Arc<GenerationInFlight>,
-        result: &Result<
-            crate::worldgen_session::GenerationRequestResult,
-            GenerationSessionExecutionError,
-        >,
-    ) {
-        // Publish before removal so a caller that observes this slot cannot
-        // become a second leader between completion and map cleanup.
-        slot.complete(result.as_ref().ok());
-        let mut in_flight = self
-            .generation_in_flight
-            .lock()
-            .expect("generation in-flight lock poisoned");
-        if in_flight
-            .get(&key)
-            .is_some_and(|current| Arc::ptr_eq(current, slot))
-        {
-            in_flight.remove(&key);
-        }
+        GenerationAdmission::Leader(GenerationLeader {
+            in_flight: &self.generation_in_flight,
+            key,
+            slot,
+            completed: false,
+        })
     }
 
     // The four accessors below are `#[cfg(test)]` rather than
@@ -5484,25 +5531,32 @@ impl<S: ChunkSource> ChunkStore<S> {
             GenerationTarget::Shaped => ChunkGenerationStage::Shaped,
             GenerationTarget::Full => ChunkGenerationStage::Full,
         };
+        let cancellation = session.cancellation();
         loop {
-            let (slot, leader) = self.begin_generation(key);
-            if !leader {
-                slot.wait();
-                if let Some(column) = slot.result() {
-                    return Ok(crate::worldgen_session::GenerationRequestResult::Existing(column));
-                }
-                if let Some(column) = self.resident_column(request.target().0, request.target().1)
-                    && column.generation_stage() >= required_stage
-                {
-                    return Ok(crate::worldgen_session::GenerationRequestResult::Existing(column));
-                }
-                if let Some(column) = self.retained_output_column(session.pipeline(), request.target()) {
-                    return Ok(crate::worldgen_session::GenerationRequestResult::Existing(column));
-                }
-                continue;
+            if cancellation.is_cancelled() {
+                return Err(GenerationSessionExecutionError::Session(SessionError::Cancelled));
             }
+            let leader = match self.begin_generation(key) {
+                GenerationAdmission::Leader(leader) => leader,
+                GenerationAdmission::Follower(slot) => {
+                    slot.wait(&cancellation)
+                        .map_err(|_| GenerationSessionExecutionError::Session(SessionError::Cancelled))?;
+                    if let Some(column) = slot.result() {
+                        return Ok(crate::worldgen_session::GenerationRequestResult::Existing(column));
+                    }
+                    if let Some(column) = self.resident_column(request.target().0, request.target().1)
+                        && column.generation_stage() >= required_stage
+                    {
+                        return Ok(crate::worldgen_session::GenerationRequestResult::Existing(column));
+                    }
+                    if let Some(column) = self.retained_output_column(session.pipeline(), request.target()) {
+                        return Ok(crate::worldgen_session::GenerationRequestResult::Existing(column));
+                    }
+                    continue;
+                }
+            };
             let result = self.execute_generation_session_inner(session);
-            self.finish_generation(key, &slot, &result);
+            leader.finish(&result);
             return result;
         }
     }
@@ -5657,25 +5711,32 @@ impl<S: ChunkSource> ChunkStore<S> {
             GenerationTarget::Shaped => ChunkGenerationStage::Shaped,
             GenerationTarget::Full => ChunkGenerationStage::Full,
         };
+        let cancellation = session.cancellation();
         loop {
-            let (slot, leader) = self.begin_generation(key);
-            if !leader {
-                slot.wait_yielding().await;
-                if let Some(column) = slot.result() {
-                    return Ok(crate::worldgen_session::GenerationRequestResult::Existing(column));
-                }
-                if let Some(column) = self.resident_column(request.target().0, request.target().1)
-                    && column.generation_stage() >= required_stage
-                {
-                    return Ok(crate::worldgen_session::GenerationRequestResult::Existing(column));
-                }
-                if let Some(column) = self.retained_output_column(session.pipeline(), request.target()) {
-                    return Ok(crate::worldgen_session::GenerationRequestResult::Existing(column));
-                }
-                continue;
+            if cancellation.is_cancelled() {
+                return Err(GenerationSessionExecutionError::Session(SessionError::Cancelled));
             }
+            let leader = match self.begin_generation(key) {
+                GenerationAdmission::Leader(leader) => leader,
+                GenerationAdmission::Follower(slot) => {
+                    slot.wait_yielding(&cancellation).await
+                        .map_err(|_| GenerationSessionExecutionError::Session(SessionError::Cancelled))?;
+                    if let Some(column) = slot.result() {
+                        return Ok(crate::worldgen_session::GenerationRequestResult::Existing(column));
+                    }
+                    if let Some(column) = self.resident_column(request.target().0, request.target().1)
+                        && column.generation_stage() >= required_stage
+                    {
+                        return Ok(crate::worldgen_session::GenerationRequestResult::Existing(column));
+                    }
+                    if let Some(column) = self.retained_output_column(session.pipeline(), request.target()) {
+                        return Ok(crate::worldgen_session::GenerationRequestResult::Existing(column));
+                    }
+                    continue;
+                }
+            };
             let result = self.execute_generation_session_yielding_inner(session).await;
-            self.finish_generation(key, &slot, &result);
+            leader.finish(&result);
             return result;
         }
     }
@@ -6839,22 +6900,32 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
         {
             let key = Self::generation_key(request);
             let mut session = session;
+            let cancellation = session.as_deref()
+                .map(GenerationSession::cancellation)
+                .unwrap_or_else(crate::worldgen_session::RequestCancellation::new);
             let execution = loop {
-                let (slot, leader) = self.begin_generation(key);
-                if !leader {
-                    slot.wait();
-                    if let Some(column) = slot.result() {
-                        crate::world_spawn::record_existing_hit();
-                        break Ok(crate::worldgen_session::GenerationRequestResult::Existing(column));
-                    }
-                    if let Some(column) = self.resident_column(request.target().0, request.target().1)
-                        && column.generation_stage() >= required_stage
-                    {
-                        crate::world_spawn::record_existing_hit();
-                        break Ok(crate::worldgen_session::GenerationRequestResult::Existing(column));
-                    }
-                    continue;
+                if cancellation.is_cancelled() {
+                    break Err(GenerationSessionExecutionError::Session(SessionError::Cancelled));
                 }
+                let leader = match self.begin_generation(key) {
+                    GenerationAdmission::Leader(leader) => leader,
+                    GenerationAdmission::Follower(slot) => {
+                        if slot.wait(&cancellation).is_err() {
+                            break Err(GenerationSessionExecutionError::Session(SessionError::Cancelled));
+                        }
+                        if let Some(column) = slot.result() {
+                            crate::world_spawn::record_existing_hit();
+                            break Ok(crate::worldgen_session::GenerationRequestResult::Existing(column));
+                        }
+                        if let Some(column) = self.resident_column(request.target().0, request.target().1)
+                            && column.generation_stage() >= required_stage
+                        {
+                            crate::world_spawn::record_existing_hit();
+                            break Ok(crate::worldgen_session::GenerationRequestResult::Existing(column));
+                        }
+                        continue;
+                    }
+                };
                 crate::world_spawn::record_request_session_leader();
                 let execution = match session.as_deref_mut() {
                     Some(session) => self.execute_generation_session_inner(session),
@@ -6863,7 +6934,7 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
                         self.execute_generation_session_inner(&mut owned)
                     }
                 };
-                self.finish_generation(key, &slot, &execution);
+                leader.finish(&execution);
                 if matches!(
                     &execution,
                     Err(GenerationSessionExecutionError::Commit(
@@ -6972,22 +7043,32 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
             }
             let key = Self::generation_key(request);
             let mut session = session;
+            let cancellation = session.as_deref()
+                .map(GenerationSession::cancellation)
+                .unwrap_or_else(crate::worldgen_session::RequestCancellation::new);
             let execution = loop {
-                let (slot, leader) = self.begin_generation(key);
-                if !leader {
-                    slot.wait_yielding().await;
-                    if let Some(column) = slot.result() {
-                        crate::world_spawn::record_existing_hit();
-                        break Ok(crate::worldgen_session::GenerationRequestResult::Existing(column));
-                    }
-                    if let Some(column) = self.resident_column(request.target().0, request.target().1)
-                        && column.generation_stage() >= required_stage
-                    {
-                        crate::world_spawn::record_existing_hit();
-                        break Ok(crate::worldgen_session::GenerationRequestResult::Existing(column));
-                    }
-                    continue;
+                if cancellation.is_cancelled() {
+                    break Err(GenerationSessionExecutionError::Session(SessionError::Cancelled));
                 }
+                let leader = match self.begin_generation(key) {
+                    GenerationAdmission::Leader(leader) => leader,
+                    GenerationAdmission::Follower(slot) => {
+                        if slot.wait_yielding(&cancellation).await.is_err() {
+                            break Err(GenerationSessionExecutionError::Session(SessionError::Cancelled));
+                        }
+                        if let Some(column) = slot.result() {
+                            crate::world_spawn::record_existing_hit();
+                            break Ok(crate::worldgen_session::GenerationRequestResult::Existing(column));
+                        }
+                        if let Some(column) = self.resident_column(request.target().0, request.target().1)
+                            && column.generation_stage() >= required_stage
+                        {
+                            crate::world_spawn::record_existing_hit();
+                            break Ok(crate::worldgen_session::GenerationRequestResult::Existing(column));
+                        }
+                        continue;
+                    }
+                };
                 crate::world_spawn::record_request_session_leader();
                 let execution = match session.as_deref_mut() {
                     Some(session) => self.execute_generation_session_yielding_inner(session).await,
@@ -6996,7 +7077,7 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
                         self.execute_generation_session_yielding_inner(&mut owned).await
                     }
                 };
-                self.finish_generation(key, &slot, &execution);
+                leader.finish(&execution);
                 if matches!(
                     &execution,
                     Err(GenerationSessionExecutionError::Commit(
@@ -13605,6 +13686,120 @@ mod tests {
         assert_eq!(after_checkpoint.committed_mutation_order(), before_checkpoint.committed_mutation_order());
         assert_eq!(after_checkpoint.current_revision(), before_checkpoint.current_revision());
         assert_eq!(ledger.frontier(identity, (0, 0)).unwrap().records(), before_checkpoint.frontiers()[0].1);
+    }
+
+    #[test]
+    fn generation_dropped_leader_completes_followers_and_releases_admission() {
+        let store = ChunkStore::new(CountingSource::new());
+        let key = GenerationRequestKey {
+            dimension: Dimension::End,
+            target: (3, -2),
+            generation_target: GenerationTarget::Full,
+            dependency_radius: 0,
+        };
+        let mut generation = Box::pin(async {
+            let GenerationAdmission::Leader(leader) = store.begin_generation(key) else {
+                panic!("first request must lead");
+            };
+            std::future::pending::<()>().await;
+            leader.finish(&Err(GenerationSessionExecutionError::MissingDriver));
+        });
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(std::future::Future::poll(generation.as_mut(), &mut context).is_pending());
+        let GenerationAdmission::Follower(slot) = store.begin_generation(key) else {
+            panic!("same request must follow");
+        };
+        assert!(!slot.completed.load(Ordering::Acquire));
+        drop(generation);
+        assert!(slot.completed.load(Ordering::Acquire));
+        assert!(slot.result().is_none());
+        assert_eq!(store.generation_in_flight.lock().unwrap().len(), 0);
+        let cancellation = crate::worldgen_session::RequestCancellation::new();
+        let mut wait = Box::pin(slot.wait_yielding_with(&cancellation, std::future::pending));
+        assert!(matches!(
+            std::future::Future::poll(wait.as_mut(), &mut context),
+            std::task::Poll::Ready(Ok(())),
+        ));
+        let GenerationAdmission::Leader(leader) = store.begin_generation(key) else {
+            panic!("abandoned request must admit a new leader");
+        };
+        let successful_slot = Arc::clone(&leader.slot);
+        leader.finish(&Ok(crate::worldgen_session::GenerationRequestResult::Existing(
+            ChunkColumn::new(-32, 2),
+        )));
+        assert_eq!(store.generation_in_flight.lock().unwrap().len(), 0);
+        let column = successful_slot.result().expect("completion keeps its column");
+        assert_eq!((column.min_y, column.height), (-32, 2));
+    }
+
+    #[test]
+    fn generation_cancelled_follower_leaves_an_unfinished_leader() {
+        let store = ChunkStore::new(CountingSource::new());
+        let request = crate::worldgen_session::GenerationRequest::new(
+            Dimension::End, (3, -2), GenerationTarget::Full, 0,
+        );
+        let key = ChunkStore::<CountingSource>::generation_key(request);
+        let GenerationAdmission::Leader(leader) = store.begin_generation(key) else {
+            panic!("first request must lead");
+        };
+        let GenerationAdmission::Follower(slot) = store.begin_generation(key) else {
+            panic!("same request must follow");
+        };
+        let cancellation = crate::worldgen_session::RequestCancellation::new();
+        let mut wait = Box::pin(slot.wait_yielding_with(&cancellation, || {
+            let mut yielded = false;
+            std::future::poll_fn(move |_| {
+                if yielded {
+                    std::task::Poll::Ready(())
+                } else {
+                    yielded = true;
+                    std::task::Poll::Pending
+                }
+            })
+        }));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(std::future::Future::poll(wait.as_mut(), &mut context).is_pending());
+        cancellation.cancel();
+        assert!(matches!(
+            std::future::Future::poll(wait.as_mut(), &mut context),
+            std::task::Poll::Ready(Err(())),
+        ));
+        assert!(!slot.completed.load(Ordering::Acquire));
+        assert_eq!(store.generation_in_flight.lock().unwrap().len(), 1);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            assert_eq!(slot.wait(&cancellation), Err(()));
+            let mut session = GenerationSession::with_cancellation(request, cancellation.clone());
+            assert!(ChunkSource::request_generation(&store, request, Some(&mut session)).is_err());
+            assert_eq!(store.source.calls(), 0);
+            drop(leader);
+            assert!(ChunkSource::request_generation(&store, request, Some(&mut session)).is_err());
+            assert_eq!(store.generation_in_flight.lock().unwrap().len(), 0);
+            assert_eq!(store.source.calls(), 0);
+        }
+        #[cfg(target_arch = "wasm32")]
+        drop(leader);
+    }
+
+    #[test]
+    #[should_panic(expected = "abandoned leader leaves its follower unfinished")]
+    fn generation_abandoned_leader_negative_control() {
+        let store = ChunkStore::new(CountingSource::new());
+        let key = GenerationRequestKey {
+            dimension: Dimension::End,
+            target: (3, -2),
+            generation_target: GenerationTarget::Full,
+            dependency_radius: 0,
+        };
+        let GenerationAdmission::Leader(leader) = store.begin_generation(key) else {
+            panic!("first request must lead");
+        };
+        let slot = Arc::clone(&leader.slot);
+        std::mem::forget(leader);
+        assert!(
+            slot.completed.load(Ordering::Acquire),
+            "abandoned leader leaves its follower unfinished",
+        );
     }
 
     #[test]
