@@ -10,6 +10,16 @@ Dimension travel has a separate opaque transition cover. It hides the old dimens
 
 `TerrainMesh` keeps a per-section settlement ledger keyed by `SectionKey`. A ready mesh enters the renderer ledger only after `app/redraw.rs` calls `RenderState::upload_section`; a `SnapshotOutcome::Empty` enters the empty ledger without an upload. Deferred or queued sections remain absent from both ledgers. `TerrainMesh::column_mesh_settled` checks the decoded local column and every section in the active `ChunkWorld` extent, so scheduler-wide pending counts, visible-section counts, and unrelated uploaded columns cannot release the gate.
 
+Each renderer, presented, and empty membership ledger uses `ColumnSectionSet`,
+which groups packed section bits by column coordinates and vertical origin.
+The first 64 section indices fit in an inline word; taller custom dimensions
+grow numeric words rather than allocating a hash table of section keys. The
+usual single-origin column needs no inner allocation. A column reset or unload
+removes only that column's membership rather than scanning every resident
+section. Distinct `min_y` values remain separate groups, and empty groups and
+columns are removed. This is the ledger's storage representation, not a second
+cache or index, and unloads need no lookup of an already removed world column.
+
 Ongoing streaming also tracks presented coverage separately from latest-revision
 settlement. Rebuilding a section invalidates the strict ledger but does not
 erase geometry already handed to the GPU. A fresh column decode or unload
@@ -41,7 +51,7 @@ The transition boundary depends on the wire event order: a changed-dimension res
 
 ## How to change it
 
-Change the section ledger and its column predicate in `crates/lodestone-shell/src/mesher.rs`. Change the `Sim` facade and post-drain readiness check in `crates/lodestone-shell/src/sim/meshing.rs`, and keep the renderer acknowledgement immediately after `RenderState::upload_section` in `crates/lodestone-shell/src/app/redraw.rs`. Session observations belong in `crates/lodestone-shell/src/sim/session.rs`; launch scope belongs in `crates/lodestone-shell/src/app/session.rs`; the remote phase clamp belongs in `crates/lodestone-shell/src/app/menus.rs`; transition reset behavior belongs in `crates/lodestone-shell/src/sim/dimension.rs`. Grid geometry and palette live in `crates/lodestone-shell/src/menu/render/`. If the event transport changes, preserve the transition boundary before old-column removal and keep ordinary unloads and same-dimension respawns as controls.
+Change the section ledger and its column predicate in `crates/lodestone-shell/src/mesher.rs`; change grouped membership storage in `crates/lodestone-shell/src/mesher/readiness.rs`. Keep full section identity and remove empty groups when changing that storage. Change the `Sim` facade and post-drain readiness check in `crates/lodestone-shell/src/sim/meshing.rs`, and keep the renderer acknowledgement immediately after `RenderState::upload_section` in `crates/lodestone-shell/src/app/redraw.rs`. Session observations belong in `crates/lodestone-shell/src/sim/session.rs`; launch scope belongs in `crates/lodestone-shell/src/app/session.rs`; the remote phase clamp belongs in `crates/lodestone-shell/src/app/menus.rs`; transition reset behavior belongs in `crates/lodestone-shell/src/sim/dimension.rs`. Grid geometry and palette live in `crates/lodestone-shell/src/menu/render/`. If the event transport changes, preserve the transition boundary before old-column removal and keep ordinary unloads and same-dimension respawns as controls.
 
 Do not derive readiness from the progress numerator, the scheduler's global pending count, or the set of visible sections. A fresh decode of a column must clear that column's old ledger before it is remeshed. If the renderer hand-off boundary changes, update the deferred `PlayerLoaded` send and the negative controls together. Keep the send retryable when the outbound control relay is full.
 

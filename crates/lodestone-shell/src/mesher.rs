@@ -107,12 +107,15 @@ use crate::net::NetClient;
 mod face;
 mod fluid;
 mod model;
+mod readiness;
 mod snapshot;
 #[cfg(any(target_arch = "wasm32", test))]
 mod browser_queue;
 
 #[cfg(target_arch = "wasm32")]
 use browser_queue::{BrowserMeshBacklog, CaptureSource, SectionIntent};
+
+use readiness::ColumnSectionSet;
 
 pub use face::mesh_snapshot;
 pub use fluid::{mesh_snapshot_fluids, mesh_snapshot_fluids_at, snapshot_visibility};
@@ -1504,15 +1507,15 @@ pub struct TerrainMesh {
     /// may be rebuilt, while this set advances only after `RenderState` receives
     /// the result. The loading gate must use the latter boundary, or one frame
     /// can be presented with a CPU result that has not reached the GPU yet.
-    rendered_sections: HashSet<SectionKey>,
+    rendered_sections: ColumnSectionSet,
     /// Renderer-owned geometry remains present while its replacement is pending.
-    presented_sections: HashSet<SectionKey>,
+    presented_sections: ColumnSectionSet,
     /// Sections whose latest snapshot explicitly returned [`SnapshotOutcome::Empty`].
     /// An all-air section is a settled result, but only after the snapshot path
     /// says so; deriving emptiness from a resident-column count would let a
     /// decoded column release the loading screen before its sections were
     /// examined.
-    empty_sections: HashSet<SectionKey>,
+    empty_sections: ColumnSectionSet,
     /// Columns with at least one settled section. This column-level index keeps
     /// arrival admission O(1) instead of scanning every section result.
     built_columns: HashSet<(i32, i32)>,
@@ -1586,9 +1589,9 @@ impl TerrainMesh {
             work_counters: MeshWorkCounters::default(),
             relight_workload: RelightWorkload::default(),
             pending_removals: Vec::new(),
-            rendered_sections: HashSet::new(),
-            presented_sections: HashSet::new(),
-            empty_sections: HashSet::new(),
+            rendered_sections: ColumnSectionSet::new(),
+            presented_sections: ColumnSectionSet::new(),
+            empty_sections: ColumnSectionSet::new(),
             built_columns: HashSet::new(),
             uploaded_sections: HashSet::new(),
             drops: 0,
@@ -1666,12 +1669,9 @@ impl TerrainMesh {
     /// decoded again. The old GPU geometry may remain until the normal remesh
     /// drain, but it cannot satisfy the new column's initial loading milestone.
     pub fn reset_column_readiness(&mut self, cx: i32, cz: i32) {
-        self.rendered_sections
-            .retain(|key| key.cx != cx || key.cz != cz);
-        self.presented_sections
-            .retain(|key| key.cx != cx || key.cz != cz);
-        self.empty_sections
-            .retain(|key| key.cx != cx || key.cz != cz);
+        self.rendered_sections.remove_column(cx, cz);
+        self.presented_sections.remove_column(cx, cz);
+        self.empty_sections.remove_column(cx, cz);
         self.built_columns.remove(&(cx, cz));
         self.provisional_columns.remove(&(cx, cz));
     }
@@ -2270,12 +2270,9 @@ impl TerrainMesh {
         self.forced_columns.remove(&(cx, cz));
         self.pending_arrivals.remove(&(cx, cz));
         self.provisional_columns.remove(&(cx, cz));
-        self.rendered_sections
-            .retain(|key| key.cx != cx || key.cz != cz);
-        self.presented_sections
-            .retain(|key| key.cx != cx || key.cz != cz);
-        self.empty_sections
-            .retain(|key| key.cx != cx || key.cz != cz);
+        self.rendered_sections.remove_column(cx, cz);
+        self.presented_sections.remove_column(cx, cz);
+        self.empty_sections.remove_column(cx, cz);
         self.built_columns.remove(&(cx, cz));
         self.scheduler.forget_column(cx, cz);
         let gone: Vec<SectionKey> = self
@@ -4226,6 +4223,44 @@ mod tests {
     }
 
     #[test]
+    fn resetting_column_readiness_preserves_unrelated_column_results() {
+        let mut terrain = TerrainMesh::new(MeshScheduler::new(
+            1,
+            ShellClassifier::Demo(DemoClassifier),
+        ));
+        let key = SectionKey { cx: 2, cz: -3, si: 0, min_y: -64 };
+        let other_height = SectionKey { min_y: 0, ..key };
+        let empty = SectionKey { si: 1, ..key };
+        let unrelated = SectionKey { cx: 3, ..key };
+        let unrelated_empty = SectionKey { si: 1, ..unrelated };
+        for rendered in [key, other_height, unrelated] {
+            terrain.mark_mesh_uploaded(rendered);
+        }
+        terrain.empty_sections.insert(empty);
+        terrain.empty_sections.insert(unrelated_empty);
+        terrain.built_columns.insert((empty.cx, empty.cz));
+        terrain.provisional_columns.insert((key.cx, key.cz));
+        terrain.provisional_columns.insert((unrelated.cx, unrelated.cz));
+
+        terrain.reset_column_readiness(key.cx, key.cz);
+        terrain.reset_column_readiness(key.cx, key.cz);
+
+        for removed in [key, other_height] {
+            assert!(!terrain.rendered_sections.contains(&removed));
+            assert!(!terrain.presented_sections.contains(&removed));
+        }
+        assert!(!terrain.empty_sections.contains(&empty));
+        assert!(!terrain.built_columns.contains(&(key.cx, key.cz)));
+        assert!(!terrain.provisional_columns.contains(&(key.cx, key.cz)));
+        assert!(terrain.rendered_sections.contains(&unrelated));
+        assert!(terrain.presented_sections.contains(&unrelated));
+        assert!(terrain.empty_sections.contains(&unrelated_empty));
+        assert!(terrain.built_columns.contains(&(unrelated.cx, unrelated.cz)));
+        assert!(terrain.provisional_columns.contains(&(unrelated.cx, unrelated.cz)));
+        assert!(terrain.pending_removals.is_empty());
+    }
+
+    #[test]
     fn forgetting_a_column_discards_never_uploaded_sections_too() {
         let mut terrain = TerrainMesh::new(MeshScheduler::new(
             1,
@@ -4261,9 +4296,22 @@ mod tests {
             ));
         }
         terrain.uploaded_sections.insert(keys[0]);
+        terrain.mark_mesh_uploaded(keys[0]);
+        terrain.mark_mesh_uploaded(keys[2]);
+        terrain.empty_sections.insert(keys[1]);
+        let unrelated_empty = SectionKey { si: 1, ..keys[2] };
+        terrain.empty_sections.insert(unrelated_empty);
 
         terrain.forget_column(2, -3);
+        terrain.forget_column(2, -3);
 
+        assert!(!terrain.rendered_sections.contains(&keys[0]));
+        assert!(!terrain.presented_sections.contains(&keys[0]));
+        assert!(!terrain.empty_sections.contains(&keys[1]));
+        assert!(terrain.rendered_sections.contains(&keys[2]));
+        assert!(terrain.presented_sections.contains(&keys[2]));
+        assert!(terrain.empty_sections.contains(&unrelated_empty));
+        assert_eq!(terrain.drain_removals(), vec![keys[0]]);
         assert_eq!(terrain.scheduler.pending(), 1);
         let remaining = terrain.scheduler.drain_frame_with_limit(2);
         assert_eq!(remaining.len(), 1);
