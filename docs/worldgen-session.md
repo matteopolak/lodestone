@@ -329,8 +329,13 @@ and fence-ready outputs in canonical order; cancelled duplicate slots do not
 prevent a live slot from owning the target. Scoped stage machines borrow the
 region and cursor's packet products only for the current action.
 
-The synchronous adapter advances immediately. The browser adapter cooperates
-between stage-machine steps and completed actions. Both expose indexed, fallible
+The synchronous adapter advances immediately. The browser adapter accumulates
+occupied synchronous work across stage-machine steps, sparse owners and completed
+actions. It cooperates after 1 ms of work or 64 operations, then resets both
+counters after resumption. Awaited cooperation does not consume this budget.
+An individual operation is indivisible and may exceed it. Cancellation checks,
+canonical ownership and stable-output fences remain at their existing boundaries.
+Both expose indexed, fallible
 stable-output callbacks through `ChunkSource` and share the store's publication
 bookkeeping. Batch APIs collect those callbacks for compatibility; production
 joins receive committed snapshots while the remaining owners continue.
@@ -419,6 +424,12 @@ independent generation parity. Keep the separate End persistence and
 halo-visited-to-own-target controls when changing this policy.
 
 ## Configuration
+
+`COHORT_OCCUPIED_BUDGET` and `COHORT_OPERATION_BUDGET` in
+`production_worldgen_cohort.rs` bound browser cooperation between complete
+operations. They do not replace admission backoff or limit a single operation's
+runtime. Measure tick wakes and player interaction latency alongside throughput
+when changing them.
 
 The request selects a dimension, target coordinate, generation target, and
 dependency radius. `SessionBudget::DEFAULT` allows 4096 products, 2048

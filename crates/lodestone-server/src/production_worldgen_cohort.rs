@@ -1,6 +1,52 @@
 use super::*;
 use crate::worldgen_session::{GenerationRequestError, GenerationRequestResult};
 
+#[cfg(any(target_arch = "wasm32", test))]
+const COHORT_OCCUPIED_BUDGET: std::time::Duration = std::time::Duration::from_millis(1);
+#[cfg(any(target_arch = "wasm32", test))]
+const COHORT_OPERATION_BUDGET: u32 = 64;
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Default)]
+struct CohortCooperationBudget {
+    occupied: std::time::Duration,
+    operations: u32,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl CohortCooperationBudget {
+    fn complete_operation(&mut self, occupied: std::time::Duration) -> bool {
+        self.occupied = self.occupied.saturating_add(occupied);
+        self.operations = self.operations.saturating_add(1);
+        self.occupied >= COHORT_OCCUPIED_BUDGET || self.operations >= COHORT_OPERATION_BUDGET
+    }
+
+    fn reset(&mut self) {
+        self.occupied = std::time::Duration::ZERO;
+        self.operations = 0;
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+async fn cooperate_after_cohort_operation<C, Y>(
+    budget: &mut CohortCooperationBudget,
+    started: lodestone_time::Instant,
+    cooperate: &mut C,
+) -> lodestone_time::Instant
+where
+    C: FnMut() -> Y,
+    Y: std::future::Future<Output = ()>,
+{
+    let completed = lodestone_time::Instant::now();
+    if budget.complete_operation(completed.duration_since(started)) {
+        cooperate().await;
+        budget.reset();
+        lodestone_time::Instant::now()
+    } else {
+        completed
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CohortAction {
     MutableSession { target: ChunkCoordinate, index: usize },
@@ -403,11 +449,15 @@ where
         Y: std::future::Future<Output = ()>,
     {
         let mut cursor = self.prepare_target_owned_cohort_yielding(sessions, plan, executor).await?;
+        let mut budget = CohortCooperationBudget::default();
+        let mut operation_started = lodestone_time::Instant::now();
         loop {
             let action = cursor.next_action(sessions);
             if let CohortAction::SparseOwner { target, sequence } = action {
                 self.complete_sparse_owner(target, sequence);
-                cooperate().await;
+                operation_started = cooperate_after_cohort_operation(
+                    &mut budget, operation_started, &mut cooperate,
+                ).await;
                 continue;
             }
             if action == CohortAction::Done {
@@ -418,13 +468,75 @@ where
                 loop {
                     match machine.advance_cohort(goal, executor) {
                         Ok(CohortAdvance::Complete(snapshot)) => break Ok(snapshot),
-                        Ok(CohortAdvance::Pending) => cooperate().await,
+                        Ok(CohortAdvance::Pending) => {
+                            operation_started = cooperate_after_cohort_operation(
+                                &mut budget, operation_started, &mut cooperate,
+                            ).await;
+                        }
                         Err(error) => break Err(error),
                     }
                 }
             };
             self.finish_cohort_action(sessions, &mut cursor, action, result, &mut on_stable)?;
-            cooperate().await;
+            operation_started = cooperate_after_cohort_operation(
+                &mut budget, operation_started, &mut cooperate,
+            ).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod cooperation_budget_tests {
+    use super::CohortCooperationBudget;
+    use std::time::Duration;
+
+    #[test]
+    fn occupied_work_uses_independent_elapsed_arithmetic() {
+        let mut budget = CohortCooperationBudget::default();
+        let exhausted = [173, 289, 463, 75].map(|micros| {
+            budget.complete_operation(Duration::from_micros(micros))
+        });
+        assert_eq!(exhausted, [false, false, false, true]);
+        assert_eq!(budget.occupied, Duration::from_micros(1000));
+        assert_eq!(budget.operations, 4);
+    }
+
+    #[test]
+    fn operation_count_bounds_work_with_no_clock_progress() {
+        let mut budget = CohortCooperationBudget::default();
+        for operation in 1..64 {
+            assert!(!budget.complete_operation(Duration::ZERO), "operation {operation}");
+        }
+        assert!(budget.complete_operation(Duration::ZERO));
+        assert_eq!(budget.occupied, Duration::ZERO);
+        assert_eq!(budget.operations, 64);
+    }
+
+    #[test]
+    fn cooperation_resets_both_occupied_work_and_operation_count() {
+        let mut budget = CohortCooperationBudget::default();
+        assert!(budget.complete_operation(Duration::from_micros(1014)));
+        budget.reset();
+        assert_eq!(budget.occupied, Duration::ZERO);
+        assert_eq!(budget.operations, 0);
+        assert!(!budget.complete_operation(Duration::from_micros(463)));
+        assert!(!budget.complete_operation(Duration::from_micros(463)));
+        assert_eq!(budget.occupied, Duration::from_micros(926));
+        assert!(budget.complete_operation(Duration::from_micros(89)));
+        budget.reset();
+        for operation in 1..64 {
+            assert!(!budget.complete_operation(Duration::ZERO), "operation {operation}");
+        }
+        assert!(budget.complete_operation(Duration::ZERO));
+    }
+
+    #[test]
+    fn a_single_operation_is_only_bounded_after_it_completes() {
+        let mut budget = CohortCooperationBudget::default();
+        assert!(budget.complete_operation(Duration::from_micros(27_031)));
+        assert_eq!(budget.occupied, Duration::from_micros(27_031));
+        assert_eq!(budget.operations, 1);
+        budget.reset();
+        assert!(!budget.complete_operation(Duration::from_micros(89)));
     }
 }

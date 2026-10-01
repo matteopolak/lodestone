@@ -3985,7 +3985,7 @@ mod tests {
         ).await.expect("cooperative cohort succeeds");
         assert_eq!(invocations.load(Ordering::Relaxed), 18);
         assert_eq!(emissions, native_emissions);
-        assert!(yields > 18, "session phases must cooperate as well as owner boundaries");
+        assert!(yields > 0, "the cohort must exhaust a cooperation budget");
         let collected = collect_cohort_outputs(outcomes, outputs);
         for (index, result) in collected.into_iter().enumerate() {
             let crate::worldgen_session::GenerationRequestResult::Generated(snapshot) =
@@ -4023,16 +4023,17 @@ mod tests {
             include_local: false,
             include_east: false,
         };
-        let mut sessions = [(0, 0), (0, 0), (1, 0)].map(|target| {
+        let targets = std::iter::repeat_n((0, 0), 9).chain([(1, 0)]);
+        let mut sessions = targets.map(|target| {
             GenerationSession::new(GenerationRequest::new(
                 Dimension::Overworld,
                 target,
                 GenerationTarget::Full,
                 1,
             ))
-        });
+        }).collect::<Vec<_>>();
         sessions[0].cancellation().cancel();
-        let cancel_during_yield = sessions[2].cancellation();
+        let cancel_during_yield = sessions[9].cancellation();
         let mut emitted = Vec::new();
         let outcomes = generate_cohort_with_cooperation(
             &source,
@@ -4055,18 +4056,17 @@ mod tests {
                 tokio::task::yield_now()
             },
         ).await.expect("a live sibling keeps the cohort usable");
-        assert_eq!(emitted, [1]);
+        assert_eq!(emitted, (1..9).collect::<Vec<_>>());
         assert!(matches!(outcomes[0], Err(crate::worldgen_session::GenerationRequestError::Session(
             SessionError::Cancelled,
         ))));
-        assert!(outcomes[1].is_ok());
-        assert!(matches!(outcomes[2], Err(crate::worldgen_session::GenerationRequestError::Session(
+        assert!(outcomes[1..9].iter().all(Result::is_ok));
+        assert!(matches!(outcomes[9], Err(crate::worldgen_session::GenerationRequestError::Session(
             SessionError::Cancelled,
         ))));
-        assert_eq!(invocations.load(Ordering::Relaxed), 9);
-        assert!(session_output_complete(&sessions[1]));
+        assert!(sessions[1..9].iter().all(session_output_complete));
         assert!(!session_output_complete(&sessions[0]));
-        assert!(!session_output_complete(&sessions[2]));
+        assert!(!session_output_complete(&sessions[9]));
     }
 
     #[tokio::test(flavor = "current_thread")]
