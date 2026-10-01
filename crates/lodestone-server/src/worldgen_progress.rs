@@ -22,10 +22,14 @@ pub enum WorldgenTimingPhase {
     EncodePoll,
     ConnectionPoll,
     ConnectionDispatch,
+    ResidentLightSettlement,
+    ResidentLightCompute,
+    ResidentLightEncode,
+    ConnectionRelight,
 }
 
 impl WorldgenTimingPhase {
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 22] = [
         Self::Lease,
         Self::PreOre,
         Self::StructureContext,
@@ -44,6 +48,10 @@ impl WorldgenTimingPhase {
         Self::EncodePoll,
         Self::ConnectionPoll,
         Self::ConnectionDispatch,
+        Self::ResidentLightSettlement,
+        Self::ResidentLightCompute,
+        Self::ResidentLightEncode,
+        Self::ConnectionRelight,
     ];
 
     pub const fn index(self) -> usize {
@@ -70,6 +78,10 @@ impl WorldgenTimingPhase {
             Self::EncodePoll => "encode-poll",
             Self::ConnectionPoll => "connection-poll",
             Self::ConnectionDispatch => "connection-dispatch",
+            Self::ResidentLightSettlement => "resident-light-settlement",
+            Self::ResidentLightCompute => "resident-light-compute",
+            Self::ResidentLightEncode => "resident-light-encode",
+            Self::ConnectionRelight => "connection-relight",
         }
     }
 }

@@ -414,6 +414,21 @@ pub trait EntitySource: Send + Sync {
     /// The entities that should currently be visible to the client.
     fn snapshots(&self) -> Vec<EntitySnapshot>;
 
+    /// Returns a publication revision and its snapshots, or `None` when that
+    /// connection has already consumed the publication. `None` as the input
+    /// requests an initial snapshot, including an empty one.
+    ///
+    /// Sources with a publication counter must read the counter and snapshots
+    /// atomically. The default always reads snapshots, ignoring the cursor,
+    /// so sources mutated directly retain their per-pass visibility. Revisions
+    /// are local to one source and a connection must not reuse them across sources.
+    fn snapshots_if_changed(
+        &self,
+        _previous_revision: Option<u64>,
+    ) -> Option<(u64, Vec<EntitySnapshot>)> {
+        Some((0, self.snapshots()))
+    }
+
     /// The registry of connected **players**, if this source tracks them
     /// (the player registry is optional).
     ///
@@ -479,14 +494,20 @@ where
     P: ServerProtocol,
     E: EntitySource,
 {
-    let mut snapshots = entities.snapshots();
     let mut directives = Vec::new();
     if let Some(registry) = entities.players() {
+        let mut snapshots = entities.snapshots();
         let view = registry.view(ticket.map(PlayerTicket::entity_id));
         directives.extend(player_list.sync(proto, &view.roster));
         snapshots.extend(view.entities);
+        directives.extend(streamer.sync(proto, &snapshots));
+        streamer.last_publication = None;
+    } else if let Some((revision, snapshots)) =
+        entities.snapshots_if_changed(streamer.last_publication)
+    {
+        directives.extend(streamer.sync(proto, &snapshots));
+        streamer.last_publication = Some(revision);
     }
-    directives.extend(streamer.sync(proto, &snapshots));
     directives.extend(streamer.sync_boss_bars(proto, &entities.boss_bars()));
     directives
 }
@@ -558,6 +579,7 @@ impl EntitySource for NoEntities {
 #[derive(Debug, Default)]
 struct EntityStreamer {
     last_sent: HashMap<i32, EntitySnapshot>,
+    last_publication: Option<u64>,
     /// The boss bars this connection has been sent `ADD` for and not yet
     /// `REMOVE` — the same last-sent-state shape [`last_sent`](Self::last_sent)
     /// keeps for entities, one level simpler (a bar has no spawn/update split
@@ -6888,6 +6910,7 @@ fn settle_resident_light_snapshot<S: ChunkSource + ?Sized>(
         &[(i32, i32, &ChunkColumn)],
     ) -> Option<lodestone_world::ColumnLight>,
 ) -> Option<(ChunkColumn, Option<lodestone_world::ColumnLight>)> {
+    let _timing = PhaseTimer::start(WorldgenTimingPhase::ResidentLightSettlement, 1);
     let mut fallback = if resident_only {
         resident_column(source, cx, cz)?
     } else {
@@ -6905,7 +6928,10 @@ fn settle_resident_light_snapshot<S: ChunkSource + ?Sized>(
             exclusive,
             compute,
         ) {
-            Ok(column) => return Some((column.clone(), column.centre_settled_light().cloned())),
+            Ok(column) => {
+                let light = column.centre_settled_light().cloned();
+                return Some((column, light));
+            }
             Err(ColumnLightSettlementError::MissingFootprint) => return None,
             Err(ColumnLightSettlementError::NoLight) => return Some((fallback, None)),
             Err(ColumnLightSettlementError::Conflict) if !exclusive => {
@@ -6946,6 +6972,7 @@ where
         let neighbour_offsets = light_neighbour_offsets(proto.uses_cross_column_light());
         let mut compute = |candidate: &ChunkColumn,
                            neighbours: &[(i32, i32, &ChunkColumn)]| {
+            let _timing = PhaseTimer::start(WorldgenTimingPhase::ResidentLightCompute, 1);
             if radius != 0 {
                 proto.compute_column_light_with_neighbours_in_dimension(
                     candidate,
@@ -6984,14 +7011,16 @@ where
         (column, light)
     };
     if let Some(light) = light {
-        let directive = proto.encode_light_update(cx, cz, &light);
+        let directive = {
+            let _timing = PhaseTimer::start(WorldgenTimingPhase::ResidentLightEncode, 1);
+            proto.encode_light_update(cx, cz, &light)
+        };
         if !matches!(directive, ServerDirective::None) {
             apply(conn, state, directive).await?;
             return Ok(());
         }
     }
-    // The lightweight path is optional per protocol family. The already-cloned
-    // centre column keeps the compatible full-column fallback non-generating.
+    // The captured centre keeps the protocol's full-column fallback non-generating.
     apply(conn, state, proto.begin_chunk_batch()).await?;
     let packet_column = column_for_initial_encode(&column);
     let directive = match proto.try_encode_chunk_in_dimension(cx, cz, &packet_column, dimension) {
@@ -7188,6 +7217,7 @@ fn compute_detached_relight(
 ) -> Option<lodestone_world::ColumnLight> {
     let offsets = light_neighbour_offsets(cross_column);
     let mut calculate = |column: &ChunkColumn, neighbours: &[(i32, i32, &ChunkColumn)]| {
+        let _timing = PhaseTimer::start(WorldgenTimingPhase::ResidentLightCompute, 1);
         Some(compute(column, neighbours, dimension))
     };
     settle_resident_light_snapshot(
@@ -7218,7 +7248,10 @@ where
         return Ok(());
     };
     if delivered.contains(&(cx, cz)) {
-        send_resident_column_light(conn, proto, source, state, cx, cz).await?;
+        crate::worldgen_progress::measure_polls(
+            WorldgenTimingPhase::ConnectionRelight,
+            send_resident_column_light(conn, proto, source, state, cx, cz),
+        ).await?;
     }
     Ok(())
 }
@@ -21115,6 +21148,11 @@ mod tests {
     const ATTRIBUTES: i32 = 6;
     const HEALTH: i32 = 7;
     const PARTICLES: i32 = 8;
+    const ROSTER_ADD: i32 = 9;
+    const ROSTER_REMOVE: i32 = 10;
+    const BOSS_ADD: i32 = 11;
+    const BOSS_PROGRESS: i32 = 12;
+    const BOSS_REMOVE: i32 = 13;
 
     impl ServerProtocol for TagProto {
         fn decode(&self, _s: State, _id: i32, _p: &[u8]) -> ServerBound {
@@ -21159,6 +21197,40 @@ mod tests {
             ServerDirective::Send {
                 packet_id: REMOVE,
                 payload: ids.iter().map(|id| *id as u8).collect(),
+            }
+        }
+
+        fn encode_player_info_add(
+            &self,
+            players: &[crate::protocol::PlayerListing],
+        ) -> Vec<ServerDirective> {
+            vec![ServerDirective::Send {
+                packet_id: ROSTER_ADD,
+                payload: vec![players.len() as u8],
+            }]
+        }
+        fn encode_player_info_remove(&self, uuids: &[Uuid]) -> Vec<ServerDirective> {
+            vec![ServerDirective::Send {
+                packet_id: ROSTER_REMOVE,
+                payload: vec![uuids.len() as u8],
+            }]
+        }
+        fn encode_boss_event_add(&self, _id: Uuid, _name: &Text, progress: f32) -> ServerDirective {
+            ServerDirective::Send {
+                packet_id: BOSS_ADD,
+                payload: progress.to_be_bytes().to_vec(),
+            }
+        }
+        fn encode_boss_event_update_progress(&self, _id: Uuid, progress: f32) -> ServerDirective {
+            ServerDirective::Send {
+                packet_id: BOSS_PROGRESS,
+                payload: progress.to_be_bytes().to_vec(),
+            }
+        }
+        fn encode_boss_event_remove(&self, _id: Uuid) -> ServerDirective {
+            ServerDirective::Send {
+                packet_id: BOSS_REMOVE,
+                payload: Vec::new(),
             }
         }
 
@@ -21236,6 +21308,161 @@ mod tests {
             ServerDirective::Send { packet_id, payload } => (*packet_id, payload.as_slice()),
             other => panic!("expected Send, got {other:?}"),
         }
+    }
+
+    fn assert_sent(out: &[ServerDirective], expected: &[(i32, &[u8])]) {
+        assert_eq!(out.iter().map(sent).collect::<Vec<_>>().as_slice(), expected);
+    }
+
+    #[derive(Default)]
+    struct CountedPublication {
+        source: crate::LiveMobSource,
+        snapshot_reads: AtomicUsize,
+        players: Option<PlayerRegistry>,
+    }
+
+    impl EntitySource for CountedPublication {
+        fn snapshots(&self) -> Vec<EntitySnapshot> {
+            self.snapshot_reads.fetch_add(1, Ordering::Relaxed);
+            self.source.snapshots()
+        }
+
+        fn snapshots_if_changed(
+            &self,
+            previous_revision: Option<u64>,
+        ) -> Option<(u64, Vec<EntitySnapshot>)> {
+            let publication = self.source.snapshots_if_changed(previous_revision)?;
+            self.snapshot_reads.fetch_add(1, Ordering::Relaxed);
+            Some(publication)
+        }
+
+        fn players(&self) -> Option<&PlayerRegistry> {
+            self.players.as_ref()
+        }
+
+        fn boss_bars(&self) -> Vec<BossBarSnapshot> {
+            self.source.boss_bars()
+        }
+    }
+
+    #[test]
+    fn publication_stream_skips_reads_and_keeps_connection_lifecycles() {
+        let source = CountedPublication::default();
+        assert_eq!(
+            source.source.snapshots_if_changed(None),
+            Some((0, Vec::new())),
+        );
+        assert_eq!(source.source.snapshots_if_changed(Some(0)), None);
+        source.source.publish(vec![snap(10, 1.25)]);
+        let mut first = EntityStreamer::default();
+        let mut first_list = PlayerListStreamer::default();
+        let out = stream_pass(&TagProto, &source, &mut first, &mut first_list, None);
+        assert_sent(&out, &[(ADD, &[10])]);
+        for _ in 0..100 {
+            assert!(stream_pass(&TagProto, &source, &mut first, &mut first_list, None).is_empty());
+        }
+        assert_eq!(source.snapshot_reads.load(Ordering::Relaxed), 1);
+
+        source.source.publish(vec![snap(10, 3.75)]);
+        let out = stream_pass(&TagProto, &source, &mut first, &mut first_list, None);
+        assert_sent(&out, &[(UPDATE, &[10])]);
+        assert_eq!(first.last_sent[&10].position.x, 3.75);
+
+        let mut second = EntityStreamer::default();
+        let mut second_list = PlayerListStreamer::default();
+        let out = stream_pass(&TagProto, &source, &mut second, &mut second_list, None);
+        assert_sent(&out, &[(ADD, &[10])]);
+        source.source.publish(vec![snap(10, 3.75)]);
+        assert!(stream_pass(&TagProto, &source, &mut first, &mut first_list, None).is_empty());
+        assert_eq!(first.last_publication, Some(3));
+        assert_eq!(source.snapshot_reads.load(Ordering::Relaxed), 4);
+
+        source.source.publish(Vec::new());
+        for (streamer, list) in [(&mut first, &mut first_list), (&mut second, &mut second_list)] {
+            let out = stream_pass(&TagProto, &source, streamer, list, None);
+            assert_sent(&out, &[(REMOVE, &[10])]);
+        }
+        let mut reconnected = EntityStreamer::default();
+        let mut reconnected_list = PlayerListStreamer::default();
+        let out = stream_pass(&TagProto, &source, &mut reconnected, &mut reconnected_list, None);
+        assert!(out.is_empty());
+        assert_eq!(reconnected.last_publication, Some(4));
+        assert_eq!(source.snapshot_reads.load(Ordering::Relaxed), 7);
+    }
+
+    #[test]
+    fn unversioned_source_still_streams_direct_mutations() {
+        struct DirectSource(std::sync::Mutex<Vec<EntitySnapshot>>);
+        impl EntitySource for DirectSource {
+            fn snapshots(&self) -> Vec<EntitySnapshot> {
+                self.0.lock().unwrap().clone()
+            }
+        }
+        let source = DirectSource(std::sync::Mutex::new(vec![snap(20, 1.25)]));
+        let mut streamer = EntityStreamer::default();
+        let mut list = PlayerListStreamer::default();
+        let out = stream_pass(&TagProto, &source, &mut streamer, &mut list, None);
+        assert_sent(&out, &[(ADD, &[20])]);
+        *source.0.lock().unwrap() = vec![snap(20, 3.75)];
+        let out = stream_pass(&TagProto, &source, &mut streamer, &mut list, None);
+        assert_sent(&out, &[(UPDATE, &[20])]);
+        source.0.lock().unwrap().clear();
+        let out = stream_pass(&TagProto, &source, &mut streamer, &mut list, None);
+        assert_sent(&out, &[(REMOVE, &[20])]);
+    }
+
+    #[test]
+    fn player_view_changes_stream_without_a_mob_publication() {
+        let players = PlayerRegistry::new();
+        let viewer = players.join("Viewer", Uuid::from_u128(1), Vec3::new(1.0, 70.0, 2.0));
+        let source = CountedPublication { players: Some(players.clone()), ..Default::default() };
+        let mut streamer = EntityStreamer::default();
+        let mut list = PlayerListStreamer::default();
+        let out = stream_pass(&TagProto, &source, &mut streamer, &mut list, Some(&viewer));
+        assert_sent(&out, &[(ROSTER_ADD, &[1])]);
+        assert!(streamer.last_sent.is_empty());
+        let peer = players.join("Peer", Uuid::from_u128(2), Vec3::new(3.0, 70.0, 4.0));
+        let peer_id = peer.entity_id();
+        let out = stream_pass(&TagProto, &source, &mut streamer, &mut list, Some(&viewer));
+        assert_sent(&out, &[
+            (ROSTER_ADD, &[1]),
+            (ADD, &[peer_id as u8]),
+            (METADATA, &[peer_id as u8, 1]),
+        ]);
+        assert!(!streamer.last_sent.contains_key(&viewer.entity_id()));
+        players.set_position(peer_id, Vec3::new(6.25, 70.0, 4.0));
+        let out = stream_pass(&TagProto, &source, &mut streamer, &mut list, Some(&viewer));
+        assert_sent(&out, &[(UPDATE, &[peer_id as u8])]);
+        assert_eq!(streamer.last_sent[&peer_id].position.x, 6.25);
+        drop(peer);
+        let out = stream_pass(&TagProto, &source, &mut streamer, &mut list, Some(&viewer));
+        assert_sent(&out, &[(ROSTER_REMOVE, &[1]), (REMOVE, &[peer_id as u8])]);
+        assert_eq!(source.snapshot_reads.load(Ordering::Relaxed), 4);
+    }
+
+    #[test]
+    fn boss_bar_publications_stream_while_entity_revision_is_unchanged() {
+        let source = CountedPublication::default();
+        let mut streamer = EntityStreamer::default();
+        let mut list = PlayerListStreamer::default();
+        assert!(stream_pass(&TagProto, &source, &mut streamer, &mut list, None).is_empty());
+        let mut bar = BossBarSnapshot {
+            id: Uuid::from_u128(3),
+            name: Text::literal("Boss"),
+            progress: 0.875,
+            visible: true,
+        };
+        source.source.publish_boss_bars(vec![bar.clone()]);
+        let out = stream_pass(&TagProto, &source, &mut streamer, &mut list, None);
+        assert_sent(&out, &[(BOSS_ADD, &[0x3f, 0x60, 0, 0])]);
+        bar.progress = 0.625;
+        source.source.publish_boss_bars(vec![bar]);
+        let out = stream_pass(&TagProto, &source, &mut streamer, &mut list, None);
+        assert_sent(&out, &[(BOSS_PROGRESS, &[0x3f, 0x20, 0, 0])]);
+        source.source.publish_boss_bars(Vec::new());
+        let out = stream_pass(&TagProto, &source, &mut streamer, &mut list, None);
+        assert_sent(&out, &[(BOSS_REMOVE, &[])]);
+        assert_eq!(source.snapshot_reads.load(Ordering::Relaxed), 1);
     }
 
     #[test]
