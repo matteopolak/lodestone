@@ -27,7 +27,10 @@ lodestone-world = { workspace = true }
 lodestone-worldgen = { path = "../lodestone-worldgen", optional = true }
 serde_json = { workspace = true, optional = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = { version = "0.2", optional = true }
+
 [features]
 default = []
-bench-record = ["dep:serde_json"]
+bench-record = ["dep:serde_json", "dep:libc"]
 worldgen = ["dep:lodestone-worldgen", "dep:serde_json"]

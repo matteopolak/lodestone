@@ -205,6 +205,24 @@ generation counters separately report logical cells read and written, cache
 decisions, retained bytes and representation passes. Neither instrument infers
 exact DRAM traffic from source-level accesses.
 
+Native paired controls can use `lodestone_testsupport::process_counters::ProcessCounters`
+with the `bench-record` feature on macOS. It reads the current process's retired instructions and
+cycles through the existing `libc` dependency; unrelated threads in that process are included.
+The helper uses the SDK's 296-byte v4 record and rejects unavailable or backwards counters rather
+than reporting plausible zero work. Other platforms do not expose this module. Keep snapshot reads
+outside the operation being compared, alternate paired order, and retain outputs through
+`black_box`. Run its isolated release calibration before interpreting a new comparison:
+
+```sh
+cargo test --release -p lodestone-testsupport --features bench-record --lib \
+  retired_counter_distinguishes_noop_and_fourfold_arithmetic \
+  -- --ignored --nocapture --test-threads=1
+```
+
+The control subtracts no-op overhead and predicts four times the instruction count for four times
+the dependent arithmetic iterations. It validates accounting, not cache misses, port contention,
+or per-thread attribution. Extend the shared helper rather than copying another syscall record.
+
 On the current macOS toolchain, the release worldgen benchmark can fail at the
 final link when Rust emits LLVM 23 LTO bitcode but the selected Apple linker
 understands LLVM 21. `just worldgen-bench` selects the pinned toolchain's

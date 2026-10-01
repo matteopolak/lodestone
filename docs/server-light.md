@@ -32,9 +32,10 @@ still constructs its own packet representation, because that path also needs bio
 section storage. When changing the live view, compare its sky and block arrays with the buffered
 conversion for all three dimensions and include a cross-column source.
 
-The shared Overworld initial-light pass also borrows its eight server neighbours through
-`InitialLightVolume`, while keeping the caller's packet-format centre. It avoids rebuilding neighbour
-block and biome palettes for each overlapping packet footprint. The shared solver still computes all
+The shared Overworld initial-light pass borrows its centre and eight server neighbours through
+`InitialLightVolume`. Settlement no longer builds and discards a packet-format centre before the
+encoder builds it again, and overlapping footprints do not rebuild neighbour block and biome
+palettes. The shared solver still computes all
 nine layers and the centre retains the same initial-packet normalization; retained sky does not seed
 this fresh Overworld pass. The borrowed view clips reads and its air ceiling to the served dimension
 window, including when a source column extends beyond it. Other dimensions keep their allocation and
@@ -45,13 +46,17 @@ This path has no cache or additional configuration and uses the existing shared 
 Set `LODESTONE_LIGHT_VIEW_PERF_ITERATIONS` to an integer in `1..=128` when running
 `borrowed_overworld_initial_light_matches_buffered_roof_seam_and_air` in release mode with
 `--nocapture` to compare both paths in the same binary. Each iteration runs both paths, alternates
-their order, and retains the output through `black_box`. `LIGHT_VIEW_PERF` reports call counts and
-elapsed sums, without a timing assertion; ordinary runs skip this measurement. The centre is already
-converted, and returned-light destruction is outside the measured interval. This synthetic roof and
-seam fixture has little terrain or biome variety. Its extended-height neighbour deliberately contains
-an emitter outside the served window, which makes the borrowed air ceiling conservative and scans a
-taller field than the buffered control. It tests clipping as well as representation cost; its sums
-do not predict natural-terrain throughput or browser join latency.
+their order, and retains the output through `black_box`. `LIGHT_VIEW_PERF` labels the boundary
+`initial_overworld_centre`: the buffered arm converts its centre inside the measurement; both arms
+borrow the same neighbours and run the same shared solver. Returned-light destruction is outside
+the interval. Call counts, elapsed sums and supported macOS process instruction/cycle sums are
+reported without a timing assertion; ordinary runs skip measurement. The synthetic roof and seam
+fixture has little terrain or biome variety and deliberately places exterior emitters beyond both
+ends of the centre's served window. A wrong extended-window control must illuminate the adjacent
+in-window air cells at level 14, while the clipped path leaves their block light zero. Every returned
+layer and the settlement's final packet bytes are compared with a separately buffered reference.
+These sums isolate representation cost; they do not predict natural-terrain throughput or browser
+join latency. See [benchmark instrumentation](oracles-and-benchmarks.md) for counter calibration.
 
 Unseeded light scans can skip block lookup above a column's proven air ceiling. The server derives
 that ceiling from packed section indices, not the world-surface heightmap: air variants can exist

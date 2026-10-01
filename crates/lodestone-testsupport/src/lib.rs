@@ -6,6 +6,9 @@ pub mod directives;
 #[cfg(all(feature = "bench-record", not(target_arch = "wasm32")))]
 pub mod bench_record;
 
+#[cfg(all(feature = "bench-record", target_os = "macos"))]
+pub mod process_counters;
+
 pub use directives::assert_emits_set;
 
 use std::future::Future;
