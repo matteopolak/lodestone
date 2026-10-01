@@ -15,8 +15,10 @@ use std::time::{Duration, Instant};
 
 use lodestone_core::Reader;
 use lodestone_server::{ChunkColumn, ChunkSource, EndChunkSource, NetherChunkSource, OverworldChunkSource, end_chunk_source, nether_chunk_source, overworld_chunk_source};
+use lodestone_server::worldgen_session::{GenerationRequest, GenerationRequestResult};
 use lodestone_world::{ChunkColumn as WorldChunkColumn, Heightmaps};
 use lodestone_worldgen::stage_schedule::{
+    Dimension as GenerationDimension, GenerationTarget,
     NETHER_FEATURE_SOURCE_RADIUS, NETHER_FEATURE_WRITE_RADIUS,
 };
 use lodestone_worldgen_parity::lifecycle::{
@@ -688,6 +690,48 @@ enum OrderedLifecycleMaterializer {
     End(LifecycleMaterializer<lodestone_server::EndChunkSource>),
 }
 
+enum StreamProductionSource {
+    Overworld(Box<dyn ChunkSource>),
+    Nether(Box<dyn ChunkSource>),
+}
+
+impl StreamProductionSource {
+    fn new(dimension: StreamDimension) -> Self {
+        match dimension {
+            StreamDimension::Overworld => Self::Overworld(Box::new(
+                lodestone_server::retained_chunk_source_for_view_radius(overworld_chunk_source(SEED), 2),
+            )),
+            StreamDimension::Nether => Self::Nether(Box::new(
+                lodestone_server::retained_chunk_source_for_view_radius(nether_chunk_source(SEED), 2),
+            )),
+            StreamDimension::End => panic!("End P06 requires authenticated lifecycle replay"),
+        }
+    }
+
+    fn request(&self, target: (i32, i32)) -> GenerationRequestResult {
+        let (source, dimension) = match self {
+            Self::Overworld(source) => (source.as_ref(), GenerationDimension::Overworld),
+            Self::Nether(source) => (source.as_ref(), GenerationDimension::Nether),
+        };
+        source
+            .request_generation(GenerationRequest::new(dimension, target, GenerationTarget::Full, 1), None)
+            .unwrap_or_else(|error| panic!("production stream request {target:?} failed: {error}"))
+            .unwrap_or_else(|| panic!("production stream source has no request driver at {target:?}"))
+    }
+
+    fn requests(&self, targets: &[(i32, i32)]) -> Vec<GenerationRequestResult> {
+        assert_eq!(targets.len(), 1, "v7 stream snapshots require one request per frame");
+        vec![self.request(targets[0])]
+    }
+}
+
+fn generation_result_column(result: &GenerationRequestResult) -> &ChunkColumn {
+    match result {
+        GenerationRequestResult::Generated(snapshot) => snapshot.column(),
+        GenerationRequestResult::Existing(column) => column,
+    }
+}
+
 fn lifecycle_admissions(targets: &[(i32, i32)]) -> Vec<(i32, i32)> {
     let min_x = targets.iter().map(|&(x, _)| x).min().expect("non-empty target batch");
     let max_x = targets.iter().map(|&(x, _)| x).max().expect("non-empty target batch");
@@ -701,7 +745,7 @@ fn lifecycle_admissions(targets: &[(i32, i32)]) -> Vec<(i32, i32)> {
         .collect()
 }
 
-/// Source-ordered fallback completions follow each requested chunk's dependency
+/// Source-ordered completions follow each requested chunk's dependency
 /// square with x changing by column and z changing fastest. This is distinct
 /// from the z-major/x-fastest order used to emit packet records.
 fn lifecycle_completion_wavefront(targets: &[(i32, i32)]) -> Vec<((i32, i32), (i32, i32))> {
@@ -736,16 +780,15 @@ fn stream_feature_completion_order(
 
 #[derive(Default)]
 struct StreamLifecycleState {
-    /// The live oracle leaves dependency chunks resident after removing the
-    /// requested centre ticket. Keep that state across bounded frame batches.
+    /// Direct lifecycle controls retain dependency admissions between targets.
     admitted: BTreeSet<(i32, i32)>,
-    /// Source-ordered fallback bodies are retained after their first completion
-    /// when a later target reaches the same source through an overlapping halo.
+    /// Overlapping direct lifecycle controls execute each source body once.
     completed: BTreeSet<(i32, i32)>,
 }
 
 type EndP06LifecycleEvents = BTreeMap<(i32, i32), Vec<LifecycleReplayEvent>>;
 
+/// Direct FEATURES controls and authenticated End resident-transition replay.
 fn lifecycle_columns(
     dimension: StreamDimension,
     targets: &[(i32, i32)],
@@ -857,10 +900,8 @@ fn lifecycle_columns(
         columns
     }
 
-    let materializer = materializer.expect("ordered lifecycle materializer for non-End stream");
-    // The external stream keeps generated columns resident after a centre
-    // ticket is removed. End batches remain independent because their packet
-    // stream uses a wider batch and its captured events own the replay state.
+    let materializer = materializer.expect("direct lifecycle materializer");
+    // End batches own their captured replay state independently.
     let persistent = dimension != StreamDimension::End;
     let columns = match materializer {
         OrderedLifecycleMaterializer::Overworld(materializer) => {
@@ -910,6 +951,89 @@ fn encode_end_p06_packet(column: &ChunkColumn, target: (i32, i32)) -> Vec<u8> {
         }
         other => panic!("End P06 packet encoder returned {other:?} at {target:?}"),
     }
+}
+
+#[test]
+fn v7_stream_uses_full_production_request_with_halo_spill_and_retained_output() {
+    let target = (250, -250);
+    let mut direct = OrderedLifecycleMaterializer::Overworld(
+        LifecycleMaterializer::new(overworld_chunk_source(SEED)),
+    );
+    let direct_columns = lifecycle_columns(
+        StreamDimension::Overworld,
+        &[target],
+        Some(&mut direct),
+        &mut StreamLifecycleState::default(),
+        None,
+    );
+    assert_eq!(direct_columns[0].block_state_id(11, 34, 14).name(), "minecraft:stone");
+
+    let source = StreamProductionSource::new(StreamDimension::Overworld);
+    let result = source.requests(&[target]).remove(0);
+    let column = generation_result_column(&result);
+    assert_eq!(column.generation_stage(), lodestone_server::ChunkGenerationStage::Full);
+    let fixture = include_str!("../../../lodestone-worldgen/tests/support/overworld_ore_ne_250_neg250_oracle.txt");
+    let mut witnesses = 0;
+    for row in fixture.lines().filter(|row| !row.is_empty() && !row.starts_with('#')) {
+        let (coordinates, expected) = row.split_once(' ').expect("external ore witness row");
+        let coordinates = coordinates.split(',')
+            .map(|value| value.parse::<i32>().expect("external ore witness coordinate"))
+            .collect::<Vec<_>>();
+        assert_eq!(coordinates.len(), 3);
+        assert_eq!(
+            column.block_state_id(coordinates[0], coordinates[1], coordinates[2]).name(),
+            expected,
+            "full production request differs from external edge witness at {target:?}, local {coordinates:?}",
+        );
+        witnesses += 1;
+    }
+    assert_eq!(witnesses, 20, "external edge witness fixture must be nonempty and complete");
+
+    source.requests(&[(251, -250)]);
+    let GenerationRequestResult::Existing(retained) = source.request(target) else {
+        panic!("an overlapping stream frame discarded the production target output");
+    };
+    assert_eq!(retained.block_state_id(11, 34, 14).name(), "minecraft:diorite");
+}
+
+struct MissingStreamRequestDriver;
+
+impl ChunkSource for MissingStreamRequestDriver {
+    fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+        panic!("v7 stream must not fall back to scalar columns");
+    }
+
+    fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> lodestone_data::block_states::StateId {
+        panic!("v7 stream must not fall back to scalar cells");
+    }
+
+    fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+        panic!("v7 stream must not fall back to scalar biomes");
+    }
+
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: lodestone_data::block_states::StateId) {}
+}
+
+#[test]
+#[should_panic(expected = "production stream source has no request driver")]
+fn v7_stream_rejects_missing_production_request_driver() {
+    let source = StreamProductionSource::Overworld(Box::new(
+        lodestone_server::retained_chunk_source_for_view_radius(MissingStreamRequestDriver, 2),
+    ));
+    source.requests(&[(0, 0)]);
+}
+
+#[test]
+#[should_panic(expected = "End P06 requires authenticated lifecycle replay")]
+fn v7_stream_rejects_end_without_authenticated_replay() {
+    StreamProductionSource::new(StreamDimension::End);
+}
+
+#[test]
+#[should_panic(expected = "v7 stream snapshots require one request per frame")]
+fn v7_stream_rejects_multiple_targets_before_generation() {
+    let source = StreamProductionSource::Overworld(Box::new(MissingStreamRequestDriver));
+    source.requests(&[(0, 0), (1, 0)]);
 }
 
 #[test]
@@ -2473,9 +2597,12 @@ fn stream_external_oracle_matches_lodestone() {
     }
     let control = std::env::var("LODESTONE_COORDINATE_CONTROL").ok();
     let source_started = Instant::now();
+    let production_source = match expected_dimension {
+        StreamDimension::Overworld | StreamDimension::Nether => Some(StreamProductionSource::new(expected_dimension)),
+        StreamDimension::End => None,
+    };
     let mut materializer = match expected_dimension {
-        StreamDimension::Overworld => Some(OrderedLifecycleMaterializer::Overworld(LifecycleMaterializer::new(overworld_chunk_source(SEED)))),
-        StreamDimension::Nether => Some(OrderedLifecycleMaterializer::Nether(LifecycleMaterializer::new(nether_chunk_source(SEED)))),
+        StreamDimension::Overworld | StreamDimension::Nether => None,
         StreamDimension::End => Some(OrderedLifecycleMaterializer::End(LifecycleMaterializer::new(end_chunk_source(SEED)))),
     };
     if matches!(std::env::var("LODESTONE_LARGE_PARITY_STREAM_TIMINGS").as_deref(), Ok("1" | "true" | "yes" | "on")) {
@@ -2523,6 +2650,9 @@ fn stream_external_oracle_matches_lodestone() {
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|&value| value != 0)
         .unwrap_or(default_batch_size);
+    if production_source.is_some() {
+        assert_eq!(batch_size, 1, "v7 production stream requires batch size one");
+    }
     let mut pending = Vec::with_capacity(batch_size);
     loop {
         match read_frame(&mut reader, &complete, stream_header.format) {
@@ -2545,14 +2675,21 @@ fn stream_external_oracle_matches_lodestone() {
         } else {
             None
         };
-        let actual_columns = lifecycle_columns(
-            stream_header.dimension,
-            &coordinates,
-            materializer.as_mut(),
-            &mut lifecycle_state,
-            end_events.as_ref(),
-        );
-        for (frame, column) in pending.drain(..).zip(actual_columns) {
+        let actual_results = match production_source.as_ref() {
+            Some(source) => source.requests(&coordinates),
+            None => lifecycle_columns(
+                stream_header.dimension,
+                &coordinates,
+                materializer.as_mut(),
+                &mut lifecycle_state,
+                end_events.as_ref(),
+            )
+                .into_iter()
+                .map(GenerationRequestResult::Existing)
+                .collect(),
+        };
+        for (frame, result) in pending.drain(..).zip(actual_results) {
+            let column = generation_result_column(&result);
             let index = compared;
             assert_eq!(frame.index, index, "stream frame index");
             let expected_cx = stream_header.cx0 + (index % width) as i32;
@@ -2566,7 +2703,7 @@ fn stream_external_oracle_matches_lodestone() {
                 end_p06_packet_payload(end_materializer, (frame.cx, frame.cz))
             } else {
                 support::large_parity_manifest::light_free_record(
-                    &column,
+                    column,
                     frame.cx,
                     frame.cz,
                     stream_header.dimension.manifest_dimension(),
