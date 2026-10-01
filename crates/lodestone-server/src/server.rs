@@ -19,6 +19,8 @@ use crate::worldgen_progress::{PhaseTimer, WorldgenTimingPhase};
 
 #[path = "connection_travel.rs"]
 mod connection_travel;
+#[path = "connection_prediction.rs"]
+mod connection_prediction;
 
 /// Portable monotonic clock for join-path measurements.
 #[derive(Clone, Copy)]
@@ -12488,6 +12490,7 @@ async fn dispatch_play_packet<T, P, S>(
     player_ticket_guard: &PlayerTicketGuard,
     pending_keep_alive: &mut Option<i64>,
     pending_break: &mut Option<PendingBreak>,
+    pending_prediction_ack: &mut connection_prediction::PendingPredictionAck,
     // The latest server-issued position correction. A matching
     // `TeleportationAccepted` clears it; movement stays inert while it remains.
     teleport_acknowledgements: &mut Option<TeleportAcknowledgements>,
@@ -12680,6 +12683,7 @@ where
     S: ChunkSource + 'static,
 {
     let packet = proto.decode(*state, packet_id, payload);
+    pending_prediction_ack.observe(&packet)?;
     if let ServerBound::TeleportationAccepted { id } = packet {
         if let Some(teleports) = teleport_acknowledgements {
             teleports.accepts(id);
@@ -13835,7 +13839,7 @@ where
         }
         // The player's projectile-launch path. A successful bow use creates the
         // projectile record consumed by the entity stream.
-        ServerBound::UseItem { hand, yaw, pitch } => {
+        ServerBound::UseItem { hand, yaw, pitch, .. } => {
             // Handle boat items before the eat/equip chain. A boat is neither
             // food nor equippable, and its raytrace needs the world source.
             //
@@ -14962,6 +14966,7 @@ where
 {
     let mut pending_keep_alive: Option<i64> = None;
     let mut pending_break: Option<PendingBreak> = None;
+    let mut pending_prediction_ack = connection_prediction::PendingPredictionAck::default();
     let mut pending_relights = PendingRelights::default();
     let mut pending_tick_updates = VecDeque::new();
     let mut detached_relight: Option<DetachedRelight> = None;
@@ -15561,6 +15566,7 @@ where
                     &player_ticket_guard,
                     &mut pending_keep_alive,
                     &mut pending_break,
+                    &mut pending_prediction_ack,
                     &mut teleport_acknowledgements,
                     &mut player_pos,
                     &mut client_movement,
@@ -15974,6 +15980,9 @@ where
 
             _ = vitals_tick.tick() => {
                 watch.enter();
+                if let Some(sequence) = pending_prediction_ack.take() {
+                    apply(conn, &mut state, proto.encode_block_changed_ack(sequence)).await?;
+                }
                 if !player_tick_ready(world, client_loaded) {
                     watch.pass("vitals_waiting_for_player_loaded");
                     continue;
@@ -17891,6 +17900,7 @@ where
 {
     let mut pending_keep_alive: Option<i64> = None;
     let mut pending_break: Option<PendingBreak> = None;
+    let mut pending_prediction_ack = connection_prediction::PendingPredictionAck::default();
     let mut pending_relights = PendingRelights::default();
     let mut pending_tick_updates = VecDeque::new();
     let mut teleport_acknowledgements = initial_teleport_id.map(TeleportAcknowledgements::after_initial);
@@ -18121,6 +18131,9 @@ where
             // deadline untouched, so no timer event is lost.
             _ = vitals_interval.tick() => {
                 activity(ConnectionActivity::Vitals, None, None);
+                if let Some(sequence) = pending_prediction_ack.take() {
+                    apply(conn, &mut state, proto.encode_block_changed_ack(sequence)).await?;
+                }
                 if player_tick_ready(world, client_loaded) {
                     wasm_vitals_tick(
                         conn,
@@ -18332,6 +18345,7 @@ where
                 &player_ticket_guard,
                 &mut pending_keep_alive,
                 &mut pending_break,
+                &mut pending_prediction_ack,
                 &mut teleport_acknowledgements,
                 &mut player_pos,
                 &mut client_movement,

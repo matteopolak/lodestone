@@ -199,10 +199,7 @@ pub enum ServerBound {
         /// current break handling does not use it (no per-face behaviour is
         /// modelled).
         face: BlockFace,
-        /// Client block-prediction sequence number. Decoded but not yet
-        /// acted on — this crate does not send
-        /// `ClientboundBlockChangedAckPacket`; see `docs/block-edit.md`'s
-        /// scope note.
+        /// Client block-prediction sequence number, retained for acknowledgement.
         sequence: i32,
     },
     /// Right-click placement against a block face
@@ -221,9 +218,7 @@ pub enum ServerBound {
         /// `crate::block_placement` reads its `y` for the upper/lower-half
         /// decision every `Half`-bearing block makes.
         cursor: Vec3f,
-        /// Client block-prediction sequence number (see
-        /// [`BlockAction::sequence`](Self::BlockAction) for why it is
-        /// decoded but not yet acted on).
+        /// Client block-prediction sequence number, retained for acknowledgement.
         sequence: i32,
         /// `0` main hand, `1` off hand — vanilla's own interaction-hand enum ordinal.
         /// `crate::server`'s `apply_use_item_on` reads this to resolve which
@@ -498,6 +493,8 @@ pub enum ServerBound {
     UseItem {
         /// `0` main hand, `1` off hand.
         hand: u8,
+        /// Client prediction sequence when the protocol carries one.
+        sequence: Option<i32>,
         /// Yaw in degrees, as the client reported it with the use.
         yaw: f32,
         /// Pitch in degrees.

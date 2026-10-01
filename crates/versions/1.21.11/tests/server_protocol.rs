@@ -286,6 +286,7 @@ fn air_use_decodes_774_look_angles_and_rejects_invalid_hands() {
         protocol.decode(State::Play, 0x40, &body),
         ServerBound::UseItem {
             hand: 1,
+            sequence: Some(17),
             yaw: 90.0,
             pitch: -15.0,
         }

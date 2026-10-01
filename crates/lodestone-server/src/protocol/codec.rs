@@ -7,8 +7,8 @@ use lodestone_core::State;
 use lodestone_data::block_states::StateId;
 use lodestone_model::command_tree::{CommandSuggestionsResponse, CommandTree};
 use lodestone_model::{
-    BlockPos, Difficulty, EntityAttributeSnapshot, GameMode, ItemStack, ResourceKey, SoundCategory,
-    Text, Vec3, Vec3f,
+    BlockPos, Difficulty, EntityAttributeSnapshot, GameMode, ItemStack, PredictionSequence,
+    ResourceKey, SoundCategory, Text, Vec3, Vec3f,
 };
 use uuid::Uuid;
 
@@ -1244,6 +1244,13 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
+    /// Settles client block predictions through the last processed sequence.
+    /// Protocols without prediction acknowledgements emit nothing.
+    fn encode_block_changed_ack(&self, sequence: PredictionSequence) -> ServerDirective {
+        let _ = sequence;
+        ServerDirective::None
+    }
+
     /// Encodes an air-supply update for the local player (vanilla's entity
     /// metadata `DATA_AIR_SUPPLY_ID`, sent over `SET_ENTITY_DATA` — see
     /// `crates/protocol/v770/src/packets/metadata.rs`'s `IDX_AIR_SUPPLY`,
@@ -2226,6 +2233,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn encode_block_update(&self, x: i32, y: i32, z: i32, state: StateId) -> ServerDirective {
         (**self).encode_block_update(x, y, z, state)
+    }
+
+    fn encode_block_changed_ack(&self, sequence: PredictionSequence) -> ServerDirective {
+        (**self).encode_block_changed_ack(sequence)
     }
 
     fn encode_block_entity_data(

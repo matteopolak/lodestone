@@ -403,6 +403,7 @@ fn use_item_on(
         // borrowing state from an earlier movement packet.
         return ServerBound::UseItem {
             hand,
+            sequence: None,
             yaw: 0.0,
             pitch: 0.0,
         };

@@ -131,7 +131,8 @@ mod tests {
     use lodestone_data::block_states::StateId;
     use lodestone_core::State;
     use lodestone_model::{
-        Difficulty, EntityAttributeSnapshot, GameMode, ItemStack, ResourceKey, Rotation, Vec3,
+        Difficulty, EntityAttributeSnapshot, GameMode, ItemStack, PredictionSequence, ResourceKey,
+        Rotation, Vec3,
     };
     use uuid::Uuid;
 
@@ -298,6 +299,9 @@ mod tests {
         }
         fn encode_block_update(&self, x: i32, y: i32, z: i32, _state: StateId) -> ServerDirective {
             send(x + y + z)
+        }
+        fn encode_block_changed_ack(&self, sequence: PredictionSequence) -> ServerDirective {
+            send(sequence.as_wire())
         }
         fn encode_air_supply_update(&self, air: i32) -> ServerDirective {
             send(air)
@@ -518,6 +522,10 @@ mod tests {
         assert_eq!(
             boxed.encode_block_update(1, 2, 3, stone),
             direct.encode_block_update(1, 2, 3, stone)
+        );
+        assert_eq!(
+            boxed.encode_block_changed_ack(PredictionSequence::new(713)),
+            send(713)
         );
         assert_eq!(
             boxed.encode_air_supply_update(19),

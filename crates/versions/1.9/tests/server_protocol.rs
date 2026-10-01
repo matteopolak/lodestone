@@ -569,6 +569,7 @@ fn hosted_block_place_sentinel_reaches_the_use_item_consumer() {
         ),
         ServerBound::UseItem {
             hand: 0,
+            sequence: None,
             yaw: 0.0,
             pitch: 0.0,
         }
@@ -588,6 +589,7 @@ fn hosted_block_place_sentinel_reaches_the_use_item_consumer() {
         ),
         ServerBound::UseItem {
             hand: 0,
+            sequence: None,
             yaw: 0.0,
             pitch: 0.0,
         }
