@@ -1811,6 +1811,15 @@ impl ChunkColumn {
         &self.palette
     }
 
+    /// Freezes the packed payload and its matching palette for generation reads.
+    pub(crate) fn worldgen_block_read(&self, cx: i32, cz: i32) -> lodestone_worldgen::block_read::BlockRead {
+        lodestone_worldgen::block_read::BlockRead::Packed(
+            lodestone_worldgen::block_read::PackedBlockColumn::new(
+                cx * 16, cz * 16, self.min_y, Arc::new(self.palette.clone()), self.blocks.shared_storage(),
+            ),
+        )
+    }
+
     /// Returns solidity at a local `(x, z)` in `0..16` and world `y`. A block is
     /// solid when it is neither air nor a fluid; blocks outside the vertical
     /// range are non-solid.
@@ -4399,6 +4408,7 @@ impl OverworldChunkSource {
                 Arc::clone(&self.generator), coords, lease_coords, prefix_targets, prefix_radius,
             );
             let completed = crate::immutable_admission::execute(
+                crate::immutable_admission::ImmutableJobRole::GenerationAdmission,
                 coords.len() as u32, cancellations.to_vec(), move || job.run(),
             ).await?;
             completed.accept(|products| {

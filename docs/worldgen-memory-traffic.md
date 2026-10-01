@@ -8,6 +8,16 @@ The `gen-counters` instrumentation reports bounded, aggregate software-cache and
 
 `lodestone_worldgen_core::counters::snapshot` exposes fixed arrays indexed by `CACHE_NAMES` and `MEMORY_BOUNDARY_NAMES`. The cache arrays cover the cell, slot, and leaf memo stores. The representation arrays count attempted logical lookups and payload bytes at the block-field, cell-cache, slot-cache, leaf-memo, and dense block-grid boundaries; a cache miss counts one lookup but zero returned payload bytes.
 
+Resident-context boundaries distinguish dense imports, packed index reads, and
+payload copies caused by shared compact storage becoming writable. End replay
+counts immutable base reads separately from base copies and newly installed
+overlay entries. Index lanes count two bytes per cell; overlay state IDs count
+four. These are logical payload counts, not hardware cache-line traffic or
+allocator totals. A dense nine-column End region copies 589,824 index cells,
+or 1,179,648 bytes; a borrowed region must report zero base-copy cells before
+explicit materialization. The hook calibration exercises this positive control
+as well as the default-feature inert path.
+
 Cache computation counters are bumped at the existing miss branches. The direct-mapped leaf memo reports displacement as an eviction; the dense and hashed stores do not evict entries. There is no wait counter because these core caches are thread-local and have no blocking miss path. `NoiseChunkSampler` queries count as block-field reads. The dense materialization and height-map loops report complete-column scans or conversions with their logical cell counts.
 
 Bounded scratch grids precompute bit shifts when their X/Z and Y lattice steps are powers of two. Dense cache indexing then shifts the non-negative coordinate deltas instead of performing three integer divisions; unusual geometries retain the general Euclidean-division path. The sampler's declared bounds are the contract that makes those deltas non-negative.

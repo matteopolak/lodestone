@@ -227,10 +227,15 @@ pub enum MemoryBoundary {
     SlotCache = 2,
     LeafMemo = 3,
     BlockGrid = 4,
+    ResidentDenseImport = 5,
+    ResidentPacked = 6,
+    ResidentPayloadCopy = 7,
+    EndReplayBase = 8,
+    EndReplayOverlay = 9,
 }
 
 /// Number of logical representation boundaries tracked by the counters.
-pub const MEMORY_BOUNDARY_COUNT: usize = 5;
+pub const MEMORY_BOUNDARY_COUNT: usize = 10;
 
 /// Names in [`MemoryBoundary`] discriminant order.
 pub const MEMORY_BOUNDARY_NAMES: [&str; MEMORY_BOUNDARY_COUNT] = [
@@ -239,6 +244,11 @@ pub const MEMORY_BOUNDARY_NAMES: [&str; MEMORY_BOUNDARY_COUNT] = [
     "slot_cache",
     "leaf_memo",
     "block_grid",
+    "resident_dense_import",
+    "resident_packed",
+    "resident_payload_copy",
+    "end_replay_base",
+    "end_replay_overlay",
 ];
 
 /// Software cache populations with existing lookup hooks.
@@ -1757,6 +1767,36 @@ mod imp {
     }
 }
 
+#[inline(always)]
+pub fn bump_resident_dense_import(cells: u64) {
+    bump_logical_write(MemoryBoundary::ResidentDenseImport, cells, cells * 2);
+}
+
+#[inline(always)]
+pub fn bump_resident_packed_read() {
+    bump_logical_read(MemoryBoundary::ResidentPacked, 1, 2);
+}
+
+#[inline(always)]
+pub fn bump_resident_payload_copied(bytes: u64) {
+    bump_logical_write(MemoryBoundary::ResidentPayloadCopy, 1, bytes);
+}
+
+#[inline(always)]
+pub fn bump_end_region_base_copy(cells: u64) {
+    bump_logical_write(MemoryBoundary::EndReplayBase, cells, cells * 2);
+}
+
+#[inline(always)]
+pub fn bump_end_region_base_read() {
+    bump_logical_read(MemoryBoundary::EndReplayBase, 1, 2);
+}
+
+#[inline(always)]
+pub fn bump_end_region_overlay_entry() {
+    bump_logical_write(MemoryBoundary::EndReplayOverlay, 1, 4);
+}
+
 pub use imp::{
     StageGuard, bump_biome_search, bump_block_at, bump_cache_compute,
     bump_cache_eviction, bump_cache_lookup, bump_cell_fill, bump_corner_eval,
@@ -1859,6 +1899,12 @@ mod tests {
         bump_cache_eviction(CacheKind::Leaf);
         bump_logical_read(MemoryBoundary::BlockGrid, 2, 4);
         bump_logical_write(MemoryBoundary::BlockGrid, 1, 2);
+        bump_resident_dense_import(384);
+        bump_resident_packed_read();
+        bump_resident_payload_copied(64);
+        bump_end_region_base_copy(589_824);
+        bump_end_region_base_read();
+        bump_end_region_overlay_entry();
         bump_scratch_pool_reuse();
         bump_scratch_pool_allocation();
         bump_scratch_pool_eviction();
@@ -1881,6 +1927,27 @@ mod tests {
     #[test]
     fn hooks_count_and_stage_tag_restores() {
         assert!(enabled());
+        reset();
+        bump_resident_dense_import(384);
+        bump_resident_packed_read();
+        bump_resident_payload_copied(64);
+        bump_end_region_base_copy(589_824);
+        bump_end_region_base_read();
+        bump_end_region_overlay_entry();
+        let memory = snapshot();
+        for (boundary, reads, writes, read_bytes, write_bytes) in [
+            (MemoryBoundary::ResidentDenseImport, 0, 384, 0, 768),
+            (MemoryBoundary::ResidentPacked, 1, 0, 2, 0),
+            (MemoryBoundary::ResidentPayloadCopy, 0, 1, 0, 64),
+            (MemoryBoundary::EndReplayBase, 1, 589_824, 2, 1_179_648),
+            (MemoryBoundary::EndReplayOverlay, 0, 1, 0, 4),
+        ] {
+            let index = boundary as usize;
+            assert_eq!(memory.logical_reads[index], reads);
+            assert_eq!(memory.logical_writes[index], writes);
+            assert_eq!(memory.logical_read_bytes[index], read_bytes);
+            assert_eq!(memory.logical_write_bytes[index], write_bytes);
+        }
         reset();
         let empty = snapshot();
         assert_eq!(empty.epoch_dirty_local_writes, 0);

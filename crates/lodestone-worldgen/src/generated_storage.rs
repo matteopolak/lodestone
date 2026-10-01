@@ -226,6 +226,20 @@ impl PartialEq for CompactBlockStorage {
 impl Eq for CompactBlockStorage {}
 
 impl CompactBlockStorage {
+    #[must_use]
+    pub fn uniform(min_y: i32, height: i32, id: u16) -> Self {
+        assert!(height >= 0, "column height is negative");
+        Self {
+            min_y,
+            height,
+            sections: OnceLock::from(Arc::new(vec![
+                CompactSection::Uniform(id);
+                (height as usize).div_ceil(SECTION_ROWS)
+            ])),
+            dense: OnceLock::new(),
+        }
+    }
+
     /// Builds section storage from the flat generated-column layout
     /// `((ly * 16 + z) * 16 + x)`. The input is borrowed so callers can compare
     /// the compact result against an independent flat control before dropping
@@ -549,6 +563,7 @@ impl CompactBlockStorage {
         sections
     }
 
+    #[inline]
     fn compact_sections(&self) -> &[CompactSection] {
         self.sections
             .get_or_init(|| {
@@ -620,6 +635,22 @@ impl CompactBlockStorage {
         self.compact_sections()
     }
 
+    #[must_use]
+    pub fn into_shared_compact(self) -> Self {
+        let Self { min_y, height, sections, dense } = self;
+        let sections = sections.into_inner().unwrap_or_else(|| {
+            let cells = dense.get().expect("lazy storage must retain its dense cell buffer");
+            crate::counters::bump_full_column_conversion(cells.len() as u64);
+            Arc::new(Self::pack_sections(height, cells, None))
+        });
+        Self {
+            min_y,
+            height,
+            sections: OnceLock::from(sections),
+            dense: OnceLock::new(),
+        }
+    }
+
     /// Consumes the storage into its sections and height. Packed word buffers
     /// can be moved into another section implementation without cell copying.
     #[must_use]
@@ -630,6 +661,7 @@ impl CompactBlockStorage {
     }
 
     /// Palette index at local `(x, y, z)`.
+    #[inline]
     #[must_use]
     pub fn get(&self, x: usize, y: i32, z: usize) -> u16 {
         assert!(x < 16 && z < 16, "column coordinates out of range");
@@ -639,6 +671,7 @@ impl CompactBlockStorage {
     }
 
     /// Sets one palette index, widening only the affected section when needed.
+    #[inline]
     pub fn set(&mut self, x: usize, y: i32, z: usize, id: u16) {
         assert!(x < 16 && z < 16, "column coordinates out of range");
         let ly = y - self.min_y;
@@ -647,20 +680,37 @@ impl CompactBlockStorage {
         let cell = ((ly as usize % SECTION_ROWS) * ROW_CELLS) + z * 16 + x;
         let rows = self.section_rows(section_index);
         if let Some(dense) = self.dense.get_mut() {
+            #[cfg(feature = "gen-counters")]
+            if Arc::strong_count(dense) > 1 {
+                crate::counters::bump_resident_payload_copied((dense.len() * std::mem::size_of::<u16>()) as u64);
+            }
             Arc::make_mut(dense)[(ly as usize * 16 + z) * 16 + x] = id;
             if let Some(sections) = self.sections.get_mut() {
-                let sections = Arc::make_mut(sections);
+                let sections = Self::mutable_sections(sections);
                 Self::set_compact_section(&mut sections[section_index], rows, cell, id);
             }
             return;
         }
-        let sections: &mut Vec<CompactSection> = Arc::make_mut(
+        let sections: &mut Vec<CompactSection> = Self::mutable_sections(
             self.sections
                 .get_mut()
                 .expect("non-lazy storage must have sections"),
         );
         let section = &mut sections[section_index];
         Self::set_compact_section(section, rows, cell, id);
+    }
+
+    fn mutable_sections(sections: &mut Arc<Vec<CompactSection>>) -> &mut Vec<CompactSection> {
+        #[cfg(feature = "gen-counters")]
+        if Arc::strong_count(sections) > 1 {
+            let bytes = sections.len() * std::mem::size_of::<CompactSection>()
+                + sections.iter().map(|section| match section {
+                    CompactSection::Uniform(_) => 0,
+                    CompactSection::Packed { words, .. } => words.len() * std::mem::size_of::<u64>(),
+                }).sum::<usize>();
+            crate::counters::bump_resident_payload_copied(bytes as u64);
+        }
+        Arc::make_mut(sections)
     }
 
     fn set_compact_section(section: &mut CompactSection, rows: usize, cell: usize, id: u16) {
@@ -1102,6 +1152,37 @@ mod tests {
         let compact = CompactBlockStorage::from_flat(-64, 384, &cells);
         assert_eq!(compact.section_count(), 24);
         assert_eq!(compact.clone().into_flat().len(), 16 * 384 * 16);
+    }
+
+    #[test]
+    fn uniform_partial_column_keeps_its_shared_snapshot_on_write() {
+        let mut storage = CompactBlockStorage::uniform(-64, 17, 9);
+        assert!(storage.dense.get().is_none());
+        assert_eq!(storage.section_count(), 2);
+        assert_eq!(storage.section_rows(1), 1);
+        let snapshot = storage.clone();
+        storage.set(3, -48, 7, 18);
+        assert_eq!(storage.get(3, -48, 7), 18);
+        assert_eq!(snapshot.get(3, -48, 7), 9);
+        assert_eq!(storage.get(15, -64, 15), 9);
+        assert!(storage.dense.get().is_none());
+        assert!(snapshot.dense.get().is_none());
+    }
+
+    #[test]
+    fn compact_handoff_retains_shared_sections_without_the_dense_carrier() {
+        let cells = Arc::new(vec![7u16; 17 * 256]);
+        let original = CompactBlockStorage::from_shared_flat(-64, 17, Arc::clone(&cells));
+        let _ = original.sections();
+        let transferred = original.clone().into_shared_compact();
+        assert!(transferred.dense.get().is_none());
+        assert!(Arc::ptr_eq(
+            original.sections.get().unwrap(), transferred.sections.get().unwrap(),
+        ));
+        assert_eq!(transferred.get(15, -48, 15), 7);
+        let lazy = CompactBlockStorage::from_shared_flat(-64, 17, cells).into_shared_compact();
+        assert!(lazy.dense.get().is_none());
+        assert_eq!(lazy.get(15, -48, 15), 7);
     }
 
     #[test]

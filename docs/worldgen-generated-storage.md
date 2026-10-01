@@ -43,6 +43,23 @@ indexed shaped carriers can move their existing flat buffer directly.
 Conversion counters distinguish retained raw products from section packing,
 widening, and compatibility expansion.
 
+`DenseBlockGrid` has explicit indexed, raw, and borrowed-region storage
+variants. End lifecycle source replay uses a borrowed 48-by-256-by-48 region
+with nine immutable `Arc` column slots in x-major, z-fast order. A point read
+checks transient writes, then resolves the matching source slot with that
+source's own vertical bounds; uncovered rows are air. Overrides are installed
+before the existing net-change journal begins. Returning to the source state
+removes the transient entry, while ordered structure provenance still records
+every accepted write. The region lives for one source replay and adds no cache.
+
+Point reads, structure processors, template placement, and bulk copies keep
+using the same grid interface. Whole-lane consumers explicitly materialize the
+borrowed region once in original chunk and y-z-x copy order, then append
+transient state introductions in encounter order. This preserves dense palette
+history even when a state was overwritten. Box conversions read only their
+requested box. Ordinary dense constructors and shared-carrier copy-on-write
+remain indexed or raw; no point operation silently materializes a region.
+
 ## How to change it
 
 Keep the palette separate from section storage: section indices are local only
@@ -62,10 +79,27 @@ Consumers that can adopt section storage should use `into_compact` and move
 packed word buffers through `CompactBlockStorage::into_sections`; callers that
 need the old contiguous carrier may continue using `into_raw`.
 
+Keep End source-window construction in
+`EndGenerator::parity_decoration_grid_for_target` and borrowed addressing in
+`DenseBlockGrid`. Changes must preserve source-height clipping, palette history,
+baseline overrides, sorted net spills, and structure mutation ordinals. The
+bounded grid control covers differing source heights and indexed/raw sources;
+the End replay control independently constructs the former dense window for
+platform and city witnesses. `end_borrowed_region_counters` is a separate
+process so its exact counter assertions cannot absorb other tests' traffic.
+
 ## Configuration
 
-There are no environment variables or feature flags. Sections are 16 rows and
+There are no storage environment variables or feature flags. Sections are 16 rows and
 their indices are `u16`; widths are derived from the largest index present.
+The diagnostic `gen-counters` feature records End base-copy cells and bytes,
+base reads, and transient-entry insertions in the `EndReplayBase` and
+`EndReplayOverlay` memory boundaries. Entry insertions are cumulative across
+removal and reinsertion, rather than a retained-entry gauge. A full dense
+48-by-256-by-48 stitch copies 589,824 cells / 1,179,648 bytes; borrowed replay
+copies zero base cells. The isolated platform gate predicts 201 base reads and
+26 entry insertions for target `(6,0)`, and 121 reads and 16 insertions for
+target `(7,1)`, with the same two accepted baseline overrides.
 
 ## Dependencies
 

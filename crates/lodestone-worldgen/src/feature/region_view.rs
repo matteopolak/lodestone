@@ -123,6 +123,7 @@
 //! delete, and `4307b59` is the scar for getting that wrong.
 
 use crate::dense_grid::DenseBlockGrid;
+use crate::block_read::BlockReadRef;
 use lodestone_data::block_states::StateId;
 
 use super::{REGION_MAX, REGION_MIN};
@@ -819,7 +820,7 @@ pub struct RegionView<'a> {
     sources: [Option<&'a DenseBlockGrid>; 9],
     /// Optional five-by-five read context. When present, reads use it while
     /// writes remain bounded by [`Self::in_region`]'s 3×3 footprint.
-    wide_sources: Option<[Option<&'a DenseBlockGrid>; WIDE_SLOTS]>,
+    wide_sources: Option<[Option<BlockReadRef<'a>>; WIDE_SLOTS]>,
     /// Absolute block coordinate that local `(0, 0)` maps to. The centre
     /// chunk's own origin in production; `(0, 0)` for a fixture whose single
     /// backing grid is *already* addressed in region-local coordinates.
@@ -899,7 +900,22 @@ impl<'a> RegionView<'a> {
         height: i32,
         source_at: impl Fn(i32, i32) -> Option<&'a DenseBlockGrid>,
     ) -> Self {
-        let mut wide_sources: [Option<&'a DenseBlockGrid>; WIDE_SLOTS] = [None; WIDE_SLOTS];
+        Self::over_wide_read_sources(
+            centre_cx, centre_cz, min_y, height,
+            |dx, dz| source_at(dx, dz).map(BlockReadRef::Dense),
+        )
+    }
+
+    /// Concrete read handles over the 5×5 context; writes keep the 3×3 bound.
+    #[must_use]
+    pub fn over_wide_read_sources(
+        centre_cx: i32,
+        centre_cz: i32,
+        min_y: i32,
+        height: i32,
+        source_at: impl Fn(i32, i32) -> Option<BlockReadRef<'a>>,
+    ) -> Self {
+        let mut wide_sources = [None; WIDE_SLOTS];
         for dx in -WIDE_RADIUS..=WIDE_RADIUS {
             for dz in -WIDE_RADIUS..=WIDE_RADIUS {
                 let slot = wide_source_slot(dx * 16, dz * 16)
@@ -975,10 +991,10 @@ impl<'a> RegionView<'a> {
             && y < self.min_y + self.height
     }
 
-    fn source_at(&self, lx: i32, lz: i32) -> Option<&'a DenseBlockGrid> {
+    fn source_at(&self, lx: i32, lz: i32) -> Option<BlockReadRef<'a>> {
         match &self.wide_sources {
             Some(sources) => wide_source_slot(lx, lz).and_then(|slot| sources[slot]),
-            None => source_slot(lx, lz).and_then(|slot| self.sources[slot]),
+            None => source_slot(lx, lz).and_then(|slot| self.sources[slot]).map(BlockReadRef::Dense),
         }
     }
 
@@ -990,12 +1006,6 @@ impl<'a> RegionView<'a> {
             return StateId::AIR;
         }
         if let Some(id) = self.overlay.get_in_bounds(&(lx, y, lz)) {
-            // Counted here as well as in [`Self::get`] so `ore_probe`'s
-            // `region_reads_overlay` stays one number across §12.149's change of read
-            // path: `try_place_ore` used to reach the overlay through `get` and now
-            // reaches it through `get_id`, and the row is only a control if it counts
-            // both. It must therefore stay equal across that change — the read
-            // *pattern* did not move, only its cost.
             super::ore_probe::bump_region_read_overlay(1);
             return id;
         }

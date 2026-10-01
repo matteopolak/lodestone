@@ -120,9 +120,12 @@ pub(crate) async fn encode_owned_packet_snapshot(
     }
     #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
     {
-        let completed = crate::immutable_admission::execute(1, Vec::new(), move || {
-            encode(cx, cz, &snapshot, dimension)
-        })
+        let completed = crate::immutable_admission::execute(
+            crate::immutable_admission::ImmutableJobRole::PacketPreparation,
+            1, Vec::new(), move || {
+                encode(cx, cz, &snapshot, dimension)
+            },
+        )
         .await
         .map_err(|error| ChunkEncodeError::new(error.to_string()))?;
         completed.accept(|directive| directive)

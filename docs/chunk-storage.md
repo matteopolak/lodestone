@@ -10,7 +10,7 @@ heightmaps, per-section fluid counters, and resident-neighbour lighting sent alo
 
 ### In-memory storage: a column-wide palette over per-section packed cells
 
-A column keeps one column-wide palette of block-state strings; each 16-row section stores its
+A column keeps one column-wide palette of canonical `StateId` values; each 16-row section stores its
 cells as either a single repeated value (an all-one-block section, allocating nothing) or a
 bit-packed array sized to the widest palette id that section actually uses, widening only when a
 write needs more bits than the section currently has and never narrowing back down afterward
@@ -24,6 +24,18 @@ block instead of failing loudly. See `docs/architecture.md`'s "World storage and
 for the shared paletted-container thresholds, bit-packing rules, and index order this crate's
 client-facing container follows; this section is specifically about the server's own simpler,
 column-scoped representation.
+
+`SectionedBlocks` retains the shared `CompactBlockStorage` section spine.
+Generated handoff consumes the storage while dropping any compatibility dense
+carrier; packed payloads already shared with another immutable product remain
+shared. `ChunkColumn::worldgen_block_read` freezes that payload with its matching
+typed palette for Nether neighbour probes. The palette copy is small and preserves
+its exact index order. Later resident mutation uses copy-on-write before changing
+shared sections, so an in-flight generation pass keeps its captured state.
+
+The palette-index storage's own Y origin can differ from the server column's
+`min_y`. Packed read handles retain the server origin and translate relative
+rows into the storage origin; partial top sections expose only real rows.
 
 The client-facing `PalettedContainer::palette_values` borrows the single value or
 stored indirect palette without scanning cells or allocating. Indirect palettes
@@ -113,6 +125,13 @@ is read from the exact palette written after it, while the packet retains each f
 properties in the block-state palette.
 
 ## How to change it
+
+Change compact packing and snapshot detachment in
+`lodestone_worldgen::generated_storage::CompactBlockStorage`; keep the server
+adapter's relative-row translation and the captured palette together. The
+`ResidentDenseImport`, `ResidentPacked`, and `ResidentPayloadCopy` logical
+memory counters distinguish full-height imports, numeric packed probes, and
+copy-on-write payload traffic when `gen-counters` is enabled.
 
 - **Never resolve a block-state string per cell, in the encoder or anywhere else on a hot path.**
   Route through the column's own pre-resolved `StateId` palette instead; convert to the raw integer

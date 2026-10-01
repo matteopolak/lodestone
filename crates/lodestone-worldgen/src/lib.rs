@@ -36,6 +36,7 @@
 
 pub mod aquifer;
 pub mod biome;
+pub mod block_read;
 pub mod carver;
 pub mod compose;
 pub mod debug;
