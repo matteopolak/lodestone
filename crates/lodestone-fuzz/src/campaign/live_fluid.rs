@@ -1,24 +1,19 @@
-//! Shared finite fluid lane reset, comparison and cleanup.
+//! Finite fluid scenario layout, reset and model construction.
 
 use std::io;
 
 use super::generation::GenerationDomain;
+pub(crate) use super::fluid_lane::{AIR, STONE, WATER, CleanupStep, run_cleanup_steps};
+use super::fluid_lane::{FluidLane, ReadFault, command, evaluate_lane_at, prepare_comparison, verify_block};
 use lodestone_fuzz::differential::fluid::FluidModelOracle;
 use lodestone_fuzz::differential::rcon::RconOracle;
-use lodestone_fuzz::differential::{
-    Action, DifferentialOutcome, OracleFailure, OracleFailureKind, Script, Side,
-    TICK_MILLIS, WorldOracle, run_differential,
-};
+use lodestone_fuzz::differential::{DifferentialOutcome, Script, WorldOracle};
 
-pub(crate) const PASSWORD: &str = "lodestone";
 pub(crate) const SCENARIO: &str = "generated-live-fluid";
 pub(crate) const ORIGIN: (i32, i32, i32) = (120_000, 200, 48_000);
 pub(crate) const CELLS: i32 = 3;
 pub(crate) const RESET_TICKS: u64 = 6;
 pub(crate) const SETTLE_TICKS: u64 = 6;
-pub(crate) const AIR: &str = "minecraft:air";
-pub(crate) const STONE: &str = "minecraft:stone";
-pub(crate) const WATER: &str = "minecraft:water[level=0]";
 
 
 pub(crate) fn domain() -> GenerationDomain {
@@ -40,24 +35,6 @@ pub(crate) fn region() -> Vec<((i32, i32, i32), Vec<String>)> {
     (0..=CELLS).map(|x| ((x, 0, 0), candidates())).collect()
 }
 
-pub(crate) fn verify_block<O: WorldOracle>(
-    oracle: &mut O,
-    pos: (i32, i32, i32),
-    expected: &str,
-    alternative: &str,
-) -> Result<(), io::Error> {
-    let candidates = vec![expected.to_owned(), alternative.to_owned()];
-    let observed = oracle
-        .block_state(pos, &candidates)
-        .map_err(|error| io::Error::other(format!("probe {pos:?}: {error}")))?;
-    if observed.as_deref() != Some(expected) {
-        return Err(io::Error::other(format!(
-            "baseline probe {pos:?} expected {expected:?}, observed {observed:?}"
-        )));
-    }
-    Ok(())
-}
-
 pub(crate) fn verify_live_baseline<O: WorldOracle>(oracle: &mut O) -> Result<(), io::Error> {
     for x in 0..=CELLS {
         verify_block(oracle, (x, 0, 0), AIR, "minecraft:water")?;
@@ -66,26 +43,6 @@ pub(crate) fn verify_live_baseline<O: WorldOracle>(oracle: &mut O) -> Result<(),
         }
     }
     Ok(())
-}
-
-pub(crate) fn failure(tick: u64, error: io::Error, context: &str) -> DifferentialOutcome {
-    let kind = if error.kind() == io::ErrorKind::TimedOut {
-        OracleFailureKind::Timeout
-    } else {
-        OracleFailureKind::Failure
-    };
-    DifferentialOutcome::OracleFailed(OracleFailure {
-        tick,
-        side: Side::Right,
-        kind,
-        message: format!("{context}: {error}"),
-    })
-}
-
-pub(crate) fn command(oracle: &mut RconOracle, command: String, context: &str) -> Result<(), io::Error> {
-    oracle
-        .apply(&Action::RunCommand(command))
-        .map_err(|error| io::Error::new(error.kind(), format!("{context}: {error}")))
 }
 
 pub(crate) fn fill_box(oracle: &mut RconOracle, state: &str) -> Result<(), io::Error> {
@@ -128,12 +85,7 @@ pub(crate) fn reset_and_build_vanilla(oracle: &mut RconOracle) -> Result<(), io:
 
     verify_live_baseline(oracle)?;
 
-    // Move away from the tick boundary before anchoring the candidate. The
-    // fixed live comparisons use the same half-tick margin.
-    oracle.advance_tick()?;
-    std::thread::sleep(TICK_MILLIS / 2);
-    oracle.reset_baseline()?;
-    Ok(())
+    prepare_comparison(oracle)
 }
 
 pub(crate) fn build_model() -> FluidModelOracle {
@@ -147,51 +99,6 @@ pub(crate) fn build_model() -> FluidModelOracle {
         model.place_static((x, 1, 0), STONE);
     }
     model
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CleanupStep {
-    Clear,
-    ResetClock,
-    Advance,
-    Release,
-}
-
-impl CleanupStep {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Clear => "clear",
-            Self::ResetClock => "reset clock",
-            Self::Advance => "advance",
-            Self::Release => "release force-load",
-        }
-    }
-}
-
-pub(crate) fn run_cleanup_steps<F>(reset_ticks: u64, mut run: F) -> Result<(), io::Error>
-where
-    F: FnMut(CleanupStep) -> Result<(), io::Error>,
-{
-    let mut failures = Vec::new();
-    for step in [CleanupStep::Clear, CleanupStep::ResetClock] {
-        if let Err(error) = run(step) {
-            failures.push(format!("{}: {error}", step.label()));
-        }
-    }
-    for _ in 0..reset_ticks {
-        if let Err(error) = run(CleanupStep::Advance) {
-            failures.push(format!("{}: {error}", CleanupStep::Advance.label()));
-            break;
-        }
-    }
-    if let Err(error) = run(CleanupStep::Release) {
-        failures.push(format!("{}: {error}", CleanupStep::Release.label()));
-    }
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(io::Error::other(failures.join("; ")))
-    }
 }
 
 pub(crate) fn tear_down(oracle: &mut RconOracle) -> Result<(), io::Error> {
@@ -208,35 +115,6 @@ pub(crate) fn tear_down(oracle: &mut RconOracle) -> Result<(), io::Error> {
     })
 }
 
-pub(crate) struct FaultyRead {
-    inner: FluidModelOracle,
-}
-
-impl WorldOracle for FaultyRead {
-    type Error = std::convert::Infallible;
-
-    fn apply(&mut self, action: &Action) -> Result<(), Self::Error> {
-        self.inner.apply(action)
-    }
-
-    fn advance_tick(&mut self) -> Result<(), Self::Error> {
-        self.inner.advance_tick()
-    }
-
-    fn block_state(
-        &mut self,
-        pos: (i32, i32, i32),
-        candidates: &[String],
-    ) -> Result<Option<String>, Self::Error> {
-        let observed = self.inner.block_state(pos, candidates)?;
-        if pos == (1, 0, 0) && observed.as_deref() == Some("minecraft:water") {
-            return Ok(Some(AIR.to_owned()));
-        }
-        Ok(observed)
-    }
-}
-
-
 pub(crate) fn evaluate_at(
     script: &Script,
     region: &[((i32, i32, i32), Vec<String>)],
@@ -244,47 +122,13 @@ pub(crate) fn evaluate_at(
     faulty: bool,
     endpoint: &str,
 ) -> DifferentialOutcome {
-    let mut vanilla = match RconOracle::connect(endpoint, PASSWORD, ORIGIN) {
-        Ok(oracle) => oracle,
-        Err(error) => return failure(0, error, "connect to the live reference oracle"),
-    };
-    let final_tick = script.last_tick() + settle_ticks;
-    let mut outcome = match reset_and_build_vanilla(&mut vanilla) {
-        Err(error) => failure(0, error, "reset the live candidate"),
-        Ok(()) => {
-            let model = build_model();
-            let comparison = if faulty {
-                let mut model = FaultyRead { inner: model };
-                run_differential(script, region, &mut model, &mut vanilla, settle_ticks)
-            } else {
-                let mut model = model;
-                run_differential(script, region, &mut model, &mut vanilla, settle_ticks)
-            };
-            if vanilla.missed_deadlines() == 0
-                || matches!(&comparison, DifferentialOutcome::OracleFailed(_)) {
-                comparison
-            } else {
-                let missed = vanilla.missed_deadlines();
-                DifferentialOutcome::OracleFailed(OracleFailure {
-                    tick: final_tick,
-                    side: Side::Right,
-                    kind: OracleFailureKind::Timeout,
-                    message: format!(
-                        "live reference crossed {missed} unobserved tick deadlines; rerun without host contention"
-                    ),
-                })
-            }
-        }
-    };
-    if let Err(error) = tear_down(&mut vanilla) {
-        match &mut outcome {
-            DifferentialOutcome::OracleFailed(failure) => {
-                failure.message.push_str(&format!("; cleanup also failed: {error}"));
-            }
-            DifferentialOutcome::Agreed | DifferentialOutcome::Diverged(_) => {
-                outcome = failure(final_tick, error, "tear down the live candidate");
-            }
-        }
-    }
-    outcome
+    evaluate_lane_at(script, region, settle_ticks, endpoint, FluidLane {
+        origin: ORIGIN,
+        reset: reset_and_build_vanilla,
+        model: build_model,
+        cleanup: tear_down,
+        fault: faulty.then_some(ReadFault {
+            pos: (1, 0, 0), observed: "minecraft:water", replacement: AIR,
+        }),
+    })
 }

@@ -12,8 +12,10 @@ use generation::{GeneratedSearch, ReplayCase, SearchBudget, SearchOutcome, retry
 
 pub mod generation;
 use crate::redstone_contraption as contraption;
+mod fluid_lane;
 mod live_fluid;
 mod live_redstone;
+mod live_waterlogging;
 
 const FORMAT_VERSION: u32 = 1;
 const GENERATION_VERSION: u32 = 2;
@@ -29,6 +31,7 @@ type Region = Vec<((i32, i32, i32), Vec<String>)>;
 pub enum Scenario {
     Fluid,
     Redstone,
+    Waterlogging,
 }
 
 impl Scenario {
@@ -36,6 +39,7 @@ impl Scenario {
         match self {
             Self::Fluid => live_fluid::SCENARIO,
             Self::Redstone => live_redstone::SCENARIO,
+            Self::Waterlogging => live_waterlogging::SCENARIO,
         }
     }
 
@@ -43,6 +47,7 @@ impl Scenario {
         match self {
             Self::Fluid => 0x549_11e,
             Self::Redstone => 0x549_0eed,
+            Self::Waterlogging => 0x549_a7e,
         }
     }
 
@@ -50,6 +55,7 @@ impl Scenario {
         match self {
             Self::Fluid => live_fluid::domain(),
             Self::Redstone => live_redstone::domain(),
+            Self::Waterlogging => live_waterlogging::domain(),
         }
     }
 
@@ -57,6 +63,7 @@ impl Scenario {
         match self {
             Self::Fluid => live_fluid::region(),
             Self::Redstone => live_redstone::region(),
+            Self::Waterlogging => live_waterlogging::region(),
         }
     }
 
@@ -64,6 +71,7 @@ impl Scenario {
         match self {
             Self::Fluid => live_fluid::SETTLE_TICKS,
             Self::Redstone => live_redstone::SETTLE_TICKS,
+            Self::Waterlogging => live_waterlogging::SETTLE_TICKS,
         }
     }
 
@@ -71,6 +79,7 @@ impl Scenario {
         match self {
             Self::Fluid => live_fluid::evaluate_at(script, region, settle, false, endpoint),
             Self::Redstone => live_redstone::evaluate_at(script, region, settle, false, endpoint),
+            Self::Waterlogging => live_waterlogging::evaluate_at(script, region, settle, false, endpoint),
         }
     }
 }

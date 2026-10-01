@@ -64,8 +64,8 @@ entities rather than an encode/decode round trip.
 
 ### Resumable live campaigns
 
-The optional `differential-campaign` binary runs the same finite fluid and
-redstone scenarios as the eight-case ignored integration tests. The tests and
+The optional `differential-campaign` binary runs the same finite fluid,
+redstone and waterlogging scenarios as the eight-case ignored integration tests. The tests and
 command share the generation, shrinking, baseline reset, comparison and cleanup
 implementations. Every evaluation still reaches `run_differential`; campaign
 bookkeeping does not contain another tick or world-reset loop.
@@ -73,6 +73,36 @@ The shared circuit layout is exposed as `lodestone_fuzz::redstone_contraption`
 and consumed directly by both production-model and live comparison tests.
 With the campaign feature enabled, test support re-exports the library's
 generated-search API instead of compiling a second copy.
+
+The waterlogging scenario uses an open-top, three-cell trench with a fixed
+dry bottom oak slab in the center. Generated edits place air or source water
+only at the two ends, with at most six steps and six ticks between steps.
+The end probes distinguish air and all sixteen water levels; the center probe
+distinguishes dry and wet bottom slabs. Baseline validation also checks the
+floor, walls, end caps and open top. It shares the production-backed
+`FluidModelOracle`, strict comparison boundaries, cleanup, shrinking and
+checkpoint accounting with the other fluid scenario. A twelve-tick trailing
+horizon bounds each candidate to at most 43 observed ticks.
+
+Directed live cases compare opposing-source hydration, level-three flow beside
+a dry slab, and a wet slab beside level-six water. The level-three fixture
+places isolated flowing water directly beside the slab: it compares decay and
+hydration in the short trench, not a persistent upstream source's flow front
+or the longer-trench level-three discriminator. All three directed cases agree
+with the live reference under strict tick boundaries. A captured five-action
+source-removal replay also agrees after contained sources participate in
+scheduled fluid spreading. The wet-slab case initializes that slab through a
+tick-zero edit. Generated replay policy keeps the center slab fixed and
+rejects these directed-only slab and flowing-water edits. A hermetic wrong-slab
+reader proves shrinking and replay detection, but does not establish reference
+parity. Exact water-level probes remain subject to the same whole-group timing
+checks; a group that crosses a counter boundary earns no accepted coverage.
+
+`campaign::fluid_lane` holds the shared fluid comparison, baseline probe,
+clock-admission and cleanup helpers. The ordinary fluid and waterlogging
+modules own only their layouts and scenario-specific setup. Their test targets
+include this shared helper module directly, so exercising one layout does not
+compile the other layout as unused test support.
 
 ```bash
 cargo run -p lodestone-fuzz --features differential-campaign --bin differential-campaign -- \
@@ -144,9 +174,10 @@ those require a language-table or rendering oracle, while this lane isolates
 the JSON tree shape, scalar conversion, ordering, and escaping boundary.
 
 The falling-block generator deliberately gives every generated step a zero
-tick gap. Its source is a setup fixture, while the server retains a chunk
-column after its first tick; extending this lane with later edits requires a
-public world-mutation path rather than writing the fixture source directly.
+tick gap. Edits already use `IntegratedServer::set_resident_block_state_id`,
+not fixture-source mutation. Its asynchronous tick-feed wait accepts a counter
+at or beyond the requested tick, so timed support removal and later edits need
+exact admission and tick acknowledgements before they earn aligned coverage.
 
 ## How to change it
 
@@ -196,13 +227,14 @@ or network service.
 limit. `GenerationDomain` bounds step count and tick gaps before any oracle is
 created; its generated and replayed horizons are capped at 4,096 ticks.
 
-The command requires `--scenario fluid|redstone` and `--output DIR`, or
+The command requires `--scenario fluid|redstone|waterlogging` and `--output DIR`, or
 `--replay FILE` for standalone replay. Default case budget is 1,000; without
 `--run-cases`, that entire budget runs in the foreground and can take tens of
 minutes. Use `--run-cases 8` for a smoke-sized slice and `--resume` for another
 slice. Cases are capped at 1,000,000, shrink attempts at 4,096 and timing
 attempts at 32. Default shrink and timing budgets are 32 and 3. Seeds default
-to `0x54911e` for fluid and `0x5490eed` for redstone; decimal and `0x` input
+to `0x54911e` for fluid, `0x5490eed` for redstone and `0x549a7e` for
+waterlogging; decimal and `0x` input
 are accepted. `--endpoint` defaults to `127.0.0.1:25571` and does not read
 `LODESTONE_DIFFERENTIAL_RCON`; all campaign configuration is explicit.
 Redstone baseline settling fails if it cannot observe twelve consecutive

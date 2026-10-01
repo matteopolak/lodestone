@@ -3,6 +3,8 @@
 #[path = "support/differential_generation.rs"]
 mod differential_generation;
 use differential_generation as generation;
+#[path = "../src/campaign/fluid_lane.rs"]
+mod fluid_lane;
 #[path = "../src/campaign/live_fluid.rs"]
 mod scenario;
 use scenario::*;

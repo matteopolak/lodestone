@@ -514,9 +514,7 @@ fn generated_domain() -> GenerationDomain {
             GRAVEL.to_owned(),
         ],
         3,
-        // `GravitySource` supplies fixture setup before the server retains a
-        // column. Keep every generated edit in that pre-tick window; later
-        // edits need the server's public world-mutation path instead.
+        // Timed edits need exact tick-feed admission, not a counter overshoot.
         0,
     )
     .expect("the generated gravity domain is valid")
