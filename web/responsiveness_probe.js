@@ -37,7 +37,7 @@ export class ResponsivenessProbe {
         if (Number.isFinite(event[field])) milestone[field] = event[field];
       }
       this.join.milestones.push(milestone);
-      return;
+      return true;
     }
     if (data.kind !== "diagnostic" || typeof data.message !== "string") return;
     let category = data.message.split(":", 1)[0];
@@ -199,9 +199,9 @@ export function install(worker, canvas) {
       playable = false;
       finish("new-join");
     }
-    probe.observe(data);
+    const joinChanged = probe.observe(data);
     if (data.kind === "progress") {
-      publishJoinReport();
+      if (joinChanged) publishJoinReport();
       if (probe.playable && !playable) {
         playable = true;
         for (const button of buttons) button.disabled = !!probe.active;
