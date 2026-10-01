@@ -1010,11 +1010,33 @@ test.
 `scripts/worldgen-oracle/coordinate-campaign.py` generates at most eight
 Overworld rectangles, each at most two by two chunks, and invokes the existing
 `stream-parity.sh` production comparator once per candidate. Every invocation
-starts a fresh external oracle and a fresh production resident lifecycle.
+starts a fresh external oracle and a fresh retained production source.
 Expected terrain, biomes, the three client heightmaps and canonical block
 entities come from the external stream. Lighting is outside this light-free
 record domain. The campaign uses world seed **42** throughout; `--seed` is the
 independent **coordinate generator seed**, not another world seed.
+
+The light-free v7 Overworld and Nether comparator uses
+`StreamProductionSource` to keep one seed-42 dimension source behind
+`lodestone_server::retained_chunk_source_for_view_radius` for the entire
+stream. Each frame requests `GenerationTarget::Full` through
+`ChunkSource::request_generation`, then serializes the generated snapshot's
+column or the authoritative `Existing` column. The request result stays alive
+through comparison; serialization borrows its column directly. Batch size must
+remain one: later requests may change resident state, so taking several snapshots after
+their combined completion changes the observed boundary. A missing request
+driver or failed request fails the comparator; there is no isolated scalar
+column fallback.
+
+The retained source owns the production generation ledger, preserving
+completed frontiers and spills across overlapping frame requests. The shared
+production driver owns writer completion, terrain admission and output fences.
+For an Overworld full request this includes the three-by-three feature writers
+and their five-by-five terrain context, rather than only the target's direct
+FEATURES body. Direct lifecycle tests still exercise that narrower body.
+End P06 remains a separate authenticated resident-transition replay and raw
+packet comparison; its retained production-request capture test is independent
+of the live v7 consumer.
 
 The finite origin alphabet is `(-1,-1)`, `(0,0)`, `(-33,31)`, `(31,-33)`,
 `(32,32)`, `(-32,-32)`, `(1,-1)`, and `(-1,1)`. A seed rotates these origins
@@ -1089,6 +1111,16 @@ serialization, leaving external bytes untouched. The ordinary
 test checks its exact frame, cell, identities and bounding box and unchanged
 expected digest. The campaign clears this hook from its environment.
 
+`v7_stream_uses_full_production_request_with_halo_spill_and_retained_output`
+checks the shared full-request consumer against the independently captured
+positive-Z ore witness at chunk `(250,-250)`, with direct target FEATURES as
+the narrower control, and revisits its retained output after an overlapping
+request. Missing-driver and multiple-target controls require explicit failure.
+To change the consumer boundary, edit `StreamProductionSource`; change
+generation semantics in the shared production driver, not in comparator-side
+feature orchestration. The factory's view radius is two and its hosted cache
+policy remains bounded; the stream test adds no separate retention policy.
+
 Run `python3 scripts/worldgen-oracle/test_coordinate_campaign.py` for hermetic
 generation, bounds, checkpoint, class-preserving reduction, replay, process
 deadline and log-retention controls. Those controls substitute the external
@@ -1096,7 +1128,7 @@ runner and establish orchestration behavior; only a completed real campaign
 establishes external world-generation comparison. Dependencies are Python's
 standard library, the existing shell launcher, Apple `container` with the
 26.2 cache, and the ignored `lodestone-v26-2` stream test using production
-world generation and resident materialization.
+world generation and the retained production request boundary.
 
 ### What Track B still does not do
 - **The client-state packet corpus is still small.** The captured lane covers
