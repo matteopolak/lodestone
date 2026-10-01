@@ -3176,6 +3176,8 @@ impl WindowApp {
             };
             let loaded_columns = progress.map_or(0, |value| value.loaded);
             let terrain_drawn = stats.sections_drawn > 0 || stats.water_sections_drawn > 0;
+            let gameplay_ready = Self::gameplay_input_ready_for(&self.ui, &self.sim)
+                && !self.sim.shows_new_world_loading();
             if let Some(trace) = self.browser_join_trace.as_mut() {
                 trace.observe_presented(
                     terrain_drawn,
@@ -3184,6 +3186,7 @@ impl WindowApp {
                     view_settlement,
                     work,
                 );
+                trace.observe_gameplay_presented(gameplay_ready, terrain_drawn, loaded_columns, work);
             }
         }
 

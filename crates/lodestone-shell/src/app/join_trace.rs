@@ -52,6 +52,7 @@ pub(super) struct BrowserJoinTrace {
     loading_terrain: bool,
     overlay_ready: bool,
     first_terrain_presented: bool,
+    gameplay_ready: bool,
     full_view_presented: bool,
     full_view_quiescent: bool,
     last_full_view_probe: Option<Instant>,
@@ -69,6 +70,7 @@ impl BrowserJoinTrace {
             loading_terrain: false,
             overlay_ready: false,
             first_terrain_presented: false,
+            gameplay_ready: false,
             full_view_presented: false,
             full_view_quiescent: false,
             last_full_view_probe: None,
@@ -85,6 +87,7 @@ impl BrowserJoinTrace {
         self.loading_terrain = false;
         self.overlay_ready = false;
         self.first_terrain_presented = false;
+        self.gameplay_ready = false;
         self.full_view_presented = false;
         self.full_view_quiescent = false;
         self.last_full_view_probe = None;
@@ -168,6 +171,19 @@ impl BrowserJoinTrace {
         }
     }
 
+    pub(super) fn observe_gameplay_presented(
+        &mut self,
+        ready: bool,
+        terrain_drawn: bool,
+        loaded_columns: usize,
+        work: JoinMeshWork,
+    ) {
+        if !self.gameplay_ready && ready && terrain_drawn {
+            self.gameplay_ready = true;
+            self.push("gameplay-ready", loaded_columns, 0, work);
+        }
+    }
+
     pub(super) fn full_view_probe_due(&mut self) -> bool {
         self.full_view_probe_due_at(Instant::now())
     }
@@ -224,6 +240,24 @@ mod tests {
     fn trace() -> (BrowserJoinTrace, Rc<RefCell<VecDeque<BrowserJoinProgress>>>) {
         let events = Rc::new(RefCell::new(VecDeque::new()));
         (BrowserJoinTrace::new(Rc::clone(&events)), events)
+    }
+
+    #[test]
+    fn gameplay_readiness_requires_input_and_terrain_and_resets_between_joins() {
+        let (mut trace, events) = trace();
+        let work = JoinMeshWork::default();
+        trace.start(2, "world-create-started");
+        trace.observe_gameplay_presented(false, true, 1, work);
+        trace.observe_gameplay_presented(true, false, 1, work);
+        assert_eq!(events.borrow().len(), 1);
+        trace.observe_gameplay_presented(true, true, 1, work);
+        trace.observe_gameplay_presented(true, true, 1, work);
+        assert_eq!(events.borrow().len(), 2);
+        assert_eq!(events.borrow().back().unwrap().phase, "gameplay-ready");
+        trace.start(2, "world-open-started");
+        assert!(!trace.gameplay_ready);
+        trace.observe_gameplay_presented(true, true, 1, work);
+        assert_eq!(events.borrow().len(), 2);
     }
 
     #[test]

@@ -6,6 +6,13 @@ The browser world-generation worker keeps the authoritative integrated server in
 
 ## How it works
 
+Join progress includes `gameplay-ready` once a submitted terrain frame passes
+the shell's shared gameplay-input gate and its initial loading cover is gone.
+The standalone responsiveness probe consumes this signal for Creative and
+existing-world joins, which do not emit a Survival loading-cover milestone.
+First terrain, cover readiness, and full-view settlement remain separate
+milestones; a complete view alone does not assert that gameplay input is ready.
+
 `web/scripts/stage_worker.sh` produces two bindgen outputs from the same worker crate: a portable serial module and an atomics-enabled module built with the pinned nightly and `wasm-bindgen-rayon`. Both use the web workspace's `worker-release` profile, which retains compact release settings while optimizing generation and server crates for speed without expanding the page profile. Staging patches the generated no-bundler Rayon helper to call the bindgen initialization export with its current object-shaped API, avoiding one deprecation warning per child worker. `worker_bootstrap.js` checks `crossOriginIsolated`, shared-memory construction, Atomics wait/notify, and a shared-memory Wasm validation module before selecting the threaded artifact. The pool is capped at four workers and leaves one reported hardware lane for the server connection and tick tasks.
 
 If the capability probe is negative, the bootstrap selects the serial artifact. A rejection after threaded initialization begins is terminal and reports an error; it never mixes a partially initialized threaded module with a fresh serial module. The immutable executor is the only parallel boundary; mutable feature, top-layer, overlay, and packet commits remain in canonical server order and retain their cancellation, memory-budget, and fingerprint checks.

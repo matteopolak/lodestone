@@ -486,6 +486,7 @@ fn emit_join_progress(callback: &Function, progress: &lodestone::BrowserJoinProg
         "loading-terrain" => "loading terrain",
         "loading-overlay-ready" => "loading overlay ready to dismiss",
         "first-terrain-presented" => "first terrain frame presented",
+        "gameplay-ready" => "terrain presented and gameplay input ready",
         "full-view-presented" => "configured view presented",
         "full-view-quiescent" => "configured view meshes settled",
         _ => "singleplayer join progress",

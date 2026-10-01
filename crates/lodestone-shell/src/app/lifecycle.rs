@@ -291,9 +291,13 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
 
 impl WindowApp {
     pub(super) fn gameplay_input_ready(&self) -> bool {
-        self.ui.accepts_gameplay_input()
-            && !self.sim.dimension_transition_pending()
-            && self.sim.world_wait().is_none()
+        Self::gameplay_input_ready_for(&self.ui, &self.sim)
+    }
+
+    pub(super) fn gameplay_input_ready_for(ui: &UiState, sim: &Sim) -> bool {
+        ui.accepts_gameplay_input()
+            && !sim.dimension_transition_pending()
+            && sim.world_wait().is_none()
     }
 
     pub(super) fn dispatch_window_event(&mut self, _window_id: WindowId, event: WindowEvent) -> bool {
