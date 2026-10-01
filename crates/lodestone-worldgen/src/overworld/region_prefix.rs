@@ -62,12 +62,22 @@ impl RegionBiomeSidecar {
         }
         for cz in side_min_z..=max_z + 1 {
             for cx in side_min_x..=max_x + 1 {
-                let biome_cells = (generator.dynamic_biome.is_none()
-                    || (cx >= product_min_x
-                        && cx <= product_max_x
-                        && cz >= product_min_z
-                        && cz <= product_max_z))
-                    .then(|| Arc::new(region_biome_cells(generator, cx, cz, climate)));
+                let admitted = cx >= product_min_x
+                    && cx <= product_max_x
+                    && cz >= product_min_z
+                    && cz <= product_max_z;
+                let biome_cells = (generator.dynamic_biome.is_none() || admitted)
+                    .then(|| {
+                        admitted
+                            .then(|| generator.store.get((cx, cz)))
+                            .flatten()
+                            .and_then(|entry| {
+                                entry.pre_ore.peek().map(|product| Arc::clone(&product.3))
+                            })
+                            .unwrap_or_else(|| {
+                                Arc::new(region_biome_cells(generator, cx, cz, climate))
+                            })
+                    });
                 no_sulfur.push(biome_cells.as_ref().is_some_and(|biome_cells| {
                     biome_cells
                         .palette_entries()
@@ -508,6 +518,7 @@ mod tests {
 #[cfg(all(test, feature = "gen-counters"))]
 mod prefix_comparison_tests {
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
 
     use serde_json::Value;
 
@@ -704,7 +715,7 @@ mod prefix_comparison_tests {
     }
 
     #[test]
-    fn mostly_warm_dynamic_region_matches_full_geometry_and_halves_biome_work() {
+    fn mostly_warm_dynamic_region_matches_full_geometry_and_reuses_admitted_biomes() {
         let admitted = (-4..0)
             .flat_map(|z| (-4..0).map(move |x| (x, z)))
             .collect::<Vec<_>>();
@@ -729,18 +740,42 @@ mod prefix_comparison_tests {
             &narrowed, &missing, admitted_bounds, &preliminary,
         );
         let cold_counts = crate::counters::snapshot();
+
+        let warmed = generator_with_biomes(true);
+        for z in -4..0 {
+            let _ = warmed.pre_ore_stage(-2, z);
+        }
+        let preliminary = warmed.preliminary_cache(crate::aquifer::PRELIMINARY_CACHE_BATCH_CAPACITY);
+        crate::counters::reset();
+        let warm = RegionPrefixBatch::execute(
+            &warmed, &missing, admitted_bounds, &preliminary,
+        );
+        let warm_counts = crate::counters::snapshot();
         for &position in &missing {
+            let full_digest = digest(&full.result(position));
+            let cold_digest = digest(&cold.result(position));
+            let warm_digest = digest(&warm.result(position));
             assert_eq!(
-                digest(&cold.result(position)),
-                digest(&full.result(position)),
+                cold_digest,
+                full_digest,
                 "{position:?}",
             );
+            assert_eq!(warm_digest, full_digest, "warm neighbour changed {position:?}");
+            eprintln!(
+                "dynamic prefix {position:?}: full={full_digest:016x} cold={cold_digest:016x} warm={warm_digest:016x}",
+            );
         }
-        assert_ne!(digest(&full.result(missing[0])), digest(&full.result(missing[1])));
+        assert_ne!(
+            digest(&warm.result(missing[0])),
+            digest(&full.result(missing[1])),
+            "negative coordinate-alias control passed",
+        );
         assert_eq!(full_counts.stage_entered[Stage::Biome as usize], 16);
         assert_eq!(cold_counts.stage_entered[Stage::Biome as usize], 8);
+        assert_eq!(warm_counts.stage_entered[Stage::Biome as usize], 4);
         assert_eq!(full_counts.stage_entered[Stage::Shape as usize], 4);
         assert_eq!(cold_counts.stage_entered[Stage::Shape as usize], 4);
+        assert_eq!(warm_counts.stage_entered[Stage::Shape as usize], 4);
 
         let full_xz = build_xz_products(&control, &admitted).expect("fixture X/Z products");
         let cold_xz = build_xz_products(&narrowed, &missing).expect("fixture X/Z products");
@@ -783,16 +818,24 @@ mod prefix_comparison_tests {
     #[test]
     fn cold_sidecar_retains_warm_neighbour_cells_and_true_exterior_searches() {
         let generator = generator_with_biomes(true);
+        assert_eq!(generator.store.len(), 0);
         let full = RegionBiomeSidecar::new(
             &generator, -4, -1, -4, -1, (-4, -1, -4, -1), None,
         );
+        assert_eq!(generator.store.len(), 0, "cold sidecar inserted stage metadata");
+        let warm = generator.pre_ore_stage(-2, -3);
+        generator.store.entry((0, -3)).pre_ore.get_or_compute(
+            |_| {}, || warm.as_ref().clone(),
+        );
+        let warm_store_len = generator.store.len();
         let cold = RegionBiomeSidecar::new(
             &generator, -1, -1, -4, -1, (-4, -1, -4, -1), None,
         );
         let misclassified = RegionBiomeSidecar::new(
             &generator, -1, -1, -4, -1, (-1, -1, -4, -1), None,
         );
-        assert!(cold.cells_at(-2, -3).is_some());
+        assert_eq!(generator.store.len(), warm_store_len, "sidecar inserted missing neighbours");
+        assert!(Arc::ptr_eq(cold.cells_at(-2, -3).expect("warm neighbour cells"), &warm.3));
         assert!(misclassified.cells_at(-2, -3).is_none());
         assert!(cold.cells_at(0, -3).is_none());
         assert_eq!(full.cells.len(), 36);

@@ -553,6 +553,16 @@ impl<E: Default> StagedStore<E> {
         handle
     }
 
+    /// An existing entry, refreshing its access epoch without inserting or reclaiming.
+    #[must_use]
+    pub(crate) fn get(&self, pos: ChunkPos) -> Option<Arc<E>> {
+        let shard = &self.shards[shard_of(pos)];
+        let mut slots = shard.slots.lock().unwrap_or_else(PoisonError::into_inner);
+        let slot = slots.get_mut(&pos)?;
+        slot.last_epoch = self.epoch.load(Ordering::Relaxed);
+        Some(Arc::clone(&slot.entry))
+    }
+
     /// Opens a scope pinning every entry within Chebyshev `radius` of `centre`
     /// against eviction, for as long as the returned guard lives.
     ///
@@ -922,6 +932,24 @@ mod tests {
     struct Stages {
         a: StageSlot<u64>,
         b: StageSlot<u64>,
+    }
+
+    #[test]
+    fn existing_entry_lookup_does_not_insert_and_refreshes_hit_epoch() {
+        let store = StagedStore::<Stages>::new(1);
+        let position = (-2, -3);
+        assert!(store.get(position).is_none());
+        assert_eq!(store.len(), 0);
+        assert_eq!(store.evicted(), 0);
+
+        let existing = store.entry(position);
+        store.epoch.store(7, Ordering::Relaxed);
+        let reused = store.get(position).expect("existing entry");
+        assert!(Arc::ptr_eq(&existing, &reused));
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.evicted(), 0);
+        let slots = store.shards[shard_of(position)].slots.lock().expect("shard lock");
+        assert_eq!(slots.get(&position).expect("existing slot").last_epoch, 7);
     }
 
     /// Shard selection must scatter the 5×5 neighbourhood a single `column()`

@@ -56,6 +56,12 @@ border resolves its sparse jitter-selected quart queries directly from the same 
 grid and search cursor. Treating that border as packet data would build 1,536 unused cells per border
 column and increase both memory and climate-search work without changing any served biome container.
 
+Within that admitted rectangle, a completed pre-ore product supplies its existing `Arc<BiomeCells>`
+to the surface sidecar. The noncreating store lookup leaves a cold miss untouched; it does not add
+another cache or build empty stage records. Missing products keep the original grid construction,
+and populated entries outside the admitted rectangle still use the sparse exterior lookup. Region
+bounds, surface search history, and RNG order are unchanged.
+
 **Sampling height matters and is per-consumer, not unified.** Carver and ore selection resolve a
 source chunk's biome at `y = 0`; vegetation resolves at the column's own generated surface height.
 At `y = 0` the `depth` channel's gradient is already ≈ +1.0 (climate-space "deep cave"), so a surface
