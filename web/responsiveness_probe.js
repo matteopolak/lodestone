@@ -162,7 +162,7 @@ const JOIN_PHASES = new Set([
 ]);
 const JOIN_PROGRESS_FIELDS = [
   "elapsedMs", "loadedColumns", "expectedColumns", "settledColumns", "pendingMeshes",
-  "pendingLightRemeshes",
+  "pendingLightRemeshes", "presentedColumns", "pendingColumns", "pendingRemovals",
 ];
 
 export function install(worker, canvas) {

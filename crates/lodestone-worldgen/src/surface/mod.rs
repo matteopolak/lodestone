@@ -787,8 +787,9 @@ impl SurfaceBiomeAnswer {
         }
     }
 
+    /// The producer proves both fields invariant throughout this XZ column.
     #[inline(always)]
-    fn fixed(biome: BuiltinBiome, cold_enough_to_snow: bool) -> Self {
+    pub(crate) fn fixed(biome: BuiltinBiome, cold_enough_to_snow: bool) -> Self {
         Self {
             biome,
             cold_enough_to_snow,
@@ -1168,6 +1169,30 @@ impl SurfaceSystem {
         )
     }
 
+    /// The ordinary diff traversal with producer-certified typed biome answers.
+    #[must_use]
+    pub(crate) fn build_surface_reusing_typed(
+        &self,
+        out: SurfaceDiff,
+        pre: &dyn Fn(i32, i32, i32) -> PreState,
+        heightmap: &dyn Fn(i32, i32) -> i32,
+        biome_at: &dyn Fn(i32, i32, i32) -> SurfaceBiomeAnswer,
+        min_block_x: i32,
+        min_block_z: i32,
+    ) -> SurfaceDiff {
+        self.build_surface_reusing_with_column_biome_and_preliminary_cache(
+            out,
+            pre,
+            heightmap,
+            &|_, _, _| unreachable!("typed surface biome callback is required"),
+            &|_, _, _| {},
+            min_block_x,
+            min_block_z,
+            &self.preliminary_shared,
+            Some(biome_at),
+        )
+    }
+
     /// [`Self::build_surface_reusing`] with an initial per-column biome lookup
     /// before the descending Y scan.
     #[inline]
@@ -1197,6 +1222,7 @@ impl SurfaceSystem {
             min_block_x,
             min_block_z,
             &self.preliminary_shared,
+            None,
         )
     }
 
@@ -1226,6 +1252,7 @@ impl SurfaceSystem {
             min_block_x,
             min_block_z,
             preliminary_shared,
+            None,
         )
     }
 
@@ -1573,6 +1600,7 @@ impl SurfaceSystem {
         min_block_x: i32,
         min_block_z: i32,
         preliminary_shared: &crate::aquifer::PreliminarySurfaceCache,
+        typed_biome_at: Option<&dyn Fn(i32, i32, i32) -> SurfaceBiomeAnswer>,
     ) -> SurfaceDiff
     where
         P: Fn(i32, i32, i32) -> PreState + ?Sized,
@@ -1628,7 +1656,7 @@ impl SurfaceSystem {
                     typed_biome: None,
                     biome_builtin: None,
                     biome_at: Some(&biome_at),
-                    typed_biome_at: None,
+                    typed_biome_at,
                     cache: &mut cache,
                     cache_y: false,
                 };
@@ -2304,7 +2332,11 @@ impl SurfaceSystem {
                 if let Some(value) = ctx.get_y_cache(*cache) {
                     return value;
                 }
-                let value = ctx.biome().1;
+                let value = if ctx.typed_biome_at.is_some() || ctx.typed_biome.is_some() {
+                    ctx.typed_biome().1
+                } else {
+                    ctx.biome().1
+                };
                 ctx.set_y_cache(*cache, value);
                 value
             }
@@ -2959,6 +2991,86 @@ mod tests {
         let mut compiled = CompiledRule::new(&rule);
         compiled.prove_deep_no_output(&conditions);
         assert!(!compiled.deep_no_output);
+    }
+
+    #[test]
+    fn typed_surface_diff_matches_named_and_honors_answer_bounds() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/worldgen_data");
+        let resolver = FsResolver { root: root.clone() };
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join("noise_settings/overworld.json")).unwrap(),
+        ).unwrap();
+        let builder = Builder::new(42, &resolver);
+        let mut surface = SurfaceSystem::new(&settings, &builder, &super::identity_canon(&settings));
+        let grass = lodestone_data::block::Block::GrassBlock.default_state();
+        let dirt = lodestone_data::block::Block::Dirt.default_state();
+        let sand = lodestone_data::block::Block::Sand.default_state();
+        surface.min_y = 0;
+        surface.gen_depth = 12;
+        surface.conditions = vec![
+            Cond::BiomeIs {
+                set: super::BiomeSet::from_names(vec!["minecraft:plains".to_owned()]),
+                cache: 0,
+            },
+            Cond::Temperature { cache: 1 },
+        ];
+        surface.compiled_rule = CompiledRule::new(&Rule::Sequence(vec![
+            Rule::Condition(0, Box::new(Rule::Block(grass))),
+            Rule::Condition(1, Box::new(Rule::Block(sand))),
+            Rule::Block(dirt),
+        ]));
+        let pre = |_: i32, y: i32, _: i32| {
+            if (0..12).contains(&y) {
+                PreState { state: surface.default_block, class: PreClass::Stone }
+            } else {
+                PreState::AIR
+            }
+        };
+        for varying in [false, true] {
+            let named = surface.build_surface_reusing(
+                SurfaceDiff::default(), &pre, &|_, _| 11,
+                &|_, y, _| {
+                    let biome = if !varying || y >= 8 {
+                        "minecraft:plains"
+                    } else {
+                        "minecraft:sulfur_caves"
+                    };
+                    (biome, !varying || y >= 4)
+                }, -32, -128,
+            );
+            let calls = std::cell::Cell::new(0);
+            let typed = surface.build_surface_reusing_typed(
+                SurfaceDiff::default(), &pre, &|_, _| 11,
+                &|_, y, _| {
+                    calls.set(calls.get() + 1);
+                    if varying {
+                        let biome = if y >= 8 { BuiltinBiome::Plains } else { BuiltinBiome::SulfurCaves };
+                        super::SurfaceBiomeAnswer::exact(
+                            y, biome, y >= 4,
+                        )
+                    } else {
+                        super::SurfaceBiomeAnswer::fixed(BuiltinBiome::Plains, true)
+                    }
+                }, -32, -128,
+            );
+            assert_eq!(typed.changes, named.changes);
+            assert_eq!(typed.column_offsets, named.column_offsets);
+            assert_eq!(calls.get(), if varying { 12 * 256 } else { 256 });
+            for x in 0..16 {
+                for z in 0..16 {
+                    for y in 0..12 {
+                        let expected = if !varying || y >= 8 {
+                            grass
+                        } else if y >= 4 {
+                            sand
+                        } else {
+                            dirt
+                        };
+                        assert_eq!(typed.get(&(x, y, z)), Some(&expected));
+                    }
+                }
+            }
+        }
     }
 
     #[test]

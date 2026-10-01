@@ -8,9 +8,18 @@ pub struct BrowserJoinProgress {
     pub elapsed_ms: f64,
     pub loaded_columns: usize,
     pub expected_columns: usize,
+    pub presented_columns: usize,
     pub settled_columns: usize,
     pub pending_meshes: usize,
+    pub pending_columns: usize,
     pub pending_light_remeshes: usize,
+    pub pending_removals: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct JoinViewProgress {
+    presented_columns: usize,
+    settled_columns: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -55,6 +64,7 @@ pub(super) struct BrowserJoinTrace {
     gameplay_ready: bool,
     full_view_presented: bool,
     full_view_quiescent: bool,
+    frame_view: JoinViewProgress,
     last_full_view_probe: Option<Instant>,
     #[cfg(target_arch = "wasm32")]
     last_view_report: Option<Instant>,
@@ -73,6 +83,7 @@ impl BrowserJoinTrace {
             gameplay_ready: false,
             full_view_presented: false,
             full_view_quiescent: false,
+            frame_view: JoinViewProgress::default(),
             last_full_view_probe: None,
             #[cfg(target_arch = "wasm32")]
             last_view_report: None,
@@ -90,13 +101,14 @@ impl BrowserJoinTrace {
         self.gameplay_ready = false;
         self.full_view_presented = false;
         self.full_view_quiescent = false;
+        self.frame_view = JoinViewProgress::default();
         self.last_full_view_probe = None;
         #[cfg(target_arch = "wasm32")]
         {
             self.last_view_report = None;
         }
         self.events.borrow_mut().clear();
-        self.push(phase, 0, 0, JoinMeshWork::default());
+        self.push(phase, 0, JoinViewProgress::default(), JoinMeshWork::default());
     }
 
     pub(super) fn observe_before_present(
@@ -108,15 +120,15 @@ impl BrowserJoinTrace {
     ) {
         if !self.joining && phase == ConnectPhase::Joining {
             self.joining = true;
-            self.push("joining", loaded_columns, 0, work);
+            self.push("joining", loaded_columns, JoinViewProgress::default(), work);
         }
         if !self.loading_terrain && phase == ConnectPhase::LoadingTerrain {
             self.loading_terrain = true;
-            self.push("loading-terrain", loaded_columns, 0, work);
+            self.push("loading-terrain", loaded_columns, JoinViewProgress::default(), work);
         }
         if !self.overlay_ready && overlay_ready {
             self.overlay_ready = true;
-            self.push("loading-overlay-ready", loaded_columns, 0, work);
+            self.push("loading-overlay-ready", loaded_columns, JoinViewProgress::default(), work);
         }
     }
 
@@ -128,17 +140,18 @@ impl BrowserJoinTrace {
         view_settlement: Option<(usize, usize, usize)>,
         work: JoinMeshWork,
     ) {
+        self.frame_view = JoinViewProgress {
+            presented_columns: view_presentation.map_or(0, |(_, presented, _)| presented),
+            settled_columns: view_settlement.map_or(0, |(_, settled, _)| settled),
+        };
+        if let Some((_, _, expected)) = view_presentation.or(view_settlement) {
+            self.expected_columns = expected;
+        }
         if !self.first_terrain_presented && terrain_drawn {
             self.first_terrain_presented = true;
-            self.push(
-                "first-terrain-presented",
-                loaded_columns,
-                view_presentation.map_or(0, |(_, presented, _)| presented),
-                work,
-            );
+            self.push("first-terrain-presented", loaded_columns, self.frame_view, work);
         }
         if let Some((resident, presented, expected)) = view_presentation {
-            self.expected_columns = expected;
             #[cfg(target_arch = "wasm32")]
             if log::max_level() >= log::LevelFilter::Debug
                 && self.last_view_report.is_none_or(|last| last.elapsed() >= Duration::from_secs(1))
@@ -158,7 +171,7 @@ impl BrowserJoinTrace {
             let full_view_presented = expected > 0 && resident == expected && presented == expected;
             if !self.full_view_presented && full_view_presented {
                 self.full_view_presented = true;
-                self.push("full-view-presented", resident, presented, work);
+                self.push("full-view-presented", resident, self.frame_view, work);
             }
             if !self.full_view_quiescent
                 && full_view_presented
@@ -166,7 +179,7 @@ impl BrowserJoinTrace {
                 && work.is_drained()
             {
                 self.full_view_quiescent = true;
-                self.push("full-view-quiescent", resident, expected, work);
+                self.push("full-view-quiescent", resident, self.frame_view, work);
             }
         }
     }
@@ -180,8 +193,14 @@ impl BrowserJoinTrace {
     ) {
         if !self.gameplay_ready && ready && terrain_drawn {
             self.gameplay_ready = true;
-            self.push("gameplay-ready", loaded_columns, 0, work);
+            self.push("gameplay-ready", loaded_columns, self.frame_view, work);
         }
+    }
+
+    pub(super) fn milestone_probe_due(&self, terrain_drawn: bool, gameplay_ready: bool) -> bool {
+        self.started.is_some()
+            && terrain_drawn
+            && (!self.first_terrain_presented || (!self.gameplay_ready && gameplay_ready))
     }
 
     pub(super) fn full_view_probe_due(&mut self) -> bool {
@@ -211,7 +230,7 @@ impl BrowserJoinTrace {
         &self,
         phase: &'static str,
         loaded_columns: usize,
-        settled_columns: usize,
+        view: JoinViewProgress,
         work: JoinMeshWork,
     ) {
         let Some(started) = self.started else {
@@ -226,9 +245,12 @@ impl BrowserJoinTrace {
             elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
             loaded_columns,
             expected_columns: self.expected_columns,
-            settled_columns,
+            presented_columns: view.presented_columns,
+            settled_columns: view.settled_columns,
             pending_meshes: work.pending_meshes,
+            pending_columns: work.pending_columns,
             pending_light_remeshes: work.pending_light_remeshes,
+            pending_removals: work.pending_removals,
         });
     }
 }
@@ -258,6 +280,90 @@ mod tests {
         assert!(!trace.gameplay_ready);
         trace.observe_gameplay_presented(true, true, 1, work);
         assert_eq!(events.borrow().len(), 2);
+    }
+
+    #[test]
+    fn browser_join_metrics_distinguish_presented_and_latest_settled_columns() {
+        let (mut trace, events) = trace();
+        trace.start(1, "world-create-started");
+        let work = JoinMeshWork {
+            pending_meshes: 905,
+            pending_columns: 3,
+            pending_light_remeshes: 7,
+            pending_removals: 2,
+        };
+        trace.observe_presented(true, 25, Some((25, 25, 25)), Some((25, 17, 25)), work);
+        trace.observe_gameplay_presented(true, true, 25, work);
+        trace.observe_gameplay_presented(true, true, 25, work);
+        {
+            let events = events.borrow();
+            let phases: Vec<_> = events.iter().map(|event| event.phase).collect();
+            assert_eq!(phases, [
+                "world-create-started", "first-terrain-presented",
+                "full-view-presented", "gameplay-ready",
+            ]);
+            for event in events.iter().skip(1) {
+                assert_eq!(event.expected_columns, 25);
+                assert_eq!(event.presented_columns, 25);
+                assert_eq!(event.settled_columns, 17);
+                assert_eq!(event.pending_meshes, 905);
+                assert_eq!(event.pending_columns, 3);
+                assert_eq!(event.pending_light_remeshes, 7);
+                assert_eq!(event.pending_removals, 2);
+            }
+        }
+        assert!(!trace.full_view_quiescent);
+        trace.observe_presented(
+            true, 25, Some((25, 25, 25)), Some((25, 25, 25)), JoinMeshWork::default(),
+        );
+        let events = events.borrow();
+        assert_eq!(events.len(), 5);
+        let event = events.back().unwrap();
+        assert_eq!(event.phase, "full-view-quiescent");
+        assert_eq!(event.presented_columns, 25);
+        assert_eq!(event.settled_columns, 25);
+        assert_eq!(event.pending_columns, 0);
+        assert_eq!(event.pending_removals, 0);
+    }
+
+    #[test]
+    fn browser_join_metrics_do_not_reuse_an_unprobed_or_previous_join_view() {
+        let (mut trace, events) = trace();
+        trace.start(2, "world-create-started");
+        trace.observe_presented(
+            true, 13, Some((13, 11, 25)), Some((13, 8, 25)), JoinMeshWork::default(),
+        );
+        assert_eq!(events.borrow().back().unwrap().presented_columns, 11);
+        assert_eq!(events.borrow().back().unwrap().settled_columns, 8);
+        trace.observe_presented(true, 13, None, None, JoinMeshWork::default());
+        trace.observe_gameplay_presented(true, true, 13, JoinMeshWork::default());
+        assert_eq!(events.borrow().back().unwrap().presented_columns, 0);
+        assert_eq!(events.borrow().back().unwrap().settled_columns, 0);
+        trace.start(1, "world-open-started");
+        trace.observe_gameplay_presented(true, true, 4, JoinMeshWork::default());
+        assert_eq!(events.borrow().len(), 2);
+        assert_eq!(events.borrow().back().unwrap().expected_columns, 9);
+        assert_eq!(events.borrow().back().unwrap().settled_columns, 0);
+    }
+
+    #[test]
+    fn browser_join_milestones_require_a_probe_between_periodic_samples() {
+        let (mut trace, _) = trace();
+        assert!(!trace.milestone_probe_due(true, true));
+        trace.start(2, "world-create-started");
+        assert!(!trace.milestone_probe_due(false, true));
+        let now = Instant::now();
+        assert!(trace.full_view_probe_due_at(now));
+        assert!(!trace.full_view_probe_due_at(now + Duration::from_millis(1)));
+        assert!(trace.milestone_probe_due(true, false));
+        trace.observe_presented(
+            true, 13, Some((13, 11, 25)), Some((13, 8, 25)), JoinMeshWork::default(),
+        );
+        assert!(!trace.milestone_probe_due(true, false));
+        assert!(trace.milestone_probe_due(true, true));
+        trace.observe_gameplay_presented(true, true, 13, JoinMeshWork::default());
+        assert!(!trace.milestone_probe_due(true, true));
+        assert!(trace.full_view_probe_due_at(now + Duration::from_millis(100)));
     }
 
     #[test]

@@ -925,6 +925,12 @@ impl ClimateSampler {
         self
     }
 
+    /// Every climate channel is proven independent of the queried Y coordinate.
+    #[inline]
+    pub(crate) fn is_xz_pure(&self) -> bool {
+        self.xz_pure.iter().all(|&pure| pure)
+    }
+
     /// Vanilla's own climate sampler's quantized target, at an exact block
     /// position (the caller is responsible for quart-aligning `x`/`z` and
     /// picking `y`; see the module doc's "y = 0 trap" section for why `y`

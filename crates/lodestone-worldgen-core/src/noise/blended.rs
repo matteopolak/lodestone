@@ -23,6 +23,20 @@ pub struct BlendedNoise {
 }
 
 impl BlendedNoise {
+    pub(crate) fn conservative_overworld_bound(&self) -> Option<f64> {
+        let stock = self.xz_multiplier == 684.412 * 0.25
+            && self.y_multiplier == 684.412 * 0.125
+            && self.xz_factor == 80.0
+            && self.y_factor == 160.0
+            && self.smear_scale_multiplier == 8.0
+            && self.min_limit_noise.has_complete_reverse_octaves(16)
+            && self.max_limit_noise.has_complete_reverse_octaves(16)
+            && self.main_noise.has_complete_reverse_octaves(8);
+        // Two nonzero gradient components give 2 + epsilon*smear per octave.
+        // The stock reverse sum, divided by 65536, is below 1.999970.
+        stock.then_some(2.001)
+    }
+
     /// Appends a complete, bit-exact description of this noise to `out` — see
     /// [`crate::noise::ImprovedNoise::write_signature`] for the contract.
     pub fn write_signature(&self, out: &mut Vec<u64>) {
@@ -219,5 +233,33 @@ mod tests {
             let expected = scalar_reference(&noise, x, y, z);
             assert_eq!(actual.to_bits(), expected.to_bits(), "point ({x}, {y}, {z})");
         }
+    }
+
+    #[cfg(feature = "gen-counters")]
+    #[test]
+    fn stock_bound_rejects_parameters_and_wrong_zero_bound_has_a_density_witness() {
+        use crate::density::{Density, NoiseChunkSampler};
+        let mut rng = LegacyRandomSource::new(4242);
+        let mut noise = BlendedNoise::new(&mut rng, 0.25, 0.125, 80.0, 160.0, 8.0);
+        assert_eq!(noise.conservative_overworld_bound(), Some(2.001));
+        noise.smear_scale_multiplier = 0.0;
+        assert_eq!(noise.conservative_overworld_bound(), None);
+        noise.smear_scale_multiplier = f64::NAN;
+        assert_eq!(noise.conservative_overworld_bound(), None);
+        noise.smear_scale_multiplier = 8.0;
+        let x = (-512..512).map(|x| x * 4)
+            .find(|&x| scalar_reference(&noise, x, 128, -32) > 0.2)
+            .expect("wrong zero bound needs a positive independent noise witness");
+        let a = -0.1;
+        assert!(a <= -(0.0 + 0.009));
+        assert!(a > -2.01);
+        let sampler = NoiseChunkSampler::new(Density::Squeeze(Box::new(Density::Interpolated {
+            inner: Box::new(Density::Add(Box::new(Density::Const(a)), Box::new(Density::Blended(noise)))),
+            slot: 0,
+        })), 1, 4, 8);
+        let mut exact = [0.0; 128];
+        sampler.final_density_cell(x, 128, -32, &mut exact);
+        assert!(exact[0] > 0.0, "wrong bound escaped the exact density detector at ({x},128,-32)");
+        assert!(!exact.iter().all(|value| value.is_finite() && *value <= 0.0));
     }
 }

@@ -19,6 +19,13 @@ pub struct NormalNoise {
 }
 
 impl NormalNoise {
+    pub(crate) fn conservative_stock_bound(&self) -> Option<f64> {
+        let sum = self.first.conservative_amplitude_sum()?
+            + self.second.conservative_amplitude_sum()?;
+        let bound = 2.001 * sum * self.value_factor.abs() + 1.0e-9;
+        bound.is_finite().then_some(bound)
+    }
+
     /// Appends a complete, bit-exact description of this noise to `out` — see
     /// [`crate::noise::ImprovedNoise::write_signature`] for the contract.
     pub fn write_signature(&self, out: &mut Vec<u64>) {

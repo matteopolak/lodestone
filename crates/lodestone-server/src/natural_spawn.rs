@@ -68,11 +68,9 @@
 //!   [`ChunkSource`](crate::chunk::ChunkSource), not a generator, so there is
 //!   nothing to ask. It is right for every overworld preset; a custom
 //!   `sea_level` would shift the water-animal bands.
-//! * **Peaceful difficulty is not read here.** `crate::tick` gates the whole
-//!   cycle on the `spawn_mobs` rule; difficulty lives on
-//!   [`crate::world_state::WorldStateHandle`] and folding it in belongs with the
-//!   peaceful-eviction pass in `lodestone_entity::spawn::check_despawn`, which
-//!   already models it.
+//! * **Environment inputs come from the tick owner.** Difficulty refuses
+//!   forbidden species before placement; dimension and weather determine the
+//!   monster light thresholds. Animal brightness remains un-darkened skylight.
 //!
 //! ## Dependencies
 //!
@@ -89,6 +87,7 @@ use lodestone_model::{Difficulty, ResourceKey, Vec3};
 use lodestone_world::{BlockVolume, LightProperties, compute_column_light};
 
 use crate::chunk::{ChunkColumn, ChunkGenerationStage};
+use crate::dimension::Dimension;
 use crate::generation_population::PlacementDecision;
 use crate::mob_spawn::{MobCategory, SpawnCandidate, SpawnCandidateSource, SpawnRng};
 use crate::mobs::ChunkWorld;
@@ -567,27 +566,35 @@ impl BlockVolume for PaletteVolume {
 
 /// `(dampening, emission)` per palette index, resolved once per column rather
 /// than once per cell.
-struct PaletteProps(Vec<(u8, u8)>);
+struct PaletteProps {
+    states: Vec<(u8, u8)>,
+    has_skylight: bool,
+}
 
 impl PaletteProps {
-    fn of(column: &ChunkColumn) -> Self {
-        Self(
-            column
+    fn of(column: &ChunkColumn, dimension: Dimension) -> Self {
+        Self {
+            states: column
                 .palette()
                 .iter()
                 .map(|&state| lodestone_data::light_props::light_props(state))
                 .collect(),
-        )
+            has_skylight: dimension.has_skylight(),
+        }
     }
 }
 
 impl LightProperties for PaletteProps {
+    fn has_skylight(&self) -> bool {
+        self.has_skylight
+    }
+
     fn opacity(&self, state: u32) -> u8 {
-        self.0.get(state as usize).map_or(15, |&(d, _)| d)
+        self.states.get(state as usize).map_or(15, |&(d, _)| d)
     }
 
     fn emission(&self, state: u32) -> u8 {
-        self.0.get(state as usize).map_or(0, |&(_, e)| e)
+        self.states.get(state as usize).map_or(0, |&(_, e)| e)
     }
 }
 
@@ -597,24 +604,25 @@ struct ColumnLight {
     light: lodestone_world::ColumnLight,
     min_y: i32,
     section_count: usize,
+    has_skylight: bool,
 }
 
 impl ColumnLight {
-    fn compute(column: &ChunkColumn) -> Self {
+    fn compute(column: &ChunkColumn, dimension: Dimension) -> Self {
         let volume = PaletteVolume::of(column);
-        let props = PaletteProps::of(column);
+        let props = PaletteProps::of(column, dimension);
         Self {
             light: compute_column_light(&volume, &props),
             min_y: column.min_y,
             section_count: column.section_count(),
+            has_skylight: dimension.has_skylight(),
         }
     }
 
     /// `(sky, block)` raw light at world `y` and chunk-local `x`/`z`.
     ///
-    /// Above the built column both answer the dimension default the client would
-    /// resolve: full sky, no block light. See `docs/server-chunk-light.md`'s
-    /// "`Missing` is full daylight" note — a `0` here would darken the sky.
+    /// Above the built column, sky-bearing dimensions have full sky light;
+    /// dimensions without a sky source have zero. Block light is zero there.
     fn at(&self, x: usize, y: i32, z: usize) -> (u8, u8) {
         let local = y - self.min_y;
         if local < 0 {
@@ -622,10 +630,14 @@ impl ColumnLight {
         }
         let s = (local / 16) as usize;
         if s >= self.section_count {
-            return (15, 0);
+            return (if self.has_skylight { 15 } else { 0 }, 0);
         }
         let y_in = (local % 16) as usize;
-        let sky = self.light.section_sky_light(s, x, y_in, z).unwrap_or(15);
+        let sky = if self.has_skylight {
+            self.light.section_sky_light(s, x, y_in, z).unwrap_or(15)
+        } else {
+            0
+        };
         let block = self.light.section_block_light(s, x, y_in, z).unwrap_or(0);
         (sky, block)
     }
@@ -667,13 +679,13 @@ pub struct NaturalSpawner {
     /// spawn-RNG seed `new` takes and is used for exactly one thing:
     /// `WorldgenRandom.seedSlimeChunk`. See [`with_world_seed`](Self::with_world_seed).
     world_seed: i64,
-    /// The world clock's `day_time`, for the moon phase
-    /// `SURFACE_SLIME_SPAWN_CHANCE` is keyframed against. See
-    /// [`set_day_time`](Self::set_day_time).
+    /// The world clock for sky darkening and the surface-slime moon phase.
     day_time: i64,
-    /// The world difficulty, for `SpawnPlacements.checkSpawnRules`' peaceful
-    /// guard. See [`set_difficulty`](Self::set_difficulty).
+    /// The world difficulty for the species-specific peaceful guard.
     difficulty: Difficulty,
+    dimension: Dimension,
+    rain_level: f32,
+    thunder_level: f32,
 }
 
 impl std::fmt::Debug for NaturalSpawner {
@@ -711,6 +723,9 @@ impl NaturalSpawner {
             // `crate::world_state::WorldState`'s own default, so a spawner nobody
             // sets it on behaves exactly as it did before the guard existed.
             difficulty: Difficulty::Normal,
+            dimension: Dimension::Overworld,
+            rain_level: 0.0,
+            thunder_level: 0.0,
         }
     }
 
@@ -764,6 +779,17 @@ impl NaturalSpawner {
     /// the behaviour every existing gate was written against.
     pub fn set_difficulty(&mut self, difficulty: Difficulty) {
         self.difficulty = difficulty;
+    }
+
+    /// Supplies the tick owner's dimension and current weather intensities.
+    /// Changing dimension invalidates light sampled with a different sky source.
+    pub fn set_environment(&mut self, dimension: Dimension, rain_level: f32, thunder_level: f32) {
+        if self.dimension != dimension {
+            self.lights.clear();
+            self.dimension = dimension;
+        }
+        self.rain_level = rain_level.clamp(0.0, 1.0);
+        self.thunder_level = thunder_level.clamp(0.0, 1.0);
     }
 
     /// Starts a cycle at `tick` with `players` as the loaded players, resetting
@@ -840,18 +866,59 @@ impl NaturalSpawner {
             }
             let column = world.column(cx, cz)?;
             self.lit_this_cycle += 1;
-            self.lights.insert((cx, cz), ColumnLight::compute(column));
+            self.lights.insert((cx, cz), ColumnLight::compute(column, self.dimension));
         }
         Some(self.lights[&(cx, cz)].at(lx, y, lz))
     }
 
-    /// Vanilla's `getMaxLocalRawBrightness(pos)`: the greater of block light and
-    /// sky light reduced by the world's current sky darkening. Ambient darkening
-    /// is not modelled (there is no world clock here), so this is the *daytime*
-    /// answer — the conservative direction, since a brighter reading only ever
-    /// suppresses a spawn.
+    /// Un-darkened light, used by animals and glow squid regardless of the clock.
     fn raw_brightness(sky: u8, block: u8) -> u8 {
         sky.max(block)
+    }
+
+    fn effective_thunder(&self) -> f32 {
+        if self.dimension == Dimension::Overworld {
+            self.rain_level * self.thunder_level
+        } else {
+            0.0
+        }
+    }
+
+    fn sky_darkening(&self) -> u8 {
+        if self.dimension != Dimension::Overworld {
+            return if self.dimension == Dimension::Nether { 11 } else { 0 };
+        }
+        let tick = self.day_time.rem_euclid(24_000) as f32;
+        let night_factor = 0.26666668;
+        let factor = if (133.0..=11_867.0).contains(&tick) {
+            1.0
+        } else if tick < 13_670.0 && tick > 11_867.0 {
+            1.0 + (night_factor - 1.0) * ((tick - 11_867.0) / 1_803.0)
+        } else if (13_670.0..=22_330.0).contains(&tick) {
+            night_factor
+        } else {
+            let dawn_tick = if tick < 133.0 { tick + 24_000.0 } else { tick };
+            night_factor + (1.0 - night_factor) * ((dawn_tick - 22_330.0) / 1_803.0)
+        };
+        let mut level = 15.0 * factor;
+        let thunder = self.effective_thunder();
+        let rain = self.rain_level - thunder;
+        level += rain * 0.3125 * (4.0 - level);
+        level += thunder * 0.52734375 * (4.0 - level);
+        (15.0 - level) as u8
+    }
+
+    fn local_brightness(&self, sky: u8, block: u8) -> u8 {
+        sky.saturating_sub(self.sky_darkening()).max(block)
+    }
+
+    fn monster_brightness(&self, sky: u8, block: u8) -> u8 {
+        let darkening = if self.effective_thunder() > 0.9 {
+            10
+        } else {
+            self.sky_darkening()
+        };
+        sky.saturating_sub(darkening).max(block)
     }
 
     /// The species-independent half of `isValidSpawnPostitionForType` plus the
@@ -919,10 +986,8 @@ impl NaturalSpawner {
             Ground::Any => {}
         }
 
-        // The light half. Drawn *after* the cheap terrain rejections, which is
-        // also vanilla's order — `isDarkEnoughToSpawn` is the last thing
-        // `checkMonsterSpawnRules` reaches — so the RNG stream is not consumed by
-        // a position that was never going to work.
+        // Terrain failures precede light draws so invalid positions do not
+        // consume the placement RNG stream.
         let (sky, block) = self.light_at(x, y, z)?;
         if rule.needs_sky && sky < 15 {
             return Some(false);
@@ -933,12 +998,20 @@ impl NaturalSpawner {
                 if i32::from(sky) > self.rng.next_int(32) {
                     return Some(false);
                 }
-                // The overworld's `monsterSpawnBlockLightLimit` is 0.
-                if block > 0 {
+                let block_limit = if self.dimension == Dimension::Nether {
+                    15
+                } else {
+                    0
+                };
+                if block > block_limit {
                     return Some(false);
                 }
-                // `monsterSpawnLightTest` is `UniformInt(0, 7)`.
-                if i32::from(Self::raw_brightness(sky, block)) > self.rng.next_int(8) {
+                let threshold = match self.dimension {
+                    Dimension::Overworld => self.rng.next_int(8),
+                    Dimension::Nether => 7,
+                    Dimension::End => 15,
+                };
+                if i32::from(self.monster_brightness(sky, block)) > threshold {
                     return Some(false);
                 }
             }
@@ -948,7 +1021,7 @@ impl NaturalSpawner {
                 }
             }
             LightRule::MaxRandom(bound) => {
-                if i32::from(Self::raw_brightness(sky, block)) > self.rng.next_int(bound) {
+                if i32::from(self.local_brightness(sky, block)) > self.rng.next_int(bound) {
                     return Some(false);
                 }
             }
@@ -961,7 +1034,7 @@ impl NaturalSpawner {
         match rule.special {
             Special::None => {}
             Special::Slime => {
-                if !self.slime_permits(x, y, z, Self::raw_brightness(sky, block)) {
+                if !self.slime_permits(x, y, z, self.local_brightness(sky, block)) {
                     return Some(false);
                 }
             }
@@ -1311,6 +1384,96 @@ mod tests {
         let mut column = ChunkColumn::new(0, 80);
         column.set_block_id(3, 63, 7, Block::GrassBlock.default_state());
         column
+    }
+
+    #[test]
+    fn spawn_sky_darkening_matches_day_track_and_weather_values() {
+        let mut spawner = NaturalSpawner::new(HashMap::new(), 0);
+        for (time, darkening) in [
+            (133, 0), (6_000, 0), (11_867, 0), (12_800, 5),
+            (13_670, 11), (18_000, 11), (22_330, 11), (23_200, 5),
+            (24_133, 0), (-6_000, 11),
+        ] {
+            spawner.set_day_time(time);
+            assert_eq!(spawner.sky_darkening(), darkening, "time={time}");
+        }
+        spawner.set_day_time(6_000);
+        spawner.set_environment(Dimension::Overworld, 1.0, 0.0);
+        assert_eq!(spawner.sky_darkening(), 3);
+        assert_eq!(spawner.monster_brightness(15, 0), 12);
+        spawner.set_environment(Dimension::Overworld, 1.0, 1.0);
+        assert_eq!(spawner.sky_darkening(), 5);
+        assert_eq!(spawner.monster_brightness(15, 0), 5);
+        assert_eq!(spawner.monster_brightness(15, 8), 8);
+        spawner.set_environment(Dimension::Overworld, 1.0, 0.9);
+        assert_eq!(spawner.monster_brightness(15, 0), 10);
+        spawner.set_environment(Dimension::Overworld, 0.5, 1.0);
+        assert_eq!(spawner.monster_brightness(15, 0), 13);
+        spawner.set_environment(Dimension::Nether, 1.0, 1.0);
+        assert_eq!(spawner.sky_darkening(), 11);
+        assert_eq!(spawner.effective_thunder(), 0.0);
+        spawner.set_environment(Dimension::End, 1.0, 1.0);
+        assert_eq!(spawner.sky_darkening(), 0);
+    }
+
+    #[test]
+    fn spawn_light_controls_distinguish_night_monsters_from_animal_brightness() {
+        let world = std::sync::Arc::new(ChunkWorld::from_columns([((0, 0), grass_column())]));
+        let monster = spawn_rule("zombie").expect("monster rule");
+        let animal = spawn_rule("cow").expect("animal rule");
+        let mut spawner = NaturalSpawner::new(HashMap::new(), 0);
+        spawner.begin_cycle(world, 1, Vec::new());
+        spawner.set_day_time(6_000);
+        assert_eq!(spawner.light_at(3, 64, 7), Some((15, 0)));
+        assert_eq!(spawner.local_brightness(15, 0), 15);
+        assert!(!spawner.permits(monster, 3, 64, 7));
+        assert!(spawner.permits(animal, 3, 64, 7));
+        spawner.set_day_time(18_000);
+        spawner.rng = SpawnRng::new(0);
+        assert_eq!(spawner.local_brightness(15, 0), 4);
+        // Seed zero's first two standard SplitMix64 words end in AF and F4:
+        // raw sky compares with 15, and the final threshold is 4.
+        assert!(spawner.permits(monster, 3, 64, 7));
+        assert!(spawner.permits(animal, 3, 64, 7));
+        spawner.set_environment(Dimension::Overworld, 1.0, 1.0);
+        assert!(spawner.permits(animal, 3, 64, 7));
+    }
+
+    #[test]
+    fn spawn_dimension_light_controls_keep_sky_and_monster_limits_distinct() {
+        let world = std::sync::Arc::new(ChunkWorld::from_columns([((0, 0), grass_column())]));
+        let monster = spawn_rule("enderman").expect("monster rule");
+        let mut spawner = NaturalSpawner::new(HashMap::new(), 0);
+        spawner.begin_cycle(world, 1, Vec::new());
+        assert_eq!(spawner.light_at(3, 64, 7), Some((15, 0)));
+        assert!(!spawner.permits(monster, 3, 64, 7));
+        spawner.set_environment(Dimension::End, 0.0, 0.0);
+        spawner.rng = SpawnRng::new(0);
+        assert_eq!(spawner.light_at(3, 64, 7), Some((15, 0)));
+        assert!(spawner.permits(monster, 3, 64, 7));
+        spawner.set_environment(Dimension::Nether, 0.0, 0.0);
+        assert_eq!(spawner.light_at(3, 64, 7), Some((0, 0)));
+        assert_eq!(spawner.light_at(3, 80, 7), Some((0, 0)));
+        assert!(spawner.permits(monster, 3, 64, 7));
+        spawner.set_environment(Dimension::Overworld, 0.0, 0.0);
+        assert_eq!(spawner.light_at(3, 64, 7), Some((15, 0)));
+    }
+
+    #[test]
+    fn spawn_dimension_block_light_controls_accept_dim_nether_emission_only() {
+        let mut column = grass_column();
+        column.set_block_id(3, 63, 7, Block::MagmaBlock.default_state());
+        let world = std::sync::Arc::new(ChunkWorld::from_columns([((0, 0), column)]));
+        let monster = spawn_rule("enderman").expect("monster rule");
+        let mut spawner = NaturalSpawner::new(HashMap::new(), 0);
+        spawner.set_environment(Dimension::Nether, 0.0, 0.0);
+        spawner.begin_cycle(world, 1, Vec::new());
+        assert_eq!(spawner.light_at(3, 64, 7), Some((0, 2)));
+        assert!(spawner.permits(monster, 3, 64, 7));
+        spawner.set_environment(Dimension::End, 0.0, 0.0);
+        spawner.rng = SpawnRng::new(0);
+        assert_eq!(spawner.light_at(3, 64, 7), Some((15, 2)));
+        assert!(!spawner.permits(monster, 3, 64, 7));
     }
 
     #[test]

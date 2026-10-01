@@ -3158,10 +3158,16 @@ impl WindowApp {
         {
             let work = JoinMeshWork::sample(&self.sim);
             let progress = self.sim.terrain_progress();
+            let terrain_drawn = stats.sections_drawn > 0 || stats.water_sections_drawn > 0;
+            let gameplay_ready = Self::gameplay_input_ready_for(&self.ui, &self.sim)
+                && !self.sim.shows_new_world_loading();
             let probe_full_view = self
                 .browser_join_trace
                 .as_mut()
-                .is_some_and(BrowserJoinTrace::full_view_probe_due);
+                .is_some_and(|trace| {
+                    trace.milestone_probe_due(terrain_drawn, gameplay_ready)
+                        || trace.full_view_probe_due()
+                });
             let view_presentation = if probe_full_view {
                 self.sim
                     .view_presentation_at_radius(self.config.render_distance)
@@ -3175,9 +3181,6 @@ impl WindowApp {
                 None
             };
             let loaded_columns = progress.map_or(0, |value| value.loaded);
-            let terrain_drawn = stats.sections_drawn > 0 || stats.water_sections_drawn > 0;
-            let gameplay_ready = Self::gameplay_input_ready_for(&self.ui, &self.sim)
-                && !self.sim.shows_new_world_loading();
             if let Some(trace) = self.browser_join_trace.as_mut() {
                 trace.observe_presented(
                     terrain_drawn,

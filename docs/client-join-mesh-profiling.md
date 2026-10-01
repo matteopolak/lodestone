@@ -229,12 +229,26 @@ been presented.
 The browser SDK reports the same player-facing boundaries through `onProgress`.
 Its clock starts in the production create-world action and emits transition-only
 events for `joining`, `loading-terrain`, `loading-overlay-ready`,
-`first-terrain-presented`, and `full-view-presented`. Each event includes
-`elapsedMs`, `loadedColumns`, `expectedColumns`, and `pendingMeshes`. The final
-event also includes `settledColumns`, meaning columns with an explicitly empty
-result or a section mesh handed to the renderer. It checks the exact configured
-view after presentation, without waiting for unrelated background remesh jobs
-to reach zero. Integrated joins immediately advertise the requested
+`first-terrain-presented`, `gameplay-ready`, `full-view-presented`, and
+`full-view-quiescent`. Each event includes `elapsedMs`, `loadedColumns`,
+`expectedColumns`, `presentedColumns`, `settledColumns`, `pendingMeshes`,
+`pendingColumns`, `pendingLightRemeshes`, and `pendingRemovals`.
+`presentedColumns` counts requested-view columns whose sections have shown
+geometry or an explicit empty result; it can retain earlier geometry during a
+replacement. `settledColumns` counts columns whose every section has a latest
+renderer handoff or explicit empty result. These are independent measurements,
+so `full-view-presented` can report fewer settled than presented columns.
+The first terrain and gameplay milestones force a current view sample after
+frame presentation; unmeasured coverage is zero, never a reused earlier sample.
+
+`pendingMeshes` counts scheduler work and ready results. `pendingColumns` counts
+ready and forced column work, `pendingLightRemeshes` counts light intents awaiting
+admission, and `pendingRemovals` counts renderer removals awaiting handoff.
+`full-view-quiescent` requires latest requested-view coverage and all four queues
+drained. Halo-only waiting columns do not block that milestone. These diagnostics
+do not change gameplay input readiness. To extend the metrics, keep the shell's
+`BrowserJoinTrace` samples and the SDK's `emit_join_progress` field mapping aligned.
+Integrated joins immediately advertise the requested
 render distance plus the shared two-column stream padding; this prevents the
 configuration-phase default from shrinking the stream and making the visible
 outer ring impossible to mesh.

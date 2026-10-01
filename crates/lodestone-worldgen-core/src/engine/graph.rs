@@ -213,6 +213,7 @@ pub struct Graph {
 /// beneath each interpolation boundary.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct OverworldFinalDensityPlan {
+    pub(crate) pre_corner_slope: Option<NodeId>,
     pub(crate) terrain_inner: NodeId,
     pub(crate) terrain_slot: usize,
     pub(crate) noodle_control_inner: NodeId,
@@ -1221,6 +1222,7 @@ impl Graph {
         }
 
         Some(OverworldFinalDensityPlan {
+            pre_corner_slope: self.detect_pre_corner_slope(terrain.a),
             terrain_inner: terrain.a,
             terrain_slot: terrain.b as usize,
             noodle_control_inner: control.a,
@@ -1232,6 +1234,98 @@ impl Graph {
             noodle_ridge_b_inner: self.op(ridge_b.a).a,
             noodle_ridge_b_slot: self.op(ridge_b.a).b as usize,
         })
+    }
+
+    fn fixed_left(&self, id: NodeId, kind: OpKind, value: f64) -> Option<NodeId> {
+        let op = self.op(id);
+        (op.kind == kind && self.const_equal(op.a, value)).then_some(op.b)
+    }
+
+    fn stock_gradient(&self, id: NodeId, values: [f64; 4]) -> bool {
+        let op = self.op(id);
+        op.kind == OpKind::YClampedGradient
+            && self.params[op.a as usize..op.a as usize + 4]
+                .iter().zip(values).all(|(actual, expected)| actual.to_bits() == expected.to_bits())
+    }
+
+    fn bounded_stock_noise(&self, id: NodeId, xz: f64, y: f64) -> bool {
+        let op = self.op(id);
+        op.kind == OpKind::Noise && self.params_equal(op.b, xz, y)
+            && self.noises[op.a as usize].conservative_stock_bound()
+                .is_some_and(|bound| bound < 3.999)
+    }
+
+    fn bounded_entrances(&self, id: NodeId) -> Option<()> {
+        let entrance = self.op(self.fixed_left(id, OpKind::Mul, 5.0)?);
+        if entrance.kind != OpKind::Min { return None; }
+        let first = self.op(entrance.a);
+        if first.kind != OpKind::Add
+            || !self.stock_gradient(first.b, [-10.0, 30.0, 0.3, 0.0])
+            || !self.bounded_stock_noise(self.fixed_left(first.a, OpKind::Add, 0.37)?, 0.75, 0.5)
+        { return None; }
+        let second = self.op(entrance.b);
+        if second.kind != OpKind::Add { return None; }
+        let clamp = self.op(second.b);
+        if clamp.kind != OpKind::Clamp || !self.params_equal(clamp.b, -1.0, 1.0) {
+            return None;
+        }
+        let rough = self.op(second.a);
+        if rough.kind != OpKind::Mul { return None; }
+        let modulator = self.fixed_left(
+            self.fixed_left(rough.a, OpKind::Add, -0.05)?, OpKind::Mul, -0.05,
+        )?;
+        let absolute = self.op(self.fixed_left(rough.b, OpKind::Add, -0.4)?);
+        if absolute.kind != OpKind::Abs
+            || !self.bounded_stock_noise(modulator, 1.0, 1.0)
+            || !self.bounded_stock_noise(absolute.a, 1.0, 1.0)
+        { return None; }
+        // Clamp is bounded or NaN; the finite first arm wins a NaN in f64::min.
+        Some(())
+    }
+
+    fn detect_pre_corner_slope(&self, terrain: NodeId) -> Option<NodeId> {
+        if self.ops.iter().filter(|op| op.kind == OpKind::Blended).count() != 1 {
+            return None;
+        }
+        let bottom = self.op(self.fixed_left(
+            self.fixed_left(terrain, OpKind::Mul, 0.64)?, OpKind::Add, 0.1171875,
+        )?);
+        if bottom.kind != OpKind::Mul
+            || !self.stock_gradient(bottom.a, [-64.0, -40.0, 0.0, 1.0])
+        { return None; }
+        let top = self.op(self.fixed_left(
+            self.fixed_left(bottom.b, OpKind::Add, -0.1171875)?, OpKind::Add, -0.078125,
+        )?);
+        if top.kind != OpKind::Mul
+            || !self.stock_gradient(top.a, [240.0, 256.0, 1.0, 0.0])
+        { return None; }
+        let range = self.op(self.fixed_left(top.b, OpKind::Add, 0.078125)?);
+        if range.kind != OpKind::RangeChoice || !self.params_equal(range.b, -1_000_000.0, 1.5625) {
+            return None;
+        }
+        let slope_id = self.child(range.a);
+        let minimum = self.op(self.child(range.a + 1));
+        if minimum.kind != OpKind::Min || minimum.a != slope_id { return None; }
+        self.bounded_entrances(minimum.b)?;
+        let slope = self.op(slope_id);
+        if slope.kind != OpKind::Add { return None; }
+        let blended = self.op(slope.b);
+        if blended.kind != OpKind::Blended { return None; }
+        let Density::Blended(noise) = &self.leaves[blended.a as usize] else { return None; };
+        noise.conservative_overworld_bound()?;
+        let quarter = self.op(self.fixed_left(slope.a, OpKind::Mul, 4.0)?);
+        if quarter.kind != OpKind::QuarterNegative { return None; }
+        let product = self.op(quarter.a);
+        if product.kind != OpKind::Mul || self.op(product.b).kind != OpKind::FlatCache {
+            return None;
+        }
+        let sum = self.op(product.a);
+        if sum.kind != OpKind::Add || self.op(sum.b).kind != OpKind::FlatCache { return None; }
+        let depth = self.op(sum.a);
+        if depth.kind != OpKind::Add || self.op(depth.b).kind != OpKind::FlatCache
+            || !self.stock_gradient(depth.a, [-64.0, 320.0, 1.5, -1.5])
+        { return None; }
+        Some(slope.a)
     }
 
     fn const_equal(&self, id: NodeId, expected: f64) -> bool {
@@ -1697,6 +1791,92 @@ impl Graph {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stock_pre_corner_program() -> (Program, usize) {
+        use crate::density::{Builder, NoiseParams, Resolver};
+        use serde_json::Value;
+        struct Files(std::path::PathBuf);
+        impl Files {
+            fn read(&self, kind: &str, id: &str) -> Value {
+                let id = id.strip_prefix("minecraft:").unwrap_or(id);
+                serde_json::from_str(&std::fs::read_to_string(
+                    self.0.join(kind).join(format!("{id}.json")),
+                ).unwrap()).unwrap()
+            }
+        }
+        impl Resolver for Files {
+            fn density_function(&self, id: &str) -> Value { self.read("density_function", id) }
+            fn noise(&self, id: &str) -> NoiseParams {
+                let value = self.read("noise", id);
+                NoiseParams {
+                    first_octave: value["firstOctave"].as_i64().unwrap() as i32,
+                    amplitudes: value["amplitudes"].as_array().unwrap().iter()
+                        .map(|v| v.as_f64().unwrap()).collect(),
+                }
+            }
+        }
+        let files = Files(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../lodestone-worldgen/tests/support/worldgen_data"));
+        let settings = files.read("noise_settings", "overworld");
+        let builder = Builder::new(42, &files);
+        let density = builder.build(&settings["noise_router"]["final_density"]).unwrap();
+        (Program::compile(&density), builder.slot_count())
+    }
+
+    #[cfg(feature = "gen-counters")]
+    #[test]
+    fn pre_corner_matcher_requires_the_identical_selector_in_the_minimum() {
+        let (mut program, _) = stock_pre_corner_program();
+        let graph = Arc::get_mut(&mut program.graph).unwrap();
+        let plan = graph.overworld_final_density.unwrap();
+        assert!(plan.pre_corner_slope.is_some());
+        let range = graph.ops.iter().copied().find(|op| {
+            op.kind == OpKind::RangeChoice && graph.params_equal(op.b, -1_000_000.0, 1.5625)
+        }).unwrap();
+        let minimum = graph.child(range.a + 1);
+        graph.ops[minimum as usize].a = plan.pre_corner_slope.unwrap();
+        assert!(graph.detect_pre_corner_slope(plan.terrain_inner).is_none());
+    }
+
+    #[test]
+    fn pre_corner_skip_preserves_later_exact_density_bits() {
+        use crate::density::NoiseChunkSampler;
+        use crate::engine::{Bounds, Field, Geom, Scratch};
+        let (program, slots) = stock_pre_corner_program();
+        let plan = program.overworld_final_density_plan().unwrap();
+        let bounds = Bounds { x: (-4, 7), y: (224, 255), z: (-4, 7) };
+        let mut scratch = Scratch::acquire(slots, 4, 8, Some(bounds));
+        {
+            let mut field = Field::new(
+                program.graph(), Geom { cell_width: 4, cell_height: 8 }, &mut scratch,
+            );
+            assert!(field.pre_corner_terrain_is_negative(plan, -4, 232, -4));
+        }
+        assert!(scratch.cell_get(plan.terrain_slot, -1, 29, -1).is_none());
+        for x in [-4, 0] {
+            for y in [232, 240] {
+                for z in [-4, 0] {
+                    assert!(scratch.slot_get(plan.terrain_slot, (x, y, z)).is_none());
+                }
+            }
+        }
+        scratch.release();
+
+        let skipped = NoiseChunkSampler::from_program(program.clone(), slots, 4, 8, Some(bounds));
+        let exact = NoiseChunkSampler::from_program(program, slots, 4, 8, Some(bounds));
+        assert!(skipped.final_density_cell_terrain_is_nonpositive(-4, 232, -4));
+        for (x, y, z) in [(-4, 232, -4), (0, 232, -4), (-4, 224, -4), (-4, 232, 0)] {
+            let mut actual = [0.0; 128];
+            skipped.final_density_cell(x, y, z, &mut actual);
+            for (lane, value) in actual.into_iter().enumerate() {
+                let px = x + ((lane % 32) / 8) as i32;
+                let py = y + (lane % 8) as i32;
+                let pz = z + (lane / 32) as i32;
+                assert_eq!(value.to_bits(), exact.final_density(px, py, pz).to_bits(),
+                    "exact query after certificate at ({px},{py},{pz})");
+            }
+        }
+    }
 
     fn b(d: Density) -> Box<Density> {
         Box::new(d)

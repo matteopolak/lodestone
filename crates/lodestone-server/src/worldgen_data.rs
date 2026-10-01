@@ -4202,28 +4202,14 @@ mod top_layer_parity {
     }
 }
 
-/// The `SPAWN` stage runs against the **real** bundled generator, not a
-/// hand-built fixture: the biome document -> `BiomeSpawners`
-/// -> `SPAWN` stage -> `GeneratedColumn` link, exercised end to end with
-/// procedurally-placed terrain rather than a synthetic column.
-///
-/// Chunk (4, -3) at seed 12345 was found by an exhaustive scan of `cx`/`cz` in
-/// `-4..=4` (the only two chunks in that whole 9x9 area that proposed
-/// anything) and is not cherry-picked beyond "the search found it" — see
-/// `dark_forest.json`'s own `spawners.creature` list for the numbers this test
-/// predicts from, independently of running the code:
-/// `[(sheep, w12, 4-4), (pig, w10, 4-4), (chicken, w10, 4-4), (cow, w8, 4-4)]`.
-/// Every entry's pack is a fixed `4`, so **whichever species the weighted pick
-/// lands on, the predicted pack size is exactly 4** — the one thing this
-/// fixture lets a hand-derived prediction pin down without re-deriving the RNG
-/// stream. `dark_forest` was chosen from the scan's own output, not selected
-/// to make this true.
+/// Bundled generation candidates and real terrain placement, with scalar
+/// height checks independent of the compact column's retained summaries.
 #[cfg(test)]
 mod generation_spawn_reaches_a_real_chunk {
     use lodestone_data::block::Block;
     use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey};
     use lodestone_data::block_states::StateId;
-    use lodestone_data::entity_type::{EntityType, EntityTypeRef};
+    use lodestone_data::entity_type::EntityType;
 
     fn state_id(block: Block, properties: &[(PropertyKey, BuiltinPropertyValue)]) -> StateId {
         let mut properties_set = Properties::empty();
@@ -4237,64 +4223,138 @@ mod generation_spawn_reaches_a_real_chunk {
     }
 
     #[test]
-    fn dark_forest_chunk_proposes_a_full_pack_of_one_species() {
+    fn bounded_real_chunks_propose_grass_supported_animals() {
         let generator = super::overworld_generator(12345);
-        let col = generator.column(4, -3);
-        assert_eq!(
-            col.biome_state(8, 8),
-            "minecraft:dark_forest",
-            "this fixture's own prediction depends on the biome being dark_forest; \
-             re-derive the expected species/pack if the generator ever changes this"
-        );
-        let candidates = col.spawn_candidates();
-        assert_eq!(
-            candidates.len(),
-            4,
-            "dark_forest's creature list is entirely fixed 4-4 packs — every entry \
-             predicts exactly 4 regardless of which one the weighted pick lands on"
-        );
-        let species = &candidates[0].entity_type;
-        let allowed = [
-            EntityTypeRef::from(EntityType::Sheep),
-            EntityTypeRef::from(EntityType::Pig),
-            EntityTypeRef::from(EntityType::Chicken),
-            EntityTypeRef::from(EntityType::Cow),
+        let mut candidate_count = 0;
+        let mut accepted_grass_animals = 0;
+        let mut diagnostics = Vec::new();
+        let mut selected = Vec::new();
+        // Independent 48-bit arithmetic fixes the local biome draws and first
+        // probability gates. Biome probes do not generate terrain columns.
+        let witnesses = [
+            (20001, -20000, 1, 2, 0.002923727035522461),
+            (19999, -20002, 7, 2, 0.04546844959259033),
+            (20001, -19997, 11, 10, 0.03898078203201294),
+            (20002, -20003, 8, 3, 0.03725546598434448),
+            (20003, -19998, 0, 9, 0.048967063426971436),
+            (19996, -20002, 2, 13, 0.002508699893951416),
+            (19997, -19996, 14, 15, 0.06552106142044067),
+            (20005, -20001, 2, 6, 0.03898102045059204),
+            (20004, -20004, 13, 10, 0.06438791751861572),
+            (20000, -20006, 6, 7, 0.03234684467315674),
+            (19994, -19999, 6, 5, 0.018687427043914795),
+            (20006, -19998, 5, 0, 0.04547971487045288),
+            (-20001, 19998, 11, 3, 0.011465311050415039),
+            (-19998, 19999, 6, 15, 0.007927298545837402),
+            (-20000, 20004, 1, 0, 0.005354166030883789),
+            (-19999, 20004, 2, 4, 0.05988889932632446),
+            (19999, 19999, 1, 13, 0.06987500190734863),
+            (19998, 20003, 3, 11, 0.05369246006011963),
+            (19996, 19998, 9, 12, 0.041105568408966064),
+            (19995, 20000, 13, 13, 0.05698889493942261),
+            (-20000, -19999, 0, 1, 0.05291450023651123),
+            (-20003, -19999, 14, 0, 0.021033167839050293),
+            (-20000, -19996, 15, 7, 0.04897868633270264),
+            (-19998, -20004, 3, 15, 0.054434239864349365),
         ];
-        assert!(
-            allowed.contains(species),
-            "{species:?} is not one of dark_forest's own four creature entries"
-        );
-        assert!(
-            candidates.iter().all(|c| &c.entity_type == species),
-            "one weighted pick names one species for the whole pack, not a mix"
-        );
-        for c in candidates {
-            assert!(
-                (4 * 16..4 * 16 + 16).contains(&c.x),
-                "x={} outside chunk (4, -3)'s own 16x16",
-                c.x
-            );
-            assert!(
-                (-3 * 16..-3 * 16 + 16).contains(&c.z),
-                "z={} outside chunk (4, -3)'s own 16x16",
-                c.z
-            );
+        for (cx, cz, lx, lz, probability_draw) in witnesses {
+            let qx = cx * 4 + lx / 4;
+            let qz = cz * 4 + lz / 4;
+            let mut land_context = false;
+            for y in [64, 80] {
+                let biome = generator.biome_at_quart(qx, y / 4, qz);
+                let settings = super::bundled_biome_spawners().get(&biome);
+                let entries = settings.map(|settings| settings.for_category(
+                    lodestone_worldgen::spawners::MobCategory::Creature,
+                )).unwrap_or(&[]);
+                land_context |= entries.iter().any(|entry| matches!(
+                    entry.entity_type.builtin_or_none(),
+                    Some(EntityType::Cow | EntityType::Sheep | EntityType::Pig | EntityType::Chicken),
+                ));
+                diagnostics.push(format!(
+                    "chunk=({cx},{cz}) local=({lx},{lz}) gate={probability_draw} y={y} biome={biome} creatures={entries:?}",
+                ));
+            }
+            if land_context && selected.len() < 2 {
+                selected.push((cx, cz, probability_draw));
+            }
         }
+        eprintln!("selected full-column witnesses: {selected:?}");
+        assert!(!selected.is_empty(), "no bounded land context: {diagnostics:#?}");
+        let mut validator = crate::natural_spawn::NaturalSpawner::new(
+            super::bundled_biome_spawners().clone(), 0,
+        );
+        validator.set_day_time(6_000);
+        for (tick, (cx, cz, _)) in selected.into_iter().enumerate() {
+            let col = generator.column(cx, cz);
+            let candidates = col.spawn_candidates().to_vec();
+            candidate_count += candidates.len();
+            diagnostics.push(format!(
+                "chunk=({cx},{cz}) biome={} candidates={}",
+                col.biome_state(8, 8), candidates.len(),
+            ));
+            for candidate in &candidates {
+                let lx = candidate.x.rem_euclid(16) as usize;
+                let lz = candidate.z.rem_euclid(16) as usize;
+                assert_eq!((candidate.x.div_euclid(16), candidate.z.div_euclid(16)), (cx, cz));
+                let canopy = matches!(
+                    candidate.entity_type.builtin_or_none(),
+                    Some(EntityType::Parrot | EntityType::Ocelot),
+                );
+                let expected_y = (col.min_y()..col.min_y() + col.height()).rev().find(|&y| {
+                    let state = col.block_state_id(lx, y, lz);
+                    let motion = lodestone_data::block_solidity::blocks_motion(state)
+                        || lodestone_data::snow_support::has_fluid_state(state);
+                    motion && (canopy || !lodestone_data::tool::builtin_block_tag_contains(
+                        "minecraft:leaves", state.block(),
+                    ))
+                }).map_or(col.min_y(), |y| y + 1);
+                assert_eq!(candidate.y, expected_y, "chunk=({cx},{cz}) candidate={candidate:?}");
+            }
+            let world = std::sync::Arc::new(crate::mobs::ChunkWorld::from_columns([
+                ((cx, cz), crate::chunk::ChunkColumn::from_generated(col)),
+            ]));
+            validator.begin_cycle(world.clone(), tick as u64 + 1, Vec::new());
+            for candidate in &candidates {
+                let ground = world.block_state_id(candidate.x, candidate.y - 1, candidate.z).block();
+                let feet = world.block_state_id(candidate.x, candidate.y, candidate.z).block();
+                let decision = validator.classify_generation_spawn(candidate);
+                let ordinary_animal = matches!(
+                    candidate.entity_type.builtin_or_none(),
+                    Some(EntityType::Cow | EntityType::Sheep | EntityType::Pig | EntityType::Chicken),
+                );
+                if ordinary_animal && matches!(
+                    &decision,
+                    crate::generation_population::PlacementDecision::Accepted(_),
+                ) {
+                    assert_eq!(ground, Block::GrassBlock, "candidate={candidate:?} feet={feet:?}");
+                    accepted_grass_animals += 1;
+                }
+                diagnostics.push(format!(
+                    "candidate={candidate:?} ground={ground:?} feet={feet:?} decision={decision:?}",
+                ));
+            }
+        }
+        eprintln!("{}", diagnostics.join("\n"));
+        assert!(candidate_count > 0, "bounded real generator produced no candidates: {diagnostics:#?}");
+        assert!(accepted_grass_animals > 0, "no grass-supported animal passed real placement: {diagnostics:#?}");
     }
 
-    /// Negative control at the real-generator level: a chunk this test does
-    /// **not** predict anything for (the 9x9 scan around it found nothing) must
-    /// itself carry no candidates — proving the positive result above is
-    /// biome-driven and not "every chunk gets something".
+    /// Independent probability arithmetic gives a first pack gate of
+    /// 0.8437569737434387 at (4,-3), above the bundled 0.1 probability.
     #[test]
-    fn a_chunk_the_scan_found_nothing_for_proposes_nothing() {
+    fn real_chunk_with_failed_probability_gate_proposes_nothing() {
+        let generator = super::overworld_generator(12345);
+        assert!(generator.column(4, -3).spawn_candidates().is_empty());
+    }
+
+    #[test]
+    fn origin_chunk_proposes_nothing() {
         let generator = super::overworld_generator(12345);
         let col = generator.column(0, 0);
         assert!(
             col.spawn_candidates().is_empty(),
-            "chunk (0, 0) at seed 12345 was not one of the two chunks the 9x9 scan \
-             found a candidate in; a non-empty result here means either the scan was \
-             stale or every chunk now proposes something regardless of biome"
+            "seed 12345 origin has no generation candidates"
         );
     }
 

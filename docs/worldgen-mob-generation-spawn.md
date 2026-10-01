@@ -15,6 +15,13 @@ failure. The default expected pack count is `0.1 / (1 - 0.1) = 1/9`. Each succes
 a creature species by weight, its inclusive pack size, and candidate positions within the column.
 An empty creature list yields no candidates regardless of other category lists.
 
+Candidate Y uses the finished column's fused motion-blocking height summaries. Ordinary creatures
+use the first free row above motion-blocking or fluid cells, excluding leaves; parrots and ocelots
+include leaves. Stored heights are relative to `min_y`, so candidate Y is `min_y + stored_height`.
+Short grass does not raise this height, allowing ordinary animals to stand in vegetation above the
+supporting grass block. The typed species reaches the height callback after the weighted pick.
+This reads existing summaries and performs no additional column scan or generation request.
+
 Only `Full` columns carry candidates. `GenerationSpawnBatch` supplies a clone-shared claim and
 completion state for each nonempty candidate list. Copying a terrain column preserves this
 state. Before publishing a claimable batch, the resident source retains its exact column through
@@ -56,10 +63,11 @@ discard the transient candidate handoff safely. Dropping a consumer restores onl
 candidates to the shared batch. It never restores animals already materialized.
 
 Generation population bypasses the natural spawn game rule, population caps and player-distance
-exclusions, matching its generation-time role. Real
-placement rules still apply. Candidate selection uses deterministic chunk seeds but does not
+exclusions, matching its generation-time role. Real placement rules still apply.
+Candidate selection uses deterministic chunk seeds but does not
 claim exact reference RNG ordering or placement retry parity: each member has one candidate,
-and its wander clamps to the generated column.
+and its wander clamps to the generated column. The one-block land-pathfindability adjustment is
+also not modeled; species height selection does not replace live terrain/light placement validation.
 
 The validator starts one light cycle per world tick. Switching from the sparse generation view
 to the natural view preserves that cycle's four-column admission budget and cached light.
@@ -73,6 +81,16 @@ or pack selection. The probability must remain below one so the repeat gate can 
 Use scripted independent draws to distinguish guaranteed, single-pack and repeated admission:
 with probability `0.1`, `0.27` admits zero packs; `0.07, 0.37` admits one; and
 `0.03, 0.08, 0.42` admits two.
+
+Change `overworld::output::generation_spawn_y` when adding a species-specific heightmap. Reuse the
+client motion summaries, whose predicates include fluids and the leaves tag; the separate
+generation motion summary has snow-support provenance and is not this placement heightmap.
+Authored grass, short-grass and leaf stacks distinguish ground animals from canopy species;
+the bundled generator's bounded placement test independently scans states and checks actual
+grass-supported candidates through the shared validator.
+The bounded placement test samples biomes at a fixed cohort of independently probability-positive coordinates,
+then generates at most two creature-bearing land contexts. Its fixed Y probes are a habitat
+prefilter, not a substitute for the required full-column grass-support and acceptance assertions.
 
 Change `GenerationPopulation` when modifying deferred placement or completion. A false
 materialization result must mean no entity was created, because it retains the candidate for a

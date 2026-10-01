@@ -129,6 +129,36 @@ pub struct NoiseChunkSampler {
 pub struct NoiseChunkRegionSampler {
     sampler: NoiseChunkSampler,
     bounds: Bounds,
+    #[cfg(feature = "gen-counters")]
+    shadow: Option<RefCell<PreCornerShadow>>,
+}
+
+#[cfg(feature = "gen-counters")]
+type BlendedMisses = (std::collections::BTreeSet<(i32, i32, i32)>, u64);
+
+#[cfg(feature = "gen-counters")]
+struct PreCornerShadow {
+    baseline: NoiseChunkSampler,
+    candidate: NoiseChunkSampler,
+    baseline_misses: BlendedMisses,
+    candidate_misses: BlendedMisses,
+    bounds: Bounds,
+    cells: u64,
+    certified: u64,
+}
+
+#[cfg(feature = "gen-counters")]
+impl Drop for PreCornerShadow {
+    fn drop(&mut self) {
+        let avoided = self.baseline_misses.0.difference(&self.candidate_misses.0).count();
+        let added = self.candidate_misses.0.difference(&self.baseline_misses.0).count();
+        eprintln!(
+            "pre_corner_shadow bounds={:?} cells={} certified_below_256={} baseline_unique={} candidate_unique={} avoided_unique={} added_unique={} baseline_calls={} candidate_calls={}",
+            self.bounds, self.cells, self.certified,
+            self.baseline_misses.0.len(), self.candidate_misses.0.len(), avoided, added,
+            self.baseline_misses.1, self.candidate_misses.1,
+        );
+    }
 }
 
 impl NoiseChunkRegionSampler {
@@ -164,7 +194,9 @@ impl NoiseChunkRegionSampler {
         bounds: Bounds,
         products: Option<Arc<XzProductLattice>>,
     ) -> Self {
-        Self {
+        let result = Self {
+            #[cfg(feature = "gen-counters")]
+            shadow: None,
             sampler: NoiseChunkSampler::from_program_with_xz_products(
                 program,
                 slot_count,
@@ -174,13 +206,88 @@ impl NoiseChunkRegionSampler {
                 products,
             ),
             bounds,
-        }
+        };
+        #[cfg(feature = "gen-counters")]
+        let result = {
+            let mut result = result;
+            if std::env::var("LODESTONE_PRE_CORNER_SHADOW").as_deref() == Ok("1")
+                && result.sampler.program.overworld_final_density_plan()
+                    .is_some_and(|plan| plan.pre_corner_slope.is_some())
+                && (result.sampler.geom.cell_width, result.sampler.geom.cell_height) == (4, 8)
+            {
+                result.enable_pre_corner_shadow(slot_count);
+            }
+            result
+        };
+        result
     }
 
     /// Inclusive block bounds covered by this sampler.
     #[must_use]
     pub fn bounds(&self) -> Bounds {
         self.bounds
+    }
+
+    /// Enables the bounded paired diagnostic explicitly without changing process environment.
+    #[cfg(feature = "gen-counters")]
+    pub fn enable_pre_corner_shadow(&mut self, slot_count: usize) {
+        let program = &self.sampler.program;
+        assert!(program.overworld_final_density_plan()
+            .is_some_and(|plan| plan.pre_corner_slope.is_some()),
+            "pre-corner shadow requires the supported stock terrain graph");
+        assert_eq!((self.sampler.geom.cell_width, self.sampler.geom.cell_height), (4, 8));
+        let make_sampler = || NoiseChunkSampler::from_program_with_xz_products(
+            program.clone(), slot_count, 4, 8, Some(self.bounds), self.sampler.products.clone(),
+        );
+        self.shadow = Some(RefCell::new(PreCornerShadow {
+            baseline: make_sampler(), candidate: make_sampler(),
+            baseline_misses: Default::default(), candidate_misses: Default::default(),
+            bounds: self.bounds, cells: 0, certified: 0,
+        }));
+    }
+
+    /// Returns certified cells, avoided unique points and added unique points for the run so far.
+    #[cfg(feature = "gen-counters")]
+    pub fn pre_corner_shadow_counts(&self) -> Option<(u64, usize, usize)> {
+        let shadow = self.shadow.as_ref()?.borrow();
+        Some((shadow.certified,
+            shadow.baseline_misses.0.difference(&shadow.candidate_misses.0).count(),
+            shadow.candidate_misses.0.difference(&shadow.baseline_misses.0).count()))
+    }
+
+    /// Runs the opt-in independent cache comparison; returned lanes need a fluid/block check.
+    #[cfg(feature = "gen-counters")]
+    pub fn pre_corner_shadow_cell(
+        &self, x: i32, y: i32, z: i32, allow_positive: bool, allow_fluid: bool,
+    ) -> Option<[f64; 128]> {
+        let mut shadow = self.shadow.as_ref()?.borrow_mut();
+        let PreCornerShadow {
+            baseline, candidate, baseline_misses, candidate_misses, cells, certified, ..
+        } = &mut *shadow;
+        *cells += 1;
+        let mut expected = [0.0; 128];
+        let mut actual = [0.0; 128];
+        let reference = baseline.shadow_step(
+            x, y, z, allow_positive, allow_fluid, false, baseline_misses, &mut expected,
+        );
+        let result = candidate.shadow_step(
+            x, y, z, allow_positive, allow_fluid, true, candidate_misses, &mut actual,
+        );
+        if result == 3 {
+            *certified += 1;
+            baseline.final_density_cell(x, y, z, &mut expected);
+            assert!(expected.iter().all(|value| value.is_finite() && *value <= 0.0),
+                "pre-corner shadow density mismatch at ({x},{y},{z}): {expected:?}");
+            return Some(expected);
+        }
+        assert_eq!(reference, result, "pre-corner shadow classification at ({x},{y},{z})");
+        if result == 2 {
+            for lane in 0..128 {
+                assert_eq!(expected[lane].to_bits(), actual[lane].to_bits(),
+                    "pre-corner shadow exact density at ({x},{y},{z}) lane {lane}");
+            }
+        }
+        None
     }
 
     /// Evaluates a contiguous vertical final-density run in the shared region
@@ -265,6 +372,32 @@ impl NoiseChunkRegionSampler {
 }
 
 impl NoiseChunkSampler {
+    #[cfg(feature = "gen-counters")]
+    fn shadow_step(
+        &self, x: i32, y: i32, z: i32, allow_positive: bool, allow_fluid: bool,
+        certificate: bool, misses: &mut BlendedMisses, output: &mut [f64; 128],
+    ) -> u8 {
+        self.assert_cell_in_bounds(x, y, z);
+        let plan = self.program.overworld_final_density_plan().unwrap();
+        let mut borrow = self.scratch.borrow_mut();
+        let scratch = borrow.as_mut().unwrap();
+        let mut field = Field::new_with_products(
+            self.program.graph(), self.geom, scratch, self.products.as_deref(),
+        );
+        field.blended_misses = Some(misses);
+        if allow_fluid && certificate && field.pre_corner_terrain_is_negative(plan, x, y, z) {
+            return 3;
+        }
+        if allow_fluid && field.eval_overworld_final_density_cell_terrain_is_nonpositive(plan, x, y, z) {
+            return 0;
+        }
+        if allow_positive && field.eval_overworld_final_density_cell_is_positive(plan, x, y, z) {
+            return 1;
+        }
+        field.eval_overworld_final_density_cell(plan, x, y, z, output);
+        2
+    }
+
     /// Creates a sampler. `cell_width`/`cell_height` are the settings-derived
     /// cell-width/cell-height values — usually 4 and 8, with 8 and 4 in the End.
     ///
@@ -587,13 +720,14 @@ impl NoiseChunkSampler {
         let scratch = borrow
             .as_mut()
             .expect("the scratch is only taken in Drop, after the last query");
-        Field::new_with_products(
+        let mut field = Field::new_with_products(
             self.program.graph(),
             self.geom,
             scratch,
             self.products.as_deref(),
-        )
-        .eval_overworld_final_density_cell_terrain_is_nonpositive(plan, x0, y0, z0)
+        );
+        field.pre_corner_terrain_is_negative(plan, x0, y0, z0)
+            || field.eval_overworld_final_density_cell_terrain_is_nonpositive(plan, x0, y0, z0)
     }
 
     fn assert_cell_in_bounds(&self, x0: i32, y0: i32, z0: i32) {

@@ -42,6 +42,37 @@ pub(crate) struct ActiveOctave {
 }
 
 impl PerlinNoise {
+    pub(crate) fn bounded_octave_inputs(&self) -> bool {
+        self.active_levels.len() <= 16 && self.active_levels.iter().all(|level| {
+            (crate::math::exp2_exact(-30)..=1.0).contains(&level.input_factor)
+                && [level.noise.xo, level.noise.yo, level.noise.zo]
+                    .into_iter().all(|offset| (0.0..256.0).contains(&offset))
+        })
+    }
+
+    pub(crate) fn conservative_amplitude_sum(&self) -> Option<f64> {
+        if !self.bounded_octave_inputs() {
+            return None;
+        }
+        let mut sum = 0.0;
+        for level in &self.active_levels {
+            let weight = (level.amplitude * level.value_factor).abs();
+            if !weight.is_finite() {
+                return None;
+            }
+            sum += weight;
+        }
+        sum.is_finite().then_some(sum * (1.0 + 1.0e-12) + 1.0e-12)
+    }
+
+    pub(crate) fn has_complete_reverse_octaves(&self, count: usize) -> bool {
+        self.bounded_octave_inputs()
+            && self.active_levels.len() == count
+            && self.active_octaves_rev().enumerate().all(|(index, octave)| {
+                octave.reverse_input_factor == crate::math::exp2_exact(-(index as i32))
+            })
+    }
+
     /// Appends a complete, bit-exact description of this stack to `out` — see
     /// [`ImprovedNoise::write_signature`] for the contract and the two traps.
     ///

@@ -2022,6 +2022,7 @@ async fn run_tick_loop_with_weather_impl<W>(
             mobs.with(|sim| sim.players().iter().map(|p| p.perception.position).collect());
         natural_spawner.set_day_time(day_time);
         natural_spawner.set_difficulty(world_state.difficulty().0);
+        natural_spawner.set_environment(follow_dimension, weather.rain_level, weather.thunder_level);
         natural_spawner.start_cycle(game_tick, players.clone());
         populate_resident_generation(&mut generation_population, &*world, &mut natural_spawner, &mobs);
         // **the natural spawn cycle, and the despawn pass.**

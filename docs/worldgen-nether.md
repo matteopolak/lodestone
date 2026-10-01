@@ -100,6 +100,22 @@ column still executes all nine sources in its existing order; every selected
 entry retains its global step index and random stream. Parsed plans continue
 to share the generator's existing biome-mask memo.
 
+Surface biome conditions use typed `SurfaceBiomeAnswer` values through the
+ordinary `SurfaceSystem` diff traversal. `ClimateSampler::is_xz_pure` admits a
+horizontal shortcut only when all six density trees prove Y independence.
+The scan's existing bounded corner products then separate into 36 horizontal
+biome answers and the Y-dependent fiddle corners. When the four horizontal
+biomes agree, every possible zoom winner has that same biome, so the answer is
+valid for the entire vertical scan and no fiddle distances are evaluated.
+No products survive the scan or enter another generator memo.
+
+Different horizontal biomes retain all eight three-dimensional corner
+distances, in the original order with the first strictly best corner winning.
+Those answers certify only the queried Y. A climate tree that depends on Y
+also keeps exact three-dimensional climate queries and never uses horizontal
+answers. Out-of-window corners stay exact without extending the fixed storage.
+Both paths retain the Nether's existing false snow-temperature answer.
+
 Set `LODESTONE_NETHER_PROFILE=1` for the optional `NetherGenerator::cache_stats`
 timings. The report separates shard-lock wait/hold time from `OnceLock` waits
 and actual computations, so a cache convoy can be attributed to lock
@@ -185,6 +201,12 @@ Keep the uniform-declaration proof aligned with `compose::build_biome_carvers`
 if supported declaration forms change. Keep mixed-plan biome reads relative
 to the held target window: a source offset of one chunk can read two chunks
 from the target, so replacing the 5×5 context with a 3×3 context is invalid.
+
+Keep surface shortcut admission tied to the density-tree purity proof, not the
+dimension name or one sampled height. Mixed corners can choose a different
+biome at adjacent heights even when climate itself is Y invariant; do not
+certify them for a quart band. Extend the shared typed surface consumer rather
+than copying its traversal, and preserve the strict distance tie comparison.
 
 ## Configuration
 

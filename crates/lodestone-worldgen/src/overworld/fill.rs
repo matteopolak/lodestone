@@ -929,11 +929,23 @@ impl OverworldGenerator {
                     let x0 = base_x + cell_x * 4;
                     let y0 = self.min_y + cell_y * 8;
                     let z0 = base_z + cell_z * 4;
-                    if empty_beard
+                    let allow_fluid = empty_beard
                         && sampler.supports_final_density_cells()
                         && aquifer
-                            .fill_nonpositive_global_fluid_run(y0, &mut vertical_blocks)
-                        && sampler.final_density_cell_terrain_is_nonpositive(x0, y0, z0)
+                            .fill_nonpositive_global_fluid_run(y0, &mut vertical_blocks);
+                    #[cfg(feature = "gen-counters")]
+                    if let Some(exact) = sampler.pre_corner_shadow_cell(
+                        x0, y0, z0, empty_beard, allow_fluid,
+                    ) {
+                        for (lane, density) in exact.into_iter().enumerate() {
+                            let x = x0 + ((lane % 32) / 8) as i32;
+                            let y = y0 + (lane % 8) as i32;
+                            let z = z0 + (lane / 32) as i32;
+                            assert_eq!(aquifer.block_at_density(x, y, z, density), vertical_blocks[lane % 8],
+                                "pre-corner shadow block mismatch at ({x},{y},{z})");
+                        }
+                    }
+                    if allow_fluid && sampler.final_density_cell_terrain_is_nonpositive(x0, y0, z0)
                     {
                         crate::counters::bump_nonpositive_cell_skip();
                         for lz in 0..4i32 {
@@ -2176,6 +2188,30 @@ mod tests {
             let after_missing = crate::counters::snapshot().pre_ore_computed;
             assert_eq!(before_missing, 25);
             assert_eq!(after_missing, before_missing + 1);
+        }
+
+        #[test]
+        fn pre_corner_shadow_removes_unique_blended_work_and_checks_exact_blocks() {
+            let generator = generator();
+            let preliminary = generator.preliminary_cache(crate::aquifer::PRELIMINARY_CACHE_BATCH_CAPACITY);
+            let aquifer = generator.build_aquifer_with_preliminary_cache(0, 0, &preliminary);
+            let mut sampler = crate::density::NoiseChunkRegionSampler::from_program(
+                generator.aquifer_trees.final_density.clone(), generator.slot_count, 4, 8,
+                crate::engine::Bounds {
+                    x: (0, 15), y: (generator.min_y, generator.min_y + generator.height - 1), z: (0, 15),
+                },
+            );
+            sampler.enable_pre_corner_shadow(generator.slot_count);
+            let mut blocks = vec![0; 256 * generator.height as usize];
+            let mut heights = [generator.min_y - 1; 256];
+            generator.fill_stage_cells(
+                &aquifer, 0, 0, &crate::structure::beardifier::Beardifier::empty(),
+                &sampler, &mut blocks, &mut heights, None,
+            );
+            let (certified, avoided, added) = sampler.pre_corner_shadow_counts().unwrap();
+            assert!(certified > 0, "stock proof must admit cells below the constant slide");
+            assert!(avoided > 0, "later mixed cells must not consume every skipped corner");
+            assert_eq!(added, 0);
         }
 
         #[test]
