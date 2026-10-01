@@ -3937,6 +3937,7 @@ dependencies = [
  "lodestone-registry",
  "lodestone-server",
  "lodestone-testsupport",
+ "lodestone-time",
  "lodestone-world",
  "lodestone-worldgen",
  "lodestone-worldgen-parity",

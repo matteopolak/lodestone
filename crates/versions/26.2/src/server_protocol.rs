@@ -3594,6 +3594,10 @@ impl ServerProtocol for V770ServerProtocol {
         Some(compute_served_light_with_neighbours)
     }
 
+    fn detached_resident_light_compute(&self) -> Option<lodestone_server::ResidentLightBatchCompute> {
+        Some(compute_served_resident_light_batch_sync)
+    }
+
     fn detached_packet_encode(&self) -> Option<lodestone_server::DetachedPacketEncode> {
         Some(|cx, cz, snapshot, dimension| {
             lodestone_server::encode_packet_snapshot_with_protocol(
@@ -3781,6 +3785,15 @@ impl ServerProtocol for V770ServerProtocol {
         dimension: Dimension,
     ) -> Option<ColumnLight> {
         Some(compute_served_light_with_neighbours(column, neighbours, dimension))
+    }
+
+    fn compute_resident_light_batch<'a>(
+        &'a self,
+        outputs: &'a [(i32, i32)],
+        columns: &'a [(i32, i32, ServerChunkColumn)],
+        dimension: Dimension,
+    ) -> Option<lodestone_server::ResidentLightFuture<'a>> {
+        Some(Box::pin(compute_served_resident_light_batch(outputs, columns, dimension)))
     }
 
     /// `overlay: false` — command feedback belongs in the chat history, not

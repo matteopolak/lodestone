@@ -22,6 +22,22 @@ use super::{
 
 pub type DetachedLightCompute =
     fn(&ChunkColumn, &[(i32, i32, &ChunkColumn)], Dimension) -> lodestone_world::ColumnLight;
+/// A connection-independent batch computation for a worker-owned snapshot.
+pub type ResidentLightBatchCompute = fn(
+    &[(i32, i32)],
+    &[(i32, i32, ChunkColumn)],
+    Dimension,
+) -> Result<Vec<((i32, i32), lodestone_world::ColumnLight)>, lodestone_world::ResidentLightError>;
+/// A borrowed resident solve returning only the explicitly selected columns.
+#[cfg(not(target_arch = "wasm32"))]
+pub type ResidentLightFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<
+    Output = Result<Vec<((i32, i32), lodestone_world::ColumnLight)>, lodestone_world::ResidentLightError>,
+> + Send + 'a>>;
+/// A borrowed resident solve that can cooperate with browser scheduling.
+#[cfg(target_arch = "wasm32")]
+pub type ResidentLightFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<
+    Output = Result<Vec<((i32, i32), lodestone_world::ColumnLight)>, lodestone_world::ResidentLightError>,
+> + 'a>>;
 pub type DetachedPacketEncode = fn(
     i32,
     i32,
@@ -617,6 +633,10 @@ pub trait ServerProtocol: Send + Sync {
         None
     }
 
+    fn detached_resident_light_compute(&self) -> Option<ResidentLightBatchCompute> {
+        None
+    }
+
     fn detached_packet_encode(&self) -> Option<DetachedPacketEncode> {
         None
     }
@@ -646,6 +666,20 @@ pub trait ServerProtocol: Send + Sync {
         _dimension: Dimension,
     ) -> Option<lodestone_world::ColumnLight> {
         self.compute_column_light_with_neighbours(column, neighbours)
+    }
+
+    /// Computes selected resident columns from their complete radius-one halo union.
+    /// Coordinates in both slices are absolute column coordinates. The future
+    /// borrows stable snapshots; the caller validates source revisions before
+    /// publishing its results. Unsupported families return `None`.
+    fn compute_resident_light_batch<'a>(
+        &'a self,
+        outputs: &'a [(i32, i32)],
+        columns: &'a [(i32, i32, ChunkColumn)],
+        dimension: Dimension,
+    ) -> Option<ResidentLightFuture<'a>> {
+        let _ = (outputs, columns, dimension);
+        None
     }
 
     /// Emits any directives to send right after the initial chunk batch has
@@ -2063,6 +2097,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         (**self).detached_light_compute()
     }
 
+    fn detached_resident_light_compute(&self) -> Option<ResidentLightBatchCompute> {
+        (**self).detached_resident_light_compute()
+    }
+
     fn detached_packet_encode(&self) -> Option<DetachedPacketEncode> {
         (**self).detached_packet_encode()
     }
@@ -2086,6 +2124,15 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         dimension: Dimension,
     ) -> Option<lodestone_world::ColumnLight> {
         (**self).compute_column_light_with_neighbours_in_dimension(column, neighbours, dimension)
+    }
+
+    fn compute_resident_light_batch<'a>(
+        &'a self,
+        outputs: &'a [(i32, i32)],
+        columns: &'a [(i32, i32, ChunkColumn)],
+        dimension: Dimension,
+    ) -> Option<ResidentLightFuture<'a>> {
+        (**self).compute_resident_light_batch(outputs, columns, dimension)
     }
 
     fn welcome_message(&self) -> Vec<ServerDirective> {

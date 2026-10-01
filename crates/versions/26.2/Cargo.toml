@@ -70,6 +70,7 @@ lodestone-server = { path = "../../lodestone-server" }
 # them); it is left alone because that file is not this crate's to edit.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
+lodestone-time = { workspace = true }
 
 [dev-dependencies]
 lodestone-command = { workspace = true }

@@ -268,12 +268,14 @@ publish the change; an unknown prior state conservatively requires relighting. E
 is still sent. Only light-changing updates add destinations to the per-connection FIFO queue,
 which deduplicates across batches. Direct player edits use that same queue on native connections
 with a shared source and a protocol-provided pure light computation. The block change is sent
-immediately; one light destination at a time is admitted to the bounded worker dispatcher. Tick
+immediately; nearby destinations share a solve admitted to the bounded worker dispatcher. Tick
 relights require an already-resident footprint, while direct edits can complete a cold neighbouring
 footprint on that worker. The connection keeps reading packets and sends a light update only if its
 settled snapshot is still current and the destination remains delivered. A later block edit can
 therefore invalidate an in-flight result without letting stale light overwrite its update. Other
 source and protocol combinations retain the synchronous path.
+The cooperative cache transaction, browser operation slices, shared input field and deferred
+edge-halo retry policy are described in [Resident relighting](resident-relighting.md).
 Scheduled fluid writes capture the replaced state immediately before each write, so changes to a
 fluid's level can avoid a full light recomputation when their light properties are unchanged.
 
@@ -404,8 +406,10 @@ lighting remains the separate `packet-lighting` phase.
 
 There is no runtime setting. `ServerProtocol::retains_initial_column_light` is the capability
 boundary for exact initial-light settlement; its default is `false`. The optional
-`ServerProtocol::detached_light_compute` supplies a pure function for native background tick and
-direct-edit relights; the 26.2 protocol implements it. Other protocols retain the ordinary
+`ServerProtocol::detached_light_compute` supplies a pure function for native single-output tick and
+direct-edit relights. `detached_resident_light_compute` and `compute_resident_light_batch` share
+grouped computation between native and browser execution; the 26.2 protocol implements them.
+Compute timing covers occupied slices, not the host waits between them. Other protocols retain the ordinary
 light-computation hooks. The per-block-state census is fixed data for a given
 game version, regenerated from its real source only when that version changes.
 

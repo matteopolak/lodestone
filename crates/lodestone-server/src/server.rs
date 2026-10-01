@@ -7138,6 +7138,20 @@ struct PendingRelights {
     queued: VecDeque<(i32, i32)>,
     queued_set: HashSet<(i32, i32)>,
     generation_required: HashSet<(i32, i32)>,
+    retry_at: Option<lodestone_time::Instant>,
+    retry_single: bool,
+}
+
+struct RelightBatch {
+    coordinates: Vec<(i32, i32)>,
+    generation_required: Vec<(i32, i32)>,
+}
+
+enum RelightBatchOutcome {
+    Committed(Vec<((i32, i32), lodestone_world::ColumnLight)>),
+    Deferred,
+    Unsupported,
+    Failed(ChunkEncodeError),
 }
 
 impl PendingRelights {
@@ -7152,10 +7166,14 @@ impl PendingRelights {
                 added += 1;
             }
         }
+        if added != 0 {
+            self.retry_at = None;
+        }
         added
     }
 
     fn enqueue_edit(&mut self, cx: i32, cz: i32, radius: i32) {
+        self.retry_at = None;
         for dz in -radius..=radius {
             for dx in -radius..=radius {
                 let coordinate = (cx + dx, cz + dz);
@@ -7174,12 +7192,10 @@ impl PendingRelights {
         Some(position)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     fn requires_generation(&self, coordinate: (i32, i32)) -> bool {
         self.generation_required.contains(&coordinate)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     fn front(&self) -> Option<(i32, i32)> {
         self.queued.front().copied()
     }
@@ -7189,6 +7205,50 @@ impl PendingRelights {
         self.queued.clear();
         self.queued_set.clear();
         self.generation_required.clear();
+        self.retry_at = None;
+        self.retry_single = false;
+    }
+
+    fn ready(&self) -> bool {
+        !self.is_empty() && self.retry_at.is_none_or(|at| lodestone_time::Instant::now() >= at)
+    }
+
+    fn batch(&self, delivered: &HashSet<(i32, i32)>, shared: bool) -> RelightBatch {
+        let Some(anchor) = self.front() else {
+            return RelightBatch { coordinates: Vec::new(), generation_required: Vec::new() };
+        };
+        let coordinates = self.queued.iter().copied().filter(|&(cx, cz)| {
+            delivered.contains(&(cx, cz)) && (if shared && !self.retry_single {
+                (i64::from(cx) - i64::from(anchor.0)).abs() <= 1
+                    && (i64::from(cz) - i64::from(anchor.1)).abs() <= 1
+            } else {
+                (cx, cz) == anchor
+            })
+        }).take(9).collect::<Vec<_>>();
+        let generation_required = coordinates.iter().copied()
+            .filter(|&coordinate| self.requires_generation(coordinate)).collect();
+        RelightBatch { coordinates, generation_required }
+    }
+
+    fn admit(&mut self, batch: &RelightBatch) {
+        self.retry_single = false;
+        self.queued.retain(|coordinate| !batch.coordinates.contains(coordinate));
+        for coordinate in &batch.coordinates {
+            self.queued_set.remove(coordinate);
+            self.generation_required.remove(coordinate);
+        }
+    }
+
+    fn defer(&mut self, batch: &RelightBatch) {
+        for &coordinate in batch.coordinates.iter().cycle().skip(1).take(batch.coordinates.len()) {
+            if self.queued_set.insert(coordinate) {
+                self.queued.push_back(coordinate);
+            }
+        }
+        self.generation_required.extend(batch.generation_required.iter().copied()
+            .filter(|coordinate| batch.coordinates.contains(coordinate)));
+        self.retry_at = Some(lodestone_time::Instant::now() + Duration::from_millis(50));
+        self.retry_single = true;
     }
 
     fn is_empty(&self) -> bool {
@@ -7202,8 +7262,121 @@ impl PendingRelights {
 
 #[cfg(not(target_arch = "wasm32"))]
 struct DetachedRelight {
-    coordinate: (i32, i32),
-    handle: crate::worldgen_dispatch::DispatchHandle<Option<lodestone_world::ColumnLight>>,
+    batch: RelightBatch,
+    handle: crate::worldgen_dispatch::DispatchHandle<RelightBatchOutcome>,
+}
+
+fn relight_transaction_outcome(error: crate::chunk::ResidentLightTransactionError) -> RelightBatchOutcome {
+    use crate::chunk::ResidentLightTransactionError;
+    match error {
+        ResidentLightTransactionError::Busy | ResidentLightTransactionError::MissingFootprint
+        | ResidentLightTransactionError::Conflict => RelightBatchOutcome::Deferred,
+        ResidentLightTransactionError::InvalidOutputs => RelightBatchOutcome::Failed(
+            ChunkEncodeError::new("resident lighting rejected an invalid output batch"),
+        ),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn compute_detached_relight_batch(
+    source: &dyn ChunkSource,
+    coordinates: &[(i32, i32)],
+    dimension: crate::dimension::Dimension,
+    compute: crate::protocol::ResidentLightBatchCompute,
+) -> RelightBatchOutcome {
+    let footprint = match lodestone_world::ResidentLightFootprint::new(coordinates.iter().copied()) {
+        Ok(footprint) => footprint,
+        Err(error) => return RelightBatchOutcome::Failed(ChunkEncodeError::new(format!("resident light footprint: {error:?}"))),
+    };
+    let transaction = match source.try_begin_resident_light(coordinates, footprint.inputs()) {
+        Some(Ok(transaction)) => transaction,
+        Some(Err(error)) => return relight_transaction_outcome(error),
+        None => return RelightBatchOutcome::Unsupported,
+    };
+    let lights = match compute(coordinates, transaction.columns(), dimension) {
+        Ok(lights) => lights,
+        Err(error) => return RelightBatchOutcome::Failed(ChunkEncodeError::new(format!("resident light solve: {error:?}"))),
+    };
+    match transaction.commit(lights.clone()) {
+        Ok(()) => RelightBatchOutcome::Committed(lights),
+        Err(error) => relight_transaction_outcome(error),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+struct CooperativeRelight<'a> {
+    batch: RelightBatch,
+    future: std::pin::Pin<Box<dyn std::future::Future<Output = RelightBatchOutcome> + 'a>>,
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn compute_cooperative_relight<P: ServerProtocol, S: ChunkSource + ?Sized>(
+    proto: &P,
+    source: &S,
+    coordinates: Vec<(i32, i32)>,
+) -> RelightBatchOutcome {
+    let footprint = match lodestone_world::ResidentLightFootprint::new(coordinates.iter().copied()) {
+        Ok(footprint) => footprint,
+        Err(error) => return RelightBatchOutcome::Failed(ChunkEncodeError::new(format!("resident light footprint: {error:?}"))),
+    };
+    let transaction = {
+        let _timing = PhaseTimer::start(WorldgenTimingPhase::ResidentLightSettlement, coordinates.len() as u32);
+        match source.try_begin_resident_light(&coordinates, footprint.inputs()) {
+            Some(Ok(transaction)) => transaction,
+            Some(Err(error)) => return relight_transaction_outcome(error),
+            None => return RelightBatchOutcome::Unsupported,
+        }
+    };
+    let dimension = source.dimension().unwrap_or(crate::dimension::Dimension::Overworld);
+    let lights = {
+        let Some(compute) = proto.compute_resident_light_batch(&coordinates, transaction.columns(), dimension) else {
+            return RelightBatchOutcome::Unsupported;
+        };
+        match compute.await {
+            Ok(lights) => lights,
+            Err(error) => return RelightBatchOutcome::Failed(ChunkEncodeError::new(format!("resident light solve: {error:?}"))),
+        }
+    };
+    let _timing = PhaseTimer::start(WorldgenTimingPhase::ResidentLightSettlement, 0);
+    match transaction.commit(lights.clone()) {
+        Ok(()) => RelightBatchOutcome::Committed(lights),
+        Err(error) => relight_transaction_outcome(error),
+    }
+}
+
+async fn send_committed_relights<T: Transport, P: ServerProtocol, S: ChunkSource + ?Sized>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    source: &S,
+    state: &mut State,
+    delivered: &HashSet<(i32, i32)>,
+    pending: &mut PendingRelights,
+    lights: Vec<((i32, i32), lodestone_world::ColumnLight)>,
+) -> Result<(), ServerError> {
+    for (coordinate, light) in lights {
+        if !delivered.contains(&coordinate) {
+            continue;
+        }
+        let current = match source.try_resident_column(coordinate.0, coordinate.1) {
+            Some(crate::chunk_store::TryResident::Present(column)) => Some(column),
+            Some(_) => None,
+            None => resident_column(source, coordinate.0, coordinate.1),
+        };
+        if !current.as_ref().is_some_and(|column| column.centre_settled_light() == Some(&light)) {
+            pending.enqueue_batch([coordinate]);
+            continue;
+        }
+        let directive = {
+            let _timing = PhaseTimer::start(WorldgenTimingPhase::ResidentLightEncode, 1);
+            proto.encode_light_update(coordinate.0, coordinate.1, &light)
+        };
+        if matches!(directive, ServerDirective::None) {
+            send_resident_column_light(conn, proto, source, state, coordinate.0, coordinate.1).await?;
+        } else {
+            apply(conn, state, directive).await?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -15507,7 +15680,7 @@ where
             .unwrap_or(block_entities);
         let block_ticks = dimension_handles.block_ticks.as_ref().unwrap_or(block_ticks);
         let mut synchronous_relight = true;
-        if let Some(coordinate) = pending_relights.front() {
+        if let Some(coordinate) = pending_relights.front().filter(|_| pending_relights.ready()) {
             if let (Some(shared), Some(compute)) = (
                 source.shared_arc(),
                 proto.detached_light_compute()
@@ -15521,21 +15694,37 @@ where
                     } else {
                         let dimension = source.dimension();
                         let cross_column = proto.uses_cross_column_light();
+                        let batch_compute = proto.detached_resident_light_compute();
+                        let batch = pending_relights.batch(&view.delivered, batch_compute.is_some());
+                        let coordinates = batch.coordinates.clone();
                         let resident_only = !pending_relights.requires_generation(coordinate);
                         let work = move || {
-                            compute_detached_relight(
+                            if coordinates.len() > 1 {
+                                if let Some(batch_compute) = batch_compute {
+                                    let result = compute_detached_relight_batch(
+                                        shared.as_ref(), &coordinates, dimension, batch_compute,
+                                    );
+                                    if !matches!(result, RelightBatchOutcome::Unsupported | RelightBatchOutcome::Deferred) {
+                                        return result;
+                                    }
+                                }
+                            }
+                            match compute_detached_relight(
                                 shared.as_ref(),
                                 coordinate,
                                 dimension,
                                 cross_column,
                                 resident_only,
                                 compute,
-                            )
+                            ) {
+                                Some(light) => RelightBatchOutcome::Committed(vec![(coordinate, light)]),
+                                None => RelightBatchOutcome::Deferred,
+                            }
                         };
                         if let Ok(handle) = crate::worldgen_dispatch::try_spawn(work) {
-                            pending_relights.pop_front();
+                            pending_relights.admit(&batch);
                             detached_relight = Some(DetachedRelight {
-                                coordinate,
+                                batch,
                                 handle,
                             });
                         }
@@ -15557,7 +15746,7 @@ where
                 .await?;
                 watch.pass("tick_block_updates");
             }
-            _ = std::future::ready(()), if synchronous_relight && !pending_relights.is_empty() => {
+            _ = std::future::ready(()), if synchronous_relight && pending_relights.ready() => {
                 watch.enter();
                 send_next_relight(
                     conn,
@@ -15575,28 +15764,27 @@ where
                 None => std::task::Poll::Pending,
             }), if detached_relight.is_some() => {
                 watch.enter();
-                let coordinate = detached_relight
+                let batch = detached_relight
                     .take()
                     .expect("the completed relight has an owned handle")
-                    .coordinate;
-                if let Ok(Some(light)) = result {
-                    let current = resident_column(source.get(), coordinate.0, coordinate.1)
-                        .and_then(|column| column.centre_settled_light().cloned());
-                    if view.delivered.contains(&coordinate) && current.as_ref() == Some(&light) {
-                        let directive = proto.encode_light_update(coordinate.0, coordinate.1, &light);
-                        if matches!(directive, ServerDirective::None) {
-                            send_resident_column_light(
-                                conn,
-                                proto,
-                                source.get(),
-                                &mut state,
-                                coordinate.0,
-                                coordinate.1,
-                            ).await?;
-                        } else {
-                            apply(conn, &mut state, directive).await?;
+                    .batch;
+                match result {
+                    Ok(RelightBatchOutcome::Committed(lights)) => {
+                        let completed = lights.iter().map(|(coordinate, _)| *coordinate).collect::<Vec<_>>();
+                        let remainder = RelightBatch {
+                            coordinates: batch.coordinates.into_iter().filter(|coordinate| !completed.contains(coordinate)).collect(),
+                            generation_required: batch.generation_required,
+                        };
+                        if !remainder.coordinates.is_empty() {
+                            pending_relights.defer(&remainder);
                         }
+                        send_committed_relights(
+                            conn, proto, source.get(), &mut state, &view.delivered,
+                            &mut pending_relights, lights,
+                        ).await?;
                     }
+                    Ok(RelightBatchOutcome::Failed(error)) => return Err(error.into()),
+                    _ => pending_relights.defer(&batch),
                 }
                 watch.pass("tick_relight");
             }
@@ -18489,6 +18677,8 @@ where
         crate::browser_timer::BrowserInterval::new(WASM_VITALS_TICK_INTERVAL);
     let browser_play_started = lodestone_time::Instant::now();
     let mut browser_vitals_ticks = 0_u64;
+    let mut cooperative_relights = proto.detached_resident_light_compute().is_some();
+    let mut cooperative_relight: Option<CooperativeRelight<'_>> = None;
     let mut connection_probe = crate::connection_progress::ConnectionProbe::start();
     use crate::connection_progress::ConnectionActivity;
     let mut pending_join_encodes = crate::join_scheduler::OrderedJoinEncodes::new();
@@ -18520,6 +18710,22 @@ where
                 probe.activity(phase, target, packet_id);
             }
         };
+        if cooperative_relights && cooperative_relight.is_none() && pending_relights.ready() {
+            if pending_relights.front().is_some_and(|coordinate| !view.delivered.contains(&coordinate)) {
+                pending_relights.pop_front();
+            } else {
+                let batch = pending_relights.batch(&view.delivered, true);
+                let coordinates = batch.coordinates.clone();
+                pending_relights.admit(&batch);
+                cooperative_relight = Some(CooperativeRelight {
+                    batch,
+                    future: Box::pin(crate::worldgen_progress::measure_polls(
+                        WorldgenTimingPhase::ConnectionRelight,
+                        compute_cooperative_relight(proto, source.get(), coordinates),
+                    )),
+                });
+            }
+        }
         let packet = tokio::select! {
             _ = std::future::ready(()), if !pending_tick_updates.is_empty() => {
                 activity(ConnectionActivity::TickUpdates, None, None);
@@ -18534,9 +18740,27 @@ where
                 .await?;
                 None
             }
-            // A queued relight is always ready, but competes with packet and
-            // timer work so large batches cannot monopolize the browser loop.
-            _ = std::future::ready(()), if !pending_relights.is_empty() => {
+            result = std::future::poll_fn(|cx| match cooperative_relight.as_mut() {
+                Some(job) => job.future.as_mut().poll(cx),
+                None => std::task::Poll::Pending,
+            }), if cooperative_relight.is_some() => {
+                activity(ConnectionActivity::Relight, None, None);
+                let batch = cooperative_relight.take().expect("the completed relight owns its batch").batch;
+                match result {
+                    RelightBatchOutcome::Committed(lights) => send_committed_relights(
+                        conn, proto, source.get(), &mut state, &view.delivered,
+                        &mut pending_relights, lights,
+                    ).await?,
+                    RelightBatchOutcome::Deferred => pending_relights.defer(&batch),
+                    RelightBatchOutcome::Unsupported => {
+                        cooperative_relights = false;
+                        pending_relights.defer(&batch);
+                    }
+                    RelightBatchOutcome::Failed(error) => return Err(error.into()),
+                }
+                None
+            }
+            _ = std::future::ready(()), if !cooperative_relights && pending_relights.ready() => {
                 activity(ConnectionActivity::Relight, None, None);
                 send_next_relight(
                     conn,
@@ -20557,6 +20781,42 @@ mod tests {
         assert_eq!(pending.pop_front(), Some((1, 0)));
         assert_eq!(pending.pop_front(), Some((0, 0)));
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn deferred_relight_batch_rotates_and_retries_individual_outputs() {
+        let delivered = HashSet::from([(-1, -1), (0, 0)]);
+        let mut pending = PendingRelights::default();
+        pending.enqueue_batch([(-1, -1), (0, 0)]);
+        let batch = pending.batch(&delivered, true);
+        assert_eq!(batch.coordinates, [(-1, -1), (0, 0)]);
+        pending.admit(&batch);
+        pending.defer(&batch);
+        assert!(!pending.ready());
+        assert_eq!(pending.front(), Some((0, 0)));
+        let retry = pending.batch(&delivered, true);
+        assert_eq!(retry.coordinates, [(0, 0)]);
+        pending.admit(&retry);
+        assert_eq!(pending.front(), Some((-1, -1)));
+    }
+
+    #[test]
+    fn relight_admission_preserves_new_edits_and_only_requeues_owed_permissions() {
+        let delivered = HashSet::from([(0, 0), (1, 0)]);
+        let mut pending = PendingRelights::default();
+        pending.enqueue_edit(0, 0, 0);
+        pending.enqueue_batch([(1, 0)]);
+        let batch = pending.batch(&delivered, true);
+        pending.admit(&batch);
+        pending.enqueue_edit(0, 0, 0);
+        pending.defer(&RelightBatch {
+            coordinates: vec![(1, 0)],
+            generation_required: batch.generation_required,
+        });
+        assert_eq!(pending.pop_front(), Some((0, 0)));
+        assert!(!pending.requires_generation((0, 0)));
+        assert_eq!(pending.pop_front(), Some((1, 0)));
+        assert!(pending.generation_required.is_empty());
     }
 
     #[cfg(not(target_arch = "wasm32"))]

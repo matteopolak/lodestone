@@ -3299,6 +3299,7 @@ dependencies = [
  "lodestone-macros",
  "lodestone-model",
  "lodestone-server",
+ "lodestone-time",
  "lodestone-world",
  "rand 0.8.7",
  "serde",

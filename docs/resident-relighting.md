@@ -1,0 +1,39 @@
+# Resident relighting
+
+## What it is
+
+`ResidentLightJob` computes fresh light for up to nine nearby resident columns using one shared input field. The integrated server uses it for grouped native relights and cooperative browser relights while continuing to service packets and ticks.
+
+## How it works
+
+`ResidentLightFootprint` validates distinct output coordinates and constructs the union of their complete radius-one input halos. That union must fit a five-by-five column field. `ResidentLightInputs` binds exactly those borrowed `BlockVolume` values and checks their common vertical shape. A missing required input is an error, never an isolated or partially settled output. Unused tiles inside the bounding rectangle are opaque barriers.
+
+The job samples each field cell once, builds opacity and fresh emission buffers, seeds open vertical sky columns, queues only sky frontiers, and floods both layers in descending light levels. It packs only selected outputs. Every output tracks its own highest non-air section and keeps the ordinary one-section full-sky framing. Explicit zero block layers and the two apron sections survive; initial-packet allocation, retained seeds, and dependency admission are outside this solver.
+
+Each output has a complete halo even when neighbouring outputs share input columns. Every propagated step costs at least one light level, and the maximum level is fifteen, so a source beyond an output's own sixteen-block halo cannot alter it. The outer input ring of a nine-output solve therefore supplies accurate centre results; it is not itself a set of complete output snapshots.
+
+`step(NonZeroUsize)` charges field scans, sky seed cells, frontier preparation and cells, queue pops or empty levels, and packing cells and section finalizations. One flood operation touches at most six neighbours. Finalizing a section performs bounded two-kibibyte layer copies and buffer clears; it does not rescan every nibble to discover uniformity. `ResidentLightWork` reports each category. The budget bounds operation count, not allocator latency, host descheduling, or wall-clock milliseconds. Field buffers reserve capacity at construction and are populated during charged scan operations.
+
+`finish` drives the same state machine synchronously. A browser owner can retain the job between `step` calls and yield outside the solver. The inputs are borrowed, so the primitive clones neither columns nor snapshots and owns no persistent cache. Its caller must capture a stable source revision set, reject conflicting results, and publish accurate outputs as one source transaction. The job itself owns no source locks, revision checks, generation requests, packet encoding, or delivery ledger.
+
+`ChunkSource::try_begin_resident_light` captures complete cache-owned terrain once per input, together with pinned coordinate revisions. Capture and commit use nonblocking locks; neither generates terrain, reads disk, nor calls wrapped persistence. Commit validates every input and installs light only for the requested outputs. Terrain stays unchanged and input-only halos keep their previous light status. This light is transient cache state, not a durable terrain edit. Ordinary mutation invalidation still reaches every wrapped retention layer.
+
+The connection owns one in-flight relight. It groups delivered destinations within the oldest queued target's immediate ring. Native uses the persistent dispatcher and the shared solver for multiple outputs; single-output work keeps the faster scalar path. Browser connections retain a compute future as a separate selection branch. The version adapter advances 16,384 charged operations before yielding to the host, with no source locks held. Losing a packet/timer selection does not cancel that future. Disconnect drops an uncommitted browser job; a native job already running can finish reusable light work but cannot deliver through a cancelled handle.
+
+Busy, missing or changed inputs leave the destinations queued. A deferred batch rotates its oldest destination behind its neighbours, backs off for 50 ms, and retries one output next; a permanently missing edge halo cannot prevent a complete nearby halo from progressing. Edits queued during a solve remain distinct pending work. Before sending results, the server checks that each destination remains delivered and its committed light is still current. Unsupported sources and protocol families retain their existing scalar route.
+
+## How to change it
+
+The solver and focused controls live in `lodestone_world::lighting::resident`; its public types are re-exported by `lodestone_world`. Keep the existing single-column and initial-light APIs unchanged when extending it. A one-output job uses the same three-by-three flood field and three byte-per-cell buffers as the existing neighbour solver. Measure synchronous throughput before replacing scalar single-target work. On native release builds, set `LODESTONE_RESIDENT_LIGHT_PERF_ITERATIONS` in `1..=128` and run `every_output_matches_independent_halo_with_distinct_sky_trimming` with `--nocapture` for paired one- and nine-target timings. The control alternates order, retains both outputs through `black_box`, and excludes result destruction from the measured sums. `RESIDENT_LIGHT_PERF` reports calls and elapsed sums for sky and no-sky fixtures without a timing assertion.
+
+The controls compare every selected output, including section tags and apron layers, with independently computed radius-one centres over nonuniform roofs, water, emitters, and transparent non-air blocks. Separate arithmetic controls require levels fourteen from an outer-halo emitter, thirteen/twelve/eleven across a torch seam and corner, thirteen/nine under a roof beside open sky, and fifteen down an opened shaft. Source removal must leave explicit zero block light. The outer-halo positive and negative controls use the same fallible exact-level check: it returns `Ok(14)` with the complete halo and `Err(0)` with the source omitted. This observes detector rejection without requiring panic unwinding. A sliced control checks both charged work and terrain reads between resumptions. Failures report output coordinates and mismatch bounds.
+
+When integrating with a source, preserve all-input revision validation and all-or-none output commit. Never assign an input-only halo a completed-centre status. Resident-only work must not generate missing columns; any generation permission and delivered-column filtering belong to the caller. Do not hold coordinate gates across a browser yield.
+
+## Configuration
+
+There are no environment variables or clocks in the solver. The native comparison control's optional `LODESTONE_RESIDENT_LIGHT_PERF_ITERATIONS` setting affects measurement only. Inputs use column coordinates, output count is at most nine, and the read field is at most five by five columns. The version adapter owns the browser slice budget; the server queue owns retry delay and grouping. `BlockVolume` supplies the vertical extent and conservative air ceiling, queried once per input at construction; `LightProperties` supplies emission, opacity, and the dimension's skylight rule.
+
+## Dependencies
+
+The primitive relies on the world lighting field layout, descending bucket queues, neighbour traversal, `ColumnLight`, and `NibbleArray`. Production uses the server's coordinate-gated cache, delivered-column ledger and native dispatcher, the version adapter's numeric light-property tables and packet encoder, and `lodestone-time` for browser cooperation. Initial packet lighting remains a separate admission contract.

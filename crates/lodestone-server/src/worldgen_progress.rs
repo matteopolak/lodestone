@@ -193,6 +193,12 @@ impl Drop for PhaseTimer {
     }
 }
 
+/// Measures occupied lighting work without including cooperative host waits.
+pub fn time_resident_light_step<T>(items: u32, work: impl FnOnce() -> T) -> T {
+    let _timing = PhaseTimer::start(WorldgenTimingPhase::ResidentLightCompute, items);
+    work()
+}
+
 pub(crate) async fn measure_polls<F: std::future::Future>(
     phase: WorldgenTimingPhase,
     future: F,

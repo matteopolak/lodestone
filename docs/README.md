@@ -867,6 +867,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   `cargo xtask` static scanners (`islands`, `world-coverage`, and their siblings
   `connectedness`, `check-ptr-const`, `wasm-check`) that catch classes of defect no
   compiler check can see.
+- [Resident relighting](./resident-relighting.md) — `ResidentLightJob` computes
+  fresh light for up to nine nearby resident columns using one shared input field. The
+  integrated server uses it for grouped native relights and cooperative browser
+  relights while continuing to service packets and ticks.
 - [Server resource packs](./resource-packs.md) — The end-to-end flow for a
   server-pushed resource pack: the accept/decline prompt, the per-server policy that
   can skip it, the download/verify/apply pipeline, and how a downloaded pack actually

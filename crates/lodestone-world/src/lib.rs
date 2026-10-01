@@ -94,7 +94,9 @@ pub use container::{LongArrayFraming, PaletteKind, PalettedContainer};
 pub use heightmap::{Heightmap, Heightmaps, height_bits};
 pub use light::{ColumnLight, LightData, LightStorage, NibbleArray, SectionLight};
 pub use lighting::{
-    BlockVolume, LightDiff, LightProperties, Neighbourhood, compute_column_light,
+    BlockVolume, LightDiff, LightProperties, Neighbourhood, ResidentLightError,
+    ResidentLightFootprint, ResidentLightInputs, ResidentLightJob, ResidentLightProgress,
+    ResidentLightResult, ResidentLightWork, compute_column_light,
     compute_column_light_for_initial_chunk, compute_column_light_with_neighbours,
     compute_column_light_with_neighbours_and_storage,
     compute_column_lights_with_neighbours_and_storage,
