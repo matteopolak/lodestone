@@ -38,14 +38,6 @@ pub struct ChunkWorld {
     // promotion this split needed.
     pub(super) min_y: i32,
     pub(super) height: i32,
-    /// the generation-spawn handoff: every fresh-off-the-generator column's `SPAWN`
-    /// candidates, drained out of each [`ChunkColumn`] as it is snapshotted
-    /// (`from_source`/`from_columns`) — a column loaded from disk contributes
-    /// nothing here, which is what makes this empty on every reopen of an
-    /// existing world and non-empty only the first time a chunk is ever
-    /// generated. [`MobHandle::replace_world`](super::MobHandle::replace_world) drains this
-    /// once, after construction, into real placed mobs.
-    pending_generation_spawns: Vec<lodestone_worldgen::spawn_stage::GenerationSpawn>,
 }
 
 impl ChunkWorld {
@@ -58,7 +50,6 @@ impl ChunkWorld {
             columns: HashMap::new(),
             min_y,
             height,
-            pending_generation_spawns: Vec::new(),
         }
     }
 
@@ -75,16 +66,11 @@ impl ChunkWorld {
         cz_range: std::ops::RangeInclusive<i32>,
     ) -> Self {
         let mut columns = HashMap::new();
-        let mut pending_generation_spawns = Vec::new();
         let mut extent: Option<(i32, i32)> = None;
         for cz in cz_range {
             for cx in cx_range.clone() {
-                let mut col = source.column(cx, cz);
+                let col = source.column(cx, cz);
                 extent = Some((col.min_y, col.height));
-                // The generation-spawn handoff is non-empty only for a column this call
-                // just generated for the first time — see this struct's field
-                // doc.
-                pending_generation_spawns.extend(col.take_generation_spawns());
                 columns.insert((cx, cz), col);
             }
         }
@@ -93,7 +79,6 @@ impl ChunkWorld {
             columns,
             min_y,
             height,
-            pending_generation_spawns,
         }
     }
 
@@ -115,12 +100,9 @@ impl ChunkWorld {
     #[must_use]
     pub fn from_columns(columns: impl IntoIterator<Item = ((i32, i32), ChunkColumn)>) -> Self {
         let mut map = HashMap::new();
-        let mut pending_generation_spawns = Vec::new();
         let mut extent: Option<(i32, i32)> = None;
-        for (coord, mut col) in columns {
+        for (coord, col) in columns {
             extent = Some((col.min_y, col.height));
-            // Use the same generation-spawn drain as `from_source`.
-            pending_generation_spawns.extend(col.take_generation_spawns());
             map.insert(coord, col);
         }
         let (min_y, height) = extent.unwrap_or((0, 1));
@@ -128,20 +110,7 @@ impl ChunkWorld {
             columns: map,
             min_y,
             height,
-            pending_generation_spawns,
         }
-    }
-
-    /// Takes every `SPAWN`-stage candidate collected while constructing this
-    /// [`ChunkWorld`], leaving the list empty.
-    ///
-    /// A [`ChunkWorld`] snapshot is built once per [`MobHandle::replace_world`
-    /// ](super::MobHandle::replace_world) call — see that method and `ChunkColumn`'s
-    /// own field doc for why draining here, exactly once, is what keeps a
-    /// fresh world's generation-time animals from duplicating across a
-    /// restart.
-    pub fn take_pending_generation_spawns(&mut self) -> Vec<lodestone_worldgen::spawn_stage::GenerationSpawn> {
-        std::mem::take(&mut self.pending_generation_spawns)
     }
 
     /// Sets a single block's solidity at world coordinates, creating the owning

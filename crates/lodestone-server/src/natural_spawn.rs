@@ -88,7 +88,8 @@ use lodestone_data::block::Block;
 use lodestone_model::{Difficulty, ResourceKey, Vec3};
 use lodestone_world::{BlockVolume, LightProperties, compute_column_light};
 
-use crate::chunk::ChunkColumn;
+use crate::chunk::{ChunkColumn, ChunkGenerationStage};
+use crate::generation_population::PlacementDecision;
 use crate::mob_spawn::{MobCategory, SpawnCandidate, SpawnCandidateSource, SpawnRng};
 use crate::mobs::ChunkWorld;
 
@@ -773,13 +774,23 @@ impl NaturalSpawner {
         tick: u64,
         players: Vec<Vec3>,
     ) {
-        self.world = Some(world);
+        self.start_cycle(tick, players);
+        self.use_world(world);
+    }
+
+    pub(crate) fn start_cycle(&mut self, tick: u64, players: Vec<Vec3>) {
+        self.world = None;
         self.players = players;
         self.lit_this_cycle = 0;
         if tick.saturating_sub(self.lights_refreshed_at) >= LIGHT_TTL_TICKS {
             self.lights.clear();
             self.lights_refreshed_at = tick;
         }
+    }
+
+    /// Changes the terrain view without resetting this cycle's shared light budget.
+    pub(crate) fn use_world(&mut self, world: std::sync::Arc<ChunkWorld>) {
+        self.world = Some(world);
     }
 
     /// Every species one biome's spawn list names for `category`, in declaration
@@ -845,14 +856,20 @@ impl NaturalSpawner {
 
     /// The species-independent half of `isValidSpawnPostitionForType` plus the
     /// species' own `SpawnRule`, evaluated at `pos`.
-    #[allow(clippy::too_many_lines)]
     fn permits(&mut self, rule: &SpawnRule, x: i32, y: i32, z: i32) -> bool {
+        self.placement_permits(rule, x, y, z).unwrap_or(false)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn placement_permits(&mut self, rule: &SpawnRule, x: i32, y: i32, z: i32) -> Option<bool> {
         if y < rule.y_range.0 || y > rule.y_range.1 {
-            return false;
+            return Some(false);
         }
-        let Some(world) = self.world.clone() else {
-            return false;
-        };
+        let world = self.world.clone()?;
+        let column = world.column(x.div_euclid(16), z.div_euclid(16))?;
+        if column.generation_stage() < ChunkGenerationStage::Full {
+            return None;
+        }
 
         let here = world.block_state_id(x, y, z);
         let below = world.block_state_id(x, y - 1, z);
@@ -861,23 +878,23 @@ impl NaturalSpawner {
         match rule.placement {
             Placement::OnGround => {
                 if !is_valid_spawn_surface_id(below) {
-                    return false;
+                    return Some(false);
                 }
                 if !is_valid_empty_spawn_block_id(here) || !is_valid_empty_spawn_block_id(above) {
-                    return false;
+                    return Some(false);
                 }
             }
             Placement::InWater => {
                 if !is_water_id(here) {
-                    return false;
+                    return Some(false);
                 }
                 if is_full_solid_id(above) {
-                    return false;
+                    return Some(false);
                 }
             }
             Placement::InLava => {
                 if !is_lava_id(here) {
-                    return false;
+                    return Some(false);
                 }
             }
             Placement::NoRestrictions => {}
@@ -886,17 +903,17 @@ impl NaturalSpawner {
         match rule.ground {
             Ground::ValidSpawn => {
                 if !is_valid_spawn_surface_id(below) {
-                    return false;
+                    return Some(false);
                 }
             }
             Ground::OneOf(blocks) => {
                 if !blocks.contains(&below.block()) {
-                    return false;
+                    return Some(false);
                 }
             }
             Ground::Water => {
                 if !is_water_id(below) {
-                    return false;
+                    return Some(false);
                 }
             }
             Ground::Any => {}
@@ -906,40 +923,38 @@ impl NaturalSpawner {
         // also vanilla's order — `isDarkEnoughToSpawn` is the last thing
         // `checkMonsterSpawnRules` reaches — so the RNG stream is not consumed by
         // a position that was never going to work.
-        let Some((sky, block)) = self.light_at(x, y, z) else {
-            return false;
-        };
+        let (sky, block) = self.light_at(x, y, z)?;
         if rule.needs_sky && sky < 15 {
-            return false;
+            return Some(false);
         }
         match rule.light {
             LightRule::Any => {}
             LightRule::Dark => {
                 if i32::from(sky) > self.rng.next_int(32) {
-                    return false;
+                    return Some(false);
                 }
                 // The overworld's `monsterSpawnBlockLightLimit` is 0.
                 if block > 0 {
-                    return false;
+                    return Some(false);
                 }
                 // `monsterSpawnLightTest` is `UniformInt(0, 7)`.
                 if i32::from(Self::raw_brightness(sky, block)) > self.rng.next_int(8) {
-                    return false;
+                    return Some(false);
                 }
             }
             LightRule::Bright => {
                 if Self::raw_brightness(sky, block) <= 8 {
-                    return false;
+                    return Some(false);
                 }
             }
             LightRule::MaxRandom(bound) => {
                 if i32::from(Self::raw_brightness(sky, block)) > self.rng.next_int(bound) {
-                    return false;
+                    return Some(false);
                 }
             }
             LightRule::Zero => {
                 if Self::raw_brightness(sky, block) != 0 {
-                    return false;
+                    return Some(false);
                 }
             }
         }
@@ -947,11 +962,11 @@ impl NaturalSpawner {
             Special::None => {}
             Special::Slime => {
                 if !self.slime_permits(x, y, z, Self::raw_brightness(sky, block)) {
-                    return false;
+                    return Some(false);
                 }
             }
         }
-        true
+        Some(true)
     }
 
     /// The moon-phase `SURFACE_SLIME_SPAWN_CHANCE` at the current `day_time`.
@@ -1048,41 +1063,38 @@ impl NaturalSpawner {
         None
     }
 
-    /// The generation-spawn handoff re-validates the `SPAWN` stage's raw candidates
-    /// (`lodestone_worldgen::spawn_stage::GenerationSpawn` — a position/species
-    /// pair unconditioned on light or ground, see that module's own doc) against
-    /// the exact same [`SpawnRule`] table and light cache the tick-driven
-    /// cycle's own [`Self::permits`] already uses.
-    ///
-    /// Requires [`begin_cycle`](Self::begin_cycle) to have been called first with
-    /// the [`ChunkWorld`] the candidates were drawn from — the same requirement
-    /// [`Self::permits`] already has, just surfaced here rather than panicking
-    /// on a `None` deep inside it. A candidate for a species absent from
-    /// [`SPAWN_RULES`] (deliberately — see the module doc's "How to change it")
-    /// is dropped, exactly as [`Self::permits`] drops it for the tick cycle.
-    pub fn validate_generation_spawns(
+    /// Applies placement rules without losing candidates whose terrain or light
+    /// is unavailable. Generation population has no player-distance or cap gate.
+    pub fn classify_generation_spawn(
         &mut self,
-        candidates: Vec<lodestone_worldgen::spawn_stage::GenerationSpawn>,
-    ) -> Vec<SpawnCandidate> {
-        let mut out = Vec::new();
-        for c in candidates {
-            let Some(entity_type) = c.entity_type.builtin_or_none() else {
-                continue;
-            };
-            let Ok(key) = ResourceKey::from_str(entity_type.name()) else {
-                continue;
-            };
-            let Some(rule) = spawn_rule(entity_type.path()) else {
-                continue;
-            };
-            if self.permits(rule, c.x, c.y, c.z) {
-                out.push(SpawnCandidate {
-                    pos: Vec3::new(f64::from(c.x) + 0.5, f64::from(c.y), f64::from(c.z) + 0.5),
-                    entity_type: key,
-                });
-            }
+        candidate: &lodestone_worldgen::spawn_stage::GenerationSpawn,
+    ) -> PlacementDecision {
+        let Some(entity_type) = candidate.entity_type.builtin_or_none() else {
+            return PlacementDecision::Rejected;
+        };
+        let Ok(key) = ResourceKey::from_str(entity_type.name()) else {
+            return PlacementDecision::Rejected;
+        };
+        let Some(rule) = spawn_rule(entity_type.path()) else {
+            return PlacementDecision::Rejected;
+        };
+        if self.difficulty == Difficulty::Peaceful
+            && !crate::mob_spawn::allowed_in_peaceful(key.path())
+        {
+            return PlacementDecision::Rejected;
         }
-        out
+        match self.placement_permits(rule, candidate.x, candidate.y, candidate.z) {
+            None => PlacementDecision::Deferred,
+            Some(false) => PlacementDecision::Rejected,
+            Some(true) => PlacementDecision::Accepted(SpawnCandidate {
+                pos: Vec3::new(
+                    f64::from(candidate.x) + 0.5,
+                    f64::from(candidate.y),
+                    f64::from(candidate.z) + 0.5,
+                ),
+                entity_type: key,
+            }),
+        }
     }
 }
 
@@ -1203,6 +1215,9 @@ impl NaturalSpawner {
     /// uniform in `[min_y, surface + 1]`.
     fn random_pos_within(&mut self, cx: i32, cz: i32) -> Option<(i32, i32, i32)> {
         let world = self.world.clone()?;
+        if world.column(cx, cz)?.generation_stage() < ChunkGenerationStage::Full {
+            return None;
+        }
         let x = cx * 16 + self.rng.next_int(16);
         let z = cz * 16 + self.rng.next_int(16);
         let min_y = world.floor_y();
@@ -1282,6 +1297,69 @@ fn is_valid_empty_spawn_block_id(state: StateId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cow_candidate(cx: i32) -> lodestone_worldgen::spawn_stage::GenerationSpawn {
+        lodestone_worldgen::spawn_stage::GenerationSpawn {
+            entity_type: lodestone_data::entity_type::EntityType::Cow.into(),
+            x: cx * 16 + 3,
+            y: 64,
+            z: 7,
+        }
+    }
+
+    fn grass_column() -> ChunkColumn {
+        let mut column = ChunkColumn::new(0, 80);
+        column.set_block_id(3, 63, 7, Block::GrassBlock.default_state());
+        column
+    }
+
+    #[test]
+    fn generation_light_budget_defers_fifth_column_then_accepts_it() {
+        let world = std::sync::Arc::new(ChunkWorld::from_columns(
+            (0..5).map(|cx| ((cx, 0), grass_column())),
+        ));
+        let mut spawner = NaturalSpawner::new(HashMap::new(), 0);
+        spawner.begin_cycle(std::sync::Arc::clone(&world), 1, Vec::new());
+        for cx in 0..4 {
+            let PlacementDecision::Accepted(candidate) =
+                spawner.classify_generation_spawn(&cow_candidate(cx))
+            else {
+                panic!("grass and open daylight must accept column {cx}");
+            };
+            assert_eq!(candidate.pos, Vec3::new(f64::from(cx * 16) + 3.5, 64.0, 7.5));
+        }
+        assert!(matches!(
+            spawner.classify_generation_spawn(&cow_candidate(4)),
+            PlacementDecision::Deferred,
+        ));
+        spawner.begin_cycle(world, 2, Vec::new());
+        assert!(matches!(
+            spawner.classify_generation_spawn(&cow_candidate(4)),
+            PlacementDecision::Accepted(_),
+        ));
+    }
+
+    #[test]
+    fn generation_missing_terrain_defers_but_solid_headroom_rejects() {
+        let mut column = grass_column();
+        column.set_block_id(3, 65, 7, Block::Stone.default_state());
+        let world = std::sync::Arc::new(ChunkWorld::from_columns([((0, 0), column)]));
+        let mut spawner = NaturalSpawner::new(HashMap::new(), 0);
+        spawner.begin_cycle(world, 1, Vec::new());
+        assert!(matches!(
+            spawner.classify_generation_spawn(&cow_candidate(0)),
+            PlacementDecision::Rejected,
+        ));
+        assert!(matches!(
+            spawner.classify_generation_spawn(&cow_candidate(1)),
+            PlacementDecision::Deferred,
+        ));
+        spawner.use_world(std::sync::Arc::new(ChunkWorld::from_columns([((1, 0), grass_column())])));
+        assert!(matches!(
+            spawner.classify_generation_spawn(&cow_candidate(1)),
+            PlacementDecision::Accepted(_),
+        ));
+    }
 
     /// The table is sorted, so [`spawn_rule`]'s binary search is valid, and holds
     /// no duplicate — the invariant vanilla's own `register` throws on.

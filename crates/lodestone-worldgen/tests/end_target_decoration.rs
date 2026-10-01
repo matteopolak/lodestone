@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use lodestone_data::block::Block;
 use lodestone_data::block_states::StateId;
 use lodestone_worldgen::density::{NoiseParams, Resolver};
 use lodestone_worldgen::end::EndGenerator;
@@ -131,4 +132,32 @@ fn target_aware_source_replay_reads_the_target_window() {
         generator.parity_source_decoration_with_overrides(source.0, source.1, &[]),
         "the source-centred control must ignore an override outside its read window",
     );
+}
+
+#[test]
+fn target_source_replay_emits_ordered_platform_and_city_changes() {
+    let assets = EndAssets::new();
+    for (seed, target, source, witness, expected, city) in [
+        (42, (7, 1), (6, 0), (100, 48, 0), Block::Obsidian.default_state(), false),
+        (-195_764_831, (45, -115), (45, -115), (720, 60, -1825), Block::PurpurBlock.default_state(), true),
+    ] {
+        let generator = EndGenerator::new(seed, &assets.read("noise_settings", "end"), &assets);
+        let result = generator.parity_source_decoration_for_target_with_overrides(
+            target.0, target.1, source.0, source.1,
+            &[(witness.0, witness.1, witness.2, Block::GoldBlock.default_state())],
+        );
+        assert!(result.spills.iter().any(|spill| spill.position == witness && spill.state == expected));
+        assert_eq!(!result.structure_blocks.mutations().is_empty(), city);
+        assert!(result.spills.iter().all(|spill| {
+            spill.source == source
+                && ((target.0 - 1) * 16..(target.0 + 2) * 16).contains(&spill.position.0)
+                && (0..256).contains(&spill.position.1)
+                && ((target.1 - 1) * 16..(target.1 + 2) * 16).contains(&spill.position.2)
+        }));
+        assert!(result.spills.windows(2).all(|pair| {
+            let (ax, ay, az) = pair[0].position;
+            let (bx, by, bz) = pair[1].position;
+            (ay, az, ax) < (by, bz, bx)
+        }));
+    }
 }

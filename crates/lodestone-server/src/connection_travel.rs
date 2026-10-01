@@ -455,7 +455,7 @@ pub(super) async fn reset_stream<T: Transport, P: ServerProtocol, S: ChunkSource
     position: Vec3,
     view: &mut ViewTracker,
     stream: &mut crate::join_scheduler::JoinChunkStream<S>,
-    encodes: &mut crate::join_scheduler::OrderedJoinEncodes<'_>,
+    encodes: &mut PendingJoinEncodes<'_>,
     batches: &mut VecDeque<PendingChunkBatch>,
     awaiting_ack: &mut bool,
     relights: &mut PendingRelights,
@@ -469,7 +469,7 @@ pub(super) async fn reset_stream<T: Transport, P: ServerProtocol, S: ChunkSource
     for &(cx, cz) in &view.loaded { apply(conn, state, proto.encode_forget_chunk(cx, cz)).await?; }
     let center = ((position.x / 16.0).floor() as i32, (position.z / 16.0).floor() as i32);
     apply(conn, state, proto.encode_chunk_cache_center(center.0, center.1)).await?;
-    *view = ViewTracker::new(center, view.radius, view.max_radius);
+    view.reset(center);
     let rings = join_view_rings(view.radius).into_iter()
         .map(|ring| ring.into_iter().map(|(dx, dz)| (center.0 + dx, center.1 + dz)).collect())
         .collect();
@@ -510,7 +510,7 @@ pub(super) async fn commit<T: Transport, P: ServerProtocol, S: ChunkSource + 'st
     state: &mut State,
     view: &mut ViewTracker,
     stream: &mut crate::join_scheduler::JoinChunkStream<S>,
-    encodes: &mut crate::join_scheduler::OrderedJoinEncodes<'_>,
+    encodes: &mut PendingJoinEncodes<'_>,
     batches: &mut VecDeque<PendingChunkBatch>,
     awaiting_ack: &mut bool,
     relights: &mut PendingRelights,

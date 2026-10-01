@@ -1094,12 +1094,8 @@ struct ViewTracker {
     center: (i32, i32),
     loaded: HashSet<(i32, i32)>,
     delivered: HashSet<(i32, i32)>,
-    /// The highest generation stage this connection has claimed for each
-    /// loaded coordinate. `loaded` is intentionally an owed set (it is seeded
-    /// before the deferred stream drains), so this map follows the same
-    /// reservation boundary: once an upgrade is queued, a second movement
-    /// cannot enqueue another copy of it.
-    sent_stages: HashMap<(i32, i32), ChunkGenerationStage>,
+    columns: HashMap<(i32, i32), ViewColumn>,
+    next_incarnation: u64,
     /// The optional moving complete-generation band. `None` preserves the
     /// historic all-full stream used by borrowed and cross-dimension joins;
     /// `Some` is the progressive shared-source path.
@@ -1136,6 +1132,26 @@ struct ViewTracker {
     /// which preserves the compatibility behavior of those callers.
     max_radius: i32,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ColumnIncarnation(u64);
+
+#[derive(Debug)]
+struct ViewColumn {
+    incarnation: ColumnIncarnation,
+    requested: ChunkGenerationStage,
+    served: Option<ChunkGenerationStage>,
+}
+
+#[derive(Debug)]
+struct EncodedColumn {
+    directive: ServerDirective,
+    stage: Option<ChunkGenerationStage>,
+}
+
+type PendingJoinEncodes<'a> = crate::join_scheduler::OrderedJoinEncodes<
+    'a, (ColumnIncarnation, EncodedColumn),
+>;
 
 /// Resolves the two-stage streaming policy for one coordinate. The arithmetic
 /// is intentionally local to the server-side ledger so the tracker and the
@@ -1185,7 +1201,7 @@ struct ViewUpdate {
     /// the same streaming pipeline the join uses, one column per pass of the
     /// `select!` loop.
     added: Vec<(i32, i32)>,
-    /// Loaded columns whose sent stage was `Shaped` but which have entered the
+    /// Loaded columns still owed a complete packet which have entered the
     /// complete-generation band. These are whole-column resends, not block
     /// updates, so the client's normal `World::load`/remesh path replaces the
     /// partial terrain and schedules all of its meshes.
@@ -1208,7 +1224,7 @@ impl ViewTracker {
     }
 
     /// Seeds a tracker for a progressive join. Columns inside `full_radius`
-    /// are recorded as `Full`; the rest are recorded as `Shaped`, matching the
+    /// are requested as `Full`; the rest are requested as `Shaped`, matching the
     /// stages the join pipeline requests. A later recenter can therefore
     /// distinguish a genuinely new column from an already-loaded partial one.
     fn new_banded(
@@ -1237,16 +1253,23 @@ impl ViewTracker {
                 loaded.insert((center.0 + dx, center.1 + dz));
             }
         }
-        let sent_stages = loaded
+        let columns = loaded
             .iter()
             .copied()
-            .map(|coord| (coord, stage_for_band(generation_band, coord)))
+            .enumerate()
+            .map(|(index, coord)| (coord, ViewColumn {
+                incarnation: ColumnIncarnation(index as u64),
+                requested: stage_for_band(generation_band, coord),
+                served: None,
+            }))
             .collect();
+        let next_incarnation = loaded.len() as u64;
         Self {
             center,
             loaded,
             delivered: HashSet::new(),
-            sent_stages,
+            columns,
+            next_incarnation,
             generation_band,
             radius: view_radius,
             max_radius: max_view_radius.max(view_radius),
@@ -1262,6 +1285,61 @@ impl ViewTracker {
     fn mark_delivered(&mut self, coord: (i32, i32)) {
         if self.loaded.contains(&coord) {
             self.delivered.insert(coord);
+        }
+    }
+
+    fn incarnation(&self, coord: (i32, i32)) -> Option<ColumnIncarnation> {
+        self.columns.get(&coord).map(|column| column.incarnation)
+    }
+
+    fn is_current(&self, coord: (i32, i32), incarnation: ColumnIncarnation) -> bool {
+        self.incarnation(coord) == Some(incarnation)
+    }
+
+    fn needs_delivery(
+        &self,
+        coord: (i32, i32),
+        incarnation: ColumnIncarnation,
+        stage: Option<ChunkGenerationStage>,
+    ) -> bool {
+        self.columns.get(&coord).is_some_and(|column| {
+            column.incarnation == incarnation
+                && stage.is_none_or(|stage| column.served.is_none_or(|served| served < stage))
+        })
+    }
+
+    fn record_delivery(
+        &mut self,
+        coord: (i32, i32),
+        incarnation: ColumnIncarnation,
+        stage: Option<ChunkGenerationStage>,
+    ) {
+        if !self.is_current(coord, incarnation) {
+            return;
+        }
+        if let Some(stage) = stage {
+            let column = self.columns.get_mut(&coord).expect("current view column exists");
+            column.served = Some(column.served.map_or(stage, |served| served.max(stage)));
+        }
+        self.mark_delivered(coord);
+    }
+
+    fn reserve_column(&mut self, coord: (i32, i32), stage: ChunkGenerationStage) {
+        let incarnation = ColumnIncarnation(self.next_incarnation);
+        self.next_incarnation = self.next_incarnation.checked_add(1)
+            .expect("column incarnation space exhausted");
+        self.columns.insert(coord, ViewColumn { incarnation, requested: stage, served: None });
+    }
+
+    fn reset(&mut self, center: (i32, i32)) {
+        self.center = center;
+        self.generation_band = None;
+        self.loaded = Self::window(center, self.radius);
+        self.delivered.clear();
+        self.columns.clear();
+        let coordinates = self.loaded.iter().copied().collect::<Vec<_>>();
+        for coord in coordinates {
+            self.reserve_column(coord, ChunkGenerationStage::Full);
         }
     }
 
@@ -1326,11 +1404,10 @@ impl ViewTracker {
             .intersection(next)
             .copied()
             .filter(|coord| {
-                self.sent_stages
-                    .get(coord)
-                    .copied()
-                    .unwrap_or(ChunkGenerationStage::Shaped)
-                    < ChunkGenerationStage::Full
+                self.columns.get(coord).is_some_and(|column| {
+                    column.requested < ChunkGenerationStage::Full
+                        && column.served != Some(ChunkGenerationStage::Full)
+                })
                     && stage_for_band(
                         self.generation_band.map(|(_, radius)| (centre, radius)),
                         *coord,
@@ -1393,14 +1470,13 @@ impl ViewTracker {
         self.delivered.retain(|coord| self.loaded.contains(coord));
         self.generation_band = next_band;
         for coord in &forgotten {
-            self.sent_stages.remove(coord);
+            self.columns.remove(coord);
         }
         for &coord in &added {
-            self.sent_stages
-                .insert(coord, stage_for_band(next_band, coord));
+            self.reserve_column(coord, stage_for_band(next_band, coord));
         }
         for &coord in &upgrades {
-            self.sent_stages.insert(coord, ChunkGenerationStage::Full);
+            self.columns.get_mut(&coord).expect("upgrade remains loaded").requested = ChunkGenerationStage::Full;
         }
         ViewUpdate {
             immediate,
@@ -1464,13 +1540,13 @@ impl ViewTracker {
         self.loaded = next;
         self.delivered.retain(|coord| self.loaded.contains(coord));
         for coord in &forgotten {
-            self.sent_stages.remove(coord);
+            self.columns.remove(coord);
         }
         for &coord in &added {
-            self.sent_stages.insert(coord, self.stage_for(coord));
+            self.reserve_column(coord, self.stage_for(coord));
         }
         for &coord in &upgrades {
-            self.sent_stages.insert(coord, ChunkGenerationStage::Full);
+            self.columns.get_mut(&coord).expect("upgrade remains loaded").requested = ChunkGenerationStage::Full;
         }
         ViewUpdate {
             immediate,
@@ -1583,8 +1659,47 @@ const JOIN_PRESTREAM_RADIUS: i32 = 0;
 const JOIN_STREAM_BATCH_COLUMNS: usize = 16;
 
 struct PendingChunkBatch {
-    directives: Vec<ServerDirective>,
-    delivered: Vec<(i32, i32)>,
+    columns: Vec<((i32, i32), ColumnIncarnation, EncodedColumn)>,
+}
+
+async fn send_encoded_column<T: Transport>(
+    conn: &mut Connection<T>,
+    state: &mut State,
+    view: &mut ViewTracker,
+    coord: (i32, i32),
+    incarnation: ColumnIncarnation,
+    encoded: EncodedColumn,
+) -> Result<bool, ServerError> {
+    if !view.needs_delivery(coord, incarnation, encoded.stage) {
+        return Ok(false);
+    }
+    let sent = matches!(encoded.directive, ServerDirective::Send { .. });
+    apply(conn, state, encoded.directive).await?;
+    if sent {
+        view.record_delivery(coord, incarnation, encoded.stage);
+    }
+    Ok(sent)
+}
+
+async fn send_pending_chunk_batch<T: Transport, P: ServerProtocol>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    state: &mut State,
+    view: &mut ViewTracker,
+    batch: PendingChunkBatch,
+) -> Result<(), ServerError> {
+    let columns = batch.columns.into_iter()
+        .filter(|(coord, incarnation, encoded)| view.needs_delivery(*coord, *incarnation, encoded.stage))
+        .collect::<Vec<_>>();
+    if columns.is_empty() {
+        return Ok(());
+    }
+    apply(conn, state, proto.begin_chunk_batch()).await?;
+    let mut count = 0;
+    for (coord, incarnation, encoded) in columns {
+        count += i32::from(send_encoded_column(conn, state, view, coord, incarnation, encoded).await?);
+    }
+    apply(conn, state, proto.end_chunk_batch(count)).await
 }
 
 /// Applies one [`ViewUpdate`]: the cache-center and forget directives right away,
@@ -1653,10 +1768,9 @@ where
     if update.added.is_empty() && update.upgrades.is_empty() {
         return Ok(());
     }
-    let mut batch = vec![proto.begin_chunk_batch()];
+    let mut batch = Vec::new();
     let mut requested = update.added;
     requested.extend(update.upgrades);
-    let count = requested.len() as i32;
     // Only a one-column protocol can offload (a borrowed source is not `'static'`):
     // cross-column and retained-initial protocols must settle their source state inline.
     let offloaded = if proto.uses_cross_column_light() || proto.retains_initial_column_light() {
@@ -1683,7 +1797,13 @@ where
         }
     };
     match offloaded {
-        Some(Ok(frames)) => batch.extend(frames),
+        Some(Ok(frames)) => {
+            for (coord, directive) in requested.iter().copied().zip(frames) {
+                if let Some(incarnation) = view.incarnation(coord) {
+                    batch.push((coord, incarnation, EncodedColumn { directive, stage: None }));
+                }
+            }
+        }
         Some(Err(error)) => {
             return return_chunk_encode_error(conn, proto, state, None, error).await;
         }
@@ -1699,8 +1819,12 @@ where
                         ))
                         .await?;
                 }
-                match encode_chunk_with_source(proto, source.get(), x, z, column) {
-                    Ok(directive) => batch.push(directive),
+                match encode_chunk_with_source_receipt(proto, source.get(), x, z, column) {
+                    Ok(encoded) => {
+                        if let Some(incarnation) = view.incarnation((x, z)) {
+                            batch.push(((x, z), incarnation, encoded));
+                        }
+                    }
                     Err(error) => {
                         return return_chunk_encode_error(conn, proto, state, None, error).await;
                     }
@@ -1708,22 +1832,14 @@ where
             }
         }
     }
-    batch.push(proto.end_chunk_batch(count));
     if *awaiting_chunk_batch_ack {
         pending_chunk_batches.push_back(PendingChunkBatch {
-            directives: batch,
-            delivered: requested,
+            columns: batch,
         });
         return Ok(());
     }
     *awaiting_chunk_batch_ack = true;
-    for directive in batch {
-        apply(conn, state, directive).await?;
-    }
-    for coord in requested {
-        view.mark_delivered(coord);
-    }
-    Ok(())
+    send_pending_chunk_batch(conn, proto, state, view, PendingChunkBatch { columns: batch }).await
 }
 
 /// Outcome of serving a connection's initial view.
@@ -2502,13 +2618,27 @@ pub fn encode_chunk_with_source<P: ServerProtocol>(
     cz: i32,
     column: &ChunkColumn,
 ) -> Result<ServerDirective, ChunkEncodeError> {
+    encode_chunk_with_source_receipt(proto, source, cx, cz, column)
+        .map(|encoded| encoded.directive)
+}
+
+fn encode_chunk_with_source_receipt<P: ServerProtocol>(
+    proto: &P,
+    source: &dyn ChunkSource,
+    cx: i32,
+    cz: i32,
+    column: &ChunkColumn,
+) -> Result<EncodedColumn, ChunkEncodeError> {
     let dimension = source
         .dimension()
         .unwrap_or(crate::dimension::Dimension::Overworld);
     if !proto.retains_initial_column_light() {
         let packet_column = column_for_initial_encode(column);
         let _timing = PhaseTimer::start(WorldgenTimingPhase::PacketEncoding, 1);
-        return proto.try_encode_chunk_in_dimension(cx, cz, &packet_column, dimension);
+        return proto.try_encode_chunk_in_dimension(cx, cz, &packet_column, dimension)
+            .map(|directive| EncodedColumn {
+                directive, stage: Some(packet_column.generation_stage()),
+            });
     }
     // The initial packet must be based on a complete, settled 3×3 footprint.
     // Prefer the source's current centre copy because another admission may
@@ -2567,7 +2697,9 @@ pub fn encode_chunk_with_source<P: ServerProtocol>(
                     &packet_column,
                     &neighbour_refs,
                     dimension,
-                );
+                ).map(|directive| EncodedColumn {
+                    directive, stage: Some(packet_column.generation_stage()),
+                });
             }
             Err(ColumnLightSettlementError::NoLight) => {
                 if captured_neighbours.is_empty() && !neighbour_offsets.is_empty() {
@@ -2585,7 +2717,9 @@ pub fn encode_chunk_with_source<P: ServerProtocol>(
                     &packet_column,
                     &neighbour_refs,
                     dimension,
-                );
+                ).map(|directive| EncodedColumn {
+                    directive, stage: Some(packet_column.generation_stage()),
+                });
             }
             Err(ColumnLightSettlementError::MissingFootprint) => {
                 return Err(ChunkEncodeError::new(
@@ -2809,7 +2943,7 @@ async fn encode_column<P: ServerProtocol, S: ChunkSource + 'static>(
     cz: i32,
     trace: Option<&JoinTrace>,
     payload: crate::join_scheduler::ColumnPayload,
-) -> Result<ServerDirective, ChunkEncodeError> {
+) -> Result<EncodedColumn, ChunkEncodeError> {
     let payload = match payload {
         crate::join_scheduler::ColumnPayload::Encoded(directive) => {
             crate::join_scheduler::ColumnPayload::Encoded(directive)
@@ -2847,9 +2981,11 @@ async fn encode_column<P: ServerProtocol, S: ChunkSource + 'static>(
             .await?;
     }
     match payload {
-        crate::join_scheduler::ColumnPayload::Encoded(directive) => Ok(directive),
+        crate::join_scheduler::ColumnPayload::Encoded(directive) => {
+            Ok(EncodedColumn { directive, stage: None })
+        }
         crate::join_scheduler::ColumnPayload::Column(column) => {
-            let directive = encode_chunk_with_source(proto, source.get(), cx, cz, &column);
+            let directive = encode_chunk_with_source_receipt(proto, source.get(), cx, cz, &column);
             if directive.is_ok() {
                 if let Some(trace) = trace {
                     trace.mark("encoded", cx, cz);
@@ -2868,7 +3004,7 @@ async fn encode_column<P: ServerProtocol, S: ChunkSource + 'static>(
             if let Some(trace) = trace {
                 trace.mark("encoded", cx, cz);
             }
-            Ok(directive)
+            Ok(EncodedColumn { directive, stage: Some(snapshot.column().generation_stage()) })
         }
     }
 }
@@ -2880,7 +3016,7 @@ async fn encode_column_owned<P: ServerProtocol>(
     cz: i32,
     trace: Option<Arc<JoinTrace>>,
     payload: crate::join_scheduler::ColumnPayload,
-) -> Result<ServerDirective, ChunkEncodeError> {
+) -> Result<EncodedColumn, ChunkEncodeError> {
     let payload = match payload {
         crate::join_scheduler::ColumnPayload::Encoded(directive) => {
             crate::join_scheduler::ColumnPayload::Encoded(directive)
@@ -2917,7 +3053,9 @@ async fn encode_column_owned<P: ServerProtocol>(
         .await?;
     }
     match payload {
-        crate::join_scheduler::ColumnPayload::Encoded(directive) => Ok(directive),
+        crate::join_scheduler::ColumnPayload::Encoded(directive) => {
+            Ok(EncodedColumn { directive, stage: None })
+        }
         crate::join_scheduler::ColumnPayload::Column(column) => {
             #[cfg(not(target_arch = "wasm32"))]
             let directive = if let Some(encode) = proto.detached_source_encode() {
@@ -2927,12 +3065,12 @@ async fn encode_column_owned<P: ServerProtocol>(
                 .await;
                 handle.await.map_err(|_| {
                     ChunkEncodeError::new("detached source encode worker ended without a result")
-                })?
+                })?.map(|directive| EncodedColumn { directive, stage: None })
             } else {
-                encode_chunk_with_source(proto, &*source, cx, cz, &column)
+                encode_chunk_with_source_receipt(proto, &*source, cx, cz, &column)
             };
             #[cfg(target_arch = "wasm32")]
-            let directive = encode_chunk_with_source(proto, &*source, cx, cz, &column);
+            let directive = encode_chunk_with_source_receipt(proto, &*source, cx, cz, &column);
             if directive.is_ok()
                 && let Some(trace) = trace.as_ref()
             {
@@ -2941,6 +3079,7 @@ async fn encode_column_owned<P: ServerProtocol>(
             directive
         }
         crate::join_scheduler::ColumnPayload::Snapshot(snapshot) => {
+            let stage = snapshot.column().generation_stage();
             let dimension = source
                 .dimension()
                 .unwrap_or(crate::dimension::Dimension::Overworld);
@@ -2955,7 +3094,7 @@ async fn encode_column_owned<P: ServerProtocol>(
             if let Some(trace) = trace.as_ref() {
                 trace.mark("encoded", cx, cz);
             }
-            Ok(directive)
+            Ok(EncodedColumn { directive, stage: Some(stage) })
         }
     }
 }
@@ -4455,6 +4594,7 @@ where
                 let t_chunks = JoinStopwatch::now();
                 let join_trace = JoinTrace::new();
                 let mut batch_size = 0;
+                let mut prestream_deliveries = Vec::new();
                 let window = crate::join_scheduler::generation_window();
                 let rings: Vec<Vec<(i32, i32)>> = join_view_rings(view_radius)
                     .into_iter()
@@ -4554,7 +4694,12 @@ where
                                     .await;
                                 }
                             };
-                            apply(conn, &mut state, directive).await?;
+                            let sent = matches!(directive.directive, ServerDirective::Send { .. });
+                            let stage = directive.stage;
+                            apply(conn, &mut state, directive.directive).await?;
+                            if sent {
+                                prestream_deliveries.push(((cx, cz), stage));
+                            }
                             if let Some(trace) = join_trace.as_ref() {
                                 trace.mark("delivered", cx, cz);
                             }
@@ -4595,7 +4740,7 @@ where
                                 if let Some(trace) = join_trace.as_ref() {
                                     trace.mark("generated", cx, cz);
                                 }
-                                let directive = match encode_chunk_with_source(
+                                let directive = match encode_chunk_with_source_receipt(
                                     proto,
                                     source.get(),
                                     cx,
@@ -4617,7 +4762,12 @@ where
                                 if let Some(trace) = join_trace.as_ref() {
                                     trace.mark("encoded", cx, cz);
                                 }
-                                apply(conn, &mut state, directive).await?;
+                                let sent = matches!(directive.directive, ServerDirective::Send { .. });
+                                let stage = directive.stage;
+                                apply(conn, &mut state, directive.directive).await?;
+                                if sent {
+                                    prestream_deliveries.push(((cx, cz), stage));
+                                }
                                 if let Some(trace) = join_trace.as_ref() {
                                     trace.mark("delivered", cx, cz);
                                 }
@@ -4751,8 +4901,10 @@ where
                     ),
                     _ => ViewTracker::new((spawn_cx, spawn_cz), view_radius, max_view_radius),
                 };
-                if chunks_sent != 0 {
-                    view.mark_delivered((spawn_cx, spawn_cz));
+                for (coord, stage) in prestream_deliveries {
+                    if let Some(incarnation) = view.incarnation(coord) {
+                        view.record_delivery(coord, incarnation, stage);
+                    }
                 }
                 // `player_uuid`, `permission_level` and
                 // `builtins` are the bindings the `COMMANDS` send above already
@@ -14162,12 +14314,7 @@ where
             *awaiting_chunk_batch_ack = false;
             if let Some(next) = pending_chunk_batches.pop_front() {
                 *awaiting_chunk_batch_ack = true;
-                for directive in next.directives {
-                    apply(conn, state, directive).await?;
-                }
-                for coord in next.delivered {
-                    view.mark_delivered(coord);
-                }
+                send_pending_chunk_batch(conn, proto, state, view, next).await?;
             }
         }
         // Chat commands run through the built-in tree, with host dispatch as
@@ -15187,11 +15334,16 @@ where
 
     let mut travel = connection_travel::TravelController::new(source);
     let mut dimension_reset: Option<Vec3> = None;
-    let mut pending_join_encodes = crate::join_scheduler::OrderedJoinEncodes::new();
+    let mut pending_join_encodes = PendingJoinEncodes::new();
 
     loop {
         service.admit_pass().await;
         if join_stream.is_done() && pending_join_encodes.is_empty() {
+            if join_batch_open {
+                apply(conn, &mut state, proto.end_chunk_batch(join_batch_size)).await?;
+                join_batch_open = false;
+                join_batch_size = 0;
+            }
             world.mark_initial_view_drained();
         }
         travel.promote();
@@ -15364,7 +15516,7 @@ where
             // pass.
             encoded = std::future::poll_fn(|cx| pending_join_encodes.poll_next(cx)), if !pending_join_encodes.is_empty() => {
                 watch.enter();
-                let ((cx, cz), directive) = match encoded {
+                let ((cx, cz), (incarnation, directive)) = match encoded {
                     Ok(encoded) => encoded,
                     Err(error) => {
                         return return_chunk_encode_error(
@@ -15377,7 +15529,7 @@ where
                         .await;
                     }
                 };
-                if !view.loaded.contains(&(cx, cz)) {
+                if !view.needs_delivery((cx, cz), incarnation, directive.stage) {
                     watch.pass("join_encode_obsolete");
                     continue;
                 }
@@ -15386,8 +15538,9 @@ where
                     join_batch_open = true;
                     join_batch_size = 0;
                 }
-                apply(conn, &mut state, directive).await?;
-                view.mark_delivered((cx, cz));
+                if !send_encoded_column(conn, &mut state, &mut view, (cx, cz), incarnation, directive).await? {
+                    continue;
+                }
                 if let Some(trace) = join_trace.as_ref() {
                     trace.mark("delivered", cx, cz);
                 }
@@ -15439,6 +15592,9 @@ where
                     }
                 };
                 if let Some(((cx, cz), payload)) = chunk {
+                    let Some(incarnation) = view.incarnation((cx, cz)) else {
+                        continue;
+                    };
                     let owned_source: Option<Arc<dyn ChunkSource>> = match source {
                         SourceRef::Shared(source) => {
                             let source: Arc<dyn ChunkSource> = source.clone();
@@ -15464,7 +15620,7 @@ where
                                 payload,
                             )
                             .await
-                            .map(|directive| ((cx, cz), directive))
+                            .map(|directive| ((cx, cz), (incarnation, directive)))
                         }));
                     } else {
                         // Borrowed sources exist for protocol-level controls and
@@ -15497,8 +15653,9 @@ where
                             join_batch_open = true;
                             join_batch_size = 0;
                         }
-                        apply(conn, &mut state, directive).await?;
-                        view.mark_delivered((cx, cz));
+                        if !send_encoded_column(conn, &mut state, &mut view, (cx, cz), incarnation, directive).await? {
+                            continue;
+                        }
                         if let Some(trace) = join_trace.as_ref() {
                             trace.mark("delivered", cx, cz);
                         }
@@ -17984,7 +18141,7 @@ where
     let mut cooperative_relight: Option<CooperativeRelight<'_>> = None;
     let mut connection_probe = crate::connection_progress::ConnectionProbe::start();
     use crate::connection_progress::ConnectionActivity;
-    let mut pending_join_encodes = crate::join_scheduler::OrderedJoinEncodes::new();
+    let mut pending_join_encodes = PendingJoinEncodes::new();
     let mut travel = connection_travel::TravelController::new(source);
     loop {
         service.admit_pass().await;
@@ -18204,14 +18361,14 @@ where
                 None
             }
             encoded = std::future::poll_fn(|cx| pending_join_encodes.poll_next(cx)), if !pending_join_encodes.is_empty() => {
-                let ((cx, cz), directive) = match encoded {
+                let ((cx, cz), (incarnation, directive)) = match encoded {
                     Ok(encoded) => encoded,
                     Err(error) => {
                         return return_chunk_encode_error(conn, proto, &mut state, Some(0), error)
                             .await;
                     }
                 };
-                if !view.loaded.contains(&(cx, cz)) {
+                if !view.needs_delivery((cx, cz), incarnation, directive.stage) {
                     continue;
                 }
                 {
@@ -18219,8 +18376,10 @@ where
                     activity(ConnectionActivity::JoinBegin, Some((cx, cz)), None);
                     apply(conn, &mut state, proto.begin_chunk_batch()).await?;
                     activity(ConnectionActivity::JoinColumn, Some((cx, cz)), None);
-                    apply(conn, &mut state, directive).await?;
-                    view.mark_delivered((cx, cz));
+                    if !send_encoded_column(conn, &mut state, &mut view, (cx, cz), incarnation, directive).await? {
+                        apply(conn, &mut state, proto.end_chunk_batch(0)).await?;
+                        continue;
+                    }
                     activity(ConnectionActivity::JoinEnd, Some((cx, cz)), None);
                     apply(conn, &mut state, proto.end_chunk_batch(1)).await?;
                 }
@@ -18269,12 +18428,15 @@ where
                     continue;
                 };
                 activity(ConnectionActivity::JoinAdmission, Some((cx, cz)), None);
+                let Some(incarnation) = view.incarnation((cx, cz)) else {
+                    continue;
+                };
                 if let Some(owned_source) = source.shared_arc() {
                     let trace = join_trace.clone();
                     pending_join_encodes.push(true, Box::pin(async move {
                         encode_column_owned(proto, owned_source, cx, cz, trace, payload)
                             .await
-                            .map(|directive| ((cx, cz), directive))
+                            .map(|directive| ((cx, cz), (incarnation, directive)))
                     }));
                     continue;
                 }
@@ -18298,8 +18460,10 @@ where
                     activity(ConnectionActivity::JoinBegin, Some((cx, cz)), None);
                     apply(conn, &mut state, proto.begin_chunk_batch()).await?;
                     activity(ConnectionActivity::JoinColumn, Some((cx, cz)), None);
-                    apply(conn, &mut state, directive).await?;
-                    view.mark_delivered((cx, cz));
+                    if !send_encoded_column(conn, &mut state, &mut view, (cx, cz), incarnation, directive).await? {
+                        apply(conn, &mut state, proto.end_chunk_batch(0)).await?;
+                        continue;
+                    }
                     activity(ConnectionActivity::JoinEnd, Some((cx, cz)), None);
                     apply(conn, &mut state, proto.end_chunk_batch(1)).await?;
                 }
@@ -18703,8 +18867,8 @@ mod tests {
             None,
             crate::join_scheduler::ColumnPayload::Column(column),
         ).await.unwrap();
-        assert_eq!(owned, inline);
-        assert!(matches!(owned, ServerDirective::Send { packet_id: 1, payload } if payload == [1]));
+        assert_eq!(owned.directive, inline.directive);
+        assert!(matches!(owned.directive, ServerDirective::Send { packet_id: 1, payload } if payload == [1]));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -18750,8 +18914,8 @@ mod tests {
         )
         .await
         .expect("the shaped target should encode after full admission");
-        assert_eq!(owned_directive, directive);
-        let payload = match directive {
+        assert_eq!(owned_directive.directive, directive.directive);
+        let payload = match directive.directive {
             ServerDirective::Send { payload, .. } => payload,
             other => panic!("unexpected Nether packet directive: {other:?}"),
         };
@@ -19134,7 +19298,8 @@ mod tests {
         )
         .await
         .expect("the detached encoder must handle an existing column");
-        let ServerDirective::Send { packet_id, payload } = directive else {
+        assert_eq!(directive.stage, None, "opaque legacy encoding cannot authenticate a stage");
+        let ServerDirective::Send { packet_id, payload } = directive.directive else {
             panic!("the detached encoder must produce a packet");
         };
         assert_eq!(packet_id, 44);
@@ -24000,6 +24165,217 @@ mod tests {
 
         let _ = view.recenter(&RefusingChunkProtocol, 2, 0, None);
         assert_eq!(view.delivered, HashSet::from([(1, 0)]));
+    }
+
+    #[test]
+    fn served_full_stage_avoids_a_full_band_upgrade_with_shaped_control() {
+        let coordinate = (2, 1);
+        for (stage, expected_upgrades) in [
+            (ChunkGenerationStage::Full, Vec::new()),
+            (ChunkGenerationStage::Shaped, vec![coordinate]),
+        ] {
+            let mut view = ViewTracker::new_banded((0, 0), 3, 3, 0);
+            let incarnation = view.incarnation(coordinate).unwrap();
+            view.record_delivery(coordinate, incarnation, Some(stage));
+            assert_eq!(view.columns[&coordinate].requested, ChunkGenerationStage::Shaped);
+            assert_eq!(view.recenter(&RefusingChunkProtocol, 2, 1, None).upgrades, expected_upgrades);
+        }
+    }
+
+    #[test]
+    fn shaped_receipt_keeps_a_higher_request_and_full_receipts_do_not_regress() {
+        let coordinate = (2, 1);
+        let mut view = ViewTracker::new_banded((0, 0), 3, 3, 0);
+        let incarnation = view.incarnation(coordinate).unwrap();
+        assert_eq!(view.recenter(&RefusingChunkProtocol, 2, 1, None).upgrades, vec![coordinate]);
+        view.record_delivery(coordinate, incarnation, Some(ChunkGenerationStage::Shaped));
+        assert_eq!(view.columns[&coordinate].requested, ChunkGenerationStage::Full);
+        assert_eq!(view.columns[&coordinate].served, Some(ChunkGenerationStage::Shaped));
+        assert_eq!(view.recenter(&RefusingChunkProtocol, 2, 2, None).upgrades, vec![(2, 2)]);
+        assert!(view.recenter(&RefusingChunkProtocol, 2, 1, None).upgrades.is_empty());
+        view.record_delivery(coordinate, incarnation, Some(ChunkGenerationStage::Full));
+        view.record_delivery(coordinate, incarnation, Some(ChunkGenerationStage::Shaped));
+        assert_eq!(view.columns[&coordinate].served, Some(ChunkGenerationStage::Full));
+        assert!(!view.needs_delivery(coordinate, incarnation, Some(ChunkGenerationStage::Full)));
+        assert!(!view.needs_delivery(coordinate, incarnation, Some(ChunkGenerationStage::Shaped)));
+        assert!(view.needs_delivery(coordinate, incarnation, None));
+    }
+
+    #[test]
+    fn forgotten_and_reset_columns_reject_old_delivery_receipts() {
+        let coordinate = (0, 0);
+        let mut view = ViewTracker::new(coordinate, 0, 0);
+        let old = view.incarnation(coordinate).unwrap();
+        view.recenter(&RefusingChunkProtocol, 1, 0, None);
+        view.recenter(&RefusingChunkProtocol, 0, 0, None);
+        let reentered = view.incarnation(coordinate).unwrap();
+        assert!(reentered.0 > old.0);
+        view.record_delivery(coordinate, old, Some(ChunkGenerationStage::Full));
+        assert!(view.delivered.is_empty());
+        assert_eq!(view.columns[&coordinate].served, None);
+        view.record_delivery(coordinate, reentered, Some(ChunkGenerationStage::Full));
+        assert_eq!(view.delivered, HashSet::from([coordinate]));
+        view.reset(coordinate);
+        assert!(view.incarnation(coordinate).unwrap().0 > reentered.0);
+        view.record_delivery(coordinate, reentered, Some(ChunkGenerationStage::Full));
+        assert!(view.delivered.is_empty());
+        assert_eq!(view.columns[&coordinate].served, None);
+    }
+
+    fn receipt_packet(payload: u8, stage: Option<ChunkGenerationStage>) -> EncodedColumn {
+        EncodedColumn {
+            directive: ServerDirective::Send { packet_id: 52, payload: vec![payload] },
+            stage,
+        }
+    }
+
+    struct ReceiptProtocol;
+
+    impl ServerProtocol for ReceiptProtocol {
+        fn decode(&self, state: State, packet_id: i32, payload: &[u8]) -> ServerBound {
+            NetherPacketAdmissionProtocol.decode(state, packet_id, payload)
+        }
+        fn login_success(&self, _username: &str, _uuid: Uuid) -> Vec<ServerDirective> {
+            Vec::new()
+        }
+        fn begin_configuration(&self) -> Vec<ServerDirective> {
+            Vec::new()
+        }
+        fn begin_play(&self, _view_radius: i32) -> Vec<ServerDirective> {
+            Vec::new()
+        }
+        fn begin_chunk_batch(&self) -> ServerDirective {
+            ServerDirective::None
+        }
+        fn encode_chunk(&self, _cx: i32, _cz: i32, column: &ChunkColumn) -> ServerDirective {
+            receipt_packet(u8::from(column.generation_stage() == ChunkGenerationStage::Full), None)
+                .directive
+        }
+        fn end_chunk_batch(&self, _batch_size: i32) -> ServerDirective {
+            ServerDirective::None
+        }
+        fn retains_initial_column_light(&self) -> bool {
+            true
+        }
+    }
+
+    struct ReceiptSource { full: bool }
+
+    impl ChunkSource for ReceiptSource {
+        fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            unreachable!("receipt fixture requires no generation")
+        }
+        fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
+            crate::chunk::air_state()
+        }
+        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+            crate::chunk::DEFAULT_BIOME.to_owned()
+        }
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
+        fn settle_resident_column_lights_with_neighbours(
+            &self,
+            _cx: i32,
+            _cz: i32,
+            _fallback: &ChunkColumn,
+            _neighbour_offsets: &[(i32, i32)],
+            _resident_only: bool,
+            _replace_existing: bool,
+            _exclusive: bool,
+            _compute: &mut dyn FnMut(
+                &ChunkColumn, &[(i32, i32, &ChunkColumn)],
+            ) -> Option<crate::chunk::ColumnLightSettlement>,
+        ) -> Result<ChunkColumn, ColumnLightSettlementError> {
+            if self.full { Ok(ChunkColumn::new(0, 16)) }
+            else { Err(ColumnLightSettlementError::NoLight) }
+        }
+    }
+
+    #[tokio::test]
+    async fn served_stage_follows_selected_centre_and_no_light_fallback() {
+        let shaped = ChunkColumn::new(0, 16)
+            .test_with_generation_stage(ChunkGenerationStage::Shaped);
+        for (full, stage, payload) in [
+            (true, ChunkGenerationStage::Full, vec![1]),
+            (false, ChunkGenerationStage::Shaped, vec![0]),
+        ] {
+            let direct = encode_chunk_with_source_receipt(
+                &ReceiptProtocol, &ReceiptSource { full }, 2, 1, &shaped,
+            ).unwrap();
+            assert_eq!(direct.stage, Some(stage));
+            assert_eq!(direct.directive, ServerDirective::Send { packet_id: 52, payload });
+            let owned = encode_column_owned(
+                &ReceiptProtocol, Arc::new(ReceiptSource { full }), 2, 1, None,
+                crate::join_scheduler::ColumnPayload::Column(shaped.clone()),
+            ).await.unwrap();
+            assert_eq!(owned.stage, Some(stage));
+            assert_eq!(owned.directive, direct.directive);
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_chunk_write_does_not_promote_the_served_stage() {
+        let coordinate = (2, 1);
+        let mut view = ViewTracker::new_banded((0, 0), 3, 3, 0);
+        let incarnation = view.incarnation(coordinate).unwrap();
+        let (peer, endpoint) = lodestone_net::memory_pair();
+        drop(peer);
+        let error = send_encoded_column(
+            &mut Connection::new(endpoint), &mut State::Play, &mut view,
+            coordinate, incarnation, receipt_packet(1, Some(ChunkGenerationStage::Full)),
+        ).await.unwrap_err();
+        assert!(matches!(error, ServerError::Net(_)));
+        assert_eq!(view.columns[&coordinate].served, None);
+        assert!(view.delivered.is_empty());
+        assert_eq!(view.recenter(&RefusingChunkProtocol, 2, 1, None).upgrades, vec![coordinate]);
+
+        let (peer, endpoint) = lodestone_net::memory_pair();
+        let mut connection = Connection::new(endpoint);
+        assert!(send_encoded_column(
+            &mut connection, &mut State::Play, &mut view,
+            coordinate, incarnation, receipt_packet(2, Some(ChunkGenerationStage::Full)),
+        ).await.unwrap());
+        assert_eq!(view.columns[&coordinate].served, Some(ChunkGenerationStage::Full));
+        assert_eq!(Connection::new(peer).read_packet().await.unwrap(), Some((52, vec![2])));
+    }
+
+    #[tokio::test]
+    async fn paused_encode_and_queued_batch_cannot_deliver_to_a_reentered_column() {
+        let coordinate = (0, 0);
+        let mut view = ViewTracker::new(coordinate, 0, 0);
+        let old = view.incarnation(coordinate).unwrap();
+        let (release, wait) = tokio::sync::oneshot::channel();
+        let mut encodes = PendingJoinEncodes::new();
+        encodes.push(true, Box::pin(async move {
+            wait.await.unwrap();
+            Ok((coordinate, (old, receipt_packet(1, Some(ChunkGenerationStage::Full)))))
+        }));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(encodes.poll_next(&mut context).is_pending());
+        view.recenter(&RefusingChunkProtocol, 1, 0, None);
+        view.recenter(&RefusingChunkProtocol, 0, 0, None);
+        let current = view.incarnation(coordinate).unwrap();
+        release.send(()).unwrap();
+        let (_, (incarnation, encoded)) = std::future::poll_fn(|context| encodes.poll_next(context))
+            .await.unwrap();
+        let (peer, endpoint) = lodestone_net::memory_pair();
+        let mut connection = Connection::new(endpoint);
+        assert!(!send_encoded_column(
+            &mut connection, &mut State::Play, &mut view, coordinate, incarnation, encoded,
+        ).await.unwrap());
+        send_pending_chunk_batch(
+            &mut connection, &RefusingChunkProtocol, &mut State::Play, &mut view,
+            PendingChunkBatch { columns: vec![
+                (coordinate, old, receipt_packet(2, Some(ChunkGenerationStage::Full))),
+                (coordinate, current, receipt_packet(3, Some(ChunkGenerationStage::Full))),
+            ] },
+        ).await.unwrap();
+        assert_eq!(view.columns[&coordinate].served, Some(ChunkGenerationStage::Full));
+        drop(connection);
+        let mut peer = Connection::new(peer);
+        assert_eq!(peer.read_packet().await.unwrap(), Some((40, Vec::new())));
+        assert_eq!(peer.read_packet().await.unwrap(), Some((52, vec![3])));
+        assert_eq!(peer.read_packet().await.unwrap(), Some((41, vec![1])));
+        assert_eq!(peer.read_packet().await.unwrap(), None);
     }
 
     /// **The cross-arm invariant the off-centre join violated**, at a centre where

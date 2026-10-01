@@ -1,35 +1,12 @@
-//! Biome mob-spawn settings — vanilla's per-biome `spawners` and `spawn_costs`
-//!.
+//! Typed biome mob-spawn settings, including first-generation pack probability.
 //!
 //! ## What it is
 //!
-//! Every one of 26.2's 66 overworld biome documents carries a `spawners` map and
-//! a `spawn_costs` map, and until this module **nothing in the workspace parsed
-//! either** — the data shipped in `crates/lodestone-server/assets/worldgen/biome/*.json`
-//! and was read by no code at all. This module turns those two fields into typed
-//! Rust, and [`crate::overworld::OverworldGenerator::biome_spawners`] exposes the
-//! per-biome answer.
-//!
-//! ## This is deliberately only the parse
-//!
-//! The SPAWN generation work has four parts and this is part 1. There is
-//! **no `SPAWN` generation step here**, and that is not an oversight: the
-//! three unported parts need things that live
-//! outside this crate: vanilla's own chunk-generation spawn-rule check
-//! (`crates/lodestone-entity/src/spawn.rs`), an entity slot on the served chunk,
-//! and entity persistence, which does not exist anywhere yet. A `SPAWN` stage
-//! built on top of this today would place mobs from a light level the server
-//! does not compute, which is the *world* species of vacuous test in
-//! `CLAUDE.md`'s table — green against the only input it can be handed.
-//!
-//! So: **this module is data, not behaviour.** Its consumer, at the time this
-//! was written, was a runtime spawner that did not exist yet; parts 2-4 have
-//! since landed (`crate::spawn_stage` for chunk-generation spawns,
-//! `lodestone_server::natural_spawn` for the tick-driven cycle and the
-//! `SpawnConditions`-equivalent revalidation), so [`parse_biome_spawners`]
-//! is no longer an island — both consumers call it directly rather than
-//! through [`crate::overworld::OverworldGenerator::biome_spawners`], which
-//! stays unused (see that method's own doc).
+//! Biome documents supply category lists, spawn costs and an optional
+//! `creature_spawn_probability`. The probability defaults to `0.1`; the bundled
+//! snowy biomes and badlands override it. [`crate::spawn_stage`] consumes that
+//! probability and the creature list; the server's natural spawner consumes
+//! category lists and placement rules with real terrain and light.
 //!
 //! ## How it works
 //!
@@ -194,11 +171,10 @@ pub struct MobSpawnCost {
     pub charge: f64,
 }
 
-/// One biome's whole `MobSpawnSettings`, minus `creature_spawn_probability`
-/// (which is a `BiomeGenerationSettings` neighbour, not part of this field pair,
-/// and which no bundled 26.2 overworld biome overrides).
-#[derive(Clone, Debug, Default, PartialEq)]
+/// One biome's creature generation probability, category lists and spawn costs.
+#[derive(Clone, Debug, PartialEq)]
 pub struct BiomeSpawners {
+    creature_spawn_probability: f32,
     /// Per-category spawner lists in **declaration order** of the list as it
     /// appears in the document. A category with an empty list is stored as an
     /// empty entry rather than omitted, so [`Self::for_category`] cannot confuse
@@ -209,7 +185,23 @@ pub struct BiomeSpawners {
     spawn_costs: BTreeMap<EntityTypeRef, MobSpawnCost>,
 }
 
+impl Default for BiomeSpawners {
+    fn default() -> Self {
+        Self {
+            creature_spawn_probability: 0.1,
+            spawners: BTreeMap::new(),
+            spawn_costs: BTreeMap::new(),
+        }
+    }
+}
+
 impl BiomeSpawners {
+    /// Probability of another creature pack during first-time chunk generation.
+    #[must_use]
+    pub fn creature_spawn_probability(&self) -> f32 {
+        self.creature_spawn_probability
+    }
+
     /// This category's entries, or an empty slice.
     #[must_use]
     pub fn for_category(&self, category: MobCategory) -> &[SpawnerEntry] {
@@ -245,7 +237,7 @@ impl BiomeSpawners {
     }
 }
 
-/// Parses one biome document's `spawners` and `spawn_costs`.
+/// Parses one biome document's generation probability, `spawners` and `spawn_costs`.
 ///
 /// Both fields are optional: a document with neither yields
 /// [`BiomeSpawners::default`], which [`BiomeSpawners::is_empty`] reports as
@@ -260,6 +252,14 @@ impl BiomeSpawners {
 /// error is a build-time defect, not untrusted input.
 #[must_use]
 pub fn parse_biome_spawners(document: &Value) -> BiomeSpawners {
+    let creature_spawn_probability = document.get("creature_spawn_probability").map_or(0.1, |value| {
+        let probability = value.as_f64().expect("creature spawn probability is a number") as f32;
+        assert!(
+            (0.0..=0.9999999_f32).contains(&probability),
+            "creature spawn probability must be in [0, 0.9999999]"
+        );
+        probability
+    });
     let mut spawners: BTreeMap<MobCategory, Vec<SpawnerEntry>> = BTreeMap::new();
     if let Some(map) = document.get("spawners").and_then(Value::as_object) {
         for (key, list) in map {
@@ -309,6 +309,7 @@ pub fn parse_biome_spawners(document: &Value) -> BiomeSpawners {
         }
     }
     BiomeSpawners {
+        creature_spawn_probability,
         spawners,
         spawn_costs,
     }
@@ -317,6 +318,21 @@ pub fn parse_biome_spawners(document: &Value) -> BiomeSpawners {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn creature_probability_defaults_and_preserves_biome_overrides() {
+        assert_eq!(parse_biome_spawners(&serde_json::json!({})).creature_spawn_probability(), 0.1);
+        for probability in [0.0, 0.03, 0.04, 0.07, 0.27] {
+            let document = serde_json::json!({"creature_spawn_probability": probability});
+            assert_eq!(parse_biome_spawners(&document).creature_spawn_probability(), probability as f32);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "creature spawn probability must be")]
+    fn probability_one_is_rejected_to_keep_generation_finite() {
+        let _ = parse_biome_spawners(&serde_json::json!({"creature_spawn_probability": 1.0}));
+    }
 
     #[test]
     fn every_vanilla_category_key_round_trips() {

@@ -98,7 +98,7 @@ fn spawn_local_batch(
     })
 }
 
-type JoinEncodeResult = Result<((i32, i32), ServerDirective), ChunkEncodeError>;
+type JoinEncodeResult<T = ServerDirective> = Result<((i32, i32), T), ChunkEncodeError>;
 
 /// Encodes an owned immutable snapshot without moving source state to a worker.
 pub(crate) async fn encode_owned_packet_snapshot(
@@ -134,22 +134,22 @@ pub(crate) async fn encode_owned_packet_snapshot(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-type JoinEncodeFuture<'a> = Pin<Box<dyn Future<Output = JoinEncodeResult> + Send + 'a>>;
+type JoinEncodeFuture<'a, T> = Pin<Box<dyn Future<Output = JoinEncodeResult<T>> + Send + 'a>>;
 #[cfg(target_arch = "wasm32")]
-type JoinEncodeFuture<'a> = Pin<Box<dyn Future<Output = JoinEncodeResult> + 'a>>;
+type JoinEncodeFuture<'a, T> = Pin<Box<dyn Future<Output = JoinEncodeResult<T>> + 'a>>;
 
-struct JoinEncodeSlot<'a> {
-    future: Option<JoinEncodeFuture<'a>>,
-    ready: Option<JoinEncodeResult>,
+struct JoinEncodeSlot<'a, T> {
+    future: Option<JoinEncodeFuture<'a, T>>,
+    ready: Option<JoinEncodeResult<T>>,
     serial: bool,
 }
 
-pub(crate) struct OrderedJoinEncodes<'a> {
-    slots: VecDeque<JoinEncodeSlot<'a>>,
+pub(crate) struct OrderedJoinEncodes<'a, T = ServerDirective> {
+    slots: VecDeque<JoinEncodeSlot<'a, T>>,
     window: usize,
 }
 
-impl<'a> OrderedJoinEncodes<'a> {
+impl<'a, T> OrderedJoinEncodes<'a, T> {
     pub(crate) fn new() -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         let window = crate::worldgen_dispatch::worker_count().saturating_sub(1).clamp(1, 4);
@@ -170,7 +170,7 @@ impl<'a> OrderedJoinEncodes<'a> {
         self.slots.len() < self.window && self.slots.iter().all(|slot| !slot.serial)
     }
 
-    pub(crate) fn push(&mut self, serial: bool, future: JoinEncodeFuture<'a>) {
+    pub(crate) fn push(&mut self, serial: bool, future: JoinEncodeFuture<'a, T>) {
         assert!(self.can_admit(), "join encode window is full or fenced");
         self.slots.push_back(JoinEncodeSlot {
             future: Some(future),
@@ -179,7 +179,7 @@ impl<'a> OrderedJoinEncodes<'a> {
         });
     }
 
-    pub(crate) fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<JoinEncodeResult> {
+    pub(crate) fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<JoinEncodeResult<T>> {
         for (index, slot) in self.slots.iter_mut().enumerate() {
             if slot.serial && index != 0 {
                 break;

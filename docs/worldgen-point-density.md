@@ -142,12 +142,29 @@ queries use the interpolating instance, while corner and point queries use the
 non-interpolating instance; recursive calls no longer carry a runtime mode
 branch through every operator.
 
-When a column's root is `interpolated`, the field walks contiguous Y slices of
-each interpolation cell directly. A missing slice uses the existing cell-column
-interpolation and publishes its full vertical cache before copying the requested
-range; a cached slice only copies that range. Other roots keep the ordinary
-per-Y evaluator, and the shared corner-demand and cache-publication order stay
-with the existing cell-column path.
+When a column's root is `interpolated` or `squeeze(interpolated(...))`, the field
+walks contiguous Y slices of each interpolation cell directly. A missing slice
+uses the existing cell-column interpolation and publishes its full vertical
+cache before copying the requested range; a cached slice only copies that range.
+The squeeze runs on the copied output, after interpolation, with the scalar
+clamp and cubic arithmetic in groups of eight SIMD lanes plus a scalar tail.
+The cached interpolation values remain unsqueezed. Other roots keep the ordinary
+per-Y evaluator, and shared corner demand and cache publication stay with the
+existing cell-column path.
+
+`compose::fill_column`, consumed by Nether and End filling, calls the aquifer's
+column API once per X/Z column, then resolves each material in `(lz, lx, ly)`
+order. One temporary density buffer holds `height` values and is reused across
+all 256 columns; it is released with the fill request. The density-first beard
+addition remains explicit, including `density + 0.0` for an empty beard. That
+addition can change the sign of zero and matches `AquiferSystem::block_at_beard`.
+
+For an aligned 128-block-high fill, the traversal requires 256 field contexts
+instead of 32,768. Reusing four X interpolations per cell-column reduces cell
+queries from 32,768 to 4,096 for 4×8 geometry and to 8,192 for 8×4 geometry;
+the corresponding X interpolation counts are 16,384 and 32,768 instead of
+131,072. These are derived traversal counts, not benchmark measurements.
+Shared cell-corner fills and distinct corner evaluations remain unchanged.
 
 The aquifer route control uses the same Darwin process counters to compare a
 16-level recursive point tree with its reusable compiled program:
@@ -196,6 +213,15 @@ If the lane layout or canonical geometry changes, update mask extraction and
 the inactive/all-active/mixed arithmetic controls together. Noncanonical geometry
 continues to use the scalar output path.
 
+Keep column admission limited to the direct interpolation root and its one
+squeeze wrapper. Moving squeeze into corner evaluation changes the resulting
+field at fractional positions. Column controls cover both 4×8 and 8×4 geometry,
+negative coordinates, partial cells, ordered slot publications, special floating
+point values, and unsupported-root fallback. The fractional negative control
+deliberately interpolates squeezed corners and must fail its equality assertion.
+Material-fill controls compare against scalar aquifer calls with both empty and
+nonempty structure adaptation. Retain the `+ 0.0` in the empty-adaptation arm.
+
 The production handoff is `OverworldGenerator::new` → `AquiferTrees` →
 `AquiferSystem::from_parts_with_preliminary_cache_and_point_programs`. The
 preliminary route and compound aquifer
@@ -223,9 +249,15 @@ compiled plan register and lane. Memo participation comes from each source
 bounded by the admitted root and cleared at each cell; it is not a
 cross-column cache.
 
+Column geometry and temporary buffer length come from the owning dimension's
+noise settings. The squeeze output uses eight lanes without extending the
+existing interpolation storage or adding a retained cache.
+
 ## Dependencies
 
 The evaluator depends on `Density`, `Context`, `NormalNoise`, and the existing
 counter/redundancy hooks in `lodestone-worldgen-core`. The production consumer
-is the worldgen aquifer and its preliminary-surface cache; tests use the checked
-worldgen density fixtures and do not require a process-wide evaluator cache.
+is the worldgen aquifer and its preliminary-surface cache; Nether and End fill
+consume the aquifer's column sampler through `compose::fill_column`. Tests use
+the checked worldgen density fixtures and do not require a process-wide
+evaluator cache.

@@ -646,6 +646,9 @@ pub struct NetherGenerator {
     /// no-data-supplied convention every other stage here follows.
     carver_replaceable: FastSet<StateId>,
     carvers_by_biome: CarverCatalog,
+    /// One catalog entry shared by every possible biome's ordered declaration.
+    /// Heterogeneous declarations retain source-local climate selection.
+    uniform_carver_biome: Option<BuiltinBiome>,
     /// The globally ordered decoration catalog. Feature seeds use the index in
     /// this per-step order, not a biome document's local position; the source
     /// pass selects the union of its 3x3 section biomes from this catalog.
@@ -1123,6 +1126,31 @@ fn synchronize_mixed_entry_reusing(
     }
 }
 
+/// Identical ordered registry ids resolve to the same parsed carver list.
+/// Normalize the direct and array forms exactly as the carver parser does.
+fn uniform_carver_biome(resolver: &dyn Resolver, biomes: &[String]) -> Option<BuiltinBiome> {
+    let first = biomes.first()?;
+    let declarations = |biome: &str| {
+        let document = resolver.biome_document(biome);
+        match document.get("carvers") {
+            Some(Value::String(id)) => vec![id.clone()],
+            Some(Value::Array(ids)) => ids
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect(),
+            _ => Vec::new(),
+        }
+    };
+    let common = declarations(first);
+    biomes
+        .iter()
+        .skip(1)
+        .all(|biome| declarations(biome) == common)
+        .then(|| BuiltinBiome::from_name(first))
+        .flatten()
+}
+
 /// Retains the Nether's local-modification entries and splits its deliberately
 /// mixed step 7 without changing the raw `(step, index)` identity either engine
 /// seeds from. Step 9 contains the usual vegetal pass. This is dimension-
@@ -1296,6 +1324,7 @@ impl NetherGenerator {
             }
         }
         let biome_source_order = Arc::new(biome_source_order);
+        let uniform_carver_biome = uniform_carver_biome(resolver, biome_source_order.as_ref());
         let decoration_catalog =
             crate::compose::build_decoration_catalog(resolver, biome_source_order.as_ref());
         assert!(
@@ -1361,6 +1390,7 @@ impl NetherGenerator {
             default_fluid_pre,
             carver_replaceable,
             carvers_by_biome,
+            uniform_carver_biome,
             decoration_catalog,
             biome_plan_bits,
             biome_source_order,
@@ -1980,11 +2010,6 @@ impl NetherGenerator {
                 seeded.insert((x, y, z), id);
             }
         }
-        let source_features: [Arc<MixedFeaturePlan>; 9] = std::array::from_fn(|index| {
-            let dx = index as i32 % 3 - 1;
-            let dz = index as i32 / 3 - 1;
-            self.source_mixed_features(cx + dx, cz + dz)
-        });
         let mut decoration_rng = decoration_random();
         let mut ore_random = decoration_random();
         let mut grid_cursor = 0usize;
@@ -2035,7 +2060,17 @@ impl NetherGenerator {
             ore_random.begin_decoration_source();
             let decoration_seed = decoration_rng.set_decoration_seed(self.seed, origin.x, origin.z);
             let ore_seed = ore_random.set_decoration_seed(self.seed, origin.x, origin.z);
-            let plan = &source_features[((dz + 1) * 3 + dx + 1) as usize];
+            let plan = self.source_mixed_features(dx, dz, |offset_x, offset_z| {
+                if offset_x == 0 && offset_z == 0 {
+                    centre_pre.2.as_ref()
+                } else {
+                    nearby[crate::feature::region_view::wide_slot_of_offset(offset_x, offset_z)]
+                        .as_ref()
+                        .expect("source biome neighborhood is inside the held prefix window")
+                        .2
+                        .as_ref()
+                }
+            });
             let (ores, decorations) = (plan.0.as_slice(), plan.1.as_slice());
             for &step_kind in NETHER_DECORATION_STEPS {
                 let dirty_before = grid.dirty_len();
@@ -2289,17 +2324,17 @@ impl NetherGenerator {
     /// used by the feature scheduler.  A source sees the union of all biomes
     /// stored by its own 3x3 chunk neighbourhood; each selected feature keeps
     /// its global per-step index, including the entries handled by the ore
-    /// adapter below.
-    fn source_mixed_features(
+    /// adapter below. Biome reads borrow the pass's already-held prefix window.
+    fn source_mixed_features<'a>(
         &self,
-        source_x: i32,
-        source_z: i32,
+        source_dx: i32,
+        source_dz: i32,
+        mut biomes_at: impl FnMut(i32, i32) -> &'a NetherBiomeQuarts,
     ) -> Arc<MixedFeaturePlan> {
         let mut key = 0_u64;
         for dx in -1..=1 {
             for dz in -1..=1 {
-                let pre = self.pre_decoration_stage(source_x + dx, source_z + dz);
-                for &biome in pre.2.iter() {
+                for &biome in biomes_at(source_dx + dx, source_dz + dz).iter() {
                     let bit = *self
                         .biome_plan_bits
                         .get(&biome)
@@ -2661,11 +2696,7 @@ impl NetherGenerator {
         world: crate::dense_grid::DenseBlockGrid,
     ) -> crate::dense_grid::DenseBlockGrid {
         let mut grid = CarveGrid::from_dense(world);
-        let mut carvers_for_source =
-            |sx: i32, sz: i32| -> &[CarverConfig] {
-                let biome = self.carver_biome_for_source(sx, sz);
-                self.carvers_by_biome.get(biome)
-            };
+        let mut carvers_for_source = |sx: i32, sz: i32| self.carvers_for_source(sx, sz);
         let top_material = |_: i32, _: i32, _: i32, _: bool| -> Option<StateId> { None };
         crate::carver::apply_carvers(
             self.seed,
@@ -2681,6 +2712,14 @@ impl NetherGenerator {
             &mut NoObserver,
         );
         grid.into_dense()
+    }
+
+    fn carvers_for_source(&self, source_x: i32, source_z: i32) -> &[CarverConfig] {
+        let biome = self.uniform_carver_biome.map_or_else(
+            || self.carver_biome_for_source(source_x, source_z),
+            crate::carver::CarverBiome::Builtin,
+        );
+        self.carvers_by_biome.get(biome)
     }
 }
 
@@ -3360,7 +3399,7 @@ mod tests {
     use super::{
         MixedEntryWriter, NetherGenerator, build_nether_feature_lists, decoration_random,
         lifecycle_pre_decoration_capacity, nether_zoom_seed, pre_decoration_capacity,
-        synchronize_mixed_entry, ShardedMemo,
+        synchronize_mixed_entry, uniform_carver_biome, ShardedMemo,
     };
     use crate::dense_grid::DenseBlockGrid;
     use crate::density::{NoiseParams, Resolver};
@@ -3501,6 +3540,108 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../lodestone-server/assets/worldgen")
     }
 
+    struct CarverDeclarations([Value; 2]);
+
+    impl Resolver for CarverDeclarations {
+        fn density_function(&self, _: &str) -> Value {
+            panic!("declaration control must not evaluate density")
+        }
+
+        fn noise(&self, _: &str) -> NoiseParams {
+            panic!("declaration control must not evaluate noise")
+        }
+
+        fn biome_document(&self, id: &str) -> Value {
+            let index = match id {
+                "minecraft:nether_wastes" => 0,
+                "minecraft:crimson_forest" => 1,
+                _ => panic!("unexpected declaration control biome {id}"),
+            };
+            serde_json::json!({ "carvers": self.0[index] })
+        }
+    }
+
+    #[test]
+    fn uniform_carver_declarations_normalize_direct_and_array_forms() {
+        let biomes = vec![
+            "minecraft:nether_wastes".to_owned(),
+            "minecraft:crimson_forest".to_owned(),
+        ];
+        let declarations = CarverDeclarations([
+            serde_json::json!("minecraft:nether_cave"),
+            serde_json::json!(["minecraft:nether_cave"]),
+        ]);
+        assert_eq!(
+            uniform_carver_biome(&declarations, &biomes),
+            Some(BuiltinBiome::NetherWastes),
+        );
+
+        let assets = NetherAssets { root: nether_assets_root() };
+        let settings = assets.read("noise_settings", "nether");
+        let generator = NetherGenerator::new(42, &settings, &assets);
+        assert!(generator.uniform_carver_biome.is_some());
+        for &(x, z) in &[(0, 0), (381, 380), (-17, -9)] {
+            assert_eq!(generator.carvers_for_source(x, z).len(), 1);
+        }
+    }
+
+    #[test]
+    fn uniform_carver_declarations_reject_changed_order_or_missing_entry() {
+        let biomes = vec![
+            "minecraft:nether_wastes".to_owned(),
+            "minecraft:crimson_forest".to_owned(),
+        ];
+        for other in [
+            serde_json::json!([]),
+            serde_json::json!(["second", "first"]),
+            serde_json::json!(["first", "second", "first"]),
+        ] {
+            let declarations = CarverDeclarations([
+                serde_json::json!(["first", "second"]),
+                other,
+            ]);
+            assert_eq!(uniform_carver_biome(&declarations, &biomes), None);
+        }
+        assert_eq!(
+            uniform_carver_biome(&CarverDeclarations([Value::Null, Value::Null]), &[]),
+            None,
+        );
+    }
+
+    struct HeterogeneousCarverAssets(NetherAssets);
+
+    impl Resolver for HeterogeneousCarverAssets {
+        fn density_function(&self, id: &str) -> Value { self.0.density_function(id) }
+        fn noise(&self, id: &str) -> NoiseParams { self.0.noise(id) }
+        fn biome_parameters(&self) -> Value { self.0.biome_parameters() }
+        fn configured_carver(&self, id: &str) -> Value { self.0.configured_carver(id) }
+        fn biome_document(&self, id: &str) -> Value {
+            let mut document = self.0.biome_document(id);
+            if id == "minecraft:nether_wastes" {
+                document["carvers"] = serde_json::json!([]);
+            }
+            document
+        }
+    }
+
+    #[test]
+    fn heterogeneous_carver_catalog_selects_each_source_biome() {
+        let assets = HeterogeneousCarverAssets(NetherAssets { root: nether_assets_root() });
+        let settings = assets.0.read("noise_settings", "nether");
+        let generator = NetherGenerator::new(42, &settings, &assets);
+        assert_eq!(generator.uniform_carver_biome, None);
+        let mut observed = HashSet::new();
+        for x in (-32..=32).step_by(8) {
+            for z in (-32..=32).step_by(8) {
+                let biome = generator.biome_quarts_typed(x, z)[0];
+                let expected = usize::from(biome != BiomeRef::builtin(BuiltinBiome::NetherWastes));
+                assert_eq!(generator.carvers_for_source(x, z).len(), expected, "source ({x},{z})");
+                observed.insert(expected);
+            }
+        }
+        assert_eq!(observed, [0, 1].into_iter().collect());
+    }
+
     fn grid_hash(
         grid: &VegGrid,
         center_x: i32,
@@ -3587,7 +3728,9 @@ mod tests {
                 };
                 let (_, negative_control_decorations) =
                     build_nether_feature_lists(&assets, biome);
-                let source_plan = generator.source_mixed_features(source_x, source_z);
+                let source_plan = generator.source_mixed_features(dx, dz, |offset_x, offset_z| {
+                    sources.get(&(offset_x, offset_z)).unwrap().2.as_ref()
+                });
                 let decorations = source_plan.1.as_slice();
                 generator.structure_step_into_grid(
                     source_x,
@@ -4365,12 +4508,57 @@ mod tests {
         .unwrap();
         let generator = NetherGenerator::new(42, &settings, &assets);
 
-        let first = generator.source_mixed_features(0, 0);
+        let biomes = [BiomeRef::builtin(BuiltinBiome::NetherWastes); 16];
+        let mut reads = Vec::new();
+        let first = generator.source_mixed_features(1, -1, |dx, dz| {
+            reads.push((dx, dz));
+            &biomes
+        });
+        assert_eq!(reads, [
+            (0, -2), (0, -1), (0, 0),
+            (1, -2), (1, -1), (1, 0),
+            (2, -2), (2, -1), (2, 0),
+        ]);
         let count = generator.mixed_feature_plan_count();
-        let second = generator.source_mixed_features(0, 0);
+        let second = generator.source_mixed_features(1, -1, |_, _| &biomes);
 
         assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(generator.mixed_feature_plan_count(), count);
+    }
+
+    #[test]
+    fn completed_source_skips_mixed_plan_selection() {
+        let assets = NetherAssets { root: nether_assets_root() };
+        let settings = assets.read("noise_settings", "nether");
+        let generator = NetherGenerator::new(42, &settings, &assets);
+        for dx in -2..=2 {
+            for dz in -2..=2 {
+                let biome = if dx == -2 || dx == 2 || dz == -2 || dz == 2 {
+                    BuiltinBiome::CrimsonForest
+                } else {
+                    BuiltinBiome::NetherWastes
+                };
+                generator.pre_decoration.get_or_compute((dx, dz), || {
+                    (
+                        Arc::new(DenseBlockGrid::with_default(
+                            dx * 16, 0, dz * 16, 16, 128, 16, StateId::AIR,
+                        )),
+                        [0; 256],
+                        Arc::new([BiomeRef::builtin(biome); 16]),
+                    )
+                });
+            }
+        }
+        let completed = [(0, 0)].into_iter().collect();
+        let result = generator.parity_target_pass_with_resident(
+            0, 0, &[], &completed, |_, _| None,
+        );
+        assert!(result.spills.is_empty());
+        assert!(result.completed_sources.is_empty());
+        assert_eq!(generator.mixed_feature_plan_count(), 0);
+        let selected = generator.parity_source_pass_with_resident(0, 0, 0, 0, &[], |_, _| None);
+        assert_eq!(selected.completed_sources, [(0, 0)]);
+        assert_eq!(generator.mixed_feature_plan_count(), 1);
     }
 
 }

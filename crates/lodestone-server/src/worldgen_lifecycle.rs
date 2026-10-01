@@ -1904,6 +1904,48 @@ impl LifecycleWorldgenSource for OverworldChunkSource {
     }
 }
 
+fn for_each_nether_resident_index(
+    column: &ChunkColumn,
+    mut write: impl FnMut(usize, u16),
+) {
+    for section in 0..column.section_count() {
+        let row = section as i32 * 16;
+        let section_min_y = column.min_y + row;
+        let first_y = section_min_y.max(NetherChunkSource::MIN_Y);
+        let last_y = (section_min_y + (column.height - row).min(16))
+            .min(NetherChunkSource::MIN_Y + NetherChunkSource::WINDOW_HEIGHT);
+        if first_y >= last_y
+            || column.uniform_section_palette_index(section)
+                .is_some_and(|id| column.palette()[id as usize] == StateId::AIR)
+        {
+            continue;
+        }
+        column.for_each_section_palette_index(section, |cell, id| {
+            let y = section_min_y + (cell / 256) as i32;
+            if (first_y..last_y).contains(&y) {
+                let destination = (y - NetherChunkSource::MIN_Y) as usize * 256
+                    + cell % 256;
+                write(destination, id);
+            }
+        });
+    }
+}
+
+fn nether_resident_grid(
+    cx: i32,
+    cz: i32,
+    column: &ChunkColumn,
+) -> lodestone_worldgen::dense_grid::DenseBlockGrid {
+    lodestone_worldgen::dense_grid::DenseBlockGrid::from_column_palette_indices(
+        cx * 16,
+        NetherChunkSource::MIN_Y,
+        cz * 16,
+        NetherChunkSource::WINDOW_HEIGHT,
+        column.palette(),
+        |write| for_each_nether_resident_index(column, write),
+    )
+}
+
 impl LifecycleWorldgenSource for NetherChunkSource {
     type ReplayContext = ();
 
@@ -1957,21 +1999,7 @@ impl LifecycleWorldgenSource for NetherChunkSource {
                 &BTreeSet::new(),
                 |cx, cz| {
                     let column = resident.get(&(cx, cz))?;
-                    Some(lodestone_worldgen::dense_grid::DenseBlockGrid::from_canonical_states(
-                        cx * 16,
-                        0,
-                        cz * 16,
-                        16,
-                        NetherChunkSource::WINDOW_HEIGHT,
-                        16,
-                        |x, y, z| {
-                            column.block_state_id(
-                                x.rem_euclid(16),
-                                y,
-                                z.rem_euclid(16),
-                            )
-                        },
-                    ))
+                    Some(nether_resident_grid(cx, cz, column))
                 },
             )
         } else {
@@ -1983,21 +2011,7 @@ impl LifecycleWorldgenSource for NetherChunkSource {
                 &overrides,
                 |cx, cz| {
                     let column = resident.get(&(cx, cz))?;
-                    Some(lodestone_worldgen::dense_grid::DenseBlockGrid::from_canonical_states(
-                        cx * 16,
-                        0,
-                        cz * 16,
-                        16,
-                        NetherChunkSource::WINDOW_HEIGHT,
-                        16,
-                        |x, y, z| {
-                            column.block_state_id(
-                                x.rem_euclid(16),
-                                y,
-                                z.rem_euclid(16),
-                            )
-                        },
-                    ))
+                    Some(nether_resident_grid(cx, cz, column))
                 },
             )
         };
@@ -4693,6 +4707,71 @@ mod tests {
 
     fn sid(name: &str) -> StateId {
         StateId::from_state_str(name).expect("test state must be canonical")
+    }
+
+    #[test]
+    fn nether_resident_grid_preserves_window_spills_and_encounter_order() {
+        let netherrack = sid("minecraft:netherrack");
+        let soul_sand = sid("minecraft:soul_sand");
+        let glowstone = sid("minecraft:glowstone");
+        let lava = sid("minecraft:lava");
+        let mut column = ChunkColumn::new(-19, 286);
+        for (x, y, z, state) in [
+            (15, -1, 15, lava),
+            (11, 197, 7, glowstone),
+            (5, 3, 1, soul_sand),
+            (2, 3, 1, netherrack),
+            (6, 3, 1, netherrack),
+            (8, 16, 2, glowstone),
+            (1, 255, 4, lava),
+            (0, 256, 0, sid("minecraft:gold_block")),
+        ] {
+            column.set_block_id(x, y, z, state);
+        }
+        let grid = nether_resident_grid(-2, -3, &column);
+        assert_eq!(grid.get_id(-30, 3, -47), netherrack);
+        assert_eq!(grid.get_id(-21, 197, -41), glowstone);
+        assert_eq!(grid.get_id(-31, 255, -44), lava);
+        assert_eq!(grid.get_id(-17, -1, -33), StateId::AIR);
+        assert_eq!(grid.get_id(-32, 256, -48), StateId::AIR);
+        let mut expected_blocks = vec![0; 65_536];
+        expected_blocks[786] = 1;
+        expected_blocks[789] = 2;
+        expected_blocks[790] = 1;
+        expected_blocks[4136] = 3;
+        expected_blocks[50_555] = 3;
+        expected_blocks[65_345] = 4;
+        let expected = (
+            vec![StateId::AIR, netherrack, soul_sand, glowstone, lava],
+            expected_blocks,
+        );
+        let actual = grid.into_id_palette_and_blocks();
+        assert_eq!(actual, expected);
+        let mut wrong_y_origin = expected;
+        wrong_y_origin.1.swap(786, 5650);
+        assert_ne!(actual.1[786], wrong_y_origin.1[786]);
+    }
+
+    #[test]
+    fn nether_resident_grid_skips_empty_sections_but_reads_upper_spills() {
+        let mut column = ChunkColumn::new(0, 256);
+        let mut visits = 0;
+        for_each_nether_resident_index(&column, |_, _| visits += 1);
+        assert_eq!(visits, 0);
+        column.set_block_id(1, 2, 3, sid("minecraft:netherrack"));
+        visits = 0;
+        for_each_nether_resident_index(&column, |_, _| visits += 1);
+        assert_eq!(visits, 4096);
+        let lower_only = nether_resident_grid(0, 0, &column).into_id_palette_and_blocks();
+        assert_eq!(lower_only.1[561], 1);
+        assert!(lower_only.1[32_768..].iter().all(|&id| id == 0));
+        column.set_block_id(7, 199, 11, sid("minecraft:glowstone"));
+        visits = 0;
+        for_each_nether_resident_index(&column, |_, _| visits += 1);
+        assert_eq!(visits, 8192);
+        let with_spill = nether_resident_grid(0, 0, &column).into_id_palette_and_blocks();
+        assert_eq!(with_spill.1[51_127], 2);
+        assert_eq!(with_spill.0, [StateId::AIR, sid("minecraft:netherrack"), sid("minecraft:glowstone")]);
     }
 
     struct CountingSource {

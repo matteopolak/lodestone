@@ -1212,6 +1212,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   representation traffic for world generation. It makes cache hits, misses,
   recomputation, logical payload reads/writes, scratch-pool reuse, and retained
   scratch-buffer bytes visible without allocating an event record in a hot loop.
+- [Generation animal population](./worldgen-mob-generation-spawn.md) — Initial
+  animal population proposes creature packs when a column reaches full generation and
+  materializes valid candidates through one shared per-world consumer. Native startup,
+  browser worlds and newly explored columns use the same claim and completion state.
 - [Ocean monument room graph](./worldgen-monument.md) — The ocean monument generator
   builds one fixed shell plus an internal room graph. The graph stage creates the
   46-cell arena, wires the special entry/core/roof/wing nodes, and selects a shuffled

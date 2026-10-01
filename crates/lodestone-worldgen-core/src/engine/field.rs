@@ -42,6 +42,8 @@ pub(crate) struct Field<'a> {
     cell_xz: Option<(usize, usize)>,
     column_y: Option<(i32, i32, f64)>,
     tile_active: bool,
+    #[cfg(test)]
+    publications: Option<Vec<(usize, (i32, i32, i32), u64)>>,
 }
 
 #[derive(Clone, Copy)]
@@ -102,6 +104,8 @@ impl<'a> Field<'a> {
             cell_xz: None,
             column_y: None,
             tile_active: false,
+            #[cfg(test)]
+            publications: None,
         }
     }
 
@@ -129,6 +133,11 @@ impl<'a> Field<'a> {
         let root = self.ops[id as usize];
         if root.kind == OpKind::Interpolated {
             self.eval_interpolated_column(root, x, z, y_start, output);
+        } else if root.kind == OpKind::Squeeze
+            && self.ops[root.a as usize].kind == OpKind::Interpolated
+        {
+            self.eval_interpolated_column(self.ops[root.a as usize], x, z, y_start, output);
+            squeeze_column(output);
         } else {
             let ch = self.geom.cell_height;
             for (offset, value) in output.iter_mut().enumerate() {
@@ -1406,6 +1415,10 @@ impl<'a> Field<'a> {
         crate::counters::bump_cache_compute(crate::counters::CacheKind::Slot);
         let v = self.eval::<false>(inner, x, y, z);
         self.scratch.slot_put(slot, key, v);
+        #[cfg(test)]
+        if let Some(publications) = &mut self.publications {
+            publications.push((slot, key, v.to_bits()));
+        }
         v
     }
 
@@ -1423,7 +1436,31 @@ impl<'a> Field<'a> {
         crate::counters::bump_cache_compute(crate::counters::CacheKind::Slot);
         let v = self.eval::<false>(inner, key.0, key.1, key.2);
         self.scratch.slot_put(slot, key, v);
+        #[cfg(test)]
+        if let Some(publications) = &mut self.publications {
+            publications.push((slot, key, v.to_bits()));
+        }
         v
+    }
+}
+
+fn squeeze_column(output: &mut [f64]) {
+    dispatch!(Level::new(), simd => squeeze_column_kernel(simd, output));
+}
+
+#[simd]
+fn squeeze_column_kernel<S: Simd>(simd: S, output: &mut [f64]) {
+    let mut groups = output.chunks_exact_mut(8);
+    for group in &mut groups {
+        let clamped = std::array::from_fn(|lane| group[lane].clamp(-1.0, 1.0));
+        let clamped = f64x8::simd_from(simd, clamped);
+        let cubed = clamped * clamped * clamped;
+        let squeezed = clamped / f64x8::splat(simd, 2.0) - cubed / f64x8::splat(simd, 24.0);
+        group.copy_from_slice(&squeezed.to_array());
+    }
+    for value in groups.into_remainder() {
+        let clamped = value.clamp(-1.0, 1.0);
+        *value = clamped / 2.0 - clamped * clamped * clamped / 24.0;
     }
 }
 
@@ -2111,6 +2148,7 @@ fn shift(noise: &crate::noise::NormalNoise, x: f64, y: f64, z: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
+        squeeze_column, squeeze_column_kernel,
         terrain_subcell_is_strictly_nonpositive, write_interpolated_corners,
         write_interpolated_corners_kernel, write_interpolated_corners_scalar,
         write_shared_noodle_output, write_shared_noodle_output_kernel,
@@ -2121,6 +2159,150 @@ mod tests {
     use crate::counters;
     use crate::density::Density;
     use crate::engine::{Bounds, Geom, Program, Scratch};
+
+    fn squeeze(value: f64) -> f64 {
+        let value = value.clamp(-1.0, 1.0);
+        value / 2.0 - value * value * value / 24.0
+    }
+
+    fn interpolate_eight(n: [f64; 8], x: f64, y: f64, z: f64) -> f64 {
+        let lerp = |t: f64, a: f64, b: f64| a + t * (b - a);
+        let low = lerp(y, lerp(x, n[0], n[1]), lerp(x, n[2], n[3]));
+        let high = lerp(y, lerp(x, n[4], n[5]), lerp(x, n[6], n[7]));
+        lerp(z, low, high)
+    }
+
+    #[test]
+    fn squeezed_column_uses_the_interpolated_eight_corner_value() {
+        let corners = [-2.75, 0.125, 0.625, -0.5, 3.125, -0.875, 0.25, 1.75];
+        let program = Program::compile(&Density::Squeeze(Box::new(Density::Interpolated {
+            inner: Box::new(Density::Const(0.0)),
+            slot: 0,
+        })));
+        for (cw, ch) in [(4, 8), (8, 4)] {
+            let mut scratch = Scratch::acquire(1, cw, ch, None);
+            for (index, corner) in corners.into_iter().enumerate() {
+                let key = (
+                    -cw + (index as i32 % 2) * cw,
+                    -ch + ((index as i32 / 2) % 2) * ch,
+                    -cw + (index as i32 / 4) * cw,
+                );
+                scratch.slot_put(0, key, corner);
+            }
+            let mut field = Field::new(
+                program.graph(),
+                Geom {
+                    cell_width: cw,
+                    cell_height: ch,
+                },
+                &mut scratch,
+            );
+            let mut output = [0.0; 1];
+            field.eval_column(program.root(), -cw + 1, -1, -ch + 3, &mut output);
+            let expected = squeeze(interpolate_eight(
+                corners,
+                1.0 / f64::from(cw),
+                3.0 / f64::from(ch),
+                f64::from(cw - 1) / f64::from(cw),
+            ));
+            assert_eq!(output[0].to_bits(), expected.to_bits(), "geometry {cw}x{ch}");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "squeeze must follow interpolation")]
+    fn squeezed_corner_interpolation_is_rejected_by_fractional_control() {
+        let corners = [-2.75, 0.125, 0.625, -0.5, 3.125, -0.875, 0.25, 1.75];
+        let expected = squeeze(interpolate_eight(corners, 0.25, 0.375, 0.75));
+        let wrong = interpolate_eight(corners.map(squeeze), 0.25, 0.375, 0.75);
+        assert_eq!(
+            wrong.to_bits(), expected.to_bits(), "squeeze must follow interpolation",
+        );
+    }
+
+    #[test]
+    fn squeezed_column_simd_and_tail_preserve_special_value_bits() {
+        let values = [
+            -0.0, 0.0, -0.125, 0.1875, -1.0, 1.0, -7.5, 9.25,
+            f64::NEG_INFINITY, f64::INFINITY, f64::NAN,
+            f64::from_bits(0xfff8_0000_0000_1234),
+            f64::from_bits(1), -f64::from_bits(1), -0.75, 0.625,
+            -0.0, f64::from_bits(0x7ff8_0000_0000_4321), f64::INFINITY,
+        ];
+        let mut actual = values;
+        let mut fallback = values;
+        squeeze_column(&mut actual);
+        squeeze_column_kernel(fearless_simd::Fallback::new(), &mut fallback);
+        for (index, value) in values.into_iter().enumerate() {
+            let expected = squeeze(value).to_bits();
+            assert_eq!(actual[index].to_bits(), expected, "native lane {index}");
+            assert_eq!(fallback[index].to_bits(), expected, "fallback lane {index}");
+        }
+    }
+
+    #[test]
+    fn squeezed_columns_match_scalar_bits_and_slot_publications() {
+        let interpolated = Density::Interpolated {
+            inner: Box::new(Density::Add(
+                Box::new(Density::Cube(Box::new(Density::YClampedGradient {
+                    from_y: -32.0,
+                    to_y: 32.0,
+                    from_value: -2.0,
+                    to_value: 2.0,
+                }))),
+                Box::new(Density::FlatCache {
+                    inner: Box::new(Density::Const(0.1875)),
+                    slot: 1,
+                    memo: crate::density::XzMemoId::NONE,
+                }),
+            )),
+            slot: 0,
+        };
+        let roots = [
+            Density::Squeeze(Box::new(interpolated.clone())),
+            Density::Add(
+                Box::new(Density::Squeeze(Box::new(interpolated))),
+                Box::new(Density::Const(-0.0)),
+            ),
+        ];
+        for root in roots {
+            let program = Program::compile(&root);
+            for (cw, ch) in [(4, 8), (8, 4)] {
+                for bounds in [
+                    None,
+                    Some(Bounds {
+                        x: (-16, 15),
+                        y: (-24, 31),
+                        z: (-16, 15),
+                    }),
+                ] {
+                    let geom = Geom {
+                        cell_width: cw,
+                        cell_height: ch,
+                    };
+                    let mut column_scratch = Scratch::acquire(2, cw, ch, bounds);
+                    let mut scalar_scratch = Scratch::acquire(2, cw, ch, bounds);
+                    let mut column = Field::new(program.graph(), geom, &mut column_scratch);
+                    let mut scalar = Field::new(program.graph(), geom, &mut scalar_scratch);
+                    column.publications = Some(Vec::new());
+                    scalar.publications = Some(Vec::new());
+                    for (x, z) in [(-7, 9), (5, -11), (0, 0), (-7, 9)] {
+                        let mut output = [0.0; 31];
+                        column.eval_column(program.root(), x, z, -15, &mut output);
+                        for (offset, got) in output.into_iter().enumerate() {
+                            let y = -15 + offset as i32;
+                            let expected = scalar.eval::<true>(program.root(), x, y, z);
+                            assert_eq!(
+                                got.to_bits(), expected.to_bits(), "({x},{y},{z}), {cw}x{ch}",
+                            );
+                        }
+                    }
+                    assert!(!column.publications.as_ref().unwrap().is_empty());
+                    assert_eq!(column.publications, scalar.publications, "geometry {cw}x{ch}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn terrain_nonpositive_proof_rejects_ambiguous_and_nonfinite_corners() {

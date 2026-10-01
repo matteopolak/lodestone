@@ -704,7 +704,7 @@ pub fn column_index(lx: i32, ly: i32, lz: i32, height: i32) -> usize {
     ((ly * 16 + lz) * 16 + lx) as usize
 }
 
-/// `fillFromNoise` for one chunk of a **disabled-aquifer** dimension: the
+/// Noise fill for one chunk of a **disabled-aquifer** dimension: the
 /// interpolated `final_density` plus the beard term, mapped to
 /// [`BlockKind`](crate::aquifer::BlockKind).
 ///
@@ -713,16 +713,10 @@ pub fn column_index(lx: i32, ly: i32, lz: i32, height: i32) -> usize {
 /// aquifer. The Overworld keeps its own copy because its fill is instrumented by
 /// the allocation-attribution bench and carries a `StageGuard` this one must not.
 ///
-/// # The two loops are a correctness property, not a micro-optimisation
-///
-/// An **empty** beardifier takes the loop that calls
-/// [`AquiferSystem::block_at`](crate::aquifer::AquiferSystem::block_at) with no
-/// addition at all. Adding `0.0` is the identity for every finite `f64` *except*
-/// `-0.0`, whose sign bit it flips; nothing downstream distinguishes the two today
-/// (`compute_substance` only asks `density > 0.0`), and the branch means that claim
-/// about the rest of the pipeline never has to be made. It is also what keeps a
-/// dimension with no adaptation-bearing structure bit-identical to the same
-/// dimension before structures existed.
+/// Each X/Z column borrows the field scratch once. Material selection keeps
+/// `(lz, lx, ly)` order and the density-first beard addition from
+/// [`AquiferSystem::block_at_beard`](crate::aquifer::AquiferSystem::block_at_beard),
+/// including `density + 0.0` for an empty beard.
 #[must_use]
 pub fn fill_column(
     aquifer: &crate::aquifer::AquiferSystem,
@@ -734,23 +728,22 @@ pub fn fill_column(
 ) -> Vec<crate::aquifer::BlockKind> {
     use crate::aquifer::BlockKind;
     let mut field = vec![BlockKind::Air; 16 * 16 * height as usize];
-    if beard.is_empty() {
-        for lz in 0..16i32 {
-            for lx in 0..16i32 {
-                for ly in 0..height {
-                    field[column_index(lx, ly, lz, height)] =
-                        aquifer.block_at(base_x + lx, min_y + ly, base_z + lz);
-                }
-            }
-        }
-        return field;
-    }
+    let mut densities = vec![0.0; height as usize];
+    let empty_beard = beard.is_empty();
     for lz in 0..16i32 {
         for lx in 0..16i32 {
-            for ly in 0..height {
-                let (wx, wy, wz) = (base_x + lx, min_y + ly, base_z + lz);
+            let (wx, wz) = (base_x + lx, base_z + lz);
+            aquifer.final_density_column(wx, wz, min_y, &mut densities);
+            for (ly, density) in densities.iter().copied().enumerate() {
+                let ly = ly as i32;
+                let wy = min_y + ly;
+                let adaptation = if empty_beard {
+                    0.0
+                } else {
+                    beard.compute(wx, wy, wz)
+                };
                 field[column_index(lx, ly, lz, height)] =
-                    aquifer.block_at_beard(wx, wy, wz, beard.compute(wx, wy, wz));
+                    aquifer.block_at_density(wx, wy, wz, density + adaptation);
             }
         }
     }
@@ -853,6 +846,103 @@ pub fn materialize_column(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fill_column_matches_scalar_with_empty_and_nonempty_adaptation() {
+        use crate::aquifer::{AquiferSystem, BlockKind};
+        use crate::density::Density;
+        use crate::engine::Program;
+        use crate::structure::beardifier::Beardifier;
+        use crate::structure::{BoundingBox, StructurePiece, StructureStart, TerrainAdjustment};
+
+        let box_ = BoundingBox {
+            min: [-14, -8, -14],
+            max: [-11, -3, -10],
+        };
+        let start = StructureStart {
+            structure: "minecraft:test".to_string(),
+            chunk_x: -1,
+            chunk_z: -1,
+            references: 0,
+            bounding_box: box_,
+            pieces: vec![StructurePiece {
+                id: "minecraft:test".to_string(),
+                bounding_box: box_,
+                orientation: None,
+                gen_depth: 0,
+                template: None,
+                placement: None,
+                extra_placements: Vec::new(),
+                blocks: None,
+                loot: Vec::new(),
+                beard: None,
+                refine: None,
+            }],
+            terrain_adaptation: TerrainAdjustment::Bury,
+            pieces_complete: true,
+            mineshaft_tree: None,
+        };
+        let beards = [
+            Beardifier::empty(),
+            Beardifier::for_chunk(-1, -1, std::iter::once(&start)),
+        ];
+        assert!(beards[0].is_empty());
+        assert!(!beards[1].is_empty());
+        assert_eq!(beards[1].compute(-13, -8, -12).to_bits(), 1.0_f64.to_bits());
+        let roots = [
+            Density::Squeeze(Box::new(Density::Interpolated {
+                inner: Box::new(Density::Cube(Box::new(Density::YClampedGradient {
+                    from_y: -16.0,
+                    to_y: 16.0,
+                    from_value: -1.0,
+                    to_value: 1.0,
+                }))),
+                slot: 0,
+            })),
+            Density::Const(-0.0),
+            Density::Const(f64::NAN),
+        ];
+        let (min_y, height) = (-15, 31);
+        for root in roots {
+            let program = Program::compile(&root);
+            for (cw, ch) in [(4, 8), (8, 4)] {
+                let make_aquifer = || {
+                    AquiferSystem::disabled(
+                        program.clone(), 1, 3, BlockKind::Lava,
+                        min_y, height, -1, -1, cw, ch,
+                    )
+                };
+                let mut outputs = Vec::new();
+                for beard in &beards {
+                    let scalar = make_aquifer();
+                    let column = make_aquifer();
+                    let actual = fill_column(&column, -16, -16, min_y, height, beard);
+                    for lz in 0..16 {
+                        for lx in 0..16 {
+                            for ly in 0..height {
+                                let (x, y, z) = (-16 + lx, min_y + ly, -16 + lz);
+                                let expected = if beard.is_empty() {
+                                    scalar.block_at(x, y, z)
+                                } else {
+                                    scalar.block_at_beard(x, y, z, beard.compute(x, y, z))
+                                };
+                                assert_eq!(
+                                    actual[column_index(lx, ly, lz, height)],
+                                    expected,
+                                    "({x},{y},{z}), {cw}x{ch}, empty={}",
+                                    beard.is_empty(),
+                                );
+                            }
+                        }
+                    }
+                    outputs.push(actual);
+                }
+                if !matches!(root, Density::Const(value) if value.is_nan()) {
+                    assert_ne!(outputs[0], outputs[1], "adaptation control must change blocks");
+                }
+            }
+        }
+    }
 
     struct FakeResolver {
         tags: HashMap<&'static str, Value>,

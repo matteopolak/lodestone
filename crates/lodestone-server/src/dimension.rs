@@ -488,6 +488,17 @@ impl<S: std::fmt::Debug> std::fmt::Debug for DimensionalSource<S> {
 }
 
 impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
+    fn retain_generation_population(&self, cx: i32, cz: i32, column: &mut ChunkColumn) -> bool {
+        self.primary.retain_generation_population(cx, cz, column)
+    }
+
+    fn pending_generation_spawn_batches(
+        &self,
+        limit: usize,
+    ) -> Vec<std::sync::Arc<crate::generation_population::GenerationSpawnBatch>> {
+        self.primary.pending_generation_spawn_batches(limit)
+    }
+
     fn horizon_sample(&self, x: i32, z: i32) -> Option<crate::chunk::HorizonSample> {
         self.primary.horizon_sample(x, z)
     }

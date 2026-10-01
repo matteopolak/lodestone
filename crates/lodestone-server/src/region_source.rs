@@ -582,6 +582,7 @@ struct WorldState {
     /// generator-only world, which is what keeps `ChunkStore`'s lossless
     /// eviction true.
     edits: Mutex<HashMap<(i32, i32), ChunkColumn>>,
+    pending_population: crate::generation_population::PendingGenerationPopulationPublication,
     /// Chunks changed since the last successful save.
     dirty: Mutex<HashSet<(i32, i32)>>,
     /// On-disk light snapshots invalidated by a block mutation. The value is
@@ -1005,6 +1006,7 @@ impl<S: ChunkSource> RegionChunkSource<S> {
                 min_y,
                 height,
                 edits: Mutex::new(HashMap::new()),
+                pending_population: crate::generation_population::PendingGenerationPopulationPublication::default(),
                 dirty: Mutex::new(HashSet::new()),
                 invalidated_light: Mutex::new(HashMap::new()),
                 next_light_invalidation: AtomicU64::new(0),
@@ -1365,6 +1367,34 @@ fn normalize_imported_end_light_storage(column: &mut ChunkColumn, dimension: Dim
 }
 
 impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
+    fn retain_generation_population(&self, cx: i32, cz: i32, column: &mut ChunkColumn) -> bool {
+        if column.generation_stage() != crate::chunk::ChunkGenerationStage::Full {
+            return false;
+        }
+        let mut edits = self.state.edits.lock().expect("world edit lock poisoned");
+        if let Some(previous) = edits.get(&(cx, cz)) {
+            column.reuse_generation_population(previous);
+        }
+        edits.insert((cx, cz), column.clone());
+        self.state.dirty.lock().expect("world dirty lock poisoned").insert((cx, cz));
+        drop(edits);
+        if let Some(batch) = column.generation_spawn_batch() {
+            self.state.pending_population.publish(batch);
+        }
+        true
+    }
+
+    fn pending_generation_spawn_batches(
+        &self,
+        limit: usize,
+    ) -> Vec<Arc<crate::generation_population::GenerationSpawnBatch>> {
+        self.state.pending_population.pending(limit)
+    }
+
+    fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
+        self.state.edits.try_lock().ok()?.get(&(cx, cz)).cloned()
+    }
+
     fn horizon_sample(&self, x: i32, z: i32) -> Option<crate::chunk::HorizonSample> {
         self.inner.horizon_sample(x, z)
     }

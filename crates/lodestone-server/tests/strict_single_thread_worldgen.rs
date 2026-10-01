@@ -5,6 +5,9 @@
 //! the production session, full stage schedule, ordered mutable commit, and
 //! packet snapshot boundary. The light and packet encoder are measured after
 //! generation instead of being folded into the generation number.
+//! `LODESTONE_WORLDGEN_BENCH_DIMENSION` selects `overworld` (default), `nether`,
+//! or `end`; `LODESTONE_WORLDGEN_BENCH_X` / `LODESTONE_WORLDGEN_BENCH_Z` select
+//! the layout origin in chunk coordinates, including negative coordinates.
 
 #![cfg(not(target_arch = "wasm32"))]
 #![allow(unsafe_code)]
@@ -24,7 +27,10 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use lodestone_server::worldgen_session::{
     GenerationRequest, GenerationRequestResult, GenerationSession,
 };
-use lodestone_server::{ChunkColumn, ChunkSource, ServerProtocol, overworld_chunk_source};
+use lodestone_server::{
+    ChunkColumn, ChunkSource, EndChunkSource, NetherChunkSource, OverworldChunkSource,
+    ServerProtocol, end_chunk_source, nether_chunk_source, overworld_chunk_source,
+};
 use lodestone_v26_2::V770ServerProtocol;
 use lodestone_server::dimension::Dimension as ServerDimension;
 use lodestone_worldgen::counters;
@@ -298,6 +304,7 @@ fn install_stage_pmu() {
 
 #[cfg(all(feature = "worldgen-stage-pmu", target_os = "macos"))]
 fn report_stage_pmu(total: &Measurement<impl Sized>, columns: usize, phase: &str) {
+    let dimension_name = dimension_label(benchmark_dimension());
     let per_column = columns.max(1) as f64;
     let instructions: [u64; STAGE_COUNT] =
         std::array::from_fn(|index| STAGE_INSTRUCTIONS[index].load(Relaxed));
@@ -313,7 +320,7 @@ fn report_stage_pmu(total: &Measurement<impl Sized>, columns: usize, phase: &str
         .map_or(0, |(_, value)| value.saturating_sub(sum_cycles));
     let report = |stage: &str, instruction_count: u64, cycle_count: u64| {
         println!(
-            "STRICT_WORLDGEN metric=stage_pmu phase={phase} stage={stage} columns={columns} instructions={instruction_count} instructions_per_column={:.0} cycles={cycle_count} cycles_per_column={:.0} ipc={:.3}",
+            "STRICT_WORLDGEN metric=stage_pmu dimension={dimension_name} phase={phase} stage={stage} columns={columns} instructions={instruction_count} instructions_per_column={:.0} cycles={cycle_count} cycles_per_column={:.0} ipc={:.3}",
             instruction_count as f64 / per_column,
             cycle_count as f64 / per_column,
             instruction_count as f64 / cycle_count.max(1) as f64,
@@ -381,7 +388,7 @@ fn report_stage_pmu(total: &Measurement<impl Sized>, columns: usize, phase: &str
         exclusive_instructions += instructions;
         exclusive_cycles += cycles;
         println!(
-            "STRICT_WORLDGEN metric=region_exclusive_pmu phase={phase} region={name} columns={columns} instructions={instructions} instructions_per_column={:.0} cycles={cycles} cycles_per_column={:.0} nonstage_instructions={} nonstage_cycles={} stage_overhang_instructions={} stage_overhang_cycles={}",
+            "STRICT_WORLDGEN metric=region_exclusive_pmu dimension={dimension_name} phase={phase} region={name} columns={columns} instructions={instructions} instructions_per_column={:.0} cycles={cycles} cycles_per_column={:.0} nonstage_instructions={} nonstage_cycles={} stage_overhang_instructions={} stage_overhang_cycles={}",
             instructions as f64 / per_column,
             cycles as f64 / per_column,
             instructions.saturating_sub(stage_instructions),
@@ -397,7 +404,7 @@ fn report_stage_pmu(total: &Measurement<impl Sized>, columns: usize, phase: &str
         .counters
         .map_or(0, |(_, value)| value.saturating_sub(exclusive_cycles));
     println!(
-        "STRICT_WORLDGEN metric=region_exclusive_pmu phase={phase} region=outside_region columns={columns} instructions={outside_instructions} instructions_per_column={:.0} cycles={outside_cycles} cycles_per_column={:.0} nonstage_instructions={} nonstage_cycles={}",
+        "STRICT_WORLDGEN metric=region_exclusive_pmu dimension={dimension_name} phase={phase} region=outside_region columns={columns} instructions={outside_instructions} instructions_per_column={:.0} cycles={outside_cycles} cycles_per_column={:.0} nonstage_instructions={} nonstage_cycles={}",
         outside_instructions as f64 / per_column,
         outside_cycles as f64 / per_column,
         outside_instructions.saturating_sub(
@@ -426,7 +433,7 @@ fn report_stage_pmu(total: &Measurement<impl Sized>, columns: usize, phase: &str
             assigned_cycles += cycle_count;
             if instruction_count != 0 || cycle_count != 0 {
                 println!(
-                    "STRICT_WORLDGEN metric=stage_region_pmu phase={phase} stage={} region={region_name} columns={columns} instructions={instruction_count} instructions_per_column={:.0} cycles={cycle_count} cycles_per_column={:.0}",
+                    "STRICT_WORLDGEN metric=stage_region_pmu dimension={dimension_name} phase={phase} stage={} region={region_name} columns={columns} instructions={instruction_count} instructions_per_column={:.0} cycles={cycle_count} cycles_per_column={:.0}",
                     counters::STAGE_NAMES[stage as usize],
                     instruction_count as f64 / per_column,
                     cycle_count as f64 / per_column,
@@ -457,6 +464,84 @@ fn parse(name: &str, default: usize) -> usize {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(default)
+}
+
+fn benchmark_dimension() -> ServerDimension {
+    match std::env::var("LODESTONE_WORLDGEN_BENCH_DIMENSION")
+        .unwrap_or_else(|_| "overworld".to_owned())
+        .as_str()
+    {
+        "overworld" => ServerDimension::Overworld,
+        "nether" => ServerDimension::Nether,
+        "end" => ServerDimension::End,
+        other => panic!("unsupported benchmark dimension {other}"),
+    }
+}
+
+fn dimension_label(dimension: ServerDimension) -> &'static str {
+    match dimension {
+        ServerDimension::Overworld => "overworld",
+        ServerDimension::Nether => "nether",
+        ServerDimension::End => "end",
+    }
+}
+
+fn parse_coordinate(name: &str, default: i32) -> i32 {
+    match std::env::var(name) {
+        Ok(value) => value.parse().unwrap_or_else(|_| panic!("{name} must be an i32 coordinate")),
+        Err(std::env::VarError::NotPresent) => default,
+        Err(error) => panic!("invalid coordinate setting {name}: {error}"),
+    }
+}
+
+fn offset_coordinate(origin: (i32, i32), dx: i32, dz: i32) -> (i32, i32) {
+    (
+        origin.0.checked_add(dx).expect("benchmark x coordinate overflow"),
+        origin.1.checked_add(dz).expect("benchmark z coordinate overflow"),
+    )
+}
+
+#[test]
+fn benchmark_coordinate_offsets_preserve_signed_origins() {
+    assert_eq!(offset_coordinate((380, 380), 1, 0), (381, 380));
+    assert_eq!(offset_coordinate((-381, -380), 1, -1), (-380, -381));
+    assert_eq!(offset_coordinate((20_000, -20_000), -10_000, 10_000), (10_000, -10_000));
+}
+
+#[test]
+#[should_panic(expected = "benchmark x coordinate overflow")]
+fn benchmark_coordinate_offsets_reject_overflow() {
+    offset_coordinate((i32::MAX, 0), 1, 0);
+}
+
+enum BenchmarkSource {
+    Overworld(Arc<OverworldChunkSource>),
+    Nether(Arc<NetherChunkSource>),
+    End(Arc<EndChunkSource>),
+}
+
+impl BenchmarkSource {
+    fn new(dimension: ServerDimension, seed: i64) -> Self {
+        match dimension {
+            ServerDimension::Overworld => Self::Overworld(Arc::new(overworld_chunk_source(seed))),
+            ServerDimension::Nether => Self::Nether(Arc::new(nether_chunk_source(seed))),
+            ServerDimension::End => Self::End(Arc::new(end_chunk_source(seed))),
+        }
+    }
+
+    fn retained(&self) -> Arc<dyn ChunkSource> {
+        match self {
+            Self::Overworld(source) => Arc::new(lodestone_server::retained_chunk_source_for_view_radius(
+                Arc::clone(source), 2,
+            )),
+            Self::Nether(source) => Arc::new(lodestone_server::retained_chunk_source_for_view_radius(
+                Arc::clone(source), 2,
+            )),
+            Self::End(source) => Arc::new(lodestone_server::retained_chunk_source_for_view_radius(
+                Arc::clone(source), 2,
+            )),
+        }
+    }
 }
 
 struct Measurement<T> {
@@ -490,6 +575,7 @@ fn report<T>(
     batch_size: usize,
     layout: &str,
 ) {
+    let dimension = dimension_label(benchmark_dimension());
     let elapsed = measurement.elapsed;
     let per_column = columns.max(1) as f64;
     if let Some((instructions, cycles)) = measurement.counters {
@@ -502,7 +588,7 @@ fn report<T>(
             "PMU cycles counter must be nonzero for {metric}/{phase}"
         );
         println!(
-            "STRICT_WORLDGEN metric={metric} phase={phase} layout={layout} batch_size={batch_size} columns={columns} elapsed_ms={:.3} columns_per_sec={:.3} instructions={} instructions_per_column={:.0} cycles={} cycles_per_column={:.0}",
+            "STRICT_WORLDGEN metric={metric} dimension={dimension} phase={phase} layout={layout} batch_size={batch_size} columns={columns} elapsed_ms={:.3} columns_per_sec={:.3} instructions={} instructions_per_column={:.0} cycles={} cycles_per_column={:.0}",
             elapsed.as_secs_f64() * 1000.0,
             per_column / elapsed.as_secs_f64(),
             instructions,
@@ -512,7 +598,7 @@ fn report<T>(
         );
     } else {
         println!(
-            "STRICT_WORLDGEN metric={metric} phase={phase} layout={layout} batch_size={batch_size} columns={columns} elapsed_ms={:.3} columns_per_sec={:.3} instructions=unavailable cycles=unavailable",
+            "STRICT_WORLDGEN metric={metric} dimension={dimension} phase={phase} layout={layout} batch_size={batch_size} columns={columns} elapsed_ms={:.3} columns_per_sec={:.3} instructions=unavailable cycles=unavailable",
             elapsed.as_secs_f64() * 1000.0,
             per_column / elapsed.as_secs_f64(),
         );
@@ -525,11 +611,12 @@ fn report_generation_counters(
     columns: usize,
     phase: &str,
 ) {
+    let dimension_name = dimension_label(benchmark_dimension());
     if std::env::var("LODESTONE_WORLDGEN_BENCH_COUNTERS").as_deref() != Ok("1") {
         return;
     }
     let Some((before, after)) = before.zip(after) else {
-        println!("STRICT_WORLDGEN metric=gen_counters phase={phase} counters=unavailable");
+        println!("STRICT_WORLDGEN metric=gen_counters dimension={dimension_name} phase={phase} counters=unavailable");
         return;
     };
     let per_column = columns.max(1) as f64;
@@ -563,11 +650,11 @@ fn report_generation_counters(
         after.epoch_dirty_sparse_unique_positions,
     );
     println!(
-        "STRICT_WORLDGEN metric=gen_counters phase={phase} columns={columns} immutable_prefix_computed={prefix_computed} immutable_prefix_hits={prefix_hits} immutable_prefix_per_column={:.3} mutable_feature_execution_ore={ore} mutable_feature_execution_vegetation={vegetation} mutable_feature_execution_top_layer={top_layer} finalization_packing_intern={intern} finalization_packing_conversions={conversions} finalization_packing_cells={conversion_cells} epoch_dirty_full_raw={full_raw} epoch_dirty_full_unique={full_unique} epoch_dirty_sparse_raw={sparse_raw} epoch_dirty_sparse_unique={sparse_unique} instructions=unavailable cycles=unavailable replay_context_construction=unavailable context_product_count=unavailable",
+        "STRICT_WORLDGEN metric=gen_counters dimension={dimension_name} phase={phase} columns={columns} immutable_prefix_computed={prefix_computed} immutable_prefix_hits={prefix_hits} immutable_prefix_per_column={:.3} mutable_feature_execution_ore={ore} mutable_feature_execution_vegetation={vegetation} mutable_feature_execution_top_layer={top_layer} finalization_packing_intern={intern} finalization_packing_conversions={conversions} finalization_packing_cells={conversion_cells} epoch_dirty_full_raw={full_raw} epoch_dirty_full_unique={full_unique} epoch_dirty_sparse_raw={sparse_raw} epoch_dirty_sparse_unique={sparse_unique} instructions=unavailable cycles=unavailable replay_context_construction=unavailable context_product_count=unavailable",
         (prefix_computed + prefix_hits) as f64 / per_column,
     );
     println!(
-        "STRICT_WORLDGEN metric=gen_work phase={phase} block_at={} full_scans={} full_scan_cells={} biome_searches={} biome_rows={} climate_grids={} preliminary_requests={} preliminary_unique={} preliminary_computations={} corner_lookups={} corner_evals={} cell_fills={} slot_hits={} slot_misses={} noise_batches={} structure_starts={} structure_height_probes={} structure_probe_blocks={} structure_context_blocks={} structure_references={} structure_candidate_cells={} structure_piece_checks={} structure_pieces_reached={} nonpositive_cell_skips={} positive_cell_skips={} positive_proof_cells={} mixed_cell_fills={}",
+        "STRICT_WORLDGEN metric=gen_work dimension={dimension_name} phase={phase} block_at={} full_scans={} full_scan_cells={} biome_searches={} biome_rows={} climate_grids={} preliminary_requests={} preliminary_unique={} preliminary_computations={} corner_lookups={} corner_evals={} cell_fills={} slot_hits={} slot_misses={} noise_batches={} structure_starts={} structure_height_probes={} structure_probe_blocks={} structure_context_blocks={} structure_references={} structure_candidate_cells={} structure_piece_checks={} structure_pieces_reached={} nonpositive_cell_skips={} positive_cell_skips={} positive_proof_cells={} mixed_cell_fills={}",
         delta(before.block_at, after.block_at),
         delta(before.full_column_scans, after.full_column_scans),
         delta(before.full_column_scan_cells, after.full_column_scan_cells),
@@ -654,7 +741,7 @@ fn report_generation_counters(
         after.authenticated_write_calls,
     );
     println!(
-        "STRICT_WORLDGEN metric=target_write_bookkeeping phase={phase} outputs={columns} epoch_dirty_local={epoch_dirty_local} epoch_dirty_local_per_output={:.3} epoch_dirty_spill={epoch_dirty_spill} epoch_dirty_spill_per_output={:.3} override_revision_attempts={override_attempts} override_revision_attempts_per_output={:.3} override_revision_insertions={override_insertions} override_revision_insertions_per_output={:.3} carver_revision_attempts={carver_attempts} carver_revision_attempts_per_output={:.3} carver_revision_insertions={carver_insertions} carver_revision_insertions_per_output={:.3} canonical_winner_updates={canonical_winner_updates} canonical_winner_updates_per_output={:.3} winner_local_vacant={winner_local_vacant} winner_local_replaced={winner_local_replaced} winner_local_lost={winner_local_lost} winner_foreign_vacant={winner_foreign_vacant} winner_foreign_replaced={winner_foreign_replaced} winner_foreign_lost={winner_foreign_lost} winner_vacant_share={:.4} authenticated_write_calls={authenticated_write_calls} authenticated_write_calls_per_output={:.3}",
+        "STRICT_WORLDGEN metric=target_write_bookkeeping dimension={dimension_name} phase={phase} outputs={columns} epoch_dirty_local={epoch_dirty_local} epoch_dirty_local_per_output={:.3} epoch_dirty_spill={epoch_dirty_spill} epoch_dirty_spill_per_output={:.3} override_revision_attempts={override_attempts} override_revision_attempts_per_output={:.3} override_revision_insertions={override_insertions} override_revision_insertions_per_output={:.3} carver_revision_attempts={carver_attempts} carver_revision_attempts_per_output={:.3} carver_revision_insertions={carver_insertions} carver_revision_insertions_per_output={:.3} canonical_winner_updates={canonical_winner_updates} canonical_winner_updates_per_output={:.3} winner_local_vacant={winner_local_vacant} winner_local_replaced={winner_local_replaced} winner_local_lost={winner_local_lost} winner_foreign_vacant={winner_foreign_vacant} winner_foreign_replaced={winner_foreign_replaced} winner_foreign_lost={winner_foreign_lost} winner_vacant_share={:.4} authenticated_write_calls={authenticated_write_calls} authenticated_write_calls_per_output={:.3}",
         epoch_dirty_local as f64 / per_column,
         epoch_dirty_spill as f64 / per_column,
         override_attempts as f64 / per_column,
@@ -668,11 +755,19 @@ fn report_generation_counters(
 }
 
 fn request_for(coordinate: (i32, i32)) -> GenerationRequest {
+    request_for_dimension(coordinate, ServerDimension::Overworld, 1)
+}
+
+fn request_for_dimension(
+    coordinate: (i32, i32),
+    dimension: ServerDimension,
+    dependency_radius: u8,
+) -> GenerationRequest {
     GenerationRequest::new(
-        WorldgenDimension::Overworld,
+        WorldgenDimension::from(dimension),
         coordinate,
         GenerationTarget::Full,
-        1,
+        dependency_radius,
     )
 }
 
@@ -889,6 +984,17 @@ fn strict_single_thread_production_worldgen() {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(42_i64);
+    let dimension = benchmark_dimension();
+    let dimension_name = dimension_label(dimension);
+    let default_origin = match dimension {
+        ServerDimension::Overworld => (20_000, -20_000),
+        ServerDimension::Nether => (380, 380),
+        ServerDimension::End => (400, 400),
+    };
+    let origin = (
+        parse_coordinate("LODESTONE_WORLDGEN_BENCH_X", default_origin.0),
+        parse_coordinate("LODESTONE_WORLDGEN_BENCH_Z", default_origin.1),
+    );
     let count = parse("LODESTONE_WORLDGEN_BENCH_COLUMNS", 8);
     assert!(count > 0, "benchmark must have at least one target");
     let batch_size = parse("LODESTONE_WORLDGEN_BENCH_BATCH", 2);
@@ -915,19 +1021,20 @@ fn strict_single_thread_production_worldgen() {
     assert_ne!(calibration.value, 0x1234_5678_9abc_def0);
 
     let construction = Instant::now();
-    let base_source = Arc::new(overworld_chunk_source(seed));
-    let source = lodestone_server::retained_chunk_source_for_view_radius(
-        Arc::clone(&base_source),
-        2,
-    );
+    let base_source = BenchmarkSource::new(dimension, seed);
+    let source = base_source.retained();
+    let dependency_radius = source.generation_request_dependency_radius(GenerationTarget::Full);
+    let request_for = |coordinate| request_for_dimension(coordinate, dimension, dependency_radius);
     println!(
-        "STRICT_WORLDGEN metric=construction phase=setup layout={layout} batch_size={batch_size} elapsed_ms={:.3} seed={seed} workers={} columns={count}",
+        "STRICT_WORLDGEN metric=construction dimension={dimension_name} phase=setup layout={layout} batch_size={batch_size} elapsed_ms={:.3} seed={seed} workers={} columns={count} origin_x={} origin_z={} dependency_radius={dependency_radius}",
         construction.elapsed().as_secs_f64() * 1000.0,
         std::env::var("LODESTONE_WORLDGEN_WORKERS").unwrap_or_default(),
+        origin.0,
+        origin.1,
     );
 
     if !production_only {
-        let cold_coordinate = (10_000, -10_000);
+        let cold_coordinate = offset_coordinate(origin, -10_000, 10_000);
         let cold_request = request_for(cold_coordinate);
         let cold = measure_request(retired(), || request_one(&source, cold_request));
         report("production_request", "cold", &cold, 1, 1, "single");
@@ -957,7 +1064,7 @@ fn strict_single_thread_production_worldgen() {
     }
 
     if layout == "ring" {
-        let center = (20_000, -20_000);
+        let center = origin;
         let primed = measure_request(retired(), || request_one(&source, request_for(center)));
         report("production_request", "primed_center", &primed, 1, 1, layout);
         black_box(expect_generated(primed.value, center));
@@ -968,7 +1075,11 @@ fn strict_single_thread_production_worldgen() {
             let side = (count as f64).sqrt() as usize;
             assert_eq!(side * side, count, "square layout needs a perfect-square column count");
             (0..side)
-                .flat_map(|z| (0..side).map(move |x| (20_000 + x as i32, -20_000 + z as i32)))
+                .flat_map(|z| (0..side).map(move |x| offset_coordinate(
+                    origin,
+                    i32::try_from(x).expect("square x offset fits i32"),
+                    i32::try_from(z).expect("square z offset fits i32"),
+                )))
                 .collect()
         }
         "ring" => {
@@ -977,7 +1088,7 @@ fn strict_single_thread_production_worldgen() {
                 for dz in -radius..=radius {
                     for dx in -radius..=radius {
                         if dx.abs().max(dz.abs()) == radius {
-                            coordinates.push((20_000 + dx, -20_000 + dz));
+                            coordinates.push(offset_coordinate(origin, dx, dz));
                             if coordinates.len() == count {
                                 break;
                             }
@@ -994,7 +1105,9 @@ fn strict_single_thread_production_worldgen() {
             coordinates
         }
         _ => (0..count)
-            .map(|index| (20_000 + index as i32, -20_000))
+            .map(|index| offset_coordinate(
+                origin, i32::try_from(index).expect("line offset fits i32"), 0,
+            ))
             .collect(),
     };
     let session_initialization = measure_request(retired(), || {
@@ -1028,7 +1141,9 @@ fn strict_single_thread_production_worldgen() {
         vegetation_census::reset_source_reads();
     }
     let generation_counter_before = counters_enabled.then(counters::snapshot);
-    base_source.generator().reset_store_lease_stats();
+    if let BenchmarkSource::Overworld(base) = &base_source {
+        base.generator().reset_store_lease_stats();
+    }
     #[cfg(feature = "worldgen-stage-pmu")]
     install_stage_pmu();
     let sustained_started = Instant::now();
@@ -1037,7 +1152,7 @@ fn strict_single_thread_production_worldgen() {
         let mut results = Vec::with_capacity(count);
         for sessions in &mut session_batches {
             if cohort_mode {
-                results.extend(request_cohort(&source, sessions, &mut || {
+                results.extend(request_cohort(source.as_ref(), sessions, &mut || {
                     if first_output_latency.is_none() {
                         first_output_latency = Some(sustained_started.elapsed());
                     }
@@ -1052,28 +1167,34 @@ fn strict_single_thread_production_worldgen() {
         results
     });
     println!(
-        "STRICT_WORLDGEN metric=first_output phase={sustained_phase} layout={layout} batch_size={batch_size} columns={count} elapsed_ms={:.3}",
+        "STRICT_WORLDGEN metric=first_output dimension={dimension_name} phase={sustained_phase} layout={layout} batch_size={batch_size} columns={count} elapsed_ms={:.3}",
         first_output_latency
             .expect("generation must produce a first output")
             .as_secs_f64()
             * 1000.0,
     );
-    let lease_stats = base_source.generator().store_lease_stats();
-    println!(
-        "STRICT_WORLDGEN metric=generator_leases phase={sustained_phase} layout={layout} batch_size={batch_size} columns={count} opens={} batch_opens={} pins={} pin_shards={} unpins={} unpin_shards={}",
-        lease_stats.opens,
-        lease_stats.batch_opens,
-        lease_stats.pins,
-        lease_stats.pin_shards,
-        lease_stats.unpins,
-        lease_stats.unpin_shards,
-    );
-    assert!(lease_stats.opens > 0, "sustained batch must admit through the generator lease");
-    let expected_batch_groups = count.div_ceil(batch_size);
-    assert!(
-        lease_stats.batch_opens <= expected_batch_groups as u64,
-        "production admission opened more union leases than submitted batches",
-    );
+    if let BenchmarkSource::Overworld(base) = &base_source {
+        let lease_stats = base.generator().store_lease_stats();
+        println!(
+            "STRICT_WORLDGEN metric=generator_leases dimension={dimension_name} phase={sustained_phase} layout={layout} batch_size={batch_size} columns={count} opens={} batch_opens={} pins={} pin_shards={} unpins={} unpin_shards={}",
+            lease_stats.opens,
+            lease_stats.batch_opens,
+            lease_stats.pins,
+            lease_stats.pin_shards,
+            lease_stats.unpins,
+            lease_stats.unpin_shards,
+        );
+        assert!(lease_stats.opens > 0, "sustained batch must admit through the generator lease");
+        let expected_batch_groups = count.div_ceil(batch_size);
+        assert!(
+            lease_stats.batch_opens <= expected_batch_groups as u64,
+            "production admission opened more union leases than submitted batches",
+        );
+    } else {
+        println!(
+            "STRICT_WORLDGEN metric=generator_leases dimension={dimension_name} phase={sustained_phase} layout={layout} batch_size={batch_size} columns={count} counters=unavailable"
+        );
+    }
     assert_eq!(sustained.value.len(), count, "every request needs a result");
     for (coordinate, result) in coordinates.iter().copied().zip(&sustained.value) {
         match result {
@@ -1094,7 +1215,7 @@ fn strict_single_thread_production_worldgen() {
     {
         let usage = rusage();
         println!(
-            "STRICT_WORLDGEN metric=memory phase={sustained_phase} layout={layout} batch_size={batch_size} columns={count} current_bytes={} peak_bytes={}",
+            "STRICT_WORLDGEN metric=memory dimension={dimension_name} phase={sustained_phase} layout={layout} batch_size={batch_size} columns={count} current_bytes={} peak_bytes={}",
             usage.ri_phys_footprint,
             usage.ri_lifetime_max_phys_footprint,
         );
@@ -1137,7 +1258,7 @@ fn strict_single_thread_production_worldgen() {
                 .zip(role_totals)
         {
             println!(
-                "STRICT_WORLDGEN metric=feature_source_reads phase={sustained_phase} role={role} owners={owners} accesses={accesses} unique_xz_lanes={lanes} unique_4x8x4_cells={cells} owner_overflow={}",
+                "STRICT_WORLDGEN metric=feature_source_reads dimension={dimension_name} phase={sustained_phase} role={role} owners={owners} accesses={accesses} unique_xz_lanes={lanes} unique_4x8x4_cells={cells} owner_overflow={}",
                 reads.owner_overflow,
             );
         }
@@ -1147,7 +1268,7 @@ fn strict_single_thread_production_worldgen() {
                 .zip(height_totals)
         {
             println!(
-                "STRICT_WORLDGEN metric=feature_height_reads phase={sustained_phase} role={role} owners={owners} accesses={accesses} unique_xz_lanes={lanes} owner_overflow={}",
+                "STRICT_WORLDGEN metric=feature_height_reads dimension={dimension_name} phase={sustained_phase} role={role} owners={owners} accesses={accesses} unique_xz_lanes={lanes} owner_overflow={}",
                 reads.owner_overflow,
             );
         }
@@ -1180,23 +1301,20 @@ fn strict_single_thread_production_worldgen() {
         columns.push((coordinate, column));
     }
     println!(
-        "STRICT_WORLDGEN metric=request_results phase={sustained_phase} layout={layout} batch_size={batch_size} columns={count} generated={generated_count} promoted={promoted_count}"
+        "STRICT_WORLDGEN metric=request_results dimension={dimension_name} phase={sustained_phase} layout={layout} batch_size={batch_size} columns={count} generated={generated_count} promoted={promoted_count}"
     );
     assert_eq!(generated_count + promoted_count, count);
     let [blocks, biomes, heightmaps] = output_checksums(&columns);
     println!(
-        "STRICT_WORLDGEN metric=output_checksum phase={sustained_phase} layout={layout} batch_size={batch_size} columns={count} blocks={blocks:016x} biomes={biomes:016x} heightmaps={heightmaps:016x}"
+        "STRICT_WORLDGEN metric=output_checksum dimension={dimension_name} phase={sustained_phase} layout={layout} batch_size={batch_size} columns={count} blocks={blocks:016x} biomes={biomes:016x} heightmaps={heightmaps:016x}"
     );
     if let Ok(compare_batch_size) = std::env::var("LODESTONE_WORLDGEN_BENCH_COMPARE_BATCH") {
         let compare_batch_size = compare_batch_size.parse::<usize>().expect("compare batch size");
         assert!(compare_batch_size > 0);
-        let compare_base = Arc::new(overworld_chunk_source(seed));
-        let compare_source = lodestone_server::retained_chunk_source_for_view_radius(
-            compare_base,
-            2,
-        );
+        let compare_base = BenchmarkSource::new(dimension, seed);
+        let compare_source = compare_base.retained();
         if layout == "ring" {
-            let center = (20_000, -20_000);
+            let center = origin;
             black_box(expect_generated(
                 request_one(&compare_source, request_for(center)),
                 center,
@@ -1225,7 +1343,7 @@ fn strict_single_thread_production_worldgen() {
         }
         let [compare_blocks, compare_biomes, compare_heightmaps] = output_checksums(&compared);
         println!(
-            "STRICT_WORLDGEN metric=comparison_checksum layout={layout} batch_size={batch_size} compare_batch_size={compare_batch_size} blocks={compare_blocks:016x} biomes={compare_biomes:016x} heightmaps={compare_heightmaps:016x}"
+            "STRICT_WORLDGEN metric=comparison_checksum dimension={dimension_name} layout={layout} batch_size={batch_size} compare_batch_size={compare_batch_size} blocks={compare_blocks:016x} biomes={compare_biomes:016x} heightmaps={compare_heightmaps:016x}"
         );
         let mut differences = 0usize;
         for ((coordinate, column), (other_coordinate, other)) in columns.iter().zip(&compared) {
@@ -1238,7 +1356,7 @@ fn strict_single_thread_production_worldgen() {
                         if left != right {
                             if differences < 32 {
                                 println!(
-                                    "STRICT_WORLDGEN metric=comparison_cell coordinate={coordinate:?} local=({x},{y},{z}) batch_state={} batch_block={} compare_state={} compare_block={}",
+                                    "STRICT_WORLDGEN metric=comparison_cell dimension={dimension_name} coordinate={coordinate:?} local=({x},{y},{z}) batch_state={} batch_block={} compare_state={} compare_block={}",
                                     left.raw(),
                                     left.name(),
                                     right.raw(),
@@ -1251,7 +1369,7 @@ fn strict_single_thread_production_worldgen() {
                 }
             }
         }
-        println!("STRICT_WORLDGEN metric=comparison_differences cells={differences}");
+        println!("STRICT_WORLDGEN metric=comparison_differences dimension={dimension_name} cells={differences}");
         if compare_batch_size == batch_size {
             assert_eq!(differences, 0, "identical batch widths must reproduce block output");
             assert_eq!(
@@ -1266,75 +1384,81 @@ fn strict_single_thread_production_worldgen() {
         return;
     }
 
-    let fresh_source = overworld_chunk_source(seed);
-    let fresh = measure_request(retired(), || {
-        coordinates
-            .iter()
-            .map(|&(cx, cz)| fresh_source.column(cx, cz))
-            .collect::<Vec<_>>()
-    });
-    report("fresh_column", "pure", &fresh, count, 1, layout);
-    for column in fresh.value {
-        assert_eq!(column.generation_stage(), lodestone_server::ChunkGenerationStage::Full);
-        black_box(column);
-    }
-
-    let source_once_source = overworld_chunk_source(seed);
-    if counters_enabled {
-        counters::reset();
-    }
-    let source_once_counter_before = counters_enabled.then(counters::snapshot);
-    let source_once = measure_request(retired(), || {
-        source_once_source
-            .generator()
-            .source_once_features(&coordinates)
-    });
-    report(
-        "source_once_features",
-        "experimental",
-        &source_once,
-        count,
-        batch_size,
-        layout,
-    );
-    report_generation_counters(
-        source_once_counter_before,
-        counters_enabled.then(counters::snapshot),
-        count,
-        "source_once",
-    );
-    let expected_sources = match layout {
-        "square" => {
-            let side = (count as f64).sqrt() as usize;
-            (side + 2) * (side + 2)
+    if dimension == ServerDimension::Overworld {
+        let fresh_source = overworld_chunk_source(seed);
+        let fresh = measure_request(retired(), || {
+            coordinates
+                .iter()
+                .map(|&(cx, cz)| fresh_source.column(cx, cz))
+                .collect::<Vec<_>>()
+        });
+        report("fresh_column", "pure", &fresh, count, 1, layout);
+        for column in fresh.value {
+            assert_eq!(column.generation_stage(), lodestone_server::ChunkGenerationStage::Full);
+            black_box(column);
         }
-        "ring" => coordinates
-            .iter()
-            .flat_map(|&(x, z)| {
-                (-1..=1).flat_map(move |dz| (-1..=1).map(move |dx| (x + dx, z + dz)))
-            })
-            .collect::<std::collections::BTreeSet<_>>()
-            .len(),
-        _ => 3 * (count + 2),
-    };
-    assert_eq!(source_once.value.source_execution_count(), expected_sources);
-    println!(
-        "STRICT_WORLDGEN metric=source_once_products phase=source_once layout={layout} requested_products={} mutable_products={} context_products=unavailable heavy_products={} mutable_writes={} retained_bytes={} padding_mutations={}",
-        source_once.value.requested().len(),
-        source_once.value.mutable_write_count(),
-        source_once.value.source_execution_count(),
-        source_once.value.mutable_write_count(),
-        source_once.value.region_retained_bytes(),
-        source_once.value.padding_mutations().len(),
-    );
-    black_box(source_once.value);
+
+        let source_once_source = overworld_chunk_source(seed);
+        if counters_enabled {
+            counters::reset();
+        }
+        let source_once_counter_before = counters_enabled.then(counters::snapshot);
+        let source_once = measure_request(retired(), || {
+            source_once_source
+                .generator()
+                .source_once_features(&coordinates)
+        });
+        report(
+            "source_once_features",
+            "experimental",
+            &source_once,
+            count,
+            batch_size,
+            layout,
+        );
+        report_generation_counters(
+            source_once_counter_before,
+            counters_enabled.then(counters::snapshot),
+            count,
+            "source_once",
+        );
+        let expected_sources = match layout {
+            "square" => {
+                let side = (count as f64).sqrt() as usize;
+                (side + 2) * (side + 2)
+            }
+            "ring" => coordinates
+                .iter()
+                .flat_map(|&(x, z)| {
+                    (-1..=1).flat_map(move |dz| (-1..=1).map(move |dx| (x + dx, z + dz)))
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            _ => 3 * (count + 2),
+        };
+        assert_eq!(source_once.value.source_execution_count(), expected_sources);
+        println!(
+            "STRICT_WORLDGEN metric=source_once_products dimension={dimension_name} phase=source_once layout={layout} requested_products={} mutable_products={} context_products=unavailable heavy_products={} mutable_writes={} retained_bytes={} padding_mutations={}",
+            source_once.value.requested().len(),
+            source_once.value.mutable_write_count(),
+            source_once.value.source_execution_count(),
+            source_once.value.mutable_write_count(),
+            source_once.value.region_retained_bytes(),
+            source_once.value.padding_mutations().len(),
+        );
+        black_box(source_once.value);
+    } else {
+        println!(
+            "STRICT_WORLDGEN metric=source_once_features dimension={dimension_name} phase=experimental status=not_applicable"
+        );
+    }
 
     let protocol = V770ServerProtocol;
     let before = retired();
     let started = Instant::now();
     for &((cx, cz), ref column) in &columns {
         let packet = protocol
-            .try_encode_chunk_in_dimension(cx, cz, column, ServerDimension::Overworld)
+            .try_encode_chunk_in_dimension(cx, cz, column, dimension)
             .expect("production chunk light and encoding must succeed");
         black_box(packet);
     }
@@ -1354,6 +1478,11 @@ fn strict_single_thread_production_worldgen() {
 #[test]
 #[ignore = "source-once worldgen benchmark"]
 fn strict_single_thread_source_once_worldgen() {
+    let dimension_name = dimension_label(benchmark_dimension());
+    assert_eq!(
+        benchmark_dimension(), ServerDimension::Overworld,
+        "source-once experimental fixture supports only Overworld",
+    );
     assert_eq!(
         std::env::var("LODESTONE_WORLDGEN_WORKERS").as_deref(),
         Ok("1")
@@ -1396,7 +1525,7 @@ fn strict_single_thread_source_once_worldgen() {
         "source_once",
     );
     println!(
-        "STRICT_WORLDGEN metric=source_once_products phase=source_once capture={capture} requested_products={} mutable_products={} context_products=unavailable heavy_products={} sources={} final_mutations={} mutable_writes={} retained_bytes={} padding_mutations={}",
+        "STRICT_WORLDGEN metric=source_once_products dimension={dimension_name} phase=source_once capture={capture} requested_products={} mutable_products={} context_products=unavailable heavy_products={} sources={} final_mutations={} mutable_writes={} retained_bytes={} padding_mutations={}",
         measurement.value.requested().len(),
         measurement.value.mutable_write_count(),
         measurement.value.source_execution_count(),

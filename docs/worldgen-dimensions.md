@@ -106,6 +106,12 @@ exact fitness tie, rather than tolerating them by threshold.
 
 ### End
 
+`EndGenerator` owns one immutable biome source per seed and lends it to regional and source-filtered
+decoration. Outer islands, gateways, spikes and chorus reuse it without changing source-local RNG
+or phase order. The 16 horizontal biome quarts repeat one chunk-centre sample at
+`(cx * 16 + 8, cz * 16 + 8)`, including negative chunks. Standalone seed-only decoration helpers
+are test-only.
+
 The End biome source is not multi-noise: `EndBiomeSource` is a closed-form function of chunk
 position (a radius-64-chunk main-island hole) and one `cache_2d(end_islands)` erosion sample,
 thresholded into five constant biome ids. `EndIslandNoise` consumes its seed through the legacy

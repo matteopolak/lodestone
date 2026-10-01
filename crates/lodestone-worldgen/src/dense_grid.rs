@@ -133,6 +133,13 @@ pub struct DenseBlockGrid {
     raw_state_ids: bool,
     raw_introductions: Vec<StateId>,
     raw_introduction_index: FastMap<StateId, ()>,
+    change_capture: Option<FastMap<usize, StateId>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DenseBlockChange {
+    pub position: (i32, i32, i32),
+    pub state: StateId,
 }
 
 pub(crate) enum DenseBlockGridParts {
@@ -287,6 +294,7 @@ impl DenseBlockGrid {
             raw_state_ids: false,
             raw_introductions: Vec::new(),
             raw_introduction_index: FastMap::default(),
+            change_capture: None,
         }
     }
 
@@ -322,6 +330,7 @@ impl DenseBlockGrid {
             raw_state_ids: true,
             raw_introductions,
             raw_introduction_index,
+            change_capture: None,
         }
     }
 
@@ -682,13 +691,7 @@ impl DenseBlockGrid {
         self.get_id(x, y, z).canonical_state()
     }
 
-    /// /// Writes the canonical `state` at `(x, y, z)`. A no-op outside the box
-    /// (matching the prior `HashMap`-keyed grids' implicit contract: nothing in
-    /// this engine writes outside the box it built a working grid for).
-    ///
-    /// The zero-allocation write path: a new palette entry costs a `Vec` push
-    /// and a `u16`-keyed map insert, and **allocates nothing** — this is where
-    /// U3's acceptance criterion is paid.
+    /// Writes the canonical `state` at `(x, y, z)`. A no-op outside the box.
     pub fn set_id(&mut self, x: i32, y: i32, z: i32, state: StateId) {
         let Some(i) = self.index(x, y, z) else {
             return;
@@ -714,6 +717,16 @@ impl DenseBlockGrid {
     }
 
     fn set_id_at_index(&mut self, i: usize, state: StateId) {
+        if let Some(changes) = &mut self.change_capture {
+            let previous = if self.raw_state_ids {
+                StateId::from_raw(self.blocks[i])
+            } else {
+                self.palette[self.blocks[i] as usize]
+            };
+            if previous != state {
+                changes.entry(i).or_insert(previous);
+            }
+        }
         if self.raw_state_ids {
             self.remember_raw_state(state);
             Arc::make_mut(&mut self.blocks)[i] =
@@ -724,6 +737,29 @@ impl DenseBlockGrid {
         let id = self.palette_index(state);
         Arc::make_mut(&mut self.blocks)[i] = id;
         crate::counters::bump_logical_write(crate::counters::MemoryBoundary::BlockGrid, 1, 2);
+    }
+
+    pub(crate) fn begin_change_capture(&mut self) {
+        assert!(self.change_capture.is_none(), "dense grid change capture is already active");
+        self.change_capture = Some(FastMap::default());
+    }
+
+    pub(crate) fn finish_change_capture(&mut self) -> Vec<DenseBlockChange> {
+        let mut originals = self.change_capture
+            .take()
+            .expect("dense grid change capture is not active")
+            .into_iter()
+            .collect::<Vec<_>>();
+        originals.sort_unstable_by_key(|&(index, _)| index);
+        originals.into_iter()
+            .filter_map(|(index, original)| {
+                let x = self.min_x + (index % self.size_x as usize) as i32;
+                let z = self.min_z + (index / self.size_x as usize % self.size_z as usize) as i32;
+                let y = self.min_y + (index / (self.size_x as usize * self.size_z as usize)) as i32;
+                let state = self.get_id(x, y, z);
+                (state != original).then_some(DenseBlockChange { position: (x, y, z), state })
+            })
+            .collect()
     }
 
     fn palette_index(&mut self, state: StateId) -> u16 {
@@ -747,7 +783,7 @@ impl DenseBlockGrid {
     /// Copies an axis-aligned box from another grid. The observable result is
     /// identical to `get_id`/`set_id` in
     /// y-z-x order: destination palette entries are therefore still appended
-    /// in first-write order. Each x row uses direct slice indexing instead of
+    /// in first-write order. Outside change capture, each x row uses direct slice indexing instead of
     /// paying coordinate bounds checks and source palette resolution for every
     /// cell. A lazy source-to-destination palette mapping also avoids hashing
     /// the same small set of state ids once per copied cell.
@@ -771,6 +807,27 @@ impl DenseBlockGrid {
     ) {
         assert!(size_x >= 0 && size_y >= 0 && size_z >= 0, "copy size is negative");
         if size_x == 0 || size_y == 0 || size_z == 0 {
+            return;
+        }
+        if self.change_capture.is_some() || self.raw_state_ids != source.raw_state_ids {
+            assert!(
+                source.index(source_x, source_y, source_z).is_some()
+                    && source.index(source_x + size_x - 1, source_y + size_y - 1, source_z + size_z - 1).is_some(),
+                "source copy box is outside the grid",
+            );
+            assert!(
+                self.index(destination_x, destination_y, destination_z).is_some()
+                    && self.index(destination_x + size_x - 1, destination_y + size_y - 1, destination_z + size_z - 1).is_some(),
+                "destination copy box is outside the grid",
+            );
+            for y in 0..size_y {
+                for z in 0..size_z {
+                    for x in 0..size_x {
+                        let state = source.get_id(source_x + x, source_y + y, source_z + z);
+                        self.set_id(destination_x + x, destination_y + y, destination_z + z, state);
+                    }
+                }
+            }
             return;
         }
         if self.raw_state_ids && source.raw_state_ids {
@@ -830,27 +887,6 @@ impl DenseBlockGrid {
                 copied_cells,
                 copied_cells * 2,
             );
-            return;
-        }
-        if self.raw_state_ids || source.raw_state_ids {
-            assert!(
-                source.index(source_x, source_y, source_z).is_some()
-                    && source.index(source_x + size_x - 1, source_y + size_y - 1, source_z + size_z - 1).is_some(),
-                "source copy box is outside the grid",
-            );
-            assert!(
-                self.index(destination_x, destination_y, destination_z).is_some()
-                    && self.index(destination_x + size_x - 1, destination_y + size_y - 1, destination_z + size_z - 1).is_some(),
-                "destination copy box is outside the grid",
-            );
-            for y in 0..size_y {
-                for z in 0..size_z {
-                    for x in 0..size_x {
-                        let state = source.get_id(source_x + x, source_y + y, source_z + z);
-                        self.set_id(destination_x + x, destination_y + y, destination_z + z, state);
-                    }
-                }
-            }
             return;
         }
         assert!(
@@ -937,6 +973,50 @@ impl DenseBlockGrid {
                 }
             }
         }
+    }
+
+    /// Imports borrowed column-palette indices into a 16-wide dense field.
+    /// Cells omitted by `visit` remain air. Visit cells in first-encounter order
+    /// to preserve the palette order; each source palette entry is resolved once.
+    #[must_use]
+    pub fn from_column_palette_indices(
+        min_x: i32,
+        min_y: i32,
+        min_z: i32,
+        height: i32,
+        source_palette: &[StateId],
+        visit: impl FnOnce(&mut dyn FnMut(usize, u16)),
+    ) -> Self {
+        assert!(height >= 0, "grid height is negative");
+        let mut grid = Self::with_default(min_x, min_y, min_z, 16, height, 16, air_state());
+        let mut remap = vec![u16::MAX; source_palette.len()];
+        for (id, &state) in source_palette.iter().enumerate() {
+            if state == air_state() {
+                remap[id] = 0;
+            }
+        }
+        let blocks = Arc::get_mut(&mut grid.blocks).expect("new grid carrier must be uniquely owned");
+        let mut copied = 0u64;
+        visit(&mut |cell, source_id| {
+            let mapped = &mut remap[source_id as usize];
+            if *mapped == u16::MAX {
+                *mapped = palette_index(
+                    &mut grid.palette,
+                    &mut grid.palette_bases,
+                    &mut grid.palette_base_facts,
+                    &mut grid.index_of,
+                    source_palette[source_id as usize],
+                );
+            }
+            blocks[cell] = *mapped;
+            copied += 1;
+        });
+        crate::counters::bump_logical_write(
+            crate::counters::MemoryBoundary::BlockGrid,
+            copied,
+            copied * std::mem::size_of::<u16>() as u64,
+        );
+        grid
     }
 
     /// Builds a chunk-sized grid from canonical global state ids.
@@ -1303,6 +1383,232 @@ mod tests {
 
     fn state(spec: &str) -> StateId {
         StateId::from_state_str(spec).expect("test state is in the generated table")
+    }
+
+    #[test]
+    fn change_capture_orders_net_changes_without_cloning_the_carrier() {
+        let stone = state("minecraft:stone");
+        let dirt = state("minecraft:dirt");
+        let gold = state("minecraft:gold_block");
+        let water = state("minecraft:water");
+        for mut grid in [
+            DenseBlockGrid::with_default(-7, -5, 11, 3, 4, 2, stone),
+            DenseBlockGrid::with_default_raw(-7, -5, 11, 3, 4, 2, stone),
+        ] {
+            grid.set_id(-6, -4, 12, dirt);
+            let carrier = Arc::as_ptr(&grid.blocks);
+            grid.begin_change_capture();
+            assert_eq!(Arc::strong_count(&grid.blocks), 1);
+            for (x, y, z, value) in [
+                (-5, -2, 12, gold), (-6, -3, 11, dirt), (-7, -5, 12, water),
+                (-6, -4, 12, stone), (-5, -5, 11, gold), (-6, -5, 11, dirt),
+                (-6, -5, 11, stone), (-7, -5, 11, stone),
+                (-8, -5, 11, gold), (-4, -5, 11, gold), (-7, -6, 11, gold),
+                (-7, -1, 11, gold), (-7, -5, 10, gold), (-7, -5, 13, gold),
+            ] {
+                grid.set_id(x, y, z, value);
+            }
+            assert_eq!(grid.finish_change_capture(), [
+                DenseBlockChange { position: (-5, -5, 11), state: gold },
+                DenseBlockChange { position: (-7, -5, 12), state: water },
+                DenseBlockChange { position: (-6, -4, 12), state: stone },
+                DenseBlockChange { position: (-6, -3, 11), state: dirt },
+                DenseBlockChange { position: (-5, -2, 12), state: gold },
+            ]);
+            assert_eq!(Arc::as_ptr(&grid.blocks), carrier);
+            grid.begin_change_capture();
+            assert!(grid.finish_change_capture().is_empty());
+        }
+    }
+
+    #[test]
+    fn change_capture_clones_continue_independently() {
+        let stone = state("minecraft:stone");
+        let dirt = state("minecraft:dirt");
+        let water = state("minecraft:water");
+        for mut grid in [
+            DenseBlockGrid::with_default(-7, -5, 11, 3, 4, 2, stone),
+            DenseBlockGrid::with_default_raw(-7, -5, 11, 3, 4, 2, stone),
+        ] {
+            grid.begin_change_capture();
+            grid.set_id(-5, -2, 12, dirt);
+            let mut clone = grid.clone();
+            grid.set_id(-7, -5, 11, water);
+            clone.set_id(-5, -2, 12, stone);
+            clone.set_id(-6, -4, 12, water);
+            assert_eq!(grid.finish_change_capture(), [
+                DenseBlockChange { position: (-7, -5, 11), state: water },
+                DenseBlockChange { position: (-5, -2, 12), state: dirt },
+            ]);
+            assert_eq!(clone.finish_change_capture(), [
+                DenseBlockChange { position: (-6, -4, 12), state: water },
+            ]);
+            assert_eq!(grid.get_id(-6, -4, 12), stone);
+            assert_eq!(clone.get_id(-7, -5, 11), stone);
+        }
+    }
+
+    #[test]
+    fn change_capture_includes_every_bulk_copy_lane_combination() {
+        let stone = state("minecraft:stone");
+        let dirt = state("minecraft:dirt");
+        let water = state("minecraft:water");
+        let gold = state("minecraft:gold_block");
+        for source_raw in [false, true] {
+            for destination_raw in [false, true] {
+                let mut source = if source_raw {
+                    DenseBlockGrid::with_default_raw(20, 40, -9, 2, 2, 2, stone)
+                } else {
+                    DenseBlockGrid::with_default(20, 40, -9, 2, 2, 2, stone)
+                };
+                source.set_id(21, 40, -9, dirt);
+                source.set_id(20, 41, -8, water);
+                let mut grid = if destination_raw {
+                    DenseBlockGrid::with_default_raw(-7, -5, 11, 3, 4, 2, stone)
+                } else {
+                    DenseBlockGrid::with_default(-7, -5, 11, 3, 4, 2, stone)
+                };
+                grid.set_id(-7, -4, 11, gold);
+                grid.set_id(-6, -4, 11, dirt);
+                let mut uncaptured = grid.clone();
+                grid.begin_change_capture();
+                grid.copy_box_from(&source, 20, 40, -9, -7, -4, 11, 2, 2, 2);
+                assert_eq!(grid.finish_change_capture(), [
+                    DenseBlockChange { position: (-7, -4, 11), state: stone },
+                    DenseBlockChange { position: (-7, -3, 12), state: water },
+                ], "source raw={source_raw}, destination raw={destination_raw}");
+                uncaptured.copy_box_from(&source, 20, 40, -9, -7, -4, 11, 2, 2, 2);
+                assert_eq!(grid.into_id_palette_and_blocks(), uncaptured.into_id_palette_and_blocks());
+            }
+        }
+    }
+
+    #[test]
+    fn change_capture_cancellation_retains_structure_provenance() {
+        let stone = state("minecraft:stone");
+        let dirt = state("minecraft:dirt");
+        for mut grid in [
+            DenseBlockGrid::with_default(-7, -5, 11, 3, 4, 2, stone),
+            DenseBlockGrid::with_default_raw(-7, -5, 11, 3, 4, 2, stone),
+        ] {
+            let mut recorder = crate::structure::StructureMutationRecorder::default();
+            grid.begin_change_capture();
+            for value in [dirt, stone, stone] {
+                grid.set_id_observed(-6, -4, 12, value, (4, -3), 7, &mut recorder);
+            }
+            assert!(grid.finish_change_capture().is_empty());
+            let blocks = recorder.finish();
+            assert_eq!(blocks.mutations().iter().map(|write| {
+                (write.source, write.step, write.ordinal, write.position, write.state)
+            }).collect::<Vec<_>>(), [
+                ((4, -3), 7, 0, [-6, -4, 12], dirt),
+                ((4, -3), 7, 1, [-6, -4, 12], stone),
+                ((4, -3), 7, 2, [-6, -4, 12], stone),
+            ]);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "dense grid change capture is already active")]
+    fn change_capture_rejects_nested_capture() {
+        let mut grid = DenseBlockGrid::with_default(0, 0, 0, 1, 1, 1, StateId::AIR);
+        grid.begin_change_capture();
+        grid.begin_change_capture();
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion `left == right` failed")]
+    fn change_capture_detector_rejects_a_bypassed_writer() {
+        let dirt = state("minecraft:dirt");
+        let mut grid = DenseBlockGrid::with_default(-7, -5, 11, 1, 1, 1, StateId::AIR);
+        grid.begin_change_capture();
+        let dirt_index = grid.palette_index(dirt);
+        Arc::make_mut(&mut grid.blocks)[0] = dirt_index;
+        assert_eq!(grid.finish_change_capture(), [
+            DenseBlockChange { position: (-7, -5, 11), state: dirt },
+        ]);
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion `left == right` failed")]
+    fn change_capture_carrier_detector_rejects_a_baseline_clone() {
+        let mut grid = DenseBlockGrid::with_default(0, 0, 0, 1, 1, 1, StateId::AIR);
+        let carrier = Arc::as_ptr(&grid.blocks);
+        let baseline = grid.clone();
+        grid.begin_change_capture();
+        grid.set_id(0, 0, 0, state("minecraft:dirt"));
+        assert_eq!(Arc::as_ptr(&grid.blocks), carrier);
+        assert_eq!(baseline.get_id(0, 0, 0), StateId::AIR);
+    }
+
+    #[test]
+    fn column_palette_import_remaps_repeated_states_in_encounter_order() {
+        let air = StateId::AIR;
+        let stone = state("minecraft:stone");
+        let dirt = state("minecraft:dirt");
+        let water = state("minecraft:water");
+        let source_palette = [air, dirt, state("minecraft:lava"), stone, stone, water];
+        let grid = DenseBlockGrid::from_column_palette_indices(
+            -32, -7, -48, 3, &source_palette,
+            |write| {
+                for (cell, id) in [(1, 3), (17, 1), (255, 3), (258, 4), (527, 5)] {
+                    write(cell, id);
+                }
+            },
+        );
+        for (x, y, z, expected) in [
+            (-31, -7, -48, stone),
+            (-31, -7, -47, dirt),
+            (-17, -7, -33, stone),
+            (-30, -6, -48, stone),
+            (-17, -5, -48, water),
+            (-32, -7, -48, air),
+            (-31, -8, -48, air),
+        ] {
+            assert_eq!(grid.get_id(x, y, z), expected, "cell ({x}, {y}, {z})");
+        }
+        let mut expected_blocks = vec![0; 768];
+        expected_blocks[1] = 1;
+        expected_blocks[17] = 2;
+        expected_blocks[255] = 1;
+        expected_blocks[258] = 1;
+        expected_blocks[527] = 3;
+        let expected = (vec![air, stone, dirt, water], expected_blocks);
+        let actual = grid.into_id_palette_and_blocks();
+        assert_eq!(actual, expected);
+
+        let mut wrong_order = expected.clone();
+        wrong_order.0.swap(1, 2);
+        assert_ne!(actual.0, wrong_order.0);
+        let mut wrong_stride = expected;
+        wrong_stride.1.swap(258, 273);
+        assert_ne!(actual.1[258], wrong_stride.1[258]);
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion `left == right` failed")]
+    fn column_palette_import_order_detector_rejects_changed_expected_order() {
+        let stone = state("minecraft:stone");
+        let dirt = state("minecraft:dirt");
+        let grid = DenseBlockGrid::from_column_palette_indices(
+            -32, -7, -48, 1, &[StateId::AIR, dirt, stone],
+            |write| {
+                write(1, 2);
+                write(17, 1);
+            },
+        );
+        let (palette, _) = grid.into_id_palette_and_blocks();
+        assert_eq!(palette, [StateId::AIR, dirt, stone]);
+    }
+
+    #[test]
+    fn column_palette_import_omitted_cells_and_unused_palette_remain_air() {
+        let grid = DenseBlockGrid::from_column_palette_indices(
+            -16, -19, 32, 17,
+            &[state("minecraft:stone"), StateId::AIR],
+            |_| {},
+        );
+        assert_eq!(grid.into_id_palette_and_blocks(), (vec![StateId::AIR], vec![0; 4352]));
     }
 
     #[test]

@@ -100,7 +100,7 @@ pub struct EndGateway {
     pub exact: bool,
 }
 
-/// Final state written by one End FEATURES source.
+/// Net state change from one End FEATURES source after target-window overrides.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EndDecorationSpill {
     pub source: (i32, i32),
@@ -108,7 +108,7 @@ pub struct EndDecorationSpill {
     pub state: StateId,
 }
 
-/// Complete output of one source-filtered End FEATURES invocation.
+/// Final state changes, gateway metadata, and structure provenance from one source.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EndDecorationResult {
     pub spills: Vec<EndDecorationSpill>,
@@ -291,13 +291,15 @@ impl EndDecoration {
         world: &mut DenseBlockGrid,
         biome_at_chunk: impl Fn(i32, i32) -> BuiltinBiome,
     ) -> Vec<EndGateway> {
+        let biome_source = EndBiomeSource::new(seed);
         let mut observe = |_: &DenseBlockGrid, _: i32, _: i32, _: i32| {};
-        self.apply_region_inner(seed, cx, cz, world, biome_at_chunk, &mut observe, |_| (), |_| ()).0
+        self.apply_region_inner(seed, &biome_source, cx, cz, world, biome_at_chunk, &mut observe, |_| (), |_| ()).0
     }
 
     pub(crate) fn apply_region_with_heightmaps_and_structure<S, E, H>(
         &self,
         seed: i64,
+        biome_source: &EndBiomeSource,
         cx: i32,
         cz: i32,
         world: &mut DenseBlockGrid,
@@ -324,6 +326,7 @@ impl EndDecoration {
         };
         self.apply_region_inner(
             seed,
+            biome_source,
             cx,
             cz,
             world,
@@ -337,6 +340,7 @@ impl EndDecoration {
     fn apply_region_inner<F, S, E, H>(
         &self,
         seed: i64,
+        biome_source: &EndBiomeSource,
         cx: i32,
         cz: i32,
         world: &mut DenseBlockGrid,
@@ -360,7 +364,7 @@ impl EndDecoration {
                     for source_x in cx - 1..=cx + 1 {
                         for source_z in cz - 1..=cz + 1 {
                             let biomes = EndBiomeSet::around_source(source_x, source_z, &biome_at_chunk);
-                            self.apply_outer_island_source(seed, source_x, source_z, world, biomes, observe);
+                            self.apply_outer_island_source(seed, biome_source, source_x, source_z, world, biomes, observe);
                         }
                     }
                 }
@@ -378,6 +382,7 @@ impl EndDecoration {
                                 self.apply_late_source_for_phase(
                                     phase,
                                     seed,
+                                    biome_source,
                                     source_x,
                                     source_z,
                                     world,
@@ -415,6 +420,7 @@ impl EndDecoration {
     pub(crate) fn apply_source_with_structure<S, E>(
         &self,
         seed: i64,
+        biome_source: &EndBiomeSource,
         source_x: i32,
         source_z: i32,
         world: &mut DenseBlockGrid,
@@ -424,9 +430,9 @@ impl EndDecoration {
     where
         S: FnOnce(&mut DenseBlockGrid) -> E,
     {
-        self.apply_outer_island_source_without_observer(seed, source_x, source_z, world, source_biomes);
+        self.apply_outer_island_source_without_observer(seed, biome_source, source_x, source_z, world, source_biomes);
         let structure = place_structure(world);
-        let gateways = self.apply_late_source_without_observer(seed, source_x, source_z, world, source_biomes);
+        let gateways = self.apply_late_source_without_observer(seed, biome_source, source_x, source_z, world, source_biomes);
         let mut observe = |_: &DenseBlockGrid, _: i32, _: i32, _: i32| {};
         for &origin in &self.platforms {
             if origin.x.div_euclid(16) == source_x && origin.z.div_euclid(16) == source_z {
@@ -449,8 +455,9 @@ impl EndDecoration {
     where
         F: FnMut(&DenseBlockGrid, i32, i32, i32),
     {
-        self.apply_outer_island_source(seed, source_x, source_z, world, source_biomes, observe);
-        let gateways = self.apply_late_source(seed, source_x, source_z, world, source_biomes, observe);
+        let biome_source = EndBiomeSource::new(seed);
+        self.apply_outer_island_source(seed, &biome_source, source_x, source_z, world, source_biomes, observe);
+        let gateways = self.apply_late_source(seed, &biome_source, source_x, source_z, world, source_biomes, observe);
         for &origin in &self.platforms {
             if origin.x.div_euclid(16) == source_x && origin.z.div_euclid(16) == source_z {
                 apply_platform_with_observer(world, origin, observe);
@@ -462,30 +469,33 @@ impl EndDecoration {
     fn apply_outer_island_source_without_observer(
         &self,
         seed: i64,
+        biome_source: &EndBiomeSource,
         source_x: i32,
         source_z: i32,
         world: &mut DenseBlockGrid,
         source_biomes: EndBiomeSet,
     ) {
         let mut observe = |_: &DenseBlockGrid, _: i32, _: i32, _: i32| {};
-        self.apply_outer_island_source(seed, source_x, source_z, world, source_biomes, &mut observe);
+        self.apply_outer_island_source(seed, biome_source, source_x, source_z, world, source_biomes, &mut observe);
     }
 
     fn apply_late_source_without_observer(
         &self,
         seed: i64,
+        biome_source: &EndBiomeSource,
         source_x: i32,
         source_z: i32,
         world: &mut DenseBlockGrid,
         source_biomes: EndBiomeSet,
     ) -> Vec<EndGateway> {
         let mut observe = |_: &DenseBlockGrid, _: i32, _: i32, _: i32| {};
-        self.apply_late_source(seed, source_x, source_z, world, source_biomes, &mut observe)
+        self.apply_late_source(seed, biome_source, source_x, source_z, world, source_biomes, &mut observe)
     }
 
     fn apply_outer_island_source<F>(
         &self,
         seed: i64,
+        biome_source: &EndBiomeSource,
         source_x: i32,
         source_z: i32,
         world: &mut DenseBlockGrid,
@@ -494,7 +504,6 @@ impl EndDecoration {
     ) where
         F: FnMut(&DenseBlockGrid, i32, i32, i32),
     {
-        let biome_source = EndBiomeSource::new(seed);
         let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
         let decoration_seed = random.set_decoration_seed(seed, source_x * 16, source_z * 16);
         if self.outer_islands && source_biomes.contains(BuiltinBiome::SmallEndIslands) {
@@ -514,6 +523,7 @@ impl EndDecoration {
     fn apply_late_source<F>(
         &self,
         seed: i64,
+        biome_source: &EndBiomeSource,
         source_x: i32,
         source_z: i32,
         world: &mut DenseBlockGrid,
@@ -532,6 +542,7 @@ impl EndDecoration {
             gateways.extend(self.apply_late_source_for_phase(
                 phase,
                 seed,
+                biome_source,
                 source_x,
                 source_z,
                 world,
@@ -546,6 +557,7 @@ impl EndDecoration {
         &self,
         phase: CompositeDecorationStep,
         seed: i64,
+        biome_source: &EndBiomeSource,
         source_x: i32,
         source_z: i32,
         world: &mut DenseBlockGrid,
@@ -555,7 +567,6 @@ impl EndDecoration {
     where
         F: FnMut(&DenseBlockGrid, i32, i32, i32),
     {
-        let biome_source = EndBiomeSource::new(seed);
         let generated_spikes = self
             .spikes
             .as_ref()
