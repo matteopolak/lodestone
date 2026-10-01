@@ -1635,7 +1635,7 @@ fn light_free_differences(expected: &[u8], actual: &[u8], dimension: StreamDimen
                 biome_bounds.observe(
                     (cell % 4) as i32,
                     min_y + (section * 16 + cell / 16 * 4) as i32,
-                    (cell / 16) as i32,
+                    (cell / 4 % 4) as i32,
                 );
                 biome_identities.get_or_insert((
                     format!("biome:{expected_value}"),
@@ -1755,6 +1755,85 @@ fn mismatch_category(
     mismatch_differences(format, expected, actual, dimension)
         .first()
         .map_or("packet", |difference| difference.component)
+}
+
+fn first_stream_divergence(frame: &Frame, actual: &[u8], header: StreamHeader) -> Option<serde_json::Value> {
+    if frame.record == actual { return None; }
+    let differences = mismatch_differences(header.format, &frame.record, actual, header.dimension);
+    let difference = differences.first().expect("mismatch has a component");
+    let byte_offset = |start: usize| {
+        let offset = frame.record.iter().zip(actual).enumerate()
+            .skip(start).find(|(_, (left, right))| left != right)
+            .map_or(frame.record.len().min(actual.len()), |(offset, _)| offset);
+        serde_json::json!({"kind": "record-byte", "offset": offset})
+    };
+    let cell = match difference.component {
+        "terrain" => first_terrain_difference(&frame.record, actual, header.dimension)
+            .map(|(_, x, y, z, _, _)| serde_json::json!({"kind": "block", "x": x, "y": y, "z": z})),
+        "heightmap" => first_heightmap_difference(&frame.record, actual, header.dimension)
+            .map(|(_, map, x, z, _, _)| serde_json::json!({"kind": "heightmap", "map": map, "x": x, "z": z})),
+        "biome" => {
+            let expected_layout = light_free_record_layout(&frame.record, header.dimension);
+            let actual_layout = light_free_record_layout(actual, header.dimension);
+            expected_layout.zip(actual_layout).and_then(|(expected_layout, actual_layout)| {
+                (0..expected_layout.section_count.min(actual_layout.section_count) * 64).find_map(|index| {
+                    let section = index / 64;
+                    let cell = index % 64;
+                    let expected_offset = expected_layout.terrain.start + (section * (4096 + 64) + 4096 + cell) * 4;
+                    let actual_offset = actual_layout.terrain.start + (section * (4096 + 64) + 4096 + cell) * 4;
+                    (u32_at(&frame.record, expected_offset) != u32_at(actual, actual_offset)).then(|| {
+                        let min_y = if header.dimension == StreamDimension::Overworld { -64 } else { 0 };
+                        serde_json::json!({"kind": "biome-quart", "x": cell % 4,
+                            "y": min_y + (section * 16 + cell / 16 * 4) as i32, "z": cell / 4 % 4})
+                    })
+                })
+            })
+        }
+        "block-entity" => light_free_record_layout(&frame.record, header.dimension)
+            .map(|layout| byte_offset(layout.block_entities.start)),
+        _ => None,
+    }.unwrap_or_else(|| byte_offset(0));
+    Some(serde_json::json!({
+        "frame": frame.index, "target": [frame.cx, frame.cz], "component": difference.component,
+        "cell": cell, "expected": difference.expected_identity, "actual": difference.actual_identity,
+        "bounds": difference.bounds.text(),
+    }))
+}
+
+fn write_coordinate_report(header: StreamHeader, raw_header: &[u8], compared: u64, divergence: Option<serde_json::Value>) {
+    let Some(path) = std::env::var_os("LODESTONE_COORDINATE_REPORT") else { return; };
+    let path = PathBuf::from(path);
+    assert!(!path.exists(), "coordinate report already exists");
+    let report = serde_json::json!({
+        "format_version": 1, "status": if divergence.is_some() { "diverged" } else { "agreed" },
+        "rectangle": [header.cx0, header.cx1, header.cz0, header.cz1], "compared": compared,
+        "protocol": PROTOCOL, "world_seed": SEED, "stream_format": header.format,
+        "header_sha256": hex(&support::large_parity_manifest::sha256(raw_header)),
+        "oracle_jar_sha256": hex(&raw_header[120..152]),
+        "oracle_source_sha256": hex(&raw_header[152..184]),
+        "divergence": divergence,
+    });
+    let pending = path.with_extension("pending");
+    let mut file = File::options().write(true).create_new(true).open(&pending).expect("create coordinate report");
+    serde_json::to_writer(&mut file, &report).expect("write coordinate report");
+    file.sync_all().expect("sync coordinate report");
+    fs::rename(pending, path).expect("publish coordinate report");
+}
+
+fn coordinate_control(frame: u64, actual: &mut [u8], dimension: StreamDimension, control: Option<&str>) {
+    let Some(control) = control else { return; };
+    let values = control.split(',').map(|value| value.parse::<i32>().expect("coordinate control integer")).collect::<Vec<_>>();
+    assert_eq!(values.len(), 4, "coordinate control is frame,x,y,z");
+    assert!(values[0] >= 0 && (0..16).contains(&values[1]) && (-64..320).contains(&values[2])
+        && (0..16).contains(&values[3]), "coordinate control bounds");
+    assert_eq!(dimension, StreamDimension::Overworld, "coordinate control dimension");
+    if frame != values[0] as u64 { return; }
+    let layout = light_free_record_layout(actual, dimension).expect("control record layout");
+    let y = (values[2] + 64) as usize;
+    let cell = (y % 16 * 16 + values[3] as usize) * 16 + values[1] as usize;
+    let offset = layout.terrain.start + (y / 16 * (4096 + 64) + cell) * 4;
+    let state = u32_at(actual, offset) ^ 1;
+    actual[offset..offset + 4].copy_from_slice(&state.to_be_bytes());
 }
 
 fn first_terrain_difference(
@@ -1926,6 +2005,57 @@ fn v7_diagnostics_parse_each_literal_record_independently() {
         Some((light_free_record_layout(&expected, StreamDimension::Nether).unwrap().terrain.start + cell * 4, 1, 3, 2, 100_000 + cell as u32, 888_888)),
     );
     assert!(!records_match_without_heightmaps(&expected, &actual, StreamDimension::Nether));
+}
+
+#[test]
+fn coordinate_control_reports_exact_first_frame_and_cell_without_changing_expected() {
+    let dimension = StreamDimension::Overworld;
+    let expected = literal_v7_record(dimension, &[1, 4, 5], 3);
+    let expected_digest = support::large_parity_manifest::sha256(&expected);
+    let header = StreamHeader { cx0: 17, cx1: 18, cz0: -23, cz1: -23,
+        count: 2, start: 0, format: STREAM_FORMAT_LIGHT_FREE, dimension,
+        payload_digest: [0; DIGEST_BYTES] };
+    let mut frame = Frame { index: 0, cx: 17, cz: -23, digest: expected_digest,
+        record: expected, lifecycle_events: Vec::new() };
+    let mut actual = frame.record.clone();
+    coordinate_control(frame.index, &mut actual, dimension, Some("1,13,-25,11"));
+    assert_eq!(first_stream_divergence(&frame, &actual, header), None);
+    frame.index = 1;
+    frame.cx = 18;
+    coordinate_control(frame.index, &mut actual, dimension, Some("1,13,-25,11"));
+    let report = first_stream_divergence(&frame, &actual, header).expect("control divergence");
+    let state = 100_000u32 + 2 * 4096 + 7 * 256 + 11 * 16 + 13;
+    assert_eq!(report["frame"], 1);
+    assert_eq!(report["target"], serde_json::json!([18, -23]));
+    assert_eq!(report["component"], "terrain");
+    assert_eq!(report["cell"], serde_json::json!({"kind": "block", "x": 13, "y": -25, "z": 11}));
+    assert_eq!(report["expected"], format!("state:{state}"));
+    assert_eq!(report["actual"], format!("state:{}", state ^ 1));
+    assert_eq!(report["bounds"], "13..13:-25..-25:11..11");
+    assert_eq!(support::large_parity_manifest::sha256(&frame.record), expected_digest);
+}
+
+#[test]
+fn coordinate_report_biome_cell_and_bounds_use_quart_z_stride() {
+    let dimension = StreamDimension::Overworld;
+    let expected = literal_v7_record(dimension, &[1, 4, 5], 3);
+    let header = StreamHeader { cx0: 17, cx1: 17, cz0: -23, cz1: -23,
+        count: 1, start: 0, format: STREAM_FORMAT_LIGHT_FREE, dimension,
+        payload_digest: [0; DIGEST_BYTES] };
+    let frame = Frame { index: 0, cx: 17, cz: -23,
+        digest: support::large_parity_manifest::sha256(&expected),
+        record: expected, lifecycle_events: Vec::new() };
+    let mut actual = frame.record.clone();
+    let layout = light_free_record_layout(&actual, dimension).expect("literal layout");
+    let cell = 1 * 16 + 2 * 4 + 3;
+    let offset = layout.terrain.start + (4096 + cell) * 4;
+    actual[offset..offset + 4].copy_from_slice(&999_999u32.to_be_bytes());
+    let report = first_stream_divergence(&frame, &actual, header).expect("biome divergence");
+    assert_eq!(report["component"], "biome");
+    assert_eq!(report["cell"], serde_json::json!({"kind": "biome-quart", "x": 3, "y": -60, "z": 2}));
+    assert_eq!(report["bounds"], "3..3:-60..-60:2..2");
+    assert_eq!(report["expected"], "biome:200027");
+    assert_eq!(report["actual"], "biome:999999");
 }
 
 #[test]
@@ -2337,6 +2467,11 @@ fn retained_end_p06_capture_matches_production_request_without_transition_inject
 #[ignore = "requires scripts/worldgen-oracle/stream-parity.sh and the external 26.2 oracle"]
 fn stream_external_oracle_matches_lodestone() {
     let expected_dimension = StreamDimension::parse();
+    if std::env::var_os("LODESTONE_COORDINATE_REPORT").is_some() {
+        assert_eq!(expected_dimension, StreamDimension::Overworld, "coordinate campaign dimension");
+        assert!(!scan_all_enabled() && !defer_heightmaps(), "coordinate campaign requires strict first mismatch");
+    }
+    let control = std::env::var("LODESTONE_COORDINATE_CONTROL").ok();
     let source_started = Instant::now();
     let mut materializer = match expected_dimension {
         StreamDimension::Overworld => Some(OrderedLifecycleMaterializer::Overworld(LifecycleMaterializer::new(overworld_chunk_source(SEED)))),
@@ -2423,7 +2558,7 @@ fn stream_external_oracle_matches_lodestone() {
             let expected_cx = stream_header.cx0 + (index % width) as i32;
             let expected_cz = stream_header.cz0 + (index / width) as i32;
             assert_eq!((frame.cx, frame.cz), (expected_cx, expected_cz), "stream coordinate order");
-            let actual = if stream_header.format == STREAM_FORMAT_END_P06_LIFECYCLE {
+            let mut actual = if stream_header.format == STREAM_FORMAT_END_P06_LIFECYCLE {
                 let end_materializer = match materializer.as_mut().expect("End materializer") {
                     OrderedLifecycleMaterializer::End(materializer) => materializer,
                     _ => panic!("P06 End stream selected a non-End materializer"),
@@ -2437,8 +2572,13 @@ fn stream_external_oracle_matches_lodestone() {
                     stream_header.dimension.manifest_dimension(),
                 )
             };
+            coordinate_control(frame.index, &mut actual, stream_header.dimension, control.as_deref());
             let actual_digest = support::large_parity_manifest::sha256(&actual);
             if actual_digest != frame.digest {
+                if std::env::var_os("LODESTONE_COORDINATE_REPORT").is_some() {
+                    write_coordinate_report(stream_header, &raw_header, compared + 1,
+                        first_stream_divergence(&frame, &actual, stream_header));
+                }
                 mismatch_count += 1;
                 let differences = (scan_all || diagnostics_enabled()).then(|| {
                     mismatch_differences(
@@ -2578,4 +2718,5 @@ fn stream_external_oracle_matches_lodestone() {
         artifacts.finish(compared);
     }
     assert_eq!(mismatch_count, 0, "stream parity scan found {mismatch_count} mismatching chunks");
+    write_coordinate_report(stream_header, &raw_header, compared, None);
 }

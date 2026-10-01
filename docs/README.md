@@ -410,9 +410,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   run end to end against a live vanilla server, and bounded generated fluid,
   waterlogging, redstone and piston scripts run against that oracle with per-case
   reset, timing-boundary checks, semantic shrinking, replay and a configurable
-  resumable campaign command. The generator's general properties are also proven
-  against fresh in-memory oracles. Its own section below says exactly what is and is
-  not there.
+  resumable campaign command. An accompanying world-generation lane generates bounded
+  Overworld coordinate rectangles through the existing external stream comparator,
+  with its own checkpoint, rectangle reduction and fresh replay confirmation. The
+  generator's general properties are also proven against fresh in-memory oracles. Its
+  own section below says exactly what is and is not there.
 - [`gpu/` module layout and shader conventions](./gpu-module-layout.md) — How
   `crates/lodestone-shell`'s render coordinator (`RenderState`) is split across
   `gpu.rs` and a `gpu/` folder of submodules, plus the convention every WGSL shader in

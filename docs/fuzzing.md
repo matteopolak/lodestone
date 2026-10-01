@@ -18,6 +18,9 @@ general-purpose live fuzzer: fixed scripts run end to end against a live vanilla
 server, and bounded generated fluid, waterlogging, redstone and piston scripts run against that oracle
 with per-case reset, timing-boundary checks, semantic shrinking, replay and a
 configurable resumable campaign command.
+An accompanying world-generation lane generates bounded Overworld coordinate
+rectangles through the existing external stream comparator, with its own
+checkpoint, rectangle reduction and fresh replay confirmation.
 The generator's general properties are also proven against fresh in-memory
 oracles. Its own section below says exactly what is and is not there.
 
@@ -1001,6 +1004,99 @@ and the motion-blocking heightmap from initial chunk content. The public client
 surface still has no narrow biome or initial block-entity query, so those
 remain coverage gaps rather than reasons to read protocol-private state in the
 test.
+
+### Bounded world-generation coordinate campaign
+
+`scripts/worldgen-oracle/coordinate-campaign.py` generates at most eight
+Overworld rectangles, each at most two by two chunks, and invokes the existing
+`stream-parity.sh` production comparator once per candidate. Every invocation
+starts a fresh external oracle and a fresh production resident lifecycle.
+Expected terrain, biomes, the three client heightmaps and canonical block
+entities come from the external stream. Lighting is outside this light-free
+record domain. The campaign uses world seed **42** throughout; `--seed` is the
+independent **coordinate generator seed**, not another world seed.
+
+The finite origin alphabet is `(-1,-1)`, `(0,0)`, `(-33,31)`, `(31,-33)`,
+`(32,32)`, `(-32,-32)`, `(1,-1)`, and `(-1,1)`. A seed rotates these origins
+and a fixed 64-bit mixer chooses one- or two-chunk axis lengths. Eight cases
+visit every origin; shorter slices have correspondingly narrower coverage.
+The order remains z-major with x fastest. This does not generate arbitrary
+request permutations, additional dimensions or multiple world seeds.
+
+```bash
+python3 scripts/worldgen-oracle/coordinate-campaign.py \
+  --output .cache/worldgen-coordinate-campaign --run-cases 2
+python3 scripts/worldgen-oracle/coordinate-campaign.py \
+  --output .cache/worldgen-coordinate-campaign --run-cases 2 --resume
+python3 scripts/worldgen-oracle/coordinate-campaign.py \
+  --replay .cache/worldgen-coordinate-campaign/replay.json
+```
+
+The first mismatch report retains the frame index, target chunk, component,
+typed local cell, expected and actual identities, and component bounding box.
+Component priority follows the existing difference engine: record structure,
+heightmaps, terrain, biomes, then block entities. A block-entity or structural
+failure uses an explicit `record-byte` offset rather than inventing a spatial
+cell. Reductions remove rectangle edges around the original divergent target;
+each candidate is accepted only if a fresh oracle run preserves target,
+component, cell and both identities. The frame index may change when earlier
+chunks are removed. Reductions do not move a target toward zero or inject
+resident transitions. Eight attempts is a maximum, not a promise of global
+minimality; a changed lifecycle can prevent a smaller rectangle from preserving
+the same failure.
+
+`checkpoint.json` atomically records format and generator versions, exact
+settings and source fingerprints, next case, completed generation/shrink/replay
+evaluations, and any explicit finding with its original and reduced rectangles.
+It also binds the actual oracle binary and source digests observed in the
+stream header to the configured cache and launcher. Resume rejects changed
+settings, oracle binary or comparator/oracle launcher source. Failed
+evaluations retain their case or reduction, and interruption before publication
+reruns that evaluation. A finding is checkpointed before reduction and written
+to `replay.json` before confirmation. Fresh confirmation must preserve its
+complete signature. An unconfirmed replay is a failure, with its finding
+retained for resume. A confirmed finding stops search. The source fingerprints
+identify the campaign and comparator harness, not every transitive production
+source; replay after changing those fingerprinted files requires reviewing and
+recapturing the case under the new implementation.
+
+Defaults and hard caps are eight generated cases and eight shrink attempts.
+`--run-cases` selects one to eight generated cases per invocation.
+`--subprocess-seconds` defaults to 240 and is capped at 600; it bounds the
+whole oracle/comparator process group, including compilation. `--total-seconds`
+defaults to 1800 and is capped at 3600 per invocation, shared by search,
+reduction and replay. Process-group cleanup has at most four additional
+seconds. JSON artifacts and the retained subprocess log tail are capped at
+64 KiB each. The existing stream launcher owns its temporary raw streams;
+the campaign adds only a separately owned temporary report directory and
+retains no raw stream copies. It removes inherited `LODESTONE_*` overrides,
+fixes stream batch size to one, and allows no heightmap deferral or scan-all
+acceptance. Use an empty output directory for a new run. An OS lock prevents
+two invocations from writing the same checkpoint. Exit `0` means a requested
+slice completed without a finding, `1` means search confirmed a finding, and
+`2` means invalid input, oracle failure or unconfirmed replay. Standalone replay
+returns `0` only after fresh confirmation. Repeat nondefault immutable options
+when resuming or replaying.
+
+To extend the domain, change `ORIGINS` and rectangle validation together and
+bump `GENERATOR_VERSION`. Report shape changes require a `FORMAT_VERSION`
+bump in both the script and comparator. Keep comparison in
+`streaming_worldgen_parity::first_stream_divergence` and its existing
+`mismatch_differences` engine. The test-only `LODESTONE_COORDINATE_CONTROL`
+hook accepts `frame,x,y,z` and flips one Rust-side terrain state after production
+serialization, leaving external bytes untouched. The ordinary
+`coordinate_control_reports_exact_first_frame_and_cell_without_changing_expected`
+test checks its exact frame, cell, identities and bounding box and unchanged
+expected digest. The campaign clears this hook from its environment.
+
+Run `python3 scripts/worldgen-oracle/test_coordinate_campaign.py` for hermetic
+generation, bounds, checkpoint, class-preserving reduction, replay, process
+deadline and log-retention controls. Those controls substitute the external
+runner and establish orchestration behavior; only a completed real campaign
+establishes external world-generation comparison. Dependencies are Python's
+standard library, the existing shell launcher, Apple `container` with the
+26.2 cache, and the ignored `lodestone-v26-2` stream test using production
+world generation and resident materialization.
 
 ### What Track B still does not do
 - **The client-state packet corpus is still small.** The captured lane covers
