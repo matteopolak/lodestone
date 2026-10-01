@@ -1,7 +1,5 @@
 //! [`VegGrid`] — vegetal decoration's read/write surface over one column's 3×3
 //! neighbourhood — and the [`census`] counters that make a silent no-op step visible.
-//!
-//! Moved here verbatim from `feature/vegetation.rs` by U16 Phase B.
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -1293,14 +1291,16 @@ impl VegGrid {
         if pending.is_empty() {
             return;
         }
-        census_bump(|c| c.height_scans += 1);
+        let mut scan_cells = 0u64;
+        let mut primary_cells = 0u64;
+        let mut companion_tail_cells = 0u64;
         let source = self.source_grid(lx, lz);
         for y in (self.min_y..self.min_y + self.height).rev() {
-            census_bump(|c| c.height_scan_cells += 1);
+            scan_cells += 1;
             if pending.contains(primary) {
-                census_bump(|c| c.height_primary_cells += 1);
+                primary_cells += 1;
             } else if !pending.is_empty() {
-                census_bump(|c| c.height_companion_tail_cells += 1);
+                companion_tail_cells += 1;
             }
             if !pending.intersection(HeightLaneMask::LIVE).is_empty() {
                 let (id, facts) = self.live_id_and_facts(source, lx, y, lz);
@@ -1339,6 +1339,12 @@ impl VegGrid {
                 self.cache_height(lx, lz, lane, self.min_y);
             }
         }
+        census_bump(|c| {
+            c.height_scans += 1;
+            c.height_scan_cells += scan_cells;
+            c.height_primary_cells += primary_cells;
+            c.height_companion_tail_cells += companion_tail_cells;
+        });
     }
 
     #[inline]
@@ -1535,15 +1541,16 @@ impl super::super::OreWorldAccess for VegGrid {
     #[inline]
     fn ore_get_id(&self, lx: i32, y: i32, lz: i32) -> StateId {
         let (lx, lz) = self.to_local_clamped(self.origin_x + lx, self.origin_z + lz);
-        let overlay = self
-            .blocks
-            .get_in_bounds(&self.overlay_key(lx, y, lz))
-            .is_some();
-        let id = self.get_local_id(lx, y, lz);
-        if overlay {
-            super::super::ore_probe::bump_region_read_overlay(1);
+        if y < self.min_y || y >= self.min_y + self.height {
+            return StateId::AIR;
         }
-        id
+        match self.blocks.get_in_bounds(&self.overlay_key(lx, y, lz)) {
+            Some(id) => {
+                super::super::ore_probe::bump_region_read_overlay(1);
+                id
+            }
+            None => self.source_id(lx, y, lz),
+        }
     }
 
     #[inline]
@@ -1956,6 +1963,7 @@ mod heightmap_tests {
     use super::census;
     use super::VegGrid;
     use crate::dense_grid::DenseBlockGrid;
+    use crate::feature::OreWorldAccess;
     #[cfg(feature = "gen-counters")]
     use crate::feature::region_view::wide_slot_of_offset;
 
@@ -1997,6 +2005,84 @@ mod heightmap_tests {
             },
         );
         (grid, air, grass, short_grass)
+    }
+
+    #[test]
+    fn ore_reads_negative_source_then_overlay_without_extra_source_reads() {
+        let (mut grid, air, grass, short_grass) = p07_source_grid();
+        census::reset();
+        crate::feature::ore_probe::reset();
+
+        assert_eq!(grid.ore_get_id(-1, 121, 13), grass);
+        assert_eq!(grid.ore_get_id(-1, 122, 13), air);
+        let reads = census::source_read_snapshot();
+        #[cfg(feature = "gen-counters")]
+        {
+            assert!(reads.is_complete());
+            assert_eq!(reads.owner_count, 1);
+            let owner = reads.owners().next().expect("west source was read");
+            assert_eq!((owner.chunk_x, owner.chunk_z), (-26, -25));
+            assert_eq!(owner.reads, 2);
+            assert_eq!(owner.unique_xz_lanes(), 1);
+            assert_eq!(owner.unique_4x8x4_cells(), 1);
+            assert_eq!(crate::feature::ore_probe::snapshot().region_reads_overlay, 0);
+        }
+
+        assert!(grid.ore_set_id(-1, 122, 13, short_grass));
+        assert_eq!(grid.ore_get_id(-1, 122, 13), short_grass);
+        assert_eq!(census::source_read_snapshot(), reads);
+        #[cfg(feature = "gen-counters")]
+        assert_eq!(crate::feature::ore_probe::snapshot().region_reads_overlay, 1);
+    }
+
+    #[test]
+    fn ore_reads_outside_vertical_bounds_are_air() {
+        let (mut grid, air, grass, short_grass) = p07_source_grid();
+        assert!(grid.ore_set_id(-1, 0, 13, grass));
+        assert!(grid.ore_set_id(-1, 127, 13, short_grass));
+        census::reset();
+        crate::feature::ore_probe::reset();
+
+        for y in [-1, 128] {
+            assert_eq!(grid.ore_get_id(-1, y, 13), air);
+            assert_eq!(grid.get_id(-401, y, -387), air);
+        }
+        assert_eq!(census::source_read_snapshot().owner_count, 0);
+        assert_eq!(crate::feature::ore_probe::snapshot().region_reads_overlay, 0);
+        assert_eq!(grid.ore_get_id(-1, 0, 13), grass);
+        assert_eq!(grid.ore_get_id(-1, 127, 13), short_grass);
+        #[cfg(feature = "gen-counters")]
+        assert_eq!(crate::feature::ore_probe::snapshot().region_reads_overlay, 2);
+    }
+
+    #[test]
+    fn ore_entry_keeps_x_z_y_dirty_order_and_overlay_no_op_writes() {
+        let (mut grid, _, grass, short_grass) = p07_source_grid();
+        assert!(grid.set_id_if_in_bounds(-398, 9, -399, short_grass));
+        grid.ore_entry_begin();
+        assert!(grid.ore_set_id(2, 9, 1, short_grass));
+        assert!(grid.ore_set_id(1, 4, 3, grass));
+        assert!(grid.ore_set_id(1, 6, -1, grass));
+        assert!(grid.ore_set_id(1, 2, -1, short_grass));
+        // A source-identical first write still creates an overlay entry;
+        // repeating that overlay state does not add another ore dirty cell.
+        assert!(grid.ore_set_id(-1, 121, 13, grass));
+        assert!(grid.ore_set_id(-1, 121, 13, grass));
+        assert_eq!(grid.dirty_len(), 1);
+        grid.ore_entry_end();
+
+        assert_eq!(
+            grid.dirty_cells().collect::<Vec<_>>(),
+            vec![
+                (-398, 9, -399, short_grass),
+                (-401, 121, -387, grass),
+                (-399, 2, -401, short_grass),
+                (-399, 6, -401, grass),
+                (-399, 4, -397, grass),
+            ],
+        );
+        assert!(grid.set_id_if_in_bounds(-398, 9, -399, short_grass));
+        assert_eq!(grid.dirty_len(), 6);
     }
 
     #[cfg(feature = "gen-counters")]

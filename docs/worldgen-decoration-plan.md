@@ -10,13 +10,21 @@ Catalog construction still resolves the ordered feature graph once. Each resulti
 
 The existing feature-to-biome map remains available for candidate-position biome gates. The numeric plan is consumed by the Overworld replay and decoration preparation paths through the existing catalog selectors, so no alternate generation implementation is introduced.
 
+Those entries share `VegGrid`'s mutable decoration surface. Reads outside its vertical window return air; in-range ore reads probe the overlay once, then fall back to the immutable source owning the column. Overlay hits increment the ore overlay-read diagnostic, while only source reads enter the source-owner census. Source routing retains Euclidean chunk division for negative coordinates.
+
+Height-lane scans accumulate visited, primary, and companion-tail cell counts locally and publish them to the vegetation census once per completed scan. Source-read accounting still records each source cell actually consumed. Live lanes observe prior overlay writes; world-generation lanes retain their immutable baseline.
+
 ## How to change it
 
 Update `compose.rs` when changing catalog ordering, membership compilation, or selector output. Keep the entry index calculation tied to the final ordered graph, and add a selector test whenever a new feature category is added. Do not sort selected entries by feature name: ascending catalog position is the observable execution order.
 
+Change `feature::vegetation::VegGrid` for shared read precedence or height accounting. Preserve its vertical guard, overlay-first reads, source census, and ore entry's `(x, z, y)` dirty transfer order. A repeated overlay-identical ore write adds no dirty cell, but the first write matching an immutable source still creates an overlay entry.
+
 ## Configuration
 
 The plan has no runtime flags. It is rebuilt when a generator is constructed from the supplied resolver and biome order.
+
+The `gen-counters` Cargo feature enables source-owner and ore-read diagnostics. The vegetation census, including height-scan totals, remains available without that feature.
 
 ## Dependencies
 
