@@ -136,9 +136,9 @@ callers must not return the scratch diff while any consumer still borrows it.
 
 ### Freeze-top-layer (snow and ice)
 
-The final decoration step, `TOP_LAYER_MODIFICATION`, walks every column and (a) freezes the block
-below the water surface to ice if the biome's `shouldFreeze` predicate is true, and (b) places a
-snow layer on top if `shouldSnow` is true, flipping the block below to its `snowy` variant. It
+The final decoration step, `TOP_LAYER_MODIFICATION`, walks every column and (a) freezes cold source
+water at the motion-blocking surface to ice, and (b) places a snow layer above a cold supporting block,
+flipping the block below to its `snowy` variant. It
 consumes **no RNG** (vanilla's own feature draws nothing), so it cannot desync anything upstream or
 downstream, and it must run after vegetation (snow sits on top of a tree canopy, not the pre-tree
 terrain). The one real trap is that vanilla's temperature test is **height-adjusted** — biome
@@ -153,6 +153,15 @@ helper delegates to canonical identity data. World-loading
 and protocol boundaries validate raw ids once; downstream freeze, snow-support
 and default-state reads cannot confuse a state id with another numeric registry
 and need no repeated range fallback.
+
+Before reading the live height or any blocks, `feature::top_layer` evaluates each column's horizontal
+temperature inputs once and checks the adjusted temperature at the configured minimum and maximum Y.
+If both endpoints are at least `0.15`, every writable position is warm and the column needs no height
+scan. Below or at `sea_level + 17` the temperature is constant; above it the exact `f32` lapse formula
+is nonincreasing. Negative lapse noise can produce an upward jump between those branches, so an upper
+endpoint alone is insufficient. The `FROZEN` modifier is horizontal-only and preserves this proof.
+Columns that can be cold keep the live height scan, ice-before-snow writes, and the same temperature
+inputs for the actual surface positions. The shortcut allocates no cache and consumes no RNG.
 
 ## How to change it, and the gotchas
 

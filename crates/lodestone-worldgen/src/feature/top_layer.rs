@@ -587,35 +587,78 @@ pub fn height_adjusted_temperature(
     z: i32,
     sea_level: i32,
 ) -> f32 {
-    let adjusted = match climate.temperature_modifier {
-        TemperatureModifier::None => climate.temperature,
-        TemperatureModifier::Frozen => {
-            let large_variation = noise.frozen_temperature(f64::from(x) * 0.05, f64::from(z) * 0.05)
-                * 7.0;
-            let edge_variation = noise.biome_info(f64::from(x) * 0.2, f64::from(z) * 0.2);
-            let ice_patches = large_variation + edge_variation;
-            if ice_patches < 0.3 {
-                let small_variation =
-                    noise.biome_info(f64::from(x) * 0.09, f64::from(z) * 0.09);
-                if small_variation < 0.8 {
-                    0.2
+    ColumnTemperature::new(climate, noise, x, z, sea_level, y).at(y)
+}
+
+/// Horizontal temperature inputs retained only for the current column.
+struct ColumnTemperature {
+    adjusted: f32,
+    lapse_noise: f32,
+    snow_level: i32,
+}
+
+impl ColumnTemperature {
+    fn new(
+        climate: &BiomeClimate,
+        noise: &ClimateNoise,
+        x: i32,
+        z: i32,
+        sea_level: i32,
+        max_y: i32,
+    ) -> Self {
+        let adjusted = match climate.temperature_modifier {
+            TemperatureModifier::None => climate.temperature,
+            TemperatureModifier::Frozen => {
+                let large_variation =
+                    noise.frozen_temperature(f64::from(x) * 0.05, f64::from(z) * 0.05) * 7.0;
+                let edge_variation = noise.biome_info(f64::from(x) * 0.2, f64::from(z) * 0.2);
+                let ice_patches = large_variation + edge_variation;
+                if ice_patches < 0.3 {
+                    let small_variation =
+                        noise.biome_info(f64::from(x) * 0.09, f64::from(z) * 0.09);
+                    if small_variation < 0.8 {
+                        0.2
+                    } else {
+                        climate.temperature
+                    }
                 } else {
                     climate.temperature
                 }
-            } else {
-                climate.temperature
             }
+        };
+        let snow_level = sea_level + SNOW_LEVEL_ABOVE_SEA;
+        let lapse_noise = if max_y > snow_level {
+            // Divide in f32 before widening the horizontal noise coordinates.
+            let nx = f64::from(x as f32 / 8.0);
+            let nz = f64::from(z as f32 / 8.0);
+            (noise.temperature(nx, nz) * 8.0) as f32
+        } else {
+            0.0
+        };
+        Self {
+            adjusted,
+            lapse_noise,
+            snow_level,
         }
-    };
-    let snow_level = sea_level + SNOW_LEVEL_ABOVE_SEA;
-    if y > snow_level {
-        // `pos.getX() / 8.0F`: a float divide, then widened for `getValue`.
-        let nx = f64::from(x as f32 / 8.0);
-        let nz = f64::from(z as f32 / 8.0);
-        let v = (noise.temperature(nx, nz) * 8.0) as f32;
-        adjusted - (v + y as f32 - snow_level as f32) * 0.05 / 40.0
-    } else {
-        adjusted
+    }
+
+    fn at(&self, y: i32) -> f32 {
+        if y > self.snow_level {
+            self.adjusted - (self.lapse_noise + y as f32 - self.snow_level as f32) * 0.05 / 40.0
+        } else {
+            self.adjusted
+        }
+    }
+
+    fn is_warm(&self, y: i32) -> bool {
+        self.at(y) >= RAIN_TEMPERATURE_THRESHOLD
+    }
+
+    fn is_warm_through(&self, min_y: i32, max_y: i32) -> bool {
+        // The lower branch is constant and the upper branch is nonincreasing.
+        // Negative lapse noise can jump upward at their boundary, so both
+        // endpoints are needed when the interval crosses that boundary.
+        self.is_warm(min_y) && self.is_warm(max_y)
     }
 }
 
@@ -944,12 +987,16 @@ fn apply_freeze_top_layer_impl<'a, G: TopLayerGrid>(
             let Some(climate) = climate_at(dx, dz) else {
                 continue;
             };
+            let temperature = ColumnTemperature::new(climate, noise, x, z, sea_level, max_y);
+            if temperature.is_warm_through(min_y, max_y) {
+                continue;
+            }
             let top_y = grid.top_layer_motion_blocking_first_free(support, x, z, min_y, height);
             let below_y = top_y - 1;
 
-            // --- ice: vanilla's own freeze predicate at belowPos, neighbour checking off
+            // Freeze the surface water before testing snow support above it.
             let inside_below = below_y >= min_y && below_y <= max_y;
-            if inside_below && !warm_enough_to_rain(climate, noise, x, below_y, z, sea_level) {
+            if inside_below && !temperature.is_warm(below_y) {
                 // The block-light gate (`< 10`) is unconditionally true during
                 // worldgen — see this module's "Approximations, named".
                 if support
@@ -967,12 +1014,11 @@ fn apply_freeze_top_layer_impl<'a, G: TopLayerGrid>(
                 }
             }
 
-            // --- snow: vanilla's own snow predicate at topPos
             if !climate.has_precipitation {
                 continue;
             }
             let inside_top = top_y >= min_y && top_y <= max_y;
-            if !inside_top || warm_enough_to_rain(climate, noise, x, top_y, z, sea_level) {
+            if !inside_top || temperature.is_warm(top_y) {
                 continue;
             }
             let top_base = grid.top_layer_get_id(x, top_y, z);
@@ -1070,12 +1116,249 @@ fn with_snowy_true(state: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     fn climate(temperature: f32) -> BiomeClimate {
         BiomeClimate {
             has_precipitation: true,
             temperature,
             temperature_modifier: TemperatureModifier::None,
+        }
+    }
+
+    struct ReadCountingGrid {
+        grid: DenseBlockGrid,
+        block_reads: Cell<usize>,
+        height_reads: Cell<usize>,
+    }
+
+    impl TopLayerGrid for ReadCountingGrid {
+        fn top_layer_get_id(&self, x: i32, y: i32, z: i32) -> StateId {
+            self.block_reads.set(self.block_reads.get() + 1);
+            self.grid.get_id(x, y, z)
+        }
+
+        fn top_layer_set_id(&mut self, x: i32, y: i32, z: i32, state: StateId) {
+            self.grid.set_id(x, y, z, state);
+        }
+
+        fn top_layer_motion_blocking_first_free(
+            &self,
+            support: &SnowSupport,
+            x: i32,
+            z: i32,
+            min_y: i32,
+            height: i32,
+        ) -> i32 {
+            self.height_reads.set(self.height_reads.get() + 1);
+            motion_blocking_first_free_scalar(self, support, x, z, min_y, height)
+        }
+    }
+
+    fn top_layer_test_support() -> SnowSupport {
+        let predicate = |names: &[&str]| {
+            StatePredicate::new(
+                names.iter().map(|name| (*name).to_owned()).collect(),
+                HashMap::new(),
+            )
+        };
+        SnowSupport {
+            blocks_motion: predicate(&["minecraft:stone", "minecraft:grass_block", "minecraft:ice"]),
+            has_fluid_state: predicate(&["minecraft:water"]),
+            water_source: predicate(&["minecraft:water"]),
+            face_full_up: predicate(&["minecraft:stone", "minecraft:grass_block", "minecraft:ice"]),
+            snowy_property: predicate(&["minecraft:grass_block"]),
+            cannot_support_blocks: [Block::Ice].into_iter().collect(),
+            ..SnowSupport::default()
+        }
+    }
+
+    #[test]
+    fn warm_top_layer_shortcut_performs_zero_grid_reads_with_cold_control() {
+        let support = top_layer_test_support();
+        let noise = ClimateNoise::new();
+        let mut grid = ReadCountingGrid {
+            grid: DenseBlockGrid::new(0, 0, 0, 16, 160, 16, "minecraft:air"),
+            block_reads: Cell::new(0),
+            height_reads: Cell::new(0),
+        };
+        grid.grid.set_id(0, 0, 0, Block::Stone.default_state());
+        let mut writes = Vec::new();
+        for (temperature, expected_counts) in [
+            (0.8, FreezeCounts::default()),
+            (0.0, FreezeCounts { ice: 0, snow: 1, snowy_flips: 0 }),
+        ] {
+            let c = climate(temperature);
+            let counts = apply_freeze_top_layer_impl(
+                &mut grid,
+                0,
+                0,
+                0,
+                160,
+                63,
+                &|_, _| Some(&c),
+                &support,
+                &noise,
+                &mut |x, y, z, state| writes.push((x, y, z, state)),
+            );
+            assert_eq!(counts, expected_counts);
+            let no_reads = grid.height_reads.get() == 0 && grid.block_reads.get() == 0;
+            assert_eq!(
+                no_reads,
+                temperature == 0.8,
+                "the cold control must fail the zero-read detector",
+            );
+            if temperature == 0.8 {
+                assert!(writes.is_empty());
+                assert_eq!((grid.height_reads.get(), grid.block_reads.get()), (0, 0));
+            }
+        }
+        assert_eq!(grid.height_reads.get(), 256);
+        assert_eq!(writes, vec![(0, 1, 0, SNOW_LAYER)]);
+    }
+
+    #[test]
+    fn warm_top_layer_shortcut_preserves_mountain_snow_and_cold_water_writes() {
+        let support = top_layer_test_support();
+        let noise = ClimateNoise::new();
+        let mountain = climate(0.2);
+        let cold = climate(0.0);
+        let (plain_grass, snowy_grass) = bind_snowy_pair(Block::GrassBlock);
+        let mut grid = DenseBlockGrid::new(0, 0, 0, 16, 160, 16, "minecraft:air");
+        grid.set_id(0, 140, 0, plain_grass);
+        grid.set_id(1, 70, 0, plain_grass);
+        grid.set_id(2, 62, 0, Block::Water.default_state());
+        let mut writes = Vec::new();
+        let counts = apply_freeze_top_layer_impl(
+            &mut grid,
+            0,
+            0,
+            0,
+            160,
+            63,
+            &|x, _| Some(if x == 2 { &cold } else { &mountain }),
+            &support,
+            &noise,
+            &mut |x, y, z, state| writes.push((x, y, z, state)),
+        );
+        // At y=141 the 61-block lapse exceeds the 40-block threshold crossing
+        // even with the measured noise range; y=71 is in the warm flat branch.
+        assert_eq!(counts, FreezeCounts { ice: 1, snow: 1, snowy_flips: 1 });
+        assert_eq!(
+            writes,
+            vec![(0, 141, 0, SNOW_LAYER), (0, 140, 0, snowy_grass), (2, 62, 0, ICE)],
+        );
+        assert_eq!(grid.get_id(1, 70, 0), plain_grass);
+        assert_eq!(grid.get_id(1, 71, 0), StateId::AIR);
+        assert_eq!(grid.get_id(2, 63, 0), StateId::AIR);
+    }
+
+    fn scalar_temperature_baseline(
+        climate: &BiomeClimate,
+        noise: &ClimateNoise,
+        x: i32,
+        y: i32,
+        z: i32,
+        sea_level: i32,
+    ) -> f32 {
+        let mut adjusted = climate.temperature;
+        if climate.temperature_modifier == TemperatureModifier::Frozen {
+            let patch = noise.frozen_temperature(f64::from(x) * 0.05, f64::from(z) * 0.05) * 7.0
+                + noise.biome_info(f64::from(x) * 0.2, f64::from(z) * 0.2);
+            if patch < 0.3 && noise.biome_info(f64::from(x) * 0.09, f64::from(z) * 0.09) < 0.8 {
+                adjusted = 0.2;
+            }
+        }
+        let snow_level = sea_level + 17;
+        if y > snow_level {
+            let v = (noise.temperature(f64::from(x as f32 / 8.0), f64::from(z as f32 / 8.0))
+                * 8.0) as f32;
+            adjusted - (v + y as f32 - snow_level as f32) * 0.05 / 40.0
+        } else {
+            adjusted
+        }
+    }
+
+    #[test]
+    fn warm_top_layer_shortcut_matches_piecewise_temperature_baseline() {
+        let noise = ClimateNoise::new();
+        let frozen = BiomeClimate {
+            temperature_modifier: TemperatureModifier::Frozen,
+            ..climate(0.0)
+        };
+        let mut frozen_branches = [None, None];
+        for x in 0..64 {
+            for z in 0..64 {
+                let warm = scalar_temperature_baseline(&frozen, &noise, x, 63, z, 63) >= 0.15;
+                frozen_branches[usize::from(warm)].get_or_insert((x, z));
+            }
+            if frozen_branches.iter().all(Option::is_some) {
+                break;
+            }
+        }
+        let coordinates = [
+            (0, 0),
+            (100, 200),
+            (1234, -567),
+            (16777217, -16777219),
+            frozen_branches[0].expect("the Frozen mask must include a cold position"),
+            frozen_branches[1].expect("the Frozen mask must include a warm position"),
+        ];
+        for modifier in [TemperatureModifier::None, TemperatureModifier::Frozen] {
+            for temperature in [0.0, 0.14999999, 0.15, 0.15000002, 0.2, 0.8] {
+                let c = BiomeClimate {
+                    temperature_modifier: modifier,
+                    ..climate(temperature)
+                };
+                for (x, z) in coordinates {
+                    for (min_y, max_y, sea_level) in [
+                        (-64, 319, 63),
+                        (-64, 80, 63),
+                        (80, 81, 63),
+                        (81, 130, 63),
+                        (-128, -1, -160),
+                    ] {
+                        let column = ColumnTemperature::new(&c, &noise, x, z, sea_level, max_y);
+                        let mut all_warm = true;
+                        for y in min_y..=max_y {
+                            let baseline = scalar_temperature_baseline(&c, &noise, x, y, z, sea_level);
+                            assert_eq!(
+                                column.at(y).to_bits(),
+                                baseline.to_bits(),
+                                "{c:?} at ({x},{y},{z}), sea={sea_level}",
+                            );
+                            all_warm &= baseline >= 0.15;
+                        }
+                        assert_eq!(
+                            column.is_warm_through(min_y, max_y),
+                            all_warm,
+                            "{c:?} at ({x},{z}), range={min_y}..={max_y}, sea={sea_level}",
+                        );
+                    }
+                }
+            }
+        }
+        let upward_jump = ColumnTemperature {
+            adjusted: 0.149,
+            lapse_noise: -7.25,
+            snow_level: 80,
+        };
+        assert!(!upward_jump.is_warm(80));
+        assert!(upward_jump.is_warm(81));
+        assert!(
+            !upward_jump.is_warm_through(80, 81),
+            "a warm upper endpoint cannot certify the cold constant branch",
+        );
+        for lapse_noise in [-7.25, 0.0, 7.25] {
+            for adjusted in [0.14999999, 0.15, 0.15000002, 0.2] {
+                let column = ColumnTemperature { adjusted, lapse_noise, snow_level: 80 };
+                for (min_y, max_y) in [(-64, 319), (80, 81), (81, 130)] {
+                    assert_eq!(
+                        column.is_warm_through(min_y, max_y),
+                        (min_y..=max_y).all(|y| column.is_warm(y)),
+                    );
+                }
+            }
         }
     }
 
