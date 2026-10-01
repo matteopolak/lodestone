@@ -99,6 +99,8 @@ pub use web_time::Instant;
 extern "C" {
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = yieldToHost)]
     fn host_yield() -> js_sys::Promise;
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = observedTimerCallback)]
+    fn observed_timer_callback(resolve: &js_sys::Function) -> js_sys::Function;
 }
 
 /// Yields to a host message task, with a timer fallback on older browsers.
@@ -162,6 +164,37 @@ impl Drop for BrowserSleep {
 #[cfg(target_arch = "wasm32")]
 #[must_use]
 pub fn browser_sleep(duration: std::time::Duration) -> BrowserSleep {
+    browser_timer(duration, false)
+}
+
+/// A cancel-safe timer reporting elapsed host time at callback firing.
+#[cfg(target_arch = "wasm32")]
+#[derive(Debug)]
+pub struct ObservedBrowserSleep(BrowserSleep);
+
+#[cfg(target_arch = "wasm32")]
+impl std::future::Future for ObservedBrowserSleep {
+    type Output = std::time::Duration;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        self.0.future.as_mut().poll(cx).map(|value| {
+            std::time::Duration::from_secs_f64(value.unwrap().as_f64().unwrap() / 1000.0)
+        })
+    }
+}
+
+/// Measures callback time separately from future resumption for diagnostics.
+#[cfg(target_arch = "wasm32")]
+#[must_use]
+pub fn browser_sleep_observed(duration: std::time::Duration) -> ObservedBrowserSleep {
+    ObservedBrowserSleep(browser_timer(duration, true))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn browser_timer(duration: std::time::Duration, observed: bool) -> BrowserSleep {
     use wasm_bindgen::{JsCast, JsValue};
 
     let global = js_sys::global();
@@ -171,8 +204,9 @@ pub fn browser_sleep(duration: std::time::Duration) -> BrowserSleep {
     let millis = i32::try_from(duration.as_millis()).unwrap_or(i32::MAX);
     let mut timer_id = None;
     let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        let callback = if observed { observed_timer_callback(&resolve) } else { resolve };
         timer_id = set_timeout
-            .call2(&global, resolve.as_ref(), &JsValue::from(millis))
+            .call2(&global, callback.as_ref(), &JsValue::from(millis))
             .ok()
             .and_then(|value| value.as_f64())
             .map(|value| value as i32);

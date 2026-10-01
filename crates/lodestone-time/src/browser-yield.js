@@ -15,3 +15,8 @@ export function createHostYielder(host) {
 }
 
 export const yieldToHost = createHostYielder(globalThis);
+
+export function observedTimerCallback(resolve, clock = globalThis.performance) {
+  const armedAt = clock.now();
+  return () => resolve(clock.now() - armedAt);
+}

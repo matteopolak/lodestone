@@ -26,6 +26,21 @@ batches; relighting stays on its separate queued path.
 
 The shared `run_tick_loop_with_weather_impl` records the three phase durations for every tick as before. When tracing is enabled, it emits a structured event only for a phase lasting at least one 50 ms tick period, including the tick number, phase name, follow-area size, and resident-column count. Native and `wasm32` use the same tick-loop implementation; the environment-variable switch is intentionally native-only.
 
+Slow waits are traced independently of simulation work. Each wait event records
+the upcoming tick, requested deadline, request time and resume time relative to
+the tick driver's monotonic origin. Phase events use that same origin, allowing
+one slow wait to be paired with its actual tick rather than a lifetime maximum.
+Paused initial-world waits do not enter the active tick history or slow-wait trace.
+
+On the browser, enabled tracing also observes when the worker's timer callback
+fires. `callback_lateness_max_micros` measures lateness against the integer
+millisecond timeout passed to the host; `callback_resume_gap_max_micros` measures
+the remaining delay before Rust resumes. They are maxima over any early-wake
+iterations of that deadline wait, not additive components of its total lateness.
+The factory/FFI arm interval introduces a small offset in the resume gap. Native
+events leave these unavailable fields empty. Untraced and paused browser waits
+retain the direct Promise-resolver timer path and its cancellation behavior.
+
 Integrated mob seeding waits for the first join. When its area lies inside the
 initial view, it reuses full columns as they become resident rather than
 submitting duplicate generation requests. If the initial stream drains without
@@ -48,6 +63,11 @@ generation handoff rather than the cost of a deliberately broad spawn view.
 
 New periodic tick work must use a resident-only accessor when it reads a bounded `ChunkSource`. Do not add a cold `ChunkSource::column` or blocking `set_block` call to the tick task: generation and cache writes hold per-coordinate gates, so the join stream and the world clock can block one another. Use `try_resident_column_presence` for admission-only checks and `try_resident_column` only when the payload is needed. Preserve the retry behavior when a column is absent or busy, and keep changes in the shared tick-loop body so native and browser scheduling remain behaviorally aligned.
 
+Change wait attribution in `TickDriver::wait_for_tick` and `TickTrace`, not the
+simulation scheduler. Keep worker-local timer and post-resolution stall controls
+in `lodestone-time`'s JS tests; stalling the page alone does not prove a worker
+timer was delayed. Preserve the direct untraced path and shared timer cancellation.
+
 If the block-update batch size changes, preserve feed order and the
 delivery-time snapshot boundary. A queued update for a column that was not yet
 visible must not arrive after its newer initial snapshot. Keep each connection
@@ -68,9 +88,11 @@ The resident-only natural-spawn view is deliberately all-or-nothing. This gives 
 
 ## Configuration
 
-Tracing is off by default. On native runs, set `LODESTONE_TICK_TRACE=1` and enable the `lodestone_tick_trace` target at `info` or above in the configured `tracing` subscriber. Healthy phases produce no trace output; only phases at least 50 ms are emitted.
+Tracing is off by default. On native runs, set `LODESTONE_TICK_TRACE=1` and enable the `lodestone_tick_trace` target at `info` or above in the configured `tracing` subscriber. On the browser, enable that target through the SDK log level. Healthy phases and waits produce no trace output; phases, service-wake delays or cooperative yields at least 50 ms are emitted.
 For an individual block-break path, enable `lodestone_block_trace=debug` to see the action, target, pending dig, and adjudication result. The `lodestone_server::stall` target warns when the authoritative break keeps the connection loop busy for at least 50 ms.
 
 ## Dependencies
 
 The handoff uses `ChunkSource` residency methods, `ChunkStore`'s cache lookup, `FollowArea`'s terrain view, and the shared `TickClock` phase boundaries. The private gate table uses `rustc-hash`; slow-phase events use the existing `tracing` dependency and do not add a runtime worker or a second tick loop.
+Browser wait attribution uses `lodestone_time::browser_sleep_observed` and its
+worker-local `performance.now()` callback, sharing `BrowserSleep` cancellation.
