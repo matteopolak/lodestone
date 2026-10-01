@@ -234,12 +234,27 @@ impl NeighborPropagator {
         &self,
         origin: BlockPos,
         skip: Option<Direction>,
-        mut notify: F,
+        notify: F,
     ) -> Vec<Notification>
     where
         F: FnMut(Notification) -> Vec<Notification>,
     {
-        let mut stack = vec![WorkItem::FanOut { origin, skip, idx: 0 }];
+        self.propagate_stack(vec![WorkItem::FanOut { origin, skip, idx: 0 }], notify)
+    }
+
+    /// Starts with explicit notifications, preserving the same depth-first
+    /// cascade order and work cap as a six-neighbour fan-out.
+    pub(crate) fn propagate_notifications<F>(&self, notifications: Vec<Notification>, notify: F) -> Vec<Notification>
+    where
+        F: FnMut(Notification) -> Vec<Notification>,
+    {
+        self.propagate_stack(notifications.into_iter().rev().map(WorkItem::Single).collect(), notify)
+    }
+
+    fn propagate_stack<F>(&self, mut stack: Vec<WorkItem>, mut notify: F) -> Vec<Notification>
+    where
+        F: FnMut(Notification) -> Vec<Notification>,
+    {
         let mut issued = Vec::new();
         let mut count: usize = 0;
         let mut capped = false;

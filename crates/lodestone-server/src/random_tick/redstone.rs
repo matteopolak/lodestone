@@ -155,14 +155,18 @@ pub fn react_at_placement_with_entities<Q: ScheduledTickQueueAccess<ScheduledTic
                 let subtract = redstone::comparator_mode_subtract(state);
                 redstone_diode::comparator_should_turn_on(input, side, subtract)
                     .then_some(ScheduledTickKind::Comparator)
+            } else if crate::piston::is_piston(state) {
+                (crate::piston::has_extend_signal(&columns, pos, crate::piston::piston_facing(state))
+                    != crate::piston::piston_extended(state)).then_some(ScheduledTickKind::Piston)
             } else {
                 None
             };
             if let Some(kind) = placed_kind {
                 if !block_ticks.has_scheduled((x, y, z), &kind) {
-                    // `level.scheduleTick(pos, this, 1)` — the three-argument
-                    // overload, so `TickPriority.NORMAL`.
-                    block_ticks.schedule((x, y, z), kind, current_tick + 1, TickPriority::Normal);
+                    // Diodes wait one tick. A piston recheck joins the next
+                    // ingress drain without an additional scheduled delay.
+                    let delay = if kind == ScheduledTickKind::Piston { 0 } else { 1 };
+                    block_ticks.schedule((x, y, z), kind, current_tick + delay, TickPriority::Normal);
                 }
             }
             // `FireBlock::onPlace` schedules the fire's own first tick, and without
@@ -246,8 +250,9 @@ pub fn react_at_placement_with_entities<Q: ScheduledTickQueueAccess<ScheduledTic
             }
         }
     }
-    own.extend(propagate_and_react_with_entities_across_chunks(
-        column, min_x, min_z, world, x, y, z, block_ticks, current_tick, block_entities, None,
+    let columns = RedstoneColumns::new(column, min_x, min_z, world, block_entities);
+    own.extend(propagate_and_react_over(
+        &columns, x, y, z, block_ticks, current_tick, block_entities, true,
     ));
     own
 }
@@ -690,7 +695,7 @@ pub(crate) fn propagate_and_react_with_entities(
 ) -> Vec<RandomTickEvent> {
     let no_neighbors = NoNeighbors;
     let columns = RedstoneColumns::new(column, min_x, min_z, &no_neighbors, block_entities);
-    propagate_and_react_over(&columns, x, y, z, block_ticks, current_tick, block_entities)
+    propagate_and_react_over(&columns, x, y, z, block_ticks, current_tick, block_entities, false)
 }
 
 /// The neighbour fan-out every production redstone edge runs through:
@@ -725,7 +730,32 @@ pub(crate) fn propagate_and_react_with_entities_across_chunks<Q: ScheduledTickQu
     if let Some((pos, output)) = comparator_output_override {
         columns.override_comparator_output(pos, output);
     }
-    propagate_and_react_over(&columns, x, y, z, block_ticks, current_tick, block_entities)
+    propagate_and_react_over(&columns, x, y, z, block_ticks, current_tick, block_entities, false)
+}
+
+/// Executes a queued piston recheck in the world tick's move phase. Placement
+/// queues it with zero relative delay; the ingress batch is rebased after the
+/// next world-tick increment, before that tick's scheduled drain.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_piston_event<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized>(
+    column: &mut crate::chunk::ChunkColumn,
+    min_x: i32,
+    min_z: i32,
+    world: &dyn ChunkSource,
+    pos: BlockPos,
+    block_ticks: &mut Q,
+    current_tick: u64,
+    block_entities: Option<&BlockEntityHandle>,
+) -> Vec<RandomTickEvent> {
+    let columns = RedstoneColumns::new(column, min_x, min_z, world, block_entities);
+    let mut events = Vec::new();
+    let propagator = NeighborPropagator::default();
+    crate::redstone_counters::begin_drain();
+    propagator.propagate_notifications(vec![Notification { pos, from: Direction::Down }], |n| {
+        react_to_notification(&columns, n, block_ticks, current_tick, &mut events, block_entities, false)
+    });
+    crate::redstone_counters::end_drain();
+    events
 }
 
 /// The shared core both [`propagate_and_react_with_entities`] and
@@ -744,6 +774,7 @@ fn propagate_and_react_over<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Si
     block_ticks: &mut Q,
     current_tick: u64,
     block_entities: Option<&BlockEntityHandle>,
+    defer_piston: bool,
 ) -> Vec<RandomTickEvent> {
     crate::redstone_counters::begin_drain();
     let mut events = Vec::new();
@@ -769,7 +800,7 @@ fn propagate_and_react_over<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Si
 
     for centre in centres {
         propagator.propagate(centre, None, |n: Notification| -> Vec<Notification> {
-            react_to_notification(columns, n, block_ticks, current_tick, &mut events, block_entities)
+            react_to_notification(columns, n, block_ticks, current_tick, &mut events, block_entities, defer_piston)
         });
     }
     crate::redstone_counters::end_drain();
@@ -779,6 +810,7 @@ fn propagate_and_react_over<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Si
 /// One neighbour notification's worth of reaction dispatch — the body of
 /// [`propagate_and_react`]'s `notify` closure, named so the seven centres a
 /// dust change fans out from can share it.
+#[allow(clippy::too_many_arguments)]
 fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized>(
     columns: &RedstoneColumns<'_, '_>,
     n: Notification,
@@ -786,6 +818,7 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
     current_tick: u64,
     events: &mut Vec<RandomTickEvent>,
     block_entities: Option<&BlockEntityHandle>,
+    defer_piston: bool,
 ) -> Vec<Notification> {
     {
         // Reachability is not a single-column bounds check: `n.pos` may be in
@@ -959,34 +992,19 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
             return Vec::new();
         }
 
-        // 3b-bis. Pistons. The neighbour-update dispatch calls
-        // `checkIfExtend`, which is **immediate** — it fires a block event rather
-        // than scheduling a tick, so the move happens in the same neighbour pass
-        // that noticed the signal. That is why this arm mutates here and returns a
-        // fan-out rather than scheduling.
-        //
-        // The signal test is `piston::has_extend_signal`, which includes
-        // **quasi-connectivity** — see its own doc comment for why that is not a
-        // bug to be fixed.
-        //
-        // **The move is two-phase.** `crate::piston::begin_move` splits
-        // `apply_move`'s one-step writes into the cells that empty now and the cells
-        // that hold a `moving_piston` for `PISTON_MOVE_DELAY` ticks, and each of the
-        // latter schedules its own commit carrying the state it will write
-        // (`piston::finish_kind`). `crate::tick`'s scheduled-tick drain runs that
-        // commit, so the world two ticks from now is what the one-step path used to
-        // produce immediately — and in between, a client has a `moving_piston` cell
-        // and a block entity to animate.
-        //
-        // A pending commit can still run to completion instead of being
-        // interrupted by a zero-tick pulse, and entity shoving is not modeled.
-        // `crate::piston` documents both limitations.
+        // External placement defers to the next move phase; in-tick fan-out
+        // starts movement now. Both commit after the same animation delay.
         if class == crate::redstone_graph::ReactionClass::Piston {
             let facing = crate::piston::piston_facing(state);
             let extended = crate::piston::piston_extended(state);
             let want_extended =
                 crate::piston::has_extend_signal(columns, n.pos, facing);
             if want_extended != extended {
+                if defer_piston {
+                    block_ticks.schedule((n.pos.x, n.pos.y, n.pos.z), ScheduledTickKind::Piston,
+                        current_tick, TickPriority::Normal);
+                    return Vec::new();
+                }
                 let sticky = crate::piston::is_sticky_piston(state);
 
                 // Finish a matching pending commit before applying a retraction.

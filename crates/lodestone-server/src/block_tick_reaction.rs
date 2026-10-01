@@ -104,6 +104,17 @@ pub fn run_due_block_tick<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Size
     block_entities: Option<&BlockEntityHandle>,
 ) -> BlockTickReaction {
     let (x, y, z) = (pos.x, pos.y, pos.z);
+    if kind == &ScheduledTickKind::Piston {
+        if !crate::piston::is_piston(state) {
+            return BlockTickReaction::default();
+        }
+        let events = crate::random_tick::run_piston_event(column, min_x, min_z, world, pos,
+            block_ticks, current_tick, block_entities);
+        // The base write is already one of the events. Some(old_state) keeps
+        // the production consumer's event publication path active without
+        // publishing that base write twice.
+        return BlockTickReaction { new_state: Some(state), comparator_output: None, events };
+    }
     let mut comparator_output = None;
     // Scoped so the borrow this view holds on `column` ends before the direct
     // `column.set_block` below and before the cascade builds its own view.
@@ -200,6 +211,15 @@ pub fn run_due_block_tick<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Size
     if changed {
         column.set_block_id(x - min_x, y, z - min_z, new_state);
         world.set_block(x, y, z, new_state);
+    }
+    if crate::piston::is_finish_kind(kind) && crate::piston::is_piston(new_state) {
+        let columns = crate::random_tick::RedstoneColumns::new(column, min_x, min_z, world, block_entities);
+        if crate::piston::has_extend_signal(&columns, pos, crate::piston::piston_facing(new_state))
+            != crate::piston::piston_extended(new_state) {
+            // Restoring a base happens after the move phase. Its own signal
+            // recheck therefore starts another move on the following tick.
+            block_ticks.schedule((x, y, z), ScheduledTickKind::Piston, current_tick + 1, TickPriority::Normal);
+        }
     }
     let events = crate::random_tick::propagate_and_react_with_entities_across_chunks(
         column,
