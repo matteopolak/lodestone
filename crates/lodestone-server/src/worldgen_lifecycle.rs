@@ -1936,6 +1936,9 @@ fn nether_resident_grid(
     cz: i32,
     column: &ChunkColumn,
 ) -> lodestone_worldgen::dense_grid::DenseBlockGrid {
+    lodestone_worldgen::counters::bump_resident_dense_import(
+        NetherChunkSource::WINDOW_HEIGHT as u64 * 256,
+    );
     lodestone_worldgen::dense_grid::DenseBlockGrid::from_column_palette_indices(
         cx * 16,
         NetherChunkSource::MIN_Y,
@@ -1992,18 +1995,24 @@ impl LifecycleWorldgenSource for NetherChunkSource {
     ) -> LifecycleFeatureResult {
         let overrides = override_vec(overrides);
         let result = if target == source {
-            self.generator().parity_target_pass_with_resident(
+            self.generator().parity_target_pass_with_read_resident(
                 target.0,
                 target.1,
                 &overrides,
                 &BTreeSet::new(),
                 |cx, cz| {
                     let column = resident.get(&(cx, cz))?;
-                    Some(nether_resident_grid(cx, cz, column))
+                    Some(if (cx, cz) == target {
+                        lodestone_worldgen::block_read::BlockRead::Dense(Arc::new(
+                            nether_resident_grid(cx, cz, column),
+                        ))
+                    } else {
+                        column.worldgen_block_read(cx, cz)
+                    })
                 },
             )
         } else {
-            self.generator().parity_source_pass_with_resident(
+            self.generator().parity_source_pass_with_read_resident(
                 target.0,
                 target.1,
                 source.0,
@@ -2011,7 +2020,13 @@ impl LifecycleWorldgenSource for NetherChunkSource {
                 &overrides,
                 |cx, cz| {
                     let column = resident.get(&(cx, cz))?;
-                    Some(nether_resident_grid(cx, cz, column))
+                    Some(if (cx, cz) == target {
+                        lodestone_worldgen::block_read::BlockRead::Dense(Arc::new(
+                            nether_resident_grid(cx, cz, column),
+                        ))
+                    } else {
+                        column.worldgen_block_read(cx, cz)
+                    })
                 },
             )
         };
@@ -4728,7 +4743,31 @@ mod tests {
         ] {
             column.set_block_id(x, y, z, state);
         }
+        lodestone_worldgen::counters::reset();
         let grid = nether_resident_grid(-2, -3, &column);
+        if lodestone_worldgen::counters::enabled() {
+            assert_eq!(
+                lodestone_worldgen::counters::snapshot().logical_writes[
+                    lodestone_worldgen::counters::MemoryBoundary::ResidentDenseImport as usize
+                ],
+                65_536,
+            );
+        }
+        lodestone_worldgen::counters::reset();
+        let packed = column.worldgen_block_read(-2, -3);
+        assert_eq!(packed.as_read().get_id(-30, 3, -47), netherrack);
+        assert_eq!(packed.as_read().get_id(-21, 197, -41), glowstone);
+        assert_eq!(packed.as_read().get_id(-31, 255, -44), lava);
+        if lodestone_worldgen::counters::enabled() {
+            let counts = lodestone_worldgen::counters::snapshot();
+            use lodestone_worldgen::counters::MemoryBoundary;
+            assert_eq!(counts.logical_writes[MemoryBoundary::ResidentDenseImport as usize], 0);
+            assert_eq!(counts.logical_reads[MemoryBoundary::ResidentPacked as usize], 3);
+            assert_eq!(counts.logical_write_bytes[MemoryBoundary::ResidentPayloadCopy as usize], 0);
+        }
+        column.set_block_id(2, 3, 1, glowstone);
+        assert_eq!(column.block_state_id(2, 3, 1), glowstone);
+        assert_eq!(packed.as_read().get_id(-30, 3, -47), netherrack);
         assert_eq!(grid.get_id(-30, 3, -47), netherrack);
         assert_eq!(grid.get_id(-21, 197, -41), glowstone);
         assert_eq!(grid.get_id(-31, 255, -44), lava);

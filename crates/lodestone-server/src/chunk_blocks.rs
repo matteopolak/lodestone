@@ -37,14 +37,15 @@
 //! indexes. A section is either:
 //!
 //! * `Uniform(id)` — every cell holds `id`. Zero heap bytes.
-//! * `Packed { bits, longs }` — ids at `bits` wide, `64 / bits` values per `u64`
+//! * `Packed { bits, words }` — ids at `bits` wide, `64 / bits` values per `u64`
 //!   with **no value spanning a long boundary** (the same non-spanning layout
 //!   `lodestone_world::PackedArray` uses). `bits` is always wide enough for the
 //!   largest id the section currently holds.
 //!
 //! `bits` only ever grows, and only on a [`set`](SectionedBlocks::set) that writes
 //! an id the current width cannot hold; the widening rebuilds that one section
-//! (4,096 reads) and nothing else. A section never narrows and never collapses
+//! (up to 4,096 reads). Immutable generation handles share the section spine;
+//! a resident write detaches shared storage before changing it. A section never narrows and never collapses
 //! back to `Uniform` — both would be pure bookkeeping for a case that does not
 //! recur, since a column is built once and then edited a handful of times.
 //!
@@ -58,12 +59,9 @@
 //! per section, and a local palette costs a remap table plus an index rewrite on
 //! every palette growth — the one operation in this file that must not have a bug,
 //! because a wrong remap silently serves the wrong block rather than failing.
-//! Reusing `PalettedContainer` outright was also considered and rejected: it is a
-//! `u32` container that would need a 4,096-entry `Vec<u32>` marshalling buffer at
-//! every construction and repeats its 32-byte `PaletteKind` in all 24 sections,
-//! and it lives in a crate that `lodestone-server` deliberately keeps out of its
-//! normal dependency graph (see this crate's `Cargo.toml`, where `lodestone-world`
-//! is dev-only, and `src/ecs/schedules.rs` for why the browser bundle cares).
+//! The client-facing container uses a `u32` index domain and an independent
+//! local palette. Server generation snapshots instead share the same `u16`
+//! column-index domain as the compact generated product.
 //!
 //! # How to change it
 //!
@@ -73,421 +71,134 @@
 //! bug lives, and `crate::chunk`'s own byte-identity gate compares a whole real
 //! generated column cell-by-cell against the flat representation.
 //!
-//! If you widen `Id` past `u16`, note that `bits_for_id` derives the width from
-//! `Id::BITS` rather than a literal, and that `MAX_BITS` asserts a value still
-//! fits one `u64`.
+//! Storage and width changes belong in
+//! `lodestone_worldgen::generated_storage::CompactBlockStorage`, which also
+//! owns partial-section bounds and snapshot copy-on-write.
 //!
 //! # Configuration
 //!
-//! None. No constant here is a tuning knob: [`CELLS`] and [`SECTION_ROWS`] are the
-//! chunk format, and the widths are derived.
+//! None. Sections have 16 rows and 4,096 cells; widths are derived.
 //!
 //! # Dependencies
 //!
-//! None outside `core`. Deliberately: this is the hottest data structure in the
-//! server and the crate's dependency graph is load-bearing for the browser bundle.
+//! `lodestone-worldgen` supplies the shared compact section implementation.
 //!
 //! [`lodestone_world`'s `Storage::Single`]: https://docs.rs/lodestone-world
 
+#[cfg(test)]
 use crate::chunk::SECTION_ROWS;
+use lodestone_worldgen::generated_storage::{CompactBlockStorage, CompactSection as Section};
 
-/// A palette index. The column's palette is `Vec<String>`, so this is an index
-/// into it and never a registry id.
 type Id = u16;
+#[cfg(test)]
+const CELLS: usize = SECTION_ROWS * 16 * 16;
 
-/// Cells in one section: `16 × 16 × 16`.
-pub(crate) const CELLS: usize = SECTION_ROWS * 16 * 16;
-
-/// Cells in one Y row of a section (`16 × 16`) — the stride
-/// `(y_local * 16 + z) * 16 + x` advances per row.
-const ROW_CELLS: usize = 16 * 16;
-
-/// Widest packing this file will produce. `Id` is `u16`, and 16 divides 64, so
-/// the worst case is still a whole number of values per long.
-const MAX_BITS: u32 = Id::BITS;
-
-const _: () = assert!(MAX_BITS <= 64, "a value must fit inside one u64");
-
-/// Bits needed to represent every id in `0..=max_id`, floored at 1.
-///
-/// `ceil(log2(max_id + 1))` via the highest set bit, so it is exact rather than a
-/// float approximation. Floored at 1 (not 4, and not 0) because a section holding
-/// only air is [`Section::Uniform`] and never reaches here, so the narrowest real
-/// packed section is the air/stone pair — genuinely 1 bit, and there is no wire
-/// format imposing vanilla's 4-bit minimum on this purely internal layout.
+#[cfg(test)]
 fn bits_for_id(max_id: Id) -> u32 {
     (Id::BITS - max_id.leading_zeros()).max(1)
 }
 
-/// Values packed into one `u64` at `bits` wide, with none spanning a boundary.
-#[inline]
-fn values_per_long(bits: u32) -> usize {
-    (64 / bits) as usize
-}
-
-/// `u64`s needed to hold [`CELLS`] values at `bits` wide.
-#[inline]
-fn long_count(bits: u32) -> usize {
-    CELLS.div_ceil(values_per_long(bits))
-}
-
-/// One 16-row window's worth of palette indices.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Section {
-    /// Every cell holds this id. **Allocates nothing** — the whole reason this
-    /// module exists, since most sections of most columns are pure air.
-    Uniform(Id),
-    /// Ids packed at `bits` wide. `bits >= bits_for_id(largest id present)`.
-    Packed { bits: u32, longs: Vec<u64> },
-}
-
-impl Section {
-    #[inline]
-    fn get(&self, index: usize) -> Id {
-        debug_assert!(index < CELLS);
-        match self {
-            Self::Uniform(id) => *id,
-            Self::Packed { bits, longs } => {
-                let per = values_per_long(*bits);
-                let slot = longs[index / per];
-                let shift = (index % per) as u32 * *bits;
-                let mask = (1u64 << *bits) - 1;
-                ((slot >> shift) & mask) as Id
-            }
-        }
-    }
-
-    /// Writes `id`, widening or promoting out of [`Uniform`](Self::Uniform) if
-    /// the current representation cannot hold it.
-    fn set(&mut self, index: usize, id: Id) {
-        debug_assert!(index < CELLS);
-        match self {
-            Self::Uniform(current) => {
-                if *current == id {
-                    return;
-                }
-                let current = *current;
-                let bits = bits_for_id(current.max(id));
-                let mut longs = vec![0u64; long_count(bits)];
-                if current != 0 {
-                    // Only the non-zero uniform needs seeding; a zeroed buffer
-                    // already reads back as id 0 everywhere.
-                    let per = values_per_long(bits);
-                    let mut word = 0u64;
-                    for slot in 0..per {
-                        word |= u64::from(current) << (slot as u32 * bits);
-                    }
-                    longs.fill(word);
-                }
-                *self = Self::Packed { bits, longs };
-                self.set(index, id);
-            }
-            Self::Packed { bits, longs } => {
-                let needed = bits_for_id(id);
-                if needed > *bits {
-                    let wider = needed;
-                    let mut next = vec![0u64; long_count(wider)];
-                    let per_old = values_per_long(*bits);
-                    let per_new = values_per_long(wider);
-                    let mask_old = (1u64 << *bits) - 1;
-                    for cell in 0..CELLS {
-                        let value =
-                            (longs[cell / per_old] >> ((cell % per_old) as u32 * *bits)) & mask_old;
-                        next[cell / per_new] |= value << ((cell % per_new) as u32 * wider);
-                    }
-                    *bits = wider;
-                    *longs = next;
-                }
-                let per = values_per_long(*bits);
-                let shift = (index % per) as u32 * *bits;
-                let mask = (1u64 << *bits) - 1;
-                let slot = &mut longs[index / per];
-                *slot = (*slot & !(mask << shift)) | (u64::from(id) << shift);
-            }
-        }
-    }
-
-    /// Heap bytes this section owns. `0` for [`Uniform`](Self::Uniform), which is
-    /// the measurement the whole change rests on.
-    fn heap_bytes(&self) -> usize {
-        match self {
-            Self::Uniform(_) => 0,
-            Self::Packed { longs, .. } => longs.capacity() * core::mem::size_of::<u64>(),
-        }
-    }
-}
-
-/// A column's block-index grid, stored one 16-row section at a time. See the
-/// module docs.
+/// Server-owned palette indices with shared immutable section snapshots.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SectionedBlocks {
-    sections: Vec<Section>,
-    /// Block rows this grid covers, from the column's `min_y` upward. Sections
-    /// always hold a full [`CELLS`], so a `height` that is not a multiple of
-    /// [`SECTION_ROWS`] leaves the top section's surplus rows addressable but
-    /// never *reported* — see [`section_rows`](Self::section_rows), which is what
-    /// every bulk reader sizes itself by.
-    height: i32,
+    storage: CompactBlockStorage,
 }
 
 impl SectionedBlocks {
-    /// An all-air grid (`id 0` everywhere) of `height` rows. Allocates one
-    /// [`Section::Uniform`] per section and **no cell storage at all**.
     pub(crate) fn new_air(height: i32) -> Self {
-        debug_assert!(height > 0);
-        let sections = (height as usize).div_ceil(SECTION_ROWS);
-        Self {
-            sections: vec![Section::Uniform(0); sections],
-            height,
-        }
+        Self { storage: CompactBlockStorage::uniform(0, height, 0) }
     }
 
-    /// Adopts a flat `(y_local * 16 + z) * 16 + x` grid — the layout
-    /// [`lodestone_worldgen::overworld::GeneratedColumn`] hands over and the one
-    /// `ChunkColumn` used to store directly.
-    ///
-    /// Each section independently picks the narrowest representation for its own
-    /// content, so this is where an air section above the terrain surface becomes
-    /// free.
     #[cfg(test)]
     pub(crate) fn from_flat(height: i32, cells: &[Id]) -> Self {
-        Self::from_flat_with_observer(height, cells, |_, _| {})
+        Self { storage: CompactBlockStorage::from_flat(0, height, cells) }
     }
 
-    /// Adopts a flat grid while visiting each source cell during section
-    /// analysis. The observer runs before packing, so callers can derive
-    /// metadata from the same read that determines a section's uniform value
-    /// and width.
     #[cfg(test)]
     pub(crate) fn from_flat_with_observer(
         height: i32,
         cells: &[Id],
         mut observer: impl FnMut(usize, Id),
     ) -> Self {
-        debug_assert!(height > 0);
-        debug_assert_eq!(cells.len(), 16 * 16 * height as usize);
-        let section_count = (height as usize).div_ceil(SECTION_ROWS);
-        let mut sections = Vec::with_capacity(section_count);
-        for s in (0..section_count).rev() {
-            let base = s * CELLS;
-            let slice = &cells[base..(base + CELLS).min(cells.len())];
-            sections.push(Self::pack_with_observer(slice, base, &mut observer));
+        for (index, &id) in cells.iter().enumerate().rev() {
+            observer(index, id);
         }
-        sections.reverse();
-        Self { sections, height }
+        Self::from_flat(height, cells)
     }
 
-    /// Adopts the generated column's section-aligned storage while visiting
-    /// each real cell for server metadata. Packed words move directly into the
-    /// server sections; unlike the compatibility flat path, no 98,304-cell
-    /// expansion is created in between.
     #[cfg(test)]
     pub(crate) fn from_compact_with_observer(
-        blocks: lodestone_worldgen::generated_storage::CompactBlockStorage,
+        blocks: CompactBlockStorage,
         mut observer: impl FnMut(usize, Id),
     ) -> Self {
         for section in 0..blocks.section_count() {
             blocks.for_each_section(section, |cell, id| {
-                #[cfg(test)]
                 crate::chunk::record_generated_metadata_cell_read();
                 observer(section * CELLS + cell, id);
             });
         }
-        Self::from_compact_parts(blocks)
+        Self::from_compact(blocks)
     }
 
-    /// Adopts generated section storage without walking its cells. Generated
-    /// metadata arrives as a separate transient summary from worldgen.
-    pub(crate) fn from_compact(
-        blocks: lodestone_worldgen::generated_storage::CompactBlockStorage,
-    ) -> Self {
-        Self::from_compact_parts(blocks)
+    pub(crate) fn from_compact(storage: CompactBlockStorage) -> Self {
+        Self { storage: storage.into_shared_compact() }
     }
 
-    fn from_compact_parts(
-        blocks: lodestone_worldgen::generated_storage::CompactBlockStorage,
-    ) -> Self {
-        let (_, height, sections) = blocks.into_sections();
-        let sections = sections
-            .into_iter()
-            .map(|section| match section.into_parts() {
-                lodestone_worldgen::generated_storage::CompactSectionParts::Uniform(id) => {
-                    Section::Uniform(id)
-                }
-                lodestone_worldgen::generated_storage::CompactSectionParts::Packed {
-                    bits,
-                    words,
-                } => Section::Packed {
-                    bits: u32::from(bits),
-                    longs: words,
-                },
-            })
-            .collect();
-        Self { sections, height }
+    pub(crate) fn shared_storage(&self) -> CompactBlockStorage {
+        self.storage.clone()
     }
 
-    /// Chooses the narrowest [`Section`] for `slice`, which may be shorter than
-    /// [`CELLS`] for a partial top section (its surplus cells read back as 0).
-    #[cfg(test)]
-    fn pack_with_observer(
-        slice: &[Id],
-        base: usize,
-        observer: &mut impl FnMut(usize, Id),
-    ) -> Section {
-        let first = slice.first().copied().unwrap_or(0);
-        let mut uniform = true;
-        let mut max_id = first;
-        for (cell, &id) in slice.iter().enumerate().rev() {
-            observer(base + cell, id);
-            uniform &= id == first;
-            max_id = max_id.max(id);
-        }
-        // A partial top section collapses to `Uniform(first)` too, even though
-        // that makes its surplus cells read back as `first` rather than as the
-        // flat grid's implicit 0. Sound because no reader can reach them:
-        // `section_rows` bounds every bulk read and `get` is only ever called
-        // with a `y_local` inside `height`.
-        if uniform {
-            return Section::Uniform(first);
-        }
-        let bits = bits_for_id(max_id);
-        let per = values_per_long(bits);
-        let mut longs = vec![0u64; long_count(bits)];
-        for (cell, &id) in slice.iter().enumerate() {
-            longs[cell / per] |= u64::from(id) << ((cell % per) as u32 * bits);
-        }
-        Section::Packed { bits, longs }
-    }
-
-    /// Sections in this grid — `height / 16`, rounded up.
     pub(crate) fn section_count(&self) -> usize {
-        self.sections.len()
+        self.storage.section_count()
     }
 
     pub(crate) fn air_ceiling_section(&self) -> usize {
-        self.sections
-            .iter()
-            .rposition(|section| match section {
-                Section::Uniform(id) => *id != 0,
-                Section::Packed { longs, .. } => longs.iter().any(|&word| word != 0),
-            })
-            .map_or(0, |index| index + 1)
+        self.storage.sections().iter().rposition(|section| match section {
+            Section::Uniform(id) => *id != 0,
+            Section::Packed { words, .. } => words.iter().any(|&word| word != 0),
+        }).map_or(0, |index| index + 1)
     }
 
-    /// Returns the palette index when section `s` is represented by one value,
-    /// or `None` for a packed section. Read-only consumers use this to reject
-    /// uniform air/terrain sections before walking their cells.
     #[inline]
-    pub(crate) fn uniform_id(&self, s: usize) -> Option<Id> {
-        match self.sections.get(s)? {
-            Section::Uniform(id) => Some(*id),
-            Section::Packed { .. } => None,
-        }
+    pub(crate) fn uniform_id(&self, section: usize) -> Option<Id> {
+        self.storage.section(section)?.uniform_id()
     }
 
-    /// Real block rows in section `s`. `16` for every section but a partial top
-    /// one, and `0` past the end.
-    ///
-    /// Bulk readers size themselves by this rather than by [`CELLS`] so that a
-    /// column whose height is not a multiple of 16 reports exactly the cells the
-    /// old flat `Vec<u16>` held, not the section's zero-padded surplus.
-    pub(crate) fn section_rows(&self, s: usize) -> usize {
-        let start = s * SECTION_ROWS;
-        (self.height as usize).saturating_sub(start).min(SECTION_ROWS)
+    #[cfg(test)]
+    fn section_rows(&self, section: usize) -> usize {
+        self.storage.section_rows(section)
     }
 
-    /// Flat cell index within a section for local `(x, z)` and a `y_local` that
-    /// may be anywhere in the column.
-    #[inline]
-    fn cell_index(x: i32, y_local: i32, z: i32) -> usize {
-        debug_assert!((0..16).contains(&x));
-        debug_assert!((0..16).contains(&z));
-        let row = (y_local as usize % SECTION_ROWS) * ROW_CELLS;
-        row + (z as usize) * 16 + (x as usize)
-    }
-
-    /// The palette index at local `(x, z)` and `y_local` (rows from the column's
-    /// `min_y`).
     #[inline]
     pub(crate) fn get(&self, x: i32, y_local: i32, z: i32) -> Id {
-        debug_assert!((0..self.height).contains(&y_local));
-        self.sections[y_local as usize / SECTION_ROWS].get(Self::cell_index(x, y_local, z))
+        self.storage.get(x as usize, self.storage.min_y() + y_local, z as usize)
     }
 
-    /// Writes the palette index at local `(x, z)` and `y_local`.
     #[inline]
     pub(crate) fn set(&mut self, x: i32, y_local: i32, z: i32, id: Id) {
-        debug_assert!((0..self.height).contains(&y_local));
-        let index = Self::cell_index(x, y_local, z);
-        self.sections[y_local as usize / SECTION_ROWS].set(index, id);
+        self.storage.set(x as usize, self.storage.min_y() + y_local, z as usize, id);
     }
 
-    /// Calls `f(cell_index_within_section, id)` for every **real** cell of
-    /// section `s`, in flat order.
-    ///
-    /// This is the bulk-read primitive: `crate::chunk_nbt`'s per-section palette
-    /// remap, `ChunkColumn::recalc_ticking_counts` and `solid_count` all go
-    /// through it, so none of them materialises a whole column. A `Uniform`
-    /// section costs one `match` and no memory traffic.
-    pub(crate) fn for_each_in_section(&self, s: usize, mut f: impl FnMut(usize, Id)) {
-        let rows = self.section_rows(s);
-        if rows == 0 {
-            return;
-        }
-        let section = &self.sections[s];
-        match section {
-            // Hoisted out of the loop: the whole point of `Uniform` is that it
-            // reads without touching memory, and the per-cell `match` would
-            // otherwise reintroduce a branch 4,096 times.
-            Section::Uniform(id) => {
-                for cell in 0..rows * ROW_CELLS {
-                    f(cell, *id);
-                }
-            }
-            Section::Packed { .. } => {
-                for cell in 0..rows * ROW_CELLS {
-                    f(cell, section.get(cell));
-                }
-            }
-        }
+    pub(crate) fn for_each_in_section(&self, section: usize, f: impl FnMut(usize, Id)) {
+        self.storage.for_each_section(section, f);
     }
 
-    /// Appends section `s`'s real cells to `out`, in flat
-    /// `(y_in_section * 16 + z) * 16 + x` order — vanilla's own section order, so
-    /// a caller can slice it straight into a chunk-format container.
-    pub(crate) fn append_section_cells(&self, s: usize, out: &mut Vec<Id>) {
-        out.reserve(self.section_rows(s) * ROW_CELLS);
-        self.for_each_in_section(s, |_, id| out.push(id));
+    pub(crate) fn append_section_cells(&self, section: usize, out: &mut Vec<Id>) {
+        self.storage.append_section_cells(section, out);
     }
 
-    /// Heap bytes the packed arrays own, excluding the `Vec<Section>` spine.
-    ///
-    /// Exists for the residency gate in `crate::chunk` — a *count* of bytes rather
-    /// than an RSS reading, so it is immune to machine load and can assert the
-    /// representation's cost directly.
     pub(crate) fn heap_bytes(&self) -> usize {
-        self.sections.iter().map(Section::heap_bytes).sum::<usize>()
-            + self.sections.capacity() * core::mem::size_of::<Section>()
+        self.storage.heap_bytes()
     }
 
-    /// How many sections allocate no cell storage at all. The direct measurement
-    /// of the larger of this module's two savings.
     #[cfg(test)]
     pub(crate) fn uniform_sections(&self) -> usize {
-        self.sections
-            .iter()
-            .filter(|s| matches!(s, Section::Uniform(_)))
-            .count()
+        self.storage.sections().iter().filter(|section| section.uniform_id().is_some()).count()
     }
 
-    /// Per-section packing width, `0` for a uniform section. Test-only: the gates
-    /// below predict exact widths rather than asserting "smaller".
     #[cfg(test)]
-    pub(crate) fn section_bits(&self, s: usize) -> u32 {
-        match &self.sections[s] {
-            Section::Uniform(_) => 0,
-            Section::Packed { bits, .. } => *bits,
-        }
+    pub(crate) fn section_bits(&self, section: usize) -> u32 {
+        u32::from(self.storage.section(section).expect("section exists").bits())
     }
 }
 
@@ -759,7 +470,7 @@ mod tests {
         assert_eq!(blocks.section_rows(1), 4);
         let mut out = Vec::new();
         blocks.append_section_cells(1, &mut out);
-        assert_eq!(out.len(), 4 * ROW_CELLS);
+        assert_eq!(out.len(), 4 * 16 * 16);
     }
 
     #[test]

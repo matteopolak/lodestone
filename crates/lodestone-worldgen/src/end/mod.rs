@@ -472,7 +472,7 @@ pub struct EndGenerator {
 /// three-by-three decoration write.
 #[derive(Debug, Clone)]
 pub struct EndBaseWorld {
-    world: DenseBlockGrid,
+    world: Arc<DenseBlockGrid>,
 }
 
 /// Keep a long-lived End generator bounded while retaining the complete
@@ -959,7 +959,7 @@ impl EndGenerator {
 
     pub fn base_world_for_batch(&self, cx: i32, cz: i32) -> Arc<EndBaseWorld> {
         self.base_worlds.get_or_compute((cx, cz), || {
-            EndBaseWorld { world: self.base_world(cx, cz) }
+            EndBaseWorld { world: Arc::new(self.base_world(cx, cz)) }
         })
     }
 
@@ -975,7 +975,7 @@ impl EndGenerator {
         self.finish_column(
             cx,
             cz,
-            base.world.clone(),
+            base.world.as_ref().clone(),
             maps,
             Vec::new(),
             Vec::new(),
@@ -1059,33 +1059,18 @@ impl EndGenerator {
         target_x: i32,
         target_z: i32,
     ) -> DenseBlockGrid {
-        let mut world = DenseBlockGrid::with_default(
+        let bases = std::array::from_fn(|slot| {
+            let cx = target_x - 1 + (slot / 3) as i32;
+            let cz = target_z - 1 + (slot % 3) as i32;
+            self.base_world_for_batch(cx, cz).world.clone()
+        });
+        DenseBlockGrid::borrowed_region(
             (target_x - 1) * 16,
             self.min_y,
             (target_z - 1) * 16,
-            48,
             WORLD_HEIGHT,
-            48,
-            StateId::AIR,
-        );
-        for cx in target_x - 1..=target_x + 1 {
-            for cz in target_z - 1..=target_z + 1 {
-                let base = self.base_world_for_batch(cx, cz);
-                world.copy_box_from(
-                    &base.world,
-                    cx * 16,
-                    self.min_y,
-                    cz * 16,
-                    cx * 16,
-                    self.min_y,
-                    cz * 16,
-                    16,
-                    WORLD_HEIGHT,
-                    16,
-                );
-            }
-        }
-        world
+            bases,
+        )
     }
 
     /// Returns a previously prepared immutable source world without starting
@@ -1170,7 +1155,7 @@ impl EndGenerator {
                     Self::stage_schedule().shaped_boundary_index(),
                 );
                 let base = Arc::new(EndBaseWorld {
-                    world,
+                    world: Arc::new(world),
                 });
                 let base = self.base_worlds.insert((cx, cz), base);
                 ((cx, cz), base)
@@ -1866,7 +1851,20 @@ mod tests {
         source: (i32, i32),
         overrides: &[(i32, i32, i32, StateId)],
     ) -> EndDecorationResult {
-        let mut world = generator.parity_decoration_grid_for_target(target.0, target.1);
+        let mut world = DenseBlockGrid::with_default(
+            (target.0 - 1) * 16, generator.min_y, (target.1 - 1) * 16,
+            48, WORLD_HEIGHT, 48, StateId::AIR,
+        );
+        for cx in target.0 - 1..=target.0 + 1 {
+            for cz in target.1 - 1..=target.1 + 1 {
+                let base = generator.base_world_for_batch(cx, cz);
+                world.copy_box_from(
+                    &base.world, cx * 16, generator.min_y, cz * 16,
+                    cx * 16, generator.min_y, cz * 16, 16, WORLD_HEIGHT, 16,
+                );
+                crate::counters::bump_end_region_base_copy(16 * WORLD_HEIGHT as u64 * 16);
+            }
+        }
         for &(x, y, z, state) in overrides {
             world.set_id(x, y, z, state);
         }
@@ -1900,7 +1898,7 @@ mod tests {
     }
 
     #[test]
-    fn source_replay_matches_full_scan_for_feature_and_city_witnesses() {
+    fn source_replay_borrowed_region_matches_dense_feature_and_city_witnesses() {
         let assets = ReplayAssets;
         let gold = Block::GoldBlock.default_state();
         for (seed, target, source, witness, expected, city) in [

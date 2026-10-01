@@ -126,6 +126,7 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
 use crate::aquifer::{AquiferSystem, BlockKind};
+use crate::block_read::{BlockRead, BlockReadRef};
 use crate::biome::{BiomeTable, ClimateSampler};
 use crate::carver::{CarveGrid, CarverCatalog, CarverConfig, NoObserver};
 use crate::density::{Builder, Resolver};
@@ -1715,7 +1716,24 @@ impl NetherGenerator {
         overrides: &[(i32, i32, i32, StateId)],
         mut resident_at: impl FnMut(i32, i32) -> Option<crate::dense_grid::DenseBlockGrid>,
     ) -> ParityTargetPass {
-        let mut resident: [Option<Arc<crate::dense_grid::DenseBlockGrid>>; 25] =
+        self.parity_source_pass_with_read_resident(
+            target_x, target_z, source_x, source_z, overrides,
+            |cx, cz| resident_at(cx, cz).map(|grid| BlockRead::Dense(Arc::new(grid))),
+        )
+    }
+
+    /// Source completion with packed immutable neighbours and a dense centre.
+    #[must_use]
+    pub fn parity_source_pass_with_read_resident(
+        &self,
+        target_x: i32,
+        target_z: i32,
+        source_x: i32,
+        source_z: i32,
+        overrides: &[(i32, i32, i32, StateId)],
+        mut resident_at: impl FnMut(i32, i32) -> Option<BlockRead>,
+    ) -> ParityTargetPass {
+        let mut resident: [Option<BlockRead>; 25] =
             std::array::from_fn(|_| None);
         for dx in -crate::feature::region_view::WIDE_RADIUS
             ..=crate::feature::region_view::WIDE_RADIUS
@@ -1724,7 +1742,7 @@ impl NetherGenerator {
                 ..=crate::feature::region_view::WIDE_RADIUS
             {
                 resident[crate::feature::region_view::wide_slot_of_offset(dx, dz)] =
-                    resident_at(target_x + dx, target_z + dz).map(Arc::new);
+                    resident_at(target_x + dx, target_z + dz);
             }
         }
         let pre = self.pre_decoration_stage(target_x, target_z);
@@ -1786,7 +1804,23 @@ impl NetherGenerator {
         completed_sources: &BTreeSet<(i32, i32)>,
         mut resident_at: impl FnMut(i32, i32) -> Option<crate::dense_grid::DenseBlockGrid>,
     ) -> ParityTargetPass {
-        let mut resident: [Option<Arc<crate::dense_grid::DenseBlockGrid>>; 25] =
+        self.parity_target_pass_with_read_resident(
+            target_x, target_z, overrides, completed_sources,
+            |cx, cz| resident_at(cx, cz).map(|grid| BlockRead::Dense(Arc::new(grid))),
+        )
+    }
+
+    /// Target completion with packed immutable neighbours and a dense centre.
+    #[must_use]
+    pub fn parity_target_pass_with_read_resident(
+        &self,
+        target_x: i32,
+        target_z: i32,
+        overrides: &[(i32, i32, i32, StateId)],
+        completed_sources: &BTreeSet<(i32, i32)>,
+        mut resident_at: impl FnMut(i32, i32) -> Option<BlockRead>,
+    ) -> ParityTargetPass {
+        let mut resident: [Option<BlockRead>; 25] =
             std::array::from_fn(|_| None);
         for dx in -crate::feature::region_view::WIDE_RADIUS
             ..=crate::feature::region_view::WIDE_RADIUS
@@ -1795,7 +1829,7 @@ impl NetherGenerator {
                 ..=crate::feature::region_view::WIDE_RADIUS
             {
                 resident[crate::feature::region_view::wide_slot_of_offset(dx, dz)] =
-                    resident_at(target_x + dx, target_z + dz).map(Arc::new);
+                    resident_at(target_x + dx, target_z + dz);
             }
         }
         let pre = self.pre_decoration_stage(target_x, target_z);
@@ -1883,7 +1917,7 @@ impl NetherGenerator {
         center_heights: &[i32; 256],
         selected_source: Option<(i32, i32)>,
         overrides: &[(i32, i32, i32, StateId)],
-        resident: Option<&[Option<Arc<crate::dense_grid::DenseBlockGrid>>; 25]>,
+        resident: Option<&[Option<BlockRead>; 25]>,
         capture_all_spills: bool,
         completed_sources: Option<&BTreeSet<(i32, i32)>>,
     ) -> (
@@ -1898,6 +1932,9 @@ impl NetherGenerator {
                 if let Some(source) =
                     sources[crate::feature::region_view::wide_slot_of_offset(0, 0)].as_ref()
                 {
+                    let BlockRead::Dense(source) = source else {
+                        panic!("the mutable Nether centre must be dense");
+                    };
                     center_world = source.as_ref().clone();
                 }
             }
@@ -2009,46 +2046,44 @@ impl NetherGenerator {
         }
         let in_tag = |_: &str, _: &str| false;
         let resident_source = |dx: i32, dz: i32| {
-            if selected_source.is_some() && dx == 0 && dz == 0 {
-                Some(&center_world)
+            if dx == 0 && dz == 0 {
+                Some(BlockReadRef::Dense(&center_world))
             } else {
                 resident.and_then(|sources| {
-                    sources[crate::feature::region_view::wide_slot_of_offset(dx, dz)].as_deref()
+                    sources[crate::feature::region_view::wide_slot_of_offset(dx, dz)]
+                        .as_ref().map(BlockRead::as_read)
                 })
             }
         };
-        let centre_source = resident_source(0, 0).unwrap_or(&center_world);
-        let mut ore_view = crate::feature::region_view::RegionView::over_wide_sources(
+        let mut ore_view = crate::feature::region_view::RegionView::over_wide_read_sources(
             cx, cz, self.min_y, self.height,
             |dx, dz| resident_source(dx, dz).or_else(|| if dx == 0 && dz == 0 {
-                Some(centre_source)
+                Some(BlockReadRef::Dense(&center_world))
             } else {
                 nearby[crate::feature::region_view::wide_slot_of_offset(dx, dz)]
                     .as_ref()
-                    .map(|source| &*source.0)
+                    .map(|source| BlockReadRef::Dense(&source.0))
             }),
         );
-        let centre_grid = resident_source(0, 0)
-            .map(|source| Arc::new(source.clone()))
-            .unwrap_or_else(|| Arc::new(center_world.clone()));
+        let centre_grid = Arc::new(center_world.clone());
         let grid_sources = &nearby;
         let resident_sources = resident;
         let grid_feature_biomes = self.feature_biomes.clone();
-        let mut grid = crate::feature::vegetation::VegGrid::with_sources_and_flat_biome_ids_shared_zoomed(
+        let mut grid = crate::feature::vegetation::VegGrid::with_read_sources_and_flat_biome_ids_shared_zoomed(
             self.min_y, DECORATION_WINDOW_HEIGHT, cx * 16, cz * 16,
             crate::feature::REGION_MIN - crate::feature::VEG_PADDING,
             crate::feature::REGION_MAX + crate::feature::VEG_PADDING,
             |dx, dz| {
                 if dx == 0 && dz == 0 {
-                    Some(Arc::clone(&centre_grid))
+                    Some(BlockRead::Dense(Arc::clone(&centre_grid)))
                 } else if let Some(source) = resident_sources.and_then(|sources| {
                     sources[crate::feature::region_view::wide_slot_of_offset(dx, dz)].as_ref()
                 }) {
-                    Some(Arc::clone(source))
+                    Some(source.clone())
                 } else {
                     grid_sources[crate::feature::region_view::wide_slot_of_offset(dx, dz)]
                         .as_ref()
-                        .map(|source| Arc::clone(&source.0))
+                        .map(|source| BlockRead::Dense(Arc::clone(&source.0)))
                 }
             },
             |dx, dz| {
@@ -2264,7 +2299,7 @@ impl NetherGenerator {
                 }
             }
         }
-        let mut world = resident_source(0, 0).cloned().unwrap_or(center_world);
+        let mut world = center_world.clone();
         let mut decoration_spills = Vec::new();
         let mut aggregate_spills = BTreeMap::new();
         for (x, y, z, state) in grid.dirty_cells() {

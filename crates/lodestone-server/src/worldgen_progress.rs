@@ -26,10 +26,22 @@ pub enum WorldgenTimingPhase {
     ResidentLightCompute,
     ResidentLightEncode,
     ConnectionRelight,
+    GenerationAdmissionPermitWait,
+    GenerationAdmissionPoolWait,
+    GenerationAdmissionCompute,
+    GenerationAdmissionReturnWait,
+    GenerationAdmissionAcceptance,
+    GenerationAdmissionPermitHold,
+    PacketPreparationPermitWait,
+    PacketPreparationPoolWait,
+    PacketPreparationCompute,
+    PacketPreparationReturnWait,
+    PacketPreparationAcceptance,
+    PacketPreparationPermitHold,
 }
 
 impl WorldgenTimingPhase {
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 34] = [
         Self::Lease,
         Self::PreOre,
         Self::StructureContext,
@@ -52,6 +64,18 @@ impl WorldgenTimingPhase {
         Self::ResidentLightCompute,
         Self::ResidentLightEncode,
         Self::ConnectionRelight,
+        Self::GenerationAdmissionPermitWait,
+        Self::GenerationAdmissionPoolWait,
+        Self::GenerationAdmissionCompute,
+        Self::GenerationAdmissionReturnWait,
+        Self::GenerationAdmissionAcceptance,
+        Self::GenerationAdmissionPermitHold,
+        Self::PacketPreparationPermitWait,
+        Self::PacketPreparationPoolWait,
+        Self::PacketPreparationCompute,
+        Self::PacketPreparationReturnWait,
+        Self::PacketPreparationAcceptance,
+        Self::PacketPreparationPermitHold,
     ];
 
     pub const fn index(self) -> usize {
@@ -82,6 +106,18 @@ impl WorldgenTimingPhase {
             Self::ResidentLightCompute => "resident-light-compute",
             Self::ResidentLightEncode => "resident-light-encode",
             Self::ConnectionRelight => "connection-relight",
+            Self::GenerationAdmissionPermitWait => "generation-admission-permit-wait",
+            Self::GenerationAdmissionPoolWait => "generation-admission-pool-wait",
+            Self::GenerationAdmissionCompute => "generation-admission-compute",
+            Self::GenerationAdmissionReturnWait => "generation-admission-return-wait",
+            Self::GenerationAdmissionAcceptance => "generation-admission-acceptance",
+            Self::GenerationAdmissionPermitHold => "generation-admission-permit-hold",
+            Self::PacketPreparationPermitWait => "packet-preparation-permit-wait",
+            Self::PacketPreparationPoolWait => "packet-preparation-pool-wait",
+            Self::PacketPreparationCompute => "packet-preparation-compute",
+            Self::PacketPreparationReturnWait => "packet-preparation-return-wait",
+            Self::PacketPreparationAcceptance => "packet-preparation-acceptance",
+            Self::PacketPreparationPermitHold => "packet-preparation-permit-hold",
         }
     }
 }
@@ -180,6 +216,15 @@ impl PhaseTimer {
             started: lodestone_time::Instant::now(),
             items,
         })
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn with_sink(
+        phase: WorldgenTimingPhase,
+        items: u32,
+        sink: WorldgenTimingSink,
+    ) -> Self {
+        Self { sink, phase, started: lodestone_time::Instant::now(), items }
     }
 }
 
@@ -329,7 +374,10 @@ mod tests {
             totals[WorldgenTimingPhase::PacketEncoding.index()],
             WorldgenTimingTotals::default(),
         );
-        let drained = std::mem::take(&mut totals);
+        let drained = std::mem::replace(
+            &mut totals,
+            [WorldgenTimingTotals::default(); WorldgenTimingPhase::ALL.len()],
+        );
         assert_eq!(drained[WorldgenTimingPhase::PreOre.index()].calls, 2);
         assert_eq!(
             totals,

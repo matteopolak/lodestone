@@ -68,6 +68,20 @@ At debug or trace level, the worker also installs a timing sink for production o
 covers completion-to-owner acceptance. Compute time includes its nested stage
 timers; all are elapsed intervals, not exclusive CPU measurements.
 
+The immutable executor tags each job as `GenerationAdmission` or
+`PacketPreparation`. The `generation-admission-*` and `packet-preparation-*`
+phases distinguish six intervals: `permit-wait` before the shared permit is
+acquired, `pool-wait` from submission until worker entry, `compute` during the
+job body, `return-wait` from completion until acceptance starts or the result
+is discarded, `acceptance` during the owner's callback, and `permit-hold`
+across pool wait, computation, return wait and acceptance. A discarded result
+has no acceptance scope. RAII closes active intervals on cancellation, closed
+channels and unwinding, and the permit remains owned until acceptance or
+discard finishes. Stage timers overlap compute; permit hold overlaps the
+other permit-owned intervals. These timings identify delay by operation role
+without changing the one-permit executor or one-slot ordered encode window.
+They do not report current queue occupancy or retained-byte estimates.
+
 `generation-poll` times each synchronous poll of the independently driven local
 generation future. `encode-poll` does the same for each ordered encode future.
 `connection-poll` encloses the Play connection poll, including any consecutive
@@ -236,7 +250,7 @@ Keep the serial and threaded artifact names in sync between `stage_worker.sh` an
 
 If changing worker-health sampling, keep the export's epoch and callback-gap arguments aligned with the Rust implementation. The harness filters on its launch epoch, and its tick advancement is the last sampled `tickCount` minus the first; keep absent or insufficient samples represented as `null`.
 
-Timing phases and accumulation live in `lodestone_server::worldgen_progress`; operation guards belong at the actual production call sites. Keep guards outside parallel item loops and end synchronous guards before yielding. Update the worker serializer and shell diagnostic forwarding together when changing the `worldgen-timing` message. An idle sample sends no phase rows; a callback delayed by generation reports its accumulated work on the next callback, not at the nominal one-second boundary.
+Timing phases and accumulation live in `lodestone_server::worldgen_progress`; operation guards belong at the actual production call sites. Keep guards outside parallel item loops and end synchronous guards before yielding. The worker enumerates `WorldgenTimingPhase::ALL`, so adding a phase there automatically uses the existing fixed buffer and message bridge. Update the worker serializer and shell diagnostic forwarding together when changing the `worldgen-timing` message fields. An idle sample sends no phase rows; a callback delayed by generation reports its accumulated work on the next callback, not at the nominal one-second boundary.
 
 Change `ConnectionProbe` and its production loop call for connection sampling;
 update the worker serializer and shell forwarding together if fields change.
@@ -247,6 +261,13 @@ loop state rather than only the last one-second sample.
 If the Rayon helper's generated call shape changes, update `patch_threaded_worker_helper.mjs` and its staging assertion together. The patcher is intentionally narrow: it fails rather than silently rewriting an unrecognized helper.
 
 The server-side executor must continue to use the persistent pool only for immutable admission and owned packet preparation. The serial adapter owns browser yield points around those same session stages; a JavaScript task queue must not become a second world owner or reorder mutable commits. Keep packet preparation on the shared permit, release completed results before unrelated awaits, and preserve the ordered encode queue when changing `join_scheduler::encode_owned_packet_snapshot`.
+
+Set the executor's typed role at its production call: generation preparation in
+`chunk`, packet preparation in `join_scheduler`. Keep the role's timing scopes
+in `immutable_admission`, including the acceptance callback, rather than adding
+guards only around the caller's await. Its injected-executor controls use
+authored poll and timer-boundary order to distinguish permit delay from pool
+delay and check acceptance, discard and unwind without elapsed-time thresholds.
 
 ## Configuration
 

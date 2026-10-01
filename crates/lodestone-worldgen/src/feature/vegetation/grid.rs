@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::dense_grid::DenseBlockGrid;
+use crate::block_read::{BlockRead, BlockReadRef};
 use crate::feature::region_view::{
     Overlay, WIDE_RADIUS, WIDE_SLOTS, WriteLog, wide_slot_of_offset, wide_source_slot,
 };
@@ -229,7 +230,7 @@ pub struct VegGrid {
     /// answering air there is what made its pass depend on the centre. Canopy
     /// spilling into the pad is still writable and still readable back, unchanged;
     /// only what an *unwritten* pad cell reads has changed.
-    sources: [Option<Arc<DenseBlockGrid>>; WIDE_SLOTS],
+    sources: [Option<BlockRead>; WIDE_SLOTS],
     /// Request-scoped rectangular source layout. Unlike `sources`, this covers
     /// a whole multi-target write union and is addressed by absolute chunk.
     dynamic_sources: Option<DynamicSources>,
@@ -435,7 +436,7 @@ impl VegGrid {
                 let slot = wide_source_slot(dx * 16, dz * 16)
                     .expect("a 5x5 offset's own origin column is inside the read region");
                 debug_assert_eq!(slot, wide_slot_of_offset(dx, dz));
-                grid.sources[slot] = source_at(dx, dz);
+                grid.sources[slot] = source_at(dx, dz).map(BlockRead::Dense);
             }
         }
         grid
@@ -672,15 +673,36 @@ impl VegGrid {
         feature_biomes: impl FeatureBiomeInput,
         biome_zoom_seed: i64,
     ) -> Self {
-        let mut grid = Self::with_sources(
-            min_y,
-            height,
-            origin_x,
-            origin_z,
-            local_lo,
-            local_hi,
-            source_at,
+        Self::with_read_sources_and_flat_biome_ids_shared_zoomed(
+            min_y, height, origin_x, origin_z, local_lo, local_hi,
+            |dx, dz| source_at(dx, dz).map(BlockRead::Dense),
+            biome_at, feature_biomes, biome_zoom_seed,
+        )
+    }
+
+    /// Flat biome context with immutable dense or packed block sources.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_read_sources_and_flat_biome_ids_shared_zoomed(
+        min_y: i32,
+        height: i32,
+        origin_x: i32,
+        origin_z: i32,
+        local_lo: i32,
+        local_hi: i32,
+        source_at: impl Fn(i32, i32) -> Option<BlockRead>,
+        biome_at: impl Fn(i32, i32) -> Option<Arc<[BiomeRef; 16]>>,
+        feature_biomes: impl FeatureBiomeInput,
+        biome_zoom_seed: i64,
+    ) -> Self {
+        let mut grid = Self::with_footprint_canonical(
+            min_y, height, origin_x, origin_z, local_lo, local_hi,
         );
+        for dx in -WIDE_RADIUS..=WIDE_RADIUS {
+            for dz in -WIDE_RADIUS..=WIDE_RADIUS {
+                grid.sources[wide_slot_of_offset(dx, dz)] = source_at(dx, dz);
+            }
+        }
         let mut biomes = std::array::from_fn(|_| None);
         for dx in -WIDE_RADIUS..=WIDE_RADIUS {
             for dz in -WIDE_RADIUS..=WIDE_RADIUS {
@@ -850,24 +872,24 @@ impl VegGrid {
     /// once and reuse the same source for every Y instead of repeating the
     /// chunk-band calculation for each cell.
     #[inline]
-    fn source_grid(&self, lx: i32, lz: i32) -> Option<&DenseBlockGrid> {
+    fn source_grid(&self, lx: i32, lz: i32) -> Option<BlockReadRef<'_>> {
         if let Some(dynamic) = &self.dynamic_sources {
             let chunk_x = (self.origin_x + lx).div_euclid(16);
             let chunk_z = (self.origin_z + lz).div_euclid(16);
             return dynamic
                 .index(chunk_x, chunk_z)
-                .and_then(|index| dynamic.blocks[index].as_deref());
+                .and_then(|index| dynamic.blocks[index].as_deref()).map(BlockReadRef::Dense);
         }
         wide_source_slot(lx, lz).and_then(|slot| {
             census::record_source_slot(slot);
-            self.sources[slot].as_deref()
+            self.sources[slot].as_ref().map(BlockRead::as_read)
         })
     }
 
     #[inline]
     fn source_id_from_grid(
         &self,
-        source: Option<&DenseBlockGrid>,
+        source: Option<BlockReadRef<'_>>,
         lx: i32,
         y: i32,
         lz: i32,
@@ -892,7 +914,7 @@ impl VegGrid {
         self.sources[centre]
             .as_ref()
             .map_or(self.min_y + self.height, |source| {
-                let (_, min_y, _, _, height, _) = source.bounds();
+                let (_, min_y, _, _, height, _) = source.as_read().bounds();
                 min_y + height
             })
     }
@@ -1239,7 +1261,7 @@ impl VegGrid {
     #[inline]
     fn live_id_and_facts(
         &self,
-        source: Option<&DenseBlockGrid>,
+        source: Option<BlockReadRef<'_>>,
         lx: i32,
         y: i32,
         lz: i32,
@@ -1260,7 +1282,7 @@ impl VegGrid {
     #[inline]
     fn worldgen_id(
         &self,
-        source: Option<&DenseBlockGrid>,
+        source: Option<BlockReadRef<'_>>,
         lx: i32,
         y: i32,
         lz: i32,
@@ -1621,7 +1643,7 @@ impl super::super::OreWorldAccess for VegGrid {
 /// back on one thread and measures exactly what it caused.
 pub mod census {
     #[cfg(feature = "gen-counters")]
-    use crate::dense_grid::DenseBlockGrid;
+    use crate::block_read::BlockReadRef;
     #[cfg(feature = "gen-counters")]
     use std::cell::Cell;
     use std::cell::RefCell;
@@ -1813,7 +1835,7 @@ pub mod census {
 
     #[cfg(feature = "gen-counters")]
     pub(super) fn record_source_read(
-        source: &DenseBlockGrid,
+        source: BlockReadRef<'_>,
         x: i32,
         y: i32,
         z: i32,
@@ -1969,6 +1991,69 @@ mod heightmap_tests {
 
     fn state(spec: &str) -> StateId {
         StateId::from_state_str(spec).expect("test state is in the generated table")
+    }
+
+    #[test]
+    fn packed_resident_precedence_keeps_prepass_heights_frozen() {
+        use crate::block_read::{BlockRead, BlockReadRef, PackedBlockColumn};
+        use crate::generated_storage::CompactBlockStorage;
+        use crate::feature::region_view::RegionView;
+
+        let rock = state("minecraft:netherrack");
+        let glowstone = state("minecraft:glowstone");
+        let quartz = state("minecraft:nether_quartz_ore");
+        let mut centre = DenseBlockGrid::with_default(-32, 0, -48, 16, 256, 16, StateId::AIR);
+        centre.set_id(-31, 4, -46, rock);
+        centre.set_id(-31, 12, -46, glowstone);
+        let centre = Arc::new(centre);
+        let mut west_blocks = CompactBlockStorage::uniform(0, 256, 1);
+        west_blocks.set(15, 197, 2, 2);
+        let west = BlockRead::Packed(PackedBlockColumn::new(
+            -48, -48, 0, Arc::new(vec![rock, StateId::AIR, quartz]), west_blocks,
+        ));
+        let mut prefix = DenseBlockGrid::with_default(0, 0, -48, 16, 128, 16, StateId::AIR);
+        prefix.set_id(0, 6, -46, rock);
+        let prefix = Arc::new(prefix);
+        let mut ore = RegionView::over_wide_read_sources(-2, -3, 0, 128, |dx, dz| {
+            match (dx, dz) {
+                (0, 0) => Some(BlockReadRef::Dense(&centre)),
+                (-1, 0) => Some(west.as_read()),
+                (2, 0) => Some(BlockReadRef::Dense(&prefix)),
+                _ => None,
+            }
+        });
+        assert_eq!(ore.get_id(1, 12, 2), glowstone);
+        assert!(ore.seed_read_id(1, 12, 2, quartz));
+        assert_eq!(ore.get_id(1, 12, 2), quartz);
+        assert_eq!(ore.get_id(32, 6, 2), rock);
+        assert!(!ore.set_id(32, 6, 2, glowstone));
+        assert_eq!(ore.get_id(-1, 197, 2), StateId::AIR);
+
+        let mut grid = VegGrid::with_read_sources_and_flat_biome_ids_shared_zoomed(
+            0, 256, -32, -48, -24, 40,
+            |dx, dz| match (dx, dz) {
+                (0, 0) => Some(BlockRead::Dense(Arc::clone(&centre))),
+                (-1, 0) => Some(west.clone()),
+                (2, 0) => Some(BlockRead::Dense(Arc::clone(&prefix))),
+                _ => None,
+            },
+            |_, _| None,
+            Arc::new(crate::compose::FeatureBiomePlan::default()),
+            0,
+        );
+        grid.set_generation_top(128);
+        assert_eq!(grid.generation_top(), 128);
+        assert_eq!(grid.height_world_surface_wg(-31, -46), 13);
+        assert_eq!(grid.height_world_surface_wg(-33, -46), 198);
+        assert_eq!(grid.get_id(0, 6, -46), rock);
+        assert!(grid.set_id_if_in_bounds(-31, 201, -46, quartz));
+        assert!(grid.set_id_if_in_bounds(-33, 197, -46, StateId::AIR));
+        assert_eq!(grid.height_world_surface(-31, -46), 202);
+        assert_eq!(grid.height_world_surface_wg(-31, -46), 13);
+        assert_eq!(grid.height_world_surface(-33, -46), 0);
+        assert_eq!(grid.height_world_surface_wg(-33, -46), 198);
+        assert_eq!(grid.get_id(-33, 197, -46), StateId::AIR);
+        assert_eq!(west.as_read().get_id(-33, 197, -46), quartz);
     }
 
     /// The P07 witness is on the east edge of source `(-26,-25)`: the source

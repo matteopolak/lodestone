@@ -81,6 +81,31 @@ keeps those upper-window writes separate from the compact terrain carrier, and
 `ChunkColumn::from_nether` applies them after padding; otherwise the generated
 heightmap would report air one block below the external result.
 
+Resident lifecycle completion imports only the centre into a mutable dense
+grid. The other 24 positions in the 5×5 read context retain concrete
+`BlockRead::Packed` handles over the server's shared sections and their matching
+typed palettes. Missing residents fall back to the immutable pre-decoration
+prefix. Both ore and vegetation therefore read in the same order: the pass's
+overlay, its frozen resident snapshot, then the prefix. Ore still reads the
+5×5 window and writes only the inner 3×3; vegetation retains its padded footprint.
+
+Centre pre-pass overrides are applied before its immutable vegetation snapshot
+is captured. WG height lanes read that snapshot, including those overrides and
+upper resident rows, while later live overlay writes affect only live height
+lanes. The generation ceiling remains 128 even when the receiving window is
+256 rows. Shared resident writes detach through compact-storage copy-on-write
+and cannot alter an already captured pass.
+
+To change this handoff, follow
+`NetherChunkSource::feature_result_for_target`,
+`NetherGenerator::parity_target_pass_with_read_resident`,
+`RegionView::over_wide_read_sources`, and
+`VegGrid::with_read_sources_and_flat_biome_ids_shared_zoomed`.
+Keep the centre dense and neighbour payloads shared. With `gen-counters`,
+`ResidentDenseImport` reports cells and bytes allocated for dense imports,
+`ResidentPacked` reports palette-index probes, and `ResidentPayloadCopy`
+reports payload bytes detached by a resident write.
+
 The prefix values are immutable for a fixed seed and coordinate. Normal
 generation keeps a 1,024-entry sharded memo: each coordinate maps to a small
 mutex-protected shard, while the value itself is published through `OnceLock`.
