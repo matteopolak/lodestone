@@ -843,6 +843,9 @@ impl<'a, 'b, 'c> Ctx<'a, 'b, 'c> {
         if self.cache_y {
             self.cache.begin_y();
         }
+        if self.typed_biome_at.is_some() {
+            self.typed_biome = None;
+        }
     }
 }
 
@@ -2907,6 +2910,54 @@ mod tests {
         let mut compiled = CompiledRule::new(&rule);
         compiled.prove_deep_no_output(&conditions);
         assert!(!compiled.deep_no_output);
+    }
+
+    #[test]
+    fn typed_surface_biome_refreshes_at_each_height() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/worldgen_data");
+        let resolver = FsResolver { root: root.clone() };
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join("noise_settings/overworld.json")).unwrap(),
+        ).unwrap();
+        let builder = Builder::new(42, &resolver);
+        let mut surface = SurfaceSystem::new(&settings, &builder, &super::identity_canon(&settings));
+        let grass = lodestone_data::block::Block::GrassBlock.default_state();
+        let dirt = lodestone_data::block::Block::Dirt.default_state();
+        surface.conditions = vec![Cond::BiomeIs {
+            set: super::BiomeSet::from_names(vec!["minecraft:plains".to_owned()]),
+            cache: 0,
+        }];
+        surface.compiled_rule = CompiledRule::new(&Rule::Sequence(vec![
+            Rule::Condition(0, Box::new(Rule::Block(grass))),
+            Rule::Block(dirt),
+        ]));
+        let visited = std::cell::RefCell::new(Vec::new());
+        let biome_at = |_: i32, y: i32, _: i32| {
+            visited.borrow_mut().push(y);
+            (if y >= 10 { BuiltinBiome::Plains } else { BuiltinBiome::SulfurCaves }, false)
+        };
+        let mut cache = EvalCache::new(surface.xz_cache_slots, surface.y_cache_slots);
+        let mut ctx = Ctx {
+            block_x: -17, block_z: -1, block_y: 10,
+            surface_depth: 1, surface_secondary: 0.0, min_surface_level: 0,
+            water_height: NO_WATER, stone_depth_above: 1, stone_depth_below: 1,
+            biome: None, typed_biome: None, biome_builtin: None,
+            biome_at: None, typed_biome_at: Some(&biome_at),
+            cache: &mut cache, cache_y: false,
+        };
+        let mut column_conditions = vec![0; surface.conditions.len()];
+        let mut states = Vec::new();
+        for y in [10, 9] {
+            ctx.block_y = y;
+            ctx.begin_y();
+            states.push(surface.try_apply_compiled_column(&|_, _| 11, &mut ctx, &mut column_conditions));
+        }
+        assert_eq!(states, [Some(grass), Some(dirt)]);
+        assert_eq!(*visited.borrow(), [10, 9]);
+        ctx.typed_biome_at = None;
+        ctx.typed_biome = Some((BuiltinBiome::Plains, false));
+        ctx.begin_y();
+        assert_eq!(surface.try_apply_compiled_column(&|_, _| 11, &mut ctx, &mut column_conditions), Some(grass));
     }
 
     #[test]

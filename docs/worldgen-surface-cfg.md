@@ -19,6 +19,21 @@ path is acyclic and visits each condition node at most once for a block, so a
 Y-cache lookup cannot hit there. X/Z column memoization and all top-material
 cache behavior remain enabled.
 
+Typed biome answers from a position callback expire at every Y update, just
+like other position-dependent predicates. Fixed biome answers supplied by
+`top_material_typed` remain valid for that isolated lookup. A column can cross
+biome boundaries vertically; retaining its first typed answer changes the
+surface rule at later heights.
+
+The region biome callback can omit the positional zoom when all eight possible
+quart corners are already resident and carry the same built-in biome identity.
+It uses the same shifted quart parent and vertical clamping as the zoomed
+lookup. Mixed identities or any missing cell keep the original lookup, including
+its stateful exterior climate search. The omitted zoom offsets depend only on
+seed and coordinates; populating their request-local cache has no random-stream
+or biome-search effect. This proof is checked anew at each requested Y and does
+not retain a biome answer across heights.
+
 `biome` conditions compile generated built-in names into a two-word canonical
 biome bitset. Names outside that registry are retained in an ordered fallback
 vector for extension registries, so built-ins avoid repeated string-set scans
@@ -37,6 +52,13 @@ condition. Keep the fallback edge as the next rule in a sequence and add a
 focused control that compares compiled and recursive results, including any
 observable callback or random-draw order. Do not put mutable scan state in the
 compiled graph.
+
+Keep `RegionBiomeSidecar::uniform_resident_biome_at` conservative when changing
+biome storage or zoom candidates. Every possible selected cell must be resident
+before returning an identity; consulting the dynamic table during this proof
+would advance its tie cursor. The `uniform_resident_surface_biome` tests compare
+the production callback with the zoomed control and check zero zoom work against
+mixed-corner and missing-cell controls.
 
 ## Configuration
 
