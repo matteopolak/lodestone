@@ -59,4 +59,30 @@ test("mining uses the host mouse-button path rather than modifying a world", () 
   assert.deepEqual(sent.at(-1), { type: "mouseButton", button: 0, pressed: true });
   assert.equal(probe.stop("worker-error").reason, "worker-error");
   assert.throws(() => probe.start("teleport"), /unknown probe mode/);
+  sent.length = 0;
+  probe.start("mine", true);
+  assert.deepEqual(sent.slice(-2), [
+    { type: "mouseMotion", dx: 0, dy: 600 },
+    { type: "mouseButton", button: 0, pressed: true },
+  ]);
+  probe.stop();
+});
+
+test("phase totals and latest rows survive raw sample truncation", () => {
+  const probe = new ResponsivenessProbe(() => {}, () => 0);
+  probe.start("walk");
+  for (let i = 0; i < 260; i++) {
+    probe.observe({ kind: "diagnostic", message:
+      "worldgen timing: phase=browser-yield calls=2 items=3 sum_ms=7.125 max_ms=3.500" });
+  }
+  probe.observe({ kind: "diagnostic", message:
+    "worldgen timing: phase=mutable-settlement calls=1 items=9 sum_ms=2.750 max_ms=2.750" });
+  const report = probe.stop();
+  assert.equal(report.samplesTruncated, true);
+  assert.equal(report.samplesSeen, 261);
+  assert.equal(report.final.length, 2);
+  assert.deepEqual(report.generationPhases, [
+    { phase: "browser-yield", calls: 520, items: 780, elapsedMs: 1852.5, maxMs: 3.5 },
+    { phase: "mutable-settlement", calls: 1, items: 9, elapsedMs: 2.75, maxMs: 2.75 },
+  ]);
 });

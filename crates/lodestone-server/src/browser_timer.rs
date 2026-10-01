@@ -15,16 +15,9 @@
 //! `while let Some(packet) = conn.read_packet().await? { .. }` with no timer
 //! arm at all.
 //!
-//! [`BrowserInterval`] is the replacement primitive: a `tokio::time::
-//! interval_at`-alike built entirely on a real browser **macrotask**
-//! (the active global's `setTimeout`), the same mechanism `crate::chunk::yield_to_browser`
-//! already uses for the join/streaming yield points (`35f4800b`), generalised
-//! from a fixed one-macrotask yield to a caller-supplied period. It is
-//! deliberately *not* a microtask (`Promise::resolve().then(..)`) — a
-//! microtask drains within the same JS task and never lets the browser paint
-//! or service input, which would satisfy "there is an `.await` point" while
-//! doing nothing to stop the tab from hanging, exactly the failure `35f4800b`
-//! fixed for chunk generation.
+//! [`BrowserInterval`] waits on a host timer through `lodestone-time`, so ready
+//! input and message tasks can run between deadlines. Generation cooperation
+//! uses a separate host-message primitive rather than changing these timers.
 //!
 //! # How it works
 //!

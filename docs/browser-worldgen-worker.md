@@ -101,10 +101,21 @@ The `browser-yield` timing phase records actual host scheduling wait around
 cooperative generation yields. Its totals are elapsed wait, not CPU work, and
 can overlap other task timings. Compare yield maxima with worker-health gaps
 before attributing a slow join to timer scheduling.
+Calls count timing scopes, including capacity polls and cancelled waits; they
+are not counts of completed JavaScript callbacks.
+
+Generation cooperation uses `lodestone_time::browser_yield`: a FIFO host message
+task when supported, otherwise a zero-delay timer. Slot and overlapping-region
+polls retain timer waits rather than turning into fast repeated atomic/lock
+checks. Tick deadlines remain host timers. Both worker variants use the same
+policy; mutable state never moves into a host callback.
 
 The standalone page's optional `?log=debug&probe=1` panel holds the public host
 input bridge for a 20-second sprint/jump walk or a three-second mining action.
-Join through the normal menus and aim at a block before mining. This exercises
+Join through the normal menus and aim at a block before mining. `Mine ground`
+first sends a downward mouse-look delta through the same public input bridge;
+at default sensitivity it aims straight down. It does not choose or edit a block.
+This exercises
 the ordinary controller, server, protocol, meshing, and surface renderer; it
 does not create terrain or edit a world directly. The panel uses virtual host
 focus/pointer-lock state, not hardware input latency. It releases held inputs
@@ -117,6 +128,11 @@ The final report is printed to the console and stored as JSON text in
 diagnostics and at most 256 intervening samples; exact sample counts and
 truncation remain explicit. The final snapshots survive sample truncation, so
 end-of-walk delivery and presentation deficits remain observable.
+Latest timing rows are retained per phase, and `generationPhases` accumulates
+every received timing row while the probe is active, even after the raw-sample
+cap. At most 40 diagnostic categories are retained. These totals describe
+completed operations reported during the capture, not an exclusive CPU partition
+or operations whose entire lifetime necessarily falls inside it.
 These are sampled diagnostics, not per-action acknowledgements. Server-center
 changes prove chunk-boundary travel; a Walk command by itself does not. A mining
 input does not prove a block was broken, confirmed, or drawn. Check the visible
