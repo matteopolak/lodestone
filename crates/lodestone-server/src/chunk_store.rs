@@ -243,7 +243,7 @@ use lodestone_data::block_states::StateId;
 
 use crate::chunk::{
     ChunkColumn, ChunkGenerationStage, ColumnLightSettlement, ColumnLightSettlementError,
-    ChunkSource,
+    ChunkSource, ResidentLightTransaction, ResidentLightTransactionError,
 };
 use crate::chunk_lifecycle::{ChunkLifecycleHandoff, ChunkLifecyclePlan};
 use crate::ticket::{TicketDelta, TicketStoreHandle};
@@ -3241,6 +3241,11 @@ struct ChunkWriteObservation {
     column: ChunkColumn,
 }
 
+struct ResidentLightRevision {
+    state: Arc<ChunkWriteState>,
+    revision: u64,
+}
+
 struct ChunkWriteSnapshot<'a> {
     gates: &'a ChunkWriteGates,
     observations: Vec<ChunkWriteObservation>,
@@ -3315,6 +3320,37 @@ struct ChunkWriteLease<'a> {
     states: Vec<Arc<ChunkWriteState>>,
     bump_revision: bool,
     revision_filter: Option<Vec<(i32, i32)>>,
+}
+
+struct NonblockingChunkWriteLease<'a> {
+    gates: &'a ChunkWriteGates,
+    table: Option<std::sync::MutexGuard<'a, rustc_hash::FxHashMap<(i32, i32), ChunkWriteGateRecord>>>,
+    coordinates: Vec<(i32, i32)>,
+    states: Vec<Arc<ChunkWriteState>>,
+    outputs: Option<Vec<(i32, i32)>>,
+}
+
+impl Drop for NonblockingChunkWriteLease<'_> {
+    fn drop(&mut self) {
+        let table = self.table.as_mut().expect("the gate lease owns its table lock");
+        for (chunk, state) in self.coordinates.iter().zip(&self.states) {
+            if self.outputs.as_ref().is_some_and(|outputs| outputs.binary_search(chunk).is_ok()) {
+                let revision = state.revision.fetch_add(1, Ordering::AcqRel) + 1;
+                table.get_mut(chunk).expect("the held gate remains registered").revision = revision;
+            }
+            state.held.store(false, Ordering::Release);
+        }
+        self.states.clear();
+        for chunk in &self.coordinates {
+            if table.get(chunk).is_some_and(|record| {
+                record.state.strong_count() == 0 && record.revision == 0
+            }) {
+                table.remove(chunk);
+            }
+        }
+        drop(self.table.take());
+        self.gates.wake.notify_all();
+    }
 }
 
 struct ChunkReadLease<'a> {
@@ -3438,6 +3474,19 @@ impl ChunkWriteGates {
         }
     }
 
+    fn forget_if_idle_nonblocking(&self, chunks: &[(i32, i32)]) {
+        let Ok(mut state) = self.state.try_lock() else {
+            return;
+        };
+        for chunk in chunks {
+            if state.get(chunk).is_some_and(|record| {
+                record.state.strong_count() == 0 && record.revision == 0
+            }) {
+                state.remove(chunk);
+            }
+        }
+    }
+
     /// Acquires one or more coordinate gates in canonical `(cx, cz)` order.
     /// Claiming the sorted set under the table mutex avoids lock inversion when
     /// adjacent columns settle concurrently, while the condition variable
@@ -3548,6 +3597,46 @@ impl ChunkWriteGates {
             states,
             bump_revision,
             revision_filter: None,
+        })
+    }
+
+    fn try_acquire_many_nonblocking<'a>(
+        &'a self,
+        chunks: &[(i32, i32)],
+    ) -> Option<NonblockingChunkWriteLease<'a>> {
+        let mut canonical = chunks.to_vec();
+        canonical.sort_unstable();
+        canonical.dedup();
+        let mut table = match self.state.try_lock() {
+            Ok(table) => table,
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                panic!("chunk write-gate table poisoned")
+            }
+        };
+        let mut states = canonical.iter()
+            .map(|&chunk| Self::state_for_locked(&mut table, chunk))
+            .collect::<Vec<_>>();
+        if states.iter().any(|state| state.held.load(Ordering::Acquire)) {
+            states.clear();
+            for chunk in &canonical {
+                if table.get(chunk).is_some_and(|record| {
+                    record.state.strong_count() == 0 && record.revision == 0
+                }) {
+                    table.remove(chunk);
+                }
+            }
+            return None;
+        }
+        for state in &states {
+            state.held.store(true, Ordering::Release);
+        }
+        Some(NonblockingChunkWriteLease {
+            gates: self,
+            table: Some(table),
+            coordinates: canonical,
+            states,
+            outputs: None,
         })
     }
 
@@ -3688,6 +3777,78 @@ pub(crate) struct ChunkStore<S> {
     /// One admission slot per request identity. Waiters hold the slot's
     /// detached signal, so the map may forget it as soon as the leader ends.
     generation_in_flight: Mutex<HashMap<GenerationRequestKey, Arc<GenerationInFlight>>>,
+}
+
+struct ChunkResidentLightTransaction<'a, S> {
+    store: &'a ChunkStore<S>,
+    footprint: lodestone_world::ResidentLightFootprint,
+    revisions: Vec<ResidentLightRevision>,
+    columns: Vec<(i32, i32, ChunkColumn)>,
+}
+
+impl<S> Drop for ChunkResidentLightTransaction<'_, S> {
+    fn drop(&mut self) {
+        self.revisions.clear();
+        self.store.write_gates.forget_if_idle_nonblocking(self.footprint.inputs());
+    }
+}
+
+impl<S: ChunkSource> ResidentLightTransaction for ChunkResidentLightTransaction<'_, S> {
+    fn columns(&self) -> &[(i32, i32, ChunkColumn)] {
+        &self.columns
+    }
+
+    fn commit(
+        self: Box<Self>,
+        mut lights: Vec<((i32, i32), lodestone_world::ColumnLight)>,
+    ) -> Result<(), ResidentLightTransactionError> {
+        if lights.len() != self.footprint.outputs().len() {
+            return Err(ResidentLightTransactionError::InvalidOutputs);
+        }
+        lights.sort_unstable_by_key(|(coordinate, _)| *coordinate);
+        for ((coordinate, light), expected) in lights.iter().zip(self.footprint.outputs()) {
+            if coordinate != expected {
+                return Err(ResidentLightTransactionError::InvalidOutputs);
+            }
+            let index = self.footprint.inputs().binary_search(coordinate)
+                .expect("each output belongs to its input halo");
+            if light.light_section_count() != self.columns[index].2.section_count() + 2 {
+                return Err(ResidentLightTransactionError::InvalidOutputs);
+            }
+        }
+        let mut lease = self.store.write_gates
+            .try_acquire_many_nonblocking(self.footprint.inputs())
+            .ok_or(ResidentLightTransactionError::Busy)?;
+        if self.revisions.iter().zip(&lease.states).any(|(captured, current)| {
+            !Arc::ptr_eq(&captured.state, current)
+                || current.revision.load(Ordering::Acquire) != captured.revision
+        }) {
+            return Err(ResidentLightTransactionError::Conflict);
+        }
+        let mut cache = match self.store.cache.try_lock() {
+            Ok(cache) => cache,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Err(ResidentLightTransactionError::Busy);
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => panic!("chunk store lock poisoned"),
+        };
+        if self.footprint.inputs().iter().any(|coordinate| {
+            !cache.columns.contains_key(coordinate)
+        }) {
+            return Err(ResidentLightTransactionError::MissingFootprint);
+        }
+        let stamp = cache.next_stamp();
+        for (coordinate, light) in lights {
+            let entry = cache.columns.get_mut(&coordinate)
+                .expect("all output residents were checked before publication");
+            entry.column.set_retained_light(light);
+            entry.last_used = stamp;
+        }
+        lease.outputs = Some(self.footprint.outputs().to_vec());
+        drop(cache);
+        drop(lease);
+        Ok(())
+    }
 }
 
 impl<S> ChunkStore<S> {
@@ -6801,6 +6962,67 @@ impl<S: ChunkSource> ChunkStore<S> {
         coordinates
     }
 
+    /// Captures cache-owned full columns without invoking a wrapped source.
+    /// The detached token owns revision pins, not gates or cache locks. Light
+    /// publication is transient cache retention and never a durable terrain edit.
+    fn begin_resident_light(
+        &self,
+        outputs: &[(i32, i32)],
+        inputs: &[(i32, i32)],
+    ) -> Result<Box<dyn ResidentLightTransaction + '_>, ResidentLightTransactionError> {
+        let footprint = lodestone_world::ResidentLightFootprint::new(
+            outputs.iter().copied(),
+        ).map_err(|_| ResidentLightTransactionError::InvalidOutputs)?;
+        if inputs.len() > 25 {
+            return Err(ResidentLightTransactionError::InvalidOutputs);
+        }
+        let mut canonical = inputs.to_vec();
+        canonical.sort_unstable();
+        if canonical.windows(2).any(|pair| pair[0] == pair[1])
+            || canonical.iter().any(|coordinate| {
+                footprint.inputs().binary_search(coordinate).is_err()
+            })
+        {
+            return Err(ResidentLightTransactionError::InvalidOutputs);
+        }
+        if canonical != footprint.inputs() {
+            return Err(ResidentLightTransactionError::MissingFootprint);
+        }
+        let lease = self.write_gates.try_acquire_many_nonblocking(&canonical)
+            .ok_or(ResidentLightTransactionError::Busy)?;
+        let cache = match self.cache.try_lock() {
+            Ok(cache) => cache,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Err(ResidentLightTransactionError::Busy);
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => panic!("chunk store lock poisoned"),
+        };
+        if canonical.iter().any(|coordinate| {
+            cache.columns.get(coordinate).is_none_or(|entry| {
+                entry.column.generation_stage() != ChunkGenerationStage::Full
+            })
+        }) {
+            return Err(ResidentLightTransactionError::MissingFootprint);
+        }
+        let columns = canonical.iter().map(|&(cx, cz)| {
+            let column = cache.columns.get(&(cx, cz))
+                .expect("all input residents were checked before capture").column.clone();
+            (cx, cz, column)
+        }).collect();
+        let revisions = lease.states.iter().map(|state| ResidentLightRevision {
+            state: Arc::clone(state),
+            revision: state.revision.load(Ordering::Acquire),
+        }).collect();
+        drop(cache);
+        drop(lease);
+        Ok(Box::new(ChunkResidentLightTransaction {
+            store: self,
+            footprint,
+            revisions,
+            columns,
+        }))
+    }
+
     fn capture_light_snapshot(
         &self,
         coordinates: &[(i32, i32)],
@@ -7472,6 +7694,14 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
         cz: i32,
     ) -> Option<crate::chunk_store::TryResident<ChunkColumn>> {
         Some(ChunkStore::try_resident_column(self, cx, cz))
+    }
+
+    fn try_begin_resident_light(
+        &self,
+        outputs: &[(i32, i32)],
+        inputs: &[(i32, i32)],
+    ) -> Option<Result<Box<dyn ResidentLightTransaction + '_>, ResidentLightTransactionError>> {
+        Some(self.begin_resident_light(outputs, inputs))
     }
 
     fn try_resident_column_presence(
@@ -10331,6 +10561,175 @@ mod tests {
                 .retained_light(),
             Some(&unrelated_light)
         );
+    }
+
+    fn resident_light_fixture(
+        outputs: &[(i32, i32)],
+    ) -> (ChunkStore<CountingSource>, lodestone_world::ResidentLightFootprint) {
+        let footprint = lodestone_world::ResidentLightFootprint::new(
+            outputs.iter().copied(),
+        ).unwrap();
+        let store = ChunkStore::with_capacity(CountingSource::new(), 32);
+        for &(cx, cz) in footprint.inputs() {
+            let _ = store.column(cx, cz);
+        }
+        (store, footprint)
+    }
+
+    fn resident_light_outputs(
+        outputs: &[(i32, i32)],
+    ) -> Vec<((i32, i32), lodestone_world::ColumnLight)> {
+        outputs.iter().enumerate().map(|(index, &coordinate)| {
+            let mut light = lodestone_world::ColumnLight::new(1);
+            *light.sky_mut(1) = lodestone_world::LightData::Uniform((index * 4 + 3) as u8);
+            (coordinate, light)
+        }).collect()
+    }
+
+    #[test]
+    fn resident_light_transaction_commits_exact_outputs_and_preserves_terrain() {
+        let outputs = [(0, 0), (1, 0), (-1, -1)];
+        let (store, footprint) = resident_light_fixture(&outputs);
+        store.set_block(3, 5, 7, Block::GoldBlock.default_state());
+        let transaction = store.try_begin_resident_light(&outputs, footprint.inputs())
+            .unwrap().unwrap();
+        assert_eq!(transaction.columns().len(), footprint.inputs().len());
+        let centre = transaction.columns().iter().find(|(x, z, _)| (*x, *z) == (0, 0))
+            .unwrap();
+        assert_eq!(centre.2.block_state_id(3, 5, 7), Block::GoldBlock.default_state());
+        let stale = store.try_begin_resident_light(&outputs, footprint.inputs())
+            .unwrap().unwrap();
+        let lights = resident_light_outputs(&outputs);
+        assert_eq!(transaction.commit(lights.clone()), Ok(()));
+        assert_eq!(stale.commit(lights.clone()), Err(ResidentLightTransactionError::Conflict));
+        for &(cx, cz) in footprint.inputs() {
+            let column = store.resident_column(cx, cz).unwrap();
+            if let Some((_, light)) = lights.iter().find(|(position, _)| *position == (cx, cz)) {
+                assert_eq!(column.retained_light(), Some(light), "output ({cx},{cz})");
+                assert_eq!(column.retained_light_status(), Some(crate::chunk::RetainedLightStatus::CentreSettled));
+            } else {
+                assert_eq!(column.retained_light(), None, "input-only halo ({cx},{cz})");
+            }
+        }
+        assert_eq!(store.block_state_id(3, 5, 7), Block::GoldBlock.default_state());
+        assert_eq!(store.source.calls(), footprint.inputs().len() as u64);
+    }
+
+    #[test]
+    fn resident_light_transaction_rejects_centre_and_outer_halo_writes() {
+        let outputs = [(0, 0), (1, 0)];
+        for changed in [(0, 0), (2, 0)] {
+            let (store, footprint) = resident_light_fixture(&outputs);
+            let transaction = store.try_begin_resident_light(&outputs, footprint.inputs())
+                .unwrap().unwrap();
+            let x = changed.0 * 16 + 3;
+            let z = changed.1 * 16 + 7;
+            store.set_block(x, 5, z, Block::GoldBlock.default_state());
+            let captured = transaction.columns().iter()
+                .find(|(cx, cz, _)| (*cx, *cz) == changed).unwrap();
+            assert_eq!(captured.2.block_state_id(3, 5, 7), crate::chunk::air_state());
+            assert_eq!(transaction.commit(resident_light_outputs(&outputs)),
+                Err(ResidentLightTransactionError::Conflict), "changed input {changed:?}");
+            assert_eq!(store.block_state_id(x, 5, z), Block::GoldBlock.default_state());
+            for &(cx, cz) in &outputs {
+                assert_eq!(store.resident_column(cx, cz).unwrap().retained_light(), None);
+            }
+        }
+    }
+
+    #[test]
+    fn resident_light_transaction_rejects_invalid_batches_without_partial_output() {
+        let outputs = [(0, 0), (1, 0)];
+        let (store, footprint) = resident_light_fixture(&outputs);
+        let lights = resident_light_outputs(&outputs);
+        let mut outside = lights.clone();
+        outside[1].0 = (2, 0);
+        let mut duplicated = lights.clone();
+        duplicated[1].0 = (0, 0);
+        let mut wrong_shape = lights.clone();
+        wrong_shape[1].1 = lodestone_world::ColumnLight::new(2);
+        for invalid in [vec![lights[0].clone()], outside, duplicated, wrong_shape] {
+            let transaction = store.try_begin_resident_light(&outputs, footprint.inputs())
+                .unwrap().unwrap();
+            assert_eq!(transaction.commit(invalid), Err(ResidentLightTransactionError::InvalidOutputs));
+            for &(cx, cz) in &outputs {
+                assert_eq!(store.resident_column(cx, cz).unwrap().retained_light(), None);
+            }
+        }
+        let transaction = store.try_begin_resident_light(&outputs, footprint.inputs())
+            .unwrap().unwrap();
+        assert_eq!(transaction.commit(lights), Ok(()));
+        assert!(store.resident_column(1, 0).unwrap().retained_light().is_some());
+    }
+
+    #[test]
+    fn resident_light_transaction_defers_busy_or_missing_without_generation() {
+        let outputs = [(0, 0)];
+        let footprint = lodestone_world::ResidentLightFootprint::new(outputs).unwrap();
+        let store = ChunkStore::with_capacity(CountingSource::new(), 32);
+        assert_eq!(store.try_begin_resident_light(&outputs, footprint.inputs()).unwrap().err(),
+            Some(ResidentLightTransactionError::MissingFootprint));
+        assert_eq!(store.source.calls(), 0);
+        for &(cx, cz) in footprint.inputs() {
+            let _ = store.column(cx, cz);
+        }
+        let calls = store.source.calls();
+        let table = store.write_gates.state.lock().unwrap();
+        assert_eq!(store.try_begin_resident_light(&outputs, footprint.inputs()).unwrap().err(),
+            Some(ResidentLightTransactionError::Busy));
+        drop(table);
+        let held = store.write_gates.acquire_many(&[(0, 0)], false);
+        assert_eq!(store.try_begin_resident_light(&outputs, footprint.inputs()).unwrap().err(),
+            Some(ResidentLightTransactionError::Busy));
+        drop(held);
+        let cache = store.cache.lock().unwrap();
+        assert_eq!(store.try_begin_resident_light(&outputs, footprint.inputs()).unwrap().err(),
+            Some(ResidentLightTransactionError::Busy));
+        drop(cache);
+        let transaction = store.try_begin_resident_light(&outputs, footprint.inputs())
+            .unwrap().unwrap();
+        let table = store.write_gates.state.lock().unwrap();
+        drop(transaction);
+        drop(table);
+        let transaction = store.try_begin_resident_light(&outputs, footprint.inputs())
+            .unwrap().unwrap();
+        let cache = store.cache.lock().unwrap();
+        assert_eq!(transaction.commit(resident_light_outputs(&outputs)),
+            Err(ResidentLightTransactionError::Busy));
+        drop(cache);
+        assert_eq!(store.resident_column(0, 0).unwrap().retained_light(), None);
+        assert_eq!(store.source.calls(), calls);
+        let transaction = store.try_begin_resident_light(&outputs, footprint.inputs())
+            .unwrap().unwrap();
+        assert_eq!(transaction.commit(resident_light_outputs(&outputs)), Ok(()));
+    }
+
+    #[test]
+    fn resident_light_transaction_rejects_evicted_and_reloaded_inputs() {
+        let outputs = [(0, 0), (1, 0)];
+        for reload in [false, true] {
+            let (store, footprint) = resident_light_fixture(&outputs);
+            let transaction = store.try_begin_resident_light(&outputs, footprint.inputs())
+                .unwrap().unwrap();
+            let outer_halo = (2, 0);
+            let mut cache = store.cache.lock().unwrap();
+            cache.capacity = footprint.inputs().len() - 1;
+            for (&coordinate, entry) in &mut cache.columns {
+                entry.last_used = if coordinate == outer_halo { 0 } else { 1 };
+            }
+            assert_eq!(cache.evict_down_to_capacity(&HashSet::new()), [outer_halo]);
+            cache.capacity = 32;
+            drop(cache);
+            if reload {
+                let _ = store.column(outer_halo.0, outer_halo.1);
+            }
+            assert_eq!(transaction.commit(resident_light_outputs(&outputs)),
+                Err(if reload { ResidentLightTransactionError::Conflict }
+                    else { ResidentLightTransactionError::MissingFootprint }));
+            for &(cx, cz) in &outputs {
+                assert_eq!(store.resident_column(cx, cz).unwrap().retained_light(), None);
+            }
+        }
     }
 
     /// The settlement centre is a distinct entry from its dependency

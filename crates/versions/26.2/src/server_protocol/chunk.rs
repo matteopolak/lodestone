@@ -5,7 +5,10 @@
 
 use super::*;
 use lodestone_core::{Nbt, Writer, write_network_nbt};
-use lodestone_world::BlockVolume;
+use lodestone_world::{
+    BlockVolume, ResidentLightError, ResidentLightFootprint, ResidentLightInputs,
+    ResidentLightJob, ResidentLightProgress,
+};
 
 /// Converts one `lodestone-server` [`ServerChunkColumn`] into the
 /// version-free [`WorldChunkColumn`] the wire codec speaks, carrying the
@@ -293,6 +296,83 @@ mod conversion_tests {
                 },
             );
             assert_eq!(direct, buffered, "{dimension:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn resident_batch_matches_independent_halos_in_every_dimension() {
+        let stone = StateId::from_state_str("minecraft:stone").expect("stone state");
+        let glowstone = StateId::from_state_str("minecraft:glowstone").expect("glowstone state");
+        let cave_air = StateId::from_state_str("minecraft:cave_air").expect("cave air state");
+        let outputs = [(42, -27), (41, -26), (41, -27)];
+        let footprint = ResidentLightFootprint::new(outputs).unwrap();
+        let protocol: Box<dyn ServerProtocol> = Box::new(V770ServerProtocol);
+        for dimension in [Dimension::Overworld, Dimension::Nether, Dimension::End] {
+            let shape = shape_for_dimension(dimension);
+            let y = shape.min_y + 72;
+            let mut columns = footprint.inputs().iter().map(|&(cx, cz)| {
+                let mut column = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
+                let roof = y + 8 + (cx + 2 * cz).rem_euclid(3) * 21;
+                for z in 0..16 {
+                    for x in 0..16 {
+                        if (x + z) % 5 != 0 {
+                            column.set_block_id(x, roof + (x % 3), z, stone);
+                        }
+                    }
+                }
+                (cx, cz, column)
+            }).collect::<Vec<_>>();
+            let (_, _, emitting) = columns.iter_mut()
+                .find(|(cx, cz, _)| (*cx, *cz) == (41, -27)).unwrap();
+            emitting.set_block_id(15, y, 8, glowstone);
+            emitting.set_block_id(8, y + 3, 15, glowstone);
+            emitting.set_block_id(3, y + 90, 3, cave_air);
+            for (_, _, column) in &mut columns {
+                column.prime_client_heightmaps();
+            }
+
+            let actual = protocol.compute_resident_light_batch(&outputs, &columns, dimension)
+                .expect("resident computation supported").await.unwrap();
+            let synchronous = protocol.detached_resident_light_compute()
+                .expect("detached resident computation supported")(&outputs, &columns, dimension)
+                .unwrap();
+            assert_eq!(actual, synchronous, "cooperative and worker results: {dimension:?}");
+            assert_eq!(
+                actual.iter().map(|(position, _)| *position).collect::<Vec<_>>(),
+                footprint.outputs(),
+                "only explicit outputs are returned",
+            );
+            for &((cx, cz), ref light) in &actual {
+                let center = &columns.iter()
+                    .find(|(x, z, _)| (*x, *z) == (cx, cz)).unwrap().2;
+                let neighbours = columns.iter().filter_map(|(x, z, column)| {
+                    let (dx, dz) = (*x - cx, *z - cz);
+                    ((dx, dz) != (0, 0) && dx.abs() <= 1 && dz.abs() <= 1)
+                        .then_some((dx, dz, column))
+                }).collect::<Vec<_>>();
+                let expected = compute_served_light_with_neighbours(center, &neighbours, dimension);
+                for section in 0..light.light_section_count() {
+                    assert_eq!(light.sky(section), expected.sky(section),
+                        "sky at column ({cx}, {cz}), section {section}, {dimension:?}");
+                    assert_eq!(light.block(section), expected.block(section),
+                        "block at column ({cx}, {cz}), section {section}, {dimension:?}");
+                }
+            }
+            for (position, x, sample_y, z) in [((42, -27), 0, y, 8), ((41, -26), 8, y + 3, 0)] {
+                let light = &actual.iter().find(|(p, _)| *p == position).unwrap().1;
+                let relative_y = (sample_y - shape.min_y) as usize;
+                assert_eq!(
+                    light.block(relative_y / 16 + 1).get(NibbleArray::index(x, relative_y % 16, z)),
+                    Some(14),
+                    "one-step emission crossing at column {position:?}, cell ({x}, {sample_y}, {z})",
+                );
+            }
+            let missing = &columns[..columns.len() - 1];
+            assert_eq!(
+                protocol.compute_resident_light_batch(&outputs, missing, dimension)
+                    .expect("resident computation supported").await,
+                Err(ResidentLightError::MissingInput),
+            );
         }
     }
 
@@ -1107,6 +1187,68 @@ pub(super) fn compute_served_light_with_neighbours(
         &V770LightProps {
             has_skylight: dimension.has_skylight(),
         },
+    )
+}
+
+pub(super) async fn compute_served_resident_light_batch(
+    outputs: &[(i32, i32)],
+    columns: &[(i32, i32, ServerChunkColumn)],
+    dimension: Dimension,
+) -> Result<Vec<((i32, i32), ColumnLight)>, ResidentLightError> {
+    use lodestone_server::worldgen_progress::time_resident_light_step;
+
+    let shape = shape_for_dimension(dimension);
+    let props = V770LightProps { has_skylight: dimension.has_skylight() };
+    let volumes = columns.iter().map(|(_, _, source)| ServerLightVolume {
+        source,
+        shape: &shape,
+    }).collect::<Vec<_>>();
+    let inputs = resident_light_inputs(outputs, columns, &volumes)?;
+    let mut job = time_resident_light_step(0, || ResidentLightJob::new(inputs, &props));
+    let budget = std::num::NonZeroUsize::new(16_384).expect("nonzero resident light slice");
+    let mut items = outputs.len() as u32;
+    loop {
+        let progress = time_resident_light_step(items, || job.step(budget));
+        items = 0;
+        if progress == ResidentLightProgress::Ready {
+            break;
+        }
+        #[cfg(target_arch = "wasm32")]
+        lodestone_time::browser_yield().await;
+    }
+    match job.into_result() {
+        Ok(result) => Ok(result.columns),
+        Err(_) => unreachable!("a completed resident solve has a result"),
+    }
+}
+
+pub(super) fn compute_served_resident_light_batch_sync(
+    outputs: &[(i32, i32)],
+    columns: &[(i32, i32, ServerChunkColumn)],
+    dimension: Dimension,
+) -> Result<Vec<((i32, i32), ColumnLight)>, ResidentLightError> {
+    use lodestone_server::worldgen_progress::time_resident_light_step;
+
+    let shape = shape_for_dimension(dimension);
+    let props = V770LightProps { has_skylight: dimension.has_skylight() };
+    let volumes = columns.iter().map(|(_, _, source)| ServerLightVolume {
+        source,
+        shape: &shape,
+    }).collect::<Vec<_>>();
+    let inputs = resident_light_inputs(outputs, columns, &volumes)?;
+    let job = time_resident_light_step(0, || ResidentLightJob::new(inputs, &props));
+    Ok(time_resident_light_step(outputs.len() as u32, || job.finish()).columns)
+}
+
+fn resident_light_inputs<'a>(
+    outputs: &[(i32, i32)],
+    columns: &[(i32, i32, ServerChunkColumn)],
+    volumes: &'a [ServerLightVolume<'a>],
+) -> Result<ResidentLightInputs<'a, ServerLightVolume<'a>>, ResidentLightError> {
+    let footprint = ResidentLightFootprint::new(outputs.iter().copied())?;
+    ResidentLightInputs::new(
+        footprint,
+        columns.iter().zip(volumes).map(|((cx, cz, _), volume)| (*cx, *cz, volume)),
     )
 }
 

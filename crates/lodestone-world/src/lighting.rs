@@ -58,6 +58,12 @@
 use crate::light::{ColumnLight, LightData, NibbleArray};
 use crate::section::ChunkSection;
 
+mod resident;
+pub use resident::{
+    ResidentLightError, ResidentLightFootprint, ResidentLightInputs, ResidentLightJob,
+    ResidentLightProgress, ResidentLightResult, ResidentLightWork,
+};
+
 /// Per-block-state light properties, injected so this crate needs no block
 /// registry of its own.
 ///

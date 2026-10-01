@@ -580,7 +580,8 @@ pub use brewing::{
 pub use chunk::{
     ChunkColumn, ChunkGenerationStage, ColumnLightSettlement, ColumnLightSettlementError,
     ChunkColumnMemory, ChunkSource, EndChunkSource, HorizonSample, NetherChunkSource, OverworldChunkSource,
-    RetainedLightStatus, WorldRegistries, WorldgenChunkSource, run_worldgen_jobs,
+    ResidentLightTransaction, ResidentLightTransactionError, RetainedLightStatus,
+    WorldRegistries, WorldgenChunkSource, run_worldgen_jobs,
 };
 // `chunk_store::ChunkStore` itself stays crate-private (its methods
 // are `pub(crate)` and `IntegratedServer` is the only thing that should build
@@ -659,7 +660,7 @@ pub use plugin_channels::{
 pub use protocol::{
     Abilities, ChunkEncodeError, ChunkEncoder, DetachedLightCompute, DetachedPacketEncode, DetachedSourceEncode, EntitySnapshot, MerchantOfferOut, MetadataField,
     PlayerListing, ResourcePackPush, ResourcePackUrl, ResourcePackUrlError, ServerBound,
-    ServerDirective, ServerProtocol, WorldgenScope,
+    ResidentLightBatchCompute, ResidentLightFuture, ServerDirective, ServerProtocol, WorldgenScope,
 };
 /// The `EntityEvent` status bytes [`ServerProtocol::encode_entity_event`] carries.
 ///

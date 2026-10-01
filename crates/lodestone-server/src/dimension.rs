@@ -512,6 +512,14 @@ impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
         self.primary.try_resident_column(cx, cz)
     }
 
+    fn try_begin_resident_light(
+        &self,
+        outputs: &[(i32, i32)],
+        inputs: &[(i32, i32)],
+    ) -> Option<Result<Box<dyn crate::chunk::ResidentLightTransaction + '_>, crate::chunk::ResidentLightTransactionError>> {
+        self.primary.try_begin_resident_light(outputs, inputs)
+    }
+
     fn try_resident_column_presence(
         &self,
         cx: i32,

@@ -2139,6 +2139,36 @@ pub enum ColumnLightSettlementError {
     Conflict,
 }
 
+/// A deferred resident-light capture or rejected cooperative commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResidentLightTransactionError {
+    /// A short source lock or an input coordinate is currently held.
+    Busy,
+    /// The complete input halo is not resident in the owning cache.
+    MissingFootprint,
+    /// An input changed after capture; none of the outputs were installed.
+    Conflict,
+    /// The requested footprint or returned output set is invalid.
+    InvalidOutputs,
+}
+
+/// A stable terrain capture for a cooperative resident-light solve.
+///
+/// Capturing and committing never wait, generate terrain, or hydrate storage.
+/// No source lock or coordinate gate remains held between these operations.
+/// Implementations retain light only for the selected outputs and preserve
+/// terrain. Cache-owned light is transient and need not reach durable storage.
+pub trait ResidentLightTransaction: Send {
+    /// Complete input halo in absolute column coordinates, stable until drop.
+    fn columns(&self) -> &[(i32, i32, ChunkColumn)];
+
+    /// Installs exactly the selected outputs if every input is still current.
+    fn commit(
+        self: Box<Self>,
+        lights: Vec<((i32, i32), lodestone_world::ColumnLight)>,
+    ) -> Result<(), ResidentLightTransactionError>;
+}
+
 /// Light snapshots produced for one admitted chunk footprint.
 ///
 /// The centre entry is always present. Additional entries use chunk-relative
@@ -2530,6 +2560,17 @@ pub trait ChunkSource: Send + Sync {
         _cx: i32,
         _cz: i32,
     ) -> Option<crate::chunk_store::TryResident<ChunkColumn>> {
+        None
+    }
+
+    /// Captures a complete bounded halo for light work that may yield.
+    /// `None` preserves the legacy source capability surface. A capable source
+    /// returns a nonblocking transaction or an explicit deferral/rejection.
+    fn try_begin_resident_light(
+        &self,
+        _outputs: &[(i32, i32)],
+        _inputs: &[(i32, i32)],
+    ) -> Option<Result<Box<dyn ResidentLightTransaction + '_>, ResidentLightTransactionError>> {
         None
     }
 
@@ -3045,6 +3086,14 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
         (**self).try_resident_column(cx, cz)
     }
 
+    fn try_begin_resident_light(
+        &self,
+        outputs: &[(i32, i32)],
+        inputs: &[(i32, i32)],
+    ) -> Option<Result<Box<dyn ResidentLightTransaction + '_>, ResidentLightTransactionError>> {
+        (**self).try_begin_resident_light(outputs, inputs)
+    }
+
     fn try_resident_column_presence(
         &self,
         cx: i32,
@@ -3396,6 +3445,14 @@ impl<S: ChunkSource + ?Sized> ChunkSource for &S {
         cz: i32,
     ) -> Option<crate::chunk_store::TryResident<ChunkColumn>> {
         (**self).try_resident_column(cx, cz)
+    }
+
+    fn try_begin_resident_light(
+        &self,
+        outputs: &[(i32, i32)],
+        inputs: &[(i32, i32)],
+    ) -> Option<Result<Box<dyn ResidentLightTransaction + '_>, ResidentLightTransactionError>> {
+        (**self).try_begin_resident_light(outputs, inputs)
     }
 
     fn try_resident_column_presence(
