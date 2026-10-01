@@ -393,6 +393,15 @@ above.
 
 ## Configuration
 
+The shared timing sink exposes `resident-light-settlement`,
+`resident-light-compute`, `resident-light-encode` and `connection-relight`.
+Settlement includes snapshot capture, retries and commit; compute counts each
+attempt separately. Connection relighting measures occupied future polls, not
+suspended transport time. These nested totals overlap with `connection-poll`
+and must not be added. Native detached computation reports on its worker;
+browser resident computation runs inside connection polling. Initial chunk
+lighting remains the separate `packet-lighting` phase.
+
 There is no runtime setting. `ServerProtocol::retains_initial_column_light` is the capability
 boundary for exact initial-light settlement; its default is `false`. The optional
 `ServerProtocol::detached_light_compute` supplies a pure function for native background tick and

@@ -200,12 +200,28 @@ list for the wire.
 
 ### Live wiring: reaching a real client
 
-`IntegratedServer::open_in_memory_with_mobs` spawns the existing connection
-task (diffing `LiveMobSource::snapshots()` against what was last sent)
-alongside `tick::run_tick_loop`, which builds a second, independent
-`ChunkWorld` snapshot of the same deterministic terrain, then loops at 20 Hz:
-tick the sim, natural spawning, and block entities, and publishes snapshots. `LiveMobSource` is an
-`Arc<Mutex<Vec<EntitySnapshot>>>` behind `EntitySource`.
+`IntegratedServer::open_in_memory_with_mobs` runs a connection task alongside
+`tick::run_tick_loop`, which advances the sim, natural spawning, and block
+entities at 20 Hz, then publishes entity snapshots through `LiveMobSource`.
+Browser singleplayer uses the same publication cache through
+`IntegratedServer::serve_with_transport`; connection timer passes deliver
+publications even when the client sends no packets.
+
+`LiveMobSource` keeps the entity list and a monotonic publication revision
+under one shared mutex. Each publication advances the revision, including an
+empty list after the last entity despawns. `EntitySource::snapshots_if_changed`
+reads the revision and list together. Each connection remembers its own last
+consumed revision, so repeated passes between publications skip both the list
+clone and entity diff. New connections begin without a revision and receive
+the latest list independently. A publication still advances when its list
+happens to equal the preceding list; the producer does not compare snapshots.
+
+Sources without a publication counter use the trait's default unconditional
+snapshot read. Sources carrying a `PlayerRegistry` always merge and diff the
+current player view because player changes are independent of mob
+publications. Boss bars remain a separate publication and are diffed on every
+pass, even when the entity revision is unchanged.
+
 `crates/lodestone-shell/src/net.rs` calls this for singleplayer with a small
 fixed chunk radius around join spawn, independent of the client's own
 streamed view radius.
@@ -244,7 +260,11 @@ streamed view radius.
 - **Live wiring**: the simulation and everything it holds must stay `Send`, since it's ticked from a
   spawned async task. Natural spawning consumes the terrain snapshot and biome spawn tables on the
   server tick; the client receives the resulting snapshots through the normal entity stream. A version
-  target with no async timer support (e.g. wasm32) falls back to a mob-free path entirely.
+  target must drive the shared tick and connection timers through its platform runtime.
+- **Publication cache**: preserve the atomic revision/list read when changing
+  `LiveMobSource`. Keep revisions connection-local, and require an initial
+  read for new connections. Forwarding only an inner source's revision from a
+  player-aware source is insufficient to cover independent player changes.
 
 ## Configuration
 
@@ -262,6 +282,8 @@ streamed view radius.
 - Live wiring: the spawn center matching the server's join spawn and mob-area
   radius (clamped `1..=3`) in `net.rs`; the mob tick interval (`50ms`) in
   `mobs/mod.rs`.
+- Publication revisions have no configuration or feature flag; they advance
+  once per `LiveMobSource::publish` call.
 - No env vars anywhere in this subsystem.
 
 ## Dependencies

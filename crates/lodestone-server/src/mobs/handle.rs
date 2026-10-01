@@ -6,39 +6,38 @@
 
 use super::*;
 
-// NOTE: this module owns `ChunkWorld` + `MobSim`; the acceptance gate lives in
-// `tests/mob_sim.rs` so it drives them through the crate's *public* API — the
-// same discipline the rest of the project uses (a consumer that is only a
-// `#[cfg(test)]` fake proves nothing about the public seam).
-
-/// A live [`EntitySource`] fed by a background-ticked [`MobSim`] (the live mob tick).
-/// [`IntegratedServer::open_in_memory_with_mobs`](crate::IntegratedServer::open_in_memory_with_mobs)
-/// constructs one alongside [`crate::tick::run_tick_loop`] (the shared tick loop; this
-/// used to be [`run_mob_tick_loop`] before the mob and block-entity tick
-/// loops were unified into one), the task that owns the sim and republishes
-/// its snapshots here every tick.
-///
-/// Deliberately the same shape as `entity_streaming_live.rs`'s own test-only
-/// `SharedSnapshotSource` (an `Arc<Mutex<Vec<EntitySnapshot>>>` behind
-/// [`EntitySource`]) — that test already proved the read side of this shape
-/// reaches a real client; this type is the production version, now fed by a
-/// real simulation instead of a hand-mutated `Vec`.
+/// Entity publications from [`crate::tick::run_tick_loop`]. The revision and
+/// snapshots share one lock so each connection can skip unchanged publications.
 #[derive(Debug, Clone, Default)]
 pub struct LiveMobSource(
-    Arc<Mutex<Vec<EntitySnapshot>>>,
-    /// The dragon fight's boss bars, published the same way `.0` is — see
-    /// [`publish_boss_bars`](Self::publish_boss_bars). A second field rather
-    /// than folding into `.0` because a boss bar is not an entity and has no
-    /// `EntitySnapshot` shape to borrow.
+    Arc<Mutex<PublishedEntities>>,
     Arc<Mutex<Vec<crate::protocol::BossBarSnapshot>>>,
 );
+
+#[derive(Debug, Default)]
+struct PublishedEntities {
+    revision: u64,
+    snapshots: Vec<EntitySnapshot>,
+}
 
 impl EntitySource for LiveMobSource {
     fn snapshots(&self) -> Vec<EntitySnapshot> {
         self.0
             .lock()
             .expect("live mob snapshot lock poisoned")
+            .snapshots
             .clone()
+    }
+
+    fn snapshots_if_changed(
+        &self,
+        previous_revision: Option<u64>,
+    ) -> Option<(u64, Vec<EntitySnapshot>)> {
+        let publication = self.0.lock().expect("live mob snapshot lock poisoned");
+        if previous_revision == Some(publication.revision) {
+            return None;
+        }
+        Some((publication.revision, publication.snapshots.clone()))
     }
 
     fn boss_bars(&self) -> Vec<crate::protocol::BossBarSnapshot> {
@@ -50,20 +49,17 @@ impl EntitySource for LiveMobSource {
 }
 
 impl LiveMobSource {
-    /// Replaces the published snapshot set. Called once per tick — in
-    /// production by [`crate::tick::run_tick_loop`], and directly by the
-    /// tick-source test. The
-    /// next `snapshots()` call from any connection (there may be several,
-    /// e.g. open-to-LAN) sees the new set. `pub(crate)`, not private: the
-    /// unified loop lives in a sibling module (`tick.rs`) and needs to call
-    /// this directly rather than through a second wrapper.
+    /// Replaces the entity publication for all connections.
     pub(crate) fn publish(&self, snapshots: Vec<EntitySnapshot>) {
-        *self.0.lock().expect("live mob snapshot lock poisoned") = snapshots;
+        let mut publication = self.0.lock().expect("live mob snapshot lock poisoned");
+        publication.revision = publication
+            .revision
+            .checked_add(1)
+            .expect("entity publication revision exhausted");
+        publication.snapshots = snapshots;
     }
 
-    /// Replaces the published boss-bar set — the [`boss_bars`](EntitySource::boss_bars)
-    /// twin of [`publish`](Self::publish), called from the same tick-loop
-    /// call site right after it (see `crate::tick::run_tick_loop`).
+    /// Replaces the independent boss-bar publication.
     pub(crate) fn publish_boss_bars(&self, bars: Vec<crate::protocol::BossBarSnapshot>) {
         *self.1.lock().expect("live mob boss-bar lock poisoned") = bars;
     }
