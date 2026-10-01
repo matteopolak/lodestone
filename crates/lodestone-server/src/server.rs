@@ -5240,7 +5240,9 @@ where
                         .players()
                         .is_some_and(PlayerRegistry::enforce_secure_profile)
                     && profile_key_issuers.is_some();
-                return serve_play(
+                let service = crate::connection_service::ConnectionService::new();
+                let play = serve_play(
+                    &service,
                     conn,
                     proto,
                     source,
@@ -5283,8 +5285,8 @@ where
                     live_save,
                     #[cfg(not(target_arch = "wasm32"))]
                     native_player,
-                )
-                .await;
+                );
+                return service.run(play).await;
             }
             // Wire-level plugin messaging, Configuration-phase: a
             // client announces the channels it supports here (via
@@ -15065,6 +15067,7 @@ fn player_tick_ready(world: &crate::world_state::WorldStateHandle, client_loaded
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::too_many_arguments)]
 async fn serve_play<T, P, S, E>(
+    service: &crate::connection_service::ConnectionService,
     conn: &mut Connection<T>,
     proto: &P,
     source: SourceRef<'_, S>,
@@ -15440,6 +15443,7 @@ where
     let mut pending_join_encodes = crate::join_scheduler::OrderedJoinEncodes::new();
 
     loop {
+        service.admit_pass().await;
         if join_stream.is_done() && pending_join_encodes.is_empty() {
             world.mark_initial_view_drained();
         }
@@ -15754,7 +15758,7 @@ where
                     return Ok(ServeSummary { username, chunks_sent, inventory });
                 };
                 let pending_keep_alive_before_packet = pending_keep_alive;
-                dispatch_play_packet(
+                let dispatch = dispatch_play_packet(
                     conn,
                     proto,
                     source,
@@ -15828,8 +15832,10 @@ where
                     &mut dimension_reset,
                     packet_id,
                     &payload,
-                )
-                .await?;
+                );
+                crate::worldgen_progress::measure_polls(
+                    WorldgenTimingPhase::ConnectionDispatch, dispatch,
+                ).await?;
                 player_tick_ready(world, client_loaded);
                 if let Some(id) = pending_keep_alive_before_packet
                     && pending_keep_alive.is_none()
@@ -18282,6 +18288,7 @@ where
 #[cfg(target_arch = "wasm32")]
 #[allow(clippy::too_many_arguments)]
 async fn serve_play<T, P, S, E>(
+    service: &crate::connection_service::ConnectionService,
     conn: &mut Connection<T>,
     proto: &P,
     source: SourceRef<'_, S>,
@@ -18453,6 +18460,7 @@ where
     use crate::connection_progress::ConnectionActivity;
     let mut pending_join_encodes = crate::join_scheduler::OrderedJoinEncodes::new();
     loop {
+        service.admit_pass().await;
         if join_stream.is_done() && pending_join_encodes.is_empty() {
             world.mark_initial_view_drained();
         }
@@ -18716,12 +18724,13 @@ where
         };
         if let Some((packet_id, payload)) = packet {
             activity(ConnectionActivity::Dispatch, None, Some(packet_id));
-            dispatch_play_packet(
+            let mut dimension_reset = None;
+            let dispatch = dispatch_play_packet(
                 conn,
                 proto,
                 source,
                 &mut state,
-                None,
+                proto.retains_initial_column_light().then_some(&mut pending_relights),
                 &mut view,
                 &player_ticket_guard,
                 &mut pending_keep_alive,
@@ -18779,11 +18788,13 @@ where
                 &mut item_in_use,
                 // This target has no portal-travel state, so `source` never uses
                 // `SourceRef::Dimension` and this out-parameter remains unused.
-                &mut None,
+                &mut dimension_reset,
                 packet_id,
                 &payload,
-            )
-            .await?;
+            );
+            crate::worldgen_progress::measure_polls(
+                WorldgenTimingPhase::ConnectionDispatch, dispatch,
+            ).await?;
             activity(ConnectionActivity::Publication, None, Some(packet_id));
             player_tick_ready(world, client_loaded);
             republish_inventory(entities.players(), player_uuid, &inventory);

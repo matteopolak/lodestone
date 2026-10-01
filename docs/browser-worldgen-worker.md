@@ -45,6 +45,33 @@ At debug or trace level, the worker also installs a timing sink for production o
 covers completion-to-owner acceptance. Compute time includes its nested stage
 timers; all are elapsed intervals, not exclusive CPU measurements.
 
+`generation-poll` times each synchronous poll of the independently driven local
+generation future. `encode-poll` does the same for each ordered encode future.
+`connection-poll` encloses the Play connection poll, including any consecutive
+ready packet, relight and publication operations before it suspends.
+The guards end when a poll returns, including `Pending`; time between polls is
+excluded. These enclosing measurements overlap the stage guards and include
+lock stalls or host descheduling during a poll, so they are server-thread
+occupancy rather than CPU cycles. Compare their maxima with wake delay before
+treating a long suspended yield or completion-to-acceptance interval as work.
+
+Native and browser Play loops share `ConnectionService`: each loop pass checks
+an eight-millisecond occupied-work budget and a 64-pass limit. Its poll wrapper
+charges only active polls, preserving the accumulated budget across suspension
+and repeated wakeups. Exhaustion yields between complete operations, using the
+native executor or browser host, before admitting another pass. It never yields
+inside a packet assembly or mutable transaction. An individual operation can
+still exceed the budget; `connection-dispatch` separates inbound packet work
+from the enclosing connection poll. Adjust the limits in `connection_service`
+using movement and block-edit traces, not generation throughput alone.
+
+For retained-light protocols, direct edits use the same deduplicated relight
+queue on native and browser connections. Packet dispatch sends the block and
+inventory effects without synchronously recomputing the entire neighboring
+light footprint. The connection services one queued relight at a time between
+input, tick and chunk operations; its service budget bounds consecutive ready
+relights. Protocols without retained light keep the synchronous fallback.
+
 An optional `lodestone_server::connection_progress` sink samples
 the browser Play connection state at most once per second. It reports
 the current center/radius, owed and uniquely delivered columns, send operations,

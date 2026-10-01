@@ -18,10 +18,14 @@ pub enum WorldgenTimingPhase {
     ImmutableQueueWait,
     ImmutableCompute,
     ImmutableReturn,
+    GenerationPoll,
+    EncodePoll,
+    ConnectionPoll,
+    ConnectionDispatch,
 }
 
 impl WorldgenTimingPhase {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 18] = [
         Self::Lease,
         Self::PreOre,
         Self::StructureContext,
@@ -36,6 +40,10 @@ impl WorldgenTimingPhase {
         Self::ImmutableQueueWait,
         Self::ImmutableCompute,
         Self::ImmutableReturn,
+        Self::GenerationPoll,
+        Self::EncodePoll,
+        Self::ConnectionPoll,
+        Self::ConnectionDispatch,
     ];
 
     pub const fn index(self) -> usize {
@@ -58,6 +66,10 @@ impl WorldgenTimingPhase {
             Self::ImmutableQueueWait => "immutable-queue-wait",
             Self::ImmutableCompute => "immutable-compute",
             Self::ImmutableReturn => "immutable-return",
+            Self::GenerationPoll => "generation-poll",
+            Self::EncodePoll => "encode-poll",
+            Self::ConnectionPoll => "connection-poll",
+            Self::ConnectionDispatch => "connection-dispatch",
         }
     }
 }
@@ -167,6 +179,17 @@ impl Drop for PhaseTimer {
             items: self.items,
         });
     }
+}
+
+pub(crate) async fn measure_polls<F: std::future::Future>(
+    phase: WorldgenTimingPhase,
+    future: F,
+) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    std::future::poll_fn(|cx| {
+        let _timing = PhaseTimer::start(phase, 1);
+        future.as_mut().poll(cx)
+    }).await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

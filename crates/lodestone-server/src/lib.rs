@@ -531,6 +531,7 @@ pub mod worldgen_lifecycle;
 pub mod worldgen_session;
 pub mod worldgen_progress;
 pub mod connection_progress;
+mod connection_service;
 pub(crate) mod production_worldgen_session;
 /// Lightning: per-chunk strike-target selection during a thunderstorm, the
 /// `LightningBolt` life-cycle and its entity-facing effects (`docs/lightning.md`).
