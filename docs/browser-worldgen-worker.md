@@ -32,6 +32,22 @@ result. The existing source cursor and packet writer fences then resume on the
 server owner. Native synchronous requests consume the same immutable job body
 without changing their dispatcher policy.
 
+Initial packet preparation for protocols with a detached packet encoder moves
+the owned `PacketSnapshot` through `join_scheduler::encode_owned_packet_snapshot`.
+Native connections retain their bounded dispatcher; the threaded browser uses
+the same immutable-admission permit as shaped preparation. The job computes
+snapshot light, assembles the packet column, and encodes the directive without
+accessing a mutable source. Its snapshot revision, dependency halo, and existing
+light settlement travel together. Acceptance immediately releases the permit,
+before framing or transport waits. Dropping the encode future skips queued work
+or lets running work finish and release its permit while suppressing delivery.
+The browser's one-slot ordered queue and source-work fence remain in force.
+Serial browser preparation uses the same encoder inline after the existing
+cooperative generation stages; protocols without a detached encoder retain
+their connection-task fallback. Shared permit contention appears in
+`immutable-queue-wait`; snapshot lighting and encoding retain their existing
+phase timers.
+
 The shell sends its already-computed integrated stream radius in the launch envelope's `viewRadius`, and the worker passes it to the authoritative server unchanged. This uses the same `integrated_stream_radius` policy as native singleplayer: configured render distance plus the mesh-dependency and movement-lookahead padding. The initial playable loading gate remains capped at radius six. The server still primes one column and streams the remaining desired view through its bounded deferred generation window; the larger halo is not an eager startup barrier.
 
 The launch epoch is registered by the worker's Rust entry point. `cancel_worker` sets shared request cancellation only for the active epoch, and each session checkpoint observes it before admitting later work or settling the packet. Already-running synchronous work finishes cooperatively; its uncommitted transaction is discarded and committed prefixes remain reusable.
@@ -230,7 +246,7 @@ loop state rather than only the last one-second sample.
 
 If the Rayon helper's generated call shape changes, update `patch_threaded_worker_helper.mjs` and its staging assertion together. The patcher is intentionally narrow: it fails rather than silently rewriting an unrecognized helper.
 
-The server-side executor must continue to use the persistent pool only for immutable admission. The serial adapter owns browser yield points around those same session stages; a JavaScript task queue must not become a second world owner or reorder mutable commits.
+The server-side executor must continue to use the persistent pool only for immutable admission and owned packet preparation. The serial adapter owns browser yield points around those same session stages; a JavaScript task queue must not become a second world owner or reorder mutable commits. Keep packet preparation on the shared permit, release completed results before unrelated awaits, and preserve the ordered encode queue when changing `join_scheduler::encode_owned_packet_snapshot`.
 
 ## Configuration
 

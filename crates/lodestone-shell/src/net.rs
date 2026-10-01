@@ -803,6 +803,8 @@ enum Origin {
         /// `lodestone_server::WorldType` it used to carry — [`preset_chunk_source`]
         /// is what resolves all seven.
         world_type: crate::menu::create_world::WorldTypePreset,
+        #[cfg(target_arch = "wasm32")]
+        game_mode: lodestone_model::GameMode,
         /// Chunk radius the server streams around the player.
         view_radius: i32,
         defer_initial_player_loaded: bool,
@@ -1210,6 +1212,7 @@ impl NetClient {
         view_radius: i32,
         defer_initial_player_loaded: bool,
         session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
+        #[cfg(target_arch = "wasm32")] game_mode: lodestone_model::GameMode,
         #[cfg(not(target_arch = "wasm32"))] world_dir: Option<std::path::PathBuf>,
     ) -> Self {
         Self::connect_impl(
@@ -1217,6 +1220,8 @@ impl NetClient {
                 protocol: server_protocol,
                 seed,
                 world_type,
+                #[cfg(target_arch = "wasm32")]
+                game_mode,
                 view_radius,
                 defer_initial_player_loaded,
                 #[cfg(not(target_arch = "wasm32"))]
@@ -2363,6 +2368,8 @@ async fn run_async(
                 world_type,
                 view_radius,
                 defer_initial_player_loaded: _,
+                #[cfg(target_arch = "wasm32")]
+                game_mode,
                 #[cfg(not(target_arch = "wasm32"))]
                 world_dir,
                 #[cfg(not(target_arch = "wasm32"))]
@@ -2692,6 +2699,7 @@ async fn run_async(
                     protocol,
                     seed,
                     world_type,
+                    game_mode,
                     view_radius,
                     Arc::clone(&horizon_surface),
                 )
@@ -3754,6 +3762,7 @@ pub fn start_browser_integrated_worker(
     epoch: u32,
     view_radius: Option<i32>,
     transport_diagnostics: Option<fn(lodestone_net::MessagePortProgress)>,
+    game_mode: lodestone_model::GameMode,
 ) -> Result<Option<lodestone_server::IntegratedTickMonitor>, String> {
     let view_radius = browser::browser_worker_view_radius(view_radius)?;
     let preset = world_preset_from_wire_id(preset)
@@ -3781,12 +3790,13 @@ pub fn start_browser_integrated_worker(
     if let Some(sink) = transport_diagnostics {
         worker_io.set_diagnostics_sink(sink);
     }
-    let monitor = lodestone_server::IntegratedServer::serve_with_transport(
+    let monitor = lodestone_server::IntegratedServer::serve_with_transport_in_mode(
         server_protocol,
         source,
         view_radius,
         commands,
         worker_io,
+        game_mode,
     );
     Ok(monitor)
 }
@@ -3857,8 +3867,17 @@ async fn open_lan_world(
     String,
 > {
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+    let world_state = lodestone_server::world_state::WorldStateHandle::new();
+    if let Some(dir) = world_dir {
+        let level = lodestone_anvil::level_dat::read_from_file(&dir.join("level.dat"))
+            .map_err(|error| format!("cannot load {} world settings: {error}", dir.display()))?;
+        if let Some(data) = level.data() {
+            world_state.load_level_data(data);
+        }
+    }
     let config = |motd: String| lodestone_server::LanConfig {
         view_radius,
+        world_state: world_state.clone(),
         // The whole point of the feature: without the multicast ping the world
         // never appears in anyone's server list and the address has to be read out
         // loud.

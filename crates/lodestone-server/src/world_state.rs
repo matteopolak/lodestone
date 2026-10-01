@@ -781,11 +781,12 @@ impl WorldStateHandle {
     /// using the 26.2 interchange names.
     ///
     /// `difficulty_settings` is written whole (difficulty + lock) because that is
-    /// how 26.2 nests them; the other three are flat.
+    /// how 26.2 nests them; the mode and clock fields are flat.
     #[must_use]
     pub fn level_data_fields(&self) -> Vec<(String, Nbt)> {
         self.with(|state| {
             let mut fields = vec![
+                ("GameType".to_owned(), Nbt::Int(state.default_game_mode as i32)),
                 (
                     "GameRules".to_owned(),
                     // Strings, even for an integer rule — see the module doc.
@@ -868,6 +869,17 @@ impl WorldStateHandle {
             });
         }
         self.with(|state| {
+            if let Some(Nbt::Int(mode)) = field("GameType") {
+                if let Some(mode) = match mode {
+                    0 => Some(GameMode::Survival),
+                    1 => Some(GameMode::Creative),
+                    2 => Some(GameMode::Adventure),
+                    3 => Some(GameMode::Spectator),
+                    _ => None,
+                } {
+                    state.default_game_mode = mode;
+                }
+            }
             if let Some(Nbt::Long(time)) = field("Time") {
                 state.time.game_time = *time;
             }
@@ -1355,6 +1367,52 @@ mod tests {
         assert_eq!(world.default_game_mode(), lodestone_model::GameMode::Survival);
         world.set_default_game_mode(lodestone_model::GameMode::Creative);
         assert_eq!(world.default_game_mode(), lodestone_model::GameMode::Creative);
+    }
+
+    #[test]
+    fn level_data_game_modes_use_the_persisted_ordinals() {
+        for (ordinal, mode) in [
+            (0, GameMode::Survival),
+            (1, GameMode::Creative),
+            (2, GameMode::Adventure),
+            (3, GameMode::Spectator),
+        ] {
+            let loaded = WorldStateHandle::new();
+            loaded.load_level_data(&Nbt::Compound(vec![(
+                "GameType".to_owned(),
+                Nbt::Int(ordinal),
+            )]));
+            assert_eq!(loaded.default_game_mode(), mode);
+            let saved = WorldStateHandle::new();
+            saved.set_default_game_mode(mode);
+            assert_eq!(
+                saved
+                    .level_data_fields()
+                    .into_iter()
+                    .find(|(name, _)| name == "GameType"),
+                Some(("GameType".to_owned(), Nbt::Int(ordinal))),
+            );
+        }
+    }
+
+    #[test]
+    fn absent_or_invalid_level_game_mode_keeps_the_current_default() {
+        for fields in [
+            vec![],
+            vec![("GameType".to_owned(), Nbt::Int(-1))],
+            vec![("GameType".to_owned(), Nbt::Int(4))],
+            vec![(
+                "GameType".to_owned(),
+                Nbt::String("creative".to_owned()),
+            )],
+        ] {
+            let world = WorldStateHandle::new();
+            world.load_level_data(&Nbt::Compound(fields.clone()));
+            assert_eq!(world.default_game_mode(), GameMode::Survival);
+            world.set_default_game_mode(GameMode::Adventure);
+            world.load_level_data(&Nbt::Compound(fields));
+            assert_eq!(world.default_game_mode(), GameMode::Adventure);
+        }
     }
 
     /// A `/weather` request queues until taken, and taking it clears it — so a

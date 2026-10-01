@@ -378,6 +378,7 @@ pub(super) async fn launch_browser_worker(
     protocol: i32,
     seed: i64,
     preset: crate::menu::create_world::WorldTypePreset,
+    game_mode: lodestone_model::GameMode,
     view_radius: i32,
     horizon_surface: super::SharedHorizonSurface,
 ) -> Result<BrowserIntegratedTransport, String> {
@@ -696,6 +697,12 @@ pub(super) async fn launch_browser_worker(
         &JsValue::from_f64(f64::from(world_preset_wire_id(preset))),
     )
     .expect("plain launch object accepts preset");
+    js_sys::Reflect::set(
+        &launch,
+        &JsValue::from_str("gameMode"),
+        &JsValue::from_f64(f64::from(game_mode as u8)),
+    )
+    .expect("plain launch object accepts game mode");
     js_sys::Reflect::set(
         &launch,
         &JsValue::from_str("viewRadius"),

@@ -35,7 +35,15 @@ pub fn start_worker(
     epoch: u32,
     log_level: String,
     view_radius: Option<i32>,
+    game_mode: Option<u8>,
 ) -> Result<(), JsValue> {
+    let game_mode = match game_mode.unwrap_or(0) {
+        0 => lodestone_model::GameMode::Survival,
+        1 => lodestone_model::GameMode::Creative,
+        2 => lodestone_model::GameMode::Adventure,
+        3 => lodestone_model::GameMode::Spectator,
+        _ => return Err(JsValue::from_str("invalid browser worker game mode")),
+    };
     console_error_panic_hook::set_once();
     install_logger(&log_level)?;
     tracing::info!(%log_level, protocol, seed, preset, epoch, "browser server worker starting");
@@ -59,6 +67,7 @@ pub fn start_worker(
         epoch,
         view_radius,
         (log::max_level() >= log::LevelFilter::Debug).then_some(post_transport_progress),
+        game_mode,
     )
         .map_err(|error| JsValue::from_str(&error));
     let monitor = result?;

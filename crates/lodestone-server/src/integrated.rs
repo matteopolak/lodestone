@@ -1488,10 +1488,34 @@ impl IntegratedServer {
         P: ServerProtocol + 'static,
         S: ChunkSource + 'static,
     {
+        Self::open_in_memory_with_items_and_commands_in_mode(
+            protocol,
+            source,
+            view_radius,
+            commands,
+            lodestone_model::GameMode::Survival,
+        )
+    }
+
+    /// Opens a fresh world with its default game mode installed before the
+    /// connection and simulation tasks start.
+    #[must_use]
+    pub fn open_in_memory_with_items_and_commands_in_mode<P, S>(
+        protocol: P,
+        source: S,
+        view_radius: i32,
+        commands: CommandDispatch,
+        game_mode: lodestone_model::GameMode,
+    ) -> (Self, DuplexStream)
+    where
+        P: ServerProtocol + 'static,
+        S: ChunkSource + 'static,
+    {
         let (client_end, server_end) = memory_pair();
         let shutdown = ShutdownSignal::new();
         let signal = shutdown.clone();
         let world_state = crate::world_state::WorldStateHandle::default();
+        world_state.set_default_game_mode(game_mode);
         world_state.pause_initial_ticks();
         #[cfg(target_arch = "wasm32")]
         let sibling_ticking = Some(sibling_tick_context(&world_state, &shutdown));
@@ -1563,33 +1587,34 @@ impl IntegratedServer {
             let plugin_channels = crate::plugin_channels::PluginChannelRegistry::default();
             #[cfg(not(target_arch = "wasm32"))]
             let access = crate::access::AccessHandle::default();
+            let serving = serve_connection_with_mob_events_and_commands_shared(
+                &mut conn,
+                &protocol,
+                &conn_source,
+                &conn_entities,
+                view_radius,
+                crate::server::MAX_CLIENT_VIEW_RADIUS,
+                &conn_block_entities,
+                &conn_mobs,
+                &conn_tickets,
+                &conn_block_ticks,
+                &conn_explosions,
+                &conn_sleep_vote,
+                &conn_sleep_feed,
+                &commands,
+                &conn_border,
+                &resource_packs,
+                &plugin_channels,
+                &conn_world_state,
+                &conn_live_save,
+                #[cfg(not(target_arch = "wasm32"))]
+                &access,
+                #[cfg(not(target_arch = "wasm32"))]
+                None,
+            );
             tokio::select! {
                 _ = signal.notified() => {}
-                result = serve_connection_with_mob_events_and_commands_shared(
-                    &mut conn,
-                    &protocol,
-                    &conn_source,
-                    &conn_entities,
-                    view_radius,
-                    crate::server::MAX_CLIENT_VIEW_RADIUS,
-                    &conn_block_entities,
-                    &conn_mobs,
-                    &conn_tickets,
-                    &conn_block_ticks,
-                    &conn_explosions,
-                    &conn_sleep_vote,
-                    &conn_sleep_feed,
-                    &commands,
-                    &conn_border,
-                    &resource_packs,
-                    &plugin_channels,
-                    &conn_world_state,
-                    &conn_live_save,
-                    #[cfg(not(target_arch = "wasm32"))]
-                    &access,
-                    #[cfg(not(target_arch = "wasm32"))]
-                    None,
-                ) => {
+                result = serving => {
                     if let Err(error) = result {
                         tracing::error!(error = %error, "integrated connection failed");
                     }
@@ -1743,18 +1768,45 @@ impl IntegratedServer {
         source: S,
         view_radius: i32,
         commands: CommandDispatch,
-        mut transport: T,
+        transport: T,
     ) -> Option<IntegratedTickMonitor>
     where
         P: ServerProtocol + 'static,
         S: ChunkSource + 'static,
         T: Transport + 'static,
     {
-        let (server, mut server_io) = Self::open_in_memory_with_items_and_commands(
+        Self::serve_with_transport_in_mode(
             protocol,
             source,
             view_radius,
             commands,
+            transport,
+            lodestone_model::GameMode::Survival,
+        )
+    }
+
+    /// Serves a fresh world over the supplied transport with the chosen default
+    /// game mode already applied when its first login arrives.
+    #[cfg(target_arch = "wasm32")]
+    pub fn serve_with_transport_in_mode<P, S, T>(
+        protocol: P,
+        source: S,
+        view_radius: i32,
+        commands: CommandDispatch,
+        mut transport: T,
+        game_mode: lodestone_model::GameMode,
+    ) -> Option<IntegratedTickMonitor>
+    where
+        P: ServerProtocol + 'static,
+        S: ChunkSource + 'static,
+        T: Transport + 'static,
+    {
+        let (server, mut server_io) = Self::open_in_memory_with_items_and_commands_in_mode(
+            protocol,
+            source,
+            view_radius,
+            commands,
+            game_mode,
         );
         let monitor = server.tick_monitor();
         spawn(async move {
@@ -2021,6 +2073,7 @@ impl IntegratedServer {
             None,
             CommandDispatch::none(),
             crate::ecs::ServerApp::bootstrap(),
+            crate::world_state::WorldStateHandle::new(),
         )
     }
 
@@ -2060,6 +2113,7 @@ impl IntegratedServer {
             None,
             CommandDispatch::none(),
             server_app,
+            crate::world_state::WorldStateHandle::new(),
         )
     }
 
@@ -2097,6 +2151,7 @@ impl IntegratedServer {
             None,
             commands,
             crate::ecs::ServerApp::bootstrap(),
+            crate::world_state::WorldStateHandle::new(),
         )
     }
 
@@ -2171,6 +2226,7 @@ impl IntegratedServer {
         // spawned task permits native plugin registration while the extracted
         // `World` remains the only value that crosses the `Send` boundary.
         server_app: crate::ecs::ServerApp,
+        world_state: crate::world_state::WorldStateHandle,
     ) -> (Self, DuplexStream)
     where
         P: ServerProtocol + 'static,
@@ -2341,13 +2397,6 @@ impl IntegratedServer {
         // the same "clone before the move" shape every other `*_for_handle`
         // binding in this constructor already follows.
         let handle_portals = portals.clone();
-        // Moved up from further down this function (where
-        // `conn_world_state`/`world_state_for_handle` are still cloned out at
-        // their original spot) — `WorldStateHandle::new` is `Self::default()`,
-        // so relocating it here changes no behaviour, and `with_nether` needs
-        // it (via `ticking`, below) to hand a Nether/End sibling's tick loop
-        // the same anchor set this connection publishes into.
-        let world_state = crate::world_state::WorldStateHandle::new();
         world_state.pause_initial_ticks();
         world_state.require_initial_seed();
         // Install the same bounded ingress that the tick task will own before
@@ -2629,45 +2678,34 @@ impl IntegratedServer {
         let conn_access = crate::access::AccessHandle::default();
         let task = spawn(async move {
             let mut conn = Connection::new(server_end);
+            let serving = serve_connection_with_mob_events_and_commands_shared(
+                &mut conn,
+                &*conn_protocol,
+                &conn_source,
+                &conn_entities,
+                view_radius,
+                crate::server::MAX_CLIENT_VIEW_RADIUS,
+                &conn_block_entities,
+                &conn_mobs,
+                &conn_tickets,
+                &conn_block_ticks,
+                &conn_explosions,
+                &conn_sleep_vote,
+                &conn_sleep_feed,
+                &conn_commands,
+                &conn_border,
+                &conn_resource_packs,
+                &conn_plugin_channels,
+                &conn_world_state,
+                &conn_live_save,
+                #[cfg(not(target_arch = "wasm32"))]
+                &conn_access,
+                #[cfg(not(target_arch = "wasm32"))]
+                None,
+            );
             tokio::select! {
                 _ = conn_signal.notified() => {}
-                // the `_shared` variant, so this task's chunk
-                // generation runs on the blocking pool rather than on the
-                // one core thread it shares with `run_tick_loop` below.
-                // `&conn_source` rather than `&*conn_source` is the entire
-                // call-site change — see `crate::server::SourceRef`.
-                result = serve_connection_with_mob_events_and_commands_shared(
-                    &mut conn,
-                    &*conn_protocol,
-                    &conn_source,
-                    &conn_entities,
-                    view_radius,
-                    // singleplayer's live-change ceiling is the
-                    // slider's own maximum, not the radius this connection
-                    // joined with — the slider's maximum remains effective after
-                    // joining. Uncapped for the same reason
-                    // `for_integrated_view_radius` above is: it is the memory of
-                    // the person who moved the slider. See
-                    // `crate::server::MAX_CLIENT_VIEW_RADIUS`.
-                    crate::server::MAX_CLIENT_VIEW_RADIUS,
-                    &conn_block_entities,
-                    &conn_mobs,
-                    &conn_tickets,
-                    &conn_block_ticks,
-                    &conn_explosions,
-                    &conn_sleep_vote,
-                    &conn_sleep_feed,
-                    &conn_commands,
-                    &conn_border,
-                    &conn_resource_packs,
-                    &conn_plugin_channels,
-                    &conn_world_state,
-                    &conn_live_save,
-                    #[cfg(not(target_arch = "wasm32"))]
-                    &conn_access,
-                    #[cfg(not(target_arch = "wasm32"))]
-                    None,
-                ) => {
+                result = serving => {
                     if let Err(error) = result {
                         tracing::error!(error = %error, "integrated connection failed");
                     }
@@ -2970,6 +3008,13 @@ impl IntegratedServer {
         let level_dat = std::sync::Arc::new(crate::region_source::LevelDatHandle::open_or_create(
             world_dir, &spawn, 0,
         )?);
+        let world_state = crate::world_state::WorldStateHandle::new();
+        if let Some(data) = level_dat.data() {
+            world_state.load_level_data(&data);
+        }
+        if level_dat.created() {
+            world_state.clear_world_spawn();
+        }
         // A second handle to the *same* world, returned to the caller. This is
         // what anything outside the connection loop (a `/setblock`, a gate)
         // mutates through, and it is the identical object the `ChunkStore`
@@ -3054,6 +3099,7 @@ impl IntegratedServer {
             Some(world_dir.to_path_buf()),
             commands,
             server_app,
+            world_state,
         );
 
         server.save = Some(save.clone());
@@ -3065,29 +3111,7 @@ impl IntegratedServer {
         let autosave_handle = save.clone();
         let autosave_dimension_saves = server.dimension_saves.clone();
         let autosave_level_dat = std::sync::Arc::clone(&level_dat);
-        // the world's scalars, loaded from disk before any connection can
-        // change them and stamped on every autosave.
-        //
-        // Load races the connection's own join by construction (the connection task
-        // is spawned inside the constructor above), and that is tolerable rather than
-        // ignored: the join's `encode_set_time` may carry a zero clock for one
-        // second, and the periodic broadcast corrects it on its next tick. Moving the
-        // load before the constructor needs the store built outside it, which is the
-        // follow-up work wants anyway.
         let autosave_world_state = server.world_state.clone();
-        if let Some(data) = level_dat.data() {
-            autosave_world_state.load_level_data(&data);
-        }
-        // The one thing that must *not* survive the load on a fresh world:
-        // `LevelDat::for_new_world` had to write *some* `spawn` compound and had no
-        // terrain to consult, so it wrote a placeholder at the mob centre. Loading
-        // that back would look like a resolved world spawn and suppress the spiral
-        // search forever — the player would spawn at the placeholder even if it is
-        // ocean. Clearing it makes the first join do the search, and its answer is
-        // what the next autosave persists.
-        if level_dat.created() {
-            autosave_world_state.clear_world_spawn();
-        }
         // Cloned before the `Self` literal for the same reason `tick_clock` is
         // in the constructor above: an `Arc::clone` inside the `async move`
         // would move the binding into the coroutine.
@@ -4101,6 +4125,7 @@ impl IntegratedServer {
     {
         let LanConfig {
             view_radius,
+            world_state: lan_world_state,
             rcon,
             query,
             discovery,
@@ -4136,15 +4161,7 @@ impl IntegratedServer {
         // behalf of every accepted connection, none of whom chose the setting.
         // `chunk_store::integrated_capacity_for_view_radius` carries the argument
         // and the price list for the other side of the fork.
-        // `shutdown`/`lan_world_state` moved up from further down
-        // this function (where `tick_world_state`/`handle_world_state` are
-        // still cloned out at their original spot) — both constructors are
-        // side-effect-free, so relocating them changes no behaviour, and
-        // `with_nether` needs both (via `ticking`, below) to give a Nether/End
-        // sibling's tick loop the anchor set and shutdown race every other LAN
-        // background task already shares.
         let shutdown = ShutdownSignal::new();
-        let lan_world_state = crate::world_state::WorldStateHandle::new();
         let source = Arc::new(with_nether(
             ChunkStore::for_view_radius(source, view_radius),
             view_radius,
@@ -5961,6 +5978,7 @@ mod tests {
             None,
             CommandDispatch::none(),
             crate::ecs::ServerApp::bootstrap(),
+            crate::world_state::WorldStateHandle::new(),
         );
         prime_integrated_columns(&server, [(0, 0), (1, 0)]);
         let mut pending = crate::scheduled_tick::ScheduledTickQueue::new();

@@ -100,6 +100,39 @@ fn spawn_local_batch(
 
 type JoinEncodeResult = Result<((i32, i32), ServerDirective), ChunkEncodeError>;
 
+/// Encodes an owned immutable snapshot without moving source state to a worker.
+pub(crate) async fn encode_owned_packet_snapshot(
+    encode: crate::protocol::DetachedPacketEncode,
+    cx: i32,
+    cz: i32,
+    snapshot: crate::worldgen_session::PacketSnapshot,
+    dimension: crate::dimension::Dimension,
+) -> Result<ServerDirective, ChunkEncodeError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let handle = crate::worldgen_dispatch::spawn(move || {
+            encode(cx, cz, &snapshot, dimension)
+        })
+        .await;
+        handle.await.map_err(|_| {
+            ChunkEncodeError::new("detached packet encode worker ended without a result")
+        })?
+    }
+    #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+    {
+        let completed = crate::immutable_admission::execute(1, Vec::new(), move || {
+            encode(cx, cz, &snapshot, dimension)
+        })
+        .await
+        .map_err(|error| ChunkEncodeError::new(error.to_string()))?;
+        completed.accept(|directive| directive)
+    }
+    #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+    {
+        encode(cx, cz, &snapshot, dimension)
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 type JoinEncodeFuture<'a> = Pin<Box<dyn Future<Output = JoinEncodeResult> + Send + 'a>>;
 #[cfg(target_arch = "wasm32")]
@@ -1801,6 +1834,34 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
     use std::time::Duration;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn owned_snapshot_encoding_leaves_the_connection_thread() {
+        fn encoder(
+            cx: i32,
+            cz: i32,
+            _snapshot: &crate::worldgen_session::PacketSnapshot,
+            _dimension: crate::dimension::Dimension,
+        ) -> Result<ServerDirective, ChunkEncodeError> {
+            assert_eq!((cx, cz), (7, -3));
+            Ok(ServerDirective::Send {
+                packet_id: 44,
+                payload: format!("{:?}", std::thread::current().id()).into_bytes(),
+            })
+        }
+        let snapshot = || crate::worldgen_session::PacketSnapshot::for_test_with_neighbours(
+            ChunkColumn::new(0, 16), Vec::new(),
+        );
+        let owner = format!("{:?}", std::thread::current().id()).into_bytes();
+        let dimension = crate::dimension::Dimension::Overworld;
+        let inline = encoder(7, -3, &snapshot(), dimension).unwrap();
+        assert!(matches!(inline, ServerDirective::Send { payload, .. } if payload == owner));
+        let actual = encode_owned_packet_snapshot(encoder, 7, -3, snapshot(), dimension)
+            .await
+            .unwrap();
+        assert!(matches!(actual, ServerDirective::Send { packet_id: 44, payload } if payload != owner));
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test(flavor = "current_thread")]

@@ -18,6 +18,7 @@ wasm-threads = [
 ]
 
 [dependencies]
+lodestone-model = { path = "../../crates/lodestone-model" }
 lodestone-net = { path = "../../crates/lodestone-net", features = ["worker-web"] }
 lodestone-shell = { path = "../../crates/lodestone-shell", default-features = false, features = ["live"] }
 lodestone-server = { path = "../../crates/lodestone-server", default-features = false, features = ["bundled-worldgen-v26_2"] }
