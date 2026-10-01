@@ -27,6 +27,18 @@ mod block_edit_tests {
     use super::*;
     use lodestone_core::State;
 
+    #[test]
+    fn prediction_acknowledgement_has_only_the_sequence_varint() {
+        // 0x1f2345 = 0x45 + (0x46 << 7) + (0x7c << 14).
+        assert_eq!(
+            V770ServerProtocol.encode_block_changed_ack(PredictionSequence::new(0x1f_2345)),
+            ServerDirective::Send {
+                packet_id: 4,
+                payload: vec![0xc5, 0xc6, 0x7c],
+            }
+        );
+    }
+
     fn encode<T: Encode>(packet: &T) -> Vec<u8> {
         let mut w = Writer::default();
         packet.encode(&mut w, CTX).expect("well-formed struct encodes");
@@ -161,16 +173,12 @@ mod block_edit_tests {
     #[test]
     fn decode_use_item_lifts_hand_and_facing() {
         let proto = V770ServerProtocol;
-        let body = encode(&UseItem {
-            hand: 1,
-            sequence: 7,
-            yaw: 137.5,
-            pitch: -22.25,
-        });
+        let body = [0x01, 0x07, 0x43, 0x09, 0x80, 0x00, 0xc1, 0xb2, 0x00, 0x00];
         assert_eq!(
             proto.decode(State::Play, play::serverbound::USE_ITEM, &body),
             ServerBound::UseItem {
                 hand: 1,
+                sequence: Some(7),
                 yaw: 137.5,
                 pitch: -22.25,
             },

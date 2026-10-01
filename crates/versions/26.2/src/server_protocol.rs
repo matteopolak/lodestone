@@ -57,8 +57,9 @@ use lodestone_model::command_tree::{
 };
 use lodestone_model::{
     BlockActionKind, BlockFace, BlockPos, Difficulty, EntityAttributeSnapshot, GameMode,
-    ItemComponents, ItemStack, RecipeBookType, ResourceKey, ResourcePackResponseKind, Rotation,
-    SoundCategory, Text, TextContent, Vec3, Vec3f, WrittenBookContent,
+    ItemComponents, ItemStack, PredictionSequence, RecipeBookType, ResourceKey,
+    ResourcePackResponseKind, Rotation, SoundCategory, Text, TextContent, Vec3, Vec3f,
+    WrittenBookContent,
 };
 use lodestone_server::{
     Abilities, ChunkColumn as ServerChunkColumn, ChunkEncoder, ColumnLightSettlement,
@@ -2236,6 +2237,7 @@ impl ServerProtocol for V770ServerProtocol {
                         // "malformed input degrades the effect, not the connection"
                         // convention (`face_from_ordinal`).
                         hand: u8::try_from(u.hand).unwrap_or(0),
+                        sequence: Some(u.sequence),
                         yaw: u.yaw,
                         pitch: u.pitch,
                     },
@@ -4082,6 +4084,15 @@ impl ServerProtocol for V770ServerProtocol {
         ServerDirective::Send {
             packet_id: play::clientbound::BLOCK_UPDATE,
             payload: encode_block_update_body(x, y, z, state.raw()),
+        }
+    }
+
+    fn encode_block_changed_ack(&self, sequence: PredictionSequence) -> ServerDirective {
+        let mut payload = Writer::default();
+        payload.var_i32(sequence.as_wire());
+        ServerDirective::Send {
+            packet_id: play::clientbound::BLOCK_CHANGED_ACK,
+            payload: payload.into_vec(),
         }
     }
 

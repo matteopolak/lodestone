@@ -84,6 +84,7 @@ fn adapter_air_use_reaches_the_registry_selected_host_consumer() {
         host.decode(lodestone_core::State::Play, packet_id, &payload),
         lodestone_server::ServerBound::UseItem {
             hand: 1,
+            sequence: Some(17),
             yaw: 90.0,
             pitch: -15.0,
         },

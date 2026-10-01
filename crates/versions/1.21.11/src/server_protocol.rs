@@ -508,7 +508,7 @@ impl ServerProtocol for V774ServerProtocol {
             State::Play if packet_id == play::serverbound::USE_ITEM => {
                 let Some(UseItem {
                     hand,
-                    sequence: _,
+                    sequence,
                     yaw,
                     pitch,
                 }) = decode_full(payload)
@@ -521,7 +521,12 @@ impl ServerProtocol for V774ServerProtocol {
                 if hand > 1 {
                     return ServerBound::Ignored;
                 }
-                ServerBound::UseItem { hand, yaw, pitch }
+                ServerBound::UseItem {
+                    hand,
+                    sequence: Some(sequence),
+                    yaw,
+                    pitch,
+                }
             }
             State::Play if packet_id == play::serverbound::CHUNK_BATCH_RECEIVED => {
                 decode_full::<crate::packets::game::ChunkBatchReceived>(payload)

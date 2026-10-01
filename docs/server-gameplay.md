@@ -32,6 +32,20 @@ start-only path: it bypasses the hardness clock and produces no drops, but still
 range, known-state, non-air, unbreakable-state, and plugin-proposal checks. A protected or invalid
 target therefore remains untouched even when the player has instant-build abilities.
 
+### Block-prediction acknowledgement
+
+`ServerBound::BlockAction` and `UseItemOn` retain the client's raw prediction sequence;
+`UseItem::sequence` is optional because older protocols carry no sequence. The server validates
+nonnegative wire values before converting them to `PredictionSequence` and acknowledges the greatest
+processed value once per connection tick, after authoritative block updates. Rejected gameplay still
+settles a processed prediction; an acknowledgement confirms processing, not a successful edit.
+
+`ServerProtocol::encode_block_changed_ack` takes a typed sequence and defaults to no output for
+protocols without this packet. The 26.2 encoder sends one VarInt and uses the generated packet table.
+Keep its boxed forward when extending the seam, and preserve absent legacy sequences as `None`
+instead of inventing a counter. This path has no runtime configuration and depends on the shared
+prediction identity type and the protocol-specific packet table.
+
 ### Server-authoritative inventory and container clicks
 
 The server keeps its own model of a player's inventory (the same native slot numbering the client's
