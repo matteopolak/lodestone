@@ -3,7 +3,7 @@ import fs from "node:fs";
 import test from "node:test";
 
 const source = fs.readFileSync(new URL("./responsiveness_probe.js", import.meta.url), "utf8");
-const { ResponsivenessProbe } = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
+const { ResponsivenessProbe, install } = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
 
 test("terrain behind the loading overlay is not a playable readiness signal", () => {
   const probe = new ResponsivenessProbe(() => {});
@@ -18,6 +18,126 @@ test("terrain behind the loading overlay is not a playable readiness signal", ()
   }
   probe.observe({ kind: "progress", event: { phase: "world-open-started" } });
   assert.equal(probe.playable, false);
+});
+
+test("join milestones survive diagnostic churn and reset without invented phases", () => {
+  let now = 0;
+  const probe = new ResponsivenessProbe(() => {}, () => now++);
+  probe.observe({ kind: "progress", event: {
+    phase: "first-terrain-presented", elapsedMs: 20,
+  } });
+  assert.equal(probe.joinReport, null);
+  assert.equal(probe.playable, false);
+
+  const progress = (phase, elapsedMs) => probe.observe({ kind: "progress", event: {
+    phase, elapsedMs, loadedColumns: 12, expectedColumns: 16,
+    settledColumns: 9, pendingMeshes: 3,
+  } });
+  progress("world-create-started", 0);
+  progress("loading-overlay-ready", 25);
+  progress("first-terrain-presented", 31);
+  progress("full-view-presented", 44);
+  for (let i = 0; i < 400; i++) progress("full-view-presented", 100 + i);
+  for (let i = 0; i < 400; i++) {
+    probe.observe({ kind: "diagnostic", message: `server health: ticks=${i}` });
+  }
+
+  const firstJoin = probe.joinReport;
+  assert.equal(firstJoin.milestones.length, 4);
+  assert.deepEqual(firstJoin.milestones.map(row => row.phase), [
+    "world-create-started", "loading-overlay-ready", "first-terrain-presented", "full-view-presented",
+  ]);
+  assert.equal(firstJoin.milestones[2].elapsedMs, 31);
+  assert.equal(firstJoin.milestones[3].elapsedMs, 44);
+  assert.equal(firstJoin.milestones[2].loadedColumns, 12);
+  assert.equal(firstJoin.milestones.some(row => row.phase === "world-open-started"), false);
+  assert.equal(probe.playable, true);
+
+  progress("world-open-started", 0);
+  assert.equal(probe.playable, false);
+  assert.equal(probe.joinReport.sequence, firstJoin.sequence + 1);
+  assert.deepEqual(probe.joinReport.milestones.map(row => row.phase), ["world-open-started"]);
+  progress("full-view-presented", 55);
+  progress("first-terrain-presented", 51);
+  assert.equal(probe.playable, false);
+  assert.deepEqual(probe.joinReport.milestones.map(row => row.phase), [
+    "world-open-started", "full-view-presented", "first-terrain-presented",
+  ]);
+  assert.equal(probe.joinReport.milestones.some(row => row.phase === "loading-overlay-ready"), false);
+
+  probe.start("walk");
+  const report = probe.stop();
+  assert.deepEqual(report.join, probe.joinReport);
+  assert.equal(report.join.milestones.length, 3);
+});
+
+test("the opt-in DOM report keeps completed probe data through same-join progress", t => {
+  const previousGlobals = ["location", "document", "window"].map(name => [
+    name, Object.getOwnPropertyDescriptor(globalThis, name),
+  ]);
+  const nodes = [];
+  const document = {
+    body: { append() {} },
+    createElement(tagName) {
+      const node = {
+        tagName,
+        style: {},
+        children: [],
+        append(...children) { this.children.push(...children); },
+      };
+      nodes.push(node);
+      return node;
+    },
+  };
+  Object.defineProperties(globalThis, {
+    location: { configurable: true, value: { search: "?probe=1" } },
+    document: { configurable: true, value: document },
+    window: { configurable: true, value: { addEventListener() {} } },
+  });
+  t.after(() => {
+    for (const [name, descriptor] of previousGlobals) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+      else delete globalThis[name];
+    }
+  });
+
+  let onMessage;
+  const worker = {
+    postMessage() {},
+    addEventListener(type, listener) { if (type === "message") onMessage = listener; },
+  };
+  install(worker, { focus() {} });
+  const sendProgress = phase => onMessage({ data: { kind: "progress", event: {
+    phase, elapsedMs: 20, loadedColumns: 4, expectedColumns: 8,
+    settledColumns: 3, pendingMeshes: 1,
+  } } });
+  sendProgress("world-create-started");
+  sendProgress("loading-overlay-ready");
+  sendProgress("first-terrain-presented");
+
+  const walk = nodes.find(node => node.tagName === "button" && node.textContent === "Walk 20s");
+  const stop = nodes.find(node => node.tagName === "button" && node.textContent === "Stop probe");
+  const reportNode = nodes.find(node => node.id === "lodestone-responsiveness-report");
+  walk.onclick();
+  stop.onclick();
+  const completed = JSON.parse(reportNode.textContent);
+  assert.equal(completed.mode, "walk");
+  assert.equal(completed.reason, "stopped");
+
+  sendProgress("full-view-presented");
+  sendProgress("joining");
+  const sameJoin = JSON.parse(reportNode.textContent);
+  assert.equal(sameJoin.mode, "walk");
+  assert.deepEqual(sameJoin.join.milestones.map(row => row.phase), [
+    "world-create-started", "loading-overlay-ready", "first-terrain-presented", "full-view-presented",
+  ]);
+
+  sendProgress("world-open-started");
+  const reset = JSON.parse(reportNode.textContent);
+  assert.equal(reset.mode, undefined);
+  assert.deepEqual(reset.join.milestones.map(row => row.phase), ["world-open-started"]);
+  sendProgress("full-view-presented");
+  assert.equal(JSON.parse(reportNode.textContent).mode, undefined);
 });
 
 test("held normal inputs are released and diagnostics are bounded", () => {
