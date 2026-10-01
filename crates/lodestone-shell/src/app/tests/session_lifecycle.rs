@@ -44,6 +44,9 @@ fn pressing_play_reaches_a_running_integrated_server() {
         None,
         seed,
         crate::menu::create_world::WorldTypePreset::Normal,
+        #[cfg(target_arch = "wasm32")]
+        lodestone_model::GameMode::Survival,
+        #[cfg(not(target_arch = "wasm32"))]
         None,
     ) {
         Ok(net) => net,

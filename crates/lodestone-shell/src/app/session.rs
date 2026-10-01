@@ -1837,6 +1837,15 @@ impl WindowApp {
             SingleplayerLaunch::Open(_) => crate::menu::create_world::WorldTypePreset::Normal,
             SingleplayerLaunch::Created { config, .. } => config.world_type,
         };
+        #[cfg(target_arch = "wasm32")]
+        let game_mode = match &launch {
+            SingleplayerLaunch::Created { config, .. }
+                if config.game_mode == crate::menu::create_world::WorldGameMode::Creative =>
+            {
+                lodestone_model::GameMode::Creative
+            }
+            _ => lodestone_model::GameMode::Survival,
+        };
         // Game-rule selection follows the same rule as `world_type` immediately
         // above: only a **new** world carries a `WorldCreationConfig` to read
         // overrides from, and an empty `Vec` (nothing touched) is left as
@@ -1911,6 +1920,7 @@ impl WindowApp {
             session,
             seed,
             world_type,
+            game_mode,
         );
         match launch_result {
             Ok(net) => {

@@ -2944,20 +2944,14 @@ async fn encode_column_owned<P: ServerProtocol>(
             let dimension = source
                 .dimension()
                 .unwrap_or(crate::dimension::Dimension::Overworld);
-            #[cfg(not(target_arch = "wasm32"))]
             let directive = if let Some(encode) = proto.detached_packet_encode() {
-                let handle = crate::worldgen_dispatch::spawn(move || {
-                    encode(cx, cz, &snapshot, dimension)
-                })
-                .await;
-                handle.await.map_err(|_| {
-                    ChunkEncodeError::new("detached packet encode worker ended without a result")
-                })?
+                crate::join_scheduler::encode_owned_packet_snapshot(
+                    encode, cx, cz, snapshot, dimension,
+                )
+                .await
             } else {
                 encode_packet_snapshot_with_protocol(proto, cx, cz, &snapshot, dimension)
             }?;
-            #[cfg(target_arch = "wasm32")]
-            let directive = encode_packet_snapshot_with_protocol(proto, cx, cz, &snapshot, dimension)?;
             if let Some(trace) = trace.as_ref() {
                 trace.mark("encoded", cx, cz);
             }
@@ -4840,7 +4834,7 @@ where
                         .is_some_and(PlayerRegistry::enforce_secure_profile)
                     && profile_key_issuers.is_some();
                 let service = crate::connection_service::ConnectionService::new();
-                let play = serve_play(
+                let play = Box::pin(serve_play(
                     &service,
                     conn,
                     proto,
@@ -4883,7 +4877,7 @@ where
                     live_save,
                     #[cfg(not(target_arch = "wasm32"))]
                     native_player,
-                );
+                ));
                 return service.run(play).await;
             }
             // Wire-level plugin messaging, Configuration-phase: a

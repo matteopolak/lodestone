@@ -115,18 +115,32 @@ test("reports ordered startup milestones and passes all three supplied ports", a
     { kind: "progress", stage: "preparing-world", executor: "serial", workers: 1 },
     { kind: "ready" },
   ]);
-  assert.deepEqual(started, [[serverPort, progressPort, horizonPort, 776, -42n, 0, 1, "debug", undefined]]);
+  assert.deepEqual(started, [[serverPort, progressPort, horizonPort, 776, -42n, 0, 1, "debug", undefined, 0]]);
 });
 
 test("forwards the configured non-round stream radius without enlarging it again", async () => {
   const { launch } = bootstrap().LodestoneWorkerBootstrap;
   let started;
   await launch(
-    { data: { ...launchRequest, viewRadius: 11 }, ports: [{}, {}, {}] },
+    { data: { ...launchRequest, viewRadius: 11, gameMode: 1 }, ports: [{}, {}, {}] },
     async () => ({ default: async () => {}, start_worker: (...args) => { started = args; } }),
     () => {},
   );
   assert.equal(started[8], 11);
+  assert.equal(started[9], 1);
+});
+
+test("rejects an invalid game mode before importing wasm", async () => {
+  const { launch } = bootstrap().LodestoneWorkerBootstrap;
+  const received = [];
+  let imported = false;
+  await launch(
+    { data: { ...launchRequest, gameMode: 4 }, ports: [{}, {}, {}] },
+    async () => { imported = true; },
+    (message) => received.push(message),
+  );
+  assert.equal(imported, false);
+  assert.deepEqual(controlMessages(received), [{ kind: "error", message: "invalid server worker game mode" }]);
 });
 
 test("does not import wasm after a malformed launch and makes failure observable", async () => {

@@ -16,6 +16,8 @@ pub struct LanConfig {
     /// The server's own view-distance cap. Every connection's requested
     /// distance is clamped to it.
     pub view_radius: i32,
+    /// World configuration installed before accepting the first connection.
+    pub world_state: crate::world_state::WorldStateHandle,
     /// Start an RCON listener. `None` leaves the port closed.
     pub rcon: Option<crate::rcon::RconConfig>,
     /// Serve the GameSpy4/UT3 query protocol on the same port's UDP space.

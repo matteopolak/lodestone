@@ -3176,6 +3176,7 @@ dependencies = [
  "console_error_panic_hook",
  "console_log",
  "js-sys",
+ "lodestone-model",
  "lodestone-net",
  "lodestone-server",
  "lodestone-shell",

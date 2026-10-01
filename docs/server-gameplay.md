@@ -13,6 +13,33 @@ the two disagree.
 
 ## How it works
 
+### Initial game mode
+
+The world's default mode is shared `WorldStateHandle` configuration. Persistent integrated worlds
+load it from `level.dat`'s integer `GameType` before spawning connection or simulation tasks, and
+autosave and shutdown write the current default back. Missing, malformed, or unsupported values keep
+the current default; an unconfigured world starts in Survival. A returning player's saved mode takes
+precedence over the world default.
+
+Creating a native world with online mode loads the same metadata into
+`LanConfig::world_state` before the listener starts. Publishing an already-running
+world retains its existing shared state.
+
+Browser hosts pass a typed `lodestone_model::GameMode` to
+`IntegratedServer::serve_with_transport_in_mode`, which uses
+`IntegratedServer::open_in_memory_with_items_and_commands_in_mode` to initialize the same shared
+store before the first login. The constructors without an explicit mode retain the Survival default.
+There is no separate gameplay loop or post-login mode correction.
+
+The connection's long-lived play future is heap-pinned at the login handoff.
+This keeps its large state out of enclosing future storage and debug polling
+frames; no per-tick allocation is introduced.
+
+To change initialization, update the host's creation settings and constructor call. To change the
+stored format, keep `WorldStateHandle::load_level_data` and `WorldStateHandle::level_data_fields`
+together. This configuration has no environment variables and depends on the shared model's
+`GameMode`, the level metadata NBT, and the normal saved-player restore path.
+
 ### Block-break validation
 
 A held-down dig is validated the same way vanilla times one: a per-tick destroy-progress rate is

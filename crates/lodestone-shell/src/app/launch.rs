@@ -87,6 +87,7 @@ pub(crate) fn launch_singleplayer(
     session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
     seed: i64,
     world_type: crate::menu::create_world::WorldTypePreset,
+    #[cfg(target_arch = "wasm32")] game_mode: lodestone_model::GameMode,
     #[cfg(not(target_arch = "wasm32"))] world_dir: Option<std::path::PathBuf>,
 ) -> Result<NetClient, LaunchError> {
     let server_protocol = lodestone_registry::server_protocol_for_protocol(protocol)
@@ -99,6 +100,8 @@ pub(crate) fn launch_singleplayer(
         view_radius,
         defer_initial_player_loaded,
         session,
+        #[cfg(target_arch = "wasm32")]
+        game_mode,
         #[cfg(not(target_arch = "wasm32"))]
         world_dir,
     ))

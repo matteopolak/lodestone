@@ -274,8 +274,8 @@ async fn drive_login_and_join(client: &mut Connection<DuplexStream>, username: &
 
 /// Drives the normal join and returns both the streamed column and the mode
 /// the protocol received at the join boundary.
-async fn drive_login_and_join_with_mode(
-    client: &mut Connection<DuplexStream>,
+async fn drive_login_and_join_with_mode<T: lodestone_net::Transport>(
+    client: &mut Connection<T>,
     username: &str,
 ) -> ((i32, i32), GameMode) {
     client.write_packet(HANDSHAKE, &[2]).await.expect("handshake");
@@ -377,6 +377,116 @@ fn tempdir(tag: &str) -> std::path::PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp world dir");
     dir
+}
+
+#[tokio::test]
+async fn fresh_in_memory_join_uses_the_configured_game_mode() {
+    for mode in [GameMode::Survival, GameMode::Creative] {
+        let (server, client_end) = if mode == GameMode::Survival {
+            IntegratedServer::open_in_memory_with_items_and_commands(
+                FakeProtocol,
+                FlatWorld,
+                0,
+                lodestone_server::CommandDispatch::none(),
+            )
+        } else {
+            IntegratedServer::open_in_memory_with_items_and_commands_in_mode(
+                FakeProtocol,
+                FlatWorld,
+                0,
+                lodestone_server::CommandDispatch::none(),
+                mode,
+            )
+        };
+        let mut client = Connection::new(client_end);
+        let (_, delivered) = drive_login_and_join_with_mode(&mut client, "FreshMode").await;
+        assert_eq!(delivered, mode);
+        server.shutdown().await;
+        drop(client);
+    }
+}
+
+#[tokio::test]
+async fn lan_join_uses_the_configured_world_mode() {
+    let world_state = lodestone_server::world_state::WorldStateHandle::new();
+    world_state.set_default_game_mode(GameMode::Creative);
+    let server = IntegratedServer::open_to_lan(
+        "127.0.0.1:0",
+        FakeProtocol,
+        FlatWorld,
+        lodestone_server::LanConfig {
+            world_state,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("open local listener");
+    let stream = tokio::net::TcpStream::connect(server.local_addr().expect("bound listener"))
+        .await
+        .expect("connect local client");
+    let mut client = Connection::new(stream);
+    let (_, delivered) = drive_login_and_join_with_mode(&mut client, "LanMode").await;
+    assert_eq!(delivered, GameMode::Creative);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn persisted_world_mode_reaches_the_first_join_and_saved_player_mode_wins() {
+    for saved_mode in [None, Some(GameMode::Spectator)] {
+        let dir = tempdir(if saved_mode.is_some() {
+            "level-mode-saved"
+        } else {
+            "level-mode-fresh"
+        });
+        let username = "LevelMode";
+        let level = lodestone_anvil::level_dat::LevelDat::for_new_world(
+            "Creative world",
+            &lodestone_anvil::level_dat::Spawn {
+                pos: [8, 61, 8],
+                ..Default::default()
+            },
+            1,
+        );
+        lodestone_anvil::level_dat::write_to_file(&level, &dir.join("level.dat"))
+            .expect("seed Creative level metadata");
+        if let Some(mode) = saved_mode {
+            PlayerDataStore::new(&dir)
+                .expect("open player store")
+                .write(
+                    test_uuid_for(username),
+                    &PlayerData {
+                        game_mode: Some(mode),
+                        ..PlayerData::default()
+                    },
+                )
+                .expect("seed saved player mode");
+        }
+        let (server, client_end, _world) = IntegratedServer::open_persistent_with_mobs(
+            FakeProtocol,
+            &dir,
+            FlatWorld,
+            MIN_Y,
+            HEIGHT,
+            (0..=0, 0..=0),
+            (8, 8),
+            0,
+            Duration::from_secs(3600),
+        )
+        .expect("open world with persisted mode");
+        assert_eq!(server.world_state().default_game_mode(), GameMode::Creative);
+        let mut client = Connection::new(client_end);
+        let (_, delivered) = drive_login_and_join_with_mode(&mut client, username).await;
+        assert_eq!(delivered, saved_mode.unwrap_or(GameMode::Creative));
+        server.shutdown().await;
+        drop(client);
+        assert_eq!(
+            lodestone_anvil::level_dat::read_from_file(&dir.join("level.dat"))
+                .expect("read saved level metadata")
+                .game_type(),
+            Some(1),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// **The gate.** Join, change game mode, move, then leave the way a real
