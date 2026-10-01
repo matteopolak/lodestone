@@ -79,7 +79,14 @@ export class ResponsivenessProbe {
     } : null;
   }
 
-  start(mode, lookDown = false) {
+  aimDown() {
+    if (this.active) throw new Error("a responsiveness probe is already running");
+    this.send({ type: "focus", focused: true });
+    this.send({ type: "pointerLock", locked: true });
+    this.send({ type: "mouseMotion", dx: 0, dy: 600 });
+  }
+
+  start(mode) {
     if (this.active) throw new Error("a responsiveness probe is already running");
     if (mode !== "walk" && mode !== "mine") throw new Error("unknown probe mode");
     this.active = {
@@ -91,7 +98,6 @@ export class ResponsivenessProbe {
     if (mode === "walk") {
       for (const code of ["ControlLeft", "Space", "KeyW"]) this.key(code, true);
     } else {
-      if (lookDown) this.send({ type: "mouseMotion", dx: 0, dy: 600 });
       this.send({ type: "mouseButton", button: 0, pressed: true });
     }
   }
@@ -104,7 +110,6 @@ export class ResponsivenessProbe {
     if (!this.active) return null;
     for (const code of ["KeyW", "ControlLeft", "Space"]) this.key(code, false);
     this.send({ type: "mouseButton", button: 0, pressed: false });
-    this.send({ type: "pointerLock", locked: false });
     const report = this.active;
     this.active = null;
     report.endedMs = this.now();
@@ -120,10 +125,11 @@ export class ResponsivenessProbe {
 
 const JOIN_PHASES = new Set([
   "world-create-started", "world-open-started", "first-terrain-presented",
-  "loading-overlay-ready", "full-view-presented",
+  "loading-overlay-ready", "full-view-presented", "full-view-quiescent",
 ]);
 const JOIN_PROGRESS_FIELDS = [
   "elapsedMs", "loadedColumns", "expectedColumns", "settledColumns", "pendingMeshes",
+  "pendingLightRemeshes",
 ];
 
 export function install(worker, canvas) {
@@ -168,9 +174,8 @@ export function install(worker, canvas) {
     displayedJoinSequence = join?.sequence ?? null;
     reportNode.textContent = JSON.stringify({ join });
   };
-  for (const [label, mode, duration, lookDown] of [
+  for (const [label, mode, duration] of [
     ["Walk 20s", "walk", 20000], ["Mine 3s", "mine", 3000],
-    ["Mine ground 3s", "mine", 3000, true],
   ]) {
     const button = document.createElement("button");
     button.textContent = label;
@@ -178,7 +183,7 @@ export function install(worker, canvas) {
     button.onpointerdown = event => event.preventDefault();
     button.onclick = () => {
       canvas.focus();
-      probe.start(mode, lookDown);
+      probe.start(mode);
       status.textContent = `${mode}: running`;
       for (const control of buttons) control.disabled = true;
       timer = setTimeout(() => finish("completed"), duration);
@@ -186,6 +191,17 @@ export function install(worker, canvas) {
     panel.append(button);
     buttons.push(button);
   }
+  const aim = document.createElement("button");
+  aim.textContent = "Aim down";
+  aim.disabled = true;
+  aim.onpointerdown = event => event.preventDefault();
+  aim.onclick = () => {
+    canvas.focus();
+    probe.aimDown();
+    status.textContent = "Aim applied; check the block target before mining";
+  };
+  panel.append(aim);
+  buttons.push(aim);
   const stop = document.createElement("button");
   stop.textContent = "Stop probe";
   stop.onpointerdown = event => event.preventDefault();

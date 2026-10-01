@@ -71,6 +71,35 @@ test("join milestones survive diagnostic churn and reset without invented phases
   assert.equal(report.join.milestones.length, 3);
 });
 
+test("quiescent is retained once after full presentation with pending work and resets on new join", () => {
+  const probe = new ResponsivenessProbe(() => {}, () => 100);
+  const progress = (phase, elapsedMs, pendingMeshes, pendingLightRemeshes) => probe.observe({
+    kind: "progress", event: {
+      phase, elapsedMs, loadedColumns: 25, expectedColumns: 25,
+      settledColumns: 25, pendingMeshes, pendingLightRemeshes,
+    },
+  });
+  progress("world-create-started", 0, 0, 0);
+  progress("loading-overlay-ready", 13_950, 910, 11);
+  progress("first-terrain-presented", 13_980, 909, 10);
+  progress("full-view-presented", 14_170, 905, 7);
+  assert.equal(probe.playable, true);
+  assert.equal(probe.joinReport.milestones.some(row => row.phase === "full-view-quiescent"), false);
+  const presented = probe.joinReport.milestones.at(-1);
+  assert.equal(presented.pendingMeshes, 905);
+  assert.equal(presented.pendingLightRemeshes, 7);
+  progress("full-view-quiescent", 21_234, 0, 0);
+  progress("full-view-quiescent", 23_000, 0, 0);
+  const settled = probe.joinReport.milestones.filter(row => row.phase === "full-view-quiescent");
+  assert.equal(settled.length, 1);
+  assert.equal(settled[0].elapsedMs, 21_234);
+  assert.equal(settled[0].pendingMeshes, 0);
+  assert.equal(settled[0].pendingLightRemeshes, 0);
+  progress("world-open-started", 0, 0, 0);
+  assert.equal(probe.playable, false);
+  assert.deepEqual(probe.joinReport.milestones.map(row => row.phase), ["world-open-started"]);
+});
+
 test("the opt-in DOM report keeps completed probe data through same-join progress", t => {
   const previousGlobals = ["location", "document", "window"].map(name => [
     name, Object.getOwnPropertyDescriptor(globalThis, name),
@@ -125,11 +154,13 @@ test("the opt-in DOM report keeps completed probe data through same-join progres
   assert.equal(completed.reason, "stopped");
 
   sendProgress("full-view-presented");
+  sendProgress("full-view-quiescent");
   sendProgress("joining");
   const sameJoin = JSON.parse(reportNode.textContent);
   assert.equal(sameJoin.mode, "walk");
   assert.deepEqual(sameJoin.join.milestones.map(row => row.phase), [
     "world-create-started", "loading-overlay-ready", "first-terrain-presented", "full-view-presented",
+    "full-view-quiescent",
   ]);
 
   sendProgress("world-open-started");
@@ -162,13 +193,13 @@ test("held normal inputs are released and diagnostics are bounded", () => {
   assert.equal(report.samplesTruncated, true);
   assert.equal(report.final.at(-1).message, "server health: ticks=259");
   assert.equal(report.final.length, 2);
-  assert.deepEqual(sent.slice(-5), [
+  assert.deepEqual(sent.slice(-4), [
     { type: "key", code: "KeyW", pressed: false, modifiers: 0 },
     { type: "key", code: "ControlLeft", pressed: false, modifiers: 0 },
     { type: "key", code: "Space", pressed: false, modifiers: 0 },
     { type: "mouseButton", button: 0, pressed: false },
-    { type: "pointerLock", locked: false },
   ]);
+  assert.equal(sent.some(input => input.type === "pointerLock" && !input.locked), false);
   assert.equal(probe.stop(), null);
 });
 
@@ -180,11 +211,11 @@ test("mining uses the host mouse-button path rather than modifying a world", () 
   assert.equal(probe.stop("worker-error").reason, "worker-error");
   assert.throws(() => probe.start("teleport"), /unknown probe mode/);
   sent.length = 0;
-  probe.start("mine", true);
-  assert.deepEqual(sent.slice(-2), [
-    { type: "mouseMotion", dx: 0, dy: 600 },
-    { type: "mouseButton", button: 0, pressed: true },
-  ]);
+  probe.aimDown();
+  assert.deepEqual(sent.at(-1), { type: "mouseMotion", dx: 0, dy: 600 });
+  assert.equal(sent.some(input => input.type === "mouseButton"), false);
+  probe.start("mine");
+  assert.deepEqual(sent.at(-1), { type: "mouseButton", button: 0, pressed: true });
   probe.stop();
 });
 

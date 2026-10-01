@@ -470,6 +470,7 @@ fn emit_join_progress(callback: &Function, progress: &lodestone::BrowserJoinProg
         "loading-overlay-ready" => "loading overlay ready to dismiss",
         "first-terrain-presented" => "first terrain frame presented",
         "full-view-presented" => "configured view presented",
+        "full-view-quiescent" => "configured view meshes settled",
         _ => "singleplayer join progress",
     };
     let fields = [
@@ -482,6 +483,7 @@ fn emit_join_progress(callback: &Function, progress: &lodestone::BrowserJoinProg
         ("expectedColumns", JsValue::from_f64(expected as f64)),
         ("settledColumns", JsValue::from_f64(progress.settled_columns as f64)),
         ("pendingMeshes", JsValue::from_f64(progress.pending_meshes as f64)),
+        ("pendingLightRemeshes", JsValue::from_f64(progress.pending_light_remeshes as f64)),
     ];
     for (name, value) in fields {
         let _ = Reflect::set(&event, &JsValue::from_str(name), &value);

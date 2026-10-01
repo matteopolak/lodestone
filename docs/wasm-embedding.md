@@ -10,6 +10,15 @@ The browser target exposes a small `mount(options)` / `LodestoneHandle.destroy()
 
 The transferred canvas is owned by the worker for the entire session; Lodestone never accesses the page DOM or performs the transfer itself. `first-frame` is emitted only after the render loop has handed a frame to the browser presentation queue, including the full-screen ownership menu path. The readiness latch is created per mount and is set by the same `WindowApp` present boundary that draws the frame, so it is not a process-global or thread-local observation that can miss a canonical threaded build. The worker-facing poll remains bounded only as a failure diagnostic if WebGPU never becomes ready. Fullscreen, input bridging, and worker lifetime remain caller-owned. `destroyed` is emitted after the worker has dropped the renderer and GPU state. A mount started while that teardown is in progress waits for it, so callers may safely reuse the initialized module and asset bundle without an arbitrary delay.
 
+Singleplayer joins emit elapsed-time progress from the in-game create/open action.
+`full-view-presented` means requested terrain has been shown, possibly with older
+meshes while replacements are pending. `full-view-quiescent` samples the first
+presented frame with latest requested-view mesh handoffs settled and scheduler,
+column-repair, light-intent and removal queues drained. These are measurement
+milestones, not input-unlock conditions. `pendingMeshes` counts scheduler work;
+`pendingLightRemeshes` counts light intents awaiting admission. See
+[browser worker diagnostics](browser-worldgen-worker.md) for the complete boundary.
+
 The browser startup gate is local only. It shows `Confirm ownership`, the checkbox
 `I confirm that I own Minecraft: Java Edition.`, and a `Continue` button that stays disabled
 until checked. Wasm has no account switcher, Microsoft sign-in, OAuth/device-code flow, token or

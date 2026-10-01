@@ -109,6 +109,16 @@ view deficits with connection delivery and mesh queue age before attributing a
 delay to generation. These sampled console diagnostics are debug-only and do not
 extend the SDK progress-event contract.
 
+Join progress distinguishes `full-view-presented` from `full-view-quiescent`.
+The first can retain earlier geometry while replacement meshes are queued. The
+second is sampled after Surface presentation and requires the requested view's
+latest mesh handoffs or explicit empty classifications, with scheduler work,
+column repairs, light intents and removals drained. Halo-only waiting columns
+outside the view do not block it. This does not change gameplay readiness.
+`pendingMeshes` counts scheduler work and ready results; `pendingLightRemeshes`
+counts light intents not yet admitted. Join probes continue every 100 ms through
+quiescence without debug logging, then retain the debug-only one-second cadence.
+
 Wasm generation batches run as independently driven local tasks. The connection
 polls a bounded ordered encode queue while continuing packet and tick service;
 dropping a batch receiver cancels its task and releases the generation claims.
@@ -139,14 +149,18 @@ policy; mutable state never moves into a host callback.
 
 The standalone page's optional `?log=debug&probe=1` panel holds the public host
 input bridge for a 20-second sprint/jump walk or a three-second mining action.
-Join through the normal menus and aim at a block before mining. `Mine ground`
-first sends a downward mouse-look delta through the same public input bridge;
-at default sensitivity it aims straight down. It does not choose or edit a block.
+Join through the normal menus and aim at a block before mining. `Aim down`
+sends a downward mouse-look delta through the same public input bridge;
+at default sensitivity it aims straight down. Check the rendered target, then
+start `Mine 3s` separately so look and attack cannot use the same stale target.
+Neither control chooses or edits a block directly.
 This exercises
 the ordinary controller, server, protocol, meshing, and surface renderer; it
 does not create terrain or edit a world directly. The panel uses virtual host
 focus/pointer-lock state, not hardware input latency. It releases held inputs
 on completion, Stop, page exit, or a worker error.
+Stopping leaves pointer-lock state unchanged: forging an unlock would pause the
+game and make the next action probe exercise a menu instead of gameplay.
 The controls wait for both first presented terrain and loading-overlay readiness;
 terrain drawn behind the loading overlay is not a playable-world signal.
 
@@ -156,7 +170,7 @@ diagnostics and at most 256 intervening samples; exact sample counts and
 truncation remain explicit. The final snapshots survive sample truncation, so
 end-of-walk delivery and presentation deficits remain observable.
 The report also retains the current join's create/open, first-terrain,
-loading-overlay-ready, and full-view milestones before any action probe starts.
+loading-overlay-ready, full-view-presented and full-view-quiescent milestones before any action probe starts.
 Each includes page receipt time and the worker's elapsed time and column/mesh
 counters when supplied. Only received milestones are recorded, in receipt order;
 a new join clears the previous record. Completed action reports survive later

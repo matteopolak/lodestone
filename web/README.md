@@ -140,12 +140,19 @@ the lifecycle and progress events.
 
 `onProgress` also receives one bounded sequence for each singleplayer join:
 `world-create-started`, `joining`, `loading-terrain`, `loading-overlay-ready`,
-`first-terrain-presented`, and `full-view-presented`. These records expose
+`first-terrain-presented`, `full-view-presented`, and `full-view-quiescent`. These records expose
 `elapsedMs`, `loadedColumns`, `expectedColumns`, `settledColumns`, and
-`pendingMeshes`; they measure
+`pendingMeshes` and `pendingLightRemeshes`; they measure
 from the in-game world action rather than SDK mount. `first-frame` remains the
 mount readiness signal and must not be interpreted as terrain readiness.
 Opening an existing world emits `world-open-started` at the same boundary.
+`full-view-presented` can retain earlier geometry while replacements are queued.
+`full-view-quiescent` requires the requested view's latest mesh handoffs and
+empty-section classifications to be settled after presentation, with scheduler,
+column-repair, light-intent and removal queues drained. It is a sampled completion
+milestone, not the gameplay unlock condition. Halo-only waiting columns outside
+the view do not prevent it. `pendingMeshes` counts scheduler work and ready results;
+`pendingLightRemeshes` counts light intents not yet admitted to that scheduler.
 The standalone adapter prints these transition-only records as `lodestone join:`
 console messages, including elapsed milliseconds and loaded, expected, settled,
 and pending counts. Asset and frame-heartbeat progress remains in the page status
