@@ -3700,6 +3700,7 @@ dependencies = [
 name = "lodestone-testsupport"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "lodestone-core",
  "lodestone-model",
  "lodestone-world",

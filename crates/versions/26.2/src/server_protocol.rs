@@ -1984,12 +1984,17 @@ impl V770ServerProtocol {
         dimension: Dimension,
     ) -> Option<[lodestone_world::ColumnLight; 9]> {
         let shape = shape_for_dimension(dimension);
-        let center = build_world_column(&shape, column);
+        let buffered_center = (dimension != Dimension::Overworld)
+            .then(|| build_world_column(&shape, column));
+        let center = buffered_center.as_ref().map_or_else(
+            || InitialLightVolume::borrowed(column, &shape),
+            InitialLightVolume::Buffered,
+        );
         let statuses = std::array::from_fn(|slot| {
             stored[slot].map(|_| RetainedLightStatus::CentreSettled)
         });
         Some(compute_served_initial_lights_with_neighbours_and_storage(
-            &center,
+            center,
             &shape,
             neighbours,
             stored,
@@ -3713,9 +3718,14 @@ impl ServerProtocol for V770ServerProtocol {
             }
         }
         let shape = shape_for_dimension(dimension);
-        let center = build_world_column(&shape, column);
+        let buffered_center = (dimension != Dimension::Overworld)
+            .then(|| build_world_column(&shape, column));
+        let center = buffered_center.as_ref().map_or_else(
+            || InitialLightVolume::borrowed(column, &shape),
+            InitialLightVolume::Buffered,
+        );
         let mut lights = compute_served_initial_lights_with_neighbours_and_storage(
-            &center,
+            center,
             &shape,
             neighbours,
             &stored,
@@ -3723,6 +3733,7 @@ impl ServerProtocol for V770ServerProtocol {
             dimension,
         );
         if dimension == Dimension::End {
+            let center = buffered_center.as_ref().expect("End has a buffered centre");
             // A newly admitted dependency needs the same sparse allocation
             // shape as the complete footprint, but a retained dependency
             // snapshot remains its own light-engine result. Do not replace a
@@ -3732,7 +3743,7 @@ impl ServerProtocol for V770ServerProtocol {
                 .iter()
                 .map(|(_, _, neighbour)| build_world_column(&shape, neighbour))
                 .collect::<Vec<_>>();
-            let admitted_columns = std::iter::once(center.clone())
+            let admitted_columns = std::iter::once((*center).clone())
                 .chain(neighbour_world.iter().cloned())
                 .collect::<Vec<_>>();
             for ((dx, dz, _), dependency) in neighbours.iter().zip(&neighbour_world) {
