@@ -740,6 +740,10 @@ fuzz-smoke seconds="30":
 fuzz-seeds-regen:
     python3 fuzz/seeds/generate-seeds.py
 
+[doc("bounded, resumable local fluid/redstone differential campaign")]
+differential-campaign *args:
+    cargo run -p lodestone-fuzz --features differential-campaign --bin differential-campaign -- {{args}}
+
 # Restore one historical fluid scheduling defect in a disposable detached
 # worktree, then require the generated live differential search to find,
 # shrink and replay the resulting divergence. The local vanilla oracle must

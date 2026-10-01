@@ -74,6 +74,12 @@ def game_time(rcon):
     return numbers[-1]
 
 
+def require_tick(rcon, expected, phase):
+    observed = game_time(rcon)
+    if observed != expected:
+        raise RuntimeError(f"{phase} crossed a tick boundary: expected {expected}, observed {observed}")
+
+
 def probe(rcon, pos, candidates):
     x, y, z = pos
     for candidate in candidates:
@@ -176,18 +182,14 @@ def main():
     loaded = []
     try:
         loaded = force_load(rcon, plan)
-        # A RCON edit is handled by the server tick loop. Anchor the first
-        # observed boundary after tick-zero edits, otherwise the command
-        # round trip itself can be mislabeled as an unobserved elapsed tick.
-        for step in (entry for entry in plan["steps"] if entry["tick"] == 0):
-            x, y, z = step["action"]["pos"]
-            rcon.command(f"setblock {x} {y} {z} {step['action']['state']}")
         baseline = game_time(rcon)
         observations = []
         for tick in range(total):
-            for step in (entry for entry in plan["steps"] if entry["tick"] == tick and tick != 0):
+            require_tick(rcon, baseline, "before actions")
+            for step in (entry for entry in plan["steps"] if entry["tick"] == tick):
                 x, y, z = step["action"]["pos"]
                 rcon.command(f"setblock {x} {y} {z} {step['action']['state']}")
+            require_tick(rcon, baseline, "after actions")
             deadline = time.monotonic() + 5
             current = baseline
             while current == baseline:
@@ -197,8 +199,10 @@ def main():
                 current = game_time(rcon)
             if current != baseline + 1:
                 raise RuntimeError(f"tick boundary skipped from {baseline} to {current}; retry on a quieter oracle")
-            observations.append({"tick": tick, "game_time": current,
-                                 "states": [probe(rcon, entry["pos"], entry["candidates"]) for entry in plan["region"]]})
+            require_tick(rcon, current, "before observations")
+            states = [probe(rcon, entry["pos"], entry["candidates"]) for entry in plan["region"]]
+            require_tick(rcon, current, "after observations")
+            observations.append({"tick": tick, "game_time": current, "states": states})
             baseline = current
     finally:
         try:

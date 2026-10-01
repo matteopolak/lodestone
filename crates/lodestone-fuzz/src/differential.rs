@@ -62,8 +62,10 @@
 //!   both), so the server's real tick count runs ahead of the harness's
 //!   assumed one — repeatably, in one direction, and by an amount that grows
 //!   with contention rather than with anything about the world being
-//!   compared. Reading the counter back removes the assumption instead of
-//!   tuning around it, at the cost of one extra RCON round trip per tick.
+//!   compared. The runner reads the counter before and after every complete
+//!   action and observation group, and advancement must reach exactly the
+//!   next counter. A crossing rejects the candidate as a timing failure,
+//!   including when a probe has already found a disagreement.
 //!   Measured on the fluid-spread rig by hand, outside this harness
 //!   entirely (a raw RCON probe with real timestamps, bypassing every
 //!   tick-counting assumption below): cell 1 read as water at 247 ms after
@@ -71,20 +73,14 @@
 //!   moment when the machine was busy enough to make the sleep-based
 //!   harness itself report a spurious divergence on the same rig.
 //!
-//! ## What this module does not do yet
+//! ## Generated comparisons and boundaries
 //!
-//! - **Generated live scripts currently cover fluids only.** The test-support
-//!   layer in `tests/support/differential_generation.rs` generates bounded
-//!   `SetBlock`-only scripts and semantically shrinks them while preserving
-//!   the complete first-divergence signature, including tick.
-//!   `tests/differential_live_generated_fluid.rs` evaluates those candidates
-//!   through this module's production fluid and RCON oracles. It clears and
-//!   drains a dedicated live lane, verifies its baseline and re-anchors tick
-//!   timing before every generated, shrink or replay candidate.
-//! - **No validation against a reverted historical fix** — revert a committed
-//!   fix in a scratch worktree and require the harness to rediscover it. That
-//!   needs an action corpus rich enough to reach the reverted code path,
-//!   which needs generation first.
+//! The optional `campaign` entry point generates bounded fluid and
+//! redstone scripts, resets the external lane for each candidate, and shrinks
+//! while preserving the complete first-divergence signature, including tick.
+//! A historical fluid scheduling control requires rediscovery and replay of
+//! an independently restored defect.
+//!
 //! - **The generic `WorldOracle` remains block-state-only.** The hermetic
 //!   `tests/differential_client_state.rs` fixture uses this block-state half,
 //!   adds direct entity and inventory comparisons through public client
@@ -396,6 +392,18 @@ pub trait WorldOracle {
         OracleFailureKind::Failure
     }
 
+    /// Enables comparison-time guards after setup. Deterministically stepped
+    /// oracles need no additional clock checks.
+    fn begin_comparison(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Verifies that actions or observations still belong to the current
+    /// tick. The runner brackets each whole group with this check.
+    fn check_tick_boundary(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     fn apply(&mut self, action: &Action) -> Result<(), Self::Error>;
     fn advance_tick(&mut self) -> Result<(), Self::Error>;
     /// Returns the state string at `pos` if it matches any of `candidates`
@@ -472,6 +480,18 @@ fn oracle_failure<O: WorldOracle>(tick: u64, side: Side, error: O::Error) -> Dif
     })
 }
 
+fn check_tick_boundaries<L: WorldOracle, R: WorldOracle>(
+    tick: u64,
+    left: &mut L,
+    right: &mut R,
+) -> Result<(), DifferentialOutcome> {
+    left.check_tick_boundary()
+        .map_err(|error| oracle_failure::<L>(tick, Side::Left, error))?;
+    right.check_tick_boundary()
+        .map_err(|error| oracle_failure::<R>(tick, Side::Right, error))?;
+    Ok(())
+}
+
 /// Runs `script` against `left` and `right` in lockstep, comparing every
 /// position in `region` (each entry a position plus the candidate states
 /// worth probing there, per [`WorldOracle::block_state`]'s doc) after every
@@ -485,6 +505,8 @@ fn oracle_failure<O: WorldOracle>(tick: u64, side: Side, error: O::Error) -> Dif
 /// react on a delay (a redstone torch inverts two ticks after its input
 /// changes) — comparing only through the last scheduled
 /// action would miss a divergence that only manifests after it.
+/// Live oracles verify both boundaries around each complete action and
+/// observation group. A timing failure overrides any observed disagreement.
 pub fn run_differential<L: WorldOracle, R: WorldOracle>(
     script: &Script,
     region: &[((i32, i32, i32), Vec<String>)],
@@ -494,7 +516,17 @@ pub fn run_differential<L: WorldOracle, R: WorldOracle>(
 ) -> DifferentialOutcome {
     let total_ticks = script.last_tick() + settle_ticks;
 
+    if let Err(error) = left.begin_comparison() {
+        return oracle_failure::<L>(0, Side::Left, error);
+    }
+    if let Err(error) = right.begin_comparison() {
+        return oracle_failure::<R>(0, Side::Right, error);
+    }
+
     for tick in 0..=total_ticks {
+        if let Err(outcome) = check_tick_boundaries(tick, left, right) {
+            return outcome;
+        }
         for action in script.steps_at(tick) {
             if let Err(e) = left.apply(action) {
                 return oracle_failure::<L>(tick, Side::Left, e);
@@ -502,6 +534,9 @@ pub fn run_differential<L: WorldOracle, R: WorldOracle>(
             if let Err(e) = right.apply(action) {
                 return oracle_failure::<R>(tick, Side::Right, e);
             }
+        }
+        if let Err(outcome) = check_tick_boundaries(tick, left, right) {
+            return outcome;
         }
 
         if let Err(e) = left.advance_tick() {
@@ -511,6 +546,10 @@ pub fn run_differential<L: WorldOracle, R: WorldOracle>(
             return oracle_failure::<R>(tick, Side::Right, e);
         }
 
+        if let Err(outcome) = check_tick_boundaries(tick, left, right) {
+            return outcome;
+        }
+        let mut divergence = None;
         for (pos, candidates) in region {
             let left_state = match left.block_state(*pos, candidates) {
                 Ok(s) => s,
@@ -524,14 +563,20 @@ pub fn run_differential<L: WorldOracle, R: WorldOracle>(
                     return oracle_failure::<R>(tick, Side::Right, e);
                 }
             };
-            if left_state != right_state {
-                return DifferentialOutcome::Diverged(Divergence {
+            if left_state != right_state && divergence.is_none() {
+                divergence = Some(Divergence {
                     tick,
                     pos: *pos,
                     left: left_state,
                     right: right_state,
                 });
             }
+        }
+        if let Err(outcome) = check_tick_boundaries(tick, left, right) {
+            return outcome;
+        }
+        if let Some(divergence) = divergence {
+            return DifferentialOutcome::Diverged(divergence);
         }
     }
 
@@ -768,45 +813,15 @@ pub mod rcon {
         /// clobbering the other's — see `docs/fuzzing.md`'s self-consistency
         /// proof, which does exactly this against one live oracle.
         origin: (i32, i32, i32),
-        /// The **nominal** tick count this oracle has reported reaching so
-        /// far via [`WorldOracle::advance_tick`] (or `None` before the first
-        /// call) — read from the server's own `time query gametime` counter,
-        /// but advanced by exactly one per call rather than jumped to
-        /// whatever the counter shows.
-        ///
-        /// That distinction is the whole fix. A fixed `sleep(TICK_MILLIS)`
-        /// assumes one sleep equals one tick, and under CPU contention
-        /// elsewhere on the machine that assumption is measurably wrong: a
-        /// `block_state` probe is a round trip that happens *between* two
-        /// sleeps, so a slow probe (or a slow machine) lets the server's
-        /// real tick count run ahead of the harness's assumed one. Reading
-        /// the real counter fixes *that* — `advance_tick` never returns
-        /// before the tick it is waiting for has genuinely happened — but a
-        /// second failure mode remains if the counter's value is adopted
-        /// wholesale: a real tick that arrives late gets read alongside a
-        /// second real tick that has *also* already happened by the time
-        /// the read lands, and jumping straight to the observed value would
-        /// silently skip this oracle's own nominal tick forward by two,
-        /// desynchronising it from a peer oracle (like
-        /// [`fluid::FluidModelOracle`]) that steps exactly one nominal tick
-        /// per call and has no way to know a real tick was skipped. Banking
-        /// only `+1` here, and letting the surplus satisfy the *next* call's
-        /// wait immediately instead, keeps both oracles' nominal tick counts
-        /// in one-to-one lockstep regardless of how many real ticks a single
-        /// call happened to straddle.
+        /// The nominal game-time boundary, advanced by one per call. During
+        /// comparison every action and observation must remain at this
+        /// counter; an advancement must observe exactly the next counter.
         baseline_gametime: Option<i64>,
-        /// How many *extra* real ticks had already elapsed by the time
-        /// `advance_tick` observed the counter it was waiting for — the
-        /// instrument's own error count, kept purely for diagnosis. It does
-        /// **not** indicate a wrong tick label: [`Self::advance_tick`] never
-        /// adopts an overshoot into its own nominal count (see
-        /// [`Self::baseline_gametime`]), so a divergence's tick number is
-        /// exact regardless of this value. A consistently non-zero count
-        /// here still means every step ran with less real-time headroom
-        /// than a quiet machine gives, and is worth checking before reading
-        /// too much into a *fine-grained timing* comparison from the same
-        /// run — a rerun once the machine quiets down has more of that
-        /// headroom to spend.
+        /// Setup and cleanup may wait across several ticks; only the paired
+        /// comparison requires exact action and observation boundaries.
+        strict_comparison: bool,
+        /// Extra elapsed ticks detected by waits or boundary checks. This is
+        /// diagnostic accounting, not sufficient proof of valid alignment.
         missed_deadlines: u32,
     }
 
@@ -844,22 +859,12 @@ pub mod rcon {
                 )
             })?;
             let mut client = TimedRconClient::connect(addr, password, io_timeout)?;
-            // Read the counter now, before the caller applies a single
-            // action, rather than lazily on the first `advance_tick` call.
-            // Capturing it late used to hide exactly the gap this oracle
-            // most needs to catch: the round trip that applies the script's
-            // first action is real wall-clock time too, and under
-            // contention it is long enough on its own to let several real
-            // ticks pass before anything reads the counter at all. Reading
-            // it here means that gap lands inside the very first
-            // `advance_tick`'s own wait, where `missed_deadlines` can see it,
-            // instead of being silently folded into what gets called "tick
-            // 0".
             let baseline_gametime = Some(Self::query_gametime_over(&mut client)?);
             Ok(Self {
                 client,
                 origin,
                 baseline_gametime,
+                strict_comparison: false,
                 missed_deadlines: 0,
             })
         }
@@ -868,22 +873,12 @@ pub mod rcon {
             (self.origin.0 + pos.0, self.origin.1 + pos.1, self.origin.2 + pos.2)
         }
 
-        /// Re-anchors the nominal tick ladder to the counter's *current*
-        /// value. For a caller that sends rig-building commands (a `/fill`
-        /// channel, a `forceload`) through this same oracle's connection
-        /// before starting the actual comparison: those commands are real
-        /// round trips too, and [`Self::connect`]'s own baseline was read
-        /// before any of them, not after. Left uncorrected, whatever real
-        /// time rig-building costs becomes a head start folded silently into
-        /// "tick 0" — invisible to [`Self::missed_deadlines`], which only
-        /// flags a real tick *overshooting* the nominal ladder, not the
-        /// ladder having started early. Call this once, right after
-        /// rig-building and right before the script's first action, so the
-        /// ladder starts at the same moment the comparison does. This also
-        /// clears [`Self::missed_deadlines`], because setup and reset time is
-        /// outside the candidate whose timing that counter diagnoses.
+        /// Re-anchors to the current counter after setup or before cleanup.
+        /// Clears diagnostic accounting and leaves comparison mode; the
+        /// runner enables strict boundaries before its first action group.
         pub fn reset_baseline(&mut self) -> std::io::Result<()> {
             self.baseline_gametime = Some(self.query_gametime()?);
+            self.strict_comparison = false;
             self.missed_deadlines = 0;
             Ok(())
         }
@@ -912,12 +907,18 @@ pub mod rcon {
                 })
         }
 
-        /// How many extra real ticks had already elapsed when this oracle's
-        /// waited-for tick showed up. **A non-zero count here does not make a
-        /// tick label wrong** (see [`Self::baseline_gametime`]) but a large or
-        /// growing one is worth checking before trusting a *timing*
-        /// comparison's fine-grained shape, since it means this run had
-        /// little headroom.
+        fn timing_failure(&mut self, expected: i64, observed: i64) -> std::io::Error {
+            self.missed_deadlines = self.missed_deadlines.saturating_add(
+                u32::try_from(observed.abs_diff(expected)).unwrap_or(u32::MAX),
+            );
+            std::io::Error::new(std::io::ErrorKind::TimedOut, format!(
+                "live comparison crossed a tick boundary: expected game time {expected}, observed {observed}"
+            ))
+        }
+
+        /// Extra real ticks detected since the last baseline reset. A zero
+        /// count alone cannot validate a candidate: actions and observations
+        /// must also pass the runner's whole-group boundary checks.
         #[must_use]
         pub fn missed_deadlines(&self) -> u32 {
             self.missed_deadlines
@@ -933,6 +934,24 @@ pub mod rcon {
             } else {
                 OracleFailureKind::Failure
             }
+        }
+
+        fn begin_comparison(&mut self) -> Result<(), Self::Error> {
+            self.strict_comparison = true;
+            Ok(())
+        }
+
+        fn check_tick_boundary(&mut self) -> Result<(), Self::Error> {
+            if self.strict_comparison {
+                let expected = self.baseline_gametime.ok_or_else(|| {
+                    std::io::Error::other("live comparison has no game-time baseline")
+                })?;
+                let observed = self.query_gametime()?;
+                if observed != expected {
+                    return Err(self.timing_failure(expected, observed));
+                }
+            }
+            Ok(())
         }
 
         fn apply(&mut self, action: &Action) -> Result<(), Self::Error> {
@@ -965,16 +984,13 @@ pub mod rcon {
             loop {
                 let observed = self.query_gametime()?;
                 if observed >= target {
-                    // Advance the nominal counter by exactly one tick, not to
-                    // `observed` — see this field's own doc. If `observed`
-                    // overshot `target`, that real tick has already happened;
-                    // banking `target` (rather than `observed`) as the new
-                    // baseline means the *next* call's wait is satisfied
-                    // immediately by the same real tick, so the two sides'
-                    // nominal tick counts stay in one-to-one lockstep no
-                    // matter how much real time a single call took.
                     if observed > target {
-                        self.missed_deadlines += u32::try_from(observed - target).unwrap_or(u32::MAX);
+                        if self.strict_comparison {
+                            return Err(self.timing_failure(target, observed));
+                        }
+                        self.missed_deadlines = self.missed_deadlines.saturating_add(
+                            u32::try_from(observed - target).unwrap_or(u32::MAX),
+                        );
                     }
                     self.baseline_gametime = Some(target);
                     return Ok(());

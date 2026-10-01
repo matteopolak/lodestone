@@ -14,9 +14,10 @@ differential-fuzzing *harness* against a real vanilla oracle, for the class of
 bug Track A structurally cannot see — wrong behaviour that never panics (the
 motivating example: breaking a waterlogged block used to destroy the water
 too, which is not the real mechanic). Track B is a narrow slice rather than a
-finished fuzzer: fixed scripts run end to end against a live vanilla server,
-and bounded generated fluid and redstone scripts now run against that oracle
-with per-case reset, timing-boundary checks, semantic shrinking, and replay.
+general-purpose live fuzzer: fixed scripts run end to end against a live vanilla
+server, and bounded generated fluid and redstone scripts run against that oracle
+with per-case reset, timing-boundary checks, semantic shrinking, replay and a
+configurable resumable campaign command.
 The generator's general properties are also proven against fresh in-memory
 oracles. Its own section below says exactly what is and is not there.
 
@@ -509,7 +510,7 @@ What exists:
 - `differential::state_matches` — gives the in-process side the vanilla side's
   matching semantics, so `minecraft:water` matches `minecraft:water[level=3]`
   on both and the two sides answer in one alphabet.
-- `tests/support/differential_generation.rs` — a test-only generator and
+- `campaign::generation` — a reusable generator and
   shrink driver over a finite position/state alphabet supplied by the caller
   outside the model under test. "External" describes that ownership boundary;
   the alphabet may be a small independently justified test domain and does
@@ -550,6 +551,24 @@ What exists:
   byte stream, but its structured `shrink` method no longer exists;
   libFuzzer's raw-input minimization is not semantic action deletion, tick
   compaction, or state/position minimization.
+- `differential-campaign` — the optional command for sustained fluid/redstone
+  campaigns. It consumes those same generation, shrinking and scenario
+  implementations; the integration tests retain their fixed eight-case
+  streams. Explicit seed, total case count, per-invocation case count,
+  shrink-attempt and timing-attempt budgets make a run bounded and reviewable.
+  An atomic versioned checkpoint saves the next case index and separate
+  search/replay accounting, including accepted cases, ticks and actions versus
+  oracle attempts, retries and failures. Resume reconstructs the deterministic
+  stream with bounded memory and refuses changed configuration. A failed
+  candidate resumes at its existing index. A minimized finding is saved before
+  replay confirmation, and a confirmed finding stops the campaign.
+
+  See [Fuzz harness](fuzz-harness.md#resumable-live-campaigns) for command
+  examples, output/exit semantics and accounting boundaries. The command
+  accepts numeric loopback endpoints only and caps every JSON artifact at
+  1 MiB. Its lane locks coordinate campaign commands; ignored integration tests
+  do not acquire those locks and must run separately. A 1,000-case default can
+  take tens of minutes; use `--run-cases 8` for a small foreground slice.
 - `differential_live_generated_fluid.rs` takes the same generator and shrinker
   through the real RCON oracle. It generates one to three edits of a channel's
   source cell from the caller-owned air/water alphabet, then compares the
@@ -573,7 +592,12 @@ What exists:
   neither is serialized as a gameplay divergence. A candidate that loses a
   tick boundary is retried from a fresh reset up to three total attempts;
   other oracle failures are not retried, and a third timing failure aborts the
-  search. Each RCON connect has a five-second deadline, and each complete frame
+  search. The shared runner checks game time before and after the complete
+  action group and the complete observation group, including the final
+  observation that first disagrees. Comparison advancement rejects overshoot
+  immediately. These checks are required even when `missed_deadlines` is zero;
+  invalid timing contributes no accepted coverage. Each RCON connect has a
+  five-second deadline, and each complete frame
   read or write shares one five-second wall-clock deadline across every partial
   socket operation. The remaining budget is installed as the socket timeout
   before each operation, so a peer cannot extend the deadline by drip-feeding
@@ -614,6 +638,7 @@ What exists:
   probe use separate dedicated lanes; each candidate force-loads and rebuilds
   its generated lane, then requires all three repeaters to remain unpowered for
   twelve consecutive observed ticks before the game-time counter is anchored.
+  Reset fails if that quiet baseline cannot be reached within 96 observed ticks.
   A missed RCON tick deadline is retryable only after a full fresh reset, and
   no accepted comparison has a missed deadline. The ignored target proves the
   powered dust probe accepts `power=15` and rejects `power=0`, then requires a
@@ -670,8 +695,11 @@ direction, where a broken rig reports agreement.
   So there is no exact single-tick primitive on the vanilla side.
   `RconOracle::advance_tick` polls `time query gametime` until the server's own
   counter reaches the next nominal tick; `differential::TICK_MILLIS` supplies
-  only the poll cadence, not the verdict that a tick happened. Overshoots are
-  recorded by `missed_deadlines` rather than silently adopted. The earlier
+  only the poll cadence, not the verdict that a tick happened. During a
+  comparison an overshoot is a typed timing failure. Setup and cleanup retain
+  permissive waiting, and `reset_baseline` leaves strict comparison mode.
+  Extra elapsed ticks are recorded by `missed_deadlines`; that diagnostic
+  count alone cannot validate the action or observation phases. The earlier
   direct measurement remains useful context: cell *N* first read as water at
   **249·*N* ms** across two independent trials against a 250·*N* ms prediction.
 
@@ -681,8 +709,8 @@ direction, where a broken rig reports agreement.
 
 ### Two more measured facts, about *aligning* a live comparison
 
-Both were found by taking a comparison out to fourteen ticks. The fluid
-comparison diverges on tick 0, so neither could show up there.
+Live alignment requires both a clean scheduled-work baseline and verified
+counter boundaries around commands and observations.
 
 - **A torn-down circuit is not a clean one: block ticks outlive the blocks
   that scheduled them.** Filling a rig back to air does not retract the
@@ -706,26 +734,32 @@ comparison diverges on tick 0, so neither could show up there.
   the longest pulse the row can hold — plus a distinct coordinate lane per
   test, which is what `RconOracle`'s `origin` parameter is for.
 
-- **Real-time alignment has two separate error terms, and each shifts every
-  tick label by a whole tick.** The first is *accumulated*: every
-  `block_state` probe is a round trip between two sleeps, so a fixed
-  `sleep(TICK_MILLIS)` per tick runs slower than the server and the server's
-  tick count creeps ahead. Measured on a three-position, two-candidate region:
-  an arrival whose true game tick is 10 was reported at harness tick 8.
-  `RconOracle::advance_tick` therefore sleeps to a **schedule** anchored at
-  the first call, absorbing probe cost into the same 50 ms budget the server
-  uses, and `RconOracle::missed_deadlines` counts the ticks that were already
-  overdue — assert it is zero before believing any tick label.
+- **A counter wait alone does not validate actions and observations.** If
+  the baseline is `B` but a source edit executes at `B + 1`, its five-tick
+  deadline is `B + 6`. The model reaches its fifth elapsed tick at harness
+  label 4, while the live wait may have reached only `B + 5`. The model is
+  then wet and the reference correctly dry, with no advancement overshoot.
+  A probe can also cross the next boundary after the wait returns, including
+  the probe that terminates the comparison. A half-tick setup margin offers
+  headroom but cannot certify either boundary.
 
-  The second is *constant*: the phase between the harness's sleeps and the
-  server's tick boundaries. Land on the boundary and a millisecond of jitter
-  decides whether a probe sees `k` or `k + 1` ticks; observed as the same test
-  alternating between agreeing and reporting a lead, flipped by three extra
-  round trips. The fix is to start mid-tick — wait for `time query gametime`
-  to advance, then sleep half a tick — which puts a 25 ms margin either side
-  of every sample. `time query gametime` is also the right instrument for a
-  one-off arrival measurement, being the server's own monotonic tick counter
-  rather than elapsed wall time.
+  `WorldOracle::begin_comparison` enables strict RCON checks in the shared
+  runner. Before and after the whole action group the counter must equal the
+  current nominal boundary; advancement must observe exactly the next
+  counter, and both reads around the whole probe group must equal that new
+  boundary. The runner retains the first differing probe but checks the
+  entire observation before returning it. A crossed boundary produces a
+  retryable timing failure, never agreement or a gameplay divergence.
+
+  An independent raw-RCON arithmetic control bracketed the source edit with
+  equal game-time reads `A`, then bracketed cell 1 observations at each of
+  `A + 1` through `A + 5`. Four accepted trials all observed air for the first
+  four boundaries and water at the fifth. Each observation's two counter
+  reads matched its predicted boundary. Repeat this bounded control when
+  changing tick alignment: reject any unequal edit or observation bracket
+  rather than interpreting it as fluid behavior. The scripted peer controls
+  in `differential_tick_boundaries.rs` separately require one-tick crossings
+  to reject both matching observations and an already detected divergence.
 
 ### Track B's second live finding: our redstone matches vanilla across two chunk seams
 
@@ -775,9 +809,9 @@ fluid queue.
 
 `our_fluid_model_matches_vanilla_s_water_front` compares every channel cell
 after every tick through the complete spread and requires agreement. The live
-result is accepted only when `RconOracle::missed_deadlines()` is zero, so a
-host that bursts through unobserved reference ticks cannot manufacture either
-agreement or disagreement.
+result must pass the shared runner's complete action and observation boundary
+checks and exact advancement checks. `RconOracle::missed_deadlines()` remains
+diagnostic; its value alone cannot establish valid tick labels.
 
 ### Captured entity lifecycle
 
@@ -1103,13 +1137,18 @@ test.
   five seconds. Partial socket operations share the frame's original deadline;
   `WouldBlock` from a platform socket timeout is normalised to `TimedOut` so the
   generated live runner's bounded retry policy sees one portable kind.
-- **`SearchBudget`** in the generated-script test support — `seed`, `cases`,
+- **`SearchBudget`** in `campaign::generation` — `seed`, `cases`,
   and `shrink_attempts` are all explicit integers. Its proptest configuration
   fixes the RNG to ChaCha, disables failure-persistence-by-seed, and sets
   `max_shrink_time` to zero; the versioned explicit JSON case is the replay
   artifact. A shrink preserves the complete first-divergence signature,
   including tick. `MAX_ORACLE_TICKS` caps each generated or replayed candidate
   at 4,096 oracle ticks after checked horizon arithmetic.
+- **`differential-campaign` Cargo feature** on `lodestone-fuzz` — enables the
+  reusable generated search, scenario evaluators and optional command. It
+  includes `rcon-oracle` plus optional `proptest`, `serde` and `serde_json`.
+  Command arguments are explicit and do not inherit endpoint/replay
+  environment variables used by ignored integration tests.
 - **`rcon-oracle` Cargo feature** on `lodestone-fuzz` — gates the
   `differential::rcon` module and its `lodestone-testsupport` dependency; off
   by default, unlike the four protocol-family features, because it pulls in a
