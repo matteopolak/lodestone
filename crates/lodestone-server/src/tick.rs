@@ -95,6 +95,27 @@ const PHASE_TRACE_THRESHOLD: Duration = TICK_PERIOD;
 #[derive(Debug, Clone, Copy)]
 struct TickTrace;
 
+#[derive(Default)]
+struct TickTimerTrace {
+    waits: u32,
+    callback_lateness: Option<Duration>,
+    resume_gap: Option<Duration>,
+}
+
+impl TickTimerTrace {
+    #[cfg(any(target_arch = "wasm32", test))]
+    fn record(&mut self, timeout: Duration, callback: Duration, total: Duration) {
+        let timeout = Duration::from_millis(timeout.as_millis().min(i32::MAX as u128) as u64);
+        self.waits += 1;
+        self.callback_lateness = Some(
+            self.callback_lateness.unwrap_or_default().max(callback.saturating_sub(timeout)),
+        );
+        self.resume_gap = Some(
+            self.resume_gap.unwrap_or_default().max(total.saturating_sub(callback)),
+        );
+    }
+}
+
 impl TickTrace {
     /// Creates the trace only when both the operator requested it and the
     /// dedicated target is enabled. `None` is the default, so normal ticks do
@@ -115,6 +136,7 @@ impl TickTrace {
     fn phase(
         self,
         tick: u64,
+        runtime_elapsed: Duration,
         phase: TickPhase,
         elapsed: Duration,
         area_moved: bool,
@@ -127,12 +149,42 @@ impl TickTrace {
         tracing::info!(
             target: "lodestone_tick_trace",
             tick,
+            runtime_micros = runtime_elapsed.as_micros() as u64,
             phase = TICK_PHASE_NAMES[phase as usize],
             elapsed_micros = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX),
             area_moved,
             area_columns,
             resident_columns,
             "slow world tick phase",
+        );
+    }
+
+    fn wait(
+        self,
+        tick: u64,
+        deadline: Duration,
+        requested: Duration,
+        resumed: Duration,
+        yielded: Option<Duration>,
+        timers: TickTimerTrace,
+    ) {
+        let service_late = resumed.saturating_sub(deadline.max(requested));
+        if service_late < PHASE_TRACE_THRESHOLD
+            && yielded.unwrap_or_default() < PHASE_TRACE_THRESHOLD
+        {
+            return;
+        }
+        tracing::info!(
+            target: "lodestone_tick_trace", tick,
+            runtime_micros = resumed.as_micros() as u64,
+            deadline_micros = deadline.as_micros() as u64,
+            requested_micros = requested.as_micros() as u64,
+            service_lateness_micros = service_late.as_micros() as u64,
+            yield_micros = yielded.map(|value| value.as_micros() as u64),
+            timer_waits = timers.waits,
+            callback_lateness_max_micros = timers.callback_lateness.map(|value| value.as_micros() as u64),
+            callback_resume_gap_max_micros = timers.resume_gap.map(|value| value.as_micros() as u64),
+            "slow world tick wait",
         );
     }
 }
@@ -926,7 +978,9 @@ impl TickDriver {
         self.schedule.reset(self.origin.elapsed());
     }
 
-    async fn wait_for_tick(&mut self, clock: &TickClock, mobs: &MobHandle, paused: bool) {
+    async fn wait_for_tick(
+        &mut self, clock: &TickClock, mobs: &MobHandle, paused: bool, trace: Option<TickTrace>,
+    ) {
         let yielded = !paused && self.schedule.needs_yield(self.origin.elapsed());
         let mut yield_wait = None;
         if paused {
@@ -962,15 +1016,34 @@ impl TickDriver {
 
         let deadline = self.schedule.deadline();
         #[cfg(not(target_arch = "wasm32"))]
+        let timers = TickTimerTrace::default();
+        #[cfg(target_arch = "wasm32")]
+        let mut timers = TickTimerTrace::default();
+        #[cfg(not(target_arch = "wasm32"))]
         tokio::time::sleep_until(self.origin + deadline).await;
         #[cfg(target_arch = "wasm32")]
         while self.origin.elapsed() < deadline {
-            lodestone_time::browser_sleep(deadline.saturating_sub(self.origin.elapsed())).await;
+            let armed = self.origin.elapsed();
+            let remaining = deadline.saturating_sub(armed);
+            if trace.is_some() && !paused {
+                let callback = lodestone_time::browser_sleep_observed(remaining).await;
+                timers.record(
+                    remaining, callback, self.origin.elapsed().saturating_sub(armed),
+                );
+            } else {
+                lodestone_time::browser_sleep(remaining).await;
+            }
         }
 
         let resumed = self.origin.elapsed();
         if !paused {
             clock.record_tick_wait(deadline, requested, resumed, shed, yield_wait);
+            if let Some(trace) = trace {
+                trace.wait(
+                    clock.tick_count().saturating_add(1), deadline, requested, resumed,
+                    yield_wait, timers,
+                );
+            }
         }
         self.schedule.admit(resumed, paused);
     }
@@ -1771,7 +1844,7 @@ async fn run_tick_loop_with_weather_impl<W>(
     let tick_trace = TickTrace::new();
 
     loop {
-        driver.wait_for_tick(&clock, &mobs, world_state.initial_ticks_paused()).await;
+        driver.wait_for_tick(&clock, &mobs, world_state.initial_ticks_paused(), tick_trace).await;
 
         if world_state.initial_ticks_paused() {
             driver.reset();
@@ -2594,6 +2667,7 @@ async fn run_tick_loop_with_weather_impl<W>(
         if let Some(trace) = tick_trace {
             trace.phase(
                 trace_tick,
+                t_mobs_end.duration_since(driver.origin),
                 TickPhase::MobsAndItems,
                 mobs_elapsed,
                 area_moved,
@@ -2712,6 +2786,7 @@ async fn run_tick_loop_with_weather_impl<W>(
         if let Some(trace) = tick_trace {
             trace.phase(
                 trace_tick,
+                t_weather_end.duration_since(driver.origin),
                 TickPhase::WeatherAndSleep,
                 weather_elapsed,
                 area_moved,
@@ -4305,6 +4380,7 @@ async fn run_tick_loop_with_weather_impl<W>(
         if let Some(trace) = tick_trace {
             trace.phase(
                 trace_tick,
+                t_scheduled_end.duration_since(driver.origin),
                 TickPhase::ScheduledAndPhysics,
                 scheduled_elapsed,
                 area_moved,
@@ -4320,6 +4396,24 @@ async fn run_tick_loop_with_weather_impl<W>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timer_trace_separates_rounded_timeout_and_resume_gap() {
+        let mut timers = TickTimerTrace::default();
+        timers.record(
+            Duration::from_micros(1500), Duration::from_micros(21500),
+            Duration::from_micros(60000),
+        );
+        assert_eq!(timers.callback_lateness, Some(Duration::from_micros(20500)));
+        assert_eq!(timers.resume_gap, Some(Duration::from_micros(38500)));
+        timers.record(
+            Duration::from_millis(8), Duration::from_millis(7), Duration::from_millis(6),
+        );
+        assert_eq!(timers.waits, 2);
+        assert_eq!(timers.callback_lateness, Some(Duration::from_micros(20500)));
+        assert_eq!(timers.resume_gap, Some(Duration::from_micros(38500)));
+    }
+
     // `LEVEL_STEP`/`WeatherEvent` are referenced only by the weather loop gates
     // below, so they live here rather than at module scope (the lib build
     // warns on imports that only tests touch).
