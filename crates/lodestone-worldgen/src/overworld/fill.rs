@@ -178,8 +178,12 @@ impl PackedStateCarrier {
                         StateId::from_raw(code - Self::SURFACE_STATE_OFFSET)
                     }
                 });
-                let facts = base_facts(state);
-                ocean_floor.observe(x - base_x, y, z - base_z, facts);
+                ocean_floor.observe(
+                    x - base_x,
+                    y,
+                    z - base_z,
+                    lodestone_data::block_solidity::blocks_motion(state),
+                );
                 state
             },
         );
@@ -193,6 +197,7 @@ impl PackedStateCarrier {
     }
 }
 
+#[cfg(test)]
 #[inline]
 fn base_facts(state: StateId) -> BaseStateFacts {
     let block = state.block();
@@ -251,8 +256,8 @@ impl OceanFloorState {
     }
 
     #[inline]
-    fn observe(&mut self, lx: i32, y: i32, lz: i32, facts: BaseStateFacts) {
-        if !facts.is_ocean_floor() {
+    fn observe(&mut self, lx: i32, y: i32, lz: i32, blocks_motion: bool) {
+        if !blocks_motion {
             return;
         }
         let column = (lz * 16 + lx) as usize;
@@ -286,15 +291,15 @@ impl OceanFloorState {
         {
             return;
         }
-        let new_facts = base_facts(new);
-        if old.is_ocean_floor() == new_facts.is_ocean_floor() {
+        let new_blocks_motion = lodestone_data::block_solidity::blocks_motion(new);
+        if old.is_ocean_floor() == new_blocks_motion {
             return;
         }
         let column = (lz * 16 + lx) as usize;
         let word = column * OCEAN_FLOOR_WORDS_PER_COLUMN + local_y as usize / 64;
         let bit = 1u64 << (local_y as usize % 64);
         self.touched[column / 64] |= 1u64 << (column % 64);
-        if new_facts.is_ocean_floor() {
+        if new_blocks_motion {
             self.occupancy[word] |= bit;
         } else {
             self.occupancy[word] &= !bit;
@@ -1471,8 +1476,7 @@ impl OverworldGenerator {
                         surface_column[next_surface_change].1
                     });
                 let state = vein_state.or(surface_state).unwrap_or(base);
-                let facts = base_facts(state);
-                ocean_floor.observe(lx, y, lz, facts);
+                ocean_floor.observe(lx, y, lz, lodestone_data::block_solidity::blocks_motion(state));
                 state
             },
         );
@@ -1822,6 +1826,7 @@ mod tests {
     #[test]
     fn packed_surface_state_keeps_its_original_stone_class() {
         use crate::surface::PreClass;
+        use lodestone_data::block::Block;
         use lodestone_data::block_states::StateId;
 
         let mut blocks = vec![1; 16 * 16];
@@ -1832,7 +1837,12 @@ mod tests {
             min_y: 0,
             height: 1,
             blocks,
-            base_states: [StateId::AIR; 4],
+            base_states: [
+                StateId::AIR,
+                Block::Dandelion.default_state(),
+                Block::Water.default_state(),
+                Block::Lava.default_state(),
+            ],
             vein_batch: None,
         };
         assert_eq!(carrier.pre_state(0, 0, 0).class, PreClass::Air);
@@ -1844,9 +1854,15 @@ mod tests {
         assert_eq!(carrier.pre_code(1, 0, 0), 1);
         assert_eq!(carrier.pre_state(1, 0, 0).state, StateId::AIR);
         assert_eq!(carrier.pre_state(1, 0, 0).class, PreClass::Stone);
-        carrier.set_id(1, 0, 0, StateId::from_raw(1));
-        assert_eq!(carrier.pre_state(1, 0, 0).state, StateId::from_raw(1));
+        carrier.set_id(1, 0, 0, Block::Stone.default_state());
+        assert_eq!(carrier.pre_state(1, 0, 0).state, Block::Stone.default_state());
         assert_eq!(carrier.pre_code(1, 0, 0), 1);
+
+        let (world, ocean_floor) = carrier.into_world();
+        assert_eq!(world.get_id(4, 0, 0), Block::Dandelion.default_state());
+        let mut expected = [0; 256];
+        expected[1] = 1;
+        assert_eq!(ocean_floor.heights, expected);
     }
 
     #[cfg(feature = "gen-counters")]
@@ -2511,30 +2527,43 @@ mod tests {
 
     #[test]
     fn tracked_ocean_floor_updates_the_exact_height_without_a_recount() {
+        use lodestone_data::block::Block;
+
         let mut world = DenseBlockGrid::new(0, 0, 0, 16, 16, 16, "minecraft:air");
         for y in 0..=5 {
             world.set(3, y, 4, "minecraft:stone");
         }
+        world.set(3, 6, 4, "minecraft:water[level=0]");
         let mut state = super::OceanFloorState::new(0);
         state.configure(0, 0, 16);
-        for y in 0..=5 {
-            state.observe(3, y, 4, base_facts(lodestone_data::block::Block::Stone.default_state()));
-        }
-        {
-            state.observe_mutation(
+        for y in 0..16 {
+            state.observe(
                 3,
-                5,
+                y,
                 4,
-                base_facts(lodestone_data::block::Block::Stone.default_state()),
-                lodestone_data::block::Block::Air.default_state(),
+                lodestone_data::block_solidity::blocks_motion(world.get_id(3, y, 4)),
             );
         }
+        assert_eq!(state.heights[(4 * 16 + 3) as usize], 6);
+        state.observe_mutation(
+            3, 5, 4, base_facts(Block::Stone.default_state()), Block::Air.default_state(),
+        );
         world.set(3, 5, 4, "minecraft:air");
+        assert_eq!(state.tracked_height((4 * 16 + 3) as usize), 5);
+        state.observe_mutation(
+            3, 11, 4, base_facts(Block::Air.default_state()), Block::Water.default_state(),
+        );
+        world.set(3, 11, 4, "minecraft:water[level=0]");
+        assert_eq!(state.tracked_height((4 * 16 + 3) as usize), 5);
+        state.observe_mutation(
+            3, 11, 4, base_facts(Block::Water.default_state()), Block::Stone.default_state(),
+        );
+        world.set(3, 11, 4, "minecraft:stone");
 
         #[cfg(feature = "gen-counters")]
         crate::counters::reset();
         let heights = OverworldGenerator::ocean_floor_wg_heights_from_state(&world, state);
-        assert_eq!(heights[(4 * 16 + 3) as usize], 5);
+        assert_eq!(heights[(4 * 16 + 3) as usize], 12);
         #[cfg(feature = "gen-counters")]
         {
             let counters = crate::counters::snapshot();

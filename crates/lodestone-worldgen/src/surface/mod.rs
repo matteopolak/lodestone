@@ -752,6 +752,57 @@ impl EvalCache {
     }
 }
 
+/// A biome answer valid only within the producer's certified Y bounds.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SurfaceBiomeAnswer {
+    biome: BuiltinBiome,
+    cold_enough_to_snow: bool,
+    min_y: i32,
+    max_y: i32,
+}
+
+impl SurfaceBiomeAnswer {
+    #[inline(always)]
+    pub(crate) fn exact(y: i32, biome: BuiltinBiome, cold_enough_to_snow: bool) -> Self {
+        Self {
+            biome,
+            cold_enough_to_snow,
+            min_y: y,
+            max_y: y,
+        }
+    }
+
+    /// The same eight shifted quart candidates apply throughout this band.
+    #[inline(always)]
+    pub(crate) fn uniform_shifted_quart(
+        parent_qy: i32,
+        biome: BuiltinBiome,
+        cold_enough_to_snow: bool,
+    ) -> Self {
+        Self {
+            biome,
+            cold_enough_to_snow,
+            min_y: 4 * parent_qy + 2,
+            max_y: 4 * parent_qy + 5,
+        }
+    }
+
+    #[inline(always)]
+    fn fixed(biome: BuiltinBiome, cold_enough_to_snow: bool) -> Self {
+        Self {
+            biome,
+            cold_enough_to_snow,
+            min_y: i32::MIN,
+            max_y: i32::MAX,
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn at_y(self, y: i32) -> Option<(BuiltinBiome, bool)> {
+        (self.min_y <= y && y <= self.max_y).then_some((self.biome, self.cold_enough_to_snow))
+    }
+}
+
 /// Per-column and per-Y state used while evaluating surface rules.
 struct Ctx<'a, 'b, 'c> {
     block_x: i32,
@@ -765,13 +816,13 @@ struct Ctx<'a, 'b, 'c> {
     stone_depth_below: i32,
     /// The current position's biome answer, populated only when needed.
     biome: Option<(&'a str, bool)>,
-    typed_biome: Option<(BuiltinBiome, bool)>,
+    typed_biome: Option<SurfaceBiomeAnswer>,
     /// The built-in identity for `biome`, resolved once per Y position.
     biome_builtin: Option<Option<BuiltinBiome>>,
     /// The callback used by the normal chunk scan. `top_material` supplies a
     /// fixed answer instead, so its context leaves this as `None`.
     biome_at: Option<&'b dyn Fn(i32, i32, i32) -> (&'a str, bool)>,
-    typed_biome_at: Option<&'b dyn Fn(i32, i32, i32) -> (BuiltinBiome, bool)>,
+    typed_biome_at: Option<&'b dyn Fn(i32, i32, i32) -> SurfaceBiomeAnswer>,
     /// Per-call condition storage. X/Z values survive Y updates.
     cache: &'c mut EvalCache,
     /// Whether Y-condition memoization is useful for this caller. The linear
@@ -799,7 +850,7 @@ impl<'a, 'b, 'c> Ctx<'a, 'b, 'c> {
 
     #[inline(always)]
     fn typed_biome(&mut self) -> (BuiltinBiome, bool) {
-        if let Some(value) = self.typed_biome {
+        if let Some(value) = self.typed_biome.and_then(|answer| answer.at_y(self.block_y)) {
             return value;
         }
         let value = (self
@@ -810,7 +861,8 @@ impl<'a, 'b, 'c> Ctx<'a, 'b, 'c> {
             self.block_z & 15,
         );
         self.typed_biome = Some(value);
-        value
+        value.at_y(self.block_y)
+            .expect("surface biome answer excludes its requested Y")
     }
 
     #[inline(always)]
@@ -842,9 +894,6 @@ impl<'a, 'b, 'c> Ctx<'a, 'b, 'c> {
     fn begin_y(&mut self) {
         if self.cache_y {
             self.cache.begin_y();
-        }
-        if self.typed_biome_at.is_some() {
-            self.typed_biome = None;
         }
     }
 }
@@ -1358,7 +1407,7 @@ impl SurfaceSystem {
         carrier: &mut PackedStateCarrier,
         heights: &[i32; 256],
         deep_biome_absent: &[bool; 256],
-        biome_at: &dyn Fn(i32, i32, i32) -> (BuiltinBiome, bool),
+        biome_at: &dyn Fn(i32, i32, i32) -> SurfaceBiomeAnswer,
         column_biome_at: &dyn Fn(i32, i32, i32),
         min_block_x: i32,
         min_block_z: i32,
@@ -1728,7 +1777,7 @@ impl SurfaceSystem {
             stone_depth_above: 1,
             stone_depth_below: 1,
             biome: None,
-            typed_biome: Some((biome, cold_enough_to_snow)),
+            typed_biome: Some(SurfaceBiomeAnswer::fixed(biome, cold_enough_to_snow)),
             biome_builtin: Some(Some(biome)),
             biome_at: None,
             typed_biome_at: None,
@@ -2934,7 +2983,9 @@ mod tests {
         let visited = std::cell::RefCell::new(Vec::new());
         let biome_at = |_: i32, y: i32, _: i32| {
             visited.borrow_mut().push(y);
-            (if y >= 10 { BuiltinBiome::Plains } else { BuiltinBiome::SulfurCaves }, false)
+            super::SurfaceBiomeAnswer::exact(
+                y, if y >= 10 { BuiltinBiome::Plains } else { BuiltinBiome::SulfurCaves }, false,
+            )
         };
         let mut cache = EvalCache::new(surface.xz_cache_slots, surface.y_cache_slots);
         let mut ctx = Ctx {
@@ -2955,9 +3006,86 @@ mod tests {
         assert_eq!(states, [Some(grass), Some(dirt)]);
         assert_eq!(*visited.borrow(), [10, 9]);
         ctx.typed_biome_at = None;
-        ctx.typed_biome = Some((BuiltinBiome::Plains, false));
+        ctx.typed_biome = Some(super::SurfaceBiomeAnswer::fixed(BuiltinBiome::Plains, false));
         ctx.begin_y();
         assert_eq!(surface.try_apply_compiled_column(&|_, _| 11, &mut ctx, &mut column_conditions), Some(grass));
+    }
+
+    #[test]
+    fn typed_surface_biome_certifies_shifted_negative_y_bounds() {
+        for (parent_qy, min_y, max_y) in [(-2, -6, -3), (-1, -2, 1), (0, 2, 5), (1, 6, 9)] {
+            let answer = super::SurfaceBiomeAnswer::uniform_shifted_quart(
+                parent_qy, BuiltinBiome::SnowyPlains, true,
+            );
+            assert_eq!(answer.at_y(min_y - 1), None);
+            for y in min_y..=max_y {
+                assert_eq!(answer.at_y(y), Some((BuiltinBiome::SnowyPlains, true)));
+            }
+            assert_eq!(answer.at_y(max_y + 1), None);
+        }
+    }
+
+    #[test]
+    fn typed_surface_biome_checks_expiry_without_begin_y() {
+        for begin_y in [false, true] {
+            for certified in [false, true] {
+                let visited = std::cell::RefCell::new(Vec::new());
+                let biome_at = |_: i32, y: i32, _: i32| {
+                    visited.borrow_mut().push(y);
+                    let biome = if y >= 2 {
+                        BuiltinBiome::SnowyPlains
+                    } else {
+                        BuiltinBiome::Plains
+                    };
+                    if certified {
+                        super::SurfaceBiomeAnswer::uniform_shifted_quart(
+                            (y - 2).div_euclid(4), biome, y >= 2,
+                        )
+                    } else {
+                        super::SurfaceBiomeAnswer::exact(y, biome, y >= 2)
+                    }
+                };
+                let mut cache = EvalCache::new(0, 0);
+                let mut ctx = Ctx {
+                    block_x: -17, block_z: -1, block_y: 5,
+                    surface_depth: 1, surface_secondary: 0.0, min_surface_level: 0,
+                    water_height: NO_WATER, stone_depth_above: 1, stone_depth_below: 1,
+                    biome: None, typed_biome: None, biome_builtin: None,
+                    biome_at: None, typed_biome_at: Some(&biome_at),
+                    cache: &mut cache, cache_y: false,
+                };
+                for y in (-7..=5).rev() {
+                    ctx.block_y = y;
+                    if begin_y {
+                        ctx.begin_y();
+                    }
+                    let expected = (
+                        if y >= 2 { BuiltinBiome::SnowyPlains } else { BuiltinBiome::Plains },
+                        y >= 2,
+                    );
+                    assert_eq!(ctx.typed_biome(), expected);
+                    assert_eq!(ctx.typed_biome(), expected);
+                }
+                let expected = if certified {
+                    vec![5, 1, -3, -7]
+                } else {
+                    (-7..=5).rev().collect()
+                };
+                assert_eq!(*visited.borrow(), expected, "begin_y={begin_y}, certified={certified}");
+
+                ctx.typed_biome_at = None;
+                ctx.typed_biome = Some(super::SurfaceBiomeAnswer::fixed(
+                    BuiltinBiome::SnowyPlains, true,
+                ));
+                for y in [i32::MIN, -7, 2, i32::MAX] {
+                    ctx.block_y = y;
+                    if begin_y {
+                        ctx.begin_y();
+                    }
+                    assert_eq!(ctx.typed_biome(), (BuiltinBiome::SnowyPlains, true));
+                }
+            }
+        }
     }
 
     #[test]

@@ -14,6 +14,7 @@ use crate::biome::PreparedClimateGrid;
 use crate::density::{Context, NoiseChunkRegionSampler};
 use crate::engine::{Bounds, PointScratch, XzProductLattice, XzRect};
 use crate::overworld::biome_cells::BiomeCells;
+use crate::surface::SurfaceBiomeAnswer;
 use super::fill::PackedStateCarrier;
 use super::structures::REFS_RADIUS;
 use super::{OverworldGenerator, PreOreResult};
@@ -150,7 +151,7 @@ impl RegionBiomeSidecar {
     }
 
     #[inline]
-    fn uniform_resident_biome_at(&self, x: i32, y: i32, z: i32) -> Option<BuiltinBiome> {
+    fn uniform_resident_biome_at(&self, x: i32, y: i32, z: i32) -> Option<SurfaceBiomeAnswer> {
         let parent_qx = (x - 2).div_euclid(4);
         let parent_qy = (y - 2).div_euclid(4);
         let parent_qz = (z - 2).div_euclid(4);
@@ -172,7 +173,11 @@ impl RegionBiomeSidecar {
                 }
             }
         }
-        uniform.and_then(BiomeRef::builtin_or_none)
+        uniform.and_then(BiomeRef::builtin_or_none).map(|biome| {
+            SurfaceBiomeAnswer::uniform_shifted_quart(
+                parent_qy, biome, self.cold_biomes[biome as usize],
+            )
+        })
     }
 
     #[inline]
@@ -183,13 +188,14 @@ impl RegionBiomeSidecar {
         x: i32,
         y: i32,
         z: i32,
-    ) -> (BuiltinBiome, bool) {
+    ) -> SurfaceBiomeAnswer {
         // Equal resident corner identities make the pure zoom choice irrelevant.
         // Missing cells must retain the cursor-based search in the zoomed path.
-        if let Some(biome) = self.uniform_resident_biome_at(x, y, z) {
-            return (biome, self.cold_biomes[biome as usize]);
+        if let Some(answer) = self.uniform_resident_biome_at(x, y, z) {
+            return answer;
         }
-        self.biome_at_typed_zoomed(generator, prepared, x, y, z)
+        let (biome, cold) = self.biome_at_typed_zoomed(generator, prepared, x, y, z);
+        SurfaceBiomeAnswer::exact(y, biome, cold)
     }
 
     #[inline]
@@ -706,6 +712,31 @@ mod prefix_comparison_tests {
         }
     }
 
+    fn assert_surface_biome_band_queries(
+        fast: &RegionBiomeSidecar,
+        control: &RegionBiomeSidecar,
+        generator: &OverworldGenerator,
+        x: i32,
+        z: i32,
+        ys: std::ops::RangeInclusive<i32>,
+        expected_queries: usize,
+    ) {
+        let mut cached: Option<super::SurfaceBiomeAnswer> = None;
+        let mut queries = 0;
+        for y in ys.rev() {
+            if cached.and_then(|answer| answer.at_y(y)).is_none() {
+                cached = Some(fast.biome_at_typed(generator, None, x, y, z));
+                queries += 1;
+            }
+            assert_eq!(
+                cached.and_then(|answer| answer.at_y(y)),
+                Some(control.biome_at_typed_zoomed(generator, None, x, y, z)),
+                "cached biome at ({x}, {y}, {z})",
+            );
+        }
+        assert_eq!(queries, expected_queries, "surface callback at ({x}, {z})");
+    }
+
     #[test]
     fn uniform_resident_surface_biome_omits_zoom_and_preserves_clamping() {
         use lodestone_data::biomes::BuiltinBiome;
@@ -715,14 +746,15 @@ mod prefix_comparison_tests {
             let cells = super::BiomeCells::uniform("minecraft:snowy_plains", -64, 384);
             let fast = surface_biome_sidecar(&generator, seed, cells.clone());
             let control = surface_biome_sidecar(&generator, seed, cells);
+            assert_surface_biome_band_queries(&fast, &control, &generator, -1, -1, -6..=9, 4);
             for x in [-16, -15, -2, -1, 0, 1, 2, 3, 14, 15, 16] {
                 for z in [-16, -15, -2, -1, 0, 1, 2, 3, 14, 15, 16] {
                     for y in [-129, -68, -65, -64, -63, -1, 0, 1, 2, 63, 127, 319, 320, 388] {
                         let actual = fast.biome_at_typed(&generator, None, x, y, z);
-                        assert_eq!(actual, (BuiltinBiome::SnowyPlains, true));
+                        assert_eq!(actual.at_y(y), Some((BuiltinBiome::SnowyPlains, true)));
                         assert_eq!(
-                            actual,
-                            control.biome_at_typed_zoomed(&generator, None, x, y, z),
+                            actual.at_y(y),
+                            Some(control.biome_at_typed_zoomed(&generator, None, x, y, z)),
                             "uniform biome at ({x}, {y}, {z}), seed {seed}",
                         );
                     }
@@ -753,6 +785,7 @@ mod prefix_comparison_tests {
             let fast = surface_biome_sidecar(&generator, 42, cells.clone());
             let control = surface_biome_sidecar(&generator, 42, cells);
             assert!(fast.uniform_resident_biome_at(0, 128, 0).is_none());
+            assert_surface_biome_band_queries(&fast, &control, &generator, 0, 0, 126..=129, 4);
             if horizontal_mix {
                 assert!(fast.uniform_resident_biome_at(4, 64, 4).is_none());
             }
@@ -761,14 +794,14 @@ mod prefix_comparison_tests {
                     for y in [-129, -64, -1, 125, 126, 127, 128, 129, 130, 319, 388] {
                         let actual = fast.biome_at_typed(&generator, None, x, y, z);
                         assert_eq!(
-                            actual,
-                            control.biome_at_typed_zoomed(&generator, None, x, y, z),
+                            actual.at_y(y),
+                            Some(control.biome_at_typed_zoomed(&generator, None, x, y, z)),
                             "mixed biome at ({x}, {y}, {z}), horizontal mix {horizontal_mix}",
                         );
                         if y >= 130 {
-                            assert_eq!(actual, (BuiltinBiome::SnowyPlains, true));
+                            assert_eq!(actual.at_y(y), Some((BuiltinBiome::SnowyPlains, true)));
                         } else if y <= 125 && !horizontal_mix {
-                            assert_eq!(actual, (BuiltinBiome::Plains, false));
+                            assert_eq!(actual.at_y(y), Some((BuiltinBiome::Plains, false)));
                         }
                     }
                 }
@@ -786,6 +819,7 @@ mod prefix_comparison_tests {
         fast.cells[10] = None;
         control.cells[10] = None;
         assert!(fast.uniform_resident_biome_at(1, 64, 1).is_none());
+        assert_surface_biome_band_queries(&fast, &control, &generator, 1, 1, 62..=65, 4);
         let mut exterior_queries = 0;
         let mut choice = super::super::biome::ZoomFiddleLattice::for_block_bounds(
             42, -16, 16, -129, 388, -16, 16,
@@ -795,8 +829,8 @@ mod prefix_comparison_tests {
                 let (qx, _, qz) = choice.selected_quart_at(x, y, z);
                 exterior_queries += usize::from(qx.div_euclid(4) == 0 && qz.div_euclid(4) == 0);
                 assert_eq!(
-                    fast.biome_at_typed(&generator, None, x, y, z),
-                    control.biome_at_typed_zoomed(&generator, None, x, y, z),
+                    fast.biome_at_typed(&generator, None, x, y, z).at_y(y),
+                    Some(control.biome_at_typed_zoomed(&generator, None, x, y, z)),
                     "missing-cell sequence at ({x}, {y}, {z})",
                 );
             }
@@ -1016,8 +1050,8 @@ mod prefix_comparison_tests {
             for (x, z) in [(0, 0), (15, 0), (0, 15), (15, 15), (1, 14)] {
                 for y in [-64, -1, 63, 318] {
                     assert_eq!(
-                        cold.biome_at_typed(&generator, None, base_x + x, y, base_z + z),
-                        full.biome_at_typed(&generator, None, base_x + x, y, base_z + z),
+                        cold.biome_at_typed(&generator, None, base_x + x, y, base_z + z).at_y(y),
+                        full.biome_at_typed(&generator, None, base_x + x, y, base_z + z).at_y(y),
                     );
                 }
             }

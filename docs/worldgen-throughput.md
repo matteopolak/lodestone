@@ -196,13 +196,20 @@ versus 1.71046275s for the string oracle, with both producing digest 134000.
 
 The pre-ore packed materialisation walk also records the baseline ocean-floor
 height for each centre column, so the later carver and structure passes do not
-require a second full-column recount. Those passes carry a request-owned
-four-word XZ mask and conservatively set a bit whenever their write path is
-attempted, including writes that leave the state unchanged. Only marked
-columns are rescanned before ores; an empty mask performs no post-mutation
-vertical scan. Focused controls compare incremental heights and the final
-block digest with a full scalar recount, bound visited cells by the marked
-columns, and deliberately omit one bit to prove the stale-height control.
+require a second full-column recount. Materialisation reads the final state's
+generated motion predicate directly, without classifying its block identity,
+air or fluid status. Surface and vein overrides are classified after resolution;
+configured default blocks use their own motion flags rather than their packed
+fill class. Tracked mutations likewise need only the old and new motion flags.
+The packed path retains motion occupancy per XZ column. Carver and structure
+mutations update that occupancy, and its highest set bit supplies the new
+height without reading terrain again. The configured-default and tracked-height
+controls cover non-blocking fill defaults and exact height changes after removal,
+fluid insertion and solid insertion. Paths without tracked occupancy retain a
+four-word touched-column mask and rescan only those columns before ores. Focused
+controls compare incremental heights and block digests with a full scalar
+recount, bound fallback reads by the marked columns, and deliberately omit a
+marked column to prove the stale-height control.
 
 The five-by-five vegetation source router is chunk-aligned (`[-32, 48)` in
 centre-relative coordinates). Its hot read path checks that window once and
